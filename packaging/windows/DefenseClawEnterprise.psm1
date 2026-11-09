@@ -23456,6 +23456,20 @@ function Restore-DefenseClawTransaction {
         [bool]$codexIncludedProperty.Value) {
         # The writer copy of the Codex state is back; the hook copy the
         # counter names must say the same (GAP-0650).
+        # GAP-0900: the hook copy of the Codex state lives in the Codex machine-policy
+        # folder; with a link on its path the copy is not written through it (nothing
+        # ever writes through a link), the link is named, and the rollback goes on.
+        $stateCopyLink = Get-DefenseClawVendorMachineFolderLink `
+            -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+            -Tolerant
+        if ($stateCopyLink -ne '') {
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'rollback'
+                path      = $stateCopyLink
+                reason    = "a link sits on the Codex machine-policy folder; the restored Codex state was not written for the hook through it. As an administrator, remove only the link with: cmd /c rmdir `"$stateCopyLink`"; the next repair or ensure then finishes the work"
+            }
+        }
+        if ($stateCopyLink -eq '') {
         try {
             Sync-DefenseClawCodexManagedHooksStateCopy `
                 -Layout $Layout `
@@ -23467,6 +23481,7 @@ function Restore-DefenseClawTransaction {
                 path   = [string]$Layout.CodexManagedHooksStatePath
                 reason = "the restored Codex managed runtime state could not be written for the hook: $($_.Exception.Message); the next Codex transaction writes it"
             }
+        }
         }
     }
     if ($hasCoworkSnapshot) {

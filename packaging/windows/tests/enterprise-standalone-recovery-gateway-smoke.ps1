@@ -599,6 +599,10 @@ $failures = & $module {
             param([string]$ServiceName)
             return 'S-1-5-80-1-2-3-4-5'
         }
+        function Sync-DefenseClawCodexManagedHooksStateCopy {
+            param([hashtable]$Layout, [string]$GatewayServiceSID)
+            $script:TestCalls.Add('state-copy-sync')
+        }
 
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         $stateRoot = [IO.Path]::Combine($root, 'state')
@@ -630,6 +634,8 @@ $failures = & $module {
         # leftover. Secure Client still stops at the cleanup failure.
         foreach ($case in @(
             @{ Profile = 'Standalone'; Existed = $true; Label = 'rollback of a failed upgrade' },
+            @{ Profile = 'Standalone'; Existed = $true; StateCopy = 'plain'; Label = 'rollback that restored the Codex state writes the hook copy' },
+            @{ Profile = 'Standalone'; Existed = $true; StateCopy = 'link'; Label = 'rollback with a link on the Codex folder writes nothing through it' },
             @{ Profile = 'Standalone'; Existed = $false; Label = 'rollback of a failed first install' },
             @{ Profile = 'SecureClient'; Existed = $true; Label = 'Secure Client rollback' },
             @{ Profile = 'Standalone'; Existed = $true; CleanupFails = $true; Label = 'rollback whose runtime cleanup fails' },
@@ -683,6 +689,26 @@ $failures = & $module {
                 # Only a record the transaction creates is in the snapshot.
                 $snapshot['files'] += [ordered]@{ path = $generationRecord; existed = $false; backup = '' }
             }
+            $stateCopy = [string]$case['StateCopy']
+            $decoy = [IO.Path]::Combine($root, 'codex-decoy')
+            $decoyBefore = ''
+            if ($stateCopy -ne '') {
+                # GAP-0900: the restored Codex state is written for the hook into the Codex
+                # machine-policy folder; with a link on its path nothing is written through it.
+                $snapshot['codex_machine_state_included'] = $true
+                if ([IO.Directory]::Exists($layout.CodexMachinePolicyDirectory)) {
+                    [IO.Directory]::Delete($layout.CodexMachinePolicyDirectory, $false)
+                }
+                if ($stateCopy -eq 'link') {
+                    [void][IO.Directory]::CreateDirectory($decoy)
+                    [IO.File]::WriteAllText([IO.Path]::Combine($decoy, 'requirements.toml'), 'decoy', $utf8)
+                    [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $layout.CodexMachinePolicyDirectory -Target $decoy)
+                }
+                else {
+                    [void][IO.Directory]::CreateDirectory($layout.CodexMachinePolicyDirectory)
+                }
+                $decoyBefore = (@(Get-ChildItem -LiteralPath $decoy -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName + ':' + $_.Length }) -join '|')
+            }
             if ($cleanupFails) {
                 # carol's folder is one this change created; dave's existed.
                 $snapshot['target_runtime_plan'] = [ordered]@{
@@ -705,6 +731,23 @@ $failures = & $module {
                 $restoreError = $_.Exception.Message
             }
             $calls = @($script:TestCalls) -join '|'
+            if ($stateCopy -ne '') {
+                $syncs = @($script:TestCalls | Microsoft.PowerShell.Core\Where-Object { $_ -ceq 'state-copy-sync' }).Count
+                $decoyAfter = (@(Get-ChildItem -LiteralPath $decoy -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName + ':' + $_.Length }) -join '|')
+                if (-not [string]::IsNullOrEmpty($restoreError)) {
+                    $failures.Add("${label}: the rollback failed: '$restoreError'")
+                }
+                if ($stateCopy -eq 'plain' -and $syncs -ne 1) {
+                    $failures.Add("${label}: the hook copy was written $syncs times, want 1")
+                }
+                if ($stateCopy -eq 'link' -and ($syncs -ne 0 -or $decoyAfter -cne $decoyBefore)) {
+                    $failures.Add("${label}: the state was written through the link ($syncs sync calls; decoy before '$decoyBefore' after '$decoyAfter')")
+                }
+                if ([IO.Directory]::Exists($layout.CodexMachinePolicyDirectory)) {
+                    [IO.Directory]::Delete($layout.CodexMachinePolicyDirectory, $false)
+                }
+                continue
+            }
             if ($case.Profile -ceq 'SecureClient' -and $cleanupFails) {
                 # Secure Client: the cleanup failure ends the rollback before
                 # any file is restored, as before.
