@@ -20,7 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/mcpkey"
-	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
 )
 
 // MCPAdmissionQuery names the MCP server a tool call reaches.
@@ -91,10 +91,10 @@ func mcpScanIssue(server config.MCPServerEntry) string {
 	if command == "" {
 		return ""
 	}
-	if scanner.MCPLocalLauncherRefusal(command) != "" {
+	switch class, _ := mcplocal.Judge(command, server.Args, server.LocalRefusal); class {
+	case mcplocal.Launcher:
 		return MCPScanIssueLauncher
-	}
-	if scanner.MCPLocalArgumentsRefusal(command, server.Args) != "" {
+	case mcplocal.Arguments:
 		return MCPScanIssueArguments
 	}
 	return ""
@@ -450,6 +450,7 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 	}
 	var pending []string
 	var pendingPath string
+	var refused *config.MCPServerEntry
 	for _, server := range servers {
 		if server.Bundled || !mcpServerServesQuery(server, q) {
 			continue
@@ -491,11 +492,23 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		if pendingPath == "" {
 			pendingPath = path
 		}
+		if refused == nil && server.LocalRefusal != "" && MCPLocalRefused(server) {
+			refused = &server
+		}
 	}
 	if len(pending) == 0 {
 		return w.mcpDepartedRevoked(q, servers, true)
 	}
 	w.AdmitAddedMCPServers(pending)
+	if refused != nil {
+		// A hook stated the scanner verdict from the complete definition and it
+		// is a refusal, so the admission that starts can only record it and
+		// there is nothing to wait for: the call that lists the server gets the
+		// cause and the next step the later calls get, not a retry message
+		// (GAP-0925). A definition the watcher read itself stays pending until
+		// its own admission.
+		return failedMCPStatus(*refused)
+	}
 	return MCPAdmissionStatus{Name: pending[0], Pending: true, RetryAfter: w.mcpRetryAfter(pendingPath)}
 }
 
