@@ -47,7 +47,7 @@ var protectedContentCases = []protectedContentCase{
 	{
 		name: "Docker daemon configuration", ruleID: dockerInsecureHTTPRegistryRuleID,
 		connector: "claudecode", tool: "Write", pathKey: "file_path", target: "/etc/docker/daemon.json",
-		content: `{"insecure-registries":["http://mirror.local"]}`, benign: `{"insecure-registries":["https://mirror.local"]}`,
+		content: `{"insecure-registries":["http://mirror.local"]}`, benign: `{"log-level":"warn"}`,
 	},
 	{
 		name: "global preload profile fragment", ruleID: "persistence.global_ld_preload_install",
