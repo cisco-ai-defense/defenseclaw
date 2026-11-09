@@ -138,6 +138,45 @@ func TestExactAdministrativeSecurityRulePosture(t *testing.T) {
 			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
 		},
 		{
+			name:   "Docker insecure registry long zero-padded port",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["198.51.100.7:00000000000000000005000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry JSON-escaped key in an Edit fragment",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"debug": true`,
+				"new_string": `"debug": true, "\u0069nsecure-registries": ["198.51.100.7:5000"]`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry JSON-escaped key in a MultiEdit fragment",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{map[string]any{
+					"old_string": `"debug": true`,
+					"new_string": `"debug": true, "\u0069nsecure-registries": ["198.51.100.7:5000"]`,
+				}},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry JSON-escaped key in a patch hunk",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "apply_patch", map[string]any{
+				"command": "*** Begin Patch\n*** Update File: /etc/docker/daemon.json\n@@\n+  \"\\u0069nsecure-registries\": [\"198.51.100.7:5000\"]\n*** End Patch\n",
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
 			name:   "named Kubernetes Secret content read",
 			ruleID: kubernetesNamedSecretReadRuleID,
 			input: actionfacts.Input{
@@ -234,6 +273,15 @@ func TestExactAdministrativeSecurityRuleHardNegatives(t *testing.T) {
 				"file_path":  "/etc/docker/daemon.json",
 				"old_string": `"debug": true`,
 				"new_string": `"debug": true, "insecure-registries": ["127.0.0.1:5000"]`,
+			}),
+		},
+		{
+			name:   "Docker Edit adding a builder block with its own insecure-registries key",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"debug": true`,
+				"new_string": `"debug": true, "builder": {"insecure-registries": ["198.51.100.7:5000"]}`,
 			}),
 		},
 		{
