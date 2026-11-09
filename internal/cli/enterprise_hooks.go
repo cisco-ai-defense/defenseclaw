@@ -951,13 +951,17 @@ const (
 	// folder follows after ": ".
 	enterpriseHookAwaitingSignInUntrustedFolder = "the owner or permissions of its DefenseClaw folder are not the ones DefenseClaw set"
 	// An upgrade left a signed-out or disconnected account with the render
-	// of an earlier release's hooks and nothing else wrong (GAP-0980): that
-	// release's DefenseClaw hook keeps running until the guardian updates it
-	// in the account's own Windows session. The open-mode form is the
-	// administrator's hook fail mode open.
+	// of an earlier release's per-user hooks (Copilot, Antigravity, Kiro) and
+	// nothing else wrong (GAP-0980): that release's DefenseClaw hook keeps
+	// running until the guardian updates it in the account's own Windows
+	// session.
 	enterpriseHookAwaitingSignInKeepsRunning = "its previous release's DefenseClaw hook keeps running"
 	enterpriseHookAwaitingSignInPriorRender  = enterpriseHookAwaitingSignInKeepsRunning + " until this account signs in"
-	enterpriseHookAwaitingSignInOpenMode     = enterpriseHookAwaitingSignInKeepsRunning + " with hook fail mode open"
+	// The administrator's hook fail mode is open and the machine hook of
+	// Claude Code or Codex, which is this release's own, is in place; only the
+	// account's registration waits for its sign-in (GAP-0980). The previous
+	// release's hook is not what runs for these connectors.
+	enterpriseHookAwaitingSignInOpenMode = "its machine hook is in place with hook fail mode open"
 )
 
 // enterpriseHookAwaitingSignInKeepsRunningRow reports a guardian row that
@@ -968,6 +972,17 @@ func enterpriseHookAwaitingSignInKeepsRunningRow(row enterpriseHookReconcileRow)
 		strings.HasPrefix(
 			strings.TrimPrefix(strings.TrimSpace(row.Error), enterpriseHookAwaitingSignInPrefix+": "),
 			enterpriseHookAwaitingSignInKeepsRunning,
+		)
+}
+
+// enterpriseHookAwaitingSignInMachineHookRow reports a guardian row that waits
+// for its account's next sign-in while the machine hook (Claude Code or Codex,
+// hook fail mode open) is in place (enterpriseHookAwaitingSignInOpenMode).
+func enterpriseHookAwaitingSignInMachineHookRow(row enterpriseHookReconcileRow) bool {
+	return enterpriseHookAwaitingSignInError(row) &&
+		strings.HasPrefix(
+			strings.TrimPrefix(strings.TrimSpace(row.Error), enterpriseHookAwaitingSignInPrefix+": "),
+			enterpriseHookAwaitingSignInOpenMode,
 		)
 }
 
@@ -996,8 +1011,8 @@ func enterpriseHookAwaitingSignInCause(guardianErr string) string {
 	cause := strings.TrimPrefix(strings.TrimSpace(guardianErr), enterpriseHookAwaitingSignInPrefix+": ")
 	switch {
 	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInOpenMode):
-		return "its previous release's DefenseClaw hook keeps running for this account, with hook fail mode open as the " +
-			"administrator chose (calls are allowed while the gateway is down), until it signs in and the guardian updates it"
+		return "its machine hook is in place, with hook fail mode open as the administrator chose (calls are allowed " +
+			"while the gateway is down), and the account's registration finishes when it signs in and the guardian updates it"
 	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInPriorRender):
 		return "its previous release's DefenseClaw hook keeps running for this account until it signs in and the " +
 			"guardian updates it"
