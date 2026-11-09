@@ -278,3 +278,72 @@ func TestReportedSpaceNamedSkillFolderKeepsItsDeclaredName(t *testing.T) {
 		t.Fatal("a space-named linked folder declaring an ordinary name was refused")
 	}
 }
+
+// A gateway that cannot enter the project judges a linked skill folder by the
+// claims the hook sends, and a folder whose name holds a tab is carried exactly
+// like any other: the ordinary one runs in the balanced default while an
+// unrelated skill is denied, and one that declares a denied name or is held is
+// refused through the link.
+func TestReportedTabNamedSkillFolderIsJudgedByItsClaims(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the project folder cannot be made unreadable here")
+	}
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".claude", "skills")
+	proj := filepath.Join(home, "proj")
+	if err := os.MkdirAll(proj, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	names := []string{"ordinary\tcopy", "listed\tcopy", "held\tcopy"}
+	links := map[string]string{}
+	for i, name := range names {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Skipf("cannot make this folder name here: %v", err)
+		}
+		link := filepath.Join(proj, fmt.Sprintf("link-%d", i))
+		if err := os.Symlink(dir, link); err != nil {
+			t.Skipf("cannot create a link here: %v", err)
+		}
+		links[name] = link
+	}
+	if err := os.Chmod(proj, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(proj, 0o700) })
+	if err := enforce.NewPolicyEngine(store).Disable("skill", "held\tcopy", "quarantine failed"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "listed-name"}, {Name: "unrelated-denied-skill"}}
+	api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
+	decide := func(name, declared string) bool {
+		t.Helper()
+		claims, ok := assetfacts.Decode(assetfacts.Encode(assetfacts.Facts{
+			SkillLinks: []string{filepath.Join(root, name)}, Skills: []assetfacts.Skill{{Folder: name, Declared: declared}},
+		}))
+		if !ok || claims.SkillLinksTruncated || claims.SkillsTruncated {
+			t.Fatalf("%q: claims %+v lost a claim", name, claims)
+		}
+		ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "fixture", Home: home})
+		ctx = context.WithValue(ctx, claimedAssetFactsContextKey{}, claims)
+		decision, matched := api.claudeCodeSkillAssetDecision(ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", ToolName: "Bash", CWD: proj,
+			ToolInput: map[string]interface{}{"command": "cat " + links[name] + "/SKILL.md"},
+		})
+		return matched && decision.Action == "block"
+	}
+	if decide("ordinary\tcopy", "ordinary-skill") {
+		t.Fatal("a tab-named linked folder declaring an ordinary name was refused")
+	}
+	if !decide("listed\tcopy", "listed-name") {
+		t.Fatal("a tab-named linked folder declaring a denied name was allowed")
+	}
+	if !decide("held\tcopy", "held-skill") {
+		t.Fatal("a held tab-named linked folder was allowed")
+	}
+}

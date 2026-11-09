@@ -352,7 +352,7 @@ func bounded(facts Facts) Facts {
 		if skill.Folder == "" || strings.TrimSpace(skill.Declared) == "" {
 			continue
 		}
-		folder, declared := cleanExact(skill.Folder, maxNameBytes), clean(skill.Declared, maxNameBytes)
+		folder, declared := cleanFileName(skill.Folder, maxNameBytes), clean(skill.Declared, maxNameBytes)
 		if folder == "" || declared == "" || len(skills) == maxSkills {
 			facts.SkillsTruncated = true
 			continue
@@ -374,7 +374,7 @@ func bounded(facts Facts) Facts {
 		// it is a folder the gateway would otherwise never look at.
 		// The path is exact: trimming a folder named with space would name
 		// its parent.
-		dir = cleanExact(dir, maxSkillLinkPathBytes)
+		dir = cleanFileName(dir, maxSkillLinkPathBytes)
 		if !filepath.IsAbs(dir) || len(links) == maxSkillLinks || linkBytes+len(dir) > maxSkillLinkBytes {
 			facts.SkillLinksTruncated = true
 			continue
@@ -538,20 +538,20 @@ func cleanHexDigest(value string, length int) string {
 // clean drops a value that is not valid UTF-8, holds a control character or
 // is longer than limit; it trims surrounding space.
 func clean(value string, limit int) string {
-	return cleanExact(strings.TrimSpace(value), limit)
-}
-
-// cleanExact is clean without the trim: it keeps the value as it is, or drops
-// it when it is not valid UTF-8, holds a control character or is longer than
-// limit.
-func cleanExact(value string, limit int) string {
-	if len(value) > limit || !utf8.ValidString(value) {
+	value = strings.TrimSpace(value)
+	if strings.ContainsFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return ""
 	}
-	for _, r := range value {
-		if r < 0x20 || r == 0x7f {
-			return ""
-		}
+	return cleanFileName(value, limit)
+}
+
+// cleanFileName keeps a folder name or path as the file system holds it: no
+// trim, and a control character (a tab, a newline) is kept, since the claim is
+// JSON and a file name may hold one. It drops a value that is not valid UTF-8,
+// that holds a NUL (no file name can), or that is longer than limit.
+func cleanFileName(value string, limit int) string {
+	if len(value) > limit || !utf8.ValidString(value) || strings.IndexByte(value, 0) >= 0 {
+		return ""
 	}
 	return value
 }
