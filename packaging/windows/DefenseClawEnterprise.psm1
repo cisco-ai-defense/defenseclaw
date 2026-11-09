@@ -36032,7 +36032,13 @@ function Assert-DefenseClawRollbackHoldsResolved {
     if ($guardianNotProven) {
         # GAP-0947 review S2: the services run, but this rollback did not prove
         # the guardian's coverage.
-        $message += ". The guardian's coverage was not proven by this rollback: it cannot reconcile the Codex policy while that file is held and may keep retrying, so run /verify after /repair"
+        if ($message -match '(^| \| )guardian_state_held: ') {
+            # GAP-0977: the file is one the guardian publishes into.
+            $message += ". The guardian's coverage was not proven by this rollback: it cannot publish while that file is held and may keep retrying, so run /verify after /repair"
+        }
+        else {
+            $message += ". The guardian's coverage was not proven by this rollback: it cannot reconcile the Codex policy while that file is held and may keep retrying, so run /verify after /repair"
+        }
     }
     throw $message
 }
