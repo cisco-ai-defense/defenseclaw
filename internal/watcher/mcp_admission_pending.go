@@ -498,8 +498,9 @@ func (w *InstallWatcher) mcpDecidedAdmission(path, hash string, row *audit.Snaps
 // admission of a definition that no scan admits, so strict and managed
 // refuse it and the default tiers warn. A server whose allow still stands,
 // or that a scan admitted, or that was never seen, has no status here
-// (GAP-0920). While the agent config lists the server (servers) the listed
-// definition decides, as for any listed server. A call that names no listed
+// (GAP-0920). While the agent config lists that very definition (servers) it
+// decides, as for any listed server; a replacement listed under the same name
+// decides for itself and never for the live connection of the earlier one. A call that names no listed
 // and no held server may be one that did not fit (mcpAdmissionLost) when a
 // note of its connector and account says so, and fails the same way rather
 // than being allowed.
@@ -520,17 +521,22 @@ func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, servers []confi
 	if len(gone) == 0 && !lost {
 		return MCPAdmissionStatus{}
 	}
+	// A listed definition stands for itself only: a replacement listed under
+	// the same name and path, admitted or not, is another definition and
+	// does not speak for the live connection of the earlier one.
 	listed := map[string]bool{}
 	for _, server := range servers {
-		if !server.Bundled && mcpServerServesQuery(server, q) {
-			listed[MCPEventPath(server)] = true
+		if server.Bundled || !mcpServerServesQuery(server, q) {
+			continue
 		}
+		hash, _ := mcpDefinitionHash(server)
+		listed[mcpDepartedKey(mcpKnownDefinition{path: MCPEventPath(server), hash: hash})] = true
 	}
 	for _, definition := range gone {
 		server := definition.server
 		// Only a server admitted before any scan is held; the allow or the
 		// setting that gave that admission is the one to ask.
-		if listed[definition.path] || !w.mcpUnscannedAdmissionLapsed(InstallEvent{
+		if listed[mcpDepartedKey(definition)] || !w.mcpUnscannedAdmissionLapsed(InstallEvent{
 			Type: InstallMCP, Name: server.Name, Path: definition.path, Connector: server.Connector, remembered: &server}) {
 			continue
 		}

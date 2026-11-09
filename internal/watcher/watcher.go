@@ -2901,13 +2901,14 @@ func (w *InstallWatcher) withMCPDefinition(cfg *config.Config, evt InstallEvent,
 	if evt.Type != InstallMCP || cfg == nil || cfg.SecureClientIntegration() {
 		return in
 	}
-	entry, err := w.lookupMCPServer(evt)
-	switch {
-	case err == nil:
-	case evt.remembered != nil:
-		entry = evt.remembered
-	default:
-		return in
+	// A remembered definition is the one the event asks about, even when the
+	// agent config lists another definition under the same name.
+	entry := evt.remembered
+	if entry == nil {
+		var err error
+		if entry, err = w.lookupMCPServer(evt); err != nil {
+			return in
+		}
 	}
 	in.URL, in.Command, in.Args, in.Transport = entry.URL, entry.Command, entry.Args, entry.Transport
 	return in
