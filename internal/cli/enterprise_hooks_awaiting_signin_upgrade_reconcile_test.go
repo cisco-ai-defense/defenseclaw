@@ -24,25 +24,22 @@ import (
 )
 
 // stubNoClosedMachineRegistration makes no connector's machine registration
-// provably closed (that proof is for Claude Code and Codex), and puts the
-// machine policy of the Copilot and Cursor hooks in force.
+// provably closed (that proof is for Claude Code and Codex).
 func stubNoClosedMachineRegistration(t *testing.T) {
 	t.Helper()
 	previous := enterpriseHookReconcileClosedMachineRegistration
 	t.Cleanup(func() { enterpriseHookReconcileClosedMachineRegistration = previous })
 	enterpriseHookReconcileClosedMachineRegistration = func(enterprisehooks.InstallOptions) (bool, error) { return false, nil }
-	previousRegistration := enterpriseHookReconcileMachineHookRegistration
-	t.Cleanup(func() { enterpriseHookReconcileMachineHookRegistration = previousRegistration })
-	enterpriseHookReconcileMachineHookRegistration = func(enterprisehooks.InstallOptions) (bool, error) { return true, nil }
 }
 
-// GAP-0980: the same upgrade with Copilot and Cursor, whose targets no closed
-// machine registration proves (that proof exists for Claude Code and Codex
-// only). A signed-out account's target an earlier release protected waits for
-// the sign-in whatever the connector, so the guardian publishes its required
-// coverage, status stays healthy and reports it pending, and a signed-in
-// account whose repair fails still fails the host.
-func TestEnterpriseHookReconcileLeavesEveryConnectorOfAnEarlierReleaseToTheNextSignIn(t *testing.T) {
+// GAP-0980: the same upgrade with Copilot and Antigravity, whose hook files
+// hold the render of releases up to 1.0.6 and that no closed machine
+// registration proves. A signed-out account's target an earlier release
+// protected waits for the sign-in when a verify that accepts that render
+// passes: the guardian publishes its required coverage, status stays healthy
+// and reports it pending, a signed-in account whose repair fails still fails
+// the host, and a lock this release wrote stays a failure.
+func TestEnterpriseHookReconcileLeavesTargetsHoldingTheEarlierReleasesRenderToTheNextSignIn(t *testing.T) {
 	stubNoClosedMachineRegistration(t)
 	restoreEnterpriseHooksLifecycleTestState(t)
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
@@ -93,7 +90,7 @@ func TestEnterpriseHookReconcileLeavesEveryConnectorOfAnEarlierReleaseToTheNextS
 		if err := os.MkdirAll(home, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		for _, connectorName := range []string{"copilot", "cursor"} {
+		for _, connectorName := range []string{"copilot", "antigravity"} {
 			fmt.Fprintf(&manifestBody,
 				"  - user_home: %q\n    uid: %d\n    gid: %d\n    sid: %s\n    connector: %s\n    enabled: true\n    deferred: true\n",
 				home, os.Getuid(), os.Getgid(), account.sid, connectorName)
@@ -123,7 +120,11 @@ func TestEnterpriseHookReconcileLeavesEveryConnectorOfAnEarlierReleaseToTheNextS
 
 	// Every rc.3 lock fails this release's verification; the lock names
 	// rc.3 unless sameRelease says this release wrote it.
-	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+	enterpriseHookReconcileVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		if opts.AcceptPriorReleaseRender {
+			// The only difference is the render of the earlier release.
+			return enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}, nil
+		}
 		return enterprisehooks.InstallResult{}, errors.New(
 			"enterprise hooks: managed Claude gateway binding: persisted managed gateway service identity: gateway service name \"\" is invalid")
 	}
@@ -194,7 +195,7 @@ func TestEnterpriseHookReconcileLeavesEveryConnectorOfAnEarlierReleaseToTheNextS
 		t.Fatalf("all signed out: status err=%v report=%+v", err, report)
 	}
 	for _, warning := range report.Warnings {
-		if !strings.Contains(warning, "is pending until that account signs in") || !strings.Contains(warning, "not protected") {
+		if !strings.Contains(warning, "is pending until that account signs in") || !strings.Contains(warning, "hook keeps running") {
 			t.Fatalf("all signed out: warning %q", warning)
 		}
 	}

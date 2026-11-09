@@ -197,14 +197,18 @@ Missing registration, an open runtime, another owner, extra write permission,
 a link, or other untrusted state still refuses the upgrade. Correct the state,
 have the account sign in, and run Setup `/ensure JSON=1` again.
 
-An account with no active Windows session (signed out or disconnected) does not fail
-a managed Windows upgrade for its Copilot, OpenCode or Cursor hooks either. The guardian
-installs a connector's new per-user hooks only in the account's own session, so when an
-earlier release's hook lock names the target and the machine policy that registers its
-hook is in force, the target is pending until the account signs in. `status` and `verify`
-show the connector as pending and say its agent is not protected until then; the upgrade
-ends `0`. A lock this release wrote, a machine policy that is not in force or cannot be
-read, and an account with an active session whose repair fails still fail the upgrade.
+An account with no active Windows session (signed out or disconnected) does not fail a
+managed Windows upgrade because the hooks of an earlier release (up to 1.0.6) still sit in its
+agent configuration. The guardian installs the new hooks only in the account's own session, so
+when an earlier release's hook lock names the target and a read-only check shows that the only
+difference from this release is the earlier render of the hook command, the connector is
+pending until the account signs in: `status` and `verify` show it as pending, and the previous
+release's DefenseClaw hook keeps running for that account until it signs in and the guardian
+updates it. That hook runs the same hook binary and arguments, so the gateway still decides its
+calls; it differs only when PowerShell runs in Constrained Language mode and the launcher never
+starts, where it allows the call (this release's hook refuses it). Any other difference (a
+deleted or replaced hook file, a link, another owner, a drifted runtime), a lock this release
+wrote, and an account with an active session whose repair fails still fail the upgrade.
 
 ## Roll back
 

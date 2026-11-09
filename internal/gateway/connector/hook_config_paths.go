@@ -590,13 +590,45 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 	case "antigravity":
 		// Setup rewrites each DefenseClaw-owned outer key whole.
 		for key, rendered := range antigravityOwnedHookKeys(runtime.GOOS, hookCommand, opts.ManagedEnterprise) {
-			if !sameHookJSON(document[key], rendered) {
-				return false
+			if sameHookJSON(document[key], rendered) {
+				continue
 			}
+			if opts.AcceptPriorReleaseRender && sameHookJSON(document[key], priorReleaseHookRender(rendered)) {
+				continue
+			}
+			return false
 		}
 		return true
 	}
 	return false
+}
+
+// priorReleaseHookRender is rendered, a hook document Setup renders, as
+// releases up to 1.0.6 rendered it: each Windows awaited hook bridge command
+// with the Constrained Language fallback end of
+// legacyWindowsAwaitedHookCommand (it exited 0 when the launcher never
+// started). Every other value is kept as it is.
+func priorReleaseHookRender(rendered interface{}) interface{} {
+	switch value := rendered.(type) {
+	case string:
+		if legacy, ok := legacyWindowsAwaitedHookCommand(value); ok {
+			return legacy
+		}
+		return value
+	case []interface{}:
+		out := make([]interface{}, len(value))
+		for i, item := range value {
+			out[i] = priorReleaseHookRender(item)
+		}
+		return out
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(value))
+		for key, item := range value {
+			out[key] = priorReleaseHookRender(item)
+		}
+		return out
+	}
+	return rendered
 }
 
 // HookRegistrationLacksOnlyFailClosed reports a Hermes registration that
