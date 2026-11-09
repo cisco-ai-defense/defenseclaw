@@ -22705,6 +22705,7 @@ function Restore-DefenseClawTransaction {
         [Parameter(Mandatory)][hashtable]$Layout,
         [switch]$DeferServiceRestart
     )
+    Clear-DefenseClawRollbackDeferredHolds
     Assert-DefenseClawDescendant -Path $SnapshotPath -Root $Layout.StateRoot -Label 'transaction snapshot' | Microsoft.PowerShell.Core\Out-Null
     Assert-DefenseClawNoReparsePath -Path $SnapshotPath
     $snapshot = Microsoft.PowerShell.Management\Get-Content -LiteralPath $SnapshotPath -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
@@ -23115,10 +23116,11 @@ function Restore-DefenseClawTransaction {
                 if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile) -and
                     ([string]$_.Exception.Message -match 'another program holds' -or
                         (Test-DefenseClawFileDeleteBlocked -Path $destination))) {
-                    throw (New-DefenseClawCodexFileHeldMessage `
+                    Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexFileHeldMessage `
                         -Layout $Layout `
                         -Path $destination `
                         -Why 'open without delete sharing, so the rollback could not put it back')
+                    continue
                 }
                 throw
             }
@@ -23143,11 +23145,23 @@ function Restore-DefenseClawTransaction {
                 # The restored file is held while its recorded access list
                 # is written back; a program that holds it open stops the
                 # restore before anything on it changes (GAP-0763).
-                $restoreHold = if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile)) {
-                    Open-DefenseClawCodexRollbackHold -Layout $Layout -Path $destination
+                try {
+                    $restoreHold = if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile)) {
+                        Open-DefenseClawCodexRollbackHold -Layout $Layout -Path $destination
+                    }
+                    else {
+                        Open-DefenseClawRestampHold -Path $destination
+                    }
                 }
-                else {
-                    Open-DefenseClawRestampHold -Path $destination
+                catch {
+                    # GAP-0947: the file is back; a late holder only keeps its
+                    # access list from being written. Leave it, carry on.
+                    if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile) -and
+                        (Test-DefenseClawRollbackHeldMessage -Message ([string]$_.Exception.Message))) {
+                        Add-DefenseClawRollbackDeferredHold -Message ([string]$_.Exception.Message)
+                        continue
+                    }
+                    throw
                 }
                 try {
                     try {
@@ -23201,10 +23215,11 @@ function Restore-DefenseClawTransaction {
             catch {
                 if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile) -and
                     (Test-DefenseClawFileDeleteBlocked -Path $destination)) {
-                    throw (New-DefenseClawCodexFileHeldMessage `
+                    Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexFileHeldMessage `
                         -Layout $Layout `
                         -Path $destination `
                         -Why 'open without delete sharing, so the rollback could not remove it')
+                    continue
                 }
                 throw
             }
@@ -23507,6 +23522,11 @@ function Restore-DefenseClawTransaction {
             Invoke-DefenseClawUserNativeOTLPRestoreBestEffort `
                 -Snapshot $snapshot -SnapshotPath $SnapshotPath -Layout $Layout
         }
+    }
+    if (-not $DeferServiceRestart) {
+        # GAP-0947: a file a late holder kept from the put-back ends the run
+        # now, with the restored services running.
+        Assert-DefenseClawRollbackHoldsResolved
     }
 }
 
@@ -24241,6 +24261,9 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
             Invoke-DefenseClawUserNativeOTLPRestoreBestEffort `
                 -Snapshot $snapshot -SnapshotPath $SnapshotPath -Layout $Layout
         }
+    }
+    if ($rollbackRequired) {
+        Assert-DefenseClawRollbackHoldsResolved
     }
     return $snapshot
 }
@@ -27422,11 +27445,25 @@ function Restore-DefenseClawSnapshotHookAfterActivation {
     $backup = [string]$rows[0].backup
     Assert-DefenseClawDescendant -Path $backup -Root $Layout.StateRoot -Label 'transaction hook backup' |
         Microsoft.PowerShell.Core\Out-Null
-    Install-DefenseClawFileAtomic `
-        -Source $backup `
-        -Destination $Layout.HookPath `
-        -ExpectedSHA256 $oldDigest `
-        -SkipIfContentMatches
+    try {
+        Install-DefenseClawFileAtomic `
+            -Source $backup `
+            -Destination $Layout.HookPath `
+            -ExpectedSHA256 $oldDigest `
+            -SkipIfContentMatches
+    }
+    catch {
+        # GAP-0947: a program that arrived during the rollback holds the
+        # replacement hook open without delete sharing. The restored release
+        # is running; the previous hook goes back with /repair.
+        if ((Test-DefenseClawStandaloneProfile) -and
+            ([string]$_.Exception.Message -match '^another program holds ' -or
+                (Test-DefenseClawFileDeleteBlocked -Path $Layout.HookPath))) {
+            Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawHookHeldMessage -Layout $Layout)
+            return
+        }
+        throw
+    }
     $live = (
         Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256
     ).Hash.ToLowerInvariant()
@@ -35342,14 +35379,54 @@ function Assert-DefenseClawInstalledArtifacts {
     }
 }
 
+function New-DefenseClawRollbackHeldMessage {
+    <#
+        GAP-0947 (r109): the retryable refusal of a rollback that cannot put
+        one file back because a program holds it open in the way (it arrived
+        after the pre-stop gate). The stable code first, the holder by name and
+        process id (a holder Windows reports without a process id, such as a
+        program that runs as SYSTEM, is named by the hint instead), the file,
+        what was refused, and the next step: /repair finishes the rollback once
+        the program lets go. The services are not named here: the rollback puts
+        everything else back and starts them (Assert-DefenseClawRollbackHoldsResolved),
+        and the result adds the state they are in. The Setup exit code is 1618.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$What,
+        [Parameter(Mandatory)][string]$Why,
+        [Parameter(Mandatory)][string]$Left
+    )
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $named = @()
+    try {
+        $excluded = [Collections.Generic.HashSet[int]]::new()
+        [void]$excluded.Add([int]$PID)
+        $named = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @($full) -Excluded $excluded).Values |
+                Microsoft.PowerShell.Core\ForEach-Object {
+                    if ([int]$_.Id -le 0) { [string]$_.Name }
+                    elseif ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
+                    else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
+                })
+    }
+    catch {
+        $named = @()
+    }
+    if ($named.Count -eq 0) {
+        $named = @('a program that Windows did not name (it may run as SYSTEM, so no process id is available)')
+    }
+    return ('{0}: {1} has {2}, {3}, {4}; {5}, and the transaction is still pending. Next step: close that program, then run {6}; it finishes the rollback (an MDM retries exit 1618 on its own)' -f $Code, ($named -join ', '), $full, $What, $Why, $Left, (Format-DefenseClawSetupAction -Action '/repair'))
+}
+
 function New-DefenseClawCodexFileHeldMessage {
     <#
         g582 round 11e (GAP-0803): the retryable refusal of a rollback that
         cannot put a Codex machine-policy file back because a program holds
         it open in the way (it arrived after the pre-stop gate). Same shape as
-        the gate's codex_state_held and codex_requirements_held: the stable
-        code first, the holder by name where Windows can tell, the file and
-        what was refused. The Setup exit code is 1618.
+        the gate's codex_state_held and codex_requirements_held; GAP-0947: the
+        rollback leaves this one file as it is and puts the rest back.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -35362,25 +35439,71 @@ function New-DefenseClawCodexFileHeldMessage {
         [IO.Path]::GetFullPath([string]$Layout.CodexMachinePolicyPath).TrimEnd('\'),
         [StringComparison]::OrdinalIgnoreCase
     )
-    $code = if ($isRequirements) { 'codex_requirements_held' } else { 'codex_state_held' }
-    $what = if ($isRequirements) { 'the Codex machine requirements' } else { 'the Codex managed-hooks state' }
-    $named = @()
-    try {
-        $excluded = [Collections.Generic.HashSet[int]]::new()
-        [void]$excluded.Add([int]$PID)
-        $named = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @($full) -Excluded $excluded).Values |
-                Microsoft.PowerShell.Core\ForEach-Object {
-                    if ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
-                    else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
-                })
+    return (New-DefenseClawRollbackHeldMessage `
+        -Layout $Layout `
+        -Path $full `
+        -Code $(if ($isRequirements) { 'codex_requirements_held' } else { 'codex_state_held' }) `
+        -What $(if ($isRequirements) { 'the Codex machine requirements' } else { 'the Codex managed-hooks state' }) `
+        -Why $Why `
+        -Left 'the rollback left that file as it is and put everything else back')
+}
+
+function New-DefenseClawHookHeldMessage {
+    <#
+        GAP-0947: the previous hook cannot be put back after the restored
+        release is running because a program holds the installed hook open
+        without delete sharing. The replacement hook stays in place (it
+        answers for the restored gateway, as it did through the rollback).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    return (New-DefenseClawRollbackHeldMessage `
+        -Layout $Layout `
+        -Path ([string]$Layout.HookPath) `
+        -Code 'hook_in_use' `
+        -What 'the installed hook' `
+        -Why 'open without delete sharing, so the rollback could not put the previous hook back' `
+        -Left 'the rollback left the replacement hook in place and put everything else back')
+}
+
+# GAP-0947: a file a late holder keeps the rollback from putting back is left
+# as it is and listed here; the rollback carries on, starts the restored
+# services, and ends with the retryable held code and the transaction still
+# pending (Assert-DefenseClawRollbackHoldsResolved). Standalone only.
+$script:DefenseClawRollbackDeferredHolds = [Collections.Generic.List[string]]::new()
+
+function Test-DefenseClawRollbackHeldMessage {
+    param([AllowEmptyString()][string]$Message)
+    return ($Message -match '^(codex_requirements_held|codex_state_held|hook_in_use): ')
+}
+
+function Clear-DefenseClawRollbackDeferredHolds {
+    $script:DefenseClawRollbackDeferredHolds.Clear()
+}
+
+function Add-DefenseClawRollbackDeferredHold {
+    param([Parameter(Mandatory)][string]$Message)
+    if (-not $script:DefenseClawRollbackDeferredHolds.Contains($Message)) {
+        $script:DefenseClawRollbackDeferredHolds.Add($Message)
     }
-    catch {
-        $named = @()
+    Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+        subsystem = 'rollback'
+        reason    = "a program holds a file the rollback must put back; it is left as it is and the transaction stays pending: $Message"
     }
-    if ($named.Count -eq 0) {
-        $named = @('a program')
+}
+
+function Assert-DefenseClawRollbackHoldsResolved {
+    <#
+        Ends a rollback that left a held file alone: the services are running
+        as restored, and the run fails with the retryable held code (exit
+        1618) and the pending transaction, which /repair finishes after the
+        program lets go.
+    #>
+    if ($script:DefenseClawRollbackDeferredHolds.Count -eq 0) {
+        return
     }
-    return ('{0}: {1} has {2}, {3}, {4}; the rollback stopped before it finished and the transaction is still pending. Next step: close that program, then run the same command again (an MDM retries exit 1618 on its own); it completes the rollback' -f $code, ($named -join ', '), $full, $what, $Why)
+    $message = $script:DefenseClawRollbackDeferredHolds -join ' | '
+    $script:DefenseClawRollbackDeferredHolds.Clear()
+    throw $message
 }
 
 function Open-DefenseClawCodexRollbackHold {
@@ -35395,6 +35518,11 @@ function Open-DefenseClawCodexRollbackHold {
         [Parameter(Mandatory)][string]$Path,
         [ValidateRange(0, 120)][int]$TimeoutSeconds = 30
     )
+    if ($script:DefenseClawRollbackDeferredHolds.Count -gt 0) {
+        # A file is already left alone: a second holder does not cost another
+        # full wait.
+        $TimeoutSeconds = [Math]::Min($TimeoutSeconds, 5)
+    }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ($true) {
         $handle = Open-DefenseClawRestampHold -Path $Path -TolerateHeld
@@ -36538,19 +36666,36 @@ function Assert-DefenseClawEnterpriseDeployment {
             -ExpectedStartMode $expectedServiceStartMode
     }
     Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
+    $codexRequirementsDeferred = $false
     if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and
         $codexTargetEnabled -and (Test-DefenseClawStandaloneProfile)) {
         # GAP-0802: the file a rollback restored may carry an administrator's
         # hand edit of the managed policy; it is replaced by the managed
         # policy (and kept in a named backup) instead of stopping recovery.
-        Repair-DefenseClawRecoveredCodexRequirements `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName
+        try {
+            Repair-DefenseClawRecoveredCodexRequirements `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
+        }
+        catch {
+            # GAP-0947: a program that holds the file keeps the recovery from
+            # republishing the managed policy. The restored services still
+            # start (the guardian republishes once the program lets go); the
+            # rollback ends with the retryable held code and the pending
+            # transaction.
+            if (-not (Test-DefenseClawRollbackHeldMessage -Message ([string]$_.Exception.Message))) {
+                throw
+            }
+            Add-DefenseClawRollbackDeferredHold -Message ([string]$_.Exception.Message)
+            $codexRequirementsDeferred = $true
+        }
     }
-    [void](Invoke-DefenseClawCodexRequirementsCommand `
-        -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName `
-        -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
+    if (-not $codexRequirementsDeferred) {
+        [void](Invoke-DefenseClawCodexRequirementsCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
+    }
 
     if ($RequireReadiness) {
         if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
@@ -47341,6 +47486,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         catch {
             if (Test-DefenseClawTrustStrictAncestors) {
                 throw "$Action failed ($($operationError.Exception.Message)); rollback also failed and pending recovery was retained: $($_.Exception.Message)"
+            }
+            if ((Test-DefenseClawStandaloneProfile) -and
+                (Test-DefenseClawRollbackHeldMessage -Message ([string]$_.Exception.Message))) {
+                # GAP-0947: a program that arrived during the rollback holds a
+                # file it must put back. The restored services run; the run
+                # ends with the retryable held code, naming the holder, and
+                # the failure that caused the rollback follows it.
+                throw ([string]$_.Exception.Message + " This $Action had failed first: " + [string]$operationError.Exception.Message)
             }
             # The pending transaction stays on disk: Repair resumes it, and
             # the next Install clears it through its automatic recovery. The
