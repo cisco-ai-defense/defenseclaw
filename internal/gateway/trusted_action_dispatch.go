@@ -1046,6 +1046,7 @@ func dispatchTrustedActionWith(
 		// findings, never the state-write proof a stateProofOnly reading keeps.
 		finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
 		finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
+		finalized = appendWindowsAliasUnverifiedFinding(finalized, request, facts)
 	}
 	if staticTargetTwin == nil {
 		return finalized
@@ -10125,7 +10126,7 @@ func appendTrustedWindowsPathFactFindings(
 		// A path with an extended-length prefix has the device flavor, though
 		// it names the same drive path.
 		if candidate.Flavor != actionfacts.PathFlavorWindows {
-			if _, opened := windowsOpenedPath(pathFactSpelling(candidate)); !opened {
+			if _, opened, _ := windowsOpenedPathOfFact(candidate); !opened {
 				continue
 			}
 		}
@@ -10483,7 +10484,7 @@ func trustedLegacyPathRuleMatches(
 		seenValues := make(map[string]struct{}, 4)
 		for _, value := range append(
 			pathFactSpellings(path),
-			typedTargetRuleText(pathFactSpelling(path), input.ActiveHome),
+			typedTargetRuleText(pathFactSpelling(path), input.ActiveHome, windowsVerbatimOperand(path.Value)),
 		) {
 			if strings.TrimSpace(value) == "" {
 				continue

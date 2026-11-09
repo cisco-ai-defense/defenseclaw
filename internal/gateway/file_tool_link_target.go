@@ -134,8 +134,8 @@ func linkTargetCandidate(facts actionfacts.Facts, candidate actionfacts.PathFact
 // rules name each home folder and credential file in one letter case, while
 // Windows reads them in any, so the names below a home are read in lower case.
 // Other paths are read as given, with the active home respelled.
-func typedTargetRuleText(resolved, home string) string {
-	if opened, ok := windowsOpenedPath(resolved); ok {
+func typedTargetRuleText(resolved, home string, verbatim bool) string {
+	if opened, ok, _ := windowsOpenedPath(resolved, verbatim); ok {
 		return windowsRuleText(opened, home)
 	}
 	if pathCaseFoldHost && filepath.IsAbs(resolved) {
@@ -153,7 +153,7 @@ func typedTargetCandidateText(candidate actionfacts.PathFact, home string) (stri
 	if !windowsRootedSpelling(spelling) && !filepath.IsAbs(candidate.Resolved) {
 		return "", false
 	}
-	return typedTargetRuleText(spelling, home), true
+	return typedTargetRuleText(spelling, home, windowsVerbatimOperand(candidate.Value)), true
 }
 
 // windowsNameFold spells a Windows name in the lower case the rules write.
