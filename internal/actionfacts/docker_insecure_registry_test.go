@@ -468,3 +468,54 @@ func TestExactDockerInsecureRegistryEditReadsTheKeyAsJSONDoes(t *testing.T) {
 		}
 	}
 }
+
+// TestExactDockerInsecureRegistryEditJudgesCompleteDocumentsByTheirEffectiveList
+// pins an edit that swaps one complete daemon.json for another to the list
+// dockerd reads from each (the last repeated key wins), the same reading a
+// whole-file write gets: a list that is only effective in the new document is
+// added, a list the new document leaves ineffective is not.
+func TestExactDockerInsecureRegistryEditJudgesCompleteDocumentsByTheirEffectiveList(t *testing.T) {
+	t.Parallel()
+	const (
+		remote   = `"198.51.100.7:5000"`
+		empty    = `{"insecure-registries":[]}`
+		listed   = `{"insecure-registries":[` + remote + `]}`
+		loopback = `{"insecure-registries":["127.0.0.1:5000"]}`
+	)
+	edit := func(oldText, newText string) Input {
+		return nativeCall(t, "Edit", map[string]any{"file_path": dockerDaemonConfigPath, "old_string": oldText, "new_string": newText})
+	}
+	multi := func(oldText, newText string) Input {
+		return nativeCall(t, "MultiEdit", map[string]any{"file_path": dockerDaemonConfigPath, "edits": []any{
+			map[string]any{"old_string": oldText, "new_string": newText},
+		}})
+	}
+	for _, row := range []struct {
+		name  string
+		input Input
+		want  bool
+	}{
+		{"remote list takes over from an empty last key", edit(`{"insecure-registries":[`+remote+`],"insecure-registries":[]}`, `{"insecure-registries":[],"insecure-registries":[`+remote+`]}`), true},
+		{"remote list takes over from a loopback last key", edit(`{"insecure-registries":[`+remote+`],"insecure-registries":["127.0.0.1:5000"]}`, `{"insecure-registries":["127.0.0.1:5000"],"insecure-registries":[`+remote+`]}`), true},
+		{"remote list takes over in a multi-edit", multi(`{"insecure-registries":[`+remote+`],"insecure-registries":[]}`, `{"insecure-registries":[],"insecure-registries":[`+remote+`]}`), true},
+		{"remote list replaces an empty document", edit(empty, listed), true},
+		{"remote list replaces a loopback document", edit(loopback, listed), true},
+		{"remote list in the last key beside settings", edit(`{"debug":true}`, `{"debug":true,"insecure-registries":[],"insecure-registries":[`+remote+`]}`), true},
+		{"remote list in a patch hunk document", nativeCall(t, "apply_patch", nativeProofPatch("Update", dockerDaemonConfigPath, `{"insecure-registries":[],"insecure-registries":[`+remote+`]}`+"\n")), true},
+
+		{"earlier remote list left ineffective by an empty last key", edit(`{"debug":true}`, `{"insecure-registries":[`+remote+`],"insecure-registries":[]}`), false},
+		{"earlier remote list left ineffective by a loopback last key", edit(`{"debug":true}`, `{"insecure-registries":[`+remote+`],"insecure-registries":["127.0.0.1:5000"]}`), false},
+		{"ordinary document swapped for one with an ineffective remote list", edit(`{"log-driver":"json-file"}`, `{"log-driver":"json-file","insecure-registries":[`+remote+`],"insecure-registries":[]}`), false},
+		{"ineffective remote list in a multi-edit", multi(`{"debug":true}`, `{"insecure-registries":[`+remote+`],"insecure-registries":[]}`), false},
+		{"ineffective remote list in a patch hunk document", nativeCall(t, "apply_patch", nativeProofPatch("Update", dockerDaemonConfigPath, `{"insecure-registries":[`+remote+`],"insecure-registries":[]}`+"\n")), false},
+		{"same effective list on both sides", edit(`{"insecure-registries":[`+remote+`],"debug":true}`, `{"insecure-registries":[`+remote+`],"debug":false}`), false},
+		{"same list on both sides after a repeated key", edit(`{"insecure-registries":[],"insecure-registries":[`+remote+`]}`, `{"insecure-registries":[`+remote+`],"debug":true}`), false},
+		{"earlier remote list left ineffective by a null last key", edit(`{"debug":true}`, `{"insecure-registries":[`+remote+`],"insecure-registries":null}`), false},
+		{"remote list removed", edit(listed, empty), false},
+		{"document without the key", edit(`{"debug":true}`, `{"debug":false}`), false},
+	} {
+		if got := ExactDockerInsecureRegistryWrite(row.input, Analyze(row.input)); got != row.want {
+			t.Errorf("%s: proof=%t, want %t", row.name, got, row.want)
+		}
+	}
+}
