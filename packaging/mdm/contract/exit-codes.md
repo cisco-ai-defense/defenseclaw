@@ -30,6 +30,29 @@ Intune's default Win32 return codes are `0` Success, `1707` Success, `3010`
 Soft reboot, `1641` Hard reboot and `1618` Retry. `1603` and `1639` report
 as Failed, which is correct. You don't need to add any codes.
 
+`guardian_state_held` (exit `1618`) means a program holds one of the hook
+guardian's state files open without delete sharing, so the guardian cannot
+publish its coverage. The files are the authorization folder
+(`hook-guardian-state`: the ledger `protected_targets.json`, `activation.json`,
+`removed-connectors.json`, `user-cleanup.json`, `unprotected-agents.json`), the
+guardian's records in `runtime` (`hook_guardian_*.json`, the OpenCode port
+warnings), the enumerator's folder (`hook-guardian`: `targets.yaml` and its
+records) and the off-roster markers; locks and state markers the services hold
+on purpose are not counted. Before a lifecycle run changes anything the check
+stops it with nothing changed. A holder that arrives during the upgrade
+transaction ends the run with the restored services running and the
+transaction pending; Setup `/repair` finishes it once the program lets go. A
+holder that arrives during a hot config change leaves the restored config and
+the running gateway. What this does not cover: a program that holds a listed
+file but shares delete does not stop the guardian and is not reported; a
+file the guardian tolerates a failed write for (its startup record, the
+OpenCode port warnings, the enumerator's records) does not stop a repair, which
+exits `0`; a file outside the list is not looked at; and between the failure and
+the repair the accounts whose roster change was undone wait for it, shown as
+pending ("not proven") by `enterprise windows status` and `verify`, which warn
+`guardian_state_held` for as long as the program holds the file. Secure Client
+is not changed.
+
 The standalone Setup can also refuse before the lifecycle starts:
 
 - A malformed command line exits `1639`: an unknown property, a `CONFIG=`
