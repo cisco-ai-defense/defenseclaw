@@ -35,6 +35,14 @@ const authorizedKeysRuleID = "persistence.ssh_authorized_keys_command"
 // call was refused, and the response.
 func postManagedHookBehindProtectHome(t *testing.T, profile string, setup func(home, project string) map[string]any) (bool, string) {
 	t.Helper()
+	return postConnectorHookBehindProtectHome(t, "claudecode", true, profile, setup)
+}
+
+// postConnectorHookBehindProtectHome is postManagedHookBehindProtectHome for
+// the hook of another connector (codex), and, when managed is false, for the
+// per-user hook: no client evidence, and a gateway that reads the home.
+func postConnectorHookBehindProtectHome(t *testing.T, connectorName string, managed bool, profile string, setup func(home, project string) map[string]any) (bool, string) {
+	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway walk")
 	}
@@ -47,7 +55,7 @@ func postManagedHookBehindProtectHome(t *testing.T, profile string, setup func(h
 	}
 	t.Setenv("HOME", home)
 	packDir := filepath.Join(guardrailPoliciesRoot(t), profile)
-	installToolCallCorpusPackDirConnector(t, "claudecode", packDir)
+	installToolCallCorpusPackDirConnector(t, connectorName, packDir)
 	raw := string(mustJSON(t, setup(home, project)))
 	t.Cleanup(func() {
 		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, _ error) error {
@@ -58,8 +66,17 @@ func postManagedHookBehindProtectHome(t *testing.T, profile string, setup func(h
 		})
 	})
 	evidence := hookpaths.Resolve([]byte(raw))
-	if err := os.Chmod(homes, 0); err != nil {
-		t.Fatal(err)
+	if connectorName == "codex" {
+		// The managed hook of a connector names it to the resolver.
+		evidence = hookpaths.ResolveConnector(connectorName, "", "PreToolUse", []byte(raw))
+	}
+	if managed {
+		if sudoersEvidenceRewrite != nil {
+			evidence = sudoersEvidenceRewrite(t, evidence)
+		}
+		if err := os.Chmod(homes, 0); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// The data directory lies outside the closed home: a lock that cannot be
 	// read counts as an install window, which the strict tier answers first.
@@ -70,20 +87,38 @@ func postManagedHookBehindProtectHome(t *testing.T, profile string, setup func(h
 	t.Setenv("DEFENSECLAW_HOME", dataDir)
 	cfg := &config.Config{DataDir: dataDir}
 	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Connector = connectorName
 	cfg.Guardrail.RulePackDir = packDir
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", strings.NewReader(raw))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/"+connectorName+"/hook", strings.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(hookpaths.Header, evidence)
-	req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+	if managed {
+		req.Header.Set(hookpaths.Header, evidence)
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+	}
+	if connectorName == "codex" {
+		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+	}
 	recorder := httptest.NewRecorder()
-	api.handleAgentHook("claudecode").ServeHTTP(recorder, req)
+	api.handleAgentHook(connectorName).ServeHTTP(recorder, req)
 	body := recorder.Body.String()
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status %d: %.400s", recorder.Code, body)
 	}
 	return strings.Contains(body, `"action":"block"`) || strings.Contains(body, `"permissionDecision":"deny"`), body
+}
+
+// codexHeredocPatch is the Codex form of its patch tool: an exec_command whose
+// text is apply_patch with a quoted here-document.
+func codexHeredocPatch(directive, name, body string) string {
+	return "apply_patch <<'EOF'\n*** Begin Patch\n*** " + directive + ": " + name + "\n" + body + "*** End Patch\nEOF\n"
+}
+
+func codexBashCall(command string) func(project string) map[string]any {
+	return func(project string) map[string]any {
+		return map[string]any{"session_id": "heredoc-closed-link", "hook_event_name": "PreToolUse", "cwd": project,
+			"tool_name": "Bash", "tool_use_id": "call_heredoc_closed_link", "tool_input": map[string]any{"command": command}}
+	}
 }
 
 // closedSSHKeyLink builds the key file in the SSH folder of the home, a
