@@ -47,7 +47,7 @@ def test_every_deferral_is_standalone_only() -> None:
     sites = [m.start() for m in re.finditer(r"Add-DefenseClawRollbackDeferredHold -Message", text)]
     # The definition is a function, not a call.
     sites = [s for s in sites if not text[max(0, s - 40) : s].rstrip().endswith("function")]
-    assert len(sites) == 6, len(sites)
+    assert len(sites) == 7, len(sites)
     for site in sites:
         window = text[max(0, site - 1700) : site]
         assert "Test-DefenseClawStandaloneProfile" in window, text[site - 200 : site + 100]
@@ -185,17 +185,46 @@ def test_a_forward_run_replaces_a_hand_edited_requirements_file_instead_of_faili
     """GAP-0955: the recovery that a rollback ran (GAP-0802) also runs in the
     forward reconcile, so one /ensure ends rc 0 for a machine it repaired."""
     text = _text()
-    start = text.index("$reconcileFailure = $null")
-    block = text[start : start + 2600]
-    assert block.index("-Action reconcile") < block.index("$reconcileFailure = $_")
-    assert block.index("Test-DefenseClawStandaloneProfile") < block.index(
-        "Repair-DefenseClawRecoveredCodexRequirements"
-    )
+    body = _function_body(text, "Invoke-DefenseClawCodexRequirementsReconcileOrRecover")
+    assert body.index("-Action reconcile") < body.index("$reconcileFailure = $_")
+    assert body.index("Test-DefenseClawStandaloneProfile") < body.index("Repair-DefenseClawRecoveredCodexRequirements")
     # A failure the recovery did not explain is the failure of the run.
-    assert block.index("Repair-DefenseClawRecoveredCodexRequirements") < block.index("throw $reconcileFailure")
-    assert "DefenseClawRecoveredCodexRequirementsNotes).Count -eq $recoveredBefore" in block
-    # The ACLs and the checks run after, unchanged.
-    after = text[start + 1500 : start + 3200]
+    assert body.index("Repair-DefenseClawRecoveredCodexRequirements") < body.index("throw $reconcileFailure")
+    assert "DefenseClawRecoveredCodexRequirementsNotes).Count -eq $recoveredBefore" in body
+    # The caller runs the ACLs and the checks after it, unchanged.
+    call = text.index("Invoke-DefenseClawCodexRequirementsReconcileOrRecover `\n")
+    after = text[call : call + 900]
     assert after.index("Set-DefenseClawManagedAcls") < after.index(
         "Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout"
     )
+    assert "Set-DefenseClawManagedAcls" in after
+
+
+def test_the_early_hook_put_back_defers_a_held_hook_after_the_services_run() -> None:
+    """Review S1: Restore-DefenseClawEarlyHook names the holder (hook_in_use, 1618)
+    and the recovery ends there with the intent pending."""
+    text = _text()
+    body = _function_body(text, "Restore-DefenseClawEarlyHook")
+    assert "Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawHookHeldMessage -Layout $Layout)" in body
+    assert body.index("Test-DefenseClawStandaloneProfile") < body.index("New-DefenseClawHookHeldMessage")
+    # Both standalone callers (after the services start) end on the hold list;
+    # the Secure Client call before the start is unchanged.
+    assert text.count("Restore-DefenseClawEarlyHook `\n") == 4
+    for marker in (
+        "-TransactionDirectory $directory\n                Assert-DefenseClawRollbackHoldsResolved",
+        "-TransactionDirectory $recordedDirectory\n        # A held hook ends the recovery here, named, with the intent pending.\n        Assert-DefenseClawRollbackHoldsResolved",
+    ):
+        assert marker in text, marker
+    assert "$heldRestart = [string]$_.Exception.Message" in text
+
+
+def test_the_result_says_the_guardian_was_not_proven_and_names_each_file_once() -> None:
+    """Review S2 and S6."""
+    text = _text()
+    done = _function_body(text, "Assert-DefenseClawRollbackHoldsResolved")
+    assert done.index("Test-DefenseClawRollbackCoverageDeferred") < done.index("Clear-DefenseClawRollbackDeferredHolds")
+    assert "The guardian's coverage was not proven by this rollback" in done
+    add = _function_body(text, "Add-DefenseClawRollbackDeferredHold")
+    assert "Get-DefenseClawHeldMessagePath" in add
+    block = text[text.index("$rollbackHeld = [string]$_.Exception.Message") :][:900]
+    assert "throw $rollbackHeld" in block and "This $Action had failed first: " in block
