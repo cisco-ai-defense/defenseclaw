@@ -26,6 +26,8 @@ DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls thr
 
 On a new install, run `defenseclaw init --connector openclaw` first. Until DefenseClaw is initialized, `defenseclaw setup openclaw` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
+OpenClaw's own gateway must be running (or be a service that `openclaw gateway restart` can start) before `defenseclaw setup openclaw` changes anything. If nothing answers at the gateway address in `openclaw.json`, setup stops with `No changes made.`: start it with `openclaw gateway run` and run the same command again.
+
 ```bash
 defenseclaw setup openclaw --mode observe --restart
 defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
