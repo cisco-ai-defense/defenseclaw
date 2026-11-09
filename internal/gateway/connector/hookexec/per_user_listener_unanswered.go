@@ -21,9 +21,15 @@ var errPerUserNotAccepted = errors.New("connected gateway server socket was not 
 // transport decides a still-queued connection, so the decision is made
 // before connectBy ends the try; queueDwell is the least time a connection
 // sat in the queue before it is decided, so a gateway that is about to accept
-// is never read as stopped.
+// is never read as stopped. The margin is the time the owner scan of the
+// listener (every process of the account, and on Linux a short re-read of a
+// thread that cannot be read for a moment, unreadableThreadWindow) has before
+// the deadline cuts the try: a scan still running at the deadline is lost and
+// the try ends as an unverified peer, a false block of an ordinary call, so
+// the margin holds the scan of a busy host (170 ms measured with tests running
+// on the same account) with room for the re-read window on top.
 const (
-	unansweredMargin = 250 * time.Millisecond
+	unansweredMargin = time.Second
 	queueDwell       = 500 * time.Millisecond
 )
 
