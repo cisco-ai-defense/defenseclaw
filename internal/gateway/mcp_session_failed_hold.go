@@ -51,27 +51,32 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 	}
 	home, _ := callerHomeForAssets(ctx)
 	now := time.Now()
-	listed, isListed := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName)
 	if status.Failed {
-		if isListed {
+		if listed, isListed := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName); isListed {
 			a.holdFailedMCP(connector, home, probe, heldScope(listed), heldMCPDefinition(listed, connector, home), now)
 		}
 		return status
 	}
+	// The ordinary call, with nothing held, reads no config: the agent state
+	// file can be large and this runs at every MCP call.
 	held, _ := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, heldScopes(probe.WorkspaceDir), now)
 	if len(held) == 0 {
 		return status
 	}
+	listed, isListed := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName)
 	var listedHeld config.MCPServerEntry
+	var listedScope string
 	if isListed {
-		listedHeld = heldMCPDefinition(listed, connector, home)
+		listedHeld, listedScope = heldMCPDefinition(listed, connector, home), heldScope(listed)
 	}
 	var gone *config.MCPServerEntry
 	for i := len(held) - 1; i >= 0; i-- {
-		if isListed && sameHeldDefinition(held[i].def, listedHeld) {
+		if isListed && held[i].scope == listedScope && sameHeldDefinition(held[i].def, listedHeld) {
 			if !status.Pending && !status.Unavailable {
-				// This very definition is listed and its admission no longer
-				// fails: the allow or the clean scan that answered it ends its hold.
+				// This very definition is listed in the scope that held it and its
+				// admission no longer fails: the allow or the clean scan that
+				// answered it ends its hold. A clean admission of the same bytes
+				// in another scope is another connection.
 				a.hookMCP.releaseFailed(connector, home, probe.SessionID, held[i].scope, probe.ServerName, held[i].def)
 			}
 			continue
