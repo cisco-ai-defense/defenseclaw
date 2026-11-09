@@ -230,3 +230,51 @@ def test_the_result_says_the_guardian_was_not_proven_and_names_each_file_once() 
     assert "Get-DefenseClawHeldMessagePath" in add
     block = text[text.index("$rollbackHeld = [string]$_.Exception.Message") :][:900]
     assert "throw $rollbackHeld" in block and "This $Action had failed first: " in block
+
+
+# GAP-0977 (r109): a guardian state file a holder keeps the guardian from
+# publishing. The transaction found it before it stopped anything, names it
+# when the fresh-coverage proof times out, and a rollback that meets it defers
+# the guardian proof like the Codex files, so the restored services run and the
+# run ends with the held code (exit 1618) and the transaction pending.
+
+
+def test_a_guardian_state_hold_is_found_before_anything_stops() -> None:
+    text = _text()
+    transaction = _function_body(text, "New-DefenseClawTransaction")
+    gate = transaction.index("Assert-DefenseClawGuardianStateNotHeld -Layout $Layout")
+    assert gate < transaction.index("$codexReadHolds = $null")
+    assert gate < transaction.index("New-DefenseClawDirectory -Path $directory")
+    assert "Test-DefenseClawStandaloneProfile" in transaction[gate - 400 : gate]
+    assert "-Phase Gate" in _function_body(text, "Assert-DefenseClawGuardianStateNotHeld")
+    # The class: the authorization folder, the guardian records, the enumerator folder.
+    files = _function_body(text, "Get-DefenseClawGuardianStateFiles")
+    for needle in ("AuthorizationDirectory", "hook_guardian_*.json", "ManifestPath", "'*.lock'", "'.state'"):
+        assert needle in files, needle
+    hold = _function_body(text, "Get-DefenseClawGuardianStateHold")
+    assert "Test-DefenseClawStandaloneProfile" in hold and "Test-DefenseClawFileDeleteBlocked" in hold
+
+
+def test_the_fresh_coverage_wait_names_a_guardian_state_hold() -> None:
+    wait = _function_body(_text(), "Wait-DefenseClawFreshGuardianReconcile")
+    held = wait.index("Get-DefenseClawGuardianStateHold -Layout $Layout")
+    assert wait.index('$guardianLog = "the guardian log is') < held
+    # Before every one of the three timeouts that follow.
+    assert held < wait.index("LocalSystem guardian did not publish fresh required coverage: the hook guardian process")
+    assert "-Phase Activation" in wait[held : held + 400]
+
+
+def test_a_rollback_defers_the_guardian_proof_for_a_guardian_state_hold() -> None:
+    text = _text()
+    start = _function_body(text, "Start-DefenseClawTransactionServices")
+    assert start.index("Set-DefenseClawRollbackGuardianStateDeferral -Layout $Layout") < start.index(
+        "if (Test-DefenseClawRollbackCoverageDeferred) {"
+    )
+    deferral = _function_body(text, "Set-DefenseClawRollbackGuardianStateDeferral")
+    assert "Test-DefenseClawStandaloneProfile" in deferral[: deferral.index("Add-DefenseClawRollbackDeferredHold")]
+    assert "-Phase Rollback" in deferral and "DefenseClawRollbackCoverageDeferred = $true" in deferral
+    # The held code is a rollback-held message, and the path it names is found again.
+    assert "guardian_state_held" in _function_body(text, "Test-DefenseClawRollbackHeldMessage")
+    assert "the hook guardian" in _function_body(text, "Get-DefenseClawHeldMessagePath")
+    # Fail closed kept: Secure Client has no such deferral, and the held run is pending, not covered.
+    assert "-Code 'guardian_state_held'" in _function_body(text, "New-DefenseClawGuardianStateHeldMessage")
