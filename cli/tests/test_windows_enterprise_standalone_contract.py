@@ -877,6 +877,10 @@ def test_the_purge_walks_of_state_root_retry_with_call_scoped_privileges_for_a_d
     assert first < wrapper.index("EnterTreeWalkPrivileges()") and wrapper.index("finally") > wrapper.index("EnterTreeWalkPrivileges()")
     links = _function_body(module, "Remove-DefenseClawUninstallStateTreeLinks")
     assert "Invoke-DefenseClawStateRootWalk -WalkRoot $stateRoot -WalkLabel StateRoot -NothingChanged" in links
+    helper = _function_body(module, "Get-DefenseClawMissingPrivilegeRefusal")
+    assert "privileges_required: " in helper and "Run the same uninstall as SYSTEM" in helper
+    assert "Get-DefenseClawMissingPrivilegeRefusal" in _function_body(module, "Get-DefenseClawStateFileHolders")
+    assert "Get-DefenseClawMissingPrivilegeRefusal" in _function_body(module, "Get-DefenseClawInstallRootHolders")
     purge = _function_body(module, "Complete-DefenseClawStatePurge")
     assert "$stateCleanup = Invoke-DefenseClawNamespaceRootCleanup" in purge and "entries_removed" in purge
     assert purge.index("entries_removed") < purge.index("Write-DefenseClawLifecycleLogDiagnostic")

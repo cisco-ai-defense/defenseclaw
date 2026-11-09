@@ -656,6 +656,28 @@ public static class DcsfUnnamedRestartManager {
             if (-not ('DcsfCannotDeleteRestartManager' -as [type])) {
                 Microsoft.PowerShell.Utility\Add-Type -TypeDefinition 'public static class DcsfCannotDeleteRestartManager { public static object[] GetFileHolders(string[] paths) { throw new System.ComponentModel.Win32Exception(5, "Restart Manager cannot read, and this account cannot delete, " + paths[0]); } }'
             }
+            # A token that lacks the privileges is told to run as SYSTEM, and
+            # the refusal is not the retryable uninstall_in_use (GAP-0890 r2).
+            if (-not ('DcsfMissingPrivilegeRestartManager' -as [type])) {
+                Microsoft.PowerShell.Utility\Add-Type -TypeDefinition 'public static class DcsfMissingPrivilegeRestartManager { public static object[] GetFileHolders(string[] paths) { throw new System.ComponentModel.Win32Exception(5, "Restart Manager cannot read, and this account cannot delete, " + paths[0] + " (Win32 error 5) (SeBackupPrivilege, SeRestorePrivilege missing)"); } }'
+            }
+            $layout = New-TestState 'missing-privileges'
+            $savedNative = ${function:Initialize-DefenseClawNativeSecurity}
+            try {
+                function script:Initialize-DefenseClawNativeSecurity { return [DcsfMissingPrivilegeRestartManager] }
+                Test-Refused 'purge by a token without backup and restore' { Invoke-Preflight $layout } (
+                    '^privileges_required: .*\(SeBackupPrivilege, SeRestorePrivilege missing\).*nothing was changed and the services are still running\. Run the same uninstall as SYSTEM ')
+                Test-Refused 'install-root check by a token without backup and restore' {
+                    Assert-DefenseClawStandaloneInstallTreeNotInUse `
+                        -Layout $layout `
+                        -GatewayServiceName DefenseClawGateway `
+                        -GuardianServiceName DefenseClawHookGuardian
+                } '^privileges_required: .*Run the same uninstall as SYSTEM '
+                Test-StateIntact 'refusal for a token without backup and restore' $layout
+            }
+            finally {
+                Microsoft.PowerShell.Management\Set-Item -Path function:script:Initialize-DefenseClawNativeSecurity -Value $savedNative
+            }
             $layout = New-TestState 'cannot-delete'
             $savedNative = ${function:Initialize-DefenseClawNativeSecurity}
             try {
