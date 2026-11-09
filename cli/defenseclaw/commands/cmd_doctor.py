@@ -139,7 +139,7 @@ from defenseclaw.doctor_hooks import (
     validate_windows_copilot_hook_registration,
     validate_windows_hook_registration,
 )
-from defenseclaw.doctor_recovery import REPAIR_IDENTITY_COMMAND
+from defenseclaw.doctor_recovery import DEVICE_KEY_PAYLOAD_INVALID, REPAIR_IDENTITY_COMMAND
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
 from defenseclaw.file_permissions import (
@@ -4763,6 +4763,21 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
                 "(it asks first, moves those files aside and mints a new identity; check that no init is "
                 "running), or defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize "
                 "(the same repair)"
+            ),
+        )
+        return
+    if health.reason_code == DEVICE_KEY_PAYLOAD_INVALID:
+        _emit(
+            "fail",
+            "Device identity",
+            f"the device key at {target} holds no usable key (empty or cut short)",
+            r=r,
+            check_id="doctor.identity.device-key",
+            reason_code=health.reason_code,
+            remediation=(
+                f"restore device.key from a trusted backup, or run: {REPAIR_IDENTITY_COMMAND} "
+                "(it asks first, keeps that file and the provenance files aside as *.orphaned-* and mints a "
+                "new identity; stop the gateway and check that no init is running)"
             ),
         )
         return

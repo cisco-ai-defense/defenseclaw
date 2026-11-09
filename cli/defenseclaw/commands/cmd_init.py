@@ -72,9 +72,10 @@ def refuse_first_run_when_managed() -> None:
     "--repair-identity",
     is_flag=True,
     help=(
-        "Repair a device identity whose key is gone but whose provenance files remain (a crashed or "
-        "concurrent first init). Asks first, moves those files aside (kept as *.orphaned-*) and creates a "
-        "new identity; nothing else runs. Check that no other init is running first."
+        "Repair a device identity whose key is gone but whose provenance files remain, or whose key file "
+        "is empty or cut short (a crashed or concurrent first init). Asks first, moves those files aside "
+        "(kept as *.orphaned-*) and creates a new identity; nothing else runs. Check that no other init is "
+        "running first; with a config.yaml, the gateway must be stopped."
     ),
 )
 @click.option("--enable-guardrail", is_flag=True, help="Configure LLM guardrail during init")
@@ -442,13 +443,16 @@ def _run_repair_identity() -> None:
 
     Takes the same init locks as init (the home and the data folder the config names), so it
     cannot run beside an init. Works with or without a config.yaml: a first init that stopped on
-    the leftovers rolled its config back.
+    the leftovers rolled its config back. With a config.yaml it also needs the proof Doctor needs
+    before it recovers durable state: that the configured gateway is not running (a running gateway
+    holds the key it loaded).
     """
 
     from defenseclaw import config as config_module
     from defenseclaw.bootstrap import InitLockError, hold_init_lock
 
-    if os.path.lexists(config_module.config_path()):
+    configured = os.path.lexists(config_module.config_path())
+    if configured:
         try:
             cfg = config_module.load()
         except Exception as exc:  # noqa: BLE001 - a hand-edited config must not hide the repair's reason.
@@ -459,8 +463,19 @@ def _run_repair_identity() -> None:
         cfg = config_module.default_config()
     target = cfg.gateway.device_key_file or os.path.join(cfg.data_dir, "device.key")
 
+    def require_gateway_inactive() -> None:
+        if not configured:
+            return  # a first init that stopped never configured a gateway
+        from defenseclaw.commands.cmd_doctor import _recovery_gateway_blocker
+
+        if blocker := _recovery_gateway_blocker(cfg):
+            raise click.ClickException(f"{blocker}; nothing was changed")
+
     def confirm(leftovers: list[str]) -> bool:
-        click.echo(f"The device key {target} is missing, but the files of that identity remain:")
+        if os.path.lexists(target):
+            click.echo(f"The device key {target} exists but holds no usable key (empty or cut short):")
+        else:
+            click.echo(f"The device key {target} is missing, but the files of that identity remain:")
         for item in leftovers:
             click.echo(f"  {item}")
         click.echo("If you have a backup of the key, restore it instead.")
@@ -473,7 +488,9 @@ def _run_repair_identity() -> None:
     try:
         with hold_init_lock() as locks:
             locks.take(cfg.data_dir)
-            moved = _repair_device_identity(target, cfg.data_dir, confirm=confirm)
+            moved = _repair_device_identity(
+                target, cfg.data_dir, confirm=confirm, require_gateway_inactive=require_gateway_inactive
+            )
     except InitLockError as exc:
         raise click.ClickException(str(exc)) from exc
     for item in moved:
@@ -3612,7 +3629,7 @@ def _publish_device_identity(target: str, identity_root: str) -> None:
             files = ", ".join(path for path in plan.continuity_paths if os.path.lexists(path))
             message += (
                 f": the device identity at {target} has no key, but these files of it remain: {files}. "
-                f"Nothing was changed. After checking that no other defenseclaw init is running, run: "
+                f"No device identity file was changed. After checking that no other defenseclaw init is running, run: "
                 f"{REPAIR_IDENTITY_COMMAND}"
             )
         raise click.ClickException(message)
@@ -3646,11 +3663,15 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
     _publish_device_identity(target, identity_root)
 
 
-def _repair_device_identity(path: str, data_dir: str, *, confirm) -> list[str]:
+def _repair_device_identity(path: str, data_dir: str, *, confirm, require_gateway_inactive) -> list[str]:
     """The explicit repair behind ``defenseclaw init --repair-identity``.
 
-    The key must be absent. If provenance files of it remain, *confirm* (called with their paths)
-    must agree before they are moved aside (kept as ``*.orphaned-*``) and a new identity is created.
+    The key must be absent, or a regular private file that holds no key (empty or cut short by an
+    interrupted publication). *require_gateway_inactive* runs before anything is asked or changed
+    (once the key is known to be repairable) and raises when the gateway may be running. If files
+    of the old identity remain, *confirm* (called with their paths) must agree before they are moved
+    aside (kept as ``*.orphaned-*``) and a new identity is created. Any other existing key is never
+    touched.
     Returns the new names of the files moved aside.
     """
 
@@ -3658,26 +3679,36 @@ def _repair_device_identity(path: str, data_dir: str, *, confirm) -> list[str]:
         RecoveryDisposition,
         plan_missing_device_key,
         set_aside_identity_leftovers,
+        set_aside_unusable_device_key,
+        unusable_device_key_files,
     )
 
     target, identity_root = _device_identity_paths(path, data_dir)
-    if os.path.lexists(target):
+    unusable = unusable_device_key_files(target, identity_root) if os.path.lexists(target) else []
+    if os.path.lexists(target) and not unusable:
         raise click.ClickException(
             f"a device key already exists at {target}; nothing was changed. "
             "Restore or replace it only from a trusted backup."
         )
+    require_gateway_inactive()
     _prepare_device_identity_location(target, identity_root)
     plan = plan_missing_device_key(target, data_dir=identity_root)
     moved: list[str] = []
-    if plan.disposition is RecoveryDisposition.BLOCKED and plan.reason_code == "continuity-evidence-present":
-        leftovers = [item for item in plan.continuity_paths if os.path.lexists(item)]
+    if unusable or (
+        plan.disposition is RecoveryDisposition.BLOCKED and plan.reason_code == "continuity-evidence-present"
+    ):
+        leftovers = unusable or [item for item in plan.continuity_paths if os.path.lexists(item)]
         if not confirm(leftovers):
             raise click.ClickException("declined; nothing was changed")
         try:
-            moved = set_aside_identity_leftovers(target, identity_root)
+            moved = (
+                set_aside_unusable_device_key(target, identity_root)
+                if unusable
+                else set_aside_identity_leftovers(target, identity_root)
+            )
         except OSError as exc:
             raise click.ClickException(
-                f"cannot move the provenance files aside ({exc.strerror or type(exc).__name__}); "
+                f"cannot move the identity files aside ({exc.strerror or type(exc).__name__}); "
                 "the files that were moved are listed by their *.orphaned-* names next to them"
             ) from exc
     _publish_device_identity(target, identity_root)

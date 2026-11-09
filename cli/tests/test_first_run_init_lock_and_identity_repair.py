@@ -58,6 +58,20 @@ def _selection_recorder():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _no_gateway_running():
+    """The repair command asks Doctor's gateway-inactivity question; no test home has a gateway."""
+
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.doctor_gateway import ListenerEvidence
+
+    with (
+        patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=cmd_doctor._GatewayTrust("missing", "none")),
+        patch.object(cmd_doctor, "_verified_listener_gateway_evidence", return_value=ListenerEvidence("missing")),
+    ):
+        yield
+
+
 def _options() -> FirstRunOptions:
     return FirstRunOptions(connector="none", profile="observe", skip_install=True, start_gateway=False, verify=False)
 
@@ -221,6 +235,7 @@ def _refused_by(plain: bool, home: Path) -> None:
     assert REPAIR_IDENTITY_COMMAND in output
     assert str(home / "device.key") in output
     assert "no other defenseclaw init is running" in output
+    assert "No device identity file was changed" in output
     assert not (home / "device.key").exists()
     assert _orphans(home) == []
     assert _identity_files(home) == identity_before
@@ -626,4 +641,146 @@ def test_a_failed_creation_takes_back_every_file_it_published(tmp_path):
     assert sorted(path.name for path in home.iterdir()) == []
 
     _ensure_device_key(str(home / "device.key"), data_dir=str(home))
+    assert _valid(home)
+
+
+# --- a key file that holds no key (cut short while it was published) -------------------------------
+# The Windows publication writes the secret and the sentinel completely, then the key; a stop in the
+# middle of the key leaves a key pathname with an empty or partial payload.  Init treats an existing
+# pathname as present, so only the explicit repair can clear it, and only after asking.
+
+
+def _cut_short_key(home: Path, size: int, *, configured: bool) -> bytes:
+    """A complete identity whose key file was cut after *size* bytes; returns what the key file holds."""
+
+    assert run_first_run(_options()).status != "needs_attention"
+    key = home / "device.key"
+    cut = key.read_bytes()[:size]
+    key.write_bytes(cut)  # keeps the private mode the publication gave the file
+    if not configured:
+        (home / "config.yaml").unlink()
+    assert not _valid(home)
+    return cut
+
+
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("size", [0, 20, 80])
+def test_the_repair_command_replaces_a_key_file_cut_short_and_keeps_every_old_file(
+    tmp_path, monkeypatch, size, configured
+):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    cut = _cut_short_key(home, size, configured=configured)
+    old = _identity_files(home)
+
+    result = _repair()
+
+    assert result.exit_code == 0, result.output
+    assert str(home / "device.key") in result.output
+    assert _valid(home)
+    kept = {name.split(".orphaned-")[0]: (home / name).read_bytes() for name in _orphans(home)}
+    assert kept == {"device.key": cut, "device.key.provenance": old["device.key.provenance"], SECRET: old[SECRET]}
+    assert (home / SECRET).read_bytes() != old[SECRET]
+
+
+def test_the_repair_command_asks_before_it_touches_a_key_file_cut_short(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _cut_short_key(home, 20, configured=True)
+    before = _snapshot(home)
+
+    result = _repair("n\n")
+
+    assert result.exit_code != 0
+    assert "nothing was changed" in result.output
+    assert "holds no usable key" in result.output
+    assert _snapshot(home) == before
+    assert _orphans(home) == []
+
+
+def test_init_leaves_a_key_file_cut_short_alone_and_doctor_names_the_repair(tmp_path, monkeypatch):
+    from defenseclaw.commands import cmd_doctor
+
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _cut_short_key(home, 20, configured=True)
+    before = _snapshot(home)
+    cfg = type("Cfg", (), {})()
+    cfg.data_dir = str(home)
+    cfg.gateway = type("Gw", (), {"device_key_file": str(home / "device.key")})()
+    health = cmd_doctor._DoctorResult()
+
+    cmd_doctor._check_device_identity(cfg, health)
+
+    assert health.checks[-1]["status"] == "fail"
+    assert REPAIR_IDENTITY_COMMAND in health.checks[-1]["remediation"]
+    assert _snapshot(home) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a link needs a privilege on Windows")
+def test_the_repair_command_never_replaces_a_linked_key_path(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    outside = tmp_path / "elsewhere.key"
+    outside.write_bytes(b"not a key")
+    protect_private_file(str(outside))
+    (home / "device.key").symlink_to(outside)
+    before = (outside.read_bytes(), os.readlink(home / "device.key"))
+
+    result = _repair()
+
+    assert result.exit_code != 0
+    assert "a device key already exists" in result.output
+    assert (outside.read_bytes(), os.readlink(home / "device.key")) == before
+    assert _orphans(home) == []
+
+
+# --- the repair needs proof that the gateway is not running, as Doctor does ------------------------
+
+
+def _gateway_running():
+    from defenseclaw.commands import cmd_doctor
+
+    return patch.object(
+        cmd_doctor,
+        "_managed_gateway_process_trust",
+        return_value=cmd_doctor._GatewayTrust("trusted", "verified", 4321, home_bound=True),
+    )
+
+
+@pytest.mark.parametrize("state", ["key-gone-files-remain", "key-cut-short", "nothing-left-over"])
+def test_the_repair_command_on_a_configured_home_changes_nothing_while_the_gateway_runs(
+    tmp_path, monkeypatch, state
+):
+    home = _configured_home_without_key(tmp_path, monkeypatch)
+    if state == "key-cut-short":
+        (home / "device.key").write_bytes(b"")
+        protect_private_file(str(home / "device.key"))
+    elif state == "nothing-left-over":
+        for name in (SECRET, "device.key.provenance"):
+            (home / name).unlink()
+    before = _snapshot(home)
+
+    with _gateway_running():
+        refused = _repair()
+
+    assert refused.exit_code != 0
+    assert "verified managed gateway process is running" in refused.output
+    assert "nothing was changed" in refused.output
+    assert _snapshot(home) == before
+    assert _orphans(home) == []
+
+    assert _repair().exit_code == 0  # once the gateway is stopped, the same command repairs it
+    assert _valid(home)
+
+
+def test_the_repair_command_before_any_config_does_not_need_a_gateway_check(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _leftover_secret_and_sentinel(home)
+
+    with _gateway_running():
+        result = _repair()
+
+    assert result.exit_code == 0, result.output
     assert _valid(home)

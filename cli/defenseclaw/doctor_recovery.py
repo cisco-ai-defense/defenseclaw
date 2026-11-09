@@ -75,6 +75,11 @@ class DeviceKeyHealthStatus(str, Enum):
     INVALID = "invalid"
 
 
+# inspect_device_key reason for a private regular file at the key path that holds no valid key
+# (empty, or cut short by an interrupted publication).
+DEVICE_KEY_PAYLOAD_INVALID = "device-key-payload-invalid"
+
+
 class AuditDBHealthStatus(str, Enum):
     VALID = "valid"
     INTEGRITY_UNVERIFIED = "integrity-unverified"
@@ -345,7 +350,7 @@ def inspect_device_key(
     except OSError:
         return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "device-key-read-failed")
     if not _valid_device_key_bytes(key_data):
-        return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "device-key-payload-invalid")
+        return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, DEVICE_KEY_PAYLOAD_INVALID)
 
     secret_path = os.path.join(plan.data_dir, _DEVICE_PROVENANCE_SECRET)
     provenance_path = plan.target + ".provenance"
@@ -741,8 +746,55 @@ def set_aside_identity_leftovers(
         for path in (normalized_target + ".provenance", os.path.join(normalized_data, _DEVICE_PROVENANCE_SECRET))
         if os.path.lexists(path)
     ]
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
+    stamp = _aside_stamp()
     return [_move_aside(path, stamp) for path in leftovers]
+
+
+def unusable_device_key_files(
+    target: str | os.PathLike[str],
+    data_dir: str | os.PathLike[str],
+) -> list[str]:
+    """The identity files to set aside when ``device.key`` is a private regular file that holds no key.
+
+    A key file that an interrupted publication left empty or cut short is no usable identity, and
+    no provenance record can vouch for it.  Returns the key and the provenance files beside it that
+    exist, or an empty list for anything else: a valid or legacy key, a link, a file that fails the
+    private-custody checks, or no key at all.  A repair asks the operator before it uses this.
+    """
+
+    normalized_target, normalized_data = _normalize_device_identity_disk_paths(target, data_dir)
+    if not normalized_target or not normalized_data or not os.path.lexists(normalized_target):
+        return []
+    health = inspect_device_key(normalized_target, data_dir=normalized_data)
+    if health.status is not DeviceKeyHealthStatus.INVALID or health.reason_code != DEVICE_KEY_PAYLOAD_INVALID:
+        return []
+    return [
+        path
+        for path in (
+            normalized_target,
+            normalized_target + ".provenance",
+            os.path.join(normalized_data, _DEVICE_PROVENANCE_SECRET),
+        )
+        if os.path.lexists(path)
+    ]
+
+
+def set_aside_unusable_device_key(
+    target: str | os.PathLike[str],
+    data_dir: str | os.PathLike[str],
+) -> list[str]:
+    """Move aside what unusable_device_key_files names (kept as ``*.orphaned-*``); attended repairs only.
+
+    The key goes first, so an interruption leaves the state set_aside_identity_leftovers handles.
+    Returns the new names (empty when the key is not an unusable file).
+    """
+
+    stamp = _aside_stamp()
+    return [_move_aside(path, stamp) for path in unusable_device_key_files(target, data_dir)]
+
+
+def _aside_stamp() -> str:
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
 
 
 def _move_aside(path: str, stamp: str) -> str:
