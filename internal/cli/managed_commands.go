@@ -106,7 +106,7 @@ var managedCommands = []managedCommand{
 		Windows:  managedOffered,
 		Probes:   [][]string{{"status"}},
 		PerUser:  perUserEverywhere, PerUserPath: []string{"status"},
-		Note: "Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`, which no managed hook covers. An administrator's run shows the deployment.",
+		Note: "Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`; the reason says whether the machine policy still inspects its calls. An administrator's run shows the deployment.",
 	},
 	{
 		Command:  "defenseclaw sandbox ...",

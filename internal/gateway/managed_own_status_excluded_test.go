@@ -19,7 +19,7 @@ import (
 // the reason in its own field. Enrolled accounts on the same machine keep
 // their rows.
 
-func ownStatusExcludedFixture(t *testing.T, exclude []string, agents []enterprisehooks.UnprotectedAgent) *APIServer {
+func ownStatusExcludedFixture(t *testing.T, exclude []string, agents []enterprisehooks.UnprotectedAgent, configure ...func(*config.Config)) *APIServer {
 	t.Helper()
 	previousGuardian := ownStatusGuardianAuthorization
 	ownStatusGuardianAuthorization = func(string) (*managedGuardianAuthorization, string) { return nil, "unavailable" }
@@ -32,6 +32,9 @@ func ownStatusExcludedFixture(t *testing.T, exclude []string, agents []enterpris
 		"claudecode": {Enabled: &enabled}, "copilot": {Enabled: &enabled}, "opencode": {Enabled: &enabled},
 	}
 	cfg.Enterprise.Enrollment.ExcludeUsers = exclude
+	for _, apply := range configure {
+		apply(cfg)
+	}
 	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
 	api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{
 		"claudecode": {}, "copilot": {}, "opencode": {},
@@ -42,7 +45,7 @@ func ownStatusExcludedFixture(t *testing.T, exclude []string, agents []enterpris
 // requireExcludedAnswer holds an answer to the excluded contract through a
 // JSON round trip: every connector row and the Cowork row are in the state
 // excluded, not protected, with the code, the reason and the next step.
-func requireExcludedAnswer(t *testing.T, answer map[string]any) {
+func requireExcludedAnswer(t *testing.T, answer map[string]any, wantCode string) {
 	t.Helper()
 	encoded, err := json.Marshal(answer)
 	if err != nil {
@@ -65,17 +68,17 @@ func requireExcludedAnswer(t *testing.T, answer map[string]any) {
 		t.Fatalf("excluded roster = %v, want the 3 configured connectors: %s", out.Connectors, encoded)
 	}
 	for name, row := range out.Connectors {
-		requireExcludedRow(t, name, row, true)
+		requireExcludedRow(t, name, row, wantCode, true)
 	}
 	// The Cowork row has a reason and no next step.
-	requireExcludedRow(t, "cowork", out.Cowork, false)
+	requireExcludedRow(t, "cowork", out.Cowork, wantCode, false)
 }
 
-func requireExcludedRow(t *testing.T, name string, row map[string]any, wantNext bool) {
+func requireExcludedRow(t *testing.T, name string, row map[string]any, wantCode string, wantNext bool) {
 	t.Helper()
 	reason, _ := row["reason"].(string)
 	next, _ := row["next_step"].(string)
-	if row["state"] != "excluded" || row["protected"] != false || row["reason_code"] != "excluded_users" ||
+	if row["state"] != "excluded" || row["protected"] != false || row["reason_code"] != wantCode ||
 		!strings.Contains(reason, "exclude_users") || wantNext != (next != "") {
 		t.Fatalf("%s row = %#v, want state excluded, not protected, with the exclude_users reason and a next step", name, row)
 	}
@@ -100,8 +103,8 @@ func TestOwnStatusExcludedAccountIsExcludedOnEveryRow(t *testing.T) {
 
 	// By name, and by decimal uid; a scan entry for the account does not
 	// change the state, which comes from the exclusion.
-	requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "uid", "5003", "carol", ""))
-	requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "uid", "5004", "dave", ""))
+	requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "uid", "5003", "carol", ""), "excluded_users_inspected")
+	requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "uid", "5004", "dave", ""), "excluded_users_inspected")
 }
 
 // Enrolled accounts on the same machine keep their current rows: protected
@@ -152,7 +155,7 @@ func TestOwnStatusWindowsExcludedAccountIsExcludedOnEveryRow(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := ownStatusExcludedFixture(t, tc.exclude, nil)
-			requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `WIN11\alice`, ""))
+			requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `WIN11\alice`, ""), "excluded_users")
 			// Benign twin: bob is enrolled.
 			if row := ownStatusRowFor(t, api, "sid", bob, `WIN11\bob`, "claudecode"); row["state"] == "excluded" {
 				t.Fatalf("bob claudecode row = %#v, want not excluded", row)
@@ -194,7 +197,7 @@ func TestOwnStatusWindowsExclusionFollowsTheEnumeratorSpellings(t *testing.T) {
 				t.Fatalf("exclude_users [%s]: row = %#v, excluded = %v, want %v", tc.exclude, row, got, tc.excluded)
 			}
 			if tc.excluded {
-				requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `CONTOSO\alice`, ""))
+				requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `CONTOSO\alice`, ""), "excluded_users")
 			} else if row["state"] != "protected" {
 				t.Fatalf("enrolled row = %#v, want protected", row)
 			}
@@ -388,7 +391,7 @@ func TestOwnStatusUnixUnresolvedAccountNameClaimsNoProtection(t *testing.T) {
 			api := ownStatusExcludedFixture(t, tc.exclude, nil)
 			answer := api.ownStatusAnswer(context.Background(), "uid", tc.uid, tc.account, "")
 			if tc.want == "excluded" {
-				requireExcludedAnswer(t, answer)
+				requireExcludedAnswer(t, answer, "excluded_users_inspected")
 				return
 			}
 			if tc.uid == "0" {

@@ -113,7 +113,7 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	// hook calls. A missing or changed view never claims protection.
 	var connectors map[string]any
 	if excluded {
-		connectors = ownExcludedConnectorStates(cfg)
+		connectors = a.ownExcludedConnectorStates(cfg, idKey, self, name)
 	} else if cfg != nil && ownExclusionUnjudgeable(cfg.Enterprise.Enrollment, idKey, self, name, domain, folder) {
 		connectors = ownUnresolvedConnectorStates(cfg)
 	} else if idKey == "uid" && cfg != nil {
@@ -132,7 +132,9 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	cowork := ownCoworkRow(true, "protected", "cowork_hooks", "Cowork runs the Claude Code hooks your organization manages")
 	switch {
 	case excluded:
-		cowork = ownCoworkRow(false, "excluded", ownCauseExcluded.code, ownCauseExcluded.reason)
+		// Cowork runs the Claude Code hooks, so it follows that connector.
+		cause := ownExcludedCause(a.ownExcludedInspection(cfg, idKey, self, name, enterprisepolicy.ConnectorClaudeCode))
+		cowork = ownCoworkRow(false, "excluded", cause.code, cause.reason)
 	case !claudeCode && claudeConfigured:
 		cowork = ownCoworkRow(false, "not confirmed", "claude_code_unverified", "Claude Code policy or enrollment is not verified for this account")
 	case !claudeCode:
@@ -241,13 +243,48 @@ func ownUnresolvedConnectorStates(cfg *config.Config) map[string]any {
 
 // ownExcludedConnectorStates is the roster of an excluded account: every
 // connector the machine policy would otherwise cover is excluded, for the
-// account never inherits the machine-wide state.
-func ownExcludedConnectorStates(cfg *config.Config) map[string]any {
+// account never inherits the machine-wide state. Each row reason says what
+// the gateway still does with the account calls for that connector.
+func (a *APIServer) ownExcludedConnectorStates(cfg *config.Config, idKey, uid, name string) map[string]any {
 	states := make(map[string]any)
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
-		states[connector] = ownExcluded()
+		states[connector] = ownExcluded(a.ownExcludedInspection(cfg, idKey, uid, name, connector))
 	}
 	return states
+}
+
+// ownExcludedInspection says what the hook authorizer does with the calls of
+// an excluded account for connector, from the inputs it decides with: the
+// connectors it admitted for machine policy (the published policy view),
+// enrollment.unenrolled_users and enrollment.exempt_users. A machine policy
+// runs the hook for every local account, so with unenrolled_users not deny the
+// excluded account is still inspected (managedHookAuthorizer.decideFor); with
+// deny it is refused unless exempt. Without a machine policy for the
+// connector nothing is installed for the account. The Windows pipe has no
+// policy view, so it claims nothing.
+func (a *APIServer) ownExcludedInspection(cfg *config.Config, idKey, uid, name, connector string) ownInspection {
+	if idKey != "uid" || cfg == nil {
+		return ownInspectionUnknown
+	}
+	view := a.managedPolicyView.Load()
+	if view == nil {
+		return ownInspectionNone
+	}
+	if _, ok := view.connectors[connector]; !ok || view.admitted != nil && !view.admitted[connector] {
+		return ownInspectionNone
+	}
+	callerUID, err := strconv.Atoi(uid)
+	if err != nil {
+		return ownInspectionUnknown
+	}
+	enrollment := cfg.Enterprise.Enrollment
+	if !strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny) {
+		return ownInspectionPolicy
+	}
+	if len(enrollment.ExemptUsers) > 0 && (&managedHookAuthorizer{enrollment: enrollment}).hostRunExempt(managedHookPeer{UID: callerUID, Name: name}) {
+		return ownInspectionPolicy
+	}
+	return ownInspectionRefused
 }
 
 // ownWindowsConnectorStates keeps the Windows status roster aligned with the
