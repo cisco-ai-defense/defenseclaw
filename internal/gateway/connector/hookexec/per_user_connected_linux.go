@@ -84,7 +84,8 @@ func listenersHeldOnlyBy(procNet, procRoot string, pid int, server *net.TCPAddr)
 	if len(inodes) == 0 {
 		return false
 	}
-	held, err := socketInodesOf(procRoot, pid)
+	var settle unreadableThreadSettle
+	held, err := settle.socketInodesOf(procRoot, pid)
 	if err != nil {
 		return false
 	}
@@ -93,7 +94,7 @@ func listenersHeldOnlyBy(procNet, procRoot string, pid int, server *net.TCPAddr)
 			return false
 		}
 	}
-	return heldByNoOtherProcessOfThisAccount(procRoot, pid, inodes)
+	return heldByNoOtherProcessOfThisAccount(procRoot, pid, inodes, &settle)
 }
 
 // heldByNoOtherProcessOfThisAccount reports whether no process other than pid
@@ -103,8 +104,12 @@ func listenersHeldOnlyBy(procNet, procRoot string, pid int, server *net.TCPAddr)
 // sshd session child, see socketInodesOf) or the process is gone or exiting:
 // such a process is not a copy of the gateway's own descriptors, which a fork
 // keeps readable. A live thread that cannot be read beside readable ones, and
-// any other read failure, leave the answer open, so it is false.
-func heldByNoOtherProcessOfThisAccount(procRoot string, pid int, inodes []string) bool {
+// any other read failure, leave the answer open, so it is false. A live thread
+// that cannot be read for a moment (a process of the account in the middle of
+// exec or of a credential change, as the compiler and test processes of a busy
+// host are all the time) is read again for a short window before it counts as
+// open (unreadableThreadSettle).
+func heldByNoOtherProcessOfThisAccount(procRoot string, pid int, inodes []string, settle *unreadableThreadSettle) bool {
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return false
@@ -126,7 +131,7 @@ func heldByNoOtherProcessOfThisAccount(procRoot string, pid int, inodes []string
 		if stat, ok := info.Sys().(*syscall.Stat_t); !ok || stat.Uid != self {
 			continue
 		}
-		held, err := socketInodesOf(procRoot, other)
+		held, err := settle.socketInodesOf(procRoot, other)
 		if err != nil {
 			if errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 				continue
@@ -140,6 +145,41 @@ func heldByNoOtherProcessOfThisAccount(procRoot string, pid int, inodes []string
 		}
 	}
 	return true
+}
+
+// Reading the descriptor list of a process right while it execs or changes its
+// credentials is refused for a thread that is readable a few milliseconds
+// later. A refusal that outlasts unreadableThreadWindow is a thread this
+// account cannot see into, and stays open (errUnreadableLiveThread: the
+// listener is not proven to belong to the recorded gateway alone).
+const (
+	unreadableThreadWindow = 250 * time.Millisecond
+	unreadableThreadPoll   = 10 * time.Millisecond
+)
+
+// unreadableThreadSettle is the one retry window of a scan: it starts at the
+// first live thread that cannot be read, so a scan that meets a process which
+// stays unreadable waits unreadableThreadWindow once and is then false.
+type unreadableThreadSettle struct {
+	by time.Time
+}
+
+// socketInodesOf is socketInodesOf that reads the process again, until the
+// window ends, while the answer is errUnreadableLiveThread.
+func (s *unreadableThreadSettle) socketInodesOf(procRoot string, pid int) (map[string]bool, error) {
+	for {
+		held, err := socketInodesOf(procRoot, pid)
+		if !errors.Is(err, errUnreadableLiveThread) {
+			return held, err
+		}
+		if s.by.IsZero() {
+			s.by = time.Now().Add(unreadableThreadWindow)
+		}
+		if !time.Now().Before(s.by) {
+			return held, err
+		}
+		time.Sleep(unreadableThreadPoll)
+	}
 }
 
 // readListenerInodes reads one socket table and returns the socket inode of
