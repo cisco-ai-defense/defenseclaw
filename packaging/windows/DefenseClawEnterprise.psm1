@@ -15946,7 +15946,7 @@ function Protect-DefenseClawKeptRecord {
         if ($null -eq $held) { $held = $_.Exception.Message }
         throw ("untrusted_record: $Path was written again, but the kept copy $Kept could not be given administrator-only access ($held). " +
             "Setup went on: the record is written again and only the stamp is left; the kept copy is evidence only and nothing reads it. " +
-            "$(Format-DefenseClawRerunStep) once the program that holds it is stopped (or after a restart): that run finishes the stamp; until then every run warns and goes on. " +
+            "Run $(Format-DefenseClawSetupAction -Action '/repair') once the program that holds it is stopped (or after a restart): that run finishes the stamp (an /ensure that finds nothing to repair does not look at it); until then every repair warns and goes on. " +
             "Or, from an elevated prompt: icacls `"$Kept`" /inheritance:r /grant:r `"*S-1-5-18:(F)`" `"*S-1-5-32-544:(F)`" and icacls `"$Kept`" /setowner *S-1-5-32-544, or delete it (Remove-Item -LiteralPath `"$Kept`" -Force)")
     }
     Write-DefenseClawResilienceEvent -Marker defenseclaw_recover -Fields @{

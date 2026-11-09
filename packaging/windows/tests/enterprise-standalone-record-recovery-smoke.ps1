@@ -260,7 +260,7 @@ try {
         $quiet = @(Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H' 3>&1)
         $script:failKeptStamp = $false
         $warned = (@($quiet | Microsoft.PowerShell.Core\Where-Object { $_ -is [Management.Automation.WarningRecord] }) | Microsoft.PowerShell.Core\ForEach-Object { $_.Message }) -join ' '
-        if ($warned -notmatch 'could not be given administrator-only access' -or $warned -notmatch 'icacls' -or $warned -notmatch 'run the same command again' -or $warned -notmatch 'only the stamp is left' -or
+        if ($warned -notmatch 'could not be given administrator-only access' -or $warned -notmatch 'icacls' -or $warned -notmatch '/repair' -or $warned -notmatch 'only the stamp is left' -or
             -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $metadata) -or @(Kept 'deployment.json').Count -ne 1) {
             throw "a kept file that could not be stamped was not named: $warned"
         }
