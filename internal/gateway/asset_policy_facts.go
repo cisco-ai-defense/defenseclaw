@@ -378,9 +378,15 @@ func (a *APIServer) skillFolderRefsDecision(
 	home := hookActiveHome(ctx)
 	caller := ""
 	var refs []assetfacts.FolderRef
+	// The strict tier reads the slash-free words of any program that name an
+	// existing entry as paths; the others, only those of a program that reads
+	// files (the hook's claim is made on the second reading).
+	strict := a.shareBodyStrictTier(ctx, connector)
 	if peer, ok := managedHookPeerFromContext(ctx); ok {
 		caller = peer.Name
-		refs = assetfacts.SkillFolderRefsForPeer(toolName, toolInput, home, cwd, caller, peer.UID, peer.GID)
+		refs = assetfacts.SkillFolderRefsForPeer(toolName, toolInput, home, cwd, caller, peer.UID, peer.GID, strict)
+	} else if strict {
+		refs = assetfacts.SkillFolderRefsStrict(toolName, toolInput, home, cwd, caller)
 	} else {
 		refs = assetfacts.SkillFolderRefs(toolName, toolInput, home, cwd, caller)
 	}
