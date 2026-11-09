@@ -14,18 +14,21 @@ import (
 )
 
 // An excluded account is out of enrollment, but a machine policy runs the hook
-// for every local account, so its own status must say what the hook really does
-// with the calls: inspects them (unenrolled_users: inspect), refuses them
-// (deny), or nothing runs. The state stays excluded; only the reason moves.
+// for every local account. Its own status claims only what it can prove: the
+// machine policy still inspects the calls when a pinned machine-policy hook is
+// proven for the account (whatever verdict the hook authorizer returns,
+// refusing included), DefenseClaw does not inspect them when no machine-policy
+// hook covers the account, and otherwise the row sends the reader to the
+// administrator status. The state stays excluded; only the reason moves.
 
 const (
-	inspectedReason  = "excluded from enrollment; the machine policy still inspects your calls (unenrolled_users: inspect)"
-	exemptReason     = "the machine policy still inspects your calls (enterprise.enrollment.exempt_users names your account)"
-	ledgerReason     = "the guardian still lists an enrollment for your account, so the gateway inspects your calls"
-	refusedReason    = "the gateway refuses the calls its hook sends for your account (unenrolled_users: deny)"
-	unverifiedReason = "DefenseClaw cannot verify the vendor policy that runs the hook for your account"
-	admittedReason   = "the gateway admits the calls of your account, but DefenseClaw cannot verify that a hook still sends them"
-	nothingReason    = "excluded from enrollment; nothing inspects your calls"
+	inspectedReason = "excluded from enrollment; the machine policy still inspects your calls"
+	nothingReason   = "excluded from enrollment; DefenseClaw does not inspect your calls"
+	unknownReason   = "excluded from enrollment; run defenseclaw-managed status as an administrator to see what still inspects calls"
+
+	inspectedCode = "excluded_users_inspected"
+	nothingCode   = "excluded_users"
+	unknownCode   = "excluded_users_unverified"
 )
 
 func ownExcludedRowsOf(t *testing.T, api *APIServer, idKey, id, name string) (map[string]map[string]any, map[string]any) {
@@ -85,6 +88,9 @@ func TestOwnStatusExcludedReasonFollowsTheMachinePolicyHook(t *testing.T) {
 	all := func(code, text string) map[string][2]string {
 		return map[string][2]string{"claudecode": {code, text}, "copilot": {code, text}, "opencode": {code, text}}
 	}
+	one := func(connector, code, text string) map[string][2]string {
+		return map[string][2]string{connector: {code, text}}
+	}
 	for _, tc := range []struct {
 		name      string
 		configure func(*config.Config)
@@ -97,67 +103,73 @@ func TestOwnStatusExcludedReasonFollowsTheMachinePolicyHook(t *testing.T) {
 		want      map[string][2]string // connector -> code, reason text
 		cowork    [2]string
 	}{
-		{name: "inspect by default", want: all("excluded_users_inspected", inspectedReason),
-			cowork: [2]string{"excluded_users_inspected", inspectedReason}},
+		{name: "inspect by default", want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
 		{name: "inspect written out", configure: func(cfg *config.Config) {
 			cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledInspect
-		}, want: all("excluded_users_inspected", inspectedReason), cowork: [2]string{"excluded_users_inspected", inspectedReason}},
-		{name: "deny refuses", configure: deny, want: all("excluded_users_refused", refusedReason),
-			cowork: [2]string{"excluded_users_refused", refusedReason}},
-		{name: "deny with exempt_users still inspects", configure: both(deny, exempt), want: all("excluded_users_inspected", exemptReason),
-			cowork: [2]string{"excluded_users_inspected", exemptReason}},
+		}, want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
+		{name: "a refusing pinned hook is still the machine policy", configure: deny, want: all(inspectedCode, inspectedReason),
+			cowork: [2]string{inspectedCode, inspectedReason}},
+		{name: "deny with exempt_users", configure: both(deny, exempt), want: all(inspectedCode, inspectedReason),
+			cowork: [2]string{inspectedCode, inspectedReason}},
 		{name: "deny with a ledger target the account still holds", configure: deny, ledger: []managedHookLedgerTarget{carolTarget("claudecode", true)},
-			want: all("excluded_users_inspected", ledgerReason), cowork: [2]string{"excluded_users_inspected", ledgerReason}},
+			want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
 		{name: "deny with a ledger target for another connector", configure: deny, ledger: []managedHookLedgerTarget{carolTarget("copilot", true)},
-			want: all("excluded_users_inspected", ledgerReason), cowork: [2]string{"excluded_users_inspected", ledgerReason}},
+			want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
 		{name: "deny with a ledger target that is not ok", configure: deny, ledger: []managedHookLedgerTarget{carolTarget("claudecode", false)},
-			want: all("excluded_users_refused", refusedReason), cowork: [2]string{"excluded_users_refused", refusedReason}},
+			want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
 		{name: "deny with another account on the ledger", configure: deny,
 			ledger: []managedHookLedgerTarget{{User: "dave", Connector: "claudecode", OK: true}},
-			want:   all("excluded_users_refused", refusedReason), cowork: [2]string{"excluded_users_refused", refusedReason}},
-		{name: "deny with the ledger unreadable claims nothing", configure: deny, ledgerErr: true,
-			want: all("excluded_users", "excluded from enrollment"), cowork: [2]string{"excluded_users", "excluded from enrollment"}},
-		{name: "connector the authorizer did not admit", machine: []string{"claudecode"},
-			want:   map[string][2]string{"claudecode": {"excluded_users_inspected", inspectedReason}, "copilot": {"excluded_users", nothingReason}, "opencode": {"excluded_users", nothingReason}},
-			cowork: [2]string{"excluded_users_inspected", inspectedReason}},
-		{name: "admitted connector missing from the view is unverified", view: func() *managedPolicyView {
+			want:   all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
+		{name: "deny with the ledger unreadable and a pinned hook", configure: deny, ledgerErr: true,
+			want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
+		{name: "ledger unreadable and no policy view claims nothing", noView: true, noMachine: true, ledgerErr: true,
+			want: all(unknownCode, unknownReason), cowork: [2]string{unknownCode, unknownReason}},
+		{name: "connector the authorizer did not admit, hook pinned", machine: []string{"claudecode"},
+			want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
+		{name: "connector the authorizer did not admit, no view", machine: []string{"claudecode"}, noView: true,
+			want:   map[string][2]string{"claudecode": {unknownCode, unknownReason}, "copilot": {nothingCode, nothingReason}, "opencode": {nothingCode, nothingReason}},
+			cowork: [2]string{unknownCode, unknownReason}},
+		{name: "admitted connector missing from the view is unknown", view: func() *managedPolicyView {
 			return &managedPolicyView{connectors: map[string]managedPolicyViewConnector{"claudecode": {}}}
-		}, want: map[string][2]string{"claudecode": {"excluded_users_inspected", inspectedReason}, "copilot": {"excluded_users_unverified", unverifiedReason}, "opencode": {"excluded_users_unverified", unverifiedReason}},
-			cowork: [2]string{"excluded_users_inspected", inspectedReason}},
+		}, want: map[string][2]string{"claudecode": {inspectedCode, inspectedReason}, "copilot": {unknownCode, unknownReason}, "opencode": {unknownCode, unknownReason}},
+			cowork: [2]string{inspectedCode, inspectedReason}},
 		{name: "no policy view while the authorizer keeps its admission", noView: true,
-			want: all("excluded_users_unverified", unverifiedReason), cowork: [2]string{"excluded_users_unverified", unverifiedReason}},
-		{name: "no policy view under deny still refuses", noView: true, configure: deny,
-			want: all("excluded_users_refused", refusedReason), cowork: [2]string{"excluded_users_refused", refusedReason}},
+			want: all(unknownCode, unknownReason), cowork: [2]string{unknownCode, unknownReason}},
+		{name: "no policy view under deny", noView: true, configure: deny,
+			want: all(unknownCode, unknownReason), cowork: [2]string{unknownCode, unknownReason}},
 		{name: "unpinned shared vendor source claims no inspection", view: provenWith(map[string]managedPolicyViewConnector{"claudecode": {shared: true}}),
-			want:   map[string][2]string{"claudecode": {"excluded_users_unverified", unverifiedReason}, "copilot": {"excluded_users_inspected", inspectedReason}, "opencode": {"excluded_users_inspected", inspectedReason}},
-			cowork: [2]string{"excluded_users_unverified", unverifiedReason}},
+			want:   map[string][2]string{"claudecode": {unknownCode, unknownReason}, "copilot": {inspectedCode, inspectedReason}, "opencode": {inspectedCode, inspectedReason}},
+			cowork: [2]string{unknownCode, unknownReason}},
 		{name: "unreadable preference folder claims no inspection", view: provenWith(map[string]managedPolicyViewConnector{"opencode": {allAccounts: true}}),
-			want:   map[string][2]string{"claudecode": {"excluded_users_inspected", inspectedReason}, "opencode": {"excluded_users_unverified", unverifiedReason}},
-			cowork: [2]string{"excluded_users_inspected", inspectedReason}},
+			want:   map[string][2]string{"claudecode": {inspectedCode, inspectedReason}, "opencode": {unknownCode, unknownReason}},
+			cowork: [2]string{inspectedCode, inspectedReason}},
 		{name: "own preference unproven for this account", view: provenWith(map[string]managedPolicyViewConnector{"claudecode": {accounts: map[string]bool{"carol": true}}}),
-			want:   map[string][2]string{"claudecode": {"excluded_users_unverified", unverifiedReason}, "copilot": {"excluded_users_inspected", inspectedReason}},
-			cowork: [2]string{"excluded_users_unverified", unverifiedReason}},
+			want:   map[string][2]string{"claudecode": {unknownCode, unknownReason}, "copilot": {inspectedCode, inspectedReason}},
+			cowork: [2]string{unknownCode, unknownReason}},
 		{name: "another account preference unproven leaves this one inspected", view: provenWith(map[string]managedPolicyViewConnector{"claudecode": {accounts: map[string]bool{"dave": true}}}),
-			want: all("excluded_users_inspected", inspectedReason), cowork: [2]string{"excluded_users_inspected", inspectedReason}},
-		{name: "deny with an unpinned source still refuses", configure: deny, view: provenWith(map[string]managedPolicyViewConnector{"claudecode": {shared: true}}),
-			want: all("excluded_users_refused", refusedReason), cowork: [2]string{"excluded_users_refused", refusedReason}},
-		{name: "no machine policy", noMachine: true, noView: true, want: all("excluded_users", nothingReason),
-			cowork: [2]string{"excluded_users", nothingReason}},
-		{name: "no machine policy under deny", noMachine: true, noView: true, configure: deny, want: all("excluded_users", nothingReason),
-			cowork: [2]string{"excluded_users", nothingReason}},
+			want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
+		{name: "deny with an unpinned source", configure: deny, view: provenWith(map[string]managedPolicyViewConnector{"claudecode": {shared: true}}),
+			want: one("claudecode", unknownCode, unknownReason), cowork: [2]string{unknownCode, unknownReason}},
+		{name: "no machine admission, hook pinned, nothing exempts the account", noMachine: true,
+			want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
+		{name: "no machine admission, hook pinned, deny and nothing exempts the account", noMachine: true, configure: deny,
+			want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
+		{name: "no machine policy", noMachine: true, noView: true, want: all(nothingCode, nothingReason),
+			cowork: [2]string{nothingCode, nothingReason}},
+		{name: "no machine policy under deny", noMachine: true, noView: true, configure: deny, want: all(nothingCode, nothingReason),
+			cowork: [2]string{nothingCode, nothingReason}},
 		{name: "no machine policy, an old ledger target alone proves no hook", noMachine: true, noView: true,
 			ledger: []managedHookLedgerTarget{carolTarget("claudecode", true)},
-			want:   map[string][2]string{"claudecode": {"excluded_users_unverified", admittedReason}, "copilot": {"excluded_users", nothingReason}, "opencode": {"excluded_users", nothingReason}},
-			cowork: [2]string{"excluded_users_unverified", admittedReason}},
+			want:   map[string][2]string{"claudecode": {unknownCode, unknownReason}, "copilot": {nothingCode, nothingReason}, "opencode": {nothingCode, nothingReason}},
+			cowork: [2]string{unknownCode, unknownReason}},
 		{name: "no machine policy, an old ledger target and a pinned vendor hook", noMachine: true,
 			ledger: []managedHookLedgerTarget{carolTarget("claudecode", true)},
-			want:   map[string][2]string{"claudecode": {"excluded_users_inspected", ledgerReason}, "copilot": {"excluded_users", nothingReason}},
-			cowork: [2]string{"excluded_users_inspected", ledgerReason}},
+			want:   all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
 		{name: "no machine policy, an old ledger target and an unpinned vendor source", noMachine: true,
 			view:   provenWith(map[string]managedPolicyViewConnector{"claudecode": {shared: true}}),
 			ledger: []managedHookLedgerTarget{carolTarget("claudecode", true)},
-			want:   map[string][2]string{"claudecode": {"excluded_users_unverified", unverifiedReason}},
-			cowork: [2]string{"excluded_users_unverified", unverifiedReason}},
+			want:   one("claudecode", unknownCode, unknownReason),
+			cowork: [2]string{unknownCode, unknownReason}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var configure []func(*config.Config)
@@ -193,9 +205,10 @@ func TestOwnStatusExcludedReasonFollowsTheMachinePolicyHook(t *testing.T) {
 	}
 }
 
-// The status says inspected exactly when the hook authorizer lets the excluded
-// account through, and refused exactly when it refuses it as excluded.
-func TestOwnStatusExcludedReasonAgreesWithTheHookAuthorizer(t *testing.T) {
+// A pinned machine-policy hook is the machine policy whatever the hook
+// authorizer answers for the excluded account: the status says inspected when
+// the authorizer lets the call through and when it refuses it as excluded.
+func TestOwnStatusExcludedReasonDoesNotDependOnTheAuthorizerVerdict(t *testing.T) {
 	peer := managedHookPeer{UID: 5003, Name: "carol"}
 	for _, unenrolled := range []string{"", config.EnterpriseUnenrolledInspect, config.EnterpriseUnenrolledDeny} {
 		for _, exempt := range []bool{false, true} {
@@ -222,43 +235,79 @@ func TestOwnStatusExcludedReasonAgreesWithTheHookAuthorizer(t *testing.T) {
 						func() (managedHookLedger, error) { return ledger, nil })
 					api.managedHookAuthz.Store(authorizer)
 					decision := authorizer.decide(peer, "claudecode", "")
+					if !decision.Allow && !decision.Excluded {
+						t.Fatalf("authorizer decision = %+v, want an allow or an excluded refusal", decision)
+					}
 					rows, _ := ownExcludedRowsOf(t, api, "uid", "5003", "carol")
-					want := "excluded_users_inspected"
-					if !decision.Allow {
-						want = "excluded_users_refused"
-						if !decision.Excluded {
-							t.Fatalf("authorizer decision = %+v, want an excluded refusal", decision)
-						}
-					}
-					if got := rows["claudecode"]["reason_code"]; got != want {
-						t.Fatalf("claudecode row = %#v, want code %s for decision %+v", rows["claudecode"], want, decision)
-					}
+					requireExcludedReason(t, "claudecode", rows["claudecode"], inspectedCode, inspectedReason)
 				})
 			}
 		}
 	}
 }
 
-// The Windows pipe has no policy view, so an excluded Windows account is told
-// it is excluded and nothing more: no claim that the calls are inspected, none
-// that nothing inspects them.
+// The status never matches the per-account proof by a name it does not have:
+// a uid that exclude_users names, with the account name lookup failed, gets no
+// claim either way, whatever the proof of an account of any name says.
+func TestOwnStatusExcludedAccountNameUnresolvedClaimsNothing(t *testing.T) {
+	proofOf := func(carolUnproven bool) *managedPolicyView {
+		return &managedPolicyView{connectors: map[string]managedPolicyViewConnector{
+			"claudecode": {accounts: map[string]bool{"carol": carolUnproven}},
+			"copilot":    {},
+			"opencode":   {},
+		}}
+	}
+	for _, tc := range []struct {
+		name          string
+		carolUnproven bool
+		account       string
+		wantCode      string
+		wantText      string
+	}{
+		{"name known, own preference unproven", true, "carol", unknownCode, unknownReason},
+		{"name known, own preference pinned", false, "carol", inspectedCode, inspectedReason},
+		{"name lookup failed, another account preference unproven", true, "", unknownCode, unknownReason},
+		{"name lookup failed, every preference pinned", false, "", unknownCode, unknownReason},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := ownStatusExcludedFixture(t, []string{"5003"}, nil)
+			api.managedPolicyView.Store(proofOf(tc.carolUnproven))
+			rows, cowork := ownExcludedRowsOf(t, api, "uid", "5003", tc.account)
+			requireExcludedReason(t, "claudecode", rows["claudecode"], tc.wantCode, tc.wantText)
+			requireExcludedReason(t, "cowork", cowork, tc.wantCode, tc.wantText)
+			// copilot is pinned for every account, but is judged by the name too.
+			copilotCode, copilotText := inspectedCode, inspectedReason
+			if tc.account == "" {
+				copilotCode, copilotText = unknownCode, unknownReason
+			}
+			requireExcludedReason(t, "copilot", rows["copilot"], copilotCode, copilotText)
+		})
+	}
+}
+
+// The Windows pipe has no policy view and no authorizer, so an excluded Windows
+// account is told it is excluded and where to look, and nothing about whether
+// its calls are inspected.
 func TestOwnStatusWindowsExcludedReasonClaimsNothingAboutInspection(t *testing.T) {
 	const alice = "S-1-5-21-1004336348-1177238915-682003330-1001"
 	api := ownStatusExcludedFixture(t, []string{"alice"}, nil)
 	rows, cowork := ownExcludedRowsOf(t, api, "sid", alice, `WIN11\alice`)
-	for name, row := range rows {
-		requireExcludedReason(t, name, row, "excluded_users", "excluded from enrollment")
-		if reason, _ := row["reason"].(string); strings.Contains(reason, "inspect") || strings.Contains(reason, "refuses") {
+	check := func(name string, row map[string]any) {
+		requireExcludedReason(t, name, row, unknownCode, unknownReason)
+		if reason, _ := row["reason"].(string); strings.Contains(reason, "still inspects your calls") || strings.Contains(reason, "does not inspect your calls") {
 			t.Fatalf("%s reason %q claims something about inspection", name, reason)
 		}
 	}
-	requireExcludedReason(t, "cowork", cowork, "excluded_users", "excluded from enrollment")
+	for name, row := range rows {
+		check(name, row)
+	}
+	check("cowork", cowork)
 }
 
-// exempt_users admits the account whatever the machine admission is, so with
-// a pinned vendor hook and no machine admission the call still arrives and is
-// served; without the pinned source nothing proves a hook sends it, and
-// nothing proves none does.
+// exempt_users admits the account whatever the machine admission is. With a
+// pinned vendor hook and no machine admission the machine policy handles the
+// call; without the pinned source nothing proves a hook sends it, and nothing
+// proves none does.
 func TestOwnStatusExcludedExemptCallerWithoutMachineAdmission(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -268,11 +317,11 @@ func TestOwnStatusExcludedExemptCallerWithoutMachineAdmission(t *testing.T) {
 	}{
 		{name: "pinned vendor hook", view: &managedPolicyView{
 			connectors: map[string]managedPolicyViewConnector{"claudecode": {}}, admitted: map[string]bool{}},
-			wantCode: "excluded_users_inspected", wantText: exemptReason},
+			wantCode: inspectedCode, wantText: inspectedReason},
 		{name: "unpinned vendor source", view: &managedPolicyView{
 			connectors: map[string]managedPolicyViewConnector{"claudecode": {shared: true}}},
-			wantCode: "excluded_users_unverified", wantText: unverifiedReason},
-		{name: "no policy view", wantCode: "excluded_users_unverified", wantText: admittedReason},
+			wantCode: unknownCode, wantText: unknownReason},
+		{name: "no policy view", wantCode: unknownCode, wantText: unknownReason},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := ownStatusExcludedFixture(t, []string{"carol"}, nil, func(cfg *config.Config) {

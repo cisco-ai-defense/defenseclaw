@@ -253,65 +253,42 @@ func (a *APIServer) ownExcludedConnectorStates(cfg *config.Config, idKey, uid, n
 	return states
 }
 
-// ownExcludedInspection says what the hook authorizer does with the calls of
-// an excluded account for connector. It asks the authorizer the hook socket
-// decides with, so it reads the inputs the hook reads: the machine-policy
-// connectors it admitted, enrollment.unenrolled_users and exempt_users, and
-// the guardian ledger. A machine policy runs the hook for every local
-// account, so with unenrolled_users not deny the excluded account is still
-// inspected; with deny it is refused unless exempt or the ledger still lists a
-// target for it. The published policy view is only the proof that the vendor
-// hook is there: an inspection claim needs it, a refusal does not (the gateway
-// refuses whatever call arrives). Admission by the ledger or exempt_users is
-// not proof of a hook either: without the pinned vendor source the row says
-// the account is admitted and claims neither inspection nor its absence. With
-// the ledger unreadable, or on the Windows pipe (no authorizer), it claims
-// nothing.
+// ownExcludedInspection says what the status can prove about the calls of an
+// excluded account for connector, and nothing it cannot. A machine-policy hook
+// that the published policy view proves installed and pinned for the account
+// means the machine policy handles its calls, whatever verdict the hook
+// authorizer returns (inspect, or refuse under unenrolled_users: deny, or an
+// outage refusal) and whether or not the authorizer still lists the connector
+// as admitted (the watcher retires admission and the vendor source
+// separately). With no such hook, no admission and no vendor source for the
+// connector, no machine-policy hook covers the account. Everything else is
+// unknown: no authorizer (the Windows pipe), no resolved account name (the
+// per-account proof is keyed by name, and the uid alone does not select it), an
+// admission the policy view does not back (a ledger row or exempt_users
+// outlives the hook), a vendor source that is unreadable or not the pinned
+// one, or a ledger that can not be read.
 func (a *APIServer) ownExcludedInspection(idKey, uid, name, connector string) ownInspection {
 	z := a.managedHookAuthz.Load()
 	callerUID, err := strconv.Atoi(uid)
-	if idKey != "uid" || z == nil || err != nil || callerUID == 0 {
+	if idKey != "uid" || z == nil || err != nil || callerUID == 0 || strings.TrimSpace(name) == "" {
 		return ownInspectionUnknown
 	}
+	view := a.managedPolicyView.Load()
+	if view.provenHook(connector, name) {
+		return ownInspectionInspected
+	}
 	decision := z.decide(managedHookPeer{UID: callerUID, Name: name}, connector, "")
+	if !decision.Allow && decision.Reason != managedHookReasonUIDUnregistered {
+		return ownInspectionUnknown
+	}
 	machine := false
 	if policy := z.machinePolicy.Load(); policy != nil {
 		machine = policy.connectors[strings.ToLower(strings.TrimSpace(connector))]
 	}
-	if !decision.Allow {
-		if decision.Reason != managedHookReasonUIDUnregistered {
-			return ownInspectionUnknown
-		}
-		if machine {
-			return ownInspectionRefused
-		}
-		return ownInspectionNone
+	if decision.Allow || machine || view.hasConnector(connector) {
+		return ownInspectionUnknown
 	}
-	if decision.Disabled {
-		return ownInspectionNone
-	}
-	view := a.managedPolicyView.Load()
-	if view.provenHook(connector, name) {
-		// The vendor hook is there, pinned and unchanged, whether or not the
-		// authorizer still counts the connector as machine policy (the watcher
-		// retires admission and the vendor source separately), so a call
-		// arrives and the authorizer's answer is what happens to it.
-		switch {
-		case decision.Exempt:
-			return ownInspectionExempt
-		case !machine || strings.EqualFold(strings.TrimSpace(z.enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny):
-			return ownInspectionLedger
-		}
-		return ownInspectionPolicy
-	}
-	if machine || view.hasConnector(connector) {
-		return ownInspectionUnverified
-	}
-	// The authorizer admits the account (a ledger row or exempt_users), but
-	// nothing proves a hook still sends its calls and nothing proves none
-	// does: a ledger row outlives the hook the enumerator removes for an
-	// excluded account, and admission is not installation.
-	return ownInspectionAdmittedOnly
+	return ownInspectionNone
 }
 
 // ownWindowsConnectorStates keeps the Windows status roster aligned with the
