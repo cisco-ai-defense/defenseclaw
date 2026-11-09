@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -1612,6 +1613,95 @@ func TestConnectorTeardownFailureRestoresActiveState(t *testing.T) {
 	}
 	if got := connector.LoadActiveConnectors(dir); !reflect.DeepEqual(got, []string{"cursor"}) {
 		t.Fatalf("active state after failed teardown = %v, want [cursor]", got)
+	}
+}
+
+// lockedConnectorNames lists the connectors the hook contract lock in dir still names.
+func lockedConnectorNames(t *testing.T, dir string) []string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(dir, "hook_contract_lock.json"))
+	if err != nil {
+		t.Fatalf("read hook contract lock: %v", err)
+	}
+	var lock struct {
+		Connectors map[string]json.RawMessage `json:"connectors"`
+	}
+	if err := json.Unmarshal(body, &lock); err != nil {
+		t.Fatalf("parse hook contract lock: %v", err)
+	}
+	names := make([]string, 0, len(lock.Connectors))
+	for name := range lock.Connectors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func saveContractLockEntries(t *testing.T, dir string, opts connector.SetupOpts, conns ...connector.Connector) {
+	t.Helper()
+	for _, conn := range conns {
+		if err := connector.SaveHookContractLockEntry(dir, connector.NewHookContractLockEntry(opts, conn, "test-build")); err != nil {
+			t.Fatalf("save %s lock entry: %v", conn.Name(), err)
+		}
+	}
+}
+
+// A torn-down connector releases its contract-lock entry, as the gateway's own
+// teardown does; the entry used to stay and `config set data_dir` copied it to
+// a folder with no inactive mark for it (GAP-0941). The peer's entry stays.
+func TestConnectorTeardownReleasesTheConnectorsContractLockEntry(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dir, "cursor")()
+
+	cfgPath := filepath.Join(testenv.PrivateTempDir(t), "hooks.json")
+	previous := connector.CursorHooksPathOverride
+	connector.CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })
+
+	conn := connector.NewCursorConnector()
+	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	// The peer's entry is saved before Setup writes the hook runtime state its save would check.
+	saveContractLockEntries(t, dir, opts, connector.NewCodexConnector())
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("cursor setup: %v", err)
+	}
+	saveContractLockEntries(t, dir, opts, conn)
+	if got := lockedConnectorNames(t, dir); !reflect.DeepEqual(got, []string{"codex", "cursor"}) {
+		t.Fatalf("lock before teardown = %v", got)
+	}
+
+	if _, stderr, exitCode := runConnectorCmd(t, "teardown", "--connector", "cursor"); exitCode != 0 {
+		t.Fatalf("teardown failed: exit=%d stderr=%q", exitCode, stderr)
+	}
+	if got := lockedConnectorNames(t, dir); !reflect.DeepEqual(got, []string{"codex"}) {
+		t.Fatalf("lock after teardown = %v, want only the peer codex", got)
+	}
+}
+
+// A teardown that fails keeps the entry: the connector is not removed.
+func TestConnectorTeardownFailureKeepsTheConnectorsContractLockEntry(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dir, "cursor")()
+
+	cfgPath := filepath.Join(testenv.PrivateTempDir(t), "hooks.json")
+	previous := connector.CursorHooksPathOverride
+	connector.CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })
+
+	conn := connector.NewCursorConnector()
+	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("cursor setup: %v", err)
+	}
+	opts.GuardrailMode, opts.HookFailMode = "action", "closed"
+	saveContractLockEntries(t, dir, opts, conn)
+	if err := os.WriteFile(filepath.Join(dir, "connector_backups", "cursor", "config.json"), []byte("not-json"), 0o600); err != nil {
+		t.Fatalf("corrupt managed backup: %v", err)
+	}
+
+	runConnectorCmd(t, "teardown", "--connector", "cursor")
+	if got := lockedConnectorNames(t, dir); !reflect.DeepEqual(got, []string{"cursor"}) {
+		t.Fatalf("lock after a failed teardown = %v, want [cursor]", got)
 	}
 }
 
