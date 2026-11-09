@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -169,4 +170,78 @@ func TestProjectSkillManifestLinkedOutsideTheProfileIsNotVerified(t *testing.T) 
 			t.Fatalf("facts %v, want the root unverified as %s", facts, ProjectSkillManifestLinked)
 		}
 	})
+}
+
+// A project skill is also invoked by the name its SKILL.md declares, whatever
+// the folder is called. A manifest that is a link is read as the agent reads
+// it, so the declared-name call binds that folder like a call by folder name,
+// and the private in-profile twin stays verified (rel-1-0-9:GAP-0951).
+func TestProjectSkillManifestLinkSelectedByDeclaredName(t *testing.T) {
+	cases := []struct {
+		label string
+		link  func(t *testing.T, home string) string // the file the manifest links to
+		bad   bool
+	}{
+		{"link to a file outside the profile", func(t *testing.T, _ string) string {
+			path := filepath.Join(t.TempDir(), "policy.md")
+			if err := os.WriteFile(path, []byte("---\nname: sample\n---\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}, true},
+		{"link to the caller private file in the profile", func(t *testing.T, home string) string {
+			private := filepath.Join(home, "private", "sample")
+			round6Skill(t, private, "sample")
+			return filepath.Join(private, "SKILL.md")
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			home, project, root, facts := manifestLinkProject(t)
+			dir := filepath.Join(root, "folder")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(tc.link(t, home), filepath.Join(dir, "SKILL.md")); err != nil {
+				t.Skipf("link unavailable: %v", err)
+			}
+			round6Skill(t, filepath.Join(root, "other"), "other")
+			args, _ := json.Marshal(map[string]any{"skill": "sample"})
+			addProjectSkillSelectedFacts(facts, nil, args, home, project)
+			unverified := facts[ProjectSkillRootUnverifiedPrefix+root]
+			_, verified := facts[ProjectSkillRootVerifiedPrefix+root]
+			selected := round6Selected(facts)
+			if tc.bad {
+				if unverified != ProjectSkillManifestLinked || verified || len(selected) != 1 || selected[0] != dir {
+					t.Fatalf("declared-name call: unverified=%q verified=%v selected=%v, want %s bound to %s",
+						unverified, verified, selected, ProjectSkillManifestLinked, dir)
+				}
+				return
+			}
+			if unverified != "" || !verified || len(selected) != 0 {
+				t.Fatalf("private twin: unverified=%q verified=%v selected=%v, want the root verified", unverified, verified, selected)
+			}
+		})
+	}
+}
+
+// A manifest that cannot be resolved makes the root unverified as
+// unreadable, not as a link, so the refusal names what went wrong.
+func TestProjectSkillManifestUnresolvableKeepsTheUnreadableReason(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a self link is not a loop the same way on Windows")
+	}
+	home, project, root, facts := manifestLinkProject(t)
+	dir := filepath.Join(root, "sample")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("SKILL.md", filepath.Join(dir, "SKILL.md")); err != nil {
+		t.Skipf("link unavailable: %v", err)
+	}
+	args, _ := json.Marshal(map[string]any{"skill": "sample", "skill_path": dir})
+	addProjectSkillSelectedFacts(facts, nil, args, home, project)
+	if got := facts[ProjectSkillRootUnverifiedPrefix+root]; got != ProjectSkillRootUnreadable {
+		t.Fatalf("facts %v, want the root unverified as %s", facts, ProjectSkillRootUnreadable)
+	}
 }
