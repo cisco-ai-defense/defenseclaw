@@ -652,9 +652,83 @@ func enterpriseHookStandalonePlatformRevokeUsers(ctx context.Context, stderr io.
 		cfg.DataDir,
 		manifest,
 		windowsStandaloneRevokedUserCleanupConnector,
+		windowsStandaloneOffRosterRuntimeCleanups(ctx, published, held, time.Now()),
 		enterpriseHookWindowsUserCleanupAttempt,
 		time.Now(),
 	)
+}
+
+// enterpriseHookWindowsConnectorUserRuntimeLeftover is replaceable in tests.
+var enterpriseHookWindowsConnectorUserRuntimeLeftover = enterprisehooks.WindowsConnectorUserRuntimeLeftover
+
+// windowsStandaloneOffRosterRuntimeCleanups lists a cleanup for each account
+// whose own DefenseClaw folder still holds files of a machine-scope connector
+// (Claude Code, Codex, Cursor) the loaded config no longer publishes. The
+// guardian used to plan the cleanup only from the account's previously
+// protected row, so an account that had no protected row when the connector
+// left the roster kept its files for good: one whose row was only pending
+// (its session was disconnected or it was signed out when the connector was
+// installed or when an earlier roster change was undone) or whose ledger had
+// been rebuilt. The files are the fact, not the row, and removing them needs
+// no session (the machine enrollment is revoked and LocalSystem does it), so
+// every account with the files is cleaned the same way, whatever its Windows
+// session is doing. The accounts are the enrollment's eligible profiles and
+// the accounts of the rows the guardian held (GAP-0964).
+func windowsStandaloneOffRosterRuntimeCleanups(
+	ctx context.Context,
+	published func(string) bool,
+	held []enterpriseHookReconcileRow,
+	now time.Time,
+) []enterpriseHookUserCleanup {
+	var offRoster []string
+	for _, name := range enterprisehooks.WindowsMachineScopeUserRuntimeConnectorNames() {
+		if !published(name) {
+			offRoster = append(offRoster, name)
+		}
+	}
+	if len(offRoster) == 0 {
+		return nil
+	}
+	type account struct{ sid, home string }
+	var accounts []account
+	seen := map[string]bool{}
+	add := func(sid, home string) {
+		sid, home = strings.TrimSpace(sid), strings.TrimSpace(home)
+		key := strings.ToUpper(sid)
+		if sid == "" || home == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		accounts = append(accounts, account{sid: sid, home: home})
+	}
+	for _, row := range held {
+		add(row.SID, row.UserHome)
+	}
+	// A profile list that fails is logged by the foreign-hook step of the
+	// same pass; the accounts it did list still count.
+	profiles, _ := enterpriseHookWindowsEligibleProfiles(ctx)
+	for _, profile := range profiles {
+		add(profile.SID, profile.UserHome)
+	}
+	var found []enterpriseHookUserCleanup
+	for _, one := range accounts {
+		home := filepath.Clean(one.home)
+		if !filepath.IsAbs(home) {
+			continue
+		}
+		for _, name := range offRoster {
+			if !enterpriseHookWindowsConnectorUserRuntimeLeftover(home, "", name) {
+				continue
+			}
+			found = append(found, enterpriseHookUserCleanup{
+				Connector:  name,
+				SID:        one.sid,
+				UserHome:   home,
+				RecordedAt: now.UTC().Format(time.RFC3339Nano),
+			})
+		}
+	}
+	return found
 }
 
 // enterpriseHookWindowsUserProfileRemoved is replaceable in tests.

@@ -839,6 +839,12 @@ func isolateTestDeploymentReaders(dir string) {
 	// The off-roster markers live in the computer's own hook runtime folder,
 	// and the removed-connectors record in its guardian state folder.
 	sandboxSeam("enterpriseHookWindowsOffRosterPublisher", &enterpriseHookWindowsOffRosterPublisher, func(string, bool) error { return nil })
+	// GAP-0964: the guardian's cleanup step lists the computer's own profiles
+	// and looks in each for a removed connector's files.
+	sandboxSeam("enterpriseHookWindowsEligibleProfiles", &enterpriseHookWindowsEligibleProfiles,
+		func(context.Context) ([]enterprisehooks.TargetCredentials, error) { return nil, nil })
+	sandboxSeam("enterpriseHookWindowsConnectorUserRuntimeLeftover", &enterpriseHookWindowsConnectorUserRuntimeLeftover,
+		func(string, string, string) bool { return false })
 	sandboxSeam("windowsConnectorOffRosterRead", &windowsConnectorOffRosterRead, func(string) (bool, error) { return false, nil })
 	sandboxSeam("windowsEnterpriseRemovedConnectorsForStatus", &windowsEnterpriseRemovedConnectorsForStatus, func() ([]managed.RemovedConnector, error) { return nil, nil })
 	sandboxSeam("windowsEnterpriseAgentSettingsNotices", &windowsEnterpriseAgentSettingsNotices, func() []string { return nil })

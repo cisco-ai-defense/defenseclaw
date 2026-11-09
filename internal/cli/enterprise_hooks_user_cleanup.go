@@ -365,10 +365,37 @@ func saveEnterpriseHookUserCleanups(dataDir string, pending []enterpriseHookUser
 	return enterpriseHookAuthorizationFileTrustCheck(path)
 }
 
+// addEnterpriseHookDiscoveredCleanups adds to planned the cleanups the caller
+// found by looking at the accounts' own folders (discovered): an account that
+// holds files of a connector the roster no longer lists, whether or not the
+// guardian ever recorded it as protected. A connector admitted for the
+// account is not off the roster for it, and an entry already planned stays as
+// planned (GAP-0964).
+func addEnterpriseHookDiscoveredCleanups(
+	planned, discovered []enterpriseHookUserCleanup,
+	admitted func(connectorName, sid string) bool,
+) []enterpriseHookUserCleanup {
+	seen := make(map[string]bool, len(planned)+len(discovered))
+	for _, entry := range planned {
+		seen[enterpriseHookUserCleanupKey(entry.Connector, entry.SID)] = true
+	}
+	for _, entry := range discovered {
+		key := enterpriseHookUserCleanupKey(entry.Connector, entry.SID)
+		if seen[key] || admitted(entry.Connector, entry.SID) {
+			continue
+		}
+		seen[key] = true
+		planned = append(planned, entry)
+	}
+	sortEnterpriseHookUserCleanups(planned)
+	return planned
+}
+
 // reconcileEnterpriseHookUserCleanups is the guardian step: plan from the
-// previous protected rows and the ledger, attempt every cleanup of a user the
-// manifest does not enroll, log the outcome, and persist what is still
-// pending. An error means the ledger
+// previous protected rows, the ledger and the cleanups discovered in the
+// accounts' own folders (nil where the platform has none), attempt every
+// cleanup of a user the manifest does not enroll, log the outcome, and persist
+// what is still pending. An error means the ledger
 // could not be written, so the caller must not publish state that drops
 // the revoked rows.
 func reconcileEnterpriseHookUserCleanups(
@@ -377,6 +404,7 @@ func reconcileEnterpriseHookUserCleanups(
 	dataDir string,
 	manifest enterprisehooks.Manifest,
 	perUser func(string) bool,
+	discovered []enterpriseHookUserCleanup,
 	attempt enterpriseHookUserCleanupAttempt,
 	now time.Time,
 ) error {
@@ -400,6 +428,7 @@ func reconcileEnterpriseHookUserCleanups(
 		perUser,
 		now,
 	)
+	planned = addEnterpriseHookDiscoveredCleanups(planned, discovered, admitted)
 	known := map[string]bool{}
 	for _, entry := range pending {
 		known[enterpriseHookUserCleanupLabel(entry)] = true

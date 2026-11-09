@@ -361,3 +361,41 @@ func TestRemoveWindowsConnectorUserRuntimeWaitsForTheRuntimeTransactionLock(t *t
 		t.Fatal("the file stays after the lock was released")
 	}
 }
+
+// GAP-0964: the guardian asks, for every account on every pass, whether a
+// removed connector left any of its own files, and queues the removal only
+// where it did. Another connector's files, the shared scripts and the
+// account's own files do not count.
+func TestWindowsConnectorUserRuntimeLeftoverSeesOnlyTheConnectorsOwnFiles(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if WindowsConnectorUserRuntimeLeftover(home, "", "cursor") {
+		t.Fatal("a profile with no DefenseClaw folder reported a leftover")
+	}
+	writeConnectorRuntimeFixture(t, dataDir,
+		"hooks/.hook-claudecode.token", "hooks/claude-code-hook.sh", "hooks/_hardening.sh", "hooks/inspect-tool.sh",
+		"hooks/.hookcfg", "hooks/.hookcfg.lock", "hooks/.managed-runtime-cursorish-0123abcd.json", "hook_contract_lock.json", "config.yaml")
+	if WindowsConnectorUserRuntimeLeftover(home, "", "cursor") || WindowsConnectorUserRuntimeLeftover(home, "", "codex") {
+		t.Fatal("another connector's files, the shared scripts or the account's own files counted as a leftover")
+	}
+	if !WindowsConnectorUserRuntimeLeftover(home, "", "Claudecode") {
+		t.Fatal("Claude Code's own token and script were not seen")
+	}
+	for _, rel := range []string{"hooks/.hook-cursor.token", "hooks/.hookcfg.cursor", "hooks/.managed-runtime-cursor-0123abcd.json"} {
+		writeConnectorRuntimeFixture(t, dataDir, rel)
+		if !WindowsConnectorUserRuntimeLeftover(home, dataDir, "cursor") {
+			t.Fatalf("%s was not seen", rel)
+		}
+		if err := os.Remove(filepath.Join(dataDir, rel)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"hermes", "opencode", "", "../cursor"} {
+		if WindowsConnectorUserRuntimeLeftover(home, "", name) {
+			t.Fatalf("%q is not a machine-scope connector and reported a leftover", name)
+		}
+	}
+	if WindowsConnectorUserRuntimeLeftover("relative", "", "cursor") || WindowsConnectorUserRuntimeLeftover(home, filepath.Join(t.TempDir(), "elsewhere"), "cursor") {
+		t.Fatal("a relative home or a data folder outside the profile reported a leftover")
+	}
+}

@@ -35,6 +35,11 @@ func WindowsMachineScopeUserRuntimeConnector(name string) bool {
 	return false
 }
 
+// WindowsMachineScopeUserRuntimeConnectorNames lists them.
+func WindowsMachineScopeUserRuntimeConnectorNames() []string {
+	return append([]string(nil), windowsMachineScopeUserRuntimeConnectors...)
+}
+
 // windowsConnectorUserRuntimeLeaves returns, relative to the account's
 // DefenseClaw folder, every file the managed install of one machine-scope
 // connector wrote for the account and no other connector shares: the entries
@@ -58,6 +63,47 @@ func windowsConnectorUserRuntimeLeaves(name string) ([]string, error) {
 		}
 	}
 	return leaves, nil
+}
+
+// WindowsConnectorUserRuntimeLeftover reports whether the account's DefenseClaw
+// folder still holds, for one machine-scope connector, a file its managed
+// install wrote: the scoped hook token, the hook config, the connector's own
+// hook script or a runtime generation record. It only looks, so the guardian
+// can ask it for every profile on every pass and queue
+// RemoveWindowsConnectorUserRuntime only where there is something to remove
+// (GAP-0964). The removal itself pins the folder and leaves a link as found, so
+// a link planted for this answer changes nothing but the question. An
+// unreadable folder says false.
+func WindowsConnectorUserRuntimeLeftover(rawHome, rawDataDir, connectorName string) bool {
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	leaves, err := windowsConnectorUserRuntimeLeaves(name)
+	if err != nil {
+		return false
+	}
+	home := filepath.Clean(strings.TrimSpace(rawHome))
+	if !filepath.IsAbs(home) {
+		return false
+	}
+	dataDir, err := resolveWindowsEnterpriseDataDir(home, rawDataDir)
+	if err != nil {
+		return false
+	}
+	for _, leaf := range leaves {
+		if _, err := os.Lstat(filepath.Join(dataDir, leaf)); err == nil {
+			return true
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(dataDir, "hooks"))
+	if err != nil {
+		return false
+	}
+	prefix := ".managed-runtime-" + name + "-"
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) && strings.HasSuffix(entry.Name(), ".json") {
+			return true
+		}
+	}
+	return false
 }
 
 // windowsConnectorUserRuntimeBeforeLockClear runs, while the folder is pinned,
