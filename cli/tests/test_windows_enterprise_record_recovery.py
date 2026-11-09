@@ -178,3 +178,40 @@ def test_ensure_plans_a_repair_that_keeps_the_payload_for_a_changed_record() -> 
     assert 'Reason: "untrusted_record"' in plan
     # The repair keeps this run's payload, which the rebuild re-records from.
     assert 'plan.Reason != "verify_failed" && plan.Reason != "untrusted_record"' in go
+
+
+def test_a_rebuilt_record_is_marked_and_its_rollback_is_judged_by_its_artifacts() -> None:
+    """GAP-0994: the rebuilt record cannot carry the evidence the full assertion asks
+    for, so a rollback to it (services down, transaction pending) could not finish."""
+    text = _text()
+    builder = _function(text, "New-DefenseClawRebuiltDeploymentRecord")
+    assert "record_rebuilt_by_setup = $true" in builder
+    assert "managed_hooks_activation" not in builder
+    marker = _function(text, "Test-DefenseClawRebuiltDeploymentRecord")
+    assert "managed_hooks_activation" in marker, "a record with evidence is never called rebuilt"
+    assertion = _function(text, "Assert-DefenseClawEnterpriseDeployment")
+    early = assertion[assertion.index("if ($RollbackRestore -and (Test-DefenseClawStandaloneProfile)") :]
+    early = early[: early.index("        return\n    }") + 20]
+    assert "Test-DefenseClawRebuiltDeploymentRecord -Metadata $metadata" in early
+    assert "Assert-DefenseClawRebuiltRecordArtifacts -Layout $Layout -Metadata $metadata" in early
+    # Identity is checked first, the evidence check stays for every other caller.
+    identity = assertion.index("Assert-DefenseClawMetadataIdentity `\n")
+    assert identity < assertion.index("if ($RollbackRestore -and (Test-DefenseClawStandaloneProfile)")
+    assert assertion.index("if ($RollbackRestore -and (Test-DefenseClawStandaloneProfile)") < assertion.index(
+        "deployment metadata is missing protected managed-hook activation evidence"
+    )
+
+
+def test_the_guardian_records_are_waited_for_before_any_service_stops() -> None:
+    """GAP-0994: the classification of a record with no activation evidence reads the
+    Guardian's three records; after the stops nothing can republish them."""
+    text = _text()
+    pins = text.index("Write-DefenseClawTransactionLifecyclePins `\n")
+    wait = text.index("Wait-DefenseClawGuardianRecordsBound `\n                -Layout $Layout", pins)
+    stop = text.index("Stop-DefenseClawService -Name $GuardianServiceName\n        Stop-DefenseClawService -Name $GatewayServiceName", pins)
+    assert wait < stop
+    guard = text[text.rindex("if ($priorDeploymentActive", 0, wait) : wait]
+    assert "$null -eq $priorManagedHooksActivation" in guard and "Test-DefenseClawStandaloneProfile" in guard
+    body = _function(text, "Wait-DefenseClawGuardianRecordsBound")
+    assert "-Action classify-activation" in body and "-AllowFailure" in body
+    assert "No service was stopped and nothing was changed" in body

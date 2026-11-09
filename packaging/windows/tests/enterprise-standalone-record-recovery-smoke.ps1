@@ -351,6 +351,94 @@ try {
             throw 'Secure Client had a record judged or moved aside'
         }
     } $state
+
+    # GAP-0994: a rebuilt deployment record carries a marker, a rollback to it
+    # is judged by the artifacts it names (not by the evidence it cannot
+    # carry), and a repair over a record with no activation evidence waits,
+    # with the services still running, for the Guardian's records to bind the
+    # manifest. Its own scope: the stubs below are gone after it.
+    & $module {
+        param($State)
+        function Test-DefenseClawStandaloneProfile { return $true }
+        function Write-DefenseClawLifecyclePhase { param([string]$Stage) $script:phases.Add($Stage) }
+        $script:phases = [Collections.Generic.List[string]]::new()
+
+        # The real builder marks its record; the marker survives JSON.
+        $built = New-DefenseClawRebuiltDeploymentRecord -Layout @{ InstallRoot = 'C:\x'; StateRoot = 'C:\y' } -Sources @{} -GatewayServiceName 'G' -GuardianServiceName 'H'
+        if ($built['record_rebuilt_by_setup'] -ne $true) { throw 'the rebuilt record carries no marker' }
+        $roundTrip = ($built | ConvertTo-Json -Depth 5) | ConvertFrom-Json
+        if (-not (Test-DefenseClawRebuiltDeploymentRecord -Metadata $roundTrip)) { throw 'the marker does not survive JSON' }
+        $withEvidence = ($built | ConvertTo-Json -Depth 5) | ConvertFrom-Json
+        $withEvidence | Add-Member -NotePropertyName managed_hooks_activation -NotePropertyValue ([pscustomobject]@{ state = 'activated' })
+        if (Test-DefenseClawRebuiltDeploymentRecord -Metadata $withEvidence) { throw 'a record with activation evidence was called rebuilt' }
+        if (Test-DefenseClawRebuiltDeploymentRecord -Metadata ([pscustomobject]@{ installed = $true })) { throw 'a record with no marker was called rebuilt' }
+        if (Test-DefenseClawRebuiltDeploymentRecord -Metadata ([pscustomobject]@{ record_rebuilt_by_setup = 'yes' })) { throw 'a marker that is not a Boolean was accepted' }
+
+        # The artifact check of the rollback: the digests the record names.
+        $gateway = [IO.Path]::Combine($State, 'defenseclaw-gateway.exe')
+        [IO.File]::WriteAllText($gateway, 'gateway bytes')
+        $digest = (Get-FileHash -LiteralPath $gateway -Algorithm SHA256).Hash.ToLowerInvariant()
+        $layout = @{ GatewayPath = $gateway }
+        $meta = [pscustomobject]@{ hashes = [pscustomobject]@{ gateway = $digest } }
+        Assert-DefenseClawRebuiltRecordArtifacts -Layout $layout -Metadata $meta
+        [IO.File]::WriteAllText($gateway, 'another file')
+        $threw = $false
+        try { Assert-DefenseClawRebuiltRecordArtifacts -Layout $layout -Metadata $meta } catch { $threw = $_.Exception.Message -match 'another digest' }
+        if (-not $threw) { throw 'a changed artifact was accepted by the rollback check' }
+        Remove-Item -LiteralPath $gateway -Force
+        $threw = $false
+        try { Assert-DefenseClawRebuiltRecordArtifacts -Layout $layout -Metadata $meta } catch { $threw = $_.Exception.Message -match 'missing' }
+        if (-not $threw) { throw 'a missing artifact was accepted by the rollback check' }
+
+        # The full assertion: a rollback to a rebuilt record returns after the
+        # identity and artifact checks; every other caller still fails.
+        $script:record = $roundTrip
+        function Get-DefenseClawDeploymentMetadata { param($Layout, [switch]$Required) return $script:record }
+        function Assert-DefenseClawMetadataIdentity { param($Metadata, $GatewayServiceName, $GuardianServiceName) }
+        function Get-DefenseClawAcceptedGatewayServiceAccounts { param($GatewayServiceName) return @('NT SERVICE\G') }
+        function Test-DefenseClawMetadataInstalled { param($Metadata) return $true }
+        function Get-DefenseClawRedactionKeySecuritySnapshot { param($Layout, $GatewayServiceSID) throw 'the full assertion ran (fixture)' }
+        function Get-DefenseClawServiceSID { param($ServiceName) return 'S-1-5-80-1-2-3-4-5' }
+        $script:record = [pscustomobject]@{ installed = $true; record_rebuilt_by_setup = $true; hashes = [pscustomobject]@{} }
+        $script:phases.Clear()
+        Assert-DefenseClawEnterpriseDeployment -Layout @{} -GatewayServiceName 'G' -GuardianServiceName 'H' -ServicingTransaction -RollbackRestore
+        if (@($script:phases | Where-Object { $_ -match 'rebuilt deployment record' }).Count -ne 1) { throw 'the rollback to a rebuilt record did not return early' }
+        $threw = $false
+        try { Assert-DefenseClawEnterpriseDeployment -Layout @{} -GatewayServiceName 'G' -GuardianServiceName 'H' -ServicingTransaction } catch { $threw = $_.Exception.Message -match 'full assertion ran' }
+        if (-not $threw) { throw 'a forward assertion accepted a rebuilt record' }
+        $script:record = [pscustomobject]@{ installed = $true; hashes = [pscustomobject]@{} }
+        $threw = $false
+        try { Assert-DefenseClawEnterpriseDeployment -Layout @{} -GatewayServiceName 'G' -GuardianServiceName 'H' -ServicingTransaction -RollbackRestore } catch { $threw = $_.Exception.Message -match 'full assertion ran' }
+        if (-not $threw) { throw 'a rollback to a record that is not rebuilt skipped the full assertion' }
+
+        # The wait before the stops. The Guardian republishes the three records
+        # on its next pass, so a refusal that goes away is waited out; one that
+        # stays ends the run before any service stops; any other refusal is the
+        # classification after the stops to report.
+        $script:GuardianBindingWaitSeconds = 3
+        $script:GuardianBindingPollSeconds = 1
+        $script:replies = [Collections.Generic.Queue[object]]::new()
+        $script:asked = 0
+        function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
+            param($Layout, $GatewayServiceName, $GatewaySource, $Action, [switch]$AllowFailure)
+            $script:asked++
+            if ($Action -cne 'classify-activation' -or -not $AllowFailure) { throw 'the wait asked for something else (fixture)' }
+            return $script:replies.Dequeue()
+        }
+        $unbound = [pscustomobject]@{ ok = $false; failure_detail = 'protected Guardian activation does not exactly bind the legacy deployment manifest and authorization (the records are from different publications)' }
+        $other = [pscustomobject]@{ ok = $false; failure_detail = 'legacy deployment has no Guardian activation but claude runtime selector is present' }
+        $good = [pscustomobject]@{ ok = $true; legacy_activation_state = 'activated' }
+        foreach ($reply in @($unbound, $unbound, $good)) { $script:replies.Enqueue($reply) }
+        Wait-DefenseClawGuardianRecordsBound -Layout @{} -GatewayServiceName 'G'
+        if ($script:asked -ne 3) { throw "the wait asked $($script:asked) times for a refusal that went away, want 3" }
+        $script:asked = 0; $script:replies.Clear(); $script:replies.Enqueue($other)
+        Wait-DefenseClawGuardianRecordsBound -Layout @{} -GatewayServiceName 'G'
+        if ($script:asked -ne 1) { throw 'the wait asked again for a refusal that is not the binding one' }
+        $script:asked = 0; $script:replies.Clear(); 1..10 | ForEach-Object { $script:replies.Enqueue($unbound) }
+        $threw = $false
+        try { Wait-DefenseClawGuardianRecordsBound -Layout @{} -GatewayServiceName 'G' } catch { $threw = $_.Exception.Message -match 'No service was stopped and nothing was changed' }
+        if (-not $threw -or $script:asked -lt 3) { throw 'a refusal that stays did not end the run before any service stops' }
+    } $state
     'enterprise-standalone-record-recovery-smoke: OK'
 }
 finally {
