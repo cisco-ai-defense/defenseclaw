@@ -38017,9 +38017,9 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
             $activeHash = Get-DefenseClawRecordedConfigGenerationHash -Layout $Layout
         }
         else {
-            # A record rebuilt from the machine (Repair-DefenseClawUnreadable
-            # DeploymentMetadata) has no activation yet, and Repair re-derives
-            # it after this step: the manifest is then judged as it is.
+            # A record rebuilt from the machine (the unreadable-record
+            # rebuild) has no activation yet, and Repair re-derives it after
+            # this step: the manifest is then judged as it is.
             $activationProperty = $Metadata.PSObject.Properties['managed_hooks_activation']
             $activeHash = if ($null -ne $activationProperty) {
                 [string]$activationProperty.Value.manifest_sha256
