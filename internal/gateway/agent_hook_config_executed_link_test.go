@@ -1,0 +1,87 @@
+package gateway
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// TestAgentHookConfigSplitStringEscapes keeps the escapes GNU env reads inside
+// a quoted split string in the same word, so the agent after them is judged as
+// when it is run directly, and keeps an ordinary quoted split string allowed.
+func TestAgentHookConfigSplitStringEscapes(t *testing.T) {
+	h := newGAP0048Home(t)
+	rows := []struct{ name, command, want string }{
+		{"quoted escaped blank disables hooks", `env -S 'claude --settings "{\"disableAllHooks\":\_true}" -p hi'`, "block"},
+		{"quoted escaped blank changes config home", `env -S 'CLAUDE_CONFIG_DIR="/tmp/other\_path" claude -p hi'`, "block"},
+		{"quoted escaped blank ordinary settings", `env -S 'claude --settings "{\"model\":\_\"sonnet\"}" -p hi'`, "allow"},
+		{"quoted escaped blank ordinary env", `env -S 'FOO="bar\_baz" claude -p hi'`, "allow"},
+	}
+	for _, row := range rows {
+		for _, profile := range []string{"permissive", "default", "strict"} {
+			for _, managed := range []bool{false, true} {
+				name := row.name + "/" + profile
+				if managed {
+					name += "/managed"
+				} else {
+					name += "/user"
+				}
+				t.Run(name, func(t *testing.T) {
+					got := rv2Action(rv3Judge(t, "claudecode", profile, h.project, managed, "Bash", map[string]any{"command": row.command}))
+					if got != row.want {
+						t.Errorf("got %s, want %s for %q", got, row.want, row.command)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestAgentHookConfigExecutedLinkPlacement judges a link by whether it runs:
+// a called function is read at its call with the values bound by then, and a
+// link in a branch a fixed condition rules out is left alone.
+func TestAgentHookConfigExecutedLinkPlacement(t *testing.T) {
+	h := newGAP0048Home(t)
+	bin := filepath.Join(h.home, ".local", "bin")
+	named := filepath.Join(h.ext, "source", "defenseclaw-hook-user")
+	if err := os.MkdirAll(filepath.Dir(named), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(named, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rows := []struct{ name, command, want string }{
+		{"called function with late known values", "link_hook() { ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; link_hook", "block"},
+		{"called function with early known values", "src=" + named + "; dest=" + bin + "; link_hook() { ln -sf \"$src\" \"$dest\"/; }; link_hook", "block"},
+		{"called function with arguments", "link_hook() { ln -sf \"$1\" \"$2\"/; }; link_hook " + named + " " + bin, "block"},
+		{"function called twice, second call reaches", "link_hook() { ln -sf \"$1\" \"$2\"/; }; link_hook " + named + " /tmp; link_hook " + named + " " + bin, "block"},
+		{"executed link in true branch", "dest=" + bin + "; if true; then ln -sf " + named + " \"$dest\"/; fi", "block"},
+		{"link after a false and-list", "dest=" + bin + "; false || ln -sf " + named + " \"$dest\"/", "block"},
+		{"unexecuted link with false and", "dest=" + bin + "; false && ln -sf " + named + " \"$dest\"/; echo ready", "allow"},
+		{"unexecuted link with true or", "dest=" + bin + "; true || ln -sf " + named + " \"$dest\"/; echo ready", "allow"},
+		{"unexecuted link in false branch", "dest=" + bin + "; if false; then ln -sf " + named + " \"$dest\"/; fi; echo ready", "allow"},
+		{"unexecuted link in true branch else", "dest=" + bin + "; if true; then echo ready; else ln -sf " + named + " \"$dest\"/; fi", "allow"},
+		{"function called only in a false branch", "link_hook() { ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; false && link_hook; echo ready", "allow"},
+		{"function never called", "link_hook() { ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; echo ready", "allow"},
+		{"function called with an ordinary folder", "link_hook() { ln -sf \"$1\" \"$2\"/; }; link_hook " + named + " /tmp", "allow"},
+		{"destination changed before the call", "dest=" + bin + "; link_hook() { ln -sf " + named + " \"$dest\"/; }; dest=/tmp; link_hook", "allow"},
+	}
+	for _, row := range rows {
+		for _, profile := range []string{"permissive", "default", "strict"} {
+			for _, managed := range []bool{false, true} {
+				name := row.name + "/" + profile
+				if managed {
+					name += "/managed"
+				} else {
+					name += "/user"
+				}
+				t.Run(name, func(t *testing.T) {
+					got := rv2Action(rv3Judge(t, "claudecode", profile, h.project, managed, "Bash", map[string]any{"command": row.command}))
+					if got != row.want {
+						t.Errorf("got %s, want %s for %q", got, row.want, row.command)
+					}
+				})
+			}
+		}
+	}
+}

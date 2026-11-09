@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -119,11 +120,71 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 	var stack []string
 	found := false
 	uncalled := actionUncalledFunctions(file, command)
-	syntax.Walk(file, func(node syntax.Node) bool {
+	called := registrationCalledFunctions(file)
+	functions := make(map[string]*syntax.FuncDecl)
+	running := make(map[*syntax.FuncDecl]bool)
+	// inert counts the enclosing parts that do not run at this point: a branch
+	// a fixed condition rules out, and the body of a function that is read at
+	// its calls. Inside them the shell state and the link arm stand still.
+	inert := 0
+	var visit func(node syntax.Node) bool
+	walkInert := func(stmts ...*syntax.Stmt) {
+		inert++
+		for _, stmt := range stmts {
+			syntax.Walk(stmt, visit)
+		}
+		inert--
+	}
+	visit = func(node syntax.Node) bool {
 		if found {
 			return false
 		}
-		if decl, ok := node.(*syntax.FuncDecl); ok && uncalled[decl] {
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			if uncalled[node] {
+				return false
+			}
+			if node.Name != nil {
+				functions[node.Name.Value] = node
+				if called[node.Name.Value] {
+					walkInert(node.Body)
+					return false
+				}
+			}
+		case *syntax.BinaryCmd:
+			truth := declaredRedirectTruth(node.X, home)
+			if node.Op == syntax.AndStmt && truth < 0 || node.Op == syntax.OrStmt && truth > 0 {
+				syntax.Walk(node.X, visit)
+				walkInert(node.Y)
+				return false
+			}
+		case *syntax.IfClause:
+			if len(node.Cond) == 0 {
+				break
+			}
+			truth := declaredRedirectTruth(node.Cond[len(node.Cond)-1], home)
+			if truth == 0 {
+				break
+			}
+			for _, stmt := range node.Cond {
+				syntax.Walk(stmt, visit)
+			}
+			if truth > 0 {
+				for _, stmt := range node.Then {
+					syntax.Walk(stmt, visit)
+				}
+			} else {
+				walkInert(node.Then...)
+			}
+			if node.Else != nil {
+				if truth > 0 {
+					inert++
+				}
+				syntax.Walk(node.Else, visit)
+				if truth > 0 {
+					inert--
+				}
+			}
 			return false
 		}
 		stmt, ok := node.(*syntax.Stmt)
@@ -135,9 +196,14 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 			return true
 		}
 		values["PWD"] = currentCWD
-		actionUpdateValues(stmt, values, currentCWD, home)
+		if inert == 0 {
+			actionUpdateValues(stmt, values, currentCWD, home)
+			registrationRunFunction(call, functions, running, visit, values, &currentCWD, home)
+		}
 		if len(call.Args) < 2 {
-			actionPosixAdvanceDirectory(call, values, home, &currentCWD, &stack)
+			if inert == 0 {
+				actionPosixAdvanceDirectory(call, values, home, &currentCWD, &stack)
+			}
 			return true
 		}
 		program, known := staticProgramWord(call.Args[0], home)
@@ -194,12 +260,13 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 				}
 			}
 		}
-		if known && (base == "ln" || base == "gln") {
+		if known && inert == 0 && (base == "ln" || base == "gln") {
 			// A link is judged by where it is placed: its operands go through
 			// the values the command has bound so far (a name, a folder or a
 			// source set by an earlier assignment), and only a destination
-			// that resolves to a registered file counts. An uncalled function
-			// body is not walked, so a link that is never run is untouched.
+			// that resolves to a registered file counts. A link that cannot
+			// run (an uncalled function, a branch a fixed condition rules out)
+			// is untouched, and a called function is read at its calls.
 			words := []string{program}
 			fixedWords := []bool{true}
 			for _, word := range call.Args[1:] {
@@ -213,10 +280,94 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 				}
 			}
 		}
-		actionPosixAdvanceDirectory(call, values, home, &currentCWD, &stack)
+		if inert == 0 {
+			actionPosixAdvanceDirectory(call, values, home, &currentCWD, &stack)
+		}
+		return true
+	}
+	syntax.Walk(file, visit)
+	return found
+}
+
+// registrationCalledFunctions names the functions the command runs only by
+// plain call words, the ones read at their calls. A name the command also
+// spells as an argument or a declaration keeps its body read where it is
+// defined, and so does every function when a call word is not static.
+func registrationCalledFunctions(file *syntax.File) map[string]bool {
+	if _, static := actionStaticCallWords(file); !static {
+		return nil
+	}
+	called, spelled := make(map[string]bool), make(map[string]bool)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.CallExpr:
+			for index, word := range node.Args {
+				if value, fixed := StaticWord(word, ""); fixed && index == 0 {
+					called[value] = true
+				} else if fixed {
+					spelled[value] = true
+				}
+			}
+		case *syntax.DeclClause:
+			for _, assign := range node.Args {
+				if assign.Name != nil {
+					spelled[assign.Name.Value] = true
+				}
+				if value, fixed := StaticWord(assign.Value, ""); fixed {
+					spelled[value] = true
+				}
+			}
+		}
 		return true
 	})
-	return found
+	for name := range spelled {
+		delete(called, name)
+	}
+	return called
+}
+
+// registrationRunFunction reads the body of a function the call names, with
+// the positional parameters bound to the call words and the values the
+// command holds at that point. A function calling itself or nesting past
+// four calls is read once.
+func registrationRunFunction(call *syntax.CallExpr, functions map[string]*syntax.FuncDecl, running map[*syntax.FuncDecl]bool, visit func(syntax.Node) bool, values actionValues, cwd *string, home string) {
+	if len(call.Args) == 0 {
+		return
+	}
+	name, fixed := StaticWord(call.Args[0], home)
+	if !fixed {
+		return
+	}
+	decl := functions[name]
+	if decl == nil || running[decl] || len(running) >= 4 {
+		return
+	}
+	var bound [9]string
+	var known [9]bool
+	for index := 1; index <= 9 && index < len(call.Args); index++ {
+		bound[index-1], known[index-1] = actionWordValue(call.Args[index], values, *cwd, home)
+	}
+	previous := make(map[string]string)
+	for index := 1; index <= 9; index++ {
+		key := strconv.Itoa(index)
+		if old, had := values[key]; had {
+			previous[key] = old
+		}
+		delete(values, key)
+		if known[index-1] {
+			values[key] = bound[index-1]
+		}
+	}
+	running[decl] = true
+	syntax.Walk(decl.Body, visit)
+	delete(running, decl)
+	for index := 1; index <= 9; index++ {
+		key := strconv.Itoa(index)
+		delete(values, key)
+		if old, had := previous[key]; had {
+			values[key] = old
+		}
+	}
 }
 
 // registrationItemPaths lists the paths one word of a loop list or an
