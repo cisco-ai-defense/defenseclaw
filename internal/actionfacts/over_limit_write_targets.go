@@ -176,7 +176,16 @@ func OverLimitWriteElidedContentTarget(input Input, facts Facts, resolved map[st
 		// resolved is the file each operand reaches through the links on its
 		// way, as the hook client placed it: a link to a protected file is
 		// that file.
-		for _, value := range []string{path.Normalized, path.Resolved, resolved[path.Value]} {
+		// The client keys an operand as OperandPath places it, so a relative
+		// operand is looked up by its placed spelling too.
+		cwd := view.CWD
+		if cwd == "" {
+			cwd = input.CWD
+		}
+		for _, value := range []string{
+			path.Normalized, path.Resolved, resolved[path.Value],
+			resolved[OperandPath(path.Value, cwd)], resolved[path.Normalized],
+		} {
 			if class := contentRuleWriteTarget(value); class != "" {
 				return class, true
 			}
@@ -223,6 +232,9 @@ type overLimitReduction struct {
 	args               json.RawMessage
 	elidedText         bool
 	elidedPatchTargets map[string]struct{}
+	// boundedCommand is set when a command text lost its white space padding
+	// (OverLimitCommandBoundedTwin).
+	boundedCommand bool
 }
 
 // overLimitArgsReducer copies one JSON object token by token. It holds the
@@ -237,18 +249,25 @@ type overLimitArgsReducer struct {
 	bounded bool
 	// patchBudget is what the bounded patch files may still add.
 	patchBudget int
+	// commandTwin reduces only a string over maxCommandBytes, to its form
+	// without padding white space, and nothing else.
+	commandTwin bool
 	overLimitReduction
 }
 
 func reduceOverLimitWriteArgs(raw json.RawMessage, patchTool, bounded bool) (overLimitReduction, bool) {
+	return runOverLimitReducer(raw, &overLimitArgsReducer{
+		patchTool: patchTool, bounded: bounded, patchBudget: maxBoundedPatchBytes,
+	})
+}
+
+// runOverLimitReducer copies the object raw through reducer.
+func runOverLimitReducer(raw json.RawMessage, reducer *overLimitArgsReducer) (overLimitReduction, bool) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return overLimitReduction{}, false
 	}
-	reducer := &overLimitArgsReducer{
-		decoder: json.NewDecoder(bytes.NewReader(trimmed)), patchTool: patchTool,
-		bounded: bounded, patchBudget: maxBoundedPatchBytes,
-	}
+	reducer.decoder = json.NewDecoder(bytes.NewReader(trimmed))
 	reducer.decoder.UseNumber()
 	if !reducer.value(0, "") {
 		return overLimitReduction{}, false
@@ -373,6 +392,15 @@ func (r *overLimitArgsReducer) writeString(text string) bool {
 // patch key (reducePatchEnvelope) and stands in for the large value of a text key. Any other
 // large value is kept, so the reduced call stays limit-exceeded.
 func (r *overLimitArgsReducer) reduceString(key, text string) (string, bool) {
+	if r.commandTwin {
+		if len(text) > maxCommandBytes {
+			if bounded, ok := boundedCommandText(text); ok {
+				r.boundedCommand = true
+				return bounded, true
+			}
+		}
+		return text, true
+	}
 	if len(text) <= maxScalarBytes {
 		return text, true
 	}
