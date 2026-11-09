@@ -18687,7 +18687,8 @@ function New-DefenseClawTransaction {
                 -Layout $Layout `
                 -TransactionDirectory $directory `
                 -GuardCopy ([string]$quiescingIntent['early_hook_guard_copy']) `
-                -GuardSHA256 ([string]$quiescingIntent['early_hook_guard_sha256']))
+                -GuardSHA256 ([string]$quiescingIntent['early_hook_guard_sha256']) `
+                -GuardianServiceName $GuardianServiceName)
             if ([string]::IsNullOrWhiteSpace($servicesQuiescedAt)) {
                 foreach ($name in @(
                     $GatewayServiceName,
@@ -23080,7 +23081,8 @@ function Restore-DefenseClawTransaction {
             -Layout $Layout `
             -TransactionDirectory ([string]$snapshot.directory) `
             -GuardCopy $guardCopy `
-            -GuardSHA256 $guardSHA256
+            -GuardSHA256 $guardSHA256 `
+            -GuardianServiceName ([string]$snapshot.guardian_service)
     }
     if (Test-DefenseClawServiceExists -Name $standaloneSensorHelper) {
         Assert-DefenseClawStandaloneSensorHelperOwned `
@@ -27686,7 +27688,14 @@ function Hold-DefenseClawEarlyHookGuard {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$TransactionDirectory,
         [AllowEmptyString()][string]$GuardCopy,
-        [AllowEmptyString()][string]$GuardSHA256
+        [AllowEmptyString()][string]$GuardSHA256,
+        # A recovery that finds the services running (a rollback that ended
+        # held, GAP-0977) must stop the guardian first: it restores any hook
+        # that is not its recorded release, so it put the previous hook back
+        # over the guard and the recovery failed "installed artifact hash drift:
+        # hook". The previous hook still answers while the gateway runs, so
+        # the guardian goes down before the guard and the rest after it.
+        [AllowEmptyString()][string]$GuardianServiceName = ''
     )
     if ([string]::IsNullOrWhiteSpace($GuardCopy) -and
         [string]::IsNullOrWhiteSpace($GuardSHA256)) {
@@ -27710,6 +27719,11 @@ function Hold-DefenseClawEarlyHookGuard {
     ).Hash.ToLowerInvariant()
     if ($digest -cne $GuardSHA256) {
         throw 'pending lifecycle closed hook guard changed'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($GuardianServiceName) -and
+        (Test-DefenseClawServiceExists -Name $GuardianServiceName)) {
+        Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode 4
+        Stop-DefenseClawService -Name $GuardianServiceName
     }
     Install-DefenseClawFileAtomic `
         -Source $expected `
@@ -27975,7 +27989,8 @@ function Recover-DefenseClawQuiescingIntent {
         -Layout $Layout `
         -TransactionDirectory $recordedDirectory `
         -GuardCopy (Get-DefenseClawEarlyHookField -Record $Intent -Name 'early_hook_guard_copy') `
-        -GuardSHA256 (Get-DefenseClawEarlyHookField -Record $Intent -Name 'early_hook_guard_sha256'))
+        -GuardSHA256 (Get-DefenseClawEarlyHookField -Record $Intent -Name 'early_hook_guard_sha256') `
+        -GuardianServiceName $GuardianServiceName)
     # A process/reboot recovery never trusts elapsed wall time from the prior
     # process. Reestablish both disabled+stopped, publish a fresh durable
     # quiescence point, and drain the complete failure-action window.
