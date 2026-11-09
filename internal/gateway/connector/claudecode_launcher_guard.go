@@ -385,13 +385,20 @@ func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, erro
 		return 0, fmt.Errorf("read Claude Code settings %s: %w", settingsPath, err)
 	}
 	convert := claudeCodeRollbackConversion(opts, settingsPath)
-	if _, changed, err := convert(data); err != nil || changed == 0 {
+	_, wanted, err := convert(data)
+	if err != nil || wanted == 0 {
 		return 0, err
 	}
 	converted := 0
-	var hold func([]byte) error
-	var committed []byte
 	err = withFileLock(settingsPath, func() error {
+		// A file nobody edited since setup gets its saved bytes back and needs
+		// no conversion (restoreUneditedForRollback).
+		if done, err := restoreUneditedForRollback(opts.DataDir, c.Name(), settingsPath, nil); err != nil || done {
+			if err == nil {
+				converted = wanted
+			}
+			return err
+		}
 		return transformClaudeCodeRollback(settingsPath, opts,
 			func(current []byte, exists bool) (atomicTransformResult, error) {
 				if !exists {
@@ -405,13 +412,9 @@ func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, erro
 					return atomicTransformResult{}, fmt.Errorf("keep a copy of the settings: %w", err)
 				}
 				converted = changed
-				hold, committed = holdManagedExactRestore(opts.DataDir, c.Name(), settingsPath, current), out
 				return atomicTransformResult{Data: out}, nil
 			})
 	})
-	if err == nil && hold != nil {
-		err = hold(committed)
-	}
 	if err != nil {
 		return 0, fmt.Errorf("rewrite Claude Code hooks in %s: %w", settingsPath, err)
 	}

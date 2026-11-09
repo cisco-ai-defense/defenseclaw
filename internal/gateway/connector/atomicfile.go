@@ -87,9 +87,7 @@ func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, pu
 		return err
 	}
 
-	if err := noteManagedSetupWrite(path, data); err != nil {
-		return err
-	}
+	noteManagedSetupWrite(path, data)
 
 	dir := filepath.Dir(writePath)
 	if err := atomicMkdirAll(dir, 0o755); err != nil {
@@ -103,49 +101,14 @@ func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, pu
 		return nil
 	}
 
-	tmpPath, stagedInfo, err := stageAtomicFile(dir, writePath, data, perm)
-	if err != nil {
-		return err
-	}
-	if atomicFileBeforePublish != nil {
-		atomicFileBeforePublish(path)
-	}
-	if err := confirmManagedSetupPublish(path); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	if atomicFileAfterConfirm != nil {
-		atomicFileAfterConfirm(path)
-	}
-	if found, held := managedConversionFound(path); held {
-		// A rollback conversion never replaces by a plain rename: whatever
-		// saved the file since the last check must survive (publishHeldConversion).
-		if err := publishHeldConversion(tmpPath, writePath, found, data, conversionPublish{stagedInfo: stagedInfo, perm: perm, publish: publish}); err != nil {
-			return err
-		}
-	} else if err := publish(tmpPath, writePath, stagedInfo, perm); err != nil {
-		os.Remove(tmpPath)
-		return &atomicPublishError{Path: writePath, Err: publishCause(err)}
-	}
-	// The staged file was synced before publication. POSIX rename additionally
-	// needs an explicit parent-directory fsync.
-	if runtime.GOOS != "windows" {
-		return atomicFileSyncParent(dir)
-	}
-	return nil
-}
-
-// stageAtomicFile writes data to a new temp file next to writePath, with perm,
-// syncs and closes it. The caller publishes it, or removes it.
-func stageAtomicFile(dir, writePath string, data []byte, perm os.FileMode) (string, os.FileInfo, error) {
 	tmp, tmpPath, err := atomicFileCreateTemp(dir, perm)
 	if err != nil {
-		return "", nil, fmt.Errorf("create temp file: %w", err)
+		return fmt.Errorf("create temp file: %w", err)
 	}
 	if err := atomicStageKeepOwner(tmpPath, writePath); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return "", nil, fmt.Errorf("keep owner of temp file: %w", err)
+		return fmt.Errorf("keep owner of temp file: %w", err)
 	}
 	if runtime.GOOS == "windows" && perm.Perm()&0o077 == 0 {
 		// atomicFileCreateTemp creates private Windows files with their final
@@ -156,54 +119,46 @@ func stageAtomicFile(dir, writePath string, data []byte, perm os.FileMode) (stri
 		if err := atomicFileValidateStagedProtection(tmp, perm); err != nil {
 			tmp.Close()
 			os.Remove(tmpPath)
-			return "", nil, fmt.Errorf("validate private temp file: %w", err)
+			return fmt.Errorf("validate private temp file: %w", err)
 		}
 	}
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return "", nil, fmt.Errorf("write temp file: %w", err)
+		return fmt.Errorf("write temp file: %w", err)
 	}
 	if err := tmp.Chmod(perm); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return "", nil, fmt.Errorf("chmod temp file: %w", err)
+		return fmt.Errorf("chmod temp file: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return "", nil, fmt.Errorf("sync temp file: %w", err)
+		return fmt.Errorf("sync temp file: %w", err)
 	}
 	stagedInfo, err := tmp.Stat()
 	if err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return "", nil, fmt.Errorf("stat temp file: %w", err)
+		return fmt.Errorf("stat temp file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
-		return "", nil, fmt.Errorf("close temp file: %w", err)
+		return fmt.Errorf("close temp file: %w", err)
 	}
-	return tmpPath, stagedInfo, nil
+	if err := publish(tmpPath, writePath, stagedInfo, perm); err != nil {
+		os.Remove(tmpPath)
+		return &atomicPublishError{Path: writePath, Err: publishCause(err)}
+	}
+	// The staged file was synced before publication. POSIX rename additionally
+	// needs an explicit parent-directory fsync.
+	if runtime.GOOS != "windows" {
+		return atomicFileSyncParent(dir)
+	}
+	return nil
 }
-
-// conversionPublish is what a rollback conversion needs to publish a staged
-// file with the writers own publisher. An exchange (Linux, macOS) does not use
-// it; Windows replaces by a rename and compares the file it displaced.
-type conversionPublish struct {
-	stagedInfo os.FileInfo
-	perm       os.FileMode
-	publish    atomicFilePublisher
-}
-
-// atomicFileBeforePublish runs just before the managed-setup check that
-// precedes a replacement, and atomicFileAfterConfirm just after it; tests save
-// a file at each to prove the replacement keeps it.
-var (
-	atomicFileBeforePublish func(path string)
-	atomicFileAfterConfirm  func(path string)
-)
 
 // atomicFileSyncParent syncs dir after a rename into it. A failure leaves the
 // new file in place; tests replace it to prove callers handle that.

@@ -202,13 +202,26 @@ func convertCodexConfigHookForms(opts SetupOpts, toBridge bool, keepCopy func(da
 		launcher = defenseclawHookBinary()
 	}
 	convert := codexWindowsHookFormConversion(configPath, launcher, toBridge)
-	if _, changed, err := convert(data); err != nil || changed == 0 {
+	_, wanted, err := convert(data)
+	if err != nil || wanted == 0 {
 		return 0, err
 	}
 	converted := 0
-	var hold func([]byte) error
-	var committed []byte
 	err = withFileLockMode(configPath, false, func() error {
+		if toBridge {
+			// A file nobody edited since setup gets its saved bytes back and
+			// needs no conversion (restoreUneditedForRollback).
+			var keep func([]byte) error
+			if keepCopy != nil {
+				keep = func(current []byte) error { return keepCopy(opts.DataDir, current) }
+			}
+			if done, err := restoreUneditedForRollback(opts.DataDir, "codex", configPath, keep); err != nil || done {
+				if err == nil {
+					converted = wanted
+				}
+				return err
+			}
+		}
 		return atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600,
 			func(current []byte, exists bool) (atomicTransformResult, error) {
 				if !exists {
@@ -224,13 +237,9 @@ func convertCodexConfigHookForms(opts SetupOpts, toBridge bool, keepCopy func(da
 					}
 				}
 				converted = changed
-				hold, committed = holdManagedExactRestore(opts.DataDir, "codex", configPath, current), out
 				return atomicTransformResult{Data: out}, nil
 			})
 	})
-	if err == nil && hold != nil {
-		err = hold(committed)
-	}
 	if err != nil {
 		return 0, fmt.Errorf("rewrite Codex hooks in %s: %w", configPath, err)
 	}
