@@ -60,12 +60,16 @@ def _selection_recorder():
 
 @pytest.fixture(autouse=True)
 def _no_gateway_running():
-    """The repair command asks Doctor's gateway-inactivity question; no test home has a gateway."""
+    """The repair command needs proof that no gateway runs (process list, PID records, Doctor); no test home has one."""
 
+    from defenseclaw import doctor_gateway
     from defenseclaw.commands import cmd_doctor
     from defenseclaw.doctor_gateway import ListenerEvidence
 
     with (
+        patch.object(
+            doctor_gateway, "list_account_gateway_processes", return_value=doctor_gateway.GatewayProcessListing("ok")
+        ),
         patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=cmd_doctor._GatewayTrust("missing", "none")),
         patch.object(cmd_doctor, "_verified_listener_gateway_evidence", return_value=ListenerEvidence("missing")),
     ):
@@ -774,13 +778,12 @@ def test_the_repair_command_on_a_configured_home_changes_nothing_while_the_gatew
     assert _valid(home)
 
 
-def test_the_repair_command_before_any_config_does_not_need_a_gateway_check(tmp_path, monkeypatch):
+def test_the_repair_command_before_any_config_repairs_when_no_gateway_runs(tmp_path, monkeypatch):
     home = _home(tmp_path)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
     _leftover_secret_and_sentinel(home)
 
-    with _gateway_running():
-        result = _repair()
+    result = _repair()
 
     assert result.exit_code == 0, result.output
     assert _valid(home)
@@ -818,7 +821,7 @@ def test_a_config_override_never_hides_the_gateway_of_a_home_that_is_configured(
     assert _valid(home)
 
 
-def test_the_repair_command_with_an_absent_override_and_no_home_config_needs_no_gateway_check(
+def test_the_repair_command_with_an_absent_override_and_no_config_repairs_when_no_gateway_runs(
     tmp_path, monkeypatch
 ):
     home = _home(tmp_path)
@@ -826,8 +829,218 @@ def test_the_repair_command_with_an_absent_override_and_no_home_config_needs_no_
     _cut_short_key(home, 20, configured=False)
     monkeypatch.setenv("DEFENSECLAW_CONFIG", str(Path(os.path.realpath(tmp_path)) / "absent" / "config.yaml"))
 
-    with _gateway_running():
-        result = _repair()
+    result = _repair()
 
     assert result.exit_code == 0, result.output
     assert _valid(home)
+
+
+# --- the gateway proof reads the account process list and the PID records, not config pathnames ------
+
+
+def _gateway_process_listed(*pids: int):
+    from defenseclaw import doctor_gateway
+
+    return patch.object(
+        doctor_gateway,
+        "list_account_gateway_processes",
+        return_value=doctor_gateway.GatewayProcessListing("ok", tuple(pids)),
+    )
+
+
+def _process_list_unreadable():
+    from defenseclaw import doctor_gateway
+
+    return patch.object(
+        doctor_gateway,
+        "list_account_gateway_processes",
+        return_value=doctor_gateway.GatewayProcessListing("unavailable", reason="the process list could not be read"),
+    )
+
+
+def _refused_unchanged(home: Path, text: str):
+    def files() -> dict[str, bytes]:
+        return {name: data for name, data in _snapshot(home).items() if name != "init.lock"}  # the lock file is not state
+
+    before = files()
+    refused = _repair()
+    assert refused.exit_code != 0
+    assert text in refused.output
+    assert "defenseclaw-gateway stop" in refused.output
+    assert "nothing was changed" in refused.output
+    assert files() == before
+    assert _orphans(home) == []
+
+
+@pytest.mark.parametrize("config_now", ["moved-away", "other-absent-path", "none-ever"])
+@pytest.mark.parametrize("state", ["key-cut-short", "key-gone"])
+def test_the_repair_command_refuses_while_a_gateway_of_this_account_runs_whatever_config_files_exist(
+    tmp_path, monkeypatch, state, config_now
+):
+    # The reviewer fixture: the home was initialised with its config at an override path outside
+    # the home; that file is gone (or another absent override is selected), no config of the home
+    # exists, and the gateway started from the earlier config still runs.
+    home = _home(tmp_path)
+    root = Path(os.path.realpath(tmp_path))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    earlier = root / "earlier" / "config.yaml"
+    earlier.parent.mkdir()
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(earlier))
+    if config_now == "none-ever":
+        monkeypatch.delenv("DEFENSECLAW_CONFIG")
+    if state == "key-cut-short":
+        _cut_short_key(home, 20, configured=True)
+    else:
+        assert run_first_run(_options()).status != "needs_attention"
+        (home / "device.key").unlink()
+    (home / "config.yaml").unlink(missing_ok=True)
+    earlier.unlink(missing_ok=True)
+    if config_now == "other-absent-path":
+        monkeypatch.setenv("DEFENSECLAW_CONFIG", str(root / "second" / "config.yaml"))
+    assert not any(path.exists() for path in (earlier, home / "config.yaml"))
+
+    with _gateway_process_listed(4321):
+        _refused_unchanged(home, "a defenseclaw-gateway process of this account is running (PID 4321)")
+
+    assert _repair().exit_code == 0  # gateway stopped: the same command repairs it
+    assert _valid(home)
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_the_repair_command_refuses_when_the_process_list_cannot_be_read(tmp_path, monkeypatch, configured):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _cut_short_key(home, 20, configured=configured)
+
+    with _process_list_unreadable():
+        _refused_unchanged(home, "a running gateway cannot be ruled out")
+
+    assert _repair().exit_code == 0
+    assert _valid(home)
+
+
+def _pid_record_behind(record, process):
+    from defenseclaw.doctor_gateway import GatewayEvidence
+
+    return (
+        patch.object(GatewayEvidence, "pid_record", return_value=record),
+        patch.object(GatewayEvidence, "process", return_value=process),
+    )
+
+
+def test_the_repair_command_refuses_when_the_install_home_pid_record_names_a_live_gateway(tmp_path, monkeypatch):
+    # A gateway the process list of this account does not show (another account started it for this
+    # home): its PID record in the install home is the second proof.
+    from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
+
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _cut_short_key(home, 20, configured=False)
+    live = ProcessEvidence("ok", pid=4321, executable="/usr/local/bin/defenseclaw-gateway", start_identity="1", uid=0)
+    record, process = _pid_record_behind(PIDRecord("ok", pid=4321), live)
+
+    with record, process:
+        _refused_unchanged(home, "the gateway recorded in")
+
+    assert _repair().exit_code == 0
+    assert _valid(home)
+
+
+@pytest.mark.parametrize(
+    "record, process, refused",
+    [
+        pytest.param("ok", "missing", False, id="record-of-a-process-that-ended"),
+        pytest.param("ok", "other-program", False, id="record-whose-pid-another-program-reused"),
+        pytest.param("missing", "", False, id="no-record"),
+        pytest.param("malformed", "", True, id="record-that-cannot-be-read"),
+        pytest.param("ok", "denied", True, id="process-behind-the-record-cannot-be-inspected"),
+    ],
+)
+def test_the_install_home_pid_record_decides_only_when_it_proves_or_hides_a_gateway(
+    tmp_path, monkeypatch, record, process, refused
+):
+    from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
+
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _cut_short_key(home, 20, configured=False)
+    evidence = (
+        ProcessEvidence("ok", pid=4321, executable="/usr/bin/python3", start_identity="1")
+        if process == "other-program"
+        else ProcessEvidence(process or "missing", pid=4321, reason="stub")
+    )
+    patches = _pid_record_behind(PIDRecord(record, pid=4321 if record == "ok" else 0, reason="stub"), evidence)
+
+    with patches[0], patches[1]:
+        if refused:
+            _refused_unchanged(home, "cannot")
+        else:
+            assert _repair().exit_code == 0
+            assert _valid(home)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="reads a /proc-shaped directory")
+def test_the_linux_process_list_finds_the_gateway_of_this_account_by_exe_or_comm(tmp_path):
+    from defenseclaw import doctor_gateway
+
+    def process(pid: str, *, exe: str | None, comm: str) -> None:
+        folder = tmp_path / pid
+        folder.mkdir()
+        if exe is not None:
+            (folder / "exe").symlink_to(exe)
+        else:
+            (folder / "exe").write_text("not a link")  # a non-dumpable process: the exe link cannot be read
+        (folder / "comm").write_text(comm + "\n")
+
+    (tmp_path / "self").mkdir()  # not a PID
+    process("11", exe="/home/u/.local/bin/defenseclaw-gateway", comm="defenseclaw-gat")
+    process("12", exe="/home/u/.local/bin/defenseclaw-gateway (deleted)", comm="defenseclaw-gat")
+    process("13", exe=None, comm="defenseclaw-gat")
+    process("14", exe="/usr/bin/python3", comm="python3")
+    process("15", exe=None, comm="bash")
+
+    listing = doctor_gateway._linux_gateway_processes(str(tmp_path))
+
+    assert listing.status == "ok"
+    assert sorted(listing.pids) == [11, 12, 13]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="reads a /proc-shaped directory")
+def test_the_linux_process_list_is_unavailable_when_it_cannot_be_read_or_a_process_cannot_be_told(tmp_path):
+    from defenseclaw import doctor_gateway
+
+    assert doctor_gateway._linux_gateway_processes(str(tmp_path / "missing")).status == "unavailable"
+
+    folder = tmp_path / "21"
+    folder.mkdir()
+    (folder / "exe").write_text("not a link")
+    (folder / "comm").mkdir()  # neither exe nor comm can be read for a process of this account
+    listing = doctor_gateway._linux_gateway_processes(str(tmp_path))
+    assert listing.status == "unavailable"
+    assert "could not be inspected" in listing.reason
+
+    (tmp_path / "22").mkdir()
+    (tmp_path / "22" / "exe").symlink_to("/opt/bin/defenseclaw-gateway")
+    assert doctor_gateway._linux_gateway_processes(str(tmp_path)).pids == (22,)  # a gateway found is proof enough
+
+
+def test_the_ps_and_tasklist_listings_name_the_gateways_of_this_account_and_never_read_nothing_as_none():
+    from defenseclaw import doctor_gateway
+
+    ps = (
+        "  101   501 /Users/a/.local/bin/defenseclaw-gateway\n"
+        "  102   502 /Users/b/bin/defenseclaw-gateway\n"
+        "  103   501 /bin/zsh\n"
+    )
+    assert doctor_gateway.parse_ps_gateway_listing(ps, 501) == doctor_gateway.GatewayProcessListing("ok", (101,))
+    assert doctor_gateway.parse_ps_gateway_listing("", 501).status == "unavailable"
+    assert doctor_gateway.parse_ps_gateway_listing("ps: illegal option\n", 501).status == "unavailable"
+
+    rows = (
+        "\"defenseclaw-gateway.exe\",\"4321\",\"Console\",\"1\",\"20,000 K\"\n"
+        "\"other.exe\",\"9\",\"Console\",\"1\",\"1 K\"\n"
+    )
+    assert doctor_gateway.parse_windows_gateway_listing(rows).pids == (4321,)
+    assert doctor_gateway.parse_windows_gateway_listing("INFO: No tasks are running which match the criteria.\n") == (
+        doctor_gateway.GatewayProcessListing("ok")
+    )

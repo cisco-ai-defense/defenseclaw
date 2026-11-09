@@ -34,6 +34,7 @@ import socket
 import stat
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -1508,3 +1509,208 @@ def gateway_executable_name(path: str, *, platform_name: str | None = None) -> s
     platform = (platform_name or ("win32" if os.name == "nt" else sys.platform)).lower()
     path_module = ntpath if platform in {"nt", "win32", "windows"} else posixpath
     return path_module.basename(path.strip()).lower()
+
+
+@dataclass(frozen=True)
+class GatewayProcessListing:
+    """The gateway processes this account runs, read from the OS process list."""
+
+    status: Literal["ok", "unavailable"]
+    pids: tuple[int, ...] = ()
+    reason: str = ""
+
+
+_LINUX_COMM_LIMIT = 15
+_GATEWAY_STOP_HINT = "stop it with `defenseclaw-gateway stop`, then run this command again"
+
+
+def list_account_gateway_processes(
+    *,
+    platform_name: str | None = None,
+    proc_root: str = "/proc",
+) -> GatewayProcessListing:
+    """List the defenseclaw-gateway processes of the current account from the OS process list.
+
+    This is evidence about the account, not about one config path: a gateway
+    started from any config of this home shows here. ``unavailable`` means the
+    list (or part of it) could not be read, so callers must not read it as "none".
+    On Windows the image listing covers every account; a gateway of another
+    account on a shared host also counts, which only makes the answer stricter.
+    """
+    platform_name = platform_name or sys.platform
+    if platform_name.startswith("linux"):
+        return _linux_gateway_processes(proc_root)
+    if platform_name == "darwin":
+        return _ps_gateway_processes()
+    if platform_name == "win32":
+        return _windows_gateway_processes()
+    return GatewayProcessListing("unavailable", reason="the process list cannot be read on this platform")
+
+
+def _linux_gateway_processes(proc_root: str) -> GatewayProcessListing:
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return GatewayProcessListing("unavailable", reason="the process list could not be read")
+    uid = os.geteuid()
+    comm_names = {name[:_LINUX_COMM_LIMIT] for name in GATEWAY_PROCESS_NAMES}
+    found: list[int] = []
+    uninspected = 0
+    for name in names:
+        if not name.isdigit():
+            continue
+        base = os.path.join(proc_root, name)
+        try:
+            if os.stat(base).st_uid != uid:
+                continue
+            try:
+                exe = os.readlink(os.path.join(base, "exe"))
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # exited, a zombie, or a kernel thread
+            except OSError:
+                exe = ""  # a non-dumpable process of this account hides its exe link; comm stays readable
+            if exe:
+                running = gateway_executable_name(exe.removesuffix(" (deleted)"), platform_name="linux")
+                running = running in GATEWAY_PROCESS_NAMES
+            else:
+                with open(os.path.join(base, "comm"), encoding="utf-8", errors="replace") as comm_file:
+                    running = comm_file.read(64).strip() in comm_names
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError:
+            uninspected += 1
+            continue
+        if running:
+            found.append(int(name))
+    if found:
+        return GatewayProcessListing("ok", tuple(found))
+    if uninspected:
+        return GatewayProcessListing(
+            "unavailable", reason=f"{uninspected} process(es) of this account could not be inspected"
+        )
+    return GatewayProcessListing("ok")
+
+
+def _ps_gateway_processes() -> GatewayProcessListing:
+    try:
+        proc = subprocess.run(
+            ["/bin/ps", "-A", "-o", "pid=,uid=,comm="],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10.0,
+            check=False,
+            env=trusted_system_subprocess_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return GatewayProcessListing("unavailable", reason="the process list could not be read")
+    if proc.returncode != 0:
+        return GatewayProcessListing("unavailable", reason="the process list could not be read")
+    return parse_ps_gateway_listing(proc.stdout, os.geteuid())
+
+
+def parse_ps_gateway_listing(output: str, uid: int) -> GatewayProcessListing:
+    """Read `ps -A -o pid=,uid=,comm=` output; an unparsable list is not an empty one."""
+    found: list[int] = []
+    parsed = 0
+    for line in output.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 3 or not fields[0].isdigit() or not fields[1].isdigit():
+            continue
+        parsed += 1
+        if (
+            int(fields[1]) == uid
+            and gateway_executable_name(fields[2], platform_name="darwin") in GATEWAY_PROCESS_NAMES
+        ):
+            found.append(int(fields[0]))
+    if not parsed:
+        return GatewayProcessListing("unavailable", reason="the process list was empty or unreadable")
+    return GatewayProcessListing("ok", tuple(found))
+
+
+def _windows_gateway_processes() -> GatewayProcessListing:  # pragma: no cover - native Windows only
+    root = os.environ.get("SystemRoot", r"C:\Windows")
+    for command in (
+        [
+            os.path.join(root, "System32", "tasklist.exe"),
+            "/FO",
+            "CSV",
+            "/NH",
+            "/FI",
+            "IMAGENAME eq defenseclaw-gateway.exe",
+        ],
+        [
+            os.path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            'Get-Process -Name defenseclaw-gateway -ErrorAction SilentlyContinue | '
+            'ForEach-Object { "defenseclaw-gateway.exe",$_.Id -join "," }',
+        ],
+    ):
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=15.0,
+                check=False,
+                env=trusted_system_subprocess_env(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0:
+            return parse_windows_gateway_listing(proc.stdout)
+    return GatewayProcessListing("unavailable", reason="the process list could not be read")
+
+
+def parse_windows_gateway_listing(output: str) -> GatewayProcessListing:
+    """Read tasklist CSV rows (image, PID, ...); anything that is not a row is not a process."""
+    import csv
+
+    found = [
+        int(fields[1])
+        for fields in csv.reader(output.splitlines())
+        if len(fields) >= 2 and fields[1].strip().isdigit() and fields[0].strip().lower() in GATEWAY_PROCESS_NAMES
+    ]
+    return GatewayProcessListing("ok", tuple(found))
+
+
+def gateway_activity_blocker(pid_record_paths: Iterable[str], *, evidence: GatewayEvidence | None = None) -> str:
+    """Why a gateway may be running for this account or any of the given PID records, or "" when none is.
+
+    Two independent proofs, neither keyed on a config pathname: (1) no
+    defenseclaw-gateway process of this account in the OS process list, and
+    (2) no live gateway behind a PID record of the install home or of a data
+    folder a config names. Anything that cannot be read is a blocker, because
+    the answer protects the device identity a running gateway has loaded.
+    """
+    evidence = evidence or GatewayEvidence()
+    listing = list_account_gateway_processes(platform_name=evidence.platform_name)
+    if listing.status != "ok":
+        return f"a running gateway cannot be ruled out ({listing.reason}); if one is running, {_GATEWAY_STOP_HINT}"
+    if listing.pids:
+        pids = ", ".join(str(pid) for pid in listing.pids)
+        return f"a defenseclaw-gateway process of this account is running (PID {pids}); {_GATEWAY_STOP_HINT}"
+    for path in dict.fromkeys(pid_record_paths):
+        record = evidence.pid_record(path)
+        if record.status == "missing":
+            continue
+        if record.status != "ok":
+            return (
+                f"the gateway PID record {path} cannot be read ({record.reason or record.status}), "
+                f"so a running gateway cannot be ruled out; {_GATEWAY_STOP_HINT}, "
+                "and remove that file if no gateway is running"
+            )
+        process = evidence.process(record.pid)
+        if process.status == "missing":
+            continue
+        if process.status != "ok":
+            return (
+                f"the process behind the gateway PID record {path} cannot be inspected "
+                f"({process.reason or process.status}); {_GATEWAY_STOP_HINT}"
+            )
+        if gateway_executable_name(process.executable, platform_name=evidence.platform_name) in GATEWAY_PROCESS_NAMES:
+            return f"the gateway recorded in {path} is running (PID {record.pid}); {_GATEWAY_STOP_HINT}"
+    return ""
