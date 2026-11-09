@@ -343,10 +343,23 @@ func scrubCopilotFile(path string, markers []string) (bool, error) {
 		}
 		return false, nil
 	}
+	// An event whose value is not a list is not Copilot's shape: it is left
+	// as it is, and when it holds a DefenseClaw entry the scrub still removes
+	// the entries of the valid events, then fails so the purge reports it.
+	var unsupported []string
 	for event, raw := range hooks {
 		if _, isList := raw.([]any); !isList && looksOwned(raw, markers) {
-			return false, fmt.Errorf("hooks.%s is not a list but holds a DefenseClaw entry; left in place", event)
+			unsupported = append(unsupported, event)
 		}
+	}
+	if len(unsupported) > 0 {
+		sort.Strings(unsupported)
+		scrubFlatHookEntries(hooks, markers)
+		changed, err := writeSortedJSON(path, cfg, data)
+		if err != nil {
+			return changed, err
+		}
+		return changed, fmt.Errorf("hooks %s not a list but holding a DefenseClaw entry; left in place", strings.Join(unsupported, ", "))
 	}
 	scrubFlatHookEntries(hooks, markers)
 	if filepath.Base(path) == copilotOwnedHookFileName && len(hooks) == 0 && copilotHookFileOnlyEnvelope(cfg) && !scrubRunsAsRoot() {

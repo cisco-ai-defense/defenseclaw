@@ -118,17 +118,40 @@ func TestScrubCopilot_KeepsFileWithUnsupportedHooksValue(t *testing.T) {
 // purge does not claim a clean removal.
 func TestScrubCopilot_ReportsOwnedEntryInUnsupportedShape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "defenseclaw.json")
-	for name, body := range map[string]string{
-		"hooks array":  `{"version":1,"hooks":[{"type":"command","bash":"'/Users/u/.defenseclaw/hooks/copilot-hook.sh' --event 'preToolUse'"}]}` + "\n",
-		"event object": `{"version":1,"hooks":{"preToolUse":{"type":"command","bash":"'/Users/u/.defenseclaw/hooks/copilot-hook.sh' --event 'preToolUse'"}}}` + "\n",
-	} {
-		writeFile(t, path, body)
-		if changed, err := scrubCopilotFile(path, scrubDefaultMarkers); err == nil || changed {
-			t.Fatalf("%s: scrubCopilotFile = %v, %v; want an error and no change", name, changed, err)
-		}
-		if got := readFile(t, path); got != body {
-			t.Fatalf("%s: file changed:\n%s", name, got)
-		}
+	body := `{"version":1,"hooks":[{"type":"command","bash":"'/Users/u/.defenseclaw/hooks/copilot-hook.sh' --event 'preToolUse'"}]}` + "\n"
+	writeFile(t, path, body)
+	if changed, err := scrubCopilotFile(path, scrubDefaultMarkers); err == nil || changed {
+		t.Fatalf("scrubCopilotFile = %v, %v; want an error and no change", changed, err)
+	}
+	if got := readFile(t, path); got != body {
+		t.Fatalf("file changed:\n%s", got)
+	}
+}
+
+// With one event in an unsupported shape, the scrub still removes the
+// DefenseClaw entries of the valid events, keeps the unsupported event as it
+// is, and fails so the purge reports what was left.
+func TestScrubCopilot_MixedShapesScrubValidEventsAndReportTheRest(t *testing.T) {
+	original := scrubRunsAsRoot
+	t.Cleanup(func() { scrubRunsAsRoot = original })
+	scrubRunsAsRoot = func() bool { return false }
+	path := filepath.Join(t.TempDir(), "defenseclaw.json")
+	writeFile(t, path, `{"version":1,"hooks":{`+
+		`"agentStop":[{"type":"command","bash":"'/Users/u/.defenseclaw/hooks/copilot-hook.sh' --event 'agentStop'"}],`+
+		`"preToolUse":{"type":"command","bash":"'/Users/u/.defenseclaw/hooks/copilot-hook.sh' --event 'preToolUse'"}}}`+"\n")
+	changed, err := scrubCopilotFile(path, scrubDefaultMarkers)
+	if err == nil || !strings.Contains(err.Error(), "preToolUse") {
+		t.Fatalf("scrubCopilotFile err = %v; want one naming preToolUse", err)
+	}
+	if !changed {
+		t.Fatal("the valid event's entry was not removed")
+	}
+	out := readFile(t, path)
+	if strings.Contains(out, "agentStop") {
+		t.Errorf("the valid event's DefenseClaw entry survived:\n%s", out)
+	}
+	if !strings.Contains(out, `"preToolUse"`) || !strings.Contains(out, "copilot-hook.sh") {
+		t.Errorf("the unsupported event was not kept as it is:\n%s", out)
 	}
 }
 
