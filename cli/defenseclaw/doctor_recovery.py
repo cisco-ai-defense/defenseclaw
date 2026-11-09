@@ -75,11 +75,6 @@ class DeviceKeyHealthStatus(str, Enum):
     INVALID = "invalid"
 
 
-# inspect_device_key reason for a private regular file at the key path that holds no valid key
-# (empty, or cut short by an interrupted publication).
-DEVICE_KEY_PAYLOAD_INVALID = "device-key-payload-invalid"
-
-
 class AuditDBHealthStatus(str, Enum):
     VALID = "valid"
     INTEGRITY_UNVERIFIED = "integrity-unverified"
@@ -350,7 +345,7 @@ def inspect_device_key(
     except OSError:
         return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "device-key-read-failed")
     if not _valid_device_key_bytes(key_data):
-        return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, DEVICE_KEY_PAYLOAD_INVALID)
+        return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "device-key-payload-invalid")
 
     secret_path = os.path.join(plan.data_dir, _DEVICE_PROVENANCE_SECRET)
     provenance_path = plan.target + ".provenance"
@@ -608,9 +603,8 @@ def apply_device_key_recovery(
     provenance secret and HMAC sentinel before the key, so no usable new
     identity exists before its provenance is durable.  A failure takes back
     what this call published.  A crash, or a file that cannot be taken back,
-    leaves continuity evidence without a key, which the next plan blocks; only
-    an attended repair sets such leftovers aside
-    (set_aside_identity_leftovers).
+    leaves continuity evidence without a key, which the next plan blocks and
+    DefenseClaw never replaces by itself.
     """
 
     _authorize_plan(plan, RecoveryKind.DEVICE_KEY, approved=approved, unattended=unattended)
@@ -689,6 +683,11 @@ def apply_device_key_recovery(
         raise
     except (ImportError, OSError, RuntimeError, ValueError):
         pass
+    except BaseException:
+        # Any other stop (an interrupt, an unexpected error) between the artifacts and the key
+        # must not leave a keyless artifact either.
+        _roll_back_device_identity(placed)
+        raise
     finally:
         for path in staged:
             _remove_staging_files(path)
@@ -717,100 +716,32 @@ def _discard_files(paths: list[str]) -> bool:
     return gone
 
 
-# What an attended repair of a device identity whose key is gone is called, in every
-# message that sends the operator to it (init, the guided first run and Doctor).
-REPAIR_IDENTITY_COMMAND = "defenseclaw init --repair-identity"
+def keyless_identity_message(target: str, files: list[str]) -> str:
+    """What init and Doctor print when a device identity has no key but its provenance files remain.
 
-
-def set_aside_identity_leftovers(
-    target: str | os.PathLike[str],
-    data_dir: str | os.PathLike[str],
-) -> list[str]:
-    """Move aside the provenance files of a device key that is gone; attended repairs only.
-
-    The caller is an explicit, confirmed repair: ``REPAIR_IDENTITY_COMMAND`` or
-    Doctor's attended device-key fix.  No init run calls it on its own: a
-    provenance file with no key may be the only trace of an identity that
-    existed, and nothing stored in the data folder can show that it did not.
-
-    Returns the new names (empty when there is nothing to move, or when a key
-    is present, which is never touched).  Files are renamed to a new
-    ``*.orphaned-*`` name, never deleted and never over an existing file.
+    DefenseClaw never replaces such files by itself: they may be the only trace of an identity that
+    existed. The way out is manual and named: restore the key, or clear the leftovers and run init again.
     """
 
-    normalized_target, normalized_data = _normalize_device_identity_disk_paths(target, data_dir)
-    if not normalized_target or not normalized_data or os.path.lexists(normalized_target):
-        return []
-    leftovers = [
-        path
-        for path in (normalized_target + ".provenance", os.path.join(normalized_data, _DEVICE_PROVENANCE_SECRET))
-        if os.path.lexists(path)
-    ]
-    stamp = _aside_stamp()
-    return [_move_aside(path, stamp) for path in leftovers]
+    listed = ", ".join(files)
+    what = "that file" if len(files) == 1 else "those files"
+    return (
+        f"the device identity at {target} has no key, but these files of it remain: {listed}. "
+        "DefenseClaw does not replace them, and nothing was changed. "
+        "If you have a backup of device.key, restore it. Otherwise: "
+        "1) stop the gateway (defenseclaw-gateway stop); "
+        "2) confirm that no other defenseclaw init is running; "
+        f"3) remove {what} ({listed}); "
+        "4) run defenseclaw init again, which creates a new device identity "
+        "(pairings tied to the old key will not be recoverable)."
+    )
 
 
-def unusable_device_key_files(
-    target: str | os.PathLike[str],
-    data_dir: str | os.PathLike[str],
-) -> list[str]:
-    """The identity files to set aside when ``device.key`` is a private regular file that holds no key.
+def device_identity_leftovers(target: str, data_dir: str) -> list[str]:
+    """The provenance files that remain beside an absent device key."""
 
-    A key file that an interrupted publication left empty or cut short is no usable identity, and
-    no provenance record can vouch for it.  Returns the key and the provenance files beside it that
-    exist, or an empty list for anything else: a valid or legacy key, a link, a file that fails the
-    private-custody checks, or no key at all.  A repair asks the operator before it uses this.
-    """
-
-    normalized_target, normalized_data = _normalize_device_identity_disk_paths(target, data_dir)
-    if not normalized_target or not normalized_data or not os.path.lexists(normalized_target):
-        return []
-    health = inspect_device_key(normalized_target, data_dir=normalized_data)
-    if health.status is not DeviceKeyHealthStatus.INVALID or health.reason_code != DEVICE_KEY_PAYLOAD_INVALID:
-        return []
-    return [
-        path
-        for path in (
-            normalized_target,
-            normalized_target + ".provenance",
-            os.path.join(normalized_data, _DEVICE_PROVENANCE_SECRET),
-        )
-        if os.path.lexists(path)
-    ]
-
-
-def set_aside_unusable_device_key(
-    target: str | os.PathLike[str],
-    data_dir: str | os.PathLike[str],
-) -> list[str]:
-    """Move aside what unusable_device_key_files names (kept as ``*.orphaned-*``); attended repairs only.
-
-    The key goes first, so an interruption leaves the state set_aside_identity_leftovers handles.
-    Returns the new names (empty when the key is not an unusable file).
-    """
-
-    stamp = _aside_stamp()
-    return [_move_aside(path, stamp) for path in unusable_device_key_files(target, data_dir)]
-
-
-def _aside_stamp() -> str:
-    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
-
-
-def _move_aside(path: str, stamp: str) -> str:
-    """Rename *path* to a name that did not exist; a set-aside never replaces a file."""
-
-    while True:
-        aside = f"{path}.orphaned-{stamp}-{os.urandom(6).hex()}"
-        try:
-            if os.name == "nt":
-                os.rename(path, aside)  # refuses an existing name on Windows
-            else:
-                os.link(path, aside, follow_symlinks=False)  # refuses an existing name
-                os.unlink(path)
-        except FileExistsError:
-            continue
-        return aside
+    plan = plan_missing_device_key(target, data_dir=data_dir)
+    return [path for path in plan.continuity_paths if os.path.lexists(path)]
 
 
 def _roll_back_device_identity(placed: list[tuple[str, str]]) -> list[tuple[str, str]]:

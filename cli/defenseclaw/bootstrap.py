@@ -53,7 +53,6 @@ from defenseclaw.connector_paths import (
     opencode_custody_text,
     opencode_unsafe_plugin_paths,
 )
-from defenseclaw.doctor_recovery import REPAIR_IDENTITY_COMMAND
 from defenseclaw.gateway_path import path_gateway
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
@@ -1307,8 +1306,9 @@ def _run_first_run_locked(options: FirstRunOptions, locks: InitLocks) -> FirstRu
                     "Bootstrap",
                     "fail",
                     e,
-                    # A device key gone with its provenance files is never replaced by init itself.
-                    REPAIR_IDENTITY_COMMAND
+                    # A device key gone with its provenance files is never replaced by init itself:
+                    # the message names the manual steps, after which init runs again.
+                    options.rerun_command
                     if "continuity-evidence-present" in e
                     else "defenseclaw doctor --fix --dry-run",
                 )
