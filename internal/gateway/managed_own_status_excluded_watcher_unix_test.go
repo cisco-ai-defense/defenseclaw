@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -148,6 +149,23 @@ func TestOwnStatusExcludedAfterDescriptorAndAdmissionAreGone(t *testing.T) {
 			}
 			rows, _ := ownExcludedRowsOf(t, rig.api, "uid", "5003", "carol")
 			requireExcludedReason(t, "vendor hook still installed", rows["claudecode"], unknownCode, unknownReason)
+
+			// The registration changed in a field the exact ownership check
+			// compares (an argument here, the timeout for Codex): the vendor
+			// still runs the command, so the status still cannot say none.
+			registered, err := os.ReadFile(rig.hookFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			drifted := strings.ReplaceAll(string(registered), `"--enterprise-managed"`, `"--enterprise-managed", "--changed"`)
+			if drifted == string(registered) {
+				t.Fatal("the drift changed nothing")
+			}
+			if err := os.WriteFile(rig.hookFile, []byte(drifted), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			rows, _ = ownExcludedRowsOf(t, rig.api, "uid", "5003", "carol")
+			requireExcludedReason(t, "vendor hook registration drifted", rows["claudecode"], unknownCode, unknownReason)
 
 			// Benign twin: the vendor hook is gone too, so nothing inspects the calls.
 			if err := os.Remove(rig.hookFile); err != nil {
