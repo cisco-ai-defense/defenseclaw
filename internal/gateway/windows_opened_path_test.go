@@ -30,12 +30,20 @@ func useShortNames(t *testing.T, long map[string]string) {
 // plain drive path of the file they open. A share of another machine keeps
 // its server and share, and a name that merely resembles one is untouched.
 func TestWindowsOpenedPathIsTheNameWindowsOpens(t *testing.T) {
-	useShortNames(t, map[string]string{"NETRC~1": ".netrc", "R109YW~1": "r109yws.d-2"})
+	useShortNames(t, map[string]string{"NETRC~1": ".netrc", "NTRCFILE": ".netrc", "R109YW~1": "r109yws.d-2"})
 	const home = "C:/Users/r109yws.d-2"
 	for spelling, want := range map[string]string{
 		`C:\Users\r109yws.d-2\.netrc`:                              home + "/.netrc",
 		`c:/Users/r109yws.d-2/.netrc`:                              home + "/.netrc",
 		`C:\Users\r109yws.d-2\NETRC~1`:                             home + "/.netrc",
+		`C:\Users\r109yws.d-2\NTRCFILE`:                            home + "/.netrc",
+		`C:\Users\r109yws.d-2\NTRCFILE.`:                           home + "/.netrc",
+		`\\?\C:\Users\r109yws.d-2\NTRCFILE`:                        home + "/.netrc",
+		`\\?\C:\Users\r109yws.d-2\.netrc.`:                         home + "/.netrc.",
+		`\\?\C:\Users\r109yws.d-2\.netrc  `:                        home + "/.netrc  ",
+		`\\?\C:\Users\r109yws.d-2\.aws.\credentials`:               home + "/.aws./credentials",
+		`\\?\C:\Users\r109yws.d-2\.netrc::$DATA`:                   home + "/.netrc",
+		`\\?\C:\Users\r109yws.d-2\x\..\.netrc`:                     home + "/.netrc",
 		`C:\Users\R109YW~1\NETRC~1`:                                home + "/.netrc",
 		`C:\Users\r109yws.d-2\.netrc.`:                             home + "/.netrc",
 		`C:\Users\r109yws.d-2\.netrc...`:                           home + "/.netrc",
@@ -113,5 +121,22 @@ func TestWindowsShortNameExpansionLeavesWhatItDoesNotKnow(t *testing.T) {
 	}
 	if got := osExpandWindowsShortNames("/no/such~1/dir"); !strings.HasSuffix(got, "/no/such~1/dir") {
 		t.Errorf("osExpandWindowsShortNames of a non-Windows path = %q", got)
+	}
+}
+
+// Every drive-letter path is asked for its long form, because an 8.3 short
+// name need not contain a tilde; a path that is not a drive path is not.
+func TestWindowsOpenedPathAsksTheFileSystemForEveryDrivePath(t *testing.T) {
+	useShortNames(t, nil)
+	var asked []string
+	expandWindowsShortNames = func(path string) string {
+		asked = append(asked, path)
+		return strings.ReplaceAll(path, "NTRCFILE", ".netrc")
+	}
+	if got, ok := windowsOpenedPath(`C:\Users\bob\NTRCFILE`); !ok || got != "C:/Users/bob/.netrc" {
+		t.Errorf("a tilde-free short name read as %q, %v", got, ok)
+	}
+	if _, ok := windowsOpenedPath(`\\server\share\NTRCFILE`); !ok || len(asked) != 1 {
+		t.Errorf("a share path was asked for its long form: %v", asked)
 	}
 }

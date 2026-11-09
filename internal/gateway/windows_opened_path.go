@@ -23,9 +23,15 @@ import (
 
 // expandWindowsShortNames is the file system's long-name form of a
 // drive-letter path in forward-slash spelling: each 8.3 short name replaced
-// by the name it stands for. A part that does not exist is left as written.
-// The Windows build asks the file system; other builds and tests replace it.
+// by the name it stands for. A short name need not contain a tilde, so every
+// such path is asked. A part that does not exist is left as written. The
+// Windows build asks the file system; other builds and tests replace it.
 var expandWindowsShortNames = osExpandWindowsShortNames
+
+// windowsProfileFolder reports a folder that holds the entries only the
+// folder of a user profile holds (NTUSER.DAT, AppData). The Windows build
+// asks the file system; other builds and tests replace it.
+var windowsProfileFolder = osWindowsProfileFolder
 
 // windowsLocalHostname is the name of this machine, which names its own admin
 // shares like localhost does. A variable so a test can name the machine.
@@ -41,32 +47,40 @@ var windowsAccountWord = regexp.MustCompile(`^\w+$`)
 // (\\?\, \\.\), and the admin share of this machine (\\localhost\c$,
 // \\127.0.0.1\c$) read as the drive path; any other share keeps its server
 // and share. In every name the part after a colon (an alternate data stream,
-// such as ::$DATA) is dropped, trailing dots and spaces are dropped as Win32
-// does, dot segments are resolved, and an 8.3 short name is expanded.
+// such as ::$DATA) is dropped, dot segments are resolved, and an 8.3 short
+// name is expanded. Trailing dots and spaces are dropped as Win32 does, except
+// in an extended-length path (\\?\): Win32 does not normalize that one, so
+// a name with trailing dots or spaces there is a file of its own.
 func windowsOpenedPath(spelling string) (string, bool) {
 	if !windowsRootedSpelling(spelling) {
 		return "", false
 	}
-	root, rest, ok := windowsPathRoot(strings.ReplaceAll(spelling, `\`, "/"))
+	slashed := strings.ReplaceAll(spelling, `\`, "/")
+	root, rest, ok := windowsPathRoot(slashed)
 	if !ok {
 		return "", false
 	}
+	verbatim := strings.HasPrefix(slashed, "//?/")
 	var names []string
 	for _, name := range strings.Split(rest, "/") {
 		if colon := strings.IndexByte(name, ':'); colon >= 0 {
 			name = name[:colon]
 		}
-		switch trimmed := strings.TrimRight(name, ". "); {
+		trimmed := name
+		if !verbatim {
+			trimmed = strings.TrimRight(name, ". ")
+		}
+		switch {
 		case name == "..":
 			if len(names) > 0 {
 				names = names[:len(names)-1]
 			}
-		case trimmed != "":
+		case name != "." && trimmed != "":
 			names = append(names, trimmed)
 		}
 	}
 	opened := root + "/" + strings.Join(names, "/")
-	if strings.Contains(opened, "~") && actionfacts.DriveLetterPath(opened) {
+	if actionfacts.DriveLetterPath(opened) {
 		opened = expandWindowsShortNames(opened)
 	}
 	return opened, true
@@ -164,7 +178,9 @@ func pathFactSpellings(path actionfacts.PathFact) []string {
 // the other platforms: the folder names are spelled as the rules write them,
 // the account folder is made a word the rules can read, and the names below
 // are read in the lower case the rules write them in (windowsNameFold). A
-// path with no such folder is read as it is.
+// drive-letter path with no such folder, below a folder that holds the
+// entries of a user profile, is read as the home of that account too. Any
+// other path is read as it is.
 func windowsRuleText(opened, home string) string {
 	text := activeHomeAsTilde(opened, home)
 	if rest, ok := strings.CutPrefix(text, "~/"); ok {
@@ -178,7 +194,7 @@ func windowsRuleText(opened, home string) string {
 		}
 	}
 	if first < 0 {
-		return text
+		return windowsProfileRuleText(text)
 	}
 	for index := first; index < len(parts); index++ {
 		name := windowsNameFold(parts[index])
@@ -201,4 +217,39 @@ func windowsAccountFolder(name string) string {
 		return name
 	}
 	return "account"
+}
+
+// windowsProfileRuleText reads a drive-letter path whose folder is the profile
+// of an account that is not in a Users or home folder (a profile moved to
+// another folder or drive) as the home of that account: the outermost folder
+// that holds the entries of a profile is the home, and its name the account.
+// The names below are read in the lower case the rules write them in. A path
+// with no such folder, or one the file system cannot be asked about, is read
+// as it is.
+func windowsProfileRuleText(text string) string {
+	if !actionfacts.DriveLetterPath(text) {
+		return text
+	}
+	parts := strings.Split(text, "/")
+	for end := 2; end < len(parts); end++ {
+		if windowsProfileFolder(strings.Join(parts[:end], "/")) {
+			return parts[0] + "/Users/" + windowsAccountFolder(parts[end-1]) + "/" +
+				windowsNameFold(strings.Join(parts[end:], "/"))
+		}
+	}
+	return text
+}
+
+// markTrailingSpaces spells each space that ends a name of an opened path as
+// a visible character (U+2423), so that a matcher which trims whitespace does
+// not read a file named with trailing spaces (extended-length path only) as
+// the file of the name without them.
+func markTrailingSpaces(opened string) string {
+	names := strings.Split(opened, "/")
+	for index, name := range names {
+		if trimmed := strings.TrimRight(name, " "); trimmed != name {
+			names[index] = trimmed + strings.Repeat("\u2423", len(name)-len(trimmed))
+		}
+	}
+	return strings.Join(names, "/")
 }
