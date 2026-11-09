@@ -27713,28 +27713,64 @@ function Hold-DefenseClawEarlyHookGuard {
             [StringComparison]::OrdinalIgnoreCase)) {
         throw 'pending lifecycle names an unexpected closed hook guard'
     }
-    Assert-DefenseClawNoReparsePath -Path $expected
-    $digest = (
-        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $expected -Algorithm SHA256
-    ).Hash.ToLowerInvariant()
-    if ($digest -cne $GuardSHA256) {
-        throw 'pending lifecycle closed hook guard changed'
+    # S-I1: the guardian is stopped for the write below. Every failure after
+    # the stop puts its start mode back and starts it again, so the services
+    # a held run leaves Running are Running at the end of a failed hold too.
+    $guardianTouched = $false
+    $guardianPriorMode = 0
+    $guardianWasRunning = $false
+    try {
+        Assert-DefenseClawNoReparsePath -Path $expected
+        $digest = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $expected -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($digest -cne $GuardSHA256) {
+            throw 'pending lifecycle closed hook guard changed'
+        }
+        if (-not [string]::IsNullOrWhiteSpace($GuardianServiceName) -and
+            (Test-DefenseClawServiceExists -Name $GuardianServiceName)) {
+            $guardianPriorMode = Get-DefenseClawServiceStartMode -Name $GuardianServiceName
+            $guardianService = Get-DefenseClawServiceChecked -Name $GuardianServiceName
+            $guardianWasRunning = (
+                $null -ne $guardianService -and
+                $guardianService.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+            )
+            $guardianTouched = $true
+            Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode 4
+            Stop-DefenseClawService -Name $GuardianServiceName
+        }
+        Install-DefenseClawFileAtomic `
+            -Source $expected `
+            -Destination $Layout.HookPath `
+            -ExpectedSHA256 $GuardSHA256 `
+            -SkipIfContentMatches
+        $live = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($live -cne $GuardSHA256) {
+            throw 'pending lifecycle closed hook guard was not published'
+        }
     }
-    if (-not [string]::IsNullOrWhiteSpace($GuardianServiceName) -and
-        (Test-DefenseClawServiceExists -Name $GuardianServiceName)) {
-        Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode 4
-        Stop-DefenseClawService -Name $GuardianServiceName
-    }
-    Install-DefenseClawFileAtomic `
-        -Source $expected `
-        -Destination $Layout.HookPath `
-        -ExpectedSHA256 $GuardSHA256 `
-        -SkipIfContentMatches
-    $live = (
-        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256
-    ).Hash.ToLowerInvariant()
-    if ($live -cne $GuardSHA256) {
-        throw 'pending lifecycle closed hook guard was not published'
+    catch {
+        $holdFailure = $_
+        if ($guardianTouched) {
+            $restartNote = ''
+            try {
+                if ($guardianPriorMode -eq 2 -or $guardianPriorMode -eq 3) {
+                    Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode $guardianPriorMode
+                }
+                if ($guardianWasRunning) {
+                    Start-DefenseClawService -Name $GuardianServiceName
+                }
+            }
+            catch {
+                $restartNote = "; the hook guardian could not be started again: $($_.Exception.Message)"
+            }
+            if ($restartNote -ne '') {
+                throw "$($holdFailure.Exception.Message)$restartNote"
+            }
+        }
+        throw $holdFailure
     }
     return $GuardSHA256
 }
@@ -35826,25 +35862,31 @@ function New-DefenseClawHookHeldMessage {
 # it arrives during the transaction, and a rollback that meets it defers the
 # guardian's coverage proof like the Codex files (Test-DefenseClawRollbackCoverageDeferred).
 # Standalone only.
-function Test-DefenseClawGuardianStateFileUserReadable {
+function Test-DefenseClawGuardianStateFileUserOpenable {
     <#
-        True when the access list of Path grants read to Users, Authenticated
-        Users, Everyone or Interactive: a standard account can open the file and
-        hold it with read sharing, so a lifecycle run must not wait for it (N2).
-        A path whose access list cannot be read answers $false.
+        True when any principal other than SYSTEM, Administrators and a
+        service SID has an Allow entry with any access on Path: a standard
+        account, a domain or local user SID named directly, Users, Everyone
+        and the like can then open the file and hold it with read sharing, so
+        a lifecycle run must not wait for it (N2). The gated set holds only
+        files just SYSTEM, Administrators and the service SIDs can open. Deny
+        entries grant nothing. A path whose access list cannot be read answers
+        $false (it stays gated).
     #>
     param([Parameter(Mandatory)][string]$Path)
     try {
-        $readers = @('S-1-5-32-545', 'S-1-5-11', 'S-1-1-0', 'S-1-5-4')
         $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop
         foreach ($rule in @($acl.Access)) {
             if ([string]$rule.AccessControlType -ne 'Allow') { continue }
-            $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-            if ($sid -notin $readers) { continue }
-            $rights = [int]$rule.FileSystemRights
-            if (($rights -band 0x1) -ne 0 -or ($rights -band [int]::MinValue) -ne 0 -or ($rights -band 0x10000000) -ne 0) {
-                return $true
+            if ([int]$rule.FileSystemRights -eq 0) { continue }
+            $reference = $rule.IdentityReference
+            $sid = ''
+            try { $sid = $reference.Translate([Security.Principal.SecurityIdentifier]).Value }
+            catch { $sid = [string]$reference.Value }
+            if ($sid -ceq 'S-1-5-18' -or $sid -ceq 'S-1-5-32-544' -or $sid.StartsWith('S-1-5-80-', [StringComparison]::Ordinal)) {
+                continue
             }
+            return $true
         }
         return $false
     }
@@ -35882,7 +35924,7 @@ function Get-DefenseClawGuardianStateFiles {
         if ($null -eq $item -or $item.PSIsContainer -or $item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
             continue
         }
-        if (Test-DefenseClawGuardianStateFileUserReadable -Path $path) {
+        if (Test-DefenseClawGuardianStateFileUserOpenable -Path $path) {
             continue
         }
         $paths.Add([string]$path)

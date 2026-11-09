@@ -37,11 +37,11 @@ func TestWindowsEnterpriseGuardianStateHeld(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(authDir, "claude-mcp"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	previousOpen, previousWait, previousHolders, previousReadable := windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateHolders, windowsEnterpriseGuardianStateUserReadable
+	previousOpen, previousWait, previousHolders, previousReadable := windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateHolders, windowsEnterpriseGuardianStateUserOpenable
 	t.Cleanup(func() {
-		windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateHolders, windowsEnterpriseGuardianStateUserReadable = previousOpen, previousWait, previousHolders, previousReadable
+		windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateHolders, windowsEnterpriseGuardianStateUserOpenable = previousOpen, previousWait, previousHolders, previousReadable
 	})
-	windowsEnterpriseGuardianStateUserReadable = func(string) bool { return false }
+	windowsEnterpriseGuardianStateUserOpenable = func(string) bool { return false }
 	windowsEnterpriseGuardianStateProbeWait = time.Millisecond
 	windowsEnterpriseGuardianStateHolders = func(path string) []string { return []string{"editor.exe (PID 4242)"} }
 	heldFile := filepath.Join(authDir, "protected_targets.json")
@@ -160,9 +160,9 @@ func TestWindowsEnterpriseGuardianStateFilesAreTheCriticalAdministratorOnlyFiles
 			t.Fatal(err)
 		}
 	}
-	previous := windowsEnterpriseGuardianStateUserReadable
-	t.Cleanup(func() { windowsEnterpriseGuardianStateUserReadable = previous })
-	windowsEnterpriseGuardianStateUserReadable = func(string) bool { return false }
+	previous := windowsEnterpriseGuardianStateUserOpenable
+	t.Cleanup(func() { windowsEnterpriseGuardianStateUserOpenable = previous })
+	windowsEnterpriseGuardianStateUserOpenable = func(string) bool { return false }
 	got := map[string]bool{}
 	for _, path := range windowsEnterpriseGuardianStateFiles(layout) {
 		got[path] = true
@@ -177,7 +177,7 @@ func TestWindowsEnterpriseGuardianStateFilesAreTheCriticalAdministratorOnlyFiles
 	}
 	// A critical file a standard account can read leaves the class.
 	userReadable := critical[0]
-	windowsEnterpriseGuardianStateUserReadable = func(path string) bool { return path == userReadable }
+	windowsEnterpriseGuardianStateUserOpenable = func(path string) bool { return path == userReadable }
 	for _, path := range windowsEnterpriseGuardianStateFiles(layout) {
 		if path == userReadable {
 			t.Errorf("%s is readable by a standard account and stayed in the class", path)
@@ -199,20 +199,66 @@ func TestWindowsEnterpriseGuardianStateUserReadableReadsTheAccessList(t *testing
 		}
 	}
 	run("/inheritance:r", "/grant:r", "*S-1-5-18:F", "*S-1-5-32-544:F")
-	if windowsEnterpriseGuardianStateUserReadable(path) {
+	if windowsEnterpriseGuardianStateUserOpenable(path) {
 		t.Fatal("a file only SYSTEM and Administrators can open read as user-readable")
 	}
 	run("/grant", "*S-1-5-32-545:R")
-	if !windowsEnterpriseGuardianStateUserReadable(path) {
+	if !windowsEnterpriseGuardianStateUserOpenable(path) {
 		t.Fatal("a file Users can read was not seen as user-readable")
 	}
 	run("/remove:g", "*S-1-5-32-545", "/grant", "*S-1-5-11:R")
-	if !windowsEnterpriseGuardianStateUserReadable(path) {
+	if !windowsEnterpriseGuardianStateUserOpenable(path) {
 		t.Fatal("a file Authenticated Users can read was not seen as user-readable")
 	}
 	run("/remove:g", "*S-1-5-11", "/deny", "*S-1-5-32-545:R")
-	if windowsEnterpriseGuardianStateUserReadable(path) {
+	if windowsEnterpriseGuardianStateUserOpenable(path) {
 		t.Fatal("a deny entry counted as a read grant")
+	}
+	// N2 tighten: any access for any principal beyond SYSTEM, Administrators and
+	// a service SID makes the file openable by a standard account.
+	run("/remove:d", "*S-1-5-32-545", "/grant", "*S-1-5-32-545:W")
+	if !windowsEnterpriseGuardianStateUserOpenable(path) {
+		t.Fatal("a write-only Users entry was not seen as openable")
+	}
+	run("/remove:g", "*S-1-5-32-545")
+	if windowsEnterpriseGuardianStateUserOpenable(path) {
+		t.Fatal("the file is back to SYSTEM and Administrators only but was seen as openable")
+	}
+	token, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := token.User.Sid.String()
+	if windowsEnterpriseGuardianStateSIDIsAdminOnly(token.User.Sid) {
+		t.Skipf("the test runs as %s, which is SYSTEM or a service SID", user)
+	}
+	run("/grant", "*"+user+":R")
+	if !windowsEnterpriseGuardianStateUserOpenable(path) {
+		t.Fatalf("a user SID named directly (%s) was not seen as openable", user)
+	}
+}
+
+// The principals that may open a gated file are SYSTEM, Administrators and the
+// service SIDs; every other SID, including a domain or local user, may not.
+func TestWindowsEnterpriseGuardianStateSIDIsAdminOnly(t *testing.T) {
+	for sidText, want := range map[string]bool{
+		"S-1-5-18":     true,
+		"S-1-5-32-544": true,
+		"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464": true,
+		"S-1-5-32-545": false,
+		"S-1-5-11":     false,
+		"S-1-1-0":      false,
+		"S-1-5-4":      false,
+		"S-1-5-21-111111111-222222222-333333333-1001": false,
+		"S-1-5-21-111111111-222222222-333333333-500":  false,
+	} {
+		sid, err := windows.StringToSid(sidText)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := windowsEnterpriseGuardianStateSIDIsAdminOnly(sid); got != want {
+			t.Errorf("%s: admin-only = %v, want %v", sidText, got, want)
+		}
 	}
 }
 
@@ -229,9 +275,9 @@ func TestWindowsEnterpriseGuardianStateHeldIgnoresAUserReadableFile(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	previousOpen, previousWait, previousReadable := windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateUserReadable
+	previousOpen, previousWait, previousReadable := windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateUserOpenable
 	t.Cleanup(func() {
-		windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateUserReadable = previousOpen, previousWait, previousReadable
+		windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateUserOpenable = previousOpen, previousWait, previousReadable
 	})
 	windowsEnterpriseGuardianStateProbeWait = time.Millisecond
 	windowsEnterpriseGuardianStateOpenForDelete = func(path string) error {
@@ -240,7 +286,7 @@ func TestWindowsEnterpriseGuardianStateHeldIgnoresAUserReadableFile(t *testing.T
 		}
 		return nil
 	}
-	windowsEnterpriseGuardianStateUserReadable = func(path string) bool { return path == ledger }
+	windowsEnterpriseGuardianStateUserOpenable = func(path string) bool { return path == ledger }
 	if hold := windowsEnterpriseGuardianStateHeld(layout); hold != nil {
 		t.Fatalf("a file a standard account can read produced a hold: %+v", hold)
 	}

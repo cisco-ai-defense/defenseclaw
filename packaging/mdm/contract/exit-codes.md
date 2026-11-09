@@ -40,9 +40,10 @@ in `runtime`. Every other file the guardian or its enumerator publishes (the
 removed-connectors record, the startup, notices and restores records, the
 OpenCode port warnings, the enumerator's folder, the off-roster markers) did not
 stop a repair when held and is not checked. A file a standard account can open
-(an access list that grants Users, Authenticated Users, Everyone or Interactive
-read) is never checked either: that account could hold it and block every ensure
-and repair. Before a lifecycle run changes anything the check stops it with
+(an access list with an Allow entry, for any access, for any principal other
+than SYSTEM, Administrators and a service SID: Users, Everyone, or a user SID
+named directly) is never checked either: that account could hold it and block
+every ensure and repair. Before a lifecycle run changes anything the check stops it with
 nothing changed. An uninstall or a purge is not held up by it. A holder that
 arrives during the upgrade transaction, including one that arrives while the
 rollback waits for the guardian, ends the run with the restored services

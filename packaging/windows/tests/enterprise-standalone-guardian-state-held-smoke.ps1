@@ -60,9 +60,11 @@ try {
         [IO.File]::WriteAllText([IO.Path]::Combine($enumerator, 'opencode-service-ports.lock'), 'x')
         [IO.File]::WriteAllText([IO.Path]::Combine($runtime, 'audit.db'), 'x')
         # What the guardian publishes is for administrators; the scratch folder
-        # inherits the profile access list, so make it so.
+        # inherits the profile access list, so make it so. Only SYSTEM and
+        # Administrators (the smoke runs elevated): no named user, or the files
+        # would not be gated (N2).
         foreach ($path in @($class + $notGated)) {
-            & icacls.exe $path /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' "*$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value):F" | Out-Null
+            & icacls.exe $path /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
         }
 
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
@@ -130,6 +132,59 @@ try {
                 if ($gate -ne '') { throw "the gate refused over a user-readable file: $gate" }
             }
             finally { $reader.Dispose(); & icacls.exe $ledger /remove:g '*S-1-5-32-545' | Out-Null }
+            # N2 tighten: any access for any other principal, not only read: a
+            # write-only Users entry, and a user SID named directly.
+            $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $openers = [ordered]@{ 'a write-only Users entry' = '*S-1-5-32-545:W' }
+            if ($currentUser -ne 'S-1-5-18') { $openers['a named user SID'] = "*${currentUser}:R" }
+            foreach ($label in $openers.Keys) {
+                $grant = $openers[$label]
+                & icacls.exe $ledger /grant $grant | Out-Null
+                try {
+                    if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -contains $ledger) { throw "$label stayed in the class" }
+                }
+                finally { & icacls.exe $ledger /remove:g ($grant -replace ':.*$', '') | Out-Null }
+                if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -notcontains $ledger) { throw "the ledger stayed out of the class after $label was removed" }
+            }
+            # S-I1: a hold that fails after it stopped the guardian starts it again
+            # and puts its start mode back; the services a held run left Running
+            # are Running at the end. The service calls are replaced in the module.
+            Add-Type -AssemblyName System.ServiceProcess
+            $replaced = @('Test-DefenseClawServiceExists', 'Get-DefenseClawServiceStartMode', 'Get-DefenseClawServiceChecked', 'Set-DefenseClawServiceStartMode', 'Stop-DefenseClawService', 'Start-DefenseClawService', 'Install-DefenseClawFileAtomic')
+            $original = @{}
+            foreach ($name in $replaced) { $original[$name] = (Get-Item -LiteralPath "function:$name").ScriptBlock }
+            $transaction = [IO.Path]::Combine($scratch, 'txn')
+            [void][IO.Directory]::CreateDirectory($transaction)
+            $guardPath = [IO.Path]::Combine($transaction, 'early-hook-closed.exe')
+            [IO.File]::WriteAllText($guardPath, 'closed hook guard')
+            $guardSha = (Get-FileHash -LiteralPath $guardPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $holdLayout = @{ HookPath = [IO.Path]::Combine($scratch, 'defenseclaw-hook.exe') }
+            $script:SmokeServiceCalls = [Collections.Generic.List[string]]::new()
+            $script:SmokeInstallFails = $true
+            $script:SmokeStartFails = $false
+            try {
+                Set-Item -LiteralPath 'function:script:Test-DefenseClawServiceExists' -Value { $true }
+                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceStartMode' -Value { 2 }
+                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceChecked' -Value { [pscustomobject]@{ Status = [ServiceProcess.ServiceControllerStatus]::Running } }
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceStartMode' -Value { $script:SmokeServiceCalls.Add("mode $($args[3])") }
+                Set-Item -LiteralPath 'function:script:Stop-DefenseClawService' -Value { $script:SmokeServiceCalls.Add('stop') }
+                Set-Item -LiteralPath 'function:script:Start-DefenseClawService' -Value { if ($script:SmokeStartFails) { throw 'start refused' }; $script:SmokeServiceCalls.Add('start') }
+                Set-Item -LiteralPath 'function:script:Install-DefenseClawFileAtomic' -Value { if ($script:SmokeInstallFails) { throw 'injected failure after the stop' }; Copy-Item -LiteralPath $guardPath -Destination $holdLayout.HookPath -Force }
+                $hold = { param($Failure) Hold-DefenseClawEarlyHookGuard -Layout $holdLayout -TransactionDirectory $transaction -GuardCopy $guardPath -GuardSHA256 $guardSha -GuardianServiceName 'DcSmokeGuardian' }
+                $caught = ''
+                try { [void](& $hold) } catch { $caught = $_.Exception.Message }
+                if ($caught -ne 'injected failure after the stop') { throw "the failed hold said '$caught'" }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|start') { throw "a failed hold left '$($script:SmokeServiceCalls -join '|')', want the guardian stopped, then its start mode and start restored" }
+                # The guardian cannot be started again: the failure says so, with the first cause.
+                $script:SmokeServiceCalls.Clear(); $script:SmokeStartFails = $true; $caught = ''
+                try { [void](& $hold) } catch { $caught = $_.Exception.Message }
+                if (-not $caught.StartsWith('injected failure after the stop') -or -not $caught.Contains('could not be started again') -or -not $caught.Contains('start refused')) { throw "the failed restart said '$caught'" }
+                # A hold that works leaves the guardian stopped for the rollback that follows.
+                $script:SmokeServiceCalls.Clear(); $script:SmokeStartFails = $false; $script:SmokeInstallFails = $false
+                if ((& $hold) -ne $guardSha) { throw 'a working hold did not return the guard digest' }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop') { throw "a working hold left '$($script:SmokeServiceCalls -join '|')'" }
+            }
+            finally { foreach ($name in $replaced) { Set-Item -LiteralPath "function:script:$name" -Value $original[$name] } }
             # S-H3: a holder that arrives during the rollback proof (after the check
             # before it) is resolved: the proof is deferred and the run continues.
             $late = [IO.FileStream]::new($class[1], [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)

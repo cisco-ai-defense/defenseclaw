@@ -251,16 +251,21 @@ def test_a_guardian_state_hold_is_found_before_anything_stops() -> None:
     # The class is the critical files only (the others did not stop a repair when held),
     # and never a file a standard account can open (N2). The CLI list is the same four.
     files = _function_body(text, "Get-DefenseClawGuardianStateFiles")
-    for needle in ("'protected_targets.json', 'activation.json', 'user-cleanup.json'", "hook_guardian_state.json", "Test-DefenseClawGuardianStateFileUserReadable"):
+    for needle in ("'protected_targets.json', 'activation.json', 'user-cleanup.json'", "hook_guardian_state.json", "Test-DefenseClawGuardianStateFileUserOpenable"):
         assert needle in files, needle
     for gone in ("hook_guardian_*.json", "ManifestPath", "-Filter", "off-roster"):
         assert gone not in files, gone
     go = (ROOT / "internal" / "cli" / "windows_enterprise_guardian_state_held_windows.go").read_text(encoding="utf-8")
     assert "[]string{managed.HookGuardianAuthorizationFile, hookGuardianActivationFile, managed.HookGuardianUserCleanupFile}" in go
-    assert "[]string{hookGuardianStateFile}" in go and "windowsEnterpriseGuardianStateUserReadable(path)" in go
-    readable = _function_body(text, "Test-DefenseClawGuardianStateFileUserReadable")
-    for sid in ("S-1-5-32-545", "S-1-5-11", "S-1-1-0", "S-1-5-4"):
+    assert "[]string{hookGuardianStateFile}" in go and "windowsEnterpriseGuardianStateUserOpenable(path)" in go
+    readable = _function_body(text, "Test-DefenseClawGuardianStateFileUserOpenable")
+    # Any Allow entry with any access for a principal other than SYSTEM, Administrators
+    # and a service SID opens the file to a standard account (N2): no list of readers.
+    for sid in ("S-1-5-18", "S-1-5-32-544", "S-1-5-80-"):
         assert sid in readable, sid
+    for gone in ("S-1-5-32-545", "-band"):
+        assert gone not in readable, gone
+    assert "windowsEnterpriseGuardianStateSIDIsAdminOnly" in go and 'HasPrefix(sid.String(), "S-1-5-80-")' in go
     # S-H2: an uninstall or purge transaction is not held up by it.
     hold = _function_body(text, "Get-DefenseClawGuardianStateHold")
     assert "Test-DefenseClawStandaloneProfile" in hold and "Test-DefenseClawFileDeleteBlocked" in hold

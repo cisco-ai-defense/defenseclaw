@@ -77,11 +77,14 @@ var (
 	windowsEnterpriseGuardianRuntimeCriticalFiles       = []string{hookGuardianStateFile}
 )
 
-// windowsEnterpriseGuardianStateUserReadable reports whether the access list of
-// path grants read to Users, Authenticated Users, Everyone or Interactive: a
-// standard account can then open it and hold it with read sharing, so it is not
-// a file a lifecycle run may wait for. Replaceable in tests.
-var windowsEnterpriseGuardianStateUserReadable = func(path string) bool {
+// windowsEnterpriseGuardianStateUserOpenable reports whether any principal
+// other than SYSTEM, Administrators and a service SID has an Allow entry with
+// any access on path: a standard account (through Users, Authenticated Users,
+// Everyone, Interactive or a user SID named directly) can then open it and hold
+// it with read sharing, so it is not a file a lifecycle run may wait for. The
+// gated set holds only files just SYSTEM, Administrators and the service SIDs
+// can open. Deny entries grant nothing. Replaceable in tests.
+var windowsEnterpriseGuardianStateUserOpenable = func(path string) bool {
 	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return false
@@ -93,31 +96,34 @@ var windowsEnterpriseGuardianStateUserReadable = func(path string) bool {
 	if acl == nil {
 		return true // no access list: everyone
 	}
-	var readers []*windows.SID
-	for _, kind := range []windows.WELL_KNOWN_SID_TYPE{
-		windows.WinBuiltinUsersSid, windows.WinAuthenticatedUserSid, windows.WinWorldSid, windows.WinInteractiveSid,
-	} {
-		if sid, err := windows.CreateWellKnownSid(kind); err == nil {
-			readers = append(readers, sid)
-		}
-	}
-	const readMask = windows.FILE_READ_DATA | windows.GENERIC_READ | windows.GENERIC_ALL
 	for index := uint32(0); index < uint32(acl.AceCount); index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(acl, index, &ace); err != nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 			continue
 		}
-		if ace.Mask&readMask == 0 {
+		if ace.Mask == 0 {
 			continue
 		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		for _, reader := range readers {
-			if windows.EqualSid(sid, reader) {
-				return true
-			}
+		if !windowsEnterpriseGuardianStateSIDIsAdminOnly((*windows.SID)(unsafe.Pointer(&ace.SidStart))) {
+			return true
 		}
 	}
 	return false
+}
+
+// windowsEnterpriseGuardianStateSIDIsAdminOnly reports whether sid is SYSTEM,
+// Administrators or a service SID (S-1-5-80-...): the principals that may open
+// a gated guardian state file.
+func windowsEnterpriseGuardianStateSIDIsAdminOnly(sid *windows.SID) bool {
+	if sid == nil {
+		return false
+	}
+	for _, kind := range []windows.WELL_KNOWN_SID_TYPE{windows.WinLocalSystemSid, windows.WinBuiltinAdministratorsSid} {
+		if known, err := windows.CreateWellKnownSid(kind); err == nil && windows.EqualSid(sid, known) {
+			return true
+		}
+	}
+	return strings.HasPrefix(sid.String(), "S-1-5-80-")
 }
 
 // windowsEnterpriseGuardianStateFiles lists the critical guardian state files
@@ -133,7 +139,7 @@ func windowsEnterpriseGuardianStateFiles(layout managed.StandaloneLayout) []stri
 			if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
 				continue
 			}
-			if windowsEnterpriseGuardianStateUserReadable(path) {
+			if windowsEnterpriseGuardianStateUserOpenable(path) {
 				continue
 			}
 			files = append(files, path)
