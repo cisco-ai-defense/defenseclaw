@@ -2950,9 +2950,10 @@ if __name__ == "__main__":
 
 
 class TestMcpListAllowedServerWithFailedScan(MCPCommandTestBase):
-    """A server the operator allowed is not listed as unverified, and gets no
-    advice to allow it, when its last scan failed (the list reads the allow
-    that the table row reads)."""
+    """The table row, the JSON item and the failed-scan footer of mcp list read
+    one effective allow per server, so an allowed server is not listed as
+    unverified and gets no advice to allow it, and a server the allow does not
+    cover keeps both the warning and the advice."""
 
     REFUSED = (
         "refused, command 'python3' is not an allowlisted stdio launcher (allowed: npx, uvx)"
@@ -2974,48 +2975,72 @@ class TestMcpListAllowedServerWithFailedScan(MCPCommandTestBase):
         )
         db.commit()
 
-    def _list(self, server):
+    def _list(self, server, *extra):
         self.app.cfg.mcp_servers = lambda connector=None, **_: [server]  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
         self._fail_scan()
-        result = self.invoke(["list", "--connector", "claudecode"])
+        result = self.invoke(["list", "--connector", "claudecode", *extra])
         self.assertEqual(result.exit_code, 0, result.output)
-        return " ".join(result.output.split())
+        return result.output
 
-    def _allow(self, **pin):
+    def _both(self, server):
+        """The text output (one line) and the JSON item of the same list."""
+        flat = " ".join(self._list(server).split())
+        return flat, json.loads(self._list(server, "--json"))["mcp_servers"][0]
+
+    def _allow(self, name="NEW", **pin):
         from defenseclaw.config import AssetPolicyRule
 
         self.app.cfg.asset_policy.mcp.allowed = [
-            AssetPolicyRule(name="NEW", connector="claudecode", **pin),
+            AssetPolicyRule(name=name, connector="claudecode", **pin),
         ]
 
-    def test_allowed_server_is_not_listed_as_unscanned_and_gets_no_allow_hint(self):
-        self._allow(command="python3", args_prefix=["server.py"], transport="stdio")
-
-        flat = self._list(self._server())
-
+    def _assert_allowed(self, flat, item):
         self.assertNotIn("could not be scanned", flat)
         self.assertNotIn("mcp allow NEW", flat)
         self.assertNotIn("not an allowlisted stdio launcher", flat)
         self.assertIn("1 allowed MCP server(s) have a failed last scan", flat)
         self.assertIn("NEW (claudecode)", flat)
+        self.assertEqual(item["verdict"], "allowed")
+        self.assertEqual(item["actions"], {"install": "allow"})
 
-    def test_server_that_is_not_allowed_keeps_the_footer_and_the_allow_hint(self):
-        flat = self._list(self._server())
-
+    def _assert_unscanned(self, flat, item):
         self.assertIn("1 MCP server(s) could not be scanned (last scan failed): NEW (claudecode)", flat)
         self.assertIn("or trust it: defenseclaw mcp allow NEW", flat)
         self.assertNotIn("allowed MCP server(s) have a failed last scan", flat)
+        self.assertEqual(item["verdict"], "scan failed")
+        self.assertNotIn("actions", item)
 
-    def test_server_changed_after_it_was_allowed_keeps_the_footer(self):
-        # The allow is pinned to the definition it was written for; a server
-        # that now starts differently is not covered by it.
+    def test_allowed_server_is_not_listed_as_unscanned_and_gets_no_allow_hint(self):
         self._allow(command="python3", args_prefix=["server.py"], transport="stdio")
 
-        flat = self._list(self._server(args=("other.py",)))
+        self._assert_allowed(*self._both(self._server()))
+
+    def test_server_that_is_not_allowed_keeps_the_footer_and_the_allow_hint(self):
+        self._assert_unscanned(*self._both(self._server()))
+
+    def test_server_changed_after_it_was_allowed_reads_unscanned_in_row_and_footer(self):
+        # The allow is pinned to the definition it was written for; a server
+        # that now starts differently is not covered by it, in the row as
+        # well as in the footer.
+        self._allow(command="python3", args_prefix=["server.py"], transport="stdio")
+
+        self._assert_unscanned(*self._both(self._server(args=("other.py",))))
+
+    def test_allow_written_in_another_case_covers_the_server_in_row_and_footer(self):
+        self._allow(name="new", command="python3", args_prefix=["server.py"], transport="stdio")
+
+        self._assert_allowed(*self._both(self._server()))
+
+    def test_secure_client_list_is_unchanged(self):
+        # Secure Client keeps the journal allow and the unscanned warning.
+        self.app.store.set_action("mcp", "NEW", "", ActionState(install="allow"), "allowed", "claudecode")
+        with patch("defenseclaw.enforce.asset_lists.is_secure_client", return_value=True):
+            flat, item = self._both(self._server())
 
         self.assertIn("1 MCP server(s) could not be scanned (last scan failed): NEW (claudecode)", flat)
-        self.assertIn("or trust it: defenseclaw mcp allow NEW", flat)
+        self.assertNotIn("allowed MCP server(s) have a failed last scan", flat)
+        self.assertEqual(item["verdict"], "allowed")
 
 
 class TestMCPScanDirectURLPreamble(MCPCommandTestBase):
