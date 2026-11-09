@@ -158,6 +158,11 @@ const (
 	// missing, lacks the connector or has an unpinned source), so the status
 	// cannot say whether any call arrives.
 	ownInspectionUnverified
+	// ownInspectionAdmittedOnly: the authorizer admits the account (a guardian
+	// ledger row, or exempt_users) but no pinned vendor hook is proven for the
+	// connector. An admission is not an installation, so the status says
+	// neither that the calls are inspected nor that nothing sends them.
+	ownInspectionAdmittedOnly
 )
 
 const (
@@ -190,6 +195,9 @@ func ownExcludedCause(inspection ownInspection) ownCause {
 	case ownInspectionUnverified:
 		cause.code = "excluded_users_unverified"
 		cause.reason += "; DefenseClaw cannot verify the vendor policy that runs the hook for your account, so it cannot say whether your calls are inspected"
+	case ownInspectionAdmittedOnly:
+		cause.code = "excluded_users_unverified"
+		cause.reason += "; the gateway admits the calls of your account, but DefenseClaw cannot verify that a hook still sends them, so it cannot say whether your calls are inspected"
 	}
 	return cause
 }
