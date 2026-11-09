@@ -379,9 +379,9 @@ func (a *APIServer) skillFolderRefsDecision(
 	var refs []assetfacts.FolderRef
 	if peer, ok := managedHookPeerFromContext(ctx); ok {
 		caller = peer.Name
-		refs = assetfacts.SkillFolderRefsForPeer(toolInput, home, cwd, caller, peer.UID, peer.GID)
+		refs = assetfacts.SkillFolderRefsForPeer(toolName, toolInput, home, cwd, caller, peer.UID, peer.GID)
 	} else {
-		refs = assetfacts.SkillFolderRefs(toolInput, home, cwd, caller)
+		refs = assetfacts.SkillFolderRefs(toolName, toolInput, home, cwd, caller)
 	}
 	roots := assetfacts.SkillRoots(connector, home, cwd)
 	// A folder a link leads to is spelled as the link resolves, which a root

@@ -571,8 +571,9 @@ func DeclaredSkillName(dir string) string {
 	}
 	path := filepath.Join(dir, "SKILL.md")
 	// A manifest on a network share that has not answered is not read: the
-	// hook would wait for the system connect timeout (ShareGate).
-	if !shareAnswers(path) {
+	// hook would wait for the system connect timeout (ShareGate). That holds
+	// for the folder a link of the path leads to as for the path as spelled.
+	if !readableTarget(path) {
 		return ""
 	}
 	info, err := os.Lstat(path)
@@ -889,48 +890,85 @@ type FolderRef struct {
 // SkillFolderRefs lists the skill folders the strings of a tool input reach
 // into: every distinct path with a "skills/<name>" pair of components, in a command
 // line, a file path or a working folder. "~" and $HOME expand to home and
-// a relative path resolves against cwd.
-func SkillFolderRefs(input any, home, cwd string, caller ...string) []FolderRef {
+// a relative path resolves against cwd. tool is the name of the tool the call
+// is for (it may be empty): a search tool that names no place searches cwd. A
+// slash-free word is a path only where the call uses it as one (see
+// operand_context.go).
+func SkillFolderRefs(tool string, input any, home, cwd string, caller ...string) []FolderRef {
 	account := ""
 	if len(caller) > 0 {
 		account = caller[0]
 	}
-	return skillFolderRefsForCaller(input, home, cwd, account, os.Geteuid(), os.Getegid())
+	return skillFolderRefsForCaller(tool, input, home, cwd, account, os.Geteuid(), os.Getegid())
 }
 
 // SkillFolderRefsForPeer resolves a managed hook request using the kernel
 // credentials of the caller, rather than the gateway service account.
-func SkillFolderRefsForPeer(input any, home, cwd, caller string, uid, gid int) []FolderRef {
-	return skillFolderRefsForCaller(input, home, cwd, caller, uid, gid)
+func SkillFolderRefsForPeer(tool string, input any, home, cwd, caller string, uid, gid int) []FolderRef {
+	return skillFolderRefsForCaller(tool, input, home, cwd, caller, uid, gid)
 }
 
-func skillFolderRefsForCaller(input any, home, cwd, account string, uid, gid int) []FolderRef {
-	var values []string
-	collectStrings(input, 0, &values)
+func skillFolderRefsForCaller(tool string, input any, home, cwd, account string, uid, gid int) []FolderRef {
+	var fields []inputField
+	collectFields(tool, input, "", 0, &fields)
 	seen := map[string]int{}
 	var refs []FolderRef
-	add := func(value, dir string, explicit bool) {
-		for _, token := range commandPathTokens(value) {
-			for _, ref := range skillFolderRefs(token, home, dir, account) {
-				ref.ExplicitDirectory = explicit
-				if index, ok := seen[ref.Dir]; ok {
-					refs[index].Manifest = refs[index].Manifest || ref.Manifest
-					refs[index].BareOperand = refs[index].BareOperand || ref.BareOperand
-					refs[index].ExplicitDirectory = refs[index].ExplicitDirectory && explicit
-					continue
+	addToken := func(token, dir string, explicit bool) {
+		for _, ref := range skillFolderRefs(token, home, dir, account) {
+			ref.ExplicitDirectory = explicit
+			if index, ok := seen[ref.Dir]; ok {
+				refs[index].Manifest = refs[index].Manifest || ref.Manifest
+				refs[index].BareOperand = refs[index].BareOperand || ref.BareOperand
+				refs[index].ExplicitDirectory = refs[index].ExplicitDirectory && explicit
+				continue
+			}
+			seen[ref.Dir] = len(refs)
+			refs = append(refs, ref)
+		}
+	}
+	add := func(f inputField, text, dir string, explicit bool) {
+		switch kindOfField(tool, f.key) {
+		case kindPath:
+			// One path, with the spaces and tabs of its folder names, and the
+			// words it splits into as well.
+			addToken(text, dir, explicit)
+			if hasBlank(text) {
+				for _, w := range shellWords(text, false, 0) {
+					addToken(w.text, dir, explicit)
 				}
-				seen[ref.Dir] = len(refs)
-				refs = append(refs, ref)
+			}
+		case kindText:
+			for _, w := range shellWords(text, false, 0) {
+				if strings.ContainsAny(w.text, "/\\") {
+					addToken(w.text, dir, explicit)
+				}
+			}
+		default:
+			words, cwdSearch := commandWords(text, f.argv)
+			for _, w := range words {
+				if w.mayNamePath() {
+					addToken(w.text, dir, explicit)
+				}
+			}
+			if cwdSearch {
+				addToken(dir, dir, explicit)
 			}
 		}
 	}
-	for _, value := range values {
+	if searchesWorkingFolder(tool, fields) {
+		addToken(cwd, cwd, false)
+	}
+	for _, field := range fields {
+		if field.argv != nil || kindOfField(tool, field.key) != kindCommand {
+			add(field, field.text, cwd, false)
+			continue
+		}
 		type position struct {
 			value    string
 			dir      string
 			explicit bool
 		}
-		positions := []position{{value: value, dir: cwd}}
+		positions := []position{{value: field.text, dir: cwd}}
 		for i := 0; i < 8; i++ {
 			var nextPositions []position
 			changed := false
@@ -941,7 +979,7 @@ func skillFolderRefsForCaller(input any, home, cwd, account string, uid, gid int
 					continue
 				}
 				changed = true
-				add(prefix, current.dir, current.explicit)
+				add(field, prefix, current.dir, current.explicit)
 				nextPositions = append(nextPositions, position{rest, next, true})
 				if sequential && !certain {
 					// A sequential successor runs in cwd when cd fails. A
@@ -963,7 +1001,7 @@ func skillFolderRefsForCaller(input any, home, cwd, account string, uid, gid int
 			}
 		}
 		for _, current := range positions {
-			add(current.value, current.dir, current.explicit)
+			add(field, current.value, current.dir, current.explicit)
 		}
 	}
 	return refs
@@ -998,7 +1036,7 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) 
 		case quote == 0 && (ch == ';' || ch == '\n' ||
 			ch == '&' && i+1 < len(value) && value[i+1] == '&'):
 			prefix = value[:i]
-			words := commandPathTokens(prefix)
+			words := wordTexts(shellWords(prefix, true, 0))
 			if len(words) != 2 || words[0] != "cd" || words[1] == "-" ||
 				strings.ContainsAny(words[1], "*?[]{}$`") {
 				return "", "", "", false, false, false
@@ -1037,28 +1075,6 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) 
 	return "", "", "", false, false, false
 }
 
-func collectStrings(value any, depth int, out *[]string) {
-	if depth > maxInputDepth || len(*out) >= maxInputStrings {
-		return
-	}
-	switch v := value.(type) {
-	case string:
-		*out = append(*out, v)
-	case []any:
-		for _, item := range v {
-			collectStrings(item, depth+1, out)
-		}
-	case []string:
-		for _, item := range v {
-			collectStrings(item, depth+1, out)
-		}
-	case map[string]any:
-		for _, key := range inputKeys(v) {
-			collectStrings(v[key], depth+1, out)
-		}
-	}
-}
-
 // pathInputKeys are the tool-input fields that usually carry a path or a
 // command line. They are visited first so a large field such as the edits of
 // a MultiEdit cannot push them past maxInputStrings (GAP-1301).
@@ -1095,49 +1111,6 @@ func isCommandSeparator(r rune) bool {
 	return false
 }
 
-// commandPathTokens preserves spaces inside shell quotes and escaped spaces
-// while keeping command operators separate from candidate paths.
-func commandPathTokens(value string) []string {
-	var tokens []string
-	var current strings.Builder
-	var quote rune
-	flush := func() {
-		if current.Len() > 0 {
-			tokens = append(tokens, current.String())
-			current.Reset()
-		}
-	}
-	chars := []rune(value)
-	for i := 0; i < len(chars); i++ {
-		ch := chars[i]
-		if ch == 0x5c && quote != 0x27 && i+1 < len(chars) {
-			next := chars[i+1]
-			if next == 0x20 || next == 0x09 || next == 0x22 || next == 0x27 {
-				current.WriteRune(next)
-				i++
-				continue
-			}
-		}
-		if ch == 0x22 || ch == 0x27 {
-			if quote == 0 {
-				quote = ch
-				continue
-			}
-			if quote == ch {
-				quote = 0
-				continue
-			}
-		}
-		if quote == 0 && isCommandSeparator(ch) {
-			flush()
-			continue
-		}
-		current.WriteRune(ch)
-	}
-	flush()
-	return tokens
-}
-
 // msysDriveSpelling spells a Git Bash drive mount (/c/x, /cygdrive/c/x,
 // and //c/x) as the drive path C:/x on Windows, where Git Bash, the shell
 // Claude Code and other agents run, maps it to that drive: the deny list
@@ -1159,7 +1132,7 @@ func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 	if bare && !namesEntryIn(cwd, token) {
 		return nil
 	}
-	path := strings.ReplaceAll(token, "\\", "/")
+	path := trimExtendedPrefix(strings.ReplaceAll(token, "\\", "/"))
 	if caller != "" && !strings.ContainsAny(caller, "/\\") && strings.HasPrefix(path, "~"+caller+"/") && home != "" {
 		path = filepath.ToSlash(home) + "/" + strings.TrimPrefix(path, "~"+caller+"/")
 	}
@@ -1207,7 +1180,7 @@ func namesEntryIn(cwd, token string) bool {
 		return false
 	}
 	path := cwd + string(filepath.Separator) + token
-	if !shareAnswers(path) {
+	if !ShareAnswers(path) {
 		return false
 	}
 	_, err := os.Lstat(path)
@@ -1217,7 +1190,7 @@ func namesEntryIn(cwd, token string) bool {
 // pathExists reports whether path exists; a path on a network share that has
 // not answered reads as missing.
 func pathExists(path string) bool {
-	if !shareAnswers(path) {
+	if !readableTarget(path) {
 		return false
 	}
 	_, err := os.Stat(path)
@@ -1256,10 +1229,42 @@ var ShareGate func(path string) bool
 
 func shareAnswers(path string) bool { return ShareGate == nil || ShareGate(path) }
 
-// ShareAnswers reports whether the hook may read path: it is local, or on a
-// network share that has answered (ShareGate). Reads of a path a call names go
-// through it.
-func ShareAnswers(path string) bool { return shareAnswers(path) }
+// ShareAnswers reports whether the hook may look path up (Lstat): it is local
+// or on a network share that has answered (ShareGate), and so is the folder
+// that holds it once the links on its way are followed, since the lookup goes
+// where they lead. Lookups of a path a call names go through it.
+func ShareAnswers(path string) bool {
+	return ShareGate == nil || ShareGate(path) && ShareGate(ResolveLinks(filepath.Dir(path)))
+}
+
+// readableTarget reports whether the hook may read path: it, and the folder
+// every link on it leads to, are local or on a network share that has
+// answered. The read of a path whose folder is a link goes where the link
+// leads, not where the spelling shows.
+func readableTarget(path string) bool {
+	return ShareGate == nil || ShareGate(path) && ShareGate(ResolveLinks(path))
+}
+
+// trimExtendedPrefix spells a Windows extended-length path (//?/C:/x,
+// //./C:/x, //?/UNC/host/share/x, written with forward slashes) the usual way
+// (C:/x, //host/share/x), so the links of the path are followed once, from a
+// spelling the deny rules and the skill roots share. path uses forward
+// slashes. A path of any other shape (a volume GUID) is returned unchanged.
+func trimExtendedPrefix(path string) string {
+	rest, ok := strings.CutPrefix(path, "//?/")
+	if !ok {
+		rest, ok = strings.CutPrefix(path, "//./")
+	}
+	switch {
+	case !ok:
+		return path
+	case len(rest) >= 4 && strings.EqualFold(rest[:4], "unc/"):
+		return "//" + rest[4:]
+	case len(rest) >= 2 && rest[1] == 0x3a && (rest[0]|0x20) >= 0x61 && (rest[0]|0x20) <= 0x7a:
+		return rest
+	}
+	return path
+}
 
 // ResolveLinks follows every link (symlink, junction or reparse point) in
 // path, one component at a time in the order the filesystem takes them: a
@@ -1280,6 +1285,9 @@ func ShareAnswers(path string) bool { return shareAnswers(path) }
 // relative path, or one with more than maxLinkHops links (a loop), comes back
 // cleaned and unresolved.
 func ResolveLinks(path string) string {
+	if runtime.GOOS == "windows" {
+		path = filepath.FromSlash(trimExtendedPrefix(filepath.ToSlash(path)))
+	}
 	volume := filepath.VolumeName(path)
 	rest := filepath.ToSlash(path[len(volume):])
 	if !strings.HasPrefix(rest, "/") {
