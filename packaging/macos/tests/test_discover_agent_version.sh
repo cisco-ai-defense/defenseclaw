@@ -38,7 +38,25 @@ JSON
   assert_eq "${got}" "0.0.1777777777-gabc123" "amp version from trusted package metadata"
 }
 
+# host_copilot_install_present -> exit 0 when this host has a system-wide
+# Copilot install (npm global or Homebrew cask) that discovery also reads; a
+# newer one there would outrank the fixtures, so those cases skip.
+host_copilot_install_present() {
+  compgen -G "/opt/homebrew/Caskroom/copilot-cli/*/" >/dev/null 2>&1 \
+    || compgen -G "/usr/local/Caskroom/copilot-cli/*/" >/dev/null 2>&1 \
+    || [[ -f /usr/local/lib/node_modules/@github/copilot/package.json ]] \
+    || [[ -f /opt/homebrew/lib/node_modules/@github/copilot/package.json ]]
+}
+
+skip_with_host_copilot() {
+  host_copilot_install_present || return 1
+  if [[ "${VERBOSE:-false}" == "true" ]]; then
+    printf '  skip (a host-wide Copilot install outranks the fixture)\n'
+  fi
+}
+
 t_copilot_from_user_npm_metadata_without_executing_cli() {
+  skip_with_host_copilot && return 0
   local home; home="$(mktest_tmp)"
   local pkg_dir="${home}/.npm-global/lib/node_modules/@github/copilot"
   mkdir -p "${pkg_dir}"
@@ -67,6 +85,7 @@ SH
 t_copilot_stale_npm_install_does_not_win() {
   # A stale npm package beside a current one must not select the legacy
   # contract: the highest version found wins, whichever path comes first.
+  skip_with_host_copilot && return 0
   local home; home="$(mktest_tmp)"
   local stale="${home}/.npm-global/lib/node_modules/@github/copilot"
   local current="${home}/.nvm/versions/node/v22.11.0/lib/node_modules/@github/copilot"
@@ -78,7 +97,15 @@ t_copilot_stale_npm_install_does_not_win() {
   assert_eq "${got}" "1.0.105" "copilot: the newest install wins over a stale npm package"
 }
 
+t_copilot_release_outranks_its_prerelease() {
+  _copilot_version_newer 1.0.105 1.0.105-rc.1 || _fail "1.0.105 does not outrank 1.0.105-rc.1"
+  ! _copilot_version_newer 1.0.105-rc.1 1.0.105 || _fail "1.0.105-rc.1 outranks 1.0.105"
+  ! _copilot_version_newer 1.0.105 1.0.105 || _fail "a version outranks itself"
+  _copilot_version_newer 1.0.106-rc.1 1.0.105 || _fail "1.0.106-rc.1 does not outrank 1.0.105"
+}
+
 t_copilot_from_nvm_global_metadata() {
+  skip_with_host_copilot && return 0
   local home; home="$(mktest_tmp)"
   local pkg_dir="${home}/.nvm/versions/node/v22.11.0/lib/node_modules/@github/copilot"
   mkdir -p "${pkg_dir}"
@@ -1177,6 +1204,8 @@ run_case "amp without metadata is unversioned" t_amp_missing_metadata_may_be_unv
 run_case "copilot from trusted user npm metadata" t_copilot_from_user_npm_metadata_without_executing_cli
 run_case "copilot from nvm global metadata"      t_copilot_from_nvm_global_metadata
 run_case "copilot package metadata identity"     t_copilot_metadata_requires_package_identity
+run_case "copilot stale npm install does not win" t_copilot_stale_npm_install_does_not_win
+run_case "copilot release outranks its prerelease" t_copilot_release_outranks_its_prerelease
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "cursor versionless user bundle falls through" t_cursor_versionless_user_bundle_falls_through_to_system_root
 run_case "cursor app plist version probe" t_cursor_app_version_reads_plist_or_nothing

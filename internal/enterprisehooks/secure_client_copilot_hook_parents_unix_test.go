@@ -9,12 +9,17 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // useMacOSSecureClientGuardian makes this process look like the macOS Secure
 // Client guardian (not standalone, a verified Secure Client install, darwin).
 func useMacOSSecureClientGuardian(t *testing.T) {
 	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("the guardian prepares the folders as the target user, never as root (UID 0 is refused)")
+	}
 	useSecureClientHookDelivery(t)
 	previousGOOS := secureClientOwnedHookConfigGOOS
 	previousStandalone := StandaloneUnix()
@@ -79,9 +84,13 @@ func TestSecureClientCopilotHookConfigParentsStayScoped(t *testing.T) {
 			secureClientOwnedHookConfigGOOS = "linux"
 		}, os.Geteuid},
 		{"not running as the target user", "copilot", useMacOSSecureClientGuardian, func() int { return os.Geteuid() + 1 }},
-		{"no verified Secure Client install", "copilot", func(t *testing.T) {
+		{"no Secure Client host", "copilot", func(t *testing.T) {
 			useMacOSSecureClientGuardian(t)
 			secureClientHookDeliveryHost = false
+		}, os.Geteuid},
+		{"no verified Secure Client install", "copilot", func(t *testing.T) {
+			useMacOSSecureClientGuardian(t)
+			connector.SecureClientDeploymentVerified = func() bool { return false }
 		}, os.Geteuid},
 	}
 	for _, tc := range cases {

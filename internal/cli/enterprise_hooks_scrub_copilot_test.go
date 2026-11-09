@@ -93,15 +93,30 @@ func TestScrubCopilot_RootKeepsOwnFileAndEmptiesIt(t *testing.T) {
 // A defenseclaw.json whose hooks value is not an object is not Copilot's
 // shape: it is left exactly as it is, never removed.
 func TestScrubCopilot_KeepsFileWithUnsupportedHooksValue(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "defenseclaw.json")
-	body := `{"version":1,"hooks":[{"type":"command","bash":"/Users/u/bin/my-copilot-hook.sh"}]}` + "\n"
-	writeFile(t, path, body)
-	changed, err := scrubCopilotFile(path, scrubDefaultMarkers)
-	if err != nil || changed {
-		t.Fatalf("scrubCopilotFile = %v, %v; want unchanged", changed, err)
+	original := scrubRunsAsRoot
+	t.Cleanup(func() { scrubRunsAsRoot = original })
+	scrubRunsAsRoot = func() bool { return false }
+	for name, body := range map[string]string{
+		"array": `{"version":1,"hooks":[{"type":"command","bash":"/Users/u/bin/my-copilot-hook.sh"}]}` + "\n",
+		"null":  `{"version":1,"hooks":null}` + "\n",
+	} {
+		path := filepath.Join(t.TempDir(), "defenseclaw.json")
+		writeFile(t, path, body)
+		changed, err := scrubCopilotFile(path, scrubDefaultMarkers)
+		if err != nil || changed {
+			t.Fatalf("%s: scrubCopilotFile = %v, %v; want unchanged", name, changed, err)
+		}
+		if got := readFile(t, path); got != body {
+			t.Fatalf("%s: file changed:\n%s", name, got)
+		}
 	}
-	if got := readFile(t, path); got != body {
-		t.Fatalf("file changed:\n%s", got)
+}
+
+// The default root predicate is the effective UID: as root the scrub keeps
+// the owned file, as a user it may remove it.
+func TestScrubCopilot_DefaultRootPredicateIsTheEffectiveUID(t *testing.T) {
+	if got, want := scrubRunsAsRoot(), os.Geteuid() == 0; got != want {
+		t.Fatalf("scrubRunsAsRoot() = %v, want %v (euid %d)", got, want, os.Geteuid())
 	}
 }
 

@@ -832,6 +832,15 @@ _claude_desktop_embedded_version_from_home() {
 # fixed. Bash regex + arithmetic on the fields is portable to BSD
 # userland and short enough to keep inline here rather than growing a
 # new dependency.
+# _copilot_version_newer A B -> exit 0 when Copilot version A ranks above B:
+# a higher X.Y.Z core, or the same core where A is the release and B a
+# prerelease of it (1.0.105 over 1.0.105-rc.1).
+_copilot_version_newer() {
+  _semver_greater "$1" "$2" && return 0
+  _semver_greater "$2" "$1" && return 1
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+.*)?$ && "$2" =~ ^[0-9]+\.[0-9]+\.[0-9]+- ]]
+}
+
 _semver_greater() {
   local -r core_re='^([0-9]+)\.([0-9]+)\.([0-9]+)'
   local a_major=0 a_minor=0 a_patch=0
@@ -1147,7 +1156,7 @@ discover_agent_version() {
         [[ -f "${pkg}" ]] || continue
         v="$(_probe_json_version "${pkg}" copilot "@github/copilot")"
         [[ -n "${v}" ]] || continue
-        if [[ -z "${best}" ]] || _semver_greater "${v}" "${best}"; then
+        if [[ -z "${best}" ]] || _copilot_version_newer "${v}" "${best}"; then
           best="${v}"
         fi
       done
@@ -1159,7 +1168,7 @@ discover_agent_version() {
           dname="$(basename -- "${dir}")"
           [[ "${dname}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || continue
           [[ -f "${dir}/copilot" && -x "${dir}/copilot" ]] || continue
-          if [[ -z "${best}" ]] || _semver_greater "${dname}" "${best}"; then
+          if [[ -z "${best}" ]] || _copilot_version_newer "${dname}" "${best}"; then
             best="${dname}"
           fi
         done
