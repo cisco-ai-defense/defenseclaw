@@ -1299,8 +1299,35 @@ jobs:
             part: darwin
             shard: 1
           - os: macos-latest
-            label: macos-latest darwin gateway and cli
+            label: macos-latest darwin gateway 1 of 4
             part: darwin-unix
+            package: internal/gateway
+            shards: 4
+            shard: 0
+          - os: macos-latest
+            label: macos-latest darwin gateway 2 of 4
+            part: darwin-unix
+            package: internal/gateway
+            shards: 4
+            shard: 1
+          - os: macos-latest
+            label: macos-latest darwin gateway 3 of 4
+            part: darwin-unix
+            package: internal/gateway
+            shards: 4
+            shard: 2
+          - os: macos-latest
+            label: macos-latest darwin gateway 4 of 4
+            part: darwin-unix
+            package: internal/gateway
+            shards: 4
+            shard: 3
+          - os: macos-latest
+            label: macos-latest darwin cli
+            part: darwin-unix
+            package: internal/cli
+            shards: 1
+            shard: 0
           - os: macos-latest
             label: macos-latest darwin connector 1 of 4
             part: darwin-connector
@@ -1391,9 +1418,16 @@ jobs:
       - name: Go tests of the darwin paths in the gateway and CLI packages
         # In internal/gateway and internal/cli, the tests of their darwin,
         # unix, linux||darwin and !windows test files plus the foreign-hook
-        # guard, which keys sessions by the agent process.
+        # guard, which keys sessions by the agent process. The gateway package
+        # runs in four parts and the CLI package in one: the gateway package
+        # alone ran past its 10-minute -timeout as one test binary on the
+        # hosted macOS runner. Every part keeps the 10-minute -timeout.
         if: runner.os == 'macOS' && matrix.part == 'darwin-unix'
         shell: bash
+        env:
+          UNIX_PACKAGE: ${{ matrix.package }}
+          GO_TEST_SHARDS: ${{ matrix.shards }}
+          GO_TEST_SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           # A link-free TMPDIR, as in the darwin paths step.
@@ -1419,11 +1453,22 @@ jobs:
             local IFS='|'
             echo "^(${names[*]})\$"
           }
-          for pkg in internal/gateway internal/cli; do
-            pattern=$(unix_tests "$pkg"/*_test.go)
-            echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
-            go test -count=1 -timeout 10m -run "$pattern" "./$pkg"
-          done
+          pkg="$UNIX_PACKAGE"
+          pattern=$(unix_tests "$pkg"/*_test.go)
+          echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
+          if [ "$GO_TEST_SHARDS" -gt 1 ]; then
+            # Time-balanced parts of the unix and darwin tests (the Linux
+            # times are the best recorded weights; go_test_shards.py covers
+            # every selected test in exactly one part).
+            pattern="$(python3 scripts/go_test_shards.py \
+              --package-dir "$pkg" \
+              --match "$pattern" \
+              --timings scripts/test-timings/go-linux.json \
+              --shard-count "$GO_TEST_SHARDS" \
+              --shard-index "$GO_TEST_SHARD")"
+            echo "part $((GO_TEST_SHARD + 1)) of $GO_TEST_SHARDS: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') tests"
+          fi
+          go test -count=1 -timeout 10m -run "$pattern" "./$pkg"
       - name: Go tests of the darwin connector package, part ${{ matrix.shard }}
         # One of four time-balanced parts of the connector package's tests
         # (go_test_shards.py covers every test exactly once). The package
