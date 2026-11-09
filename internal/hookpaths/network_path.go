@@ -137,6 +137,34 @@ type hookCall struct {
 	// bodyLinks when the link bound stopped the walk to it
 	// (ShareBodyUnread).
 	bodyUnread, bodyLinks bool
+	// plainFolders are the local folders (and files) the share walk of this
+	// call found to be no link, so that the many paths of one call that run
+	// through the same folders are not read component by component again
+	// (linkIntoShare). Only the goroutine that runs the call reads it.
+	plainFolders map[string]struct{}
+}
+
+// plainFoldersLimit bounds plainFolders; a path past it is walked as before.
+const plainFoldersLimit = 4096
+
+// knownPlain reports a path this call has already found to be no link.
+func (call *hookCall) knownPlain(path string) bool {
+	if call == nil {
+		return false
+	}
+	_, known := call.plainFolders[path]
+	return known
+}
+
+// notePlain records a path this call has found to be no link.
+func (call *hookCall) notePlain(path string) {
+	if call == nil || len(call.plainFolders) >= plainFoldersLimit {
+		return
+	}
+	if call.plainFolders == nil {
+		call.plainFolders = make(map[string]struct{})
+	}
+	call.plainFolders[path] = struct{}{}
 }
 
 // shareWait is how long the call may wait for the next share: a full answer
