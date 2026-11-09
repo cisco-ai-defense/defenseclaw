@@ -16316,6 +16316,11 @@ function New-DefenseClawRebuiltDeploymentRecord {
         guardian_service = $GuardianServiceName
         hashes = $provenHashes
         profile = 'standalone'
+        # rel-1-0-6:GAP-0994: this record has the legacy shape (no activation
+        # evidence, no pinned paths) until the repair transaction that follows
+        # has written the full one. A rollback to it is judged by
+        # Assert-DefenseClawRebuiltRecordArtifacts, not by the full assertion.
+        record_rebuilt_by_setup = $true
     }
     if ($null -ne $ApprovedPolicySources -and $ApprovedPolicySources.Count -gt 0) {
         $rebuilt['approved_policy_sources'] = $ApprovedPolicySources
@@ -31335,6 +31340,54 @@ function Test-DefenseClawManifestCatchUpTeardownRefusal {
 $script:UninstallDeletedAccountWaitSeconds = 180
 $script:UninstallDeletedAccountPollSeconds = 10
 
+# rel-1-0-6:GAP-0994: how long a repair over a deployment record with no
+# activation evidence waits, with the services still running, for the
+# Guardian's three records to bind the manifest, and how often it asks again.
+# Tests shorten them.
+$script:GuardianBindingWaitSeconds = 45
+$script:GuardianBindingPollSeconds = 3
+
+function Wait-DefenseClawGuardianRecordsBound {
+    <#
+        rel-1-0-6:GAP-0994: asks the activation classifier, before any service
+        stops, whether the Guardian's activation, authorization and state
+        records bind the manifest. The Guardian publishes the three one after
+        the other and republishes on its next pass when they are not from one
+        publication, so a refusal here goes away by itself while it runs.
+        After the stop it cannot: the records stay as they were, the
+        classification after the stop refuses, and a repair that stopped the
+        services ended with the transaction pending. Any other refusal is left
+        to that classification. Past the wait the run ends here, with every
+        service running and nothing changed.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $needle = 'does not exactly bind the legacy deployment manifest and authorization'
+    $deadline = [DateTime]::UtcNow.AddSeconds($script:GuardianBindingWaitSeconds)
+    while ($true) {
+        $report = Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action classify-activation `
+            -AllowFailure
+        if ([bool]$report.ok) {
+            return
+        }
+        $detail = [string]$report.failure_detail
+        if (-not $detail.Contains($needle)) {
+            return
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            throw ("the hook Guardian's records do not bind the manifest yet and did not within $($script:GuardianBindingWaitSeconds) seconds ($detail). " +
+                'No service was stopped and nothing was changed. Look at the Guardian log under the state folder logs\guardian, then run the same command again.')
+        }
+        Write-DefenseClawLifecyclePhase -Stage 'waiting for the Guardian to publish records that bind the manifest, before any service stops'
+        Microsoft.PowerShell.Utility\Start-Sleep -Seconds $script:GuardianBindingPollSeconds
+    }
+}
+
 function Invoke-DefenseClawUninstallPrecommitHookCheck {
     <#
         GAP-0571 read-only check of the hook removal before the uninstall
@@ -36815,6 +36868,61 @@ function Repair-DefenseClawRecoveredCodexRequirements {
     )
 }
 
+function Test-DefenseClawRebuiltDeploymentRecord {
+    <#
+        rel-1-0-6:GAP-0994: whether the deployment record is one Setup rebuilt
+        from the machine and the payload (New-DefenseClawRebuiltDeploymentRecord)
+        and that no transaction has completed over since.
+    #>
+    param([Parameter(Mandatory)]$Metadata)
+    $marker = $Metadata.PSObject.Properties['record_rebuilt_by_setup']
+    return [bool](
+        $null -ne $marker -and
+        $marker.Value -is [bool] -and
+        [bool]$marker.Value -and
+        $null -eq $Metadata.PSObject.Properties['managed_hooks_activation']
+    )
+}
+
+function Assert-DefenseClawRebuiltRecordArtifacts {
+    <#
+        rel-1-0-6:GAP-0994: what a rollback to a rebuilt deployment record can
+        check. The record names no activation evidence and no pinned paths, so
+        the full assertion cannot pass and a rollback that waited for it
+        stopped with the services down and the transaction pending (Repair
+        then failed the same way; only a forced purge ended it). Every
+        artifact the record does name has the digest of the authenticated
+        payload it was rebuilt from, and each must still have it.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata
+    )
+    $layoutKey = @{
+        gateway = 'GatewayPath'; acp = 'ACPPath'; hook = 'HookPath'; sensor_helper = 'SensorHelperPath'
+        cli = 'CLIPath'; installer = 'InstallerPath'; module = 'ModulePath'
+    }
+    $hashesProperty = $Metadata.PSObject.Properties['hashes']
+    if ($null -eq $hashesProperty -or $null -eq $hashesProperty.Value) {
+        throw 'the rebuilt deployment record names no artifact digests'
+    }
+    foreach ($artifact in $layoutKey.Keys) {
+        $recorded = $hashesProperty.Value.PSObject.Properties[$artifact]
+        if ($null -eq $recorded -or -not $Layout.ContainsKey($layoutKey[$artifact])) {
+            continue
+        }
+        $installed = [string]$Layout[$layoutKey[$artifact]]
+        if ([string]::IsNullOrWhiteSpace($installed) -or
+            -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $installed -PathType Leaf)) {
+            throw "the rebuilt deployment record names $artifact, which is missing at $installed"
+        }
+        $digest = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($digest -cne ([string]$recorded.Value).ToLowerInvariant()) {
+            throw "the rebuilt deployment record names $artifact with another digest than the file at $installed"
+        }
+    }
+}
+
 function Assert-DefenseClawEnterpriseDeployment {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -36881,6 +36989,16 @@ function Assert-DefenseClawEnterpriseDeployment {
         -Metadata $metadata `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
+    if ($RollbackRestore -and (Test-DefenseClawStandaloneProfile) -and
+        (Test-DefenseClawRebuiltDeploymentRecord -Metadata $metadata)) {
+        # rel-1-0-6:GAP-0994: the transaction opened over a rebuilt record and
+        # failed. Its rollback puts that record back, and the record cannot
+        # carry what the full assertion below asks for; the next repair writes
+        # the full one. The services start again and the run ends with its error.
+        Assert-DefenseClawRebuiltRecordArtifacts -Layout $Layout -Metadata $metadata
+        Write-DefenseClawLifecyclePhase -Stage 'rollback restored the rebuilt deployment record; the next repair writes the full one'
+        return
+    }
     if (Test-DefenseClawStandaloneProfile) {
         # Verify also serves an installed-host ensure that would otherwise
         # return compliant without opening a transaction. Use the fresh-install
@@ -48092,6 +48210,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Layout $Layout `
                 -Metadata $metadata `
                 -SnapshotPath $snapshot
+        }
+        if ($priorDeploymentActive -and $null -eq $priorManagedHooksActivation -and
+            -not $recoverCommittedManagedHooksLifecycle -and
+            (Test-DefenseClawStandaloneProfile)) {
+            # rel-1-0-6:GAP-0994: the classification after the stops reads
+            # records no running Guardian can fix any more.
+            Wait-DefenseClawGuardianRecordsBound `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
         }
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
