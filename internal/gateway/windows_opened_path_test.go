@@ -262,10 +262,39 @@ func TestHoldsProfileEntriesNeedsTheKindOfEntryAProfileHolds(t *testing.T) {
 		"NTUSER.DAT folder":    {map[string]bool{"C:/p/NTUSER.DAT": true}, false},
 		"hive and AppData":     {map[string]bool{"C:/p/AppData": true, "C:/p/NTUSER.DAT": false}, true},
 		"neither":              {map[string]bool{"C:/p/notes.txt": false}, false},
+		"NTUSER.MAN file":      {map[string]bool{"C:/p/NTUSER.MAN": false}, true},
+		"NTUSER.MAN folder":    {map[string]bool{"C:/p/NTUSER.MAN": true}, false},
 	} {
-		if got := holdsProfileEntries("C:/p", stat(c.entries)); got != c.want {
-			t.Errorf("%s: holdsProfileEntries = %v, want %v", name, got, c.want)
+		if got, err := holdsProfileEntries("C:/p", stat(c.entries)); got != c.want || err != nil {
+			t.Errorf("%s: holdsProfileEntries = %v, %v, want %v", name, got, err, c.want)
 		}
+	}
+}
+
+// A refusal of the file system (access denied) to say whether the hive is
+// there is not an answer of no: the folder is no proven profile, and the error
+// says so. A hive that can be seen proves the profile whatever the other one
+// answered.
+func TestHoldsProfileEntriesReportsARefusalOfTheFileSystem(t *testing.T) {
+	refuse := func(refused map[string]bool) func(string) (os.FileInfo, error) {
+		return func(path string) (os.FileInfo, error) {
+			switch {
+			case refused[path]:
+				return nil, os.ErrPermission
+			case path == "C:/p/NTUSER.MAN":
+				return fakeEntry{}, nil
+			}
+			return nil, os.ErrNotExist
+		}
+	}
+	if found, err := holdsProfileEntries("C:/q", refuse(map[string]bool{"C:/q/NTUSER.DAT": true})); found || !errors.Is(err, os.ErrPermission) {
+		t.Errorf("a refused hive: %v, %v, want false and a refusal", found, err)
+	}
+	if found, err := holdsProfileEntries("C:/p", refuse(map[string]bool{"C:/p/NTUSER.DAT": true})); !found || err != nil {
+		t.Errorf("a mandatory hive beside a refused one: %v, %v, want true", found, err)
+	}
+	if found, err := holdsProfileEntries("C:/r", refuse(nil)); found || err != nil {
+		t.Errorf("no hive: %v, %v, want false and no error", found, err)
 	}
 }
 

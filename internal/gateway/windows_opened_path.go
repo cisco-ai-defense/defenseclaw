@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"errors"
 	"net"
 	"os"
 	"regexp"
@@ -31,13 +32,16 @@ import (
 // normalize that path, so a name with trailing dots or spaces is the file of
 // its own. An error says the file system could not answer (a folder it
 // cannot list): the path is returned as written, and the caller decides by
-// profile what that means (windowsAliasUnverifiedFinding). The Windows build
+// profile what that means (appendWindowsPathUnverifiedFinding). The Windows build
 // asks the file system; other builds and tests replace it.
 var expandWindowsShortNames = osExpandWindowsShortNames
 
-// windowsProfileFolder reports a folder that holds the registry hive only
-// the folder of a user profile holds (NTUSER.DAT). The Windows build
-// asks the file system; other builds and tests replace it.
+// windowsProfileFolder reports a folder that holds the registry hive of a
+// user profile (NTUSER.DAT, or NTUSER.MAN in a mandatory profile). The error
+// says the file system could not answer for the folder (access denied): the
+// folder is then no proven profile, and the caller decides by profile what
+// that means (appendWindowsPathUnverifiedFinding). The Windows build asks the
+// file system; other builds and tests replace it.
 var windowsProfileFolder = osWindowsProfileFolder
 
 // windowsLocalHostname is the name of this machine, which names its own admin
@@ -282,13 +286,39 @@ func windowsProfileRuleText(text string) string {
 		return text
 	}
 	parts := strings.Split(text, "/")
-	for end := 1; end < len(parts); end++ {
-		if windowsProfileFolder(strings.Join(parts[:end], "/")) {
-			return parts[0] + "/Users/" + windowsAccountFolder(parts[end-1]) + "/" +
-				windowsNameFold(strings.Join(parts[end:], "/"))
-		}
+	if end, found, _ := outermostProfileFolder(parts); found {
+		return parts[0] + "/Users/" + windowsAccountFolder(parts[end-1]) + "/" +
+			windowsNameFold(strings.Join(parts[end:], "/"))
 	}
 	return text
+}
+
+// outermostProfileFolder finds the outermost folder of a drive-letter path
+// (parts is the path split at its slashes) that holds the registry hive of a
+// user profile: end is the number of leading parts that make that folder. A
+// folder the file system could not be asked about is skipped and reported as
+// unresolved, so a profile below it is still found.
+func outermostProfileFolder(parts []string) (end int, found, unresolved bool) {
+	for end = 1; end < len(parts); end++ {
+		profile, err := windowsProfileFolder(strings.Join(parts[:end], "/"))
+		if profile {
+			return end, true, unresolved
+		}
+		unresolved = unresolved || err != nil
+	}
+	return 0, false, unresolved
+}
+
+// windowsProfileUnresolved reports a drive-letter path in forward-slash
+// spelling with a folder the file system could not be asked about whether it
+// holds the hive of a user profile (access denied): the path may lie in the
+// home of an account.
+func windowsProfileUnresolved(opened string) bool {
+	if !actionfacts.DriveLetterPath(opened) {
+		return false
+	}
+	_, _, unresolved := outermostProfileFolder(strings.Split(opened, "/"))
+	return unresolved
 }
 
 // markTrailingSpaces spells each space that ends a name of an opened path as
@@ -305,14 +335,30 @@ func markTrailingSpaces(opened string) string {
 	return strings.Join(names, "/")
 }
 
-// holdsProfileEntries reports a folder that holds the registry hive every user
-// profile has: NTUSER.DAT, a file. A folder of that name is no marker, and
-// neither are folders an ordinary project can hold as well (AppData with its
-// Local and Roaming folders): only the hive proves an account profile. stat
-// answers for a path in forward-slash spelling.
-func holdsProfileEntries(dir string, stat func(string) (os.FileInfo, error)) bool {
-	info, err := stat(dir + "/NTUSER.DAT")
-	return err == nil && !info.IsDir()
+// profileHives are the names of the registry hive a user profile holds: the
+// hive of an ordinary profile, and the one a mandatory profile is renamed to.
+var profileHives = []string{"NTUSER.DAT", "NTUSER.MAN"}
+
+// holdsProfileEntries reports a folder that holds the registry hive of a
+// user profile (a file named in profileHives). A folder of such a name is no
+// marker, and neither are folders an ordinary project can hold as well
+// (AppData with its Local and Roaming folders): only the hive proves an
+// account profile. stat answers for a path in forward-slash spelling. The
+// error is the refusal (access denied) of the file system to say whether a
+// hive is there: an ACL on the hive is no proof of access to the folder, so
+// the folder stays unproven and the caller says so (windowsProfileUnresolved).
+func holdsProfileEntries(dir string, stat func(string) (os.FileInfo, error)) (bool, error) {
+	var refused error
+	for _, hive := range profileHives {
+		info, err := stat(dir + "/" + hive)
+		switch {
+		case err == nil && !info.IsDir():
+			return true, nil
+		case errors.Is(err, os.ErrPermission):
+			refused = err
+		}
+	}
+	return false, refused
 }
 
 // profileHomeAtOrAbove reports a drive-letter path that lies in a folder of a
@@ -326,35 +372,34 @@ func profileHomeAtOrAbove(resolved, cwd string) bool {
 		return false
 	}
 	parts := strings.Split(resolved, "/")
-	for end := 1; end < len(parts); end++ {
-		if home := strings.Join(parts[:end], "/"); windowsProfileFolder(home) {
-			return pathWithin(home, cwd)
-		}
-	}
-	return false
+	end, found, _ := outermostProfileFolder(parts)
+	return found && pathWithin(strings.Join(parts[:end], "/"), cwd)
 }
 
-// windowsAliasUnverifiedRuleID is the finding of a call that changes a
-// Windows path whose 8.3 short names the file system could not expand.
+// windowsPathUnverifiedRuleID is the finding of a call that changes a
+// Windows path the file system could not be asked about: its 8.3 short names
+// could not be expanded, or a folder of it could not be checked for a user
+// profile.
 const (
-	windowsAliasUnverifiedRuleID = "TOOL-PATH-UNVERIFIED"
-	windowsAliasUnverifiedTitle  = "Windows file path whose short names could not be resolved; the file it opens cannot be verified"
+	windowsPathUnverifiedRuleID = "TOOL-PATH-UNVERIFIED"
+	windowsPathUnverifiedTitle  = "Windows file path the file system could not verify (short names or user-profile folder); the file it opens cannot be verified"
 )
 
-// appendWindowsAliasUnverifiedFinding adds the finding of a call that writes,
+// appendWindowsPathUnverifiedFinding adds the finding of a call that writes,
 // appends to or deletes a Windows path the file system could not be asked
-// about (a folder of the path it cannot list): a short name in that path may
-// be the alias of a protected file. The finding is HIGH, so the default and
+// about (a folder of the path it cannot list, or a folder it will not say
+// holds the hive of a user profile): a short name in that path may be the
+// alias of a protected file, and the folder may be the home of an account. The finding is HIGH, so the default and
 // permissive profiles show it as an alert and let the call run, and the strict
 // profile, which blocks from MEDIUM, closes. Like every finding it only
 // blocks where the call is enforcement-capable.
-func appendWindowsAliasUnverifiedFinding(
+func appendWindowsPathUnverifiedFinding(
 	findings []RuleFinding,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
 	for _, finding := range findings {
-		if finding.RuleID == windowsAliasUnverifiedRuleID {
+		if finding.RuleID == windowsPathUnverifiedRuleID {
 			return findings
 		}
 	}
@@ -364,7 +409,8 @@ func appendWindowsAliasUnverifiedFinding(
 		default:
 			continue
 		}
-		if _, ok, err := windowsOpenedPathOfFact(path); !ok || err == nil {
+		opened, ok, err := windowsOpenedPathOfFact(path)
+		if !ok || (err == nil && !windowsProfileUnresolved(opened)) {
 			continue
 		}
 		enforcement := findingEnforcementAllowed
@@ -372,8 +418,8 @@ func appendWindowsAliasUnverifiedFinding(
 			enforcement = findingEnforcementDetectionOnly
 		}
 		return append(findings, RuleFinding{
-			RuleID:      windowsAliasUnverifiedRuleID,
-			Title:       windowsAliasUnverifiedTitle,
+			RuleID:      windowsPathUnverifiedRuleID,
+			Title:       windowsPathUnverifiedTitle,
 			Severity:    "HIGH",
 			Confidence:  1,
 			Tags:        []string{"tool-arguments"},

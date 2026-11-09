@@ -11,4 +11,4 @@ func osExpandWindowsShortNames(path string, _ bool) (string, error) { return pat
 
 // osWindowsProfileFolder is false: only a Windows file system holds the
 // folders of Windows user profiles.
-func osWindowsProfileFolder(string) bool { return false }
+func osWindowsProfileFolder(string) (bool, error) { return false, nil }

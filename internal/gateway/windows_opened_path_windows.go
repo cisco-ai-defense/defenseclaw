@@ -83,8 +83,9 @@ func longPathName(path string, verbatim bool) (string, error) {
 
 // osWindowsProfileFolder reports a folder (drive-letter path in forward-slash
 // spelling) that holds the entries of a user profile (holdsProfileEntries). A
-// folder the caller cannot read reports false.
-func osWindowsProfileFolder(dir string) bool {
+// folder the file system refuses to answer for (access denied) reports false
+// with the error.
+func osWindowsProfileFolder(dir string) (bool, error) {
 	return holdsProfileEntries(dir, func(path string) (os.FileInfo, error) {
 		return os.Stat(filepath.FromSlash(path))
 	})
