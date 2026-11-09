@@ -303,3 +303,217 @@ func TestRestartedGuardianPublishesFreshGenerationForUnchangedOutcome(t *testing
 		t.Fatalf("second pass after the restart = %+v, %v; want the generation kept", again, err)
 	}
 }
+
+// guardianFreshCoverage is the question Setup asks after it restarts the
+// guardian (Test-DefenseClawGuardianCoverageReport with the manifest digest,
+// the standalone activation and rollback wait): the generation is not older
+// than the moment Setup started the restart, the activation names that very
+// generation with a reconcile ID Setup has not seen and the manifest digest it
+// expects, and the state and authorization name the same generation too.
+func guardianFreshCoverage(t *testing.T, dataDir string, startedAfter time.Time, priorReconcileID, manifestSHA256 string) error {
+	t.Helper()
+	activation, exists, err := loadEnterpriseHookGuardianActivation(dataDir)
+	if err != nil || !exists {
+		return errors.New("guardian status is missing protected activation coverage")
+	}
+	state, _, _ := loadEnterpriseHookGuardianState(dataDir)
+	authorization, _, _ := loadEnterpriseHookGuardianAuthorization(dataDir)
+	generation, err := time.Parse(time.RFC3339Nano, activation.UpdatedAt)
+	if err != nil {
+		return errors.New("guardian generation " + activation.UpdatedAt + " is invalid")
+	}
+	if generation.Before(startedAfter) {
+		return errors.New("guardian generation " + activation.UpdatedAt + " predates activation")
+	}
+	if activation.ReconcileID == priorReconcileID {
+		return errors.New("guardian reconcile ID " + activation.ReconcileID + " is not fresh")
+	}
+	if state.UpdatedAt != activation.UpdatedAt || authorization.UpdatedAt != activation.UpdatedAt {
+		return errors.New("guardian activation does not identify the reported generation")
+	}
+	if activation.ManifestSHA256 != manifestSHA256 {
+		return errors.New("guardian manifest SHA-256 does not match")
+	}
+	return nil
+}
+
+func useGuardianPublishFixture(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
+	}
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	originalOwnership := enterpriseHookAuthorizationOwnershipSetter
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = originalOwnership })
+	wasPublished := enterpriseHookGuardianPublishedByProcess.Load()
+	t.Cleanup(func() { enterpriseHookGuardianPublishedByProcess.Store(wasPublished) })
+	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
+	return t.TempDir()
+}
+
+// GAP-0936: a Setup lifecycle rollback restarts the guardian, and the
+// restarted guardian decides the same failed row (a link on a vendor machine
+// folder) as the process before it. Its first pass must still publish a new
+// generation, because the wait that proves the restart rejects the one the
+// earlier process left ("generation predates activation"). The row is failed
+// on purpose: the failed-row pass is the one GAP-0912 made quiet.
+func TestRestartedGuardianAfterARollbackPublishesAFreshGenerationForTheSameFailedRow(t *testing.T) {
+	dataDir := useGuardianPublishFixture(t)
+	manifestSHA256 := strings.Repeat("a", sha256.Size*2)
+	failedRow := []enterpriseHookReconcileRow{
+		{User: "alice", Connector: "cursor", OK: false, Error: "reparse point in path: C:\\ProgramData\\Cursor"},
+		{User: "alice", Connector: "codex", OK: true},
+	}
+	publish := func() {
+		t.Helper()
+		if err := writeEnterpriseHookGuardianState(dataDir, "targets.yaml", manifestSHA256, failedRow, 1, true); err != nil {
+			t.Fatalf("write guardian records: %v", err)
+		}
+	}
+	// The guardian before the rollback published this outcome.
+	enterpriseHookGuardianPublishedByProcess.Store(false)
+	publish()
+	before, _, err := loadEnterpriseHookGuardianActivation(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The rollback: Setup notes the moment, stops the guardian and starts it.
+	time.Sleep(5 * time.Millisecond)
+	startedAfter := time.Now().UTC()
+	if err := guardianFreshCoverage(t, dataDir, startedAfter, before.ReconcileID, manifestSHA256); err == nil ||
+		!strings.Contains(err.Error(), "predates activation") {
+		t.Fatalf("the generation the earlier process left passed the wait for a restart: %v", err)
+	}
+	enterpriseHookGuardianPublishedByProcess.Store(false) // the new process
+	publish()
+	if err := guardianFreshCoverage(t, dataDir, startedAfter, before.ReconcileID, manifestSHA256); err != nil {
+		t.Fatalf("the restarted guardian first pass did not satisfy the fresh-coverage wait: %v", err)
+	}
+	after, _, _ := loadEnterpriseHookGuardianActivation(dataDir)
+	if after.OK || after.FailureCount != 1 || after.ReconcileID == before.ReconcileID {
+		t.Fatalf("restarted guardian activation = %+v; want the same failed outcome under a new reconcile ID", after)
+	}
+}
+
+// GAP-0912 must keep its benefit: after its first pass a guardian process
+// does not rewrite the three records for a pass that decided nothing new,
+// whether the outcome is healthy or carries a failed row.
+func TestGuardianPassesAfterTheFirstDoNotRewriteAnUnchangedOutcome(t *testing.T) {
+	for name, rows := range map[string][]enterpriseHookReconcileRow{
+		"healthy":    {{User: "alice", Connector: "codex", OK: true}},
+		"failed row": {{User: "alice", Connector: "cursor", OK: false, Error: "reparse point in path"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dataDir := useGuardianPublishFixture(t)
+			failures := 0
+			for _, row := range rows {
+				if !row.OK {
+					failures++
+				}
+			}
+			manifestSHA256 := strings.Repeat("a", sha256.Size*2)
+			enterpriseHookGuardianPublishedByProcess.Store(false)
+			if err := writeEnterpriseHookGuardianState(dataDir, "targets.yaml", manifestSHA256, rows, failures, true); err != nil {
+				t.Fatal(err)
+			}
+			records := func() map[string]string {
+				read := map[string]string{}
+				for _, path := range []string{
+					filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), hookGuardianAuthorizationFile),
+					filepath.Join(dataDir, hookGuardianStateFile),
+					filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), hookGuardianActivationFile),
+				} {
+					body, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					info, err := os.Stat(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					read[path] = string(body) + "@" + info.ModTime().String()
+				}
+				return read
+			}
+			first := records()
+			time.Sleep(10 * time.Millisecond)
+			for pass := 2; pass <= 4; pass++ {
+				if err := writeEnterpriseHookGuardianState(dataDir, "targets.yaml", manifestSHA256, rows, failures, true); err != nil {
+					t.Fatal(err)
+				}
+				now := records()
+				for path, want := range first {
+					if now[path] != want {
+						t.Fatalf("pass %d rewrote %s for an unchanged outcome", pass, path)
+					}
+				}
+			}
+		})
+	}
+}
+
+// GAP-0936: an activation the guardian has not acknowledged is published
+// even from a process that already published. The activation Setup waits for
+// is the manifest digest the guardian runs and the one generation all three
+// records name; a pass that runs a different manifest, or finds the
+// activation record newer or different than the generation it published,
+// publishes again.
+func TestGuardianPublishesAnActivationItHasNotAcknowledged(t *testing.T) {
+	manifestSHA256 := strings.Repeat("a", sha256.Size*2)
+	rows := []enterpriseHookReconcileRow{{User: "alice", Connector: "cursor", OK: false, Error: "reparse point in path"}}
+	rewriteActivation := func(t *testing.T, dataDir string, change func(*enterpriseHookGuardianActivation)) {
+		t.Helper()
+		activation, _, err := loadEnterpriseHookGuardianActivation(dataDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		change(&activation)
+		body, err := json.MarshalIndent(activation, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		replaceRecord(t, filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), hookGuardianActivationFile), append(body, 10))
+	}
+	for name, unacknowledge := range map[string]func(t *testing.T, dataDir string) string{
+		"a new manifest digest": func(*testing.T, string) string { return strings.Repeat("b", sha256.Size*2) },
+		"an activation newer than the published generation": func(t *testing.T, dataDir string) string {
+			rewriteActivation(t, dataDir, func(activation *enterpriseHookGuardianActivation) {
+				stamped, _ := time.Parse(time.RFC3339Nano, activation.UpdatedAt)
+				activation.UpdatedAt = stamped.Add(time.Millisecond).Format(time.RFC3339Nano)
+			})
+			return manifestSHA256
+		},
+		"an activation that names another outcome": func(t *testing.T, dataDir string) string {
+			rewriteActivation(t, dataDir, func(activation *enterpriseHookGuardianActivation) {
+				activation.OK, activation.FailureCount = true, 0
+			})
+			return manifestSHA256
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dataDir := useGuardianPublishFixture(t)
+			enterpriseHookGuardianPublishedByProcess.Store(false)
+			if err := writeEnterpriseHookGuardianState(dataDir, "targets.yaml", manifestSHA256, rows, 1, true); err != nil {
+				t.Fatal(err)
+			}
+			published, _, _ := loadEnterpriseHookGuardianActivation(dataDir)
+			// The same process, unchanged: kept.
+			if err := writeEnterpriseHookGuardianState(dataDir, "targets.yaml", manifestSHA256, rows, 1, true); err != nil {
+				t.Fatal(err)
+			}
+			if kept, _, _ := loadEnterpriseHookGuardianActivation(dataDir); kept.ReconcileID != published.ReconcileID {
+				t.Fatalf("an unchanged pass republished (control): %+v", kept)
+			}
+			digest := unacknowledge(t, dataDir)
+			time.Sleep(5 * time.Millisecond)
+			startedAfter := time.Now().UTC()
+			if err := writeEnterpriseHookGuardianState(dataDir, "targets.yaml", digest, rows, 1, true); err != nil {
+				t.Fatal(err)
+			}
+			if err := guardianFreshCoverage(t, dataDir, startedAfter, published.ReconcileID, digest); err != nil {
+				t.Fatalf("the unacknowledged activation was not published: %v", err)
+			}
+		})
+	}
+}

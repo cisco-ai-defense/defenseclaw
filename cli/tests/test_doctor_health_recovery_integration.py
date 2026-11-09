@@ -1254,8 +1254,9 @@ def test_device_identity_requires_explicit_attended_repair(tmp_path) -> None:
     assert repaired_health.checks[-1]["reason_code"] == "device-key-provenance-valid"
 
 
-def test_deleted_device_key_with_leftover_provenance_has_an_attended_repair(tmp_path) -> None:
-    # GAP-0323: only device.key was deleted; its provenance files remain.
+def test_deleted_device_key_with_leftover_provenance_is_never_replaced_by_doctor(tmp_path) -> None:
+    # GAP-0323 / GAP-0927: only device.key was deleted; its provenance files remain. Neither Doctor nor
+    # init replaces them: Doctor names the files and the manual steps and offers no repair.
     data_dir = _private_data_dir(tmp_path)
     cfg = _cfg(data_dir)
     attended = (
@@ -1265,17 +1266,30 @@ def test_deleted_device_key_with_leftover_provenance_has_an_attended_repair(tmp_
     with attended[0], attended[1]:
         assert cmd_doctor._fix_device_key_recovery(cfg, assume_yes=False)[0] == "pass"
     os.remove(cfg.gateway.device_key_file)
+    before = {
+        name: open(os.path.join(data_dir, name), "rb").read() for name in sorted(os.listdir(data_dir)) if name.startswith("device.")
+    }
+    assert len(before) == 2, before
 
     health = _DoctorResult()
     cmd_doctor._check_device_identity(cfg, health)
-    assert "doctor.identity.device-key.initialize" in health.checks[-1]["remediation"]
-    with attended[0], attended[1]:
+    remediation = health.checks[-1]["remediation"]
+    assert "doctor.identity.device-key.initialize" not in remediation
+    assert "defenseclaw-gateway stop" in remediation
+    assert "run defenseclaw init again" in remediation
+    for name in before:
+        assert os.path.join(data_dir, name) in remediation
+
+    assert cmd_doctor._plan_device_key_recovery(cfg).state == "blocked"
+    with attended[0], attended[1] as confirm:
         tag, detail = cmd_doctor._fix_device_key_recovery(cfg, assume_yes=False)
-    assert tag == "pass", detail
-    status = inspect_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir).status
-    assert status is DeviceKeyHealthStatus.VALID
-    kept = [name for _root, _dirs, files in os.walk(data_dir) for name in files if ".orphaned-" in name]
-    assert len(kept) == 2, kept
+    assert tag == "fail", detail
+    confirm.assert_not_called()
+    assert not os.path.exists(cfg.gateway.device_key_file)
+    assert {
+        name: open(os.path.join(data_dir, name), "rb").read() for name in sorted(os.listdir(data_dir)) if name.startswith("device.")
+    } == before
+    assert not [name for name in os.listdir(data_dir) if ".orphaned-" in name]
 
 
 def test_gateway_writing_to_a_deleted_audit_db_fails_and_restarts(tmp_path) -> None:

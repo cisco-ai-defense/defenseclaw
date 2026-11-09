@@ -358,13 +358,21 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) error {
 	windowsStandaloneGoOwnedPolicyMu.Lock()
 	published, err := enterpriseHookWindowsPublishGoOwned(publishOpts, connectors)
 	windowsStandaloneGoOwnedPolicyMu.Unlock()
-	reportWindowsGuardianVendorFolders(stderr, published, err)
+	// A vendor policy file DefenseClaw has no record of that another account
+	// can change and the publish just failed to use or move aside is the same
+	// refusal as a weak recorded folder: alerted once, and the pass is not
+	// clean (GAP-0930).
+	unrecorded := enterpriseHookWindowsUnrecordedFiles(opts, connectors)
+	reportWindowsGuardianVendorFolders(stderr, published, err, unrecorded)
 	var refusal error
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
 		if len(windowsVendorFolderRefusals(err)) != 0 {
 			refusal = err
 		}
+	}
+	for _, problem := range unrecorded {
+		refusal = errors.Join(refusal, fmt.Errorf("%s: %s", problem.Connector, problem.Message))
 	}
 	if _, err := enterpriseHookWindowsClaudeVersionFloor(opts, connectors); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code version floor: %v\n", err)
@@ -382,6 +390,9 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) error {
 	}
 	return refusal
 }
+
+// enterpriseHookWindowsUnrecordedFiles is replaceable in tests.
+var enterpriseHookWindowsUnrecordedFiles = enterprisepolicy.UnrecordedPolicyFileProblems
 
 // windowsVendorFolderRefusals is replaceable in tests.
 var windowsVendorFolderRefusals = enterprisepolicy.VendorFolderRefusals
@@ -408,7 +419,7 @@ var (
 // and one log line; a refused folder gets one alert row naming it (and not a
 // repaired row), and the log line at every pass (GAP-0756, GAP-0760). An
 // alert that could not be written is tried again at the next pass.
-func reportWindowsGuardianVendorFolders(stderr io.Writer, published enterprisepolicy.Result, publishErr error) {
+func reportWindowsGuardianVendorFolders(stderr io.Writer, published enterprisepolicy.Result, publishErr error, unrecorded []enterprisepolicy.VendorFolderProblem) {
 	for _, state := range published.States {
 		for _, folder := range state.Reprotected {
 			fmt.Fprintf(stderr, "[hook-guardian] re-protected %s (%s): %s; access list before %s, after %s\n",
@@ -424,7 +435,12 @@ func reportWindowsGuardianVendorFolders(stderr io.Writer, published enterprisepo
 	refused := map[string]bool{}
 	var fresh []enterprisepolicy.VendorFolderRefusal
 	windowsGuardianVendorFolderMu.Lock()
-	for _, refusal := range windowsVendorFolderRefusals(publishErr) {
+	refusals := windowsVendorFolderRefusals(publishErr)
+	for _, problem := range unrecorded {
+		// Keyed by the file: its folder may be fine.
+		refusals = append(refusals, enterprisepolicy.VendorFolderRefusal{Dir: problem.File, Message: problem.Message})
+	}
+	for _, refusal := range refusals {
 		key := windowsGuardianVendorFolderKey(refusal.Dir)
 		refused[key] = true
 		if windowsGuardianVendorFolderRefusals[key] != refusal.Message {
@@ -539,6 +555,62 @@ func windowsStandalonePerUserCleanupConnector(name string) bool {
 	return perUser
 }
 
+// windowsStandaloneRevokedUserCleanupConnector is the set the guardian cleans
+// after a user loses enrollment: the per-user connectors, whose registrations
+// live in the account's agent configuration, and the machine-scope ones
+// (Claude Code, Codex, Cursor), whose scoped hook token, hook config and
+// runtime records stay in the account's DefenseClaw folder after the machine
+// enrollment is revoked (GAP-0916). Uninstall's own plan keeps
+// windowsStandalonePerUserCleanupConnector.
+func windowsStandaloneRevokedUserCleanupConnector(name string) bool {
+	return windowsStandalonePerUserCleanupConnector(name) || enterprisehooks.WindowsMachineScopeUserRuntimeConnector(name)
+}
+
+// enterpriseHookWindowsConnectorUserRuntimeRemover and
+// enterpriseHookWindowsOffRosterPublisher are replaceable in tests.
+var (
+	enterpriseHookWindowsConnectorUserRuntimeRemover = enterprisehooks.RemoveWindowsConnectorUserRuntime
+	enterpriseHookWindowsOffRosterPublisher          = enterprisehooks.PublishWindowsConnectorOffRoster
+)
+
+// enterpriseHookStandalonePlatformClearStaleOffRoster removes the off-roster
+// marker of every connector the loaded config publishes, before the pass
+// republishes its machine policy: a connector back on the roster never keeps a
+// marker into the pass that publishes its policy again. The markers of the
+// connectors still off the roster are published after the machine policy is
+// synced (enterpriseHookStandalonePlatformRevokeUsers).
+func enterpriseHookStandalonePlatformClearStaleOffRoster(stderr io.Writer) {
+	if cfg == nil || !cfg.StandaloneEnterprise() || !enterprisehooks.WindowsStandaloneProcess() {
+		return
+	}
+	clearWindowsStandaloneOffRosterMarkers(stderr, func(name string) bool { return enterprisepolicy.StandaloneConnectorPublished(cfg, name) })
+}
+
+// clearWindowsStandaloneOffRosterMarkers removes the markers of the published
+// connectors; a failure is logged, and the marker then only keeps the hook's
+// refusal (the hook allows nothing while the policy is present).
+func clearWindowsStandaloneOffRosterMarkers(stderr io.Writer, published func(string) bool) {
+	for _, name := range []string{"claudecode", "codex"} {
+		if published(name) {
+			if err := enterpriseHookWindowsOffRosterPublisher(name, false); err != nil {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise off-roster marker for %s: %v\n", name, err)
+			}
+		}
+	}
+}
+
+// publishWindowsStandaloneOffRosterMarkers publishes, for Claude Code and
+// Codex, whether the loaded config leaves the connector off the roster; a
+// failure is logged and the previous marker stays, which only keeps the hook's
+// existing refusal.
+func publishWindowsStandaloneOffRosterMarkers(stderr io.Writer, published func(string) bool) {
+	for _, name := range []string{"claudecode", "codex"} {
+		if err := enterpriseHookWindowsOffRosterPublisher(name, !published(name)); err != nil {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise off-roster marker for %s: %v\n", name, err)
+		}
+	}
+}
+
 // enterpriseHookStandalonePlatformRevokeUsers removes DefenseClaw's own hook
 // registrations and plugins (Amp, Antigravity, Copilot, Devin, Hermes,
 // OpenCode) from the agent configuration of every user whose row the
@@ -550,12 +622,36 @@ func enterpriseHookStandalonePlatformRevokeUsers(ctx context.Context, stderr io.
 	if cfg == nil || !cfg.StandaloneEnterprise() || !enterprisehooks.WindowsStandaloneProcess() {
 		return nil
 	}
+	// A connector back on the roster for an account, or an account that is
+	// gone, ends its removed-connectors record; a machine-scope connector the
+	// config no longer publishes is recorded for each account the guardian's
+	// last pass or its ledger held a row of it for.
+	published := func(name string) bool { return enterprisepolicy.StandaloneConnectorPublished(cfg, name) }
+	// The hook of a running agent is told the connector is off the roster
+	// through a marker it can read as the user.
+	publishWindowsStandaloneOffRosterMarkers(stderr, published)
+	if err := pruneEnterpriseHookRemovedConnectors(cfg.DataDir, manifest, published,
+		func(sid string) bool { return enterpriseHookWindowsUserProfileRemoved(sid) },
+		time.Now()); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise removed connectors record: %v\n", err)
+	}
+	var held []enterpriseHookReconcileRow
+	if state, _, err := loadEnterpriseHookGuardianState(cfg.DataDir); err == nil {
+		held = append(held, state.Results...)
+	}
+	if authorization, _, err := loadEnterpriseHookGuardianAuthorization(cfg.DataDir); err == nil {
+		held = append(held, authorization.ProtectedTargets...)
+	}
+	if err := recordEnterpriseHookRemovedConnectors(cfg.DataDir, held, manifest, published,
+		enterprisehooks.WindowsMachineScopeUserRuntimeConnector, time.Now()); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise removed connectors record: %v\n", err)
+	}
 	return reconcileEnterpriseHookUserCleanups(
 		ctx,
 		stderr,
 		cfg.DataDir,
 		manifest,
-		windowsStandalonePerUserCleanupConnector,
+		windowsStandaloneRevokedUserCleanupConnector,
 		enterpriseHookWindowsUserCleanupAttempt,
 		time.Now(),
 	)
@@ -610,6 +706,16 @@ func attemptWindowsStandaloneUserCleanup(
 			return enterpriseHookUserCleanupDone, nil
 		}
 		return enterpriseHookUserCleanupPending, nil
+	}
+	if enterprisehooks.WindowsMachineScopeUserRuntimeConnector(entry.Connector) {
+		// A machine-scope connector's machine enrollment is already revoked, so
+		// only DefenseClaw's own files in the account's DefenseClaw folder are
+		// left. LocalSystem removes them whether or not the account is signed
+		// in; no session token is needed and none is waited for (GAP-0916).
+		if err := enterpriseHookWindowsConnectorUserRuntimeRemover(home, entry.SID, entry.DataDir, entry.Connector); err != nil {
+			return enterpriseHookUserCleanupFailed, err
+		}
+		return enterpriseHookUserCleanupDone, nil
 	}
 	if err := enterpriseHookWindowsRequireTargetSession(entry.SID, home); err != nil {
 		if enterprisehooks.IsWindowsTargetSessionUnavailable(err) {

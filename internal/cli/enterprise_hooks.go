@@ -1130,7 +1130,21 @@ func enterpriseHookRepairAfterVerifyFailure(
 					)
 				}
 			}
-			if enterpriseHookReconcileSecureClient() {
+			// On Secure Client a committed non-purge uninstall can retire a
+			// target; on the standalone profile a roster change can take a
+			// target out of its connector's machine runtime selection (a
+			// connector removed, or a change undone after the guardian had
+			// already revoked it). Either way only the account's own Windows
+			// session can select a runtime for it again. With no runtime
+			// selected for it (the pending proof) it holds nothing protected
+			// and its hooks fail closed (the machine policy keeps the SID
+			// registered with no runtime), so it is pending until the account
+			// signs in, like an account DefenseClaw never protected. As a
+			// failure it made every ensure and repair refuse until that
+			// account signed in (GAP-0909). Any target that still has a
+			// runtime selected, and every non-deferred target, keeps the
+			// failure.
+			if enterpriseHookReconcileSecureClient() || (cfg != nil && cfg.StandaloneEnterprise()) {
 				if available, pendingErr := enterpriseHookReconcileDeferredSessionAvailable(target); pendingErr == nil && !available {
 					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
 						"%w (verification: %v): %w",
@@ -3094,6 +3108,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if proxyAddr == "" {
 		proxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
+	// An off-roster marker of a connector the config publishes again goes
+	// before the machine policy is published again, so it never survives into
+	// the pass that republishes the policy (the Windows standalone guardian
+	// only; the hook allows only while the policy is absent).
+	enterpriseHookStandalonePlatformClearStaleOffRoster(os.Stderr)
 	// Revoke removed/disabled SIDs before touching any target runtime. This
 	// makes stale enrollment fail closed even when a later repair fails.
 	// A link at a connector's vendor folder fails that connector's targets
@@ -3208,6 +3227,13 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			// A row of a connector the loaded config no longer enables is
 			// stale: the enumerator has not dropped it yet (GAP-2373).
 			err = enterpriseHookReconcileConnectorEnabled(target.Connector)
+			if err != nil {
+				// The config no longer publishes the connector, so no row of
+				// it keeps a protected claim: carried forward from the last
+				// pass, it would keep a leftover credential accepted by the
+				// gateway until the enumerator drops the row (GAP-0916).
+				row.RevokeProtection = true
+			}
 		}
 		if err == nil && enterpriseHookTargetForeignLink(target, resolved.home, resolved.sid) {
 			// A link another principal owns at the account's folder is never

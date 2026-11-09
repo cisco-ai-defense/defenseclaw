@@ -69,8 +69,17 @@ const (
 	// small deflated value cannot make the gateway allocate without limit.
 	maxDecodedBytes = 8 << 20
 	maxSkills       = 16
-	maxFieldBytes   = 1024
-	maxArgs         = 32
+	// maxSkillLinks, maxSkillLinkBytes and maxSkillLinkPathBytes bound the
+	// linked skill folders a claim carries: their number, their text in all
+	// and one path (a Windows path can be 32 KiB). They are the evidence a
+	// gateway that cannot follow a link has, so the bounds are far past any
+	// ordinary call, and a link the claim does not carry for any reason says
+	// so (Facts.SkillLinksTruncated).
+	maxSkillLinks         = 4096
+	maxSkillLinkBytes     = 512 << 10
+	maxSkillLinkPathBytes = 32 << 10
+	maxFieldBytes         = 1024
+	maxArgs               = 32
 	// maxPinArgs bounds the argument digests a claim carries: a definition
 	// past maxArgs still pins every argument a deny prefix can sensibly name.
 	// A prefix longer than this cannot be ruled out and is refused.
@@ -116,6 +125,17 @@ type Facts struct {
 	// that exist in the skill folders of its agent, found as the user. The
 	// gateway takes only folders it would look at itself (GAP-1212).
 	SkillDirs []string `json:"skill_dirs,omitempty"`
+	// SkillLinks lists the skill folders a path in the request reaches
+	// through a link, resolved as the user: a gateway that may not read the
+	// profile cannot follow the link itself and so would judge only the
+	// spelling of the path.
+	SkillLinks []string `json:"skill_links,omitempty"`
+	// SkillLinksTruncated says a linked folder the hook found is not in
+	// SkillLinks (past the bounds, or a path the claim cannot carry): the
+	// gateway cannot rule out that it is held or denied, so it refuses the
+	// call as unproven when it has a held or denied skill to protect, instead
+	// of judging only the folders it was told of.
+	SkillLinksTruncated bool `json:"skill_links_truncated,omitempty"`
 	// SkillsTruncated says Skills holds only the first maxSkills claims: a
 	// folder the request reaches into may declare a name no claim names, so
 	// a gateway that cannot read it cannot prove it is not a denied skill
@@ -217,7 +237,7 @@ func TailDigestAt(tail []byte, i int) []byte {
 // otherwise an oversized MCP definition could silently lose a pinned deny.
 func Encode(facts Facts) string {
 	facts = bounded(facts)
-	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && !facts.SkillsTruncated && len(facts.Contents) == 0 {
+	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && len(facts.SkillLinks) == 0 && !facts.SkillLinksTruncated && !facts.SkillsTruncated && len(facts.Contents) == 0 {
 		return ""
 	}
 	var raw bytes.Buffer
@@ -298,28 +318,42 @@ func Decode(value string) (Facts, bool) {
 		return Facts{}, false
 	}
 	facts = bounded(facts)
-	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || facts.SkillsTruncated || len(facts.Contents) > 0
+	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || len(facts.SkillLinks) > 0 || facts.SkillLinksTruncated || facts.SkillsTruncated || len(facts.Contents) > 0
 }
 
 // DeclaredFor returns the names the facts say folder declares.
 func (f Facts) DeclaredFor(folder string) []string {
 	var out []string
 	for _, skill := range f.Skills {
-		if strings.EqualFold(skill.Folder, strings.TrimSpace(folder)) {
+		if sameFolderName(skill.Folder, folder) {
 			out = append(out, skill.Declared)
 		}
 	}
 	return out
 }
 
+// sameFolderName reports whether two folder names are the same folder: exactly,
+// or (for a claim from a hook that trimmed the name) once surrounding space is
+// trimmed from names that hold more than space.
+func sameFolderName(a, b string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	return a != "" && strings.EqualFold(a, b)
+}
+
 func bounded(facts Facts) Facts {
 	var skills []Skill
 	for _, skill := range facts.Skills {
-		folder, declared := clean(skill.Folder, maxNameBytes), clean(skill.Declared, maxNameBytes)
-		if folder == "" || declared == "" {
+		// A folder name is exact: a folder named with space is a folder, and
+		// trimming it to nothing would drop its claim. A claim that cannot be
+		// carried is signalled, as one past the bound is.
+		if skill.Folder == "" || strings.TrimSpace(skill.Declared) == "" {
 			continue
 		}
-		if len(skills) == maxSkills {
+		folder, declared := cleanFileName(skill.Folder, maxNameBytes), clean(skill.Declared, maxNameBytes)
+		if folder == "" || declared == "" || len(skills) == maxSkills {
 			facts.SkillsTruncated = true
 			continue
 		}
@@ -333,6 +367,22 @@ func bounded(facts Facts) Facts {
 		}
 	}
 	facts.SkillDirs = dirs
+	var links []string
+	linkBytes := 0
+	for _, dir := range facts.SkillLinks {
+		// A link that is not carried must be signalled, whatever the reason:
+		// it is a folder the gateway would otherwise never look at.
+		// The path is exact: trimming a folder named with space would name
+		// its parent.
+		dir = cleanFileName(dir, maxSkillLinkPathBytes)
+		if !filepath.IsAbs(dir) || len(links) == maxSkillLinks || linkBytes+len(dir) > maxSkillLinkBytes {
+			facts.SkillLinksTruncated = true
+			continue
+		}
+		linkBytes += len(dir)
+		links = append(links, filepath.Clean(dir))
+	}
+	facts.SkillLinks = links
 	facts.Contents = boundedContents(facts.Contents)
 	if server := facts.MCP; server != nil {
 		out := MCPServer{
@@ -489,13 +539,19 @@ func cleanHexDigest(value string, length int) string {
 // is longer than limit; it trims surrounding space.
 func clean(value string, limit int) string {
 	value = strings.TrimSpace(value)
-	if len(value) > limit || !utf8.ValidString(value) {
+	if strings.ContainsFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return ""
 	}
-	for _, r := range value {
-		if r < 0x20 || r == 0x7f {
-			return ""
-		}
+	return cleanFileName(value, limit)
+}
+
+// cleanFileName keeps a folder name or path as the file system holds it: no
+// trim, and a control character (a tab, a newline) is kept, since the claim is
+// JSON and a file name may hold one. It drops a value that is not valid UTF-8,
+// that holds a NUL (no file name can), or that is longer than limit.
+func cleanFileName(value string, limit int) string {
+	if len(value) > limit || !utf8.ValidString(value) || strings.IndexByte(value, 0) >= 0 {
+		return ""
 	}
 	return value
 }
@@ -788,6 +844,9 @@ type FolderRef struct {
 	// ExplicitDirectory means a leading static cd fixed the directory for
 	// this reference, so a missing folder must not be resolved in other roots.
 	ExplicitDirectory bool
+	// Linked is set when the folder is the target of a link the call's path
+	// goes through, not the spelling of the path.
+	Linked bool
 }
 
 // SkillFolderRefs lists the skill folders the strings of a tool input reach
@@ -1074,11 +1133,26 @@ func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 	path = msysDriveSpelling(path)
 	// Resolve the entire path before selecting skills/<name> pairs. A
 	// parent segment can otherwise change which skill folders are reached.
-	dir := filepath.FromSlash(path)
-	if !filepath.IsAbs(dir) && strings.TrimSpace(cwd) != "" {
-		dir = filepath.Join(cwd, dir)
+	raw := filepath.FromSlash(path)
+	if !filepath.IsAbs(raw) && strings.TrimSpace(cwd) != "" {
+		raw = cwd + string(filepath.Separator) + raw
 	}
-	dir = filepath.Clean(dir)
+	dir := filepath.Clean(raw)
+	refs := skillFolderRefsIn(dir, false)
+	// A link anywhere on the path leads into a skill folder the spelling
+	// does not show. The folder it ends in is judged as the direct path is.
+	// The raw spelling is followed in the order the filesystem takes it: a
+	// parent segment after a link leaves the folder the link leads to, not the
+	// folder that holds the link. A path that cannot be followed (a missing
+	// folder, one the caller may not enter) stays as written.
+	if real := ResolveLinks(raw); real != dir {
+		refs = append(refs, skillFolderRefsIn(real, true)...)
+	}
+	return refs
+}
+
+// skillFolderRefsIn lists the skills/<name> pairs of the cleaned path dir.
+func skillFolderRefsIn(dir string, linked bool) []FolderRef {
 	parts := strings.Split(filepath.ToSlash(dir), "/")
 	var refs []FolderRef
 	for i := 0; i+1 < len(parts); i++ {
@@ -1091,7 +1165,74 @@ func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 		}
 		skillDir := filepath.FromSlash(strings.Join(parts[:i+2], "/"))
 		manifest := i+2 < len(parts) && strings.EqualFold(parts[i+2], "SKILL.md")
-		refs = append(refs, FolderRef{Dir: skillDir, Name: name, Manifest: manifest})
+		refs = append(refs, FolderRef{Dir: skillDir, Name: name, Manifest: manifest, Linked: linked})
 	}
 	return refs
+}
+
+// maxLinkHops bounds the links ResolveLinks follows.
+const maxLinkHops = 40
+
+// ResolveLinks follows every link (symlink, junction or reparse point) in
+// path, one component at a time in the order the filesystem takes them: a
+// parent segment removes the last component of the path as resolved so far,
+// so it leaves the folder a link leads to, not the folder that holds the link.
+// Pass the path as it is spelled; cleaning it first would drop that segment
+// before the link in front of it is known. A link whose target is missing is
+// read and followed all the same, so a link placed before its target exists
+// leads the same way once it does. A part that cannot be examined (missing, or
+// a folder the caller may not enter) is kept as written and the rest follows
+// lexically after it: the spelling is then the only evidence there is. A
+// relative path, or one with more than maxLinkHops links (a loop), comes back
+// cleaned and unresolved.
+func ResolveLinks(path string) string {
+	volume := filepath.VolumeName(path)
+	rest := filepath.ToSlash(path[len(volume):])
+	if !strings.HasPrefix(rest, "/") {
+		return filepath.Clean(path)
+	}
+	resolved := volume + string(filepath.Separator)
+	pending := strings.Split(rest, "/")
+	hops := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, part)
+		info, err := os.Lstat(next)
+		if err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			resolved = next
+			continue
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			resolved = next
+			continue
+		}
+		if hops++; hops > maxLinkHops {
+			return filepath.Clean(path)
+		}
+		targetVolume := filepath.VolumeName(target)
+		targetRest := filepath.ToSlash(target[len(targetVolume):])
+		if strings.HasPrefix(targetRest, "/") {
+			if targetVolume == "" {
+				targetVolume = filepath.VolumeName(resolved)
+			}
+			resolved = targetVolume + string(filepath.Separator)
+		}
+		pending = append(strings.Split(targetRest, "/"), pending...)
+	}
+	// A path that exists and has no link left is spelled as the filesystem
+	// spells it (a Windows short name, the case of a folder); a missing one
+	// stays as written.
+	if real, err := filepath.EvalSymlinks(resolved); err == nil {
+		return real
+	}
+	return resolved
 }

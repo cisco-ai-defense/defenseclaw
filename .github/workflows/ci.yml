@@ -418,13 +418,46 @@ jobs:
           done < <(python3 -c 'import json, os; [print(t["package"] + "\t" + t["run"]) for t in json.loads(os.environ["GO_TESTS"])]')
           exit "$status"
 
+  go-test-throughput:
+    # The managed sandbox open-loop tests (internal/gateway
+    # gap0490_open_loop_test.go, built without -race) measure wall-clock
+    # answers inside the hook window of 3.5 s. They run in a job of their own,
+    # one go test process at a time (-p 1), so no other package, shard or build
+    # competes with them for the runner: on a shared runner the gateway shared
+    # the box with the compilers and the same stream failed 3 of 4 runs at
+    # load 52 (GAP-0490). Each test measures the single-stream latency of the
+    # real path right before its stream, states its p95 budget from it, and
+    # fails INCONCLUSIVE, naming that baseline, when the box cannot carry the
+    # stream or the launcher did not issue the required rate (never a skip,
+    # never a pass). The Cadence and Judgement tests run that judgement against
+    # stand-ins and recorded numbers.
+    name: Go Throughput Test (no race)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        id: go
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
+      - name: Run the open-loop throughput tests (-p 1, no race)
+        run: go test -p 1 -count=1 -timeout 4m -v -run '^TestGAP0490OpenLoop(SandboxStream|TwoSandboxes|FourSandboxes|Cadence[A-Za-z]+|Judgement[A-Za-z]+|Queueing[A-Za-z]+)$' ./internal/gateway
+
   go-test:
     # Preserve the existing required-check name while combining the complete
     # race/coverage suite from the gateway and audit shards plus all remaining
     # packages. A pull request without Go changes skips the shards and runs
     # only Go Pinned Tests, if any.
     name: Go Test
-    needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]
+    needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-test-throughput, go-pinned]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -435,6 +468,7 @@ jobs:
           GATEWAY_RESULT: ${{ needs.go-test-gateway.result }}
           AUDIT_RESULT: ${{ needs.go-test-audit.result }}
           OTHER_RESULT: ${{ needs.go-test-other.result }}
+          THROUGHPUT_RESULT: ${{ needs.go-test-throughput.result }}
           PINNED_RESULT: ${{ needs.go-pinned.result }}
         run: |
           set -euo pipefail
@@ -446,6 +480,7 @@ jobs:
           test "$GATEWAY_RESULT" = success
           test "$AUDIT_RESULT" = success
           test "$OTHER_RESULT" = success
+          test "$THROUGHPUT_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         if: ${{ needs.changes.outputs.go != 'false' }}
         with:

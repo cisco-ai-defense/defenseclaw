@@ -325,6 +325,46 @@ defenseclaw_sandbox_confirm_receipt /hook '{"action":"allow"}'`)
 				t.Fatalf("failed receipt did not report the response status: %q", run.stderr)
 			}
 		})
+		// A call the gateway refused 429 is blocked with the gateway's message,
+		// which names the limit that refused it, and says it is not an outage:
+		// the hook never reports the answer as "gateway unreachable" or the
+		// receipt as "not acknowledged", and never names the account budget
+		// for a refusal that came from another limit (rel-1-0-6 GAP-0490).
+		const (
+			accountBody  = `{"error":"rate_limited","reason":"enterprise_managed_rate_limited","message":"DefenseClaw allows the sandboxes of one user 40 tool calls a second together (a burst of 100); this call is over that budget and did not run, so retry in a few seconds","retry_after_seconds":"1"}`
+			bindingBody  = `{"error":"rate_limited","reason":"sandbox_rate_limited","message":"DefenseClaw is limiting how fast this one sandbox may send requests (tool calls: 25 a second, a burst of 100); this request did not run, so retry in a few seconds","retry_after_seconds":"1"}`
+			overloadBody = `{"error":"rate_limited","reason":"enterprise_managed_overloaded","message":"DefenseClaw is handling as many hook requests as it can; retry shortly","retry_after_seconds":"1"}`
+			legacyBody   = `{"error":"sandboxauth: too many concurrent sandbox requests"}`
+			allowReceipt = `200|{"action":"allow","delivery_receipt":"` + receiptID + `"}`
+		)
+		for _, refused := range []struct {
+			name      string
+			responses []string
+			calls     int
+			want      string
+			notWant   string
+		}{
+			{"account_budget_refused_proposal", []string{"429|" + accountBody}, 1, "40 tool calls a second together (a burst of 100)", ""},
+			{"account_budget_refused_receipt", []string{allowReceipt, "429|" + accountBody}, 2, "40 tool calls a second together (a burst of 100)", ""},
+			{"binding_rate_refused_proposal", []string{"429|" + bindingBody}, 1, "this one sandbox may send requests", "40 tool calls"},
+			{"binding_rate_refused_receipt", []string{allowReceipt, "429|" + bindingBody}, 2, "this one sandbox may send requests", "40 tool calls"},
+			{"overload_refused_receipt", []string{allowReceipt, "429|" + overloadBody}, 2, "handling as many hook requests as it can", "budget"},
+			{"legacy_body_refused_receipt", []string{allowReceipt, "429|" + legacyBody}, 2, "too many concurrent sandbox requests", "budget"},
+			{"empty_body_refused_receipt", []string{allowReceipt, "429|"}, 2, "HTTP 429 (too many requests", "budget"},
+		} {
+			t.Run(tc.connector+"/"+refused.name, func(t *testing.T) {
+				run := h.run(t, SandboxHookDir+"/"+tc.script, tc.args, tc.stdin, env, refused.responses)
+				if !tc.blocked(run) || len(run.calls) != refused.calls {
+					t.Fatalf("refused call exit=%d calls=%d stdout=%q stderr=%q", run.exitCode, len(run.calls), run.stdout, run.stderr)
+				}
+				text := run.stdout + run.stderr
+				if !strings.Contains(text, refused.want) || !strings.Contains(text, "not an outage") ||
+					strings.Contains(text, "not acknowledged") || strings.Contains(text, "does not answer") ||
+					strings.Contains(text, "unreachable") || (refused.notWant != "" && strings.Contains(text, refused.notWant)) {
+					t.Fatalf("refusal did not name its limit as a refusal: stdout=%q stderr=%q", run.stdout, run.stderr)
+				}
+			})
+		}
 	}
 }
 

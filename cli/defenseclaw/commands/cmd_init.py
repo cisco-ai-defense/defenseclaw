@@ -33,7 +33,7 @@ import click
 from defenseclaw import connector_paths, long_paths, platform_support, terminal_checkbox, ux
 
 if TYPE_CHECKING:
-    from defenseclaw.bootstrap import StepResult
+    from defenseclaw.bootstrap import InitLocks, StepResult
     from defenseclaw.config import Config
 from defenseclaw.config import gateway_pid_path
 from defenseclaw.context import AppContext, pass_ctx
@@ -405,6 +405,37 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             )
         return
 
+    from defenseclaw.bootstrap import InitLockError, hold_init_lock
+
+    try:
+        with hold_init_lock() as locks:
+            _run_plain_init(
+                app,
+                locks,
+                skip_install=skip_install,
+                enable_guardrail=enable_guardrail,
+                non_interactive=non_interactive,
+                yes=yes,
+                api_port=api_port,
+                proxy_port=proxy_port,
+            )
+    except InitLockError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
+    app: AppContext,
+    locks: InitLocks,
+    *,
+    skip_install: bool,
+    enable_guardrail: bool,
+    non_interactive: bool,
+    yes: bool,
+    api_port: int | None,
+    proxy_port: int | None,
+) -> None:
+    """The plain (non-guided) init; init_cmd holds the init lock around it."""
+
     from defenseclaw.config import (
         config_path,
         default_config,
@@ -471,6 +502,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
         for step in apply_first_run_ports(cfg, api_port or 0, proxy_port or 0, new_config=False):
             click.echo(f"  {step.name}: " + ux._style(f"{step.detail}; run {step.next_command}", fg="yellow"))
+
+    # The identity and the stores live in the data folder the config names, which
+    # may not be the home locked so far. Lock it before anything is changed there.
+    locks.take(cfg.data_dir)
 
     cfg.environment = env
     if cfg.claw.mode.strip():
@@ -3474,6 +3509,21 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
     _validate_device_identity_windows_path_syntax(target, identity_root)
     _validate_device_identity_artifact_layout(target, identity_root)
     if os.path.lexists(target):
+        from defenseclaw.doctor_recovery import (
+            DEVICE_KEY_UNUSABLE_REASONS,
+            inspect_device_key_usability,
+            unusable_key_message,
+        )
+
+        # An existing key is a finished identity only if the gateway can load it and its file custody holds
+        # (the one test Doctor and readiness use too). A creation stopped during the key write, or a wrong
+        # mode or a link, leaves one that is not: init never replaces it and names the manual steps.
+        reason = inspect_device_key_usability(target, data_dir=identity_root).reason_code
+        if reason in DEVICE_KEY_UNUSABLE_REASONS:
+            raise click.ClickException(
+                f"cannot safely create device identity ({reason}): "
+                + unusable_key_message(target, identity_root, reason)
+            )
         return
 
     from defenseclaw.doctor_recovery import (
@@ -3482,6 +3532,7 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
         RecoveryRefusedError,
         _device_identity_paths_equal,
         apply_device_key_recovery,
+        keyless_identity_message,
         plan_missing_device_key,
     )
     try:
@@ -3505,9 +3556,12 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
 
     plan = plan_missing_device_key(target, data_dir=identity_root)
     if plan.disposition is not RecoveryDisposition.READY:
-        raise click.ClickException(
-            f"cannot safely create device identity ({plan.reason_code})"
-        )
+        message = f"cannot safely create device identity ({plan.reason_code})"
+        if plan.reason_code == "continuity-evidence-present":
+            # A keyless identity is never replaced by init: say which files remain and the manual way out.
+            files = [path for path in plan.continuity_paths if os.path.lexists(path)]
+            message += ": " + keyless_identity_message(target, files)
+        raise click.ClickException(message)
     try:
         result = apply_device_key_recovery(plan, approved=True)
     except RecoveryRefusedError as exc:

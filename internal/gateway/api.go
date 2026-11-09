@@ -434,10 +434,12 @@ type APIServer struct {
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
 	sandboxIngressMu sync.RWMutex
 	sandboxIngress   *sandboxIngressState
-	// The receipt's fallback, audit, and settlement use SQLite's one writer.
-	// Queue those writes in the gateway instead of making parallel receipts
-	// contend in SQLite's busy handler while their hook answers wait.
-	sandboxReceiptWriteMu sync.Mutex
+	// sandboxWriteLanes orders the managed sandbox call's writes on the two
+	// audit connections (laneGate).
+	sandboxWriteLanes laneGate
+	// hookCorrelationTurns holds the hooks of one session to one correlation
+	// attempt at a time (hookCorrelationSerial).
+	hookCorrelationTurns hookCorrelationSerial
 
 	// sandboxCtl is the OpenShell sandbox manager behind /api/v1/sandbox/
 	// (api_sandbox.go); nil when sandboxes are off.

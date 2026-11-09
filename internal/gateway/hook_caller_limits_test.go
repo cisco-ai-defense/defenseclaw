@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -797,14 +799,14 @@ func TestSandboxHookReceiptAdmissionKeys(t *testing.T) {
 		}
 	}
 	var l hookCallerLimiter
-	if rps, burst, inFlight, _ := l.limits("1001|" + sandboxBudgetReceipt); rps != 100 || burst != 200 || inFlight != sandboxUserReceiptInFlight {
+	if rps, burst, inFlight, _ := l.limits("1001|" + sandboxBudgetReceipt); rps != sandboxUserHookRate || burst != sandboxUserHookBurst || inFlight != sandboxUserReceiptInFlight {
 		t.Fatalf("receipt limits %d/%d/%d", rps, burst, inFlight)
 	}
 }
 
 // Delivery receipts are posts in their own rate class. Several bindings of
 // one account must not fill a second, 32-request user cap while each binding
-// and the shared 100/s receipt bucket remain within their limits.
+// and the shared receipt bucket remain within their limits.
 func TestGAP0490ConcurrentReceiptsAcrossBindings(t *testing.T) {
 	now := time.Unix(4_000_000, 0)
 	limiter := &hookCallerLimiter{now: func() time.Time { return now }}
@@ -831,7 +833,7 @@ func TestGAP0490ConcurrentReceiptsAcrossBindings(t *testing.T) {
 	for len(releases) < sandboxUserReceiptInFlight {
 		// Advance the bucket as receipts arrive; keeping their slots held
 		// exercises the concurrency boundary.
-		now = now.Add(11 * time.Millisecond)
+		now = now.Add(time.Second / sandboxUserHookRate)
 		release, _, reason, _ := limiter.acquire("1001|" + sandboxBudgetReceipt)
 		if reason != "" {
 			t.Fatalf("receipt %d below the aggregate bound refused: %s", len(releases), reason)
@@ -880,8 +882,8 @@ func (b *oneShotHookCallerBody) Read([]byte) (int, error) {
 func (*oneShotHookCallerBody) Close() error { return nil }
 
 // TestSandboxHookFloodAtTheDocumentedUserRate is the per-user side of
-// rel-1-0-6 GAP-0490: the documented relayed-hook budget of one account (100
-// calls a second, burst 200), 10 s of allowed calls at that rate, each a
+// rel-1-0-6 GAP-0490: the documented relayed-hook budget of one account (40
+// calls a second, burst 100), 10 s of allowed calls at that rate, each a
 // relayed hook post and its delivery receipt, on a clock the test moves. No
 // call and no receipt may be refused.
 func TestSandboxHookFloodAtTheDocumentedUserRate(t *testing.T) {
@@ -986,19 +988,24 @@ func TestGAP0490MultipleSandboxBindingsShareTheUserBudget(t *testing.T) {
 	if allowed, refused := run(1, 24, 10, time.Second); allowed != 240 || refused != 0 {
 		t.Fatalf("one ordinary binding: %d allowed, %d refused", allowed, refused)
 	}
-	if allowed, refused := run(4, 24, 10, time.Second); allowed != 960 || refused != 0 {
-		t.Fatalf("four ordinary bindings at 96/s: %d allowed, %d refused", allowed, refused)
+	if allowed, refused := run(4, 10, 10, time.Second); allowed != 400 || refused != 0 {
+		t.Fatalf("four ordinary bindings at the 40/s budget: %d allowed, %d refused", allowed, refused)
 	}
-	if allowed, refused := run(5, 20, 10, 1300*time.Millisecond); allowed != 1000 || refused != 0 {
-		t.Fatalf("five ordinary bindings at 100/s: %d allowed, %d refused", allowed, refused)
+	if allowed, refused := run(5, 8, 10, 1300*time.Millisecond); allowed != 400 || refused != 0 {
+		t.Fatalf("five ordinary bindings at the 40/s budget: %d allowed, %d refused", allowed, refused)
 	}
-	if allowed, refused := run(6, 16, 10, 1500*time.Millisecond); allowed != 960 || refused != 0 {
-		t.Fatalf("six ordinary bindings at 96/s: %d allowed, %d refused", allowed, refused)
+	if allowed, refused := run(8, 5, 10, 1500*time.Millisecond); allowed != 400 || refused != 0 {
+		t.Fatalf("eight ordinary bindings at the 40/s budget: %d allowed, %d refused", allowed, refused)
 	}
-	if allowed, refused := run(20, 5, 10, 3400*time.Millisecond); allowed != 1000 || refused != 0 {
-		t.Fatalf("twenty ordinary bindings at 100/s: %d allowed, %d refused", allowed, refused)
+	if allowed, refused := run(20, 2, 10, 3400*time.Millisecond); allowed != 400 || refused != 0 {
+		t.Fatalf("twenty ordinary bindings at the 40/s budget: %d allowed, %d refused", allowed, refused)
 	}
-	if allowed, refused := run(10, 13, 15, 100*time.Millisecond); refused == 0 || allowed > 200+100*15 {
+	// Above the budget (130/s) the account is refused only what is over it:
+	// no more than the burst and the rate over the run is admitted, and the
+	// admitted calls are the whole budget, not a collapsed share of it.
+	const overSeconds = 15
+	allowed, refused := run(10, 13, overSeconds, 100*time.Millisecond)
+	if refused == 0 || allowed > sandboxUserHookBurst+sandboxUserHookRate*overSeconds || allowed < sandboxUserHookRate*overSeconds {
 		t.Fatalf("over-budget account at 130/s: %d allowed, %d refused", allowed, refused)
 	}
 }
@@ -1070,6 +1077,56 @@ func TestGAP0490ManagedHookAndReceiptWindows(t *testing.T) {
 				t.Fatalf("ordinary call %d refused: %s", i+1, reason)
 			}
 			release()
+		}
+	})
+}
+
+// A call refused for the account budget is answered 429 with the stable
+// reason and a message that names the budget, whichever of the two places
+// refuses it (the admission of the request, or the charge of the hook class
+// once the body is read): the sandbox hook shows that message to the user, so
+// a rate refusal is never read as an outage (rel-1-0-6 GAP-0490).
+func TestGAP0490RefusalNamesTheBudget(t *testing.T) {
+	check := func(t *testing.T, w *httptest.ResponseRecorder) {
+		t.Helper()
+		var body struct{ Error, Reason, Message string }
+		if w.Code != http.StatusTooManyRequests || json.Unmarshal(w.Body.Bytes(), &body) != nil {
+			t.Fatalf("refusal %d %s, want 429 with a JSON body", w.Code, w.Body.String())
+		}
+		if body.Reason != managedHookReasonRateLimited || body.Message != sandboxHookBudgetMessage() || w.Header().Get("Retry-After") != "1" {
+			t.Fatalf("refusal %+v retry-after %q", body, w.Header().Get("Retry-After"))
+		}
+		if want := fmt.Sprintf("%d tool calls a second together (a burst of %d)", sandboxUserHookRate, sandboxUserHookBurst); !strings.Contains(body.Message, want) {
+			t.Fatalf("message %q does not state the budget %q", body.Message, want)
+		}
+	}
+	t.Run("admission", func(t *testing.T) {
+		prev := sandboxBudgetLimits[sandboxBudgetReceipt]
+		sandboxBudgetLimits[sandboxBudgetReceipt] = sandboxBudgetLimit{Rate: 1, Burst: 1, InFlight: 8}
+		t.Cleanup(func() { sandboxBudgetLimits[sandboxBudgetReceipt] = prev })
+		api := &APIServer{}
+		path := sandboxrelay.PathHookPrefix + "claudecode"
+		var last *httptest.ResponseRecorder
+		for i := 0; i < 3; i++ {
+			last = httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
+			r.Header.Set(sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue)
+			if _, release := api.admitHookCaller(last, r, "1001", path); release != nil {
+				defer release()
+			}
+		}
+		check(t, last)
+	})
+	t.Run("charge", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, sandboxrelay.PathHookPrefix+"claudecode", nil)
+		r = r.WithContext(withSandboxHookBudgetCharge(r.Context(), func(bool) error { return errors.New(managedHookReasonRateLimited) }))
+		(&APIServer{}).handleAgentHook("claudecode")(w, r)
+		check(t, w)
+	})
+	t.Run("host hooks keep their message", func(t *testing.T) {
+		if isSandboxHookClassKey("1001") || isSandboxHookClassKey("1001|"+sandboxBudgetPolicy) || isSandboxHookClassKey("1001|otlp") {
+			t.Fatal("a host or policy key got the sandbox hook budget message")
 		}
 	})
 }

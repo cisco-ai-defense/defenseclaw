@@ -38,7 +38,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -52,6 +52,14 @@ from defenseclaw.connector_paths import (
     hermes_config_path,
     opencode_custody_text,
     opencode_unsafe_plugin_paths,
+)
+from defenseclaw.doctor_recovery import (
+    DEVICE_KEY_UNUSABLE_REASONS,
+    DeviceKeyHealthStatus,
+    device_identity_leftovers,
+    inspect_device_key_usability,
+    keyless_identity_message,
+    unusable_key_message,
 )
 from defenseclaw.gateway_path import path_gateway
 from defenseclaw.inventory import agent_discovery
@@ -799,7 +807,105 @@ def _restore_first_run_selection_authority(cfg, setup_snapshot) -> str:
     return "; ".join(errors)
 
 
+# How long a second init waits for the one that holds the data home before it
+# reports that another init is running.
+_FIRST_RUN_LOCK_WAIT_SECONDS = 30.0
+
+
+class InitLockError(Exception):
+    """The init lock of the data home could not be taken; the run changed nothing."""
+
+
+class InitLockBusyError(InitLockError):
+    """Another init still held the lock after the wait."""
+
+
+class InitLocks:
+    """The init locks one run holds, one per data folder it initializes."""
+
+    def __init__(self, stack: contextlib.ExitStack) -> None:
+        self._stack = stack
+        self._held: set[str] = set()
+
+    def take(self, directory: str | os.PathLike[str]) -> None:
+        """Take the init lock of one data folder; a folder this run already holds is skipped.
+
+        The lock is one exclusive file lock (init.lock: a byte lock on Windows,
+        flock on POSIX). The second run waits for the first and then runs as an
+        ordinary re-run of a finished init; if the first is still going after
+        _FIRST_RUN_LOCK_WAIT_SECONDS it raises InitLockBusyError. A folder whose
+        lock cannot be made or opened raises InitLockError, because without the
+        lock the run could race another one into the same half-created state.
+        """
+
+        from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
+        from defenseclaw.file_permissions import make_private_directory
+
+        folder = os.fspath(directory)
+        try:
+            make_private_directory(folder)
+            key = os.path.normcase(os.path.realpath(folder))
+            if key in self._held:
+                return
+            self._stack.enter_context(
+                locked_file_update(os.path.join(folder, "init"), timeout_seconds=_FIRST_RUN_LOCK_WAIT_SECONDS)
+            )
+        except FileLockTimeoutError as exc:
+            raise InitLockBusyError(
+                f"another defenseclaw init is running on {folder}; this run changed nothing"
+            ) from exc
+        except OSError as exc:
+            raise InitLockError(
+                f"cannot take the init lock of {folder} ({exc.strerror or type(exc).__name__}); "
+                "this run changed nothing"
+            ) from exc
+        self._held.add(key)
+
+
+@contextlib.contextmanager
+def hold_init_lock() -> Iterator[InitLocks]:
+    """Hold the init lock of the data home for one init run.
+
+    Two inits started together on one home used to race through the same seeds
+    and device identity and leave it half created (GAP-0927). Every path that
+    initializes the home takes the lock before anything is read or written.
+    The home is not always where the identity lives: config.yaml can name
+    another data_dir, so the caller also takes that folder's lock
+    (InitLocks.take) as soon as the config says which it is, and before it
+    changes anything there. Two runs that name each other's folders can wait
+    on each other; both then stop at the wait limit and change nothing.
+    """
+
+    from defenseclaw import config as cfg_mod
+
+    with contextlib.ExitStack() as stack:
+        locks = InitLocks(stack)
+        locks.take(cfg_mod.default_data_path())
+        yield locks
+
+
 def run_first_run(options: FirstRunOptions) -> FirstRunReport:
+    """Run the first-run setup flow while holding the init lock of the data home."""
+
+    try:
+        with hold_init_lock() as locks:
+            return _run_first_run_locked(options, locks)
+    except InitLockError as exc:
+        from defenseclaw import config as cfg_mod
+
+        connector = _normalize_connector(options.connector)
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=str(cfg_mod.default_data_path()),
+            connector=connector,
+            profile=_normalize_profile(options.profile, connector),
+            setup=[StepResult("Init lock", "fail", str(exc), options.rerun_command)],
+            next_commands=[options.rerun_command],
+        )
+
+
+def _run_first_run_locked(options: FirstRunOptions, locks: InitLocks) -> FirstRunReport:
     """Run the canonical first-run setup flow without rendering UI.
 
     This is the backend shared by ``defenseclaw init``, ``quickstart``,
@@ -881,6 +987,11 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         # unversioned/legacy objects after the hard cutover.
         if new_config and getattr(cfg, "_source_config_version", 0) == 0:
             cfg_mod.prepare_fresh_v8_config(cfg)
+
+    # The identity and the stores live in the data folder the config names, which
+    # may not be the home locked so far. Lock it before anything is changed there.
+    if getattr(cfg, "data_dir", ""):
+        locks.take(cfg.data_dir)
 
     # First step after the config loads, before anything is set aside, written or
     # started: hooks of a DefenseClaw Setup 0.8.x install in the agent's settings
@@ -1199,7 +1310,17 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         bootstrap = bootstrap_env(cfg, logger)
         if bootstrap.errors:
             setup.extend(
-                StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix --dry-run") for e in bootstrap.errors
+                StepResult(
+                    "Bootstrap",
+                    "fail",
+                    e,
+                    # A device key gone with its provenance files, or one that cannot be used, is never
+                    # replaced by init itself: the message names the manual steps, after which init runs again.
+                    options.rerun_command
+                    if any(f"({code})" in e for code in ("continuity-evidence-present", *DEVICE_KEY_UNUSABLE_REASONS))
+                    else "defenseclaw doctor --fix --dry-run",
+                )
+                for e in bootstrap.errors
             )
         else:
             setup.append(StepResult("Bootstrap", "pass", cfg.data_dir))
@@ -1346,6 +1467,48 @@ def _until_key_ok(detail: str) -> str:
     return "until the key is set" if "not set" in detail else "until a valid key is set"
 
 
+def _device_key_readiness(cfg: Config, options: FirstRunOptions) -> StepResult:
+    """The device key row of first-run readiness, decided on the identity state init and Doctor use.
+
+    A key that cannot be used, or a key gone with its provenance files, is never replaced by a command:
+    the row carries the manual steps and the next command is the init rerun they end with.
+    """
+    device_key = cfg.gateway.device_key_file
+    if not device_key:
+        return StepResult("Device key", "fail", "(unset)", "defenseclaw init")
+    data_dir = cfg.data_dir
+    health = inspect_device_key_usability(device_key, data_dir=data_dir)
+    if health.status is DeviceKeyHealthStatus.VALID:
+        return StepResult("Device key", "pass", device_key)
+    if health.status is DeviceKeyHealthStatus.MISSING:
+        return StepResult(
+            "Device key",
+            "fail",
+            device_key,
+            "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize",
+        )
+    if health.reason_code == "continuity-evidence-present":
+        files = device_identity_leftovers(device_key, data_dir)
+        return StepResult("Device key", "fail", keyless_identity_message(device_key, files), options.rerun_command)
+    if health.reason_code in DEVICE_KEY_UNUSABLE_REASONS:
+        return StepResult(
+            "Device key",
+            "fail",
+            unusable_key_message(device_key, data_dir, str(health.reason_code)),
+            options.rerun_command,
+        )
+    # A folder-level custody reason is about the folders, not the key; Doctor reports it. The row keeps
+    # its earlier meaning: the key file is there or it is not.
+    if os.path.isfile(device_key):
+        return StepResult("Device key", "pass", device_key)
+    return StepResult(
+        "Device key",
+        "fail",
+        device_key,
+        "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize",
+    )
+
+
 def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult]:
     """Run scoped readiness checks for the choices made during first run."""
     from defenseclaw.config import config_path_for_data_dir
@@ -1372,19 +1535,7 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             ),
         )
     )
-    device_key = cfg.gateway.device_key_file
-    steps.append(
-        StepResult(
-            "Device key",
-            "pass" if device_key and os.path.isfile(device_key) else "fail",
-            device_key or "(unset)",
-            (
-                "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"
-                if not (device_key and os.path.isfile(device_key))
-                else ""
-            ),
-        )
-    )
+    steps.append(_device_key_readiness(cfg, options))
 
     for s in _scanner_availability(cfg):
         if s.status == "warn":

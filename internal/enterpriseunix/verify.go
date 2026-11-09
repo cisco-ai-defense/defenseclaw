@@ -1607,7 +1607,6 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 		return
 	}
 	state, err := loadOpenCodePortsRecord(env.P(path))
-	unknown := state.Unknown
 	if err != nil {
 		r.AddWarning("opencode_port_record_unreadable", fmt.Sprintf(
 			"the guardian's OpenCode service ports record %s cannot be read (%v), so no account gets a new OpenCode port; ports already in service.json files are kept. Remove it to rebuild it on the next pass: sudo rm %s",
@@ -1629,14 +1628,44 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 			"OpenCode service port %d was named by the files of uids %s when the guardian's record was built, so no account is given it; to release it: sudo %s %d --yes",
 			entry.Port, strings.Join(uids, ", "), env.lifecycleCommand("opencode-port-clear"), entry.Port))
 	}
-	if len(unknown) > 0 {
-		names := make([]string, 0, len(unknown))
-		for _, entry := range unknown {
-			names = append(names, fmt.Sprintf("%s (uid %d): %s (%s); to clear it: %s", entry.User, entry.UID, entry.Path, entry.Reason, entry.Fix))
+	env.warnOpenCodePortsUnknown(r, state.Unknown)
+}
+
+// warnOpenCodePortsUnknown reports the unknown list of the guardian record:
+// the accounts whose service.json the last pass could not read or write. The
+// list is the last pass snapshot and the pass rewrites it only while OpenCode
+// is on the machine policy, so the entry of an account deleted since then can
+// outlive the account. Status and verify never hide an entry: one whose uid no
+// account of the host holds is reported as a record with no account, with the
+// one command that removes it after it checks the uid again; the rest keep the
+// account, file, reason and step. The lookup only picks the wording. A lookup
+// that does not answer keeps the account wording.
+func (env *Env) warnOpenCodePortsUnknown(r *enterprisestatus.Result, unknown []enterprisehooks.UnixOpenCodeServicePortUnknown) {
+	if len(unknown) == 0 {
+		return
+	}
+	var accounts, orphans []string
+	for _, entry := range unknown {
+		has, err := env.UIDHasAccount(context.Background(), entry.UID)
+		if err == nil && !has {
+			detail := entry.Reason
+			if entry.Path != "" {
+				detail = entry.Path + " (" + entry.Reason + ")"
+			}
+			orphans = append(orphans, fmt.Sprintf(
+				"OpenCode port record for UID %d (no account found): recorded for %s, %s; its recorded port stays reserved. If the UID really has no account, remove this stale entry; the command refuses while the UID still resolves: sudo %s %d --yes",
+				entry.UID, entry.User, detail, env.lifecycleCommand("opencode-port-unknown-clear"), entry.UID))
+			continue
 		}
+		accounts = append(accounts, fmt.Sprintf("%s (uid %d): %s (%s); to clear it: %s", entry.User, entry.UID, entry.Path, entry.Reason, entry.Fix))
+	}
+	if len(accounts) > 0 {
 		r.AddWarning("opencode_port_account_unknown", fmt.Sprintf(
 			"the guardian could not read or write the OpenCode service port file of these accounts as the account; each keeps its recorded port, nothing in the record changes, and other accounts are not affected: %s",
-			strings.Join(names, "; ")))
+			strings.Join(accounts, "; ")))
+	}
+	for _, orphan := range orphans {
+		r.AddWarning("opencode_port_account_unknown", orphan)
 	}
 }
 

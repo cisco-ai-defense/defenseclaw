@@ -4703,8 +4703,10 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
     """Validate the local Ed25519 identity and its continuity evidence."""
 
     from defenseclaw.doctor_recovery import (
+        DEVICE_KEY_UNUSABLE_REASONS,
         DeviceKeyHealthStatus,
         inspect_device_key,
+        unusable_key_message,
     )
 
     gateway = getattr(cfg, "gateway", None)
@@ -4749,7 +4751,11 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
         )
         return
     if health.reason_code == _DEVICE_KEY_LEFTOVERS:
-        # Only the key is gone: say so and name the attended repair (GAP-0323).
+        # Only the key is gone: neither Doctor nor init replaces the provenance files (they may be the only
+        # trace of that identity); Doctor names them and the manual steps (GAP-0927).
+        from defenseclaw.doctor_recovery import device_identity_leftovers, keyless_identity_message
+
+        files = device_identity_leftovers(target, str(getattr(cfg, "data_dir", "") or ""))
         _emit(
             "fail",
             "Device identity",
@@ -4757,10 +4763,21 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
             r=r,
             check_id="doctor.identity.device-key",
             reason_code=health.reason_code,
-            remediation=(
-                "restore device.key from a trusted backup, or run: defenseclaw doctor --fix --fix-id "
-                "doctor.identity.device-key.initialize (it asks first, moves those files aside and "
-                "mints a new identity)"
+            remediation=keyless_identity_message(target, files),
+        )
+        return
+    if health.reason_code in DEVICE_KEY_UNUSABLE_REASONS:
+        # The key file cannot be used (empty or cut short after a stopped creation, not private, a link):
+        # not replaced, and the steps name the file and the reason (GAP-0927).
+        _emit(
+            "fail",
+            "Device identity",
+            f"device key at {target} cannot be used ({health.reason_code})",
+            r=r,
+            check_id="doctor.identity.device-key",
+            reason_code=health.reason_code,
+            remediation=unusable_key_message(
+                target, str(getattr(cfg, "data_dir", "") or ""), str(health.reason_code)
             ),
         )
         return
@@ -16797,14 +16814,13 @@ def _plan_device_key_recovery(cfg) -> RepairDecision:
             effects=effects,
         )
     if health.status is DeviceKeyHealthStatus.INVALID and health.reason_code == _DEVICE_KEY_LEFTOVERS:
-        if blocker := _recovery_gateway_blocker(cfg):
-            return RepairDecision("blocked", blocker, effects=effects, blockers=(blocker,))
-        return RepairDecision(
-            "requires_confirmation",
-            "the device key was deleted but its provenance files remain; after an attended review, move them "
-            "aside and mint a new device identity",
-            effects=("move the provenance files of the deleted key aside (kept as *.orphaned-<time>)", *effects),
+        # The key is gone but its provenance files remain: DefenseClaw never replaces them (GAP-0927);
+        # the way out is the manual steps Doctor prints.
+        detail = (
+            "the device key was deleted but its provenance files remain; DefenseClaw does not replace "
+            "them, remove them by hand (see the Device identity check) and run defenseclaw init again"
         )
+        return RepairDecision("blocked", detail, effects=effects, blockers=(health.reason_code,))
     if health.status is DeviceKeyHealthStatus.INVALID:
         detail = (
             f"existing device identity is invalid ({health.reason_code}); restore the "
@@ -16863,34 +16879,24 @@ def _fix_device_key_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
         DeviceKeyHealthStatus.LEGACY_UNPROVENANCED,
     }:
         return ("skip", "existing device identity is valid and will be preserved")
-    leftovers: list[str] = []
     if health.status is DeviceKeyHealthStatus.INVALID and health.reason_code == _DEVICE_KEY_LEFTOVERS:
-        markers = plan_missing_device_key(target, data_dir=data_dir).continuity_paths
-        leftovers = [path for path in markers if os.path.lexists(path)]
-    elif health.status is DeviceKeyHealthStatus.INVALID:
+        return (
+            "fail",
+            "the device key was deleted but its provenance files remain; refusing to replace them "
+            "(remove them by hand and run defenseclaw init again)",
+        )
+    if health.status is DeviceKeyHealthStatus.INVALID:
         return (
             "fail",
             f"existing device identity is invalid ({health.reason_code}); refusing to replace it",
         )
     if blocker := _recovery_gateway_blocker(cfg):
         return ("fail", blocker)
-    if leftovers:
-        click.echo(
-            f"    {target} is missing, but the provenance files of that key remain: {', '.join(leftovers)}. "
-            "If you have a backup of the key, restore it instead."
-        )
     if not click.confirm(
         "    Mint a NEW device identity? Existing pairings tied to a prior key will not be recoverable.",
         default=False,
     ):
         return ("skip", "declined by user")
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    for path in leftovers:
-        # Kept, not deleted: a continuity-aware review can still use them.
-        try:
-            os.replace(path, f"{path}.orphaned-{stamp}")
-        except OSError as exc:
-            return ("fail", f"could not move {path} aside: {exc}")
     plan = plan_missing_device_key(target, data_dir=data_dir)
     try:
         result = apply_device_key_recovery(plan, approved=True, unattended=False)

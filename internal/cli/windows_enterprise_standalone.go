@@ -1943,7 +1943,8 @@ func applyWindowsEnterpriseInstallerReport(
 			windowsEnterpriseLiveStandaloneServices(),
 		)
 		if windowsBundleHasCode(result.Errors[firstError:], "codex_requirements_held") ||
-			windowsBundleHasCode(result.Errors[firstError:], "codex_state_held") {
+			windowsBundleHasCode(result.Errors[firstError:], "codex_state_held") ||
+			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) {
 			next = windowsEnterpriseHeldRollbackNextStep(report.TransactionPending, windowsEnterpriseLiveStandaloneServices())
 		}
 		if next != "" {
@@ -3218,8 +3219,13 @@ func applyWindowsEnterpriseAmpMachineFolder(result *enterprisestatus.Result) {
 // can use to delete or replace that file, or, for a vendor that loads every
 // file in the folder, to add one. It is the verdict the guardian's publish
 // and machine-policy verify reach for the same folders
-// (enterprisepolicy.InspectRecordedVendorFolders). A host with no installed
-// standalone config has none. Replaceable in tests.
+// (enterprisepolicy.InspectRecordedVendorFolders), plus the vendor policy
+// files DefenseClaw has no record of that another account can change (what a
+// purge leaves behind, GAP-0930) and every other conflict or error that
+// machine-policy verify raises for the Go-owned targets
+// (enterprisepolicy.MachinePolicyProblems, the same function), so status and
+// verify never claim coverage that machine-policy verify denies. A host with
+// no installed standalone config has none. Replaceable in tests.
 var windowsEnterpriseVendorFolderProblems = func() []enterprisepolicy.VendorFolderProblem {
 	installed, err := loadWindowsEnterpriseStandaloneConfig("")
 	if err != nil || installed == nil {
@@ -3230,7 +3236,7 @@ var windowsEnterpriseVendorFolderProblems = func() []enterprisepolicy.VendorFold
 		return nil
 	}
 	defer pinWindowsStandaloneTrustScope()()
-	return enterprisepolicy.InspectRecordedVendorFolders(opts, connectors)
+	return enterprisepolicy.MachinePolicyProblems(opts, connectors)
 }
 
 // pinWindowsStandaloneTrustScope makes this process judge managed trust by the
@@ -3287,8 +3293,13 @@ func writeWindowsEnterpriseAuditRow(write func() error) error {
 }
 
 // windowsEnterpriseVendorFolderCode is the result code of a vendor folder that
-// does not protect DefenseClaw's recorded policy file.
+// does not protect DefenseClaw's recorded policy file, or of a vendor policy
+// file it cannot publish through.
 const windowsEnterpriseVendorFolderCode = "vendor_folder_not_held"
+
+// windowsEnterpriseMachinePolicyConflictCode is the result code of any other
+// conflict machine-policy verify raises for the Go-owned targets.
+const windowsEnterpriseMachinePolicyConflictCode = "machine_policy_not_covered"
 
 // refuseWindowsEnterpriseUntrustedVendorFolders is the install-like
 // lifecycle's and the reconcile's judgement of the vendor folders DefenseClaw
@@ -3303,9 +3314,12 @@ const windowsEnterpriseVendorFolderCode = "vendor_folder_not_held"
 // folder holds nothing DefenseClaw did not account for. Otherwise the action
 // is refused, by name, with the access list unchanged and the administrator's
 // recovery commands in the message, so reporting success never leaves the
-// connector unprotected (GAP-0756, GAP-0760). A fresh install, and a folder
-// with no recorded file (case b), pass: the first publish takes that folder
-// over.
+// connector unprotected (GAP-0756, GAP-0760). The same holds for a vendor
+// policy file DefenseClaw has no record of that another account can change and
+// that the publish cannot move aside (what a purge leaves when it keeps a
+// recorded file of that kind, GAP-0930): the action stops with 1603 and the
+// file's recovery. A fresh install, and a folder with no recorded file and no
+// such file (case b), pass: the first publish takes that folder over.
 func refuseWindowsEnterpriseUntrustedVendorFolders(opts *windowsEnterpriseLifecycleOptions) error {
 	if !windowsEnterpriseStandalone(opts) {
 		return nil
@@ -3329,11 +3343,19 @@ func refuseWindowsEnterpriseUntrustedVendorFolders(opts *windowsEnterpriseLifecy
 		return nil
 	}
 	messages := make([]string, 0, len(blocked))
+	var explanations []string
 	for _, problem := range blocked {
 		message := problem.Connector + ": " + problem.Message
 		// The same alert row the guardian pass writes, so a refusal Setup
 		// finds first (or with the guardian stopped) leaves a trail too.
-		details := windowsVendorFolderAlertDetails(problem.Dir, problem.Message)
+		path, explanation := problem.Dir, windowsEnterpriseVendorFolderRefusalWhy
+		if problem.UnrecordedFile {
+			path, explanation = problem.File, windowsEnterpriseUnrecordedFileRefusalWhy
+		}
+		if !slices.Contains(explanations, explanation) {
+			explanations = append(explanations, explanation)
+		}
+		details := windowsVendorFolderAlertDetails(path, problem.Message)
 		details["connector"], details["actor"] = problem.Connector, "defenseclaw-setup"
 		if err := writeWindowsEnterpriseAuditRow(func() error {
 			return windowsEnterpriseVendorFolderAlert("managed-vendor-folder", "managed_vendor_folder_not_protected", details)
@@ -3342,9 +3364,18 @@ func refuseWindowsEnterpriseUntrustedVendorFolders(opts *windowsEnterpriseLifecy
 		}
 		messages = append(messages, message)
 	}
-	return fmt.Errorf("%s (DefenseClaw does not take over a vendor folder it did not create unless it can prove nothing else holds it or has changed it, "+
-		"and does not give a file another account could change a trusted access list back in place): %s", windowsEnterpriseGateRefusal, strings.Join(messages, "; "))
+	return fmt.Errorf("%s (%s): %s", windowsEnterpriseGateRefusal, strings.Join(explanations, "; "), strings.Join(messages, "; "))
 }
+
+// Why the gate refuses: a vendor folder DefenseClaw did not create that holds
+// a file it recorded, and a vendor policy file it has no record of that
+// another account can change (GAP-0930).
+const (
+	windowsEnterpriseVendorFolderRefusalWhy = "DefenseClaw does not take over a vendor folder it did not create unless it can prove nothing else holds it or has changed it, " +
+		"and does not give a file another account could change a trusted access list back in place"
+	windowsEnterpriseUnrecordedFileRefusalWhy = "DefenseClaw does not publish machine policy through a vendor policy file it did not write and another account can change, " +
+		"and does not move aside or replace one an administrator owns"
+)
 
 // applyWindowsEnterpriseVendorFolders reports the same folders in a status,
 // verify or any other result: coverage and security are incomplete while a
@@ -3353,10 +3384,14 @@ func refuseWindowsEnterpriseUntrustedVendorFolders(opts *windowsEnterpriseLifecy
 func applyWindowsEnterpriseVendorFolders(result *enterprisestatus.Result) {
 	for _, problem := range windowsEnterpriseVendorFolderProblems() {
 		message := problem.Connector + ": " + problem.Message
+		code := windowsEnterpriseVendorFolderCode
+		if problem.Conflict {
+			code = windowsEnterpriseMachinePolicyConflictCode
+		}
 		if result.Action == "verify" {
-			result.AddError(windowsEnterpriseVendorFolderCode, message)
+			result.AddError(code, message)
 		} else {
-			result.AddWarning(windowsEnterpriseVendorFolderCode, message)
+			result.AddWarning(code, message)
 		}
 		result.CoverageComplete, result.SecurityComplete = false, false
 	}
@@ -3391,12 +3426,13 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 }
 
 // windowsEnterpriseTrimHeldCodePrefix drops the leading "code: " the module
-// puts on the two Codex hold deferrals so the code that is a field of the
+// puts on the two Codex hold deferrals and on privileges_required (GAP-0890
+// r2) so the code that is a field of the
 // error is not repeated at the start of its message ("codex_state_held:
 // codex_state_held: ...", g582 round 11c, L3).
 func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
-	case "codex_state_held", "codex_requirements_held":
+	case "codex_state_held", "codex_requirements_held", "privileges_required":
 		return strings.TrimPrefix(message, code+": ")
 	}
 	return message
@@ -3587,6 +3623,7 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	}
 	if result.Action == "status" || result.Action == "verify" {
 		writeWindowsEnterpriseEnrollmentAccounts(output, result.Enrollment.Accounts)
+		writeWindowsEnterpriseRemovedConnectors(output, result.Enrollment.RemovedConnectors)
 		writeWindowsEnterpriseEnrollmentExclusions(output, result.Enrollment)
 		if line := enterprisestatus.ConnectorsLine(result.Connectors); line != "" {
 			fmt.Fprintf(output, "  %s\n", line)
@@ -4005,7 +4042,9 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 	}
 	var manifest struct {
 		Targets []struct {
-			Enabled bool `yaml:"enabled"`
+			Enabled   bool   `yaml:"enabled"`
+			Connector string `yaml:"connector"`
+			SID       string `yaml:"sid"`
 		} `yaml:"targets"`
 	}
 	if err := yaml.Unmarshal(body, &manifest); err != nil {
@@ -4027,6 +4066,24 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 			}
 		}
 		enrollment.Accounts = windowsEnterpriseEnrollmentAccounts(state.Results)
+	}
+	if removed, err := windowsEnterpriseRemovedConnectorsForStatus(); err == nil {
+		// An entry ends on the guardian pass after its connector is back on the
+		// roster; until then it is not shown: the manifest admits the pair, or
+		// the loaded config publishes the connector again.
+		admitted := map[string]bool{}
+		for _, target := range manifest.Targets {
+			if target.Enabled {
+				admitted[managed.RemovedConnectorKey(target.Connector, target.SID)] = true
+			}
+		}
+		current := removed[:0:0]
+		for _, entry := range removed {
+			if !admitted[managed.RemovedConnectorKey(entry.Connector, entry.SID)] && !windowsEnterpriseConnectorPublishedForStatus(entry.Connector) {
+				current = append(current, entry)
+			}
+		}
+		enrollment.RemovedConnectors = windowsEnterpriseRemovedConnectorAccounts(current)
 	}
 	return enrollment, nil
 }

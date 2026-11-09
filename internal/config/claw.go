@@ -898,7 +898,8 @@ func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 // ReadMCPFromJSONCPaths reads the MCP servers found at each key chain of
 // paths in a JSON or JSONC file (union). AI discovery uses it for the agent
 // files whose servers are not a top-level mcpServers map: Amp's
-// amp.mcpServers and OpenClaw's and ZeptoClaw's mcp.servers (GAP-1062).
+// amp.mcpServers and ZeptoClaw's mcp.servers (GAP-1062). OpenClaw's file is
+// JSON5 and has its own reader, ReadMCPFromOpenClawConfig.
 func ReadMCPFromJSONCPaths(path string, paths ...[]string) ([]MCPServerEntry, error) {
 	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {

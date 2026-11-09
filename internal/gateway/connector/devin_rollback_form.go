@@ -4,9 +4,14 @@
 package connector
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookguard"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // Releases before 1.0.9 own the per-user Windows Devin command only in the
@@ -81,4 +86,87 @@ func convertDevinHookForms(hooks map[string]interface{}, pairs map[string][][2]s
 		}
 	}
 	return changed
+}
+
+// convertDevinHooksFile applies convertDevinHookForms to one Devin hooks file
+// under its lock, keeps a copy of it before a rollback conversion, and
+// returns how many handlers it rewrote. A rollback conversion (toEarlier)
+// first puts back the saved bytes of a file nobody edited since setup
+// (restoreUneditedForRollback). The conversion is written by a
+// compare-and-swap replace that commits only while the file is still the bytes
+// it converted: a save made meanwhile (including while the copy is kept) is
+// converted as saved, and a file deleted meanwhile stays deleted.
+func convertDevinHooksFile(path, dataDir, connectorName string, pairs map[string][][2]string, toEarlier bool, keepCopy func(dataDir, name string, data []byte) error) (int, error) {
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return 0, nil
+	}
+	copyName := ""
+	if keepCopy != nil {
+		sum := sha256.Sum256([]byte(strings.ToLower(path)))
+		copyName = "devin-" + hex.EncodeToString(sum[:6]) + ".before-rollback.json"
+	}
+	// convert returns the file converted in memory and how many handlers it
+	// rewrote.
+	convert := func(current []byte) (map[string]interface{}, int, error) {
+		cfg, err := parseDevinJSONObject(path, current)
+		if err != nil {
+			return nil, 0, err
+		}
+		return cfg, convertDevinHookForms(devinHooksObject(path, cfg), pairs, toEarlier), nil
+	}
+	converted := 0
+	err := withFileLockMode(path, false, func() error {
+		data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		_, wanted, err := convert(data)
+		if err != nil || wanted == 0 {
+			return err
+		}
+		if toEarlier {
+			var keep func([]byte) error
+			if keepCopy != nil {
+				keep = func(current []byte) error { return keepCopy(dataDir, copyName, current) }
+			}
+			if done, err := restoreUneditedForRollback(dataDir, connectorName, path, keep); err != nil || done {
+				if err == nil {
+					converted = wanted
+				}
+				return err
+			}
+		}
+		return atomicTransformFileWithStateDir(path, dataDir, 0o600,
+			func(current []byte, exists bool) (atomicTransformResult, error) {
+				converted = 0
+				if !exists {
+					return atomicTransformResult{Keep: true}, nil
+				}
+				if int64(len(current)) > devinConfigReadLimit {
+					return atomicTransformResult{}, fmt.Errorf("the Devin hooks file %s is larger than %d bytes", path, devinConfigReadLimit)
+				}
+				cfg, changed, err := convert(current)
+				if err != nil {
+					return atomicTransformResult{}, err
+				}
+				if changed == 0 {
+					return atomicTransformResult{Keep: true}, nil
+				}
+				if keepCopy != nil {
+					if err := keepCopy(dataDir, copyName, current); err != nil {
+						return atomicTransformResult{}, fmt.Errorf("keep a copy of the Devin hooks: %w", err)
+					}
+				}
+				out, err := renderDevinHooksFile(path, current, cfg)
+				if err != nil {
+					return atomicTransformResult{}, err
+				}
+				converted = changed
+				return atomicTransformResult{Data: out}, nil
+			})
+	})
+	return converted, err
 }

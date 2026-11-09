@@ -6,13 +6,8 @@
 package connector
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"os"
 	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // ConvertHooksForRollback rewrites the per-user Devin guarded starts this
@@ -61,34 +56,7 @@ func (c *hookOnlyConnector) convertDevinConfigHookForms(opts SetupOpts, toEarlie
 	}
 	total := 0
 	for _, path := range uniqueNonEmptyStrings(HookConfigPathsForConnector(c, opts)) {
-		if _, err := os.Lstat(path); os.IsNotExist(err) {
-			continue
-		}
-		converted := 0
-		err := withFileLockMode(path, false, func() error {
-			data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit)
-			if os.IsNotExist(err) {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-			cfg, err := readDevinJSONObject(path)
-			if err != nil {
-				return err
-			}
-			converted = convertDevinHookForms(devinHooksObject(path, cfg), pairs, toEarlier)
-			if converted == 0 {
-				return nil
-			}
-			if keepCopy != nil {
-				sum := sha256.Sum256([]byte(strings.ToLower(path)))
-				if err := keepCopy(opts.DataDir, "devin-"+hex.EncodeToString(sum[:6])+".before-rollback.json", data); err != nil {
-					return fmt.Errorf("keep a copy of the Devin hooks: %w", err)
-				}
-			}
-			return writeDevinHooksFile(path, cfg)
-		})
+		converted, err := convertDevinHooksFile(path, opts.DataDir, c.name, pairs, toEarlier, keepCopy)
 		if err != nil {
 			return total, fmt.Errorf("rewrite Devin hooks in %s: %w", path, err)
 		}

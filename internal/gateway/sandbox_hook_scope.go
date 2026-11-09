@@ -132,6 +132,10 @@ func hookCWDForContext(ctx context.Context, cwd string) string {
 	if view, ok := sandboxHookView(ctx); ok {
 		return sandboxHookCWD(view, cwd)
 	}
+	// Where the system reads a parent step as text (Windows), the directory a
+	// call starts in is the cleaned one, whatever link the text crosses; the
+	// hook client keys its evidence there (hookpaths.PlaceDirectory).
+	cwd = hookpaths.OSCleanedDirectory(cwd)
 	if resolved := sanitizeHookCWD(cwd); resolved != "" {
 		return resolved
 	}

@@ -326,7 +326,7 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks status          #
 sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise hooks status    # macOS
 ```
 
-On Windows, run from an elevated PowerShell prompt and read `enrollment.accounts`, which lists each account and connector as enrolled, pending or failed. Setup puts no DefenseClaw command on `PATH`, so the command names the installed CLI by its path:
+On Windows, run from an elevated PowerShell prompt and read `enrollment.accounts`, which lists each account and connector as enrolled, pending or failed. A connector you took off the roster that an account had been enrolled for (an account whose row was only pending is listed too) is listed apart, in `enrollment.removed_connectors`, as `not managed (removed from roster)`: it is neither protected nor pending, DefenseClaw no longer governs it for that account, and a hook call a running agent still makes is allowed. The entry ends when the connector is on the roster again for the account, or the account is gone. Setup puts no DefenseClaw command on `PATH`, so the command names the installed CLI by its path:
 
 ```powershell title="Elevated PowerShell prompt"
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone --json
