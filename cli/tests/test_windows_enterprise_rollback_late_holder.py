@@ -47,7 +47,8 @@ def test_every_deferral_is_standalone_only() -> None:
     sites = [m.start() for m in re.finditer(r"Add-DefenseClawRollbackDeferredHold -Message", text)]
     # The definition is a function, not a call.
     sites = [s for s in sites if not text[max(0, s - 40) : s].rstrip().endswith("function")]
-    assert len(sites) == 7, len(sites)
+    # GAP-0977 added the eighth: a guardian state file a holder keeps the guardian from publishing.
+    assert len(sites) == 8, len(sites)
     for site in sites:
         window = text[max(0, site - 1700) : site]
         assert "Test-DefenseClawStandaloneProfile" in window, text[site - 200 : site + 100]
@@ -118,8 +119,9 @@ def test_the_second_holder_does_not_cost_another_full_wait() -> None:
 
 def test_the_guardian_coverage_proof_is_deferred_only_for_a_republish_a_holder_blocked() -> None:
     text = _text()
-    # Set in two places, both in the rollback readiness: the held republish of the Codex requirements and the held state check.
-    assert text.count("$script:DefenseClawRollbackCoverageDeferred = $true") == 2
+    # Set in three places, all in the rollback: the held republish of the Codex requirements, the held state check, and (GAP-0977) a held
+    # guardian state file, which the guardian cannot publish over.
+    assert text.count("$script:DefenseClawRollbackCoverageDeferred = $true") == 3
     deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
     assert "$script:DefenseClawRollbackCoverageDeferred = $true" in deployment
     check = _function_body(text, "Test-DefenseClawRollbackCoverageDeferred")

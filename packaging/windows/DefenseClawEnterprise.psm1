@@ -35949,6 +35949,9 @@ function Set-DefenseClawRollbackGuardianStateDeferral {
         transaction pending (Assert-DefenseClawRollbackHoldsResolved).
     #>
     param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
     $held = Get-DefenseClawGuardianStateHold -Layout $Layout -Probes 3
     if ($null -eq $held) {
         return
