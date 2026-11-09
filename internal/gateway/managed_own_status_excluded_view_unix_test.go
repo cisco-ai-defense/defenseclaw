@@ -25,10 +25,8 @@ import (
 func TestOwnStatusExcludedAfterDescriptorOnlyRemovalClaimsNeitherNothingNorInspection(t *testing.T) {
 	for _, deny := range []bool{false, true} {
 		name := "inspect"
-		wantCode, wantText := "excluded_users_unverified", unverifiedReason
 		if deny {
 			name = "deny"
-			wantCode, wantText = "excluded_users_refused", refusedReason
 		}
 		t.Run(name, func(t *testing.T) {
 			opts, _ := claudePolicyViewTestRoot(t, "linux")
@@ -63,7 +61,7 @@ func TestOwnStatusExcludedAfterDescriptorOnlyRemovalClaimsNeitherNothingNorInspe
 			// Benign twin: with the proven view the inspect case says inspected.
 			if !deny {
 				requireExcludedReason(t, "claudecode with the view", ownStatusRowFor(t, api, "uid", "5003", "carol", "claudecode"),
-					"excluded_users_inspected", inspectedReason)
+					inspectedCode, inspectedReason)
 			}
 			descriptor.MachinePolicyConnectors = nil
 			if err := os.WriteFile(descriptorPath, []byte("version two"), 0o600); err != nil {
@@ -73,7 +71,7 @@ func TestOwnStatusExcludedAfterDescriptorOnlyRemovalClaimsNeitherNothingNorInspe
 			if api.managedPolicyView.Load() != nil {
 				t.Fatal("the view must be nil after a descriptor-only removal")
 			}
-			requireExcludedReason(t, "claudecode", ownStatusRowFor(t, api, "uid", "5003", "carol", "claudecode"), wantCode, wantText)
+			requireExcludedReason(t, "claudecode", ownStatusRowFor(t, api, "uid", "5003", "carol", "claudecode"), unknownCode, unknownReason)
 		})
 	}
 }
@@ -84,10 +82,10 @@ func TestOwnStatusExcludedAfterDescriptorOnlyRemovalClaimsNeitherNothingNorInspe
 func TestOwnStatusExcludedWithTheVendorHookRemovedDoesNotPromiseInspection(t *testing.T) {
 	for _, removed := range []bool{false, true} {
 		name := "hook in place"
-		wantCode, wantText := "excluded_users_inspected", inspectedReason
+		wantCode, wantText := inspectedCode, inspectedReason
 		if removed {
 			name = "hook removed"
-			wantCode, wantText = "excluded_users_unverified", unverifiedReason
+			wantCode, wantText = unknownCode, unknownReason
 		}
 		t.Run(name, func(t *testing.T) {
 			opts, dir := claudePolicyViewTestRoot(t, "linux")

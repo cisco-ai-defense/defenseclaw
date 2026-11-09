@@ -157,7 +157,7 @@ func TestOwnStatusWindowsExcludedAccountIsExcludedOnEveryRow(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := ownStatusExcludedFixture(t, tc.exclude, nil)
-			requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `WIN11\alice`, ""), "excluded_users")
+			requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `WIN11\alice`, ""), "excluded_users_unverified")
 			// Benign twin: bob is enrolled.
 			if row := ownStatusRowFor(t, api, "sid", bob, `WIN11\bob`, "claudecode"); row["state"] == "excluded" {
 				t.Fatalf("bob claudecode row = %#v, want not excluded", row)
@@ -199,7 +199,7 @@ func TestOwnStatusWindowsExclusionFollowsTheEnumeratorSpellings(t *testing.T) {
 				t.Fatalf("exclude_users [%s]: row = %#v, excluded = %v, want %v", tc.exclude, row, got, tc.excluded)
 			}
 			if tc.excluded {
-				requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `CONTOSO\alice`, ""), "excluded_users")
+				requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `CONTOSO\alice`, ""), "excluded_users_unverified")
 			} else if row["state"] != "protected" {
 				t.Fatalf("enrolled row = %#v, want protected", row)
 			}
@@ -393,7 +393,13 @@ func TestOwnStatusUnixUnresolvedAccountNameClaimsNoProtection(t *testing.T) {
 			api := ownStatusExcludedFixture(t, tc.exclude, nil)
 			answer := api.ownStatusAnswer(context.Background(), "uid", tc.uid, tc.account, "")
 			if tc.want == "excluded" {
-				requireExcludedAnswer(t, answer, "excluded_users_inspected")
+				// The per-account proof is matched by name only, so a lookup that
+				// failed claims nothing about inspection.
+				wantCode := "excluded_users_inspected"
+				if tc.account == "" {
+					wantCode = "excluded_users_unverified"
+				}
+				requireExcludedAnswer(t, answer, wantCode)
 				return
 			}
 			if tc.uid == "0" {

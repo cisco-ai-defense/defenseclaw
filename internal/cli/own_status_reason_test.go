@@ -70,8 +70,8 @@ func TestOwnStateTextJoinsStateReasonAndNextStep(t *testing.T) {
 		"protected with a reason": {ownStatusRow{Protected: true, State: "protected", Reason: "Cowork runs the managed hooks"},
 			"protected: Cowork runs the managed hooks"},
 		"protected": {ownStatusRow{Protected: true, State: "protected"}, "protected"},
-		"excluded account": {ownStatusRow{State: "excluded", ReasonCode: "excluded_users_inspected", Reason: "your account is listed in enterprise.enrollment.exclude_users: excluded from enrollment; the machine policy still inspects your calls (unenrolled_users: inspect)", NextStep: "Ask IT to remove your account from enterprise.enrollment.exclude_users"},
-			"excluded: your account is listed in enterprise.enrollment.exclude_users: excluded from enrollment; the machine policy still inspects your calls (unenrolled_users: inspect). Ask IT to remove your account from enterprise.enrollment.exclude_users"},
+		"excluded account": {ownStatusRow{State: "excluded", ReasonCode: "excluded_users_inspected", Reason: "your account is listed in enterprise.enrollment.exclude_users: excluded from enrollment; the machine policy still inspects your calls", NextStep: "Ask IT to remove your account from enterprise.enrollment.exclude_users"},
+			"excluded: your account is listed in enterprise.enrollment.exclude_users: excluded from enrollment; the machine policy still inspects your calls. Ask IT to remove your account from enterprise.enrollment.exclude_users"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := ownStateText(tc.row); got != tc.want {

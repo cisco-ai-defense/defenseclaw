@@ -126,43 +126,27 @@ func ownNotConfirmed(cause ownCause) map[string]any {
 	return ownRow(false, "not confirmed", cause)
 }
 
-// ownInspection is what the gateway really does with the calls of an account
-// that exclude_users names, for one connector. Exclusion only keeps the account
-// out of enrollment; a machine policy runs the hook for every account whatever
-// enrollment says, so the row must say which of these holds (rel-1-0-9
-// GAP-0949).
+// ownInspection is what the status can prove about the calls of an account that
+// exclude_users names, for one connector. Exclusion only keeps the account out
+// of enrollment; a machine policy runs its hook for every account whatever
+// enrollment says. The row claims only what it can back: a pinned machine-policy
+// hook, or the absence of any, and otherwise it sends the reader to the
+// administrator status (rel-1-0-9 GAP-0949).
 type ownInspection int
 
 const (
-	// ownInspectionUnknown: the status cannot tell what the authorizer does
-	// (the Windows own-status pipe has no authorizer, or the guardian ledger
-	// is unreadable), so the row claims nothing about the calls.
+	// ownInspectionUnknown: the status cannot tell what still inspects the
+	// calls (no authorizer, as on the Windows own-status pipe; the account name
+	// is not resolved; the vendor source is unreadable or not the pinned one; an
+	// admission without a proven hook), so the row claims nothing.
 	ownInspectionUnknown ownInspection = iota
-	// ownInspectionNone: no machine policy covers the connector, and the
-	// excluded account has no hook of its own: nothing inspects its calls.
+	// ownInspectionNone: no machine-policy hook covers the account for the
+	// connector, and no admission names it.
 	ownInspectionNone
-	// ownInspectionPolicy: a proven machine policy covers the connector and
-	// unenrolled_users is inspect, so the hook still inspects the account.
-	ownInspectionPolicy
-	// ownInspectionExempt: the same, and exempt_users names the account.
-	ownInspectionExempt
-	// ownInspectionLedger: the guardian ledger still lists a protected target
-	// for the account, so the authorizer lets its calls through.
-	ownInspectionLedger
-	// ownInspectionRefused: a machine policy covers the connector, the
-	// account is neither exempt nor on the ledger, and unenrolled_users is
-	// deny, so the gateway refuses the calls its hook sends.
-	ownInspectionRefused
-	// ownInspectionUnverified: the authorizer admits the account, but the
-	// vendor policy that runs the hook is not proven (the policy view is
-	// missing, lacks the connector or has an unpinned source), so the status
-	// cannot say whether any call arrives.
-	ownInspectionUnverified
-	// ownInspectionAdmittedOnly: the authorizer admits the account (a guardian
-	// ledger row, or exempt_users) but no pinned vendor hook is proven for the
-	// connector. An admission is not an installation, so the status says
-	// neither that the calls are inspected nor that nothing sends them.
-	ownInspectionAdmittedOnly
+	// ownInspectionInspected: a machine-policy hook for the connector is
+	// installed and pinned for the account. Whatever the hook authorizer then
+	// answers (inspect, refuse), the machine policy is what handles the calls.
+	ownInspectionInspected
 )
 
 const (
@@ -173,31 +157,19 @@ const (
 )
 
 // ownExcludedCause is the reason of an excluded row: the exclusion, and what
-// the gateway still does with the calls. The state stays excluded whatever
-// the inspection is; the reason is in its own field.
+// the status can prove about the calls. The state stays excluded whatever the
+// inspection is; the reason is in its own field.
 func ownExcludedCause(inspection ownInspection) ownCause {
 	cause := ownCause{"excluded_users", ownExcludedBase, ownExcludedNextStep}
 	switch inspection {
 	case ownInspectionNone:
-		cause.reason += "; nothing inspects your calls"
-	case ownInspectionPolicy:
+		cause.reason += "; DefenseClaw does not inspect your calls"
+	case ownInspectionInspected:
 		cause.code = "excluded_users_inspected"
-		cause.reason += "; the machine policy still inspects your calls (unenrolled_users: inspect)"
-	case ownInspectionExempt:
-		cause.code = "excluded_users_inspected"
-		cause.reason += "; the machine policy still inspects your calls (enterprise.enrollment.exempt_users names your account)"
-	case ownInspectionLedger:
-		cause.code = "excluded_users_inspected"
-		cause.reason += "; the guardian still lists an enrollment for your account, so the gateway inspects your calls"
-	case ownInspectionRefused:
-		cause.code = "excluded_users_refused"
-		cause.reason += "; the gateway refuses the calls its hook sends for your account (unenrolled_users: deny)"
-	case ownInspectionUnverified:
+		cause.reason += "; the machine policy still inspects your calls"
+	default:
 		cause.code = "excluded_users_unverified"
-		cause.reason += "; DefenseClaw cannot verify the vendor policy that runs the hook for your account, so it cannot say whether your calls are inspected"
-	case ownInspectionAdmittedOnly:
-		cause.code = "excluded_users_unverified"
-		cause.reason += "; the gateway admits the calls of your account, but DefenseClaw cannot verify that a hook still sends them, so it cannot say whether your calls are inspected"
+		cause.reason += "; run defenseclaw-managed status as an administrator to see what still inspects calls"
 	}
 	return cause
 }
