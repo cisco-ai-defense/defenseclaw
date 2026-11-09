@@ -369,6 +369,48 @@ def test_an_uninstall_with_a_cache_the_writer_cannot_emit_succeeds_and_leaves_th
     assert aside in shown
 
 
+def _nested(open_, close, depth, inner="0"):
+    return open_ * depth + inner + close * depth
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # a small file the parser accepts but the reader's depth cap refuses, as an answer and as the whole document
+        "{\"answers\":{" + _KEY + ":" + _nested("[", "]", 995) + "}}",
+        "{\"answers\":{" + _KEY + ":" + _nested("{\"k\":", "}", 400) + "}}",
+        _nested("[", "]", 300),
+        # a file too deep for the parser itself
+        "{\"answers\":{" + _KEY + ":" + _nested("[", "]", 20000) + "}}",
+    ],
+    ids=["array-995", "object-400", "document-300", "parser-limit"],
+)
+def test_a_deeply_nested_cache_is_moved_aside_and_named_and_the_uninstall_succeeds(
+    tmp_path, monkeypatch, capsys, body,
+):
+    home, plan = _move_and_plan(tmp_path, monkeypatch)
+    (home / "hermes-plugin-entrypoints.json").write_bytes(body.encode())
+
+    result = _execute_earlier_folder_phase(plan)
+
+    assert result.succeeded
+    assert cmd_uninstall._phases_left(result) == []
+    shown, cache, aside = _cache_moved_aside(home, body, capsys)
+    assert cache in shown
+    assert aside in shown
+    assert "nested" in shown
+
+
+def test_the_depth_cap_walk_is_iterative_and_ordinary_nesting_still_reads():
+    assert cmd_uninstall._loads_as_written(_nested("[", "]", 250)) is not None
+    for body in (_nested("[", "]", 600), _nested("{\"k\":", "}", 257)):
+        with pytest.raises(ValueError, match="nested"):
+            cmd_uninstall._loads_as_written(body)
+    assert cmd_uninstall._loads_as_written("{\"a\":[{\"b\":[1,\"x\"]}]}") == {"a": [{"b": [1, "x"]}]}
+    with pytest.raises(ValueError, match="surrogate"):
+        cmd_uninstall._loads_as_written("[[{\"k\":\"\\ud800\"}]]")
+
+
 def test_a_second_cache_the_writer_cannot_emit_is_moved_to_the_next_free_name_and_the_first_is_kept(
     tmp_path, monkeypatch, capsys,
 ):

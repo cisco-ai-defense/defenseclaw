@@ -1349,28 +1349,64 @@ def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return found
 
 
+# The deepest nesting a file DefenseClaw wrote can hold (its records nest a few levels); a deeper document is
+# not one of its files, and the walk below is iterative so a small deeply nested file cannot exhaust the stack.
+_JSON_MAX_DEPTH = 256
+
+
 def _check_utf8_strings(value: object) -> None:
-    """Raise ValueError for a string holding an unpaired surrogate, at any depth.
+    """Raise ValueError for a string holding an unpaired surrogate, or for nesting deeper than _JSON_MAX_DEPTH.
 
     The Go writers marshal valid UTF-8 and cannot emit one; Python parses the escape into a string it cannot
-    encode, so a file that has one was not written by DefenseClaw (GAP-0945).
+    encode, so a file that has one was not written by DefenseClaw (GAP-0945). The walk keeps its own stack, so
+    no document, however deep, can raise RecursionError here.
     """
-    if isinstance(value, str):
-        if re.search("[\ud800-\udfff]", value):
-            raise ValueError("a string holds an unpaired surrogate")
-    elif isinstance(value, list):
-        for item in value:
-            _check_utf8_strings(item)
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            _check_utf8_strings(key)
-            _check_utf8_strings(item)
+    pending: list[tuple[object, int]] = [(value, 1)]
+    while pending:
+        item, depth = pending.pop()
+        if isinstance(item, str):
+            _check_no_surrogate(item)
+        elif isinstance(item, (list, dict)):
+            if depth > _JSON_MAX_DEPTH:
+                raise ValueError(f"it is nested deeper than {_JSON_MAX_DEPTH} levels")
+            if isinstance(item, dict):
+                for key in item:
+                    _check_no_surrogate(key)
+                item = list(item.values())
+            pending.extend((child, depth + 1) for child in item)
+
+
+def _check_no_surrogate(text: str) -> None:
+    if re.search("[\ud800-\udfff]", text):
+        raise ValueError("a string holds an unpaired surrogate")
+
+
+def _json_loads(raw: bytes | str) -> object:
+    """json.loads with no repeated key at any level; a document too deep for the parser is a ValueError."""
+    try:
+        return json.loads(raw, object_pairs_hook=_unique_keys)
+    except RecursionError as exc:
+        raise ValueError("it is nested too deeply to read") from exc
 
 
 def _loads_as_written(raw: bytes | str) -> object:
-    """Parse JSON the way a file DefenseClaw wrote can read: no repeated key at any level, no unpaired surrogate."""
-    document = json.loads(raw, object_pairs_hook=_unique_keys)
+    """Parse JSON the way a file DefenseClaw wrote can read: no repeated key at any level, no unpaired surrogate,
+    nesting within _JSON_MAX_DEPTH. Anything else raises ValueError (a malformed file, never a crash)."""
+    document = _json_loads(raw)
     _check_utf8_strings(document)
+    return document
+
+
+def _loads_top_level_record(raw: bytes | str) -> object:
+    """Parse a backup record Setup copied byte for byte: only its top level is judged, so the depth of a captured
+    value (the extra fields of a hook handler) never rejects it. Repeated keys are still refused; an unpaired
+    surrogate is refused in the top-level keys and string values the record shape reads."""
+    document = _json_loads(raw)
+    if isinstance(document, dict):
+        for key, value in document.items():
+            _check_no_surrogate(key)
+            if isinstance(value, str):
+                _check_no_surrogate(value)
     return document
 
 
@@ -1412,7 +1448,7 @@ def _is_setup_top_level_backup(path: str, move_digests: dict[str, str] | None = 
     required, allowed = shape
     raw = _small_file_bytes(path)
     try:
-        document = _loads_as_written(raw) if raw is not None else None
+        document = _loads_top_level_record(raw) if raw is not None else None
     except ValueError:
         return False
     if raw is None:
