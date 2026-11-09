@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // hookAssetFacts is the assetfacts.Header value of a standalone managed
@@ -55,6 +56,9 @@ func hookAssetFacts(connector string, payload []byte) string {
 		event.ToolInput = hookToolArgs(event.ToolArgs)
 	}
 	home, _ := os.UserHomeDir()
+	// The links of the call are followed on a network share only once it has
+	// answered, within the wait this call has for shares.
+	defer hookpaths.HookCall()()
 	var facts assetfacts.Facts
 	addSkill := func(folder, dir string) {
 		declared := assetfacts.DeclaredSkillName(dir)
@@ -84,6 +88,7 @@ func hookAssetFacts(connector string, payload []byte) string {
 			}
 		}
 	}
+	facts.SkillLinksUnproven = hookpaths.SkillLinksUnproven()
 	if server := hookMCPServerName(event.ToolName, event.MCPServerName); server != "" && connector != "copilot" {
 		entry, source, ok := hookCommandLineMCPServer(connector, event.CWD, server)
 		switch {

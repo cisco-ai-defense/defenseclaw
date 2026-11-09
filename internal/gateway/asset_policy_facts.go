@@ -329,6 +329,51 @@ func (a *APIServer) skillFolderAccessDecision(
 	if cfg == nil || cfg.SecureClientIntegration() || !runtimeAssetCanEnforce(hookEvent) {
 		return config.AssetPolicyDecision{}, false
 	}
+	if decision, matched := a.skillFolderRefsDecision(ctx, cfg, connector, hookEvent, cwd, toolName, toolInput); matched {
+		return decision, true
+	}
+	return a.skillLinksUnprovenDecision(ctx, cfg, connector, hookEvent, toolName)
+}
+
+// skillLinksUnprovenDecision judges a call whose links could not all be
+// followed because a network share on a path did not answer within the wait
+// the hook call has for shares (the hook's claim, or this gateway's own walk):
+// the skill folder a link there leads to is unknown. It matters only when a
+// skill is held or denied. Then the strict tier (and managed strict) refuses
+// the call as unproven; the default and permissive tiers allow it with a
+// visible alert, since an ordinary command on a slow share is not a named or
+// known protected folder. A held or denied folder the call names, directly or
+// through a link the walk followed, is refused in every tier by the check
+// before this one.
+func (a *APIServer) skillLinksUnprovenDecision(
+	ctx context.Context, cfg *config.Config, connector, hookEvent, toolName string,
+) (config.AssetPolicyDecision, bool) {
+	if !claimedAssetFactsFromContext(ctx).SkillLinksUnproven && !hookpaths.SkillLinksUnproven() {
+		return config.AssetPolicyDecision{}, false
+	}
+	if !a.skillFoldersAreGuarded(cfg) {
+		return config.AssetPolicyDecision{}, false
+	}
+	const reason = "a network share on a path of the call did not answer in time, so a skill folder a link there leads to cannot be shown not to be held or denied"
+	decision := runtimeAssetDisableBlockDecision("skill", "skill-links", connector, "skill_folder", reason, "skill-links-unproven")
+	decision.RegistryStatus = "unknown"
+	probe := skillRuntimeProbe{TargetType: "skill", SkillName: "skill-links", ToolName: toolName, Surface: "skill_folder", Matched: true}
+	if a.shareBodyStrictTier(ctx, connector) {
+		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
+		return decision, true
+	}
+	a.logAssetPolicyAudit(ctx, connector, "skill:skill-links", runtimeSkillAssetPolicyAuditDetails(
+		config.AssetPolicyDecision{Action: "allow", Source: decision.Source, RegistryStatus: decision.RegistryStatus, WouldBlock: true, Reason: reason},
+		connector, hookEvent, probe))
+	fmt.Fprintf(os.Stderr, "[gateway] warning: %s (connector=%s; the strict policy tier blocks the call)\n", reason, connector)
+	return config.AssetPolicyDecision{}, false
+}
+
+// skillFolderRefsDecision is skillFolderAccessDecision for the skill folders
+// the call names or reaches through a link.
+func (a *APIServer) skillFolderRefsDecision(
+	ctx context.Context, cfg *config.Config, connector, hookEvent, cwd, toolName string, toolInput map[string]interface{},
+) (config.AssetPolicyDecision, bool) {
 	facts := claimedAssetFactsFromContext(ctx)
 	home := hookActiveHome(ctx)
 	caller := ""
