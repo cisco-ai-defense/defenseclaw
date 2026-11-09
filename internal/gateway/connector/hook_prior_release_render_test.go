@@ -4,7 +4,10 @@
 
 package connector
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // GAP-0980: the render of releases up to 1.0.6 is the current render with the
 // Constrained Language fallback end of legacyWindowsAwaitedHookCommand; the
@@ -43,5 +46,35 @@ func TestPriorReleaseHookRenderIsTheLegacyFallbackEndOfEveryBridge(t *testing.T)
 	}
 	if got := priorReleaseHookRender(float64(30)); got != float64(30) {
 		t.Fatalf("number changed: %v", got)
+	}
+}
+
+// The needle comparison of a generic hook config (Kiro and the connectors that
+// are matched by their native hook flag) accepts the earlier release's bridge
+// only when asked, and only as the legacy fallback end of the same command.
+func TestHookCommandMatchesPriorReleaseAcceptsOnlyTheLegacyFallbackEnd(t *testing.T) {
+	for _, name := range []string{"kiro", "devin", "antigravity", "copilot"} {
+		needle := nativeHookFlag + name
+		current := hookInvocationCommandFor("windows", name, "")
+		legacy, ok := legacyWindowsAwaitedHookCommand(current)
+		if !ok {
+			// A connector whose command is not an awaited bridge has no earlier render.
+			if hookCommandMatchesPriorRelease(current+" x", needle) {
+				t.Fatalf("%s: a different command matched", name)
+			}
+			continue
+		}
+		if !hookCommandMatches(current, needle) || hookCommandMatches(legacy, needle) {
+			t.Fatalf("%s: the exact comparison must take only the current command", name)
+		}
+		if !hookCommandMatchesPriorRelease(current, needle) || !hookCommandMatchesPriorRelease(legacy, needle) {
+			t.Fatalf("%s: the prior-release comparison must take the current and the legacy command", name)
+		}
+		if hookCommandMatchesPriorRelease(legacy+" ", needle) || hookCommandMatchesPriorRelease(strings.Replace(legacy, "powershell", "pwsh", 1), needle) {
+			t.Fatalf("%s: an edited legacy command matched", name)
+		}
+	}
+	if hookCommandMatchesPriorRelease("anything", "/opt/defenseclaw/hooks/kiro-hook.sh") {
+		t.Fatal("a script needle matched a stranger")
 	}
 }
