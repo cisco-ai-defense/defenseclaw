@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -424,3 +425,41 @@ func actionClientLoopCopySourceStartupUnknown() bool {
 	}
 	return false
 }
+
+// copyOpensNoSource reports a reading that is one plain copy whose source
+// operand is the empty string. cp stats its source first and fails, so the
+// call writes nothing wherever the destination lies; the loop proof above
+// reaches the same answer for a loop whose source variable is empty. A
+// reading the straight-line walk gives for such a call (IFS=; cp "$IFS" d,
+// src=; cp "$src" d) names the destination only because the walk
+// substituted the value, so it is not described as a write.
+func copyOpensNoSource(reading, home string) bool {
+	if actionClientLoopCopySourceStartupUnknown() {
+		return false
+	}
+	file, parsed := parseShell(reading)
+	if !parsed || len(file.Stmts) != 1 {
+		return false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 || len(call.Assigns) != 0 || len(call.Args) < 3 {
+		return false
+	}
+	program, fixed := staticProgramWord(call.Args[0], home)
+	if !fixed || programBase(program) != "cp" && programBase(program) != "gcp" {
+		return false
+	}
+	// Only options that take no value: -t, -S and their long forms name a
+	// directory or a suffix and change which words are the sources.
+	for _, word := range call.Args[1 : len(call.Args)-2] {
+		option, fixed := StaticWord(word, home)
+		if !fixed || option != "--" && !plainCopyFlags.MatchString(option) {
+			return false
+		}
+	}
+	source, fixed := StaticWord(call.Args[len(call.Args)-2], home)
+	return fixed && source == ""
+}
+
+var plainCopyFlags = regexp.MustCompile(`^-[fipnrRavdPLHux]+$`)
