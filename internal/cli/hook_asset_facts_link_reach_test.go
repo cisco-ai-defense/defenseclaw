@@ -97,9 +97,10 @@ func TestHookAssetFactsReportsALinkIntoAnotherConnectorsSkillRoot(t *testing.T) 
 	}
 }
 
-// A word with no slash that names an existing entry of the working folder is a
-// path: the link it names, or SKILL.md read from inside a skill folder, is
-// reported as ./word would be. A word that names nothing there, and an
+// A command line that holds the name of an existing entry of the working
+// folder, with a word that reads or runs, reaches the folder that entry leads
+// to: the link it names, or SKILL.md read from inside a skill folder, is
+// reported as ./name would be. A line that holds no such name, and an
 // ordinary file, report nothing.
 func TestHookAssetFactsReportsASkillFolderAWordOfTheCallLeadsTo(t *testing.T) {
 	f := newLinkReachFixture(t)
@@ -116,7 +117,7 @@ func TestHookAssetFactsReportsASkillFolderAWordOfTheCallLeadsTo(t *testing.T) {
 		{"opencode", "opencode", "bash", map[string]any{"command": "cat lnk-held"}, f.proj, true},
 		{"manifest from inside", "claudecode", "Bash", map[string]any{"command": "cat SKILL.md"}, f.held, true},
 		{"ordinary file", "claudecode", "Bash", map[string]any{"command": "cat notes.txt"}, f.proj, false},
-		{"word that names nothing", "claudecode", "Bash", map[string]any{"command": "echo lnk-held-no ls"}, f.proj, false},
+		{"word that names nothing", "claudecode", "Bash", map[string]any{"command": "echo nothing-here ls"}, f.proj, false},
 		{"link outside the roots", "claudecode", "Bash", map[string]any{"command": "ls lnk-away"}, f.proj, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

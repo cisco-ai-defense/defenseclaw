@@ -939,18 +939,17 @@ type FolderRef struct {
 // line, a file path or a working folder. "~" and $HOME expand to home and
 // a relative path resolves against cwd. tool is the name of the tool the call
 // is for (it may be empty): a search tool that names no place searches cwd. A
-// slash-free word is a path only when it names an existing entry of the
-// working folder and the call reads it: a path field is judged whole as typed,
-// a program that reads files (cat, grep, find, cp, sed, ...) reads every
-// word after it, and any other program only in the strict tier (see
-// operand_context.go).
+// slash-free word is a path only as the name of an existing entry that leads
+// into a skill folder: a command line that holds such a name anywhere in its
+// text, and a word that reads, copies, writes or runs, reads that folder in
+// every tier; the strict tier needs no such word (see operand_context.go).
 func SkillFolderRefs(tool string, input any, home, cwd string, caller ...string) []FolderRef {
 	return skillFolderRefsForCaller(tool, input, home, cwd, callerName(caller), os.Geteuid(), os.Getegid(), false)
 }
 
 // SkillFolderRefsStrict is SkillFolderRefs for the strict policy tier: a
-// slash-free word of any program that names an existing entry of the working
-// folder is read as a path, not only the words of a program that reads files.
+// command line that holds the name of an entry that leads into a skill folder
+// reads that folder, with or without a word that reads or runs.
 func SkillFolderRefsStrict(tool string, input any, home, cwd string, caller ...string) []FolderRef {
 	return skillFolderRefsForCaller(tool, input, home, cwd, callerName(caller), os.Geteuid(), os.Getegid(), true)
 }
@@ -974,8 +973,9 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 	collectFields(tool, input, "", 0, &fields)
 	seen := map[string]int{}
 	var refs []FolderRef
-	addToken := func(token, dir string, explicit bool) {
-		for _, ref := range skillFolderRefs(token, home, dir, account) {
+	scan := newEntryScan(home, account)
+	addRefs := func(found []FolderRef, explicit bool) {
+		for _, ref := range found {
 			ref.ExplicitDirectory = explicit
 			if index, ok := seen[ref.Dir]; ok {
 				refs[index].Manifest = refs[index].Manifest || ref.Manifest
@@ -987,6 +987,9 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 			refs = append(refs, ref)
 		}
 	}
+	addToken := func(token, dir string, explicit bool) {
+		addRefs(skillFolderRefs(token, home, dir, account), explicit)
+	}
 	add := func(f inputField, text, dir string, explicit bool) {
 		kind := kindOfField(tool, f.key)
 		switch kind {
@@ -995,21 +998,37 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 			// its folder names.
 			addToken(text, dir, explicit)
 		case kindText:
-			for _, w := range shellWords(text, 0) {
-				if strings.ContainsAny(w.text, "/\\") {
-					addToken(w.text, dir, explicit)
-				}
+			for _, word := range slashWords(text) {
+				addToken(word, dir, explicit)
 			}
 		default:
 			if kind == kindOther && !strings.ContainsAny(text, " \t") {
 				// A field no rule knows may hold one path.
 				addToken(text, dir, explicit)
 			}
-			words, cwdSearch := commandPathWords(text, f.argv, dir, strict || kind == kindOther, 0)
-			for _, word := range words {
-				addToken(word, dir, explicit)
+			// A word with a slash in it is a path, whatever the program. A
+			// word without one is a path when it is the name of an entry of
+			// the folder and the line also holds a word that reads or runs
+			// something (any line in the strict tier); an argument vector
+			// is read as one line, its elements joined by one space, and
+			// each element with a slash is one path whole.
+			line := text
+			if f.argv != nil {
+				line = strings.Join(f.argv, " ")
+				for _, element := range f.argv {
+					if strings.ContainsAny(element, "/\\") {
+						addToken(element, dir, explicit)
+					}
+				}
+			} else {
+				for _, word := range slashWords(line) {
+					addToken(word, dir, explicit)
+				}
 			}
-			if cwdSearch {
+			if strict || kind == kindOther || holdsReaderWord(textForms(line)) {
+				addRefs(scan.folders(line, dir), explicit)
+			}
+			if searchesFolder(line) {
 				addToken(dir, dir, explicit)
 			}
 		}
@@ -1095,7 +1114,7 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) 
 		case quote == 0 && (ch == ';' || ch == '\n' ||
 			ch == '&' && i+1 < len(value) && value[i+1] == '&'):
 			prefix = value[:i]
-			words := wordTexts(shellWords(prefix, 0))
+			words := splitWords(prefix, false)
 			if len(words) != 2 || words[0] != "cd" || words[1] == "-" ||
 				strings.ContainsAny(words[1], "*?[]{}$`") {
 				return "", "", "", false, false, false
@@ -1160,14 +1179,6 @@ func inputKeys(m map[string]any) []string {
 		return keys[i] < keys[j]
 	})
 	return keys
-}
-
-func isCommandSeparator(r rune) bool {
-	switch r {
-	case 0x20, 0x09, 0x0a, 0x0d, 0x22, 0x27, 0x60, 0x3b, 0x7c, 0x26, 0x28, 0x29, 0x3c, 0x3e, 0x3d, 0x2c:
-		return true
-	}
-	return false
 }
 
 // msysDriveSpelling spells a Git Bash drive mount (/c/x, /cygdrive/c/x,
