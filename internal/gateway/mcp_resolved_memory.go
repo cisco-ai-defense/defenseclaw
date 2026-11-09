@@ -322,13 +322,14 @@ func (m *mcpResolvedDefinitions) expireLocked(now time.Time) {
 }
 
 // sameMCPDefinition reports whether two entries are the same server under the
-// same configured name: where it points or how it starts, and the name the
-// lists and the registry know it by. An edit that only renames the entry is a
+// same configured name: where it points or how it starts (a bounded copy of
+// a longer argument list is not the complete list it stands for), and the
+// name the lists and the registry know it by. An edit that only renames the entry is a
 // change too, because a rule can deny the old name.
 func sameMCPDefinition(a, b config.MCPServerEntry) bool {
 	return strings.TrimSpace(a.Name) == strings.TrimSpace(b.Name) &&
 		strings.TrimSpace(a.URL) == strings.TrimSpace(b.URL) &&
 		strings.TrimSpace(a.Command) == strings.TrimSpace(b.Command) &&
 		strings.TrimSpace(a.Transport) == strings.TrimSpace(b.Transport) &&
-		slices.Equal(a.Args, b.Args)
+		slices.Equal(a.Args, b.Args) && a.ArgsCut == b.ArgsCut
 }
