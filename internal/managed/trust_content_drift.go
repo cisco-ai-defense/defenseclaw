@@ -90,7 +90,7 @@ func standaloneMachinePolicyDriftRecovery(path string, cause error) string {
 		// stays (a vendor folder that lost it breaks every standard user).
 		parent := filepath.Dir(path)
 		fix += ` and, for the folder above it, run icacls "` + parent + `" to see which account can write it, then take away only that account's ` +
-			`write-like grant and keep its read: for BUILTIN\Users that is icacls "` + parent + `" /grant:r "*` + sidUsers + `:(OI)(CI)(RX)"`
+			`write-like grant and keep its read: for BUILTIN\Users that is icacls "` + parent + `" /remove:g *` + sidUsers + ` /grant "*` + sidUsers + `:(OI)(CI)(RX)"`
 	}
 	if statErr == nil && info.IsDir() {
 		return "the hook guardian leaves it as it is and every DefenseClaw reader keeps refusing it: from an elevated PowerShell prompt run " +
@@ -196,13 +196,15 @@ func standaloneExactFix(path string, directory bool, writers, drift []string) st
 // standaloneWriterAboveFix takes the write-like grant of one account away from
 // a folder above the object and leaves its read: the stock accounts that every
 // standard user needs to read a vendor folder (Users, Authenticated Users,
-// Everyone) get their grant replaced by read and execute, any other account
-// loses its grants. /remove:g on Users would break reading for everyone.
+// Everyone) lose their entries and get read and execute back in the same
+// command, any other account loses its entries. A bare /remove:g on Users
+// would break reading for everyone, and a bare /grant:r leaves an entry with
+// other inheritance flags (a Modify entry for the folder alone).
 func standaloneWriterAboveFix(folder, sid string) string {
 	quoted := `"` + folder + `"`
 	switch sid {
 	case sidUsers, sidAuthenticatedUser, sidEveryone:
-		return "icacls " + quoted + ` /grant:r "*` + sid + `:(OI)(CI)(RX)"`
+		return "icacls " + quoted + " /remove:g *" + sid + ` /grant "*` + sid + `:(OI)(CI)(RX)"`
 	}
 	return "icacls " + quoted + " /remove:g *" + sid
 }

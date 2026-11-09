@@ -104,9 +104,9 @@ func TestStandaloneMachinePolicyRecoveryNamesTheExactCommand(t *testing.T) {
 	for _, test := range []struct {
 		name, sid, want string
 	}{
-		{"Users", "S-1-5-32-545", `icacls "` + vendor + `" /grant:r "*S-1-5-32-545:(OI)(CI)(RX)"`},
-		{"Authenticated Users", "S-1-5-11", `icacls "` + vendor + `" /grant:r "*S-1-5-11:(OI)(CI)(RX)"`},
-		{"Everyone", "S-1-1-0", `icacls "` + vendor + `" /grant:r "*S-1-1-0:(OI)(CI)(RX)"`},
+		{"Users", "S-1-5-32-545", `icacls "` + vendor + `" /remove:g *S-1-5-32-545 /grant "*S-1-5-32-545:(OI)(CI)(RX)"`},
+		{"Authenticated Users", "S-1-5-11", `icacls "` + vendor + `" /remove:g *S-1-5-11 /grant "*S-1-5-11:(OI)(CI)(RX)"`},
+		{"Everyone", "S-1-1-0", `icacls "` + vendor + `" /remove:g *S-1-1-0 /grant "*S-1-1-0:(OI)(CI)(RX)"`},
 		{"another account", "S-1-5-21-1-2-3-1001", `icacls "` + vendor + `" /remove:g *S-1-5-21-1-2-3-1001`},
 	} {
 		verdict := errors.New("managed policy file " + vendorState + " is not trusted: " + vendor + ": untrusted Windows principal " + test.sid + " has write-like access mask 0x2")
@@ -114,10 +114,11 @@ func TestStandaloneMachinePolicyRecoveryNamesTheExactCommand(t *testing.T) {
 		if !strings.Contains(above, test.want) {
 			t.Errorf("%s above the object: %q lacks %q", test.name, above, test.want)
 		}
-		// Neither a /remove:g of a stock reader group nor the object's own
-		// access list is touched for a writer that sits on the folder above.
-		if strings.Contains(above, `/remove:g *S-1-5-32-545`) || strings.Contains(above, `/remove:g *S-1-5-11`) || strings.Contains(above, `/remove:g *S-1-1-0`) {
-			t.Errorf("%s above the object: %q removes a reader group", test.name, above)
+		// A stock reader group gets its read back in the same command; the
+		// object's own access list is not touched for a writer that sits on
+		// the folder above.
+		if test.sid != "S-1-5-21-1-2-3-1001" && !strings.Contains(above, `/grant "*`+test.sid+`:(OI)(CI)(RX)"`) {
+			t.Errorf("%s above the object: %q does not grant read again", test.name, above)
 		}
 		if strings.Contains(above, `icacls "`+vendorState+`" /remove:g *`+test.sid) {
 			t.Errorf("%s above the object: %q fixes the object for the folder's writer", test.name, above)
@@ -126,8 +127,9 @@ func TestStandaloneMachinePolicyRecoveryNamesTheExactCommand(t *testing.T) {
 	// A verdict that names no account does not guess one: it says how to see
 	// it and keeps read.
 	unnamed := standaloneMachinePolicyDriftRecovery(stateFile, errors.New("managed policy file x has an untrusted writer above it"))
-	if strings.Contains(unnamed, "/remove:g *S-1-5-32-545") || !strings.Contains(unnamed, `icacls "`+dir+`" to see which account can write it`) ||
-		!strings.Contains(unnamed, "keep its read") {
+	removeUsers := "/remove:g *S-1-5-32-545"
+	if strings.Count(unnamed, removeUsers) != strings.Count(unnamed, removeUsers+` /grant "*S-1-5-32-545:(OI)(CI)(RX)"`) ||
+		!strings.Contains(unnamed, `icacls "`+dir+`" to see which account can write it`) || !strings.Contains(unnamed, "keep its read") {
 		t.Errorf("an unnamed writer above the object: %q", unnamed)
 	}
 	file := filepath.Join(dir, "requirements.toml")

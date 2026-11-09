@@ -130,8 +130,8 @@ var windowsDefenseClawOwnedPath = regexp.MustCompile(`(?i)\\DefenseClaw(\\|$)`)
 // one account off path. For a path DefenseClaw owns, or an account that holds
 // no read there, it removes the account's entries. For a folder or file that
 // is not DefenseClaw's (a vendor folder under ProgramData) and the stock
-// reader groups (Users, Authenticated Users, Everyone) it replaces the
-// account's entries by read and execute, so the write is gone and the read
+// reader groups (Users, Authenticated Users, Everyone) it removes the
+// account's entries and grants read and execute again, so the write is gone and the read
 // every standard user needs stays: /remove:g would take the vendor's own
 // read entry away too and break reading for everyone (GAP-0602 review D3).
 func windowsWriterFix(path, sid string) string {
@@ -143,7 +143,11 @@ func windowsWriterFix(path, sid string) string {
 			if windowsPathIsDirectory(path) {
 				inherit = "(OI)(CI)"
 			}
-			return quoted + ` /grant:r "*` + sid + `:` + inherit + `(RX)"`
+			// /grant:r alone leaves an entry with other inheritance flags (a
+			// Modify entry for this folder only next to the stock read entry);
+			// /remove:g first takes every entry of the account off, and the
+			// grant puts the read back in the same command.
+			return quoted + " /remove:g *" + sid + ` /grant "*` + sid + `:` + inherit + `(RX)"`
 		}
 	}
 	return quoted + " /remove:g *" + sid

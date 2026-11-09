@@ -73,10 +73,10 @@ func TestWindowsWriterFixKeepsTheReadOfTheStockReaderGroups(t *testing.T) {
 		name, path, sid, want string
 		reads, directory      bool
 	}{
-		{"Users on a vendor folder", vendor, "S-1-5-32-545", `icacls "C:\ProgramData\OpenAI" /grant:r "*S-1-5-32-545:(OI)(CI)(RX)"`, true, true},
-		{"Authenticated Users on a vendor folder", vendor, "S-1-5-11", `/grant:r "*S-1-5-11:(OI)(CI)(RX)"`, true, true},
-		{"Everyone on a vendor folder", vendor, "S-1-1-0", `/grant:r "*S-1-1-0:(OI)(CI)(RX)"`, true, true},
-		{"Users on a vendor file", vendor + `\requirements.toml`, "S-1-5-32-545", `/grant:r "*S-1-5-32-545:(RX)"`, true, false},
+		{"Users on a vendor folder", vendor, "S-1-5-32-545", `icacls "C:\ProgramData\OpenAI" /remove:g *S-1-5-32-545 /grant "*S-1-5-32-545:(OI)(CI)(RX)"`, true, true},
+		{"Authenticated Users on a vendor folder", vendor, "S-1-5-11", `/remove:g *S-1-5-11 /grant "*S-1-5-11:(OI)(CI)(RX)"`, true, true},
+		{"Everyone on a vendor folder", vendor, "S-1-1-0", `/remove:g *S-1-1-0 /grant "*S-1-1-0:(OI)(CI)(RX)"`, true, true},
+		{"Users on a vendor file", vendor + `\requirements.toml`, "S-1-5-32-545", `/remove:g *S-1-5-32-545 /grant "*S-1-5-32-545:(RX)"`, true, false},
 		{"Users with no read there", vendor, "S-1-5-32-545", `icacls "C:\ProgramData\OpenAI" /remove:g *S-1-5-32-545`, false, true},
 		{"another account", vendor, "S-1-5-21-1-2-3-1001", `icacls "C:\ProgramData\OpenAI" /remove:g *S-1-5-21-1-2-3-1001`, true, true},
 		{"Users on DefenseClaw's own folder", `C:\ProgramData\Cisco\DefenseClaw\etc`, "S-1-5-32-545", `icacls "C:\ProgramData\Cisco\DefenseClaw\etc" /remove:g *S-1-5-32-545`, true, true},
@@ -86,10 +86,10 @@ func TestWindowsWriterFixKeepsTheReadOfTheStockReaderGroups(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
 	}
-	// The rewritten verdict carries it, and never removes Users read.
+	// The rewritten verdict carries it: the read is granted again in the same command.
 	reads, directory = true, true
 	got := windowsEnterpriseNamePrincipals(vendor + `: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x1301bf`)
-	if !strings.Contains(got, `Fix: icacls "C:\ProgramData\OpenAI" /grant:r "*S-1-5-32-545:(OI)(CI)(RX)"`) || strings.Contains(got, "/remove:g *S-1-5-32-545") {
+	if !strings.Contains(got, `Fix: icacls "C:\ProgramData\OpenAI" /remove:g *S-1-5-32-545 /grant "*S-1-5-32-545:(OI)(CI)(RX)"`) {
 		t.Errorf("a verdict on a vendor folder: %q", got)
 	}
 }
