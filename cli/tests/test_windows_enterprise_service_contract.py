@@ -6380,7 +6380,8 @@ def test_vendor_folder_link_refusal_runs_first_for_standalone_install_like_actio
         assert folder in listing
     assert 'cmd /c rmdir `"$($_.Link)`"' in _psm1_function(module, "Format-DefenseClawVendorMachineFolderLinkFix")
     walk = _psm1_function(module, "Get-DefenseClawVendorMachineFolderLink")
-    assert "[IO.File]::GetAttributes($current)" in walk  # no-follow: a dangling junction is found
+    assert "Get-DefenseClawLinkCheckAttributes -Path $current" in walk  # no-follow: a dangling junction is found
+    assert "[IO.File]::GetAttributes($Path)" in _psm1_function(module, "Get-DefenseClawLinkCheckAttributes")
     assert "Test-Path" not in walk
 
     # The snapshot names the same links before it takes anything back.
@@ -7938,7 +7939,7 @@ _SC_SHARED_INSERTS = {
         ),
         (
             '        }\n    }\n',
-            '    # GAP-0900: a rollback (-RollbackRestore) that finds a link on the Codex folder\n    # does not read the Codex machine policy through it. The checks below keep their\n    # lines; they are skipped by the braces around them.\n    $codexFolderLink = \'\'\n    if ($RollbackRestore -and $codexTargetEnabled) {\n        $codexFolderLink = Get-DefenseClawVendorMachineFolderLink `\n            -Directory ([string]$Layout.CodexMachinePolicyDirectory)\n    }\n    if ($codexFolderLink -ne \'\') {\n        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{\n            subsystem = \'rollback\'\n            path      = $codexFolderLink\n            reason    = "a link sits on the Codex machine-policy folder; its policy was not checked and Codex is not protected until the link is removed with: cmd /c rmdir `"$codexFolderLink`""\n        }\n    }\n    if ($codexFolderLink -eq \'\') {\n',
+            '    # GAP-0900: a rollback (-RollbackRestore) that finds a link on the Codex folder\n    # does not read the Codex machine policy through it. The checks below keep their\n    # lines; they are skipped by the braces around them.\n    $codexFolderLink = \'\'\n    if ($RollbackRestore -and $codexTargetEnabled) {\n        $codexFolderLink = Get-DefenseClawVendorMachineFolderLink `\n            -Directory ([string]$Layout.CodexMachinePolicyDirectory) `\n            -Tolerant\n    }\n    if ($codexFolderLink -ne \'\') {\n        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{\n            subsystem = \'rollback\'\n            path      = $codexFolderLink\n            reason    = "a link sits on the Codex machine-policy folder; its policy was not checked and Codex is not protected until the link is removed with: cmd /c rmdir `"$codexFolderLink`""\n        }\n    }\n    if ($codexFolderLink -eq \'\') {\n',
             '    if ($codexTargetEnabled) {\n',
         ),
         (
@@ -7960,12 +7961,12 @@ _SC_SHARED_INSERTS = {
     'Restore-DefenseClawTransaction': [
         (
             '        }\n        if ($isSharedCodexFile) {\n',
-            '            # GAP-0900: a link that appeared on the Codex folder after the\n            # transaction opened. Nothing is written through it and the rollback\n            # goes on, so the services come back; the link stays for the\n            # administrator, who removes only the link. Standalone only.\n            $restoreCodexLink = Get-DefenseClawVendorMachineFolderLink `\n                -Directory ([string]$Layout.CodexMachinePolicyDirectory)\n            if ($restoreCodexLink -ne \'\') {\n                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{\n                    subsystem = \'rollback\'\n                    path      = $restoreCodexLink\n                    reason    = "a link sits on the Codex machine-policy folder; the rollback did not write through it. As an administrator, remove only the link with: cmd /c rmdir `"$restoreCodexLink`"; the next repair or ensure then finishes the work"\n                }\n                continue\n            }\n',
+            '            # GAP-0900: a link that appeared on the Codex folder after the\n            # transaction opened. Nothing is written through it and the rollback\n            # goes on, so the services come back; the link stays for the\n            # administrator, who removes only the link. Standalone only.\n            $restoreCodexLink = Get-DefenseClawVendorMachineFolderLink `\n                -Directory ([string]$Layout.CodexMachinePolicyDirectory) `\n                -Tolerant\n            if ($restoreCodexLink -ne \'\') {\n                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{\n                    subsystem = \'rollback\'\n                    path      = $restoreCodexLink\n                    reason    = "a link sits on the Codex machine-policy folder; the rollback did not write through it. As an administrator, remove only the link with: cmd /c rmdir `"$restoreCodexLink`"; the next repair or ensure then finishes the work"\n                }\n                continue\n            }\n',
             '            $policyDirectoryExists = Microsoft.PowerShell.Management\\Test-Path `\n',
         ),
         (
             '                -GatewayServiceName ([string]$snapshot.gateway_service)\n        }\n',
-            "        # GAP-0900: nothing is stamped through a link on the Codex folder either.\n        $restoreCodexLinked = (Get-DefenseClawVendorMachineFolderLink `\n                -Directory ([string]$Layout.CodexMachinePolicyDirectory)) -ne ''\n",
+            "        # GAP-0900: nothing is stamped through a link on the Codex folder either.\n        $restoreCodexLinked = (Get-DefenseClawVendorMachineFolderLink `\n                -Directory ([string]$Layout.CodexMachinePolicyDirectory) `\n                -Tolerant) -ne ''\n",
             '        Set-DefenseClawManagedAcls `\n',
         ),
         (
@@ -7993,7 +7994,7 @@ def test_secure_client_shared_rollback_functions_only_gain_dead_gated_lines() ->
     module = read(MODULE)
     probe = _psm1_function(module, "Get-DefenseClawVendorMachineFolderLink")
     assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in probe
-    assert probe.index("Test-DefenseClawStandaloneProfile") < probe.index("GetAttributes")
+    assert probe.index("Test-DefenseClawStandaloneProfile") < probe.index("Get-DefenseClawLinkCheckAttributes")
     for name, blocks in _SC_SHARED_INSERTS.items():
         body = _psm1_function(module, name)
         for before, block, after in blocks:
@@ -8014,13 +8015,41 @@ def test_secure_client_shared_rollback_functions_only_gain_dead_gated_lines() ->
     assert module.count("if ($RollbackRestore -and $codexTargetEnabled) {") == 1
 
 
+def _powershell_approved_verbs() -> set[str]:
+    """The approved verbs PowerShell itself lists (Get-Verb), when a PowerShell is on
+    the machine; the Windows CI runners have one."""
+    import shutil
+    import subprocess
+
+    for exe in ("pwsh", "powershell"):
+        found = shutil.which(exe)
+        if not found:
+            continue
+        try:
+            out = subprocess.run(
+                [found, "-NoProfile", "-NonInteractive", "-Command", "(Get-Verb).Verb"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        verbs = {line.strip() for line in out.splitlines() if line.strip().isalpha()}
+        if len(verbs) > 50:
+            return verbs
+    return set()
+
+
 def test_every_defenseclaw_function_a_script_or_go_file_calls_is_defined() -> None:
     """GAP-0900: a function that is renamed while another change still calls its old
     name merges without a textual conflict and then fails at run time (the Windows
     uninstall answered 1603 for the old Codex link check). Every
     <Verb>-DefenseClaw<Noun> name that the module, a Windows script or a Go file
     (tests excluded) mentions must be a function some module or script of the
-    Windows packaging defines."""
+    Windows packaging defines. The verbs are the approved verbs Get-Verb lists plus
+    the verbs of the functions the packaging defines (custom ones included), never
+    a hand list."""
     import re
 
     sources = [
@@ -8036,10 +8065,13 @@ def test_every_defenseclaw_function_a_script_or_go_file_calls_is_defined() -> No
         defined.add(path.stem)  # a kit script is invoked by its name
     assert len(defined) > 500
     assert "Get-DefenseClawVendorMachineFolderLink" in defined
-    verbs = "Add|Assert|Clear|Compare|Complete|Confirm|ConvertFrom|ConvertTo|Copy|Disable|Enable|Export|Find|Format|Get|Grant|Import|Initialize|Install|Invoke|Join|Lock|Merge|Move|New|Out|Protect|Publish|Read|Register|Remove|Rename|Repair|Reset|Resolve|Restore|Resume|Revoke|Save|Select|Send|Set|Show|Split|Start|Step|Stop|Suspend|Sync|Test|Unlock|Unregister|Update|Use|Wait|Write"
-    # A name followed by a dot, a dash or a slash is a file or path (Invoke-DefenseClawEnterprise.ps1)
-    # or a wrapped name in a comment, not a call.
-    pattern = re.compile(rf"\b(?:{verbs})-DefenseClaw[A-Za-z0-9]*(?![A-Za-z0-9.\\/-])")
+    verbs = {name.split("-")[0] for name in defined if re.match(r"[A-Z][A-Za-z]*-DefenseClaw", name)} | _powershell_approved_verbs()
+    for custom in ("Open", "Close", "Enter", "Exit", "Recover", "Hold", "Ensure", "Request"):
+        assert custom in verbs or not _powershell_approved_verbs(), custom
+    alternation = "|".join(sorted(map(re.escape, verbs), key=len, reverse=True))
+    # A name followed by a dot, a dash or a slash is a file or path
+    # (Invoke-DefenseClawEnterprise.ps1) or a wrapped name in a comment, not a call.
+    pattern = re.compile(rf"\b(?:{alternation})-DefenseClaw[A-Za-z0-9]*(?![A-Za-z0-9.\\/-])")
     unknown: dict[str, set[str]] = {}
     scanned = list(sources)
     for root in (ROOT / "internal", ROOT / "cmd"):
@@ -8048,9 +8080,34 @@ def test_every_defenseclaw_function_a_script_or_go_file_calls_is_defined() -> No
             for path in root.rglob("*.go")
             if not path.name.endswith("_test.go") and "testdata" not in path.parts
         ]
+    mentions = 0
+    seen: set[str] = set()
     for path in scanned:
-        for name in set(pattern.findall(path.read_text(encoding="utf-8", errors="replace"))):
+        for name in pattern.findall(path.read_text(encoding="utf-8", errors="replace")):
+            mentions += 1
+            seen.add(name)
             if name not in defined:
                 unknown.setdefault(name, set()).add(str(path.relative_to(ROOT)))
     assert not unknown, unknown
+    # The scan has to find the calls: a pattern that stops matching must not pass.
+    assert mentions >= 4000, mentions
+    assert len(seen) >= 700, len(seen)
     assert "Get-DefenseClawCodexMachineFolderLink" not in defined
+
+
+def test_the_rollback_link_probes_are_tolerant_and_the_start_of_run_ones_are_not() -> None:
+    """GAP-0900 review: an error other than not-found on the link walk fails the start
+    of a run closed, but inside a rollback it is treated like a found link (the path is
+    skipped, with a degraded event naming the path and the error) so the services come
+    back."""
+    module = read(MODULE)
+    walk = _psm1_function(module, "Get-DefenseClawVendorMachineFolderLink")
+    assert "[switch]$Tolerant" in walk
+    assert "if (-not $Tolerant) {\n                throw\n            }" in walk
+    assert "subsystem = 'rollback'" in walk and "return $current" in walk
+    assert "Get-DefenseClawLinkCheckAttributes -Path $current" in walk
+    # The three probes inside the rollback pass -Tolerant; no other caller does.
+    restore = _psm1_function(module, "Restore-DefenseClawTransaction")
+    assert restore.count("-Tolerant") == 2
+    assert _psm1_function(module, "Assert-DefenseClawEnterpriseDeployment").count("-Tolerant") == 1
+    assert module.count("-Tolerant") == 3  # the three rollback call sites
