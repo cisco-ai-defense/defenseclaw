@@ -145,7 +145,14 @@ func (w *managedPolicyViewWatch) refresh() {
 // policy files of the recorded standalone config: the admission of a changed
 // descriptor and the own status of an excluded account both ask them whether a
 // machine-policy hook is installed.
+//
+// The platform is the view options own: the proof reads the sources the view
+// reader reads, so a caller that names another platform cannot send it to an
+// empty tree and have the vendor hook called absent.
 func machinePolicyPresenceOptions(goos string, viewOpts enterprisepolicy.Options, cfg *config.Config) (enterprisepolicy.Options, error) {
+	if viewOpts.GOOS != "" {
+		goos = viewOpts.GOOS
+	}
 	layout, err := managed.StandaloneLayoutFor(goos)
 	if err != nil {
 		return enterprisepolicy.Options{}, err

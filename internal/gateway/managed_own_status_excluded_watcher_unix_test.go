@@ -176,3 +176,24 @@ func TestOwnStatusExcludedAfterDescriptorAndAdmissionAreGone(t *testing.T) {
 		})
 	}
 }
+
+// The absence proof reads the vendor files the view options name, whatever
+// platform the caller reports: on macOS the own status passes the host
+// platform while the view options hold the managed tree. An installed vendor
+// hook is never called absent, and a tree that holds none is.
+func TestMachineHookAbsentReadsTheViewOptionsTree(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			rig := newWatcherRig(t, false, false)
+			if machineHookAbsent(goos, rig.cfg, "claudecode") {
+				t.Fatalf("an installed vendor hook was called absent for caller platform %s", goos)
+			}
+			if err := os.Remove(rig.hookFile); err != nil {
+				t.Fatal(err)
+			}
+			if !machineHookAbsent(goos, rig.cfg, "claudecode") {
+				t.Fatalf("a tree holding no vendor hook must be absent for caller platform %s", goos)
+			}
+		})
+	}
+}
