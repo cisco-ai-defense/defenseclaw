@@ -107,7 +107,7 @@ func verifyConnected(ctx context.Context, check *perUserPeerCheck, conn net.Conn
 	// (connectBy). A read that says no ends that wait, so a proof that comes
 	// after the deadline from anywhere else stays void.
 	check.deciding.Store(ownerScanSupported)
-	holds := ownGatewayHoldsQueueRetried(ctx, check, server, &settled)
+	holds := ownGatewayHoldsQueueRetried(ctx, check, conn, &settled)
 	// A connection that was accepted while the owner was read has its answer
 	// (or its own error): a listener owned by the own gateway does not show
 	// that the connection was never accepted. Only a wait that ended as not
@@ -150,15 +150,21 @@ const (
 // ownGatewayHoldsQueueRetried is ownGatewayHoldsQueue repeated, while it says
 // no, for ownerScanRetry, and not after the try was abandoned (connectBy) or
 // once the wait settled (the connection was accepted or failed on its own;
-// the caller reads that result first).
-func ownGatewayHoldsQueueRetried(ctx context.Context, check *perUserPeerCheck, server *net.TCPAddr, settled *atomic.Bool) bool {
+// the caller reads that result first). Its yes also needs conn itself to be
+// seen unaccepted in the socket table after the owner was read: the owner of
+// the listener does not show that this connection was never accepted, and a
+// gateway that accepted it has an answer that the peer check, which may still
+// be running, is about to release (a connection that cannot be seen queued
+// is left to that result, which is closed when the peer is not proved).
+func ownGatewayHoldsQueueRetried(ctx context.Context, check *perUserPeerCheck, conn net.Conn, settled *atomic.Bool) bool {
+	server, _ := conn.RemoteAddr().(*net.TCPAddr)
 	end := time.Now().Add(ownerScanRetry)
 	for {
 		if settled.Load() {
 			return false
 		}
 		if ownGatewayHoldsQueue(ctx, server) {
-			return true
+			return connectionStillQueued(conn)
 		}
 		if !ownerScanSupported || check.abandoned.Load() || !time.Now().Add(ownerScanPoll).Before(end) {
 			return false

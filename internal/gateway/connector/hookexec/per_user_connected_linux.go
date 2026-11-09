@@ -46,6 +46,13 @@ func verifyPerUserConnectedTupleIn(procNet string, self int, wait time.Duration,
 	return err
 }
 
+// tupleStillQueued reports whether the kernel lists the held connection as an
+// established socket that the gateway has not accept()ed (no inode yet).
+func tupleStillQueued(client, server *net.TCPAddr) bool {
+	_, err := findConnectedTCPUID(procSelfNet, client, server)
+	return errors.Is(err, errConnectedSocketNotAccepted)
+}
+
 // listenersHeldOnlyByPID is listenersHeldOnlyBy on the live socket tables.
 func listenersHeldOnlyByPID(pid int, server *net.TCPAddr) bool {
 	return listenersHeldOnlyBy(procSelfNet, "/proc", pid, server)
