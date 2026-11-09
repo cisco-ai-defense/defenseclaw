@@ -129,6 +129,20 @@ again when you roll forward.`,
 	RunE:        runConnectorPrepareRollback,
 }
 
+var connectorRecoverConfigCmd = &cobra.Command{
+	Use:   "recover-config",
+	Short: "Finish the agent config changes an interrupted run left behind (Windows)",
+	Long: `Finish every agent config change that was interrupted (for example a
+rollback stopped by an editor saving the same file) and left recovery files in
+the data directory. defenseclaw rollback and the upgrade refuse to go on while
+such files remain; run this with the same --data-dir, then run them again. A
+change the recovery cannot prove is kept and named, and the file you saved is
+never replaced.`,
+	Hidden:      true,
+	Annotations: map[string]string{auditOptionalAnnotation: "true", configOptionalAnnotation: "true"},
+	RunE:        runConnectorRecoverConfig,
+}
+
 var connectorPruneOrphansCmd = &cobra.Command{
 	Use:   "prune-orphans",
 	Short: "Remove the DefenseClaw hook entries of connectors that are not configured (run by the installers)",
@@ -251,6 +265,7 @@ func init() {
 
 	connectorCmd.AddCommand(connectorTeardownCmd)
 	connectorCmd.AddCommand(connectorPrepareRollbackCmd)
+	connectorCmd.AddCommand(connectorRecoverConfigCmd)
 	connectorCmd.AddCommand(connectorPruneOrphansCmd)
 	connectorCmd.AddCommand(connectorVerifyCmd)
 	connectorCmd.AddCommand(connectorReconcileCmd)
@@ -1285,6 +1300,24 @@ func pruneOrphanedConnector(ctx context.Context, dataDir, name string, conn conn
 		return nil, err
 	}
 	return paths, nil
+}
+
+func runConnectorRecoverConfig(cmd *cobra.Command, _ []string) error {
+	dataDir := resolveConnectorDataDir()
+	if dataDir == "" {
+		return fmt.Errorf("connector recover-config: no data directory configured (set --data-dir)")
+	}
+	recovered, err := connector.RecoverRetainedConfigTransforms(dataDir)
+	if err != nil {
+		return fmt.Errorf("connector recover-config: recovery files are kept in %s: %w", dataDir, err)
+	}
+	if connectorFlagJSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+			"action": "recover-config", "ok": true, "recovered": recovered,
+		})
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "  finished %d interrupted agent config change(s) in %s\n", recovered, dataDir)
+	return nil
 }
 
 func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {

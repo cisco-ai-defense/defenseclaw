@@ -1550,6 +1550,66 @@ type atomicTransformV2CandidateGroup struct {
 	primary, gc           map[string]string
 }
 
+// enumerateAtomicTransformV2Groups lists the receipt candidate groups in the
+// bound state directory, one per transaction base, without reading any receipt.
+func enumerateAtomicTransformV2Groups(stateBound *atomicTransformBoundDirectory) ([]atomicTransformV2CandidateGroup, error) {
+	groups := make([]atomicTransformV2CandidateGroup, 0, 4)
+	matchingEntries := 0
+	for {
+		entries, readErr := stateBound.file.ReadDir(32)
+		for _, entry := range entries {
+			candidate, reserved, parseErr := parseAtomicTransformV2Candidate(entry.Name())
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			if !reserved {
+				continue
+			}
+			matchingEntries++
+			if matchingEntries > atomicTransformMaxIntentCandidates {
+				return nil, fmt.Errorf(
+					"compare-and-swap recovery receipt candidate limit exceeded in %s", stateBound.path,
+				)
+			}
+			candidateBasePath := filepath.Join(stateBound.path, candidate.base)
+			index := -1
+			for i := range groups {
+				if atomicTransformPathsEqual(groups[i].base, candidateBasePath) {
+					index = i
+					break
+				}
+			}
+			if index < 0 {
+				groups = append(groups, atomicTransformV2CandidateGroup{
+					base: candidateBasePath, primary: map[string]string{}, gc: map[string]string{},
+				})
+				index = len(groups) - 1
+			}
+			group := &groups[index]
+			dest := group.primary
+			if candidate.gc {
+				dest = group.gc
+				if group.gcTransactionID != "" && group.gcTransactionID != candidate.transactionID {
+					return nil, fmt.Errorf("multiple V2 CAS GC transaction identifiers claim %s", group.base)
+				}
+				group.gcTransactionID = candidate.transactionID
+			}
+			if previous := dest[candidate.phase]; previous != "" &&
+				!atomicTransformPathsEqual(previous, entry.Name()) {
+				return nil, fmt.Errorf("multiple ordinal-equivalent %s V2 CAS receipts", candidate.phase)
+			}
+			dest[candidate.phase] = entry.Name()
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("enumerate bound stable compare-and-swap receipts: %w", readErr)
+		}
+	}
+	return groups, nil
+}
+
 func loadAtomicTransformV2(path, stateDir string) (atomicTransformV2Loaded, error) {
 	return loadAtomicTransformV2Phased(path, stateDir, false)
 }
@@ -1581,59 +1641,9 @@ func loadAtomicTransformV2Phased(path, stateDir string, beforeCommit bool) (atom
 	}
 	loadedNone = atomicTransformV2Loaded{base: primaryBase, logical: logical}
 
-	groups := make([]atomicTransformV2CandidateGroup, 0, 4)
-	matchingEntries := 0
-	for {
-		entries, readErr := stateBound.file.ReadDir(32)
-		for _, entry := range entries {
-			candidate, reserved, parseErr := parseAtomicTransformV2Candidate(entry.Name())
-			if parseErr != nil {
-				return loadedNone, parseErr
-			}
-			if !reserved {
-				continue
-			}
-			matchingEntries++
-			if matchingEntries > atomicTransformMaxIntentCandidates {
-				return loadedNone, fmt.Errorf(
-					"compare-and-swap recovery receipt candidate limit exceeded in %s", stateBound.path,
-				)
-			}
-			candidateBasePath := filepath.Join(stateBound.path, candidate.base)
-			index := -1
-			for i := range groups {
-				if atomicTransformPathsEqual(groups[i].base, candidateBasePath) {
-					index = i
-					break
-				}
-			}
-			if index < 0 {
-				groups = append(groups, atomicTransformV2CandidateGroup{
-					base: candidateBasePath, primary: map[string]string{}, gc: map[string]string{},
-				})
-				index = len(groups) - 1
-			}
-			group := &groups[index]
-			dest := group.primary
-			if candidate.gc {
-				dest = group.gc
-				if group.gcTransactionID != "" && group.gcTransactionID != candidate.transactionID {
-					return loadedNone, fmt.Errorf("multiple V2 CAS GC transaction identifiers claim %s", group.base)
-				}
-				group.gcTransactionID = candidate.transactionID
-			}
-			if previous := dest[candidate.phase]; previous != "" &&
-				!atomicTransformPathsEqual(previous, entry.Name()) {
-				return loadedNone, fmt.Errorf("multiple ordinal-equivalent %s V2 CAS receipts", candidate.phase)
-			}
-			dest[candidate.phase] = entry.Name()
-		}
-		if errors.Is(readErr, io.EOF) {
-			break
-		}
-		if readErr != nil {
-			return loadedNone, fmt.Errorf("enumerate bound stable compare-and-swap receipts: %w", readErr)
-		}
+	groups, err := enumerateAtomicTransformV2Groups(stateBound)
+	if err != nil {
+		return loadedNone, err
 	}
 
 	requestedInput, inputErr := canonicalAtomicTransformPath(path)
