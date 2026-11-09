@@ -20,11 +20,11 @@ import (
 // for that account only.
 func TestOwnStatusForWindowsAccountShowsAConnectorRemovedFromTheRoster(t *testing.T) {
 	completeOwnStatusScan(t, nil)
-	previousName, previousValidate := ownStatusWindowsAccountName, validateManagedGuardianAuthorization
+	previousAccount, previousValidate := ownStatusWindowsAccount, validateManagedGuardianAuthorization
 	t.Cleanup(func() {
-		ownStatusWindowsAccountName, validateManagedGuardianAuthorization = previousName, previousValidate
+		ownStatusWindowsAccount, validateManagedGuardianAuthorization = previousAccount, previousValidate
 	})
-	ownStatusWindowsAccountName = func(string) string { return `WIN11\alice` }
+	ownStatusWindowsAccount = func(string) (string, string) { return "alice", "WIN11" }
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	const alice, bob = "S-1-5-21-1004336348-1177238915-682003330-1001", "S-1-5-21-1004336348-1177238915-682003330-1002"
 	dataDir := t.TempDir()
