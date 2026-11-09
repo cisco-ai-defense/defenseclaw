@@ -19376,6 +19376,9 @@ function Assert-DefenseClawCodexManagedHooksStateFilePreflight {
 # writer transaction that is open (GAP-0877). A transaction takes
 # milliseconds; a counter that is still odd after this is a writer that stopped.
 $script:CodexStateSettleSeconds = 30
+# Paths whose wait reached the bound in this lifecycle run, with the seconds
+# waited (g877b review G1); Invoke-DefenseClawEnterpriseLifecycle clears it.
+$script:CodexStateUnsettled = @{}
 
 function Wait-DefenseClawCodexManagedHooksStateSettled {
     <#
@@ -19392,11 +19395,27 @@ function Wait-DefenseClawCodexManagedHooksStateSettled {
         copy of its end value the state is that copy, otherwise the check
         refuses with the named reason and changes nothing. The next Setup run
         or the next guardian pass ends a stopped transaction.
+        One stopped writer costs one wait per lifecycle run, not one per
+        caller (g877b review G1): a wait that reached its bound is remembered
+        for $Path until Invoke-DefenseClawEnterpriseLifecycle starts the next run,
+        and a later caller in the run only looks once. That look still ends
+        the same way, so the outcome is as fail-closed as the wait: a writer
+        that has ended since is judged (and forgotten), one that has not is
+        refused or judged on its end copy at once.
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
         [int]$TimeoutSeconds = $script:CodexStateSettleSeconds
     )
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath variable:script:CodexStateUnsettled)) {
+        $script:CodexStateUnsettled = @{}
+    }
+    $memo = $Path.ToLowerInvariant()
+    $waitedSeconds = $TimeoutSeconds
+    if ($script:CodexStateUnsettled.ContainsKey($memo)) {
+        $waitedSeconds = [int]$script:CodexStateUnsettled[$memo]
+        $TimeoutSeconds = 0
+    }
     $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(0, $TimeoutSeconds))
     $last = [int64]0
     $waitStarted = $null
@@ -19415,6 +19434,7 @@ function Wait-DefenseClawCodexManagedHooksStateSettled {
                             [int]([DateTime]::UtcNow - $waitStarted).TotalMilliseconds, $before)
                     }
                 }
+                $script:CodexStateUnsettled.Remove($memo)
                 return [pscustomobject]@{ Path = $copy; Present = $present; Counter = $before }
             }
         }
@@ -19425,6 +19445,9 @@ function Wait-DefenseClawCodexManagedHooksStateSettled {
             $waitStarted = [DateTime]::UtcNow
         }
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 100
+    }
+    if ($TimeoutSeconds -gt 0) {
+        $script:CodexStateUnsettled[$memo] = $TimeoutSeconds
     }
     if (($last % 2) -ne 0) {
         # A writer that stopped after it put the hook copy of its end value in
@@ -19438,7 +19461,7 @@ function Wait-DefenseClawCodexManagedHooksStateSettled {
     $why = if (($last % 2) -ne 0) { 'odd: a transaction is open' } else { 'still changing' }
     throw (
         'codex_state_unsettled: the Codex writer transaction counter next to ' + $Path +
-        ' stayed at ' + $last + ' (' + $why + ') for ' + $TimeoutSeconds +
+        ' stayed at ' + $last + ' (' + $why + ') for ' + $waitedSeconds +
         ' seconds, so the Codex managed-hooks state could not be judged and this run stopped (an install, repair, ensure or upgrade that had started is rolled back, an upgrade to the release it came from; a verify changes nothing). Next step: run ' +
         (Format-DefenseClawSetupAction -Action '/repair') +
         ' again once no Codex writer is running (the next Codex writer pass ends a stopped transaction)'
@@ -52241,6 +52264,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -Path $layout.LifecycleLockDirectory `
         -Label 'lifecycle lock directory' `
         -RequiredBase $script:ProgramData
+    # A new lifecycle run waits for a Codex writer afresh (g877b review G1).
+    $script:CodexStateUnsettled = @{}
     $lifecycleLock = Enter-DefenseClawLifecycleLock -Layout $layout
     # The vendor folders DefenseClaw touched, before an uninstall removes its
     # files (GAP-0704 rule i, review 3 L4).
