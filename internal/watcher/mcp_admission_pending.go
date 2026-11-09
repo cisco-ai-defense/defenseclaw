@@ -114,9 +114,9 @@ func mcpLocalHost(host string) bool {
 		ip.IsMulticast() || ip.IsUnspecified()
 }
 
-// failedMCPStatus is the status of a server whose completed admission scan
+// FailedMCPStatus is the status of a server whose completed admission scan
 // failed, with the cause its definition shows.
-func failedMCPStatus(server config.MCPServerEntry) MCPAdmissionStatus {
+func FailedMCPStatus(server config.MCPServerEntry) MCPAdmissionStatus {
 	return MCPAdmissionStatus{Name: server.Name, Failed: true, ScanIssue: mcpScanIssue(server)}
 }
 
@@ -469,7 +469,7 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 			if revoked := w.mcpDepartedRevoked(q, servers, true); revoked.Failed {
 				return revoked
 			}
-			return failedMCPStatus(server)
+			return FailedMCPStatus(server)
 		}
 		// An allow given before any scan is the policy that gave it, not a
 		// verdict on the definition: once the allow rule or the setting is
@@ -507,7 +507,7 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		// cause and the next step the later calls get, not a retry message
 		// (GAP-0925). A definition the watcher read itself stays pending until
 		// its own admission.
-		return failedMCPStatus(*refused)
+		return FailedMCPStatus(*refused)
 	}
 	return MCPAdmissionStatus{Name: pending[0], Pending: true, RetryAfter: w.mcpRetryAfter(pendingPath)}
 }
@@ -587,7 +587,7 @@ func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, servers []confi
 			Type: InstallMCP, Name: server.Name, Path: definition.path, Connector: server.Connector, remembered: &server}) {
 			continue
 		}
-		status := failedMCPStatus(server)
+		status := FailedMCPStatus(server)
 		status.ScanIssue = definition.issue
 		status.Revoked = true
 		return status
@@ -629,7 +629,7 @@ func (w *InstallWatcher) mcpFailedFromLastRead(q MCPAdmissionQuery) MCPAdmission
 		}
 		row, err := mcpSnapshotForServer(w.store, definition.server)
 		if err == nil && row != nil && row.ContentHash == definition.hash && mcpSnapshotFailed(row) {
-			status := failedMCPStatus(definition.server)
+			status := FailedMCPStatus(definition.server)
 			status.ScanIssue = definition.issue
 			return status
 		}
