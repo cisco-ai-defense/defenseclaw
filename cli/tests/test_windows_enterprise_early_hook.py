@@ -82,6 +82,13 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     assert "$guardianPriorDelayed = [bool](Get-DefenseClawServiceDelayedAutoStart -Name $GuardianServiceName)" in hold
     assert "-StartMode $guardianPriorMode" in handler and "-DelayedAutoStart $guardianPriorDelayed" in handler
     assert "Restore-DefenseClawServiceStartModeExact" in handler
+    # GAP-0989: the original error is rethrown as it is (type and message prefix kept);
+    # a failed restart rides on its Data, the lifecycle log and the failure document.
+    assert 'throw "$($holdFailure' not in handler and "throw $holdFailure" in handler
+    assert "$holdFailure.Exception.Data['DefenseClaw.GuardianRestartFailure'] = $restartNote" in handler
+    assert "Write-DefenseClawLifecycleLogDiagnostic -Message $restartNote" in handler
+    installer = (ROOT / "packaging" / "windows" / "install-enterprise.ps1").read_text(encoding="utf-8")
+    assert "@('DefenseClaw.GuardianRestartFailure', 'guardian_restart_failure')" in installer
     exact = _function_body(module, "Restore-DefenseClawServiceStartModeExact")
     assert exact.index("Set-DefenseClawServiceStartMode -Name $Name -StartMode $StartMode") < exact.index("Set-DefenseClawServiceDelayedAutoStart -Name $Name -Enabled $DelayedAutoStart")
     delayed = _function_body(module, "Set-DefenseClawServiceDelayedAutoStart")
