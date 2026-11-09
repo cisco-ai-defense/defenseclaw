@@ -171,7 +171,7 @@ func registrationWriteCapable(file *syntax.File, home string) bool {
 		switch node := node.(type) {
 		case *syntax.Redirect:
 			switch node.Op {
-			case syntax.RdrOut, syntax.AppOut, syntax.RdrAll, syntax.AppAll, syntax.ClbOut, syntax.RdrInOut:
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrAll, syntax.AppAll, syntax.RdrClob, syntax.RdrInOut:
 				value, fixed := StaticWord(node.Word, home)
 				capable = capable || !fixed || value != "/dev/null"
 			}
