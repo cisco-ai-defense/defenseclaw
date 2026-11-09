@@ -61,13 +61,36 @@ func standaloneMachinePolicyDriftRecovery(path string, cause error) string {
 			drift = append(drift, "owner "+match[1]+" is not trusted")
 		}
 	}
+	// A verdict on a folder above the object ("<folder>: untrusted Windows
+	// principal S-1-... has write-like access mask 0x...") is a fix for that
+	// folder, not for the object: the account is the one the verdict names,
+	// and only its write-like grant goes (standaloneWriterAboveFix).
+	var above []string
+	if cause != nil {
+		text := cause.Error()
+		for _, match := range standaloneCauseFolderVerdict.FindAllStringSubmatch(text, -1) {
+			if folderAbove(match[1], path) {
+				above = append(above, standaloneWriterAboveFix(match[1], match[2]))
+				writers = removeSID(writers, match[2])
+			}
+		}
+	}
 	info, statErr := os.Lstat(path)
 	fix := standaloneExactFix(path, statErr == nil && info.IsDir(), writers, drift)
-	if len(writers) == 0 && len(drift) == 0 && cause != nil && strings.Contains(cause.Error(), "untrusted writer above") {
-		// The writer is a folder above the object, not the object itself:
-		// the common one is BUILTIN\Users, taken off the parent folder here;
-		// the message names the folder and account when it is another.
-		fix += ` and, on the folder above it, icacls "` + filepath.Dir(path) + `" /remove:g *` + sidUsers
+	if len(above) > 0 {
+		if len(writers) == 0 && len(drift) == 0 {
+			fix = strings.Join(above, " and ")
+		} else {
+			fix += " and " + strings.Join(above, " and ")
+		}
+	} else if len(writers) == 0 && len(drift) == 0 && cause != nil && strings.Contains(cause.Error(), "untrusted writer above") {
+		// The verdict says a folder above the object has a writer but does not
+		// name the account. Say how to see it, and what to leave alone: only
+		// the write-like grant of that account goes, and BUILTIN\Users read
+		// stays (a vendor folder that lost it breaks every standard user).
+		parent := filepath.Dir(path)
+		fix += ` and, for the folder above it, run icacls "` + parent + `" to see which account can write it, then take away only that account's ` +
+			`write-like grant and keep its read: for BUILTIN\Users that is icacls "` + parent + `" /grant:r "*` + sidUsers + `:(OI)(CI)(RX)"`
 	}
 	if statErr == nil && info.IsDir() {
 		return "the hook guardian leaves it as it is and every DefenseClaw reader keeps refusing it: from an elevated PowerShell prompt run " +
@@ -170,10 +193,46 @@ func standaloneExactFix(path string, directory bool, writers, drift []string) st
 	return strings.Join(commands, " and ")
 }
 
+// standaloneWriterAboveFix takes the write-like grant of one account away from
+// a folder above the object and leaves its read: the stock accounts that every
+// standard user needs to read a vendor folder (Users, Authenticated Users,
+// Everyone) get their grant replaced by read and execute, any other account
+// loses its grants. /remove:g on Users would break reading for everyone.
+func standaloneWriterAboveFix(folder, sid string) string {
+	quoted := `"` + folder + `"`
+	switch sid {
+	case sidUsers, sidAuthenticatedUser, sidEveryone:
+		return "icacls " + quoted + ` /grant:r "*` + sid + `:(OI)(CI)(RX)"`
+	}
+	return "icacls " + quoted + " /remove:g *" + sid
+}
+
+// folderAbove reports whether folder is a folder above path (any depth), by
+// Windows rules: case-insensitive, either separator.
+func folderAbove(folder, path string) bool {
+	norm := func(s string) string {
+		return strings.TrimRight(strings.ToLower(strings.ReplaceAll(s, "/", `\`)), `\`)
+	}
+	folder, path = norm(folder), norm(path)
+	return folder != "" && folder != path && strings.HasPrefix(path, folder+`\`)
+}
+
+func removeSID(sids []string, sid string) []string {
+	var kept []string
+	for _, s := range sids {
+		if s != sid {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
+
 var (
-	standaloneDriftOwnerSID  = regexp.MustCompile(`\bowner (S-1-[0-9-]+) is not trusted`)
-	standaloneSIDPattern     = regexp.MustCompile(`^S-1-[0-9]+(-[0-9]+)+$`)
-	standaloneCauseWriterSID = regexp.MustCompile(`untrusted (?:Windows )?principal (S-1-[0-9]+(?:-[0-9]+)+)`)
+	// "<path>: untrusted Windows principal <SID> has write-like access mask 0x..."
+	standaloneCauseFolderVerdict = regexp.MustCompile(`([A-Za-z]:\\[^:]*?): untrusted (?:Windows )?principal (S-1-[0-9]+(?:-[0-9]+)+)`)
+	standaloneDriftOwnerSID      = regexp.MustCompile(`\bowner (S-1-[0-9-]+) is not trusted`)
+	standaloneSIDPattern         = regexp.MustCompile(`^S-1-[0-9]+(-[0-9]+)+$`)
+	standaloneCauseWriterSID     = regexp.MustCompile(`untrusted (?:Windows )?principal (S-1-[0-9]+(?:-[0-9]+)+)`)
 )
 
 // standaloneInPlaceRecovery is the recovery text of a managed file or folder
