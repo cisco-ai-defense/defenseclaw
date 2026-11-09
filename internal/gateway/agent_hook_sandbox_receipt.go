@@ -122,9 +122,7 @@ func (a *APIServer) recordSandboxHookReceiptState(ctx context.Context, p *pendin
 	if err != nil {
 		return err
 	}
-	leave := a.sandboxWriteLanes.enter(journalLane)
 	stored, err := a.store.UpdateHookDelivery(ctx, p.ID, encoded, pendingHookJournalLimits)
-	leave()
 	if err != nil {
 		return err
 	}
@@ -134,12 +132,9 @@ func (a *APIServer) recordSandboxHookReceiptState(ctx context.Context, p *pendin
 	return nil
 }
 
-// finalizeSandboxReceiptAnswer writes the audit verdict of a receipt with no
-// journal write beside it (sandboxWriteLanes).
+// finalizeSandboxReceiptAnswer writes the audit verdict of a receipt.
 func (a *APIServer) finalizeSandboxReceiptAnswer(ctx context.Context, connectorName string, req agentHookRequest,
 	resp agentHookResponse, p *pendingHookOccurrence) hookFinalizationResult {
-	leave := a.sandboxWriteLanes.enter(auditLane)
-	defer leave()
 	return a.finalizeAgentHookAnswer(ctx, connectorName, req, resp, p.RawEventIDs,
 		nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra, false)
 }

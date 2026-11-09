@@ -434,9 +434,6 @@ type APIServer struct {
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
 	sandboxIngressMu sync.RWMutex
 	sandboxIngress   *sandboxIngressState
-	// sandboxWriteLanes orders the managed sandbox call's writes on the two
-	// audit connections (laneGate).
-	sandboxWriteLanes laneGate
 	// hookCorrelationTurns holds the hooks of one session to one correlation
 	// attempt at a time (hookCorrelationSerial).
 	hookCorrelationTurns hookCorrelationSerial
