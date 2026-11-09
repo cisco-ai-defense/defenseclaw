@@ -120,6 +120,13 @@ var windowsEnterpriseLinkedConnectors = []struct{ connector, label, code string 
 	{"claudecode", "Claude Code", "claudecode_machine_folder_link"},
 }
 
+// windowsEnterpriseRemoveLinkFix is the command that removes only a link a
+// DefenseClaw step will not follow; status, verify and the uninstall result use
+// the same words (GAP-0900).
+func windowsEnterpriseRemoveLinkFix(link string) string {
+	return fmt.Sprintf("as an administrator, remove the link with: cmd /c rmdir \"%s\" (it removes the link only, not its target)", link)
+}
+
 // noteWindowsEnterpriseVendorFolderLinks names, for status and verify, a link at
 // the machine-policy folder of Codex, Cursor or Claude Code with the command
 // that removes it. The hook guardian never writes through the link: it fails
@@ -136,8 +143,8 @@ func noteWindowsEnterpriseVendorFolderLinks(result *enterprisestatus.Result) {
 		}
 		result.AddWarning(entry.code, fmt.Sprintf("a link or a non-folder sits at %s on the path of the %s machine-policy folder; "+
 			"DefenseClaw does not follow, change or remove it, so the hook guardian cannot recreate or repair the folder and %s is not protected until it is gone; "+
-			"as an administrator, remove the link with: cmd /c rmdir \"%s\" (it removes the link only, not its target); the guardian then recreates the folder on its next pass",
-			link, entry.label, entry.label, link))
+			"%s; the guardian then recreates the folder on its next pass",
+			link, entry.label, entry.label, windowsEnterpriseRemoveLinkFix(link)))
 	}
 }
 
@@ -159,8 +166,8 @@ func noteWindowsEnterprisePendingTransactionLink(result *enterprisestatus.Result
 		}
 		result.AddWarning("transaction_pending_link", fmt.Sprintf("a lifecycle transaction is pending and the DefenseClaw services stay stopped until it is recovered; "+
 			"a link or a non-folder at %s on the path of the %s machine-policy folder is the likely cause, because DefenseClaw does not write through it; "+
-			"as an administrator, remove the link with: cmd /c rmdir \"%s\" (it removes the link only, not its target), then run the recovery step named above",
-			link, entry.label, link))
+			"%s, then run the recovery step named above",
+			link, entry.label, windowsEnterpriseRemoveLinkFix(link)))
 	}
 }
 
