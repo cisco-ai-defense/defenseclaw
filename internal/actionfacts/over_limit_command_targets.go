@@ -27,12 +27,15 @@ import (
 // A shell command over maxCommandBytes that white space does not explain has
 // no complete reading: its targets are no path facts, so a content rule
 // cannot prove what it writes (GAP-0934). OverLimitCommandContentTarget
-// reads its text once more, without the shell grammar, for the one thing the
-// owner steer keeps blocked in every profile: a protected file named
-// directly as the target of a write. The reading over-approximates on
-// purpose. It never reads a quote, a comment or a here-document as ending
-// anything, so no text can hide a later statement from it; it also reads a
-// write written in a quoted string or a comment as a write.
+// reads its text once more for the one thing the owner steer keeps blocked in
+// every profile: a protected file named directly as the target of a write.
+// The reading over-approximates on purpose. It finds a write wherever the
+// text puts one, also in a quoted string, so no quote can hide a later
+// statement from it. Where readCommandLayout follows the text with
+// certainty it leaves out what the shell does not run (comments, here-
+// document bodies that only feed data) and applies a cd or an assignment in
+// the order written, so the later replaces the earlier as it does for the
+// shell. Otherwise every cd and assignment counts, wherever it is.
 
 // Bytes the scan compares against. Rune literals are avoided so the
 // constants read as the shell grammar they stand for.
@@ -93,7 +96,7 @@ func OverLimitCommandContentTarget(input Input, facts Facts) (string, bool) {
 	}
 	texts, dirs := overLimitCommandTexts(input)
 	for _, text := range texts {
-		scan := commandWriteScan{text: text, dirs: dirs}
+		scan := commandWriteScan{text: text, dirs: slices.Clone(dirs)}
 		if class := scan.protectedWriteClass(); class != "" {
 			return class, true
 		}
@@ -145,9 +148,14 @@ func appendJSONStrings(texts []string, value any, depth int) []string {
 
 // commandWriteScan reads one command text for writes to protected files.
 type commandWriteScan struct {
-	text string
-	// dirs are the directories a relative target may be placed in.
+	text   string
+	layout commandLayout
+	// base are the directories the call starts in; dirs are the directories
+	// a relative target may be placed in at the point read.
+	base []string
 	dirs []string
+	// previous are the directories the last cd left.
+	previous []string
 	// vars are the values the text assigns to a variable name, for the names
 	// whose value is, or holds, a protected file.
 	vars map[string][]string
@@ -161,9 +169,23 @@ type commandOperand struct {
 }
 
 func (s *commandWriteScan) protectedWriteClass() string {
-	s.followAssignments()
-	text := s.text
-	for index := 0; index < len(text); {
+	if layout, readable := readCommandLayout(s.text); readable {
+		s.layout = layout
+	}
+	s.base = slices.Clone(s.dirs)
+	if !s.layout.sequential {
+		// Every cd and assignment counts wherever it is. The second reading
+		// sees a relative value against the directories the first followed to.
+		s.followAssignments()
+		s.followAssignments()
+	}
+	var skipCursor, quotedCursor int
+	for index := 0; index < len(s.text); {
+		if end := spanEnd(s.layout.skipped, &skipCursor, index); end > index {
+			index = end
+			continue
+		}
+		text := s.readableText(&quotedCursor, index)
 		class, next := "", index+1
 		switch {
 		case text[index] == scanGreater:
@@ -185,6 +207,7 @@ func (s *commandWriteScan) protectedWriteClass() string {
 			}
 			next = after
 		default:
+			matched := false
 			for _, name := range scanLastOperandWriters {
 				if !hasKeywordAt(text, index, name, true) {
 					continue
@@ -194,8 +217,11 @@ func (s *commandWriteScan) protectedWriteClass() string {
 					last := operands[len(operands)-1]
 					class = s.classOf(last.word, last.plain)
 				}
-				next = after
+				next, matched = after, true
 				break
+			}
+			if !matched && s.layout.sequential {
+				next = s.followStatement(text, index)
 			}
 		}
 		if class != "" {
@@ -211,31 +237,74 @@ func (s *commandWriteScan) protectedWriteClass() string {
 // through an earlier variable included) and for the directories it changes
 // to with cd when a protected file lives in them, so that a target written
 // through $NAME, or a relative target after cd /etc, is read as the file it
-// is. Every assignment and every cd counts, wherever it is in the text: the
-// scan reads no grammar, and a later assignment or cd elsewhere does not
-// hide the earlier one.
+// is. It is the reading of a text whose order of statements is not known:
+// every assignment and every cd counts, wherever it is, and a later one does
+// not hide the earlier one.
 func (s *commandWriteScan) followAssignments() {
-	base := append([]string(nil), s.dirs...)
-	text := s.text
-	for index := 0; index < len(text); {
-		next := index + 1
-		if name := assignmentNameAt(text, index); name != "" {
-			word, after, plain := readCommandWord(text, index+len(name)+1)
-			for _, value := range s.expand(word, plain) {
+	var skipCursor, quotedCursor int
+	for index := 0; index < len(s.text); {
+		if end := spanEnd(s.layout.skipped, &skipCursor, index); end > index {
+			index = end
+			continue
+		}
+		index = s.followStatement(s.readableText(&quotedCursor, index), index)
+	}
+}
+
+// readableText is the text a read that starts at index may use: all of it,
+// and, for a command written inside a quoted word, up to the end of that word.
+func (s *commandWriteScan) readableText(cursor *int, index int) string {
+	if end := spanEnd(s.layout.quoted, cursor, index); end > index {
+		return s.text[:end]
+	}
+	return s.text
+}
+
+// followStatement applies the assignment or the cd that starts at index and
+// returns the index after it (index+1 when none starts there). One that the
+// layout reads as running in the main shell in the order written replaces
+// the value or the directories (a sequential text only); any other adds to
+// them.
+func (s *commandWriteScan) followStatement(text string, index int) int {
+	straight := s.layout.sequential && s.layout.straight[index]
+	if name := assignmentNameAt(text, index); name != "" {
+		word, after, plain := readCommandWord(text, index+len(name)+1)
+		readings := s.expand(word, plain)
+		if straight {
+			s.setVariable(name, readings)
+		} else {
+			for _, value := range readings {
 				s.addVariable(name, value)
 			}
-			next = after
-		} else if hasKeywordAt(text, index, "cd", true) {
-			operands, after := commandOperands(text, index+len("cd"))
-			next = after
-			if len(operands) != 0 {
-				for _, dir := range s.expand(operands[0].word, operands[0].plain) {
-					s.addDirectory(base, dir)
-				}
+		}
+		return max(after, index+1)
+	}
+	if hasKeywordAt(text, index, "pushd", true) {
+		// pushd keeps the directory it leaves on a stack: it only adds.
+		operands, after := commandOperands(text, index+len("pushd"))
+		if len(operands) != 0 {
+			for _, dir := range s.expand(operands[0].word, operands[0].plain) {
+				s.addDirectory(dir)
 			}
 		}
-		index = max(next, index+1)
+		return max(after, index+1)
 	}
+	if hasKeywordAt(text, index, "cd", true) {
+		operands, after := commandOperands(text, index+len("cd"))
+		readings := s.vars["HOME"]
+		if len(operands) != 0 {
+			readings = s.expand(operands[0].word, operands[0].plain)
+		}
+		if straight && len(operands) <= 1 {
+			s.changeDirectory(readings)
+		} else {
+			for _, dir := range readings {
+				s.addDirectory(dir)
+			}
+		}
+		return max(after, index+1)
+	}
+	return index + 1
 }
 
 // holdsProtectedFile reports whether an absolute path is a protected file,
@@ -252,13 +321,19 @@ func holdsProtectedFile(value string) bool {
 	return false
 }
 
+// addVariable adds a value a variable may hold: an absolute path that is, or
+// holds, a protected file, or a relative one that is, or holds, a protected
+// file in a directory the text works in.
 func (s *commandWriteScan) addVariable(name, value string) {
-	if !strings.HasPrefix(value, "/") {
+	if strings.HasPrefix(value, "/") {
+		value = path.Clean(value)
+		if !holdsProtectedFile(value) {
+			return
+		}
+	} else if !s.relativeValueMatters(value) {
 		return
 	}
-	value = path.Clean(value)
-	if !holdsProtectedFile(value) || slices.Contains(s.vars[name], value) ||
-		len(s.vars[name]) >= scanMaxDirs || len(s.vars) >= scanMaxDirs {
+	if slices.Contains(s.vars[name], value) || len(s.vars[name]) >= scanMaxDirs {
 		return
 	}
 	if s.vars == nil {
@@ -267,21 +342,90 @@ func (s *commandWriteScan) addVariable(name, value string) {
 	s.vars[name] = append(s.vars[name], value)
 }
 
-func (s *commandWriteScan) addDirectory(base []string, word string) {
-	candidates := []string{word}
-	if !strings.HasPrefix(word, "/") {
-		candidates = candidates[:0]
-		for _, dir := range base {
-			if strings.HasPrefix(dir, "/") {
-				candidates = append(candidates, path.Join(dir, word))
+func (s *commandWriteScan) relativeValueMatters(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, dir := range s.dirs {
+		if strings.HasPrefix(dir, "/") && holdsProtectedFile(path.Join(dir, value)) {
+			return true
+		}
+	}
+	return false
+}
+
+// setVariable replaces what a variable holds: the shell has the value of the
+// last assignment, whatever the variable held before.
+func (s *commandWriteScan) setVariable(name string, values []string) {
+	delete(s.vars, name)
+	for _, value := range values {
+		if strings.HasPrefix(value, "/") {
+			value = path.Clean(value)
+		}
+		if len(s.vars[name]) >= scanMaxDirs {
+			return
+		}
+		if s.vars == nil {
+			s.vars = make(map[string][]string)
+		}
+		if !slices.Contains(s.vars[name], value) {
+			s.vars[name] = append(s.vars[name], value)
+		}
+	}
+}
+
+// resolveDirectory is the directories a cd word names from the directories
+// the text works in.
+func (s *commandWriteScan) resolveDirectory(word string) []string {
+	if strings.HasPrefix(word, "/") {
+		return []string{path.Clean(word)}
+	}
+	var resolved []string
+	for _, dir := range s.dirs {
+		if strings.HasPrefix(dir, "/") {
+			resolved = append(resolved, path.Join(dir, word))
+		}
+	}
+	return resolved
+}
+
+// addDirectory adds a directory the text may work in when a protected file
+// lives in it.
+func (s *commandWriteScan) addDirectory(word string) {
+	for _, candidate := range s.resolveDirectory(word) {
+		if len(s.dirs) < len(s.base)+scanMaxDirs && !slices.Contains(s.dirs, candidate) && holdsProtectedFile(candidate) {
+			s.dirs = append(s.dirs, candidate)
+		}
+	}
+}
+
+// changeDirectory makes the directories a cd word names the ones the text
+// works in; cd - names both the ones it leaves and the ones it left before.
+// A word that names none the scan knows (an unknown variable, no HOME) leaves
+// them as they are.
+func (s *commandWriteScan) changeDirectory(words []string) {
+	var next []string
+	add := func(dir string) {
+		if !slices.Contains(next, dir) {
+			next = append(next, dir)
+		}
+	}
+	for _, word := range words {
+		switch word {
+		case "":
+			return
+		case "-":
+			for _, dir := range append(slices.Clone(s.previous), s.dirs...) {
+				add(dir)
+			}
+		default:
+			for _, dir := range s.resolveDirectory(word) {
+				add(dir)
 			}
 		}
 	}
-	for _, candidate := range candidates {
-		candidate = path.Clean(candidate)
-		if len(s.dirs) < len(base)+scanMaxDirs && !slices.Contains(s.dirs, candidate) && holdsProtectedFile(candidate) {
-			s.dirs = append(s.dirs, candidate)
-		}
+	if len(next) != 0 {
+		s.previous, s.dirs = s.dirs, next[:min(len(next), len(s.base)+scanMaxDirs)]
 	}
 }
 
@@ -363,13 +507,14 @@ func isScanWordByte(c byte) bool {
 
 // hasKeywordAt reports whether keyword starts at index as a word of its own:
 // not the end of a longer name, and, with blankAfter, followed by white
-// space. A command path (/usr/bin/tee) and a quote before it are word starts.
+// space, the end of the word (a separator or redirection) or the end of the
+// text. A command path (/usr/bin/tee) and a quote before it are word starts.
 func hasKeywordAt(text string, index int, keyword string, blankAfter bool) bool {
 	if !strings.HasPrefix(text[index:], keyword) || (index > 0 && isScanWordByte(text[index-1])) {
 		return false
 	}
 	end := index + len(keyword)
-	return !blankAfter || (end < len(text) && isShellWhiteSpace(text[end]))
+	return !blankAfter || end >= len(text) || isShellWhiteSpace(text[end]) || strings.IndexByte(scanWordEnd, text[end]) >= 0
 }
 
 // skipBlanks skips blanks, tabs and line continuations.

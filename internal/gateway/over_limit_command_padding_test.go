@@ -194,3 +194,68 @@ func TestOverLimitCommandPaddingKeepsHeredocMeaning(t *testing.T) {
 		}
 	})
 }
+
+// TestOverLimitCommandDataPaddingFollowsShellOrder pins that a command padded
+// with data (a quoted string) is read in the order the shell runs it
+// (GAP-0934): a later cd or assignment replaces the earlier one, the body of a
+// here-document that only feeds a file is data, and a text a command prints
+// is no write. A protected file reached through a known directory or a known
+// relative value still blocks, and a here-document or a string run by a shell
+// is code.
+func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	notes := filepath.Join(project, "notes.txt")
+	lib := "/usr/local/lib/libreview.so"
+	load := "echo " + lib + " > /etc/ld.so.preload"
+	text := strings.Repeat("x", 70000)
+	paddings := map[string]func(statement string) string{
+		"quoted text after": func(statement string) string { return statement + "\n: \x27" + text + "\x27" },
+		"quoted text first": func(statement string) string { return ": \x27" + text + "\x27\n" + statement },
+		"document after":    func(statement string) string { return statement + "\ncat > /dev/null <<EOF\n" + text + "\nEOF\n" },
+	}
+	for name, statement := range map[string]string{
+		"here-document to an ordinary file":     "cat > " + notes + " <<\x27EOF\x27\n" + load + "\nEOF\n",
+		"here-document with a padded delimiter": "cat > " + notes + " <<EOF\nnote\nEOF \n" + load + "\nEOF\n",
+		"cd superseded before a relative write": "cd /etc; cd " + project + "; echo " + lib + " > ld.so.preload",
+		"variable reassigned before the write":  "F=/etc/ld.so.preload; F=" + notes + "; echo " + lib + " > \"$F\"",
+		"relative value in the project":         "cd " + project + "; F=ld.so.preload; echo " + lib + " > \"$F\"",
+		"printed text names a redirect":         "printf \x27%s\\n\x27 \x27" + load + "\x27 > " + notes,
+		"redirect in a comment":                 "echo ok > " + notes + " # " + load,
+		"exported variable reassigned":          "export F=/etc/ld.so.preload; export F=" + notes + "; echo ok > \"$F\"",
+	} {
+		for padName, pad := range paddings {
+			t.Run("benign/"+name+"/"+padName, func(t *testing.T) {
+				got := overLimitCommandVerdict(t, home, project, pad(statement))
+				if action := overLimitHookAction(t, got); action == "block" {
+					t.Fatalf("ordinary oversize command blocked: %.600s", got)
+				}
+			})
+		}
+	}
+	for name, statement := range map[string]string{
+		"known relative value":                   "cd /etc; F=ld.so.preload; echo " + lib + " > \"$F\"",
+		"relative value before the cd":           "F=ld.so.preload; cd /etc; echo " + lib + " > \"$F\"",
+		"cd up from a subdirectory":              "cd /etc/x; cd ..; echo " + lib + " > ld.so.preload",
+		"cd back with a dash":                    "cd /etc; cd " + project + "; cd -; echo " + lib + " > ld.so.preload",
+		"cd that may fail":                       "cd /etc; cd " + project + " || true; echo " + lib + " > ld.so.preload",
+		"exported variable":                      "export F=/etc/ld.so.preload; echo " + lib + " > \"$F\"",
+		"here-document run by a shell":           "sh <<EOF\n" + load + "\nEOF\n",
+		"here-document piped to a shell":         "cat <<EOF | bash\n" + load + "\nEOF\n",
+		"string run by a shell":                  "sh -c \x27" + load + "\x27",
+		"string run by a shell with a cd":        "bash -c \x27cd /etc && echo " + lib + " > ld.so.preload\x27",
+		"redirect after a data here-document":    "cat > " + notes + " <<EOF\nnote\nEOF\n" + load,
+		"function that runs in the directory":    "f() { echo " + lib + " > ld.so.preload; }; cd /etc; f",
+		"tee with a quoted operand":              "echo " + lib + " | tee \"/etc/ld.so.preload\"",
+		"redirect after a printed text":          "echo \x27tee x\x27; " + load,
+		"directory variable and relative target": "cd /etc; D=pam.d; echo \x27auth sufficient pam_permit.so\x27 > $D/sshd",
+	} {
+		for padName, pad := range paddings {
+			t.Run("attack/"+name+"/"+padName, func(t *testing.T) {
+				got := overLimitCommandVerdict(t, home, project, pad(statement))
+				if overLimitHookAction(t, got) != "block" {
+					t.Fatalf("not blocked: %.600s", got)
+				}
+			})
+		}
+	}
+}

@@ -309,22 +309,7 @@ func heredocDelimiter(text string, index int) (string, int, bool) {
 // up to and including its delimiter line, and returns the index after it.
 // A body without a delimiter line runs to the end of the text.
 func copyHeredocBody(out *strings.Builder, text string, index int, delimiter string, stripTabs bool) int {
-	for index < len(text) {
-		end := strings.IndexByte(text[index:], shellNewline)
-		next := len(text)
-		line := text[index:]
-		if end >= 0 {
-			next = index + end + 1
-			line = text[index : index+end]
-		}
-		out.WriteString(text[index:next])
-		if stripTabs {
-			line = strings.TrimLeft(line, "\t")
-		}
-		index = next
-		if line == delimiter {
-			return index
-		}
-	}
-	return index
+	end := heredocBodyEnd(text, index, delimiter, stripTabs)
+	out.WriteString(text[index:end])
+	return end
 }
