@@ -15,7 +15,21 @@ import (
 
 // readNativeEditFile reads the text of a file an Edit or MultiEdit changes;
 // tests replace it. ok is false for a file that cannot be read as text.
-var readNativeEditFile = readBoundedTextFile
+var readNativeEditFile = func(name string) (string, bool) {
+	return readNativeEditFileOn(runtime.GOOS, name)
+}
+
+// readNativeEditFileOn reads name as the gateway running on goos would. On
+// Windows the daemon configuration is a POSIX path the gateway cannot place
+// (a missing \etc\docker\daemon.json on the current drive would read as an
+// empty document and so allow an edit of the real file), so nothing is read
+// and the edit is judged on the text the call carries.
+func readNativeEditFileOn(goos, name string) (string, bool) {
+	if goos == "windows" {
+		return "", false
+	}
+	return readBoundedTextFile(name)
+}
 
 // withNativeEditFileContents gives the content proof of Docker's daemon
 // configuration the text of the file each Edit or MultiEdit of the call
