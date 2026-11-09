@@ -5,35 +5,105 @@
 package connector
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
-	"unicode"
 )
 
-// hermesKeptHookEvents lists the hook events Setup registers that still hold an
-// entry DefenseClaw does not own (hermesHookEntryOwned) and that names a
-// DefenseClaw hook (hermesCommandNamesDefenseClawHook). Such an entry is the
-// user content Setup, repair and teardown keep, and it may be a hand-edited
-// copy of a DefenseClaw hook. A user's own unrelated hook is kept without a
-// word: the notice tells the user to remove entries that run a DefenseClaw
-// hook, and that is no advice for a hook of theirs (GAP-0940).
-func hermesKeptHookEvents(hooks map[string]interface{}, hookScript string, recognizedCommands map[string]struct{}) []string {
-	required := hermesHookEventSet()
-	var events []string
-	for event, raw := range hooks {
-		if _, ok := required[event]; !ok {
+// hermesHookEntryRecord is what Setup remembers of the entry it wrote on one
+// required Hermes event, in the Hermes home record (hermesHomeSetUp.Hooks).
+// It is the only thing the kept-entry notice reads: the notice never looks at
+// what a command says, because a command that merely mentions a DefenseClaw
+// hook name (as data, in a comment) runs no DefenseClaw hook (GAP-0940).
+type hermesHookEntryRecord struct {
+	// Shape is the hash of the entry Setup wrote without its command (timeout,
+	// matcher and the other fields), so the entry a person edited in place is
+	// told from a hook that is theirs.
+	Shape string `json:"shape"`
+	// Kept lists the hashes of the commands of entries Setup found in the place
+	// of its own edited entry and kept. They stay listed for as long as the
+	// same command stays in the file.
+	Kept []string `json:"kept,omitempty"`
+}
+
+func hermesCommandHash(command string) string {
+	sum := sha256.Sum256([]byte(command))
+	return hex.EncodeToString(sum[:])
+}
+
+// hermesEntryShape hashes every field of a hook entry except its command.
+func hermesEntryShape(entry map[string]interface{}) string {
+	rest := make(map[string]interface{}, len(entry))
+	for key, value := range entry {
+		if key != "command" {
+			rest[key] = value
+		}
+	}
+	data, _ := json.Marshal(rest)
+	return hermesCommandHash(string(data))
+}
+
+// hermesRecordDir is the data directory that holds the record, read from the
+// generated script <data dir>/hooks/hermes-hook.sh. Windows and any other
+// command have no record: the notice is then not printed.
+func hermesRecordDir(hookScript string) string {
+	dir := filepath.Dir(hookScript)
+	if runtime.GOOS == "windows" || filepath.Base(dir) != "hooks" {
+		return ""
+	}
+	return filepath.Dir(dir)
+}
+
+// hermesKeptCommands lists the hashes of the entries of one event that Setup
+// keeps as the place of an entry DefenseClaw wrote and a person has edited: an
+// entry DefenseClaw does not own that was kept before and is still there, or,
+// when the event no longer holds an entry DefenseClaw owns, one with the shape
+// of the entry Setup wrote. Without a record of the event nothing is listed.
+func hermesKeptCommands(prior hermesHomeSetUp, event string, raw interface{}, hookScript string, recognizedCommands map[string]struct{}) []string {
+	record, ok := prior.Hooks[event]
+	if !ok {
+		return nil
+	}
+	entries, _ := hermesHookList(raw)
+	ownedLeft := false
+	for _, entry := range entries {
+		ownedLeft = ownedLeft || hermesHookEntryOwned(entry, hookScript, recognizedCommands)
+	}
+	var kept []string
+	for _, entry := range entries {
+		command, hasCommand := hermesHookEntryCommand(entry)
+		if !hasCommand || hermesHookEntryOwned(entry, hookScript, recognizedCommands) {
 			continue
 		}
-		entries, _ := hermesHookList(raw)
+		hash := hermesCommandHash(command)
+		if slices.Contains(kept, hash) {
+			continue
+		}
+		if slices.Contains(record.Kept, hash) || (!ownedLeft && record.Shape == hermesEntryShape(entry.(map[string]interface{}))) {
+			kept = append(kept, hash)
+		}
+	}
+	sort.Strings(kept)
+	return kept
+}
+
+// hermesRecordedKeptEvents lists, for teardown, the required events whose file
+// still holds an entry the record says Setup kept.
+func hermesRecordedKeptEvents(prior hermesHomeSetUp, hooks map[string]interface{}, hookScript string, recognizedCommands map[string]struct{}) []string {
+	var events []string
+	for event := range hermesHookEventSet() {
+		record := prior.Hooks[event]
+		entries, _ := hermesHookList(hooks[event])
 		for _, entry := range entries {
 			if command, hasCommand := hermesHookEntryCommand(entry); hasCommand &&
-				!hermesHookEntryOwned(entry, hookScript, recognizedCommands) &&
-				hermesCommandNamesDefenseClawHook(command, hookScript) {
+				slices.Contains(record.Kept, hermesCommandHash(command)) &&
+				!hermesHookEntryOwned(entry, hookScript, recognizedCommands) {
 				events = append(events, event)
 				break
 			}
@@ -43,130 +113,10 @@ func hermesKeptHookEvents(hooks map[string]interface{}, hookScript string, recog
 	return events
 }
 
-// hermesDefenseClawLauncherFlag finds the native launcher Hermes flag as a
-// whole word: a character that can continue a name before or after it means
-// another command.
-var hermesDefenseClawLauncherFlag = regexp.MustCompile(
-	`(?:^|[^A-Za-z0-9._-])` + regexp.QuoteMeta(nativeHookFlag+"hermes") + `(?:$|[^A-Za-z0-9._-])`)
-
-// hermesWindowsCommands says Hermes runs the command the Windows way: every
-// backslash separates folders. On Linux and macOS a POSIX shell reads the
-// command, and a backslash there is an escape (hermesCommandWords).
-var hermesWindowsCommands = runtime.GOOS == "windows"
-
-// hermesCommandWords splits a command into the words the platform's shell
-// reads, honouring single and double quotes, and breaks unquoted words at the
-// shell operators and at "=" so a path after VAR= or after && is a word of its
-// own. On Linux and macOS a backslash outside quotes escapes the next
-// character (my\ hermes-hook.sh is the one word "my hermes-hook.sh" and
-// my\hermes-hook.sh the word "myhermes-hook.sh", both files of the user);
-// inside double quotes it escapes only a double quote, "$", a backtick or a
-// backslash, and inside single quotes nothing, and a backslash that stays is
-// read again when the quoted text is a shell -c argument. On Windows every
-// backslash is a path separator and reads as "/".
-func hermesCommandWords(command string) []string {
-	const singleQuote, doubleQuote = rune(0x27), rune(0x22)
-	var words []string
-	var word strings.Builder
-	started := false
-	var quote rune
-	flush := func() {
-		if started {
-			words = append(words, word.String())
-		}
-		word.Reset()
-		started = false
-	}
-	runes := []rune(command)
-	for i := 0; i < len(runes); i++ {
-		r := runes[i]
-		switch {
-		case r == '\\':
-			started = true
-			following := rune(0)
-			if i+1 < len(runes) {
-				following = runes[i+1]
-			}
-			switch {
-			case hermesWindowsCommands:
-				word.WriteRune('/')
-			case quote == singleQuote || following == 0 ||
-				(quote == doubleQuote && !strings.ContainsRune(string(doubleQuote)+"$`\\", following)):
-				word.WriteRune('\\')
-			default:
-				i++
-				if following != '\n' { // a backslash before a newline continues the line
-					word.WriteRune(following)
-				}
-			}
-		case quote != 0:
-			if r == quote {
-				quote = 0
-			} else {
-				word.WriteRune(r)
-			}
-		case r == singleQuote || r == doubleQuote:
-			quote, started = r, true
-		case unicode.IsSpace(r) || strings.ContainsRune(";&|<>()=", r):
-			flush()
-		default:
-			word.WriteRune(r)
-			started = true
-		}
-	}
-	flush()
-	return words
-}
-
-// hermesWordNamesDefenseClawHook reports whether one word of a command is a
-// path DefenseClaw owns after the path is cleaned: the generated script (or an
-// edited copy of it, hermes-hook.sh.off), or anything in the hooks folder,
-// spelled absolute, with ~, with $HOME or relative. The clean path decides,
-// so .defenseclaw/hooks/../user-hook.sh is a file of the user and
-// hermes-hook.sh-audit or my-hermes-hook.sh is another name.
-func hermesWordNamesDefenseClawHook(word, hooksDir string) bool {
-	clean := path.Clean(word)
-	if hooksDir != "" && (clean == hooksDir || strings.HasPrefix(clean, hooksDir+"/")) {
-		return true
-	}
-	const folder = ".defenseclaw/hooks"
-	if clean == folder || strings.HasPrefix(clean, folder+"/") ||
-		strings.HasSuffix(clean, "/"+folder) || strings.Contains(clean, "/"+folder+"/") {
-		return true
-	}
-	base := path.Base(clean)
-	return base == hermesHookScriptName || strings.HasPrefix(base, hermesHookScriptName+".")
-}
-
-// hermesCommandNamesDefenseClawHook reports whether a kept entry command
-// names a DefenseClaw hook: a word that is the generated script or a file in
-// the hooks folder (see hermesWordNamesDefenseClawHook), the argument of a
-// shell -c read the same way, or the native launcher Hermes flag. It only
-// picks which kept entries are listed; ownership never reads the command, so
-// no entry is changed, claimed or removed because of it.
-func hermesCommandNamesDefenseClawHook(command, hookScript string) bool {
-	hooksDir := ""
-	if hookScript != "" {
-		hooksDir = path.Clean(filepath.ToSlash(filepath.Dir(hookScript)))
-	}
-	if hermesDefenseClawLauncherFlag.MatchString(command) {
-		return true
-	}
-	previous := ""
-	for _, word := range hermesCommandWords(command) {
-		if hermesWordNamesDefenseClawHook(word, hooksDir) ||
-			(previous == "-c" && word != command && hermesCommandNamesDefenseClawHook(word, hookScript)) {
-			return true
-		}
-		previous = word
-	}
-	return false
-}
-
 // warnHermesKeptHookEntries says once, after Setup or teardown (operation),
-// which events keep hook entries DefenseClaw did not write.
-func warnHermesKeptHookEntries(operation, path string, hooks map[string]interface{}, hookScript string, recognizedCommands map[string]struct{}) {
-	if kept := hermesKeptHookEvents(hooks, hookScript, recognizedCommands); len(kept) > 0 {
-		fmt.Fprintf(hermesSetupWarningOutput, "[connector] hermes %s: kept hook entries in %s (events: %s) that DefenseClaw did not write; remove any that runs a DefenseClaw hook by hand\n", operation, path, strings.Join(kept, ", "))
+// which events keep an entry DefenseClaw wrote and a person edited.
+func warnHermesKeptHookEntries(operation, path string, events []string) {
+	if len(events) > 0 {
+		fmt.Fprintf(hermesSetupWarningOutput, "[connector] hermes %s: kept hook entries in %s (events: %s) that DefenseClaw did not write; remove any that runs a DefenseClaw hook by hand\n", operation, path, strings.Join(events, ", "))
 	}
 }

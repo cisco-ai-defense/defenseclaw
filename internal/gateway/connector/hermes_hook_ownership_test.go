@@ -82,6 +82,56 @@ func captureHermesNotices(t *testing.T) *bytes.Buffer {
 	return &notice
 }
 
+// hermesSetUp runs Setup on the fixture config, which leaves the record of the
+// entries Setup wrote that the kept-entry notice reads.
+func hermesSetUp(t *testing.T, conn *hookOnlyConnector, opts SetupOpts, configPath string) {
+	t.Helper()
+	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+}
+
+// hermesRewriteHooks lets edit change the hook entries of the config the way a
+// person edits the file by hand.
+func hermesRewriteHooks(t *testing.T, configPath string, edit func(hooks map[string]interface{})) {
+	t.Helper()
+	cfg, err := readYAMLObject(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	edit(hooks)
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// hermesSetUpAndEditTheEntry runs Setup and then rewrites the command of the
+// pre_tool_call entry Setup wrote, in place, as a person does; the entries of the
+// other events go, so the file holds that one entry.
+func hermesSetUpAndEditTheEntry(t *testing.T, conn *hookOnlyConnector, opts SetupOpts, configPath, command string) {
+	t.Helper()
+	hermesSetUp(t, conn, opts, configPath)
+	hermesRewriteHooks(t, configPath, func(hooks map[string]interface{}) {
+		for event, raw := range hooks {
+			if event != "pre_tool_call" {
+				delete(hooks, event)
+				continue
+			}
+			for _, entry := range raw.([]interface{}) {
+				entry.(map[string]interface{})["command"] = command
+			}
+		}
+	})
+}
+
 // hermesSetupCommandIn is the command Setup writes for a data directory.
 func hermesSetupCommandIn(dataDir string) string {
 	return hermesConfiguredHookCommand(filepath.Join(dataDir, "hooks", hermesHookScriptName), "")
@@ -176,11 +226,9 @@ func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptAndListed(t *testing.T)
 	}
 	for name, form := range forms {
 		t.Run(name, func(t *testing.T) {
-			var command string
-			conn, opts, configPath, home := hermesHookDirFixture(t, form.home, func(dataDir, home string) []string {
-				command = form.command(dataDir, home)
-				return []string{command}
-			})
+			conn, opts, configPath, home := hermesHookDirFixture(t, form.home, func(string, string) []string { return nil })
+			command := form.command(opts.DataDir, home)
+			hermesSetUpAndEditTheEntry(t, conn, opts, configPath, command)
 			userScript := filepath.Join(home, "user-hook.sh")
 			if err := os.WriteFile(userScript, []byte("#!/bin/sh\n"), 0o700); err != nil {
 				t.Fatal(err)
@@ -189,6 +237,26 @@ func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptAndListed(t *testing.T)
 			if err := conn.VerifyClean(opts); err != nil {
 				t.Fatalf("VerifyClean rejected a user entry: %v", err)
 			}
+			// Repair adds the current entry beside the edited one, keeps the
+			// edited one and warns once, and never refuses.
+			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+				t.Fatalf("repair refused a user entry: %v", err)
+			}
+			if got := hermesPreToolCommands(t, configPath); len(got) != 2 || got[0] != command || got[1] != hermesConfiguredHookCommand(conn.hookCommand(opts), "") {
+				t.Fatalf("repaired commands = %q; want the edited entry %q then the current one", got, command)
+			}
+			if !strings.Contains(notice.String(), "kept hook entries") || !strings.Contains(notice.String(), "pre_tool_call") || strings.Count(notice.String(), "\n") != 1 {
+				t.Fatalf("repair notice = %q; want one line naming pre_tool_call", notice.String())
+			}
+			// Repair again: the entry is still kept, so the notice still comes.
+			notice.Reset()
+			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+				t.Fatalf("second repair: %v", err)
+			}
+			if !strings.Contains(notice.String(), "pre_tool_call") {
+				t.Fatalf("second repair notice = %q; want pre_tool_call listed", notice.String())
+			}
+			notice.Reset()
 			if err := conn.Teardown(context.Background(), opts); err != nil {
 				t.Fatalf("Teardown: %v", err)
 			}
@@ -203,18 +271,6 @@ func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptAndListed(t *testing.T)
 			}
 			if !strings.Contains(notice.String(), "kept hook entries") || !strings.Contains(notice.String(), "pre_tool_call") || strings.Count(notice.String(), "\n") != 1 {
 				t.Fatalf("notice = %q; want one line naming pre_tool_call", notice.String())
-			}
-			// Repair applies the same predicate: it adds the current entry,
-			// keeps the user entry and warns, and never refuses.
-			notice.Reset()
-			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
-				t.Fatalf("repair refused a user entry: %v", err)
-			}
-			if got := hermesPreToolCommands(t, configPath); len(got) != 2 || got[0] != command || got[1] != hermesConfiguredHookCommand(conn.hookCommand(opts), "") {
-				t.Fatalf("repaired commands = %q; want the user entry %q then the current one", got, command)
-			}
-			if !strings.Contains(notice.String(), "kept hook entries") || !strings.Contains(notice.String(), "pre_tool_call") || strings.Count(notice.String(), "\n") != 1 {
-				t.Fatalf("repair notice = %q; want one line naming pre_tool_call", notice.String())
 			}
 			if matches, _ := filepath.Glob(configPath + ".*"); len(matches) != 0 {
 				t.Fatalf("teardown wrote extra files next to the config: %q", matches)
@@ -365,9 +421,7 @@ func TestHermesKeptEntryNoticeIgnoresTheDataDirectoryName(t *testing.T) {
 			conn, opts, configPath, home := hermesHookDirFixture(t, "", func(string, string) []string { return nil })
 			opts.DataDir = filepath.Join(home, "state")
 			command := edit(opts.DataDir)
-			writeHermesPreToolEntries(t, configPath, []interface{}{
-				map[string]interface{}{"command": command, "fail_closed": true, "matcher": ".*", "timeout": 30},
-			})
+			hermesSetUpAndEditTheEntry(t, conn, opts, configPath, command)
 			notice := captureHermesNotices(t)
 			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
 				t.Fatalf("repair: %v", err)
@@ -389,55 +443,103 @@ func TestHermesKeptEntryNoticeIgnoresTheDataDirectoryName(t *testing.T) {
 	}
 }
 
-// A backslash is a shell escape before a blank, quote, "$" or operator and a
-// Windows path separator before anything else, so the DefenseClaw hook is
-// still named when its Windows path is written with backslashes.
-func TestHermesBackslashIsAShellEscapeOnLinuxAndMacWhenNamingAHook(t *testing.T) {
-	const own = "/home/u/.defenseclaw/hooks/hermes-hook.sh"
-	previous := hermesWindowsCommands
-	hermesWindowsCommands = false
-	t.Cleanup(func() { hermesWindowsCommands = previous })
-	for command, want := range map[string]bool{
-		`bash /home/u/.defenseclaw/hooks/hermes-hook.sh`:         true,
-		`bash /home/u/bin/my\ hermes-hook.sh`:                    false,
-		`bash "/home/u/bin/my\ hermes-hook.sh"`:                  false,
-		`bash /home/u/bin/audit\;hermes-hook.sh`:                 false,
-		`bash /home/u/bin/audit\=hermes-hook.sh`:                 false,
-		`bash /home/u/bin/audit\$hermes-hook.sh`:                 false,
-		`bash /home/u/bin/my\hermes-hook.sh`:                     false,
-		`bash /home/u/my\.defenseclaw/hooks/user.sh`:             false,
-		`bash "/home/u/bin/my\\hermes-hook.sh"`:                  false,
-		`bash '/home/u/bin/my\hermes-hook.sh'`:                   false,
-		`bash /home/u/bin/my\ hermes-hook.sh --event\ x`:         false,
-		`bash /home/u/.defenseclaw/hooks/my\ audit.sh`:           true,
-		`bash /home/u/.defenseclaw/hooks/my\audit.sh`:            true,
-		`bash /home/u/.defenseclaw/hooks\/hermes-hook.sh`:        true,
-		`bash /home/u/.defenseclaw\hooks\hermes-hook.sh`:         false,
-		`sh -c "bash /home/u/bin/my\ hermes-hook.sh"`:            false,
-		`sh -c "bash /home/u/.defenseclaw/hooks/hermes-hook.sh"`: true,
-	} {
-		if got := hermesCommandNamesDefenseClawHook(command, own); got != want {
-			t.Errorf("hermesCommandNamesDefenseClawHook(%q) = %v; want %v", command, got, want)
-		}
+// The notice is printed for an entry Setup wrote and a person edited, found by
+// the record Setup made, and never for the words of a command: a hook of the
+// user that only names a DefenseClaw hook, as data or in a comment, gets none
+// beside the entry Setup wrote (repair, teardown), and an edited entry gets
+// none either when no record of Setup exists.
+func TestHermesTheKeptEntryNoticeIsDecidedByTheSetupRecordNotByTheWordsOfACommand(t *testing.T) {
+	mentions := map[string]string{
+		"printf data":         `printf '%s' 'hermes-hook.sh' >/dev/null`,
+		"comment":             `true # hermes-hook.sh`,
+		"echo":                `echo hermes-hook.sh`,
+		"folder in a comment": `true # ~/.defenseclaw/hooks/hermes-hook.sh`,
+		"folder as data":      `printf '%s' "$HOME/.defenseclaw/hooks/hermes-hook.sh"`,
+		"launcher flag":       `echo hook --connector hermes`,
+		"script of the user":  `bash /opt/tools/audit.sh`,
 	}
+	for name, command := range mentions {
+		t.Run(name, func(t *testing.T) {
+			conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(string, string) []string { return nil })
+			hermesSetUp(t, conn, opts, configPath)
+			hermesRewriteHooks(t, configPath, func(hooks map[string]interface{}) {
+				for _, event := range []string{"pre_tool_call", "post_tool_call"} {
+					hooks[event] = append([]interface{}{
+						map[string]interface{}{"command": command, "matcher": ".*", "timeout": 30},
+					}, hooks[event].([]interface{})...)
+				}
+			})
+			notice := captureHermesNotices(t)
+			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+				t.Fatalf("repair refused a user entry: %v", err)
+			}
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			if got := hermesPreToolCommands(t, configPath); len(got) != 1 || got[0] != command {
+				t.Fatalf("remaining commands = %q; want only the user entry %q", got, command)
+			}
+			if notice.Len() != 0 {
+				t.Fatalf("notice = %q; want none for a user hook that names a DefenseClaw hook as data", notice.String())
+			}
+		})
+	}
+
+	t.Run("an edited entry without a record of Setup", func(t *testing.T) {
+		conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(string, string) []string { return nil })
+		hermesSetUp(t, conn, opts, configPath)
+		if err := os.Remove(filepath.Join(opts.DataDir, hermesHomeSetUpFileName)); err != nil {
+			t.Fatal(err)
+		}
+		hermesRewriteHooks(t, configPath, func(hooks map[string]interface{}) {
+			for _, entry := range hooks["pre_tool_call"].([]interface{}) {
+				entry.(map[string]interface{})["command"] = " " + hermesSetupCommandIn(opts.DataDir)
+			}
+		})
+		notice := captureHermesNotices(t)
+		if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+			t.Fatalf("repair: %v", err)
+		}
+		if err := conn.Teardown(context.Background(), opts); err != nil {
+			t.Fatalf("Teardown: %v", err)
+		}
+		if notice.Len() != 0 {
+			t.Fatalf("notice = %q; want none without the record", notice.String())
+		}
+	})
+
+	t.Run("a hook of the user added after Setup is not an edited entry", func(t *testing.T) {
+		conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(string, string) []string { return nil })
+		hermesSetUp(t, conn, opts, configPath)
+		hermesRewriteHooks(t, configPath, func(hooks map[string]interface{}) {
+			hooks["pre_tool_call"] = append(hooks["pre_tool_call"].([]interface{}),
+				map[string]interface{}{"command": "/opt/tools/audit", "matcher": ".*", "timeout": 30})
+		})
+		notice := captureHermesNotices(t)
+		if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+			t.Fatalf("repair: %v", err)
+		}
+		if notice.Len() != 0 {
+			t.Fatalf("notice = %q; want none while the entry Setup wrote is intact", notice.String())
+		}
+	})
 }
 
-func TestHermesBackslashIsAPathSeparatorOnWindowsWhenNamingAHook(t *testing.T) {
-	const own = "C:/Users/u/.defenseclaw/hooks/hermes-hook.sh"
-	previous := hermesWindowsCommands
-	hermesWindowsCommands = true
-	t.Cleanup(func() { hermesWindowsCommands = previous })
-	for command, want := range map[string]bool{
-		`bash C:\Users\u\.defenseclaw\hooks\hermes-hook.sh`:   true,
-		`bash "C:\Users\u\.defenseclaw\hooks\hermes-hook.sh"`: true,
-		`bash 'C:\Users\u\.defenseclaw\hooks\hermes-hook.sh'`: true,
-		`bash C:\Users\u\bin\hermes-hook.sh`:                  true,
-		`bash C:\Users\u\bin\my-hermes-hook.sh`:               false,
-		`bash C:\Users\u\.defenseclaw\hooks-backup\audit.sh`:  false,
-		`bash C:\Users\u\.defenseclaw\hooks\..\user-hook.sh`:  false,
-	} {
-		if got := hermesCommandNamesDefenseClawHook(command, own); got != want {
-			t.Errorf("hermesCommandNamesDefenseClawHook(%q) = %v; want %v", command, got, want)
-		}
+// Go writes the record that Python reads (hermes_recorded_kept_commands): an
+// entry Setup kept is named by the sha256 of its command, under its event.
+func TestHermesSetupRecordNamesAKeptEntryByTheHashOfItsCommand(t *testing.T) {
+	conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(string, string) []string { return nil })
+	hermesSetUpAndEditTheEntry(t, conn, opts, configPath, "/opt/tools/audit --old")
+	captureHermesNotices(t)
+	if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	record := readHermesSetUpRecord(opts.DataDir)
+	const hash = "043eaf7fcdff435feeb38ee9f79e6c7e49f6125e8663f452f1d4a264ea1c7b91"
+	if got := record.Hooks["pre_tool_call"].Kept; len(got) != 1 || got[0] != hash {
+		t.Fatalf("kept = %q; want [%s]", got, hash)
+	}
+	if got := record.Hooks["post_tool_call"].Kept; len(got) != 0 {
+		t.Fatalf("post_tool_call kept = %q; want none", got)
 	}
 }
