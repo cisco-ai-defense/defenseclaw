@@ -967,6 +967,16 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 				var extra []string
 				var nextDepth int
 				var ok bool
+				if base == "" && linkDepth >= SystemLinkLimit() {
+					// The links met so far spend the whole limit of one
+					// resolution. The folder reached is one a process can
+					// stand in (cd into it, or start there), and it opens a
+					// relative name from that folder with a limit of its own;
+					// a link that follows is counted from there. The chain of
+					// one link is still bounded: its own walk keeps the
+					// depth it started from (rel-1-0-9:GAP-0935).
+					linkDepth = 0
+				}
 				current, extra, nextDepth, ok = walkWritePath(current, link, linkDepth+1, collect, patchTarget)
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
 					return fail()

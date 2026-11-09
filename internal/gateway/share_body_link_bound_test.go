@@ -16,17 +16,19 @@ import (
 )
 
 // A sourced script whose folder is reached through more links than the share
-// walk follows (40, or the fewer links the system opens in one path) is a body
-// the call could not read. It is judged as a body the share budget kept
-// unread is: the strict tier blocks, the default tier allows with the alert. A chain within the bound reads the script, and
+// walk follows (the links the system opens in one path: 63 on Windows, 40 on
+// Linux, 32 on macOS) is a body the call could not read. It is judged as a
+// body the share budget kept unread is: the strict tier blocks, the default
+// tier allows with the alert. A chain within the bound reads the script, and
 // the script that writes a protected file through a link is blocked in both
-// tiers (rel-1-0-9:GAP-0621).
+// tiers, whether the folder is reached through one link or through all the
+// system opens (rel-1-0-9:GAP-0621, GAP-0935).
 func TestSourcedScriptBehindTooManyLinksIsJudgedByTheTier(t *testing.T) {
-	// The links the call reads through: the share walk bound, which is never
-	// more than the system opens in one path (40 on Linux and Windows, 32 on
-	// macOS). One more is a path the call could not read.
 	within := hookpaths.ShareWalkLinkLimit()
-	for _, tc := range []struct {
+	counts := []int{1, 2, 17, 31, 32, 33, 39, 40, 41, 62, 63, 64, within - 1, within, within + 1}
+	slices.Sort(counts)
+	counts = slices.Compact(counts)
+	type tierCase struct {
 		name          string
 		links         int
 		script        string
@@ -34,12 +36,20 @@ func TestSourcedScriptBehindTooManyLinksIsJudgedByTheTier(t *testing.T) {
 		def           string
 		defHasAlert   bool
 		strictHasRule string
-	}{
-		{"writer within the bound", within, "writer.sh", "block", "block", false, ""},
-		{"ordinary within the bound", within, "safe.sh", "allow", "allow", false, ""},
-		{"writer beyond the bound", within + 1, "writer.sh", "block", "alert", true, "ACTION-COMPOUND-LIMIT"},
-		{"ordinary beyond the bound", within + 1, "safe.sh", "block", "alert", true, "ACTION-COMPOUND-LIMIT"},
-	} {
+	}
+	var cases []tierCase
+	for _, links := range counts {
+		if links <= within {
+			cases = append(cases,
+				tierCase{fmt.Sprintf("writer behind %d links", links), links, "writer.sh", "block", "block", false, ""},
+				tierCase{fmt.Sprintf("ordinary behind %d links", links), links, "safe.sh", "allow", "allow", false, ""})
+			continue
+		}
+		cases = append(cases,
+			tierCase{fmt.Sprintf("writer behind %d links", links), links, "writer.sh", "block", "alert", true, "ACTION-COMPOUND-LIMIT"},
+			tierCase{fmt.Sprintf("ordinary behind %d links", links), links, "safe.sh", "block", "alert", true, "ACTION-COMPOUND-LIMIT"})
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			home, live := r104ReviewHome(t)
 			for name, body := range map[string]string{
