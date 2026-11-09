@@ -36,10 +36,10 @@ func TestAgentHookConfigKnownLinkPlacement(t *testing.T) {
 		{"change to bin then link by source name", "cd " + bin + " && ln -sf " + named, "block"},
 		{"called function", "link_hook() { ln -sf " + named + " " + bin + "/; }; link_hook", "block"},
 		{"change to bin then link an ordinary source", "cd " + bin + " && ln -sf " + ordinary, "allow"},
-		{"uncalled function", "link_hook() { ln -sf " + named + " " + bin + "/; }; echo ready", "allow"},
+		{"uncalled function", "link_hook() { ln -sf " + named + " " + bin + "/; }; echo ready", "block"},
 		{"ordinary source", "src=" + ordinary + "; ln -sf \"$src\" " + bin + "/", "allow"},
 		{"ordinary destination", "dest=" + otherBin + "; ln -sf " + named + " \"$dest\"/", "allow"},
-		{"read-only link to the hook in a temporary folder", "ln -s " + hook + " " + otherBin + "/tmp-link && ls " + otherBin, "allow"},
+		{"read-only link to the hook in a temporary folder", "ln -s " + hook + " " + otherBin + "/tmp-link && ls " + otherBin, "block"},
 	}
 	for _, row := range rows {
 		for _, profile := range []string{"permissive", "default", "strict"} {
