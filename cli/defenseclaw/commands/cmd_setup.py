@@ -8692,13 +8692,6 @@ class _OpenClawConfigRecord:
 # front instead of being rolled back approximately.
 _OPENCLAW_CONFIG_MAX_BYTES = 64 * 1024 * 1024
 
-# What DefenseClaw's own registration writes. The plugin entry also lives under
-# plugins.entries, and plugins.allow / plugins.load.paths list it by name or by
-# its extension directory.
-_OPENCLAW_OWNED_PATHS = (("plugins", "entries", "defenseclaw"), ("approvals", "plugin"))
-_OPENCLAW_MISSING = object()
-
-
 def _read_openclaw_config_bytes(path: str) -> bytes | None:
     """The bytes of openclaw.json, None when it is absent. A file over the size limit raises OSError."""
     try:
@@ -8738,39 +8731,104 @@ def _with_openclaw_config_record(snapshot: _SetupConfigSnapshot, config_file: st
     return replace(snapshot, openclaw_config=_capture_openclaw_config_record(config_file))
 
 
-def _openclaw_content_added(current: Any, prior: Any, path: tuple[str, ...]) -> bool:
-    """True when ``current`` holds a value that ``prior`` lacks and DefenseClaw's registration does not write."""
-    if path in _OPENCLAW_OWNED_PATHS:
-        return False
-    if isinstance(current, dict):
-        if prior is _OPENCLAW_MISSING:
-            prior = {}
-        if not isinstance(prior, dict):
-            return True
-        return any(
-            _openclaw_content_added(value, prior.get(key, _OPENCLAW_MISSING), (*path, key))
-            for key, value in current.items()
-        )
-    if isinstance(current, list):
-        if prior is _OPENCLAW_MISSING:
-            prior = []
-        if not isinstance(prior, list):
-            return True
-        return any(
-            item not in prior and not (isinstance(item, str) and "defenseclaw" in item.lower())
-            for item in current
-        )
-    return prior is _OPENCLAW_MISSING or prior != current
+def _openclaw_defenseclaw_path(value: Any) -> bool:
+    """True for a plugins.load.paths item the Go writer takes for DefenseClaw extension directory."""
+    if isinstance(value, str):
+        return os.path.basename(os.path.normpath(value.strip())) == "defenseclaw"
+    if isinstance(value, dict):
+        return any(_openclaw_defenseclaw_path(nested) for nested in value.values())
+    if isinstance(value, list):
+        return any(_openclaw_defenseclaw_path(nested) for nested in value)
+    return False
+
+
+def _openclaw_object(parent: dict, key: str) -> dict:
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        value = {}
+    parent[key] = value
+    return value
+
+
+def _openclaw_registrations(prior: dict) -> list[dict]:
+    """Every document DefenseClaw registration can make of ``prior``.
+
+    This mirrors patchOpenClawConfig (internal/gateway/connector/openclaw.go)
+    step by step: the plugin name in plugins.allow, plugins.entries.defenseclaw
+    (enabled, and the conversation-hook grant when the key is unset), the
+    extension directory in plugins.load.paths, and the approvals.plugin block,
+    which is added, dropped (only when it is exactly what setup wrote) or left
+    alone. Which of those the Go writer applies depends on the OpenClaw
+    release, so every combination is a candidate. Nothing else may change.
+    """
+    documents: list[dict] = []
+    for approvals in ("enable", "drop", "keep"):
+        for conversation_hooks in (True, False):
+            document = copy.deepcopy(prior)
+            plugins = _openclaw_object(document, "plugins")
+            allow = plugins.get("allow")
+            allow = allow if isinstance(allow, list) else []
+            plugins["allow"] = allow if "defenseclaw" in allow else [*allow, "defenseclaw"]
+            entry = _openclaw_object(_openclaw_object(plugins, "entries"), "defenseclaw")
+            entry["enabled"] = True
+            if conversation_hooks:
+                _openclaw_object(entry, "hooks").setdefault("allowConversationAccess", True)
+            load = _openclaw_object(plugins, "load")
+            paths = load.get("paths")
+            kept = [item for item in (paths if isinstance(paths, list) else []) if not _openclaw_defenseclaw_path(item)]
+            load["paths"] = [*kept, "defenseclaw"]
+            if approvals == "enable":
+                plugin = _openclaw_object(_openclaw_object(document, "approvals"), "plugin")
+                plugin["enabled"] = True
+                plugin.setdefault("mode", "session")
+            elif approvals == "drop":
+                section = document.get("approvals")
+                plugin = section.get("plugin") if isinstance(section, dict) else None
+                if (
+                    isinstance(plugin, dict)
+                    and len(plugin) == 2
+                    and plugin.get("enabled") is True
+                    and plugin.get("mode") == "session"
+                ):
+                    del section["plugin"]
+                    if not section:
+                        del document["approvals"]
+            documents.append(document)
+    return documents
+
+
+def _openclaw_whole_numbers(value: Any) -> Any:
+    """The same document with integral floats as ints: the Go writer prints 1.0 as 1."""
+    if isinstance(value, dict):
+        return {key: _openclaw_whole_numbers(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_openclaw_whole_numbers(item) for item in value]
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def _openclaw_comparable(document: dict) -> str:
+    """A canonical form that ignores where the extension directory sits in plugins.load.paths."""
+    document = copy.deepcopy(document)
+    plugins = document.get("plugins")
+    load = plugins.get("load") if isinstance(plugins, dict) else None
+    if isinstance(load, dict) and isinstance(load.get("paths"), list):
+        load["paths"] = [item for item in load["paths"] if not _openclaw_defenseclaw_path(item)]
+        if not load["paths"]:
+            del load["paths"]
+        if not load:
+            del plugins["load"]
+    return _json.dumps(_openclaw_whole_numbers(document), sort_keys=True, default=str)
 
 
 def _openclaw_config_saved_by_others(prior: bytes | None, current: bytes) -> bool:
-    """True when ``current`` holds more than DefenseClaw's registration on top of ``prior``.
+    """True unless ``current`` is exactly what DefenseClaw registration makes of ``prior``.
 
-    The failed setup's own write only adds the plugin entry. Anything else new
-    or changed was saved by OpenClaw or the operator while setup ran; a file
-    that cannot be read as JSON5 is not DefenseClaw's output either. A file
-    that did not exist before setup was created by it: it is DefenseClaw's
-    when it registers the plugin, whatever else the first start put there.
+    The failed setup own write only registers the plugin. Any other addition,
+    changed value or removed key means OpenClaw or the operator saved the file
+    while setup ran; so does content that cannot be read as a JSON5 object.
+    A file that did not exist before setup is compared with an empty document.
     """
     from defenseclaw.openclaw_json5 import OpenClawConfigSyntaxError, loads
 
@@ -8780,15 +8838,12 @@ def _openclaw_config_saved_by_others(prior: bytes | None, current: bytes) -> boo
         return loads(raw.decode("utf-8"))
 
     try:
-        now = parse(current)
-        if prior is None:
-            plugins = now.get("plugins") if isinstance(now, dict) else None
-            entries = plugins.get("entries") if isinstance(plugins, dict) else None
-            registered = isinstance(entries, dict) and "defenseclaw" in entries
-            allowed = isinstance(plugins, dict) and "defenseclaw" in (plugins.get("allow") or [])
-            return not (registered or allowed)
-        return _openclaw_content_added(now, parse(prior), ())
-    except (OpenClawConfigSyntaxError, UnicodeError, TypeError):
+        before, now = parse(prior), parse(current)
+        if not isinstance(before, dict) or not isinstance(now, dict):
+            return True
+        wanted = _openclaw_comparable(now)
+        return all(wanted != _openclaw_comparable(document) for document in _openclaw_registrations(before))
+    except (OpenClawConfigSyntaxError, UnicodeError, TypeError, ValueError, RecursionError):
         return True
 
 
