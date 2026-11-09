@@ -442,8 +442,11 @@ func TestStripShellComments(t *testing.T) {
 
 // TestOverLimitWriteElidedContentTargetRelativeLink pins that the client's
 // attested target of a relative operand is read under the key the client
-// gives it, the operand placed in the working directory.
+// gives it, the operand placed in the working directory. The rows are POSIX:
+// /etc/ld.so.preload is a Linux loader file and /srv/app is not a rooted path
+// of a Windows host, so the client places the operand differently there.
 func TestOverLimitWriteElidedContentTargetRelativeLink(t *testing.T) {
+	skipPOSIXPathsOnWindows(t)
 	opaque := "*** Begin Patch\n*** Add File: lnk-preload\n+" + strings.Repeat("x", 300000) + "\n*** End Patch\n"
 	raw, err := json.Marshal(map[string]any{"command": opaque, "workdir": "/srv/app"})
 	if err != nil {
