@@ -395,10 +395,12 @@ jobs:
     # account running at the same time (the deliberate mixed-credential and
     # private-thread helpers of the other hookexec tests) is such a holder.
     # -p 1 runs one package, and the step fails if any of the three did not
-    # run and pass, so a skip cannot pass for a run.
+    # run and pass, so a skip cannot pass for a run. The two tests that ran in
+    # the remaining-package shard keep its race detector and coverage profile
+    # (the profile joins the Combine Go coverage step).
     name: Go Test (frozen gateway, alone)
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.go != false }}
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -419,16 +421,37 @@ jobs:
           DEFENSECLAW_FROZEN_GATEWAY_JOB: "1"
         run: |
           set -euo pipefail
-          tests=(
+          # The two tests that ran in the remaining-package shard keep the
+          # race detector there; the parallel test starts many hook processes
+          # against a budget of seconds each and runs without it (the race
+          # detector's slowdown of every child is not what it looks for). Both
+          # write a coverage profile (atomic, as -race does) and the profiles
+          # are merged into the one the Go Test aggregate requires.
+          race_tests=(
             TestFrozenOwnGatewayFollowsTheOutageMode
             TestFrozenGatewayTheDaemonStartedFollowsTheOutageMode
-            TestParallelHookProcessesFollowTheOutageModeOfAFrozenGateway
           )
-          pattern="^($(IFS="|"; echo "${tests[*]}"))$"
-          go test -v -p 1 -count=1 -timeout 8m -run "$pattern" ./internal/gateway/connector/hookexec 2>&1 | tee "$RUNNER_TEMP/frozen-gateway.log"
-          for name in "${tests[@]}"; do
-            grep -q "^--- PASS: $name " "$RUNNER_TEMP/frozen-gateway.log" || { echo "::error::$name did not run and pass"; exit 1; }
+          parallel_tests=(TestParallelHookProcessesFollowTheOutageModeOfAFrozenGateway)
+          pkg=./internal/gateway/connector/hookexec
+          log="$RUNNER_TEMP/frozen-gateway.log"
+          : > "$log"
+          # checkptr is off only in modernc.org, as in the shared race jobs.
+          go test -v -race -gcflags=modernc.org/...=-d=checkptr=0 -p 1 -count=1 -timeout 8m \
+            -coverprofile=coverage-go-frozen-gateway-race.out \
+            -run "^($(IFS="|"; echo "${race_tests[*]}"))$" "$pkg" 2>&1 | tee -a "$log"
+          go test -v -covermode=atomic -p 1 -count=1 -timeout 8m \
+            -coverprofile=coverage-go-frozen-gateway-parallel.out \
+            -run "^($(IFS="|"; echo "${parallel_tests[*]}"))$" "$pkg" 2>&1 | tee -a "$log"
+          for name in "${race_tests[@]}" "${parallel_tests[@]}"; do
+            grep -q "^--- PASS: $name " "$log" || { echo "::error::$name did not run and pass"; exit 1; }
           done
+          python3 scripts/merge_go_coverage.py --output coverage-go-frozen-gateway.out \
+            coverage-go-frozen-gateway-race.out coverage-go-frozen-gateway-parallel.out
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: go-coverage-frozen-gateway
+          path: coverage-go-frozen-gateway.out
+          retention-days: 1
 
   go-pinned:
     # A pull request with no Go change still runs the Go tests that name a
@@ -562,8 +585,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 36 gateway + 4 audit + 16 remaining-package shards.
-          test "${#coverage_parts[@]}" -eq 56
+          # 36 gateway + 4 audit + 16 remaining-package shards, plus the
+          # frozen-gateway job.
+          test "${#coverage_parts[@]}" -eq 57
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
