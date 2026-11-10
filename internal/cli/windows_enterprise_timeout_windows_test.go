@@ -332,6 +332,53 @@ func TestWindowsEnterpriseRestoreStartModeOnlyUndoesQuiesce(t *testing.T) {
 	}
 }
 
+// GAP-0989: the last-resort restore puts a delayed start back with the mode,
+// only for a service recorded as automatic with a delayed start.
+func TestWindowsEnterpriseDelayedStartToRestore(t *testing.T) {
+	for _, input := range []struct {
+		recorded string
+		delayed  bool
+		restored uint32
+		want     bool
+	}{
+		{"auto", true, windows.SERVICE_AUTO_START, true},
+		{"auto", false, windows.SERVICE_AUTO_START, false},
+		{"manual", true, windows.SERVICE_DEMAND_START, false},
+		{"auto", true, windows.SERVICE_DEMAND_START, false},
+		{"disabled", true, windows.SERVICE_DISABLED, false},
+	} {
+		if got := windowsEnterpriseDelayedStartToRestore(input.recorded, input.delayed, input.restored); got != input.want {
+			t.Fatalf("delayed start restore %+v = %v", input, got)
+		}
+	}
+}
+
+// GAP-0989: a failed recovery hold's restart failure reaches the operator as a
+// bounded warning; an empty value says nothing.
+func TestWindowsEnterpriseGuardianRestartFailureWarning(t *testing.T) {
+	var result enterprisestatus.Result
+	addWindowsEnterpriseRecoveryGatewayWarnings(&result, &windowsEnterpriseInstallerReport{})
+	for _, warning := range result.Warnings {
+		if warning.Code == "guardian_restart_failed" {
+			t.Fatalf("a report without a restart failure warned: %+v", warning)
+		}
+	}
+	long := "the hook guardian could not be started again: " + strings.Repeat("x", 2000) + "\x07\n"
+	addWindowsEnterpriseRecoveryGatewayWarnings(&result, &windowsEnterpriseInstallerReport{GuardianRestartFailure: long})
+	var found *enterprisestatus.Message
+	for i := range result.Warnings {
+		if result.Warnings[i].Code == "guardian_restart_failed" {
+			found = &result.Warnings[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no guardian_restart_failed warning: %+v", result.Warnings)
+	}
+	if !strings.Contains(found.Message, "could not be started again") || strings.ContainsAny(found.Message, "\x07\n") || strings.Count(found.Message, "x") > windowsEnterpriseGuardianRestartFailureMax {
+		t.Fatalf("warning not bounded or not clean (%d bytes): %q", len(found.Message), found.Message)
+	}
+}
+
 func TestWindowsEnterpriseTimeoutPhasesRetainLastBoundedStages(t *testing.T) {
 	stderr := []byte("ignored error with a path\nDC_LIFECYCLE_PHASE: 2026-10-14T21:19:00Z stop DefenseClawGateway wait\n")
 	got := windowsEnterpriseTimeoutPhases(stderr)
