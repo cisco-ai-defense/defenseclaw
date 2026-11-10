@@ -176,3 +176,54 @@ func TestUnixEnrollmentExclusion(t *testing.T) {
 		t.Fatalf("root without enrollment.root: %q", got)
 	}
 }
+
+// GAP-0949: the install scan skips an exclude_users account before it finds
+// the OpenCode it runs, so a covered OpenCode machine-policy row must not be
+// the last word for that account in the administrator status. Text and JSON
+// state that V1 is not protected and V2 is required; an enrolled account, an
+// account no rule excludes, and a deployment with no OpenCode row stay as
+// they were.
+func TestEnterprisePolicyShowExcludedAccountSaysOpenCodeV1IsNotProtected(t *testing.T) {
+	saved := enterprisePolicyJSON
+	t.Cleanup(func() { enterprisePolicyJSON = saved })
+	excluded := unixEnrollmentExclusion(config.EnterpriseEnrollmentConfig{ExcludeUsers: []string{"alice"}}, "alice", 501)
+	exempt := unixEnrollmentExclusion(config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"alice"}}, "alice", 501)
+	openCode := enterprisepolicy.State{Connector: "opencode", Route: enterprisepolicy.RouteMachinePolicy, Covered: true, OwnedEntries: 1}
+	claude := enterprisepolicy.State{Connector: "claudecode", Route: enterprisepolicy.RouteMachinePolicy, Covered: true, OwnedEntries: 1}
+	off := openCode
+	off.Ownership = config.MachinePolicyOwnershipOff
+	for _, tc := range []struct {
+		name       string
+		enrollment string
+		states     []enterprisepolicy.State
+		want       bool
+	}{
+		{"excluded with a covered OpenCode row", excluded, []enterprisepolicy.State{claude, openCode}, true},
+		{"excluded with an uncovered OpenCode row", excluded, []enterprisepolicy.State{{Connector: "opencode", Route: enterprisepolicy.RouteMachinePolicy}}, true},
+		{"excluded, OpenCode ownership off", excluded, []enterprisepolicy.State{off}, false},
+		{"excluded, no OpenCode row", excluded, []enterprisepolicy.State{claude}, false},
+		{"enrolled account", "", []enterprisepolicy.State{claude, openCode}, false},
+		{"exempt account", exempt, []enterprisepolicy.State{claude, openCode}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := enterprisePolicyReport{
+				Complete: true, HookBinary: "/opt/defenseclaw/bin/defenseclaw-hook", goos: "linux",
+				Result: enterprisepolicy.Result{States: tc.states},
+				User:   &enterprisePolicyUserReport{User: "alice", Enrollment: tc.enrollment},
+			}
+			report.User.OpenCodeNote = excludedOpenCodeNote(tc.enrollment, tc.states)
+			for _, asJSON := range []bool{false, true} {
+				enterprisePolicyJSON = asJSON
+				var out bytes.Buffer
+				if err := writeEnterprisePolicyReport(&out, report); err != nil {
+					t.Fatal(err)
+				}
+				text := out.String()
+				got := strings.Contains(text, "OpenCode V1 (opencode-ai) is not protected") && strings.Contains(text, "V2 is required")
+				if got != tc.want {
+					t.Fatalf("json %t: V1 warning present=%t, want %t:\n%s", asJSON, got, tc.want, text)
+				}
+			}
+		})
+	}
+}
