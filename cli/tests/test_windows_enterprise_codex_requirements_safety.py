@@ -125,6 +125,18 @@ def test_a_rebuild_never_swaps_in_an_empty_or_unpublishable_requirements_file() 
     assert guard < repair.index("Install-DefenseClawFileAtomic -Source $staged -Destination $path")
 
 
+def test_the_rollback_never_swaps_an_unguarded_requirements_file_over_a_guarded_one() -> None:
+    text = _text()
+    problem = _function_body(text, "Get-DefenseClawCodexRequirementsGuardProblem")
+    for needle in ("Assert-DefenseClawCodexRequirementsPublishable -Bytes $Bytes", "[[hooks.", "defenseclaw-hook"):
+        assert needle in problem.replace("\\[\\[\\s*hooks\\.", "[[hooks."), needle
+    restore = _function_body(text, "Restore-DefenseClawTransaction")
+    guard = restore.index("Get-DefenseClawCodexRequirementsGuardProblem -Bytes ([IO.File]::ReadAllBytes($backup))")
+    assert restore.index("$isCodexMachinePolicy -and (Test-DefenseClawStandaloneProfile)") < guard
+    assert guard < restore.index("-Source $backup", guard)
+    assert "$backupProblem -ne '' -and $currentProblem -eq ''" in restore
+
+
 def test_a_failed_rebuild_puts_the_original_requirements_file_back_through_the_same_swap() -> None:
     # GAP-1001: the rebuild writes a base through a sibling and a swap; when the
     # reconcile that follows fails, the bytes read first go back the same way,
