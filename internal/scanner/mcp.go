@@ -73,6 +73,82 @@ func mcpScanTargetNotScanned(target, why string) error {
 // mcpScanLookupIP resolves an MCP scan URL's host; a seam for tests.
 var mcpScanLookupIP = net.LookupIP
 
+// MCPTargetRefusal names why the scanner refuses an MCP URL from the URL
+// text alone, before any name is resolved.
+type MCPTargetRefusal string
+
+const (
+	// MCPTargetRefusalNone: the URL is not refused from its text.
+	MCPTargetRefusalNone MCPTargetRefusal = ""
+	// MCPTargetRefusalCredentials: the URL carries inline credentials.
+	MCPTargetRefusalCredentials MCPTargetRefusal = "credentials"
+	// MCPTargetRefusalAddress: the host is a loopback alias, the metadata host,
+	// or a literal loopback, private, link-local, multicast, unspecified or
+	// metadata address.
+	MCPTargetRefusalAddress MCPTargetRefusal = "address"
+	// MCPTargetRefusalMalformed: the URL does not parse or names no host.
+	MCPTargetRefusalMalformed MCPTargetRefusal = "malformed"
+)
+
+// mcpScanTargetTextRefusal is every refusal of an MCP scan URL that needs no
+// name resolved. validateMCPScanTargetURL applies it and MCPScanTargetRefusal
+// reports it to the watcher, so the managed gateway holds exactly the
+// definitions the scanner refuses from their text. literal says the host is an
+// address, which needs no resolving either.
+func mcpScanTargetTextRefusal(target string) (kind MCPTargetRefusal, literal bool, host string, err error) {
+	u, perr := url.Parse(target)
+	if perr != nil {
+		return MCPTargetRefusalMalformed, false, "", fmt.Errorf("invalid MCP scan target URL: %w", perr)
+	}
+	if u.User != nil {
+		return MCPTargetRefusalCredentials, false, "", errors.New("MCP scan target URL must not contain inline credentials")
+	}
+	host = u.Hostname()
+	if host == "" {
+		return MCPTargetRefusalMalformed, false, "", errors.New("MCP scan target URL has empty host")
+	}
+	lowerHost := strings.ToLower(host)
+	if lowerHost == "localhost" ||
+		lowerHost == "ip6-localhost" ||
+		lowerHost == "ip6-loopback" ||
+		strings.HasSuffix(lowerHost, ".localhost") {
+		return MCPTargetRefusalAddress, false, host, mcpScanTargetNotScanned(target, fmt.Sprintf("names the loopback host %s", host))
+	}
+	if lowerHost == "metadata.google.internal" {
+		return MCPTargetRefusalAddress, false, host, fmt.Errorf("MCP scan target %q points at cloud metadata host", host)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() ||
+			ip.IsPrivate() ||
+			ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() ||
+			ip.IsUnspecified() ||
+			ip.IsMulticast() {
+			return MCPTargetRefusalAddress, true, host, mcpScanTargetNotScanned(target, fmt.Sprintf("is on %s, %s", ip, mcpScanAddressClass(ip)))
+		}
+		// AWS / Oracle / DO IMDS literals.
+		if ip.String() == "169.254.169.254" || ip.String() == "fd00:ec2::254" {
+			return MCPTargetRefusalAddress, true, host, fmt.Errorf("MCP scan target %s is a cloud metadata endpoint", ip)
+		}
+		return MCPTargetRefusalNone, true, host, nil
+	}
+	return MCPTargetRefusalNone, false, host, nil
+}
+
+// MCPScanTargetRefusal reports why the scanner refuses an MCP server URL from
+// its text alone (inline credentials, no host, a loopback alias, the metadata
+// host, or a literal local address), whatever the process environment says. A host the
+// scanner refuses only after resolving its name is not named here: the scan
+// decides that one.
+func MCPScanTargetRefusal(target string) MCPTargetRefusal {
+	target = strings.TrimSpace(target)
+	if !mcpScanTargetLooksLikeURL(target) {
+		return MCPTargetRefusalNone
+	}
+	kind, _, _, _ := mcpScanTargetTextRefusal(target)
+	return kind
+}
+
 // validateMCPScanTargetURL refuses MCP scan URLs that point at
 // loopback / private / link-local / cloud metadata destinations, or
 // that embed inline credentials. The check is opt-out via
@@ -81,48 +157,17 @@ func validateMCPScanTargetURL(target string) error {
 	if envvars.Getenv("DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS") == "1" {
 		return nil
 	}
-	u, err := url.Parse(target)
-	if err != nil {
-		return fmt.Errorf("invalid MCP scan target URL: %w", err)
-	}
-	if u.User != nil {
-		return errors.New("MCP scan target URL must not contain inline credentials")
-	}
-	host := u.Hostname()
-	if host == "" {
-		return errors.New("MCP scan target URL has empty host")
-	}
-	lowerHost := strings.ToLower(host)
-	if lowerHost == "localhost" ||
-		lowerHost == "ip6-localhost" ||
-		lowerHost == "ip6-loopback" ||
-		strings.HasSuffix(lowerHost, ".localhost") {
-		return mcpScanTargetNotScanned(target, fmt.Sprintf("names the loopback host %s", host))
-	}
-	if lowerHost == "metadata.google.internal" {
-		return fmt.Errorf("MCP scan target %q points at cloud metadata host", host)
-	}
-	if literal := net.ParseIP(host); literal != nil {
-		if literal.IsLoopback() ||
-			literal.IsPrivate() ||
-			literal.IsLinkLocalUnicast() ||
-			literal.IsLinkLocalMulticast() ||
-			literal.IsUnspecified() ||
-			literal.IsMulticast() {
-			return mcpScanTargetNotScanned(target, fmt.Sprintf("is on %s, %s", literal, mcpScanAddressClass(literal)))
-		}
-		// AWS / Oracle / DO IMDS literals.
-		if literal.String() == "169.254.169.254" || literal.String() == "fd00:ec2::254" {
-			return fmt.Errorf("MCP scan target %s is a cloud metadata endpoint", literal)
-		}
-		return nil
+	_, literal, host, err := mcpScanTargetTextRefusal(target)
+	if err != nil || literal {
+		return err
 	}
 	addrs, err := mcpScanLookupIP(host)
 	if err != nil {
 		// No address, so nothing is dialed and the server was not scanned.
-		// That is a scan that did not finish, not a refusal of the server's
-		// definition: unverified_server decides, as mcp set does (GAP-1277).
-		// An address that resolves later is checked by the next scan.
+		// That is a scan that did not finish, not a refusal of the definition
+		// of the server: unverified_server decides, as mcp set does
+		// (GAP-1277). An address that resolves later is checked by the next
+		// scan.
 		return fmt.Errorf("MCP scan target %q does not resolve: %w: %w", host, errMCPScanTargetUnresolved, err)
 	}
 	for _, ip := range addrs {

@@ -94,7 +94,7 @@ func TestFailedMCPAdmissionOverflowMarkerLastsAfterTheKeptDefinitionsAreReleased
 				f.listUser(scopeHoldServer(url(i), ""))
 				wantHeldFailed(t, fmt.Sprintf("failed definition %d", i), tc.action, f.call(f.cwd, "s1", "wiki-ok"))
 			}
-			held, overflow := f.api.hookMCP.heldFailures("claudecode", f.home, "s1", "wiki-ok", heldScopes(f.cwd), time.Now())
+			held, overflow := f.api.hookMCP.heldFailures("claudecode", f.home, "s1", "wiki-ok", time.Now())
 			if len(held) != hookRefusedPerName || !overflow {
 				t.Fatalf("held=%d overflow=%t, want %d and true", len(held), overflow, hookRefusedPerName)
 			}
@@ -127,7 +127,7 @@ func TestFailedMCPAdmissionOverflowStoreKeepsASessionThatMetAnotherDefinition(t 
 	f, failed, url := overflowFixture(t, "strict")
 	filler := config.MCPServerEntry{Name: "filler", URL: scopeHoldCleanURL}
 	for i := 0; i < hookReportedMCPPerHomeLimit; i++ {
-		if !f.api.hookMCP.retainRefused("claudecode", f.home, fmt.Sprintf("prior-%d", i), "", "filler", filler, time.Now()) {
+		if !f.api.hookMCP.retainRefused("claudecode", f.home, fmt.Sprintf("prior-%d", i), "filler", filler, time.Now()) {
 			t.Fatalf("setup: session slot %d not filled", i)
 		}
 	}

@@ -168,7 +168,7 @@ func (h *hookReportedMCPServers) forget(entry config.MCPServerEntry) {
 // (unrecordedMCPDecision), so a full store never turns a refusal into an
 // allow. The decision is on that definition only: no other server of the
 // account is held for it, and the session that met it keeps it in the
-// overflow store (holdOverflow), by its own session, workspace and name.
+// overflow store (holdOverflow), by its own session and name.
 func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	if a == nil || a.hookMCP == nil || !probe.Matched || probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return config.AssetPolicyDecision{}, false
@@ -213,14 +213,14 @@ func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName
 		// a named session keeps what it met. The list comes first: a session
 		// whose definition the list holds is not given up for a newer one.
 		a.hookMCP.noteAt(reported, now)
-		kept := probe.SessionID == "" || a.hookMCP.retainRefused(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, reported, now)
+		kept := probe.SessionID == "" || a.hookMCP.retainRefused(connectorName, home, probe.SessionID, probe.ServerName, reported, now)
 		if !kept {
-			a.hookMCP.holdOverflow(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, reported, now)
+			a.hookMCP.holdOverflow(connectorName, home, probe.SessionID, probe.ServerName, reported, now)
 		}
 		if !kept || !a.hookMCP.listedAs(reported) {
 			unrecorded = &reported
 		}
-	} else if held, _ := a.hookMCP.heldRefusals(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, now); len(held) > 0 {
+	} else if held, _ := a.hookMCP.heldRefusals(connectorName, home, probe.SessionID, probe.ServerName, now); len(held) > 0 {
 		// The running agent keeps the connection to a refused definition after
 		// its config is edited, so a refusal the session reported stays
 		// listed, and blocks the calls, until the agent starts again
@@ -243,7 +243,7 @@ func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName
 	// A session the session store was full for stays refused after its config
 	// is edited, with the cause of the definition it met first, not the one of
 	// the edit (holdOverflow).
-	if kept, ok := a.hookMCP.overflowHeld(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, now); ok {
+	if kept, ok := a.hookMCP.overflowHeld(connectorName, home, probe.SessionID, probe.ServerName, now); ok {
 		unrecorded = &kept
 	}
 	if unrecorded != nil {
