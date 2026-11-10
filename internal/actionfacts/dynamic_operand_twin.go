@@ -42,10 +42,13 @@ const DynamicOperandPlaceholder = "/dev/null"
 // the call, so "cp a.txt ~/.defenseclaw/config.yaml $(true)" and
 // "cp $SRC ~/.defenseclaw/config.yaml" named no write at all.
 //
-// Only words that the shell expands from a parameter, a command or
-// arithmetic count; a call with a filename pattern, brace or tilde word that
-// is not home-anchored keeps the readings the glob resolver already gives it,
-// and has no twin. The first reading has each expanded word as one plain
+// Words that the shell expands from a parameter, a command or arithmetic
+// count, and a filename pattern, brace or tilde word that is a source of cp,
+// mv, install or ln (patternSourceWord): what such a word expands to never
+// changes which operand is the destination, so it is read as one plain name
+// too (GAP-1053). A call with a pattern word in a destination or option-value
+// position keeps the readings the glob resolver already gives it, and has no
+// twin. The first reading has each expanded word as one plain
 // name. The second,
 // returned only when some call ends in unquoted words that are a lone
 // command substitution or plain parameter expansion (which expand to no
@@ -61,12 +64,15 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 			twins = nil
 		}
 	}()
-	source := command
+	source, userHome := command, ""
 	if home, _ := normalizeActiveHome(activeHome); home != "" {
 		home = strings.TrimRight(home, "/")
 		if posixShellHome(home) && !strings.ContainsAny(home, "\x00\r\n") {
 			if resolved, ok := homeResolvedSource(source, home); ok {
 				source = resolved
+			}
+			if strings.HasPrefix(home, "/") {
+				userHome = home
 			}
 		}
 	}
@@ -93,14 +99,24 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 		if !known {
 			return true
 		}
-		last := -1
+		last, respelled, replaced := -1, map[int]string{}, false
 		for index := first; index < len(call.Args); index++ {
 			word := call.Args[index]
 			if !projectPOSIXWord(word).Expands {
 				last = index
-			} else if !runtimeExpansionWord(word) {
+			} else if below, user := userHomeRewriteWord(word, userHome); userHome != "" && user {
+				// A path below the home spelled through USER or LOGNAME
+				// (/home/$USER/f) is the home path: it keeps its role as a
+				// destination in the reading (GAP-1053).
+				respelled[index], last = userHome+below, index
+			} else if !runtimeExpansionWord(word) && !patternSourceWord(call.Args, first, index) {
 				return false
+			} else {
+				replaced = true
 			}
+		}
+		if !replaced {
+			return false
 		}
 		trailing := last >= first && last < len(call.Args)-1
 		var callPlain, callVanished []edit
@@ -114,15 +130,19 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 				invalid = true
 				return false
 			}
-			replaced := edit{start: start, end: end, text: operandKeyPrefix(word) + DynamicOperandPlaceholder}
-			callPlain = append(callPlain, replaced)
+			text := operandKeyPrefix(word) + DynamicOperandPlaceholder
+			if path, user := respelled[index]; user {
+				text = path
+			}
+			rewrite := edit{start: start, end: end, text: text}
+			callPlain = append(callPlain, rewrite)
 			if index > last {
 				if !vanishingWord(word) {
 					trailing = false
 				}
-				replaced.text = ""
+				rewrite.text = ""
 			}
-			callVanished = append(callVanished, replaced)
+			callVanished = append(callVanished, rewrite)
 		}
 		plain = append(plain, callPlain...)
 		if trailing {
@@ -162,6 +182,84 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 		}
 	}
 	return twins
+}
+
+// patternSourceWord reports a filename pattern, brace or tilde word of a cp,
+// mv, install or ln call (operands from first) that is a source operand
+// whatever it expands to: not an option and not the value of one, and not
+// the last operand, which names the destination, unless a target-directory
+// option names the destination and so makes every operand a source.
+func patternSourceWord(args []*syntax.Word, first, index int) bool {
+	if first < 1 || index < first || index >= len(args) {
+		return false
+	}
+	name := projectPOSIXWord(args[first-1]).Value
+	if slash := strings.LastIndexByte(name, '/'); slash >= 0 {
+		name = name[slash+1:]
+	}
+	switch name {
+	case "cp", "mv", "install", "ln":
+	default:
+		return false
+	}
+	if len(args[index].Parts) > 0 && partStartsWithDash(args[index].Parts[0]) {
+		return false
+	}
+	targetDirectory := false
+	for before := first; before < index; before++ {
+		option := projectPOSIXWord(args[before])
+		if option.Expands || !strings.HasPrefix(option.Value, "-") || option.Value == "-" {
+			continue
+		}
+		if targetDirectoryOption(option.Value) {
+			targetDirectory = true
+		}
+		if before == index-1 && optionTakesNextWord(option.Value) {
+			return false
+		}
+	}
+	return index < len(args)-1 || targetDirectory
+}
+
+func partStartsWithDash(part syntax.WordPart) bool {
+	lit, ok := part.(*syntax.Lit)
+	return ok && strings.HasPrefix(lit.Value, "-")
+}
+
+// targetDirectoryOption reports a cp, mv, install or ln option word that
+// names the target directory: -t (also joined or inside a cluster) or any
+// abbreviation of --target-directory.
+func targetDirectoryOption(option string) bool {
+	if name, ok := strings.CutPrefix(option, "--"); ok {
+		name, _, _ = strings.Cut(name, "=")
+		return len(name) >= 2 && strings.HasPrefix("target-directory", name)
+	}
+	return strings.ContainsRune(option[1:], 't')
+}
+
+// optionTakesNextWord reports an option word that, as the word before an
+// operand, may take it as its value: anything but a known cluster of switches
+// or a long option with its value attached.
+func optionTakesNextWord(option string) bool {
+	if name, ok := strings.CutPrefix(option, "--"); ok {
+		if strings.Contains(name, "=") {
+			return false
+		}
+		switch name {
+		case "force", "recursive", "archive", "verbose", "no-clobber", "interactive", "preserve",
+			"parents", "update", "link", "symbolic-link", "symbolic", "dereference", "no-dereference",
+			"remove-destination", "no-target-directory", "strip-trailing-slashes", "one-file-system",
+			"attributes-only", "copy-contents", "relative", "logical", "physical", "directory", "":
+			return false
+		}
+		return true
+	}
+	for _, letter := range option[1:] {
+		if !strings.ContainsRune("abcCdDfHilLnpPrRsTuvx", letter) {
+			return true
+		}
+	}
+	return false
 }
 
 // runtimeExpansionWord reports a word whose expansion comes from a
