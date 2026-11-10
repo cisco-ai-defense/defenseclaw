@@ -588,9 +588,9 @@ func reducePatchEnvelope(text string, bounded bool, budget *int) (reduced string
 			flush()
 			section = &patchEnvelopeSection{}
 			previous = ""
-			section.targets = append(section.targets, line[strings.Index(line, ": ")+2:])
+			section.targets = append(section.targets, patchDirectivePath(line, line[:strings.Index(line, ": ")+2]))
 		case strings.HasPrefix(line, "*** Move to: "):
-			section.targets = append(section.targets, strings.TrimPrefix(line, "*** Move to: "))
+			section.targets = append(section.targets, patchDirectivePath(line, "*** Move to: "))
 		}
 		marker := patchHunkMarker(line)
 		if marker == "" {

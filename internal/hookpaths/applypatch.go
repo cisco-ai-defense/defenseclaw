@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"mvdan.cc/sh/v3/syntax"
@@ -93,7 +94,7 @@ func ApplyPatchNamesProtectedTarget(tool string, args json.RawMessage, cwd, home
 		for _, line := range strings.Split(patchTextField(fields[key]), "\n") {
 			line = strings.TrimSpace(line)
 			for _, directive := range patchTargetDirectives {
-				if strings.HasPrefix(line, directive) && names(strings.TrimSpace(line[len(directive):])) {
+				if strings.HasPrefix(line, directive) && names(actionfacts.PatchTargetName(strings.TrimSpace(line[len(directive):]))) {
 					return true
 				}
 			}
@@ -365,7 +366,7 @@ func patchEnvelopePaths(text string) (paths []string, envelopes int, ok bool) {
 		known := false
 		for _, directive := range patchTargetDirectives {
 			if strings.HasPrefix(line, directive) {
-				path := strings.TrimSpace(line[len(directive):])
+				path := actionfacts.PatchTargetName(strings.TrimSpace(line[len(directive):]))
 				if path == "" {
 					return nil, envelopes, false
 				}

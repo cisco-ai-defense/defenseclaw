@@ -1,0 +1,57 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package hookpaths
+
+import (
+	"encoding/json"
+	"slices"
+	"testing"
+)
+
+// The hook client lists the file the apply_patch tool opens for a directive,
+// which has no tab or carriage return in its name, for a patch tool call and
+// for a shell command that feeds the envelope, so the protected-file checks
+// of the user-side hook and of the gateway read the same name.
+func TestApplyPatchTargetsListTheNameTheToolOpens(t *testing.T) {
+	const cwd, home = "/work/project", "/work"
+	for _, spelled := range []string{".ne\ttrc", "\t.netrc", ".netrc\t", ".ne\rtrc"} {
+		for _, directive := range []string{"Add File", "Update File", "Delete File"} {
+			envelope := "*** Begin Patch\n*** " + directive + ": " + home + "/" + spelled + "\n*** End Patch"
+			args, err := json.Marshal(map[string]string{"command": envelope})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := ApplyPatchLexicalTargets("apply_patch", args, cwd, home)
+			if !ok || !slices.Contains(targets, home+"/.netrc") {
+				t.Errorf("tool %s %q: targets = %v ok = %v, want %s", directive, spelled, targets, ok, home+"/.netrc")
+			}
+			command := "apply_patch <<'EOF'\n" + envelope + "\nEOF"
+			targets, ok = ApplyPatchLexicalCommandTargets("shell", nil, command, cwd, home)
+			if !ok || !slices.Contains(targets, home+"/.netrc") {
+				t.Errorf("shell %s %q: targets = %v ok = %v, want %s", directive, spelled, targets, ok, home+"/.netrc")
+			}
+		}
+	}
+}
+
+// The authorized-keys check reads the opened name too.
+func TestApplyPatchNamesProtectedTargetReadsTheNameTheToolOpens(t *testing.T) {
+	const cwd, home = "/work/project", "/work"
+	for _, spelled := range []string{".ssh/authorized_keys", ".ssh/author\tized_keys", ".ssh/authorized_keys\t", "\t.ssh/authorized_keys", ".ssh/author\rized_keys"} {
+		args, err := json.Marshal(map[string]string{"command": "*** Begin Patch\n*** Add File: " + home + "/" + spelled + "\n+x\n*** End Patch"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ApplyPatchNamesProtectedTarget("apply_patch", args, cwd, home, nil) {
+			t.Errorf("%q: not named as the protected authorized-keys file", spelled)
+		}
+	}
+	args, err := json.Marshal(map[string]string{"command": "*** Begin Patch\n*** Add File: " + home + "/.ssh/authorized_keys.bak\n+x\n*** End Patch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ApplyPatchNamesProtectedTarget("apply_patch", args, cwd, home, nil) {
+		t.Error("a copy of the authorized-keys file is named as the protected file")
+	}
+}
