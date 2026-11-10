@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
@@ -75,19 +76,30 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 	// from the first call that meets it: the allow is the administrator word,
 	// and the connection the agent opens to it outlives the allow and the
 	// entry. The watcher names the scope that listed it, so a later hook of the
-	// session finds it whatever directory it reports (GAP-1018). While the
-	// allow stands the hold answers nothing (the held definition is allowed).
-	var admitted *config.MCPServerEntry
-	if status.Admitted != nil {
-		held := heldMCPDefinition(*status.Admitted, connector, home)
-		admitted = &held
+	// session finds it whatever directory it reports (GAP-1018). The same holds
+	// for a first call an exact allow lets run while the watcher has not yet
+	// decided its admission (GAP-0998): that call opens the connection too, so
+	// the listed definition is held on the call the allow permits, not on the
+	// watcher answer that comes later. While the allow stands the hold answers
+	// nothing (the held definition is allowed).
+	admitted := status.Admitted
+	if admitted == nil && status.Pending {
+		if listed, isListed := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName); isListed &&
+			heldDefinitionAllowed(ctx, cfg, connector, probe, heldMCPDefinition(listed, connector, home)) {
+			admitted = &listed
+		}
+	}
+	var admittedHeld *config.MCPServerEntry
+	if admitted != nil {
+		held := heldMCPDefinition(*admitted, connector, home)
+		admittedHeld = &held
 		a.holdFailedMCP(connector, home, probe, held, now)
 	}
 	// The ordinary call, with nothing held, reads no config: the agent state
 	// file can be large and this runs at every MCP call.
 	held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, now)
-	if admitted != nil {
-		held = slices.DeleteFunc(held, func(entry config.MCPServerEntry) bool { return sameHeldDefinition(entry, *admitted) })
+	if admittedHeld != nil {
+		held = slices.DeleteFunc(held, func(entry config.MCPServerEntry) bool { return sameHeldDefinition(entry, *admittedHeld) })
 	}
 	if len(held) == 0 && !overflow {
 		return status
@@ -112,7 +124,7 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 		// A held definition an administrator rule allows exactly is not a failed
 		// admission, whatever directory the hook reports: the rule of the managed
 		// hold (unallowedHeldRefusal). The answer is the latest one no rule allows.
-		if gone == nil && !heldDefinitionAllowed(ctx, cfg, connector, probe, held[i]) {
+		if gone == nil && !heldDefinitionAdmitted(ctx, cfg, connector, probe, held[i]) {
 			gone = &held[i]
 		}
 	}
@@ -132,6 +144,20 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 func heldDefinitionAllowed(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe, held config.MCPServerEntry) bool {
 	verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, held, true))
 	return verdict.Enabled && verdict.Source == "admin-allow"
+}
+
+// heldDefinitionAdmitted reports whether the policy in force still admits the
+// held definition without a scan: an administrator rule allows it exactly, or
+// admission.mcp.scan_on_install is off, which admitted this definition and any
+// replacement the same way. An explicit deny still refuses it. The previous
+// admission is released only by the policy that gave it going away.
+func heldDefinitionAdmitted(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe, held config.MCPServerEntry) bool {
+	verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, held, true))
+	if verdict.Enabled && verdict.Source == "admin-allow" {
+		return true
+	}
+	adm := policy.AdmissionFor(policy.CompileAdmission(cfg), config.AdmissionTypeMCP)
+	return adm != nil && !adm.ScanOnInstall && verdict.Action != "block"
 }
 
 // heldMCPDefinition is the part of a listed definition the hold keeps: how the
