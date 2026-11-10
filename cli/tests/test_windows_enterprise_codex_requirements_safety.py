@@ -114,15 +114,41 @@ def test_a_busy_writer_never_reaches_the_recovery_that_rebuilds_the_policy_file(
     assert "throw $verifyError" in repair and "throw $mergeError" in repair
 
 
-def test_a_rebuild_never_swaps_in_an_empty_or_unpublishable_requirements_file() -> None:
+def test_the_rebuild_renders_beside_the_file_and_never_swaps_a_base_over_it() -> None:
     text = _text()
-    check = _function_body(text, "Assert-DefenseClawCodexRequirementsPublishable")
-    for needle in ("$Bytes.Length -eq 0", "IndexOf($Bytes, [byte]0)", "UTF8Encoding]::new($false, $true)", "IsNullOrWhiteSpace($text)"):
-        assert needle in check, needle
     repair = _function_body(text, "Repair-DefenseClawRecoveredCodexRequirements")
-    guard = repair.index("Assert-DefenseClawCodexRequirementsPublishable -Bytes $base")
-    assert repair.index("# GAP-1001: the base is never an empty file") < guard < repair.index("[IO.File]::WriteAllBytes($staged, $base)")
-    assert guard < repair.index("Install-DefenseClawFileAtomic -Source $staged -Destination $path")
+    # Nothing is swapped over the live path by PowerShell: no placeholder, no
+    # restore. The gateway renders the preimage into the managed policy beside
+    # the file, checks it (it parses and carries every managed hook) and swaps
+    # the result in, or leaves the file as it was.
+    assert "Install-DefenseClawFileAtomic" not in repair
+    assert "-BaseFile $staged" in repair
+    capability = repair.index("-Capability codex_requirements_base_file")
+    assert capability < repair.index("-BaseFile $staged")
+    assert "cannot render the managed policy beside the file" in repair
+    assert repair.count("the file was left as it was") >= 2
+    assert "# DefenseClaw managed Codex requirements" not in repair
+    command = _function_body(text, "Invoke-DefenseClawCodexRequirementsCommand")
+    assert "'--base-file', $BaseFile" in command
+    assert "$BaseFile -ne '' -and $Action -cne 'reconcile'" in command
+
+
+def test_the_publishable_check_refuses_empty_bom_nul_and_non_text() -> None:
+    check = _function_body(_text(), "Assert-DefenseClawCodexRequirementsPublishable")
+    for needle in ("$Bytes.Length -eq 0", "IndexOf($Bytes, [byte]0)", "UTF8Encoding]::new($false, $true)", "TrimStart([char]0xFEFF)"):
+        assert needle in check, needle
+
+
+def test_a_writer_lock_failure_is_classified_by_its_error_code_not_only_by_text() -> None:
+    text = _text()
+    command = _function_body(text, "Invoke-DefenseClawCodexRequirementsCommand")
+    assert "$reportedCode -ceq 'writer_lock_busy'" in command
+    go = (ROOT / "internal" / "gateway" / "connector" / "codex_machine_requirements_windows.go").read_text(encoding="utf-8")
+    assert go.count("windowsCodexWriterLockBusyError{") >= 3
+    assert go.count("windows.ERROR_IO_PENDING") == 2
+    cli = (ROOT / "internal" / "cli" / "windows_codex_requirements.go").read_text(encoding="utf-8")
+    assert "report.ErrorCode = windowsCodexRequirementsWriterLockBusyCode" in cli
+    assert '"--base-file"' not in cli and 'StringVar(&baseFile, "base-file"' in cli
 
 
 def test_the_rollback_never_swaps_an_unguarded_requirements_file_over_a_guarded_one() -> None:
@@ -135,17 +161,3 @@ def test_the_rollback_never_swaps_an_unguarded_requirements_file_over_a_guarded_
     assert restore.index("$isCodexMachinePolicy -and (Test-DefenseClawStandaloneProfile)") < guard
     assert guard < restore.index("-Source $backup", guard)
     assert "$backupProblem -ne '' -and $currentProblem -eq ''" in restore
-
-
-def test_a_failed_rebuild_puts_the_original_requirements_file_back_through_the_same_swap() -> None:
-    # GAP-1001: the rebuild writes a base through a sibling and a swap; when the
-    # reconcile that follows fails, the bytes read first go back the same way,
-    # so no empty or partial file stays in place of the one the recovery found.
-    repair = _function_body(_text(), "Repair-DefenseClawRecoveredCodexRequirements")
-    assert "$edited = $null" in repair
-    rebuild = repair.index("$rebuildError = [string]$_.Exception.Message")
-    window = repair[rebuild : rebuild + 1800]
-    assert "[IO.File]::WriteAllBytes($restoreStaged, $edited)" in window
-    assert "Install-DefenseClawFileAtomic -Source $restoreStaged -Destination $path" in window
-    assert "the file was left as it was" in window
-    assert window.index("Install-DefenseClawFileAtomic") < window.index("throw (\"Codex requirements recovery could not republish")

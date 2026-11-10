@@ -691,7 +691,11 @@ func codexRepublishAdvice(opts Options) string {
 		return "run " + managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", "standalone") +
 			" as an administrator (Setup /repair does the same)"
 	}
-	return "run `defenseclaw enterprise reconcile` as root"
+	group := "linux"
+	if opts.goos() == "darwin" {
+		group = "macos"
+	}
+	return "run `defenseclaw-gateway enterprise " + group + " ensure` as root"
 }
 
 // codexParseError names the file and the line of a requirements.toml that

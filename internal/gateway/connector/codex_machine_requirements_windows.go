@@ -241,6 +241,12 @@ func ReconcileWindowsCodexMachineRequirements(
 		// for byte, the postimage the trusted record names.
 		ownPublication := !ownershipAdopted && requirements.existed &&
 			windowsCodexMachineHash(requirements.data) == state.PostimageSHA256
+		if opts.RenderBaseSet {
+			// GAP-1001: the base is the document rendered off to the side, not
+			// the file on disk; the result is checked below as any publish is.
+			requirementsBase = opts.RenderBase
+			ownPublication = false
+		}
 		rendered, _, err := reconcileWindowsCodexRequirements(requirementsBase, opts, ownPublication)
 		if err != nil {
 			return err
@@ -1720,6 +1726,9 @@ func acquireWindowsCodexWriterLock(path string) (windows.Handle, *windows.Overla
 		0,
 	)
 	if err != nil {
+		if errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			err = windowsCodexWriterLockBusyError{err}
+		}
 		return 0, nil, fmt.Errorf("open Codex machine policy lock: %w", err)
 	}
 	closeOnError := func(cause error) (windows.Handle, *windows.Overlapped, error) {
@@ -1746,14 +1755,14 @@ func acquireWindowsCodexWriterLock(path string) (windows.Handle, *windows.Overla
 		if err == nil {
 			return handle, overlapped, nil
 		}
-		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) && !errors.Is(err, windows.ERROR_IO_PENDING) {
 			return closeOnError(fmt.Errorf("acquire Codex machine policy lock: %w", err))
 		}
 		if !time.Now().Before(deadline) {
-			return closeOnError(fmt.Errorf(
+			return closeOnError(windowsCodexWriterLockBusyError{fmt.Errorf(
 				"timed out waiting %s for Codex machine policy lock",
 				windowsCodexMachineLockTimeout,
-			))
+			)})
 		}
 		delay := 50 * time.Millisecond
 		if remaining := time.Until(deadline); remaining < delay {
@@ -1912,6 +1921,9 @@ func acquireWindowsCodexMachineFileLockMode(
 		0,
 	)
 	if err != nil {
+		if errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			err = windowsCodexWriterLockBusyError{err}
+		}
 		return 0, nil, fmt.Errorf("open Codex machine policy lock: %w", err)
 	}
 	closeOnError := func(cause error) (windows.Handle, *windows.Overlapped, error) {
@@ -1952,14 +1964,14 @@ func acquireWindowsCodexMachineFileLockMode(
 		if err == nil {
 			return handle, overlapped, nil
 		}
-		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) && !errors.Is(err, windows.ERROR_IO_PENDING) {
 			return closeOnError(fmt.Errorf("acquire Codex machine policy lock: %w", err))
 		}
 		if !time.Now().Before(deadline) {
-			return closeOnError(fmt.Errorf(
+			return closeOnError(windowsCodexWriterLockBusyError{fmt.Errorf(
 				"timed out waiting %s for Codex machine policy lock",
 				windowsCodexMachineLockTimeout,
-			))
+			)})
 		}
 		delay := 50 * time.Millisecond
 		if remaining := time.Until(deadline); remaining < delay {
