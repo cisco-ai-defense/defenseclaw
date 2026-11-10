@@ -88,6 +88,50 @@ func TestScriptHookCallWhoseClientLeftWithAPolicyBlockIsUnconfirmedWhenTheHookMa
 	}
 }
 
+// GAP-1028 (the prompt events): the script hook of a prompt or an expansion
+// fails open on a curl timeout too, and sends no delivery receipt, so a call
+// of those events whose client left is unconfirmed whatever the gateway
+// proposed. The tool-gate spelling alone left an open-mode prompt block
+// recorded as a block nobody proved delivered.
+func TestOpenModePromptCallWhoseClientLeftIsUnconfirmedWhateverTheProposal(t *testing.T) {
+	f := perUserHookFixture(t)
+	for _, event := range []string{"UserPromptSubmit", "UserPromptExpansion", "PreToolUse"} {
+		for _, proposal := range []string{"allow", "block"} {
+			got := f.api.clientLeftHookDecision(t.Context(), "claudecode", agentHookRequest{HookEventName: event}, nil,
+				agentHookResponse{Action: proposal, RawAction: proposal, Mode: "action"})
+			if got.Action != hookActionUnconfirmed || got.RawAction != proposal {
+				t.Errorf("%s with a proposed %s: action %q raw %q, want unconfirmed keeping the proposal", event, proposal, got.Action, got.RawAction)
+			}
+		}
+	}
+	serveScriptHookBody(t, f, managedHookBody("prompt-left", "UserPromptSubmit"), true)
+	if got := f.audited(t, "prompt-left")["prompt-left"]; got != "unconfirmed/no_answer" {
+		t.Fatalf("audited prompt = %q, want unconfirmed/no_answer", got)
+	}
+}
+
+// The twins: a hook that fails closed keeps the proposed block of a prompt,
+// a lifecycle event the hook cannot deny is not rewritten, and a prompt
+// answered to its client stays an allow.
+func TestPromptCallWhoseClientLeftKeepsItsBlockWhenTheHookFailsClosed(t *testing.T) {
+	f := perUserHookFixture(t)
+	f.api.scannerCfg.Guardrail.HookFailMode = "closed"
+	got := f.api.clientLeftHookDecision(t.Context(), "claudecode", agentHookRequest{HookEventName: "UserPromptSubmit"}, nil,
+		agentHookResponse{Action: "block", RawAction: "block", Mode: "action"})
+	if got.Action != "block" {
+		t.Fatalf("closed prompt block = %q, want block", got.Action)
+	}
+	f.api.scannerCfg.Guardrail.HookFailMode = ""
+	if got := f.api.clientLeftHookDecision(t.Context(), "claudecode", agentHookRequest{HookEventName: "SessionEnd"}, nil,
+		agentHookResponse{Action: "allow", RawAction: "allow", Mode: "action"}); got.Action != "allow" {
+		t.Fatalf("a lifecycle event the hook cannot deny = %q, want allow", got.Action)
+	}
+	serveScriptHookBody(t, f, managedHookBody("prompt-answered", "UserPromptSubmit"), false)
+	if got := f.audited(t, "prompt-answered")["prompt-answered"]; got != "allow" {
+		t.Fatalf("answered prompt = %q, want allow", got)
+	}
+}
+
 // Under a hook that fails closed the policy block is the answer the agent got
 // whether or not the hook heard the gateway, so the block row stays.
 func TestScriptHookPolicyBlockWhoseClientLeftStaysBlockedWhenTheHookFailsClosed(t *testing.T) {

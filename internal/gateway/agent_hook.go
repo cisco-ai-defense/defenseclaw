@@ -1695,6 +1695,9 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			// answer already on the wire (delivered) is never replaced either.
 			if !delivered && !recoverable && req.pendingOccurrenceID == "" {
 				adjusted, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+				// The answer goes out with no row; keep the call's record
+				// outside the store for the failure report (GAP-1031).
+				a.recordUnauditedHookCall(connectorName, req, adjusted)
 			}
 			resp = adjusted
 			env.adoptVerdict(resp)

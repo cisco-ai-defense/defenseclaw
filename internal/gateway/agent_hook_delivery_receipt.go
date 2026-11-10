@@ -246,12 +246,13 @@ func (a *APIServer) unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer bool
 //     blocks the call whatever the gateway proposed, so a proposed block and a
 //     proposed allow are both the fail-closed block.
 //   - A hook that may fail open (the default and permissive tiers) exits 0 on
-//     a curl timeout and the agent runs the call. For a tool-gate event, an
+//     a curl timeout and the agent runs the call or the prompt. For every
+//     event that can be answered (a tool gate, a prompt, an expansion), an
 //     allowed call and a call the gateway proposed to block alike are
 //     unconfirmed rows that keep the proposal: the gateway never records a
 //     block the hook did not deliver (GAP-1028). The hook's own answer is what
 //     protects a named target; this row only states what the gateway can
-//     prove. Other events keep the legacy rewrite below.
+//     prove. A neutral lifecycle event keeps the rewrite below.
 //
 // Secure Client keeps its own contract and is never rewritten.
 func (a *APIServer) clientLeftHookDecision(ctx context.Context, connectorName string, req agentHookRequest, rawBody []byte, resp agentHookResponse) agentHookResponse {
@@ -260,7 +261,7 @@ func (a *APIServer) clientLeftHookDecision(ctx context.Context, connectorName st
 		return resp
 	}
 	if cfg != nil && cfg.EffectiveHookOutageFailModeForConnector(connectorName) == "open" &&
-		hookexec.DeliveryReceiptEvent(connectorName, req.HookEventName) {
+		!hookexec.NeutralLifecycleEvent(connectorName, req.HookEventName) {
 		return unconfirmedHookDelivery(resp)
 	}
 	if resp.Action == "block" {
