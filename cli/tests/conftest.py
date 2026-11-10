@@ -95,6 +95,23 @@ def _isolated_windows_identity(tmp_path_factory, monkeypatch: pytest.MonkeyPatch
     yield
 
 
+# The module that tests the Windows launcher preflight itself.
+_LAUNCHER_PREFLIGHT_MODULES = frozenset({"test_cmd_setup_multi_connector"})
+
+
+@pytest.fixture(autouse=True)
+def _setup_tests_need_no_installed_hook_launcher(request, monkeypatch: pytest.MonkeyPatch):
+    """Setup refuses a per-user restart on a Windows host that has no usable
+    defenseclaw-hook.exe; a CI runner has none, so the tests of setup flows
+    that are about something else run past the preflight. The tests of the
+    preflight itself keep it."""
+    if os.name != "nt" or request.module.__name__.rpartition(".")[2] in _LAUNCHER_PREFLIGHT_MODULES:
+        return
+    from defenseclaw.commands import cmd_setup
+
+    monkeypatch.setattr(cmd_setup, "_windows_hook_launcher_setup_refusal", lambda *_args, **_kwargs: "")
+
+
 @pytest.fixture(autouse=True)
 def _inject_supported_connector_host(request, monkeypatch: pytest.MonkeyPatch):
     """Run platform-neutral connector behavior tests on an explicit host."""

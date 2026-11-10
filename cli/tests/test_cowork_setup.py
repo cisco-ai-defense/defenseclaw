@@ -301,8 +301,21 @@ def test_windows_packaged_handler_runs_after_binary_removal(
             assert "additionalContext" in result.stdout
 
 
+def _built_hooks_gateway():
+    """The gateway that builds the plugin: a Windows host builds the native guard
+    form, which is the one its status reader accepts as current."""
+    if os.name != "nt":
+        return None
+    program_files = Path("C:/Program Files/DefenseClaw")
+    doc = _windows_hooks_doc(
+        program_files / "defenseclaw-hook-guard.exe", Path("C:/ProgramData/DefenseClaw"),
+        program_files / "defenseclaw-hook.exe",
+    )
+    return _gateway(stdout=json.dumps(doc))
+
+
 def test_build_bumps_and_a_rebuild_clears_the_confirmation(app) -> None:
-    first, calls = _setup(app, "--yes")
+    first, calls = _setup(app, "--yes", gateway=_built_hooks_gateway())
     assert first.exit_code == 0, first.output
     assert calls[0][:3] == [GATEWAY, "connector", "cowork-plugin"]
     assert "observe mode: records only" in first.output and "--mode action" in first.output
@@ -313,7 +326,7 @@ def test_build_bumps_and_a_rebuild_clears_the_confirmation(app) -> None:
         return _health(last_activity_at=stamp, last_session_start_at=stamp), ""
 
     with patch("defenseclaw.commands.cmd_setup_cowork._gateway_health", side_effect=health):
-        waited, _ = _setup(app, "--yes", "--wait", "--timeout", "10")
+        waited, _ = _setup(app, "--yes", "--wait", "--timeout", "10", gateway=_built_hooks_gateway())
     assert waited.exit_code == 0, waited.output
     assert "Cowork is protected: a Cowork session reached" in waited.output
     assert "observe mode: records only" in waited.output
@@ -321,7 +334,7 @@ def test_build_bumps_and_a_rebuild_clears_the_confirmation(app) -> None:
     assert state["version"] > v1 and state["last_event_at"] and state["confirmed_at"]
     assert cowork.cowork_status(app.cfg, None, gateway_running=True).protected
 
-    rebuilt, _ = _setup(app, "--yes")
+    rebuilt, _ = _setup(app, "--yes", gateway=_built_hooks_gateway())
     assert rebuilt.exit_code == 0, rebuilt.output
     state = cowork.load_state(_data_dir(app))
     assert "last_event_at" not in state and "confirmed_at" not in state and state["previous_event_at"]
