@@ -41,9 +41,15 @@ func (a *APIServer) recordUnauditedHookCall(connectorName string, req agentHookR
 		req.ToolInvocationID == "" || !hookexec.ToolGateEvent(connectorName, req.HookEventName) {
 		return
 	}
+	// What the line states is what the gateway can prove: a block it answered,
+	// an allow it answered, or an unconfirmed call (the client left, so no
+	// answer was delivered and the hook alone knows what the agent got).
 	outcome, mode := "fail_open", "open"
-	if resp.Action == "block" {
+	switch resp.Action {
+	case "block":
 		outcome, mode = "fail_closed", "closed"
+	case hookActionUnconfirmed:
+		outcome = hookActionUnconfirmed
 	}
 	line, err := json.Marshal(struct {
 		TS        string `json:"ts"`
