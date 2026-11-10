@@ -1013,20 +1013,28 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 			// is read as one line, its elements joined by one space, and
 			// each element with a slash is one path whole.
 			line := text
+			reading := liveReading{live: line, names: line}
 			if f.argv != nil {
 				line = strings.Join(f.argv, " ")
+				reading = liveReading{live: line, names: line}
+				if !strict && kind == kindCommand {
+					reading = readLiveLine(line, f.argv)
+				}
 				for _, element := range f.argv {
 					if strings.ContainsAny(element, "/\\") {
 						addToken(element, dir, explicit)
 					}
 				}
 			} else {
-				for _, word := range slashWords(line) {
+				if !strict && kind == kindCommand {
+					reading = readLiveLine(line, nil)
+				}
+				for _, word := range slashWords(reading.live) {
 					addToken(word, dir, explicit)
 				}
 			}
-			if strict || kind == kindOther || holdsReaderWord(textForms(line)) {
-				addRefs(scan.folders(line, dir), explicit)
+			if strict || kind == kindOther || reading.reads {
+				addRefs(scan.folders(reading.names, dir), explicit)
 			}
 			if runsFolderReader(line, f.argv, kind == kindCommand) {
 				addToken(dir, dir, explicit)

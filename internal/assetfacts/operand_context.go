@@ -438,6 +438,8 @@ type commandWord struct {
 	// dynamic is set for a word that holds an expansion or a pattern: its
 	// value is not in the text.
 	dynamic bool
+	// start and end are the byte offsets of the word in the parsed text.
+	start, end int
 }
 
 func (w commandWord) isOneOf(set map[string]bool) bool {
@@ -448,7 +450,7 @@ func (w commandWord) isOption() bool { return strings.HasPrefix(w.text, "-") }
 
 func readCommandWord(word *syntax.Word) commandWord {
 	var raw, text strings.Builder
-	var out commandWord
+	out := commandWord{start: int(word.Pos().Offset()), end: int(word.End().Offset())}
 	for _, part := range word.Parts {
 		switch p := part.(type) {
 		case *syntax.Lit:
