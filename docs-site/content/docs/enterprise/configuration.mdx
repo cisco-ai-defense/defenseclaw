@@ -51,7 +51,7 @@ Set these in every standalone config. On Linux and macOS the lifecycle fills in 
 | `enterprise.profile` | `standalone` |
 | `data_dir` | Linux: exactly `/var/lib/defenseclaw` or unset. macOS: exactly `/opt/cisco/defenseclaw/runtime` or unset. Windows: leave unset. |
 | `gateway.api_bind`, `gateway.api_port` | `127.0.0.1` and `18970`, or unset. Every OS refuses another bind address; Linux and macOS also refuse another port. |
-| `guardrail.rule_pack` | Unset, a preset (`default`, `strict`, `permissive`) or a [custom pack](#custom-rule-packs) |
+| `guardrail.rule_pack` | Unset, a preset (`default`, `strict`, `permissive`) or a [custom pack](#custom-rule-packs). On Windows only `default` needs nothing else: `strict` and `permissive` need a `policy_dir` that holds the pack ([Strict and permissive rule packs](/docs/enterprise/windows#strict-and-permissive-rule-packs)) |
 
 Always set `enterprise.profile`. When it is unset, Windows and macOS resolve to the Secure Client profile and the `enterprise policy` commands refuse to run. The profile cannot change without a reinstall. For `policy_dir` and the rule-pack lookup rules, see [Custom rule packs](#custom-rule-packs).
 
