@@ -20793,7 +20793,11 @@ function Wait-DefenseClawCommittedUninstallFileReleased {
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return
     }
-    $bound = if ($script:DefenseClawCommittedUninstallHeldWaits) { [int]$script:CodexStateSettleSeconds } else { 0 }
+    if (-not $script:DefenseClawCommittedUninstallHeldWaits) {
+        # A recovery (the watchdog Setup arms behind every uninstall) goes on to the delete as it did.
+        return
+    }
+    $bound = [int]$script:CodexStateSettleSeconds
     $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(0, $bound))
     while ($true) {
         # A probe that fails is not a held file: the delete that follows reports it.
