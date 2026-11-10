@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -390,7 +391,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 			// -fprint0, -fprintf and -fls, and what an -exec child writes. The
 			// values the command bound so far resolve a name, so a link or a
 			// folder spelled through a variable is read like a literal one.
-			for _, path := range registrationFindActionTargets(call.Args[1:], values, currentCWD, home) {
+			for _, path := range registrationFindActionTargets(call.Args[1:], values, currentCWD, home, protected) {
 				if protectedReachPath(OperandPath(path, currentCWD), protected, "") {
 					found = true
 					return false
@@ -706,14 +707,23 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 		}
 	}
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) < 2 {
+	if !ok {
 		return targets
 	}
-	program, fixed := StaticWord(call.Args[0], home)
+	// The runner grammar the other readers share (env, command, nice,
+	// timeout, ...) is stripped first: the program it runs is the one judged.
+	args := call.Args
+	if words, known := actionLiteralCommandWords(args, home); known {
+		args = words
+	}
+	if len(args) < 2 {
+		return targets
+	}
+	program, fixed := StaticWord(args[0], home)
 	if !fixed {
 		return targets
 	}
-	operands := call.Args[1:]
+	operands := args[1:]
 	switch programBase(program) {
 	case "rm", "unlink", "shred", "rmdir", "chmod", "chown", "chgrp", "setfacl", "chattr", "truncate", "tee":
 		for _, word := range operands {
@@ -770,17 +780,36 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 // actions of a find call write (args are the words after the program): the
 // file of -fprint, -fprint0, -fprintf and -fls, and the targets of the program
 // an -exec, -execdir, -ok or -okdir action runs, read by the loop-statement
-// reader with the given values bound. -delete names no path of its own; the
-// folder reader judges it by the search root.
-func registrationFindActionTargets(args []*syntax.Word, values actionValues, cwd, home string) []string {
+// reader with the given values bound. In a child, {} stands for each
+// protected file the search stands on (registrationFindReachedFiles), and an
+// -execdir or -okdir child runs in that file folder, so a relative name there
+// is the file beside it. -delete names no path of its own; the folder reader
+// judges it by the search root.
+func registrationFindActionTargets(args []*syntax.Word, values actionValues, cwd, home string, protected protectedFiles) []string {
 	var targets []string
+	var reached []string
+	scanned := false
 	registrationFindActions(args, home, func(action string, operands []*syntax.Word) bool {
 		switch action {
 		case "-delete":
 		case "-exec", "-execdir", "-ok", "-okdir":
-			if len(operands) > 0 {
-				stmt := &syntax.Stmt{Cmd: &syntax.CallExpr{Args: operands}}
-				targets = append(targets, registrationLoopStatementTargets(stmt, values, cwd, home)...)
+			if len(operands) == 0 {
+				return false
+			}
+			if !scanned {
+				reached, scanned = registrationFindReachedFiles(args, values, cwd, home, protected), true
+			}
+			run := func(words []*syntax.Word, dir string) {
+				stmt := &syntax.Stmt{Cmd: &syntax.CallExpr{Args: words}}
+				targets = append(targets, registrationLoopStatementTargets(stmt, values, dir, home)...)
+			}
+			run(operands, cwd)
+			for _, file := range reached {
+				dir := cwd
+				if action == "-execdir" || action == "-okdir" {
+					dir = filepath.Dir(file)
+				}
+				run(registrationFindFileWords(operands, file, home), dir)
 			}
 		default:
 			if len(operands) > 0 {
@@ -792,6 +821,157 @@ func registrationFindActionTargets(args []*syntax.Word, values actionValues, cwd
 		return false
 	})
 	return targets
+}
+
+// registrationFindFileWords returns the words of an -exec child with the file
+// the search stands on put in place of every {}.
+func registrationFindFileWords(words []*syntax.Word, file, home string) []*syntax.Word {
+	out := make([]*syntax.Word, len(words))
+	for i, word := range words {
+		out[i] = word
+		if text, fixed := StaticWord(word, home); fixed && strings.Contains(text, "{}") {
+			out[i] = &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: strings.ReplaceAll(text, "{}", file)}}}
+		}
+	}
+	return out
+}
+
+// registrationFindReachedFiles lists the protected files a find call stands
+// on: each search root that names one directly (the file, or a link to it),
+// and the protected files below a root folder that a -name, -iname, -path,
+// -ipath, -wholename or -iwholename test matches. A root or test value that is
+// neither spelled out nor bound is no root and no test, and a negated test
+// selects nothing.
+func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd, home string, protected protectedFiles) []string {
+	type nameTest struct {
+		pattern     string
+		whole, fold bool
+	}
+	var roots []string
+	var tests []nameTest
+	rootsOpen, negated := true, false
+	for index := 0; index < len(args); index++ {
+		text, fixed := StaticWord(args[index], home)
+		if rootsOpen && (text == "-H" || text == "-L" || text == "-P") {
+			continue
+		}
+		if rootsOpen && (!fixed || !strings.HasPrefix(text, "-") && text != "!" && text != "(") {
+			if value, known := actionWordValue(args[index], values, cwd, home); known && value != "" {
+				roots = append(roots, value)
+			}
+			continue
+		}
+		rootsOpen = false
+		if !fixed {
+			continue
+		}
+		switch text {
+		case "!", "-not":
+			negated = !negated
+			continue
+		case "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename":
+			if index+1 < len(args) {
+				if pattern, known := StaticWord(args[index+1], home); known && !negated {
+					tests = append(tests, nameTest{pattern, strings.Contains(text, "path") || strings.Contains(text, "wholename"), strings.HasPrefix(text, "-i")})
+				}
+				index++
+			}
+		case "-exec", "-execdir", "-ok", "-okdir":
+			for index+1 < len(args) {
+				index++
+				if end, _ := StaticWord(args[index], home); end == ";" || end == "+" {
+					break
+				}
+			}
+		default:
+			if registrationFindValueOptions[text] || strings.HasPrefix(text, "-newer") && len(text) == len("-newerXY") {
+				index++
+			}
+		}
+		negated = false
+	}
+	if len(roots) == 0 {
+		roots = []string{"."}
+	}
+	var reached []string
+	for _, root := range roots {
+		path := OperandPath(root, cwd)
+		if info, err := pathStat(path); err == nil && info.IsDir() {
+			for _, target := range protected {
+				if !strings.HasPrefix(target.path, path+string(filepath.Separator)) {
+					continue
+				}
+				for _, test := range tests {
+					text := filepath.Base(target.path)
+					if test.whole {
+						text = target.path
+					}
+					if registrationGlobMatch(test.pattern, text, test.fold) {
+						reached = append(reached, target.path)
+						break
+					}
+				}
+			}
+		} else if protectedReachPath(path, protected, "") {
+			reached = append(reached, path)
+		}
+	}
+	return reached
+}
+
+// registrationGlobMatch matches text against a find glob: * and ? also match
+// a path separator, [..] is a class ([!..] negates it) and a backslash quotes
+// the next character.
+func registrationGlobMatch(pattern, text string, fold bool) bool {
+	if fold {
+		pattern, text = strings.ToLower(pattern), strings.ToLower(text)
+	}
+	for pattern != "" {
+		_, size := utf8.DecodeRuneInString(text)
+		switch pattern[:1] {
+		case "*":
+			pattern = strings.TrimLeft(pattern, "*")
+			if pattern == "" {
+				return true
+			}
+			for offset := range text {
+				if registrationGlobMatch(pattern, text[offset:], false) {
+					return true
+				}
+			}
+			return false
+		case "?":
+			if text == "" {
+				return false
+			}
+			pattern, text = pattern[1:], text[size:]
+		case "[":
+			end := strings.Index(pattern[1:], "]") + 1
+			if end < 2 || text == "" {
+				return false
+			}
+			class := pattern[:end+1]
+			if strings.HasPrefix(class, "[!") {
+				class = "[^" + class[2:]
+			}
+			if matched, err := filepath.Match(class, text[:size]); err != nil || !matched {
+				return false
+			}
+			pattern, text = pattern[end+1:], text[size:]
+		case "\\":
+			if len(pattern) < 2 {
+				return false
+			}
+			pattern = pattern[1:]
+			fallthrough
+		default:
+			if text == "" || pattern[:1] != text[:1] {
+				return false
+			}
+			pattern, text = pattern[1:], text[1:]
+		}
+	}
+	return text == ""
 }
 
 // registrationFindRsyncReach reads the two tools that empty a folder without
