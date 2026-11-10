@@ -31,24 +31,28 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 	pwsh := func(body string) string {
 		return `"C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile -Command ` + "'" + body + "'"
 	}
-	// alternatives binds $p to ordinary files named for DefenseClaw, one per
-	// branch of an if / elseif chain of n branches (the state file in branch
-	// protectedAt when it is not -1), and to last in the else branch; it
-	// writes $p, then runs extra.
-	alternatives := func(n int, last string, protectedAt int, extra string) string {
-		var chain strings.Builder
+	// chain binds the variable name to ordinary files named for DefenseClaw,
+	// one per branch of an if / elseif chain of n branches (the state file in
+	// branch protectedAt when it is not -1), and to last in the else branch;
+	// then it runs tail.
+	chain := func(name string, n int, last string, protectedAt int, tail string) string {
+		var branches strings.Builder
 		for i := 0; i < n; i++ {
 			keyword := "if"
 			if i > 0 {
 				keyword = " elseif"
 			}
-			value := fmt.Sprintf(`C:\Users\Alice\project\defenseclaw_note%d.txt`, i)
+			value := fmt.Sprintf(`C:\Users\Alice\project\defenseclaw_note%d`, i)
 			if i == protectedAt {
 				value = state
 			}
-			fmt.Fprintf(&chain, `%s ($c%d) { $p = '%s' }`, keyword, i, value)
+			fmt.Fprintf(&branches, `%s ($c%d) { $%s = '%s' }`, keyword, i, name, value)
 		}
-		return `$p = '` + project + `'; ` + chain.String() + ` else { $p = '` + last + `' }; [IO.File]::WriteAllText($p, 'x')` + extra
+		return `$` + name + ` = '` + project + `'; ` + branches.String() + ` else { $` + name + ` = '` + last + `' }; ` + tail
+	}
+	// alternatives binds $p in n branches and writes it, then runs extra.
+	alternatives := func(n int, last string, protectedAt int, extra string) string {
+		return chain("p", n, last, protectedAt, `[IO.File]::WriteAllText($p, 'x')`+extra)
 	}
 	const ordinaryLast = `C:\Users\Alice\project\defenseclaw_last.txt`
 	const (
@@ -102,6 +106,19 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 		{"patch run by codex started by cmd start", `$patch = "` + envelope + `"; & cmd.exe /c 'start /b C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
 		{"patch run by codex in one expanded cmd command string", `$patch = "` + envelope + `"; & cmd.exe /c "C:\dc\codex.exe --codex-run-as-apply-patch $patch"`, true},
 		{"patch run by codex behind cmd start with a title", `$patch = "` + envelope + `"; & cmd.exe /d /s /c 'start /b "" C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex behind cmd start with option values", `$patch = "` + envelope + `"; & cmd.exe /c 'start /node 0 /affinity 3 C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex behind cmd start with a title and options", `$patch = "` + envelope + `"; & cmd.exe /c 'start "job" /b /d C:\dc C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex behind cmd start with a title after the options", `$patch = "` + envelope + `"; & cmd.exe /c 'start /b "job" C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex behind a true cmd if", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==1 C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex behind cmd if not exist", `$patch = "` + envelope + `"; & cmd.exe /c 'if not exist C:\none C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex behind cmd if with an operator word", `$patch = "` + envelope + `"; & cmd.exe /c 'if /i a EQU A C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex behind cmd if and start", `$patch = "` + envelope + `"; & cmd.exe /c 'if errorlevel 0 start /b C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex in a cmd else", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==2 (echo no) else C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex in a cmd for loop", `$patch = "` + envelope + `"; & cmd.exe /c 'for %i in (1) do C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"cmd start of another program lists codex and the flag", `$patch = "` + envelope + `"; & cmd.exe /c 'start /b whoami.exe C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd start titled with the codex name starts another program", `$patch = "` + envelope + `"; & cmd.exe /c 'start "C:\dc\codex.exe" /b whoami.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd start of cmd echoes the codex name", `$patch = "` + envelope + `"; & cmd.exe /c 'start /b cmd.exe /c echo C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd if runs another program that lists codex and the flag", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==1 whoami.exe C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
 		{"patch run by codex behind cmd call", `$patch = "` + envelope + `"; & cmd.exe /c 'call C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
 		{"patch run by codex after another cmd command", `$patch = "` + envelope + `"; & cmd.exe /c 'echo hi & C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
 		{"patch run by codex with a caret in its name", `$patch = "` + envelope + `"; & cmd.exe /c 'c^odex.exe --codex-run-as-apply-patch' $patch`, true},
@@ -123,6 +140,15 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 		{"nine ordinary alternatives, state bound and unused", alternatives(8, ordinaryLast, -1, unusedBinding), false},
 		{"nine ordinary alternatives, state as written text", alternatives(8, ordinaryLast, -1, stateAsContent), false},
 		{"twenty ordinary alternatives, state read elsewhere", alternatives(19, ordinaryLast, -1, readState), false},
+		{"ninth protected path only read", chain("p", 8, state, -1, `[IO.File]::ReadAllText($p)`), false},
+		{"ninth protected path read by Get-Content", chain("p", 8, state, -1, `Get-Content $p`), false},
+		{"ninth protected path never used", chain("p", 8, state, -1, `Write-Output done`), false},
+		{"ninth protected path rebound before an ordinary write", chain("p", 8, state, -1, `$p = '`+project+`'; [IO.File]::WriteAllText($p, 'x')`), false},
+		{"ninth protected path written", chain("p", 8, state, -1, `[IO.File]::WriteAllText($p, 'x')`), true},
+		{"protected path built from a ninth directory", chain("d", 8, `C:\Users\Alice\.defenseclaw\..`, -1, `$p = "$d\.defenseclaw\config.yaml"; [IO.File]::WriteAllText($p, 'x')`), true},
+		{"ordinary path built from nine directories", chain("d", 8, `C:\Users\Alice\project\defenseclaw_last`, -1, `$p = "$d\notes.txt"; [IO.File]::WriteAllText($p, 'x')`), false},
+		{"sixty ordinary alternatives", alternatives(59, ordinaryLast, -1, ""), false},
+		{"seventy alternatives, state last", alternatives(69, state, -1, ""), true},
 		{"values carried around a loop", `$a = '` + state + `'; $b = '` + project + `defenseclaw1'; $c = '` + project + `defenseclaw2'; $d = '` + project + `defenseclaw3'; foreach ($i in 1..4) { [IO.File]::WriteAllText($d, 'x'); $d = $c; $c = $b; $b = $a }`, true},
 		{"bound read", `$p = '` + state + `'; [IO.File]::ReadAllText($p)`, false},
 		{"bound read in pwsh", pwsh(`$p = ''` + state + `''; if (Test-Path -LiteralPath $p) { Get-Content -LiteralPath $p -Raw }`), false},

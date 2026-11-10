@@ -15,14 +15,13 @@ const (
 	psBoundValueMaxRunes = 8 << 10
 	// psBoundAlternatives bounds the values one variable holds at once (the
 	// ways control flow can have bound it) and so the readings of a command.
-	psBoundAlternatives = 8
-	// psBoundSpilled bounds the values a variable could hold past
-	// psBoundAlternatives that are not read at its uses but are judged on
-	// their own (psSpill); past it the command counts as past its bound.
-	psBoundSpilled = 32
+	// It is set far above any ordinary script: past it the command counts as
+	// past its bound (a value dropped without a trace could be the protected
+	// one), so an ordinary command never gets there.
+	psBoundAlternatives = 64
 	// psBoundCombinations bounds the strings one interpolated literal can
-	// hold: the alternatives that fit and the ones judged on their own.
-	psBoundCombinations = psBoundAlternatives + psBoundSpilled
+	// hold before they are deduplicated.
+	psBoundCombinations = 4 * psBoundAlternatives
 	// psBoundTextMaxBytes bounds the text of one value being built.
 	psBoundTextMaxBytes = 4 * psBoundValueMaxRunes
 	// psBoundLoopRounds bounds the extra passes over a loop whose values are
@@ -52,41 +51,16 @@ func (b psBindings) size() int {
 	return n
 }
 
-// psSpill holds the values a variable could hold past psBoundAlternatives.
-// They are not read at the uses of the variable, but a value dropped without
-// a trace could be the protected one, so each is judged on its own as a write
-// of that path (the caller adds it to the twins of the command): a protected
-// one still counts, an ordinary one costs nothing. A dropped value is the
-// whole value of an assignment, so a path built from it later is read from
-// the values that fit.
-type psSpill struct {
-	values []string
-	over   bool // more than psBoundSpilled: the command counts as past its bound
-}
-
-func (s *psSpill) add(value string) {
-	for _, v := range s.values {
-		if v == value {
-			return
-		}
-	}
-	if len(s.values) >= psBoundSpilled {
-		s.over = true
-		return
-	}
-	s.values = append(s.values, value)
-}
-
 // psAddValue returns values with value added when it is new. A new value that
-// does not fit goes to spill.
-func psAddValue(values []string, value string, spill *psSpill) []string {
+// does not fit is dropped and sets *overflow.
+func psAddValue(values []string, value string, overflow *bool) []string {
 	for _, v := range values {
 		if v == value {
 			return values
 		}
 	}
 	if len(values) >= psBoundAlternatives {
-		spill.add(value)
+		*overflow = true
 		return values
 	}
 	return append(values[:len(values):len(values)], value)
@@ -94,12 +68,12 @@ func psAddValue(values []string, value string, spill *psSpill) []string {
 
 // psUnionBindings returns what a variable can hold after either path: every
 // value it holds on one path or the other.
-func psUnionBindings(a, b psBindings, spill *psSpill) psBindings {
+func psUnionBindings(a, b psBindings, overflow *bool) psBindings {
 	out := a.clone()
 	for name, values := range b {
 		merged := out[name]
 		for _, value := range values {
-			merged = psAddValue(merged, value, spill)
+			merged = psAddValue(merged, value, overflow)
 		}
 		out[name] = merged
 	}
@@ -129,11 +103,10 @@ func psUnionBindings(a, b psBindings, spill *psSpill) psBindings {
 // binds and what it reads are not counted. A block is read twice when its
 // first pass binds something new, so a value bound late in a loop reaches an
 // earlier use in the next round. A block proven on one reading counts;
-// nothing else does. The values a variable held past the bound are returned
-// too (dropped), to be judged as writes of their own.
-func psBindStaticValues(command, home string, budget *psBudget) (readings, dropped []string) {
+// nothing else does. A value past a bound sets budget.over.
+func psBindStaticValues(command, home string, budget *psBudget) (readings []string) {
 	if !strings.Contains(strings.ToLower(command), "defenseclaw") || !strings.ContainsRune(command, '$') {
-		return nil, nil
+		return nil
 	}
 	r := []rune(command)
 	readingCount := 1
@@ -142,16 +115,11 @@ func psBindStaticValues(command, home string, budget *psBudget) (readings, dropp
 		binder.run(0, psBindings{}, false)
 		// Past a bound a protected value may have been dropped: the command
 		// counts as the write, as for every other bound of this proof.
-		if binder.overflow || binder.spill.over {
+		if binder.overflow {
 			budget.over = true
 		}
 		if budget.over {
-			return nil, nil
-		}
-		for _, value := range binder.spill.values {
-			if !slices.Contains(dropped, value) {
-				dropped = append(dropped, value)
-			}
+			return nil
 		}
 		readingCount = max(readingCount, binder.readings)
 		text := string(binder.out)
@@ -162,7 +130,7 @@ func psBindStaticValues(command, home string, budget *psBudget) (readings, dropp
 			readings = append(readings, text)
 		}
 	}
-	return readings, dropped
+	return readings
 }
 
 // psBinder rewrites one command for one choice of the alternative a use of a
@@ -176,9 +144,8 @@ type psBinder struct {
 	readings int // most values any one use could read
 	changed  bool
 	out      []rune
-	dead     int     // depth of the never-run blocks being read: nothing binds or expands there
-	overflow bool    // a loop pass or a combination past its bound was dropped
-	spill    psSpill // the values past psBoundAlternatives
+	dead     int  // depth of the never-run blocks being read: nothing binds or expands there
+	overflow bool // a value, a loop pass or a combination past its bound was dropped
 }
 
 // psBindChain is an if / elseif / else chain being read.
@@ -301,7 +268,7 @@ func (b *psBinder) run(i int, st psBindings, inBlock bool) (int, psBindings) {
 				var kept []string
 				for _, value := range values {
 					if strings.Contains(strings.ToLower(value), "defenseclaw") && len([]rune(value)) <= psBoundValueMaxRunes {
-						kept = psAddValue(kept, value, &b.spill)
+						kept = psAddValue(kept, value, &b.overflow)
 					}
 				}
 				if len(kept) > 0 {
@@ -435,10 +402,10 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 		}
 		result := psBindings{}
 		for _, end := range ch.ends {
-			result = psUnionBindings(result, end, &b.spill)
+			result = psUnionBindings(result, end, &b.overflow)
 		}
 		if !ch.sealed && !ch.hasElse {
-			result = psUnionBindings(result, ch.before, &b.spill)
+			result = psUnionBindings(result, ch.before, &b.overflow)
 		}
 		*chain = nil
 		return next, result
@@ -454,7 +421,7 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 	var end psBindings
 	for round := 0; ; round++ {
 		next, end = b.run(i, entry.clone(), true)
-		merged := psUnionBindings(entry, end, &b.spill)
+		merged := psUnionBindings(entry, end, &b.overflow)
 		if merged.size() == entry.size() {
 			break
 		}
@@ -465,7 +432,7 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 		b.out = b.out[:mark]
 		entry = merged
 	}
-	return b.closeBlock(next), psUnionBindings(st, end, &b.spill)
+	return b.closeBlock(next), psUnionBindings(st, end, &b.overflow)
 }
 
 // runDead reads the block whose { was just copied (i is the index after it)
@@ -755,8 +722,8 @@ func psPatchRunTargets(statement, cwd string, budget *psBudget) []string {
 }
 
 // psLauncherDepth bounds the launchers one patch run is read through
-// (cmd /c start codex.exe).
-const psLauncherDepth = 3
+// (cmd /c if ... start ... call codex.exe); a chain past it counts as the run.
+const psLauncherDepth = 8
 
 // psRunsPatch reports that the statement runs the patch tool: the program it
 // starts is apply_patch, or Codex's own (a name with codex in it) given
@@ -794,12 +761,16 @@ func psRunsPatch(words []psWord, budget *psBudget) bool {
 }
 
 // psLineRunsPatch reports a command line (program first) that runs the patch
-// tool, through the launchers cmd /c, start and call.
+// tool, through the launchers cmd /c, start, call, if, else and do: a launcher
+// runs the command it names, so the program in command position decides.
 func psLineRunsPatch(line []string, depth int) bool {
-	if len(line) == 0 || depth > psLauncherDepth {
+	if len(line) == 0 {
 		return false
 	}
-	program := psExecutableName(line[0])
+	if depth > psLauncherDepth {
+		return true
+	}
+	program := psExecutableName(strings.TrimLeft(psCmdUnquote(line[0]), "@"))
 	switch {
 	case program == "apply_patch" || program == "applypatch":
 		return true
@@ -807,20 +778,80 @@ func psLineRunsPatch(line []string, depth int) bool {
 		return psHasPatchFlag(line[1:])
 	case program == "cmd":
 		return psCmdRunsPatch(line[1:], depth)
-	case program == "call":
+	case program == "call" || program == "else" || program == "do":
 		return psLineRunsPatch(line[1:], depth+1)
+	case program == "if":
+		return psLineRunsPatch(psCmdIfCommand(line[1:]), depth+1)
 	case program == "start":
-		// start ["title"] [/options] program arguments
-		tried := 0
-		for i := 1; i < len(line) && tried < 2; i++ {
-			if strings.HasPrefix(line[i], "/") {
-				continue
+		return psLineRunsPatch(psCmdStartCommand(line[1:]), depth+1)
+	}
+	return false
+}
+
+// psCmdUnquote drops the double quotes cmd would drop from a word.
+func psCmdUnquote(word string) string {
+	return strings.ReplaceAll(word, `"`, "")
+}
+
+// psCmdStartCommand returns the command line cmd's start runs: start
+// ["title"] [/d dir] [/node n] [/affinity mask] [other /options] program
+// arguments. The first quoted word is the window title, wherever it stands
+// among the options, so it is never the program; /d, /node and /affinity
+// take the word after them.
+func psCmdStartCommand(args []string) []string {
+	titled := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case strings.HasPrefix(arg, `"`) && !titled:
+			titled = true
+		case strings.HasPrefix(arg, "/"):
+			switch strings.ToLower(arg) {
+			case "/d", "/node", "/affinity":
+				i++
 			}
-			tried++
-			if psLineRunsPatch(line[i:], depth+1) {
-				return true
-			}
+		default:
+			return args[i:]
 		}
+	}
+	return nil
+}
+
+// psCmdIfCommand returns the command line cmd's if runs when its condition
+// holds: if [/i] [not] errorlevel n | exist f | defined v | cmdextversion n |
+// a==b | a OP b, then the command. A = run is one "=" word (psCmdSegments).
+func psCmdIfCommand(args []string) []string {
+	i := 0
+	for i < len(args) && (strings.EqualFold(args[i], "/i") || strings.EqualFold(args[i], "not")) {
+		i++
+	}
+	if i >= len(args) {
+		return nil
+	}
+	switch strings.ToLower(args[i]) {
+	case "errorlevel", "exist", "defined", "cmdextversion":
+		i += 2
+	default:
+		i++
+		if i < len(args) && args[i] == "=" {
+			i += 2
+		} else if i < len(args) && psCmdCompareOperator(args[i]) {
+			i += 2
+		} else {
+			return nil
+		}
+	}
+	if i >= len(args) {
+		return nil
+	}
+	return args[i:]
+}
+
+// psCmdCompareOperator reports an operator word of cmd's if comparison.
+func psCmdCompareOperator(word string) bool {
+	switch strings.ToLower(word) {
+	case "equ", "neq", "lss", "leq", "gtr", "geq":
+		return true
 	}
 	return false
 }
@@ -836,7 +867,7 @@ func psCmdRunsPatch(args []string, depth int) bool {
 		if len(lower) < 2 || lower[0] != '/' || !strings.ContainsRune("ckr", rune(lower[1])) {
 			continue
 		}
-		command := strings.Join(append([]string{arg[2:]}, args[i+1:]...), " ")
+		command := psCmdCommandLine(append([]string{arg[2:]}, args[i+1:]...))
 		for _, segment := range psCmdSegments(command) {
 			if psLineRunsPatch(segment, depth+1) {
 				return true
@@ -847,9 +878,28 @@ func psCmdRunsPatch(args []string, depth int) bool {
 	return false
 }
 
+// psCmdCommandLine joins the words PowerShell passed after /c into the line
+// cmd receives: the first is the command string and stays as it is; a later
+// word with a blank in it is quoted, as PowerShell quotes it.
+func psCmdCommandLine(pieces []string) string {
+	var line []string
+	for _, piece := range pieces {
+		if piece == "" {
+			continue
+		}
+		if len(line) > 0 && strings.ContainsAny(piece, " \t") && !strings.HasPrefix(piece, `"`) {
+			piece = `"` + piece + `"`
+		}
+		line = append(line, piece)
+	}
+	return strings.Join(line, " ")
+}
+
 // psCmdSegments splits a cmd command line into its commands (at & | and
-// parentheses) and their words (at blanks, commas, semicolons and =), outside
-// double quotes; a caret takes the next character as text.
+// parentheses) and their words (at blanks, commas and semicolons; a run of =
+// is a word of its own), outside double quotes; a word keeps its double
+// quotes, which tell a window title from a program, and a caret takes the
+// next character as text.
 func psCmdSegments(line string) [][]string {
 	var segments [][]string
 	var segment []string
@@ -876,6 +926,7 @@ func psCmdSegments(line string) [][]string {
 			started, escaped = true, false
 		case c == '"':
 			quoted = !quoted
+			word.WriteRune(c)
 			started = true
 		case quoted:
 			word.WriteRune(c)
@@ -883,7 +934,12 @@ func psCmdSegments(line string) [][]string {
 			escaped = true
 		case c == '&' || c == '|' || c == '(' || c == ')':
 			endCommand()
-		case c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ',' || c == ';' || c == '=':
+		case c == '=':
+			flush()
+			if len(segment) == 0 || segment[len(segment)-1] != "=" {
+				segment = append(segment, "=")
+			}
+		case c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ',' || c == ';':
 			flush()
 		default:
 			word.WriteRune(c)
