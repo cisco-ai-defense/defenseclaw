@@ -7,6 +7,8 @@ package hookexec
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,5 +86,71 @@ func TestTypedPatchStepUpThroughMissingDirectoryTakesTheGatewayAnswer(t *testing
 				t.Fatalf("code %d, stdout %q, stderr %q, want the call to run", result.code, result.stdout, result.stderr)
 			}
 		})
+	}
+}
+
+// The step-up spelling is unplaced only while the directory it steps up from
+// is missing. A managed Codex typed patch of an ordinary-looking file whose
+// missing directory becomes a link while the gateway answers, onto a hard
+// link to the keys file that the hook can open but cannot identify (the keys
+// directory is unreadable), is refused, though the gateway allowed the call
+// it scanned before the link.
+func TestTypedPatchStepUpDirectoryLinkedToUnprovedKeysFileWhileGatewayAnswersIsRefused(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	project := filepath.Join(home, "proj")
+	keysDir := filepath.Join(home, ".ssh")
+	hop := filepath.Join(home, "hop")
+	for _, dir := range []string{project, keysDir, hop} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := filepath.Join(keysDir, "authorized_keys")
+	if err := os.WriteFile(keys, []byte("k\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keysInfo, err := os.Stat(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(keys, filepath.Join(home, "notes.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(keysDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(keysDir, 0o700) })
+	patch := "*** Begin Patch\n*** Update File: other/../notes.txt\n@@\n k\n+x\n*** End Patch\n"
+	stdin, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "apply_patch",
+		"tool_input": map[string]any{"command": patch}, "cwd": project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := ok(`{"action":"allow"}`)
+	rt.onRequest = func(_ *stubRT, _ *http.Request) (*http.Response, error) {
+		if err := os.Symlink(hop, filepath.Join(project, "other")); err != nil {
+			t.Fatal(err)
+		}
+		opened, err := os.Stat(project + "/other/../notes.txt")
+		if err != nil || !os.SameFile(keysInfo, opened) {
+			t.Fatalf("the fixture does not lead the raw target to the keys file: %v", err)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(rt.body)), Header: make(http.Header)}, nil
+	}
+	result := run(t, "codex", rt, func(o *Options) {
+		o.FailMode = "closed"
+		o.ManagedEnterprise = true
+		o.Stdin = strings.NewReader(string(stdin))
+	})
+	text := result.stdout + result.stderr
+	if result.code == 0 && !strings.Contains(text, "deny") {
+		t.Fatalf("the keys file was reached and the call ran: stdout %q, stderr %q", result.stdout, result.stderr)
+	}
+	if !strings.Contains(text, "patch target changed") {
+		t.Fatalf("the refusal did not name the changed patch target: stdout %q, stderr %q", result.stdout, result.stderr)
 	}
 }

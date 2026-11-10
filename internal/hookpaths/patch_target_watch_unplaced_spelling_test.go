@@ -29,6 +29,8 @@ func TestPatchTargetWatchUnplacedStepUpSpellingIsNotAChange(t *testing.T) {
 		{"step up to an ordinary config", "proj/../.ssh/config", false},
 		{"step up to a project file", "proj/../notes.txt", false},
 		{"step up from a missing sub directory", "sub/../notes.txt", false},
+		{"step up from two missing directories", "a/b/../../notes.txt", false},
+		{"step up after a dot", "./missing/../notes.txt", false},
 		{"plain project file", "notes.txt", false},
 		{"step up out of the project to the keys file", "../.ssh/authorized_keys", true},
 		{"absolute keys file", "@HOME@/.ssh/authorized_keys", true},
@@ -99,4 +101,77 @@ func stepUpWatch(t *testing.T, form, target, project string) *PatchTargetWatch {
 		t.Fatal(err)
 	}
 	return watchOfEvidence(ResolveConnector("codex", "", "PreToolUse", body))
+}
+
+// A spelling that stepped up from a missing directory when the patch was read
+// and that a link made since leads to a file the walk can reach but not
+// identify (a hard link to the keys file while the keys directory cannot be
+// read) is a change, as is one that leads through a link the walk cannot
+// follow. Only a spelling that still steps up from a missing directory is
+// unchanged.
+func TestPatchTargetWatchUnplacedStepUpSpellingRetargetedToUnprovedFileIsAChange(t *testing.T) {
+	t.Run("hard link to the keys file with the keys directory unreadable", func(t *testing.T) {
+		home, project := stepUpFixture(t)
+		keysDir := filepath.Join(home, ".ssh")
+		if err := os.Link(filepath.Join(keysDir, "authorized_keys"), filepath.Join(home, "notes.txt")); err != nil {
+			t.Fatal(err)
+		}
+		hop := filepath.Join(home, "hop")
+		if err := os.Mkdir(hop, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(keysDir, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(keysDir, 0o700) })
+		watch := stepUpWatch(t, "typed", "other/../notes.txt", project)
+		if watch == nil || watch.Changed() {
+			t.Fatal("the unchanged patch reads as changed or is not attested")
+		}
+		if err := os.Symlink(hop, filepath.Join(project, "other")); err != nil {
+			t.Fatal(err)
+		}
+		if !watch.Changed() {
+			t.Error("a link made since onto a hard link to the keys file reads as unchanged")
+		}
+	})
+	t.Run("link the walk cannot follow", func(t *testing.T) {
+		_, project := stepUpFixture(t)
+		watch := stepUpWatch(t, "typed", "other/../notes.txt", project)
+		if watch == nil || watch.Changed() {
+			t.Fatal("the unchanged patch reads as changed or is not attested")
+		}
+		if err := os.Symlink("/proc/self/cwd", filepath.Join(project, "other")); err != nil {
+			t.Fatal(err)
+		}
+		if !watch.Changed() {
+			t.Error("a link made since to the working directory of the process reads as unchanged")
+		}
+	})
+	t.Run("link loop", func(t *testing.T) {
+		_, project := stepUpFixture(t)
+		watch := stepUpWatch(t, "typed", "other/../notes.txt", project)
+		if watch == nil || watch.Changed() {
+			t.Fatal("the unchanged patch reads as changed or is not attested")
+		}
+		if err := os.Symlink("other", filepath.Join(project, "other")); err != nil {
+			t.Fatal(err)
+		}
+		if !watch.Changed() {
+			t.Error("a link made since that loops reads as unchanged")
+		}
+	})
+	t.Run("directory made since", func(t *testing.T) {
+		_, project := stepUpFixture(t)
+		watch := stepUpWatch(t, "typed", "a/b/../../notes.txt", project)
+		if watch == nil || watch.Changed() {
+			t.Fatal("the unchanged patch reads as changed or is not attested")
+		}
+		if err := os.MkdirAll(filepath.Join(project, "a", "b"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !watch.Changed() {
+			t.Error("directories made since read as unchanged")
+		}
+	})
 }
