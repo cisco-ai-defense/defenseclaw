@@ -130,18 +130,21 @@ func (write nativeFileWrite) applyEdits(content string) (string, editResult) {
 }
 
 // boundedNativeText is text padded with white space past maxCommandBytes in
-// the form the file reads the same in: without the white space around it. A
-// proof's size bound then applies to the content, so padding a patch hunk
-// does not carry protected text past the proof, as it does not for a write
-// (OverLimitWriteBoundedTwin). Text without such padding is returned as it is.
+// the form the file reads the same in: without the white space around it, and
+// without the runs of it inside it (boundedWhiteSpaceText). A proof size
+// bound then applies to the content, so padding a patch hunk, on the line of
+// the protected text or on lines of its own, does not carry protected text
+// past the proof, as it does not for a write (OverLimitWriteBoundedTwin).
+// Text without such padding is returned as it is.
 func boundedNativeText(text string) string {
 	if len(text) <= maxCommandBytes {
 		return text
 	}
-	if trimmed := strings.TrimSpace(text); len(trimmed) <= maxCommandBytes {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) <= maxCommandBytes {
 		return trimmed
 	}
-	return text
+	return boundedWhiteSpaceText(trimmed)
 }
 
 // nativeCallWrites reads the files one call writes and the facts that describe
