@@ -28,7 +28,10 @@ import (
 //     With a word that reads, copies, writes or runs (readerWords) it is a
 //     path in every tier; without one only in the strict tier. A name is
 //     matched as a substring of the text as typed and with quotes and
-//     backslashes taken out, without regard to case.
+//     backslashes taken out, without regard to case. In the balanced tiers
+//     the word that reads must be a word of a command that runs, and a
+//     lookup, the body of a function nothing names and the pattern of a
+//     grep or rg are left out of the scan (live_reading.go).
 //
 // The entries read are those of the working folder and of each folder the
 // line names with a path (entryScan).
