@@ -4,6 +4,7 @@
 package hookexec
 
 import (
+	"bytes"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -127,6 +128,69 @@ func TestCallAnsweredInTimeClosesEveryFailureLogHandleItOpened(t *testing.T) {
 	})
 	if claudeBlocked(result) {
 		t.Fatalf("code %d stdout %q, want the gateway's allow", result.code, result.stdout)
+	}
+	handles.waitClosed(t)
+}
+
+// GAP-1022: a managed call whose watchdog is held past the deadline is
+// answered by finish (answerLate), and watch, which finds the call finished,
+// returns before it closes the prepared log. A log open still in flight then
+// arrived after the answer and stayed open. The late answer closes the
+// prepared log, and the open in flight closes the file it opens.
+func TestALateManagedAnswerClosesTheFailureLogOpenedAheadOfIt(t *testing.T) {
+	previous := lateAnswerWait
+	lateAnswerWait = 50 * time.Millisecond
+	t.Cleanup(func() { lateAnswerWait = previous })
+	var handles handleRecorder
+	handles.wrap(t)
+	// The first open, the prepared log of the call, stalls until released.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var stalled sync.Once
+	wrapped := openHookFailureLog
+	openHookFailureLog = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		stalled.Do(func() {
+			close(entered)
+			<-release
+		})
+		return wrapped(name, flag, perm)
+	}
+	t.Cleanup(func() { openHookFailureLog = wrapped })
+
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "logs", "hook-failures.jsonl"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sp, _ := specFor("claudecode")
+	var stdout, stderr bytes.Buffer
+	opts := Options{Connector: "claudecode", Event: "PreToolUse", ManagedEnterprise: true, FailMode: "closed",
+		FailureLogHome: func() string { return home }, Now: time.Now, Stdout: &stdout, Stderr: &stderr}
+	w := prepareAnswerWatchdog(&opts, sp, "closed", time.Time{})
+	w.waiter.extendTo(time.Now().Add(-time.Millisecond))
+	// The open ahead of the deadline is under way; the watchdog thread is held.
+	w.failureLog.prepare(w.failureLogHome)
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the prepared log was not opened")
+	}
+	_, _ = w.out.WriteString(`{"systemMessage":"late gateway verdict"}`)
+	w.answered()
+	if code := w.finish(0); code == 0 {
+		t.Fatalf("exit %d, want the watchdog closed answer", code)
+	}
+	close(release)
+	// The released open returns its file; it must not stay open.
+	for start := time.Now(); ; time.Sleep(10 * time.Millisecond) {
+		if opened, _ := handles.open(); opened >= 1 {
+			break
+		}
+		if time.Since(start) > 10*time.Second {
+			t.Fatal("the prepared log was never opened")
+		}
 	}
 	handles.waitClosed(t)
 }
