@@ -48545,9 +48545,16 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
             # Only fully verified live state may become boot-active. A crash
             # before pending cleanup can start only validated services.
-            Set-DefenseClawServiceStartMode `
+            # GAP-0989: a service the transaction journal recorded as delayed
+            # start is promoted to delayed-auto, not plain automatic, so an
+            # upgrade or repair keeps an administrator's delayed start. The
+            # trust-strict pin keeps plain automatic: it treats a delayed
+            # start as drift.
+            $keepDelayedStart = -not (Test-DefenseClawTrustStrictAncestors)
+            Restore-DefenseClawServiceStartModeExact `
                 -Name $GuardianServiceName `
-                -StartMode 2
+                -StartMode 2 `
+                -DelayedAutoStart ($keepDelayedStart -and [bool]$priorServiceStates[$GuardianServiceName].delayed_auto_start)
             if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
                 Set-DefenseClawServiceStartMode `
                     -Name $Layout.BrokerServiceName `
@@ -48556,17 +48563,19 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $Layout.SensorHelperServiceName `
                 -StartMode 2
-            Set-DefenseClawServiceStartMode `
+            Restore-DefenseClawServiceStartModeExact `
                 -Name $GatewayServiceName `
-                -StartMode 2
+                -StartMode 2 `
+                -DelayedAutoStart ($keepDelayedStart -and [bool]$priorServiceStates[$GatewayServiceName].delayed_auto_start)
             # Promote the (already-running) enumerator
             # from demand-start to auto-start now that readiness has
             # been proven. Without this, boot would leave the
             # enumerator disabled and new user profiles would never
             # get picked up.
-            Set-DefenseClawServiceStartMode `
+            Restore-DefenseClawServiceStartModeExact `
                 -Name $enumeratorServiceName `
-                -StartMode 2
+                -StartMode 2 `
+                -DelayedAutoStart ($keepDelayedStart -and [bool]$priorServiceStates[$enumeratorServiceName].delayed_auto_start)
             Assert-DefenseClawEnterpriseDeployment `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `

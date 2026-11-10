@@ -986,6 +986,13 @@ def test_the_delayed_start_flag_is_journaled_and_restored_standalone_only() -> N
     assert exact.index("Set-DefenseClawServiceStartMode -Name $Name -StartMode $StartMode") < exact.index("if (-not (Test-DefenseClawStandaloneProfile)) {") < exact.index("Set-DefenseClawServiceDelayedAutoStart")
     assert "[bool]$guardian.delayed_auto_start" in module and "[bool]$gateway.delayed_auto_start" in module
     assert "-DelayedAutoStart ([bool]$service.delayed_auto_start)" in module
+    # The forward activation promotes the recorded delayed services to delayed-auto
+    # (not plain automatic), except under the trust-strict pin, which calls a delayed
+    # start drift.
+    assert "$keepDelayedStart = -not (Test-DefenseClawTrustStrictAncestors)" in module
+    for service in ("$GuardianServiceName", "$GatewayServiceName", "$enumeratorServiceName"):
+        needle = f"-DelayedAutoStart ($keepDelayedStart -and [bool]$priorServiceStates[{service}].delayed_auto_start)"
+        assert module.count(needle) == 1, service
     # The start-mode setter itself is unchanged: plain sc config start= auto.
     setter = _function_body(module, "Set-DefenseClawServiceStartMode")
     assert "delayed" not in setter.lower()
