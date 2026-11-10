@@ -89,7 +89,7 @@ func clientResolvedTargetWhere(target, cwd string, clientDirs []string, resolved
 		return "", false
 	}
 	for _, dir := range append([]string{cwd}, clientDirs...) {
-		for _, key := range []string{OperandPath(target, dir), posixOperandPath(target, dir)} {
+		for _, key := range []string{OperandPath(target, dir), posixOperandPath(target, dir), clientOperandKey(target, dir)} {
 			if physical := resolved[key]; accept(physical) {
 				return physical, true
 			}
