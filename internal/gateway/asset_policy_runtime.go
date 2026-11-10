@@ -299,6 +299,7 @@ func (a *APIServer) mcpAdmissionPendingDecision(ctx context.Context, connectorNa
 		status.Name, status.Pending = a.mcpAdmissionPending(connectorName, probe.ServerName, home, probe.WorkspaceDir)
 		status.RetryAfter = time.Minute
 	}
+	status = a.failedMCPSessionHold(ctx, cfg, connectorName, probe, status)
 	return a.mcpAdmissionStatusDecision(ctx, cfg, connectorName, hookEvent, probe, status)
 }
 
