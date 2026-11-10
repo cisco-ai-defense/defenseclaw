@@ -553,6 +553,20 @@ func windowsEnterprisePendingLead(services []enterprisestatus.Service) string {
 	return "The transaction is still pending, so the deployment cannot be changed until it is recovered."
 }
 
+// windowsEnterprisePendingUnsettledLead is the lead for a rollback that a Codex
+// writer which never settles left pending (GAP-0999). The services run, but
+// the rollback did not finish, so it does not say they keep enforcing: what is
+// covered is what verify says once /repair has finished it.
+func windowsEnterprisePendingUnsettledLead(services []enterprisestatus.Service) string {
+	switch stopped := windowsEnterpriseStoppedRequiredServices(services); {
+	case len(stopped) == 1:
+		return "The transaction is still pending: the " + stopped[0] + " service stays stopped until it is recovered."
+	case len(stopped) > 1:
+		return "The transaction is still pending: the " + strings.Join(stopped, ", ") + " services stay stopped until it is recovered."
+	}
+	return "The transaction is still pending and the rollback is not finished: the DefenseClaw services are running, but protection may be incomplete until /repair finishes it (verify says what is not covered), and the deployment cannot be changed until the transaction is recovered."
+}
+
 // windowsEnterpriseStandaloneRosterRunning reports whether services lists
 // every service of the standalone roster as running. A service it does not
 // list (absent) counts as not running.

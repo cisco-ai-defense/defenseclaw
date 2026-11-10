@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -906,71 +905,7 @@ def test_the_purge_walks_of_state_root_retry_with_call_scoped_privileges_for_a_d
     assert tree.index("Invoke-DefenseClawStateRootWalk") < tree.index("Remove-Item")
 
 
-# The standalone PowerShell smokes run inside disposable scratch directories
-# and never touch a service or a real machine root, so Windows CI runs every
-# one of them on each installed engine (Windows PowerShell 5.1 and 7).
-STANDALONE_SMOKES = (
-    "enterprise-profile-lifecycle-lock-smoke.ps1",
-    "enterprise-profile-deployment-record-smoke.ps1",
-    "enterprise-standalone-claude-policy-binding-smoke.ps1",
-    "enterprise-standalone-codex-vendor-folder-smoke.ps1",
-    "enterprise-standalone-config-acl-repair-smoke.ps1",
-    "enterprise-standalone-held-file-restamp-smoke.ps1",
-    "enterprise-standalone-codex-writer-stuck-smoke.ps1",
-    "enterprise-standalone-cowork-delivery-smoke.ps1",
-    "enterprise-standalone-enumerator-environment-smoke.ps1",
-    "enterprise-standalone-forced-uninstall-residue-smoke.ps1",
-    "enterprise-standalone-guardian-first-reconcile-wait-smoke.ps1",
-    "enterprise-standalone-guardian-readiness-older-gateway-smoke.ps1",
-    "enterprise-standalone-guardian-state-held-smoke.ps1",
-    "enterprise-standalone-guardian-state-identity-smoke.ps1",
-    "enterprise-standalone-hook-keep-smoke.ps1",
-    "enterprise-standalone-hook-swap-launch-smoke.ps1",
-    "enterprise-standalone-install-tree-smoke.ps1",
-    "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
-    "enterprise-standalone-manifest-adoption-smoke.ps1",
-    "enterprise-standalone-mdm-rotation-journal-smoke.ps1",
-    "enterprise-standalone-native-otlp-rollback-smoke.ps1",
-    "enterprise-standalone-pretransaction-bundle-classification-smoke.ps1",
-    "enterprise-standalone-recorded-trust-smoke.ps1",
-    "enterprise-standalone-recovery-activation-deferral-smoke.ps1",
-    "enterprise-standalone-recovery-gateway-smoke.ps1",
-    "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
-    "enterprise-standalone-root-squat-smoke.ps1",
-    "enterprise-standalone-runtime-env-acl-smoke.ps1",
-    "enterprise-standalone-w2b-lifecycle-smoke.ps1",
-    "enterprise-standalone-secrets-acl-smoke.ps1",
-    "enterprise-standalone-service-logged-error-smoke.ps1",
-    "enterprise-standalone-stale-lifecycle-journal-smoke.ps1",
-    "enterprise-standalone-state-files-in-use-smoke.ps1",
-    "enterprise-standalone-uninstall-hook-commit-smoke.ps1",
-    "enterprise-standalone-uninstall-lifecycle-lock-smoke.ps1",
-    "enterprise-standalone-purge-bundle-lock-smoke.ps1",
-    "enterprise-standalone-uninstall-cleanup-trust-smoke.ps1",
-    "enterprise-standalone-user-cleanup-report-smoke.ps1",
-)
-
-
-def _standalone_smoke_engines() -> list[str]:
-    import os
-
-    if sys.platform != "win32":
-        return []
-    import winreg
-
-    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
-    with winreg.OpenKey(
-        winreg.HKEY_LOCAL_MACHINE,
-        r"SOFTWARE\Microsoft\Windows\CurrentVersion",
-        0,
-        winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
-    ) as current_version:
-        program_files_raw, _ = winreg.QueryValueEx(current_version, "ProgramFilesDir")
-    candidates = (
-        system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
-        Path(str(program_files_raw)) / "PowerShell" / "7" / "pwsh.exe",
-    )
-    return [str(path) for path in candidates if path.is_file()]
+from tests.standalone_smokes import SMOKES_A, SMOKES_B, STANDALONE_SMOKES  # noqa: E402
 
 
 def test_every_standalone_smoke_is_wired() -> None:
@@ -992,47 +927,19 @@ def test_runtime_env_acl_smoke_is_in_native_workflow() -> None:
     assert f"./packaging/windows/tests/{name}" in workflow
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows PowerShell")
-@pytest.mark.parametrize("smoke", STANDALONE_SMOKES)
-@pytest.mark.parametrize(
-    "engine",
-    _standalone_smoke_engines() or (None,),
-    ids=lambda engine: Path(engine).stem if engine else "missing",
-)
-def test_standalone_smokes_run_on_every_engine(engine: str | None, smoke: str) -> None:
-    assert engine, "Windows CI must provide Windows PowerShell 5.1 or PowerShell 7"
-    script = MODULE.parent / "tests" / smoke
-    if "#Requires -Version 7" in _text(script) and Path(engine).stem.lower() != "pwsh":
-        pytest.skip(f"{smoke} requires PowerShell 7")
-    # Each smoke creates, and removes, its own uniquely named scratch tree
-    # under the engine's temporary directory. Keep that prefix short: the IPC
-    # smoke binds AF_UNIX sockets, whose paths are limited to 108 characters.
-    completed = subprocess.run(
-        [
-            engine,
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script),
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8-sig",
-        errors="replace",
-        timeout=600,
-        check=False,
-    )
-    assert completed.returncode == 0, (
-        f"{smoke} failed under {engine}\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
-    )
-    marker = smoke.removesuffix(".ps1")
-    if f"{marker}: SKIP" in completed.stdout:
-        pytest.skip(completed.stdout.strip())
-    assert f"{marker}: OK" in completed.stdout
+def test_every_standalone_smoke_runs_from_exactly_one_smoke_file() -> None:
+    # The runner moved to test_windows_enterprise_standalone_smokes_a.py and _b.py so the
+    # Python shards carry the smokes apart from these contract checks; each smoke still
+    # runs on both engines, from exactly one of them.
+    assert len(STANDALONE_SMOKES) == len(set(STANDALONE_SMOKES))
+    assert set(SMOKES_A).isdisjoint(SMOKES_B)
+    assert set(SMOKES_A) | set(SMOKES_B) == set(STANDALONE_SMOKES)
+    tests = MODULE.parent / "tests"
+    for letter in ("a", "b"):
+        body = (ROOT / "cli" / "tests" / f"test_windows_enterprise_standalone_smokes_{letter}.py").read_text(encoding="utf-8")
+        assert "run_standalone_smoke(engine, smoke)" in body and "standalone_smoke_engines()" in body
+    assert "enterprise-standalone-codex-writer-stuck-smoke.ps1" in STANDALONE_SMOKES
+    assert (tests / "enterprise-standalone-codex-writer-stuck-smoke.ps1").is_file()
 
 
 # The standalone Claude client floor the module records equals the lowest

@@ -30504,8 +30504,16 @@ function Test-DefenseClawBusyWriterIsTheOnlyFailure {
     if ($lines.Count -eq 0) {
         return $false
     }
+    # Each line is one busy-writer answer and nothing else: the phrase ends the line and
+    # follows the start of the line or a ': ' of the wrapper text in front of it.
     foreach ($line in $lines) {
-        if (-not (Test-DefenseClawCodexWriterLockBusyMessage -Message $line)) {
+        $text = $line.Trim()
+        $busy = (
+            $text -match '(^|: )timed out waiting \S+ for Codex machine policy lock\.?$' -or
+            $text -match '(^|: )timed out waiting \S+ for a Codex machine policy transaction to finish\.?$' -or
+            $text -match '(^|: )open Codex machine policy lock: [^:]*(being used by another process|sharing violation|locked a portion of the file)\.?$'
+        )
+        if (-not $busy) {
             return $false
         }
     }
@@ -36705,7 +36713,7 @@ function New-DefenseClawCodexWriterUnsettledHeldMessage {
         $writerText = 'the writer is a program that Windows did not name'
     }
     $repair = Format-DefenseClawSetupAction -Action '/repair'
-    $message = ('codex_state_unsettled: the Codex writer transaction counter next to {0} stayed at {1} ({2}; {3}), so the rollback could not judge the Codex managed-hooks state; the rollback left that state as it is and put everything else back, and the transaction is still pending. Next step: once no Codex writer is running (the next Codex writer pass ends a stopped transaction), run {4}; it finishes the rollback (an MDM retries exit 1618 on its own)' -f $path, $counter, $why, $writerText, $repair)
+    $message = ('codex_state_unsettled: the Codex writer transaction counter next to {0} stayed at {1} ({2}; {3}), so the rollback could not judge the Codex managed-hooks state; the rollback left that state as it is and has not proven the rest of what it puts back, so the transaction is still pending and /verify says what is not covered. Next step: once no Codex writer is running (the next Codex writer pass ends a stopped transaction), run {4}; it finishes the rollback (an MDM retries exit 1618 on its own)' -f $path, $counter, $why, $writerText, $repair)
     $what = ''
     $policyPath = [string]$Layout.CodexMachinePolicyPath
     # Only a deployment that guards Codex can leave it unguarded.

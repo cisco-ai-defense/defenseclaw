@@ -161,7 +161,7 @@ func TestWindowsEnterpriseUnsettledCodexStateCodeSurvivesTheWrappingFailureText(
 // with the held-rollback convention (1618, the MDM retries and /repair
 // finishes it); a refusal whose rollback was clean stays 1603.
 func TestWindowsEnterpriseUnsettledCodexStateWithAPendingRollbackIsRetryable(t *testing.T) {
-	deferred := "codex_state_unsettled: the Codex writer transaction counter next to C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state stayed at 19 (odd: a transaction is open; the writer is pwsh.exe (pid 4242, account NT AUTHORITY\\SYSTEM)), so the rollback could not judge the Codex managed-hooks state; the rollback left that state as it is and put everything else back, and the transaction is still pending. Next step: once no Codex writer is running, run /repair; it finishes the rollback (an MDM retries exit 1618 on its own)"
+	deferred := "codex_state_unsettled: the Codex writer transaction counter next to C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state stayed at 19 (odd: a transaction is open; the writer is pwsh.exe (pid 4242, account NT AUTHORITY\\SYSTEM)), so the rollback could not judge the Codex managed-hooks state; the rollback left that state as it is and has not proven the rest of what it puts back, so the transaction is still pending and /verify says what is not covered. Next step: once no Codex writer is running, run /repair; it finishes the rollback (an MDM retries exit 1618 on its own)"
 	for name, test := range map[string]struct {
 		message string
 		pending bool
@@ -169,7 +169,7 @@ func TestWindowsEnterpriseUnsettledCodexStateWithAPendingRollbackIsRetryable(t *
 	}{
 		"rollback left pending":                 {deferred, true, enterprisestatus.WindowsExitBusy},
 		"wrapped in the failure":                {"Ensure failed: " + deferred, true, enterprisestatus.WindowsExitBusy},
-		"clean rollback":                        {strings.Replace(deferred, "the rollback left that state as it is and put everything else back, and the transaction is still pending", "this run stopped", 1), false, enterprisestatus.WindowsExitFailure},
+		"clean rollback":                        {strings.Replace(deferred, "the rollback left that state as it is and has not proven the rest of what it puts back, so the transaction is still pending and /verify says what is not covered", "this run stopped", 1), false, enterprisestatus.WindowsExitFailure},
 		"refusal without a pending transaction": {"codex_state_unsettled: x", false, enterprisestatus.WindowsExitFailure},
 		// The forward run was refused for the writer, then its rollback failed for
 		// another reason and left the transaction pending (services may be

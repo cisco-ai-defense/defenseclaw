@@ -146,6 +146,14 @@ func windowsManagedHooksTeardownOnlyBusyWriter(err error) bool {
 	if err == nil {
 		return false
 	}
+	if err == connector.ErrWindowsCodexWriterLockBusy {
+		return true
+	}
+	// A busy-writer error marks itself; asking errors.Is of a wrapper would also
+	// find a busy cause hidden beside another failure.
+	if marked, ok := err.(interface{ Is(error) bool }); ok && marked.Is(connector.ErrWindowsCodexWriterLockBusy) {
+		return true
+	}
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		causes := joined.Unwrap()
 		if len(causes) == 0 {
@@ -158,7 +166,10 @@ func windowsManagedHooksTeardownOnlyBusyWriter(err error) bool {
 		}
 		return true
 	}
-	return errors.Is(err, connector.ErrWindowsCodexWriterLockBusy)
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return windowsManagedHooksTeardownOnlyBusyWriter(wrapped.Unwrap())
+	}
+	return false
 }
 
 // windowsManagedHooksKeptUntrustedPolicyFiles lists the vendor policy files

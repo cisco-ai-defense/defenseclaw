@@ -1954,6 +1954,11 @@ func applyWindowsEnterpriseInstallerReport(
 			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "guardian_state_held")) {
 			next = windowsEnterpriseHeldRollbackNextStep(report.TransactionPending, windowsEnterpriseLiveStandaloneServices())
 		}
+		if report.TransactionPending && windowsEnterpriseUnsettledRollbackDeferred(result.Errors[firstError:]) {
+			// GAP-0999: this rollback is not finished, so the text does not say the
+			// services keep enforcing; verify says what is covered.
+			next = windowsEnterprisePendingUnsettledLead(windowsEnterpriseLiveStandaloneServices())
+		}
 		if next != "" {
 			result.Errors[firstError].Message += " " + next
 		}
