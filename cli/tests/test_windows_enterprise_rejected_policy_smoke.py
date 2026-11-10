@@ -21,7 +21,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "packaging" / "windows" / "DefenseClawEnterprise.psm1"
-SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-standalone-rejected-policy-smoke.ps1"
+SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-policy-rejected-copy-smoke.ps1"
 STANDALONE_GO = ROOT / "internal" / "cli" / "windows_enterprise_standalone.go"
 
 
@@ -99,4 +99,4 @@ def test_rejected_policy_smoke_runs(engine: str | None) -> None:
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "enterprise-standalone-rejected-policy-smoke: OK" in completed.stdout
+    assert "enterprise-policy-rejected-copy-smoke: OK" in completed.stdout

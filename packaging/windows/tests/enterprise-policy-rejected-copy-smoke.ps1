@@ -124,4 +124,4 @@ try {
 finally {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $state -Recurse -Force -ErrorAction SilentlyContinue
 }
-Microsoft.PowerShell.Utility\Write-Output 'enterprise-standalone-rejected-policy-smoke: OK'
+Microsoft.PowerShell.Utility\Write-Output 'enterprise-policy-rejected-copy-smoke: OK'
