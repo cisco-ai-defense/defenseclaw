@@ -109,14 +109,24 @@ func (b *operandBounder) operand(word string) {
 // word at the next redirection written against it, so a word holds one). A
 // file redirection counts its target as an operand and, past the bound with a
 // plain target, is left out whole (the operator and the target together). A
-// descriptor copy, a here-string and /dev names are no file operands.
+// descriptor copy or close, a here-string and /dev names are no file operands.
+// Bash writes the file of >&word and 1>&word when word is not a descriptor
+// number or "-" (GAP-2143), so those two operators are file redirections
+// then and descriptor copies otherwise.
 func (b *operandBounder) redirect(word string, end int) int {
 	command := b.command
 	op, target := redirectParts(word)
 	switch {
-	case strings.HasSuffix(op, "&") || op == "<<<" || strings.HasPrefix(target, "/dev/"):
+	case op == "<<<" || strings.HasPrefix(target, "/dev/"):
 		b.out.WriteString(word)
 		if target == "" && op == "<<<" {
+			end = b.copyNextWord(end)
+		}
+	case strings.HasSuffix(op, "&") && !fileDuplicate(op, target):
+		// A descriptor copy; a copy written with a blank takes its
+		// descriptor from the next word.
+		b.out.WriteString(word)
+		if target == "" {
 			end = b.copyNextWord(end)
 		}
 	case target != "":
@@ -139,6 +149,11 @@ func (b *operandBounder) redirect(word string, end int) int {
 			b.out.WriteString(word)
 			return end
 		}
+		if strings.HasSuffix(op, "&") && !fileDuplicate(op, next) {
+			b.out.WriteString(word)
+			b.out.WriteString(command[end:tend])
+			return tend
+		}
 		if b.countedTarget(next) {
 			b.out.WriteString(word)
 			b.out.WriteString(command[end:j])
@@ -147,6 +162,27 @@ func (b *operandBounder) redirect(word string, end int) int {
 		end = tend
 	}
 	return end
+}
+
+// fileDuplicate reports a >&word or 1>&word redirection (op with its
+// descriptor) whose word is, or may be, a file name; an empty target is the
+// next word, which the caller reads. A descriptor number, "-" and a word
+// that expands without naming a folder stay descriptor copies, as the
+// readers of the write targets decide it.
+func fileDuplicate(op, target string) bool {
+	if !strings.HasSuffix(op, ">&") {
+		return false
+	}
+	if fd := strings.TrimSuffix(op, ">&"); fd != "" && fd != "1" {
+		return false
+	}
+	switch {
+	case target == "":
+		return true
+	case target == "-" || strings.Trim(target, "0123456789") == "":
+		return false
+	}
+	return strings.ContainsAny(target, "/\\") || !strings.ContainsAny(target, "$`")
 }
 
 // countedTarget counts a file operand or target and reports whether it stays:
