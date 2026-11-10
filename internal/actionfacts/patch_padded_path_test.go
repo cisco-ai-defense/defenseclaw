@@ -54,16 +54,20 @@ func TestAnalyzeApplyPatchReadsTargetsPaddedAtTheEnd(t *testing.T) {
 	}
 }
 
-// The same target spelled with and without the padding is one path.
-func TestAnalyzeApplyPatchPaddedAndPlainTargetAreDuplicates(t *testing.T) {
+// The same target spelled with and without the padding is one path: a file an
+// envelope names in two blocks is read block by block (GAP-1037), both blocks
+// naming the same file.
+func TestAnalyzeApplyPatchPaddedAndPlainTargetAreOneFile(t *testing.T) {
 	args, err := json.Marshal(map[string]string{
 		"patch": "*** Begin Patch\n*** Add File: a.go \n+x\n*** Delete File: a.go\n*** End Patch",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	facts := Analyze(Input{Tool: "apply_patch", Args: args})
-	if facts.Parse.Status != StatusAmbiguous || facts.Authoritative() {
+	facts := Analyze(Input{Tool: "apply_patch", Args: args, CWD: "/work"})
+	if facts.Parse.Status != StatusComplete || len(facts.Paths) != 2 ||
+		facts.Paths[0].Resolved != "/work/a.go" || facts.Paths[1].Resolved != "/work/a.go" ||
+		facts.Paths[0].Access != PathAccessWrite || facts.Paths[1].Access != PathAccessDelete {
 		t.Fatalf("facts = %#v", facts)
 	}
 }

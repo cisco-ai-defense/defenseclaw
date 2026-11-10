@@ -72,7 +72,8 @@ func TestAnalyzeApplyPatchReadsTargetsSpelledWithTabsAndCarriageReturns(t *testi
 }
 
 // A carriage return outside a directive line still leaves no readable
-// envelope, and a spelling with a tab and the plain name are one target.
+// envelope, and a spelling with a tab and the plain name are one file, read in
+// each of the two blocks that name it (GAP-1037).
 func TestAnalyzeApplyPatchStillRejectsCarriageReturnsOutsideDirectives(t *testing.T) {
 	for _, patch := range []string{
 		"*** Begin Patch\n*** Add File: a.txt\n+x\ry\n*** End Patch",
@@ -94,7 +95,9 @@ func TestAnalyzeApplyPatchStillRejectsCarriageReturnsOutsideDirectives(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if facts := Analyze(Input{Tool: "apply_patch", Args: args}); facts.Parse.Status != StatusAmbiguous || facts.Authoritative() {
+	facts := Analyze(Input{Tool: "apply_patch", Args: args, CWD: "/work"})
+	if facts.Parse.Status != StatusComplete || len(facts.Paths) != 2 ||
+		facts.Paths[0].Resolved != "/work/.netrc" || facts.Paths[1].Resolved != "/work/.netrc" {
 		t.Fatalf("spelled and plain target: facts = %#v", facts)
 	}
 }

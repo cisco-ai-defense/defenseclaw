@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"encoding/json"
+	pathpkg "path"
 	"slices"
 	"strings"
 )
@@ -398,6 +399,40 @@ func nativePatchEnvelopeWrites(text string) []nativeFileWrite {
 				*writes[index].lastHunk() += strings.TrimPrefix(line, " ") + "\n"
 			}
 		}
+	}
+	return withRepeatedTargetResults(writes)
+}
+
+// withRepeatedTargetResults adds, for a file the envelope changes in more than
+// one block, the write of its blocks taken together: the tool applies the
+// blocks in order, so the file ends with the text of all of them, and a
+// document that one block opens and a later one finishes is judged as the
+// text it makes, as the hunks of one block are. Each block stays a write of its
+// own, because each block is applied and the file holds its text.
+func withRepeatedTargetResults(writes []nativeFileWrite) []nativeFileWrite {
+	key := func(write nativeFileWrite) string {
+		return pathpkg.Clean(strings.ReplaceAll(write.target, `\`, "/"))
+	}
+	blocks := map[string][]int{}
+	var order []string
+	for index, write := range writes {
+		name := key(write)
+		if len(blocks[name]) == 0 {
+			order = append(order, name)
+		}
+		blocks[name] = append(blocks[name], index)
+	}
+	for _, name := range order {
+		if len(blocks[name]) < 2 {
+			continue
+		}
+		merged := nativeFileWrite{target: writes[blocks[name][0]].target}
+		for _, index := range blocks[name] {
+			merged.added += writes[index].added
+			merged.replaced += writes[index].replaced
+			merged.after = append(merged.after, writes[index].after...)
+		}
+		writes = append(writes, merged)
 	}
 	return writes
 }
