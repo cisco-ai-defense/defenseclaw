@@ -63,8 +63,6 @@ func TestFileToolWindowsVendorFolderOrdinaryFileAndShortNameShapeAllowAndAliases
 		for _, pack := range []string{"", "permissive", "strict"} {
 			for _, file := range []string{
 				`C:\Program Files\ClaudeCode\managed-settings.json`,
-				`C:\PROGRA~1\ClaudeCode\MANAGE~1.JSO`,
-				`C:\PROGRA~1\CLAUDE~1\managed-settings.d\90-defenseclaw.json`,
 				`//localhost/C$/Program Files/ClaudeCode/managed-settings.json`,
 			} {
 				input := map[string]any{"file_path": file, "content": "x"}

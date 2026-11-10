@@ -136,14 +136,12 @@ func TestWindowsManagedAgentSettingsAreSelfProtection(t *testing.T) {
 		`C:\ProgramData\Cursor\hooks.json`,
 		`C:\ProgramData\GitHub\Copilot\policy.d\90-defenseclaw.json`,
 		`C:\ProgramData\opencode\opencode.json`,
-		// The local administrative share and the 8.3 names of the same files.
+		// The local administrative share. The 8.3 names of the same files are
+		// in TestWindowsShortNamesOfManagedAgentSettingsStayBlocked.
 		`\\localhost\C$\Program Files\ClaudeCode\managed-settings.json`,
 		`\\127.0.0.1\C$\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`,
 		`\\?\UNC\localhost\C$\ProgramData\OpenAI\Codex\requirements.toml`,
 		`\\[::1]\C$\Program Files\ClaudeCode\managed-settings.json`,
-		`C:\PROGRA~1\ClaudeCode\managed-settings.json`,
-		`C:\PROGRA~1\CLAUDE~1\managed-settings.json`,
-		`C:\PROGRA~3\OpenAI\Codex\requirements.toml`,
 	}
 	allowed := []string{
 		home + `\proj\ClaudeCode\managed-settings.json`,
@@ -263,6 +261,17 @@ func TestManagedAgentSettingsLinuxHomeUnderUsersKeepsExactCase(t *testing.T) {
 	}
 }
 
+// otherMachineName is the computer name with the letter at index i changed to
+// one that is not the same letter in either case: a name of the same length
+// that is another machine.
+func otherMachineName(name string, i int) string {
+	letter := "a"
+	if strings.EqualFold(name[i:i+1], letter) {
+		letter = "b"
+	}
+	return name[:i] + letter + name[i+1:]
+}
+
 // rel-1-0-6:GAP-0734 review 11 M1: an administrative share is this machine
 // only when the whole server name is one of its names. A server that shares
 // the first label of the host name with another DNS domain is another
@@ -274,13 +283,19 @@ func TestWindowsAdminShareNeedsWholeHostName(t *testing.T) {
 		t.Skip("host has no name")
 	}
 	short, _, _ := strings.Cut(host, ".")
+	if short == "" {
+		t.Skip("host has no short name")
+	}
 	const tail = `\C$\Program Files\ClaudeCode\managed-settings.json`
 	local := []string{`\\` + host + tail, `\\` + strings.ToUpper(short) + tail}
 	remote := []string{
 		`\\` + short + `.unrelated.invalid` + tail,
 		`\\` + host + `.unrelated.invalid` + tail,
-		`\\` + short + `x` + tail,
-		`\\x` + short + tail,
+		// Another machine differs from this one in a letter. It never has an
+		// added one: NetBIOS cuts a computer name to 15 characters, so a
+		// 15-character host name with a letter added is this machine.
+		`\\` + otherMachineName(short, len(short)-1) + tail,
+		`\\` + otherMachineName(short, 0) + tail,
 	}
 	for _, managed := range []bool{false, true} {
 		for _, pack := range []string{"", "permissive", "strict"} {
