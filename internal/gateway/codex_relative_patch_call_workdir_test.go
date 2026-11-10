@@ -59,7 +59,7 @@ func TestCodexRelativePatchIsJudgedInTheFolderTheCallRunsIn(t *testing.T) {
 		blocked             bool
 	}{
 		{"loader file with workdir /etc", "/etc", "ld.so.preload", true},
-		{"loader file with a dot-dot workdir", "{project}/../../../../../../../../etc", "ld.so.preload", true},
+		{"loader file with a dot-dot workdir", "{project}/{to-root}/etc", "ld.so.preload", true},
 		{"loader file with a trailing slash", "/etc/", "ld.so.preload", true},
 		{"loader file in the session folder", "{project}", "ld.so.preload", false},
 		{"ordinary file with workdir /etc", "/etc", "notes-review.txt", false},
@@ -78,6 +78,7 @@ func TestCodexRelativePatchIsJudgedInTheFolderTheCallRunsIn(t *testing.T) {
 				t.Run(map[bool]string{false: "per-user", true: "managed"}[managed]+"/"+profile+"/"+row.name, func(t *testing.T) {
 					_, body := postConnectorHookBehindProtectHome(t, "codex", managed, profile, func(home, project string) map[string]any {
 						workdir := strings.ReplaceAll(row.workdir, "{project}", project)
+						workdir = strings.ReplaceAll(workdir, "{to-root}", dotDotToRoot(t, project))
 						return codexRolloutCall(t, home, project, workdir, patch(row.file))
 					})
 					if named := strings.Contains(body, loader); named != row.blocked {
@@ -90,6 +91,23 @@ func TestCodexRelativePatchIsJudgedInTheFolderTheCallRunsIn(t *testing.T) {
 			}
 		}
 	}
+}
+
+// dotDotToRoot is the dot-dot path that climbs from the folder to the root as
+// the operating system walks it: the count comes from the physical folder, so
+// a temp dir under a link (the /var link of macOS, whose physical folder is one
+// level deeper) is climbed in full, and not a fixed count short of the root.
+func dotDotToRoot(t *testing.T, folder string) string {
+	t.Helper()
+	physical, err := filepath.EvalSymlinks(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, err := filepath.Rel(physical, string(filepath.Separator))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return up
 }
 
 // hookBodyAction is the action field of a hook response body.
