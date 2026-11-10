@@ -242,7 +242,7 @@ def test_the_rebuilt_record_must_name_the_programs_the_services_run() -> None:
     for name in ("gateway", "hook", "sensor_helper"):
         assert f"'{name}'" in required
     check = _function(text, "Assert-DefenseClawRebuiltRecordArtifacts")
-    assert "Get-DefenseClawRebuiltRecordRequiredArtifacts" in check and "names no digest" not in check.split("foreach")[0] or True
+    assert "Get-DefenseClawRebuiltRecordRequiredArtifacts" in check and "names no digest" in check
     body = _function(text, "Invoke-DefenseClawStandaloneRecordRecovery")
     assert body.index("Assert-DefenseClawRebuiltRecordCoversArtifacts -Layout $Layout -Value $deploymentValue") < body.index(
         "Publish-DefenseClawRecordKeepingOld `\n"
