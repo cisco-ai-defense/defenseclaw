@@ -234,50 +234,54 @@ try {
                 if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop') { throw "a working hold left '$($script:SmokeServiceCalls -join '|')'" }
             }
             finally { foreach ($name in $replaced) { Set-Item -LiteralPath "function:script:$name" -Value $original[$name] } }
-            # GAP-0989: any start= other than delayed-auto clears the delayed-start flag
-            # (the real service does: sc config start= disabled, then auto, gives plain
-            # automatic), so the setter notes the flag before it changes the mode and
-            # restores automatic as delayed-auto for a service it saw delayed. Standalone
-            # only; Secure Client keeps start= auto. sc is replaced and emulates the flag.
-            $replacedSetter = @('Assert-DefenseClawServiceName', 'Test-DefenseClawServiceExists', 'Get-DefenseClawServiceStartMode', 'Get-DefenseClawServiceDelayedAutoStart', 'Invoke-DefenseClawNative')
-            $originalSetter = @{}
-            foreach ($name in $replacedSetter) { $originalSetter[$name] = (Get-Item -LiteralPath "function:$name").ScriptBlock }
-            $script:SmokeScCalls = [Collections.Generic.List[string]]::new()
-            $script:SmokeScMode = 2
-            $script:SmokeScDelayed = $false
+            # GAP-0989: the transaction journal carries the delayed-start flag beside
+            # start_mode, so a recovery in a later process brings back delayed-auto.
+            # An older journal has no field (not delayed); a malformed one is refused;
+            # Secure Client restores the plain mode only. Service calls are replaced.
+            $replacedJournal = @('Set-DefenseClawServiceStartMode', 'Get-DefenseClawServiceDelayedAutoStart', 'Set-DefenseClawServiceDelayedAutoStart')
+            $originalJournal = @{}
+            foreach ($name in $replacedJournal) { $originalJournal[$name] = (Get-Item -LiteralPath "function:$name").ScriptBlock }
+            $script:SmokeJCalls = [Collections.Generic.List[string]]::new()
+            $script:SmokeJDelayed = @{}
             try {
-                Set-Item -LiteralPath 'function:script:Assert-DefenseClawServiceName' -Value { }
-                Set-Item -LiteralPath 'function:script:Test-DefenseClawServiceExists' -Value { $true }
-                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceStartMode' -Value { $script:SmokeScMode }
-                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeScDelayed }
-                Set-Item -LiteralPath 'function:script:Invoke-DefenseClawNative' -Value {
-                    param([string]$File, [string[]]$Arguments, [int]$TimeoutSeconds, [switch]$Capture, [switch]$TolerateServicePendingDelete)
-                    $token = $Arguments[3]
-                    $script:SmokeScCalls.Add($token)
-                    $script:SmokeScMode = @{ 'auto' = 2; 'delayed-auto' = 2; 'demand' = 3; 'disabled' = 4 }[$token]
-                    $script:SmokeScDelayed = ($token -eq 'delayed-auto')
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceStartMode' -Value { $script:SmokeJCalls.Add("mode $($args[1]) $($args[3])"); $script:SmokeJDelayed[[string]$args[1]] = $false }
+                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceDelayedAutoStart' -Value { [bool]$script:SmokeJDelayed[[string]$args[1]] }
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeJCalls.Add("delayed $($args[1]) $($args[3])"); $script:SmokeJDelayed[[string]$args[1]] = [bool]$args[3] }
+                $gwName = 'DefenseClawGateway'; $gdName = 'DefenseClawHookGuardian'
+                $journal = {
+                    param($GuardianRecord, $GatewayRecord)
+                    $states = Get-DefenseClawTransactionServiceStates -Services @($GatewayRecord, $GuardianRecord) -GatewayServiceName $gwName -GuardianServiceName $gdName
+                    $script:SmokeJCalls.Clear()
+                    Restore-DefenseClawTransactionServiceStartModes -Services @($GatewayRecord, $GuardianRecord) -GatewayServiceName $gwName -GuardianServiceName $gdName
+                    ,@($states, ($script:SmokeJCalls -join '|'))
                 }
-                $setterRows = @(
-                    @{ Label = 'standalone, delayed-auto service disabled and restored'; Profile = 'Standalone'; Delayed = $true; Want = 'disabled|delayed-auto'; WantDelayed = $true },
-                    @{ Label = 'standalone, plain automatic service disabled and restored'; Profile = 'Standalone'; Delayed = $false; Want = 'disabled|auto'; WantDelayed = $false },
-                    @{ Label = 'standalone, delayed-auto service set to demand then automatic'; Profile = 'Standalone'; Delayed = $true; Want = 'demand|delayed-auto'; WantDelayed = $true; First = 3 },
-                    @{ Label = 'Secure Client, delayed-auto service disabled and restored'; Profile = 'SecureClient'; Delayed = $true; Want = 'disabled|auto'; WantDelayed = $false }
-                )
-                foreach ($row in $setterRows) {
-                    $script:DefenseClawDelayedAutoStartSeen.Clear()
-                    $script:SmokeScCalls.Clear(); $script:SmokeScMode = 2; $script:SmokeScDelayed = $row.Delayed
-                    Set-DefenseClawEnterpriseProfile -EnterpriseProfile $row.Profile
-                    try {
-                        $first = if ($row.ContainsKey('First')) { $row.First } else { 4 }
-                        Set-DefenseClawServiceStartMode -Name 'DcSmokeGuardian' -StartMode $first
-                        Set-DefenseClawServiceStartMode -Name 'DcSmokeGuardian' -StartMode 2
-                    }
-                    finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone }
-                    if (($script:SmokeScCalls -join '|') -ne $row.Want -or $script:SmokeScDelayed -ne $row.WantDelayed) { throw "$($row.Label): sc calls '$($script:SmokeScCalls -join '|')' delayed=$($script:SmokeScDelayed), want '$($row.Want)' delayed=$($row.WantDelayed)" }
+                $gateway = [pscustomobject]@{ name = $gwName; existed = $true; running = $true; start_mode = 2; account = 'LocalSystem' }
+                $delayedGuardian = [pscustomobject]@{ name = $gdName; existed = $true; running = $true; start_mode = 2; account = 'LocalSystem'; delayed_auto_start = $true }
+                $plainGuardian = [pscustomobject]@{ name = $gdName; existed = $true; running = $true; start_mode = 2; account = 'LocalSystem'; delayed_auto_start = $false }
+                $oldGuardian = [pscustomobject]@{ name = $gdName; existed = $true; running = $true; start_mode = 2; account = 'LocalSystem' }
+                $result = & $journal $delayedGuardian $gateway
+                if (-not [bool]$result[0][$gdName].delayed_auto_start -or [bool]$result[0][$gwName].delayed_auto_start) { throw 'the journal flag was not read per service' }
+                if ($result[1] -ne "mode $gdName 2|delayed $gdName True|mode $gwName 2") { throw "a delayed-auto guardian journal restored '$($result[1])'" }
+                $result = & $journal $plainGuardian $gateway
+                if ($result[1] -ne "mode $gdName 2|mode $gwName 2") { throw "a plain automatic journal restored '$($result[1])'" }
+                # An older journal (no delayed_auto_start field): not delayed, as before.
+                $result = & $journal $oldGuardian $gateway
+                if ([bool]$result[0][$gdName].delayed_auto_start -or $result[1] -ne "mode $gdName 2|mode $gwName 2") { throw "a journal without the field restored '$($result[1])'" }
+                foreach ($bad in @(
+                    @{ Label = 'a non-boolean flag'; Record = [pscustomobject]@{ name = $gdName; existed = $true; running = $true; start_mode = 2; delayed_auto_start = 'yes' } },
+                    @{ Label = 'a delayed flag on a demand-start service'; Record = [pscustomobject]@{ name = $gdName; existed = $true; running = $true; start_mode = 3; delayed_auto_start = $true } }
+                )) {
+                    $refused = ''
+                    try { [void](Get-DefenseClawTransactionServiceStates -Services @($gateway, $bad.Record) -GatewayServiceName $gwName -GuardianServiceName $gdName) } catch { $refused = $_.Exception.Message }
+                    if ($refused -eq '') { throw "$($bad.Label) was accepted" }
                 }
-                $script:DefenseClawDelayedAutoStartSeen.Clear()
+                # Secure Client: the plain mode only, the flag is never read or set.
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+                try { $result = & $journal $delayedGuardian $gateway }
+                finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone }
+                if ($result[1] -ne "mode $gdName 2|mode $gwName 2") { throw "Secure Client restored '$($result[1])'" }
             }
-            finally { foreach ($name in $replacedSetter) { Set-Item -LiteralPath "function:script:$name" -Value $originalSetter[$name] } }
+            finally { foreach ($name in $replacedJournal) { Set-Item -LiteralPath "function:script:$name" -Value $originalJournal[$name] } }
             # S-H3: a holder that arrives during the rollback proof (after the check
             # before it) is resolved: the proof is deferred and the run continues.
             $late = [IO.FileStream]::new($class[1], [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)

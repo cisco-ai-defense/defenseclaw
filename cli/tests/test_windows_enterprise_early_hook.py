@@ -966,26 +966,37 @@ def test_the_hook_payload_trust_is_unchanged(tmp_path: Path, case: str) -> None:
         assert result["hook"] == "hook-1.0.2", result
 
 
-def test_the_exact_start_mode_helpers_are_reached_only_from_the_standalone_hold() -> None:
-    # GAP-0989 Secure Client pin: outside their own bodies the helpers are named
-    # only in the early-hook hold, which refuses outside the standalone profile
-    # before it touches the guardian, so Secure Client behaves as before.
+def test_the_delayed_start_flag_is_journaled_and_restored_standalone_only() -> None:
+    # GAP-0989: the flag travels in the transaction journal beside start_mode (so a
+    # recovery in any process brings back delayed-auto), is read leniently from a
+    # journal without it, and Secure Client records and restores none of it.
     module = _text()
-    hold = _function_body(module, "Hold-DefenseClawEarlyHookGuard")
-    assert hold.index("if (-not (Test-DefenseClawStandaloneProfile)") < hold.index("Get-DefenseClawServiceDelayedAutoStart")
-    rest = module
+    new_transaction = _function_body(module, "New-DefenseClawTransaction")
+    record = new_transaction[new_transaction.index("$record = [ordered]@{") :]
+    assert "if ((Test-DefenseClawStandaloneProfile) -and $null -ne $service -and [int]$startMode -eq 2) {" in record
+    assert record.index("Test-DefenseClawStandaloneProfile") < record.index("$record['delayed_auto_start']") < record.index("$services.Add($record)")
+    reader = _function_body(module, "Get-DefenseClawTransactionServiceDelayedAutoStart")
+    assert "if ($null -eq $property) {\n        return $false" in reader
+    assert "-isnot [bool]" in reader and "$Mode -ne 2" in reader
+    states = _function_body(module, "Get-DefenseClawTransactionServiceStates")
+    assert states.count("delayed_auto_start = ") == 3
+    restore = _function_body(module, "Restore-DefenseClawTransactionServiceStartModes")
+    assert "-DelayedAutoStart ([bool]$state.delayed_auto_start)" in restore
+    exact = _function_body(module, "Restore-DefenseClawServiceStartModeExact")
+    assert exact.index("Set-DefenseClawServiceStartMode -Name $Name -StartMode $StartMode") < exact.index("if (-not (Test-DefenseClawStandaloneProfile)) {") < exact.index("Set-DefenseClawServiceDelayedAutoStart")
+    assert "[bool]$guardian.delayed_auto_start" in module and "[bool]$gateway.delayed_auto_start" in module
+    assert "-DelayedAutoStart ([bool]$service.delayed_auto_start)" in module
+    # The start-mode setter itself is unchanged: plain sc config start= auto.
     setter = _function_body(module, "Set-DefenseClawServiceStartMode")
-    assert setter.index("if (Test-DefenseClawStandaloneProfile) {") < setter.index("Get-DefenseClawServiceDelayedAutoStart")
-    assert setter.index("Get-DefenseClawServiceDelayedAutoStart") < setter.index("'delayed-auto'")
+    assert "delayed" not in setter.lower()
+    # Outside their own bodies the flag helpers are named only by the hold, the
+    # journal recording and the restore sites.
+    rest = module
     for name in (
         "Get-DefenseClawServiceDelayedAutoStart",
         "Set-DefenseClawServiceDelayedAutoStart",
         "Restore-DefenseClawServiceStartModeExact",
-        "Hold-DefenseClawEarlyHookGuard",
-        "Set-DefenseClawServiceStartMode",
     ):
         rest = rest.replace(_function_body(module, name), "")
-    assert rest.count("Restore-DefenseClawServiceStartModeExact") == 0
-    assert rest.count("Get-DefenseClawServiceDelayedAutoStart") == 0
     assert rest.count("Set-DefenseClawServiceDelayedAutoStart") == 0
-    assert rest.count("DefenseClawDelayedAutoStartSeen") == 1  # its declaration; the setter holds the rest
+    assert "DefenseClawDelayedAutoStartSeen" not in module
