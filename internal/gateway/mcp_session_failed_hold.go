@@ -71,9 +71,24 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 		}
 		return status
 	}
+	// A definition an allow admitted before any scan is held for the session
+	// from the first call that meets it: the allow is the administrator word,
+	// and the connection the agent opens to it outlives the allow and the
+	// entry. The watcher names the scope that listed it, so a later hook of the
+	// session finds it whatever directory it reports (GAP-1018). While the
+	// allow stands the hold answers nothing (the held definition is allowed).
+	var admitted *config.MCPServerEntry
+	if status.Admitted != nil {
+		held := heldMCPDefinition(*status.Admitted, connector, home)
+		admitted = &held
+		a.holdFailedMCP(connector, home, probe, held, now)
+	}
 	// The ordinary call, with nothing held, reads no config: the agent state
 	// file can be large and this runs at every MCP call.
 	held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, now)
+	if admitted != nil {
+		held = slices.DeleteFunc(held, func(entry config.MCPServerEntry) bool { return sameHeldDefinition(entry, *admitted) })
+	}
 	if len(held) == 0 && !overflow {
 		return status
 	}
@@ -94,7 +109,10 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 			}
 			continue
 		}
-		if gone == nil {
+		// A held definition an administrator rule allows exactly is not a failed
+		// admission, whatever directory the hook reports: the rule of the managed
+		// hold (unallowedHeldRefusal). The answer is the latest one no rule allows.
+		if gone == nil && !heldDefinitionAllowed(ctx, cfg, connector, probe, held[i]) {
 			gone = &held[i]
 		}
 	}
@@ -107,6 +125,13 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 		return status
 	}
 	return watcher.FailedMCPStatus(*gone)
+}
+
+// heldDefinitionAllowed reports whether an administrator rule on the policy in
+// force allows the held definition itself.
+func heldDefinitionAllowed(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe, held config.MCPServerEntry) bool {
+	verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, held, true))
+	return verdict.Enabled && verdict.Source == "admin-allow"
 }
 
 // heldMCPDefinition is the part of a listed definition the hold keeps: how the
