@@ -341,7 +341,7 @@ func TestClaudeCodeCustomLayoutUsesGatewayGuardSource(t *testing.T) {
 	previous := claudeChainGatewayExecutable
 	claudeChainGatewayExecutable = func() (string, error) { return gateway, nil }
 	t.Cleanup(func() { claudeChainGatewayExecutable = previous })
-	if got := claudeChainSource(launcher); got != guard {
+	if got := claudeChainGuardSource(launcher); got != guard {
 		t.Fatalf("custom launcher guard source = %q, want %q", got, guard)
 	}
 }

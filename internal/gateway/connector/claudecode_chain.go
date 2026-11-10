@@ -107,9 +107,12 @@ func claudeWrapperSafe(path string) bool {
 	return strings.ContainsAny(path, " \t") || !strings.ContainsAny(path, "&|<>^(),;=")
 }
 
-// claudeChainSource selects the small guard installed with the launcher or
+// claudeChainSource selects the guard to install; a test replaces it.
+var claudeChainSource = claudeChainGuardSource
+
+// claudeChainGuardSource selects the small guard installed with the launcher or
 // the running gateway. A custom launcher may live outside the gateway's bin.
-var claudeChainSource = func(launcher string) string {
+func claudeChainGuardSource(launcher string) string {
 	if !hookguard.AbsoluteHookExecutable(launcher) {
 		return ""
 	}
