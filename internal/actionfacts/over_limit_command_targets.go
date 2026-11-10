@@ -92,12 +92,15 @@ func OverLimitCommandContentTarget(input Input, facts Facts) (string, bool) {
 		len(input.Args) > maxOverLimitWriteArgsBytes {
 		return "", false
 	}
-	if _, bounded := OverLimitCommandBoundedTwin(input, facts); bounded {
-		return "", false
-	}
+	_, bounded := OverLimitCommandBoundedTwin(input, facts)
 	texts, dirs := overLimitCommandTexts(input)
 	for _, text := range texts {
-		scan := commandWriteScan{text: text, dirs: slices.Clone(dirs)}
+		// A command with a bounded twin is judged as the twin by every rule,
+		// which reads a variable as the last assignment of the text. The
+		// reading below adds only the target a conditional assignment may
+		// leave in a variable (a && x=v, a || x=v), which the twin reading
+		// does not keep (GAP-1003).
+		scan := commandWriteScan{text: text, dirs: slices.Clone(dirs), candidatesOnly: bounded}
 		if class := scan.protectedWriteClass(); class != "" {
 			return class, true
 		}
@@ -169,6 +172,11 @@ type commandWriteScan struct {
 	// expansion. Never changed in place: a scope keeps the map it opened with.
 	watched  map[string]bool
 	definite map[string]bool
+	// candidatesOnly keeps only a target written through a variable that some
+	// assignment of the text that may not run (a conditional one) can have
+	// set; uncertain are those names, and a straight assignment clears one.
+	candidatesOnly bool
+	uncertain      map[string]bool
 	// open are the command substitutions and backticks the read is inside:
 	// what the directories and values were when each opened, taken back at its
 	// close, as a subshell leaves the shell around it as it was. next is the
@@ -430,6 +438,10 @@ func (s *commandWriteScan) followStatement(text string, index int) int {
 		if straight {
 			s.setVariable(name, readings)
 		} else {
+			if s.uncertain == nil {
+				s.uncertain = make(map[string]bool)
+			}
+			s.uncertain[name] = true
 			for _, value := range readings {
 				s.addVariable(name, value)
 			}
@@ -533,6 +545,7 @@ func (s *commandWriteScan) relativeValueMatters(value string) bool {
 // setVariable replaces what a variable holds: the shell has the value of the
 // last assignment, whatever the variable held before.
 func (s *commandWriteScan) setVariable(name string, values []string) {
+	delete(s.uncertain, name)
 	s.ownVars()
 	delete(s.vars, name)
 	if s.watched[name] {
@@ -735,6 +748,9 @@ func codeStartIn(text string, start, end int) int {
 // classOf is the content-rule class of the file a write word names, ""
 // when the word depends on the environment or names an ordinary file.
 func (s *commandWriteScan) classOf(word string, plain bool) string {
+	if s.candidatesOnly && !s.namesUncertainVariable(word, plain) {
+		return ""
+	}
 	for _, reading := range s.expand(word, plain) {
 		if reading == "" {
 			continue
@@ -755,6 +771,16 @@ func (s *commandWriteScan) classOf(word string, plain bool) string {
 		}
 	}
 	return ""
+}
+
+// namesUncertainVariable reports whether a word expands a variable that a
+// conditional assignment may have set.
+func (s *commandWriteScan) namesUncertainVariable(word string, plain bool) bool {
+	if plain {
+		return false
+	}
+	match := variablePrefix.FindStringSubmatch(word)
+	return match != nil && s.uncertain[match[1]+match[2]]
 }
 
 // isScanWordByte is a byte that continues a command name: a name that only
