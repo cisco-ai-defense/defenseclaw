@@ -136,6 +136,13 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 		from, to uint
 	}
 	unsafeNames := map[string]bool{}
+	// copies: the bindings that take the value of another name, to be kept
+	// only when that name is sure to hold it at that point.
+	type copiedName struct {
+		name, from, value string
+		at                uint
+	}
+	var copies []copiedName
 	// bound: the distinct values the bindings of each name give.
 	bound := map[string]map[string]bool{}
 	bind := func(name, value string) {
@@ -245,12 +252,21 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			if node.Value != nil {
 				value, fixed = StaticWord(node.Value, home)
 				if !fixed {
-					// NAME=${OTHER:-word} of a name no binding so far gives
-					// a value is the word.
+					// NAME=${OTHER:-word}, NAME=${OTHER-word}, NAME=$OTHER: a
+					// name no binding so far gives a value is the word, and a
+					// name one binding gives is that value, when the binding
+					// is sure to have run (settled below).
 					if param := soleParameter(node.Value); param != nil {
-						if literal, isDefault := scalarDefaultWord(param, safe); isDefault &&
-							len(bound[param.Param.Value]) == 0 && len(loops[param.Param.Value]) == 0 {
-							value, fixed = literal, true
+						if read, fallback, hasFallback, ok := scalarRead(param, safe); ok {
+							switch {
+							case hasFallback && len(bound[read]) == 0 && len(loops[read]) == 0:
+								value, fixed = fallback, true
+							case len(bound[read]) == 1 && len(loops[read]) == 0:
+								for only := range bound[read] {
+									value, fixed = only, true
+								}
+								copies = append(copies, copiedName{name, read, value, node.Pos().Offset()})
+							}
 						}
 					}
 				}
@@ -358,6 +374,19 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 					afterDirectory[assign.Name.Value] = fromDirectory
 				}
 			}
+		}
+	}
+	// A copy of the value of another name is that value only when the name
+	// was bound by a statement that always ran before the copy and no binding
+	// anywhere gives it another value; otherwise the name may be unset or
+	// hold another value when the copy runs, and the copy is unknown. The
+	// copies are in source order, so a copy of a copy is settled after its
+	// source.
+	for _, copied := range copies {
+		end, isBound := after[copied.from]
+		if !isBound || copied.at <= end || afterDirectory[copied.from] || unsafeNames[copied.from] ||
+			len(bound[copied.from]) != 1 || !bound[copied.from][copied.value] || len(loops[copied.from]) != 0 {
+			unsafeNames[copied.name] = true
 		}
 	}
 	uses := map[*syntax.Word]bool{}
@@ -468,20 +497,30 @@ func soleParameter(word *syntax.Word) *syntax.ParamExp {
 	return param
 }
 
-// scalarDefaultWord is the word of ${NAME:-word} or ${NAME-word} of a plain
-// variable name, when the word is one plain literal that safe accepts.
-func scalarDefaultWord(param *syntax.ParamExp, safe func(string) bool) (string, bool) {
-	if param == nil || param.Exp == nil || param.Exp.Word == nil ||
-		param.Exp.Op != syntax.DefaultUnset && param.Exp.Op != syntax.DefaultUnsetOrNull {
-		return "", false
+// scalarRead is the name read by $NAME, ${NAME}, ${NAME:-word} or ${NAME-word}
+// of a plain variable name. The word of the default is returned when it is one
+// plain literal that safe accepts; any other operator, or another word, is not
+// a plain read.
+func scalarRead(param *syntax.ParamExp, safe func(string) bool) (name, fallback string, hasFallback, ok bool) {
+	if param == nil {
+		return "", "", false, false
 	}
 	plain := *param
 	plain.Exp = nil
 	if !simpleScalarParameter(&plain) {
-		return "", false
+		return "", "", false, false
 	}
-	literal, ok := plainLiteralWord(param.Exp.Word)
-	return literal, ok && safe(literal)
+	switch {
+	case param.Exp == nil:
+		return param.Param.Value, "", false, true
+	case param.Exp.Word != nil && (param.Exp.Op == syntax.DefaultUnset || param.Exp.Op == syntax.DefaultUnsetOrNull):
+		literal, isLiteral := plainLiteralWord(param.Exp.Word)
+		if !isLiteral || !safe(literal) {
+			return "", "", false, false
+		}
+		return param.Param.Value, literal, true, true
+	}
+	return "", "", false, false
 }
 
 // staticDirectoryCall reports a directory-changing call whose words are all

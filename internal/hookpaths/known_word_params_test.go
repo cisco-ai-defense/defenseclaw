@@ -224,6 +224,56 @@ func TestCopyWordValueIsKnownOnlyWhenEveryBindingGivesTheSameValue(t *testing.T)
 	}
 }
 
+// GAP-0934: a name set from ${NAME:-word}, ${NAME-word} or $NAME is the word
+// when no binding gives NAME a value, and the value of NAME when one binding
+// that always ran before gives it; a name that may be unset, or that another
+// binding gives another value, has none, and the command stays unproven.
+func TestCopyWordValueOfADefaultFollowsTheBindingThatAlwaysRan(t *testing.T) {
+	const home = "/home/u"
+	rows := []struct {
+		command, want string
+	}{
+		{`f=${g:-out.txt}; cp a.txt $f`, "out.txt"},
+		{`f=${g-out.txt}; cp a.txt "$f"`, "out.txt"},
+		{`p=out.txt; f=${p:-keylink}; cp a.txt "$f"`, "out.txt"},
+		{`p=out.txt; f=${p-keylink}; cp a.txt $f`, "out.txt"},
+		{`p=/tmp/out.txt; f=${p:-/etc/ld.so.preload}; cp a.txt $f`, "/tmp/out.txt"},
+		{`p=out.txt; f=$p; cp a.txt $f`, "out.txt"},
+		{`p=out.txt; f=${p}; cp a.txt "$f"`, "out.txt"},
+		{`p=out.txt; f=${p:-keylink}; g=${f:-other}; cp a.txt $g`, "out.txt"},
+		{`p=keylink; f=${p:-out.txt}; cp a.txt $f`, "keylink"},
+		{`p=keylink; f=${p-out.txt}; cp a.txt "$f"`, "keylink"},
+		{`f=${p:-keylink}; p=out.txt; cp a.txt $f`, "keylink"},
+		{`p=out.txt; f=${p:-keylink}; p=keylink; cp a.txt $f`, ""},
+		{`p=out.txt; f=${p:-keylink}; p+=x; cp a.txt $f`, ""},
+		{`p=out.txt; f=${p:=keylink}; cp a.txt $f`, ""},
+		{`p=out.txt; f=${p:-$q}; cp a.txt $f`, ""},
+		{`f=$p; cp a.txt $f`, ""},
+		{`p=out.txt && true; f=${p:-keylink}; cp a.txt $f`, "out.txt"},
+		{`true && p=out.txt; f=${p:-keylink}; cp a.txt $f`, ""},
+		{`cd /nonexistent && p=out.txt; f=${p:-keylink}; cp a.txt $f`, ""},
+		{`for p in out.txt; do f=${p:-keylink}; cp a.txt $f; done`, ""},
+		{`if c; then p=out.txt; fi; f=${p:-keylink}; cp a.txt $f`, ""},
+	}
+	for _, row := range rows {
+		file, ok := parseShell(row.command)
+		if !ok {
+			t.Fatalf("%s does not parse", row.command)
+		}
+		values := knownWordParameterValues(row.command, file, home)
+		got := ""
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) == 3 {
+				got = values[call.Args[2]]
+			}
+			return true
+		})
+		if got != row.want {
+			t.Errorf("%s: destination value %q, want %q", row.command, got, row.want)
+		}
+	}
+}
+
 // BD-BATCH3a merge of rel-1-0-6:GAP-0235 (known copy words) with
 // rel-1-0-6:GAP-0228 (brace operands of every writer): a cp call with a
 // known parameter word and a brace word lists the keys file the brace word
