@@ -113,6 +113,9 @@ func literalSourceFileOperands(words []string, cwd, home string, depth int) []st
 	}
 	content, ok := readIndirectSource(words[1], cwd)
 	if !ok {
+		content, ok = readHomeScript(words[1], cwd, home)
+	}
+	if !ok {
 		return nil
 	}
 	return literalSimpleScriptOperands(content, cwd, home, depth+1)
