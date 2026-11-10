@@ -9,8 +9,8 @@ import (
 	"maps"
 	"path"
 	"slices"
-	"sort"
 	"strings"
+	"unicode"
 )
 
 // A file-tool call (a read, write, edit, multiedit, notebook edit, create,
@@ -28,7 +28,14 @@ import (
 //   - Every path-shaped string the unknown keys hold (at any depth up to
 //     maxUnknownKeyValueDepth) is judged as the target of the same tool:
 //     the reduced call with its target replaced, or, where the reduced call
-//     is not complete, the tool's reviewed shape for that target.
+//     is not complete, the tool's reviewed shape for that target. A string
+//     under a key that names a place (path, file, target, destination,
+//     output, ... at any depth, destinationArgumentKey) is judged by every
+//     rule. Any other string (metadata, commentary, description, ...) is
+//     judged for DefenseClaw's own state only, which blocks in every
+//     profile whatever the key is called; it is text for every other
+//     protected class, and the managed agent settings files of the vendors
+//     are such a class (rel-1-0-6:GAP-0729).
 //   - Each target a reviewed target key names is judged the same way when
 //     the reduced call is not complete (a mixed dialect, a non-string or
 //     repeated target).
@@ -50,6 +57,17 @@ const (
 type UnknownKeyTwin struct {
 	Args  json.RawMessage
 	Facts Facts
+	// SelfProtectionOnly marks the reading of a string under a key that
+	// names no place: callers count only the findings that protect
+	// DefenseClaw's own state from it.
+	SelfProtectionOnly bool
+}
+
+// ArgumentTarget is a path-shaped string in the arguments of a call and
+// whether a key that names a place (destinationArgumentKey) holds it.
+type ArgumentTarget struct {
+	Value       string
+	Destination bool
 }
 
 // UnknownKeyTwins returns the reviewed and alternate readings of a file-tool
@@ -114,40 +132,46 @@ func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
 		return nil, false
 	}
 	var twins []UnknownKeyTwin
-	seen := map[string]bool{}
-	add := func(args map[string]any) bool {
+	type reading struct {
+		index    int
+		complete bool
+	}
+	seen := map[string]reading{}
+	add := func(args map[string]any, selfOnly bool) bool {
 		raw, err := json.Marshal(args)
 		if err != nil {
 			return false
 		}
-		if complete, exists := seen[string(raw)]; exists {
-			return complete
+		if prior, exists := seen[string(raw)]; exists {
+			if !selfOnly {
+				twins[prior.index].SelfProtectionOnly = false
+			}
+			return prior.complete
 		}
 		view := input
 		view.Args = raw
 		analyzed := Analyze(view)
 		complete := analyzed.Authoritative() && len(analyzed.Paths) > 0
-		seen[string(raw)] = complete
-		twins = append(twins, UnknownKeyTwin{Args: raw, Facts: analyzed})
+		seen[string(raw)] = reading{len(twins), complete}
+		twins = append(twins, UnknownKeyTwin{Args: raw, Facts: analyzed, SelfProtectionOnly: selfOnly})
 		return complete
 	}
-	reducedComplete := len(reduced) != 0 && add(reduced)
+	reducedComplete := len(reduced) != 0 && add(reduced, false)
 	if reducedComplete && !isApplyPatchTool(input.Tool) {
 		for _, key := range unknownKeyTargetKeys {
 			if raw, ok := reduced[key].(string); ok {
 				if target := KnownExtraKeyPath(raw, input.ActiveHome); target != raw {
 					placed := maps.Clone(reduced)
 					placed[key] = target
-					add(placed)
+					add(placed, false)
 				}
 			}
 		}
 	}
 
-	var candidates []string
-	overflow := false
+	var collected targetCollector
 	collect := func(value any) {
-		appendPathShapedStrings(&candidates, value, 0, &overflow)
+		appendPathShapedStrings(&collected, value, 0, true)
 	}
 	// More than one target field can be two dialect readings. Keep every
 	// named value regardless of which field the reduction selected.
@@ -179,19 +203,18 @@ func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
 		}
 	}
 	for _, key := range unknown {
-		collect(object[key])
+		appendPathShapedStrings(&collected, object[key], 0, destinationArgumentKey(key))
 	}
-	if len(candidates) > maxUnknownKeyTargets {
-		candidates, overflow = candidates[:maxUnknownKeyTargets], true
-	}
-	for _, target := range candidates {
-		target = KnownExtraKeyPath(target, input.ActiveHome)
+	candidates, overflow := collected.result()
+	for _, candidate := range candidates {
+		selfOnly := !candidate.Destination
+		target := KnownExtraKeyPath(candidate.Value, input.ActiveHome)
 		if reducedComplete {
-			if retargeted, ok := retargetFileToolArgs(input.Tool, reduced, target); ok && add(retargeted) {
+			if retargeted, ok := retargetFileToolArgs(input.Tool, reduced, target); ok && add(retargeted, selfOnly) {
 				continue
 			}
 		}
-		add(unknownKeyFileToolShape(input.Tool, target))
+		add(unknownKeyFileToolShape(input.Tool, target), selfOnly)
 	}
 	return twins, overflow
 }
@@ -225,12 +248,12 @@ func KnownExtraKeyPath(target, home string) string {
 // of a file-tool call with unknown keys (UnknownKeyTwins) that write,
 // append to or delete a path. The hook client lists their targets, so the
 // gateway judges the same files the user's hook resolved.
-func UnknownKeyWriteTargetViews(input Input, facts Facts) []Facts {
+func UnknownKeyWriteTargetViews(input Input, facts Facts) []UnknownKeyTwin {
 	twins, _ := UnknownKeyTwins(input, facts)
-	var views []Facts
+	var views []UnknownKeyTwin
 	for _, twin := range twins {
 		if factsMutateAPath(twin.Facts) {
-			views = append(views, twin.Facts)
+			views = append(views, twin)
 		}
 	}
 	return views
@@ -247,26 +270,23 @@ func UnknownKeyWriteOverflow(input Input, facts Facts) bool {
 	return overflow
 }
 
-// PathShapedArgumentValues returns the path-shaped strings an argument
-// value holds, at any depth up to maxUnknownKeyValueDepth, once each, and
-// whether it holds more than maxUnknownKeyTargets of them (only that many
-// are returned). A connector projection that keeps only its harness's
-// reviewed keys judges these values of the keys it leaves out as targets
-// too, as UnknownKeyTwins does.
-func PathShapedArgumentValues(raw json.RawMessage) ([]string, bool) {
+// PathShapedArgumentValues returns the path-shaped strings the value of an
+// unknown argument key holds, at any depth up to maxUnknownKeyValueDepth,
+// once each, and whether it holds more than maxUnknownKeyTargets of them
+// (only that many of each kind are returned). A connector projection that
+// keeps only its harness's reviewed keys judges these values of the keys it
+// leaves out as targets too, as UnknownKeyTwins does: those under a key
+// that names a place by every rule, the others for DefenseClaw's own state.
+func PathShapedArgumentValues(key string, raw json.RawMessage) ([]ArgumentTarget, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var value any
 	if decoder.Decode(&value) != nil {
 		return nil, false
 	}
-	var values []string
-	overflow := false
-	appendPathShapedStrings(&values, value, 0, &overflow)
-	if len(values) > maxUnknownKeyTargets {
-		return values[:maxUnknownKeyTargets], true
-	}
-	return values, overflow
+	var collected targetCollector
+	appendPathShapedStrings(&collected, value, 0, destinationArgumentKey(key))
+	return collected.result()
 }
 
 // unknownKeyFileTool reports a tool whose reviewed arguments name a file:
@@ -346,45 +366,155 @@ func reviewedFileToolArgumentKey(tool, key string, object map[string]any) bool {
 	}
 }
 
-// appendPathShapedStrings appends every path-shaped string in value
-// (pathShapedArgumentValue), searching objects and arrays to
-// maxUnknownKeyValueDepth, once each, in a stable order. It stops one past
-// maxUnknownKeyTargets: the caller reports the overflow.
-func appendPathShapedStrings(out *[]string, value any, depth int, overflow *bool) {
-	if len(*out) > maxUnknownKeyTargets {
+// targetCollector gathers the path-shaped strings of argument values: at
+// most one past maxUnknownKeyTargets of each kind (under a key that names a
+// place, and others), so that a long run of one kind never hides the other.
+type targetCollector struct {
+	out                  []ArgumentTarget
+	destinations, others int
+	overflow             bool
+}
+
+func (c *targetCollector) add(value string, destination bool) {
+	if i := slices.IndexFunc(c.out, func(target ArgumentTarget) bool { return target.Value == value }); i >= 0 {
+		if destination && !c.out[i].Destination {
+			c.out[i].Destination = true
+			c.destinations, c.others = c.destinations+1, c.others-1
+		}
+		return
+	}
+	if destination {
+		if c.destinations > maxUnknownKeyTargets {
+			return
+		}
+		c.destinations++
+	} else {
+		// The vendor machine-policy files are a protected class of their
+		// own: a string that only mentions one is text (GAP-0729).
+		if c.others > maxUnknownKeyTargets || ManagedAgentSettingsPath(value, true) || WindowsManagedAgentSettingsPath(value) {
+			return
+		}
+		c.others++
+	}
+	c.out = append(c.out, ArgumentTarget{Value: value, Destination: destination})
+}
+
+func (c *targetCollector) full() bool {
+	return c.destinations > maxUnknownKeyTargets && c.others > maxUnknownKeyTargets
+}
+
+// result lists the targets under a key that names a place first, then the
+// others, each kind cut at maxUnknownKeyTargets (overflow is then true).
+func (c *targetCollector) result() ([]ArgumentTarget, bool) {
+	var places, others []ArgumentTarget
+	for _, target := range c.out {
+		if target.Destination {
+			places = append(places, target)
+		} else {
+			others = append(others, target)
+		}
+	}
+	overflow := c.overflow
+	if len(places) > maxUnknownKeyTargets {
+		places, overflow = places[:maxUnknownKeyTargets], true
+	}
+	if len(others) > maxUnknownKeyTargets {
+		others, overflow = others[:maxUnknownKeyTargets], true
+	}
+	return append(places, others...), overflow
+}
+
+// appendPathShapedStrings adds every path-shaped string in value
+// (pathShapedArgumentValue) to the collector, searching objects and arrays
+// to maxUnknownKeyValueDepth, in a stable order. destination is true when
+// the key that holds value, or one above it, names a place.
+func appendPathShapedStrings(c *targetCollector, value any, depth int, destination bool) {
+	if c.full() {
 		return
 	}
 	switch value := value.(type) {
 	case string:
-		if pathShapedArgumentValue(value) && !slices.Contains(*out, value) {
-			*out = append(*out, value)
+		if pathShapedArgumentValue(value) {
+			c.add(value, destination)
 		}
 	case []any:
 		if depth >= maxUnknownKeyValueDepth {
 			if len(value) > 0 {
-				*overflow = true
+				c.overflow = true
 			}
 			return
 		}
 		for _, item := range value {
-			appendPathShapedStrings(out, item, depth+1, overflow)
+			appendPathShapedStrings(c, item, depth+1, destination)
 		}
 	case map[string]any:
 		if depth >= maxUnknownKeyValueDepth {
 			if len(value) > 0 {
-				*overflow = true
+				c.overflow = true
 			}
 			return
 		}
-		keys := make([]string, 0, len(value))
-		for key := range value {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			appendPathShapedStrings(out, value[key], depth+1, overflow)
+		for _, key := range slices.Sorted(maps.Keys(value)) {
+			appendPathShapedStrings(c, value[key], depth+1, destination || destinationArgumentKey(key))
 		}
 	}
+}
+
+// destinationWords are the words of an argument key that name where a call
+// writes: the owner's list for the extra keys of a file tool.
+var destinationWords = []string{
+	"path", "file", "filename", "target", "destination", "dest", "output", "out", "to", "location",
+}
+
+// destinationArgumentKey reports a key with a word that names a place
+// (path, file, filename, target, destination, dest, output, out, to,
+// location), singular or plural, alone or joined to another place word
+// (filepath, outputfile), split at separators, digits and camel-case
+// humps: file_path, targetFile, destinations. A key that only holds text
+// about the call (metadata, commentary, description, notes) names no place.
+func destinationArgumentKey(key string) bool {
+	var word []rune
+	flush := func() bool {
+		defer func() { word = word[:0] }()
+		return len(word) > 0 && destinationWord(strings.ToLower(string(word)))
+	}
+	var previous rune
+	for _, r := range key {
+		switch {
+		case !unicode.IsLetter(r):
+			if flush() {
+				return true
+			}
+		case unicode.IsUpper(r) && unicode.IsLower(previous):
+			if flush() {
+				return true
+			}
+			word = append(word, r)
+		default:
+			word = append(word, r)
+		}
+		previous = r
+	}
+	return flush()
+}
+
+// destinationWord reports a lower-case word that is a place word, its
+// plural, or made only of place words.
+func destinationWord(word string) bool {
+	if word == "" {
+		return false
+	}
+	if len(word) > 3 {
+		if singular, ok := strings.CutSuffix(word, "s"); ok && destinationWord(singular) {
+			return true
+		}
+	}
+	for _, place := range destinationWords {
+		if rest, ok := strings.CutPrefix(word, place); ok && (rest == "" || destinationWord(rest)) {
+			return true
+		}
+	}
+	return false
 }
 
 // pathShapedArgumentValue reports a string that can name a file: bounded,

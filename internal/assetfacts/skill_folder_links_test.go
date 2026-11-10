@@ -86,7 +86,7 @@ func TestSkillFolderRefsFollowLinksIntoSkillFolders(t *testing.T) {
 		"in a command line": {"cat " + filepath.Join(proj, "lnk-held", "SKILL.md"), held},
 	} {
 		t.Run(name, func(t *testing.T) {
-			refs := SkillFolderRefs(map[string]any{"command": tc.input}, home, proj)
+			refs := SkillFolderRefs("", map[string]any{"command": tc.input}, home, proj)
 			ref, ok := linkedRef(refs, tc.want)
 			if !ok {
 				t.Fatalf("refs = %#v, want a linked ref to %s", refs, tc.want)
@@ -120,7 +120,7 @@ func TestSkillFolderRefsAddNothingForOrdinaryLinks(t *testing.T) {
 		filepath.Join(home, "no", "such", "tree", "file"),
 		"cat lnk-other/notes.txt | wc -l",
 	} {
-		if refs := SkillFolderRefs(map[string]any{"command": input}, home, proj); len(refs) != 0 {
+		if refs := SkillFolderRefs("", map[string]any{"command": input}, home, proj); len(refs) != 0 {
 			t.Fatalf("%q: refs = %#v, want none", input, refs)
 		}
 	}
@@ -139,7 +139,7 @@ func TestSkillFolderRefsLinkToAnotherSkillKeepsItsName(t *testing.T) {
 		t.Fatal(err)
 	}
 	linkOrSkip(t, ok, filepath.Join(proj, "lnk-ordinary"))
-	refs := SkillFolderRefs(filepath.Join(proj, "lnk-ordinary", "SKILL.md"), home, proj)
+	refs := SkillFolderRefs("", filepath.Join(proj, "lnk-ordinary", "SKILL.md"), home, proj)
 	if len(refs) != 1 || refs[0].Name != "ordinary" || refs[0].Dir != ok || !refs[0].Linked {
 		t.Fatalf("refs = %#v, want only the ordinary skill", refs)
 	}
@@ -170,7 +170,7 @@ func TestSkillFolderRefsFollowLinkThenParentSegment(t *testing.T) {
 		"dot first":     proj + sep + "." + sep + "via-sub" + sep + ".." + sep + "SKILL.md",
 	} {
 		t.Run(name, func(t *testing.T) {
-			refs := SkillFolderRefs(map[string]any{"command": tc}, home, proj)
+			refs := SkillFolderRefs("", map[string]any{"command": tc}, home, proj)
 			if _, ok := linkedRef(refs, held); !ok {
 				t.Fatalf("refs = %#v, want a linked ref to %s", refs, held)
 			}
@@ -179,10 +179,10 @@ func TestSkillFolderRefsFollowLinkThenParentSegment(t *testing.T) {
 	// A benign twin: the same shape through a link to another skill reaches the
 	// folder that skill sits in, and a parent segment inside the project reaches
 	// no skill folder at all.
-	if refs := SkillFolderRefs(proj+sep+"via-other"+sep+".."+sep+"ordinary"+sep+"SKILL.md", home, proj); len(refs) != 1 || refs[0].Name != "ordinary" {
+	if refs := SkillFolderRefs("", proj+sep+"via-other"+sep+".."+sep+"ordinary"+sep+"SKILL.md", home, proj); len(refs) != 1 || refs[0].Name != "ordinary" {
 		t.Fatalf("refs = %#v, want only the ordinary skill", refs)
 	}
-	if refs := SkillFolderRefs(proj+sep+"plain"+sep+".."+sep+"notes.txt", home, proj); len(refs) != 0 {
+	if refs := SkillFolderRefs("", proj+sep+"plain"+sep+".."+sep+"notes.txt", home, proj); len(refs) != 0 {
 		t.Fatalf("refs = %#v, want none", refs)
 	}
 }

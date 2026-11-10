@@ -27,6 +27,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	dialect := hookShellDialect("", "Bash")
 	_ = actionfacts.CommandTextOverLimit(command)
 	shellparse.TooDeep(command)
+	BoundCommandOperands(command, cwd, home)
 	ActionCommandAuditReasonWithDialect(command, cwd, home, dialect)
 	MayNameState(command)
 	StateNamingReading(command, home, false)
@@ -50,6 +51,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	}
 	simples := actionfacts.SimpleCommands(fallback, fallbackFacts)
 	plainMoveDestinationsWithStatements(fallback, fallbackFacts, simples)
+	straightLineReadings(fallback, command)
 	callPastArgvBound(command)
 	ShellWriteOperands(command, cwd, home)
 	shellWriteOperands(command, cwd, home, KnownUser{})
@@ -108,7 +110,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 // TestGAP0749ResolveReadersCoverResolve fails when the two differ.
 var gap0749ResolveReaderCalls = []string{
 	"ActionCommandAuditReasonWithDialect", "ActionCommandDecision", "AdjacentAssignedWriteOperands",
-	"BoundedGlobLoopCopyDestinations", "BoundedLoopCopyDestinations", "BoundedShellWriteOperands",
+	"BoundCommandOperands", "BoundedGlobLoopCopyDestinations", "BoundedLoopCopyDestinations", "BoundedShellWriteOperands",
 	"CopySourceGlobDestinations", "DeclaredRedirectWriteOperands", "LinkWalkFacts", "LiteralWriteOperands",
 	"MayNameState", "NoDereferenceTouchShape", "QuotedDynamicCopyDestinations",
 	"SafeShellRedirectOccurrencesWithFacts", "ShellDirectoryWriteOperands", "ShellWriteOperands",
@@ -118,7 +120,7 @@ var gap0749ResolveReaderCalls = []string{
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
 	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
-	"plainMoveDestinationsWithStatements", "shellWriteOperands", "shellparse.TooDeep",
+	"plainMoveDestinationsWithStatements", "shellWriteOperands", "shellparse.TooDeep", "straightLineReadings",
 }
 
 // TestGAP0749ResolveReadersCoverResolve: the argv readers a bounded sweep

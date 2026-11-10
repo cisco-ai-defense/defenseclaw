@@ -712,7 +712,7 @@ func windowsNonFilesystemProviderPath(value string) bool {
 
 func canonicalExtendedWindowsPath(value string) (string, bool, bool) {
 	slashed := strings.ReplaceAll(value, `\`, "/")
-	if !strings.HasPrefix(slashed, "//?/") {
+	if !strings.HasPrefix(slashed, "//?/") && !windowsDeviceNamespaceVolumePath(slashed) {
 		return value, false, true
 	}
 
@@ -741,6 +741,20 @@ func canonicalExtendedWindowsPath(value string) (string, bool, bool) {
 		canonical += strings.Join(parts, `\`)
 	}
 	return canonical, true, true
+}
+
+// windowsDeviceNamespaceVolumePath reports //./C:/... and //./UNC/...: the
+// Win32 device namespace opens a volume or a share by the same path as the
+// \\?\ prefix does, so the file is the one the plain drive path names
+// (rel-1-0-6:GAP-0729). Other device names (pipes, COM ports, physical
+// drives) are not paths of files.
+func windowsDeviceNamespaceVolumePath(slashed string) bool {
+	if !strings.HasPrefix(slashed, "//./") {
+		return false
+	}
+	remainder := slashed[len("//./"):]
+	return len(remainder) >= len("UNC/") && strings.EqualFold(remainder[:len("UNC/")], "UNC/") ||
+		len(remainder) >= 3 && isASCIILetter(remainder[0]) && remainder[1] == ':' && remainder[2] == '/'
 }
 
 func safeExtendedWindowsParts(

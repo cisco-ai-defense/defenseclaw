@@ -322,6 +322,11 @@ func (a *APIServer) profileSkillFolders(ctx context.Context, connector, cwd, nam
 // SKILL.md with a shell command and follows it, and no skill selection hook
 // sees that (GAP-0569). Only the denied list applies: reading any other skill
 // folder is not an asset load. Secure Client keeps main (issue #1092).
+//
+// A sandbox request whose binding maps no sandbox path to the host (a copy-mode
+// workdir) names paths in the sandbox, not on this host. The link walk below
+// reads the host, so it is not made for that request: the sandbox copy view
+// decides what the agent can read, and the host holds nothing the call names.
 func (a *APIServer) skillFolderAccessDecision(
 	ctx context.Context, connector, hookEvent, cwd, toolName string, toolInput map[string]interface{},
 ) (config.AssetPolicyDecision, bool) {
@@ -329,28 +334,96 @@ func (a *APIServer) skillFolderAccessDecision(
 	if cfg == nil || cfg.SecureClientIntegration() || !runtimeAssetCanEnforce(hookEvent) {
 		return config.AssetPolicyDecision{}, false
 	}
+	if view, sandboxed := sandboxHookView(ctx); sandboxed && !view.HostAccess() {
+		return config.AssetPolicyDecision{}, false
+	}
+	if decision, matched := a.skillFolderRefsDecision(ctx, cfg, connector, hookEvent, cwd, toolName, toolInput); matched {
+		return decision, true
+	}
+	return a.skillLinksUnprovenDecision(ctx, cfg, connector, hookEvent, toolName)
+}
+
+// skillLinksUnprovenDecision judges a call whose links could not all be
+// followed because a network share on a path did not answer within the wait
+// the hook call has for shares (the hook's claim, or this gateway's own walk):
+// the skill folder a link there leads to is unknown. It matters only when a
+// skill is held or denied. Then a managed deployment and the strict tier
+// refuse the call as unproven; the OSS default and permissive tiers allow it
+// with a visible alert, since an ordinary command on a slow share is not a
+// named or known protected folder. A held or denied folder the call names, directly or
+// through a link the walk followed, is refused in every tier by the check
+// before this one.
+func (a *APIServer) skillLinksUnprovenDecision(
+	ctx context.Context, cfg *config.Config, connector, hookEvent, toolName string,
+) (config.AssetPolicyDecision, bool) {
+	if !claimedAssetFactsFromContext(ctx).SkillLinksUnproven && !hookpaths.SkillLinksUnproven() {
+		return config.AssetPolicyDecision{}, false
+	}
+	if !a.skillFoldersAreGuarded(cfg) {
+		return config.AssetPolicyDecision{}, false
+	}
+	const reason = "a path of the call could not be placed (a network share did not answer in time, or a drive-relative path names a drive other than the one of the working folder), so a skill folder a link there leads to cannot be shown not to be held or denied"
+	decision := runtimeAssetDisableBlockDecision("skill", "skill-links", connector, "skill_folder", reason, "skill-links-unproven")
+	decision.RegistryStatus = "unknown"
+	probe := skillRuntimeProbe{TargetType: "skill", SkillName: "skill-links", ToolName: toolName, Surface: "skill_folder", Matched: true}
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) || a.shareBodyStrictTier(ctx, connector) {
+		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
+		return decision, true
+	}
+	a.logAssetPolicyAudit(ctx, connector, "skill:skill-links", runtimeSkillAssetPolicyAuditDetails(
+		config.AssetPolicyDecision{Action: "allow", Source: decision.Source, RegistryStatus: decision.RegistryStatus, WouldBlock: true, Reason: reason},
+		connector, hookEvent, probe))
+	fmt.Fprintf(os.Stderr, "[gateway] warning: %s (connector=%s; the strict policy tier and a managed deployment block the call)\n", reason, connector)
+	return config.AssetPolicyDecision{}, false
+}
+
+// skillFolderRefsDecision is skillFolderAccessDecision for the skill folders
+// the call names or reaches through a link.
+func (a *APIServer) skillFolderRefsDecision(
+	ctx context.Context, cfg *config.Config, connector, hookEvent, cwd, toolName string, toolInput map[string]interface{},
+) (config.AssetPolicyDecision, bool) {
 	facts := claimedAssetFactsFromContext(ctx)
 	home := hookActiveHome(ctx)
 	caller := ""
 	var refs []assetfacts.FolderRef
+	// The strict tier reads a command line that holds the name of an entry
+	// leading into a skill folder as a read of it; the others, only when the
+	// line also holds a word that reads or runs (the hook's claim is made on
+	// the second reading).
+	strict := a.shareBodyStrictTier(ctx, connector)
 	if peer, ok := managedHookPeerFromContext(ctx); ok {
 		caller = peer.Name
-		refs = assetfacts.SkillFolderRefsForPeer(toolInput, home, cwd, caller, peer.UID, peer.GID)
+		refs = assetfacts.SkillFolderRefsForPeer(toolName, toolInput, home, cwd, caller, peer.UID, peer.GID, strict)
+	} else if strict {
+		refs = assetfacts.SkillFolderRefsStrict(toolName, toolInput, home, cwd, caller)
 	} else {
-		refs = assetfacts.SkillFolderRefs(toolInput, home, cwd, caller)
+		refs = assetfacts.SkillFolderRefs(toolName, toolInput, home, cwd, caller)
 	}
 	roots := assetfacts.SkillRoots(connector, home, cwd)
 	// A folder a link leads to is spelled as the link resolves, which a root
 	// reached through a link itself (a home on another mount) is not.
 	skillRoots := slices.Clone(roots)
-	if len(facts.SkillLinks) > 0 || slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return ref.Linked }) {
+	followsLinks := len(facts.SkillLinks) > 0 || slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return ref.Linked })
+	if followsLinks {
 		for _, root := range roots {
 			if real := assetfacts.ResolveLinks(root); real != filepath.Clean(root) {
 				skillRoots = append(skillRoots, real)
 			}
 		}
 	}
-	refs = appendReportedSkillLinks(refs, facts.SkillLinks, skillRoots)
+	// A link ends in a protected folder whichever connector's call follows it,
+	// so the folders a link claim names are taken from the skill root of every
+	// connector that loads skills from folders, not only this connector's.
+	linkRoots := slices.Clone(skillRoots)
+	for _, root := range assetfacts.KnownSkillRoots(home, cwd) {
+		if !slices.ContainsFunc(linkRoots, func(have string) bool { return sameCleanPath(have, root) }) {
+			linkRoots = append(linkRoots, root)
+			if real := assetfacts.ResolveLinks(root); followsLinks && real != filepath.Clean(root) {
+				linkRoots = append(linkRoots, real)
+			}
+		}
+	}
+	refs = appendReportedSkillLinks(refs, facts.SkillLinks, linkRoots)
 	if facts.SkillLinksTruncated && a.skillFoldersAreGuarded(cfg) {
 		// The hook names the skill folders a link of the call leads into, up
 		// to a bound. Past it a protected folder cannot be ruled out (fail
@@ -374,7 +447,11 @@ func (a *APIServer) skillFolderAccessDecision(
 		return config.AssetPolicyDecision{}, false
 	}
 	for _, ref := range refs {
-		if !skillFolderRefIsSkill(ref, skillRoots, len(facts.DeclaredFor(ref.Name)) > 0) {
+		rootsOfRef := skillRoots
+		if ref.Linked {
+			rootsOfRef = linkRoots
+		}
+		if !skillFolderRefIsSkill(ref, rootsOfRef, len(facts.DeclaredFor(ref.Name)) > 0) {
 			continue
 		}
 		// A skill admission blocked and disabled (one whose quarantine

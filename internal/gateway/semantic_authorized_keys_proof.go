@@ -1057,8 +1057,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// the client did describe, and does not make them omitted.
 	clientTargets := request.ResolvedWriteTargets
 	truncated := clientTargets[hookpaths.TruncatedKey] == "1"
-	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
-		len(request.ResolvedWriteTargets) != 0 {
+	// A managed Claude Code or Codex hook reports its evidence the same way,
+	// so the gateway scopes both alike: an operand the client could not place
+	// (a target the call assigns inside a group) is judged by the shell
+	// reading, as the call is for a per-user gateway (rel-1-0-6:GAP-0675).
+	// Codex keeps every answer the client did place (placedByCodexClient), as
+	// it did before this scoping, so a call over the evaluation limit that
+	// the client placed in the project stays ordinary.
+	scopedClientEvidence := (request.Connector == "claudecode" || request.Connector == "codex") &&
+		request.ProtectedHomeHook
+	if scopedClientEvidence && len(request.ResolvedWriteTargets) != 0 {
 		// Keep the client's positive protected-path evidence and inspected copy
 		// sources. A directory proof is relevant once the hook observed a
 		// different logical directory or a protected starting directory.
@@ -1079,7 +1087,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				!strings.HasPrefix(filepath.Clean(target), home+string(filepath.Separator))
 		}
 		// An incomplete map keeps its marker and the client's cwd, so an
-		// operand the client omitted is placed and denied as it is for Codex.
+		// operand the client omitted is placed and denied.
 		var scoped map[string]string
 		// A plain move onto an existing link to a file replaces the link:
 		// the client described that entry, which decides it (GAP-2558).
@@ -1131,7 +1139,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				operand == hookpaths.LinksStableKey ||
 				operand == hookpaths.TruncatedKey ||
 				resolved == "" && (external(operand) && !truncated || closedDirectoryAnswer(operand)) ||
-				isProtected(resolved) {
+				isProtected(resolved) ||
+				placedByCodexClient(request.Connector, resolved) {
 				if scoped == nil {
 					scoped = make(map[string]string)
 				}
@@ -1433,7 +1442,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		return confirmed()
 	}
 	if !cannotResolveLocally && trustedPOSIXShellCall(input, facts) &&
-		strings.Contains(input.Command, "for") && strings.Contains(input.Command, "cp") &&
+		strings.Contains(input.Command, "for") &&
 		hookpaths.LoopCopyDestinationProtected(input.Command, input.CWD, facts.ActiveHome) {
 		// The per-user gateway can check the same fixed loop destination
 		// that a managed hook checks before ProtectHome hides the home.
@@ -1463,7 +1472,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	directoryFacts := request.ResolvedWriteTargets
 	var startDirectoryFacts map[string]string
 	if start, present := clientTargets[hookpaths.DirectoryFactPrefix+input.CWD]; present &&
-		request.Connector == "claudecode" && request.ProtectedHomeHook && !truncated {
+		scopedClientEvidence && !truncated {
 		startDirectoryFacts = map[string]string{hookpaths.DirectoryFactPrefix + input.CWD: start}
 		if _, scoped := directoryFacts[hookpaths.DirectoryFactPrefix+input.CWD]; !scoped {
 			directoryFacts = maps.Clone(directoryFacts)
@@ -2265,4 +2274,12 @@ func nativeFileToolWriteOperand(input actionfacts.Input, facts actionfacts.Facts
 		}
 	}
 	return false
+}
+
+// placedByCodexClient reports a client answer that the scoping of a managed
+// Codex hook keeps whatever it names: the client resolved the operand, so it
+// is evidence, not a missing proof. Only the unplaced entries of its map are
+// left to the shell reading.
+func placedByCodexClient(connector, resolved string) bool {
+	return connector == "codex" && resolved != ""
 }

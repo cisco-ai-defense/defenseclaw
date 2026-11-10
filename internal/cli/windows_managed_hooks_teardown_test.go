@@ -1951,8 +1951,9 @@ func TestWindowsManagedHooksTeardownReportsABusyCodexWriterByCode(t *testing.T) 
 	// A busy Codex writer next to another failure (a compensation that failed too) is not a
 	// writer-only failure: no code, so the caller throws as before.
 	for name, err := range map[string]error{
-		"busy plus compensation": errors.Join(busy, errors.New("restore pre-rollback Claude policy after Codex failure: access denied")),
-		"compensation first":     errors.Join(errors.New("restore pre-rollback Cursor policy after Codex failure: access denied"), busy),
+		"busy plus compensation":                          errors.Join(busy, errors.New("restore pre-rollback Claude policy after Codex failure: access denied")),
+		"compensation first":                              errors.Join(errors.New("restore pre-rollback Cursor policy after Codex failure: access denied"), busy),
+		"single wrapper around a join with a plain cause": fmt.Errorf("teardown rollback: %w", errors.Join(busy, errors.New("restore pre-rollback Claude policy after Codex failure: access denied"))),
 	} {
 		if got := windowsManagedHooksTeardownErrorCode(err); got != "" {
 			t.Fatalf("%s: code = %q, want none", name, got)

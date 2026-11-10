@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -89,7 +90,7 @@ func TestReportedCwdWithAParentStepAfterALinkIsPlacedAsTextWhereTheSystemDoes(t 
 								defer func() { _ = os.Chmod(homes, 0o700) }()
 							}
 							got := overLimitHostHookWithEvidence(t, connector, home, string(body), evidence)
-							if blocked := nativeWriteBlocked(t, got); blocked != probe.want {
+							if blocked := nativeWriteBlockedOverBound(t, got, count > actionfacts.MaxOperandsPerCall); blocked != probe.want {
 								t.Fatalf("blocked = %t, want %t: %.600s", blocked, probe.want, got)
 							}
 						})

@@ -167,6 +167,9 @@ func rulePackValidateCommand(cfg *config.Config, goos string) string {
 func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s rulePackScope, scope string) (*guardrail.RulePack, error) {
 	if s.ref.Name != "" && s.dir == "" && !cfg.EmbeddedRulePack(s.ref) {
 		if config.IsBuiltinRulePack(s.ref.Name) {
+			if advice := cfg.WindowsBuiltinRulePackAdvice(s.ref.Name); advice != "" {
+				return nil, fmt.Errorf("%s rule pack %q: policy_dir is not set; %s", scope, s.ref.Name, advice)
+			}
 			return nil, fmt.Errorf("%s rule pack %q: policy_dir is not set", scope, s.ref.Name)
 		}
 		return nil, fmt.Errorf("%s rule pack %q is neither built in (%s) nor a guardrail.custom_packs entry",
@@ -178,6 +181,14 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 		errors.As(err, &packErr) && packErr.Code == "invalid_manifest" {
 		// Secure Client ignored malformed optional manifests before v9.
 		base, err = guardrail.LoadRulePackForSecureClient(s.dir)
+	}
+	if err != nil && s.ref.Name != "" && errors.As(err, &packErr) && packErr.Code == "directory_not_found" {
+		// A built-in pack folder that is not there: name the property to fix.
+		if advice := cfg.WindowsBuiltinRulePackAdvice(s.ref.Name); advice != "" && strings.TrimSpace(cfg.PolicyDir) != "" {
+			if _, isCustom := cfg.UsableCustomRulePack(s.ref.Name); !isCustom {
+				err = fmt.Errorf("%w; policy_dir is %s and it has no guardrail\\%s folder: %s", err, cfg.PolicyDir, s.ref.Name, advice)
+			}
+		}
 	}
 	if err != nil {
 		return nil, err

@@ -1549,7 +1549,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		// not as a key write it does not name (GAP-0146); a protected target
 		// the client found is its ActionDecisionKey and is proved above.
 		symlinkWrite = false
-		findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+		findings = withOmittedOperandLimitFinding(findings, request.EnforcementCapable)
 	}
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
@@ -2771,6 +2771,26 @@ var activeDefenseClawStateNames = []string{
 	"quarantine", "receipts", "registries",
 }
 
+// managedSettingsCaseFold reports a host whose file system ignores case; a
+// variable so that a test can stand in for the platform.
+var managedSettingsCaseFold = actionfacts.CaseInsensitiveFilesystem
+
+// managedAgentSettingsCandidate reports a path of the machine policy files
+// DefenseClaw publishes for an agent, in either path syntax.
+func managedAgentSettingsCandidate(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	caseFold := managedSettingsCaseFold()
+	// The cleaned forms collapse a leading // of a \\host\C$ share path into
+	// one slash, which names another directory: the text as written names
+	// the volume, so it is read too.
+	for _, value := range []string{exactSemanticPathValue(candidate), candidate.Value} {
+		if candidate.Flavor == actionfacts.PathFlavorPOSIX && actionfacts.ManagedAgentSettingsPath(value, caseFold) ||
+			actionfacts.WindowsManagedAgentSettingsPath(value) {
+			return true
+		}
+	}
+	return false
+}
+
 func matchesActiveDefenseClawState(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
@@ -2787,6 +2807,12 @@ func matchesActiveDefenseClawStateInLine(
 	lineStaysOff func() bool,
 	clientTargets map[string]string,
 ) bool {
+	if managedAgentSettingsCandidate(facts, candidate) {
+		// The machine policy files DefenseClaw publishes for an agent are
+		// protected like its own state, whoever the active user is
+		// (rel-1-0-6:GAP-0734).
+		return true
+	}
 	relative, ok := activeHomeRelative(facts, candidate)
 	if runtime.GOOS == "linux" && !pathCaseFoldHost && candidate.Flavor == actionfacts.PathFlavorPOSIX {
 		relative, ok = exactActiveDefenseClawRelative(facts, candidate)

@@ -794,6 +794,9 @@ func runWindowsEnterpriseStandaloneAction(
 	if err := refuseWindowsEnterpriseStandaloneDeferredState(action, opts); err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
+	if err := refuseWindowsEnterpriseStandaloneWithoutHookGuard(action, opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
 	if err := refuseWindowsEnterpriseRepairFromAnotherRelease(action, opts); err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
@@ -1953,6 +1956,11 @@ func applyWindowsEnterpriseInstallerReport(
 			(report.TransactionPending && windowsEnterpriseUnsettledRollbackDeferred(result.Errors[firstError:])) ||
 			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "guardian_state_held")) {
 			next = windowsEnterpriseHeldRollbackNextStep(report.TransactionPending, windowsEnterpriseLiveStandaloneServices())
+		}
+		if report.TransactionPending && windowsEnterpriseUnsettledRollbackDeferred(result.Errors[firstError:]) {
+			// GAP-0999: this rollback is not finished, so the text does not say the
+			// services keep enforcing; verify says what is covered.
+			next = windowsEnterprisePendingUnsettledLead(windowsEnterpriseLiveStandaloneServices())
 		}
 		if next != "" {
 			result.Errors[firstError].Message += " " + next
@@ -5113,7 +5121,7 @@ func planWindowsEnterpriseEnsure(
 	}
 	if drift != "" {
 		if missing := missingWindowsEnterpriseSources(opts); len(missing) != 0 && drift != "bundle" {
-			if windowsEnterpriseStandalone(opts) && len(missing) == len(missingWindowsEnterpriseSources(&windowsEnterpriseLifecycleOptions{})) {
+			if windowsEnterpriseStandalone(opts) && len(missing) == len(missingWindowsEnterpriseSources(&windowsEnterpriseLifecycleOptions{resolvedProfile: opts.resolvedProfile})) {
 				// The installed CLI carries no payload, so it can never pass
 				// the binary flags; naming them sent administrators the wrong
 				// way (GAP-0682). Setup is the command that applies a config.
@@ -5192,7 +5200,25 @@ func missingWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) []
 			missing = append(missing, source.flag)
 		}
 	}
+	// The standalone Claude Code policy starts every hook through the guard
+	// installed beside the hook, so a payload without it is incomplete: the
+	// install would refuse ordinary calls (Secure Client has no guard).
+	if windowsEnterpriseStandalone(opts) && strings.TrimSpace(opts.hookGuardBinary) == "" {
+		missing = append(missing, "--hook-guard-binary")
+	}
 	return missing
+}
+
+// refuseWindowsEnterpriseStandaloneWithoutHookGuard refuses a direct install
+// or upgrade that names no hook guard source before anything is changed. The
+// extracted-payload route passes the sources as flags, and the installer
+// repeats the check for a caller that reaches it without this CLI.
+func refuseWindowsEnterpriseStandaloneWithoutHookGuard(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	if (action != "install" && action != "upgrade") || !windowsEnterpriseStandalone(opts) || strings.TrimSpace(opts.hookGuardBinary) != "" {
+		return nil
+	}
+	return windowsEnterpriseInvalidArguments("%s requires --hook-guard-binary (defenseclaw-hook-guard.exe from the Setup payload): "+
+		"the managed Claude Code hooks start through it, and without it they refuse ordinary calls (nothing was changed)", action)
 }
 
 // windowsBundleRollbackWithoutPayload reports the nested ensure that puts
@@ -5211,6 +5237,7 @@ func windowsEnterpriseKeepsInstalledConfig(opts *windowsEnterpriseLifecycleOptio
 
 func clearWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) {
 	opts.gatewayBinary, opts.acpBinary, opts.hookBinary = "", "", ""
+	opts.hookGuardBinary = ""
 	opts.sensorHelperBinary, opts.cliBinary = "", ""
 	opts.policyCompiler = ""
 	opts.configPath, opts.manifestPath, opts.mode, opts.connector = "", "", "", ""
@@ -5228,6 +5255,7 @@ func defaultWindowsEnterpriseEnsurePayload(opts *windowsEnterpriseLifecycleOptio
 		{&opts.gatewayBinary, "defenseclaw-gateway.exe"},
 		{&opts.acpBinary, "defenseclaw-acp.exe"},
 		{&opts.hookBinary, "defenseclaw-hook.exe"},
+		{&opts.hookGuardBinary, "defenseclaw-hook-guard.exe"},
 		{&opts.sensorHelperBinary, "defenseclaw-sensor-helper.exe"},
 		{&opts.policyCompiler, "policy_compiler.py"},
 		{&opts.cliBinary, "defenseclaw.exe"},
@@ -5274,6 +5302,7 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 		{"gateway", opts.gatewayBinary},
 		{"acp", opts.acpBinary},
 		{"hook", opts.hookBinary},
+		{"hook_guard", opts.hookGuardBinary},
 		{"sensor_helper", opts.sensorHelperBinary},
 		{"compiler", opts.policyCompiler},
 		{"cli", opts.cliBinary},
@@ -5284,6 +5313,11 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 			continue
 		}
 		recorded := strings.ToLower(strings.TrimSpace(metadata.Hashes[source.key]))
+		if source.key == "hook_guard" && recorded == "" {
+			// A deployment from before the guard shipped records none: the
+			// supplied guard is drift until an upgrade installs it.
+			return source.key, nil
+		}
 		if source.key == "compiler" {
 			// Setup always carries the optional Fleet source, including when
 			// Fleet is off. Only a Fleet-enabled target config makes it an

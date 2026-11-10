@@ -470,6 +470,13 @@ type Options struct {
 	// not "gateway unreachable". The Windows standalone hook sets it; Secure
 	// Client keeps its message.
 	ExplainUnenrolledAccount bool
+	// ManagedEnrolledPending marks a Windows standalone refusal of an account
+	// that was enrolled and is pending now (managedEnrollmentPendingReason: its
+	// guardian runtime is revoked, and a disconnected or signed-out session
+	// keeps it so): the refusal then says the agent is blocked until the
+	// account signs in (GAP-1026). A never-enrolled account keeps the
+	// enrollment wait text (GAP-1010). The CLI sets it.
+	ManagedEnrolledPending bool
 	// ManagedGatewayServiceName is the administrator-protected SCM identity
 	// that must own the connected loopback listener before any HTTP bytes are
 	// written. It is ignored outside ManagedEnterprise mode.
@@ -619,6 +626,15 @@ func runHook(ctx context.Context, opts Options) int {
 		resolveManagedStandaloneFailureEvent(&opts, sp)
 		if opts.ExplainUnenrolledAccount && !sp.failOpenOnly &&
 			(reason == managedSIDUnregisteredReason || reason == managedEnrollmentPendingReason) {
+			// While the gateway service is proven stopped nothing enrolls
+			// an account, so the wait text is wrong for a new account and for
+			// an excluded one (its exclusion is read from the gateway). The
+			// call is refused, closed, with the outage text an enrolled
+			// account gets (GAP-1010). Such a failure resolved no gateway
+			// service, so the stopped test reads the standalone one.
+			if stoppedOpts := withStandaloneGatewayService(opts); managedGatewayProvenStopped(stoppedOpts) {
+				return failUnreachable(stoppedOpts, sp, "closed", managedGatewayNotRunningReason)
+			}
 			return failEnrollmentRefusal(opts, sp, reason)
 		}
 		return failUnreachable(
@@ -1412,10 +1428,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		_ = resp.Body.Close()
 	}
 	patchWatch := opts.requestFacts.watch()
-	if patchWatch.Changed() {
+	if patchWatch != nil && !gatewayBlocked(body) && patchWatch.Changed() {
 		// The gateway judged the patch targets the hook read before the
 		// request; one leads elsewhere now. Behind ProtectHome only this hook
-		// can read it again (GAP-0488, GAP-0073).
+		// can read it again (GAP-0488, GAP-0073). A block answer is not
+		// replaced: it already stops the call and names the rule, and a
+		// target that is itself a protected file reads as changed here
+		// (GAP-1007).
 		return failResponse(opts, sp, "closed", "a patch target changed after DefenseClaw reviewed it")
 	}
 	code := sp.decide(opts, body)
@@ -1439,10 +1458,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		}
 	}
 	if opts.oversizedReview && validUniqueGatewayResponse(body) {
-		var verdict struct {
-			Action string `json:"action"`
-		}
-		if json.Unmarshal(body, &verdict) == nil && (verdict.Action == "allow" || verdict.Action == "alert") {
+		if gatewayAllowed(body) {
 			quiet := opts
 			quiet.Stderr = io.Discard
 			logHookFailure(quiet, sp, "stdin body exceeded cap; oversize, command not inspected", "transport", "open", false)
@@ -1490,12 +1506,40 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	return code
 }
 
-// gatewayAllowed reports a gateway answer whose action lets the call run.
-func gatewayAllowed(body []byte) bool {
-	var verdict struct {
-		Action string `json:"action"`
+// gatewayAction reads the action of a gateway answer the way decide does: the
+// exact key "action", trimmed and lower-cased. ambiguous is set when the body
+// is not a unique-key JSON object or carries another key that differs from
+// "action" only in case; such a body is never taken as a block here, so no
+// protected-target check is skipped on a reading the decision does not share.
+func gatewayAction(body []byte) (action string, ambiguous bool) {
+	if !validUniqueGatewayResponse(body) {
+		return "", true
 	}
-	return json.Unmarshal(body, &verdict) == nil && (verdict.Action == "allow" || verdict.Action == "alert")
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil {
+		return "", true
+	}
+	for key := range fields {
+		if key != "action" && strings.EqualFold(key, "action") {
+			ambiguous = true
+		}
+	}
+	action, _ = rawString(fields, "action")
+	return action, ambiguous
+}
+
+// gatewayBlocked reports a gateway answer whose one unambiguous action is a
+// block. Any other action (allow, alert, confirm, none) can let the call run.
+func gatewayBlocked(body []byte) bool {
+	action, ambiguous := gatewayAction(body)
+	return !ambiguous && action == "block"
+}
+
+// gatewayAllowed reports a gateway answer whose action, as decide reads it,
+// lets the call run.
+func gatewayAllowed(body []byte) bool {
+	action, _ := gatewayAction(body)
+	return action == "allow" || action == "alert"
 }
 
 // failAfterErrorStatus fails a call the gateway answered with the error
@@ -3202,6 +3246,20 @@ const unenrolledAccountExplanation = "this account is not enrolled yet; restart 
 	"For Claude Code, the wait starts at its first start if that is later. " +
 	"If this continues, the policy may exclude this account: ask your administrator"
 
+// pendingAccountExplanation is why a Windows standalone account that the
+// machine policy registers but that has no runtime yet is blocked. The guardian
+// publishes the runtime only in the account's own connected session, so a
+// signed-out or disconnected account stays blocked until it signs in or
+// reconnects, also when it was enrolled before (GAP-1026). It leads with the
+// block and the way out within the first 80 characters, and keeps the
+// prerequisites of unenrolledAccountExplanation.
+const pendingAccountExplanation = "this account is not enrolled; blocked until you sign in. " +
+	"A disconnected or signed-out account stays blocked until it signs in or reconnects: " +
+	"DefenseClaw enrolls an account within 5 minutes once you have signed in and the agent is installed " +
+	"(console or Remote Desktop; not SSH, a scheduled task or runas), and only in a connected session. " +
+	"Then restart the agent. For Claude Code, the wait starts at its first start if that is later. " +
+	"If this continues, the policy may exclude this account: ask your administrator"
+
 // failEnrollmentRefusal blocks, like failUnreachable in closed mode, a tool
 // call of an account the administrator has not enrolled (yet) or excludes, or
 // of root under enrollment.root: deny, and says so: the gateway is up, and
@@ -3227,6 +3285,14 @@ func failEnrollmentRefusalOf(opts Options, sp spec, reason string, excluded bool
 	}
 	why := unenrolledAccountExplanation
 	switch reason {
+	case managedEnrollmentPendingReason:
+		// An account that was enrolled and has no runtime now (disconnected or
+		// signed out, its runtime revoked; GAP-1026): the text says the agent
+		// is blocked and what ends that, not only "restart". A never-enrolled
+		// account keeps the enrollment wait text.
+		if opts.ManagedEnrolledPending && !opts.SecureClient {
+			why = pendingAccountExplanation
+		}
 	case managedUIDUnregisteredReason:
 		why = unixUnenrolledAccountExplanation
 		if excluded {
@@ -4178,6 +4244,17 @@ func managedFailClosedText(opts Options, layer, reason string) string {
 	return managedStandaloneFailClosedText(opts.Event, layer, reason)
 }
 
+// withStandaloneGatewayService is opts with the standalone gateway service
+// as the managed gateway service when the call resolved none, as every
+// runtime-state or enrollment refusal does (the service name is the compiled-in
+// standalone one, never read from user-controlled state).
+func withStandaloneGatewayService(opts Options) Options {
+	if strings.TrimSpace(opts.ManagedGatewayServiceName) == "" {
+		opts.ManagedGatewayServiceName = managed.StandaloneWindowsGatewaySvc
+	}
+	return opts
+}
+
 // managedInstallWindowText is what a managed hook says when the gateway is
 // stopped, restarting or silent while an enterprise lifecycle run (a package
 // install or upgrade, ensure, repair or rollback: managedLifecycleActive)
@@ -4200,9 +4277,7 @@ func managedInstallWindowText(opts Options, layer, reason string) string {
 		return ""
 	}
 	if managedLifecycleRuntimeStateReason(reason) {
-		if strings.TrimSpace(opts.ManagedGatewayServiceName) == "" {
-			opts.ManagedGatewayServiceName = managed.StandaloneWindowsGatewaySvc
-		}
+		opts = withStandaloneGatewayService(opts)
 	} else if !managedOutageShapedReason(reason) {
 		return ""
 	}

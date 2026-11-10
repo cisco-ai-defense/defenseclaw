@@ -223,6 +223,7 @@ switch ($Case) {
         $oldJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"timed out waiting 10s for Codex machine policy lock","results":[]}'
         $otherJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"Codex machine policy is not clean after teardown rollback","results":[]}'
         $joinedJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"restore pre-rollback Claude policy after Codex failure: access denied\ntimed out waiting 10s for Codex machine policy lock","results":[]}'
+        $trailingJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"timed out waiting 10s for Codex machine policy lock; compensation of the Claude policy then also failed","results":[]}'
         $lockViolationJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"open Codex machine policy lock: The process cannot access the file because another process has locked a portion of the file.","results":[]}'
         function Try-Rollback([string]$Json, [bool]$Flag) {
             $script:probe = [pscustomobject]@{ exit_code = 1; output = @($Json) }
@@ -238,6 +239,7 @@ switch ($Case) {
         $out.flagOff = Try-Rollback $busyJson $false
         $out.other = Try-Rollback $otherJson $true
         $out.joined = Try-Rollback $joinedJson $true
+        $out.trailing = Try-Rollback $trailingJson $true
         $out.lockViolation = Try-Rollback $lockViolationJson $true
     }
     'even' {
@@ -424,7 +426,7 @@ def test_the_teardown_rollback_defers_a_busy_codex_writer_only_where_the_rollbac
     assert result["lockViolation"]["deferred"] is True and result["lockViolation"]["threw"] == "", result
     # A busy writer next to another failure (a compensation that failed too) is not a writer-only
     # failure: thrown as before, nothing deferred.
-    for key in ("flagOff", "other", "joined"):
+    for key in ("flagOff", "other", "joined", "trailing"):
         got = result[key]
         assert got["threw"].startswith("managed-hook teardown rollback failed: "), (key, result)
         assert got["deferred"] is False and got["holds"] == [], (key, result)

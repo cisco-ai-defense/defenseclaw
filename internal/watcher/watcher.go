@@ -878,7 +878,7 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 	}
 	snap, err := w.snapshotForEvent(evt)
 	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline) &&
-		!w.mcpBaselineLapsed(evt, baseline)) {
+		!w.mcpBaselineLapsed(evt, baseline) && !w.mcpFailureAllowed(evt, baseline)) {
 		return
 	}
 	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil), "watch")
@@ -1039,6 +1039,9 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 		} else if w.mcpScanRetryDue(path, baseline) {
 			// Its scan failed: tried again with backoff, not every poll
 			// (rel-1-0-6:GAP-0258).
+			added = append(added, server.Name)
+		} else if w.mcpFailureAllowed(InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector}, baseline) {
+			// An allow written after the failure admits it now.
 			added = append(added, server.Name)
 		}
 	}

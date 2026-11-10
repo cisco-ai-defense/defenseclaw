@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
@@ -86,6 +87,7 @@ func (f b36ManagedHookFixture) serve(call *hookCall) (string, string) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = call.connector
+	cfg.Guardrail.RulePackDir = f.packDir
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(call.payload)))
 	if call.managed && call.header != "" {
@@ -103,6 +105,8 @@ func (f b36ManagedHookFixture) serve(call *hookCall) (string, string) {
 	switch {
 	case strings.HasPrefix(body, `{"action":"block"`):
 		return "block", body
+	case strings.HasPrefix(body, `{"action":"alert"`):
+		return "alert", body
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow", body
 	}
@@ -157,6 +161,7 @@ func TestGAP0151LongOperandListKeepsProtectedTarget(t *testing.T) {
 	type row struct {
 		name, command string
 		protected     bool
+		over          bool // past actionfacts.MaxOperandsPerCall
 	}
 	sizes := []int{100, 255, 256, 500, 511, 512, 513, 600, 2000}
 	if hookAnswerRaceBuild {
@@ -170,7 +175,8 @@ func TestGAP0151LongOperandListKeepsProtectedTarget(t *testing.T) {
 					continue
 				}
 				rows = append(rows, row{fmt.Sprintf("n=%d %s %s", n, position, protected),
-					"cd ordinary && touch " + gap0151Operands(n, position, protected), position != "none"})
+					"cd ordinary && touch " + gap0151Operands(n, position, protected), position != "none",
+					n > actionfacts.MaxOperandsPerCall})
 			}
 		}
 	}
@@ -195,6 +201,15 @@ func TestGAP0151LongOperandListKeepsProtectedTarget(t *testing.T) {
 		want := "allow"
 		if rows[i/4].protected {
 			want = "block"
+		}
+		if want == "allow" && rows[i/4].over {
+			// Past the operand bound the ordinary twin is unresolved: the
+			// default tier allows it with the alert that names the bound
+			// (GAP-0943).
+			if !strings.HasPrefix(call.body, `{"action":"alert"`) || !strings.Contains(call.body, operandBoundRuleID) {
+				t.Errorf("%s: want an allowing alert %s; verdict %s", call.name, operandBoundRuleID, call.verdict)
+			}
+			continue
 		}
 		if call.verdict != want {
 			t.Errorf("%s: verdict %s, want %s", call.name, call.verdict, want)

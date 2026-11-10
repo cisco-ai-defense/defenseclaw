@@ -515,10 +515,9 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not protect $stage" }
     & icacls.exe $stage /setowner '*S-1-5-32-544' | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $stage" }
-    # A standalone Windows host without a policy_dir keeps the embedded rule
-    # packs only while the config names none: rule_pack: default would select
-    # the default pack of a policy_dir this host does not have, and the Setup
-    # refuses it ("policy_dir is not set").
+    # The config names no rule_pack, so the embedded default pack applies;
+    # strict and permissive need a policy_dir that holds their pack folder
+    # (GAP-1041).
     $adminConfigVersion = if ($UpgradeFrom) { Get-AdminConfigVersion $PreviousVersion } else { 9 }
     $configText = @(
         "config_version: $adminConfigVersion"

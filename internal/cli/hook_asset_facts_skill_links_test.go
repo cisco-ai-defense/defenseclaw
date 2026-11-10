@@ -12,13 +12,17 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // The standalone hook runs as the user and follows a link the gateway may not
@@ -123,10 +127,16 @@ func TestHookAssetFactsReportsALongLinkedSkillFolderPath(t *testing.T) {
 	}
 }
 
-// A linked skill folder whose name is space is reported by its own path and
-// with the name its SKILL.md declares: cleaning must not turn the path into
-// its skill root or drop the claim.
+// A linked skill folder whose name is only whitespace is reported by its own
+// path and with the name its SKILL.md declares: cleaning must not turn the path
+// into its skill root or drop the claim. The names are the ones the file system
+// holds: a space, which Windows cannot hold (Win32 drops a trailing space from a
+// name), and the no-break and ideographic spaces, which every system holds.
 func TestHookAssetFactsReportsASpaceNamedLinkedSkillFolder(t *testing.T) {
+	names := []string{"\u00a0", "\u3000"}
+	if runtime.GOOS != "windows" {
+		names = append(names, " ")
+	}
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -138,34 +148,42 @@ func TestHookAssetFactsReportsASpaceNamedLinkedSkillFolder(t *testing.T) {
 	if err := os.MkdirAll(proj, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for name, declared := range map[string]string{" ": "listed-name", "ordinary": "ordinary-skill"} {
+	declaredOf := map[string]string{"ordinary": "ordinary-skill"}
+	for i, name := range names {
+		declaredOf[name] = fmt.Sprintf("listed-name-%d", i)
+	}
+	var command []string
+	for name, declared := range declaredOf {
 		dir := filepath.Join(root, name)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Skipf("cannot make this folder name here: %v", err)
+			t.Fatalf("cannot make the folder %q: %v", name, err)
 		}
 		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: "+declared+"\n---\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(dir, filepath.Join(proj, "lnk-"+strings.TrimSpace(name)+"x")); err != nil {
+		link := "lnk-" + declared
+		if err := os.Symlink(dir, filepath.Join(proj, link)); err != nil {
 			t.Skipf("cannot create a link here: %v", err)
 		}
+		command = append(command, link+"/SKILL.md")
 	}
 	raw, err := json.Marshal(map[string]any{
-		"tool_name": "Bash", "cwd": proj, "tool_input": map[string]any{"command": "cat lnk-x/SKILL.md lnk-ordinaryx/SKILL.md"},
+		"tool_name": "Bash", "cwd": proj, "tool_input": map[string]any{"command": "cat " + strings.Join(command, " ")},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	facts, _ := assetfacts.Decode(hookAssetFacts("claudecode", raw))
-	spaced, ordinary := filepath.Join(root, " "), filepath.Join(root, "ordinary")
-	if len(facts.SkillLinks) != 2 || !slices.Contains(facts.SkillLinks, spaced) || !slices.Contains(facts.SkillLinks, ordinary) || facts.SkillLinksTruncated {
-		t.Fatalf("SkillLinks = %q truncated=%t, want %q and %q", facts.SkillLinks, facts.SkillLinksTruncated, spaced, ordinary)
+	if len(facts.SkillLinks) != len(declaredOf) || facts.SkillLinksTruncated || facts.SkillsTruncated {
+		t.Fatalf("SkillLinks = %q links_truncated=%t skills_truncated=%t, want one per folder and no signal", facts.SkillLinks, facts.SkillLinksTruncated, facts.SkillsTruncated)
 	}
-	if got := facts.DeclaredFor(" "); len(got) != 1 || got[0] != "listed-name" {
-		t.Fatalf("DeclaredFor(space) = %q, want the declared name", got)
-	}
-	if got := facts.DeclaredFor("ordinary"); len(got) != 1 || got[0] != "ordinary-skill" {
-		t.Fatalf("DeclaredFor(ordinary) = %q, want its declared name", got)
+	for name, declared := range declaredOf {
+		if !slices.Contains(facts.SkillLinks, filepath.Join(root, name)) {
+			t.Errorf("SkillLinks = %q, want %q", facts.SkillLinks, filepath.Join(root, name))
+		}
+		if got := facts.DeclaredFor(name); len(got) != 1 || got[0] != declared {
+			t.Errorf("DeclaredFor(%q) = %q, want %q", name, got, declared)
+		}
 	}
 }
 
@@ -206,5 +224,68 @@ func TestHookAssetFactsReportsATabNamedLinkedSkillFolder(t *testing.T) {
 	}
 	if got := facts.DeclaredFor("ordinary\tcopy"); len(got) != 1 || got[0] != "ordinary-skill" {
 		t.Fatalf("DeclaredFor(tab name) = %q, want its declared name", got)
+	}
+}
+
+// A link on a network share that answers is followed and the folder it leads to
+// is reported; when shares that do not answer have spent the wait the hook call
+// has for shares before a share that would have answered is asked, the link
+// there is not followed and the claim says so, so the gateway judges the call by
+// its policy tier instead of taking the folder for an ordinary one.
+func TestHookAssetFactsReportsALinkWalkThatAShareCutShort(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	held := filepath.Join(home, ".claude", "skills", "held")
+	live := filepath.Join(home, "live-share")
+	dead := []string{filepath.Join(home, "dead-share-1"), filepath.Join(home, "dead-share-2")}
+	for _, dir := range append([]string{held, live}, dead...) {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(held, filepath.Join(live, "lnk-held")); err != nil {
+		t.Skipf("cannot create a link here: %v", err)
+	}
+	release := make(chan struct{})
+	restore := hookpaths.OverrideNetworkSharesForTest(func(path string) string {
+		for _, root := range append([]string{live}, dead...) {
+			if path == root || strings.HasPrefix(path, root+string(filepath.Separator)) {
+				return root
+			}
+		}
+		return ""
+	}, func(root string) {
+		if strings.TrimRight(root, string(filepath.Separator)) == live {
+			time.Sleep(600 * time.Millisecond)
+			return
+		}
+		<-release
+	})
+	t.Cleanup(func() {
+		close(release)
+		restore()
+	})
+	facts := func(command string) assetfacts.Facts {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": home, "tool_input": map[string]any{"command": command}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, _ := assetfacts.Decode(hookAssetFacts("claudecode", raw))
+		return decoded
+	}
+	link := filepath.Join(live, "lnk-held", "SKILL.md")
+	// The share was asked by no call yet: this one is cut short, the next finds
+	// the answer the share gave.
+	got := facts("cat " + filepath.Join(dead[0], "a") + " " + filepath.Join(dead[1], "a") + " " + link)
+	if len(got.SkillLinks) != 0 || !got.SkillLinksUnproven {
+		t.Errorf("a link on a share the wait was spent before: SkillLinks = %q unproven=%t, want none and the signal", got.SkillLinks, got.SkillLinksUnproven)
+	}
+	if got = facts("cat " + link); !slices.Equal(got.SkillLinks, []string{held}) || got.SkillLinksUnproven {
+		t.Errorf("a link on an answering share: SkillLinks = %q unproven=%t, want [%s] and no signal", got.SkillLinks, got.SkillLinksUnproven, held)
 	}
 }

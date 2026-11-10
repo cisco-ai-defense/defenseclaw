@@ -299,7 +299,7 @@ func (a *APIServer) hookDeliveredPersistenceContext(ctx context.Context, receipt
 		return ctx, nil
 	}
 	cfg := a.decisionConfig(ctx)
-	if cfg == nil || cfg.SecureClientIntegration() || cfg.DeploymentMode != "per_user" {
+	if cfg == nil || cfg.SecureClientIntegration() || !perUserHookInstall(cfg) {
 		return ctx, nil
 	}
 	durableCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -1537,18 +1537,12 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	delivered bool,
 ) hookFinalizationResult {
 	receipted, _ := ctx.Value(hookDeliveryReceiptContextKey{}).(bool)
-	if client, ok := ctx.Value(hookClientContextKey{}).(context.Context); ok && client.Err() != nil && resp.Action != "block" &&
-		resp.Action != hookActionUnconfirmed && !receipted {
-		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-			failed := a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, req.Payload, hookCheckFailure{
-				base:  agentHookResponse{Severity: "WARN", Reason: "hook client disconnected before the gateway decision was delivered"},
-				cause: "because the hook client disconnected before it received the gateway decision",
-			})
-			if failed.Action == "block" {
-				failed.EvaluationID = resp.EvaluationID
-				resp = failed
-			}
-		}
+	// clientLeft: a script caller that left without a delivery receipt. No
+	// answer reaches it, so what is recorded is only what the gateway can prove.
+	client, hasClient := ctx.Value(hookClientContextKey{}).(context.Context)
+	clientLeft := hasClient && client.Err() != nil && !receipted
+	if clientLeft && resp.Action != hookActionUnconfirmed {
+		resp = a.clientLeftHookDecision(ctx, connectorName, req, rawBody, resp)
 	}
 	// Treat a block response as enforced unless identity stamping proves
 	// otherwise. If identity stamping itself panics, notification stays
@@ -1703,7 +1697,15 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			// report a retroactive block the agent did not receive (s2-obs). An
 			// answer already on the wire (delivered) is never replaced either.
 			if !delivered && !recoverable && req.pendingOccurrenceID == "" {
-				adjusted, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+				if !clientLeft || resp.Action != hookActionUnconfirmed {
+					// An unconfirmed call whose client left stays unconfirmed:
+					// an audit fault must not turn a proposal nobody delivered
+					// into a block (GAP-1028, GAP-1031).
+					adjusted, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+				}
+				// The answer goes out with no row; keep the call's record
+				// outside the store for the failure report (GAP-1031).
+				a.recordUnauditedHookCall(connectorName, req, adjusted)
 			}
 			resp = adjusted
 			env.adoptVerdict(resp)
@@ -4329,9 +4331,7 @@ func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHook
 		return decision, true
 	}
 	if published {
-		if decision, refused := a.mcpAdmissionPendingDecision(ctx, req.ConnectorName, req.HookEventName, probe); refused {
-			return decision, true
-		}
+		return a.mcpAdmissionAndAssetDecision(ctx, req.ConnectorName, req.HookEventName, probe)
 	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 }
