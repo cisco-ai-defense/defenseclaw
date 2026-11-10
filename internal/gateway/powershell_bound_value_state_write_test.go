@@ -31,19 +31,31 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 	pwsh := func(body string) string {
 		return `"C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile -Command ` + "'" + body + "'"
 	}
-	// alternatives binds $p to n ordinary files named for DefenseClaw, one per
-	// branch of an if / elseif chain, and to last in the else branch.
-	alternatives := func(n int, last string) string {
+	// alternatives binds $p to ordinary files named for DefenseClaw, one per
+	// branch of an if / elseif chain of n branches (the state file in branch
+	// protectedAt when it is not -1), and to last in the else branch; it
+	// writes $p, then runs extra.
+	alternatives := func(n int, last string, protectedAt int, extra string) string {
 		var chain strings.Builder
 		for i := 0; i < n; i++ {
 			keyword := "if"
 			if i > 0 {
 				keyword = " elseif"
 			}
-			fmt.Fprintf(&chain, `%s ($c%d) { $p = 'C:\Users\Alice\project\defenseclaw_note%d.txt' }`, keyword, i, i)
+			value := fmt.Sprintf(`C:\Users\Alice\project\defenseclaw_note%d.txt`, i)
+			if i == protectedAt {
+				value = state
+			}
+			fmt.Fprintf(&chain, `%s ($c%d) { $p = '%s' }`, keyword, i, value)
 		}
-		return `$p = '` + project + `'; ` + chain.String() + ` else { $p = '` + last + `' }; [IO.File]::WriteAllText($p, 'x')`
+		return `$p = '` + project + `'; ` + chain.String() + ` else { $p = '` + last + `' }; [IO.File]::WriteAllText($p, 'x')` + extra
 	}
+	const ordinaryLast = `C:\Users\Alice\project\defenseclaw_last.txt`
+	const (
+		readState      = `; [IO.File]::ReadAllText('` + state + `')`
+		unusedBinding  = `; $q = '` + state + `'`
+		stateAsContent = `; $s = '` + state + `'; Set-Content -LiteralPath ` + project + ` -Value $s`
+	)
 	for _, tc := range []struct {
 		name, command string
 		block         bool
@@ -85,11 +97,32 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 		{"patch flag on an unrelated program", `$patch = "` + envelope + `"; & 'C:\Windows\System32\whoami.exe' --codex-run-as-apply-patch $patch`, false},
 		{"patch flag echoed by cmd", `$patch = "` + envelope + `"; & 'C:\Windows\System32\cmd.exe' /c echo --codex-run-as-apply-patch $patch`, false},
 		{"patch run by codex behind cmd", `$patch = "` + envelope + `"; & 'C:\Windows\System32\cmd.exe' /c 'C:\dc\codex.exe' --codex-run-as-apply-patch $patch`, true},
+		{"patch run by quoted codex and flag behind cmd", `$patch = "` + envelope + `"; & 'C:\Windows\System32\cmd.exe' /c 'C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex with a spaced path behind cmd", `$patch = "` + envelope + `"; & cmd.exe /c '"C:\Program Files\dc\codex.exe" --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex started by cmd start", `$patch = "` + envelope + `"; & cmd.exe /c 'start /b C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex in one expanded cmd command string", `$patch = "` + envelope + `"; & cmd.exe /c "C:\dc\codex.exe --codex-run-as-apply-patch $patch"`, true},
+		{"patch run by codex behind cmd start with a title", `$patch = "` + envelope + `"; & cmd.exe /d /s /c 'start /b "" C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex behind cmd call", `$patch = "` + envelope + `"; & cmd.exe /c 'call C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex after another cmd command", `$patch = "` + envelope + `"; & cmd.exe /c 'echo hi & C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex with a caret in its name", `$patch = "` + envelope + `"; & cmd.exe /c 'c^odex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"patch run by codex behind Start-Process cmd", `$patch = "` + envelope + `"; Start-Process cmd -ArgumentList '/c', 'C:\dc\codex.exe --codex-run-as-apply-patch', $patch`, true},
+		{"patch run by codex behind Start-Process -FilePath", `$patch = "` + envelope + `"; Start-Process -FilePath 'C:\dc\codex.exe' -ArgumentList '--codex-run-as-apply-patch', $patch`, true},
+		{"cmd echoes a quoted codex name and the flag", `$patch = "` + envelope + `"; & cmd.exe /c echo 'C:\dc\codex.exe' --codex-run-as-apply-patch $patch`, false},
+		{"cmd echoes one quoted codex command line", `$patch = "` + envelope + `"; & cmd.exe /c 'echo C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"Start-Process of an unrelated program lists codex and the flag", `$patch = "` + envelope + `"; Start-Process whoami.exe -ArgumentList 'C:\dc\codex.exe', '--codex-run-as-apply-patch', $patch`, false},
 		{"patch run by codex behind Start-Process", `$patch = "` + envelope + `"; Start-Process 'C:\dc\codex.exe' -ArgumentList '--codex-run-as-apply-patch', $patch`, true},
-		{"eight alternatives, state last", alternatives(7, state), true},
-		{"nine alternatives, state last", alternatives(8, state), true},
-		{"twelve alternatives, state last", alternatives(11, state), true},
-		{"eight ordinary alternatives", alternatives(7, `C:\Users\Alice\project\defenseclaw_last.txt`), false},
+		{"eight alternatives, state last", alternatives(7, state, -1, ""), true},
+		{"nine alternatives, state last", alternatives(8, state, -1, ""), true},
+		{"twelve alternatives, state last", alternatives(11, state, -1, ""), true},
+		{"eight ordinary alternatives", alternatives(7, ordinaryLast, -1, ""), false},
+		{"thirty alternatives, state last", alternatives(30, state, -1, ""), true},
+		{"state is the ninth branch of eleven", alternatives(10, ordinaryLast, 8, ""), true},
+		{"nine alternatives, state last, read elsewhere", alternatives(8, state, -1, readState), true},
+		{"nine ordinary alternatives", alternatives(8, ordinaryLast, -1, ""), false},
+		{"nine ordinary alternatives, state read elsewhere", alternatives(8, ordinaryLast, -1, readState), false},
+		{"nine ordinary alternatives, state bound and unused", alternatives(8, ordinaryLast, -1, unusedBinding), false},
+		{"nine ordinary alternatives, state as written text", alternatives(8, ordinaryLast, -1, stateAsContent), false},
+		{"twenty ordinary alternatives, state read elsewhere", alternatives(19, ordinaryLast, -1, readState), false},
 		{"values carried around a loop", `$a = '` + state + `'; $b = '` + project + `defenseclaw1'; $c = '` + project + `defenseclaw2'; $d = '` + project + `defenseclaw3'; foreach ($i in 1..4) { [IO.File]::WriteAllText($d, 'x'); $d = $c; $c = $b; $b = $a }`, true},
 		{"bound read", `$p = '` + state + `'; [IO.File]::ReadAllText($p)`, false},
 		{"bound read in pwsh", pwsh(`$p = ''` + state + `''; if (Test-Path -LiteralPath $p) { Get-Content -LiteralPath $p -Raw }`), false},
