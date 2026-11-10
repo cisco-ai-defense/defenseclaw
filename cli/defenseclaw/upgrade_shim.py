@@ -397,7 +397,7 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     # Only a downgrade to a release that keeps the newer hook helper waits
     # for its installer and drops the helper (rel-1-0-4:GAP-2503).
     newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
-    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer)
+    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer, version=version)
 
 
 def _refuse_unguarding_downgrade(version: str) -> None:
@@ -744,6 +744,78 @@ def _terminal_command(script: str, ps_args: list[str]) -> str:
     return " ".join(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f'"{script}"', *ps_args])
 
 
+_RECOVERY_COMPANIONS = ("checksums.txt", "checksums.txt.bundle")
+
+
+def _stage_recovery_copy(path: str) -> tuple[str, str] | None:
+    """Copy the verified installer and its checksum files to a directory only the shim owns (GAP-1011).
+
+    install.ps1 deletes the temporary directory it runs from (a leaf named
+    defenseclaw-upgrade-* or defenseclaw-rollback-*) before the process ends,
+    so a command printed for a file in that directory names a file that is
+    gone. This directory has a different leaf name, which that cleanup never
+    matches. Returns (installer copy, SHA-256 of the verified bytes), or
+    ``None`` when the copy could not be made.
+    """
+    directory: str | None = None
+    try:
+        directory = tempfile.mkdtemp(prefix="defenseclaw-recovery-")
+        with open(path, "rb") as stream:
+            body = stream.read()
+        copy = os.path.join(directory, os.path.basename(path))
+        with open(copy, "xb") as target:
+            target.write(body)
+        for name in _RECOVERY_COMPANIONS:
+            try:
+                shutil.copyfile(os.path.join(os.path.dirname(path), name), os.path.join(directory, name))
+            except FileNotFoundError:
+                continue
+    except OSError:
+        if directory:
+            shutil.rmtree(directory, ignore_errors=True)
+        return None
+    return copy, hashlib.sha256(body).hexdigest()
+
+
+def _drop_recovery_copy(recovery: tuple[str, str] | None) -> None:
+    if recovery:
+        shutil.rmtree(os.path.dirname(recovery[0]), ignore_errors=True)
+
+
+def _recovery_copy_verifies(recovery: tuple[str, str] | None) -> bool:
+    if not recovery:
+        return False
+    try:
+        with open(recovery[0], "rb") as stream:
+            return hashlib.sha256(stream.read()).hexdigest() == recovery[1]
+    except OSError:
+        return False
+
+
+def _release_one_liner(ps_args: list[str], version: str | None) -> str:
+    """The release installer one-liner for the same request, for when no verified local copy remains."""
+    args: list[str] = []
+    skip = False
+    for arg in ps_args:
+        if skip:
+            skip = False
+        elif arg == "-Local":
+            skip = True  # a local test directory means nothing on another machine
+        else:
+            args.append(arg)
+    try:
+        source = release_source()
+    except ShimUsageError:
+        source = OFFICIAL_SOURCE
+    if version:
+        base = f"{source}/releases/download/{version}"
+        if "-Version" not in args:
+            args = ["-Version", version, *args]
+    else:
+        base = f"{source}/releases/latest/download"
+    return " ".join([f"& ([scriptblock]::Create((irm {base}/install.ps1)))", *args])
+
+
 def _install_logs(logs: str) -> dict[str, int]:
     """The install logs (name -> size) in *logs*."""
     sizes: dict[str, int] = {}
@@ -825,7 +897,9 @@ def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: dict[s
         time.sleep(_INSTALLER_LOG_POLL)
 
 
-def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | None = None) -> int:
+def _run_installer(
+    path: str, args: list[str], workdir: str, *, newer: str | None = None, version: str | None = None
+) -> int:
     # The installer downloads the release assets: hand it update.source
     # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
     configured = _configured_update_source()
@@ -862,6 +936,9 @@ def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | Non
         home = _data_home()
         logs = os.path.join(home, "logs")
         known = _install_logs(logs)
+        # The installer deletes the directory it runs from; keep a verified
+        # copy elsewhere for the recovery command of a failed run.
+        recovery = _stage_recovery_copy(path)
         try:
             proc = subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, *ps_args],
@@ -871,6 +948,7 @@ def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | Non
             )
         except OSError as exc:
             shutil.rmtree(workdir, ignore_errors=True)
+            _drop_recovery_copy(recovery)
             raise ShimError(f"could not start {powershell}: {exc}") from None
         # A started process is not a running install (GAP-1011): the installer
         # opens its log only after it has the install lock, and an installer
@@ -878,24 +956,39 @@ def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | Non
         print(f"  → Waiting for the installer to open its log (up to {int(_INSTALLER_LOG_WAIT)} s)...", flush=True)
         opened, rc = _await_installer_log(proc, logs, known)
         if opened:
+            _drop_recovery_copy(recovery)
             print("  → The installer continues in a new window, which shows the result when it ends.")
             print(f"    Its log is saved in {logs} (install-<time>.log).")
         elif rc == 0:
             shutil.rmtree(workdir, ignore_errors=True)
+            _drop_recovery_copy(recovery)
             print("  → The installer ran in its own window and ended with exit code 0 without opening an install log.")
         elif rc is not None:
             # No log is not proof that nothing changed: the installer goes on
             # without a transcript when it cannot write one. Keep the staged
             # installer, so the result can be read in this terminal.
+            shutil.rmtree(workdir, ignore_errors=True)
+            if recovery and _recovery_copy_verifies(recovery):
+                route = (
+                    "run the kept installer copy, verified against SHA-256 "
+                    f"{recovery[1]}, in this terminal:\n      {_terminal_command(recovery[0], ps_args)}\n"
+                )
+            else:
+                _drop_recovery_copy(recovery)
+                route = (
+                    "run the release installer in this terminal (the kept copy is not available):\n"
+                    f"      {_release_one_liner(ps_args, version)}\n"
+                )
             raise ShimOutcomeUnknownError(
                 f"the installer ended with exit code {rc} before it opened its log. It may have stopped before "
                 "changing anything, or later if it could not write its log, so the result is not known; the "
                 "reason was shown only in its window, which has closed. Check the install with: "
-                "defenseclaw --version and defenseclaw doctor. To read the result, run the kept installer "
-                f"in this terminal:\n      {_terminal_command(path, ps_args)}\n"
+                "defenseclaw --version and defenseclaw doctor. To read the result, "
+                f"{route}"
                 "    or run this command again; the installer first restores an install it was replacing."
             )
         else:
+            _drop_recovery_copy(recovery)
             raise ShimOutcomeUnknownError(
                 f"the installer is still running and has not opened its log after {int(_INSTALLER_LOG_WAIT)} "
                 "seconds, so the start is not confirmed: it may wait on an earlier uninstall's cleanup or another "

@@ -21,6 +21,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -638,6 +640,117 @@ def test_windows_installer_that_fails_without_a_log_does_not_claim_that_nothing_
     command = next(line.strip() for line in err.splitlines() if line.strip().startswith("powershell "))
     assert command.endswith("-Rollback -Yes"), command
     assert os.path.isfile(command.split('"')[1])
+
+
+_INSTALLER_CLEANUP_LEAF = re.compile(r"^defenseclaw-(upgrade|rollback)-[a-z0-9_]+$")
+
+
+def _installer_that_cleans_up_then_fails(created: list[str]) -> object:
+    """A Popen stand-in whose child does what install.ps1 does in its finally block, then ends with exit 1."""
+
+    def popen(argv: list[str], **kwargs: object) -> types.SimpleNamespace:
+        script = argv[argv.index("-File") + 1]
+        launch_dir = os.path.dirname(script)
+        created.append(launch_dir)
+
+        def poll() -> int:
+            names = set(os.listdir(launch_dir)) if os.path.isdir(launch_dir) else set()
+            if _INSTALLER_CLEANUP_LEAF.match(os.path.basename(launch_dir)) and names <= {
+                "install.ps1",
+                "checksums.txt",
+                "checksums.txt.bundle",
+            }:
+                shutil.rmtree(launch_dir)
+            return 1
+
+        return _child(poll)
+
+    return popen
+
+
+def _recovery_dirs(home: Path) -> list[Path]:
+    return list((home.parent.parent / "tmp").glob("defenseclaw-recovery-*"))
+
+
+def _printed_target(err: str) -> str:
+    command = next(line.strip() for line in err.splitlines() if line.strip().startswith("powershell "))
+    return command.split('"')[1]
+
+
+def test_windows_no_log_failure_names_a_verified_installer_that_outlives_the_installer_cleanup(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # install.ps1 deletes the temporary directory it runs from before it
+    # exits; the command in the message must name a copy that survives that.
+    _windows_rollback_with_desktop(home, monkeypatch)
+    created: list[str] = []
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", _installer_that_cleans_up_then_fails(created))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    err = capsys.readouterr().err
+    assert created and not os.path.exists(created[0]), "the fake child did not perform the installer cleanup"
+    target = _printed_target(err)
+    assert os.path.isfile(target), err
+    assert not _INSTALLER_CLEANUP_LEAF.match(os.path.basename(os.path.dirname(target)))
+    saved = (home / "installer" / "install.ps1").read_bytes()
+    assert Path(target).read_bytes() == saved
+    assert hashlib.sha256(saved).hexdigest() in err
+
+
+@pytest.mark.parametrize("damage", ["missing", "changed"])
+def test_windows_no_log_failure_prints_the_release_command_when_the_recovery_copy_does_not_verify(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], damage: str
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+    created: list[str] = []
+    cleanup = _installer_that_cleans_up_then_fails(created)
+
+    def popen(argv: list[str], **kwargs: object) -> types.SimpleNamespace:
+        child = cleanup(argv, **kwargs)
+        recovery = _recovery_dirs(home)[0]
+        if damage == "missing":
+            shutil.rmtree(recovery)
+        else:
+            (recovery / "install.ps1").write_bytes(b"changed")
+        return child
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", popen)
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    err = capsys.readouterr().err
+    assert "powershell -NoProfile" not in err, err
+    assert "releases/latest/download/install.ps1" in err and "-Rollback -Yes" in err, err
+    assert _recovery_dirs(home) == []
+
+
+def test_windows_upgrade_no_log_failure_release_command_pins_the_version(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command = upgrade_shim._release_one_liner(["-Yes", "-Local", "C:/dir"], "1.0.9")
+    assert "releases/download/1.0.9/install.ps1" in command
+    assert command.endswith("-Version 1.0.9 -Yes"), command
+    assert "-Local" not in command and "C:/dir" not in command
+
+
+@pytest.mark.parametrize("ending", ["exit-0-no-log", "log-opened"])
+def test_windows_recovery_copy_is_removed_when_the_installer_ran(
+    home: Path, monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+
+    def poll() -> int:
+        if ending == "log-opened":
+            _write_transcript(home)
+            return 1
+        return 0
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+    assert _recovery_dirs(home) == []
+
 
 
 def test_windows_installer_that_appends_beyond_the_first_chunk_of_a_same_second_log_has_opened_its_log(
