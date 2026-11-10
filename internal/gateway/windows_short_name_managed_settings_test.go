@@ -9,7 +9,7 @@ import "testing"
 // folder is the same file, so a file-tool write to it is self-protection in
 // every profile. The alias exists only on a volume that makes short names, so
 // on Windows the names come from the file system (the test makes the files,
-// reads their short names and skips where the volume has none); elsewhere no
+// reads their short names, asserts every one that exists, and skips only where the volume has none at all); elsewhere no
 // volume can say and the shape of the name decides.
 func TestWindowsShortNamesOfManagedAgentSettingsStayBlocked(t *testing.T) {
 	const home = `C:\Users\vn`
