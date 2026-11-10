@@ -139,6 +139,13 @@ func renderClaudeHigherPrecedence(opts Options, policy config.ResolvedConnectorP
 func claudeHandlerIsOwned(opts Options, raw any) bool {
 	command := stringField(raw, "command")
 	if opts.goos() == "windows" {
+		// Windows managed Setup registers the launcher through the guarded
+		// cmd.exe form; that is the current managed form on that host.
+		if fields := claudeHandlerFields(raw); fields != nil {
+			if launcher, _, guarded := connector.ClaudeCodeManagedGuardLauncher(fields); guarded {
+				return strings.EqualFold(launcher, opts.HookBinary)
+			}
+		}
 		if !strings.EqualFold(command, opts.HookBinary) {
 			return false
 		}
@@ -374,17 +381,23 @@ func claudeMatcherMatchesAll(matcher string) bool {
 	return err == nil && compiled.MatchString("")
 }
 
+// claudeHandlerFields is the field map of a decoded handler, or nil.
+func claudeHandlerFields(raw any) map[string]any {
+	switch v := raw.(type) {
+	case *object:
+		return v.values
+	case map[string]any:
+		return v
+	}
+	return nil
+}
+
 // claudeHandlerRuns reports whether Claude Code runs a handler as a command
 // that can decide the call: type "command", no "if" filter, and no
 // background run unless the contract runs the group in the background.
 func claudeHandlerRuns(raw any, group connector.ManagedHookGroup) bool {
-	var fields map[string]any
-	switch v := raw.(type) {
-	case *object:
-		fields = v.values
-	case map[string]any:
-		fields = v
-	default:
+	fields := claudeHandlerFields(raw)
+	if fields == nil {
 		return false
 	}
 	if fields["type"] != "command" {

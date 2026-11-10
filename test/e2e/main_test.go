@@ -6,6 +6,8 @@ package e2e
 import (
 	"os"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // TestMain lets native helper executables copied from this test binary handle
@@ -15,5 +17,9 @@ func TestMain(m *testing.M) {
 	if handled, exitCode := runCodexPolicyFixtureIfRequested(); handled {
 		os.Exit(exitCode)
 	}
-	os.Exit(m.Run())
+	// Setup for Claude Code on Windows needs the hook guard a packaged install has.
+	restoreChain := connector.UseClaudeCodeChainFixtureForTests()
+	code := m.Run()
+	restoreChain()
+	os.Exit(code)
 }

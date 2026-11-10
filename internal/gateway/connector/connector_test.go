@@ -2738,7 +2738,7 @@ func TestVerifyClaudeCodeHookMatrixRejectsAsyncAliasesOnEnforcingEvents(t *testi
 			hooks := candidate["hooks"].(map[string]interface{})
 			handler := hooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
 			handler[alias] = true
-			err := verifyClaudeCodeHookMatrix(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"))
+			err := verifyClaudeCodeHookMatrixForSetup(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"), opts)
 			if err == nil || !strings.Contains(err.Error(), "asynchronous") {
 				t.Fatalf("verification error = %v, want asynchronous-enforcement rejection", err)
 			}
@@ -2752,7 +2752,7 @@ func TestVerifyClaudeCodeHookMatrixRejectsAsyncAliasesOnEnforcingEvents(t *testi
 	hooks := candidate["hooks"].(map[string]interface{})
 	messageHandler := hooks["MessageDisplay"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
 	messageHandler["async"] = false
-	if err := verifyClaudeCodeHookMatrix(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks")); err == nil || !strings.Contains(err.Error(), "must be asynchronous") {
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"), opts); err == nil || !strings.Contains(err.Error(), "must be asynchronous") {
 		t.Fatalf("verification error = %v, want MessageDisplay async requirement", err)
 	}
 }
