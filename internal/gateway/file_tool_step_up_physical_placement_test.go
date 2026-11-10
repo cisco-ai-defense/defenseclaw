@@ -78,6 +78,7 @@ func stepUpClaude(tool string, input map[string]any) func(t *testing.T, project 
 
 func stepUpRows() []stepUpRow {
 	const loader = "persistence.global_ld_preload_install"
+	const sudoersGrantRuleID = "privilege.sudoers_unrestricted_nopasswd"
 	const system = "/etc/pam.d"
 	preload := map[string]any{"content": "/opt/lib/libreview.so\n"}
 	withLink := func(name string, call func(t *testing.T, project string) map[string]any) func(t *testing.T, project string) map[string]any {
@@ -123,6 +124,18 @@ func stepUpRows() []stepUpRow {
 		{"pam entry by a patch header after a link", "codex", pamPermitAuthenticationBypassRuleID, withLink("lnk-sys", func(t *testing.T, project string) map[string]any {
 			return codexBashCall(codexHeredocPatch("Update File", "lnk-sys/../pam.d/sshd", "@@\n+auth sufficient pam_permit.so\n"))(project)
 		})},
+		{"sudoers grant by a patch header after a link to the profile folder", "codex", sudoersGrantRuleID, func(t *testing.T, project string) map[string]any {
+			stepUpLink(t, project, "lnk-profd", "/etc/profile.d")
+			return codexBashCall(codexHeredocPatch("Update File", "lnk-profd/../sudoers", "@@\n+reviewer ALL=(ALL) NOPASSWD: ALL\n"))(project)
+		}},
+		{"sudoers drop-in by a patch header after a link to the profile folder", "codex", sudoersGrantRuleID, func(t *testing.T, project string) map[string]any {
+			stepUpLink(t, project, "lnk-profd", "/etc/profile.d")
+			return codexBashCall(codexHeredocPatch("Add File", "lnk-profd/../sudoers.d/review", "+reviewer ALL=(ALL) NOPASSWD: ALL\n"))(project)
+		}},
+		{"sudoers grant by a file tool after a link to the profile folder", "claudecode", sudoersGrantRuleID, func(t *testing.T, project string) map[string]any {
+			stepUpLink(t, project, "lnk-profd", "/etc/profile.d")
+			return stepUpClaude("Write", map[string]any{"file_path": "lnk-profd/../sudoers", "content": "reviewer ALL=(ALL) NOPASSWD: ALL\n"})(t, project)
+		}},
 		// Ordinary twins: the same shapes with a file nobody protects.
 		{"ordinary file after a link", "claudecode", "", func(t *testing.T, project string) map[string]any {
 			stepUpLink(t, project, "lnk-other", stepUpOrdinaryFolder(t, project))
@@ -184,5 +197,35 @@ func TestStepUpWriteNamesAreJudgedAsThePhysicalFile(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestStepUpOrdinaryFileNamedAsASudoersDropInIsAllowedInBalanced: the per-user
+// gateway walks the home itself, so a file in the folders of the user whose
+// lexical name cleans to a sudoers drop-in is the ordinary file it is, for a
+// file tool and for the apply_patch header of a shell here-document, with the
+// same grant text that a drop-in would be blocked for. The strict tier keeps
+// its path rule on the lexical name of the file.
+func TestStepUpOrdinaryFileNamedAsASudoersDropInIsAllowedInBalanced(t *testing.T) {
+	const grant = "reviewer ALL=(ALL) NOPASSWD: ALL\n"
+	calls := map[string]struct {
+		connector string
+		call      func(t *testing.T, project string) map[string]any
+	}{
+		"patch header": {"codex", func(t *testing.T, project string) map[string]any {
+			return codexBashCall(codexHeredocPatch("Add File", stepUpDeepOrdinaryName(t, project, "etc/sudoers.d/review"), "+"+grant))(project)
+		}},
+		"file tool": {"claudecode", func(t *testing.T, project string) map[string]any {
+			return stepUpClaude("Write", map[string]any{"file_path": stepUpDeepOrdinaryName(t, project, "etc/sudoers.d/review"), "content": grant})(t, project)
+		}},
+	}
+	for name, row := range calls {
+		t.Run(name, func(t *testing.T) {
+			blocked, body := postConnectorHookBehindProtectHome(t, row.connector, false, "default",
+				func(home, project string) map[string]any { return row.call(t, project) })
+			if blocked {
+				t.Fatalf("an ordinary file is blocked: %.500s", body)
+			}
+		})
 	}
 }

@@ -368,16 +368,8 @@ func dispatchTrustedAction(
 		parent = context.Background()
 	}
 	if !request.simpleCommandPass {
-		facts = actionfacts.Analyze(request.Input)
+		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
-		// The headers of a here-document apply_patch are known only now that
-		// the shell text is read: they are placed as a file-tool name is.
-		if len(facts.Commands) != 0 {
-			request.Input.ClientResolvedTargets = withLocalWriteAnswers(
-				request, request.Input.ClientResolvedTargets,
-				actionfacts.NativeCallWriteTargets(request.Input, facts),
-			)
-		}
 		if trustedCallOverStatementBudget(request.Input, facts) {
 			// Over the statement budget the call blocks with
 			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is
@@ -456,7 +448,7 @@ func dispatchTrustedAction(
 	}
 
 	if !analyzed {
-		facts = actionfacts.Analyze(request.Input)
+		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
