@@ -10362,6 +10362,7 @@ function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
         $Layout.GatewayPath,
         $Layout.ACPPath,
         $Layout.HookPath,
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookGuardPath),
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
         (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath),
@@ -14276,6 +14277,7 @@ function Set-DefenseClawManagedAcls {
     foreach ($path in @(
         $Layout.ACPPath,
         $Layout.HookPath,
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookGuardPath),
         $Layout.SensorHelperPath,
         $Layout.InstallerPath,
         $Layout.ModulePath
@@ -15535,6 +15537,13 @@ function Get-DefenseClawLayout {
         $brokerStateDirectory = ''
         $brokerLogDirectory = ''
     }
+    # The standalone Claude Code policy starts the hook through this guard
+    # (beside the hook). The Secure Client payload does not carry it, so that
+    # layout has no guard path.
+    $hookGuardPath = ''
+    if (-not $brokerEnabled) {
+        $hookGuardPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-hook-guard.exe')
+    }
     $layout = @{
         InstallRoot = $InstallRoot
         StateRoot = $StateRoot
@@ -15578,6 +15587,7 @@ function Get-DefenseClawLayout {
         BrokerPipeName = $brokerPipeName
         ProviderLibraryPath = ''
         HookPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-hook.exe')
+        HookGuardPath = $hookGuardPath
         CLIPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw.exe')
         ConfigPath = (Microsoft.PowerShell.Management\Join-Path $configDirectory 'config.yaml')
         ManifestPath = (Microsoft.PowerShell.Management\Join-Path $guardianDirectory 'targets.yaml')
@@ -16747,6 +16757,7 @@ function New-DefenseClawDeploymentMetadata {
         @('compiler', (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath)),
         @('acp', $Layout.ACPPath),
         @('hook', $Layout.HookPath),
+        @('hook_guard', (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookGuardPath)),
         @('sensor_helper', $Layout.SensorHelperPath),
         @('cli', $Layout.CLIPath),
         @('installer', $Layout.InstallerPath),
@@ -17369,7 +17380,7 @@ function Assert-DefenseClawRepairableConfigAcl {
 $script:StandaloneContentGateOutOfClass = @(
     [pscustomobject]@{
         Reason = 'an installed binary: verify and the lifecycle actions check its bytes against the digest recorded from the signed payload'
-        Paths  = @('GatewayPath', 'ACPPath', 'HookPath', 'SensorHelperPath', 'InstallerPath', 'ModulePath', 'BrokerPath', 'CLIPath', 'CompilerPath')
+        Paths  = @('GatewayPath', 'ACPPath', 'HookPath', 'HookGuardPath', 'SensorHelperPath', 'InstallerPath', 'ModulePath', 'BrokerPath', 'CLIPath', 'CompilerPath')
     },
     [pscustomobject]@{
         Reason = 'a log: DefenseClaw appends to it and never reads it as policy or as a record'
@@ -18394,6 +18405,7 @@ function New-DefenseClawTransaction {
         $Layout.GatewayPath,
         $Layout.ACPPath,
         $Layout.HookPath,
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookGuardPath),
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
         # A rollback restores a compiler the Fleet-off retire deleted.
@@ -36069,6 +36081,7 @@ function Assert-DefenseClawInstalledArtifacts {
             'gateway' { $Layout.GatewayPath }
             'acp' { $Layout.ACPPath }
             'hook' { $Layout.HookPath }
+            'hook_guard' { Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookGuardPath }
             'sensor_helper' { $Layout.SensorHelperPath }
             'compiler' { Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath }
             'cli' { $Layout.CLIPath }
@@ -37381,6 +37394,13 @@ function Assert-DefenseClawEnterpriseDeployment {
     )) {
         $managedInstallFiles.Add([string]$path)
     }
+    # The standalone hook guard is checked once it is installed; a deployment
+    # from before the guard shipped gets it from its next Upgrade or Repair.
+    $installedHookGuard = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookGuardPath
+    if (-not [string]::IsNullOrWhiteSpace([string]$installedHookGuard) -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $installedHookGuard -PathType Leaf)) {
+        $managedInstallFiles.Add([string]$installedHookGuard)
+    }
     if (-not $AllowTransactionRecordedBrokerAbsence -or
         (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.BrokerPath)) {
@@ -38002,6 +38022,7 @@ function Get-DefenseClawArtifactPath {
         'gateway' { $Layout.GatewayPath }
         'acp' { $Layout.ACPPath }
         'hook' { $Layout.HookPath }
+        'hook_guard' { Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookGuardPath }
         'sensor_helper' { $Layout.SensorHelperPath }
         'compiler' { Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath }
         'cli' { $Layout.CLIPath }
@@ -38122,6 +38143,7 @@ function Get-DefenseClawLifecycleSources {
         [string]$GatewayBinary,
         [string]$ACPBinary,
         [string]$HookBinary,
+        [string]$HookGuardBinary,
         [string]$SensorHelperBinary,
         [string]$PolicyCompiler,
         [string]$CLIBinary,
@@ -38171,6 +38193,9 @@ function Get-DefenseClawLifecycleSources {
     if ($brokerEnabled -and -not [string]::IsNullOrWhiteSpace($PolicyCompiler)) {
         throw '-PolicyCompiler applies only to the standalone profile'
     }
+    if ($brokerEnabled -and -not [string]::IsNullOrWhiteSpace($HookGuardBinary)) {
+        throw '-HookGuardBinary applies only to the standalone profile'
+    }
     if ($Action -eq 'Install') {
         $required = @()
         if ($brokerEnabled) {
@@ -38189,6 +38214,12 @@ function Get-DefenseClawLifecycleSources {
             @('HookBinary', $HookBinary),
             @('SensorHelperBinary', $SensorHelperBinary)
         )
+        if (-not $brokerEnabled) {
+            # The standalone Claude Code policy starts every hook through the
+            # guard installed beside the hook; without it each ordinary call
+            # is refused. Setup carries the guard in every payload.
+            $required += @(,@('HookGuardBinary', $HookGuardBinary))
+        }
         # Deferred Install supplies authenticated placeholder config and
         # manifest sources; their Fleet content is inspected at Repair.
         if (-not $DeferredConfig) {
@@ -38207,8 +38238,9 @@ function Get-DefenseClawLifecycleSources {
         ([string]::IsNullOrWhiteSpace($GatewayBinary) -or
         [string]::IsNullOrWhiteSpace($ACPBinary) -or
         [string]::IsNullOrWhiteSpace($HookBinary) -or
+        [string]::IsNullOrWhiteSpace($HookGuardBinary) -or
         [string]::IsNullOrWhiteSpace($SensorHelperBinary))) {
-        throw 'Upgrade requires -GatewayBinary, -ACPBinary, -HookBinary, and -SensorHelperBinary'
+        throw 'Upgrade requires -GatewayBinary, -ACPBinary, -HookBinary, -HookGuardBinary, and -SensorHelperBinary'
     }
     if ($Action -eq 'Upgrade' -and $brokerEnabled -and
         ([string]::IsNullOrWhiteSpace($BrokerBinary) -or
@@ -38225,6 +38257,7 @@ function Get-DefenseClawLifecycleSources {
         @('gateway', $GatewayBinary, 'gateway executable', $true),
         @('acp', $ACPBinary, 'ACP guard executable', $true),
         @('hook', $HookBinary, 'hook executable', $true),
+        @('hook_guard', $HookGuardBinary, 'hook guard executable', $true),
         @('sensor_helper', $SensorHelperBinary, 'privileged sensor helper executable', $true),
         @('cli', $CLIBinary, 'CLI executable', $true),
         @('config', $Config, 'managed config', $false),
@@ -40345,6 +40378,7 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.GatewayPath,
         $Layout.ACPPath,
         $Layout.HookPath,
+        (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookGuardPath),
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
         $Layout.InstallerPath,
@@ -41378,6 +41412,9 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
             (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw')
         )
         $files += (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw\policy_compiler.py')
+        # Only the standalone payload carries the Claude Code hook guard;
+        # Secure Client's retired-tree verdict on that name is unchanged.
+        $files += (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-hook-guard.exe')
     }
     return @{
         directories = @(
@@ -47982,6 +48019,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 'acp',
                 'broker',
                 'hook',
+                'hook_guard',
                 'sensor_helper',
                 'compiler',
                 'cli',
@@ -48362,6 +48400,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             @{Path = $Layout.ACPPath;       SourceKey = $null},
             @{Path = $Layout.HookPath;      SourceKey = $null},
             @{Path = $Layout.SensorHelperPath; SourceKey = $null},
+            @{Path = (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookGuardPath); SourceKey = 'hook_guard'},
             @{Path = $Layout.ConfigPath;    SourceKey = 'config'},
             @{Path = $Layout.ManifestPath;  SourceKey = 'manifest'},
             @{Path = $Layout.InstallerPath; SourceKey = $null},
@@ -53239,6 +53278,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$GatewayBinary,
         [string]$ACPBinary,
         [string]$HookBinary,
+        [string]$HookGuardBinary,
         [string]$SensorHelperBinary,
         [string]$PolicyCompiler,
         [string]$CLIBinary,
@@ -53763,6 +53803,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -GatewayBinary $GatewayBinary `
         -ACPBinary $ACPBinary `
         -HookBinary $HookBinary `
+        -HookGuardBinary $HookGuardBinary `
         -SensorHelperBinary $SensorHelperBinary `
         -PolicyCompiler $PolicyCompiler `
         -CLIBinary $CLIBinary `

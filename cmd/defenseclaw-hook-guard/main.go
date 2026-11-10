@@ -34,8 +34,8 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if launcher, hookArgs, ok := hookguard.Argv(args); ok {
-		return hookguard.Run(launcher, hookArgs, stdin, stdout, stderr)
+	if launcher, hookArgs, event, wrapped, open, ok := hookguard.ParseInvocationMode(args); ok {
+		return hookguard.RunEventMode(launcher, hookArgs, event, wrapped, open, stdin, stdout, stderr)
 	}
 	if hookArgs, event, contract, ok := hookguard.SiblingArgv(args); ok {
 		// A guard that cannot name its own folder starts nothing, which
