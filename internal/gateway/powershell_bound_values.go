@@ -4,7 +4,9 @@
 package gateway
 
 import (
+	"cmp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -19,6 +21,10 @@ const (
 	// past its bound (a value dropped without a trace could be the protected
 	// one), so an ordinary command never gets there.
 	psBoundAlternatives = 64
+	// psBoundExactValues is how many values one variable holds each on its
+	// own; from there on a value the proof cannot tell from a held one adds
+	// no reading (psAddValue).
+	psBoundExactValues = 8
 	// psBoundCombinations bounds the strings one interpolated literal can
 	// hold before they are deduplicated.
 	psBoundCombinations = 4 * psBoundAlternatives
@@ -51,12 +57,21 @@ func (b psBindings) size() int {
 	return n
 }
 
-// psAddValue returns values with value added when it is new. A new value that
-// does not fit is dropped and sets *overflow.
-func psAddValue(values []string, value string, overflow *bool) []string {
-	for _, v := range values {
-		if v == value {
-			return values
+// psAddValue returns values with value added when it is new. From
+// psBoundExactValues values on, a value the proof cannot tell from one it
+// holds (psPlainPathSignature) is that value; a new value that does not fit
+// below psBoundAlternatives is dropped and sets *overflow.
+func psAddValue(values []string, value, home string, overflow *bool) []string {
+	if slices.Contains(values, value) {
+		return values
+	}
+	if len(values) >= psBoundExactValues {
+		if signature, ok := psPlainPathSignature(value, home); ok {
+			for _, held := range values {
+				if held, ok := psPlainPathSignature(held, home); ok && held == signature {
+					return values
+				}
+			}
 		}
 	}
 	if len(values) >= psBoundAlternatives {
@@ -66,14 +81,65 @@ func psAddValue(values []string, value string, overflow *bool) []string {
 	return append(values[:len(values):len(values)], value)
 }
 
+// psPlainPathSignature identifies a value the proof reads the same as every
+// value with its signature: an absolute drive path of plain segments that is
+// not in DefenseClaw state. Such a path, and any path made from it by
+// appending text (a child, a ".." walk back up and down a name), is judged
+// only by how many segments it has, how many of its leading segments the
+// home shares (that decides where a walk up lands against the state
+// directory) and whether it ends in a separator. Anything else (a variable,
+// a wildcard, a short name, a stream, a relative or UNC path, a segment that
+// names the state directory or could be completed to it) has no signature
+// and is held on its own. The physical state of the path (a link or hard
+// link onto state) is judged on the value held for its signature.
+func psPlainPathSignature(value, home string) (string, bool) {
+	parts, ok := psPlainPathSegments(value)
+	if !ok {
+		return "", false
+	}
+	shared := 0
+	if homeParts := strings.Split(strings.ToLower(strings.TrimRight(strings.ReplaceAll(home, "/", `\`), `\`)), `\`); len(homeParts) > 0 {
+		for shared < len(homeParts) && shared < len(parts) && homeParts[shared] == strings.ToLower(parts[shared]) {
+			shared++
+		}
+	}
+	return strconv.Itoa(len(parts)) + "/" + strconv.Itoa(shared) + "/" + strconv.FormatBool(strings.HasSuffix(value, `\`) || strings.HasSuffix(value, "/")), true
+}
+
+// psASCIILetter reports an ASCII letter.
+func psASCIILetter(c rune) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// psPlainPathSegments splits an absolute drive path of plain segments.
+func psPlainPathSegments(value string) ([]string, bool) {
+	if len(value) < 3 || value[1] != ':' || value[2] != '\\' && value[2] != '/' || !psASCIILetter(rune(value[0])) {
+		return nil, false
+	}
+	parts := strings.Split(strings.TrimRight(strings.ReplaceAll(value, "/", `\`), `\`), `\`)
+	for _, part := range parts[1:] {
+		lower := strings.ToLower(part)
+		if part == "" || part == "." || part == ".." || strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") ||
+			strings.Contains(lower, ".defenseclaw") || strings.HasPrefix(".defenseclaw", lower) {
+			return nil, false
+		}
+		for _, c := range part {
+			if !psASCIILetter(c) && (c < '0' || c > '9') && !strings.ContainsRune("_-. ()", c) {
+				return nil, false
+			}
+		}
+	}
+	return parts, true
+}
+
 // psUnionBindings returns what a variable can hold after either path: every
 // value it holds on one path or the other.
-func psUnionBindings(a, b psBindings, overflow *bool) psBindings {
+func psUnionBindings(a, b psBindings, home string, overflow *bool) psBindings {
 	out := a.clone()
 	for name, values := range b {
 		merged := out[name]
 		for _, value := range values {
-			merged = psAddValue(merged, value, overflow)
+			merged = psAddValue(merged, value, home, overflow)
 		}
 		out[name] = merged
 	}
@@ -268,7 +334,7 @@ func (b *psBinder) run(i int, st psBindings, inBlock bool) (int, psBindings) {
 				var kept []string
 				for _, value := range values {
 					if strings.Contains(strings.ToLower(value), "defenseclaw") && len([]rune(value)) <= psBoundValueMaxRunes {
-						kept = psAddValue(kept, value, &b.overflow)
+						kept = psAddValue(kept, value, b.home, &b.overflow)
 					}
 				}
 				if len(kept) > 0 {
@@ -402,10 +468,10 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 		}
 		result := psBindings{}
 		for _, end := range ch.ends {
-			result = psUnionBindings(result, end, &b.overflow)
+			result = psUnionBindings(result, end, b.home, &b.overflow)
 		}
 		if !ch.sealed && !ch.hasElse {
-			result = psUnionBindings(result, ch.before, &b.overflow)
+			result = psUnionBindings(result, ch.before, b.home, &b.overflow)
 		}
 		*chain = nil
 		return next, result
@@ -421,7 +487,7 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 	var end psBindings
 	for round := 0; ; round++ {
 		next, end = b.run(i, entry.clone(), true)
-		merged := psUnionBindings(entry, end, &b.overflow)
+		merged := psUnionBindings(entry, end, b.home, &b.overflow)
 		if merged.size() == entry.size() {
 			break
 		}
@@ -432,7 +498,7 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 		b.out = b.out[:mark]
 		entry = merged
 	}
-	return b.closeBlock(next), psUnionBindings(st, end, &b.overflow)
+	return b.closeBlock(next), psUnionBindings(st, end, b.home, &b.overflow)
 }
 
 // runDead reads the block whose { was just copied (i is the index after it)
@@ -781,7 +847,7 @@ func psLineRunsPatch(line []string, depth int) bool {
 	case program == "call" || program == "else" || program == "do":
 		return psLineRunsPatch(line[1:], depth+1)
 	case program == "if":
-		return psLineRunsPatch(psCmdIfCommand(line[1:]), depth+1)
+		return psCmdSegmentsRunPatch([][]string{line}, depth+1)
 	case program == "start":
 		return psLineRunsPatch(psCmdStartCommand(line[1:]), depth+1)
 	}
@@ -796,8 +862,8 @@ func psCmdUnquote(word string) string {
 // psCmdStartCommand returns the command line cmd's start runs: start
 // ["title"] [/d dir] [/node n] [/affinity mask] [other /options] program
 // arguments. The first quoted word is the window title, wherever it stands
-// among the options, so it is never the program; /d, /node and /affinity
-// take the word after them.
+// among the options, so it is never the program; /d, /node, /affinity and
+// /machine take the word after them.
 func psCmdStartCommand(args []string) []string {
 	titled := false
 	for i := 0; i < len(args); i++ {
@@ -807,7 +873,7 @@ func psCmdStartCommand(args []string) []string {
 			titled = true
 		case strings.HasPrefix(arg, "/"):
 			switch strings.ToLower(arg) {
-			case "/d", "/node", "/affinity":
+			case "/d", "/node", "/affinity", "/machine":
 				i++
 			}
 		default:
@@ -817,34 +883,93 @@ func psCmdStartCommand(args []string) []string {
 	return nil
 }
 
-// psCmdIfCommand returns the command line cmd's if runs when its condition
-// holds: if [/i] [not] errorlevel n | exist f | defined v | cmdextversion n |
-// a==b | a OP b, then the command. A = run is one "=" word (psCmdSegments).
-func psCmdIfCommand(args []string) []string {
-	i := 0
-	for i < len(args) && (strings.EqualFold(args[i], "/i") || strings.EqualFold(args[i], "not")) {
+// psCmdTruth is what the condition of a cmd if says when it is a literal.
+type psCmdTruth int
+
+const (
+	psCmdUnknown psCmdTruth = iota // cmd decides at run time: both branches may run
+	psCmdTrue                      // only the command runs
+	psCmdFalse                     // only the else runs
+)
+
+// psCmdIfParts reads the arguments of cmd's if: [/i] [not] errorlevel n |
+// exist f | defined v | cmdextversion n | a==b | a OP b, then the command
+// (empty when it follows in a parenthesised group). A = run is one "=" word
+// (psCmdSegments). The truth is known only when both sides of a comparison
+// are literals (no %variable% or !variable!).
+func psCmdIfParts(args []string) (psCmdTruth, []string) {
+	i, fold, negate := 0, false, false
+	for i < len(args) {
+		if strings.EqualFold(args[i], "/i") {
+			fold = true
+		} else if strings.EqualFold(args[i], "not") {
+			negate = !negate
+		} else {
+			break
+		}
 		i++
 	}
 	if i >= len(args) {
-		return nil
+		return psCmdUnknown, nil
 	}
+	truth := psCmdUnknown
 	switch strings.ToLower(args[i]) {
 	case "errorlevel", "exist", "defined", "cmdextversion":
 		i += 2
 	default:
-		i++
-		if i < len(args) && args[i] == "=" {
-			i += 2
-		} else if i < len(args) && psCmdCompareOperator(args[i]) {
-			i += 2
-		} else {
-			return nil
+		switch {
+		case i+2 < len(args) && args[i+1] == "=":
+			truth = psCmdCompare("equ", args[i], args[i+2], fold)
+			i += 3
+		case i+2 < len(args) && psCmdCompareOperator(args[i+1]):
+			truth = psCmdCompare(strings.ToLower(args[i+1]), args[i], args[i+2], fold)
+			i += 3
+		default:
+			return psCmdUnknown, nil
 		}
 	}
-	if i >= len(args) {
-		return nil
+	if negate && truth != psCmdUnknown {
+		truth = psCmdTrue + psCmdFalse - truth
 	}
-	return args[i:]
+	return truth, args[min(i, len(args)):]
+}
+
+// psCmdCompare evaluates a comparison of two literals: numbers compare as
+// numbers when both are, anything else as text (without case with /i).
+func psCmdCompare(operator, left, right string, fold bool) psCmdTruth {
+	if strings.ContainsAny(left+right, "%!") {
+		return psCmdUnknown
+	}
+	if fold {
+		left, right = strings.ToLower(left), strings.ToLower(right)
+	}
+	order := strings.Compare(left, right)
+	if a, errA := strconv.ParseInt(left, 0, 64); errA == nil {
+		if b, errB := strconv.ParseInt(right, 0, 64); errB == nil {
+			order = cmp.Compare(a, b)
+		}
+	}
+	holds := false
+	switch operator {
+	case "equ":
+		holds = order == 0
+	case "neq":
+		holds = order != 0
+	case "lss":
+		holds = order < 0
+	case "leq":
+		holds = order <= 0
+	case "gtr":
+		holds = order > 0
+	case "geq":
+		holds = order >= 0
+	default:
+		return psCmdUnknown
+	}
+	if holds {
+		return psCmdTrue
+	}
+	return psCmdFalse
 }
 
 // psCmdCompareOperator reports an operator word of cmd's if comparison.
@@ -868,12 +993,89 @@ func psCmdRunsPatch(args []string, depth int) bool {
 			continue
 		}
 		command := psCmdCommandLine(append([]string{arg[2:]}, args[i+1:]...))
-		for _, segment := range psCmdSegments(command) {
-			if psLineRunsPatch(segment, depth+1) {
+		return psCmdSegmentsRunPatch(psCmdSegments(command), depth+1)
+	}
+	return false
+}
+
+// psCmdOpen and psCmdClose are the segments a parenthesis becomes (a NUL
+// cannot be in a command line, so no word is mistaken for one).
+const (
+	psCmdOpen  = "\x00("
+	psCmdClose = "\x00)"
+)
+
+// psCmdGroupEnd returns the index of the parenthesis that closes the group
+// the segments from index from are in, or len(segments).
+func psCmdGroupEnd(segments [][]string, from int) int {
+	level := 0
+	for j := from; j < len(segments); j++ {
+		if len(segments[j]) != 1 {
+			continue
+		}
+		switch segments[j][0] {
+		case psCmdOpen:
+			level++
+		case psCmdClose:
+			if level == 0 {
+				return j
+			}
+			level--
+		}
+	}
+	return len(segments)
+}
+
+// psCmdSegmentsRunPatch reports that the commands cmd runs from these
+// segments (psCmdSegments) run the patch tool. An if is conditional: with a
+// literal condition that is false only its else can run, with one that is
+// true only its command can, and with one cmd decides at run time both can.
+// Without parentheses the command of an if is the rest of the line.
+func psCmdSegmentsRunPatch(segments [][]string, depth int) bool {
+	for i := 0; i < len(segments); i++ {
+		segment := segments[i]
+		if len(segment) == 1 && (segment[0] == psCmdOpen || segment[0] == psCmdClose) {
+			continue
+		}
+		if psExecutableName(strings.TrimLeft(psCmdUnquote(segment[0]), "@")) != "if" {
+			if psLineRunsPatch(segment, depth) {
 				return true
 			}
+			continue
 		}
-		return false
+		truth, command := psCmdIfParts(segment[1:])
+		var then, otherwise [][]string
+		next := i + 1
+		if len(command) > 0 {
+			next = psCmdGroupEnd(segments, i+1)
+			then = append([][]string{command}, segments[i+1:next]...)
+		} else if next < len(segments) && len(segments[next]) == 1 && segments[next][0] == psCmdOpen {
+			end := psCmdGroupEnd(segments, next+1)
+			then = segments[next+1 : end]
+			next = min(end+1, len(segments))
+			if next < len(segments) && strings.EqualFold(segments[next][0], "else") {
+				rest := segments[next][1:]
+				switch {
+				case len(rest) > 0:
+					end = psCmdGroupEnd(segments, next+1)
+					otherwise = append([][]string{rest}, segments[next+1:end]...)
+					next = end
+				case next+1 < len(segments) && len(segments[next+1]) == 1 && segments[next+1][0] == psCmdOpen:
+					end = psCmdGroupEnd(segments, next+2)
+					otherwise = segments[next+2 : end]
+					next = min(end+1, len(segments))
+				default:
+					next++
+				}
+			}
+		}
+		if truth != psCmdFalse && psCmdSegmentsRunPatch(then, depth) {
+			return true
+		}
+		if truth != psCmdTrue && psCmdSegmentsRunPatch(otherwise, depth) {
+			return true
+		}
+		i = next - 1
 	}
 	return false
 }
@@ -895,8 +1097,8 @@ func psCmdCommandLine(pieces []string) string {
 	return strings.Join(line, " ")
 }
 
-// psCmdSegments splits a cmd command line into its commands (at & | and
-// parentheses) and their words (at blanks, commas and semicolons; a run of =
+// psCmdSegments splits a cmd command line into its commands (at & and |; a
+// parenthesis is a segment of its own) and their words (at blanks, commas and semicolons; a run of =
 // is a word of its own), outside double quotes; a word keeps its double
 // quotes, which tell a window title from a program, and a caret takes the
 // next character as text.
@@ -932,7 +1134,13 @@ func psCmdSegments(line string) [][]string {
 			word.WriteRune(c)
 		case c == '^':
 			escaped = true
-		case c == '&' || c == '|' || c == '(' || c == ')':
+		case c == '(':
+			endCommand()
+			segments = append(segments, []string{psCmdOpen})
+		case c == ')':
+			endCommand()
+			segments = append(segments, []string{psCmdClose})
+		case c == '&' || c == '|':
 			endCommand()
 		case c == '=':
 			flush()
@@ -950,11 +1158,15 @@ func psCmdSegments(line string) [][]string {
 	return segments
 }
 
-// psHasPatchFlag reports an argument that is, or lists, --codex-run-as-apply-patch.
+// psHasPatchFlag reports an argument that is, or lists, the option
+// --codex-run-as-apply-patch; a longer option that starts with it is another
+// option (Codex rejects it before any patch run).
 func psHasPatchFlag(args []string) bool {
 	for _, arg := range args {
-		if strings.Contains(arg, "--codex-run-as-apply-patch") {
-			return true
+		for _, option := range strings.FieldsFunc(arg, func(c rune) bool { return strings.ContainsRune(" \t,;\"'", c) }) {
+			if strings.EqualFold(option, "--codex-run-as-apply-patch") {
+				return true
+			}
 		}
 	}
 	return false
