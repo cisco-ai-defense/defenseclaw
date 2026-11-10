@@ -42,7 +42,8 @@ func patchDeleteVerdict(t *testing.T, connector, directive, home, cwd, file stri
 // below the working directory (the home of the user under another parent).
 func TestTypedPatchDeleteOfCredentialFileIsJudgedLikeAnAdd(t *testing.T) {
 	const home = "/Users/alice"
-	files := []string{".netrc", ".git-credentials", ".aws/credentials", ".kube/config"}
+	// The copies are compared too: a profile that protects a copy of a credential file for a write protects it for a delete.
+	files := []string{".netrc", ".git-credentials", ".aws/credentials", ".kube/config", ".netrc.bak", ".aws/credentials.bak", ".aws/credentials.example"}
 	for _, profile := range []string{"default", "permissive", "strict"} {
 		connector := "typed-patch-delete-" + profile
 		installToolCallCorpusProfileConnector(t, connector, profile)
