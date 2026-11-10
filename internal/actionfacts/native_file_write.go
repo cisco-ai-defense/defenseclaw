@@ -167,13 +167,22 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 	view := facts
 	view.Paths = nil
 	var writes []nativeFileWrite
-	patchCommands := map[int64]bool{}
+	patchCommands := map[int64]CommandFact{}
+	patchFiles := map[int64]map[string]bool{}
 	for _, command := range facts.Commands {
 		text, ok := applyPatchStdinText(command)
-		if !ok || parsePatchEnvelope(text).status != StatusComplete {
+		if !ok {
 			continue
 		}
-		patchCommands[command.ID] = true
+		envelope := parsePatchEnvelope(text)
+		if envelope.status != StatusComplete {
+			continue
+		}
+		patchCommands[command.ID] = command
+		patchFiles[command.ID] = map[string]bool{}
+		for _, change := range envelope.changes {
+			patchFiles[command.ID][change.path] = true
+		}
 		for _, write := range nativePatchEnvelopeWrites(text) {
 			write.added = boundedNativeText(write.added)
 			write.replaced = boundedNativeText(write.replaced)
@@ -181,9 +190,19 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 		}
 	}
 	for _, candidate := range facts.Paths {
-		if patchCommands[candidate.CommandID] {
-			view.Paths = append(view.Paths, candidate)
+		command, ok := patchCommands[candidate.CommandID]
+		if !ok {
+			continue
 		}
+		// A file the command redirects to or from is a redirect of the shell
+		// (apply_patch </dev/null <<EOF), judged by the rules for that redirect;
+		// it is no file the patch writes, unless the patch names it too.
+		if !patchFiles[command.ID][candidate.Value] && slices.ContainsFunc(command.Redirects, func(redirect RedirectFact) bool {
+			return redirect.Target == candidate.Value && redirect.Access == candidate.Access
+		}) {
+			continue
+		}
+		view.Paths = append(view.Paths, candidate)
 	}
 	return writes, view
 }
