@@ -55,6 +55,14 @@ type MCPAdmissionStatus struct {
 	// definition the agent config lists now does not answer it: the hook
 	// names the server, not the connection (GAP-0920).
 	Revoked bool
+	// Admitted is the listed definition serving the query that an allow
+	// admitted before any scan, when there is one: a definition the agent
+	// runs on the administrator's word, not on a verdict. The agent keeps its
+	// connection to it after the entry is edited or the allow is withdrawn,
+	// and the entry carries the config scope that listed it (Project), so the
+	// hook can hold it for the session whatever directory a later call reports
+	// (GAP-1018).
+	Admitted *config.MCPServerEntry
 }
 
 // The definitions a scan refuses, as the hook and mcp list word them.
@@ -448,6 +456,13 @@ func (w *InstallWatcher) MCPAdmissionPending(q MCPAdmissionQuery) (string, bool)
 // scan failure for the server's current definition. A failed scan stays
 // visible even when the admission policy kept the server installed.
 func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionStatus {
+	var admitted *config.MCPServerEntry
+	status := w.mcpAdmissionStatus(q, &admitted)
+	status.Admitted = admitted
+	return status
+}
+
+func (w *InstallWatcher) mcpAdmissionStatus(q MCPAdmissionQuery, admitted **config.MCPServerEntry) MCPAdmissionStatus {
 	if w == nil || !w.admitNewMCP || w.store == nil || w.secureClientActive() ||
 		strings.TrimSpace(q.Server) == "" {
 		return MCPAdmissionStatus{}
@@ -501,6 +516,10 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		lapsed := decided && unscanned &&
 			w.mcpUnscannedAdmissionLapsed(InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector})
 		if decided && !lapsed {
+			if unscanned && *admitted == nil {
+				listed := server
+				*admitted = &listed
+			}
 			continue
 		}
 		if !lapsed && firstCycle && (!w.mcpStartupListed.Load() || w.listedAtStartup(path)) {
