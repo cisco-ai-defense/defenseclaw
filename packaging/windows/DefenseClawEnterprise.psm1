@@ -30142,6 +30142,131 @@ function Invoke-DefenseClawTargetRuntimeRollbackCleanup {
         -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
 }
 
+function Get-DefenseClawCodexWriterHolderText {
+    <#
+        GAP-0999: which program is the Codex writer that never settled. The
+        writer keeps the writer lock beside the state open while its
+        transaction runs, so Restart Manager names it, with its process id and
+        account, the way the held-file refusals name a holder. A writer Windows
+        cannot name (it may run as SYSTEM, or it stopped in the middle of its
+        transaction and holds nothing) gets that said instead. Best effort:
+        the answer only words the refusal.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $lock = [IO.Path]::Combine(
+        [IO.Path]::GetDirectoryName($Path),
+        '.defenseclaw-managed-hooks.writer.lock'
+    )
+    $named = [Collections.Generic.List[string]]::new()
+    try {
+        if ([IO.File]::Exists($lock)) {
+            $native = Initialize-DefenseClawNativeSecurity
+            $images = @{}
+            foreach ($process in @(Get-DefenseClawProcessImages)) {
+                $images[[int]$process.Id] = $process
+            }
+            foreach ($holder in @($native::GetFileHolders([string[]]@($lock)))) {
+                if (Test-DefenseClawUnnamedFileHolder -Holder $holder) {
+                    continue
+                }
+                $id = [int]$holder.ProcessId
+                if ($id -eq [int]$PID) {
+                    continue
+                }
+                $process = $images[$id]
+                if ($null -eq $process -and $images.Count -gt 0) {
+                    continue
+                }
+                $image = if ($null -ne $process) { [string]$process.Path } else { '' }
+                $name = if (-not [string]::IsNullOrEmpty($image)) {
+                    [IO.Path]::GetFileName($image)
+                }
+                elseif (-not [string]::IsNullOrWhiteSpace([string]$holder.AppName)) {
+                    [string]$holder.AppName
+                }
+                else {
+                    'a program'
+                }
+                $named.Add((Format-DefenseClawProcessInUse `
+                    -Name $name `
+                    -Id $id `
+                    -UserName $(if ($null -ne $process) { [string]$process.UserName } else { '' }) `
+                    -Parent $(if ($null -ne $process) { [string]$process.Parent } else { '' })))
+            }
+        }
+    }
+    catch {
+        $named.Clear()
+    }
+    if ($named.Count -gt 0) {
+        return ('the writer is ' + ($named -join ', '))
+    }
+    return 'no program this account can name has the writer lock open: the writer stopped in the middle of its transaction or runs as SYSTEM'
+}
+
+function Test-DefenseClawCodexWriterLockBusyMessage {
+    <#
+        GAP-0999: the two ways the gateway's Codex machine policy commands say
+        a Codex writer holds the writer lock: the open is refused with a
+        sharing violation, or the byte-range lock is not given within the
+        command's bound. The text is the gateway's own
+        (codex_machine_requirements_windows.go).
+    #>
+    param([AllowEmptyString()][string]$Message)
+    return ($Message -match 'timed out waiting \S+ for Codex machine policy lock' -or
+        $Message -match 'open Codex machine policy lock: .*(being used by another process|sharing violation)')
+}
+
+function New-DefenseClawCodexWriterBusyRefusal {
+    <#
+        GAP-0999: the refusal of a forward step whose Codex command could not
+        take the writer lock a writer holds. The stable code codex_state_unsettled
+        (as the wait's refusal, exit 1603), the writer by name, what the run
+        does next, and /repair. It is what the command's failure was before
+        GAP-0999 read as a hand edit of the Codex policy (the recovery then
+        rebuilt a file it had no reason to touch).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Action,
+        [Parameter(Mandatory)][string]$Detail
+    )
+    $path = [string]$Layout.CodexManagedHooksStatePath
+    $writerText = ''
+    try { $writerText = [string](Get-DefenseClawCodexWriterHolderText -Path $path) } catch { $writerText = '' }
+    if ($writerText -eq '') {
+        $writerText = 'the writer is a program that Windows did not name'
+    }
+    return ('codex_state_unsettled: a Codex writer holds the writer lock next to {0} ({1}), so the Codex managed policy could not be checked ({2}) and this run stopped (an install, repair, ensure or upgrade that had started is rolled back, an upgrade to the release it came from; a verify changes nothing). Next step: run {3} again once no Codex writer is running (the next Codex writer pass ends a stopped transaction). The Codex command said: {4}' -f $path, $writerText, $Action, (Format-DefenseClawSetupAction -Action '/repair'), $Detail)
+}
+
+function Assert-DefenseClawCodexRequirementsPublishable {
+    <#
+        GAP-1001: the bytes a rebuild swaps into the Codex requirements path.
+        An empty file loads no DefenseClaw hook and no policy, so Codex runs
+        unguarded; bytes that are not valid text cannot be a TOML document.
+        Both are refused before anything is written, and the file stays as it
+        was. (The reconcile that follows parses the document itself.)
+    #>
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
+    if ($Bytes.Length -eq 0) {
+        throw 'refusing to publish an empty Codex requirements file: Codex would load no DefenseClaw hook or policy'
+    }
+    if ([Array]::IndexOf($Bytes, [byte]0) -ge 0) {
+        throw 'refusing to publish a Codex requirements file that contains NUL bytes'
+    }
+    $text = ''
+    try {
+        $text = [Text.UTF8Encoding]::new($false, $true).GetString($Bytes)
+    }
+    catch {
+        throw 'refusing to publish a Codex requirements file that is not valid UTF-8'
+    }
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        throw 'refusing to publish a Codex requirements file with nothing in it: Codex would load no DefenseClaw hook or policy'
+    }
+}
+
 function Invoke-DefenseClawCodexRequirementsCommand {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -30217,6 +30342,10 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         }
         else {
             (($probe.output | Microsoft.PowerShell.Utility\Out-String).Trim())
+        }
+        if ((Test-DefenseClawStandaloneProfile) -and (Test-DefenseClawCodexWriterLockBusyMessage -Message $detail)) {
+            # GAP-0999: not a defect of the policy file.
+            throw (New-DefenseClawCodexWriterBusyRefusal -Layout $Layout -Action $Action -Detail "Codex requirements $Action failed: $detail")
         }
         throw "Codex requirements $Action failed: $detail"
     }
@@ -36294,6 +36423,11 @@ function Invoke-DefenseClawCodexRequirementsReconcileOrRecover {
     if ($null -eq $reconcileFailure) {
         return
     }
+    if (([string]$reconcileFailure.Exception.Message).StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+        # GAP-0999: a Codex writer holds the lock; the policy file was not
+        # judged, so no recovery runs and nothing is rebuilt.
+        throw $reconcileFailure
+    }
     $recoveredBefore = @($script:DefenseClawRecoveredCodexRequirementsNotes).Count
     if (Test-DefenseClawStandaloneProfile) {
         Repair-DefenseClawRecoveredCodexRequirements `
@@ -36377,6 +36511,11 @@ function Repair-DefenseClawRecoveredCodexRequirements {
     catch {
         $verifyError = [string]$_.Exception.Message
     }
+    if ($verifyError.StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+        # GAP-0999: a Codex writer holds the lock; the file was not judged and
+        # is not touched.
+        throw $verifyError
+    }
     $blockedState = Get-DefenseClawBlockedCodexStatePath -Layout $Layout
     if ($blockedState -ne '') {
         throw (New-DefenseClawCodexFileHeldMessage `
@@ -36398,6 +36537,7 @@ function Repair-DefenseClawRecoveredCodexRequirements {
     $backupPath = ''
     $editedSHA256 = ''
     $editedLength = 0
+    $edited = $null
     $directory = Microsoft.PowerShell.Management\Join-Path ([string]$Layout.InstallStateDirectory) 'recovered-policy'
     [void](New-DefenseClawProtectedDirectory -Path $directory)
     if ($exists) {
@@ -36436,6 +36576,12 @@ function Repair-DefenseClawRecoveredCodexRequirements {
     }
     catch {
         $mergeError = [string]$_.Exception.Message
+        if ($mergeError.StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+            # GAP-0999: the merge could not run because a Codex writer holds
+            # the lock; the file is not rebuilt (the copy of the file kept
+            # above stays).
+            throw $mergeError
+        }
         if ($exists -and ((Test-DefenseClawFileReadBlocked -Path $path) -or
                 (Test-DefenseClawFileDeleteBlocked -Path $path))) {
             throw (New-DefenseClawCodexFileHeldMessage `
@@ -36457,6 +36603,12 @@ function Repair-DefenseClawRecoveredCodexRequirements {
         }
         $staged = Microsoft.PowerShell.Management\Join-Path $directory ('base.{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
         try {
+            if ($base.Length -eq 0 -or [string]::IsNullOrWhiteSpace([Text.Encoding]::UTF8.GetString($base))) {
+                # GAP-1001: the base is never an empty file; the reconcile that
+                # follows publishes the managed policy over this line.
+                $base = [Text.UTF8Encoding]::new($false).GetBytes("# DefenseClaw managed Codex requirements: the managed policy is published by the reconcile that follows`r`n")
+            }
+            Assert-DefenseClawCodexRequirementsPublishable -Bytes $base
             [IO.File]::WriteAllBytes($staged, $base)
             Install-DefenseClawFileAtomic -Source $staged -Destination $path
             [void](Invoke-DefenseClawCodexRequirementsCommand `
@@ -36465,7 +36617,28 @@ function Repair-DefenseClawRecoveredCodexRequirements {
                 -Action reconcile)
         }
         catch {
-            throw ("Codex requirements recovery could not republish the managed policy: merge: $mergeError; rebuild: " + [string]$_.Exception.Message + $(if ($backupPath) { "; the file as it was is kept at $backupPath" } else { '' }))
+            $rebuildError = [string]$_.Exception.Message
+            # GAP-1001: a failed rebuild never leaves an empty or partial
+            # file in place of the one it found. The bytes read above go back
+            # through the same sibling-and-swap, and the failure is named.
+            $restoredNote = ''
+            if ($exists -and $null -ne $edited) {
+                $restoreStaged = Microsoft.PowerShell.Management\Join-Path $directory ('restore.{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
+                try {
+                    [IO.File]::WriteAllBytes($restoreStaged, $edited)
+                    Install-DefenseClawFileAtomic -Source $restoreStaged -Destination $path
+                    $restoredNote = '; the file was left as it was'
+                }
+                catch {
+                    $restoredNote = '; putting the file back also failed (' + [string]$_.Exception.Message + ')'
+                }
+                finally {
+                    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $restoreStaged) {
+                        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $restoreStaged -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+            throw ("Codex requirements recovery could not republish the managed policy: merge: $mergeError; rebuild: " + $rebuildError + $restoredNote + $(if ($backupPath) { "; the file as it was is kept at $backupPath" } else { '' }))
         }
         finally {
             if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $staged) {

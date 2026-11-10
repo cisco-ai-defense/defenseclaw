@@ -328,6 +328,39 @@ func TestCodexVerifyOnlyNeverWrites(t *testing.T) {
 	}
 }
 
+// GAP-1001: a requirements.toml with nothing in it (or only white space) is
+// reported by name as leaving Codex unguarded, with the way to publish it
+// again, not only as a list of missing entries.
+func TestCodexVerifyNamesAnEmptyRequirementsFile(t *testing.T) {
+	opts := testOptions(t)
+	path := codexPath(t, opts)
+	for name, content := range map[string]string{"empty": "", "white space": " \r\n\t\n"} {
+		writeFile(t, path, content)
+		state, err := codexTarget{}.Verify(opts)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if state.Covered || len(state.Conflicts) == 0 {
+			t.Fatalf("%s: an empty requirements file must not verify as covered: %+v", name, state)
+		}
+		first := state.Conflicts[0]
+		if !strings.Contains(first, path+" is empty") || !strings.Contains(first, "nothing guards Codex") || !strings.Contains(first, "repair") && !strings.Contains(first, "reconcile") {
+			t.Fatalf("%s: the first conflict does not name the empty file and the recovery: %q", name, first)
+		}
+	}
+	// A file with content that lacks the hooks keeps its per-entry conflicts and is not called empty.
+	writeFile(t, path, adminCodexRequirements)
+	state, err := codexTarget{}.Verify(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, conflict := range state.Conflicts {
+		if strings.Contains(conflict, "is empty") {
+			t.Fatalf("a file with content was called empty: %q", conflict)
+		}
+	}
+}
+
 func TestCodexFlappingSecondWriterIsReported(t *testing.T) {
 	opts := testOptions(t)
 	path := codexPath(t, opts)
