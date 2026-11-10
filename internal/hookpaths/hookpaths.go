@@ -1689,6 +1689,18 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
 				var concreteOperands actionConcreteOperands
+				// An apply_patch command is a patch envelope, and one over
+				// the analysis string limit is file content far past what a
+				// shell reader describes: its targets are read from the
+				// envelope below, and the gateway judges its reduced call.
+				// Reading that text as shell cost the client seconds for an
+				// ordinary 889 KB patch, past the managed hook window
+				// (GAP-1008). The map says only that it is incomplete, as the
+				// fallback reading of a command over the limit does.
+				if isApplyPatchToolName(tool) && actionfacts.CommandTextOverLimit(command) {
+					truncated = true
+					break
+				}
 				// A shell command nested past the reading bound is past the
 				// analysis limits: no reader below parses it (GAP-2556). Only
 				// the command is measured: a Write or Edit body of ordinary

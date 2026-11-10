@@ -25,6 +25,7 @@ import (
 // is found on every form, not on a sample (GAP-0749, review round 2).
 func gap0749ResolveReaders(command, cwd, home string) {
 	dialect := hookShellDialect("", "Bash")
+	_ = actionfacts.CommandTextOverLimit(command)
 	shellparse.TooDeep(command)
 	ActionCommandAuditReasonWithDialect(command, cwd, home, dialect)
 	MayNameState(command)
@@ -114,7 +115,7 @@ var gap0749ResolveReaderCalls = []string{
 	"StateNamingReading", "actionClientLoopCopyDestinationProtected", "actionClientProvedOverwrittenRedirect",
 	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
 	"actionConcreteProtectedWriteOnWithOperands", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
-	"actionfacts.Analyze", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
+	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
 	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
 	"plainMoveDestinationsWithStatements", "shellWriteOperands", "shellparse.TooDeep",
