@@ -17380,7 +17380,7 @@ function Assert-DefenseClawRepairableConfigAcl {
 $script:StandaloneContentGateOutOfClass = @(
     [pscustomobject]@{
         Reason = 'an installed binary: verify and the lifecycle actions check its bytes against the digest recorded from the signed payload'
-        Paths  = @('GatewayPath', 'ACPPath', 'HookPath', 'SensorHelperPath', 'InstallerPath', 'ModulePath', 'BrokerPath', 'CLIPath', 'CompilerPath')
+        Paths  = @('GatewayPath', 'ACPPath', 'HookPath', 'HookGuardPath', 'SensorHelperPath', 'InstallerPath', 'ModulePath', 'BrokerPath', 'CLIPath', 'CompilerPath')
     },
     [pscustomobject]@{
         Reason = 'a log: DefenseClaw appends to it and never reads it as policy or as a record'
