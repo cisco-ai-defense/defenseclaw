@@ -20893,7 +20893,7 @@ function ConvertTo-DefenseClawCommittedUninstallJournalMessage {
         return $null
     }
     if ($Message -notmatch 'managed-hook teardown journal' -or
-        $Message -match 'journal is missing or is not a regular file|journal disappeared|Next step: leave ') {
+        $Message -match 'journal is missing or is not a regular file|journal disappeared|Next step: leave |refusing to retire|while it was read|changed during publication|identity changed') {
         return $null
     }
     try {
@@ -20908,7 +20908,7 @@ function ConvertTo-DefenseClawCommittedUninstallJournalMessage {
         if ([string]::IsNullOrWhiteSpace($journal)) {
             return $null
         }
-        return ('{0}. This run changed nothing: the file is the teardown record of the uninstall and it cannot be trusted for this deployment. Next step: leave {1} as it is, run {2} to see what is left, and send both results with the lifecycle log to DefenseClaw support' -f
+        return ('{0}. Setup deleted nothing and changed no teardown record: the file is the teardown record of the uninstall and it cannot be trusted for this deployment (another deployment or manifest, or a damaged record). Next step: leave {1} as it is, run {2} to see what is left, and send both results with the lifecycle log to DefenseClaw support' -f
             $Message.TrimEnd('.', ' '),
             $journal,
             (Format-DefenseClawSetupAction -Action '/verify'))

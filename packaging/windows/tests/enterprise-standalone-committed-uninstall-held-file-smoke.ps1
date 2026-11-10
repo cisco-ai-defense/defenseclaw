@@ -192,10 +192,13 @@ $fs.Dispose()
             $untrusted = 'schema-6 managed-hook teardown journal activation binding is invalid'
             $text = [string](ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message $untrusted)
             if (-not $text.StartsWith($untrusted) -or -not $text.Contains($layout['ManagedHooksTeardownJournalPath']) -or -not $text.Contains('/verify') -or
-                -not $text.Contains('This run changed nothing') -or $text -match 'FORCE') { throw "journal refusal: '$text'" }
+                -not $text.Contains('Setup deleted nothing') -or $text -match 'FORCE') { throw "journal refusal: '$text'" }
             if ($null -ne (ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message $text)) { throw 'journal refusal: a named refusal was named again' }
             if ($null -ne (ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message 'managed-hook teardown journal is missing or is not a regular file')) { throw 'journal refusal: a missing journal was refused' }
             if ($null -ne (ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message 'some other failure')) { throw 'journal refusal: an unrelated failure was read' }
+            foreach ($transient in @('managed-hook teardown journal identity changed while it was read', 'managed-hook teardown journal was replaced while it was read', 'refusing to retire the managed-hook teardown journal before uninstall is durably committed', 'managed-hook teardown journal changed during publication')) {
+                if ($null -ne (ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message $transient)) { throw "journal refusal: a transient failure was named as an untrusted record: $transient" }
+            }
             $script:smokeInstalled = $true
             if ($null -ne (ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message $untrusted)) { throw 'journal refusal: an uninstall that is not committed was read' }
             $script:smokeInstalled = $false

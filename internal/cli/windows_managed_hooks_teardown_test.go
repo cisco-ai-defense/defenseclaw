@@ -2023,7 +2023,7 @@ func TestWindowsManagedHooksTeardownForeignJournalNamesTheNextStep(t *testing.T)
 	}
 	foreign := fmt.Errorf("%w: %s (phase captured)", errors.New("managed-hook teardown journal does not match the protected deployment"), path)
 	got := windowsManagedHooksTeardownForeignJournalNextStep(foreign, path).Error()
-	for _, want := range []string{"does not match the protected deployment", path, "changed nothing", "Next step:", "Setup /verify", "lifecycle log"} {
+	for _, want := range []string{"does not match the protected deployment", path, "deleted nothing", "Next step:", "Setup /verify", "lifecycle log"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("the foreign journal refusal lacks %q: %s", want, got)
 		}

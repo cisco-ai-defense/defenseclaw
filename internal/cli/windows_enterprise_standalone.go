@@ -2189,8 +2189,9 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
 			"--purge removed the machine deployment, but %d account(s) still have a DefenseClaw per-user folder %%USERPROFILE%%\\.defenseclaw. "+
 				"With no deployment record left, Setup cannot tell DefenseClaw's files there from the account's own, so it removes nothing. "+
-				"To remove a folder with its agent registrations, %s; if that account has no DefenseClaw registration left and runs no per-user DefenseClaw of its own, delete the folder as an administrator. Accounts: %s",
-			len(unattributed), windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1"), windowsEnterpriseBoundedLabels(unattributed)))
+				"Delete each folder as an administrator once its account has no DefenseClaw registration left and runs no per-user DefenseClaw of its own; "+
+				"a folder kept for the account's agent registrations (its connector_backups restore them) needs %s and then %s while that account has an active session. Accounts: %s",
+			len(unattributed), windowsEnterpriseSetupCommand("/ensure"), windowsEnterpriseSetupCommand("/uninstall", "PURGE=1"), windowsEnterpriseBoundedLabels(unattributed)))
 	}
 	if len(notLocalSystem) > 0 {
 		// A purge that did not run as LocalSystem removed the machine

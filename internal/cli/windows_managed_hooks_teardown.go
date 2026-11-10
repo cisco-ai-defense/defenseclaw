@@ -2900,7 +2900,7 @@ func windowsManagedHooksTeardownForeignJournalNextStep(err error, journalPath st
 		return err
 	}
 	return fmt.Errorf(
-		"%w. This run changed nothing: the file is the teardown record of another deployment or manifest, not of this uninstall. "+
+		"%w. Setup deleted nothing and changed no teardown record: the file cannot be trusted for this uninstall (the record of another deployment or manifest, or a damaged one). "+
 			"Next step: leave %s as it is, run `Setup /verify` to see what is left, and send both results with the lifecycle log to DefenseClaw support",
 		err,
 		journalPath,
