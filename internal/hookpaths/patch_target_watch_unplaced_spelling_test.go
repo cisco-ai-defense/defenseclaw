@@ -175,3 +175,54 @@ func TestPatchTargetWatchUnplacedStepUpSpellingRetargetedToUnprovedFileIsAChange
 		}
 	})
 }
+
+// A working directory reached through a link that stays as it is does not make
+// the step up from a missing directory a change: the ordinary spellings stay
+// unchanged and the keys file reached from the same working directory stays
+// changed. A link made since at the missing directory, leading to the keys
+// directory, is a change as it is without the link above it.
+func TestPatchTargetWatchUnplacedStepUpSpellingThroughLinkedWorkingDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name, target string
+		changed      bool
+	}{
+		{"step up to an ordinary config", "proj/../.ssh/authorized_keys", false},
+		{"step up to a project file", "proj/../notes.txt", false},
+		{"step up from a missing sub directory", "sub/../notes.txt", false},
+		{"step up from two missing directories", "a/b/../../notes.txt", false},
+		{"step up after a dot", "./missing/../notes.txt", false},
+		{"step up out of the project to the keys file", "../.ssh/authorized_keys", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, project := stepUpFixture(t)
+			cwd := filepath.Join(t.TempDir(), "work")
+			if err := os.Symlink(project, cwd); err != nil {
+				t.Fatal(err)
+			}
+			watch := stepUpWatch(t, "typed", tc.target, cwd)
+			if watch == nil {
+				t.Fatal("the patch is not attested complete")
+			}
+			if got := watch.Changed(); got != tc.changed {
+				t.Errorf("changed = %v, want %v", got, tc.changed)
+			}
+		})
+	}
+	t.Run("link made since at the missing directory", func(t *testing.T) {
+		home, project := stepUpFixture(t)
+		cwd := filepath.Join(t.TempDir(), "work")
+		if err := os.Symlink(project, cwd); err != nil {
+			t.Fatal(err)
+		}
+		watch := stepUpWatch(t, "typed", "proj/../.ssh/authorized_keys", cwd)
+		if watch == nil || watch.Changed() {
+			t.Fatal("the unchanged patch reads as changed or is not attested")
+		}
+		if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "proj")); err != nil {
+			t.Fatal(err)
+		}
+		if !watch.Changed() {
+			t.Error("a link made since at the missing directory reads as unchanged")
+		}
+	})
+}

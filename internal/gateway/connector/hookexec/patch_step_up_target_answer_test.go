@@ -154,3 +154,52 @@ func TestTypedPatchStepUpDirectoryLinkedToUnprovedKeysFileWhileGatewayAnswersIsR
 		t.Fatalf("the refusal did not name the changed patch target: stdout %q, stderr %q", result.stdout, result.stderr)
 	}
 }
+
+// The same typed patch run from a working directory reached through a link
+// that stays as it is takes the gateway allow too: the link above the missing
+// directory is not a change of the patch target.
+func TestTypedPatchStepUpThroughLinkedWorkingDirectoryTakesTheGatewayAllow(t *testing.T) {
+	for _, target := range []string{"proj/../.ssh/authorized_keys", "proj/../notes.txt"} {
+		t.Run(target, func(t *testing.T) {
+			home, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", home)
+			project := filepath.Join(home, "proj")
+			if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(project, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(project, "notes.txt"), []byte("k\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cwd := filepath.Join(t.TempDir(), "work")
+			if err := os.Symlink(project, cwd); err != nil {
+				t.Fatal(err)
+			}
+			patch := "*** Begin Patch\n*** Update File: " + target + "\n@@\n k\n+x\n*** End Patch\n"
+			stdin, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "apply_patch",
+				"tool_input": map[string]any{"command": patch}, "cwd": cwd})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) {
+				o.FailMode = "closed"
+				o.ManagedEnterprise = true
+				o.Stdin = strings.NewReader(string(stdin))
+			})
+			text := result.stdout + result.stderr
+			for _, refusal := range []string{"deny", "could not use", "patch target changed", "blocked"} {
+				if strings.Contains(text, refusal) {
+					t.Fatalf("code %d, stdout %q, stderr %q: the gateway allow was refused (%q)", result.code, result.stdout, result.stderr, refusal)
+				}
+			}
+			if result.code != 0 {
+				t.Fatalf("code %d, stdout %q, stderr %q, want the call to run", result.code, result.stdout, result.stderr)
+			}
+		})
+	}
+}

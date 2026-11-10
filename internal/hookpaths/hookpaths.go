@@ -2865,16 +2865,22 @@ func (w *PatchTargetWatch) Changed() bool {
 }
 
 // stepsUpFromMissingDirectory reports an absolute path that steps up (..) out
-// of a directory that does not exist, with no link and no unreadable name on
-// the way to it. The walk of a write path cannot cross such a step, because
-// the missing directory may become a link before the command runs; that is
-// the only reason it fails for this path, and it fails for it still while
-// the directory is missing.
+// of a directory that does not exist, with no unreadable name on the way to
+// it. A link on the way (a working directory reached through a link) is
+// followed to where it leads, as the operating system does; the walk of a
+// write path cannot cross such a step, because the missing directory may
+// become a link before the command runs, and that is the only reason it fails
+// for this path. It fails for it still while the directory is missing, and a
+// link, a directory or a non-directory made there since ends the walk first.
 func stepsUpFromMissingDirectory(path string) bool {
 	volume := filepath.VolumeName(path)
-	current := volume + string(filepath.Separator)
+	root := volume + string(filepath.Separator)
+	current := root
+	parts := strings.Split(filepath.ToSlash(strings.TrimPrefix(path, volume)), "/")
 	var missing []bool
-	for _, part := range strings.Split(filepath.ToSlash(strings.TrimPrefix(path, volume)), "/") {
+	for hops := 0; len(parts) > 0; {
+		part := parts[0]
+		parts = parts[1:]
 		switch part {
 		case "", ".":
 		case "..":
@@ -2891,8 +2897,22 @@ func stepsUpFromMissingDirectory(path string) bool {
 			switch {
 			case os.IsNotExist(err):
 				missing = append(missing, true)
-			case err != nil || info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(current, info):
+			case err != nil || windowsMountPointLink(current, info):
 				return false
+			case info.Mode()&os.ModeSymlink != 0:
+				text, err := pathReadlink(current)
+				if hops++; err != nil || text == "" || hops > SystemLinkLimit() {
+					return false
+				}
+				current = filepath.Dir(current)
+				if filepath.IsAbs(text) || filepath.VolumeName(text) != "" {
+					if filepath.VolumeName(text) != volume {
+						return false
+					}
+					current, missing = root, nil
+					text = strings.TrimPrefix(text, volume)
+				}
+				parts = append(strings.Split(filepath.ToSlash(text), "/"), parts...)
 			default:
 				missing = append(missing, false)
 			}
