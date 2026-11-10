@@ -398,7 +398,10 @@ def test_a_recovery_republishes_a_hand_edited_requirements_file_instead_of_stopp
     assert body.index("New-DefenseClawCodexFileHeldMessage") < body.index("[IO.FileMode]::CreateNew")
     # The content comes from DefenseClaw's record, verified by its hash.
     assert "Get-DefenseClawRecordedCodexRequirementsPreimage" in body
-    assert "-Action reconcile" in body[body.index("Install-DefenseClawFileAtomic") :]
+    # GAP-1001: the recorded preimage is the base the gateway renders the managed policy into beside the
+    # file (no swap of a base over the live path), and the reconcile that does it comes last.
+    assert "-Action reconcile" in body[body.index("-BaseFile $staged") - 200 :]
+    assert "Install-DefenseClawFileAtomic" not in body
     record = _function_body(text, "Get-DefenseClawRecordedCodexRequirementsPreimage")
     assert "preimage_sha256" in record and "SHA256" in record and "requirements_path" in record
     # Secure Client keeps its recovery.

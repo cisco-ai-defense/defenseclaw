@@ -344,7 +344,7 @@ func TestCodexVerifyNamesAnEmptyRequirementsFile(t *testing.T) {
 			t.Fatalf("%s: an empty requirements file must not verify as covered: %+v", name, state)
 		}
 		first := state.Conflicts[0]
-		if !strings.Contains(first, path+" is empty") || !strings.Contains(first, "nothing guards Codex") || !strings.Contains(first, "repair") && !strings.Contains(first, "reconcile") {
+		if !strings.Contains(first, path+" is empty") || !strings.Contains(first, "nothing guards Codex") || !strings.Contains(first, "repair") && !strings.Contains(first, "ensure") {
 			t.Fatalf("%s: the first conflict does not name the empty file and the recovery: %q", name, first)
 		}
 	}
@@ -358,6 +358,87 @@ func TestCodexVerifyNamesAnEmptyRequirementsFile(t *testing.T) {
 		if strings.Contains(conflict, "is empty") {
 			t.Fatalf("a file with content was called empty: %q", conflict)
 		}
+	}
+}
+
+// GAP-1001: valid TOML that lacks the DefenseClaw managed hook, or whose hook
+// points at another command, is reported once, by name, as leaving Codex
+// unguarded; a parse error is named with its line; and the inspection that the
+// publish gate uses finds the missing entries.
+func TestCodexVerifyNamesAValidFileWithoutTheManagedHook(t *testing.T) {
+	opts := testOptions(t)
+	path := codexPath(t, opts)
+	if _, err := (codexTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	good := readFile(t, path)
+	moved := opts
+	moved.HookBinary = "/opt/elsewhere/defenseclaw-hook"
+	for name, content := range map[string]string{
+		"valid toml without a hook":    "[features]\nfoo = true\n",
+		"hook points at another file":  strings.ReplaceAll(good, opts.HookBinary, moved.HookBinary),
+		"comment only":                 "# nothing here\n",
+		"hooks table without a group": "[hooks]\nmanaged_dir = \"/x\"\n",
+	} {
+		writeFile(t, path, content)
+		state, err := codexTarget{}.Verify(opts)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if state.Covered || len(state.Conflicts) == 0 {
+			t.Fatalf("%s: must not verify as covered: %+v", name, state)
+		}
+		first := state.Conflicts[0]
+		if !strings.Contains(first, "does not carry the DefenseClaw managed hook") || !strings.Contains(first, "nothing guards Codex") || !strings.Contains(first, "enterprise linux ensure") {
+			t.Fatalf("%s: the first conflict does not name the missing hook and the recovery: %q", name, first)
+		}
+	}
+	writeFile(t, path, "[hooks\nthis = = nope\n")
+	if _, err := (codexTarget{}).Verify(opts); err == nil || !strings.Contains(err.Error(), "line 1") {
+		t.Fatalf("a parse error must name the line, got %v", err)
+	}
+	// The healthy file stays covered and is not called unguarded.
+	writeFile(t, path, good)
+	state, err := codexTarget{}.Verify(opts)
+	if err != nil || !state.Covered {
+		t.Fatalf("a healthy file lost its coverage: %+v %v", state, err)
+	}
+	for _, conflict := range state.Conflicts {
+		if strings.Contains(conflict, "does not carry") {
+			t.Fatalf("a healthy file was called unguarded: %q", conflict)
+		}
+	}
+}
+
+// The publish gate: the document a reconcile renders is inspected with the
+// same eyes; one without (or with an altered) managed hook is not swapped in.
+func TestCodexMissingHookConflictsFindsWhatTheGateRefuses(t *testing.T) {
+	opts := testOptions(t)
+	policy := opts.PolicyFor(codexConnector)
+	rendered, _, err := renderCodex(opts, nil, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := State{}
+	if err := inspectCodex(opts, rendered, policy, &ok); err != nil || len(codexMissingHookConflicts(ok)) != 0 {
+		t.Fatalf("the document a reconcile renders must carry every managed hook: %v %v", err, ok.Conflicts)
+	}
+	for name, doc := range map[string][]byte{
+		"empty":                    nil,
+		"valid without a hook":     []byte("[features]\nfoo = true\n"),
+		"hook points elsewhere":    []byte(strings.ReplaceAll(string(rendered), opts.HookBinary, "/opt/elsewhere/defenseclaw-hook")),
+		"one managed hook removed": []byte(strings.Replace(string(rendered), "[[hooks.SessionStart]]", "[[hooks.NotOurs]]", 1)),
+	} {
+		probe := State{}
+		if err := inspectCodex(opts, doc, policy, &probe); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(codexMissingHookConflicts(probe)) == 0 {
+			t.Fatalf("%s: the gate would let this document through", name)
+		}
+	}
+	if err := inspectCodex(opts, []byte("[hooks\nthis = = nope\n"), policy, &State{}); err == nil {
+		t.Fatal("a parse error must stop the publish")
 	}
 }
 
