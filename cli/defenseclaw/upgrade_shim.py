@@ -117,6 +117,16 @@ class ShimError(RuntimeError):
     """A user-facing failure; nothing on the machine was changed."""
 
     exit_code = 1
+    changed_nothing = True
+
+
+class ShimOutcomeUnknownError(ShimError):
+    """The installer was started and ended, or is still running, with a result the shim cannot prove.
+
+    The machine may have changed, so the failure must not say it did not.
+    """
+
+    changed_nothing = False
 
 
 class ShimUsageError(ShimError):
@@ -196,7 +206,8 @@ def run(argv: list[str]) -> int:
         return _upgrade(options["version"], yes=options["yes"])
     except ShimError as exc:
         print(f"  ✗ {exc}", file=sys.stderr)
-        print("    Nothing was changed.", file=sys.stderr)
+        if exc.changed_nothing:
+            print("    Nothing was changed.", file=sys.stderr)
         return exc.exit_code
     except KeyboardInterrupt:
         return 130
@@ -712,14 +723,20 @@ def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str
     )
 
 
-# How long the shim waits for a started Windows installer to open its log. An
-# installer run with --yes that ends with an error keeps its console for up to
-# 120 seconds (Wait-BeforeClose in install.ps1) before the process exits, so the
-# wait outlasts that: the exit code is then known before the shim reports.
-_INSTALLER_LOG_WAIT = 150.0
+# How long the shim waits for a started Windows installer to open its log. Before
+# it has one the installer can wait up to 300 seconds for an earlier uninstall's
+# cleanup (Wait-UninstallCleanup in install.ps1) and then fails; an installer run
+# with --yes that fails keeps its console for up to 120 seconds (Wait-BeforeClose)
+# before the process exits. The wait covers both and a margin, so the exit code is
+# known before the shim reports.
+_INSTALLER_CLEANUP_WAIT = 300.0
+_INSTALLER_ERROR_WINDOW = 120.0
+_INSTALLER_LOG_WAIT = _INSTALLER_CLEANUP_WAIT + _INSTALLER_ERROR_WINDOW + 30.0
 _INSTALLER_LOG_POLL = 0.25
-# The read of a log's new bytes for the installer's process id.
-_INSTALLER_LOG_HEAD = 65536
+# A log's new bytes are read in chunks that overlap by more than a transcript
+# header line is long, so a header cut by a chunk edge is still found.
+_INSTALLER_LOG_CHUNK = 1 << 20
+_INSTALLER_LOG_OVERLAP = 256
 
 
 def _terminal_command(script: str, ps_args: list[str]) -> str:
@@ -743,29 +760,46 @@ def _install_logs(logs: str) -> dict[str, int]:
     return sizes
 
 
-def _log_opened_by(logs: str, known: dict[str, int], pid: int) -> bool:
+def _log_opened_by(logs: str, known: dict[str, int], pid: int, scanned: dict[str, int] | None = None) -> bool:
     """Whether the process *pid* wrote a transcript header into *logs* since *known*.
 
     The installer names a log to the second and opens it with ``-Append``, so
     a name already in *known* may be the installer's own log, and a log that
     appeared or grew may be another run's. The transcript header names the
     process (``Process ID: <pid>``): only the bytes added since the snapshot
-    count, and only a header with this process's id.
+    count, however many another run added before this header, and only a
+    header with this process's id. *scanned* (name -> bytes read so far) lets
+    a poll read only what is new.
     """
+    if scanned is None:
+        scanned = {}
     marker = re.compile(rb"Process ID:\s*" + str(pid).encode("ascii") + rb"(?!\d)")
     for name, size in _install_logs(logs).items():
-        before = known.get(name, 0)
-        if size == before:
+        floor = known.get(name, 0)
+        if size < floor:  # replaced by a shorter file: all of it is new
+            floor = 0
+        done = scanned.get(name, floor)
+        if size < done:
+            done = floor
+        if size == done:
             continue
+        pos = max(floor, done - _INSTALLER_LOG_OVERLAP)
         try:
             with open(os.path.join(logs, name), "rb") as stream:
-                stream.seek(before if size > before else 0)
-                added = stream.read(_INSTALLER_LOG_HEAD)
+                stream.seek(pos)
+                while True:
+                    chunk = stream.read(_INSTALLER_LOG_CHUNK)
+                    # A UTF-16 transcript spaces every character with a NUL.
+                    if marker.search(chunk.replace(b"\x00", b"")):
+                        return True
+                    pos += len(chunk)
+                    if len(chunk) < _INSTALLER_LOG_CHUNK:
+                        break
+                    pos -= _INSTALLER_LOG_OVERLAP
+                    stream.seek(pos)
         except OSError:
             continue
-        # A UTF-16 transcript spaces every character with a NUL.
-        if marker.search(added.replace(b"\x00", b"")):
-            return True
+        scanned[name] = pos
     return False
 
 
@@ -773,14 +807,16 @@ def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: dict[s
     """Wait until the started installer opens its install log or ends.
 
     Returns (log opened, exit code or None while it still runs). It gives up
-    waiting after ``_INSTALLER_LOG_WAIT`` seconds; an installer that is still
-    running then (it waits for an earlier uninstall, a lock or a download) is
-    reported as unconfirmed, not as failed.
+    waiting after ``_INSTALLER_LOG_WAIT`` seconds, which outlasts the
+    installer's own 300-second wait for an earlier uninstall and its 120-second
+    error window; the caller reports an installer that still runs then as
+    unconfirmed.
     """
     deadline = time.monotonic() + _INSTALLER_LOG_WAIT
+    scanned: dict[str, int] = {}
     while True:
         rc = proc.poll()
-        if _log_opened_by(logs, known, proc.pid):
+        if _log_opened_by(logs, known, proc.pid, scanned):
             return True, rc
         if rc is not None:
             return False, rc
@@ -841,22 +877,30 @@ def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | Non
         # that ends before then leaves nothing but a window that closes.
         print(f"  → Waiting for the installer to open its log (up to {int(_INSTALLER_LOG_WAIT)} s)...", flush=True)
         opened, rc = _await_installer_log(proc, logs, known)
-        if rc not in (None, 0) and not opened:
-            shutil.rmtree(workdir, ignore_errors=True)
-            raise ShimError(
-                f"the installer ended with exit code {rc} before it opened its log, so it made no change; "
-                "the reason was shown only in its window, which has closed. Run this command again and read "
-                "that window, or check the install with: defenseclaw doctor"
-            )
         if opened:
             print("  → The installer continues in a new window, which shows the result when it ends.")
             print(f"    Its log is saved in {logs} (install-<time>.log).")
         elif rc == 0:
+            shutil.rmtree(workdir, ignore_errors=True)
             print("  → The installer ran in its own window and ended with exit code 0 without opening an install log.")
+        elif rc is not None:
+            # No log is not proof that nothing changed: the installer goes on
+            # without a transcript when it cannot write one. Keep the staged
+            # installer, so the result can be read in this terminal.
+            raise ShimOutcomeUnknownError(
+                f"the installer ended with exit code {rc} before it opened its log. It may have stopped before "
+                "changing anything, or later if it could not write its log, so the result is not known; the "
+                "reason was shown only in its window, which has closed. Check the install with: "
+                "defenseclaw --version and defenseclaw doctor. To read the result, run the kept installer "
+                f"in this terminal:\n      {_terminal_command(path, ps_args)}\n"
+                "    or run this command again; the installer first restores an install it was replacing."
+            )
         else:
-            print(
-                f"  ! The installer has not opened its log after {int(_INSTALLER_LOG_WAIT)} seconds, so the start is "
-                "not confirmed: it may wait on another install, or have failed with the reason shown in its window."
+            raise ShimOutcomeUnknownError(
+                f"the installer is still running and has not opened its log after {int(_INSTALLER_LOG_WAIT)} "
+                "seconds, so the start is not confirmed: it may wait on an earlier uninstall's cleanup or another "
+                "install, or hold an error in its window. Read that window and let the installer end before you "
+                "start another install; then check: defenseclaw --version and defenseclaw doctor"
             )
         print("    Confirm the result afterwards with: defenseclaw --version")
         return 0
