@@ -354,7 +354,7 @@ try {
             Reset-Recovery @('codex_state_unsettled: a Codex writer holds the writer lock') 'edit'
             $message = ''
             try { Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway' } catch { $message = $_.Exception.Message }
-            if (-not $message.StartsWith('codex_state_unsettled: ') -or -not $message.Contains('the rollback left that state as it is') -or [IO.File]::ReadAllText($recRequirements) -ne 'edit' -or @(Get-Backups).Count -ne 0 -or $script:RecoverCalls.Count -ne 1) { throw "recovery: a busy writer was read as a hand edit: '$message' calls=$($script:RecoverCalls.Count)" }
+            if (-not $message.StartsWith('codex_state_unsettled: ') -or [IO.File]::ReadAllText($recRequirements) -ne 'edit' -or @(Get-Backups).Count -ne 0 -or $script:RecoverCalls.Count -ne 1) { throw "recovery: a busy writer was read as a hand edit: '$message' calls=$($script:RecoverCalls.Count)" }
             Reset-Recovery @('bad', 'codex_state_unsettled: a Codex writer holds the writer lock') 'edit'
             $message = ''
             try { Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway' } catch { $message = $_.Exception.Message }

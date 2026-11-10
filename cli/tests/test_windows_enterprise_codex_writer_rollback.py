@@ -285,7 +285,10 @@ def test_a_busy_writer_never_reaches_the_recovery_that_rebuilds_the_policy_file(
     # The file is judged and touched only after the busy answers are told apart.
     assert repair.index("$verifyError.StartsWith('codex_state_unsettled: '") < repair.index("$backupPath = ''")
     assert repair.index("$mergeError.StartsWith('codex_state_unsettled: '") < repair.index("Get-DefenseClawRecordedCodexRequirementsPreimage")
-    assert repair.count("New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout") == 2
+    assert "throw $verifyError" in repair and "throw $mergeError" in repair
+    # The rollback turns the recovery's busy answer into its own deferral.
+    deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
+    assert "$recoveryMessage = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout" in deployment
     deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
     verify = deployment.index("-Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))")
     assert "New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout" in deployment[verify : verify + 1200]

@@ -938,6 +938,10 @@ func commandProgram(executable string) string {
 	if strings.Contains(executable, "/") && !trustedExecutablePath(executable) {
 		return ""
 	}
+	if executable == "." {
+		// The dot builtin reads a file into the current shell like source.
+		return "."
+	}
 	executable = path.Base(executable)
 	if executable == "." || executable == "/" {
 		return ""
