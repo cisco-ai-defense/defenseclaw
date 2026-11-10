@@ -349,6 +349,9 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     repo = release_source()
     local_dir = os.environ.get(LOCAL_DIR_ENV)
     explicit = version is not None
+    # The command as the user ran it, for a message that sends them back
+    # through this shim and the current controller.
+    rerun = " ".join(["defenseclaw upgrade", *(["--version", version] if version else []), *(["--yes"] if yes else [])])
     if version is None:
         version = _local_version(local_dir) if local_dir else _latest_version(repo)
     if not explicit and _key(version) <= _key(installed):
@@ -397,7 +400,7 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     # Only a downgrade to a release that keeps the newer hook helper waits
     # for its installer and drops the helper (rel-1-0-4:GAP-2503).
     newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
-    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer, version=version)
+    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer, rerun=rerun)
 
 
 def _refuse_unguarding_downgrade(version: str) -> None:
@@ -660,7 +663,8 @@ def _rollback(*, yes: bool) -> int:
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
-    return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir)
+    rerun = "defenseclaw rollback" + (" --yes" if yes else "")
+    return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir, rerun=rerun)
 
 
 INSTALLER_RECORD = os.path.join("receipts", "installer.sha256")
@@ -792,30 +796,6 @@ def _recovery_copy_verifies(recovery: tuple[str, str] | None) -> bool:
         return False
 
 
-def _release_one_liner(ps_args: list[str], version: str | None) -> str:
-    """The release installer one-liner for the same request, for when no verified local copy remains."""
-    args: list[str] = []
-    skip = False
-    for arg in ps_args:
-        if skip:
-            skip = False
-        elif arg == "-Local":
-            skip = True  # a local test directory means nothing on another machine
-        else:
-            args.append(arg)
-    try:
-        source = release_source()
-    except ShimUsageError:
-        source = OFFICIAL_SOURCE
-    if version:
-        base = f"{source}/releases/download/{version}"
-        if "-Version" not in args:
-            args = ["-Version", version, *args]
-    else:
-        base = f"{source}/releases/latest/download"
-    return " ".join([f"& ([scriptblock]::Create((irm {base}/install.ps1)))", *args])
-
-
 def _install_logs(logs: str) -> dict[str, int]:
     """The install logs (name -> size) in *logs*."""
     sizes: dict[str, int] = {}
@@ -897,9 +877,7 @@ def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: dict[s
         time.sleep(_INSTALLER_LOG_POLL)
 
 
-def _run_installer(
-    path: str, args: list[str], workdir: str, *, newer: str | None = None, version: str | None = None
-) -> int:
+def _run_installer(path: str, args: list[str], workdir: str, *, rerun: str, newer: str | None = None) -> int:
     # The installer downloads the release assets: hand it update.source
     # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
     configured = _configured_update_source()
@@ -956,7 +934,9 @@ def _run_installer(
         print(f"  → Waiting for the installer to open its log (up to {int(_INSTALLER_LOG_WAIT)} s)...", flush=True)
         opened, rc = _await_installer_log(proc, logs, known)
         if opened:
-            _drop_recovery_copy(recovery)
+            # An open log is a start, not a result: the installer may still
+            # fail and delete the folder it runs from, so the verified copy
+            # stays. Only an exit code 0 the shim has seen removes it.
             print("  → The installer continues in a new window, which shows the result when it ends.")
             print(f"    Its log is saved in {logs} (install-<time>.log).")
         elif rc == 0:
@@ -972,23 +952,24 @@ def _run_installer(
                 route = (
                     "run the kept installer copy, verified against SHA-256 "
                     f"{recovery[1]}, in this terminal:\n      {_terminal_command(recovery[0], ps_args)}\n"
+                    f"    or run this command again:\n      {rerun}\n"
                 )
             else:
+                # A release installer of a lower target cannot read the recovery
+                # receipts of this install: go back through the shim, which
+                # picks the current controller again.
                 _drop_recovery_copy(recovery)
-                route = (
-                    "run the release installer in this terminal (the kept copy is not available):\n"
-                    f"      {_release_one_liner(ps_args, version)}\n"
-                )
+                route = f"run this command again (the kept copy is not available):\n      {rerun}\n"
             raise ShimOutcomeUnknownError(
                 f"the installer ended with exit code {rc} before it opened its log. It may have stopped before "
                 "changing anything, or later if it could not write its log, so the result is not known; the "
                 "reason was shown only in its window, which has closed. Check the install with: "
                 "defenseclaw --version and defenseclaw doctor. To read the result, "
                 f"{route}"
-                "    or run this command again; the installer first restores an install it was replacing."
+                "    The installer first restores an install it was replacing."
             )
         else:
-            _drop_recovery_copy(recovery)
+            # Still running, so no result: the verified copy stays.
             raise ShimOutcomeUnknownError(
                 f"the installer is still running and has not opened its log after {int(_INSTALLER_LOG_WAIT)} "
                 "seconds, so the start is not confirmed: it may wait on an earlier uninstall's cleanup or another "

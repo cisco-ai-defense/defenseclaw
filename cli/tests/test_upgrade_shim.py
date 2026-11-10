@@ -263,7 +263,7 @@ def test_installer_handoff_keeps_relative_retired_config_paths_bound_to_the_call
         or _child(lambda: 0),
     )
 
-    assert upgrade_shim._run_installer(str(staged / "install.sh"), [], str(staged)) == 0
+    assert upgrade_shim._run_installer(str(staged / "install.sh"), [], str(staged), rerun="defenseclaw upgrade") == 0
     assert "chdir" not in called
     if platform == "nt":
         assert called["cwd"] == str(staged)
@@ -721,36 +721,90 @@ def test_windows_no_log_failure_prints_the_release_command_when_the_recovery_cop
 
     err = capsys.readouterr().err
     assert "powershell -NoProfile" not in err, err
-    assert "releases/latest/download/install.ps1" in err and "-Rollback -Yes" in err, err
+    # The command the user ran goes back through the shim; no release URL.
+    assert "run this command again (the kept copy is not available)" in err, err
+    assert err.rstrip().splitlines()[-2].strip() == "defenseclaw rollback --yes", err
+    assert "releases/" not in err and "irm " not in err, err
     assert _recovery_dirs(home) == []
 
 
-def test_windows_upgrade_no_log_failure_release_command_pins_the_version(
+@pytest.mark.parametrize("damage", ["missing", "changed"])
+def test_windows_downgrade_no_log_failure_with_a_damaged_recovery_copy_names_the_command_the_user_ran(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], damage: str
+) -> None:
+    # A downgrade stages the current saved installer, because an older one
+    # cannot read the recovery receipts of this install. When the kept copy is
+    # damaged, the fallback must not hand the user the older release installer.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.9")
+    _windows_rollback_with_desktop(home, monkeypatch)
+    created: list[str] = []
+    cleanup = _installer_that_cleans_up_then_fails(created)
+    launched: list[list[str]] = []
+
+    def popen(argv: list[str], **kwargs: object) -> types.SimpleNamespace:
+        if "-File" not in argv:  # a hardware probe of the upgrade, not the installer
+            raise FileNotFoundError(argv[0])
+        launched.append(argv)
+        child = cleanup(argv, **kwargs)
+        recovery = _recovery_dirs(home)[0]
+        if damage == "missing":
+            shutil.rmtree(recovery)
+        else:
+            (recovery / "install.ps1").write_bytes(b"changed")
+        return child
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", popen)
+
+    assert upgrade_shim.run(["upgrade", "--version", "v1.0.5", "--yes"]) == 1
+
+    err = capsys.readouterr().err
+    assert "-Version 1.0.5" in " ".join(launched[0]), launched
+    assert "run this command again (the kept copy is not available)" in err, err
+    assert err.rstrip().splitlines()[-2].strip() == "defenseclaw upgrade --version 1.0.5 --yes", err
+    assert "releases/" not in err and "irm " not in err and "scriptblock" not in err, err
+    assert _recovery_dirs(home) == []
+
+
+def test_windows_recovery_copy_is_removed_when_the_installer_ended_with_exit_code_0(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    command = upgrade_shim._release_one_liner(["-Yes", "-Local", "C:/dir"], "1.0.9")
-    assert "releases/download/1.0.9/install.ps1" in command
-    assert command.endswith("-Version 1.0.9 -Yes"), command
-    assert "-Local" not in command and "C:/dir" not in command
-
-
-@pytest.mark.parametrize("ending", ["exit-0-no-log", "log-opened"])
-def test_windows_recovery_copy_is_removed_when_the_installer_ran(
-    home: Path, monkeypatch: pytest.MonkeyPatch, ending: str
-) -> None:
     _windows_rollback_with_desktop(home, monkeypatch)
-
-    def poll() -> int:
-        if ending == "log-opened":
-            _write_transcript(home)
-            return 1
-        return 0
-
-    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(lambda: 0))
 
     assert upgrade_shim.run(["rollback", "--yes"]) == 0
     assert _recovery_dirs(home) == []
 
+
+def test_windows_recovery_copy_is_kept_when_the_installer_opened_its_log_and_then_failed(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An open log is a start, not a result: the installer may fail later and
+    # delete the folder it runs from, so the verified copy is the way back.
+    _windows_rollback_with_desktop(home, monkeypatch)
+
+    def poll() -> int:
+        _write_transcript(home)
+        return 1
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+    kept = _recovery_dirs(home)
+    assert len(kept) == 1
+    assert (kept[0] / "install.ps1").read_bytes() == (home / "installer" / "install.ps1").read_bytes()
+
+
+def test_windows_recovery_copy_is_kept_when_the_installer_still_runs_without_a_log(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(upgrade_shim.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(upgrade_shim.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(lambda: None))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+    assert len(_recovery_dirs(home)) == 1
 
 
 def test_windows_installer_that_appends_beyond_the_first_chunk_of_a_same_second_log_has_opened_its_log(
@@ -1680,7 +1734,7 @@ def test_rollback_runs_the_recorded_saved_installer(
     _record(home, saved)
     ran: list[tuple[str, list[str], bytes]] = []
     monkeypatch.setattr(
-        upgrade_shim, "_run_installer", lambda path, args, workdir: ran.append((path, args, Path(path).read_bytes())) or 0
+        upgrade_shim, "_run_installer", lambda path, args, workdir, *, rerun: ran.append((path, args, Path(path).read_bytes())) or 0
     )
     monkeypatch.setattr(upgrade_shim.os, "name", platform)
 
