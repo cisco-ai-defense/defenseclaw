@@ -213,7 +213,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 			}
 			if (program == "source" || program == ".") && len(call.Args) >= 2 {
 				if name, ok := StaticWord(call.Args[1], home); ok {
-					if content, ok := readIndirectSource(name, cwd); ok && protectedReachFromText(content, cwd, home) {
+					if content, ok := readActionScript(name, cwd); ok && protectedReachFromText(content, cwd, home) {
 						set("eval-source", true)
 						return true
 					}
@@ -301,7 +301,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 			// shell's visible words fail closed when they reach a protected
 			// path, because the contents it will run are not bounded here.
 			if script, ok := shellScriptOperand(words); ok {
-				if content, read := readIndirectSource(script, cwd); read {
+				if content, read := readActionScript(script, cwd); read {
 					if nested := unprovenProtectedWriteDepth(content, cwd, home, depth+1, budget); nested != "" {
 						set(nested, true)
 					} else if shellBodyProtectedWrite(content, cwd, home) {

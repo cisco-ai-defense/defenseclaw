@@ -1478,11 +1478,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			if len(words) > 2 {
 				return "nested-shell"
 			}
-			content, read := readActionScript(script, cwd, home)
-			if !read {
-				return "nested-shell"
-			}
-			return actionPosixCommandDecision(content, cwd, home, depth+1)
+			return actionScriptBodyDecision(script, cwd, home, depth, "nested-shell")
 		}
 		return "nested-shell" // stdin, -s or an unrecognized option.
 	}
@@ -1544,11 +1540,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		if len(words) != 2 || words[1] == "" {
 			return "eval-source"
 		}
-		content, read := readActionScript(words[1], cwd, home)
-		if !read {
-			return "eval-source"
-		}
-		return actionPosixCommandDecision(content, cwd, home, depth+1)
+		return actionScriptBodyDecision(words[1], cwd, home, depth, "eval-source")
 	case "git":
 		return actionGitDecision(words, cwd, home, depth+1, true)
 	case "command", "exec", "busybox", "time", "nohup":
@@ -1773,68 +1765,42 @@ func actionWordsDecision(words []string, cwd, home string, depth int) string {
 }
 
 func actionScriptInsideCWD(script, cwd string) bool {
-	return actionScriptInside(script, cwd, cwd)
-}
-
-func actionScriptInside(script, cwd, root string) bool {
 	path := OperandPath(script, cwd)
 	resolved, ok := ResolveWriteTarget(path)
-	return ok && (resolved == root || strings.HasPrefix(resolved, root+string(filepath.Separator)))
-}
-
-// actionScriptReadRoot names the folder a script operand is read below: the
-// working folder when the script lies in it, otherwise the account home when
-// a script named by a full path (what ~ and $HOME expand to) lies there and
-// not in the working folder, so a script in the home is the same file
-// whichever folder the hook reports as the working folder, at the top level
-// and inside a shell command string alike (rel-1-0-9:GAP-1035). A name
-// relative to the working folder stays read below it only, and a working
-// folder behind links stays an unread body (rel-1-0-9:GAP-0950); a script
-// anywhere else is not read.
-func actionScriptReadRoot(script, cwd, home string) (string, bool) {
-	if script == "" {
-		return "", false
-	}
-	if actionScriptInsideCWD(script, cwd) {
-		return cwd, true
-	}
-	if home = filepath.Clean(home); !filepath.IsAbs(script) || !filepath.IsAbs(home) ||
-		home == filepath.Dir(home) || actionPathLexicallyInside(script, cwd) ||
-		!actionScriptInside(script, cwd, home) {
-		return "", false
-	}
-	return home, true
-}
-
-// actionPathLexicallyInside reports whether the cleaned path is spelled
-// below root, whatever links it passes.
-func actionPathLexicallyInside(path, root string) bool {
-	path, root = filepath.Clean(path), filepath.Clean(root)
-	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
-}
-
-func actionScriptReadable(script, cwd, home string) bool {
-	_, ok := actionScriptReadRoot(script, cwd, home)
-	return ok
+	return ok && (resolved == cwd || strings.HasPrefix(resolved, cwd+string(filepath.Separator)))
 }
 
 // readActionScript reads the script operand of a source, dot or shell
-// command below the folder actionScriptReadRoot names.
-func readActionScript(script, cwd, home string) (string, bool) {
+// command: the file the system opens for the name, whatever folder it lies
+// in and however the name spells it (relative, ~ or $HOME expanded, a full
+// path, folder links on the way). A name that reaches into the working
+// folder is read from it first; any other name is read from the root of its
+// volume. The hook client runs as the user, so it is the one reader that
+// opens a script in the user home or beside the project for a managed
+// gateway that cannot (rel-1-0-9:GAP-1035, GAP-1038, GAP-1039).
+func readActionScript(script, cwd string) (string, bool) {
 	if actionScriptInsideCWD(script, cwd) {
-		return readIndirectSource(script, cwd)
+		if content, read := readIndirectSource(script, cwd); read {
+			return content, true
+		}
 	}
-	return readHomeScript(script, cwd, home)
+	return readIndirectSourceAnywhere(script, cwd)
 }
 
-// readHomeScript reads a script that actionScriptReadRoot finds in the
-// account home and not in the working folder.
-func readHomeScript(script, cwd, home string) (string, bool) {
-	root, ok := actionScriptReadRoot(script, cwd, home)
-	if !ok || root == cwd {
-		return "", false
+// actionScriptBodyDecision is the decision on the body of the script a source,
+// dot or shell command names. A body that writes a protected file is judged
+// wherever the script lies. A body that is not read, and an ordinary body of
+// a script outside the working folder, stay the unproven class the audit
+// records for it (unproven).
+func actionScriptBodyDecision(script, cwd, home string, depth int, unproven string) string {
+	content, read := readActionScript(script, cwd)
+	if !read {
+		return unproven
 	}
-	return readIndirectSource(OperandPath(script, cwd), root)
+	if class := actionPosixCommandDecision(content, cwd, home, depth+1); class != "" || actionScriptInsideCWD(script, cwd) {
+		return class
+	}
+	return unproven
 }
 
 func actionWrappedDecision(program string, words []string, cwd, home string, depth int) string {
