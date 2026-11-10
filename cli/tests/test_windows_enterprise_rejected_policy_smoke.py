@@ -88,6 +88,9 @@ def test_the_activation_rebind_leaves_an_untrusted_manifest_to_the_restore_and_t
     adoption = sync.index("Get-DefenseClawStandaloneManifestAdoption `\n        -Layout")
     assert acl < adoption
     assert "return $false" in sync[acl:adoption]
+    # Only when Setup holds an approved copy of exactly the activated manifest:
+    # without one the adoption judges the file as before.
+    assert "Get-DefenseClawApprovedPolicyHash" in sync[:acl]
 
 
 def _engines() -> list[str]:
