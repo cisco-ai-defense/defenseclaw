@@ -186,7 +186,7 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 		for _, change := range envelope.changes {
 			patchFiles[command.ID][change.path] = true
 		}
-		for _, write := range nativePatchEnvelopeWrites(text) {
+		for _, write := range nativePatchEnvelopeWrites(envelope.canonical) {
 			write.added = boundedNativeText(write.added)
 			write.replaced = boundedNativeText(write.replaced)
 			writes = append(writes, write)
@@ -352,20 +352,20 @@ func nativePatchWrites(object map[string]any) []nativeFileWrite {
 		return nil
 	}
 	text, ok := nativeStringField(object, nativePatchTextKeys)
-	if !ok || parsePatchEnvelope(text).status != StatusComplete {
+	envelope := parsePatchEnvelope(text)
+	if !ok || envelope.status != StatusComplete {
 		return nil
 	}
-	return nativePatchEnvelopeWrites(text)
+	return nativePatchEnvelopeWrites(envelope.canonical)
 }
 
 // nativePatchEnvelopeWrites reads the files and the added and removed lines of
-// an apply_patch envelope that parsePatchEnvelope read complete.
+// an apply_patch envelope that parsePatchEnvelope read complete (its
+// canonical form).
 func nativePatchEnvelopeWrites(text string) []nativeFileWrite {
 	var writes []nativeFileWrite
 	var current []int
-	for _, line := range strings.Split(
-		strings.TrimSuffix(strings.ReplaceAll(text, "\r\n", "\n"), "\n"), "\n",
-	) {
+	for _, line := range strings.Split(text, "\n") {
 		switch {
 		case strings.HasPrefix(line, "*** Add File: "), strings.HasPrefix(line, "*** Update File: "):
 			writes = append(writes, nativeFileWrite{

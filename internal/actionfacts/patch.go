@@ -32,10 +32,15 @@ type patchPathChange struct {
 }
 
 type patchEnvelopeResult struct {
-	changes []patchPathChange
-	hasMove bool
-	status  ParseStatus
-	issue   IssueCode
+	// canonical is the envelope as the patch tool reads it: without the white
+	// space around the patch and around a file header, and with LF line ends.
+	// The content proofs read the files text from it, so they judge what the
+	// tool applies.
+	canonical string
+	changes   []patchPathChange
+	hasMove   bool
+	status    ParseStatus
+	issue     IssueCode
 }
 
 func isApplyPatchTool(tool string) bool {
@@ -66,7 +71,24 @@ func isPatchInputField(field string) bool {
 // value keeps the nested reading.
 func isPatchEnvelopeField(field string, value any) bool {
 	text, ok := value.(string)
-	return ok && field == "input" && strings.HasPrefix(text, "*** Begin Patch")
+	return ok && field == "input" && strings.HasPrefix(strings.TrimSpace(text), patchBeginLine)
+}
+
+const (
+	patchBeginLine = "*** Begin Patch"
+	patchEndLine   = "*** End Patch"
+)
+
+// patchFileHeaderPrefixes start the header line of a file of a patch.
+var patchFileHeaderPrefixes = []string{"*** Add File: ", "*** Update File: ", "*** Delete File: "}
+
+func isPatchFileHeader(line string) bool {
+	for _, prefix := range patchFileHeaderPrefixes {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // isAcceptedPatchPath reports a patch target with one stable meaning: a path
@@ -198,13 +220,19 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		return fail(StatusLimitExceeded, IssueInputLimit)
 	}
 
-	normalized := strings.ReplaceAll(text, "\r\n", "\n")
-	normalized = strings.TrimSuffix(normalized, "\n")
+	// The patch tool trims the white space around the patch text before it
+	// checks the Begin and End markers, and reads CRLF line ends as LF, so the
+	// envelope is judged in that form: the same text with any padding or line
+	// end style is the same patch. A carriage return that does not end a line
+	// is not padding: one beside a marker leaves the envelope unread.
+	normalized := strings.Trim(strings.ReplaceAll(text, "\r\n", "\n"), " \t\n\v\f")
 	lines := strings.Split(normalized, "\n")
-	if len(lines) < 3 || lines[0] != "*** Begin Patch" ||
-		lines[len(lines)-1] != "*** End Patch" {
+	if len(lines) < 3 || lines[0] != patchBeginLine ||
+		lines[len(lines)-1] != patchEndLine {
 		return fail(StatusInvalid, IssueInvalidSyntax)
 	}
+	canonical := make([]string, 0, len(lines))
+	canonical = append(canonical, lines[0])
 
 	changes := make([]patchPathChange, 0, 8)
 	seenPaths := make(map[string]struct{})
@@ -221,6 +249,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		if strings.ContainsRune(line, '\r') && !isPatchDirectiveLine(line) {
 			return fail(StatusInvalid, IssueInvalidSyntax)
 		}
+		canonical = append(canonical, line)
 		if line == "*** End of File" {
 			if activeDirective != "update" || !updateHunk || !updateContent {
 				return fail(StatusInvalid, IssueInvalidSyntax)
@@ -244,6 +273,12 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 				contentAfterDirective = true
 				continue
 			}
+			// The tool reads an empty line of an update as an empty line of
+			// its text.
+			if updateHunk && line == "" {
+				contentAfterDirective = true
+				continue
+			}
 			if updateHunk && (strings.HasPrefix(line, "+") ||
 				strings.HasPrefix(line, "-") || strings.HasPrefix(line, " ")) {
 				contentAfterDirective = true
@@ -251,12 +286,20 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 				continue
 			}
 		}
+		// The tool reads the header of a file without the white space around
+		// it. A line that starts with a space inside an update is a line of
+		// its text, not a header.
+		if header := strings.TrimSpace(line); header != line &&
+			isPatchFileHeader(header) && (activeDirective != "update" || line[0] != ' ') {
+			line = header
+			canonical[len(canonical)-1] = header
+		}
 		if line == "" || strings.HasPrefix(line, "+") ||
 			strings.HasPrefix(line, "-") || strings.HasPrefix(line, " ") ||
 			strings.HasPrefix(line, "@@") {
 			return fail(StatusInvalid, IssueInvalidSyntax)
 		}
-		if line == "*** Begin Patch" || line == "*** End Patch" {
+		if line == patchBeginLine || line == patchEndLine {
 			return fail(StatusInvalid, IssueInvalidSyntax)
 		}
 
@@ -347,9 +390,10 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		return fail(StatusInvalid, IssueInvalidSyntax)
 	}
 	return patchEnvelopeResult{
-		changes: changes,
-		hasMove: hasMove,
-		status:  StatusComplete,
+		canonical: strings.Join(append(canonical, patchEndLine), "\n"),
+		changes:   changes,
+		hasMove:   hasMove,
+		status:    StatusComplete,
 	}
 }
 
