@@ -20,7 +20,7 @@ func TestContentProofsReadTheStdinTheLastRedirectLeaves(t *testing.T) {
 	}{
 		{"document after a null input", "apply_patch </dev/null <<EOF\n" + protected + "EOF\n", true},
 		{"document after a descriptor 0 input", "apply_patch 0< other.patch <<EOF\n" + protected + "EOF\n", true},
-		{"document after a descriptor copy nothing opened", "apply_patch <&3 <<EOF\n" + protected + "EOF\n", false},
+		{"document after a descriptor copy", "apply_patch <&3 <<EOF\n" + protected + "EOF\n", true},
 		{"document after a null input, expanding", "apply_patch </dev/null <<EOF\n" + withExpansion + "EOF\n", true},
 		{"document after a null input, quoted", "apply_patch </dev/null <<\x27EOF\x27\n" + protected + "EOF\n", true},
 		{"ordinary document after a null input", "apply_patch </dev/null <<EOF\n" + ordinary + "EOF\n", false},
@@ -31,7 +31,18 @@ func TestContentProofsReadTheStdinTheLastRedirectLeaves(t *testing.T) {
 		{"descriptor copy after the document", "apply_patch <<EOF <&3\n" + protected + "EOF\n", false},
 		{"descriptor copy after the expanding document", "apply_patch <<EOF <&3\n" + withExpansion + "EOF\n", false},
 		{"here-string after the document", "apply_patch <<EOF <<< ordinary\n" + protected + "EOF\n", false},
-		{"two documents", "apply_patch <<A <<B\n" + protected + "A\n" + protected + "B\n", false},
+		{"two documents, protected last", "apply_patch <<A <<B\n" + ordinary + "A\n" + protected + "B\n", true},
+		{"two documents, protected first", "apply_patch <<A <<B\n" + protected + "A\n" + ordinary + "B\n", false},
+		{"two documents, both protected", "apply_patch <<A <<B\n" + protected + "A\n" + protected + "B\n", true},
+		{"two documents, protected last, quoted", "apply_patch <<A <<\x27B\x27\n" + ordinary + "A\n" + protected + "B\n", true},
+		{"two documents, protected last, expanding", "apply_patch <<A <<B\n" + ordinary + "A\n" + withExpansion + "B\n", true},
+		{"two documents, protected last, dash", "apply_patch <<A <<-B\n" + ordinary + "A\n" + protected + "B\n", true},
+		{"file between documents, protected last", "apply_patch <<A < ordinary.patch <<B\n" + ordinary + "A\n" + protected + "B\n", true},
+		{"file between documents, protected first", "apply_patch <<A < ordinary.patch <<B\n" + protected + "A\n" + ordinary + "B\n", false},
+		{"descriptor copy between documents, protected last", "apply_patch <<A 3< ordinary.patch 0<&3 <<B\n" + ordinary + "A\n" + protected + "B\n", true},
+		{"descriptor copy between documents, protected first", "apply_patch <<A 3< ordinary.patch 0<&3 <<B\n" + protected + "A\n" + ordinary + "B\n", false},
+		{"document on another descriptor last", "apply_patch <<A 3<<B\n" + ordinary + "A\n" + protected + "B\n", false},
+		{"protected document, then a descriptor 3 document", "apply_patch <<A 3<<B\n" + protected + "A\n" + ordinary + "B\n", true},
 		{"output redirect after the document", "apply_patch <<EOF > /dev/null\n" + protected + "EOF\n", true},
 	}
 	for _, row := range rows {

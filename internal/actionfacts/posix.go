@@ -888,7 +888,9 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			}) {
 				return
 			}
-			out.markPartial(IssueUnsupportedConstruct)
+			if fd != 0 || command.Program != "apply_patch" {
+				out.markPartial(IssueUnsupportedConstruct)
+			}
 			continue
 		}
 		access, ok := posixRedirectAccess(redirection.Op)
@@ -949,7 +951,12 @@ func posixLiteralStdinReplaced(command *CommandFact, out *parseOutput) {
 	command.LiteralStdinView = ""
 	command.LiteralStdinComplete = false
 	command.LiteralStdinAmbiguous = true
-	out.markPartial(IssueUnsupportedConstruct)
+	if command.Program != "apply_patch" {
+		// An apply_patch call without a document reading is partial anyway
+		// (classifyPOSIXApplyPatchStdin), and a later here-document may
+		// still be its stdin, so the call is not marked partial here.
+		out.markPartial(IssueUnsupportedConstruct)
+	}
 }
 
 func projectPOSIXLiteralHeredoc(
@@ -963,7 +970,8 @@ func projectPOSIXLiteralHeredoc(
 		out.markPartial(IssueUnsupportedConstruct)
 		return
 	}
-	if command.LiteralStdinComplete || command.LiteralStdinAmbiguous {
+	patch := command.Program == "apply_patch"
+	if !patch && (command.LiteralStdinComplete || command.LiteralStdinAmbiguous) {
 		command.LiteralStdin = ""
 		command.LiteralStdinView = ""
 		command.LiteralStdinComplete = false
@@ -973,16 +981,29 @@ func projectPOSIXLiteralHeredoc(
 	}
 	if redirection.N != nil {
 		parsed, err := strconv.ParseInt(redirection.N.Value, 10, 64)
+		if err == nil && parsed != 0 && patch {
+			// A document on another descriptor is no stdin of the patch
+			// call: the stdin stays what the other redirects left.
+			return
+		}
 		if err != nil || parsed != 0 {
 			out.markPartial(IssueUnsupportedConstruct)
 			return
 		}
 	}
-	if command.Program == "apply_patch" {
+	if patch {
 		// The shell opens the redirects in order and the last input redirect
 		// of descriptor 0 is the stdin: a here-document after an earlier
-		// input redirect is the stdin the command reads.
+		// input redirect or an earlier here-document is the stdin the
+		// command reads, and replaces whatever the earlier ones showed.
+		command.LiteralStdin = ""
+		command.LiteralStdinView = ""
+		command.LiteralStdinComplete = false
+		command.LiteralStdinAmbiguous = false
 		projectPOSIXPatchHeredoc(redirection, command, out)
+		if !command.LiteralStdinComplete && command.LiteralStdinView == "" {
+			command.LiteralStdinAmbiguous = true
+		}
 		return
 	}
 	if posixDescriptorIsRedirected(command, 0) {

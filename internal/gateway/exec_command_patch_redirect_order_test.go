@@ -36,6 +36,13 @@ func TestShellApplyPatchRedirectOrderDecidesWhichStdinIsJudged(t *testing.T) {
 		{"file after the document", "apply_patch <<EOF < ordinary.patch\n" + decoy + "EOF\n", ""},
 		{"descriptor 0 file after the document", "apply_patch <<EOF 0< ordinary.patch\n" + decoy + "EOF\n", ""},
 		{"file after the literal document", "apply_patch <<EOF < ordinary.patch\n" + protected + "EOF\n", ""},
+		{"two documents, protected last", "apply_patch <<A <<B\n" + ordinary + "A\n" + protected + "B\n", loader},
+		{"two documents, ordinary last", "apply_patch <<A <<B\n" + protected + "A\n" + ordinary + "B\n", ""},
+		{"file between documents, protected last", "apply_patch <<A < ordinary.patch <<B\n" + ordinary + "A\n" + protected + "B\n", loader},
+		{"file between documents, ordinary last", "apply_patch <<A < ordinary.patch <<B\n" + protected + "A\n" + ordinary + "B\n", ""},
+		{"descriptor copy between documents, protected last", "apply_patch <<A 3< ordinary.patch 0<&3 <<B\n" + ordinary + "A\n" + protected + "B\n", loader},
+		{"descriptor copy between documents, ordinary last", "apply_patch <<A 3< ordinary.patch 0<&3 <<B\n" + protected + "A\n" + ordinary + "B\n", ""},
+		{"protected document, then a descriptor 3 document", "apply_patch <<A 3<<B\n" + protected + "A\n" + ordinary + "B\n", loader},
 		{"protected file beside an expanding context line", "apply_patch <<EOF\n" + context + "*** Add File: /etc/ld.so.preload\n+" + lib + "\n" + end + "EOF\n", loader},
 		{"ordinary file beside an expanding context line", "apply_patch <<EOF\n" + context + "*** Add File: other-order.txt\n+hello\n" + end + "EOF\n", ""},
 	}

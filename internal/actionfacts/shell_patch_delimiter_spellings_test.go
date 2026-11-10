@@ -111,7 +111,6 @@ func TestContentProofsReadNothingFromAnUnmodelledHereDocument(t *testing.T) {
 	const body = "*** Begin Patch\n*** Add File: /etc/ld.so.preload\n+/usr/local/lib/libreview.so\n*** End Patch\n"
 	for name, command := range map[string]string{
 		"delimiter with an expansion": "apply_patch <<\"$X\"\n" + body + "$X\n",
-		"two here-documents":          "apply_patch <<A <<B\n" + body + "A\n" + body + "B\n",
 		"extra argument":              "apply_patch --dry-run <<EOF\n" + body + "EOF\n",
 		"cat is no patch program":     "cat <<EOF\n" + body + "EOF\n",
 	} {
