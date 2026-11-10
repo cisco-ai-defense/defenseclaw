@@ -36,6 +36,7 @@ func TestTrustedActionHomeCredentialPipeline(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input:      actionfacts.Input{Tool: "shell", Command: test.command, CWD: "/work", ActiveHome: "/home/alice"},
 				LegacyText: test.command, Connector: connector, EnforcementCapable: true,
+				StrictPolicy: true,
 			})
 			exfil := findingWithID(findings, "exfil.secret_read_and_egress_oneliner")
 			path := findingWithID(findings, "PATH-AWS-CREDS")
