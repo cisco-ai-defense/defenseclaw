@@ -12,6 +12,10 @@ import (
 	"testing"
 )
 
+// overLimitCommandVerdict judges one command on a gateway of its own, so the
+// cells of the tests below do not share state and run concurrently: a cell
+// costs seconds under -race, and about 500 of them ran one after another in
+// one CI shard (GAP-1014).
 func overLimitCommandVerdict(t *testing.T, home, project, command string) string {
 	t.Helper()
 	call := nativeWriteCall{"codex", "exec_command", func(string) map[string]any {
@@ -45,6 +49,7 @@ func TestOverLimitCommandPaddingKeepsItsVerdict(t *testing.T) {
 				"lines":    c.head + c.tail + strings.Repeat("\n  \n", pad/8),
 			} {
 				t.Run(fmt.Sprintf("%s/pad %d %s", c.name, pad, position), func(t *testing.T) {
+					t.Parallel()
 					got := overLimitCommandVerdict(t, home, project, command)
 					if overLimitHookAction(t, got) != "block" || !strings.Contains(got, c.rule) {
 						t.Fatalf("not blocked by %s: %.600s", c.rule, got)
@@ -61,6 +66,7 @@ func TestOverLimitCommandPaddingKeepsItsVerdict(t *testing.T) {
 		"leading line break": strings.Repeat("\n", 300000) + "echo ok > " + ordinary,
 	} {
 		t.Run("benign/"+name, func(t *testing.T) {
+			t.Parallel()
 			got := overLimitCommandVerdict(t, home, project, command)
 			if action := overLimitHookAction(t, got); action == "block" {
 				t.Fatalf("ordinary padded command blocked: %.600s", got)
@@ -103,6 +109,7 @@ func TestOverLimitCommandOpaqueTextFailsClosedForItsTargetOnly(t *testing.T) {
 	} {
 		for padName, pad := range paddings {
 			t.Run("attack/"+name+"/"+padName, func(t *testing.T) {
+				t.Parallel()
 				got := overLimitCommandVerdict(t, home, project, pad(statement))
 				if overLimitHookAction(t, got) != "block" || !strings.Contains(got, "persistence.global_ld_preload_install") {
 					t.Fatalf("not blocked by the preload rule: %.600s", got)
@@ -120,6 +127,7 @@ func TestOverLimitCommandOpaqueTextFailsClosedForItsTargetOnly(t *testing.T) {
 	} {
 		for _, padName := range []string{"quoted text after", "quoted text first"} {
 			t.Run("fallback attack/"+name+"/"+padName, func(t *testing.T) {
+				t.Parallel()
 				got := overLimitCommandVerdict(t, home, project, paddings[padName](statement))
 				if overLimitHookAction(t, got) != "block" {
 					t.Fatalf("not blocked: %.600s", got)
@@ -141,6 +149,7 @@ func TestOverLimitCommandOpaqueTextFailsClosedForItsTargetOnly(t *testing.T) {
 	} {
 		for _, padName := range []string{"comment after", "comment line next", "comment line first"} {
 			t.Run("benign/"+name+"/"+padName, func(t *testing.T) {
+				t.Parallel()
 				got := overLimitCommandVerdict(t, home, project, paddings[padName](statement))
 				if action := overLimitHookAction(t, got); action == "block" {
 					t.Fatalf("ordinary oversize command blocked: %.600s", got)
@@ -155,6 +164,7 @@ func TestOverLimitCommandOpaqueTextFailsClosedForItsTargetOnly(t *testing.T) {
 	} {
 		for _, padName := range []string{"quoted text after", "document after"} {
 			t.Run("benign data padded/"+name+"/"+padName, func(t *testing.T) {
+				t.Parallel()
 				got := overLimitCommandVerdict(t, home, project, paddings[padName](statement))
 				if action := overLimitHookAction(t, got); action == "block" {
 					t.Fatalf("ordinary oversize command blocked: %.600s", got)
@@ -181,6 +191,7 @@ func TestOverLimitCommandPaddingKeepsHeredocMeaning(t *testing.T) {
 		"padded line in a document": "cat > " + notes + " <<EOF\nnote" + strings.Repeat(" ", 70000) + "\n" + attack + "\nEOF\n",
 	} {
 		t.Run("benign/"+name, func(t *testing.T) {
+			t.Parallel()
 			got := overLimitCommandVerdict(t, home, project, command)
 			if action := overLimitHookAction(t, got); action == "block" {
 				t.Fatalf("ordinary here-document blocked: %.600s", got)
@@ -188,6 +199,7 @@ func TestOverLimitCommandPaddingKeepsHeredocMeaning(t *testing.T) {
 		})
 	}
 	t.Run("attack/delimiter then redirect", func(t *testing.T) {
+		t.Parallel()
 		got := overLimitCommandVerdict(t, home, project, "cat > "+notes+" <<EOF\nnote\nEOF\n"+attack+strings.Repeat(" ", 70000))
 		if overLimitHookAction(t, got) != "block" || !strings.Contains(got, "persistence.global_ld_preload_install") {
 			t.Fatalf("not blocked by the preload rule: %.600s", got)
@@ -195,24 +207,33 @@ func TestOverLimitCommandPaddingKeepsHeredocMeaning(t *testing.T) {
 	})
 }
 
-// TestOverLimitCommandDataPaddingFollowsShellOrder pins that a command padded
-// with data (a quoted string) is read in the order the shell runs it
-// (GAP-0934): a later cd or assignment replaces the earlier one, the body of a
-// here-document that only feeds a file is data, and a text a command prints
-// is no write. A protected file reached through a known directory or a known
-// relative value still blocks, and a here-document or a string run by a shell
-// is code.
-func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
-	home, project := hermesPatchHome(t)
-	notes := filepath.Join(project, "notes.txt")
-	lib := "/usr/local/lib/libreview.so"
-	load := "echo " + lib + " > /etc/ld.so.preload"
+// overLimitDataPaddingFixture is what the two data-padding tests below share:
+// the home and project, the ordinary file, the protected library and its
+// write, and the three paddings with data.
+func overLimitDataPaddingFixture(t *testing.T) (home, project, notes, lib, load string, paddings map[string]func(statement string) string) {
+	t.Helper()
+	home, project = hermesPatchHome(t)
+	notes = filepath.Join(project, "notes.txt")
+	lib = "/usr/local/lib/libreview.so"
+	load = "echo " + lib + " > /etc/ld.so.preload"
 	text := strings.Repeat("x", 70000)
-	paddings := map[string]func(statement string) string{
+	paddings = map[string]func(statement string) string{
 		"quoted text after": func(statement string) string { return statement + "\n: \x27" + text + "\x27" },
 		"quoted text first": func(statement string) string { return ": \x27" + text + "\x27\n" + statement },
 		"document after":    func(statement string) string { return statement + "\ncat > /dev/null <<EOF\n" + text + "\nEOF\n" },
 	}
+	return home, project, notes, lib, load, paddings
+}
+
+// TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowed pins the
+// allowed half of the reading of a command padded with data (a quoted
+// string) in the order the shell runs it (GAP-0934): a later cd or assignment
+// replaces the earlier one, the body of a here-document that only feeds a
+// file is data, and a text a command prints is no write. The attack half is
+// TestOverLimitCommandDataPaddingKeepsShellOrderAttacksBlocked; they are two
+// tests so that the CI shards can each hold one (GAP-1014).
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowed(t *testing.T) {
+	home, project, notes, lib, load, paddings := overLimitDataPaddingFixture(t)
 	for name, statement := range map[string]string{
 		"here-document to an ordinary file":     "cat > " + notes + " <<\x27EOF\x27\n" + load + "\nEOF\n",
 		"here-document with a padded delimiter": "cat > " + notes + " <<EOF\nnote\nEOF \n" + load + "\nEOF\n",
@@ -294,6 +315,7 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 	} {
 		for padName, pad := range paddings {
 			t.Run("benign/"+name+"/"+padName, func(t *testing.T) {
+				t.Parallel()
 				got := overLimitCommandVerdict(t, home, project, pad(statement))
 				if action := overLimitHookAction(t, got); action == "block" {
 					t.Fatalf("ordinary oversize command blocked: %.600s", got)
@@ -301,6 +323,14 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestOverLimitCommandDataPaddingKeepsShellOrderAttacksBlocked pins the
+// blocked half: a protected file reached through a known directory or a known
+// relative value still blocks, and a here-document or a string run by a shell
+// is code (GAP-0934).
+func TestOverLimitCommandDataPaddingKeepsShellOrderAttacksBlocked(t *testing.T) {
+	home, project, notes, lib, load, paddings := overLimitDataPaddingFixture(t)
 	for name, statement := range map[string]string{
 		"known relative value":                   "cd /etc; F=ld.so.preload; echo " + lib + " > \"$F\"",
 		"relative value before the cd":           "F=ld.so.preload; cd /etc; echo " + lib + " > \"$F\"",
@@ -370,6 +400,7 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 	} {
 		for padName, pad := range paddings {
 			t.Run("attack/"+name+"/"+padName, func(t *testing.T) {
+				t.Parallel()
 				got := overLimitCommandVerdict(t, home, project, pad(statement))
 				if overLimitHookAction(t, got) != "block" {
 					t.Fatalf("not blocked: %.600s", got)

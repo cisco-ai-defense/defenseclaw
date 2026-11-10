@@ -13,7 +13,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -297,29 +299,60 @@ func TestManagedShellWriteThroughAClosedFolderLinkStaysBlockedWhenTheClientMapIs
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
-	closed := filepath.Join(project, "closed")
-	t.Cleanup(func() { _ = os.Chmod(closed, 0o700) })
-	alias := filepath.Join(project, "alias")
-	resolve := func(count, pad int) map[string]string {
-		raw := mustJSON(t, boundedClosedLinkCall(t, count, pad)(home, project))
-		if err := os.Chmod(closed, 0); err != nil {
-			t.Fatal(err)
+	// A resolve closes the folder it walks, so each worker of the sweep has a
+	// project of its own. The names have the same length, which keeps the
+	// same map bound; the first worker is the project itself.
+	workers := min(max(runtime.GOMAXPROCS(0), 1), 8)
+	projects := make([]string, workers)
+	for w := range projects {
+		projects[w] = project
+		if w > 0 {
+			projects[w] = filepath.Join(home, fmt.Sprintf("pro%d", w))
 		}
-		targets, ok := hookpaths.Decode(hookpaths.Resolve(raw))
-		if err := os.Chmod(closed, 0o700); err != nil {
-			t.Fatal(err)
+		closed := filepath.Join(projects[w], "closed")
+		t.Cleanup(func() { _ = os.Chmod(closed, 0o700) })
+	}
+	type clientMap struct {
+		targets map[string]string
+		ok      bool
+	}
+	// resolveAll reads the client map of each pad; pad i is read in the
+	// project of worker i%workers. The calls are built here, in the test
+	// goroutine, and only the folder walk runs in the workers.
+	resolveAll := func(count int, pads []int) []clientMap {
+		raws := make([][]byte, len(pads))
+		for i, pad := range pads {
+			raws[i] = mustJSON(t, boundedClosedLinkCall(t, count, pad)(home, projects[i%workers]))
 		}
-		if !ok {
-			t.Fatalf("%d redirects, pad %d: the client map could not be read back", count, pad)
+		got := make([]clientMap, len(pads))
+		var wg sync.WaitGroup
+		for w := range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				closed := filepath.Join(projects[w], "closed")
+				for i := w; i < len(pads); i += workers {
+					if os.Chmod(closed, 0) != nil {
+						continue
+					}
+					targets, ok := hookpaths.Decode(hookpaths.Resolve(raws[i]))
+					got[i] = clientMap{targets, ok && os.Chmod(closed, 0o700) == nil}
+				}
+			}()
 		}
-		return targets
+		wg.Wait()
+		return got
 	}
 	// The most redirects the map holds whole. The hard cap is far above the
 	// count the 64 KiB bound allows for paths of this size.
 	const redirectCap = 400
 	count := 0
 	for next := 1; next <= redirectCap; next++ {
-		if resolve(next, 0)[hookpaths.TruncatedKey] != "" {
+		r := resolveAll(next, []int{0})[0]
+		if !r.ok {
+			t.Fatalf("%d redirects, pad 0: the client map could not be read back", next)
+		}
+		if r.targets[hookpaths.TruncatedKey] != "" {
 			break
 		}
 		count = next
@@ -332,21 +365,35 @@ func TestManagedShellWriteThroughAClosedFolderLinkStaysBlockedWhenTheClientMapIs
 	// With the pad on the first names, the room left after the last whole
 	// entry shrinks two bytes a step: it passes the size of the operand answer
 	// and its link text once, then the last redirect no longer fits and the
-	// answer is whole again. The sweep ends there.
-	for pad, last := 0, count*boundedPadPerName; pad <= last; pad++ {
-		targets := resolve(count, pad)
-		resolved, present := targets[alias]
-		_, text := targets[hookpaths.LinkTextFactPrefix+alias]
-		switch {
-		case present && resolved == "" && text:
-			withText++
-			if len(incomplete) > 0 {
-				pad = last
+	// answer is whole again. The sweep ends there. It reads every pad in turn,
+	// a batch at a time.
+	last := count * boundedPadPerName
+	batch := 8 * workers
+sweep:
+	for start := 0; start <= last; start += batch {
+		var pads []int
+		for pad := start; pad < start+batch && pad <= last; pad++ {
+			pads = append(pads, pad)
+		}
+		for i, r := range resolveAll(count, pads) {
+			pad := pads[i]
+			if !r.ok {
+				t.Fatalf("%d redirects, pad %d: the client map could not be read back", count, pad)
 			}
-		case present && resolved == "":
-			t.Fatalf("%d redirects, pad %d: an empty answer for the linked operand without its link text and without a bound marker", count, pad)
-		case !present && targets[hookpaths.TruncatedKey] != "":
-			incomplete = append(incomplete, pad)
+			alias := filepath.Join(projects[i%workers], "alias")
+			resolved, present := r.targets[alias]
+			_, text := r.targets[hookpaths.LinkTextFactPrefix+alias]
+			switch {
+			case present && resolved == "" && text:
+				withText++
+				if len(incomplete) > 0 {
+					break sweep
+				}
+			case present && resolved == "":
+				t.Fatalf("%d redirects, pad %d: an empty answer for the linked operand without its link text and without a bound marker", count, pad)
+			case !present && r.targets[hookpaths.TruncatedKey] != "":
+				incomplete = append(incomplete, pad)
+			}
 		}
 	}
 	t.Logf("the map holds %d redirects; %d maps with the link text, %d incomplete maps (pads %v)", count, withText, len(incomplete), incomplete)
