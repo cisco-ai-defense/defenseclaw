@@ -3202,6 +3202,20 @@ const unenrolledAccountExplanation = "this account is not enrolled yet; restart 
 	"For Claude Code, the wait starts at its first start if that is later. " +
 	"If this continues, the policy may exclude this account: ask your administrator"
 
+// pendingAccountExplanation is why a Windows standalone account that the
+// machine policy registers but that has no runtime yet is blocked. The guardian
+// publishes the runtime only in the account's own connected session, so a
+// signed-out or disconnected account stays blocked until it signs in or
+// reconnects, also when it was enrolled before (GAP-1026). It leads with the
+// block and the way out within the first 80 characters, and keeps the
+// prerequisites of unenrolledAccountExplanation.
+const pendingAccountExplanation = "blocked until this account is enrolled; sign in or reconnect. " +
+	"DefenseClaw enrolls an account within 5 minutes once you have signed in and the agent is installed " +
+	"(console or Remote Desktop; not SSH, a scheduled task or runas), and only in a connected session: " +
+	"a signed-out or disconnected account stays blocked until it signs in or reconnects. Then restart the agent. " +
+	"For Claude Code, the wait starts at its first start if that is later. " +
+	"If this continues, the policy may exclude this account: ask your administrator"
+
 // failEnrollmentRefusal blocks, like failUnreachable in closed mode, a tool
 // call of an account the administrator has not enrolled (yet) or excludes, or
 // of root under enrollment.root: deny, and says so: the gateway is up, and
@@ -3227,6 +3241,13 @@ func failEnrollmentRefusalOf(opts Options, sp spec, reason string, excluded bool
 	}
 	why := unenrolledAccountExplanation
 	switch reason {
+	case managedEnrollmentPendingReason:
+		// A Windows standalone account with no runtime yet: it may have been
+		// enrolled before and be disconnected now (GAP-1026), so the text says
+		// the agent is blocked and what ends that, not only "restart".
+		if !opts.SecureClient {
+			why = pendingAccountExplanation
+		}
 	case managedUIDUnregisteredReason:
 		why = unixUnenrolledAccountExplanation
 		if excluded {

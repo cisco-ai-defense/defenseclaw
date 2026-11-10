@@ -510,6 +510,21 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 	if !prepared || err == nil {
 		return ""
 	}
+	// A registered account with no runtime selected for it is pending, not
+	// drifted (GAP-1026): the guardian publishes a runtime only in the
+	// account's own connected session, and revokes the selection when its
+	// protected record is gone. The resolver tags that missing selection as
+	// drift when no integrity finding backs it, so an account that had been
+	// enrolled was told DefenseClaw "is not set up correctly" and to contact
+	// its administrator, while it only waits for a connected session. A
+	// standalone account is refused either way; Secure Client keeps its class,
+	// whose fail mode differs (a pending account follows the profile's open
+	// default, a drifted one the mode its authenticated generation names).
+	if errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending) &&
+		enterprisehooks.WindowsManagedRuntimeFailureClassOf(err) == enterprisehooks.WindowsManagedRuntimeFailureDrift &&
+		standaloneEnterpriseHookCheck(nativeHookExecutable()) {
+		return enterprisehooks.WindowsManagedEnrollmentPendingReason
+	}
 	switch enterprisehooks.WindowsManagedRuntimeFailureClassOf(err) {
 	case enterprisehooks.WindowsManagedRuntimeFailureUnregistered:
 		return enterprisehooks.WindowsManagedSIDUnregisteredReason
