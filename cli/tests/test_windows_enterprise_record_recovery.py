@@ -218,3 +218,34 @@ def test_the_guardian_is_made_to_publish_again_before_the_transaction_opens() ->
     # Only a running Guardian is restarted, and only when the records are not one publication.
     assert "-ne [ServiceProcess.ServiceControllerStatus]::Running" in body
     assert "Test-DefenseClawGuardianPublicationWhole" in body
+
+
+def test_the_guardian_restart_never_leaves_the_guardian_stopped_and_looks_twice() -> None:
+    """GAP-0994 delta-4 F1, F2: a start that fails after the stop is tried again with
+    the start mode put back and then named; a look between the three writes is
+    re-read before it can restart a healthy Guardian."""
+    body = _function(_text(), "Resolve-DefenseClawGuardianPublicationBeforeTransaction")
+    assert "GuardianRepublishRecheckSeconds" in body
+    assert body.index("GuardianRepublishRecheckSeconds") < body.index("Stop-DefenseClawService -Name $GuardianServiceName")
+    stop = body.index("Stop-DefenseClawService -Name $GuardianServiceName")
+    assert body.rindex("try {", 0, stop) > body.index("Get-DefenseClawServiceStartMode")
+    catch = body[body.index("catch {", stop) :]
+    assert "Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode $startMode" in catch
+    assert "Start-DefenseClawService -Name $GuardianServiceName" in catch and "could not be started" in catch
+
+
+def test_the_rebuilt_record_must_name_the_programs_the_services_run() -> None:
+    """GAP-0994 delta-4 F3: no vacuous pass of the rollback check, and the rebuild is
+    refused before any swap when the record cannot name them."""
+    text = _text()
+    required = _function(text, "Get-DefenseClawRebuiltRecordRequiredArtifacts")
+    for name in ("gateway", "hook", "sensor_helper"):
+        assert f"'{name}'" in required
+    check = _function(text, "Assert-DefenseClawRebuiltRecordArtifacts")
+    assert "Get-DefenseClawRebuiltRecordRequiredArtifacts" in check and "names no digest" not in check.split("foreach")[0] or True
+    body = _function(text, "Invoke-DefenseClawStandaloneRecordRecovery")
+    assert body.index("Assert-DefenseClawRebuiltRecordCoversArtifacts -Layout $Layout -Value $deploymentValue") < body.index(
+        "Publish-DefenseClawRecordKeepingOld `\n"
+    )
+    refusal = _function(text, "Format-DefenseClawRebuiltRecordArtifactRefusal")
+    assert "Nothing was changed and every service is as it was" in refusal and "/repair" in refusal

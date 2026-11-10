@@ -31,12 +31,15 @@ try {
         $script:approvedCarried = $null
         $script:serviceRegistered = $true
         $script:failKeptStamp = $false
+        $script:omitHash = @()
         function New-DefenseClawRebuiltDeploymentRecord {
             param($Layout, $Sources, $GatewayServiceName, $GuardianServiceName, $ApprovedPolicySources = $null)
             if ($script:rebuildFails) { throw 'the rebuild failed (fixture)' }
             $script:rebuilds.Add('built')
             $script:approvedCarried = $ApprovedPolicySources
-            return [ordered]@{ installed = $true; rebuilt = $true }
+            $hashes = [ordered]@{ gateway = ('a' * 64); hook = ('a' * 64); sensor_helper = ('a' * 64) }
+            foreach ($left in @($script:omitHash)) { if ($left) { $hashes.Remove($left) } }
+            return [ordered]@{ installed = $true; rebuilt = $true; hashes = $hashes }
         }
         # Review D1: the one-step swap is wrapped so a run can be "killed" at
         # the Nth swap, and every call checks that a live record is in place
@@ -305,6 +308,27 @@ try {
             throw 'an attestation-only change lost the approved policy digests'
         }
 
+        # Delta-4 F3: a rebuilt record that cannot name the gateway, the hook and
+        # the sensor helper (an empty hashes table, or one artifact missing)
+        # is refused before anything is swapped: the record, the attestation and
+        # the services are as they were, and the text names the artifact and the way out.
+        foreach ($omit in @(@('gateway', 'hook', 'sensor_helper'), @('hook'), @('sensor_helper'))) {
+            Reset-Records
+            Plant-Writer $metadata
+            $before = [IO.File]::ReadAllText($metadata)
+            $script:omitHash = $omit
+            $script:rebuilds.Clear()
+            $refusal = ''
+            try { [void](Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H') } catch { $refusal = $_.Exception.Message }
+            $script:omitHash = @()
+            if ($refusal -notmatch 'Nothing was changed and every service is as it was' -or $refusal -notmatch [regex]::Escape($omit[0]) -or $refusal -notmatch '/repair') {
+                throw "a rebuilt record without $($omit -join ',') was not refused by name before the swap: $refusal"
+            }
+            if ([IO.File]::ReadAllText($metadata) -cne $before -or @(Kept 'deployment.json').Count -ne 0 -or (Get-DefenseClawStandaloneRecordUntrustedReason -Path $metadata) -eq '') {
+                throw 'a refused rebuild changed the record'
+            }
+        }
+
         # Review S5: the refusal names every account (owner and writer), each
         # command exact, the inherited-entry step and the open-handle caveat.
         Reset-Records
@@ -375,21 +399,34 @@ try {
         if (Test-DefenseClawRebuiltDeploymentRecord -Metadata ([pscustomobject]@{ installed = $true })) { throw 'a record with no marker was called rebuilt' }
         if (Test-DefenseClawRebuiltDeploymentRecord -Metadata ([pscustomobject]@{ record_rebuilt_by_setup = 'yes' })) { throw 'a marker that is not a Boolean was accepted' }
 
-        # The artifact check of the rollback: the digests the record names.
-        $gateway = [IO.Path]::Combine($State, 'defenseclaw-gateway.exe')
-        [IO.File]::WriteAllText($gateway, 'gateway bytes')
-        $digest = (Get-FileHash -LiteralPath $gateway -Algorithm SHA256).Hash.ToLowerInvariant()
-        $layout = @{ GatewayPath = $gateway }
-        $meta = [pscustomobject]@{ hashes = [pscustomobject]@{ gateway = $digest } }
+        # The artifact check of the rollback: the gateway, the hook and the sensor
+        # helper must be named with the digest of their installed file (delta-4 F3);
+        # an empty table or a missing one is refused by name, never passed.
+        $files = @{}
+        foreach ($pair in @(@('gateway', 'GatewayPath'), @('hook', 'HookPath'), @('sensor_helper', 'SensorHelperPath'))) {
+            $f = [IO.Path]::Combine($State, "$($pair[0]).exe")
+            [IO.File]::WriteAllText($f, "$($pair[0]) bytes")
+            $files[$pair[0]] = $f
+        }
+        $layout = @{ GatewayPath = $files.gateway; HookPath = $files.hook; SensorHelperPath = $files.sensor_helper }
+        function New-Hashes { $h = [ordered]@{}; foreach ($k in $files.Keys) { $h[$k] = (Get-FileHash -LiteralPath $files[$k] -Algorithm SHA256).Hash.ToLowerInvariant() }; [pscustomobject]$h }
+        $meta = [pscustomobject]@{ hashes = (New-Hashes) }
         Assert-DefenseClawRebuiltRecordArtifacts -Layout $layout -Metadata $meta
-        [IO.File]::WriteAllText($gateway, 'another file')
-        $threw = $false
-        try { Assert-DefenseClawRebuiltRecordArtifacts -Layout $layout -Metadata $meta } catch { $threw = $_.Exception.Message -match 'another digest' }
-        if (-not $threw) { throw 'a changed artifact was accepted by the rollback check' }
-        Remove-Item -LiteralPath $gateway -Force
-        $threw = $false
-        try { Assert-DefenseClawRebuiltRecordArtifacts -Layout $layout -Metadata $meta } catch { $threw = $_.Exception.Message -match 'missing' }
-        if (-not $threw) { throw 'a missing artifact was accepted by the rollback check' }
+        function Expect-Refusal([string]$Why, $Metadata, [string]$Pattern) {
+            $threw = $false
+            try { Assert-DefenseClawRebuiltRecordArtifacts -Layout $layout -Metadata $Metadata } catch { $threw = $_.Exception.Message -match $Pattern }
+            if (-not $threw) { throw "$Why was accepted by the rollback check" }
+        }
+        Expect-Refusal 'a record with an empty hashes table' ([pscustomobject]@{ hashes = [pscustomobject]@{} }) 'names no digest'
+        Expect-Refusal 'a record with no hashes at all' ([pscustomobject]@{ installed = $true }) 'names no digest'
+        foreach ($drop in @('gateway', 'hook', 'sensor_helper')) {
+            $partial = New-Hashes; $partial.PSObject.Properties.Remove($drop)
+            Expect-Refusal "a record without the $drop digest" ([pscustomobject]@{ hashes = $partial }) ("for it|" + $drop)
+        }
+        [IO.File]::WriteAllText($files.hook, 'another file')
+        Expect-Refusal 'a changed hook' $meta 'another digest'
+        Remove-Item -LiteralPath $files.hook -Force
+        Expect-Refusal 'a missing hook' $meta 'missing'
 
         # The full assertion: a rollback to a rebuilt record returns after the
         # identity and artifact checks; every other caller still fails.
@@ -400,9 +437,11 @@ try {
         function Test-DefenseClawMetadataInstalled { param($Metadata) return $true }
         function Get-DefenseClawRedactionKeySecuritySnapshot { param($Layout, $GatewayServiceSID) throw 'the full assertion ran (fixture)' }
         function Get-DefenseClawServiceSID { param($ServiceName) return 'S-1-5-80-1-2-3-4-5' }
-        $script:record = [pscustomobject]@{ installed = $true; record_rebuilt_by_setup = $true; hashes = [pscustomobject]@{} }
+        [IO.File]::WriteAllText($files.hook, 'hook bytes')
+        $script:record = [pscustomobject]@{ installed = $true; record_rebuilt_by_setup = $true; hashes = (New-Hashes) }
+        $script:layoutForRollback = $layout
         $script:phases.Clear()
-        Assert-DefenseClawEnterpriseDeployment -Layout @{} -GatewayServiceName 'G' -GuardianServiceName 'H' -ServicingTransaction -RollbackRestore
+        Assert-DefenseClawEnterpriseDeployment -Layout $script:layoutForRollback -GatewayServiceName 'G' -GuardianServiceName 'H' -ServicingTransaction -RollbackRestore
         if (@($script:phases | Where-Object { $_ -match 'rebuilt deployment record' }).Count -ne 1) { throw 'the rollback to a rebuilt record did not return early' }
         $threw = $false
         try { Assert-DefenseClawEnterpriseDeployment -Layout @{} -GatewayServiceName 'G' -GuardianServiceName 'H' -ServicingTransaction } catch { $threw = $_.Exception.Message -match 'full assertion ran' }
@@ -431,13 +470,21 @@ try {
         Add-Type -AssemblyName System.ServiceProcess
         $script:GuardianRepublishWaitSeconds = 3
         $script:GuardianRepublishPollSeconds = 1
+        $script:GuardianRepublishRecheckSeconds = 1
         $script:guardianStatus = [ServiceProcess.ServiceControllerStatus]::Running
         $script:restarts = 0
         $script:republishes = $true
+        $script:startFailures = 0
+        $script:startCalls = 0
+        $script:startModeSet = @()
+        function Get-DefenseClawServiceStartMode { param([string]$Name) return 2 }
+        function Set-DefenseClawServiceStartMode { param([string]$Name, [int]$StartMode) $script:startModeSet += $StartMode }
         function Get-DefenseClawServiceChecked { param([string]$Name) return [pscustomobject]@{ Status = $script:guardianStatus } }
         function Stop-DefenseClawService { param([string]$Name) $script:restarts++ }
         function Start-DefenseClawService {
             param([string]$Name, [string]$FailureLogPath)
+            $script:startCalls++
+            if ($script:startFailures -gt 0) { $script:startFailures--; throw 'SCM start request exited 1056 (fixture)' }
             if ($script:republishes) { Write-Publication '2026-11-09T22:00:00.5Z' '2026-11-09T22:00:00.5Z' '2026-11-09T22:00:00.5Z' }
         }
         Write-Publication '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z'
@@ -446,6 +493,42 @@ try {
         Write-Publication '2026-11-09T00:00:00Z' '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z'
         Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
         if ($script:restarts -ne 1 -or -not (Test-DefenseClawGuardianPublicationWhole -Layout $glayout)) { throw 'records from different publications were not published again by one restart' }
+        # Delta-4 F2: a look taken between the Guardian's three writes is not a
+        # fault. The records agree about a second later: no restart. They still
+        # disagree: one restart.
+        $realStamps = Get-Command -Name Get-DefenseClawGuardianPublicationStamps -CommandType Function
+        $script:stampQueue = [Collections.Generic.Queue[object]]::new()
+        function Get-DefenseClawGuardianPublicationStamps {
+            param($Layout)
+            if ($script:stampQueue.Count -gt 0) { return $script:stampQueue.Dequeue() }
+            return & $realStamps -Layout $Layout
+        }
+        $mid = [ordered]@{ activation = 'T0'; authorization = 'T1'; state = 'T1' }
+        $whole = [ordered]@{ activation = 'T1'; authorization = 'T1'; state = 'T1' }
+        $script:restarts = 0
+        foreach ($look in @($mid, $mid, $whole)) { $script:stampQueue.Enqueue($look) }
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
+        if ($script:restarts -ne 0 -or $script:stampQueue.Count -ne 0) { throw 'a read between the Guardian writes restarted a healthy Guardian' }
+        Write-Publication '2026-11-09T00:00:00Z' '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z'
+        Remove-Item Function:\Get-DefenseClawGuardianPublicationStamps
+        function Get-DefenseClawGuardianPublicationStamps { param($Layout) return & $realStamps -Layout $Layout }
+        $script:restarts = 0
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
+        if ($script:restarts -ne 1) { throw 'records that still disagree after the second look were not restarted once' }
+
+        # Delta-4 F1: a start that fails after the stop is tried once more with the
+        # start mode put back; a Guardian that still does not start ends the run
+        # naming both failures and the exact command, with nothing else changed.
+        Write-Publication '2026-11-09T00:00:00Z' '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z'
+        $script:restarts = 0; $script:startCalls = 0; $script:startFailures = 1; $script:startModeSet = @()
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
+        if ($script:startCalls -ne 2 -or @($script:startModeSet).Count -ne 1 -or $script:startModeSet[0] -ne 2 -or -not (Test-DefenseClawGuardianPublicationWhole -Layout $glayout)) { throw 'a failed first start was not retried once with the start mode put back' }
+        Write-Publication '2026-11-09T00:00:00Z' '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z'
+        $script:startCalls = 0; $script:startFailures = 5; $script:startModeSet = @()
+        $threw = ''
+        try { Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H' } catch { $threw = $_.Exception.Message }
+        $script:startFailures = 0
+        if ($script:startCalls -ne 2 -or $threw -notmatch 'could not be started' -or $threw -notmatch 'sc\.exe start H' -or $threw -notmatch 'No transaction was opened' -or $threw -notmatch '1056') { throw "a Guardian that does not start was not named: $threw" }
         $script:republishes = $false; $script:restarts = 0
         Write-Publication '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z' '2026-11-09T00:00:00Z'
         $threw = $false
