@@ -1405,10 +1405,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		_ = resp.Body.Close()
 	}
 	patchWatch := opts.requestFacts.watch()
-	if patchWatch.Changed() {
+	if patchWatch != nil && !gatewayBlocked(body) && patchWatch.Changed() {
 		// The gateway judged the patch targets the hook read before the
 		// request; one leads elsewhere now. Behind ProtectHome only this hook
-		// can read it again (GAP-0488, GAP-0073).
+		// can read it again (GAP-0488, GAP-0073). A block answer is not
+		// replaced: it already stops the call and names the rule, and a
+		// target that is itself a protected file reads as changed here
+		// (GAP-1007).
 		return failResponse(opts, sp, "closed", "a patch target changed after DefenseClaw reviewed it")
 	}
 	code := sp.decide(opts, body)
@@ -1478,6 +1481,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		*requestHandedOff = true
 	}
 	return code
+}
+
+// gatewayBlocked reports a gateway answer whose action is a block. Any other
+// action (allow, alert, confirm, none) can let the call run.
+func gatewayBlocked(body []byte) bool {
+	var verdict struct {
+		Action string `json:"action"`
+	}
+	return json.Unmarshal(body, &verdict) == nil && verdict.Action == "block"
 }
 
 // gatewayAllowed reports a gateway answer whose action lets the call run.
