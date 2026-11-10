@@ -209,7 +209,7 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 				return operands
 			}
 			if allowFileRead {
-				if script, ok := shellScriptOperand(words); ok && actionScriptInsideCWD(script, cwd) {
+				if script, ok := shellScriptOperand(words); ok && actionScriptReadable(script, cwd, home) {
 					return literalLocalShellScriptOperands(script, cwd, home, depth)
 				}
 			}
@@ -245,7 +245,7 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 		case "xargs":
 			return nil // A producer must prove the replacement text first.
 		default:
-			if allowFileRead && strings.HasSuffix(program, ".sh") && actionScriptInsideCWD(words[0], cwd) {
+			if allowFileRead && strings.HasSuffix(program, ".sh") && actionScriptReadable(words[0], cwd, home) {
 				return literalLocalShellScriptOperands(words[0], cwd, home, depth)
 			}
 			operands := directLiteralProgramOperands(words, stmt, cwd, home, allowFileRead)
@@ -259,7 +259,7 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 }
 
 func literalLocalShellScriptOperands(script, cwd, home string, depth int) []string {
-	content, read := readIndirectSource(script, cwd)
+	content, read := readActionScript(script, cwd, home)
 	if !read {
 		return nil
 	}
