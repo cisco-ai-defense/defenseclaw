@@ -312,17 +312,43 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 	}
 }
 
-// classifyPOSIXApplyPatchStdin gives a shell-fed, literal patch the same
-// path operations as the native apply_patch tool. A quoted heredoc preserves
-// the envelope bytes; other stdin forms have no authoritative patch text.
-func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
+// applyPatchStdinText is the envelope text of a POSIX apply_patch command
+// fed by a here-document, in every delimiter spelling: the document itself
+// when no shell expansion touches it, and for a document the shell expands,
+// the text it shows (LiteralStdinView) when no file directive of it holds an
+// expansion or a backslash. The expansions are then unknown content of the
+// lines that hold them; the files the patch names are as the text names them.
+// A document that is not read yields no text.
+func applyPatchStdinText(command CommandFact) (string, bool) {
 	if command.Dialect != DialectPOSIX || command.Executable != "apply_patch" ||
-		!command.ArgvComplete || len(command.Argv) != 1 ||
-		!command.LiteralStdinComplete || command.LiteralStdinAmbiguous {
+		!command.ArgvComplete || len(command.Argv) != 1 {
+		return "", false
+	}
+	if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
+		return command.LiteralStdin, true
+	}
+	if command.LiteralStdinComplete || command.LiteralStdinView == "" {
+		return "", false
+	}
+	for _, line := range strings.Split(command.LiteralStdinView, "\n") {
+		if strings.HasPrefix(line, "*** ") && strings.ContainsAny(line, "$\\") {
+			return "", false
+		}
+	}
+	return command.LiteralStdinView, true
+}
+
+// classifyPOSIXApplyPatchStdin gives a shell-fed, literal patch the same
+// path operations as the native apply_patch tool. A here-document keeps the
+// envelope bytes (applyPatchStdinText); other stdin forms have no
+// authoritative patch text.
+func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
+	text, ok := applyPatchStdinText(*command)
+	if !ok {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
-	patch := parsePatchEnvelope(command.LiteralStdin)
+	patch := parsePatchEnvelope(text)
 	if patch.status != StatusComplete {
 		if patch.status == StatusLimitExceeded {
 			out.markLimit(patch.issue)

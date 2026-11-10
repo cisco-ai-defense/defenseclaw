@@ -25,6 +25,7 @@ import (
 // is found on every form, not on a sample (GAP-0749, review round 2).
 func gap0749ResolveReaders(command, cwd, home string) {
 	dialect := hookShellDialect("", "Bash")
+	_ = actionfacts.CommandTextOverLimit(command)
 	shellparse.TooDeep(command)
 	ActionCommandAuditReasonWithDialect(command, cwd, home, dialect)
 	MayNameState(command)
@@ -44,6 +45,9 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	}
 	fallback := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home}
 	fallbackFacts := actionfacts.Analyze(fallback)
+	if twin, ok := actionfacts.OverLimitCommandBoundedTwin(fallback, fallbackFacts); ok {
+		fallback, fallbackFacts = twin, actionfacts.Analyze(twin)
+	}
 	simples := actionfacts.SimpleCommands(fallback, fallbackFacts)
 	plainMoveDestinationsWithStatements(fallback, fallbackFacts, simples)
 	callPastArgvBound(command)
@@ -111,7 +115,8 @@ var gap0749ResolveReaderCalls = []string{
 	"StateNamingReading", "actionClientLoopCopyDestinationProtected", "actionClientProvedOverwrittenRedirect",
 	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
 	"actionConcreteProtectedWriteOnWithOperands", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
-	"actionfacts.Analyze", "actionfacts.DynamicOperandTwins", "actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
+	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
+	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
 	"plainMoveDestinationsWithStatements", "shellWriteOperands", "shellparse.TooDeep",
 }

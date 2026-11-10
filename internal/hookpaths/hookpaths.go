@@ -1770,6 +1770,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
 	facts := actionfacts.Analyze(input)
+	if view, ok := overLimitBoundedTwinFacts(input, facts); ok {
+		// A command over the limit only by the white space and comments that
+		// pad it is judged by the gateway as the command without them, so the
+		// map describes that command and is not marked incomplete for the
+		// padding alone (GAP-1003).
+		facts = view
+	}
 	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(input, facts); ok {
 		// The gateway judges the reduced call: list its targets.
 		facts = view
@@ -1842,6 +1849,18 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
 				var concreteOperands actionConcreteOperands
+				// An apply_patch command is a patch envelope, and one over
+				// the analysis string limit is file content far past what a
+				// shell reader describes: its targets are read from the
+				// envelope below, and the gateway judges its reduced call.
+				// Reading that text as shell cost the client seconds for an
+				// ordinary 889 KB patch, past the managed hook window
+				// (GAP-1008). The map says only that it is incomplete, as the
+				// fallback reading of a command over the limit does.
+				if isApplyPatchToolName(tool) && actionfacts.CommandTextOverLimit(command) {
+					truncated = true
+					break
+				}
 				// A shell command nested past the reading bound is past the
 				// analysis limits: no reader below parses it (GAP-2556). Only
 				// the command is measured: a Write or Edit body of ordinary
@@ -1919,6 +1938,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
+				if twin, ok := actionfacts.OverLimitCommandBoundedTwin(fallback, fallbackFacts); ok {
+					fallback, fallbackFacts = twin, actionfacts.Analyze(twin)
+				}
 				// One per-command reading serves the move and the child
 				// readings below.
 				simples := actionfacts.SimpleCommands(fallback, fallbackFacts)
@@ -2453,6 +2475,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 	}
 	identity := strings.Join(identities, "\x00")
+	// A script body this call could not read (the call wait for a network
+	// share, or the links on its path past the bound) is told to the gateway:
+	// only this reader opens the user home (ShareBodyUnreadKey).
+	if unread := shareBodyUnreadFact(); unread != "" {
+		entry := len(jsonString(ShareBodyUnreadKey)) + 1 + len(jsonString(unread)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			return unprovenEvidence(cwd, unprovenReason, identity)
+		}
+		targets[ShareBodyUnreadKey] = unread
+		size += entry
+	}
 	if unprovenReason != "" {
 		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
@@ -2544,6 +2577,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		*watch = patchTargetWatchOf(targets, home)
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+// overLimitBoundedTwinFacts are the facts of the bounded twin of a limit-
+// exceeded shell call (actionfacts.OverLimitCommandBoundedTwin): the same call
+// within the limits, which the gateway judges in its place.
+func overLimitBoundedTwinFacts(input actionfacts.Input, facts actionfacts.Facts) (actionfacts.Facts, bool) {
+	twin, ok := actionfacts.OverLimitCommandBoundedTwin(input, facts)
+	if !ok {
+		return actionfacts.Facts{}, false
+	}
+	return actionfacts.Analyze(twin), true
 }
 
 // movedDirectorySightingPath names a directory a complete, plain move may
@@ -2813,6 +2857,8 @@ func resolveCopilotCalls(connector, surface, event string, envelope map[string]j
 				merged[key] = value
 			case key == FileIdentitiesKey:
 				merged[key] = previous + "," + value
+			case key == ShareBodyUnreadKey:
+				merged[key] = mergeShareBodyUnread(previous, value)
 			case key == InstructionIdentityKey:
 				merged[key] = previous + "\x00" + value
 			default:
@@ -2865,6 +2911,9 @@ func unprovenEvidence(cwd, reason, identity string) string {
 	if identity != "" {
 		targets[InstructionIdentityKey] = identity
 	}
+	if unread := shareBodyUnreadFact(); unread != "" {
+		targets[ShareBodyUnreadKey] = unread
+	}
 	encoded, _ := json.Marshal(targets)
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
@@ -2891,6 +2940,7 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[NoDereferenceTouchSafeKey] != "" && targets[NoDereferenceTouchSafeKey] != "1") ||
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
+		!validShareBodyUnreadFact(targets[ShareBodyUnreadKey]) ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}

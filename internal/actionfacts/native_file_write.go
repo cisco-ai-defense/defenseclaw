@@ -130,25 +130,29 @@ func (write nativeFileWrite) applyEdits(content string) (string, editResult) {
 }
 
 // boundedNativeText is text padded with white space past maxCommandBytes in
-// the form the file reads the same in: without the white space around it. A
-// proof's size bound then applies to the content, so padding a patch hunk
-// does not carry protected text past the proof, as it does not for a write
-// (OverLimitWriteBoundedTwin). Text without such padding is returned as it is.
+// the form the file reads the same in: without the white space around it, and
+// without the runs of it inside it (boundedWhiteSpaceText). A proof size
+// bound then applies to the content, so padding a patch hunk, on the line of
+// the protected text or on lines of its own, does not carry protected text
+// past the proof, as it does not for a write (OverLimitWriteBoundedTwin).
+// Text without such padding is returned as it is.
 func boundedNativeText(text string) string {
 	if len(text) <= maxCommandBytes {
 		return text
 	}
-	if trimmed := strings.TrimSpace(text); len(trimmed) <= maxCommandBytes {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) <= maxCommandBytes {
 		return trimmed
 	}
-	return text
+	return boundedWhiteSpaceText(trimmed)
 }
 
 // nativeCallWrites reads the files one call writes and the facts that describe
 // them. A native file-tool call gives them in its arguments, and its facts are
-// the facts of the call. A shell command gives them only in the literal
-// envelope of an apply_patch command with a quoted here-document, the form in
-// which Codex sends its patch tool (exec_command), and the proofs then read the
+// the facts of the call. A shell command gives them only in the envelope of an
+// apply_patch command fed by a here-document (any delimiter spelling, as
+// applyPatchStdinText reads it), the form in which Codex sends its patch tool
+// (exec_command), and the proofs then read the
 // path facts of those commands only: a path another command of the same text
 // reads or writes is judged by the rules for that command, and is no operand of
 // the patch. Any other shell text, and any call with an argument vector, writes
@@ -166,25 +170,42 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 	view := facts
 	view.Paths = nil
 	var writes []nativeFileWrite
-	patchCommands := map[int64]bool{}
+	patchCommands := map[int64]CommandFact{}
+	patchFiles := map[int64]map[string]bool{}
 	for _, command := range facts.Commands {
-		if command.Dialect != DialectPOSIX || command.Executable != "apply_patch" ||
-			!command.ArgvComplete || len(command.Argv) != 1 ||
-			!command.LiteralStdinComplete || command.LiteralStdinAmbiguous ||
-			parsePatchEnvelope(command.LiteralStdin).status != StatusComplete {
+		text, ok := applyPatchStdinText(command)
+		if !ok {
 			continue
 		}
-		patchCommands[command.ID] = true
-		for _, write := range nativePatchEnvelopeWrites(command.LiteralStdin) {
+		envelope := parsePatchEnvelope(text)
+		if envelope.status != StatusComplete {
+			continue
+		}
+		patchCommands[command.ID] = command
+		patchFiles[command.ID] = map[string]bool{}
+		for _, change := range envelope.changes {
+			patchFiles[command.ID][change.path] = true
+		}
+		for _, write := range nativePatchEnvelopeWrites(text) {
 			write.added = boundedNativeText(write.added)
 			write.replaced = boundedNativeText(write.replaced)
 			writes = append(writes, write)
 		}
 	}
 	for _, candidate := range facts.Paths {
-		if patchCommands[candidate.CommandID] {
-			view.Paths = append(view.Paths, candidate)
+		command, ok := patchCommands[candidate.CommandID]
+		if !ok {
+			continue
 		}
+		// A file the command redirects to or from is a redirect of the shell
+		// (apply_patch </dev/null <<EOF), judged by the rules for that redirect;
+		// it is no file the patch writes, unless the patch names it too.
+		if !patchFiles[command.ID][candidate.Value] && slices.ContainsFunc(command.Redirects, func(redirect RedirectFact) bool {
+			return redirect.Target == candidate.Value && redirect.Access == candidate.Access
+		}) {
+			continue
+		}
+		view.Paths = append(view.Paths, candidate)
 	}
 	return writes, view
 }

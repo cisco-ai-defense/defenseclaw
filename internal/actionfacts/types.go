@@ -1070,17 +1070,21 @@ type CommandFact struct {
 	Argv               []string
 	Arguments          []ArgumentFact
 	ArgvComplete       bool
-	// LiteralStdin is retained only for one bounded, single-quoted POSIX
-	// heredoc whose bytes cannot undergo shell expansion. It is private
-	// in-process evidence and is intentionally not part of the public semantic
-	// projection.
+	// LiteralStdin is retained only for one bounded POSIX heredoc (any
+	// delimiter quoting, <<-) whose bytes cannot undergo shell expansion.
+	// It is private in-process evidence and is intentionally not part of
+	// the public semantic projection.
 	LiteralStdin          string
 	LiteralStdinComplete  bool
 	LiteralStdinAmbiguous bool
-	Operations            []OperationKind
-	Redirects             []RedirectFact
-	Wrappers              []WrapperFact
-	curlCapability        *CurlCapability `json:"-"`
+	// LiteralStdinView is, for an apply_patch fed by a here-document the
+	// shell expands, the text the document shows with one "$" for each
+	// expansion. It is not the stdin; only applyPatchStdinText reads it.
+	LiteralStdinView string
+	Operations       []OperationKind
+	Redirects        []RedirectFact
+	Wrappers         []WrapperFact
+	curlCapability   *CurlCapability `json:"-"`
 }
 
 // CommandControlFlowOperator is a private, value-free summary of the POSIX
