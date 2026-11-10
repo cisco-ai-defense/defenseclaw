@@ -2136,6 +2136,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	}
 	// A native patch call names its files in the call, not in a shell command.
 	nativePatch := isApplyPatchToolName(tool) || hermesV4A
+	// A delete of a typed file tool or a patch removes the final name, so
+	// the target map describes it as that entry (its directory followed, the
+	// final name kept), never as the file a link there reaches.
+	var deletedEntries map[string]bool
+	if nativePatch || actionfacts.PathTool(tool) {
+		deletedEntries = deletedFileEntries(facts)
+	}
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
@@ -2209,9 +2216,10 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			}
 		}
 		entryOnly := false
-		if replacedLinks[path] {
-			// mv replaces the link entry: only its directory is followed,
-			// the file the link names is not written (GAP-2558).
+		if replacedLinks[path] || deletedEntries[path] {
+			// mv replaces the link entry and a delete removes it: only its
+			// directory is followed, the file the link names is not written
+			// (GAP-2558).
 			if parent, parentOK := ResolveWriteTarget(filepath.Dir(path)); parentOK {
 				resolved, ok, entryOnly = filepath.Join(parent, filepath.Base(path)), true, true
 			}
@@ -3238,6 +3246,29 @@ func movedOntoLinkEntriesOf(destinations, noTarget map[string]bool) map[string]b
 			out = map[string]bool{}
 		}
 		out[path] = true
+	}
+	return out
+}
+
+// deletedFileEntries lists the absolute names a typed file tool or a patch
+// deletes (Delete File), without a trailing separator.
+func deletedFileEntries(facts actionfacts.Facts) map[string]bool {
+	var out map[string]bool
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessDelete || strings.HasSuffix(candidate.Value, "/") {
+			continue
+		}
+		path := candidate.Resolved
+		if path == "" {
+			path = candidate.Normalized
+		}
+		if !filepath.IsAbs(path) || strings.ContainsAny(path, "*?[]$\x60") {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[filepath.Clean(path)] = true
 	}
 	return out
 }
