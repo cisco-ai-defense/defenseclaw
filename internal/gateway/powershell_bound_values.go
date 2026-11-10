@@ -57,18 +57,105 @@ func (b psBindings) size() int {
 	return n
 }
 
+// psMerger is what the proof knows about where a value lands: the user home,
+// the working directory a relative path is resolved against, and the paths
+// the hook client found to be links.
+type psMerger struct {
+	home, cwd string
+	links     map[string]bool
+}
+
+func newPSMerger(home, cwd string, targets map[string]string) psMerger {
+	return psMerger{home: home, cwd: cwd, links: psLinkSpellings(targets, cwd)}
+}
+
+// psLinkKey is a path as the link set holds it: lower case, backslashes, no
+// trailing separator.
+func psLinkKey(path string) string {
+	return strings.ToLower(strings.TrimRight(strings.ReplaceAll(path, "/", `\`), `\`))
+}
+
+// psLinkSpellings returns the paths (psLinkKey) that the resolved-target map
+// of the hook client places somewhere other than where they are spelled:
+// links and hard links onto other files, directories and the paths of client
+// facts about them, also as a relative spelling resolved against cwd.
+func psLinkSpellings(targets map[string]string, cwd string) map[string]bool {
+	var links map[string]bool
+	for key, target := range targets {
+		path := key
+		if strings.HasPrefix(path, "\x00") {
+			// A client fact about a path is keyed "\x00<fact>:<path>".
+			i := strings.IndexByte(path, ':')
+			if i < 0 {
+				continue
+			}
+			path = path[i+1:]
+		}
+		if path == "" || psLinkKey(path) == psLinkKey(target) {
+			continue
+		}
+		if links == nil {
+			links = map[string]bool{}
+		}
+		links[psLinkKey(path)] = true
+		if abs, ok := psResolveRelative(cwd, path); ok {
+			links[psLinkKey(abs)] = true
+		}
+	}
+	return links
+}
+
+// psResolveRelative returns a relative path of plain segments (no drive, not
+// rooted, no stream) as the absolute path it names under the drive path cwd.
+func psResolveRelative(cwd, path string) (string, bool) {
+	if len(cwd) < 3 || cwd[1] != ':' || strings.ContainsRune(path, ':') {
+		return "", false
+	}
+	path = strings.ReplaceAll(path, "/", `\`)
+	for strings.HasPrefix(path, `.\`) {
+		path = path[2:]
+	}
+	if path == "" || path == "." || strings.HasPrefix(path, `\`) {
+		return "", false
+	}
+	return strings.TrimRight(cwd, `\/`) + `\` + path, true
+}
+
+// pinned reports a value that can stand for a path the hook client placed
+// somewhere else (a link onto other state): the link itself, a path under it,
+// or a path text appended to the value completes to it (a directory that holds
+// the link, a name cut short). Where such a path lands cannot be read from its
+// shape, so it is never merged with another value.
+func (m psMerger) pinned(value string) bool {
+	if len(m.links) == 0 {
+		return false
+	}
+	candidates := []string{psLinkKey(value)}
+	if abs, ok := psResolveRelative(m.cwd, value); ok {
+		candidates = append(candidates, psLinkKey(abs))
+	}
+	for _, candidate := range candidates {
+		for link := range m.links {
+			if strings.HasPrefix(link, candidate) || strings.HasPrefix(candidate, link) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // psAddValue returns values with value added when it is new. From
 // psBoundExactValues values on, a value the proof cannot tell from one it
-// holds (psPlainPathSignature) is that value; a new value that does not fit
+// holds (psMerger.signature) is that value; a new value that does not fit
 // below psBoundAlternatives is dropped and sets *overflow.
-func psAddValue(values []string, value, home string, overflow *bool) []string {
+func psAddValue(values []string, value string, m psMerger, overflow *bool) []string {
 	if slices.Contains(values, value) {
 		return values
 	}
 	if len(values) >= psBoundExactValues {
-		if signature, ok := psPlainPathSignature(value, home); ok {
+		if signature, ok := m.signature(value); ok {
 			for _, held := range values {
-				if held, ok := psPlainPathSignature(held, home); ok && held == signature {
+				if held, ok := m.signature(held); ok && held == signature {
 					return values
 				}
 			}
@@ -81,29 +168,40 @@ func psAddValue(values []string, value, home string, overflow *bool) []string {
 	return append(values[:len(values):len(values)], value)
 }
 
-// psPlainPathSignature identifies a value the proof reads the same as every
-// value with its signature: an absolute drive path of plain segments that is
-// not in DefenseClaw state. Such a path, and any path made from it by
-// appending text (a child, a ".." walk back up and down a name), is judged
-// only by how many segments it has, how many of its leading segments the
-// home shares (that decides where a walk up lands against the state
-// directory) and whether it ends in a separator. Anything else (a variable,
-// a wildcard, a short name, a stream, a relative or UNC path, a segment that
-// names the state directory or could be completed to it) has no signature
-// and is held on its own. The physical state of the path (a link or hard
-// link onto state) is judged on the value held for its signature.
-func psPlainPathSignature(value, home string) (string, bool) {
+// signature identifies a value the proof reads the same as every value with
+// its signature: a path of plain segments that is not in DefenseClaw state
+// and that the hook client did not find to be a link. Such a path, and any
+// path made from it by appending text (a child, a ".." walk back up and down
+// a name), is judged only by how many segments it has, how many of its
+// leading segments the home shares (that decides where a walk up lands
+// against the state directory) and whether it ends in a separator. A drive
+// path, a relative path (resolved against the working directory) and a path
+// under a remote server and share (a walk up stops at the share) are such
+// paths. Anything else (a variable, a wildcard, a short name, a stream, a
+// rooted path, a local server or administrative share, a segment that names
+// the state directory or could be completed to it) has no signature and is
+// held on its own.
+func (m psMerger) signature(value string) (string, bool) {
+	if m.pinned(value) {
+		return "", false
+	}
+	trailing := strconv.FormatBool(strings.HasSuffix(value, `\`) || strings.HasSuffix(value, "/"))
+	if segments, ok := psRemotePathSegments(value); ok {
+		return "unc/" + strconv.Itoa(len(segments)) + "/" + trailing, true
+	}
+	if abs, ok := psResolveRelative(m.cwd, value); ok {
+		value = abs
+	}
+	homeParts := strings.Split(strings.ToLower(strings.TrimRight(strings.ReplaceAll(m.home, "/", `\`), `\`)), `\`)
 	parts, ok := psPlainPathSegments(value)
 	if !ok {
 		return "", false
 	}
 	shared := 0
-	if homeParts := strings.Split(strings.ToLower(strings.TrimRight(strings.ReplaceAll(home, "/", `\`), `\`)), `\`); len(homeParts) > 0 {
-		for shared < len(homeParts) && shared < len(parts) && homeParts[shared] == strings.ToLower(parts[shared]) {
-			shared++
-		}
+	for shared < len(homeParts) && shared < len(parts) && homeParts[shared] == strings.ToLower(parts[shared]) {
+		shared++
 	}
-	return strconv.Itoa(len(parts)) + "/" + strconv.Itoa(shared) + "/" + strconv.FormatBool(strings.HasSuffix(value, `\`) || strings.HasSuffix(value, "/")), true
+	return strconv.Itoa(len(parts)) + "/" + strconv.Itoa(shared) + "/" + trailing, true
 }
 
 // psASCIILetter reports an ASCII letter.
@@ -118,28 +216,65 @@ func psPlainPathSegments(value string) ([]string, bool) {
 	}
 	parts := strings.Split(strings.TrimRight(strings.ReplaceAll(value, "/", `\`), `\`), `\`)
 	for _, part := range parts[1:] {
-		lower := strings.ToLower(part)
-		if part == "" || part == "." || part == ".." || strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") ||
-			strings.Contains(lower, ".defenseclaw") || strings.HasPrefix(".defenseclaw", lower) {
+		if !psPlainSegment(part) {
 			return nil, false
-		}
-		for _, c := range part {
-			if !psASCIILetter(c) && (c < '0' || c > '9') && !strings.ContainsRune("_-. ()", c) {
-				return nil, false
-			}
 		}
 	}
 	return parts, true
 }
 
+// psPlainSegment reports a path segment that is not, and cannot be completed
+// to, the state directory (.defenseclaw: a name that holds it and goes on,
+// such as .defenseclaw_notes, is another name) or a name that stands for it
+// (a trailing dot or blank, a short name, a stream), and has no character the
+// proof reads specially.
+func psPlainSegment(part string) bool {
+	if part == "" || part == "." || part == ".." || strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") ||
+		strings.HasPrefix(".defenseclaw", strings.ToLower(part)) {
+		return false
+	}
+	for _, c := range part {
+		if !psASCIILetter(c) && (c < '0' || c > '9') && !strings.ContainsRune("_-. ()+#@,=", c) {
+			return false
+		}
+	}
+	return true
+}
+
+// psRemotePathSegments splits the part of a UNC path below its share when the
+// server is a remote name and the share is not administrative. A walk up
+// from such a path stops at the share, so only how many segments it has
+// matters.
+func psRemotePathSegments(value string) ([]string, bool) {
+	value = strings.ReplaceAll(value, "/", `\`)
+	if !strings.HasPrefix(value, `\\`) {
+		return nil, false
+	}
+	parts := strings.Split(strings.TrimRight(value[2:], `\`), `\`)
+	if len(parts) < 3 {
+		return nil, false
+	}
+	server := strings.ToLower(parts[0])
+	if server == "." || server == "localhost" || strings.HasPrefix(server, "127.") || strings.HasPrefix(server, "0.") ||
+		!psPlainSegment(server) || strings.ContainsAny(server, " ()") {
+		return nil, false
+	}
+	for _, part := range parts[1:] {
+		if !psPlainSegment(part) {
+			return nil, false
+		}
+	}
+	return parts[2:], true
+}
+
 // psUnionBindings returns what a variable can hold after either path: every
 // value it holds on one path or the other.
-func psUnionBindings(a, b psBindings, home string, overflow *bool) psBindings {
+func psUnionBindings(a, b psBindings, m psMerger, overflow *bool) psBindings {
 	out := a.clone()
 	for name, values := range b {
 		merged := out[name]
 		for _, value := range values {
-			merged = psAddValue(merged, value, home, overflow)
+			merged = psAddValue(merged, value, m, overflow)
 		}
 		out[name] = merged
 	}
@@ -170,14 +305,14 @@ func psUnionBindings(a, b psBindings, home string, overflow *bool) psBindings {
 // first pass binds something new, so a value bound late in a loop reaches an
 // earlier use in the next round. A block proven on one reading counts;
 // nothing else does. A value past a bound sets budget.over.
-func psBindStaticValues(command, home string, budget *psBudget) (readings []string) {
+func psBindStaticValues(command string, merge psMerger, budget *psBudget) (readings []string) {
 	if !strings.Contains(strings.ToLower(command), "defenseclaw") || !strings.ContainsRune(command, '$') {
 		return nil
 	}
 	r := []rune(command)
 	readingCount := 1
 	for choice := 0; choice < readingCount && choice < psBoundAlternatives; choice++ {
-		binder := &psBinder{r: r, scan: newPSScan(r, budget), budget: budget, home: home, choice: choice, readings: 1}
+		binder := &psBinder{r: r, scan: newPSScan(r, budget), budget: budget, merge: merge, choice: choice, readings: 1}
 		binder.run(0, psBindings{}, false)
 		// Past a bound a protected value may have been dropped: the command
 		// counts as the write, as for every other bound of this proof.
@@ -205,7 +340,7 @@ type psBinder struct {
 	r        []rune
 	scan     *psStateScan
 	budget   *psBudget
-	home     string
+	merge    psMerger
 	choice   int
 	readings int // most values any one use could read
 	changed  bool
@@ -334,7 +469,7 @@ func (b *psBinder) run(i int, st psBindings, inBlock bool) (int, psBindings) {
 				var kept []string
 				for _, value := range values {
 					if strings.Contains(strings.ToLower(value), "defenseclaw") && len([]rune(value)) <= psBoundValueMaxRunes {
-						kept = psAddValue(kept, value, b.home, &b.overflow)
+						kept = psAddValue(kept, value, b.merge, &b.overflow)
 					}
 				}
 				if len(kept) > 0 {
@@ -468,10 +603,10 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 		}
 		result := psBindings{}
 		for _, end := range ch.ends {
-			result = psUnionBindings(result, end, b.home, &b.overflow)
+			result = psUnionBindings(result, end, b.merge, &b.overflow)
 		}
 		if !ch.sealed && !ch.hasElse {
-			result = psUnionBindings(result, ch.before, b.home, &b.overflow)
+			result = psUnionBindings(result, ch.before, b.merge, &b.overflow)
 		}
 		*chain = nil
 		return next, result
@@ -487,7 +622,7 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 	var end psBindings
 	for round := 0; ; round++ {
 		next, end = b.run(i, entry.clone(), true)
-		merged := psUnionBindings(entry, end, b.home, &b.overflow)
+		merged := psUnionBindings(entry, end, b.merge, &b.overflow)
 		if merged.size() == entry.size() {
 			break
 		}
@@ -498,7 +633,7 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 		b.out = b.out[:mark]
 		entry = merged
 	}
-	return b.closeBlock(next), psUnionBindings(st, end, b.home, &b.overflow)
+	return b.closeBlock(next), psUnionBindings(st, end, b.merge, &b.overflow)
 }
 
 // runDead reads the block whose { was just copied (i is the index after it)
@@ -585,7 +720,7 @@ func (b *psBinder) assignedValues(eq int, st psBindings) (values []string, end i
 	case psDoubleQuote(r[start]):
 		literalEnd = b.scan.doubleQuoted(start)
 		var expanded bool
-		values, expanded = psDoubleQuotedValues(string(r[start:literalEnd]), st, b.home, &b.overflow)
+		values, expanded = psDoubleQuotedValues(string(r[start:literalEnd]), st, b.merge.home, &b.overflow)
 		if !expanded {
 			return nil, 0, false
 		}
@@ -934,8 +1069,10 @@ func psCmdIfParts(args []string) (psCmdTruth, []string) {
 	return truth, args[min(i, len(args)):]
 }
 
-// psCmdCompare evaluates a comparison of two literals: numbers compare as
-// numbers when both are, anything else as text (without case with /i).
+// psCmdCompare evaluates a comparison of two literals: operands made of
+// digits compare as decimal numbers (09 is 9, 010 is 10), anything else as
+// text (without case with /i). An operand written as a hexadecimal number
+// next to another number is not decided.
 func psCmdCompare(operator, left, right string, fold bool) psCmdTruth {
 	if strings.ContainsAny(left+right, "%!") {
 		return psCmdUnknown
@@ -944,10 +1081,13 @@ func psCmdCompare(operator, left, right string, fold bool) psCmdTruth {
 		left, right = strings.ToLower(left), strings.ToLower(right)
 	}
 	order := strings.Compare(left, right)
-	if a, errA := strconv.ParseInt(left, 0, 64); errA == nil {
-		if b, errB := strconv.ParseInt(right, 0, 64); errB == nil {
-			order = cmp.Compare(a, b)
-		}
+	a, hexA, okA := psParseCmdNumber(left)
+	b, hexB, okB := psParseCmdNumber(right)
+	switch {
+	case okA && okB && (hexA || hexB):
+		return psCmdUnknown
+	case okA && okB:
+		order = a.compare(b)
 	}
 	holds := false
 	switch operator {
@@ -970,6 +1110,62 @@ func psCmdCompare(operator, left, right string, fold bool) psCmdTruth {
 		return psCmdTrue
 	}
 	return psCmdFalse
+}
+
+// psCmdNumber is a number of any size written with decimal digits.
+type psCmdNumber struct {
+	negative bool
+	digits   string // without leading zeros; "0" for zero
+}
+
+// psParseCmdNumber reads an optionally signed number of digits. hex reports
+// the 0x form, whose value is not read.
+func psParseCmdNumber(text string) (number psCmdNumber, hex, ok bool) {
+	body := text
+	if strings.HasPrefix(body, "-") || strings.HasPrefix(body, "+") {
+		number.negative = body[0] == '-'
+		body = body[1:]
+	}
+	if body == "" {
+		return psCmdNumber{}, false, false
+	}
+	if len(body) > 2 && body[0] == '0' && (body[1] == 'x' || body[1] == 'X') {
+		for _, c := range body[2:] {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+				return psCmdNumber{}, false, false
+			}
+		}
+		return psCmdNumber{}, true, true
+	}
+	for _, c := range body {
+		if c < '0' || c > '9' {
+			return psCmdNumber{}, false, false
+		}
+	}
+	number.digits = strings.TrimLeft(body, "0")
+	if number.digits == "" {
+		number.digits, number.negative = "0", false
+	}
+	return number, false, true
+}
+
+// compare orders two numbers: negative, zero or positive as n is less than,
+// equal to or greater than other.
+func (n psCmdNumber) compare(other psCmdNumber) int {
+	if n.negative != other.negative {
+		if n.negative {
+			return -1
+		}
+		return 1
+	}
+	order := cmp.Compare(len(n.digits), len(other.digits))
+	if order == 0 {
+		order = strings.Compare(n.digits, other.digits)
+	}
+	if n.negative {
+		return -order
+	}
+	return order
 }
 
 // psCmdCompareOperator reports an operator word of cmd's if comparison.
@@ -1159,12 +1355,13 @@ func psCmdSegments(line string) [][]string {
 }
 
 // psHasPatchFlag reports an argument that is, or lists, the option
-// --codex-run-as-apply-patch; a longer option that starts with it is another
-// option (Codex rejects it before any patch run).
+// --codex-run-as-apply-patch. The option is case sensitive and exact: a
+// longer option that starts with it, or another spelling of its letters, is
+// another option that Codex rejects before any patch run.
 func psHasPatchFlag(args []string) bool {
 	for _, arg := range args {
 		for _, option := range strings.FieldsFunc(arg, func(c rune) bool { return strings.ContainsRune(" \t,;\"'", c) }) {
-			if strings.EqualFold(option, "--codex-run-as-apply-patch") {
+			if option == "--codex-run-as-apply-patch" {
 				return true
 			}
 		}

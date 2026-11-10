@@ -217,15 +217,32 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 // proof cannot read them differently at any use, in any path built from them.
 func TestPowerShellPlainPathSignature(t *testing.T) {
 	const home = `C:\Users\Alice`
+	plain := newPSMerger(home, home+`\project`, nil)
+	merger := newPSMerger(home, home+`\project`, map[string]string{
+		`C:/Users/Alice/project/defenseclaw_link.txt`: `C:/Users/Alice/.defenseclaw/config.yaml`,
+		"\x00dir:C:/Users/Alice/project/jl":           `C:/Users/Alice/.defenseclaw`,
+		`C:/Users/Alice/project/ordinary.txt`:         `C:/Users/Alice/project/ordinary.txt`,
+	})
 	same := [][2]string{
 		{`C:\Users\Alice\project\defenseclaw_a`, `c:/users/alice/project/defenseclaw_b.txt`},
 		{`C:\Users\Alice\a\b\defenseclaw one`, `C:\Users\Alice\other\c\defenseclaw-two(1)`},
 		{`C:\Users\Bob\a\defenseclaw_a`, `C:\Users\Carol\b\defenseclaw_b`},
 		{`D:\work\defenseclaw_a`, `E:\other\defenseclaw_b`},
+		// A relative path is the absolute path under the working directory.
+		{`.\defenseclaw_a`, `C:\Users\Alice\project\defenseclaw_b`},
+		{`defenseclaw_a\b`, `.\.\sub\defenseclaw_b`},
+		// A dotted name that goes on past the state directory name is another name.
+		{`C:\Users\Alice\project\.defenseclaw_a`, `C:\Users\Alice\project\defenseclaw_b`},
+		{`C:\Users\Alice\.defenseclaw_a`, `C:\Users\Alice\defenseclaw_b`},
+		{`C:\Users\Alice\project\a.defenseclaw`, `C:\Users\Alice\project\defenseclaw_b`},
+		// Below a remote share only the depth matters.
+		{`\\srv\share\defenseclaw_a`, `\\other\data\defenseclaw_b`},
+		{`//srv/share/a/defenseclaw_a`, `\\other\data\b\defenseclaw_b`},
+		{`C:\Users\Alice\project\ordinary.txt`, `C:\Users\Alice\project\defenseclaw_b`},
 	}
 	for _, pair := range same {
-		a, okA := psPlainPathSignature(pair[0], home)
-		b, okB := psPlainPathSignature(pair[1], home)
+		a, okA := plain.signature(pair[0])
+		b, okB := plain.signature(pair[1])
 		if !okA || !okB || a != b {
 			t.Errorf("%q and %q: signatures %q (%t) and %q (%t), want the same", pair[0], pair[1], a, okA, b, okB)
 		}
@@ -236,23 +253,184 @@ func TestPowerShellPlainPathSignature(t *testing.T) {
 		{`C:\Users\Alice\project\defenseclaw_a`, `C:\Users\Alice\project\defenseclaw_a\`},
 		{`C:\Users\Alice\project\defenseclaw_a`, `D:\Users\Alice\project\defenseclaw_a`},
 		{`C:\Users\Alice`, `C:\Users\Alice\project`},
+		{`.\defenseclaw_a`, `defenseclaw_a\b`},
+		{`\\srv\share\defenseclaw_a`, `\\srv\share\a\defenseclaw_a`},
+		{`\\srv\share\defenseclaw_a`, `C:\Users\Alice\project\defenseclaw_a`},
 	}
 	for _, pair := range different {
-		a, okA := psPlainPathSignature(pair[0], home)
-		b, okB := psPlainPathSignature(pair[1], home)
+		a, okA := plain.signature(pair[0])
+		b, okB := plain.signature(pair[1])
 		if !okA || !okB || a == b {
 			t.Errorf("%q and %q: signatures %q (%t) and %q (%t), want different", pair[0], pair[1], a, okA, b, okB)
 		}
 	}
 	for _, value := range []string{
 		`C:\Users\Alice\.defenseclaw\config.yaml`, `C:\Users\Alice\project\.DefenseClaw`, `C:\Users\Alice\.de`, `C:\Users\Alice\.`,
-		`C:\Users\Alice\project\..\x`, `C:\Users\Alice\project\.\x`, `\\srv\share\defenseclaw`, `relative\defenseclaw`, `\rooted\defenseclaw`,
+		`C:\Users\Alice\project\..\x`, `C:\Users\Alice\project\.\x`, `\rooted\defenseclaw`, `..\defenseclaw`, `.\sub\..\defenseclaw`, `.`, `.\`,
 		`C:\Users\Alice\defenseclaw~1`, `C:\Users\Alice\defenseclaw$x`, `C:\Users\Alice\defenseclaw.`, `C:\Users\Alice\defenseclaw `,
 		`C:\Users\Alice\defenseclaw:stream`, `C:\Users\Alice\project*\defenseclaw`, `C:\Users\Alice\\defenseclaw`, `C:\Users\Alice\defenseclaw%x%`,
 		`C:\Users\Alice\défenseclaw`, `C:defenseclaw`, "",
+		// A link or hard link the hook client resolved, however it is spelled.
+		`C:\Users\Alice\project\defenseclaw_link.txt`, `c:/users/alice/project/DEFENSECLAW_LINK.TXT`, `.\defenseclaw_link.txt`, `defenseclaw_link.txt`,
+		`C:\Users\Alice\project\jl`, `.\jl\`, `C:\Users\Alice\project\jl\x.txt`,
+		// A directory that holds a link, or a name cut short before one.
+		`C:\Users\Alice\project`, `C:\Users\Alice`, `.\`, `C:\Users\Alice\project\defenseclaw_li`, `.\defenseclaw_l`,
+		// A local server, an administrative share, a device path, a bare share.
+		`\\localhost\c$\Users\Alice\defenseclaw`, `\\127.0.0.1\share\defenseclaw`, `\\srv\c$\defenseclaw`, `\\srv\share`, `\\srv\share\`,
+		`\\?\C:\Users\Alice\defenseclaw`, `\\.\C:\defenseclaw`, `\\srv\share\.defenseclaw`, `\\srv\share\..\defenseclaw`, `\\srv\share\a:b`,
 	} {
-		if signature, ok := psPlainPathSignature(value, home); ok {
+		if signature, ok := merger.signature(value); ok {
 			t.Errorf("%q has signature %q, want none", value, signature)
+		}
+	}
+}
+
+// TestPowerShellBoundValueMergeKeepsLinksAndReadsEveryOrdinaryFamily: a
+// variable bound to more ordinary files than the proof holds apart must not
+// block a command that does not touch state, whatever the spelling of the
+// files (relative, remote share, dotted name, forward slashes); a link onto
+// state stays a protected value wherever it is among them.
+func TestPowerShellBoundValueMergeKeepsLinksAndReadsEveryOrdinaryFamily(t *testing.T) {
+	const connectorName = "ps-bound-merge"
+	installToolCallCorpusProfileConnector(t, connectorName, "default")
+	const home = `C:\Users\Alice`
+	const state = `C:\Users\Alice\.defenseclaw\config.yaml`
+	const link = `C:\Users\Alice\project\defenseclaw_link.txt`
+	const envelope = "*** Begin Patch`n*** Update File: C:/Users/Alice/.defenseclaw/config.yaml`n@@`n-a`n+b`n*** End Patch"
+	resolved := map[string]string{
+		"C:/Users/Alice/.defenseclaw":             "C:/Users/Alice/.defenseclaw",
+		"C:/Users/Alice/.defenseclaw/config.yaml": "C:/Users/Alice/.defenseclaw/config.yaml",
+	}
+	linked := map[string]string{}
+	for key, value := range resolved {
+		linked[key] = value
+	}
+	for _, spelling := range []string{link, strings.ReplaceAll(link, `\`, "/")} {
+		linked[spelling] = "C:/Users/Alice/.defenseclaw/config.yaml"
+	}
+	linked[`C:/Users/Alice/project/defenseclaw_dir/link.txt`] = "C:/Users/Alice/.defenseclaw/config.yaml"
+	// binding binds $p to n files (the tail reads the state too: a command that
+	// never names state has no link to follow) named prefix<i>.txt, then to last, in the
+	// branches of an if chain, then runs tail.
+	binding := func(prefix string, n int, last, tail string) string {
+		var branches strings.Builder
+		for i := 0; i < n; i++ {
+			keyword := "if"
+			if i > 0 {
+				keyword = " elseif"
+			}
+			fmt.Fprintf(&branches, `%s ($c%d) { $p = '%s%d.txt' }`, keyword, i, prefix, i)
+		}
+		return `$p = '` + prefix + `base.txt'; ` + branches.String() + ` else { $p = '` + last + `' }; ` + tail
+	}
+	readThenWrite := `[IO.File]::ReadAllText('` + state + `'); [IO.File]::WriteAllText($p, 'x')`
+	write := `[IO.File]::WriteAllText($p, 'x')`
+	families := []struct{ name, prefix, ordinary string }{
+		{"drive path", `C:\Users\Alice\project\defenseclaw_note`, `C:\Users\Alice\project\defenseclaw_last.txt`},
+		{"forward-slash drive path", `C:/Users/Alice/project/defenseclaw_note`, `C:/Users/Alice/project/defenseclaw_last.txt`},
+		{"relative path", `.\defenseclaw_note`, `.\defenseclaw_last.txt`},
+		{"bare relative path", `sub\defenseclaw_note`, `sub\defenseclaw_last.txt`},
+		{"remote share", `\\server\share\project\defenseclaw_note`, `\\server\share\project\defenseclaw_last.txt`},
+		{"dotted name under the project", `C:\Users\Alice\project\.defenseclaw_note`, `C:\Users\Alice\project\.defenseclaw_last.txt`},
+		{"dotted name under the home", `C:\Users\Alice\.defenseclaw_note`, `C:\Users\Alice\.defenseclaw_last.txt`},
+		{"relative dotted name", `.\.defenseclaw_note`, `.\.defenseclaw_last.txt`},
+	}
+	type row struct {
+		name, command string
+		block, links  bool
+	}
+	var rows []row
+	for _, family := range families {
+		for _, n := range []int{9, 65, 90} {
+			rows = append(rows,
+				row{name: fmt.Sprintf("%s, %d ordinary, a separate state read, an ordinary write", family.name, n), command: binding(family.prefix, n, family.ordinary, readThenWrite)},
+				row{name: fmt.Sprintf("%s, %d ordinary, the state read only", family.name, n), command: binding(family.prefix, n, family.ordinary, `[IO.File]::ReadAllText('`+state+`')`)},
+				row{name: fmt.Sprintf("%s, %d ordinary, a link in the map but unused", family.name, n), command: binding(family.prefix, n, family.ordinary, readThenWrite), links: true},
+				row{name: fmt.Sprintf("%s, %d ordinary, the state last, written", family.name, n), command: binding(family.prefix, n, state, write), block: true},
+				row{name: fmt.Sprintf("%s, %d ordinary, the state last, only read", family.name, n), command: binding(family.prefix, n, state, `[IO.File]::ReadAllText($p)`)},
+			)
+		}
+	}
+	for _, n := range []int{0, 7, 8, 9, 40, 70} {
+		rows = append(rows,
+			row{name: fmt.Sprintf("a known link last among %d, written", n), command: binding(`C:\Users\Alice\project\defenseclaw_note`, n, link, readThenWrite), block: true, links: true},
+			row{name: fmt.Sprintf("a known link last among %d, only read", n), command: binding(`C:\Users\Alice\project\defenseclaw_note`, n, link, `[IO.File]::ReadAllText($p)`), links: true},
+			row{name: fmt.Sprintf("a known link spelled with slashes last among %d, written", n), command: binding(`C:\Users\Alice\project\defenseclaw_note`, n, strings.ReplaceAll(link, `\`, "/"), readThenWrite), block: true, links: true},
+			row{name: fmt.Sprintf("a known link spelled relative last among %d, written", n), command: binding(`.\defenseclaw_note`, n, `.\defenseclaw_link.txt`, readThenWrite), block: true, links: true},
+			row{name: fmt.Sprintf("a known link last among %d relative files, written", n), command: binding(`defenseclaw_note`, n, link, readThenWrite), block: true, links: true},
+			row{name: fmt.Sprintf("the same files with no link in the map, %d, written", n), command: binding(`C:\Users\Alice\project\defenseclaw_note`, n, link, readThenWrite)},
+		)
+	}
+	// A directory that holds a link, or a name cut short before one, is read
+	// against the known link, not merged with the other directories.
+	holder := `[IO.File]::ReadAllText('` + state + `'); $q = "$p\link.txt"; [IO.File]::WriteAllText($q, 'x')`
+	cutShort := `[IO.File]::ReadAllText('` + state + `'); $q = "${p}nk.txt"; [IO.File]::WriteAllText($q, 'x')`
+	for _, n := range []int{3, 12, 70} {
+		rows = append(rows,
+			row{name: fmt.Sprintf("the directory that holds a known link among %d directories", n), command: binding(`C:\Users\Alice\project\defenseclaw_other`, n, `C:\Users\Alice\project\defenseclaw_dir`, holder), block: true, links: true},
+			row{name: fmt.Sprintf("the same directories with no link in the map, %d", n), command: binding(`C:\Users\Alice\project\defenseclaw_other`, n, `C:\Users\Alice\project\defenseclaw_dir`, holder)},
+			row{name: fmt.Sprintf("a directory that does not hold the link among %d", n), command: binding(`C:\Users\Alice\project\defenseclaw_other`, n, `C:\Users\Alice\project\defenseclaw_sub`, holder), links: true},
+			row{name: fmt.Sprintf("a name cut short before a known link among %d", n), command: binding(`C:\Users\Alice\project\defenseclaw_note`, n, `C:\Users\Alice\project\defenseclaw_li`, cutShort), block: true, links: true},
+			row{name: fmt.Sprintf("a name cut short before another name among %d", n), command: binding(`C:\Users\Alice\project\defenseclaw_note`, n, `C:\Users\Alice\project\defenseclaw_lx`, cutShort), links: true},
+		)
+	}
+	rows = append(rows, row{name: "ninety ordinary files with plain punctuation in their names", command: binding(`C:\Users\Alice\project\defenseclaw+note #@,=`, 90, `C:\Users\Alice\project\defenseclaw+last`, readThenWrite)})
+	patch := `$patch = "` + envelope + `"; & cmd.exe /c `
+	for _, tc := range []struct {
+		name, condition string
+		block           bool
+	}{
+		{"a leading zero is not octal, 09 is above 8", `09 GTR 8`, true},
+		{"09 is not below 8", `09 LSS 8`, false},
+		{"010 is above 9", `010 GTR 9`, true},
+		{"010 is not below 9", `010 LSS 9`, false},
+		{"010 equals 10", `010 EQU 10`, true},
+		{"010 does not equal 8", `010 EQU 8`, false},
+		{"010 differs from 8", `010 NEQ 8`, true},
+		{"zeros equal zero", `000 EQU 0`, true},
+		{"a negative number is below zero", `-1 LSS 0`, true},
+		{"a negative number is not above zero", `-1 GTR 0`, false},
+		{"a negative number is below a longer positive one", `-100 LSS 5`, true},
+		{"two negative numbers", `-100 LSS -5`, true},
+		{"a number past 64 bits is above a small one", `99999999999999999999 GTR 9`, true},
+		{"a number past 64 bits is not below a small one", `99999999999999999999 LSS 9`, false},
+		{"decimal control", `10 GTR 9`, true},
+		{"decimal control, false", `10 LSS 9`, false},
+		{"text is compared as text", `abc GTR abd`, false},
+		{"text is compared as text, true", `abd GTR abc`, true},
+		{"a number against text is text", `10 LSS 9a`, true},
+		{"a hexadecimal operand next to a number is not decided", `0x10 EQU 16`, true},
+		{"a hexadecimal operand next to a number is not decided, false twin", `0x10 EQU 17`, true},
+	} {
+		rows = append(rows, row{name: "cmd if " + tc.name, command: patch + `'if ` + tc.condition + ` C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, block: tc.block})
+	}
+	rows = append(rows,
+		row{name: "an upper-case Codex option is not the patch option", command: `$patch = "` + envelope + `"; & 'C:\dc\codex.exe' --CODEX-RUN-AS-APPLY-PATCH $patch`},
+		row{name: "a mixed-case Codex option is not the patch option", command: `$patch = "` + envelope + `"; & 'C:\dc\codex.exe' --Codex-Run-As-Apply-Patch $patch`},
+		row{name: "an upper-case Codex option behind cmd", command: patch + `'C:\dc\codex.exe --CODEX-RUN-AS-APPLY-PATCH' $patch`},
+		row{name: "the exact Codex option", command: `$patch = "` + envelope + `"; & 'C:\dc\codex.exe' --codex-run-as-apply-patch $patch`, block: true},
+		row{name: "the exact Codex option behind cmd", command: patch + `'C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, block: true},
+	)
+	api := &APIServer{}
+	for _, tc := range rows {
+		for _, managed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/managed=%t", tc.name, managed), func(t *testing.T) {
+				args, _ := json.Marshal(map[string]string{"command": tc.command})
+				input := actionfacts.Input{Tool: "shell_command", Args: args, CWD: home + `\project`, ActiveHome: home}
+				input.DialectHint = agentHookWindowsShellDialect(input)
+				targets := resolved
+				if tc.links {
+					targets = linked
+				}
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: input, LegacyText: string(args), Connector: connectorName,
+					EnforcementCapable: true, ResolvedWriteTargets: targets, ProtectedHomeHook: managed,
+				})
+				verdict := buildVerdict(findings, "tool_call")
+				if got := verdict.Action == "block" && api.provenActiveStateMutation(t.Context(), verdict); got != tc.block {
+					t.Fatalf("observe-mode hard block=%t, want %t (action %q, findings %v)", got, tc.block, verdict.Action, findingIDs(findings))
+				}
+			})
 		}
 	}
 }
