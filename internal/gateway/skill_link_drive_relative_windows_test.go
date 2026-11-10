@@ -68,7 +68,7 @@ func TestHeldSkillFolderNamedByADriveRelativePathIsRefused(t *testing.T) {
 			}
 			api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
 			ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "fixture", Home: home})
-			decide := func(tool, key, value string) (blocked bool, source string) {
+			decide := func(tool, key string, value any) (blocked bool, source string) {
 				t.Helper()
 				defer hookpaths.HookCall()()
 				decision, matched := api.claudeCodeSkillAssetDecision(ctx, claudeCodeHookRequest{
@@ -82,7 +82,10 @@ func TestHeldSkillFolderNamedByADriveRelativePathIsRefused(t *testing.T) {
 			if strings.EqualFold(vol, otherVol) {
 				otherVol = "E:"
 			}
-			for name, tc := range map[string]struct{ tool, key, value string }{
+			for name, tc := range map[string]struct {
+				tool, key string
+				value     any
+			}{
 				"read":          {"Read", "file_path", vol + `lnk-held\SKILL.md`},
 				"read dot":      {"Read", "file_path", vol + `.\lnk-held\SKILL.md`},
 				"grep":          {"Grep", "path", vol + `lnk-held`},
@@ -94,20 +97,33 @@ func TestHeldSkillFolderNamedByADriveRelativePathIsRefused(t *testing.T) {
 					t.Errorf("%s: %s %s=%q was allowed, want the held skill refused", name, tc.tool, tc.key, tc.value)
 				}
 			}
-			for name, tc := range map[string]struct{ tool, key, value string }{
+			for name, tc := range map[string]struct {
+				tool, key string
+				value     any
+			}{
 				"ordinary file":    {"Read", "file_path", vol + `notes.txt`},
 				"link to ordinary": {"Read", "file_path", vol + `lnk-ordinary\SKILL.md`},
 				"working folder":   {"Grep", "path", vol + `.`},
 				"ordinary reader":  {"Bash", "command", `type ` + vol + `notes.txt`},
+				"no drive reader":  {"Bash", "command", `dir notes.txt`},
+				"no drive argv":    {"Bash", "command", []any{"cmd", "/c", "dir", "notes.txt"}},
 			} {
 				if blocked, _ := decide(tc.tool, tc.key, tc.value); blocked {
 					t.Errorf("twin %s: %s %s=%q was refused, want it allowed", name, tc.tool, tc.key, tc.value)
 				}
 			}
 			wantUnprovenBlock := tier == "strict" || tier == "managed"
-			for name, tc := range map[string]struct{ tool, key, value string }{
-				"read": {"Read", "file_path", otherVol + `lnk-held\SKILL.md`},
-				"grep": {"Grep", "path", otherVol + `lnk-held`},
+			for name, tc := range map[string]struct {
+				tool, key string
+				value     any
+			}{
+				"read":            {"Read", "file_path", otherVol + `lnk-held\SKILL.md`},
+				"grep":            {"Grep", "path", otherVol + `lnk-held`},
+				"bare listing":    {"Bash", "command", `dir ` + otherVol + `lnk-held`},
+				"bare shell":      {"Bash", "command", `cmd /c dir ` + otherVol + `lnk-held`},
+				"bare reader":     {"Bash", "command", `type ` + otherVol + `lnk-held`},
+				"bare argv":       {"Bash", "command", []any{"cmd", "/c", "dir", otherVol + `lnk-held`}},
+				"bare drive only": {"Bash", "command", `dir ` + otherVol},
 			} {
 				blocked, source := decide(tc.tool, tc.key, tc.value)
 				if blocked != wantUnprovenBlock {

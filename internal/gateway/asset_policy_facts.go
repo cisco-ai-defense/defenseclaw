@@ -362,7 +362,7 @@ func (a *APIServer) skillLinksUnprovenDecision(
 	if !a.skillFoldersAreGuarded(cfg) {
 		return config.AssetPolicyDecision{}, false
 	}
-	const reason = "a network share on a path of the call did not answer in time, so a skill folder a link there leads to cannot be shown not to be held or denied"
+	const reason = "a path of the call could not be placed (a network share did not answer in time, or a drive-relative path names a drive other than the one of the working folder), so a skill folder a link there leads to cannot be shown not to be held or denied"
 	decision := runtimeAssetDisableBlockDecision("skill", "skill-links", connector, "skill_folder", reason, "skill-links-unproven")
 	decision.RegistryStatus = "unknown"
 	probe := skillRuntimeProbe{TargetType: "skill", SkillName: "skill-links", ToolName: toolName, Surface: "skill_folder", Matched: true}
