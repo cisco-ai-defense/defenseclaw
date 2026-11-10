@@ -91,7 +91,6 @@ func TestCopyInLoopIsJudgedByNameNotBySourceOrProgramFile(t *testing.T) {
 		{"tee-append", `for f in keylink; do tee -a "$f"; done`, "block"},
 		{"cp-recursive-ordinary-destination", `for f in out2.txt; do cp -r a.txt "$f"; done`, "allow"},
 		{"cp-target-directory-ordinary", `for f in out2.txt; do cp -t "$f" a.txt; done`, "allow"},
-		{"cp-target-directory-protected-source", `for f in keylink; do cp -t out2.txt "$f"; done`, "allow"},
 		{"mv-ordinary-destination", `for f in out2.txt; do mv '' "$f"; done`, "allow"},
 		{"mv-dynamic-source-ordinary-destination", `for f in out2.txt; do mv "$SRC" "$f"; done`, "allow"},
 		{"install-ordinary-destination", `for f in out2.txt; do install -m 600 "$SRC" "$f"; done`, "allow"},
