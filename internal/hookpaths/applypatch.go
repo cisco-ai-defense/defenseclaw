@@ -219,12 +219,10 @@ func jsonStringRaw(value string) json.RawMessage {
 	return encoded
 }
 
-func applyPatchTargets(tool string, args json.RawMessage, command, cwd, home string, resolve patchResolution) (targets []string, ok bool) {
-	var fields map[string]json.RawMessage
-	if len(args) != 0 {
-		_ = json.Unmarshal(args, &fields)
-	}
-	patchTool := isApplyPatchToolName(tool)
+// patchCallTexts lists the texts of a call that may hold an apply_patch
+// envelope: the shell command and the argument fields that carry a command or
+// a patch.
+func patchCallTexts(patchTool bool, fields map[string]json.RawMessage, command string) []string {
 	texts := []string{command}
 	keys := []string{"command", "cmd"}
 	if patchTool {
@@ -233,6 +231,57 @@ func applyPatchTargets(tool string, args json.RawMessage, command, cwd, home str
 	for _, key := range keys {
 		texts = append(texts, patchTextField(fields[key]))
 	}
+	return texts
+}
+
+// ApplyPatchCommandHeaderNames lists, as the envelopes write them, the file
+// names of the apply_patch headers that a shell command holds in its own text
+// (a here-document or a quoted envelope), wherever the text holds them: at the
+// top level or in the body of a function. It is the list of names that
+// ApplyPatchLexicalCommandTargets places, before they are placed, so a
+// gateway that reads the answers of the hook client by the raw spelling of a
+// name (actionfacts.StepUpSpelling) can find the answer of a header the shell
+// parse does not project (a function body). A name in a home or variable form
+// is not listed: it has no raw spelling to walk.
+func ApplyPatchCommandHeaderNames(command string) []string {
+	if command == "" {
+		return nil
+	}
+	text := command
+	known, calls, _ := patchShellInvocationsKnown(text)
+	if !known {
+		if body, ok := patchShellCommandBody(text); ok {
+			text = body
+			known, calls, _ = patchShellInvocationsKnown(text)
+		}
+	}
+	if !known || calls == 0 {
+		return nil
+	}
+	paths, _, parsed := patchEnvelopePaths(text)
+	if !parsed {
+		return nil
+	}
+	var names []string
+	for _, path := range paths {
+		if len(path) >= 2 && (path[0] == 0x22 || path[0] == 0x27) && path[len(path)-1] == path[0] {
+			path = path[1 : len(path)-1]
+		}
+		if _, homeForm := trimHomePrefix(path); homeForm || strings.ContainsAny(path, "$`") {
+			continue
+		}
+		names = append(names, path)
+	}
+	return names
+}
+
+func applyPatchTargets(tool string, args json.RawMessage, command, cwd, home string, resolve patchResolution) (targets []string, ok bool) {
+	var fields map[string]json.RawMessage
+	if len(args) != 0 {
+		_ = json.Unmarshal(args, &fields)
+	}
+	patchTool := isApplyPatchToolName(tool)
+	texts := patchCallTexts(patchTool, fields, command)
 	found := false
 	for _, text := range texts {
 		if text == "" {
