@@ -43,8 +43,8 @@ func managedWindowsPolicyFor(t *testing.T, contractID, launcher string) []byte {
 
 // The Windows managed policy of the largest Claude Code contract, every hook
 // event wrapped by the guard, stays well under the state bound: three quarters
-// of it for the default install folder, and under it for a folder of 150
-// characters.
+// of it for the default install folder, and seven eighths of it for a folder
+// of 150 characters.
 func TestManagedClaudeCodeWindowsPolicyStaysWellUnderTheStateBound(t *testing.T) {
 	contracts := builtinHookContracts["claudecode"]
 	if len(contracts) == 0 {
@@ -57,10 +57,33 @@ func TestManagedClaudeCodeWindowsPolicyStaysWellUnderTheStateBound(t *testing.T)
 		maxBytes int
 	}{
 		{"default install folder", `C:\Program Files\DefenseClaw\bin`, claudeManagedStateRecordBound * 3 / 4},
-		{"150 character install folder", long, claudeManagedStateRecordBound - 1},
+		{"150 character install folder", long, claudeManagedStateRecordBound * 7 / 8},
 	} {
 		for _, contract := range contracts {
 			body := managedWindowsPolicyFor(t, contract.ContractID, tc.folder+`\defenseclaw-hook.exe`)
+			// The size is only meaningful for the guard wrapper form: a handler
+			// that fell back to the bare launcher would be small and pass.
+			var form struct {
+				Hooks map[string][]struct {
+					Hooks []struct {
+						Command string   `json:"command"`
+						Args    []string `json:"args"`
+					} `json:"hooks"`
+				} `json:"hooks"`
+			}
+			if err := json.Unmarshal(body, &form); err != nil {
+				t.Fatalf("%s, %s: %v", tc.name, contract.ContractID, err)
+			}
+			for event, entries := range form.Hooks {
+				if len(entries) != 1 || len(entries[0].Hooks) != 1 ||
+					!strings.EqualFold(entries[0].Hooks[0].Command, claudeCodeWindowsCommandProcessor()) ||
+					len(entries[0].Hooks[0].Args) < 100 {
+					t.Fatalf("%s, %s: %s is not the cmd.exe guard wrapper: %+v", tc.name, contract.ContractID, event, entries)
+				}
+			}
+			if len(body) < 20<<10 {
+				t.Fatalf("%s, %s: managed policy is only %d bytes, it cannot hold the guard wrapper of %d events", tc.name, contract.ContractID, len(body), len(contract.Events))
+			}
 			t.Logf("%s, %s: %d events, %d bytes (state bound %d)", tc.name, contract.ContractID, len(contract.Events), len(body), claudeManagedStateRecordBound)
 			if len(body) > tc.maxBytes {
 				t.Errorf("%s, %s: managed policy is %d bytes, want at most %d (state bound %d)",

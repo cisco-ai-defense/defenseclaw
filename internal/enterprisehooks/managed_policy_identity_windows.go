@@ -34,11 +34,12 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 		return err
 	}
 	setup := withWindowsClaudeManagedHooksOnly(connector.SetupOpts{
-		APIAddr:                  gatewayAddr,
-		HookFailMode:             "closed",
-		ManagedEnterprise:        true,
+		APIAddr:           gatewayAddr,
+		HookFailMode:      "closed",
+		ManagedEnterprise: true,
+		HookExecutable:    hookExecutable,
+
 		SecureClientHookDelivery: secureClientHookDelivery(),
-		HookExecutable:           hookExecutable,
 	})
 	provider := connector.NewClaudeCodeConnector()
 	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {

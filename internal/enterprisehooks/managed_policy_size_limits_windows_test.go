@@ -14,9 +14,10 @@ import (
 )
 
 // The managed Claude Code policy holds the guarded Windows form of all 29 hook
-// events (about 76 KiB), the state record a few lines. Reading the policy under
-// the state record's 64 KiB bound made every install, verify and removal of the
-// managed policy refuse its own file as an unsafe artifact.
+// events (about 41 KB written compact, 105 KB when it was indented), the state
+// record a few lines. Reading the policy under the state record's 64 KiB bound
+// made every install, verify and removal of the managed policy refuse its own
+// file as an unsafe artifact; the policy has its own, larger bound.
 func TestManagedPolicySnapshotUsesThePolicyBoundNotTheStateBound(t *testing.T) {
 	dir := t.TempDir()
 	policy := filepath.Join(dir, windowsClaudeManagedPolicyFile)
@@ -55,6 +56,9 @@ func TestInstalledWindowsClaudePolicyFitsTheStateBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("installed managed policy: %d bytes, state bound %d", info.Size(), windowsClaudeManagedStateLimit)
+	if body, err := os.ReadFile(fixture.policyPath); err != nil || bytes.Count(body, []byte("\n")) != 1 || bytes.Contains(body, []byte(`\u0026`)) {
+		t.Fatalf("installed managed policy is not the compact form (err %v)", err)
+	}
 	if info.Size() > windowsClaudeManagedStateLimit*7/8 {
 		t.Fatalf("installed managed policy is %d bytes, want well under the %d byte state bound", info.Size(), windowsClaudeManagedStateLimit)
 	}
