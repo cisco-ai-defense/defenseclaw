@@ -43,7 +43,9 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the real per-user folders:", err)
 		os.Exit(1)
 	}
+	restoreChain := UseClaudeCodeChainFixtureForTests()
 	code := m.Run()
+	restoreChain()
 	cleanup()
 	if err := finishUserRoots(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

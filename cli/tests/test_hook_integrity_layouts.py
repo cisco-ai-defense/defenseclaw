@@ -339,6 +339,8 @@ def test_claude_chain_view_and_guard_drift(tmp_path, monkeypatch):
     approved.write_bytes(body)
     (chain / "chain.json").write_text(json.dumps({"guard_sha256": hashlib.sha256(body).hexdigest(), "generation": generation}))
     launcher = str(tmp_path / "defenseclaw-hook.exe")
+    # A Windows host checks that the launcher the handler names is installed.
+    (tmp_path / "defenseclaw-hook.exe").write_bytes(b"MZ launcher")
     command = "C:\\Windows\\System32\\cmd.exe"
     compare = "C:\\Windows\\System32\\fc.exe"
     words = hook_integrity._claude_chain_wrapper_words(
