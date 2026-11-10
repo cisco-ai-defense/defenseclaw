@@ -698,8 +698,12 @@ func (s *entryScan) folders(line, cwd string) []FolderRef {
 	for i, word := range splitWords(line, true) {
 		// A word with no slash that is a folder of the working folder
 		// (cd sub; cat name) names that folder too.
-		if i < maxNamedWords && !strings.ContainsAny(word, "/\\") {
-			named = append(named, "./"+word)
+		if strings.ContainsAny(word, "/\\") {
+			continue
+		}
+		name, placed := driveRelativeName(word, cwd)
+		if placed && i < maxNamedWords {
+			named = append(named, "./"+name)
 		}
 	}
 	for _, word := range named {
@@ -717,8 +721,8 @@ func (s *entryScan) folders(line, cwd string) []FolderRef {
 			names = nil
 			for _, word := range splitWords(line, true) {
 				if !strings.ContainsAny(word, "/\\") {
-					if namesEntryIn(dir, word) {
-						names = append(names, word)
+					if name, placed := driveRelativeName(word, cwd); placed && namesEntryIn(dir, name) {
+						names = append(names, name)
 					}
 				}
 			}
@@ -732,6 +736,28 @@ func (s *entryScan) folders(line, cwd string) []FolderRef {
 		}
 	}
 	return refs
+}
+
+// driveRelativeName gives the entry name a slash-free word of a command line
+// names in the working folder cwd. A word with a drive in front and nothing
+// else (D:lnk) is relative to the working folder of that drive, as the system
+// reads it: the name after the drive when the drive is the drive of cwd. On
+// another drive the working folder is not in the hook event, so the word
+// cannot be placed: it is recorded as a path whose links are unproven
+// (UnprovenLinkNote), as the same word with a slash in it is, and reports
+// placed false. A word with no drive is its own name.
+func driveRelativeName(word, cwd string) (name string, placed bool) {
+	volume := filepath.VolumeName(word)
+	if volume == "" {
+		return word, true
+	}
+	if strings.EqualFold(volume, filepath.VolumeName(cwd)) {
+		return word[len(volume):], true
+	}
+	if UnprovenLinkNote != nil {
+		UnprovenLinkNote()
+	}
+	return "", false
 }
 
 // reached lists the skill folders the entry at path leads into.

@@ -64,7 +64,10 @@ func TestDriveRelativePathIsBelowTheWorkingFolderOfItsDrive(t *testing.T) {
 		t.Errorf("a path on another drive: placeIn = %q, recorded %d times; want it as written, recorded once", got, noted)
 	}
 
-	for name, tc := range map[string]struct{ tool, key, value string }{
+	for name, tc := range map[string]struct {
+		tool, key string
+		value     any
+	}{
 		"read":          {"Read", "file_path", vol + `lnk-held\SKILL.md`},
 		"read dot":      {"Read", "file_path", vol + `.\lnk-held\SKILL.md`},
 		"read lower":    {"Read", "file_path", strings.ToLower(vol) + `lnk-held\SKILL.md`},
@@ -73,6 +76,7 @@ func TestDriveRelativePathIsBelowTheWorkingFolderOfItsDrive(t *testing.T) {
 		"glob dot":      {"Glob", "path", vol + `.\lnk-held`},
 		"shell reader":  {"Bash", "command", `type ` + vol + `lnk-held\SKILL.md`},
 		"shell listing": {"Bash", "command", `dir ` + vol + `lnk-held`},
+		"shell argv":    {"Bash", "command", []any{"cmd", "/c", "dir", vol + `lnk-held`}},
 	} {
 		noted = 0
 		if refs := SkillFolderRefs(tc.tool, map[string]any{tc.key: tc.value}, home, proj); !reaches(refs, held) {
@@ -82,7 +86,13 @@ func TestDriveRelativePathIsBelowTheWorkingFolderOfItsDrive(t *testing.T) {
 			t.Errorf("%s: a path of the drive of the working folder was recorded as unproven", name)
 		}
 	}
-	for name, tc := range map[string]struct{ tool, key, value string }{
+	for name, tc := range map[string]struct {
+		tool, key string
+		value     any
+	}{
+		"bare same drive": {"Bash", "command", `dir ` + vol + `notes.txt`},
+		"no drive":        {"Bash", "command", `dir notes.txt`},
+		"no drive argv":   {"Bash", "command", []any{"cmd", "/c", "dir", "notes.txt"}},
 		"ordinary file":   {"Read", "file_path", vol + `notes.txt`},
 		"working folder":  {"Grep", "path", vol + `.`},
 		"ordinary reader": {"Bash", "command", `type ` + vol + `notes.txt`},
@@ -95,10 +105,16 @@ func TestDriveRelativePathIsBelowTheWorkingFolderOfItsDrive(t *testing.T) {
 			t.Errorf("twin %s: recorded as unproven", name)
 		}
 	}
-	for name, tc := range map[string]struct{ tool, key, value string }{
-		"read":   {"Read", "file_path", otherVol + `lnk-held\SKILL.md`},
-		"grep":   {"Grep", "path", otherVol + `lnk-held`},
-		"reader": {"Bash", "command", `type ` + otherVol + `lnk-held\SKILL.md`},
+	for name, tc := range map[string]struct {
+		tool, key string
+		value     any
+	}{
+		"read":         {"Read", "file_path", otherVol + `lnk-held\SKILL.md`},
+		"grep":         {"Grep", "path", otherVol + `lnk-held`},
+		"reader":       {"Bash", "command", `type ` + otherVol + `lnk-held\SKILL.md`},
+		"bare listing": {"Bash", "command", `dir ` + otherVol + `lnk-held`},
+		"bare shell":   {"Bash", "command", `cmd /c dir ` + otherVol + `lnk-held`},
+		"bare argv":    {"Bash", "command", []any{"cmd", "/c", "dir", otherVol + `lnk-held`}},
 	} {
 		noted = 0
 		SkillFolderRefs(tc.tool, map[string]any{tc.key: tc.value}, home, proj)
