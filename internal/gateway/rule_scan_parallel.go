@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 )
@@ -21,7 +22,66 @@ const (
 	parallelRuleScanMinText = 64 << 10
 	// parallelRuleScanMaxWorkers bounds the goroutines of one scan.
 	parallelRuleScanMaxWorkers = 8
+	// recentLargeTextEntries bounds how many large texts keep their rule
+	// answers, and recentLargeTextLife for how long: the proofs of one hook
+	// call scan the same text with the same rules several times (GAP-1040).
+	recentLargeTextEntries = 4
+	recentLargeTextLife    = 30 * time.Second
 )
+
+// largeTextAnswers holds the first accepted match of each rule in one text.
+// The answer is a pure function of the rule and the text, so a scan that finds
+// the rule here reads it instead of running the regexp again.
+type largeTextAnswers struct {
+	text   string
+	at     time.Time
+	mu     sync.Mutex
+	byRule map[*PatternRule][]int
+}
+
+func (a *largeTextAnswers) get(rule *PatternRule) ([]int, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	loc, ok := a.byRule[rule]
+	return loc, ok
+}
+
+func (a *largeTextAnswers) put(rule *PatternRule, loc []int) {
+	a.mu.Lock()
+	a.byRule[rule] = loc
+	a.mu.Unlock()
+}
+
+var recentLargeTexts struct {
+	sync.Mutex
+	entries []*largeTextAnswers
+}
+
+// answersForLargeText returns the answers kept for text, a new empty set when
+// there is none.
+func answersForLargeText(text string) *largeTextAnswers {
+	recentLargeTexts.Lock()
+	defer recentLargeTexts.Unlock()
+	now := time.Now()
+	kept := recentLargeTexts.entries[:0]
+	for _, entry := range recentLargeTexts.entries {
+		if now.Sub(entry.at) < recentLargeTextLife {
+			kept = append(kept, entry)
+		}
+	}
+	recentLargeTexts.entries = kept
+	for _, entry := range kept {
+		if entry.text == text {
+			return entry
+		}
+	}
+	entry := &largeTextAnswers{text: text, at: now, byRule: map[*PatternRule][]int{}}
+	if len(kept) >= recentLargeTextEntries {
+		kept = kept[1:]
+	}
+	recentLargeTexts.entries = append(kept, entry)
+	return entry
+}
 
 // ruleScanEligible reports whether rule is checked against the text in this
 // scan: its category (or, for a migrated literal rule, the rule itself) is
@@ -81,6 +141,7 @@ func scanRuleMatchesInParallel(
 		done bool
 	}
 	answers := make([]answer, len(todo))
+	kept := answersForLargeText(text.text)
 	var next atomic.Int64
 	var wg sync.WaitGroup
 	for range workers {
@@ -95,10 +156,15 @@ func scanRuleMatchesInParallel(
 				func() {
 					defer func() { _ = recover() }()
 					rule := todo[index]
+					if loc, ok := kept.get(rule); ok {
+						answers[index] = answer{loc: loc, done: true}
+						return
+					}
 					var loc []int
 					if text.mayMatch(rule.Pattern) {
 						loc = firstAcceptedRuleMatchIn(*rule, scan)
 					}
+					kept.put(rule, loc)
 					answers[index] = answer{loc: loc, done: true}
 				}()
 			}
