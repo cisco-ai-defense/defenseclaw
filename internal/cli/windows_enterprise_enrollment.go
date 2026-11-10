@@ -109,10 +109,11 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 		for _, row := range rows {
 			// Only a row that waits with no runtime at all is blocked: a row
 			// that waits for a hook fail mode change, an untrusted folder or
-			// another cause has its runtime, and its hook decides.
+			// another cause is an awaiting-sign-in error, never Pending, has
+			// its runtime, and its hook decides.
 			if windowsEnterpriseEnrollmentKey(row.SID, row.User, row.UserHome) ==
 				windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome) &&
-				row.Pending && !enterpriseHookAwaitingSignInError(row) && windowsEnterpriseMachineHookConnector(row.Connector) {
+				row.Pending && windowsEnterpriseMachineHookConnector(row.Connector) {
 				blocked = append(blocked, strings.TrimSpace(row.Connector))
 			}
 		}
