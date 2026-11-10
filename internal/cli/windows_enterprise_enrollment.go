@@ -101,10 +101,10 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 		// the sign-in is not merely unguarded: the machine hook is registered
 		// for the account and refuses every tool call until the guardian
 		// publishes the account's runtime in its connected session
-		// (GAP-1026). The reason says so. Standalone only: Secure Client keeps
-		// its reason word for word.
-		if blocked, rest := windowsEnterpriseSplitBlockedConnectors(unguarded); pending && len(blocked) > 0 &&
-			!enterpriseHookReconcileSecureClient() {
+		// (GAP-1026). The reason says so. The only caller is the standalone
+		// status (readWindowsEnterpriseStandaloneEnrollmentAt); Secure Client
+		// builds its reason elsewhere and keeps it word for word.
+		if blocked, rest := windowsEnterpriseSplitBlockedConnectors(unguarded); pending && len(blocked) > 0 {
 			account.Reason = windowsEnterpriseStandaloneBlockedPendingReason(blocked, rest, keepsRunning, machineHook)
 			if failure := failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)]; failure != "" {
 				account.Reason += "; failed: " + failure

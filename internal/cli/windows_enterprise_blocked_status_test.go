@@ -23,8 +23,8 @@ import (
 
 // GAP-1026: a pending account's Claude Code, Codex and Cursor are refused by
 // their machine hooks, so status and verify say "blocked", not only "not
-// guarded"; a connector with nothing running keeps the old wording; Secure
-// Client keeps its reason word for word.
+// guarded"; a connector with nothing running keeps the old wording; the
+// Secure Client status never reaches this builder.
 func TestWindowsEnterprisePendingMachineHookConnectorsAreNamedAsBlocked(t *testing.T) {
 	const sid = "S-1-5-21-1-2-3-1001"
 	row := func(connector string) enterpriseHookReconcileRow {
@@ -58,12 +58,5 @@ func TestWindowsEnterprisePendingMachineHookConnectorsAreNamedAsBlocked(t *testi
 	if got, want := reason("cursor", "copilot"), windowsEnterpriseEnrollmentPendingLead+
 		"cursor: "+windowsEnterpriseEnrollmentBlocked+"; copilot: "+windowsEnterpriseEnrollmentUnguarded; got != want {
 		t.Fatalf("mixed account: %q, want %q", got, want)
-	}
-
-	previous := enterpriseHookReconcileSecureClient
-	t.Cleanup(func() { enterpriseHookReconcileSecureClient = previous })
-	enterpriseHookReconcileSecureClient = func() bool { return true }
-	if got := reason("claudecode", "codex", "cursor"); got != windowsEnterpriseEnrollmentPending {
-		t.Fatalf("Secure Client reason changed: %q", got)
 	}
 }
