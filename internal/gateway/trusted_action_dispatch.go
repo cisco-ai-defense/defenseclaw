@@ -1169,8 +1169,15 @@ func withActiveStateTargetMention(
 	// target, whatever the list holds and whatever runs before the loop
 	// (rel-1-0-6:GAP-0880). The match is on the spelling, so a gateway that
 	// cannot open the user home reads it as a per-user one does.
+	// A gateway behind ProtectHome receives no cwd of its own; the loop scan
+	// reads the spelling only, so it is placed where the hook client ran the
+	// call (GAP-1052).
+	loopCWD := request.Input.CWD
+	if client, placed := protectedHomeReportedDirectory(request); placed {
+		loopCWD = client
+	}
 	if command, known := trustedBashCommandInput(request.Input); known && trustedPOSIXShellCall(request.Input, facts) &&
-		hookpaths.LoopWriterReachesState(command, request.Input.CWD, request.Input.ActiveHome, request.StrictPolicy) {
+		hookpaths.LoopWriterReachesState(command, loopCWD, request.Input.ActiveHome, request.StrictPolicy) {
 		return withProvenActiveStateMutation(request, findings)
 	}
 	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)
@@ -3623,7 +3630,7 @@ func protectedHomeGitHookTwinRequest(request trustedActionRequest) (trustedActio
 // write targets first, then the local filesystem when the hook allows it.
 func stateLinkResolver(request trustedActionRequest) func(string) (string, bool) {
 	return func(value string) (string, bool) {
-		if physical, found := request.ResolvedWriteTargets[value]; found {
+		if physical, found := request.ResolvedWriteTargets[value]; found && physical != "" {
 			return physical, true
 		}
 		if request.SkipLocalFilesystemResolution {
@@ -3817,6 +3824,9 @@ func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedAct
 				rewritten[index], changed = spelled, true
 			}
 		}
+		if spelled, moved := copyDestinationThroughLink(command, rewritten, home, facts.CWD, root, resolve, inState); moved {
+			rewritten, changed = spelled, true
+		}
 		if changed && globbedStateCommandMutates(command, rewritten, home, facts.CWD) {
 			return true
 		}
@@ -3838,6 +3848,48 @@ func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedAct
 		}
 	}
 	return false
+}
+
+// copyDestinationThroughLink spells the destination of a cp, mv or ln, which
+// the call treats as a directory when the target-directory option names it or
+// the link it names points at one, under ~/.defenseclaw when it is a link to a
+// directory of the state (`cp -t dclink /tmp/x/conf*.yaml`, `cp /tmp/x/conf*.yaml
+// dclink`, GAP-1053). Its static directory part is the word itself, not the
+// parent stateWordThroughLink reads for a plain word.
+func copyDestinationThroughLink(
+	command actionfacts.CommandFact, words []string, home, cwd, root string,
+	resolve func(string) (string, bool),
+	inState func(string) bool,
+) ([]string, bool) {
+	switch path.Base(command.Program) {
+	case "cp", "mv", "ln":
+	default:
+		return words, false
+	}
+	index, attached, option := actionfacts.CopyOperandRoles(words)
+	prefix := ""
+	if index < 0 && attached != "" {
+		for position, word := range words {
+			if option[position] && strings.HasSuffix(word, attached) {
+				index, prefix = position, strings.TrimSuffix(word, attached)
+				break
+			}
+		}
+	}
+	if index < 0 {
+		return words, false
+	}
+	word := strings.TrimPrefix(words[index], prefix)
+	if word == "" || stateWordExpands(word) {
+		return words, false
+	}
+	spelled, ok := stateWordThroughLink(strings.TrimRight(word, "/")+"/", home, cwd, root, resolve, inState)
+	if !ok {
+		return words, false
+	}
+	moved := slices.Clone(words)
+	moved[index] = prefix + strings.TrimRight(spelled, "/")
+	return moved, true
 }
 
 // gitDirectoryWordThroughLink spells the value of a git -C or --work-tree

@@ -19,7 +19,10 @@ type stateWriterRow struct{ name, command string }
 // managed, in the default and strict packs. A protected row must block on the
 // DefenseClaw state rule in every cell; an ordinary row must not block in
 // any. One error names each failing row with the first cell it failed in.
-func runStateWriterRows(t *testing.T, home, project string, protected, ordinary []stateWriterRow) {
+// With blind, the managed cells run behind a home the gateway cannot read, and
+// only the default pack (the strict pack of that fixture blocks every call as
+// an install window).
+func runStateWriterRows(t *testing.T, home, project string, protected, ordinary []stateWriterRow, blind bool) {
 	t.Helper()
 	failed := map[string][]string{}
 	var order []string
@@ -33,15 +36,18 @@ func runStateWriterRows(t *testing.T, home, project string, protected, ordinary 
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, managed := range []bool{false, true} {
 			for _, pack := range []string{"", "strict"} {
+				if blind && managed && pack != "" {
+					continue
+				}
 				cell := fmt.Sprintf("%s/managed=%t/pack=%q", connector, managed, pack)
 				for _, row := range protected {
-					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
+					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, blind && managed, row.command)
 					if !strings.HasPrefix(got, `{"action":"block"`) || !strings.Contains(got, "tamper.detector_state_write") {
 						note(row, cell, got)
 					}
 				}
 				for _, row := range ordinary {
-					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
+					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, blind && managed, row.command)
 					if strings.HasPrefix(got, `{"action":"block"`) {
 						note(row, cell, got)
 					}
@@ -86,7 +92,60 @@ func TestCopyWithGlobSourceKeepsItsStateDestination(t *testing.T) {
 			}
 		}
 	}
+	// The destination is a directory (the target-directory option in every
+	// spelling, or a plain last operand that is a link to a state directory),
+	// and a source pattern can name a protected file in it.
+	for _, dir := range []string{"$HOME/.defenseclaw", "~/.defenseclaw", parent + active + "/.defenseclaw", "$HOME/aliasdir", "$HOME/aliasdir/"} {
+		for _, verb := range []string{"cp", "mv", "ln -sf"} {
+			for _, source := range []string{src + "/config*.yaml", "./conf*.yaml", "c*"} {
+				for _, form := range []string{"-t " + dir + " " + source, "-t" + dir + " " + source, "--target-directory " + dir + " " + source,
+					"--target-directory=" + dir + " " + source, "--target " + dir + " " + source, source + " -t " + dir, "-at " + dir + " " + source} {
+					if strings.HasPrefix(form, "-at") && verb != "cp" {
+						continue
+					}
+					// A home word joined to a short option (-t$HOME/d) is not read as a home path.
+					if strings.HasPrefix(form, "-t"+dir) && strings.ContainsAny(dir, "$~") {
+						continue
+					}
+					protected = append(protected,
+						stateWriterRow{"target-directory", verb + " " + form},
+						stateWriterRow{"loop-target-directory", "for u in $USER; do " + verb + " " + form + "; done"},
+					)
+				}
+			}
+		}
+	}
+	for _, dir := range []string{"$HOME/aliasdir", "$HOME/aliasdir/"} {
+		protected = append(protected, stateWriterRow{"plain-directory-link", "cp " + src + "/config*.yaml " + dir})
+	}
+	// A pattern is not the destination wherever else it stands: the value of
+	// another option, or a word after the end of the options.
+	for _, dest := range []string{state, "$HOME/.defenseclaw/config.yaml", "~/.defenseclaw/config.yaml", parent + "$USER/.defenseclaw/config.yaml", "$HOME/statealias"} {
+		protected = append(protected,
+			stateWriterRow{"option-value-pattern", "cp -S suffix*.bak " + src + "/a*.cfg " + dest},
+			stateWriterRow{"after-end-of-options", "cp -- -S* " + dest},
+			stateWriterRow{"loop-option-value-pattern", "for u in $USER; do cp -S suffix*.bak " + src + "/a*.cfg " + dest + "; done"},
+		)
+	}
+	// A login the command binds to the active account is that account; the
+	// same word bound to another account names the file of that account.
+	for _, name := range []string{"USER", "LOGNAME"} {
+		for _, bind := range []string{name + "=" + active + ";", "export " + name + "=" + active + ";"} {
+			protected = append(protected, stateWriterRow{"bound-login", bind + " cp " + src + "/*.cfg " + parent + "$" + name + "/.defenseclaw/config.yaml"})
+		}
+	}
 	ordinary := []stateWriterRow{
+		{"glob-to-state-dir-no-protected-name", "cp -t $HOME/.defenseclaw " + src + "/*.cfg"},
+		{"glob-to-state-dir-link-no-protected-name", "cp -t $HOME/aliasdir " + src + "/*.cfg"},
+		{"glob-to-state-dir-plain-no-protected-name", "cp " + src + "/*.cfg $HOME/.defenseclaw/"},
+		{"glob-option-value-to-project-file", "cp -S suffix*.bak " + src + "/a*.cfg ./ok"},
+		{"glob-after-end-of-options-to-project-file", "cp -- -S* ./ok"},
+		{"glob-target-directory-after-end-of-options", "cp -t ordinary -- " + src + "/config*.yaml"},
+		{"glob-target-directory-long-project", "cp --target-directory=ordinary " + src + "/config*.yaml"},
+		{"glob-sources-before-target-directory-project", "cp " + src + "/config*.yaml -t ordinary"},
+		{"bound-other-login", "USER=ordinary; cp " + src + "/*.cfg " + parent + "$USER/.defenseclaw/config.yaml"},
+		{"bound-other-logname", "LOGNAME=ordinary; cp " + src + "/*.cfg " + parent + "$LOGNAME/.defenseclaw/config.yaml"},
+		{"exported-other-login", "export USER=ordinary; cp " + src + "/*.cfg " + parent + "$USER/.defenseclaw/config.yaml"},
 		{"glob-to-project-file", "cp " + src + "/*.cfg ./ok"},
 		{"glob-to-project-dir", "cp *.txt ordinary/"},
 		{"glob-to-sibling-state-name", "cp " + src + "/*.cfg " + parent + "ordinary/aliasdir/config.yaml"},
@@ -94,15 +153,15 @@ func TestCopyWithGlobSourceKeepsItsStateDestination(t *testing.T) {
 		{"glob-target-dir-project", "cp -t ordinary *.txt"},
 		{"mv-glob-to-project-file", "mv a* ./ok"},
 	}
-	runStateWriterRows(t, home, project, protected, ordinary)
+	runStateWriterRows(t, home, project, protected, ordinary, false)
 }
 
-// rel-1-0-6:GAP-1052 (not reproduced on rel d0e6d95094; kept as the class
-// guard): a for loop over a variable with a known value reads the
+// rel-1-0-6:GAP-1052: a for loop over a variable with a known value reads the
 // words of that value the way the shell splits an unquoted expansion, so a
 // list that holds the login blocks a state write through the loop variable.
-// A list of other names, a quoted expansion (one word) and an unknown value
-// keep the verdict they have.
+// A gateway behind a home it cannot read has no cwd of its own and reads the
+// loop from the directory the hook client ran it in. A list of other names, a
+// quoted expansion (one word) and an unknown value keep the verdict they have.
 func TestLoopOverKnownMultiWordVariableReachesState(t *testing.T) {
 	home, project, parent := g235bBinderFixture(t)
 	active := filepath.Base(home)
@@ -135,5 +194,6 @@ func TestLoopOverKnownMultiWordVariableReachesState(t *testing.T) {
 		{"quoted-expansion-one-word", `L="zed ordinary"; for u in "$L"; do sed -i s/a/b/ ` + parent + `$u/notes.txt; done`},
 		{"known-ordinary-copy", `L="a.txt b.txt"; for f in $L; do cp $f ordinary/; done`},
 	}
-	runStateWriterRows(t, home, project, protected, ordinary)
+	runStateWriterRows(t, home, project, protected, ordinary, false)
+	runStateWriterRows(t, home, project, protected, ordinary, true)
 }

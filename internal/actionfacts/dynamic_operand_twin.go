@@ -43,12 +43,12 @@ const DynamicOperandPlaceholder = "/dev/null"
 // "cp $SRC ~/.defenseclaw/config.yaml" named no write at all.
 //
 // Words that the shell expands from a parameter, a command or arithmetic
-// count, and a filename pattern, brace or tilde word that is a source of cp,
-// mv, install or ln (patternSourceWord): what such a word expands to never
-// changes which operand is the destination, so it is read as one plain name
-// too (GAP-1053). A call with a pattern word in a destination or option-value
-// position keeps the readings the glob resolver already gives it, and has no
-// twin. The first reading has each expanded word as one plain
+// count, and a filename pattern, brace or tilde word of a cp, mv, install or
+// ln call that is not the destination (copyPatternWords): what such a word
+// expands to never changes which operand is the destination, so it is read as
+// one plain name too (GAP-1053). A call with a pattern word in the
+// destination position keeps the readings the glob resolver already gives
+// it, and has no twin. The first reading has each expanded word as one plain
 // name. The second,
 // returned only when some call ends in unquoted words that are a lone
 // command substitution or plain parameter expansion (which expand to no
@@ -80,6 +80,10 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 	if !parsed {
 		return nil
 	}
+	// A command that binds USER or LOGNAME leaves the login to the reader of
+	// the reading, which follows the assignment: a word spelled through it
+	// is kept as it is, not respelled as the home of the active login.
+	loginBound := bindsLoginName(file)
 	type edit struct {
 		start, end int
 		text       string
@@ -100,6 +104,7 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 			return true
 		}
 		last, respelled, replaced := -1, map[int]string{}, false
+		patternWord := copyPatternWords(call.Args, first, source)
 		for index := first; index < len(call.Args); index++ {
 			word := call.Args[index]
 			if !projectPOSIXWord(word).Expands {
@@ -107,9 +112,13 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 			} else if below, user := userHomeRewriteWord(word, userHome); userHome != "" && user {
 				// A path below the home spelled through USER or LOGNAME
 				// (/home/$USER/f) is the home path: it keeps its role as a
-				// destination in the reading (GAP-1053).
-				respelled[index], last = userHome+below, index
-			} else if !runtimeExpansionWord(word) && !patternSourceWord(call.Args, first, index) {
+				// destination in the reading (GAP-1053). Where the command
+				// binds the login, the word stays as written.
+				last = index
+				if !loginBound {
+					respelled[index] = userHome + below
+				}
+			} else if !runtimeExpansionWord(word) && !patternWord(index) {
 				return false
 			} else {
 				replaced = true
@@ -123,6 +132,9 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 		for index := first; index < len(call.Args); index++ {
 			word := call.Args[index]
 			if !projectPOSIXWord(word).Expands {
+				continue
+			}
+			if _, user := userHomeRewriteWord(word, userHome); user && loginBound {
 				continue
 			}
 			start, end := int(word.Pos().Offset()), int(word.End().Offset())
@@ -184,14 +196,17 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 	return twins
 }
 
-// patternSourceWord reports a filename pattern, brace or tilde word of a cp,
-// mv, install or ln call (operands from first) that is a source operand
-// whatever it expands to: not an option and not the value of one, and not
-// the last operand, which names the destination, unless a target-directory
-// option names the destination and so makes every operand a source.
-func patternSourceWord(args []*syntax.Word, first, index int) bool {
-	if first < 1 || index < first || index >= len(args) {
-		return false
+// copyPatternWords returns the test for a filename pattern, brace or tilde
+// word of a cp, mv, install or ln call (operands from first) that is not the
+// destination, whatever it expands to: a source, the value of an option other
+// than the target directory, or a word after "--". The destination is the
+// last operand, or the value of the target-directory option (CopyOperandRoles),
+// and the shell may expand any other word to any number of names without
+// changing which operand that is. The test is false for every word of any
+// other program.
+func copyPatternWords(args []*syntax.Word, first int, source string) func(index int) bool {
+	if first < 1 || first > len(args) {
+		return func(int) bool { return false }
 	}
 	name := projectPOSIXWord(args[first-1]).Value
 	if slash := strings.LastIndexByte(name, '/'); slash >= 0 {
@@ -200,66 +215,49 @@ func patternSourceWord(args []*syntax.Word, first, index int) bool {
 	switch name {
 	case "cp", "mv", "install", "ln":
 	default:
-		return false
+		return func(int) bool { return false }
 	}
-	if len(args[index].Parts) > 0 && partStartsWithDash(args[index].Parts[0]) {
-		return false
+	words := make([]string, 0, len(args)-first)
+	for _, word := range args[first:] {
+		text := projectPOSIXWord(word)
+		value := text.Value
+		if start, end := int(word.Pos().Offset()), int(word.End().Offset()); text.Expands &&
+			start >= 0 && start < end && end <= len(source) {
+			value = source[start:end]
+		}
+		words = append(words, value)
 	}
-	targetDirectory := false
-	for before := first; before < index; before++ {
-		option := projectPOSIXWord(args[before])
-		if option.Expands || !strings.HasPrefix(option.Value, "-") || option.Value == "-" {
-			continue
-		}
-		if targetDirectoryOption(option.Value) {
-			targetDirectory = true
-		}
-		if before == index-1 && optionTakesNextWord(option.Value) {
-			return false
-		}
+	destination, _, option := CopyOperandRoles(words)
+	return func(index int) bool {
+		index -= first
+		return index >= 0 && index < len(words) && index != destination && !option[index]
 	}
-	return index < len(args)-1 || targetDirectory
 }
 
-func partStartsWithDash(part syntax.WordPart) bool {
-	lit, ok := part.(*syntax.Lit)
-	return ok && strings.HasPrefix(lit.Value, "-")
-}
-
-// targetDirectoryOption reports a cp, mv, install or ln option word that
-// names the target directory: -t (also joined or inside a cluster) or any
-// abbreviation of --target-directory.
-func targetDirectoryOption(option string) bool {
-	if name, ok := strings.CutPrefix(option, "--"); ok {
-		name, _, _ = strings.Cut(name, "=")
-		return len(name) >= 2 && strings.HasPrefix("target-directory", name)
-	}
-	return strings.ContainsRune(option[1:], 't')
-}
-
-// optionTakesNextWord reports an option word that, as the word before an
-// operand, may take it as its value: anything but a known cluster of switches
-// or a long option with its value attached.
-func optionTakesNextWord(option string) bool {
-	if name, ok := strings.CutPrefix(option, "--"); ok {
-		if strings.Contains(name, "=") {
-			return false
+// bindsLoginName reports a command that can change USER or LOGNAME: an
+// assignment or declaration, a for loop over either, or a builtin or
+// printf -v given the bare name.
+func bindsLoginName(file *syntax.File) bool {
+	login := func(name string) bool { return name == "USER" || name == "LOGNAME" }
+	bound := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.Assign:
+			bound = bound || typed.Name != nil && login(typed.Name.Value)
+		case *syntax.ForClause:
+			if iter, ok := typed.Loop.(*syntax.WordIter); ok && iter.Name != nil {
+				bound = bound || login(iter.Name.Value)
+			}
+		case *syntax.CallExpr:
+			for _, word := range typed.Args {
+				if text := projectPOSIXWord(word); !text.Expands && login(text.Value) {
+					bound = true
+				}
+			}
 		}
-		switch name {
-		case "force", "recursive", "archive", "verbose", "no-clobber", "interactive", "preserve",
-			"parents", "update", "link", "symbolic-link", "symbolic", "dereference", "no-dereference",
-			"remove-destination", "no-target-directory", "strip-trailing-slashes", "one-file-system",
-			"attributes-only", "copy-contents", "relative", "logical", "physical", "directory", "":
-			return false
-		}
-		return true
-	}
-	for _, letter := range option[1:] {
-		if !strings.ContainsRune("abcCdDfHilLnpPrRsTuvx", letter) {
-			return true
-		}
-	}
-	return false
+		return !bound
+	})
+	return bound
 }
 
 // runtimeExpansionWord reports a word whose expansion comes from a
