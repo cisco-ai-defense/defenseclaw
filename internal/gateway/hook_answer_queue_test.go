@@ -29,6 +29,14 @@ import (
 // gateway's answer must reach the hook inside it, queueing included.
 const hookAnswerQueueBudget = 3500 * time.Millisecond
 
+// hookAnswerQueueCeiling is the longest any single answer may take on any
+// host, starved or not: three budgets, under the 11-13 s p95 of the queueing
+// the group commit removed. A starved host can make the budget unjudgeable,
+// but it cannot make an answer of this length a host effect: the starvation
+// flag only says some busy thread waited, not how much of the answer it
+// explains (GAP-0889).
+const hookAnswerQueueCeiling = 3 * hookAnswerQueueBudget
+
 // TestHookAnswersStayInsideTheBudgetUnderCPULoad drives the real hook
 // handler, audit store and v8 runtime at 10 benign Claude Code PreToolUse
 // calls a second from ten sessions on two CPUs with six busy goroutines (the
@@ -141,8 +149,11 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	if len(answers) < sessions*int(duration/time.Second)/2 {
 		t.Fatalf("only %d calls ran", len(answers))
 	}
-	over, overOnAFreeHost := 0, 0
+	over, overOnAFreeHost, beyondCeiling := 0, 0, 0
 	for _, a := range answers {
+		if a.took > hookAnswerQueueCeiling {
+			beyondCeiling++
+		}
 		if a.took > hookAnswerQueueBudget {
 			over++
 			if !a.starved {
@@ -165,7 +176,11 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	// call, the process was not given the two CPUs the load is shaped for,
 	// and the run says so and is not judged. A call that missed it on a host
 	// that left the process three quarters of its CPU is never in that case:
-	// the answers take under 1 s there.
+	// the answers take under 1 s there. No answer is excused beyond the
+	// ceiling (three budgets): that fails whatever the host did.
+	if beyondCeiling > 0 {
+		t.Fatalf("%d of %d answers over the %v answer ceiling, starved host or not (max %v, p95 %v)", beyondCeiling, len(answers), hookAnswerQueueCeiling, answers[len(answers)-1].took, p95)
+	}
 	if overOnAFreeHost > 0 {
 		t.Fatalf("%d of %d answers over the %v answer budget (%d on a free host; max %v, p95 %v)", over, len(answers), hookAnswerQueueBudget, overOnAFreeHost, answers[len(answers)-1].took, p95)
 	}
