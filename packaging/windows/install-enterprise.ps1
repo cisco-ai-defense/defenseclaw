@@ -23,7 +23,6 @@ param(
     [string]$GatewayBinary,
     [string]$ACPBinary,
     [string]$HookBinary,
-    [string]$HookGuardBinary,
     [string]$SensorHelperBinary,
     [string]$PolicyCompiler,
     [string]$CLIBinary,
@@ -4650,7 +4649,6 @@ try {
         GatewayBinary = $GatewayBinary
         ACPBinary = $ACPBinary
         HookBinary = $HookBinary
-        HookGuardBinary = $HookGuardBinary
         SensorHelperBinary = $SensorHelperBinary
         PolicyCompiler = $PolicyCompiler
         CLIBinary = $CLIBinary

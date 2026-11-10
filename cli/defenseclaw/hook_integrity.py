@@ -368,15 +368,12 @@ def _launcher_paths(command: str) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def _windows_hook_programs(cfg: Any, connector: str) -> tuple[list[str], list[str], HookProblem | None]:
-    """The launcher files and hook guards the recorded hook files of *connector* start (per-user Windows).
-
-    The third value is the Claude Code guard-chain defect found while reading them, if any.
-    """
+def _windows_hook_programs(cfg: Any, connector: str) -> tuple[list[str], list[str]]:
+    """The launcher files and hook guards the recorded hook files of *connector* start (per-user Windows)."""
 
     if not _is_windows() or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
         # Managed installs (Secure Client included) keep their own status.
-        return [], [], None
+        return [], []
     launchers: list[str] = []
     guards: list[str] = []
     for path in _hook_config_paths(cfg, connector):
@@ -386,27 +383,12 @@ def _windows_hook_programs(cfg: Any, connector: str) -> tuple[list[str], list[st
             document = _load_agent_document(path)
         except (OSError, ValueError):
             continue
-        if connector == "claudecode":
-            hooks = document.get("hooks") if isinstance(document, dict) else None
-            for groups in hooks.values() if isinstance(hooks, dict) else ():
-                for group in groups if isinstance(groups, list) else ():
-                    handlers = group.get("hooks") if isinstance(group, dict) else None
-                    for handler in handlers if isinstance(handlers, list) else ():
-                        parts = _claude_chain_wrapper_parts(handler)
-                        if parts is not None:
-                            _launcher, _inner, guard, approved = parts
-                            if not _claude_chain_files_match(guard, approved):
-                                return [], [], HookProblem(
-                                    f"the Claude Code hook guard {guard} is missing or changed, "
-                                    "so the registered hook cannot check events",
-                                    "run `defenseclaw setup claude-code --yes`; it restores the hook guard",
-                                )
         for value in _strings(document):
             launchers += [launcher for launcher in _launcher_paths(value) if launcher not in launchers]
             guard = hook_guard_program(connector, value)
             if guard and guard not in guards:
                 guards.append(guard)
-    return launchers, guards, None
+    return launchers, guards
 
 
 class LauncherReport(NamedTuple):
@@ -437,9 +419,7 @@ def hook_launcher_report(cfg: Any, connector: str) -> LauncherReport:
     never passes it; the installer again records the digest (GAP-0810).
     """
 
-    launchers, guards, chain_problem = _windows_hook_programs(cfg, connector)
-    if chain_problem is not None:
-        return LauncherReport([chain_problem])
+    launchers, guards = _windows_hook_programs(cfg, connector)
     data_dir = str(getattr(cfg, "data_dir", "") or "")
     unverified = ""
     for launcher in launchers:
@@ -854,185 +834,10 @@ CLAUDE_LAUNCHER_GUARD_WORDS = (
 ).split()
 
 
-# The per-user Windows direct handler runs the installed full hook as this
+# The per-user Windows PreToolUse handler runs the installed full hook as this
 # guard instead of cmd.exe, which Cursor's argument-free import of the hook
 # could not run (GAP-1011). Keep it identical to ClaudeCodeLauncherGuardArgv.
 CLAUDE_LAUNCHER_GUARD_SUBCOMMAND = "launcher-guard"
-_CLAUDE_WRAPPED_GUARD_SUBCOMMAND = "launcher-guard-wrapped"
-_CLAUDE_WRAPPED_EXIT_BASE = 65536
-_CLAUDE_NEUTRAL_EVENTS = frozenset({"Stop", "SubagentStop", "TeammateIdle", "StopFailure", "SessionEnd"})
-_CLAUDE_CHAIN_WARNING = (
-    "DefenseClaw could not start its Claude Code hook guard. "
-    "Run the DefenseClaw installer again to repair it."
-).split()
-
-
-# The managed standalone wrapper names the missing guard and the repair that
-# can restore it: Setup /repair, the only route that carries the guard payload.
-# Keep it identical to claudeManagedGuardMissingWords in
-# internal/gateway/connector/claudecode_chain.go.
-_CLAUDE_MANAGED_GUARD_MISSING = (
-    "DefenseClaw could not start its Claude Code hook guard defenseclaw-hook-guard.exe "
-    "because it is missing from the install folder. "
-    "Run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair "
-    "as an administrator to restore it. "
-    "Setup is not installed on this computer: use the copy in your MDM package or the release download."
-).split()
-
-
-def _claude_wrapper_safe(path: str) -> bool:
-    return (
-        bool(path)
-        and path.strip() == path
-        and not any(ch in path for ch in '"%!\r\n')
-        and (ntpath.isabs(path) or os.path.isabs(path))
-        and (any(ch in path for ch in " \t") or not any(ch in path for ch in "&|<>^(),;="))
-    )
-
-
-def _claude_chain_wrapper_words(
-    compare: str, guard: str, approved: str, launcher: str, event: str, unavailable_open: bool = False,
-) -> list[str]:
-    fail_code = "1" if event in _CLAUDE_NEUTRAL_EVENTS or unavailable_open else "2"
-    warning = ["echo", *_CLAUDE_CHAIN_WARNING, "1>&2", "&", "exit", "/b", fail_code]
-    mode = ["--unavailable-mode", "open"] if unavailable_open else []
-    return [
-        "/d", "/v:on", "/c", "if", "not", "exist", guard, "(", *warning, ")",
-        "&", compare, "/b", guard, approved, ">nul", "2>&1", "||", "(", *warning, ")",
-        "&", guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND, launcher, "hook", "--connector", "claudecode",
-        "--event", event, *mode,
-        "&", "set", "dc_hook_status=!errorlevel!",
-        "&", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0",
-        "&", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2",
-        "&", "if", "!dc_hook_status!", "geq", str(_CLAUDE_WRAPPED_EXIT_BASE + 1),
-        "if", "!dc_hook_status!", "leq", str(2 * _CLAUDE_WRAPPED_EXIT_BASE - 1),
-        "(", "set", "/a", f"dc_hook_result=!dc_hook_status!-{_CLAUDE_WRAPPED_EXIT_BASE}", ">nul",
-        "&", "exit", "/b", "!dc_hook_result!", ")", "&", *warning,
-    ]
-
-
-def _claude_chain_wrapper_parts(handler: Any) -> tuple[str, list[str], str, str] | None:
-    if not isinstance(handler, dict):
-        return None
-    command, args = handler.get("command"), handler.get("args")
-    if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-        return None
-    system_root = os.environ.get("SystemRoot") or "C:\\Windows"
-    processor = ntpath.join(system_root, "System32", "cmd.exe")
-    compare = ntpath.join(system_root, "System32", "fc.exe")
-    if ntpath.normcase(ntpath.normpath(command)) != ntpath.normcase(ntpath.normpath(processor)):
-        return None
-    if len(args) < 30 or args[:6] != ["/d", "/v:on", "/c", "if", "not", "exist"]:
-        return None
-    guard = args[6]
-    if not _claude_wrapper_safe(guard) or ntpath.basename(guard).lower() != "defenseclaw-hook-guard.exe":
-        return None
-    approved = next(
-        (args[i + 3] for i in range(8, len(args) - 3)
-         if ntpath.normcase(ntpath.normpath(args[i])) == ntpath.normcase(ntpath.normpath(compare))
-         and args[i + 1:i + 3] == ["/b", guard]),
-        "",
-    )
-    if not _claude_wrapper_safe(approved) or ntpath.basename(approved).lower() != "defenseclaw-hook-guard.approved":
-        return None
-    for i in range(len(args) - 8):
-        if args[i:i + 2] != [guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND]:
-            continue
-        launcher = args[i + 2]
-        inner = args[i + 3:i + 6]
-        if not _claude_guardable_hook_executable(launcher) or inner != ["hook", "--connector", "claudecode"]:
-            return None
-        if args[i + 6] != "--event":
-            return None
-        event = args[i + 7]
-        if not event or len(event) > 64 or not event.isascii() or not event.isalnum():
-            return None
-        unavailable_open = args[i + 8:i + 10] == ["--unavailable-mode", "open"]
-        if args == _claude_chain_wrapper_words(compare, guard, approved, launcher, event, unavailable_open):
-            return launcher, inner, guard, approved
-    return None
-
-
-def _claude_managed_wrapper_words(guard: str, launcher: str, event: str) -> list[str]:
-    fail_code = "1" if event in _CLAUDE_NEUTRAL_EVENTS else "2"
-    missing = ["echo", *_CLAUDE_MANAGED_GUARD_MISSING, "1>&2", "&", "exit", "/b", fail_code]
-    warning = ["echo", *_CLAUDE_CHAIN_WARNING, "1>&2", "&", "exit", "/b", fail_code]
-    return [
-        "/d", "/v:on", "/c", "if", "not", "exist", guard, "(", *missing, ")",
-        "&", guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND, launcher,
-        "hook", "--connector", "claudecode", "--enterprise-managed", "--event", event,
-        "&", "set", "dc_hook_status=!errorlevel!",
-        "&", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0",
-        "&", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2",
-        "&", "if", "!dc_hook_status!", "geq", str(_CLAUDE_WRAPPED_EXIT_BASE + 1),
-        "if", "!dc_hook_status!", "leq", str(2 * _CLAUDE_WRAPPED_EXIT_BASE - 1),
-        "(", "set", "/a", f"dc_hook_result=!dc_hook_status!-{_CLAUDE_WRAPPED_EXIT_BASE}", ">nul",
-        "&", "exit", "/b", "!dc_hook_result!", ")", "&", *warning,
-    ]
-
-
-def _claude_managed_wrapper_parts(handler: Any) -> tuple[str, list[str]] | None:
-    if not isinstance(handler, dict):
-        return None
-    command, args = handler.get("command"), handler.get("args")
-    if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-        return None
-    system_root = os.environ.get("SystemRoot") or "C:\\Windows"
-    processor = ntpath.join(system_root, "System32", "cmd.exe")
-    if ntpath.normcase(ntpath.normpath(command)) != ntpath.normcase(ntpath.normpath(processor)):
-        return None
-    if len(args) < 25 or args[:6] != ["/d", "/v:on", "/c", "if", "not", "exist"]:
-        return None
-    guard = args[6]
-    for index in range(8, len(args) - 8):
-        if args[index:index + 2] != [guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND]:
-            continue
-        launcher = args[index + 2]
-        if not _claude_wrapper_safe(launcher) or not _claude_guardable_hook_executable(launcher):
-            continue
-        expected_guard = ntpath.join(ntpath.dirname(launcher), "defenseclaw-hook-guard.exe")
-        if ntpath.normcase(ntpath.normpath(guard)) != ntpath.normcase(ntpath.normpath(expected_guard)):
-            continue
-        event = args[index + 8]
-        if not event or len(event) > 64 or not event.isascii() or not event.isalnum():
-            continue
-        if args == _claude_managed_wrapper_words(guard, launcher, event):
-            return launcher, ["hook", "--connector", "claudecode", "--enterprise-managed"]
-    return None
-
-
-def _claude_chain_files_match(guard: str, approved: str) -> bool:
-    pair_dir = os.path.dirname(guard)
-    generation = os.path.basename(pair_dir)
-    if (not generation.startswith("chain-") or not generation[6:].isascii()
-            or not generation[6:].isalnum()
-            or os.path.normcase(os.path.dirname(approved)) != os.path.normcase(pair_dir)):
-        return False
-    record = os.path.join(os.path.dirname(pair_dir), "chain.json")
-    try:
-        with open(record, "rb") as fh:
-            raw = fh.read(64 * 1024 + 1)
-        if len(raw) > 64 * 1024:
-            return False
-        payload = json.loads(raw)
-        if payload.get("generation") != generation:
-            return False
-        digest = payload.get("guard_sha256")
-        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
-            return False
-        for path in (guard, approved):
-            info = os.lstat(path)
-            if not stat.S_ISREG(info.st_mode) or info.st_size == 0 or info.st_size > 64 * 1024 * 1024:
-                return False
-            hasher = hashlib.sha256()
-            with open(path, "rb") as fh:
-                for block in iter(lambda: fh.read(1024 * 1024), b""):
-                    hasher.update(block)
-            if hasher.hexdigest() != digest:
-                return False
-        return True
-    except (OSError, ValueError, AttributeError, TypeError):
-        return False
 
 
 def _claude_guardable_hook_executable(path: str) -> bool:
@@ -1063,15 +868,9 @@ def _claude_pretool_guard_program(path: str) -> bool:
 
 
 def _claude_pretool_guard_view(handler: dict, command: str, args: list[str]) -> dict | None:
-    if len(args) not in (5, 7, 9) or args[0] != CLAUDE_LAUNCHER_GUARD_SUBCOMMAND:
+    if len(args) != 5 or args[0] != CLAUDE_LAUNCHER_GUARD_SUBCOMMAND:
         return None
-    if args[2:5] != ["hook", "--connector", "claudecode"]:
-        return None
-    if len(args) >= 7 and (
-        args[5] != "--event" or not args[6] or len(args[6]) > 64 or not args[6].isascii() or not args[6].isalnum()
-    ):
-        return None
-    if len(args) == 9 and args[7:] != ["--unavailable-mode", "open"]:
+    if args[2:] != ["hook", "--connector", "claudecode"]:
         return None
     launcher = args[1]
     if not _claude_pretool_guard_program(command) or not _claude_guardable_hook_executable(launcher):
@@ -1080,7 +879,7 @@ def _claude_pretool_guard_view(handler: dict, command: str, args: list[str]) -> 
         return None
     view = dict(handler)
     view["command"] = launcher
-    view["args"] = list(args[2:5])
+    view["args"] = list(args[2:])
     return view
 
 
@@ -1096,18 +895,6 @@ def claude_launcher_guard_view(handler: Any) -> Any:
     command, args = handler.get("command"), handler.get("args")
     if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         return handler
-    chain = _claude_chain_wrapper_parts(handler)
-    if chain is not None:
-        launcher, inner, _guard, _approved = chain
-        view = dict(handler)
-        view["command"], view["args"] = launcher, inner
-        return view
-    managed = _claude_managed_wrapper_parts(handler)
-    if managed is not None:
-        launcher, inner = managed
-        view = dict(handler)
-        view["command"], view["args"] = launcher, inner
-        return view
     pretool = _claude_pretool_guard_view(handler, command, args)
     if pretool is not None:
         return pretool
@@ -1876,8 +1663,8 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
 # sources the gateway checks too: user, ~/.claude.json, managed, and the
 # project of the pinned claw.workspace_dir. Otherwise, and for the folder
 # doctor or status runs in, it is a warning (agent_hook_env_warnings).
-# A managed Claude Code install starts the native hook in exec form on POSIX,
-# so its settings env does not govern the hook launch. Doctor and status still report
+# A managed Claude Code install starts the native hook in exec form, so its
+# settings env does not govern the hook launch. doctor and status still report
 # SHELLOPTS values that can affect Bash tool scripts.
 HOOK_SHELL_ENV_NAMES = ("BASHOPTS", "BASH_ENV", "CLAUDE_CODE_SHELL_PREFIX", "FUNCNEST", "SHELLOPTS")
 _HOOK_SHELL_ENV_FUNCTION_PREFIX = "BASH_FUNC_"

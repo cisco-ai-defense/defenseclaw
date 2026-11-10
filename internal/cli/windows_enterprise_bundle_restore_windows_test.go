@@ -757,7 +757,7 @@ func TestWindowsBundleRollbackRecordsTheLastGoodBundleAgain(t *testing.T) {
 				return windowsServiceConfigValidation{}, nil
 			}
 			opts := windowsBundleRestoreOptions()
-			opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.hookGuardBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", "", ""
+			opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", ""
 			opts.noStart, opts.resolvedInstaller = false, `C:\stage\install-enterprise.ps1`
 			cmd, _ := windowsBundleCommand()
 			run := &windowsBundleRun{ctx: ctx, layout: host.layout, driver: newWindowsBundleDriver(host.layout),

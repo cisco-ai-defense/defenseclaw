@@ -44,6 +44,17 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 		if spelling == "" {
 			continue
 		}
+		// A delete removes the final name and never the file a link there
+		// reaches: only the directory of the name is followed, and the final
+		// name is kept (deleting a link to a credential file removes the
+		// link). The client lists the entry it removes the same way.
+		walk, entry := spelling, ""
+		if candidate.Access == actionfacts.PathAccessDelete {
+			if strings.HasSuffix(candidate.Value, "/") || strings.HasSuffix(candidate.Value, `\`) {
+				continue
+			}
+			walk, entry = filepath.Dir(spelling), filepath.Base(spelling)
+		}
 		physical := ""
 		for _, key := range []string{spelling, candidate.Resolved, candidate.Normalized, candidate.Value} {
 			if target := request.ResolvedWriteTargets[key]; filepath.IsAbs(target) {
@@ -51,18 +62,24 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 				break
 			}
 		}
+		walked := false
 		if physical == "" && !reported && !request.SkipLocalFilesystemResolution {
-			physical, _ = request.targetMemo.ResolveWriteTarget(windowsWalkPath(spelling, candidate.Value))
+			physical, _ = request.targetMemo.ResolveWriteTarget(windowsWalkPath(walk, candidate.Value))
 			physical = windowsWalkResult(physical)
+			walked = true
 		}
 		if !filepath.IsAbs(physical) && !reported && !request.SkipLocalFilesystemResolution {
 			// A gateway that walks the link itself finds the same closed
 			// directory the client would.
-			if text, reached := hookpaths.LinkTextWriteTarget(spelling); reached {
+			if text, reached := hookpaths.LinkTextWriteTarget(walk); reached {
 				physical = text
+				walked = true
 			}
 		}
-		if !filepath.IsAbs(physical) {
+		if walked && entry != "" && filepath.IsAbs(physical) {
+			physical = filepath.Join(physical, entry)
+		}
+		if !filepath.IsAbs(physical) && entry == "" {
 			// The user could not open a directory on the way of the link:
 			// the file its link text leads to is judged by name.
 			for _, key := range []string{spelling, candidate.Resolved, candidate.Normalized, candidate.Value} {
@@ -154,11 +171,14 @@ func linkTargetSpelling(request trustedActionRequest, candidate actionfacts.Path
 }
 
 // linkTargetCandidate reports whether a path fact is a file operation that
-// follows its final path and so reaches the file a link names: the read,
-// write or append of a typed file tool, or a path of an apply_patch command.
+// reaches the file a link names: the read, write or append of a typed file
+// tool, or a path of an apply_patch command. A delete is one too: it follows
+// the links of the directory of its name (not the final name) and removes a
+// file there, so it is judged like a write of that name.
 func linkTargetCandidate(facts actionfacts.Facts, candidate actionfacts.PathFact, typed bool) bool {
 	switch candidate.Access {
-	case actionfacts.PathAccessRead, actionfacts.PathAccessWrite, actionfacts.PathAccessAppend:
+	case actionfacts.PathAccessRead, actionfacts.PathAccessWrite, actionfacts.PathAccessAppend,
+		actionfacts.PathAccessDelete:
 	default:
 		return false
 	}

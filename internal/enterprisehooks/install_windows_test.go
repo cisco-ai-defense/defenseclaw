@@ -649,14 +649,12 @@ func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T)
 	}
 	entry := preTool[0].(map[string]interface{})
 	handler := entry["hooks"].([]interface{})[0].(map[string]interface{})
-	command, _ := handler["command"].(string)
-	if !strings.EqualFold(filepath.Base(command), "cmd.exe") {
-		t.Fatalf("managed command = %q, want the system command parent", command)
+	if handler["command"] != fixture.hookExe {
+		t.Fatalf("managed command = %q, want %q", handler["command"], fixture.hookExe)
 	}
-	launcher, args, owned := connector.ClaudeCodeLauncherGuardTarget(handler)
-	if !owned || launcher != fixture.hookExe || len(args) != 4 ||
-		args[0] != "hook" || args[1] != "--connector" || args[2] != "claudecode" || args[3] != "--enterprise-managed" {
-		t.Fatalf("managed command does not carry the expected native hook: %q %#v", launcher, args)
+	args := handler["args"].([]interface{})
+	if len(args) != 4 || args[0] != "hook" || args[1] != "--connector" || args[2] != "claudecode" || args[3] != "--enterprise-managed" {
+		t.Fatalf("managed exec args = %#v", args)
 	}
 	tokenPath := filepath.Join(fixture.home, ".defenseclaw", "hooks", ".hook-claudecode.token")
 	if token, err := os.ReadFile(tokenPath); err != nil || strings.TrimSpace(string(token)) != opts.APIToken {
