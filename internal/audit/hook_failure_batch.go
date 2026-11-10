@@ -47,7 +47,8 @@ func (l *Logger) LogHookFailureRowsAtomic(ctx context.Context, rows []HookFailur
 	events := make([]Event, 0, len(rows))
 	mandatory := make([]bool, 0, len(rows))
 	for _, row := range rows {
-		if row.Action != string(ActionGuardrailBlock) && row.Action != string(ActionGuardrailWarn) {
+		if row.Action != string(ActionGuardrailBlock) && row.Action != string(ActionGuardrailWarn) &&
+			row.Action != string(ActionConnectorHook) {
 			return 0, fmt.Errorf("audit: unsupported hook failure action")
 		}
 		severity := row.Severity

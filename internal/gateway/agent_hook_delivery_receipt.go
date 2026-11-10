@@ -11,7 +11,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // hookDeliveryReceipt keeps the managed hook's request open until the hook
@@ -140,6 +142,15 @@ const hookActionUnconfirmed = "unconfirmed"
 // enforced when it refused the proposed answer.
 const hookDeliveryRejectedReason = "managed hook rejected the proposed answer"
 
+// perUserHookInstall reports a per-user (OSS) install: any deployment that is
+// not managed enterprise. The deployment mode of such an install is empty (or
+// one of the other validated modes); it is never the literal per_user, which
+// config validation rejects, so the checks that compared against that literal
+// never ran outside tests (GAP-1028).
+func perUserHookInstall(cfg *config.Config) bool {
+	return cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode)
+}
+
 // deliveredHookDecision is the decision of a call that asked for a delivery
 // receipt: the offered answer once the hook acknowledged it, and the hook's
 // own block when it refused it. A missing receipt cannot prove what an older
@@ -152,13 +163,13 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 	case hookexec.HookDeliveryReceiptBlock:
 		return failedClosedHookDelivery(resp, hookDeliveryRejectedReason)
 	case hookexec.HookDeliveryReceiptLate:
-		if a.scannerCfg.DeploymentMode == "per_user" {
+		if perUserHookInstall(a.scannerCfg) {
 			return failedClosedHookDelivery(resp, hookexec.PerUserGatewayNoAnswerReason)
 		}
 		return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
 	case hookexec.HookDeliveryReceiptOpen:
 		reason := hookexec.ManagedGatewayNoAnswerReason
-		if a.scannerCfg.DeploymentMode == "per_user" {
+		if perUserHookInstall(a.scannerCfg) {
 			reason = hookexec.PerUserGatewayNoAnswerReason
 		}
 		return failedOpenHookDelivery(resp, reason)
@@ -223,6 +234,45 @@ func (a *APIServer) unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer bool
 		return resp
 	case hungUpBeforeAnswer, !shellBridge && hookexec.DeliveryReceiptEvent(connectorName, event):
 		return unconfirmedHookDelivery(resp)
+	}
+	return resp
+}
+
+// clientLeftHookDecision is the decision recorded for a call whose hook client
+// left before the gateway finished it and sent no delivery receipt (a script
+// hook, whose curl gave up). Nothing shows which answer the agent got, so the
+// recorded outcome follows what the hook does when it hears nothing:
+//   - A hook that fails closed (the strict tier, a saved closed mode, managed)
+//     blocks the call whatever the gateway proposed, so a proposed block and a
+//     proposed allow are both the fail-closed block.
+//   - A hook that may fail open (the default and permissive tiers) exits 0 on
+//     a curl timeout and the agent runs the call. For a tool-gate event, an
+//     allowed call and a call the gateway proposed to block alike are
+//     unconfirmed rows that keep the proposal: the gateway never records a
+//     block the hook did not deliver (GAP-1028). The hook's own answer is what
+//     protects a named target; this row only states what the gateway can
+//     prove. Other events keep the legacy rewrite below.
+//
+// Secure Client keeps its own contract and is never rewritten.
+func (a *APIServer) clientLeftHookDecision(ctx context.Context, connectorName string, req agentHookRequest, rawBody []byte, resp agentHookResponse) agentHookResponse {
+	cfg := a.decisionConfig(ctx)
+	if cfg != nil && cfg.SecureClientIntegration() {
+		return resp
+	}
+	if cfg != nil && cfg.EffectiveHookOutageFailModeForConnector(connectorName) == "open" &&
+		hookexec.DeliveryReceiptEvent(connectorName, req.HookEventName) {
+		return unconfirmedHookDelivery(resp)
+	}
+	if resp.Action == "block" {
+		return resp
+	}
+	failed := a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, req.Payload, hookCheckFailure{
+		base:  agentHookResponse{Severity: "WARN", Reason: "hook client disconnected before the gateway decision was delivered"},
+		cause: "because the hook client disconnected before it received the gateway decision",
+	})
+	if failed.Action == "block" {
+		failed.EvaluationID = resp.EvaluationID
+		return failed
 	}
 	return resp
 }
