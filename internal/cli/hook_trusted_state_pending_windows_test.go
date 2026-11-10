@@ -21,6 +21,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -64,10 +65,15 @@ func TestWindowsStandaloneHookNamesARevokedSelectionPendingNotDrift(t *testing.T
 			standalone, err := tc.standalone, tc.err
 			standaloneEnterpriseHookCheck = func(string) bool { return standalone }
 			secureClientHost = func() bool { return tc.secureClient }
+			// The account's DefenseClaw folder exists: a missing one has its own reason.
+			dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
 				return enterprisehooks.WindowsManagedHookRuntime{
 					Connector:    "codex",
-					DataDir:      filepath.Join(t.TempDir(), ".defenseclaw"),
+					DataDir:      dataDir,
 					PolicyActive: true,
 				}, err
 			})

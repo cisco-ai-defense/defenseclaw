@@ -3209,11 +3209,11 @@ const unenrolledAccountExplanation = "this account is not enrolled yet; restart 
 // reconnects, also when it was enrolled before (GAP-1026). It leads with the
 // block and the way out within the first 80 characters, and keeps the
 // prerequisites of unenrolledAccountExplanation.
-const pendingAccountExplanation = "blocked until this account is enrolled; sign in or reconnect. " +
+const pendingAccountExplanation = "this account is not enrolled; blocked until you sign in. " +
+	"A disconnected or signed-out account stays blocked until it signs in or reconnects: " +
 	"DefenseClaw enrolls an account within 5 minutes once you have signed in and the agent is installed " +
-	"(console or Remote Desktop; not SSH, a scheduled task or runas), and only in a connected session: " +
-	"a signed-out or disconnected account stays blocked until it signs in or reconnects. Then restart the agent. " +
-	"For Claude Code, the wait starts at its first start if that is later. " +
+	"(console or Remote Desktop; not SSH, a scheduled task or runas), and only in a connected session. " +
+	"Then restart the agent. For Claude Code, the wait starts at its first start if that is later. " +
 	"If this continues, the policy may exclude this account: ask your administrator"
 
 // failEnrollmentRefusal blocks, like failUnreachable in closed mode, a tool

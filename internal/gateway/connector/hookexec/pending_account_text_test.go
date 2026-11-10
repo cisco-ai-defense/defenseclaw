@@ -60,8 +60,8 @@ func TestPendingAccountRefusalSaysTheAgentIsBlockedUntilSignIn(t *testing.T) {
 	for connector := range events {
 		code, text := refusal(connector, managedEnrollmentPendingReason, false)
 		for _, want := range []string{
-			"blocked until this account is enrolled; sign in or reconnect",
-			"a signed-out or disconnected account stays blocked",
+			"this account is not enrolled; blocked until you sign in",
+			"A disconnected or signed-out account stays blocked until it signs in or reconnects",
 			"once you have signed in and the agent is installed",
 		} {
 			if !strings.Contains(text, want) {
