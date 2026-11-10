@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
@@ -87,10 +88,30 @@ func TestRepairEnterpriseHookManifestACLRefusesAnUntrustedManifestOnAStandaloneH
 	manifest := untrustedManifestForTest(t)
 	before := manifestDescriptorForTest(t, manifest)
 	err := repairEnterpriseHookManifestACL(manifest)
-	if err == nil || !strings.Contains(err.Error(), "not repaired in place") {
+	if err == nil || !strings.Contains(err.Error(), "an untrusted principal can write or owns") {
 		t.Fatalf("repair of an untrusted manifest on a standalone host = %v, want a refusal", err)
 	}
 	if after := manifestDescriptorForTest(t, manifest); after != before {
 		t.Fatalf("the refused repair changed the manifest descriptor:\n before %s\n after  %s", before, after)
+	}
+}
+
+func TestRestoredPolicySourcesAreListedInTheResultChanges(t *testing.T) {
+	previous := windowsPrincipalName
+	t.Cleanup(func() { windowsPrincipalName = previous })
+	windowsPrincipalName = func(string) string { return "" }
+	result := &enterprisestatus.Result{}
+	note := `the installed config.yaml untrusted principal S-1-5-21-1-2-3-1001 has write-like access to managed path: C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml; ` +
+		`kept it as C:\ProgramData\Cisco\DefenseClaw\etc\rejected-config.yaml and restored config.yaml from Setup's approved copy`
+	report := &windowsEnterpriseInstallerReport{RestoredPolicySources: []string{note}}
+	addWindowsEnterpriseRestoredPolicyChanges(result, report)
+	addWindowsEnterpriseRestoredPolicyChanges(result, report)
+	if len(result.Changes) != 1 {
+		t.Fatalf("changes = %q, want the restore listed once", result.Changes)
+	}
+	for _, want := range []string{"rejected-config.yaml", "icacls", "/remove:g *S-1-5-21-1-2-3-1001"} {
+		if !strings.Contains(result.Changes[0], want) {
+			t.Fatalf("change %q does not contain %q", result.Changes[0], want)
+		}
 	}
 }

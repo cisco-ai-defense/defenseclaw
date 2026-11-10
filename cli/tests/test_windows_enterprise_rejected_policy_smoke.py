@@ -50,8 +50,13 @@ def test_every_approved_policy_restore_keeps_the_replaced_file_first() -> None:
 def test_the_kept_file_is_administrator_only_and_reported() -> None:
     helper = _function(_text(MODULE), "Save-DefenseClawRejectedStandalonePolicy")
     assert "Set-DefenseClawPathAcl -Path $kept -Kind AdminFile" in helper
-    assert "Write-DefenseClawResilienceEvent -Marker defenseclaw_repair" in helper
-    assert "$script:DefenseClawRestoredPolicyNotes +=" in helper
+    # The note and the event follow the restore, never precede it.
+    assert "Write-DefenseClawResilienceEvent" not in helper
+    reporter = _function(_text(MODULE), "Add-DefenseClawRestoredPolicyNote")
+    assert "Write-DefenseClawResilienceEvent -Marker defenseclaw_repair" in reporter
+    assert "$script:DefenseClawRestoredPolicyNotes +=" in reporter
+    recovery = _function(_text(MODULE), "Invoke-DefenseClawRepairApprovedPolicyRecovery")
+    assert recovery.count("Add-DefenseClawRestoredPolicyNote -Kept $keptPolicy") == 2
     module = _text(MODULE)
     assert module.count("$script:DefenseClawRestoredPolicyNotes = @()") == 2
     assert "$status['restored_policy_sources']" in module
@@ -68,7 +73,13 @@ def test_setup_process_reads_of_the_manifest_never_restamp_it() -> None:
     repair = _text(ROOT / "internal" / "cli" / "enterprise_hooks_protected_file_windows.go")
     body = repair[repair.index("func repairEnterpriseHookManifestACL") :]
     body = body[: body.index("\n}\n")]
-    assert body.index("managed.AssessCanonical") < body.index("ProtectWindowsManagedRuntimeAdminFile(path)")
+    assert body.index("pinWindowsStandaloneTrustScope()") < body.index("managed.RefuseStandaloneInPlaceRepair")
+    assert body.index("managed.RefuseStandaloneInPlaceRepair") < body.index("ProtectWindowsManagedRuntimeAdminFile(path)")
+    hot = _text(ROOT / "internal" / "cli" / "windows_enterprise_hot_config.go")
+    record = hot[hot.index("var windowsEnterpriseHotConfigTargetsRecord") :]
+    record = record[: record.index("\n}\n")]
+    assert record.index("managed.StandaloneFileLeafDrift") < record.index("enterprisehooks.LoadManifest")
+    assert record.index("pinWindowsStandaloneTrustScope()") < record.index("WriteTargetsManifestAtomic")
 
 
 def _engines() -> list[str]:

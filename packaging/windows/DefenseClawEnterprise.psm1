@@ -38621,7 +38621,7 @@ function Save-DefenseClawRejectedStandalonePolicy {
     )
     if (-not (Test-DefenseClawStandaloneProfile) -or
         -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return
+        return $null
     }
     $leaf = if ($Name -ceq 'config') { 'config.yaml' } else { 'targets.yaml' }
     $kept = [IO.Path]::Combine([string]$Layout.ConfigDirectory, "rejected-$leaf")
@@ -38646,13 +38646,26 @@ function Save-DefenseClawRejectedStandalonePolicy {
         throw ("Repair could not keep the installed $leaf as $kept before it restored the file from " +
             "Setup's approved copy, so it changed nothing: $($_.Exception.Message)")
     }
-    $note = "the installed $leaf $problem; kept it as $kept and restored $leaf from Setup's approved copy $ApprovedPath, with Setup's access list"
-    Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
-        path   = $Path
-        kind   = if ($Name -ceq 'config') { 'ConfigFile' } else { 'AdminFile' }
-        reason = $note
+    return [pscustomobject]@{
+        path = $Path
+        kind = if ($Name -ceq 'config') { 'ConfigFile' } else { 'AdminFile' }
+        note = "the installed $leaf $problem; kept it as $kept and restored $leaf from Setup's approved copy $ApprovedPath, with Setup's access list"
     }
-    $script:DefenseClawRestoredPolicyNotes += $note
+}
+
+function Add-DefenseClawRestoredPolicyNote {
+    <#
+        Logs and lists a restore Save-DefenseClawRejectedStandalonePolicy
+        prepared, after the approved copy is in place (GAP-1049).
+    #>
+    param($Kept)
+    if ($null -eq $Kept) { return }
+    Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+        path   = [string]$Kept.path
+        kind   = [string]$Kept.kind
+        reason = [string]$Kept.note
+    }
+    $script:DefenseClawRestoredPolicyNotes += [string]$Kept.note
 }
 
 function Invoke-DefenseClawRepairApprovedPolicyRecovery {
@@ -38699,11 +38712,12 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
                     }
                 }
                 if ($installedHash -cne $approvedHash) {
-                    Save-DefenseClawRejectedStandalonePolicy `
+                    $keptPolicy = Save-DefenseClawRejectedStandalonePolicy `
                         -Layout $Layout -Name $name -Path $destination -ApprovedPath ([string]$handEditApproved.path)
                     Install-DefenseClawSourceDescriptor -Source $handEditApproved -Destination $destination
                     Set-DefenseClawPathAcl -Path $destination -Kind ConfigFile `
                         -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+                    Add-DefenseClawRestoredPolicyNote -Kept $keptPolicy
                 }
                 $ApprovedConfig['config'] = $approvedHash
                 continue
@@ -38755,12 +38769,13 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
                 (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) +
                 ' on a signed-bundle deployment')
         }
-        Save-DefenseClawRejectedStandalonePolicy `
+        $keptPolicy = Save-DefenseClawRejectedStandalonePolicy `
             -Layout $Layout -Name $name -Path $destination -ApprovedPath ([string]$approved.path)
         Install-DefenseClawSourceDescriptor -Source $approved -Destination $destination
         $kind = if ($name -ceq 'config') { 'ConfigFile' } else { 'AdminFile' }
         Set-DefenseClawPathAcl -Path $destination -Kind $kind `
             -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+        Add-DefenseClawRestoredPolicyNote -Kept $keptPolicy
         if ($name -ceq 'config') {
             # The hook guardian may record these approved bytes as a hand edit
             # before the config step runs; the step records them as the
