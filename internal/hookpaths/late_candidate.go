@@ -15,11 +15,24 @@ import (
 // LateCallGrade combines every known word of a late shell call with the
 // shared protected-reach reader. An unreadable shell shape remains Possible;
 // it never clears a Named candidate found in another segment.
+//
+// On a Windows host the call is read twice, as the shell reads it and as the
+// host reads its Windows spellings (late_windows_spelling.go): a backslash
+// before a letter is an escape to the shell and a separator to Windows, and
+// the grade is the higher of the two readings.
 func LateCallGrade(command, cwd, home string) Grade {
 	if !filepath.IsAbs(cwd) || !filepath.IsAbs(home) || len(command) > MaxPayloadBytes {
 		return GradePossible
 	}
-	calls, known := LateKnownCalls(command, cwd, home)
+	grade := lateCallGradeReading(command, cwd, home, false)
+	if runtime.GOOS == "windows" && grade != GradeNamed {
+		grade = grade.Max(lateCallGradeReading(command, cwd, home, true))
+	}
+	return grade
+}
+
+func lateCallGradeReading(command, cwd, home string, spelled bool) Grade {
+	calls, known := lateKnownCalls(command, cwd, home, 0, spelled)
 	if !known {
 		return GradePossible
 	}
@@ -125,10 +138,10 @@ func lateAttachedFileOptionValue(program, option string) (string, bool) {
 // simple call keeps its own option boundary. A shell wrapper is read as a
 // nested command, so its quoted body cannot hide a known path value.
 func LateKnownCalls(command, cwd, home string) ([][]string, bool) {
-	return lateKnownCalls(command, cwd, home, 0)
+	return lateKnownCalls(command, cwd, home, 0, false)
 }
 
-func lateKnownCalls(command, cwd, home string, depth int) ([][]string, bool) {
+func lateKnownCalls(command, cwd, home string, depth int, spelled bool) ([][]string, bool) {
 	if depth > 2 {
 		return nil, false
 	}
@@ -138,7 +151,7 @@ func lateKnownCalls(command, cwd, home string, depth int) ([][]string, bool) {
 	}
 	var calls [][]string
 	for _, stmt := range file.Stmts {
-		part, ok := lateKnownStatement(stmt, cwd, home, depth, len(file.Stmts) > 1)
+		part, ok := lateKnownStatement(stmt, cwd, home, depth, len(file.Stmts) > 1, spelled)
 		if !ok {
 			return nil, false
 		}
@@ -147,24 +160,24 @@ func lateKnownCalls(command, cwd, home string, depth int) ([][]string, bool) {
 	return calls, true
 }
 
-func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound bool) ([][]string, bool) {
+func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound, spelled bool) ([][]string, bool) {
 	if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess {
 		return nil, false
 	}
 	var calls [][]string
 	switch cmd := stmt.Cmd.(type) {
 	case *syntax.BinaryCmd:
-		left, ok := lateKnownStatement(cmd.X, cwd, home, depth, true)
+		left, ok := lateKnownStatement(cmd.X, cwd, home, depth, true, spelled)
 		if !ok {
 			return nil, false
 		}
-		right, ok := lateKnownStatement(cmd.Y, cwd, home, depth, true)
+		right, ok := lateKnownStatement(cmd.Y, cwd, home, depth, true, spelled)
 		if !ok {
 			return nil, false
 		}
 		calls = append(left, right...)
 	case *syntax.CallExpr:
-		values, ok := lateAssignValues(cmd.Assigns, cwd, home)
+		values, ok := lateAssignValues(cmd.Assigns, cwd, home, spelled)
 		if !ok {
 			return nil, false
 		}
@@ -182,7 +195,7 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 			return nil, false
 		}
 		for _, wrapper := range wrappers {
-			value, known := lateKnownWord(wrapper, cwd, home)
+			value, known := lateKnownWord(wrapper, cwd, home, spelled)
 			if !known {
 				return nil, false
 			}
@@ -201,7 +214,7 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 			return nil, false
 		}
 		if len(args) == 1 && strings.ContainsAny(program, " \t") && lateHasSplitWrapper(wrappers, home) {
-			inner, ok := lateKnownCalls(program, cwd, home, depth+1)
+			inner, ok := lateKnownCalls(program, cwd, home, depth+1, spelled)
 			if !ok {
 				return nil, false
 			}
@@ -218,11 +231,11 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 			} else if option, known := StaticWord(args[1], home); !known || option != "-c" && option != "-lc" {
 				return nil, false
 			}
-			body, bodyOK := lateKnownWord(args[bodyIndex], cwd, home)
+			body, bodyOK := lateKnownWord(args[bodyIndex], cwd, home, spelled)
 			if !bodyOK {
 				return nil, false
 			}
-			inner, ok := lateKnownCalls(body, cwd, home, depth+1)
+			inner, ok := lateKnownCalls(body, cwd, home, depth+1, spelled)
 			if !ok {
 				return nil, false
 			}
@@ -235,7 +248,7 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 					words = append(words, "")
 					continue
 				}
-				value, ok := lateKnownWord(arg, cwd, home)
+				value, ok := lateKnownWord(arg, cwd, home, spelled)
 				if !ok {
 					return nil, false
 				}
@@ -253,7 +266,7 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 		if redirect.Word == nil {
 			continue
 		}
-		value, ok := lateKnownWord(redirect.Word, cwd, home)
+		value, ok := lateKnownWord(redirect.Word, cwd, home, spelled)
 		if !ok {
 			return nil, false
 		}
@@ -267,7 +280,7 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 // of a colon list, as the shell expands an assignment. An assignment that
 // changes how the reader expands later words (HOME, PWD, IFS), an array, an
 // index or an unknown value keeps the statement unknown.
-func lateAssignValues(assigns []*syntax.Assign, cwd, home string) ([][]string, bool) {
+func lateAssignValues(assigns []*syntax.Assign, cwd, home string, spelled bool) ([][]string, bool) {
 	var calls [][]string
 	for _, assign := range assigns {
 		if assign == nil || assign.Name == nil || assign.Naked || assign.Index != nil || assign.Array != nil {
@@ -280,7 +293,7 @@ func lateAssignValues(assigns []*syntax.Assign, cwd, home string) ([][]string, b
 		if assign.Value == nil {
 			continue
 		}
-		value, known := lateKnownWord(assign.Value, cwd, home)
+		value, known := lateKnownWord(assign.Value, cwd, home, spelled)
 		if !known {
 			return nil, false
 		}
@@ -557,11 +570,11 @@ func lateChangesShellContext(program string) bool {
 	}
 }
 
-func lateKnownWord(word *syntax.Word, cwd, home string) (string, bool) {
+func lateKnownWord(word *syntax.Word, cwd, home string, spelled bool) (string, bool) {
 	if !lateKnownWordParts(word) {
 		return "", false
 	}
-	if runtime.GOOS == "windows" {
+	if spelled {
 		word = lateWindowsPathWord(word)
 	}
 	fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron(
