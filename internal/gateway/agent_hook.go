@@ -289,6 +289,23 @@ func (a *APIServer) hookPersistenceContext(ctx context.Context) (context.Context
 	return context.WithTimeout(context.WithoutCancel(ctx), agentHookPersistGrace)
 }
 
+// A receipt-capable per-user call has already offered its answer before its
+// terminal records are written. Its pending occurrence is durable, so give
+// finalization a fresh window after earlier telemetry used the ordinary 10 s
+// window. Writes queued in that window finish after its deadline. This does
+// not extend the hook's answer deadline or Secure Client's path.
+func (a *APIServer) hookDeliveredPersistenceContext(ctx context.Context, receiptBacked bool) (context.Context, context.CancelFunc) {
+	if !receiptBacked {
+		return ctx, nil
+	}
+	cfg := a.decisionConfig(ctx)
+	if cfg == nil || cfg.SecureClientIntegration() || cfg.DeploymentMode != "per_user" {
+		return ctx, nil
+	}
+	durableCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	return audit.WithCallWriteAfterCancel(durableCtx), cancel
+}
+
 // contextWithCancelGrace keeps parent's values and is cancelled grace after
 // parent is done, or when the returned cancel runs.
 func contextWithCancelGrace(parent context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
@@ -336,6 +353,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		delivery := hookDeliveryReceiptForRequest(r)
 		if delivery == nil {
 			delivery = a.beginHookDeliveryReceipt(w, r)
+		}
+		if delivery != nil {
+			delivery.bindBody(r.Body)
 		}
 		// Resolve the identity-based guardrail profile once, after
 		// authentication, from the route's connector, the verified subject
@@ -863,6 +883,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 						persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
 					}
 					if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+						if answered != nil {
+							if durableCtx, cancelDurable := a.hookDeliveredPersistenceContext(persistCtx, pending != nil && delivery != nil); cancelDurable != nil {
+								if cancelPersist != nil {
+									defer cancelPersist()
+								}
+								persistCtx = durableCtx
+								cancelPersist = cancelDurable
+							}
+						}
 						finalPersistenceCtx = persistCtx
 						if cancelPersist != nil {
 							cancelFinalPersistence = cancelPersist
@@ -1211,6 +1240,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		var preKey preToolDecisionKey
 		preNoted := false
 		shellBridge := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell"
+		unreceipted := func(proposal agentHookResponse) agentHookResponse {
+			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && !shellBridge &&
+				r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" &&
+				hookexec.DeliveryReceiptEvent(connectorName, req.HookEventName) {
+				return a.deliveredHookDecision(connectorName, proposal, "")
+			}
+			return a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
+		}
 		if delivery != nil {
 			preKey, preNoted = a.notePreToolDecision(ctx, req, wireResp)
 			body := a.hookAnswerBody(ctx, profile, connectorName, req,
@@ -1224,7 +1261,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				})
 			}()
 			if receipt == hookexec.HookDeliveryReleased {
-				resp = a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
+				resp = unreceipted(resp)
 			} else {
 				resp = a.deliveredHookDecision(connectorName, resp, receipt)
 			}
@@ -1232,7 +1269,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			answered = &delivered
 			hookStageForTest(ctx, "delivered")
 		} else {
-			resp = a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
+			resp = unreceipted(resp)
 		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
@@ -1242,6 +1279,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
 		}
 		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			if durableCtx, cancelDurable := a.hookDeliveredPersistenceContext(persistCtx, pending != nil && delivery != nil); cancelDurable != nil {
+				if cancelPersist != nil {
+					defer cancelPersist()
+				}
+				persistCtx = durableCtx
+				cancelPersist = cancelDurable
+			}
 			finalPersistenceCtx = persistCtx
 			if cancelPersist != nil {
 				cancelFinalPersistence = cancelPersist
@@ -1740,10 +1784,17 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			}
 		}
 		if !result.DecisionSettled {
-			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(ctx)
+			decisionBaseCtx := ctx
+			if ctx.Err() != nil {
+				if renewed, cancel := a.hookDeliveredPersistenceContext(ctx, req.pendingOccurrenceID != "" && delivered); cancel != nil {
+					decisionBaseCtx = renewed
+					defer cancel()
+				}
+			}
+			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(decisionBaseCtx)
 			decision := a.emitHookDecisionObservabilityV8(decisionCtx, req, resp, env, panicked)
 			// The hook_decision record is committed before the answer.
-			audit.FlushCallWrites(ctx)
+			audit.FlushCallWrites(decisionBaseCtx)
 			result.DecisionSettled = decision.settled() && decisionOutcome.Err() == nil
 			if decision == hookDecisionLogUnbuildable && req.pendingOccurrenceID != "" {
 				fmt.Fprintf(os.Stderr, "[gateway] hook_decision record cannot be built connector=%s event=%s; the connector audit row keeps the decision\n",
@@ -1781,9 +1832,13 @@ func (a *APIServer) hookAuditFailureResponse(
 		return resp, false
 	}
 	cfg := a.decisionConfig(ctx)
-	if resp.Action == "allow" && cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+	if (resp.Action == "allow" || resp.Action == hookActionUnconfirmed && resp.RawAction == "allow") &&
+		cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
 		cfg.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict &&
 		!sandboxHookForConnector(ctx, connectorName) {
+		// A missing receipt leaves a decision unconfirmed, but an audit
+		// failure still gives a balanced caller its visible allow answer.
+		resp.Action = "allow"
 		resp.RawAction = "alert"
 		resp.Severity = "WARN"
 		resp.WouldBlock = false

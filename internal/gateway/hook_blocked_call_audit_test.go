@@ -107,9 +107,10 @@ func TestHookBlockAfterTheAnswerBudgetIsAuditedAsTheBlockTheAgentGot(t *testing.
 	if code == 0 && !strings.Contains(out, "deny") {
 		t.Fatalf("late call: exit %d %q, want the hook's block at its answer budget", code, out)
 	}
-	// The injected divergence: the gateway recorded allow for both calls.
-	if got := deliveredVerdicts(t, fixture.api.store); got[onTime] != "allow" || got[late] != "allow" {
-		t.Fatalf("gateway rows before the report = %v, want allow for both", got)
+	// This synthetic transport does not return a receipt. The gateway
+	// retains both decisions as unconfirmed until a local outcome arrives.
+	if got := deliveredVerdicts(t, fixture.api.store); got[onTime] != "unconfirmed" || got[late] != "unconfirmed" {
+		t.Fatalf("gateway rows before the report = %v, want both unconfirmed", got)
 	}
 	logDir := filepath.Join(home, "logs")
 	for range 2 {
@@ -118,8 +119,8 @@ func TestHookBlockAfterTheAnswerBudgetIsAuditedAsTheBlockTheAgentGot(t *testing.
 		}
 	}
 	got := deliveredVerdicts(t, fixture.api.store)
-	if got[onTime] != "allow" || got[late] != "block" {
-		t.Fatalf("audit verdicts = %v, want %s allow and %s block, as the agent got them", got, onTime, late)
+	if got[onTime] != "unconfirmed" || got[late] != "block" {
+		t.Fatalf("audit verdicts = %v, want %s unconfirmed and %s block", got, onTime, late)
 	}
 	events, err := fixture.api.store.ListEvents(500)
 	if err != nil {
@@ -206,11 +207,13 @@ func TestPostExecutionHookBlockIsNotTheVerdictOfACallThatRan(t *testing.T) {
 		t.Fatal(err)
 	}
 	const ran, blocked = "toolu_0271_ran", "toolu_0271_pre"
+	server := httptest.NewServer(fixture.api.handleAgentHook("claudecode"))
+	t.Cleanup(server.Close)
 	var stdout, stderr bytes.Buffer
 	if code := hookexec.Run(t.Context(), hookexec.Options{
-		Connector: "claudecode", Event: "PreToolUse", APIAddr: "127.0.0.1:8787", FailMode: "open",
+		Connector: "claudecode", Event: "PreToolUse", APIAddr: strings.TrimPrefix(server.URL, "http://"), FailMode: "open",
 		Home: home, HookDir: hookDir, Stdin: bytes.NewReader(preToolUseBody(t, ran)),
-		Stdout: &stdout, Stderr: &stderr, HTTPClient: &http.Client{Transport: handlerTransport{handler: fixture.api.handleAgentHook("claudecode")}},
+		Stdout: &stdout, Stderr: &stderr, HTTPClient: server.Client(),
 	}); code != 0 || strings.Contains(stdout.String(), "deny") {
 		t.Fatalf("PreToolUse: exit %d %q %q, want the gateway's allow", code, stdout.String(), stderr.String())
 	}

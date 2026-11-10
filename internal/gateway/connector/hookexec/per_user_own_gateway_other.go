@@ -14,3 +14,9 @@ import (
 // queued connection in its own socket table (Windows), or cannot (others), and
 // a connection it could not prove stays an unverified peer.
 func ownGatewayHoldsQueue(context.Context, *net.TCPAddr) bool { return false }
+
+// connectionStillQueued is never true here, as ownGatewayHoldsQueue is not.
+func connectionStillQueued(net.Conn) bool { return false }
+
+// ownerScanSupported is false here: ownGatewayHoldsQueue answers at once.
+const ownerScanSupported = false

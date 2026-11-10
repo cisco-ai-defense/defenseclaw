@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"maps"
 	"os"
@@ -516,6 +517,33 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 // it, and the gateway asks for them by the same function.
 func OperandPath(name, cwd string) string {
 	return actionfacts.OperandPath(name, cwd)
+}
+
+func init() { actionfacts.SetOperandLinkProbe(directoryHasLink) }
+
+// directoryHasLink reports a directory whose path, or the longest existing
+// part of it, passes through a link. A directory that does not exist yet is
+// read through its existing parents (a command such as pushd has not entered
+// it); a path that cannot be read (no permission, not a folder) has no link
+// to read, as before.
+func directoryHasLink(dir string) bool {
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	for current := filepath.Clean(dir); ; {
+		real, err := pathEvalSymlinks(current)
+		if err == nil {
+			return real != current
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
 }
 
 // parseShell parses a command of at most MaxPayloadBytes as bash, or else as
@@ -1066,6 +1094,138 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 				}
 				forms = append(forms, extra...)
 				_, err = pathLstat(current)
+				if err != nil && !os.IsNotExist(err) {
+					return fail()
+				}
+				crossed = append(crossed, os.IsNotExist(err))
+			} else {
+				current = candidate
+				crossed = append(crossed, unknown)
+			}
+		}
+		if memo != nil {
+			memo.storePrefix(key, walkState{current: current, crossed: crossed, linkDepth: linkDepth})
+		}
+	}
+	return filepath.Clean(current), forms, linkDepth, true
+}
+
+func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo,
+	lstat func(string) (os.FileInfo, error), readlink func(string) (string, error),
+	procLink func(path string, below bool) bool, tail bool,
+) (string, []string, int, bool) {
+	if linkDepth > SystemLinkLimit() {
+		return "", nil, linkDepth, false
+	}
+	current := base
+	absolute := filepath.IsAbs(path)
+	if absolute {
+		current = filepath.VolumeName(path) + string(filepath.Separator)
+		path = strings.TrimPrefix(path, filepath.VolumeName(path))
+	} else if !filepath.IsAbs(base) {
+		return "", nil, linkDepth, false
+	}
+	if memo != nil && (base != "" || linkDepth != 0 || collect || patchTarget || !absolute) {
+		memo = nil
+	}
+	var forms []string
+	if collect && absolute {
+		forms = append(forms, current)
+	}
+	add := func(form string) bool {
+		if collect {
+			forms = append(forms, form)
+			return len(forms) <= maxOpaquePathForms
+		}
+		return true
+	}
+	// The stack records whether a component added after base is missing.
+	// A resolved link is a physical directory, so ".." ascends from its
+	// target. A missing component cannot be crossed: it may become a link
+	// before the command executes.
+	var crossed []bool
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	start := 0
+	// key is the memo key of parts[:i+1]: the volume root and the
+	// components as written.
+	var key string
+	if memo != nil {
+		key = current
+		for i, part := range parts {
+			next := key + "\x00" + part
+			state, ok := memo.prefix(next)
+			if !ok {
+				break
+			}
+			if state.failed {
+				return "", nil, state.linkDepth, false
+			}
+			key, start = next, i+1
+			current, crossed, linkDepth = state.current, append([]bool(nil), state.crossed...), state.linkDepth
+		}
+	}
+	fail := func() (string, []string, int, bool) {
+		if memo != nil {
+			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true})
+		}
+		return "", nil, linkDepth, false
+	}
+	for i, part := range parts[start:] {
+		if memo != nil {
+			key += "\x00" + part
+		}
+		switch part {
+		case "", ".":
+		case "..":
+			if len(crossed) > 0 {
+				if crossed[len(crossed)-1] {
+					return fail()
+				}
+				crossed = crossed[:len(crossed)-1]
+			}
+			current = filepath.Dir(current)
+			if !add(current) {
+				return fail()
+			}
+		default:
+			candidate := filepath.Join(current, part)
+			if !add(candidate) {
+				return fail()
+			}
+			memo.noteWork()
+			info, err := lstat(candidate)
+			if err != nil && !os.IsNotExist(err) {
+				return fail()
+			}
+			unknown := os.IsNotExist(err)
+			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
+				// A process link the hook reads for another process than the
+				// one opening the operand would prove a different path. below
+				// tells whether the path goes on below the link.
+				below := tail || stepFollows(parts[start+i+1:])
+				if procLink(candidate, below) {
+					return fail()
+				}
+				link, err := readlink(candidate)
+				if err != nil {
+					return fail()
+				}
+				// A patch tool may reinterpret a link target with line breaks
+				// as multiple file directives. Ordinary file opens use the
+				// literal kernel path and retain their normal proof.
+				if patchTarget && strings.ContainsAny(link, "\r\n") {
+					return fail()
+				}
+				var extra []string
+				var nextDepth int
+				var ok bool
+				current, extra, nextDepth, ok = walkWritePathMemoWithReaders(current, link, linkDepth+1, collect, patchTarget, nil, lstat, readlink, procLink, below)
+				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
+					return fail()
+				}
+				linkDepth = nextDepth
+				forms = append(forms, extra...)
+				_, err = lstat(current)
 				if err != nil && !os.IsNotExist(err) {
 					return fail()
 				}
@@ -7827,4 +7987,15 @@ func stateStatementReadOnlyWithBindings(text, home string, shadowed map[string]b
 		return true
 	})
 	return seen && safe
+}
+
+// stepFollows reports that a path goes on with a name or a dot-dot step after
+// the current component. Empty and dot components name the same directory.
+func stepFollows(parts []string) bool {
+	for _, part := range parts {
+		if part != "" && part != "." {
+			return true
+		}
+	}
+	return false
 }

@@ -341,6 +341,9 @@ type Options struct {
 	// for this call found it held. The answer rendered from it with no home
 	// (the watchdog's prepared answer) still names the install (GAP-2440).
 	installWindowSeen bool
+	// lateOrdinaryOpen is set once lateOrdinaryLook proved this per-user
+	// call ordinary under an open outage tier (noAnswerFailMode).
+	lateOrdinaryOpen bool
 	// managedOutageOpen is set on a standalone hook outside Secure Client
 	// for a failure that ManagedOutageFailsOpen lets through (the gateway is
 	// not running, was still restarting, or gave no answer). Only such a
@@ -1036,7 +1039,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		retry := retryingAfterOutage
 		var check *perUserPeerCheck
 		onConnect := func() {
-			if retry {
+			if retry || opts.ManagedEnterprise {
 				opts.answerWatch.noDecisionPending()
 			}
 			// A gateway that only just started and has not answered any
@@ -1063,6 +1066,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 	}
 	resp, err := send()
+	if opts.ManagedEnterprise {
+		opts.answerWatch.managedOutageSeen(opts, sp, failMode, err)
+	}
 	if !opts.ManagedEnterprise {
 		retryingAfterOutage = perUserOutageError(opts, err)
 		// A first try the gateway refused or dropped met an outage: from now
@@ -1102,6 +1108,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			resp, err = nil, cause
 			break
 		}
+		opts.answerWatch.managedOutageSeen(opts, sp, failMode, err)
 	}
 	if errors.Is(err, errInvalidHookRequest) {
 		return failResponse(opts, sp, nonOutageFailMode(opts, failMode), err.Error())
@@ -1458,7 +1465,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 				if receiptWait < 0 {
 					receiptWait = 0
 				}
-				receiptTimer := time.AfterFunc(receiptWait, requestCancel)
+				// The receipt transport outlives the answer context for a
+				// watchdog token. Bound a normal confirmation with its own
+				// timer as well.
+				receiptTimer := time.AfterFunc(receiptWait, delivery.close)
 				defer receiptTimer.Stop()
 				if delivery.acknowledge(localBlock) == nil {
 					// Keep the request alive until HTTP has carried the receipt
@@ -1718,18 +1728,48 @@ func sendHookRequest(
 		req.Header.Set("tracestate", v)
 	}
 	opts.requestFacts.set(req.Header, opts, payload)
+	requestClient := opts.HTTPClient
 	var delivery *hookDeliveryRequest
 	if wantsHookDeliveryReceipt(opts) {
-		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), hookDeliveryGatewayStarting(opts))
+		if !opts.ManagedEnterprise {
+			var continueSignal bool
+			requestClient, continueSignal = hookDeliveryContinueClient(requestClient)
+			if continueSignal {
+				req.Header.Set("Expect", "100-continue")
+			}
+		}
+		// The answer timer ends the hook's wait, but the request body must
+		// remain writable long enough to carry the watchdog's outcome once
+		// this request's gateway has advertised receipt support. Until then,
+		// the original context still bounds connection and body release.
+		deadlineCtx, cancelDeadline := context.WithDeadline(
+			context.WithoutCancel(req.Context()), opts.answerWatch.ceiling.Add(answerWatchdogLogWait))
+		transportCtx, cancelWithCause := context.WithCancelCause(deadlineCtx)
+		cancelTransport := func() {
+			cancelWithCause(nil)
+			cancelDeadline()
+		}
+		req = req.WithContext(transportCtx)
+		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), hookDeliveryGatewayStarting(opts), !opts.ManagedEnterprise && req.Header.Get("Expect") == "100-continue")
+		delivery.setCancel(cancelTransport)
+		context.AfterFunc(ctx, func() {
+			select {
+			case <-delivery.ready:
+				// The accepted request can carry the committed answer.
+			default:
+				cancelWithCause(context.Cause(ctx))
+			}
+		})
+		opts.answerWatch.setDeadlineDelivery(delivery)
 	}
 
 	var connected atomic.Bool
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) {
+		GotConn: func(info httptrace.GotConnInfo) {
 			connected.Store(true)
 		},
 	}))
-	resp, err := opts.HTTPClient.Do(req)
+	resp, err := requestClient.Do(req)
 	if err != nil {
 		if delivery != nil {
 			delivery.close()
@@ -1741,8 +1781,8 @@ func sendHookRequest(
 	}
 	// Headers are a gateway response even if its body has not arrived yet.
 	if delivery != nil {
-		// A 103 after the capability wait still asks for a receipt; the
-		// gateway reads the released marker instead and takes none.
+		// A transport without the legacy read signal may release at the
+		// compatibility wait. A later 103 on that request has no receipt.
 		if resp.Header.Get(HookDeliveryRequiredHeader) == "1" && !delivery.wasReleased() {
 			resp.Body = &hookDeliveryResponseBody{ReadCloser: resp.Body, delivery: delivery}
 		} else {

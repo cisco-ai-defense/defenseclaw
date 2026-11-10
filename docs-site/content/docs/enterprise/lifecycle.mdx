@@ -197,6 +197,27 @@ Missing registration, an open runtime, another owner, extra write permission,
 a link, or other untrusted state still refuses the upgrade. Correct the state,
 have the account sign in, and run Setup `/ensure JSON=1` again.
 
+An account with no active Windows session (signed out or disconnected) does not fail a
+managed Windows upgrade because the hooks of an earlier release (up to 1.0.6) still sit in its
+agent configuration. The guardian installs the new hooks only in the account's own session, so
+when an earlier release's hook lock names the target and a read-only check shows that the only
+difference from this release is the earlier render of the hook command, the connector is
+pending until the account signs in: `status` and `verify` show it as pending, and the previous
+release's DefenseClaw hook keeps running for that account until it signs in and the guardian
+updates it. That hook runs the same hook binary and arguments, so the gateway still decides its
+calls; it differs only when PowerShell runs in Constrained Language mode and the launcher never
+starts, where it allows the call (this release's hook refuses it). Any other difference (a
+deleted or replaced hook file, a link, another owner, a drifted runtime), a lock this release
+wrote, and an account with an active session whose repair fails still fail the upgrade. With the
+administrator's hook fail mode open, a signed-out Claude Code or Codex account whose machine
+registration is proven waits as well. For these two the machine hook is this release's own, so
+`status` and `verify` say that the machine hook is in place and the account's registration
+finishes when it signs in (the previous release's hook is what keeps running only for Copilot,
+Antigravity and Kiro); with fail mode closed they keep the closed-registration proof described
+above. When one account has connectors of several kinds, its reason names each group, for example
+`devin: not guarded until this account signs in; copilot: the previous release's DefenseClaw hook
+keeps running until this account signs in and the guardian updates it`.
+
 ## Roll back
 
 With bundle trust anchors, DefenseClaw refuses to install a release below the

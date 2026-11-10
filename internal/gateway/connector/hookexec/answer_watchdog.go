@@ -6,7 +6,10 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +29,36 @@ var answerWatchdogLogWait = 100 * time.Millisecond
 // disk must not hold the answer, and a lock it could not read in time counts
 // as held, so the answer is closed.
 var installLockCheckWait = 100 * time.Millisecond
+
+// watchdogAnswer keeps the native answer and its audit witness together.
+// Every replacement of a pending answer replaces this whole value.
+type watchdogAnswer struct {
+	out, err         []byte
+	code             int
+	blocked          bool
+	mode             string
+	reason, category string
+	logFailure       func()
+	frame            []byte
+}
+
+// lateAnswerOutcome is the one policy input for a call with no usable gateway
+// answer. The answer, receipt, and local record use the returned values.
+// The balanced timeout policy can be changed here without adding a second
+// decision path in the watchdog.
+func lateAnswerOutcome(opts Options, sp spec, configured string) (mode, reason string, blocked bool) {
+	mode = noAnswerFailMode(opts, configured)
+	reason = perUserGatewayNoAnswerReason
+	if opts.ManagedEnterprise {
+		reason = managedNoAnswerReason(opts)
+	}
+	if sp.failOpenOnly {
+		blocked = !opts.SecureClient && loggedFailMode(opts, sp, mode) == "closed"
+	} else {
+		blocked = mode == "closed" && !failClosedStopEvent(opts, sp)
+	}
+	return
+}
 
 // answerWatchdog makes the answer budget of a tool call hold when the hook
 // process itself runs late. On a host that lifecycle work saturates (the
@@ -73,6 +106,9 @@ type answerWatchdog struct {
 	// with that reason, so no later render replaces the answer, and the
 	// answer the agent gets names what the row names (rel-1-0-6 GAP-0294).
 	claimedAnswer bool
+	// managedOutagePrimed is an open answer backed by a stopped-service
+	// proof. A later connection or a different failure withdraws it.
+	managedOutagePrimed bool
 	// logHome is the background lookup of the invoking user's diagnostic
 	// directory of a managed call (cacheFailureLogHome).
 	logHome *failureLogHomeLookup
@@ -80,16 +116,13 @@ type answerWatchdog struct {
 	stdout, stderr io.Writer
 	out, err       bytes.Buffer
 
-	fallbackOut, fallbackErr     []byte
-	fallbackCode                 int
-	logFailure                   func()
-	noDecisionOut, noDecisionErr []byte
-	noDecisionCode               int
-	noDecisionLog                func()
-	secureClient                 bool
-	visibleOutage                func() ([]byte, []byte, int)
-	exit                         func(int)
-	deliveryReceipt              func(bool, bool)
+	fallback         watchdogAnswer
+	noDecision       watchdogAnswer
+	secureClient     bool
+	visibleOutage    func() ([]byte, []byte, int)
+	exit             func(int)
+	deliveryReceipt  func(bool, bool)
+	deadlineDelivery *hookDeliveryRequest
 	// revoke reads the call's patch targets once more after finish wrote an
 	// allow, and replaces it with a block when one changed (hookexec,
 	// GAP-0488, GAP-0073). It reports whether it did.
@@ -101,10 +134,12 @@ type answerWatchdog struct {
 	// the deadline the watchdog gives the install answer below instead when
 	// it says held, or does not answer in time. Nil when the fallback is
 	// closed already.
-	installCheck           func() bool
-	installOut, installErr []byte
-	installCode            int
-	installLogFailure      func()
+	installCheck func() bool
+	install      watchdogAnswer
+	// lookGen numbers the ordinary looks (startOrdinaryLook): only the look
+	// of the latest rendering may open its answer.
+	lookGen  int
+	ordinary *ordinaryAnswer
 
 	ceiling         time.Time
 	waiter          *answerDeadlineWaiter
@@ -190,6 +225,7 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 	}
 	opts.Stdin = strings.NewReader("")
 	opts = withDefaults(opts)
+	opts.failurePayload = payload
 	if copilotVSCodeLocal(opts) {
 		sp = copilotVSCodeLocalSpec
 	}
@@ -226,7 +262,103 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 	// The deadline holds from now, also before the watch goroutine runs.
 	w.waiter.extendTo(deadline)
 	go w.watch(deadline)
+	w.mu.Lock()
+	w.lookGen++
+	gen := w.lookGen
+	w.mu.Unlock()
+	w.startOrdinaryLook(gen, *opts, sp, failMode)
 	return w
+}
+
+// ordinaryAnswer is the open no-answer answer of a per-user call whose
+// payload the shared reader proved ordinary (startOrdinaryLook); it is
+// given only if the account tier read at the deadline is open.
+type ordinaryAnswer struct {
+	answer       watchdogAnswer
+	tier         func() string
+	installCheck func() bool
+	install      watchdogAnswer
+}
+
+// lateOrdinaryTierWait bounds the tier read at the deadline: a read that
+// stalls past it leaves the closed answer.
+var lateOrdinaryTierWait = 250 * time.Millisecond
+
+// startOrdinaryLook reads the payload's protected reach once the deadline
+// is armed and, for an ordinary call, renders its open answer. The account
+// tier is read only when the watchdog answers (watch), never for a call the
+// gateway answers. Until both prove the open tier the prepared closed answer
+// stands, so a stalled read gives the closed answer at the deadline and
+// never holds it (GAP-0641 review 7). Only the look of the latest rendering
+// (gen) counts.
+func (w *answerWatchdog) startOrdinaryLook(gen int, opts Options, sp spec, failMode string) {
+	if !lateOrdinaryLookCall(opts) {
+		return
+	}
+	go func() {
+		if !bothLateScansOrdinary(opts) {
+			return
+		}
+		opts.lateOrdinaryOpen = true
+		answer := renderNoAnswer(opts, sp, failMode)
+		if answer.mode != "open" {
+			return
+		}
+		installCheck, install := renderInstallAnswer(opts, sp, answer.mode)
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if gen == w.lookGen {
+			w.ordinary = &ordinaryAnswer{answer: answer, tier: opts.OutageFailModeNow, installCheck: installCheck, install: install}
+		}
+	}()
+}
+
+// ordinaryOwedLocked reports a watchdog still due to give its prepared
+// no-decision answer, which an ordinary open answer may then replace.
+func (w *answerWatchdog) ordinaryOwedLocked() bool {
+	return !w.fired && !w.finished && !w.answeredInTime.Load() && !w.claimedAnswer &&
+		!w.failureClosed && !w.failureLogged && !w.answeredStatus && sameWatchdogAnswer(w.fallback, w.noDecision)
+}
+
+// useOrdinaryAtDeadline gives the ordinary open answer when the account
+// tier, read now within lateOrdinaryTierWait, is open.
+func (w *answerWatchdog) useOrdinaryAtDeadline() {
+	w.mu.Lock()
+	ordinary := w.ordinary
+	owed := ordinary != nil && ordinary.tier != nil && w.ordinaryOwedLocked()
+	w.mu.Unlock()
+	if !owed {
+		return
+	}
+	tier := make(chan string, 1)
+	go func() { tier <- ordinary.tier() }()
+	timer := time.NewTimer(lateOrdinaryTierWait)
+	defer timer.Stop()
+	select {
+	case mode := <-tier:
+		if normalizeFailMode(mode) != "open" {
+			return
+		}
+	case <-timer.C:
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.ordinary != ordinary || !w.ordinaryOwedLocked() {
+		return
+	}
+	w.fallback, w.noDecision = ordinary.answer, ordinary.answer
+	if w.failureLog.markerEnabled {
+		w.failureLog.replaceFallbackFrame(ordinary.answer.frame)
+	}
+	w.installCheck, w.install = ordinary.installCheck, ordinary.install
+}
+
+// sameWatchdogAnswer reports whether a is the rendering b itself, not
+// another answer: an assignment shares the rendered buffers.
+func sameWatchdogAnswer(a, b watchdogAnswer) bool {
+	same := func(x, y []byte) bool { return len(x) == len(y) && (len(x) == 0 || &x[0] == &y[0]) }
+	return a.code == b.code && a.mode == b.mode && same(a.out, b.out) && same(a.err, b.err)
 }
 
 // prepareAnswerWatchdog is startAnswerWatchdog without the wait for the
@@ -241,13 +373,16 @@ func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time
 		// computer (GAP-0648 review F4).
 		w.waiter.countSleep(platformSuspendClock)
 	}
+	w.failureLog.markerEnabled = !opts.ManagedEnterprise && !opts.SecureClient
 	w.cacheFailureLogHome(opts)
 	opts.failureLog = w.failureLog
 	w.failureLogHome = failureLogHomeOf(*opts)
-	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = renderNoAnswer(*opts, sp, failMode)
-	w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog =
-		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure
-	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure = renderInstallAnswer(*opts, sp, failMode)
+	w.fallback = renderNoAnswer(*opts, sp, failMode)
+	w.noDecision = w.fallback
+	if w.failureLog.markerEnabled {
+		w.failureLog.setFallbackFrame(w.noDecision.frame)
+	}
+	w.installCheck, w.install = renderInstallAnswer(*opts, sp, failMode)
 	opts.Stdout, opts.Stderr = &w.out, &w.err
 	opts.answerWatch = w
 	return w
@@ -255,11 +390,15 @@ func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time
 
 // renderNoAnswer renders the answer of a call whose gateway did not answer
 // in time, and the failure log line it writes when it is given.
-func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []byte, code int, logFailure func()) {
+func renderNoAnswer(opts Options, sp spec, failMode string) watchdogAnswer {
 	// The row and the rendered decision must use the same effective mode.
-	failMode = noAnswerFailMode(opts, failMode)
+	failMode, reason, blocked := lateAnswerOutcome(opts, sp, failMode)
+	category := "transport"
+	if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
+		reason, category = answeredErrorReason(opts), "response"
+	}
 	if opts.ManagedEnterprise {
-		opts.managedNoAnswerCode = managedNoAnswerReason(opts)
+		opts.managedNoAnswerCode = reason
 	}
 	var out, errb bytes.Buffer
 	rendered := opts
@@ -274,26 +413,37 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 	if !rendered.ManagedEnterprise && !rendered.SecureClient && rendered.ManagedUnixSocket == "" {
 		rendered.OutageFailModeNow = func() string { return failMode }
 	}
-	code = failNoAnswer(rendered, sp, failMode)
+	code := failNoAnswerInMode(rendered, sp, failMode)
 	logged := opts
 	logged.answerWatch = nil
 	// The rendered answer already carries any fail-open warning.
 	logged.Stderr = io.Discard
-	logFailure = func() {
+	logBlocked := blocked
+	if logged.SecureClient {
+		// Preserve the Secure Client record contract while its native
+		// answer path keeps the established policy.
+		logBlocked = logged.StrictAvailability || failMode == "closed"
+		if !logged.ManagedEnterprise {
+			logBlocked = !sp.failOpenOnly && logBlocked
+		}
+	}
+	logFailure := func() {
 		if managedNativeDecision(logged) && logged.answeredErrorStatus != 0 {
 			logged.FailMode = "closed"
-			logHookFailure(logged, sp, answeredErrorReason(logged), "response", "closed", true)
+			logHookFailure(logged, sp, reason, category, "closed", true)
 			return
 		}
 		if logged.ManagedEnterprise {
-			logHookFailure(logged, sp, managedNoAnswerReason(logged), "transport", failMode,
-				logged.StrictAvailability || failMode == "closed")
+			logHookFailure(logged, sp, reason, category, failMode, logBlocked)
 			return
 		}
-		logHookFailure(logged, sp, perUserGatewayNoAnswerReason, "transport", failMode,
-			!sp.failOpenOnly && (logged.StrictAvailability || failMode == "closed"))
+		logHookFailure(logged, sp, reason, category, failMode, logBlocked)
 	}
-	return out.Bytes(), errb.Bytes(), code, logFailure
+	return watchdogAnswer{
+		out: out.Bytes(), err: errb.Bytes(), code: code, blocked: blocked,
+		mode: failMode, reason: reason, category: category, logFailure: logFailure,
+		frame: localFailureFallbackFrame(opts, sp, reason, category, failMode, blocked),
+	}
 }
 
 // renderVisibleOutage reserves the session warning only when the watchdog
@@ -315,9 +465,9 @@ func renderVisibleOutage(opts Options, sp spec, mode, reason string) (stdout, st
 // managed call's computer lifecycle (managedLifecycleActive). It returns no
 // look, and nothing to give, when the fallback is closed already or the call
 // is neither (a Secure Client hook, a per-user call with no home).
-func renderInstallAnswer(opts Options, sp spec, failMode string) (check func() bool, stdout, stderr []byte, code int, logFailure func()) {
+func renderInstallAnswer(opts Options, sp spec, failMode string) (check func() bool, answer watchdogAnswer) {
 	if opts.answerSpentLocally || normalizeFailMode(failMode) == "closed" {
-		return nil, nil, nil, 0, nil
+		return nil, watchdogAnswer{}
 	}
 	switch {
 	case managedNativeDecision(opts):
@@ -327,15 +477,14 @@ func renderInstallAnswer(opts Options, sp spec, failMode string) (check func() b
 		home := opts.Home
 		check = func() bool { return installLockHeldWithin(home, installLockCheckWait) }
 	default:
-		return nil, nil, nil, 0, nil
+		return nil, watchdogAnswer{}
 	}
 	closed := opts
 	closed.FailMode = "closed"
 	closed.StrictAvailability = true
 	// Given only when the look at the deadline finds the install (watch).
 	closed.installWindowSeen = true
-	stdout, stderr, code, logFailure = renderNoAnswer(closed, sp, "closed")
-	return check, stdout, stderr, code, logFailure
+	return check, renderNoAnswer(closed, sp, "closed")
 }
 
 // adopt renders the watchdog's answer again for the call Run resolved (its
@@ -349,18 +498,24 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 		failMode = "closed"
 	}
 	opts.failureLog = w.failureLog
-	stdout, stderr, code, logFailure := renderNoAnswer(*opts, sp, failMode)
-	installCheck, installOut, installErr, installCode, installLogFailure := renderInstallAnswer(*opts, sp, failMode)
+	answer := renderNoAnswer(*opts, sp, failMode)
+	installCheck, installAnswer := renderInstallAnswer(*opts, sp, failMode)
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.fired || w.claimedAnswer || (w.closedKnown && !closed) {
+		w.mu.Unlock()
 		return
 	}
-	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
-	w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog = stdout, stderr, code, logFailure
+	w.fallback, w.noDecision = answer, answer
+	if w.failureLog.markerEnabled {
+		w.failureLog.replaceFallbackFrame(answer.frame)
+	}
 	w.visibleOutage = nil
-	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
-		installCheck, installOut, installErr, installCode, installLogFailure
+	w.installCheck, w.install = installCheck, installAnswer
+	w.lookGen++
+	w.ordinary = nil
+	gen := w.lookGen
+	w.mu.Unlock()
+	w.startOrdinaryLook(gen, *opts, sp, failMode)
 }
 
 // closeForAnsweredError makes the watchdog's answer the closed response of a
@@ -369,7 +524,7 @@ func (w *answerWatchdog) closeForAnsweredError(opts Options, sp spec) {
 	if w == nil {
 		return
 	}
-	stdout, stderr, code, logFailure := renderNoAnswer(opts, sp, "closed")
+	answer := renderNoAnswer(opts, sp, "closed")
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.answeredStatus = true
@@ -381,8 +536,11 @@ func (w *answerWatchdog) closeForAnsweredError(opts Options, sp spec) {
 		// The call's row is written: its answer stays, and it is closed.
 		return
 	}
-	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
+	w.fallback = answer
 	w.visibleOutage = nil
+	if len(answer.frame) != 0 {
+		w.failureLog.replaceFallbackFrame(answer.frame)
+	}
 }
 
 // claimFailureLog runs first in logHookFailure, before anything there can
@@ -404,16 +562,14 @@ func (w *answerWatchdog) closeForAnsweredError(opts Options, sp spec) {
 // enterprise_managed_gateway_not_running and, when the deadline passed while
 // the row was written, showed enterprise_managed_gateway_no_answer
 // (rel-1-0-6 GAP-0294).
-func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, reason, failMode string, unreachableAnswer bool) (chan struct{}, bool) {
-	var out, errb []byte
-	var code int
-	var logFailure func()
+func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, reason, failMode string, unreachableAnswer bool, frame ...[]byte) (chan struct{}, bool) {
+	var closedAnswer watchdogAnswer
 	// Rendered outside the lock: a render can read the lifecycle marker.
-	ownOut, ownErr, ownCode, own := renderClaimedFailure(opts, sp, reason, failMode, closed, unreachableAnswer)
+	ownAnswer, own := renderClaimedFailure(opts, sp, reason, failMode, closed, unreachableAnswer)
 	if closed {
 		closedOpts := opts
 		closedOpts.FailMode = "closed"
-		out, errb, code, logFailure = renderNoAnswer(closedOpts, sp, "closed")
+		closedAnswer = renderNoAnswer(closedOpts, sp, "closed")
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -430,9 +586,16 @@ func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, rea
 		// that row's (claimedAnswer, closed already); otherwise the answer
 		// turns closed.
 		if closed && !w.claimedAnswer {
-			w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
+			w.fallback = closedAnswer
 		}
 		return nil, false
+	}
+	if len(frame) > 0 && len(frame[0]) > 0 {
+		if own {
+			w.failureLog.replaceFallbackFrame(frame[0])
+		} else {
+			w.failureLog.setFallbackFrame(frame[0])
+		}
 	}
 	w.failureLogged = true
 	w.failureLogDone = make(chan struct{})
@@ -440,9 +603,9 @@ func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, rea
 	case own:
 		w.claimedAnswer = true
 		// This claim writes the row; the watchdog writes none of its own.
-		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = ownOut, ownErr, ownCode, func() {}
+		w.fallback = ownAnswer
 	case closed:
-		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
+		w.fallback = closedAnswer
 	}
 	return w.failureLogDone, true
 }
@@ -455,10 +618,10 @@ func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, rea
 // false for every other failure (its own refusal text, a Secure Client
 // hook, a connector with no fail-closed contract) and for a stop event: the
 // watchdog keeps its answer for those.
-func renderClaimedFailure(opts Options, sp spec, reason, failMode string, closed, unreachableAnswer bool) (stdout, stderr []byte, code int, ok bool) {
+func renderClaimedFailure(opts Options, sp spec, reason, failMode string, closed, unreachableAnswer bool) (answer watchdogAnswer, ok bool) {
 	if !unreachableAnswer || opts.SecureClient || strings.TrimSpace(reason) == "" || sp.failOpenOnly ||
 		failClosedStopEvent(opts, sp) {
-		return nil, nil, 0, false
+		return watchdogAnswer{}, false
 	}
 	if closed {
 		failMode = "closed"
@@ -476,8 +639,12 @@ func renderClaimedFailure(opts Options, sp spec, reason, failMode string, closed
 		// The mode the caller already read; the render must not read it again.
 		rendered.OutageFailModeNow = func() string { return mode }
 	}
-	code = failUnreachable(rendered, sp, failMode, reason)
-	return out.Bytes(), errb.Bytes(), code, true
+	code := failUnreachable(rendered, sp, failMode, reason)
+	answer = watchdogAnswer{out: out.Bytes(), err: errb.Bytes(), code: code,
+		blocked: closed, mode: failMode, reason: reason, category: "transport",
+		logFailure: func() {},
+		frame:      localFailureFallbackFrame(opts, sp, reason, "transport", failMode, closed)}
+	return answer, true
 }
 
 // perUserOutageSeen makes the watchdog's answer the outage answer of a
@@ -511,6 +678,80 @@ func (w *answerWatchdog) perUserOutageSeen(opts Options, sp spec, failMode strin
 	w.useRestartAnswerLocked(answer)
 }
 
+// managedOutageSeen preserves the administrator's open answer when a managed
+// hook has already proved that its gateway service is stopped. A later
+// connected try or a different failure restores the closed no-decision
+// answer; the stopped service alone cannot authorize a call the new gateway
+// has accepted. The lifecycle is checked again at the answer deadline.
+func (w *answerWatchdog) managedOutageSeen(opts Options, sp spec, failMode string, err error) {
+	if w == nil || !opts.ManagedEnterprise || opts.SecureClient {
+		return
+	}
+	if err == nil {
+		// A response supersedes an earlier stopped-service proof even when
+		// a test transport does not provide a GotConn trace.
+		if w.managedOutagePending() {
+			w.noDecisionPending()
+		}
+		return
+	}
+	outage := withManagedOutage(opts, err)
+	if outage.managedOutageOpen && !OrdinaryNoAnswerPayload(opts.failurePayload) {
+		outage.managedOutageOpen = false
+	}
+	if !outage.managedOutageOpen {
+		// The request's own deadline is not a later peer observation. The
+		// connect trace withdraws the proof if this retry reached a peer.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, errGatewayNoAnswer) || errors.Is(err, errGatewayNotConnected) {
+			return
+		}
+		w.mu.Lock()
+		primed := w.managedOutagePrimed
+		w.mu.Unlock()
+		if primed {
+			w.noDecisionPending()
+		}
+		return
+	}
+	reason := managedPeerFailureReason(opts, err)
+	var out, errb bytes.Buffer
+	rendered := outage
+	rendered.Stdout, rendered.Stderr = &out, &errb
+	rendered.Home, rendered.FailureLogHome, rendered.HookDir, rendered.answerWatch = "", nil, "", nil
+	code := failUnreachable(rendered, sp, failMode, reason)
+	logged := outage
+	logged.answerWatch = nil
+	logged.Stderr = io.Discard
+	answer := watchdogAnswer{out: out.Bytes(), err: errb.Bytes(), code: code,
+		mode: failMode, reason: reason, category: "transport",
+		logFailure: func() { _ = failUnreachable(logged, sp, failMode, reason) },
+		frame:      localFailureFallbackFrame(outage, sp, reason, "transport", failMode, false)}
+	installCheck, install := renderInstallAnswer(outage, sp, failMode)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired || w.claimedAnswer || w.closedKnown || w.failureLogged || w.decisionPending {
+		return
+	}
+	w.fallback = answer
+	w.managedOutagePrimed = true
+	w.visibleOutage = func() ([]byte, []byte, int) {
+		return renderVisibleOutage(outage, sp, failMode, reason)
+	}
+	w.installCheck, w.install = installCheck, install
+}
+
+// managedOutagePending is the proof the request path can use if its context
+// ends just before the watchdog writes the same prepared answer.
+func (w *answerWatchdog) managedOutagePending() bool {
+	if w == nil {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.managedOutagePrimed && !w.closedKnown && !w.decisionPending && !w.answeredStatus
+}
+
 // perUserRestartWindowCall reports a per-user call (not managed, socket or
 // Secure Client, and not fail-open-only) whose deadline may follow the
 // account's outage mode.
@@ -522,19 +763,11 @@ func perUserRestartWindowCall(opts Options, sp spec) bool {
 // gateway is restarting (perUserGatewayRestartingReason), in the outage mode
 // read for the call, with its failure row and install-window answer.
 type perUserRestartAnswer struct {
-	mode string
-	// reason is the failure row's reason: the gateway restarting
-	// (perUserGatewayRestartingReason) or a verified gateway that took the
-	// call and was late with an ordinary one (perUserGatewayNoAnswerReason).
-	reason                 string
-	out, err               []byte
-	code                   int
-	logFailure             func()
-	visible                func() ([]byte, []byte, int)
-	installCheck           func() bool
-	installOut, installErr []byte
-	installCode            int
-	installLogFailure      func()
+	mode         string
+	answer       watchdogAnswer
+	visible      func() ([]byte, []byte, int)
+	installCheck func() bool
+	install      watchdogAnswer
 }
 
 func renderPerUserRestartAnswer(opts Options, sp spec, failMode, reason string) *perUserRestartAnswer {
@@ -546,28 +779,33 @@ func renderPerUserRestartAnswer(opts Options, sp spec, failMode, reason string) 
 	rendered := outage
 	rendered.Stdout, rendered.Stderr = &out, &errb
 	rendered.Home, rendered.FailureLogHome, rendered.HookDir = "", nil, ""
-	answer := &perUserRestartAnswer{mode: mode, reason: reason}
-	answer.code = failUnreachable(rendered, sp, mode, reason)
-	answer.out, answer.err = out.Bytes(), errb.Bytes()
+	answer := &perUserRestartAnswer{mode: mode}
+	code := failUnreachable(rendered, sp, mode, reason)
 	logged := outage
 	logged.Stdout, logged.Stderr = io.Discard, io.Discard
-	answer.logFailure = func() { _ = failUnreachable(logged, sp, mode, reason) }
+	logFailure := func() { _ = failUnreachable(logged, sp, mode, reason) }
 	if mode == "open" {
 		answer.visible = func() ([]byte, []byte, int) {
 			return renderVisibleOutage(outage, sp, mode, reason)
 		}
 	}
-	answer.installCheck, answer.installOut, answer.installErr, answer.installCode, answer.installLogFailure =
-		renderInstallAnswer(outage, sp, mode)
+	blocked := !sp.failOpenOnly && mode == "closed" && !failClosedStopEvent(outage, sp)
+	answer.answer = watchdogAnswer{out: out.Bytes(), err: errb.Bytes(), code: code,
+		blocked: blocked, mode: mode, reason: reason,
+		category: "transport", logFailure: logFailure,
+		frame: localFailureFallbackFrame(outage, sp, reason, "transport", mode, blocked)}
+	answer.installCheck, answer.install = renderInstallAnswer(outage, sp, mode)
 	return answer
 }
 
 // useRestartAnswerLocked makes answer the watchdog's answer. w.mu is held.
 func (w *answerWatchdog) useRestartAnswerLocked(answer *perUserRestartAnswer) {
-	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = answer.out, answer.err, answer.code, answer.logFailure
+	w.fallback = answer.answer
 	w.visibleOutage = answer.visible
-	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
-		answer.installCheck, answer.installOut, answer.installErr, answer.installCode, answer.installLogFailure
+	w.installCheck, w.install = answer.installCheck, answer.install
+	if len(answer.answer.frame) != 0 {
+		w.failureLog.replaceFallbackFrame(answer.answer.frame)
+	}
 }
 
 // restartWindowContact notes the proven connection of a per-user try. When
@@ -686,7 +924,7 @@ func (w *answerWatchdog) restartWindowProven() (mode, reason string, ok bool) {
 		w.failureLog.setRestartReason(w.restartWindowSkipReasonLocked())
 		return "", "", false
 	}
-	return w.restart.mode, w.restart.reason, true
+	return w.restart.mode, w.restart.answer.reason, true
 }
 
 // provenWithin runs proof bounded by wait: a proof that takes longer is none.
@@ -790,7 +1028,14 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	}
 	// A call still waiting answerWatchdogLogPrepareLead before its deadline
 	// opens its log now, so the line of the answer below is one append.
-	prepare := time.AfterFunc(time.Until(deadline.Add(-w.prepareLead)), func() {
+	// Give quick answers a short window to finish without opening a log,
+	// while leaving enough time to prepare the marker before the deadline.
+	remaining := max(time.Until(deadline), 0)
+	lead := min(w.prepareLead, remaining)
+	if remaining > 100*time.Millisecond {
+		lead = min(w.prepareLead, remaining-100*time.Millisecond)
+	}
+	prepare := time.AfterFunc(time.Until(deadline.Add(-lead)), func() {
 		w.failureLog.prepare(w.failureLogHome)
 	})
 	if !w.waiter.wait(deadline) {
@@ -820,6 +1065,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	} else {
 		w.failureLog.setRestartReason(result.reason)
 	}
+	w.useOrdinaryAtDeadline()
 	w.mu.Lock()
 	installCheck := w.installCheck
 	w.mu.Unlock()
@@ -830,37 +1076,113 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		return
 	}
 	if installing && !w.closedKnown && !w.claimedAnswer && w.installCheck != nil {
-		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
-			w.installOut, w.installErr, w.installCode, w.installLogFailure
+		w.fallback = w.install
+		if len(w.install.frame) != 0 {
+			w.failureLog.replaceFallbackFrame(w.install.frame)
+		}
 	} else if !w.closedKnown && !w.claimedAnswer && !w.failureLogged && w.visibleOutage != nil {
-		w.fallbackOut, w.fallbackErr, w.fallbackCode = w.visibleOutage()
+		w.fallback.out, w.fallback.err, w.fallback.code = w.visibleOutage()
 	}
 	w.fired = true
-	_, _ = w.stderr.Write(w.fallbackErr)
-	_, _ = w.stdout.Write(w.fallbackOut)
+	_, _ = w.stderr.Write(w.fallback.err)
+	_, _ = w.stdout.Write(w.fallback.out)
+	// The token and local record describe this same committed answer. Send
+	// them concurrently; neither may add a second exit wait to the hook.
+	receiptDone := make(chan struct{})
+	if delivery := w.deadlineDelivery; delivery != nil && !w.secureClient {
+		blocked := w.fallback.blocked
+		done := receiptDone
+		// The transport remains open for the token after the answer timer
+		// ends. Close it at the same bounded exit window if the process is
+		// simulated rather than exited (as in tests).
+		time.AfterFunc(answerWatchdogLogWait, delivery.close)
+		go func() {
+			_ = delivery.deadline(blocked)
+			close(done)
+		}()
+	} else {
+		close(receiptDone)
+	}
 	if w.exit == nil {
 		if !w.failureLogged {
-			w.logFailure()
+			w.fallback.logFailure()
 		}
 		return
 	}
-	if w.failureLogged {
-		if w.failureLogDone != nil {
-			waitForLog(w.failureLogDone)
+	localDone := (<-chan struct{})(w.failureLogDone)
+	var markerDone <-chan bool
+	markerTried, ordinaryStarted := false, false
+	startOrdinary := func() {
+		if ordinaryStarted || w.failureLogged {
+			return
 		}
-		w.exit(w.fallbackCode)
-		return
+		ordinaryStarted = true
+		done := make(chan struct{})
+		localDone = done
+		logFailure := w.fallback.logFailure
+		go func() {
+			defer close(done)
+			logFailure()
+		}()
 	}
-	logged := make(chan struct{})
-	logFailure := w.logFailure
-	go func() {
-		defer close(logged)
-		logFailure()
-	}()
-	waitForLog(logged)
+	startMarker := func() {
+		if markerTried || !w.failureLog.markerEnabled {
+			return
+		}
+		markerTried = true
+		if w.fallback.blocked {
+			w.failureLog.promoteFallbackClosed()
+		}
+		result := make(chan bool, 1)
+		markerDone = result
+		go func() { result <- w.failureLog.appendFallback() }()
+	}
+	// Prefer a prepared ordinary descriptor. If its open is still pending,
+	// the prepared fallback can record the committed answer immediately.
+	if !w.failureLogged {
+		if remaining > answerWatchdogLogWait && w.failureLog.markerEnabled && !w.failureLog.ordinaryReady() {
+			startMarker()
+		} else {
+			startOrdinary()
+		}
+	}
+	recorded := false
+	deadlineExpired, stopDeadline := proofclock.NewTimer(answerWatchdogLogWait)
+	defer stopDeadline()
+	fallbackExpired, stopFallback := proofclock.NewTimer(answerWatchdogLogWait / 2)
+	defer stopFallback()
+	for !recorded || receiptDone != nil {
+		select {
+		case <-localDone:
+			localDone = nil
+			recorded = true
+		case <-receiptDone:
+			receiptDone = nil
+		case saved := <-markerDone:
+			markerDone = nil
+			if saved {
+				recorded = true
+			} else {
+				startOrdinary()
+			}
+		case <-fallbackExpired:
+			if !recorded {
+				if markerTried {
+					startOrdinary()
+				} else {
+					startMarker()
+				}
+			}
+		case <-deadlineExpired:
+			if !recorded {
+				fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be appended before exit")
+			}
+			recorded, receiptDone = true, nil
+		}
+	}
 	// Production exits here; the lock is never released, so the call's own
 	// output cannot follow the answer.
-	w.exit(w.fallbackCode)
+	w.exit(w.fallback.code)
 }
 
 // gatewayAnsweredError makes the watchdog's answer closed after a gateway
@@ -873,7 +1195,7 @@ func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec, status int)
 	}
 	closedOpts := opts
 	closedOpts.FailMode = "closed"
-	out, errb, code, logFailure := renderNoAnswer(closedOpts, sp, "closed")
+	answer := renderNoAnswer(closedOpts, sp, "closed")
 	if status >= 200 && status < 300 {
 		// The watchdog may fire while the body read is still waiting. Use
 		// the same response-layer reason the ordinary body-read path uses.
@@ -881,12 +1203,14 @@ func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec, status int)
 		rendered := closedOpts
 		rendered.Stdout, rendered.Stderr = &stdout, &stderr
 		rendered.Home, rendered.FailureLogHome, rendered.answerWatch = "", nil, nil
-		code = failResponse(rendered, sp, "closed", "incomplete gateway response")
-		out, errb = stdout.Bytes(), stderr.Bytes()
+		answer.code = failResponse(rendered, sp, "closed", "incomplete gateway response")
+		answer.out, answer.err = stdout.Bytes(), stderr.Bytes()
 		logged := closedOpts
 		logged.answerWatch = nil
 		logged.Stderr = io.Discard
-		logFailure = func() { logHookFailure(logged, sp, "incomplete gateway response", "response", "closed", true) }
+		answer.logFailure = func() { logHookFailure(logged, sp, "incomplete gateway response", "response", "closed", true) }
+		answer.reason, answer.category = "incomplete gateway response", "response"
+		answer.frame = localFailureFallbackFrame(closedOpts, sp, answer.reason, answer.category, "closed", true)
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -895,8 +1219,11 @@ func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec, status int)
 		return
 	}
 	w.closedKnown = true
-	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
+	w.fallback = answer
 	w.visibleOutage = nil
+	if w.failureLog.markerEnabled {
+		w.failureLog.replaceFallbackFrame(answer.frame)
+	}
 }
 
 // waitForLog waits for the watchdog's hook-failures row (done) for at most
@@ -967,11 +1294,14 @@ func (w *answerWatchdog) noDecisionPending() {
 		return
 	}
 	w.decisionPending = true
+	w.managedOutagePrimed = false
 	if !w.fired && !w.claimedAnswer && !w.failureClosed {
 		w.closedKnown = true
-		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
-			w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog
+		w.fallback = w.noDecision
 		w.visibleOutage = nil
+		if len(w.noDecision.frame) != 0 {
+			w.failureLog.replaceFallbackFrame(w.noDecision.frame)
+		}
 	}
 }
 
@@ -1038,7 +1368,7 @@ func (w *answerWatchdog) finish(code int) int {
 		if w.deliveryReceipt != nil {
 			w.deliveryReceipt(false, true)
 		}
-		return w.fallbackCode
+		return w.fallback.code
 	}
 	w.finished = true
 	_, _ = w.stderr.Write(w.err.Bytes())
@@ -1081,17 +1411,19 @@ func (w *answerWatchdog) answerLate() (code int, ok bool) {
 		return 0, false
 	}
 	if installing && !w.closedKnown && !w.claimedAnswer && w.installCheck != nil {
-		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
-			w.installOut, w.installErr, w.installCode, w.installLogFailure
+		w.fallback = w.install
+		if len(w.install.frame) != 0 {
+			w.failureLog.replaceFallbackFrame(w.install.frame)
+		}
 	}
 	// The watchdog's answer: watch finds the call finished and stays quiet.
 	w.fired, w.finished = true, true
-	_, _ = w.stderr.Write(w.fallbackErr)
-	_, _ = w.stdout.Write(w.fallbackOut)
+	_, _ = w.stderr.Write(w.fallback.err)
+	_, _ = w.stdout.Write(w.fallback.out)
 	logged := w.failureLogDone
 	if !w.failureLogged {
 		done := make(chan struct{})
-		logFailure := w.logFailure
+		logFailure := w.fallback.logFailure
 		go func() {
 			defer close(done)
 			logFailure()
@@ -1104,7 +1436,7 @@ func (w *answerWatchdog) answerLate() (code int, ok bool) {
 	if w.deliveryReceipt != nil {
 		w.deliveryReceipt(false, true)
 	}
-	return w.fallbackCode, true
+	return w.fallback.code, true
 }
 
 // lateAnswerOwedLocked reports a late managed call nobody answered yet.
@@ -1123,5 +1455,13 @@ func (w *answerWatchdog) setRevoke(revoke func(stdout, stderr io.Writer) (int, b
 func (w *answerWatchdog) setDeliveryReceipt(receipt func(bool, bool)) {
 	w.mu.Lock()
 	w.deliveryReceipt = receipt
+	w.mu.Unlock()
+}
+
+func (w *answerWatchdog) setDeadlineDelivery(delivery *hookDeliveryRequest) {
+	w.mu.Lock()
+	if !w.fired {
+		w.deadlineDelivery = delivery
+	}
 	w.mu.Unlock()
 }

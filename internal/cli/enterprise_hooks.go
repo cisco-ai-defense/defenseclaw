@@ -825,6 +825,10 @@ var (
 	// Tests replace it.
 	enterpriseHookReconcileTargetEarlierMatrix       = enterprisehooks.WindowsProtectedTargetRunsEarlierHookMatrix
 	enterpriseHookReconcileClosedMachineRegistration = enterprisehooks.WindowsProtectedTargetHasClosedMachineRegistration
+	// enterpriseHookReconcileMachineRegistration is the closed-registration
+	// proof for a deployment whose administrator chose hook fail mode open: the
+	// registration without the closed requirement (GAP-0980). Tests replace it.
+	enterpriseHookReconcileMachineRegistration = enterprisehooks.WindowsProtectedTargetHasMachineRegistration
 	// enterpriseHookReconcileTargetFailModeChange returns the hook fail mode
 	// a target's lock records and the one the config asks for. Tests
 	// replace it.
@@ -946,7 +950,41 @@ const (
 	// folder or hooks folder changed (#1105, GAP-0211, GAP-2516); the
 	// folder follows after ": ".
 	enterpriseHookAwaitingSignInUntrustedFolder = "the owner or permissions of its DefenseClaw folder are not the ones DefenseClaw set"
+	// An upgrade left a signed-out or disconnected account with the render
+	// of an earlier release's per-user hooks (Copilot, Antigravity, Kiro) and
+	// nothing else wrong (GAP-0980): that release's DefenseClaw hook keeps
+	// running until the guardian updates it in the account's own Windows
+	// session.
+	enterpriseHookAwaitingSignInKeepsRunning = "its previous release's DefenseClaw hook keeps running"
+	enterpriseHookAwaitingSignInPriorRender  = enterpriseHookAwaitingSignInKeepsRunning + " until this account signs in"
+	// The administrator's hook fail mode is open and the machine hook of
+	// Claude Code or Codex, which is this release's own, is in place; only the
+	// account's registration waits for its sign-in (GAP-0980). The previous
+	// release's hook is not what runs for these connectors.
+	enterpriseHookAwaitingSignInOpenMode = "its machine hook is in place with hook fail mode open"
 )
+
+// enterpriseHookAwaitingSignInKeepsRunningRow reports a guardian row that
+// waits for its account's next sign-in while the previous release's hook keeps
+// running for it (enterpriseHookAwaitingSignInKeepsRunning).
+func enterpriseHookAwaitingSignInKeepsRunningRow(row enterpriseHookReconcileRow) bool {
+	return enterpriseHookAwaitingSignInError(row) &&
+		strings.HasPrefix(
+			strings.TrimPrefix(strings.TrimSpace(row.Error), enterpriseHookAwaitingSignInPrefix+": "),
+			enterpriseHookAwaitingSignInKeepsRunning,
+		)
+}
+
+// enterpriseHookAwaitingSignInMachineHookRow reports a guardian row that waits
+// for its account's next sign-in while the machine hook (Claude Code or Codex,
+// hook fail mode open) is in place (enterpriseHookAwaitingSignInOpenMode).
+func enterpriseHookAwaitingSignInMachineHookRow(row enterpriseHookReconcileRow) bool {
+	return enterpriseHookAwaitingSignInError(row) &&
+		strings.HasPrefix(
+			strings.TrimPrefix(strings.TrimSpace(row.Error), enterpriseHookAwaitingSignInPrefix+": "),
+			enterpriseHookAwaitingSignInOpenMode,
+		)
+}
 
 // enterpriseHookEarlierMatrixRow reports a guardian row that waits for its
 // account's next connect while the hooks an earlier release registered still
@@ -972,6 +1010,12 @@ const enterpriseHookEarlierMatrixState = "enrolled with the hook matrix of an ea
 func enterpriseHookAwaitingSignInCause(guardianErr string) string {
 	cause := strings.TrimPrefix(strings.TrimSpace(guardianErr), enterpriseHookAwaitingSignInPrefix+": ")
 	switch {
+	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInOpenMode):
+		return "its machine hook is in place, with hook fail mode open as the administrator chose (calls are allowed " +
+			"while the gateway is down), and the account's registration finishes when it signs in and the guardian updates it"
+	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInPriorRender):
+		return "its previous release's DefenseClaw hook keeps running for this account until it signs in and the " +
+			"guardian updates it"
 	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInFailClosed):
 		return "its hooks still fail closed, and the guardian renders hook fail mode open in the account's own " +
 			"Windows session at its next sign-in"
@@ -1159,6 +1203,41 @@ func enterpriseHookRepairAfterVerifyFailure(
 					ctx, target, opts, locked, wanted, verifyErr,
 				); handled {
 					return result, repaired, err
+				}
+			}
+			// An upgrade changed the hooks this account's agents run, and only
+			// the account's own Windows session installs them. When the lock
+			// names an earlier release the drift is the upgrade's own, and the
+			// account must not fail the upgrade (GAP-0980). Two proofs admit
+			// the wait, and everything else stays a failure: a second,
+			// read-only verify that accepts the earlier release's render
+			// (enterprisehooks.InstallOptions.AcceptPriorReleaseRender) passes,
+			// so the only difference is that render and the account's
+			// previous-release hook keeps running; or the administrator chose
+			// hook fail mode open, which the closed-registration proof above
+			// cannot hold, and the registration itself is proven. Secure Client
+			// has its own branch above.
+			if !enterpriseHookReconcileSecureClient() {
+				if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
+					prior := opts
+					prior.AcceptPriorReleaseRender = true
+					if _, priorErr := enterpriseHookReconcileVerifier(ctx, prior); priorErr == nil {
+						return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+							"%w: %s: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
+								"Windows session; its exact active Windows session is unavailable, so the guardian updates "+
+								"it at the account's next sign-in (verification: %v)",
+							errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInPriorRender, written, verifyErr,
+						)
+					}
+					if strings.EqualFold(strings.TrimSpace(opts.HookFailMode), "open") {
+						if registered, proofErr := enterpriseHookReconcileMachineRegistration(opts); proofErr == nil && registered {
+							return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+								"%w: %s: DefenseClaw %s protected it, and its exact active Windows session is unavailable, "+
+									"so the guardian updates it at the account's next sign-in (verification: %v)",
+								errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInOpenMode, written, verifyErr,
+							)
+						}
+					}
 				}
 			}
 		}
