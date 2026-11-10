@@ -115,20 +115,29 @@ func TestPerUserStandingScanDisabledPolicyKeepsEarlierUnscannedAdmissionValid(t 
 	admitted := func(e config.MCPServerEntry) watcher.MCPAdmissionStatus {
 		return watcher.MCPAdmissionStatus{Name: "vgr", Admitted: &e}
 	}
+	// The calls run: the hold the policy asks for is kept, as the hook does
+	// once the complete decision lets the call run.
+	answered := func(p mcpRuntimeProbe, status watcher.MCPAdmissionStatus) watcher.MCPAdmissionStatus {
+		got, opened := api.failedMCPSessionHold(ctx, api.scannerCfg, "claudecode", p, status)
+		if opened != nil {
+			api.holdFailedMCP("claudecode", home, p, *opened, time.Now())
+		}
+		return got
+	}
 	a, b := entry("--a"), entry("--b")
 	set("--a")
-	if got := api.failedMCPSessionHold(ctx, api.scannerCfg, "claudecode", probe(project), admitted(a)); got.Failed {
+	if got := answered(probe(project), admitted(a)); got.Failed {
 		t.Fatalf("call of A while scan_on_install is off: %+v, want the admission", got)
 	}
 	set("--b")
 	for _, cwd := range []string{project, sibling} {
-		if got := api.failedMCPSessionHold(ctx, api.scannerCfg, "claudecode", probe(cwd), admitted(b)); got.Failed {
+		if got := answered(probe(cwd), admitted(b)); got.Failed {
 			t.Fatalf("call of B, hook directory %q, scan_on_install still off: %+v, want the admission", cwd, got)
 		}
 	}
 	// The setting that admitted A is gone: its live connection is a failed admission.
 	api.scannerCfg.Admission.MCP.ScanOnInstall = &on
-	if got := api.failedMCPSessionHold(ctx, api.scannerCfg, "claudecode", probe(sibling), watcher.MCPAdmissionStatus{Name: "vgr"}); !got.Failed {
+	if got := answered(probe(sibling), watcher.MCPAdmissionStatus{Name: "vgr"}); !got.Failed {
 		t.Fatalf("call after scan_on_install is back on: %+v, want the earlier unscanned connection refused", got)
 	}
 }

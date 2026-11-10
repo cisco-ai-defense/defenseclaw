@@ -4274,9 +4274,7 @@ func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHook
 		return decision, true
 	}
 	if published {
-		if decision, refused := a.mcpAdmissionPendingDecision(ctx, req.ConnectorName, req.HookEventName, probe); refused {
-			return decision, true
-		}
+		return a.mcpAdmissionAndAssetDecision(ctx, req.ConnectorName, req.HookEventName, probe)
 	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 }
