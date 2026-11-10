@@ -33,11 +33,12 @@ func TestScriptNamedThroughLinksOutsideTheWorkingFolderIsReadOrUnread(t *testing
 				if err := os.Mkdir(live, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(live, "alias")); err != nil {
-					t.Fatal(err)
-				}
+				// The writer appends to alias, the link to the keys file that
+				// r104ReviewHome makes in the working folder the script runs in;
+				// a path with the host separators would not be one word of a
+				// POSIX script on Windows.
 				for name, body := range map[string]string{
-					"writer_direct.sh": "echo marker >> " + filepath.Join(live, "alias") + "\n",
+					"writer_direct.sh": "echo marker >> alias\n",
 					"safe.sh":          "echo ordinary > report.txt\n",
 				} {
 					if err := os.WriteFile(filepath.Join(live, name), []byte(body), 0o600); err != nil {
