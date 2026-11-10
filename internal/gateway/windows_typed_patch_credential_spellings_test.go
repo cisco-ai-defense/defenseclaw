@@ -69,9 +69,8 @@ func TestWindowsTypedPatchOfCredentialFileIsJudgedInEverySpellingWindowsOpens(t 
 		for _, file := range files {
 			for _, directive := range []string{"Add File", "Delete File"} {
 				plainAction, plainRules := windowsPatchVerdictIn(t, connector, directive, home, home+`\project`, home+`\`+file)
-				// A write is judged in every profile; a delete of the plain name
-				// may be an ordinary action in a profile, and its spellings then are.
-				if directive == "Add File" && (len(plainRules) == 0 || plainAction == "allow") {
+				// A write and a delete are judged in every profile.
+				if len(plainRules) == 0 || plainAction == "allow" {
 					t.Fatalf("%s: plain %s %s: %s %v, want a finding", profile, directive, file, plainAction, plainRules)
 				}
 				for _, prefix := range spellings {
