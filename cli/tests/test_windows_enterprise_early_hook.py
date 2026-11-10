@@ -986,13 +986,24 @@ def test_the_delayed_start_flag_is_journaled_and_restored_standalone_only() -> N
     assert exact.index("Set-DefenseClawServiceStartMode -Name $Name -StartMode $StartMode") < exact.index("if (-not (Test-DefenseClawStandaloneProfile)) {") < exact.index("Set-DefenseClawServiceDelayedAutoStart")
     assert "[bool]$guardian.delayed_auto_start" in module and "[bool]$gateway.delayed_auto_start" in module
     assert "-DelayedAutoStart ([bool]$service.delayed_auto_start)" in module
-    # The forward activation promotes the recorded delayed services to delayed-auto
-    # (not plain automatic), except under the trust-strict pin, which calls a delayed
-    # start drift.
-    assert "$keepDelayedStart = -not (Test-DefenseClawTrustStrictAncestors)" in module
-    for service in ("$GuardianServiceName", "$GatewayServiceName", "$enumeratorServiceName"):
-        needle = f"-DelayedAutoStart ($keepDelayedStart -and [bool]$priorServiceStates[{service}].delayed_auto_start)"
-        assert module.count(needle) == 1, service
+    # The forward promotion of a completed upgrade or repair is plain automatic: the
+    # hardening writes DelayedAutoStart=0 and the verifier repairs a delayed start
+    # as drift. A rollback or recovery restores the recorded flag (above).
+    promotion = _function_body(module, "Set-DefenseClawVerifiedServiceBootPolicy")
+    promotion = promotion[promotion.index("#>") :]
+    assert "Delayed" not in promotion and "Exact" not in promotion and "keepDelayedStart" not in module
+    assert promotion.count("-StartMode 2") == 5
+    forward = module[module.index("Set-DefenseClawVerifiedServiceBootPolicy `") :]
+    assert forward.startswith("Set-DefenseClawVerifiedServiceBootPolicy `\n                -Layout $Layout")
+    # A flag that cannot be put back never aborts a recovery; the guardian is started
+    # again whatever the start mode did, and the failure note is bounded.
+    exact = _function_body(module, "Restore-DefenseClawServiceStartModeExact")
+    assert "try {" in exact and "delayed start could not be put back" in exact
+    hold = _function_body(module, "Hold-DefenseClawEarlyHookGuard")
+    handler = hold[hold.index("catch {\n        $holdFailure = $_"):]
+    assert handler.index("start mode could not be put back") < handler.index("Start-DefenseClawService -Name $GuardianServiceName") < handler.index("could not be started again")
+    assert "ConvertTo-DefenseClawBoundedDiagnostic -Value ($restartNotes -join '; ') -MaxLength 512" in handler
+    assert "$status['service_delayed_auto_start']" in module
     # The start-mode setter itself is unchanged: plain sc config start= auto.
     setter = _function_body(module, "Set-DefenseClawServiceStartMode")
     assert "delayed" not in setter.lower()

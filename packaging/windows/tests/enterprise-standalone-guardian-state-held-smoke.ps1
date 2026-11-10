@@ -179,6 +179,8 @@ try {
             $script:SmokeServiceCalls = [Collections.Generic.List[string]]::new()
             $script:SmokeInstallFails = $true
             $script:SmokeStartFails = $false
+            $script:SmokeModeRestoreFails = $false
+            $script:SmokeDelayedFails = $false
             $script:SmokeInstallError = $null
             # GAP-0989: the guardian's delayed-auto flag. SmokeDelayed is the flag the
             # mocked service holds; SmokeModeClearsDelayed models a mode change that
@@ -190,8 +192,8 @@ try {
                 Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceStartMode' -Value { 2 }
                 Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceChecked' -Value { [pscustomobject]@{ Status = [ServiceProcess.ServiceControllerStatus]::Running } }
                 Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeDelayed }
-                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeServiceCalls.Add("delayed $($args[3])"); $script:SmokeDelayed = [bool]$args[3] }
-                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceStartMode' -Value { $script:SmokeServiceCalls.Add("mode $($args[3])"); if ($script:SmokeModeClearsDelayed) { $script:SmokeDelayed = $false } }
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeServiceCalls.Add("delayed $($args[3])"); if ($script:SmokeDelayedFails) { throw 'delayed refused' }; $script:SmokeDelayed = [bool]$args[3] }
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceStartMode' -Value { $script:SmokeServiceCalls.Add("mode $($args[3])"); if ($script:SmokeModeRestoreFails -and $args[3] -eq 2) { throw 'mode refused' }; if ($script:SmokeModeClearsDelayed) { $script:SmokeDelayed = $false } }
                 Set-Item -LiteralPath 'function:script:Stop-DefenseClawService' -Value { $script:SmokeServiceCalls.Add('stop') }
                 Set-Item -LiteralPath 'function:script:Start-DefenseClawService' -Value { if ($script:SmokeStartFails) { throw 'start refused' }; $script:SmokeServiceCalls.Add('start') }
                 Set-Item -LiteralPath 'function:script:Install-DefenseClawFileAtomic' -Value { if ($script:SmokeInstallFails) { if ($null -ne $script:SmokeInstallError) { throw $script:SmokeInstallError }; throw 'injected failure after the stop' }; Copy-Item -LiteralPath $guardPath -Destination $holdLayout.HookPath -Force }
@@ -214,6 +216,18 @@ try {
                 $script:SmokeServiceCalls.Clear(); $script:SmokeDelayed = $false; $script:SmokeModeClearsDelayed = $false; $caught = ''
                 try { [void](& $hold) } catch { $caught = $_.Exception.Message }
                 if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|start' -or $script:SmokeDelayed) { throw "a failed hold of a plain automatic guardian left '$($script:SmokeServiceCalls -join '|')' delayed=$($script:SmokeDelayed)" }
+                # S1/S2: a delayed flag that cannot be put back is cosmetic (the guardian is started,
+                # the original error is the failure, no restart note); a start mode that cannot be
+                # put back is named and the guardian is still started again.
+                $script:SmokeServiceCalls.Clear(); $script:SmokeDelayed = $true; $script:SmokeModeClearsDelayed = $true; $script:SmokeDelayedFails = $true; $typed = $null
+                try { [void](& $hold) } catch { $typed = $_.Exception }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|delayed True|start' -or $typed.Message -ne 'injected failure after the stop' -or $typed.Data.Contains('DefenseClaw.GuardianRestartFailure')) { throw "a refused delayed flag left '$($script:SmokeServiceCalls -join '|')' message '$($typed.Message)'" }
+                $script:SmokeDelayedFails = $false
+                $script:SmokeServiceCalls.Clear(); $script:SmokeModeRestoreFails = $true; $typed = $null
+                try { [void](& $hold) } catch { $typed = $_.Exception }
+                $note = [string]$typed.Data['DefenseClaw.GuardianRestartFailure']
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|start' -or -not $note.Contains('start mode could not be put back') -or $note.Contains('could not be started again') -or $typed.Message -ne 'injected failure after the stop') { throw "a refused start mode left '$($script:SmokeServiceCalls -join '|')' note '$note'" }
+                $script:SmokeModeRestoreFails = $false; $script:SmokeModeClearsDelayed = $false; $script:SmokeDelayed = $false
                 # The guardian cannot be started again: the failure says so, with the first cause.
                 $script:SmokeServiceCalls.Clear()
                 $script:SmokeServiceCalls.Clear(); $script:SmokeStartFails = $true; $caught = ''
@@ -238,7 +252,7 @@ try {
             # start_mode, so a recovery in a later process brings back delayed-auto.
             # An older journal has no field (not delayed); a malformed one is refused;
             # Secure Client restores the plain mode only. Service calls are replaced.
-            $replacedJournal = @('Set-DefenseClawServiceStartMode', 'Get-DefenseClawServiceDelayedAutoStart', 'Set-DefenseClawServiceDelayedAutoStart')
+            $replacedJournal = @('Set-DefenseClawServiceStartMode', 'Get-DefenseClawServiceDelayedAutoStart', 'Set-DefenseClawServiceDelayedAutoStart', 'Test-DefenseClawLayoutBrokerEnabled')
             $originalJournal = @{}
             foreach ($name in $replacedJournal) { $originalJournal[$name] = (Get-Item -LiteralPath "function:$name").ScriptBlock }
             $script:SmokeJCalls = [Collections.Generic.List[string]]::new()
@@ -274,6 +288,27 @@ try {
                     $refused = ''
                     try { [void](Get-DefenseClawTransactionServiceStates -Services @($gateway, $bad.Record) -GatewayServiceName $gwName -GuardianServiceName $gdName) } catch { $refused = $_.Exception.Message }
                     if ($refused -eq '') { throw "$($bad.Label) was accepted" }
+                }
+                # S2: a flag that cannot be set back never aborts a recovery (the modes are all restored).
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeJCalls.Add("delayed $($args[1]) $($args[3])"); throw 'delayed refused' }
+                $aborted = ''
+                try { $result = & $journal $delayedGuardian $gateway } catch { $aborted = $_.Exception.Message }
+                if ($aborted -ne '' -or $result[1] -ne "mode $gdName 2|delayed $gdName True|mode $gwName 2") { throw "a refused delayed flag aborted the recovery or skipped a mode: '$aborted' '$($result[1])'" }
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeJCalls.Add("delayed $($args[1]) $($args[3])"); $script:SmokeJDelayed[[string]$args[1]] = [bool]$args[3] }
+                # S3: the forward promotion of a completed install, upgrade or repair is plain
+                # automatic from a delayed start and from a plain one, and never sets the flag.
+                $script:SmokeBroker = $false
+                Set-Item -LiteralPath 'function:script:Test-DefenseClawLayoutBrokerEnabled' -Value { $script:SmokeBroker }
+                $promotionLayout = @{ BrokerServiceName = 'DefenseClawCMIDBroker'; SensorHelperServiceName = 'DefenseClawSensorHelper' }
+                $enName = 'DefenseClawHookEnumerator'
+                foreach ($row in @(@{ Label = 'delayed'; Delayed = $true; Broker = $false }, @{ Label = 'plain'; Delayed = $false; Broker = $false }, @{ Label = 'delayed with a broker'; Delayed = $true; Broker = $true })) {
+                    $script:SmokeBroker = $row.Broker
+                    $script:SmokeJCalls.Clear(); $script:SmokeJDelayed[$gdName] = $row.Delayed; $script:SmokeJDelayed[$gwName] = $row.Delayed
+                    Set-DefenseClawVerifiedServiceBootPolicy -Layout $promotionLayout -GatewayServiceName $gwName -GuardianServiceName $gdName -EnumeratorServiceName $enName
+                    $brokerCall = if ($row.Broker) { 'mode DefenseClawCMIDBroker 2|' } else { '' }
+                    $want = "mode $gdName 2|${brokerCall}mode DefenseClawSensorHelper 2|mode $gwName 2|mode $enName 2"
+                    if (($script:SmokeJCalls -join '|') -ne $want) { throw "the $($row.Label) promotion made '$($script:SmokeJCalls -join '|')', want '$want'" }
+                    if ($script:SmokeJDelayed[$gdName] -or $script:SmokeJDelayed[$gwName]) { throw "the $($row.Label) promotion left a delayed start" }
                 }
                 # Secure Client: the plain mode only, the flag is never read or set.
                 Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient

@@ -12961,7 +12961,8 @@ function Restore-DefenseClawServiceStartModeExact {
     <#
         Puts back a start mode recorded with Get-DefenseClawServiceStartMode
         and Get-DefenseClawServiceDelayedAutoStart: the mode first, then the
-        delayed flag when the mode change did not leave it as recorded.
+        delayed flag when the mode change did not leave it as recorded. A mode
+        that cannot be set throws; a flag that cannot be set is logged only.
     #>
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -12973,10 +12974,66 @@ function Restore-DefenseClawServiceStartModeExact {
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return
     }
-    if ($StartMode -eq 2 -and
-        (Get-DefenseClawServiceDelayedAutoStart -Name $Name) -ne $DelayedAutoStart) {
-        Set-DefenseClawServiceDelayedAutoStart -Name $Name -Enabled $DelayedAutoStart
+    # The delayed start is cosmetic next to the mode: a flag that cannot be put
+    # back is named in the lifecycle log and never aborts a recovery.
+    if ($StartMode -eq 2) {
+        try {
+            if ((Get-DefenseClawServiceDelayedAutoStart -Name $Name) -ne $DelayedAutoStart) {
+                Set-DefenseClawServiceDelayedAutoStart -Name $Name -Enabled $DelayedAutoStart
+            }
+        }
+        catch {
+            try {
+                Write-DefenseClawLifecycleLogDiagnostic -Message (
+                    ConvertTo-DefenseClawBoundedDiagnostic `
+                        -Value "service $Name delayed start could not be put back: $($_.Exception.Message)" `
+                        -MaxLength 256
+                )
+            }
+            catch { $null = $_ }
+        }
     }
+}
+
+function Set-DefenseClawVerifiedServiceBootPolicy {
+    <#
+        The boot policy of a completed install, upgrade or repair: every
+        managed service becomes plain automatic. This is the product's desired
+        state (the hardening writes DelayedAutoStart=0 and the verifier
+        repairs a delayed start as drift), so the delayed start an
+        administrator may have set is not kept here; a rollback or a recovery
+        of an interrupted transaction puts the recorded delayed start back
+        (Restore-DefenseClawServiceStartModeExact), because that restores the
+        prior state.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)][string]$EnumeratorServiceName
+    )
+    Set-DefenseClawServiceStartMode `
+        -Name $GuardianServiceName `
+        -StartMode 2
+    if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
+        Set-DefenseClawServiceStartMode `
+            -Name $Layout.BrokerServiceName `
+            -StartMode 2
+    }
+    Set-DefenseClawServiceStartMode `
+        -Name $Layout.SensorHelperServiceName `
+        -StartMode 2
+    Set-DefenseClawServiceStartMode `
+        -Name $GatewayServiceName `
+        -StartMode 2
+    # Promote the (already-running) enumerator
+    # from demand-start to auto-start now that readiness has
+    # been proven. Without this, boot would leave the
+    # enumerator disabled and new user profiles would never
+    # get picked up.
+    Set-DefenseClawServiceStartMode `
+        -Name $EnumeratorServiceName `
+        -StartMode 2
 }
 
 function ConvertFrom-DefenseClawServiceQuiescenceTimestamp {
@@ -27877,21 +27934,33 @@ function Hold-DefenseClawEarlyHookGuard {
     catch {
         $holdFailure = $_
         if ($guardianTouched) {
-            $restartNote = ''
-            try {
-                if ($guardianPriorMode -eq 2 -or $guardianPriorMode -eq 3) {
+            # The guardian is started again whatever the start mode did: the
+            # two steps do not share a try, so a start mode that cannot be put
+            # back is named and never leaves the guardian stopped.
+            $restartNotes = [Collections.Generic.List[string]]::new()
+            if ($guardianPriorMode -eq 2 -or $guardianPriorMode -eq 3) {
+                try {
                     # GAP-0989: the exact mode, a delayed-auto start included.
                     Restore-DefenseClawServiceStartModeExact `
                         -Name $GuardianServiceName `
                         -StartMode $guardianPriorMode `
                         -DelayedAutoStart $guardianPriorDelayed
                 }
-                if ($guardianWasRunning) {
-                    Start-DefenseClawService -Name $GuardianServiceName
+                catch {
+                    $restartNotes.Add("the hook guardian start mode could not be put back: $($_.Exception.Message)")
                 }
             }
-            catch {
-                $restartNote = "the hook guardian could not be started again: $($_.Exception.Message)"
+            if ($guardianWasRunning) {
+                try {
+                    Start-DefenseClawService -Name $GuardianServiceName
+                }
+                catch {
+                    $restartNotes.Add("the hook guardian could not be started again: $($_.Exception.Message)")
+                }
+            }
+            $restartNote = ''
+            if ($restartNotes.Count -gt 0) {
+                $restartNote = ConvertTo-DefenseClawBoundedDiagnostic -Value ($restartNotes -join '; ') -MaxLength 512
             }
             if ($restartNote -ne '') {
                 # GAP-0989: the original error is rethrown as it is, so its type
@@ -39052,6 +39121,16 @@ function Get-DefenseClawLifecycleStatus {
             }
         }
         $status['service_start_modes'] = [pscustomobject]$startModes
+        # GAP-0989: an automatic service that starts delayed. The last-resort
+        # restore in the CLI (an installer child killed before its rollback)
+        # reads it to put the delayed start back with the mode.
+        $delayedStarts = [ordered]@{}
+        foreach ($name in $startModes.Keys) {
+            if ($startModes[$name] -ceq 'auto' -and (Get-DefenseClawServiceDelayedAutoStart -Name $name)) {
+                $delayedStarts[$name] = $true
+            }
+        }
+        $status['service_delayed_auto_start'] = [pscustomobject]$delayedStarts
         # The standalone helper derives this log from the fixed layout (the
         # Service Control Manager discards service stderr).
         $status['sensor_helper_log_path'] = [IO.Path]::Combine(
@@ -48767,37 +48846,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
             # Only fully verified live state may become boot-active. A crash
             # before pending cleanup can start only validated services.
-            # GAP-0989: a service the transaction journal recorded as delayed
-            # start is promoted to delayed-auto, not plain automatic, so an
-            # upgrade or repair keeps an administrator's delayed start. The
-            # trust-strict pin keeps plain automatic: it treats a delayed
-            # start as drift.
-            $keepDelayedStart = -not (Test-DefenseClawTrustStrictAncestors)
-            Restore-DefenseClawServiceStartModeExact `
-                -Name $GuardianServiceName `
-                -StartMode 2 `
-                -DelayedAutoStart ($keepDelayedStart -and [bool]$priorServiceStates[$GuardianServiceName].delayed_auto_start)
-            if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
-                Set-DefenseClawServiceStartMode `
-                    -Name $Layout.BrokerServiceName `
-                    -StartMode 2
-            }
-            Set-DefenseClawServiceStartMode `
-                -Name $Layout.SensorHelperServiceName `
-                -StartMode 2
-            Restore-DefenseClawServiceStartModeExact `
-                -Name $GatewayServiceName `
-                -StartMode 2 `
-                -DelayedAutoStart ($keepDelayedStart -and [bool]$priorServiceStates[$GatewayServiceName].delayed_auto_start)
-            # Promote the (already-running) enumerator
-            # from demand-start to auto-start now that readiness has
-            # been proven. Without this, boot would leave the
-            # enumerator disabled and new user profiles would never
-            # get picked up.
-            Restore-DefenseClawServiceStartModeExact `
-                -Name $enumeratorServiceName `
-                -StartMode 2 `
-                -DelayedAutoStart ($keepDelayedStart -and [bool]$priorServiceStates[$enumeratorServiceName].delayed_auto_start)
+            Set-DefenseClawVerifiedServiceBootPolicy `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -EnumeratorServiceName $enumeratorServiceName
             Assert-DefenseClawEnterpriseDeployment `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
