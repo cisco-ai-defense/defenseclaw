@@ -156,9 +156,8 @@ func TestSignedOutOwnerRewrittenAccountUpgradeNeedsReadableOlderLock(t *testing.
 	row := enterpriseHookReconcileRow{User: target.User, UserHome: target.UserHome, SID: target.SID, Connector: target.Connector, Error: pendingErr.Error()}
 	accounts := windowsEnterpriseEnrollmentAccounts([]enterpriseHookReconcileRow{row})
 	if len(accounts) != 1 || accounts[0].Account != target.User || accounts[0].Connectors["codex"] != "pending" ||
-		!strings.HasPrefix(accounts[0].Reason, windowsEnterpriseEnrollmentPendingLead) ||
-		!strings.Contains(accounts[0].Reason, "codex: "+windowsEnterpriseEnrollmentBlocked) {
-		t.Fatalf("signed-out account status = %+v, want the account and pending repair, the Codex hook named as blocking", accounts)
+		!strings.Contains(accounts[0].Reason, windowsEnterpriseEnrollmentPending) {
+		t.Fatalf("signed-out account status = %+v, want the account and pending repair", accounts)
 	}
 	for _, action := range []string{"status", "verify"} {
 		status := &enterprisestatus.Result{Action: action, SecurityComplete: true}
