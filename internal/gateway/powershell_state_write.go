@@ -276,9 +276,11 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 		return false, false
 	}
 	if bind {
-		if bound, changed := psBindStaticValues(command, reading.home, budget); budget.over {
+		readings := psBindStaticValues(command, reading.home, budget)
+		if budget.over {
 			return true, true
-		} else if changed {
+		}
+		for _, bound := range readings {
 			if bounded, _ := reading.collect(bound, depth, false, seen, forms, budget); bounded {
 				return true, true
 			}

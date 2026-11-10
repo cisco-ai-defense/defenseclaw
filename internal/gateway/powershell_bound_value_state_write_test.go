@@ -24,6 +24,7 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 		resolved[value] = value
 	}
 	const state = `C:\Users\Alice\.defenseclaw\config.yaml`
+	const project = `C:\Users\Alice\project\notes.txt`
 	const envelope = "*** Begin Patch`n*** Update File: C:/Users/Alice/.defenseclaw/config.yaml`n@@`n-a`n+b`n*** End Patch"
 	api := &APIServer{}
 	pwsh := func(body string) string {
@@ -43,6 +44,26 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 		{"bound patch run by the codex binary", `$patch = "` + envelope + `"; & 'C:\dc\codex.exe' --codex-run-as-apply-patch $patch`, true},
 		{"bound patch run by apply_patch", `$patch = "` + envelope + `"; apply_patch $patch`, true},
 		{"bound patch in pwsh", pwsh(`$patch = "` + envelope + `"; & ''C:\dc\codex.exe'' --codex-run-as-apply-patch $patch`), true},
+		{"self assignment keeps the binding", `$p = '` + state + `'; $p = $p; [IO.File]::WriteAllText($p, 'x')`, true},
+		{"interpolated from a bound directory", `$d = 'C:\Users\Alice\.defenseclaw'; $p = "$d\config.yaml"; [IO.File]::WriteAllText($p, 'x')`, true},
+		{"dead branch rebind to an ordinary file", `$p = '` + state + `'; if ($false) { $p = '` + project + `' }; [IO.File]::WriteAllText($p, 'x')`, true},
+		{"live branch may rebind", `$p = '` + state + `'; if ($c) { $p = '` + project + `' }; [IO.File]::WriteAllText($p, 'x')`, true},
+		{"live branch may bind the state", `$p = '` + project + `'; if ($c) { $p = '` + state + `' }; [IO.File]::WriteAllText($p, 'x')`, true},
+		{"one else branch binds the state", `$p = '` + project + `'; if ($c) { $p = '` + state + `' } else { $p = '` + project + `' }; [IO.File]::WriteAllText($p, 'x')`, true},
+		{"always-true branch binds the state", `$p = '` + project + `'; if ($true) { $p = '` + state + `' } else { $p = '` + project + `' }; [IO.File]::WriteAllText($p, 'x')`, true},
+		{"loop binds the state after its write", `$p = '` + project + `'; foreach ($i in 1..2) { [IO.File]::WriteAllText($p, 'x'); $p = '` + state + `' }`, true},
+		{"script block binds the state", `$p = '` + project + `'; 1..2 | ForEach-Object { [IO.File]::WriteAllText($p, 'x'); $p = '` + state + `' }`, true},
+		{"command call in the condition", `$p = '` + project + `'; if (Test-Path $p) { $p = '` + state + `' }; [IO.File]::WriteAllText($p, 'x')`, true},
+		{"command call in the condition, both branches rebind", `$p = '` + state + `'; if (foo) { $p = '` + project + `' } else { $p = '` + project + `' }; [IO.File]::WriteAllText($p, 'x')`, false},
+		{"elseif chain, last branch binds the state", `$p = '` + project + `'; if ($a) { $p = '` + project + `' } elseif ($b) { $p = '` + state + `' } else { $p = '` + project + `' }; [IO.File]::WriteAllText($p, 'x')`, true},
+		{"multi-line if and else both rebind", "$p = '" + state + "'\nif ($c) {\n  $p = '" + project + "'\n}\nelse {\n  $p = '" + project + "'\n}\n[IO.File]::WriteAllText($p, 'x')", false},
+		{"dead branch binds the state", `$p = '` + project + `'; if ($false) { $p = '` + state + `' }; [IO.File]::WriteAllText($p, 'x')`, false},
+		{"write in a dead branch", `$p = '` + state + `'; if ($false) { [IO.File]::WriteAllText($p, 'x') }; [IO.File]::WriteAllText('` + project + `', 'x')`, false},
+		{"dead loop write", `$p = '` + state + `'; while ($false) { [IO.File]::WriteAllText($p, 'x') }`, false},
+		{"both branches rebind", `$p = '` + state + `'; if ($c) { $p = '` + project + `' } else { $p = '` + project + `' }; [IO.File]::WriteAllText($p, 'x')`, false},
+		{"always-true branch rebinds", `$p = '` + state + `'; if ($true) { $p = '` + project + `' }; [IO.File]::WriteAllText($p, 'x')`, false},
+		{"patch text printed, not run", `$patch = "` + envelope + `"; Write-Output '--codex-run-as-apply-patch' $patch`, false},
+		{"patch text echoed with the flag", `$patch = "` + envelope + `"; echo --codex-run-as-apply-patch $patch`, false},
 		{"bound read", `$p = '` + state + `'; [IO.File]::ReadAllText($p)`, false},
 		{"bound read in pwsh", pwsh(`$p = ''` + state + `''; if (Test-Path -LiteralPath $p) { Get-Content -LiteralPath $p -Raw }`), false},
 		{"bound project write", `$p = 'C:\Users\Alice\project\notes.txt'; [IO.File]::WriteAllText($p, 'x')`, false},
