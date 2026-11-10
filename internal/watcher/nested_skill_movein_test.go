@@ -195,9 +195,13 @@ func TestWatcherLargeMovedCategoryReaderStall(t *testing.T) {
 	if err := os.Rename(staged, moved); err != nil {
 		t.Fatal(err)
 	}
+	// The traversal registers one watch per directory of a 32,768-directory
+	// category; how long that takes is the runner's speed, not a property of
+	// the watcher. Wait for the event and fail only at the test binary's own
+	// deadline.
 	select {
 	case <-watchProgress:
-	case <-time.After(5 * time.Second):
+	case <-testDeadlineGuard(t):
 		t.Fatal("large moved category watch did not reach 1,024 directories")
 	}
 	// Keep the traversal worker parked at directory 1,024. Reading a second
@@ -228,7 +232,10 @@ func TestWatcherLargeMovedCategoryReaderStall(t *testing.T) {
 	released = true
 	wantBlocked := filepath.Join(moved, "zz-blocked-skill")
 	gotBlocked, gotAllowed := false, false
-	deadline := time.After(30 * time.Second)
+	// Discovery of the moved category walks all 32,768 directories (twice, once
+	// to the bounded limit and once for the full scan); wait for the two
+	// admissions themselves, not for a wall-clock estimate of that walk.
+	deadline := testDeadlineGuard(t)
 	for !gotBlocked || !gotAllowed {
 		select {
 		case result := <-admitted:
@@ -372,6 +379,19 @@ func TestWatcherExpandsMovedNestedSkillCategory(t *testing.T) {
 			}
 		})
 	}
+}
+
+// testDeadlineGuard fires when nine tenths of the time left before the test
+// binary's own -timeout have passed, so a watcher that never produces the
+// event a test waits for fails with the test's message and not with the
+// binary's panic. It never fires when the binary has no deadline.
+func testDeadlineGuard(t *testing.T) <-chan time.Time {
+	t.Helper()
+	deadline, ok := t.Deadline()
+	if !ok {
+		return nil
+	}
+	return time.After(time.Until(deadline) / 10 * 9)
 }
 
 func waitForSkillWatchStart(t *testing.T, runtime *watcherTestRuntime) {
