@@ -186,7 +186,7 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 		// A built-in pack folder that is not there: name the property to fix.
 		if advice := cfg.WindowsBuiltinRulePackAdvice(s.ref.Name); advice != "" && strings.TrimSpace(cfg.PolicyDir) != "" {
 			if _, isCustom := cfg.UsableCustomRulePack(s.ref.Name); !isCustom {
-				err = fmt.Errorf("%w; policy_dir is %q and it has no guardrail\\%s folder: %s", err, cfg.PolicyDir, s.ref.Name, advice)
+				err = fmt.Errorf("%w; policy_dir is %s and it has no guardrail\\%s folder: %s", err, cfg.PolicyDir, s.ref.Name, advice)
 			}
 		}
 	}

@@ -60,6 +60,13 @@ func TestBuiltinRulePackRefusalNamesTheProperty(t *testing.T) {
 		t.Errorf("windows policy_dir without the pack = %v, want the property named", err)
 	}
 
+	// The default pack is embedded: it never gets the advice, with or without a folder.
+	windows.Guardrail.RulePack = "default"
+	if err := load(windows); err != nil && strings.Contains(err.Error(), "ships only the default rule pack") {
+		t.Errorf("default got the strict advice: %v", err)
+	}
+	windows.Guardrail.RulePack = "strict"
+
 	for name, cfg := range map[string]*config.Config{
 		"secure client": managedConfig("secure_client", `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`),
 		"linux layout":  managedConfig("standalone", "/etc/defenseclaw/config.yaml"),
