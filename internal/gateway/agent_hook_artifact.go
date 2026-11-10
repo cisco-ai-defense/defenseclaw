@@ -398,9 +398,8 @@ func promotedArtifactCandidateAlone(
 		return actionfacts.Facts{}, false
 	}
 	command := facts.Commands[index]
-	if command.ParentCommandID != 0 || len(command.Argv) == 0 ||
+	if !promotedArtifactOnlyShellWrapped(facts, command) || len(command.Argv) == 0 ||
 		len(command.Argv) != len(command.Arguments) ||
-		len(command.Wrappers) != 0 ||
 		slices.ContainsFunc(command.Arguments, func(argument actionfacts.ArgumentFact) bool {
 			return argument.Expands
 		}) {
@@ -440,6 +439,32 @@ func promotedArtifactCandidateAlone(
 		input.Argv = append([]string(nil), command.Argv...)
 	}
 	return actionfacts.Analyze(input), true
+}
+
+// promotedArtifactOnlyShellWrapped reports whether command is a top-level
+// command, or one that runs only inside shell command strings (`bash -c
+// ". ./x"`, `sh -c "bash -c ..."`) and nothing else: every command above it
+// is such a shell, so the command alone has the verdict it has typed at the
+// top level. Any other launcher (sudo, env, find -exec, a pipeline stage)
+// keeps the match detection-only.
+func promotedArtifactOnlyShellWrapped(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	if command.ParentCommandID == 0 {
+		return len(command.Wrappers) == 0
+	}
+	depth := 0
+	for parent := command.ParentCommandID; parent != 0; depth++ {
+		index := slices.IndexFunc(facts.Commands, func(candidate actionfacts.CommandFact) bool {
+			return candidate.ID == parent
+		})
+		if index < 0 || depth >= len(command.Wrappers) {
+			return false
+		}
+		parent = facts.Commands[index].ParentCommandID
+	}
+	return depth == len(command.Wrappers) &&
+		!slices.ContainsFunc(command.Wrappers, func(wrapper actionfacts.WrapperFact) bool {
+			return !actionfacts.IsShellCommandStringWrapper(wrapper)
+		})
 }
 
 var promotedArtifactCompoundIssues = map[actionfacts.IssueCode]bool{
