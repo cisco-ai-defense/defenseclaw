@@ -16371,6 +16371,11 @@ function Repair-DefenseClawUnreadableDeploymentMetadata {
         -Sources $Sources `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
+    # rel-1-0-6:GAP-0994 (delta-5 F4): the same refusal as the changed-record
+    # path, before the record is written: a rebuilt record that cannot name the
+    # gateway, the hook and the sensor helper (an installed file that is stale)
+    # is refused by name with the services as they were.
+    Assert-DefenseClawRebuiltRecordCoversArtifacts -Layout $Layout -Value $rebuilt
     Write-DefenseClawJsonAtomic -Path $Layout.MetadataPath -Kind AdminFile -Value $rebuilt
     Microsoft.PowerShell.Utility\Write-Warning -Message (
         "DefenseClaw enterprise repair: rebuilding the deployment metadata: $unreadable"
