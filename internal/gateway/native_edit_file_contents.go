@@ -37,10 +37,12 @@ func readNativeEditFileOn(goos, name string) (string, bool) {
 // of that document is, and not on the pieces it is cut into. A file that does
 // not exist reads as empty text. A file that cannot be read (permission, too
 // large, not a regular file or not text) is left out, and its edit is judged
-// on the text the call carries. A gateway whose action runs elsewhere, or on
-// Windows where the file is a POSIX path it cannot place, reads nothing.
+// on the text the call carries. A gateway whose action runs elsewhere reads
+// nothing, and on Windows the default reader reads nothing (the file is a POSIX
+// path it cannot place), so the Windows rule lives behind the readNativeEditFile
+// seam and not ahead of it.
 func withNativeEditFileContents(request trustedActionRequest) map[string]string {
-	if request.SkipLocalFilesystemResolution || runtime.GOOS == "windows" {
+	if request.SkipLocalFilesystemResolution {
 		return nil
 	}
 	var contents map[string]string
