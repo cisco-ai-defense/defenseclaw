@@ -370,6 +370,7 @@ func dispatchTrustedAction(
 	request.Input.StraightLineFunctions = !request.StrictPolicy
 	request.Input.ClientResolvedTargets = withLocalWriteAnswers(
 		request, clientResolvedPathTargets(request.ResolvedWriteTargets),
+		actionfacts.NativeFileWriteTargets(request.Input),
 	)
 	request.Input.ClientWorkingDirectories = clientWorkingDirectories(request.ResolvedWriteTargets, request.Input.CWD)
 	// Only the strict tier follows code the shell may never run into a loop
@@ -408,7 +409,7 @@ func dispatchTrustedAction(
 		parent = context.Background()
 	}
 	if !request.simpleCommandPass {
-		facts = actionfacts.Analyze(request.Input)
+		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
 		if trustedCallOverStatementBudgetWith(request.Input, facts, request.simpleMemo.commands(request.Input, facts)) {
 			// Over the statement budget the call blocks with
@@ -488,7 +489,7 @@ func dispatchTrustedAction(
 	}
 
 	if !analyzed {
-		facts = actionfacts.Analyze(request.Input)
+		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)

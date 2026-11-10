@@ -38,6 +38,12 @@ const Header = "X-DefenseClaw-Resolved-Writes"
 // prevents it from validating that directory locally.
 const CWDKey = "\x00cwd"
 
+// CallWorkdirKey carries the workdir of a Codex shell call, as the model gave
+// it, which the hook client read from the session rollout (the Codex hook
+// sends only the command and the session folder). A gateway that cannot read
+// the rollout (managed) places the call there, as a per-user gateway does.
+const CallWorkdirKey = "\x00call-workdir"
+
 // ProjectSkillRootUnverifiedPrefix carries an adverse project-root finding
 // made by the hook in the caller's filesystem view. It can only add a
 // refusal; its absence cannot authorize a skill.
@@ -1708,24 +1714,25 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	cwd = PlaceDirectory("", cwd)
 	var toolArgs map[string]json.RawMessage
 	_ = json.Unmarshal(args, &toolArgs)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return incompleteEvidence(cwd)
+	}
 	// Codex exec_command runs in tool_input.workdir, which can differ from
 	// the session cwd carried by the hook event. Resolve relative operands
 	// there so client evidence and the gateway proof name the same files.
 	// Codex cleans the workdir as text (WorkdirCleanedByAgent), so a parent
-	// step after a link is not followed here either.
-	if tool == "exec_command" {
-		if raw, present := toolArgs["workdir"]; present {
-			var workdir string
-			if json.Unmarshal(raw, &workdir) != nil || workdir == "" ||
-				strings.HasPrefix(workdir, "~") || strings.IndexByte(workdir, 0) >= 0 {
-				return incompleteEvidence(cwd)
-			}
-			cwd = CleanedDirectory(cwd, workdir)
-		}
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
+	// step after a link is not followed here either. The Codex hook leaves
+	// the workdir out of tool_input: this client, which reads the home of the
+	// user, takes it from the call in the session rollout, so a gateway that
+	// cannot read the home (managed) judges the call in the folder it runs
+	// in (GAP-0991).
+	var callWorkdir string
+	if workdir, present, ok := codexCallWorkdir(connector, tool, toolArgs, envelope, home); !ok {
 		return incompleteEvidence(cwd)
+	} else if present {
+		callWorkdir = workdir
+		cwd = CleanedDirectory(cwd, workdir)
 	}
 	if len(args) == 0 {
 		return incompleteEvidence(cwd)
@@ -2323,12 +2330,22 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
 			continue
 		}
-		path := candidate.Resolved
+		path, rawStepUp := candidate.Resolved, ""
 		if path == "" {
 			path = candidate.Normalized
 		}
 		if raw, ok := RawDotDotOperand(candidate.Value, cwd); ok {
 			path = raw
+		} else if pathFactIsNativeWrite(tool, candidate, facts.Commands) &&
+			!strings.ContainsAny(candidate.Value, "*?[]$\x60~") {
+			// A write of a file tool or an apply_patch header that steps up
+			// a directory is listed by the raw spelling as well as by the
+			// clean one: the links before the step (the working directory of
+			// the call is one) are walked as the operating system walks
+			// them, and the gateway finds the answer by the same key.
+			if raw, steps := actionfacts.StepUpSpelling(candidate.Value, cwd); steps {
+				rawStepUp = raw
+			}
 		}
 		if value := filepath.ToSlash(candidate.Value); value == ".." || strings.HasPrefix(value, "../") {
 			dotDotOperands = append(dotDotOperands, candidate.Value)
@@ -2337,6 +2354,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			continue
 		}
 		add(path, false, false)
+		if rawStepUp != "" {
+			add(rawStepUp, false, false)
+		}
 	}
 	// A delete removes the final name, so only its directory is followed.
 	// Behind ProtectHome, PrivateTmp and PrivateDevices a managed gateway
@@ -2373,7 +2393,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	}
 	// An apply_patch edit names its files in the patch envelope, not in a
 	// redirect. Unknown targets make the map incomplete.
-	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
+	patchTargets, patchKnown := ApplyPatchClientTargets(tool, args, "", cwd, home)
 	if hermesV4A {
 		// The V4A headers, read as Hermes reads them, are the whole target
 		// list; the apply_patch envelope reading does not apply.
@@ -2494,6 +2514,16 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			targets[LinksStableKey] = "1"
 			size += entry
 		}
+	}
+	if callWorkdir != "" {
+		// The folder the call runs in, as the model gave it: a gateway that
+		// cannot read the rollout judges the call there (GAP-0991).
+		entry := len(jsonString(CallWorkdirKey)) + 1 + len(jsonString(callWorkdir)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			return incompleteEvidence(cwd)
+		}
+		targets[CallWorkdirKey] = callWorkdir
+		size += entry
 	}
 	identity := strings.Join(identities, "\x00")
 	// A script body this call could not read (the call wait for a network
@@ -3108,6 +3138,22 @@ func RawDotDotOperand(value, cwd string) (string, bool) {
 		return "", false
 	}
 	return OperandPath(value, cwd), true
+}
+
+// pathFactIsNativeWrite reports whether a path fact is the target of a write
+// that a file tool or an apply_patch command makes itself: every path of a
+// typed file-tool call, and a path of an apply_patch command. No other
+// command is part of the class.
+func pathFactIsNativeWrite(tool string, candidate actionfacts.PathFact, commands []actionfacts.CommandFact) bool {
+	if actionfacts.PathTool(tool) {
+		return true
+	}
+	for _, command := range commands {
+		if command.ID == candidate.CommandID {
+			return command.Executable == "apply_patch"
+		}
+	}
+	return false
 }
 
 func pathFactIsRedirect(candidate actionfacts.PathFact, commands []actionfacts.CommandFact) bool {

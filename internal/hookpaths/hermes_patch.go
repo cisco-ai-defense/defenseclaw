@@ -92,7 +92,7 @@ func hermesV4APatchTargets(args json.RawMessage, cwd, home string) (paths []stri
 		if !hermesargs.PlainPath(target.Path) {
 			return nil, true, false
 		}
-		placed, known := patchTargetPaths(target.Path, cwd, home, true)
+		placed, known := patchTargetPaths(target.Path, cwd, home, patchResolved)
 		if !known {
 			return nil, true, false
 		}
