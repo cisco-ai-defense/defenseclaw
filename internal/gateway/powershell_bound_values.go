@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const (
@@ -497,7 +499,7 @@ func (b *psBinder) run(i int, st psBindings, inBlock bool) (int, psBindings) {
 				break
 			}
 			if value, ok := lookup(name); ok {
-				b.put([]rune("'" + strings.ReplaceAll(value, "'", "''") + "'"))
+				b.put([]rune(managed.PowerShellLiteral(value)))
 				i = end
 				b.changed = true
 				break
@@ -730,7 +732,7 @@ func (b *psBinder) assignedValues(eq int, st psBindings) (values []string, end i
 	case psSingleQuote(r[start]):
 		literalEnd = b.scan.singleQuoted(start)
 		inner := string(r[start+1 : max(literalEnd-1, start+1)])
-		values = []string{strings.NewReplacer("''", "'", "\u2018\u2018", "'", "\u2019\u2019", "'").Replace(inner)}
+		values = []string{managed.PowerShellLiteralValue(inner)}
 	case psDoubleQuote(r[start]):
 		literalEnd = b.scan.doubleQuoted(start)
 		var expanded bool
@@ -927,7 +929,7 @@ func psPatchRunTargets(statement, cwd string, budget *psBudget) []string {
 			if cwd != "" && !psAbsolutePath(path) {
 				path = strings.TrimRight(cwd, `\/`) + `\` + path
 			}
-			targets = append(targets, psSingleQuoted(path))
+			targets = append(targets, managed.PowerShellLiteral(path))
 			if len(targets) >= maxTargets {
 				return targets
 			}
@@ -1395,9 +1397,4 @@ func psExecutableName(word string) string {
 // psAbsolutePath reports a drive, UNC or rooted path.
 func psAbsolutePath(path string) bool {
 	return len(path) >= 2 && path[1] == ':' || strings.HasPrefix(path, `\`) || strings.HasPrefix(path, "/")
-}
-
-// psSingleQuoted is text as a single-quoted PowerShell literal.
-func psSingleQuoted(text string) string {
-	return "'" + strings.ReplaceAll(text, "'", "''") + "'"
 }
