@@ -1084,6 +1084,12 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		w.fallback.out, w.fallback.err, w.fallback.code = w.visibleOutage()
 	}
 	w.fired = true
+	// Whatever of the prepared failure log (the ordinary log, the marker) the
+	// record of this answer did not take is closed when the answer is done,
+	// as Run closes it for a call that was answered in time. A descriptor
+	// left open would stop the account folder of a simulated exit from being
+	// removed on Windows.
+	defer w.failureLog.close()
 	_, _ = w.stderr.Write(w.fallback.err)
 	_, _ = w.stdout.Write(w.fallback.out)
 	// The token and local record describe this same committed answer. Send
@@ -1418,6 +1424,11 @@ func (w *answerWatchdog) answerLate() (code int, ok bool) {
 	}
 	// The watchdog's answer: watch finds the call finished and stays quiet.
 	w.fired, w.finished = true, true
+	// Whatever of the prepared failure log the record of this answer does not
+	// take is closed with it, as watch does for the answer it gives: watch
+	// finds the call finished and returns before its own close, and an open
+	// still in flight closes the file it opens (GAP-1022).
+	defer w.failureLog.close()
 	_, _ = w.stderr.Write(w.fallback.err)
 	_, _ = w.stdout.Write(w.fallback.out)
 	logged := w.failureLogDone

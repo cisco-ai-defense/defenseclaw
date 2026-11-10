@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"mvdan.cc/sh/v3/syntax"
@@ -41,7 +42,28 @@ var patchTargetDirectives = []string{
 // caller must then treat the protected file as a possible target. There is
 // no bound on the number of targets.
 func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, home string) (targets []string, ok bool) {
-	return applyPatchTargets(tool, args, command, cwd, home, true)
+	return applyPatchTargets(tool, args, command, cwd, home, patchResolved)
+}
+
+// patchResolution is how a patch directive path is placed: lexically, with the
+// links followed (a link the user cannot read is unknown), or with the links
+// followed and a link into a directory closed to the user judged by its link
+// text.
+type patchResolution int
+
+const (
+	patchPlaced patchResolution = iota
+	patchResolved
+	patchResolvedOrClosed
+)
+
+// ApplyPatchClientTargets lists the same targets as ApplyPatchWriteTargets for
+// the hook client, which describes each of them as the user: a directive that
+// goes through a link into a directory the user cannot open is a target (the
+// client reports its empty answer and link text), where the gateway's own
+// reading of it is unknown.
+func ApplyPatchClientTargets(tool string, args json.RawMessage, command, cwd, home string) (targets []string, ok bool) {
+	return applyPatchTargets(tool, args, command, cwd, home, patchResolvedOrClosed)
 }
 
 // ApplyPatchLexicalTargets lists the same targets as ApplyPatchWriteTargets
@@ -53,7 +75,7 @@ func ApplyPatchLexicalTargets(tool string, args json.RawMessage, cwd, home strin
 	if !isApplyPatchToolName(tool) {
 		return nil, false
 	}
-	return applyPatchTargets(tool, args, "", cwd, home, false)
+	return applyPatchTargets(tool, args, "", cwd, home, patchPlaced)
 }
 
 // ApplyPatchNamesProtectedTarget is the protected-target check of an
@@ -81,7 +103,7 @@ func ApplyPatchNamesProtectedTarget(tool string, args json.RawMessage, cwd, home
 		return false
 	}
 	names := func(path string) bool {
-		paths, _ := patchTargetPaths(path, cwd, home, false)
+		paths, _ := patchTargetPaths(path, cwd, home, patchPlaced)
 		for _, target := range paths {
 			if protected(target) || protected(resolved[OperandPath(target, cwd)]) {
 				return true
@@ -114,7 +136,7 @@ func ApplyPatchNamesProtectedTarget(tool string, args json.RawMessage, cwd, home
 // traverse the user's home binds them to the user-side hook's evidence
 // (GAP-1106).
 func ApplyPatchLexicalCommandTargets(tool string, args json.RawMessage, command, cwd, home string) ([]string, bool) {
-	return applyPatchTargets(tool, args, command, cwd, home, false)
+	return applyPatchTargets(tool, args, command, cwd, home, patchPlaced)
 }
 
 // PatchCallNamesProtectedTarget is the protected-target check of a call that
@@ -197,12 +219,10 @@ func jsonStringRaw(value string) json.RawMessage {
 	return encoded
 }
 
-func applyPatchTargets(tool string, args json.RawMessage, command, cwd, home string, resolve bool) (targets []string, ok bool) {
-	var fields map[string]json.RawMessage
-	if len(args) != 0 {
-		_ = json.Unmarshal(args, &fields)
-	}
-	patchTool := isApplyPatchToolName(tool)
+// patchCallTexts lists the texts of a call that may hold an apply_patch
+// envelope: the shell command and the argument fields that carry a command or
+// a patch.
+func patchCallTexts(patchTool bool, fields map[string]json.RawMessage, command string) []string {
 	texts := []string{command}
 	keys := []string{"command", "cmd"}
 	if patchTool {
@@ -211,6 +231,57 @@ func applyPatchTargets(tool string, args json.RawMessage, command, cwd, home str
 	for _, key := range keys {
 		texts = append(texts, patchTextField(fields[key]))
 	}
+	return texts
+}
+
+// ApplyPatchCommandHeaderNames lists, as the envelopes write them, the file
+// names of the apply_patch headers that a shell command holds in its own text
+// (a here-document or a quoted envelope), wherever the text holds them: at the
+// top level or in the body of a function. It is the list of names that
+// ApplyPatchLexicalCommandTargets places, before they are placed, so a
+// gateway that reads the answers of the hook client by the raw spelling of a
+// name (actionfacts.StepUpSpelling) can find the answer of a header the shell
+// parse does not project (a function body). A name in a home or variable form
+// is not listed: it has no raw spelling to walk.
+func ApplyPatchCommandHeaderNames(command string) []string {
+	if command == "" {
+		return nil
+	}
+	text := command
+	known, calls, _ := patchShellInvocationsKnown(text)
+	if !known {
+		if body, ok := patchShellCommandBody(text); ok {
+			text = body
+			known, calls, _ = patchShellInvocationsKnown(text)
+		}
+	}
+	if !known || calls == 0 {
+		return nil
+	}
+	paths, _, parsed := patchEnvelopePaths(text)
+	if !parsed {
+		return nil
+	}
+	var names []string
+	for _, path := range paths {
+		if len(path) >= 2 && (path[0] == 0x22 || path[0] == 0x27) && path[len(path)-1] == path[0] {
+			path = path[1 : len(path)-1]
+		}
+		if _, homeForm := trimHomePrefix(path); homeForm || strings.ContainsAny(path, "$`") {
+			continue
+		}
+		names = append(names, path)
+	}
+	return names
+}
+
+func applyPatchTargets(tool string, args json.RawMessage, command, cwd, home string, resolve patchResolution) (targets []string, ok bool) {
+	var fields map[string]json.RawMessage
+	if len(args) != 0 {
+		_ = json.Unmarshal(args, &fields)
+	}
+	patchTool := isApplyPatchToolName(tool)
+	texts := patchCallTexts(patchTool, fields, command)
 	found := false
 	for _, text := range texts {
 		if text == "" {
@@ -722,7 +793,7 @@ func invokesApplyPatch(text string) bool {
 // patchTargetPaths makes a directive path absolute. apply_patch does not
 // expand ~ or variables, but a shell or PowerShell wrapper may, so a home
 // form yields both the home path and the literal path under cwd.
-func patchTargetPaths(path, cwd, home string, resolve bool) ([]string, bool) {
+func patchTargetPaths(path, cwd, home string, resolve patchResolution) ([]string, bool) {
 	if len(path) >= 2 && (path[0] == '"' || path[0] == '\'') && path[len(path)-1] == path[0] {
 		path = path[1 : len(path)-1]
 	}
@@ -730,7 +801,7 @@ func patchTargetPaths(path, cwd, home string, resolve bool) ([]string, bool) {
 		return nil, false
 	}
 	var paths []string
-	literal := path
+	literal, name := path, path
 	if rest, homeForm := trimHomePrefix(path); homeForm {
 		if !filepath.IsAbs(home) {
 			return nil, false
@@ -751,9 +822,33 @@ func patchTargetPaths(path, cwd, home string, resolve bool) ([]string, bool) {
 		}
 	}
 	paths = append(paths, filepath.Clean(literal))
-	if resolve {
+	if resolve == patchResolvedOrClosed && runtime.GOOS != "windows" {
+		// The hook client describes the name of a header that steps up a
+		// directory by its raw spelling too: the links before the step, the
+		// working directory among them, decide the file the patch writes,
+		// and the gateway reads the answer by the same spelling
+		// (actionfacts.StepUpSpelling). A name the client cannot walk keeps
+		// only the clean one.
+		if raw, steps := actionfacts.StepUpSpelling(name, cwd); steps {
+			if _, known := ResolvePatchWriteTarget(raw); known {
+				paths = append(paths, raw)
+			}
+		}
+	}
+	if resolve != patchPlaced {
 		for _, candidate := range paths {
-			if _, known := ResolvePatchWriteTarget(candidate); !known {
+			if _, known := ResolvePatchWriteTarget(candidate); known {
+				continue
+			}
+			// A directory on the way of a link is closed to the user, so the
+			// user cannot write through it either: the file the link text
+			// leads to is the write the hook client reports (with the
+			// closed-directory fact), as for a file-tool write. A name that
+			// cannot be read as text stays unknown.
+			if resolve != patchResolvedOrClosed {
+				return nil, false
+			}
+			if text, reached := linkTextWritePath(candidate); !reached || strings.ContainsAny(text, "\r\n") {
 				return nil, false
 			}
 		}

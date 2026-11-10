@@ -550,3 +550,21 @@ func nativeStringField(object map[string]any, keys []string) (string, bool) {
 	}
 	return value, found == 1
 }
+
+// NativeCallWriteTargets lists, as written, the files one call writes through
+// a patch or file tool it runs itself: the files of a native file-tool call
+// (NativeFileWriteTargets) and the files of the literal apply_patch envelope
+// of a shell here-document, the form in which Codex sends its patch tool
+// (nativeCallWrites). Such a call runs no command that could open a closed
+// directory before it writes, so the permissions it meets at the hook are the
+// ones the write meets.
+func NativeCallWriteTargets(input Input, facts Facts) []string {
+	writes, _ := nativeCallWrites(input, facts)
+	targets := make([]string, 0, len(writes))
+	for _, write := range writes {
+		if write.target != "" {
+			targets = append(targets, write.target)
+		}
+	}
+	return targets
+}

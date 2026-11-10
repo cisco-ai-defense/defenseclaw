@@ -44,13 +44,31 @@ func projectPOSIXUnrestrictedSudoersGrantWrites(
 	}
 	writes, _ := nativeCallWrites(input, facts)
 	for _, write := range writes {
-		if (sudoersWriteTargetInCWD(write.target, input.CWD) ||
-			clientResolvedSudoersTarget(write.target, input.CWD, input.ClientWorkingDirectories, input.ClientResolvedTargets)) &&
+		if sudoersWriteTarget(input, write.target) &&
 			addsUnrestrictedSudoersGrant(write.added, write.replaced) {
 			return []POSIXUnrestrictedSudoersGrantWriteFact{{}}
 		}
 	}
 	return nil
+}
+
+// sudoersWriteTarget reports whether a native write reaches a sudoers file. A
+// name that steps up a directory is the file the client answered with when it
+// gave one: the lexical clean of such a name is no file the write reaches, so a
+// file reached through a link is judged by its own place in both directions
+// (a link to a sudoers file is that file, and an ordinary file whose lexical
+// name cleans to a sudoers path is not).
+func sudoersWriteTarget(input Input, target string) bool {
+	if answers := nativeDotDotAnswers(input, target); len(answers) != 0 {
+		for _, answer := range answers {
+			if exactSudoersWriteTarget(answer) {
+				return true
+			}
+		}
+		return false
+	}
+	return sudoersWriteTargetInCWD(target, input.CWD) ||
+		clientResolvedSudoersTarget(target, input.CWD, input.ClientWorkingDirectories, input.ClientResolvedTargets)
 }
 
 // resolvesToSudoersTarget is the cheap test that keeps an ordinary call from
@@ -89,7 +107,7 @@ func clientResolvedTargetWhere(target, cwd string, clientDirs []string, resolved
 		return "", false
 	}
 	for _, dir := range append([]string{cwd}, clientDirs...) {
-		for _, key := range []string{OperandPath(target, dir), posixOperandPath(target, dir)} {
+		for _, key := range []string{OperandPath(target, dir), posixOperandPath(target, dir), clientOperandKey(target, dir)} {
 			if physical := resolved[key]; accept(physical) {
 				return physical, true
 			}
