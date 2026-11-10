@@ -142,7 +142,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseClawCodexWriterBusyRefusal', 'Get-DefenseClawOptionalLayoutValue', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Test-DefenseClawRollbackHeldMessage', 'New-DefenseClawCodexWriterUnsettledHeldMessage', 'Test-DefenseClawGuardianProofDeferredByCodexWriter', 'Test-DefenseClawCodexWriterLockNamed', 'Get-DefenseClawRollbackCodexWriterHolds', 'Restore-DefenseClawRollbackCodexWriterHolds', 'Get-DefenseClawCodexRequirementsGuardProblem', 'Assert-DefenseClawCodexRequirementsPublishable', 'Clear-DefenseClawRollbackDeferredHolds', 'Assert-DefenseClawRestoredTransactionReadyForActivation', 'Test-DefenseClawRollbackCoverageDeferred', 'Get-DefenseClawHeldMessagePath', 'Add-DefenseClawRollbackDeferredHold', 'Assert-DefenseClawRollbackHoldsResolved')) {
+foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseClawCodexWriterBusyRefusal', 'Get-DefenseClawOptionalLayoutValue', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Test-DefenseClawRollbackHeldMessage', 'New-DefenseClawCodexWriterUnsettledHeldMessage', 'Test-DefenseClawGuardianProofDeferredByCodexWriter', 'Test-DefenseClawCodexWriterLockNamed', 'Get-DefenseClawRollbackCodexWriterHolds', 'Restore-DefenseClawRollbackCodexWriterHolds', 'Get-DefenseClawCodexRequirementsGuardProblem', 'Assert-DefenseClawCodexRequirementsPublishable', 'Clear-DefenseClawRollbackDeferredHolds', 'Assert-DefenseClawRestoredTransactionReadyForActivation', 'Invoke-DefenseClawManagedHooksTeardownCommand', 'ConvertTo-DefenseClawBoundedDiagnostic', 'Test-DefenseClawRollbackCoverageDeferred', 'Get-DefenseClawHeldMessagePath', 'Add-DefenseClawRollbackDeferredHold', 'Assert-DefenseClawRollbackHoldsResolved')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -153,6 +153,8 @@ foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseCl
 $script:DefenseClawRollbackDeferredHolds = [Collections.Generic.List[string]]::new()
 $script:DefenseClawRollbackCoverageDeferred = $false
 $script:DefenseClawRollbackDeferBusyWriter = $false
+$script:DefenseClawTeardownRollbackDeferBusy = $false
+$script:DefenseClawTeardownRollbackDeferred = $false
 $script:events = [Collections.Generic.List[string]]::new()
 function Test-DefenseClawStandaloneProfile { [bool]$Standalone }
 function Write-DefenseClawResilienceEvent { param([string]$Marker, [hashtable]$Fields) $script:events.Add($Marker + ': ' + $Fields['reason']) }
@@ -163,7 +165,7 @@ $state = Join-Path $Scratch '.defenseclaw-managed-hooks.state'
 $lock = Join-Path $Scratch '.defenseclaw-managed-hooks.writer.lock'
 function Set-Counter([int]$Size) { [IO.File]::WriteAllBytes($lock, [byte[]]::new($Size)) }
 $policy = Join-Path $Scratch 'requirements.toml'
-$layout = @{ CodexManagedHooksStatePath = $state; CodexMachinePolicyPath = $policy }
+$layout = @{ CodexManagedHooksStatePath = $state; CodexMachinePolicyPath = $policy; CodexTargetEnabled = $true; ManagedHookContractCleanupReceiptPath = ''; ManifestPath = 'C:\\m'; ManagedHooksTeardownJournalPath = 'C:\\j' }
 $out = [ordered]@{}
 switch ($Case) {
     'odd' {
@@ -199,6 +201,40 @@ switch ($Case) {
         $out.messages.missing = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $layout
         [IO.File]::WriteAllText($policy, "[[hooks.SessionStart]]`ncommand = 'defenseclaw-hook.exe'`n")
         $out.messages.guarded = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $layout
+    }
+    'codex-off' {
+        # A deployment without a Codex target never says Codex is unguarded.
+        Set-Counter 19
+        $layoutOff = @{ CodexManagedHooksStatePath = $state; CodexMachinePolicyPath = $policy; CodexTargetEnabled = $false }
+        [IO.File]::WriteAllBytes($policy, [byte[]]@())
+        $out.message = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $layoutOff
+        $layoutMissing = @{ CodexManagedHooksStatePath = $state; CodexMachinePolicyPath = $policy }
+        $out.messageMissing = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $layoutMissing
+        [IO.File]::WriteAllBytes($policy, [byte[]]@())
+        $out.messageOn = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $layout
+    }
+    'teardown' {
+        # The managed-hook teardown rollback of a transaction meets a Codex writer that holds the lock.
+        Set-Counter 19
+        $script:probe = $null
+        function Assert-DefenseClawAdministrator { }
+        function Invoke-DefenseClawGatewayCommand { param([Parameter(ValueFromRemainingArguments)]$Rest) $script:probe }
+        $busyJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"timed out waiting 10s for Codex machine policy lock","error_code":"writer_lock_busy","results":[]}'
+        $oldJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"timed out waiting 10s for Codex machine policy lock","results":[]}'
+        $otherJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"Codex machine policy is not clean after teardown rollback","results":[]}'
+        function Try-Rollback([string]$Json, [bool]$Flag) {
+            $script:probe = [pscustomobject]@{ exit_code = 1; output = @($Json) }
+            $script:DefenseClawTeardownRollbackDeferred = $false
+            $script:DefenseClawTeardownRollbackDeferBusy = $Flag
+            Clear-DefenseClawRollbackDeferredHolds
+            $threw = ''; $returned = 'none'
+            try { $returned = [string]@(Invoke-DefenseClawManagedHooksTeardownCommand -Layout $layout -GatewayServiceName gw -GuardianServiceName gd -Action rollback).Count } catch { $threw = $_.Exception.Message }
+            [ordered]@{ threw = $threw; returned = $returned; deferred = [bool]$script:DefenseClawTeardownRollbackDeferred; holds = @($script:DefenseClawRollbackDeferredHolds) }
+        }
+        $out.byCode = Try-Rollback $busyJson $true
+        $out.byText = Try-Rollback $oldJson $true
+        $out.flagOff = Try-Rollback $busyJson $false
+        $out.other = Try-Rollback $otherJson $true
     }
     'even' {
         $script:Named = $false
@@ -363,6 +399,47 @@ def test_secure_client_has_no_writer_lock_and_defers_nothing(tmp_path: Path) -> 
     assert result["deferred"] is False, result
     assert result["holds"] == [], result
     assert result["coverage"] is False, result
+
+
+def test_the_teardown_rollback_defers_a_busy_codex_writer_only_where_the_rollback_asks(tmp_path: Path) -> None:
+    # GAP-0999 review round 2: the hidden managed-hook teardown rollback runs BEFORE the readiness
+    # assertion and meets the writer lock first (restoreWindowsCodexManagedHooks under the lock).
+    result = _run(tmp_path, "teardown")
+    for key in ("byCode", "byText"):
+        got = result[key]
+        assert got["threw"] == "" and got["deferred"] is True, (key, result)
+        (hold,) = got["holds"]
+        assert hold.startswith("codex_state_unsettled: ") and "the rollback left that state as it is" in hold, (key, result)
+        assert "The managed-hook teardown of the uninstall was not rolled back" in hold, (key, result)
+        assert "run Setup /repair" in hold and "FORCE" not in hold, (key, result)
+    # Not asked for (a forward step, Secure Client) or not a busy writer: the failure stands.
+    for key in ("flagOff", "other"):
+        got = result[key]
+        assert got["threw"].startswith("managed-hook teardown rollback failed: "), (key, result)
+        assert got["deferred"] is False and got["holds"] == [], (key, result)
+
+
+def test_a_deployment_without_codex_never_says_codex_is_unguarded(tmp_path: Path) -> None:
+    result = _run(tmp_path, "codex-off")
+    assert "Codex is not guarded" not in result["message"], result
+    assert "Codex is not guarded" not in result["messageMissing"], result
+    assert "Codex is not guarded right now" in result["messageOn"], result
+
+
+def test_the_teardown_rollback_call_defers_and_keeps_the_receipt_for_the_repair() -> None:
+    text = _text()
+    restore = _function_body(text, "Restore-DefenseClawTransactionWithManagedHooksRollback")
+    flag = restore.index("$script:DefenseClawTeardownRollbackDeferBusy = [bool](Test-DefenseClawStandaloneProfile)")
+    call = restore.index("-Action rollback)")
+    assert flag < restore.index("try {", flag) < restore.index("Invoke-DefenseClawManagedHooksTeardownCommand `\n", flag) < call
+    assert call < restore.index("finally {", call) < restore.index("if ($script:DefenseClawTeardownRollbackDeferred) {", call)
+    # A deferred teardown rollback must not retire the prepared receipt (the repair needs it).
+    keep = restore.index("$journalPreserved = $false", call)
+    assert keep < restore.index("$rollbackReceipt = Get-DefenseClawManagedHookContractCleanupReceipt")
+    wrapper = _function_body(text, "Invoke-DefenseClawManagedHooksTeardownCommand")
+    gate = wrapper.index("if ($Action -ceq 'rollback' -and $script:DefenseClawTeardownRollbackDeferBusy -and")
+    assert wrapper.index("Test-DefenseClawStandaloneProfile", gate) < wrapper.index("return $null", gate) < wrapper.index('throw "managed-hook teardown $Action failed: $detail"')
+    assert "error_code" in wrapper[gate - 400 : gate] and "Test-DefenseClawCodexWriterLockBusyMessage" in wrapper[gate : gate + 400]
 
 
 def test_the_readiness_assertion_sets_the_flag_for_the_check_and_always_resets_it(tmp_path: Path) -> None:

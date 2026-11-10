@@ -123,6 +123,19 @@ type windowsManagedHooksTeardownReport struct {
 	MachineStateRemaining        []string                            `json:"machine_state_remaining,omitempty"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
+	// ErrorCode is the stable class of a failure the caller acts on without
+	// reading text: writer_lock_busy when a Codex writer holds the writer lock
+	// or keeps a transaction open (GAP-0999).
+	ErrorCode string `json:"error_code,omitempty"`
+}
+
+// windowsManagedHooksTeardownErrorCode is the stable code of a teardown
+// failure, or "" when it has none.
+func windowsManagedHooksTeardownErrorCode(err error) string {
+	if err != nil && errors.Is(err, connector.ErrWindowsCodexWriterLockBusy) {
+		return windowsCodexRequirementsWriterLockBusyCode
+	}
+	return ""
 }
 
 // windowsManagedHooksKeptUntrustedPolicyFiles lists the vendor policy files
@@ -913,6 +926,7 @@ func runWindowsManagedHooksTeardown(
 	fail := func(err error) (windowsManagedHooksTeardownReport, error) {
 		report.OK = false
 		report.Error = err.Error()
+		report.ErrorCode = windowsManagedHooksTeardownErrorCode(err)
 		report.SucceededCount = 0
 		report.VerifiedCleanCount = 0
 		if !report.RollbackCompleted {

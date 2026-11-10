@@ -985,10 +985,12 @@ func resolveWindowsCodexManagedRuntimeRegistryStable(
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return WindowsCodexManagedRuntimeRegistry{}, fmt.Errorf(
+			// GAP-0999: an open Codex transaction is a writer that has not
+			// settled, the same class as a held writer lock.
+			return WindowsCodexManagedRuntimeRegistry{}, windowsCodexWriterLockBusyError{fmt.Errorf(
 				"timed out waiting %s for a Codex machine policy transaction to finish",
 				windowsCodexReaderWait,
-			)
+			)}
 		}
 		delay := 25 * time.Millisecond
 		if remaining < delay {

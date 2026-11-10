@@ -282,6 +282,10 @@ func TestWindowsCodexStableReaderAcceptsOnlyAnUnchangedEvenCounter(t *testing.T)
 				if err == nil || !strings.Contains(err.Error(), "timed out") || result.Active {
 					t.Fatalf("persistently odd counter = %+v, %v; want a fail-closed timeout", result, err)
 				}
+				// GAP-0999: that timeout is the busy-writer class, text unchanged.
+				if !errors.Is(err, ErrWindowsCodexWriterLockBusy) {
+					t.Fatalf("a transaction that never ends is not classified as a busy writer: %v", err)
+				}
 				return
 			}
 			if err != nil || !result.Active || result.GatewayAddr != tc.want {

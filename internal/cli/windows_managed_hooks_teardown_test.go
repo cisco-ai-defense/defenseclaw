@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1931,5 +1932,26 @@ func TestWindowsManagedHooksTeardownRollbackDoesNotRestoreBehindAKeptPerUserLink
 	}
 	if !slices.Equal(*restores, []string{"copilot"}) {
 		t.Fatalf("restores = %q, want copilot once", *restores)
+	}
+}
+
+// GAP-0999: a managed-hook teardown whose Codex step meets a Codex writer that
+// holds the lock reports the stable busy-writer code, so the rollback that
+// called it defers instead of failing with the services stopped.
+func TestWindowsManagedHooksTeardownReportsABusyCodexWriterByCode(t *testing.T) {
+	busy := fmt.Errorf("restore Codex managed hooks: timed out waiting 10s for Codex machine policy lock: %w", connector.ErrWindowsCodexWriterLockBusy)
+	for name, err := range map[string]error{
+		"direct": busy,
+		"joined": errors.Join(errors.New("restore pre-rollback Claude policy"), busy),
+	} {
+		if got := windowsManagedHooksTeardownErrorCode(err); got != "writer_lock_busy" {
+			t.Fatalf("%s: code = %q, want writer_lock_busy", name, got)
+		}
+	}
+	if got := windowsManagedHooksTeardownErrorCode(errors.New("Codex machine policy is not clean after teardown rollback")); got != "" {
+		t.Fatalf("a plain failure got code %q", got)
+	}
+	if got := windowsManagedHooksTeardownErrorCode(nil); got != "" {
+		t.Fatalf("nil error got code %q", got)
 	}
 }
