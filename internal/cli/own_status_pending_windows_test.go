@@ -22,6 +22,10 @@ func TestOwnStatusPendingForReadsTheHooksOwnPendingResult(t *testing.T) {
 	previous := ownStatusRuntimeResolve
 	t.Cleanup(func() { ownStatusRuntimeResolve = previous })
 	pending := fmt.Errorf("selector: %w", enterprisehooks.ErrWindowsManagedRuntimeGenerationPending)
+	// The caller's profile folder; the account was enrolled before for Claude Code only.
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	enrollMarker(t, home, "claudecode")
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -41,6 +45,17 @@ func TestOwnStatusPendingForReadsTheHooksOwnPendingResult(t *testing.T) {
 		if got := ownStatusPendingFor("claudecode"); got != tc.want {
 			t.Errorf("%s: pending = %t, want %t", tc.name, got, tc.want)
 		}
+	}
+
+	// Pending, but never enrolled for this connector (no marker): no claim (GAP-1010).
+	ownStatusRuntimeResolve = func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+		return enterprisehooks.WindowsManagedHookRuntime{}, pending
+	}
+	if ownStatusPendingFor("codex") {
+		t.Error("a never-enrolled connector was called blocked")
+	}
+	if !ownStatusPendingFor("claudecode") {
+		t.Error("an enrolled connector that is pending was not called blocked")
 	}
 
 	previousFetch := ownStatusPipeFetch

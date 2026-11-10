@@ -765,3 +765,18 @@ func windowsHookPathHasNoReparsePoints(path string) bool {
 		cursor = parent
 	}
 }
+
+// enterpriseManagedHookRuntimeEnrolledPending reports whether reason is the
+// enrollment-pending refusal of an account the guardian enrolled for this
+// connector before (GAP-1026): a standalone hook only. A never-enrolled
+// account is refused with the enrollment wait text, and Secure Client keeps
+// its texts.
+func enterpriseManagedHookRuntimeEnrolledPending(reason string) bool {
+	if reason != enterprisehooks.WindowsManagedEnrollmentPendingReason || !standaloneEnterpriseHookCheck(nativeHookExecutable()) {
+		return false
+	}
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	home, connector := nativeEnterpriseHookRuntimeSnapshot.home, nativeEnterpriseHookRuntimeSnapshot.connector
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	return enterpriseConnectorEnrolledBefore(home, connector)
+}

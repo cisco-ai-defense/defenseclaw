@@ -48,17 +48,20 @@ func TestWindowsStandaloneHookNamesARevokedSelectionPendingNotDrift(t *testing.T
 		err          error
 		standalone   bool
 		secureClient bool
+		enrolled     bool
 		want         string
 	}{
-		{"pending tagged drift, standalone", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, pending), true, false,
+		{"pending tagged drift, standalone, enrolled before", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, pending), true, false, true,
 			enterprisehooks.WindowsManagedEnrollmentPendingReason},
-		{"pending tagged drift, Secure Client", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, pending), false, true,
-			enterprisehooks.WindowsManagedRuntimeDriftReason},
-		{"real drift, standalone", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, errors.New("bundle ACL drifted")), true, false,
-			enterprisehooks.WindowsManagedRuntimeDriftReason},
-		{"pending with a boundary finding, standalone", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeBoundary, pending), true, false,
+		{"pending tagged drift, standalone, never enrolled", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, pending), true, false, false,
 			enterprisehooks.WindowsManagedEnrollmentPendingReason},
-		{"boundary without pending, standalone", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeBoundary, errors.New("reparse point")), true, false,
+		{"pending tagged drift, Secure Client", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, pending), false, true, true,
+			enterprisehooks.WindowsManagedRuntimeDriftReason},
+		{"real drift, standalone", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, errors.New("bundle ACL drifted")), true, false, true,
+			enterprisehooks.WindowsManagedRuntimeDriftReason},
+		{"pending with a boundary finding, standalone", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeBoundary, pending), true, false, false,
+			enterprisehooks.WindowsManagedEnrollmentPendingReason},
+		{"boundary without pending, standalone", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeBoundary, errors.New("reparse point")), true, false, true,
 			"enterprise_managed_runtime_state_invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,6 +72,14 @@ func TestWindowsStandaloneHookNamesARevokedSelectionPendingNotDrift(t *testing.T
 			dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
 			if err := os.MkdirAll(dataDir, 0o700); err != nil {
 				t.Fatal(err)
+			}
+			if tc.enrolled {
+				if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dataDir, "hooks", ".hookcfg.codex"), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
 				return enterprisehooks.WindowsManagedHookRuntime{
@@ -83,6 +94,11 @@ func TestWindowsStandaloneHookNamesARevokedSelectionPendingNotDrift(t *testing.T
 			opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "open", true)
 			if opts.ManagedRuntimeFailure != tc.want {
 				t.Fatalf("runtime failure %q, want %q", opts.ManagedRuntimeFailure, tc.want)
+			}
+			// Only an enrolled-before standalone account that is pending is told it is blocked.
+			wantEnrolledPending := tc.want == enterprisehooks.WindowsManagedEnrollmentPendingReason && tc.standalone && tc.enrolled
+			if opts.ManagedEnrolledPending != wantEnrolledPending {
+				t.Fatalf("ManagedEnrolledPending = %t, want %t", opts.ManagedEnrolledPending, wantEnrolledPending)
 			}
 			if tc.standalone && (opts.FailMode != "closed" || !opts.StrictAvailability) {
 				t.Fatalf("standalone refusal is not closed: fail mode %q strict %v", opts.FailMode, opts.StrictAvailability)

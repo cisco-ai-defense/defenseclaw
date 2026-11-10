@@ -29,5 +29,11 @@ func ownStatusPendingFor(connector string) bool {
 		return false
 	}
 	_, err = ownStatusRuntimeResolve(filepath.Join(filepath.Dir(executable), "defenseclaw-hook.exe"), connector)
-	return errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending)
+	if !errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending) {
+		return false
+	}
+	// Only an account the guardian enrolled for the connector before is
+	// blocked; a never-enrolled one keeps its status (GAP-1010).
+	home, err := os.UserHomeDir()
+	return err == nil && enterpriseHomeConnectorEnrolledBefore(home, connector)
 }

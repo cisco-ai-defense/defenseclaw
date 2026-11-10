@@ -107,13 +107,16 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 		// builds its reason elsewhere and keeps it word for word.
 		var blocked []string
 		for _, row := range rows {
-			// Only a row that waits with no runtime at all is blocked: a row
+			// Only a row of an account the guardian enrolled for the connector
+			// before is blocked (a never-enrolled account keeps the enrollment
+			// wait, GAP-1010). Only a row that waits with no runtime at all: a row
 			// that waits for a hook fail mode change, an untrusted folder or
 			// another cause is an awaiting-sign-in error, never Pending, has
 			// its runtime, and its hook decides.
 			if windowsEnterpriseEnrollmentKey(row.SID, row.User, row.UserHome) ==
 				windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome) &&
-				row.Pending && windowsEnterpriseMachineHookConnector(row.Connector) {
+				row.Pending && windowsEnterpriseMachineHookConnector(row.Connector) &&
+				enterpriseHomeConnectorEnrolledBefore(row.UserHome, row.Connector) {
 				blocked = append(blocked, strings.TrimSpace(row.Connector))
 			}
 		}

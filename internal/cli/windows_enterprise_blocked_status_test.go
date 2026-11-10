@@ -27,8 +27,14 @@ import (
 // Secure Client status never reaches this builder.
 func TestWindowsEnterprisePendingMachineHookConnectorsAreNamedAsBlocked(t *testing.T) {
 	const sid = "S-1-5-21-1-2-3-1001"
+	// The account was enrolled before for Claude Code, Codex and Cursor (the
+	// guardian's hook configuration is in its folder), never for Copilot or Hermes.
+	home := t.TempDir()
+	for _, connector := range []string{"claudecode", "codex", "cursor"} {
+		enrollMarker(t, home, connector)
+	}
 	row := func(connector string) enterpriseHookReconcileRow {
-		return enterpriseHookReconcileRow{User: "dcw-std1", SID: sid, Connector: connector, Pending: true}
+		return enterpriseHookReconcileRow{User: "dcw-std1", UserHome: home, SID: sid, Connector: connector, Pending: true}
 	}
 	reason := func(connectors ...string) string {
 		var rows []enterpriseHookReconcileRow
@@ -65,6 +71,23 @@ func TestWindowsEnterprisePendingMachineHookConnectorsAreNamedAsBlocked(t *testi
 		if len(accounts) != 1 || strings.Contains(accounts[0].Reason, "blocked") || accounts[0].Connectors["codex"] != "pending" {
 			t.Fatalf("cause %q: %+v, want pending and not named as blocked", cause, accounts)
 		}
+	}
+	// A never-enrolled account (no marker) keeps the old wording for the same
+	// connectors (GAP-1010).
+	neverEnrolled := func(connectors ...string) string {
+		var rows []enterpriseHookReconcileRow
+		for _, connector := range connectors {
+			rows = append(rows, enterpriseHookReconcileRow{User: "dcw-new", UserHome: t.TempDir(), SID: sid + "9", Connector: connector, Pending: true})
+		}
+		return windowsEnterpriseEnrollmentAccounts(rows)[0].Reason
+	}
+	if got := neverEnrolled("claudecode", "codex", "cursor"); got != windowsEnterpriseEnrollmentPending {
+		t.Fatalf("a never-enrolled account: %q, want the old wording", got)
+	}
+	// A row with no profile folder recorded cannot be judged enrolled.
+	if got := windowsEnterpriseEnrollmentAccounts([]enterpriseHookReconcileRow{
+		{User: "dcw-x", SID: sid + "8", Connector: "codex", Pending: true}})[0].Reason; got != windowsEnterpriseEnrollmentPending {
+		t.Fatalf("a row without a folder: %q", got)
 	}
 	if got := reason("copilot"); got != windowsEnterpriseEnrollmentPending {
 		t.Fatalf("a connector with nothing running keeps the old reason: %q", got)

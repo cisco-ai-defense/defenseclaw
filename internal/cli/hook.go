@@ -563,6 +563,7 @@ func buildHookOptionsForCall(connector, event, apiAddr, _ string, enterpriseMana
 		if failMode, strict, ok := secureClientRuntimeFailureDelivery(opts.SecureClient, opts.ManagedRuntimeFailure); ok {
 			opts.FailMode, opts.StrictAvailability = failMode, strict
 		}
+		opts.ManagedEnrolledPending = enterpriseManagedHookRuntimeEnrolledPending(opts.ManagedRuntimeFailure)
 		opts.FailureLogHome = managedHookFailureLogHome
 		// Marks a failed Unix standalone runtime as the standalone profile's
 		// (no transport is selected); a no-op elsewhere.
@@ -698,6 +699,7 @@ func buildHookOptionsForCall(connector, event, apiAddr, _ string, enterpriseMana
 			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
 		}
 		opts.ManagedRuntimeFailure = managedRuntimeFailure
+		opts.ManagedEnrolledPending = enterpriseManagedHookRuntimeEnrolledPending(managedRuntimeFailure)
 		// A managed hook takes its fail mode from administrator-owned runtime
 		// state, never from the command line: the authenticated Windows
 		// runtime generation, or the root-owned Unix runtime descriptor. Each

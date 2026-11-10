@@ -470,6 +470,13 @@ type Options struct {
 	// not "gateway unreachable". The Windows standalone hook sets it; Secure
 	// Client keeps its message.
 	ExplainUnenrolledAccount bool
+	// ManagedEnrolledPending marks a Windows standalone refusal of an account
+	// that was enrolled and is pending now (managedEnrollmentPendingReason: its
+	// guardian runtime is revoked, and a disconnected or signed-out session
+	// keeps it so): the refusal then says the agent is blocked until the
+	// account signs in (GAP-1026). A never-enrolled account keeps the
+	// enrollment wait text (GAP-1010). The CLI sets it.
+	ManagedEnrolledPending bool
 	// ManagedGatewayServiceName is the administrator-protected SCM identity
 	// that must own the connected loopback listener before any HTTP bytes are
 	// written. It is ignored outside ManagedEnterprise mode.
@@ -3251,10 +3258,11 @@ func failEnrollmentRefusalOf(opts Options, sp spec, reason string, excluded bool
 	why := unenrolledAccountExplanation
 	switch reason {
 	case managedEnrollmentPendingReason:
-		// A Windows standalone account with no runtime yet: it may have been
-		// enrolled before and be disconnected now (GAP-1026), so the text says
-		// the agent is blocked and what ends that, not only "restart".
-		if !opts.SecureClient {
+		// An account that was enrolled and has no runtime now (disconnected or
+		// signed out, its runtime revoked; GAP-1026): the text says the agent
+		// is blocked and what ends that, not only "restart". A never-enrolled
+		// account keeps the enrollment wait text.
+		if opts.ManagedEnrolledPending && !opts.SecureClient {
 			why = pendingAccountExplanation
 		}
 	case managedUIDUnregisteredReason:

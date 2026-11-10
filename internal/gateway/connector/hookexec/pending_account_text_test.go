@@ -25,13 +25,25 @@ import (
 	"testing"
 )
 
-// GAP-1026: a Windows standalone account the machine policy registers but that
-// has no runtime yet is blocked, and the refusal of every machine-hook agent
-// says so and what ends it; the unregistered account and Secure Client keep
-// their text.
+// GAP-1026: a Windows standalone account the guardian enrolled before and that
+// is pending now (ManagedEnrolledPending) is told its agent is blocked until it
+// signs in, in every machine-hook agent. The line is between that account and
+// one that was never enrolled: the second keeps the enrollment wait text and,
+// with the gateway service stopped, the service-not-running text of GAP-1010.
+// The unregistered account and Secure Client keep their text.
 func TestPendingAccountRefusalSaysTheAgentIsBlockedUntilSignIn(t *testing.T) {
 	events := map[string]string{"claudecode": "PreToolUse", "codex": "PreToolUse", "cursor": "beforeShellExecution"}
-	refusal := func(connector, reason string, secureClient bool) (int, string) {
+	type cell struct {
+		reason       string
+		enrolled     bool
+		stopped      bool
+		secureClient bool
+	}
+	refusal := func(t *testing.T, connector string, c cell) (int, string) {
+		t.Helper()
+		previous := managedGatewayServiceStopped
+		managedGatewayServiceStopped = func(service string) bool { return c.stopped && service == "DefenseClawGateway" }
+		t.Cleanup(func() { managedGatewayServiceStopped = previous })
 		var out, errb bytes.Buffer
 		home := t.TempDir()
 		rt := ok(`{"action":"allow"}`)
@@ -44,8 +56,9 @@ func TestPendingAccountRefusalSaysTheAgentIsBlockedUntilSignIn(t *testing.T) {
 			FailMode:                 "closed",
 			StrictAvailability:       true,
 			ManagedEnterprise:        true,
-			SecureClient:             secureClient,
-			ManagedRuntimeFailure:    reason,
+			SecureClient:             c.secureClient,
+			ManagedRuntimeFailure:    c.reason,
+			ManagedEnrolledPending:   c.enrolled,
 			ExplainUnenrolledAccount: true,
 			Stdin:                    strings.NewReader("{}"),
 			Stdout:                   &out,
@@ -57,26 +70,42 @@ func TestPendingAccountRefusalSaysTheAgentIsBlockedUntilSignIn(t *testing.T) {
 		}
 		return code, out.String() + errb.String()
 	}
+	const blocked = "this account is not enrolled; blocked until you sign in"
 	for connector := range events {
-		code, text := refusal(connector, managedEnrollmentPendingReason, false)
-		for _, want := range []string{
-			"this account is not enrolled; blocked until you sign in",
-			"A disconnected or signed-out account stays blocked until it signs in or reconnects",
-			"once you have signed in and the agent is installed",
-		} {
-			if !strings.Contains(text, want) {
-				t.Errorf("%s pending refusal lacks %q: %q", connector, want, text)
+		t.Run(connector, func(t *testing.T) {
+			code, text := refusal(t, connector, cell{reason: managedEnrollmentPendingReason, enrolled: true})
+			for _, want := range []string{
+				blocked,
+				"A disconnected or signed-out account stays blocked until it signs in or reconnects",
+				"once you have signed in and the agent is installed",
+			} {
+				if !strings.Contains(text, want) {
+					t.Errorf("enrolled+pending refusal lacks %q: %q", want, text)
+				}
 			}
-		}
-		if code == 0 && !strings.Contains(text, `"deny"`) && !strings.Contains(text, `"block"`) && !strings.Contains(text, `"permission":"deny"`) {
-			t.Errorf("%s pending account was not blocked: code %d %q", connector, code, text)
-		}
-		if _, other := refusal(connector, managedSIDUnregisteredReason, false); strings.Contains(other, "stays blocked until it signs in") {
-			t.Errorf("%s: the unregistered account took the pending text: %q", connector, other)
-		}
-	}
-	// Secure Client keeps the explanation it had.
-	if _, text := refusal("claudecode", managedEnrollmentPendingReason, true); strings.Contains(text, "stays blocked until it signs in") {
-		t.Errorf("Secure Client took the standalone pending text: %q", text)
+			if code == 0 && !strings.Contains(text, `"deny"`) && !strings.Contains(text, `"block"`) && !strings.Contains(text, `"permission":"deny"`) {
+				t.Errorf("an enrolled+pending account was not blocked: code %d %q", code, text)
+			}
+			// A never-enrolled account, the gateway service running: the enrollment wait text.
+			_, never := refusal(t, connector, cell{reason: managedEnrollmentPendingReason})
+			if strings.Contains(never, "blocked until you sign in") || !strings.Contains(never, "not enrolled yet") {
+				t.Errorf("a never-enrolled account: %q", never)
+			}
+			// The gateway service stopped: the service-not-running text, for both, never the blocked text.
+			for _, enrolled := range []bool{false, true} {
+				_, stopped := refusal(t, connector, cell{reason: managedEnrollmentPendingReason, enrolled: enrolled, stopped: true})
+				if strings.Contains(stopped, "blocked until you sign in") || !strings.Contains(stopped, "service is not running") {
+					t.Errorf("enrolled=%t, service stopped: %q", enrolled, stopped)
+				}
+			}
+			// The unregistered account never takes the pending text, even with the flag.
+			if _, other := refusal(t, connector, cell{reason: managedSIDUnregisteredReason, enrolled: true}); strings.Contains(other, "blocked until you sign in") {
+				t.Errorf("the unregistered account took the pending text: %q", other)
+			}
+			// Secure Client keeps the explanation it had.
+			if _, sc := refusal(t, connector, cell{reason: managedEnrollmentPendingReason, enrolled: true, secureClient: true}); strings.Contains(sc, "blocked until you sign in") {
+				t.Errorf("Secure Client took the standalone pending text: %q", sc)
+			}
+		})
 	}
 }

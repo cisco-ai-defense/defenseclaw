@@ -2617,10 +2617,7 @@ func TestSecureClientUnenrolledAccountFollowsFailMode(t *testing.T) {
 
 func TestWindowsUnenrolledRefusalLeadsWithTheNextStep(t *testing.T) {
 	const lead = "DefenseClaw: this account is not enrolled yet; restart the agent in 5 minutes."
-	// A pending account is blocked until it has a connected session, also when
-	// it was enrolled before (GAP-1026), so its refusal leads with that.
-	const pendingLead = "DefenseClaw: this account is not enrolled; blocked until you sign in."
-	for reason, lead := range map[string]string{managedSIDUnregisteredReason: lead, managedEnrollmentPendingReason: pendingLead} {
+	for _, reason := range []string{managedSIDUnregisteredReason, managedEnrollmentPendingReason} {
 		var out, errb bytes.Buffer
 		home := t.TempDir()
 		rt := ok(`{"action":"allow"}`)
