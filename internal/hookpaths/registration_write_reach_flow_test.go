@@ -95,6 +95,13 @@ func TestRegistrationWriteReachFlowConstructs(t *testing.T) {
 		{"echo of a writer name through find", "find . -name cp -exec echo rm {} \\; ; cat " + hook, false},
 		{"find that only lists", "find . -name cp; cat " + hook, false},
 		{"git status", "git status && cat " + hook, false},
+		// The value of a find test option is a pattern, never a program or a write.
+		{"find lists with a dynamic name pattern", "find . -name \"$pattern\"; cat " + hook, false},
+		{"find lists with a dynamic path pattern", "find . -type f -path \"$pattern\" -mtime -1; cat " + hook, false},
+		{"find lists with a dynamic newer reference", "find . -newer \"$ref\" -newermt \"$when\"; cat " + hook, false},
+		{"find executes a copy onto the hook after a dynamic pattern", "echo a; find . -name \"$pattern\" -exec cp " + ordinary + "/tool " + hook + " \\;", true},
+		{"find with a dynamic word in an action position", "echo a; find . $action; cat " + hook, true},
+		{"find deletes the hook after a dynamic pattern", "echo a; find " + hook + " -name \"$pattern\" -delete", true},
 		{"copy onto the hook through xargs", "echo a; printf x | xargs cp " + ordinary + "/tool " + hook, true},
 		{"copy onto the hook through xargs options", "echo a; printf x | xargs -n 1 cp " + ordinary + "/tool " + hook, true},
 		{"copy onto the hook through flock", "echo a; flock /tmp/lock cp " + ordinary + "/tool " + hook, true},

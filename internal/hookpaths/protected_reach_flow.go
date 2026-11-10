@@ -279,14 +279,35 @@ func registrationRunWords(spec registrationRunner, args []*syntax.Word, home str
 	return args[index:], true
 }
 
+// registrationFindValueOptions are the find tests and print options that take
+// one value. The value is a pattern, a number, a file to compare or a format:
+// never a program and never a write, whatever it holds or however it is
+// spelled. The names are one text, not one literal each: the GAP-0055 sweep
+// reads every option-shaped literal of this package as an option of a
+// program branch, and these are not.
+var registrationFindValueOptions = func() map[string]bool {
+	options := map[string]bool{}
+	for _, name := range strings.Fields("name iname path ipath wholename iwholename regex iregex regextype " +
+		"lname ilname samefile newer anewer cnewer user group type xtype perm size mtime atime ctime " +
+		"mmin amin cmin links inum uid gid fstype maxdepth mindepth used printf context flags D O") {
+		options["-"+name] = true
+	}
+	return options
+}()
+
 // registrationFindWrites reports whether a find call can write: it deletes
-// or prints into a file, runs a program that writes, or has a word that is
-// not spelled out.
+// or prints into a file, runs a program that writes, or has a word in an
+// action position that is not spelled out. The value of a test option
+// (-name "$pattern") is not in an action position.
 func registrationFindWrites(args []*syntax.Word, home string) bool {
-	for index, word := range args {
-		value, fixed := StaticWord(word, home)
+	for index := 0; index < len(args); index++ {
+		value, fixed := StaticWord(args[index], home)
 		if !fixed {
 			return true
+		}
+		if registrationFindValueOptions[value] || strings.HasPrefix(value, "-newer") && len(value) == len("-newerXY") {
+			index++
+			continue
 		}
 		switch value {
 		case "-delete", "-fprint", "-fprint0", "-fprintf", "-fls":
@@ -302,6 +323,7 @@ func registrationFindWrites(args []*syntax.Word, home string) bool {
 			if len(run) > 0 && registrationCallWrites(&syntax.CallExpr{Args: run}, home) {
 				return true
 			}
+			index += len(run)
 		}
 	}
 	return false
