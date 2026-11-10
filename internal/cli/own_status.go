@@ -142,6 +142,13 @@ func ownStateText(row ownStatusRow) string {
 		return "not protected: " + ownStateNoReason
 	case reason == "" && (state == "not protected" || state == "not confirmed"):
 		return state + ": " + ownStateNoReason
+	case state == "blocked" && reason != "":
+		// The reason is the whole sentence the administrator's status uses.
+		text := strings.TrimRight(reason, ". ")
+		if next != "" {
+			text += ". " + strings.TrimRight(next, ". ")
+		}
+		return text
 	case reason == "":
 		return state
 	}

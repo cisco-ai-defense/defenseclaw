@@ -164,6 +164,9 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 		// Cowork runs the Claude Code hooks, so it follows that connector.
 		cause := ownExcludedCause(a.ownExcludedInspection(cfg, idKey, self, name, enterprisepolicy.ConnectorClaudeCode))
 		cowork = ownCoworkRow(false, "excluded", cause.code, cause.reason)
+	case ownConnectorRowBlocked(connectors, enterprisepolicy.ConnectorClaudeCode):
+		cowork = ownCoworkRow(false, "blocked", ownCauseBlockedUntilSignIn.code,
+			"blocked until this account signs in or reconnects (Cowork runs the Claude Code hooks, which refuse every tool call)")
 	case !claudeCode && claudeConfigured:
 		cowork = ownCoworkRow(false, "not confirmed", "claude_code_unverified", "Claude Code policy or enrollment is not verified for this account")
 	case !claudeCode:
@@ -338,6 +341,12 @@ func (a *APIServer) ownWindowsConnectorStates(cfg *config.Config, sid, name stri
 			state = decided
 		} else if connector == enterprisepolicy.ConnectorClaudeCode {
 			state = ownProtected()
+		}
+		// A machine-hook connector the hook refuses as enrollment pending is
+		// blocked, not protected and not unconfirmed (GAP-1034). The scan keeps
+		// its own, more specific reasons.
+		if _, scanned := scan.state(connector); !scanned && ownWindowsRuntimePending(connector, sid) {
+			state = ownBlocked(ownCauseBlockedUntilSignIn)
 		}
 		states[connector] = state
 	}
