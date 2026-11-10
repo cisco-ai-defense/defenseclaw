@@ -249,8 +249,9 @@ func unreadPatchContentTarget(input Input, facts Facts, resolved map[string]stri
 // blocks of one file taken together: every block alone is within the proof
 // bound (and so read), but the text they make together is not, so no rule has
 // judged a document that one block opens and a later block finishes. Only the
-// strict tier acts on it: in the default and permissive tiers such blocks stay
-// allowed, as a file written by separate calls does.
+// strict tier and a managed install act on it: in the default and permissive
+// tiers of a per-user install such blocks stay allowed, as a file written by
+// separate calls does.
 func OverLimitCombinedPatchContentTarget(input Input, facts Facts, resolved map[string]string) (string, bool) {
 	return unreadPatchContentTarget(input, facts, resolved, true)
 }

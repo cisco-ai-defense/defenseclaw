@@ -7,11 +7,15 @@ package gateway
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // TestPatchEnvelopeRepeatedTargetKeepsContentRuleVerdict pins that an
@@ -131,5 +135,47 @@ func TestPatchEnvelopeRepeatedTargetPastProofBoundIsStrictOnly(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestPatchEnvelopeRepeatedTargetPastProofBoundBlocksOnManagedInstall pins that
+// a managed install, which fails closed, takes the conservative block of the
+// file rule for two readable blocks of one content-rule file that make a text
+// past the proof bound, in its default tier as well as in a strict one, and
+// that the same blocks of an ordinary file stay allowed.
+func TestPatchEnvelopeRepeatedTargetPastProofBoundBlocksOnManagedInstall(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	line := "+# no libraries are preloaded on this host\n"
+	half := strings.Repeat(line, 40<<10/len(line))
+	for _, row := range []struct {
+		name, target string
+		blocked      bool
+	}{
+		{"preload twice", "/etc/ld.so.preload", true},
+		{"ordinary twice", filepath.Join(project, "notes.txt"), false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			block := "*** Add File: " + row.target + "\n" + half
+			patch := "*** Begin Patch\n" + block + block + "*** End Patch\n"
+			body := (nativeWriteCall{"codex", "apply_patch", func(string) map[string]any { return map[string]any{"command": patch} }}).body(t, project, project)
+			store, logger := testStoreAndLogger(t)
+			cfg := config.DefaultConfig()
+			cfg.DataDir = t.TempDir()
+			cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			cfg.Enterprise.Profile = managed.ProfileStandalone
+			cfg.Guardrail.Mode, cfg.Guardrail.HookFailMode, cfg.Guardrail.Connector = "action", "closed", "codex"
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth(), store: store, logger: logger}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(hookpaths.Header, hookpaths.ResolveConnector("codex", "", "preToolUse", []byte(body)))
+			setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+			req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+			recorder := httptest.NewRecorder()
+			api.handleAgentHook("codex").ServeHTTP(recorder, req)
+			got := recorder.Body.String()
+			if blocked := overLimitHookAction(t, got) == "block"; blocked != row.blocked {
+				t.Fatalf("blocked = %t, want %t: %.600s", blocked, row.blocked, got)
+			}
+		})
 	}
 }
