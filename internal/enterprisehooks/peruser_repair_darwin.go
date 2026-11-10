@@ -108,16 +108,20 @@ func RepairUserTarget(opts InstallOptions, unit string) error {
 		uid:  uint32(opts.OwnerUID),
 		gid:  uint32(opts.OwnerGID),
 	}
-	err := repairer.run(opts, walkDataDir)
+	walked, err := repairer.run(opts, walkDataDir)
+	if walked {
+		// A completed walk counts even when an agent config after it is
+		// skipped, so the user's other connectors do not walk it again.
+		userRepairState.Lock()
+		userRepairState.lastRun[key] = userRepairNow()
+		userRepairState.Unlock()
+	}
 	var skip *UserSkipError
 	switch {
 	case errors.As(err, &skip):
 		reportUserSkip(unit, key, skip)
 	case err == nil:
 		userRepairState.Lock()
-		if walkDataDir {
-			userRepairState.lastRun[key] = userRepairNow()
-		}
 		delete(userRepairState.skips, key)
 		userRepairState.Unlock()
 	}
@@ -173,16 +177,17 @@ func (r *userRepairer) skip(reason, path string, err error) error {
 }
 
 // run repairs the agent configs of opts, and ~/.defenseclaw first when
-// walkDataDir is set.
-func (r *userRepairer) run(opts InstallOptions, walkDataDir bool) error {
+// walkDataDir is set. walked reports a completed ~/.defenseclaw walk,
+// whatever the agent configs then return.
+func (r *userRepairer) run(opts InstallOptions, walkDataDir bool) (walked bool, err error) {
 	homeFD, err := r.openHome()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			// An unmounted or deleted home is reported by the validators as
 			// pending; there is nothing to repair.
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	defer unix.Close(homeFD)
 
@@ -192,16 +197,17 @@ func (r *userRepairer) run(opts InstallOptions, walkDataDir bool) error {
 			dataDir = filepath.Join(r.home, ".defenseclaw")
 		}
 		if err := r.repairDataDir(homeFD, filepath.Clean(dataDir)); err != nil {
-			return err
+			return false, err
 		}
+		walked = true
 	}
 
 	for _, path := range userAgentConfigPaths(opts) {
 		if err := r.repairAgentConfig(homeFD, path); err != nil {
-			return err
+			return walked, err
 		}
 	}
-	return nil
+	return walked, nil
 }
 
 // openHome opens the home without following a link and checks it, never

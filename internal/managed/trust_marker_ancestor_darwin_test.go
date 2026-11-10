@@ -33,6 +33,9 @@ func TestInstallMarkerAncestorAcceptsOnlyAnAdministratorGroupWriteBit(t *testing
 	if StandaloneTrustScope() {
 		t.Skip("a standalone trust scope accepts no administrator group")
 	}
+	// The strict-ancestor switch makes every ancestor verdict fatal; this test
+	// is about the default rule.
+	t.Setenv(TrustStrictAncestorsEnv, "")
 	dir := t.TempDir()
 	if err := os.Chown(dir, -1, darwinAdminGID); err != nil {
 		t.Skipf("the test user cannot give a folder to the admin group: %v", err)

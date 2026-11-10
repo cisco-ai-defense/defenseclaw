@@ -468,6 +468,41 @@ func TestRepairUserTargetRepairsEveryConnectorsConfigWithinTheInterval(t *testin
 	}
 }
 
+// A completed ~/.defenseclaw walk is recorded even when the agent config after
+// it skips the user (a symlinked folder above the config), so the user's next
+// connector inside the interval does not walk the tree again.
+func TestRepairUserTargetRecordsTheWalkWhenAnAgentConfigSkips(t *testing.T) {
+	f := newPerUserRepairFixture(t)
+	elsewhere := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Dir(f.config)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Dir(f.config)); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0)
+	previousNow := userRepairNow
+	userRepairNow = func() time.Time { return now }
+	t.Cleanup(func() { userRepairNow = previousNow })
+
+	var skip *UserSkipError
+	if err := RepairUserTarget(f.opts(), "user:fixture"); !errors.As(err, &skip) {
+		t.Fatalf("first pass: err=%v, want a skip for the symlinked folder above the config", err)
+	}
+	hook := filepath.Join(f.dataDir, "hooks", "claude-code-hook.sh")
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	_ = RepairUserTarget(f.opts(), "user:fixture")
+	if got := uint32(statOf(t, hook).Mode) & 0o7777; got != 0o755 {
+		t.Fatalf("the walk ran again inside the interval after a skipped config (hook mode %04o)", got)
+	}
+}
+
 func TestRepairUserTargetLeavesSymlinkedAgentConfigToSetup(t *testing.T) {
 	f := newPerUserRepairFixture(t)
 	dotfiles := filepath.Join(t.TempDir(), "settings.json")
