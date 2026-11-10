@@ -277,7 +277,7 @@ func TestPowerShellPlainPathSignature(t *testing.T) {
 		`C:\Users\Alice\defenseclaw:stream`, `C:\Users\Alice\project*\defenseclaw`, `C:\Users\Alice\\defenseclaw`, `C:\Users\Alice\defenseclaw%x%`,
 		`C:\Users\Alice\défenseclaw`, `C:defenseclaw`, "",
 		// A link or hard link the hook client resolved, however it is spelled.
-		`C:\Users\Alice\project\defenseclaw_link.txt`, `c:/users/alice/project/DEFENSECLAW_LINK.TXT`, `.\defenseclaw_link.txt`, `defenseclaw_link.txt`,
+		`C:\Users\Alice\project\defenseclaw_link.txt`, `c:/users/alice/project/DefenseClaw_Link.TXT`, `.\defenseclaw_link.txt`, `defenseclaw_link.txt`,
 		`C:\Users\Alice\project\defenseclaw_link.txt\child`, `C:\Users\Alice\project\defenseclaw_link.txt.`, `C:\Users\Alice\project\defenseclaw_link.txt:s`,
 		`C:\Users\Alice\project\jl`, `.\jl\`, `C:\Users\Alice\project\jl\x.txt`,
 		// A directory that holds a link, or a name cut short before one.
