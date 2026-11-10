@@ -275,17 +275,6 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 	if scan.parseError {
 		return false, false
 	}
-	if bind {
-		readings := psBindStaticValues(command, reading.home, budget)
-		if budget.over {
-			return true, true
-		}
-		for _, bound := range readings {
-			if bounded, _ := reading.collect(bound, depth, false, seen, forms, budget); bounded {
-				return true, true
-			}
-		}
-	}
 	add := func(form string) {
 		form = strings.TrimSpace(form)
 		if form == "" || seen[form] || !strings.Contains(strings.ToLower(form), "defenseclaw") ||
@@ -294,6 +283,21 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 		}
 		seen[form] = true
 		*forms = append(*forms, form)
+	}
+	if bind {
+		readings, dropped := psBindStaticValues(command, reading.home, budget)
+		if budget.over {
+			return true, true
+		}
+		for _, bound := range readings {
+			if bounded, _ := reading.collect(bound, depth, false, seen, forms, budget); bounded {
+				return true, true
+			}
+		}
+		// A value the bound dropped is judged as a write of its own path.
+		for _, value := range dropped {
+			add("Set-Content -LiteralPath " + psSingleQuoted(value) + " -Value x")
+		}
 	}
 	for _, piece := range scan.pieces {
 		add(piece)
@@ -577,9 +581,34 @@ func psArrayBody(text string) string {
 // spaces as Start-Process does) is the shell's argument line (checker it15
 // RV15-2).
 func psStartProcessShellBody(words []psWord, budget *psBudget) (string, bool) {
-	words = psJoinListWords(words, budget)
-	var file, arguments string
-	var positional []string
+	file, arguments, _ := psStartProcessParts(psJoinListWords(words, budget), budget)
+	program := psProgramName(psUnquote(file, budget))
+	if program != "powershell" && program != "pwsh" || arguments == "" {
+		return "", false
+	}
+	var parts []string
+	for _, part := range psSplitArguments(psArrayBody(arguments), budget) {
+		if part == "" {
+			return "", false
+		}
+		parts = append(parts, psUnquote(part, budget))
+	}
+	line := strings.Join(parts, " ")
+	inner := psWords("powershell "+line, budget)
+	return psShellArgumentsBody(inner, func(rest []psWord) string {
+		texts := make([]string, 0, len(rest))
+		for _, word := range rest {
+			texts = append(texts, psUnquote(word.text, budget))
+		}
+		return strings.Join(texts, " ")
+	})
+}
+
+// psStartProcessParts returns the program (-FilePath or the first positional
+// word), the argument list (-ArgumentList or the second positional word) and
+// the positional words left over of a Start-Process call whose words (the
+// cmdlet first, comma lists joined) are words.
+func psStartProcessParts(words []psWord, budget *psBudget) (file, arguments string, positional []string) {
 	for k := 1; k < len(words); k++ {
 		name, _, hasValue := strings.Cut(strings.ToLower(words[k].text), ":")
 		if words[k].quoted || !strings.HasPrefix(name, "-") || len(name) < 2 {
@@ -610,28 +639,9 @@ func psStartProcessShellBody(words []psWord, budget *psBudget) (string, bool) {
 		file, positional = positional[0], positional[1:]
 	}
 	if arguments == "" && len(positional) > 0 {
-		arguments = positional[0]
+		arguments, positional = positional[0], positional[1:]
 	}
-	program := psProgramName(psUnquote(file, budget))
-	if program != "powershell" && program != "pwsh" || arguments == "" {
-		return "", false
-	}
-	var parts []string
-	for _, part := range psSplitArguments(psArrayBody(arguments), budget) {
-		if part == "" {
-			return "", false
-		}
-		parts = append(parts, psUnquote(part, budget))
-	}
-	line := strings.Join(parts, " ")
-	inner := psWords("powershell "+line, budget)
-	return psShellArgumentsBody(inner, func(rest []psWord) string {
-		texts := make([]string, 0, len(rest))
-		for _, word := range rest {
-			texts = append(texts, psUnquote(word.text, budget))
-		}
-		return strings.Join(texts, " ")
-	})
+	return file, arguments, positional
 }
 
 // psStartProcessSwitch reports a Start-Process switch parameter (no value).
