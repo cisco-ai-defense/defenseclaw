@@ -26,6 +26,11 @@ func readIndirectSource(name, cwd string) (string, bool) {
 	}
 	relative := name
 	if filepath.IsAbs(name) {
+		// A drive path spelled with forward slashes (C:/Users/..., or /c/...
+		// mapped to c:/...) is the same file as its backslash spelling; the
+		// prefix test below is on the text. Separators change, no component
+		// is cleaned, so link/.. keeps its meaning.
+		name = filepath.FromSlash(name)
 		prefix := filepath.Clean(cwd)
 		if !os.IsPathSeparator(prefix[len(prefix)-1]) {
 			prefix += string(filepath.Separator)

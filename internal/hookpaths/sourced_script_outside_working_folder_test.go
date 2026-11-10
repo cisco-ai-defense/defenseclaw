@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -46,6 +48,11 @@ func TestClientDecisionReadsASourcedScriptOutsideTheWorkingFolder(t *testing.T) 
 		filepath.ToSlash(shared) + "/%s",
 		"$HOME/chain/live/%s",
 		"~/chain/live/%s",
+	}
+	if volume := filepath.VolumeName(live); runtime.GOOS == "windows" && len(volume) == 2 {
+		// Git Bash and Cygwin spell the drive as a folder.
+		msys := "/" + strings.ToLower(volume[:1]) + filepath.ToSlash(strings.TrimPrefix(live, volume))
+		spellings = append(spellings, msys+"/%s", "/cygdrive"+msys+"/%s")
 	}
 	for _, spelling := range spellings {
 		for _, command := range []string{". %s", "source %s", "bash %s", "sh %s", `bash -c ". %s"`, `sh -c "bash %s"`} {
