@@ -13,6 +13,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -233,6 +234,51 @@ func TestWindowsEnterpriseCommittedUninstallHeldFileIsRetryable(t *testing.T) {
 		}
 		if next := windowsEnterpriseHeldRollbackNextStep(false, nil); next != "" {
 			t.Fatalf("%s: a committed uninstall with no pending transaction got a next step %q", code, next)
+		}
+	}
+}
+
+// GAP-1063: an uninstall that ran next to the recovery Setup arms behind the
+// run before it finds no deployment record, and the module names each
+// account folder it cannot attribute. With nothing of the deployment left that
+// is the end state of an uninstall that found nothing to remove: a warning that
+// names the folders, exit 0. While some deployment state remains it is still
+// an error.
+func TestWindowsEnterpriseUnattributedUserStateIsAWarningWhenNothingIsLeft(t *testing.T) {
+	previous := windowsEnterpriseStandaloneFootprint
+	t.Cleanup(func() { windowsEnterpriseStandaloneFootprint = previous })
+	entry := `EC2AMAZ-X\Administrator (S-1-5-21-1-2-3-500): C:\Users\Administrator\.defenseclaw: ` + windowsEnterpriseUnattributedUserStateReason
+	raw, err := json.Marshal([]string{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := &windowsEnterpriseInstallerReport{UserStateRemaining: raw}
+	for name, test := range map[string]struct {
+		present bool
+		err     error
+		code    string
+		warning bool
+	}{
+		"nothing left":             {false, nil, "", true},
+		"deployment state remains": {true, nil, "per_user_state_remaining", false},
+		"footprint cannot be read": {false, errors.New("scm"), "per_user_state_remaining", false},
+	} {
+		windowsEnterpriseStandaloneFootprint = func() (bool, error) { return test.present, test.err }
+		result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "9.9.9")
+		addWindowsEnterpriseUserStateWarning(result, report)
+		if test.warning {
+			if len(result.Errors) != 0 || len(result.Warnings) != 1 || result.Warnings[0].Code != "per_user_state_remaining" ||
+				!strings.Contains(result.Warnings[0].Message, `C:\Users\Administrator\.defenseclaw`) ||
+				strings.Contains(result.Warnings[0].Message, windowsEnterpriseUnattributedUserStateReason) {
+				t.Fatalf("%s: errors=%v warnings=%v, want one warning naming the folder", name, result.Errors, result.Warnings)
+			}
+			if exit := result.Finish("windows", enterprisestatus.WindowsExitFailure); exit != 0 {
+				t.Fatalf("%s: exit = %d, want 0", name, exit)
+			}
+			continue
+		}
+		if len(result.Errors) != 1 || result.Errors[0].Code != test.code {
+			t.Fatalf("%s: errors=%v, want the per_user_state_remaining error", name, result.Errors)
 		}
 	}
 }
