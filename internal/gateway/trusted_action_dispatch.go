@@ -9339,7 +9339,7 @@ func trustedPowerShellExecutionTool(tool string) bool {
 	}
 }
 
-func trustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool) {
+func decodeTrustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	opening, err := decoder.Token()
 	if err != nil || opening != json.Delim('{') {
