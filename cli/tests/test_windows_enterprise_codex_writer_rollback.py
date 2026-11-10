@@ -142,7 +142,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseClawCodexWriterBusyRefusal', 'Get-DefenseClawOptionalLayoutValue', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Test-DefenseClawRollbackHeldMessage', 'New-DefenseClawCodexWriterUnsettledHeldMessage', 'Test-DefenseClawGuardianProofDeferredByCodexWriter', 'Test-DefenseClawCodexWriterLockNamed', 'Get-DefenseClawRollbackCodexWriterHolds', 'Restore-DefenseClawRollbackCodexWriterHolds', 'Get-DefenseClawCodexRequirementsGuardProblem', 'Assert-DefenseClawCodexRequirementsPublishable', 'Clear-DefenseClawRollbackDeferredHolds', 'Test-DefenseClawRollbackCoverageDeferred', 'Get-DefenseClawHeldMessagePath', 'Add-DefenseClawRollbackDeferredHold', 'Assert-DefenseClawRollbackHoldsResolved')) {
+foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseClawCodexWriterBusyRefusal', 'Get-DefenseClawOptionalLayoutValue', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Test-DefenseClawRollbackHeldMessage', 'New-DefenseClawCodexWriterUnsettledHeldMessage', 'Test-DefenseClawGuardianProofDeferredByCodexWriter', 'Test-DefenseClawCodexWriterLockNamed', 'Get-DefenseClawRollbackCodexWriterHolds', 'Restore-DefenseClawRollbackCodexWriterHolds', 'Get-DefenseClawCodexRequirementsGuardProblem', 'Assert-DefenseClawCodexRequirementsPublishable', 'Clear-DefenseClawRollbackDeferredHolds', 'Assert-DefenseClawRestoredTransactionReadyForActivation', 'Test-DefenseClawRollbackCoverageDeferred', 'Get-DefenseClawHeldMessagePath', 'Add-DefenseClawRollbackDeferredHold', 'Assert-DefenseClawRollbackHoldsResolved')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -235,6 +235,30 @@ switch ($Case) {
         $script:DefenseClawRollbackDeferBusyWriter = $true
         $out.refusal = New-DefenseClawCodexWriterBusyRefusal -Layout $layout -Action 'reconcile' -Detail 'timed out waiting 10s for Codex machine policy lock'
         $out.held = [bool](Test-DefenseClawRollbackHeldMessage -Message $out.refusal)
+    }
+    'ready' {
+        # The readiness assertion both rollbacks end in (the restore of a transaction and the restore that ends
+        # a managed-hook teardown): the flag is set while the deployment check runs, and reset whatever happens.
+        function Get-DefenseClawTransactionServiceStates { param($Services, $GatewayServiceName, $GuardianServiceName) @{ gw = [pscustomobject]@{ existed = $true }; gd = [pscustomobject]@{ existed = $true }; br = [pscustomobject]@{ existed = $false }; en = [pscustomobject]@{ existed = $true } } }
+        function Get-DefenseClawCMIDBrokerServiceName { param($GatewayServiceName) 'br' }
+        function Get-DefenseClawEnumeratorServiceName { param($GuardianServiceName) 'en' }
+        function Test-DefenseClawTransactionBrokerTopology { param($Layout) $false }
+        function Test-DefenseClawServiceExists { param($Name) $false }
+        function Get-DefenseClawEarlyHookField { param($Record, $Name) '' }
+        function Get-DefenseClawTransactionGatewayAccount { param($Snapshot) 'acct' }
+        $script:seen = [Collections.Generic.List[string]]::new()
+        $script:boom = $false
+        function Assert-DefenseClawEnterpriseDeployment { param([Parameter(ValueFromRemainingArguments)]$Rest) $script:seen.Add([string]$script:DefenseClawRollbackDeferBusyWriter); if ($script:boom) { throw 'deployment check failed' } }
+        $snap = [pscustomobject]@{ services = @(); gateway_service = 'gw'; guardian_service = 'gd' }
+        $out.result = [bool](Assert-DefenseClawRestoredTransactionReadyForActivation -Snapshot $snap -Layout $layout)
+        $out.flagDuring = @($script:seen)
+        $out.flagAfter = [bool]$script:DefenseClawRollbackDeferBusyWriter
+        $script:boom = $true
+        $threw = ''
+        try { [void](Assert-DefenseClawRestoredTransactionReadyForActivation -Snapshot $snap -Layout $layout) } catch { $threw = $_.Exception.Message }
+        $out.threw = $threw
+        $out.flagAfterThrow = [bool]$script:DefenseClawRollbackDeferBusyWriter
+        $out.flagDuringAll = @($script:seen)
     }
     'forward-refusal' {
         $refusal = 'codex_state_unsettled: the Codex writer transaction counter next to X stayed at 3 (odd: a transaction is open) for 30 seconds (the writer is writer.exe (pid 4242)), so the Codex managed-hooks state could not be judged and this run stopped (an install, repair, ensure or upgrade that had started is rolled back, an upgrade to the release it came from; a verify changes nothing). Next step: run Setup /repair again once no Codex writer is running'
@@ -339,6 +363,20 @@ def test_secure_client_has_no_writer_lock_and_defers_nothing(tmp_path: Path) -> 
     assert result["deferred"] is False, result
     assert result["holds"] == [], result
     assert result["coverage"] is False, result
+
+
+def test_the_readiness_assertion_sets_the_flag_for_the_check_and_always_resets_it(tmp_path: Path) -> None:
+    result = _run(tmp_path, "ready")
+    assert result["result"] is True and result["flagDuring"] == ["True"], result
+    assert result["flagAfter"] is False, result
+    # A failed deployment check still resets it (the rollback that follows must not defer).
+    assert result["threw"] == "deployment check failed", result
+    assert result["flagDuringAll"] == ["True", "True"] and result["flagAfterThrow"] is False, result
+
+
+def test_secure_client_readiness_assertion_never_sets_the_flag(tmp_path: Path) -> None:
+    result = _run(tmp_path, "ready", standalone=False)
+    assert result["flagDuring"] == ["False"] and result["flagAfter"] is False, result
 
 
 def test_a_busy_writer_inside_a_rollback_is_the_rollbacks_held_form(tmp_path: Path) -> None:
