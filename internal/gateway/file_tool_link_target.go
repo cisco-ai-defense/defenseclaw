@@ -255,6 +255,13 @@ func applyPatchCommandPath(facts actionfacts.Facts, candidate actionfacts.PathFa
 // facts supply the exact resolved target too, so a link receives the same
 // path rule as a direct file call. The usual typed path and proof filters
 // still decide whether each finding can enforce.
+//
+// A path a shell word writes as a Windows drive or share path is read the
+// same way, in any slash spelling, for the path rules (PATH-*): they write the
+// slash form (/Users/<name>/.netrc), so the backslash spelling of the same
+// file would otherwise reach only the rules written for it by hand. A file one
+// of those rules names keeps its verdict and its rule, and a path written
+// relative to the working directory is not read here.
 func fileToolLinkTargetFindings(
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
@@ -262,8 +269,7 @@ func fileToolLinkTargetFindings(
 	options ruleScanOptions,
 ) []RuleFinding {
 	typed := actionfacts.PathTool(request.Input.Tool)
-	if !facts.Authoritative() || !facts.EnforcementEligible() ||
-		!typed && !hasApplyPatchCommand(facts) && !pathCaseFoldHost {
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
 		return nil
 	}
 	var findings []RuleFinding
@@ -271,8 +277,13 @@ func fileToolLinkTargetFindings(
 		// On a case-folding host every path of the action is also read in
 		// the spelling the rules write, whatever the command or access:
 		// ~/.NETRC is the file ~/.netrc names.
+		shellWindowsPath := false
 		if !linkTargetCandidate(facts, candidate, typed) && !pathCaseFoldHost {
-			continue
+			if !windowsRootedSpelling(strings.TrimLeftFunc(candidate.Value, unicode.IsSpace)) ||
+				windowsPathRuleNamesFact(candidate, request.Input.Tool, options) {
+				continue
+			}
+			shellWindowsPath = true
 		}
 		texts, ok := typedTargetCandidateTexts(candidate, request.Input.ActiveHome)
 		if !ok {
@@ -282,6 +293,9 @@ func fileToolLinkTargetFindings(
 		for _, text := range texts {
 			readings := make(map[string]struct{}, 2)
 			for _, finding := range scanRuleGeneration(generation, text, request.Input.Tool, options) {
+				if shellWindowsPath && !strings.HasPrefix(finding.RuleID, "PATH-") {
+					continue
+				}
 				// A case-folding host reads the path rules that have no
 				// path proof (AWS config, GnuPG, /etc/shadow) in any letter case
 				// too: the exact-case spelling gets their finding from the call text.
@@ -299,4 +313,16 @@ func fileToolLinkTargetFindings(
 		}
 	}
 	return findings
+}
+
+// windowsPathRuleNamesFact reports a path fact that one of the path rules
+// written by hand for Windows spellings (windowsSensitivePathRules) names.
+func windowsPathRuleNamesFact(candidate actionfacts.PathFact, tool string, options ruleScanOptions) bool {
+	for _, value := range pathFactSpellings(candidate) {
+		if strings.TrimSpace(value) != "" &&
+			len(windowsSensitivePathFindingsWithOptions(value, tool, true, options)) > 0 {
+			return true
+		}
+	}
+	return false
 }
