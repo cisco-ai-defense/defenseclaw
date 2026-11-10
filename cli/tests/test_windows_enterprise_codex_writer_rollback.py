@@ -292,3 +292,16 @@ def test_a_busy_writer_never_reaches_the_recovery_that_rebuilds_the_policy_file(
     deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
     verify = deployment.index("-Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))")
     assert "New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout" in deployment[verify : verify + 1200]
+
+
+def test_a_rollback_that_keeps_a_guarded_requirements_file_says_so_in_the_failed_run() -> None:
+    # GAP-1001 review D2: the failed run names the file the rollback kept.
+    text = _text()
+    restore = _function_body(text, "Restore-DefenseClawTransaction")
+    assert "$script:DefenseClawRollbackKeptGuardedNote = ''" in restore
+    note = restore.index("$script:DefenseClawRollbackKeptGuardedNote = \"The Codex requirements.toml was not put back")
+    assert note < restore.index("continue", note) < restore.index("-Source $backup", note)
+    install = _function_body(text, "Invoke-DefenseClawInstallLikeLifecycle")
+    keep = install.index("if ($script:DefenseClawRollbackKeptGuardedNote -ne '') {")
+    assert "$operationError.Exception.Message + '. ' + $script:DefenseClawRollbackKeptGuardedNote" in install[keep : keep + 300]
+    assert keep < install.index("throw $operationError", keep)

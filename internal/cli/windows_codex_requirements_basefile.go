@@ -5,12 +5,27 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+// windowsCodexRequirementsWriterLockBusyCode is the error_code of a report
+// whose failure is a Codex writer holding the writer lock (GAP-1001).
+const windowsCodexRequirementsWriterLockBusyCode = "writer_lock_busy"
+
+// annotateWindowsCodexRequirementsFailure puts the stable code of a failure
+// the caller acts on without reading text into the report.
+func annotateWindowsCodexRequirementsFailure(report *connector.WindowsCodexMachineRequirementsReport, err error) {
+	if err != nil && errors.Is(err, connector.ErrWindowsCodexWriterLockBusy) {
+		report.ErrorCode = windowsCodexRequirementsWriterLockBusyCode
+	}
+}
 
 // windowsCodexRequirementsBaseFileLimit bounds a --base-file document.
 const windowsCodexRequirementsBaseFileLimit = 4 << 20

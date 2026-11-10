@@ -22991,6 +22991,7 @@ function Restore-DefenseClawTransaction {
         [switch]$DeferServiceRestart
     )
     Clear-DefenseClawRollbackDeferredHolds
+    $script:DefenseClawRollbackKeptGuardedNote = ''
     Assert-DefenseClawDescendant -Path $SnapshotPath -Root $Layout.StateRoot -Label 'transaction snapshot' | Microsoft.PowerShell.Core\Out-Null
     Assert-DefenseClawNoReparsePath -Path $SnapshotPath
     $snapshot = Microsoft.PowerShell.Management\Get-Content -LiteralPath $SnapshotPath -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
@@ -23416,6 +23417,7 @@ function Restore-DefenseClawTransaction {
                         path      = $destination
                         reason    = "the Codex requirements recorded by the transaction would leave Codex unguarded ($backupProblem); the file in place carries the DefenseClaw hook and was not replaced"
                     }
+                    $script:DefenseClawRollbackKeptGuardedNote = "The Codex requirements.toml was not put back to the file this run recorded ($backupProblem): the file in place carries the DefenseClaw hook and stays, so Codex stays guarded ($destination)"
                     continue
                 }
             }
@@ -36289,6 +36291,10 @@ $script:DefenseClawRollbackDeferredHolds = [Collections.Generic.List[string]]::n
 # guardian cannot reconcile until the holder lets go, so the restored services
 # start without the guardian's coverage proof (Test-DefenseClawRollbackCoverageDeferred).
 $script:DefenseClawRollbackCoverageDeferred = $false
+# GAP-1001: set when a rollback kept a requirements.toml that carries the hook
+# instead of putting back a recorded one that would leave Codex unguarded; the
+# failed run says so (Invoke-DefenseClawInstallLikeLifecycle).
+$script:DefenseClawRollbackKeptGuardedNote = ''
 
 function Test-DefenseClawRollbackHeldMessage {
     param([AllowEmptyString()][string]$Message)
@@ -48884,6 +48890,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 path      = [string]$Layout.ManagedHooksLifecycleJournalPath
                 reason    = "prior enrollment restored; the completed lifecycle journal is kept for recovery: $($_.Exception.Message)"
             }
+        }
+        if ($script:DefenseClawRollbackKeptGuardedNote -ne '') {
+            throw ([string]$operationError.Exception.Message + '. ' + $script:DefenseClawRollbackKeptGuardedNote)
         }
         throw $operationError
     }
