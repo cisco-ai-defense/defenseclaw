@@ -200,9 +200,12 @@ func foldRuleText(text string) string {
 	return strings.Map(foldRuleRune, text)
 }
 
-// ruleScanText is one text a rule scan reads, folded once on first use.
+// ruleScanText is one text a rule scan reads, folded once on first use. The
+// mutex guards the fold: the rules of one scan may check the text from
+// several goroutines (scanRuleMatchesInParallel).
 type ruleScanText struct {
 	text   string
+	mu     sync.Mutex
 	folded string
 	ready  bool
 }
@@ -214,13 +217,16 @@ func (t *ruleScanText) mayMatch(pattern *regexp.Regexp) bool {
 	if plan == nil {
 		return true
 	}
+	t.mu.Lock()
 	if !t.ready {
 		t.folded, t.ready = foldRuleText(t.text), true
 	}
+	folded := t.folded
+	t.mu.Unlock()
 	for _, set := range plan {
 		found := false
 		for _, literal := range set {
-			if strings.Contains(t.folded, literal) {
+			if strings.Contains(folded, literal) {
 				found = true
 				break
 			}

@@ -229,7 +229,10 @@ func foldCanonical(text string) string {
 // Text is one text checked against many expressions; its fold form is made
 // once, when first needed.
 type Text struct {
-	text   string
+	text string
+	// mu guards the fold, which the first check that needs it computes: the
+	// checks of one text may run on several goroutines.
+	mu     sync.Mutex
 	folded string
 	done   bool
 }
@@ -256,15 +259,21 @@ func (t *Text) holds(re *regexp.Regexp) bool {
 	if !set.ok {
 		return true
 	}
-	if set.fold && !t.done {
-		t.folded, t.done = foldCanonical(t.text), true
+	folded := ""
+	if set.fold {
+		t.mu.Lock()
+		if !t.done {
+			t.folded, t.done = foldCanonical(t.text), true
+		}
+		folded = t.folded
+		t.mu.Unlock()
 	}
 	for _, c := range set.clauses {
 		found := false
 		for _, l := range c {
 			haystack := t.text
 			if l.fold {
-				haystack = t.folded
+				haystack = folded
 			}
 			if strings.Contains(haystack, l.text) {
 				found = true

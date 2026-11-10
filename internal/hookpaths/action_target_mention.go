@@ -1557,18 +1557,38 @@ func (g *actionGlobs) targetMemo() *TargetMemo {
 	return g.memo
 }
 
-// actionDotglobSetting matches, once lowercased without underscores, a
+// actionDotglobSettings are the names (lowercased, without underscores) of a
 // shell setting that lets * and ? match a leading dot: bash dotglob or a
-// GLOBIGNORE, zsh GLOB_DOTS or a (D) qualifier, or a startup file
-// (BASH_ENV) that may set one.
+// GLOBIGNORE, zsh GLOB_DOTS, or a startup file (BASH_ENV) that may set one;
+// actionDotglobQualifier matches a (D) glob qualifier.
 var (
-	actionDotglobSetting   = lazyregexp.New(`dotglob|globdots|globignore|bashenv`)
+	actionDotglobSettings  = []string{"dotglob", "globdots", "globignore", "bashenv"}
 	actionDotglobQualifier = lazyregexp.New(`[*?\]]\([^()]*D[^()]*\)`)
 )
 
+// actionDotglobSettingIn reports a dotglob setting in text that is lowercased
+// without underscores.
+func actionDotglobSettingIn(folded string) bool {
+	for _, setting := range actionDotglobSettings {
+		if strings.Contains(folded, setting) {
+			return true
+		}
+	}
+	return false
+}
+
+// actionCommandMayDotglob reads the command with plain substring checks
+// first: the regular expression is an automaton run over every byte, which
+// costs a large heredoc body hundreds of milliseconds, and it can match only
+// where a glob character is followed by an opening parenthesis.
 func actionCommandMayDotglob(command string) bool {
-	return actionDotglobSetting.MatchString(strings.ReplaceAll(strings.ToLower(command), "_", "")) ||
-		actionDotglobQualifier.MatchString(command)
+	if actionDotglobSettingIn(strings.ReplaceAll(strings.ToLower(command), "_", "")) {
+		return true
+	}
+	if !strings.Contains(command, "*(") && !strings.Contains(command, "?(") && !strings.Contains(command, "](") {
+		return false
+	}
+	return actionDotglobQualifier.MatchString(command)
 }
 
 // actionShellProfileMayDotglob reports a startup file of the user's or the
@@ -1596,7 +1616,7 @@ func actionShellProfileMayDotglob(home string) bool {
 		}
 		data, err := io.ReadAll(io.LimitReader(file, 1<<20))
 		_ = file.Close()
-		if err != nil || actionDotglobSetting.MatchString(strings.ReplaceAll(strings.ToLower(string(data)), "_", "")) {
+		if err != nil || actionDotglobSettingIn(strings.ReplaceAll(strings.ToLower(string(data)), "_", "")) {
 			return true
 		}
 	}
