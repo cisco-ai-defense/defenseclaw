@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -181,11 +180,14 @@ func repairEnterpriseHookManifestACL(path string) error {
 	// that carries no standalone scope (Setup's own, a copied binary), so the
 	// repair reads the file's own descriptor first (GAP-1048).
 	if _, standalone := managedHostWindowsStandalone(); standalone {
-		result, err := managed.AssessCanonical(path, managed.ObjectAdminFile, managed.CanonicalOptions{Quiet: true})
-		if err != nil || result.Outcome == managed.CanonicalBoundary {
-			return managed.RefuseStandaloneContentDrift(fmt.Errorf(
-				"the hook guardian manifest %s is not repaired in place: an untrusted principal can write or owns it (%s)",
-				path, strings.Join(result.Drift, "; ")))
+		// Under the standalone scope the assessment also reads a descriptor
+		// that hides itself from this caller with backup privileges, and
+		// turns anything it cannot judge into a refusal.
+		restore := pinWindowsStandaloneTrustScope()
+		refused := managed.RefuseStandaloneInPlaceRepair(path, managed.ObjectAdminFile)
+		restore()
+		if refused != nil {
+			return refused
 		}
 	}
 	return enterprisehooks.ProtectWindowsManagedRuntimeAdminFile(path)

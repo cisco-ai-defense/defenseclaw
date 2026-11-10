@@ -59,13 +59,18 @@ try {
             # Secure Client (not the standalone profile): nothing is kept.
             function Test-DefenseClawStandaloneProfile { return $false }
             $script:DefenseClawRestoredPolicyNotes = @()
-            Save-DefenseClawRejectedStandalonePolicy -Layout $layout -Name $case.Name -Path $installed -ApprovedPath $approved
-            if ([IO.File]::Exists($kept) -or @($script:DefenseClawRestoredPolicyNotes).Count -ne 0) {
+            $prepared = Save-DefenseClawRejectedStandalonePolicy -Layout $layout -Name $case.Name -Path $installed -ApprovedPath $approved
+            Add-DefenseClawRestoredPolicyNote -Kept $prepared
+            if ($null -ne $prepared -or [IO.File]::Exists($kept) -or @($script:DefenseClawRestoredPolicyNotes).Count -ne 0) {
                 throw "$($case.Leaf): the Secure Client profile kept a rejected file or noted it"
             }
 
             function Test-DefenseClawStandaloneProfile { return $true }
-            Save-DefenseClawRejectedStandalonePolicy -Layout $layout -Name $case.Name -Path $installed -ApprovedPath $approved
+            $prepared = Save-DefenseClawRejectedStandalonePolicy -Layout $layout -Name $case.Name -Path $installed -ApprovedPath $approved
+            if (@($script:DefenseClawRestoredPolicyNotes).Count -ne 0) {
+                throw "$($case.Leaf): the restore was noted before it happened"
+            }
+            Add-DefenseClawRestoredPolicyNote -Kept $prepared
             if (-not [IO.File]::Exists($kept) -or [IO.File]::ReadAllText($kept) -ne $body) {
                 throw "$($case.Leaf): the replaced bytes were not kept as $kept"
             }
@@ -84,7 +89,7 @@ try {
 
             # A second restore replaces the kept file with the newer bytes.
             [IO.File]::WriteAllText($installed, "# second`n")
-            Save-DefenseClawRejectedStandalonePolicy -Layout $layout -Name $case.Name -Path $installed -ApprovedPath $approved
+            [void](Save-DefenseClawRejectedStandalonePolicy -Layout $layout -Name $case.Name -Path $installed -ApprovedPath $approved)
             if ([IO.File]::ReadAllText($kept) -ne "# second`n") {
                 throw "$($case.Leaf): a second keep did not replace the kept file"
             }
@@ -93,7 +98,8 @@ try {
             [IO.File]::Delete($installed)
             [IO.File]::Delete($kept)
             $script:DefenseClawRestoredPolicyNotes = @()
-            Save-DefenseClawRejectedStandalonePolicy -Layout $layout -Name $case.Name -Path $installed -ApprovedPath $approved
+            $prepared = Save-DefenseClawRejectedStandalonePolicy -Layout $layout -Name $case.Name -Path $installed -ApprovedPath $approved
+            Add-DefenseClawRestoredPolicyNote -Kept $prepared
             if ([IO.File]::Exists($kept) -or @($script:DefenseClawRestoredPolicyNotes).Count -ne 0) {
                 throw "$($case.Leaf): a missing file was kept or noted"
             }

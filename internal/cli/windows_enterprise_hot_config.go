@@ -1427,6 +1427,12 @@ type windowsHotConfigPublishedTargets struct {
 // before the apply refreshes them. With none published no user has a hook
 // to lose, and there is nothing to put back. A seam for tests.
 var windowsEnterpriseHotConfigTargetsRecord = func(layout managed.StandaloneLayout) (windowsHotConfigPublishedTargets, error) {
+	// The roster recorded here is written back under a trusted access list
+	// if the refresh fails, so a roster another account owns or can write is
+	// refused and not recorded (GAP-1048).
+	if drift := managed.StandaloneFileLeafDrift(layout.ManifestPath, "hook guardian manifest"); drift != nil {
+		return windowsHotConfigPublishedTargets{}, managed.RefuseStandaloneContentDrift(drift)
+	}
 	before, err := enterprisehooks.LoadManifest(layout.ManifestPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return windowsHotConfigPublishedTargets{restore: func() error { return nil }, dropped: func() []enterprisehooks.ManifestTarget { return nil }}, nil
@@ -1436,6 +1442,9 @@ var windowsEnterpriseHotConfigTargetsRecord = func(layout managed.StandaloneLayo
 	}
 	return windowsHotConfigPublishedTargets{
 		restore: func() error {
+			// Setup's own process lacks the standalone scope the writer's
+			// refusal of a drifted manifest depends on (GAP-1048).
+			defer pinWindowsStandaloneTrustScope()()
 			_, err := enterprisehooks.WriteTargetsManifestAtomic(layout.ManifestPath, before)
 			return err
 		},

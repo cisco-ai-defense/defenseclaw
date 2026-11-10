@@ -220,6 +220,9 @@ func runWindowsTargetRuntimeAction(cmd *cobra.Command, action string, opts *wind
 // it under the target-runtime trust checks and returns the digest of the
 // exact bytes now on disk.
 func publishWindowsTargetRuntimeManifest(path string, reduced enterprisehooks.Manifest) (string, error) {
+	// A process without the standalone scope would re-stamp a drifted
+	// manifest in place before the replace (GAP-1048).
+	defer pinWindowsStandaloneTrustScope()()
 	if _, err := windowsTargetRuntimeManifestWrite(path, reduced); err != nil {
 		return "", err
 	}
