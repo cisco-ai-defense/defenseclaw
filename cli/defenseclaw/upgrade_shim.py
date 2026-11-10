@@ -712,9 +712,14 @@ def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str
     )
 
 
-# How long the shim waits for a started Windows installer to open its log.
-_INSTALLER_LOG_WAIT = 60.0
+# How long the shim waits for a started Windows installer to open its log. An
+# installer run with --yes that ends with an error keeps its console for up to
+# 120 seconds (Wait-BeforeClose in install.ps1) before the process exits, so the
+# wait outlasts that: the exit code is then known before the shim reports.
+_INSTALLER_LOG_WAIT = 150.0
 _INSTALLER_LOG_POLL = 0.25
+# The read of a log's new bytes for the installer's process id.
+_INSTALLER_LOG_HEAD = 65536
 
 
 def _terminal_command(script: str, ps_args: list[str]) -> str:
@@ -722,26 +727,60 @@ def _terminal_command(script: str, ps_args: list[str]) -> str:
     return " ".join(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f'"{script}"', *ps_args])
 
 
-def _install_logs(logs: str) -> set[str]:
+def _install_logs(logs: str) -> dict[str, int]:
+    """The install logs (name -> size) in *logs*."""
+    sizes: dict[str, int] = {}
     try:
         names = os.listdir(logs)
     except OSError:
-        return set()
-    return {name for name in names if name.startswith("install-") and name.endswith(".log")}
+        return sizes
+    for name in names:
+        if name.startswith("install-") and name.endswith(".log"):
+            try:
+                sizes[name] = os.stat(os.path.join(logs, name)).st_size
+            except OSError:
+                continue
+    return sizes
 
 
-def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: set[str]) -> tuple[bool, int | None]:
-    """Wait until the started installer opens a new install log or ends.
+def _log_opened_by(logs: str, known: dict[str, int], pid: int) -> bool:
+    """Whether the process *pid* wrote a transcript header into *logs* since *known*.
+
+    The installer names a log to the second and opens it with ``-Append``, so
+    a name already in *known* may be the installer's own log, and a log that
+    appeared or grew may be another run's. The transcript header names the
+    process (``Process ID: <pid>``): only the bytes added since the snapshot
+    count, and only a header with this process's id.
+    """
+    marker = re.compile(rb"Process ID:\s*" + str(pid).encode("ascii") + rb"(?!\d)")
+    for name, size in _install_logs(logs).items():
+        before = known.get(name, 0)
+        if size == before:
+            continue
+        try:
+            with open(os.path.join(logs, name), "rb") as stream:
+                stream.seek(before if size > before else 0)
+                added = stream.read(_INSTALLER_LOG_HEAD)
+        except OSError:
+            continue
+        # A UTF-16 transcript spaces every character with a NUL.
+        if marker.search(added.replace(b"\x00", b"")):
+            return True
+    return False
+
+
+def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: dict[str, int]) -> tuple[bool, int | None]:
+    """Wait until the started installer opens its install log or ends.
 
     Returns (log opened, exit code or None while it still runs). It gives up
     waiting after ``_INSTALLER_LOG_WAIT`` seconds; an installer that is still
     running then (it waits for an earlier uninstall, a lock or a download) is
-    reported as running, not as failed.
+    reported as unconfirmed, not as failed.
     """
     deadline = time.monotonic() + _INSTALLER_LOG_WAIT
     while True:
         rc = proc.poll()
-        if _install_logs(logs) - known:
+        if _log_opened_by(logs, known, proc.pid):
             return True, rc
         if rc is not None:
             return False, rc
@@ -800,6 +839,7 @@ def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | Non
         # A started process is not a running install (GAP-1011): the installer
         # opens its log only after it has the install lock, and an installer
         # that ends before then leaves nothing but a window that closes.
+        print(f"  → Waiting for the installer to open its log (up to {int(_INSTALLER_LOG_WAIT)} s)...", flush=True)
         opened, rc = _await_installer_log(proc, logs, known)
         if rc not in (None, 0) and not opened:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -808,13 +848,16 @@ def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | Non
                 "the reason was shown only in its window, which has closed. Run this command again and read "
                 "that window, or check the install with: defenseclaw doctor"
             )
-        if rc == 0 and not opened:
-            print("  → The installer ran in its own window and ended with exit code 0 without opening an install log.")
-        else:
+        if opened:
             print("  → The installer continues in a new window, which shows the result when it ends.")
             print(f"    Its log is saved in {logs} (install-<time>.log).")
-        if rc is None and not opened:
-            print(f"  ! Its log is not open after {int(_INSTALLER_LOG_WAIT)} seconds; it may wait on another install.")
+        elif rc == 0:
+            print("  → The installer ran in its own window and ended with exit code 0 without opening an install log.")
+        else:
+            print(
+                f"  ! The installer has not opened its log after {int(_INSTALLER_LOG_WAIT)} seconds, so the start is "
+                "not confirmed: it may wait on another install, or have failed with the reason shown in its window."
+            )
         print("    Confirm the result afterwards with: defenseclaw --version")
         return 0
     bash = "/bin/bash" if os.path.exists("/bin/bash") else (shutil.which("bash") or "bash")
