@@ -234,6 +234,50 @@ try {
                 if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop') { throw "a working hold left '$($script:SmokeServiceCalls -join '|')'" }
             }
             finally { foreach ($name in $replaced) { Set-Item -LiteralPath "function:script:$name" -Value $original[$name] } }
+            # GAP-0989: any start= other than delayed-auto clears the delayed-start flag
+            # (the real service does: sc config start= disabled, then auto, gives plain
+            # automatic), so the setter notes the flag before it changes the mode and
+            # restores automatic as delayed-auto for a service it saw delayed. Standalone
+            # only; Secure Client keeps start= auto. sc is replaced and emulates the flag.
+            $replacedSetter = @('Assert-DefenseClawServiceName', 'Test-DefenseClawServiceExists', 'Get-DefenseClawServiceStartMode', 'Get-DefenseClawServiceDelayedAutoStart', 'Invoke-DefenseClawNative')
+            $originalSetter = @{}
+            foreach ($name in $replacedSetter) { $originalSetter[$name] = (Get-Item -LiteralPath "function:$name").ScriptBlock }
+            $script:SmokeScCalls = [Collections.Generic.List[string]]::new()
+            $script:SmokeScMode = 2
+            $script:SmokeScDelayed = $false
+            try {
+                Set-Item -LiteralPath 'function:script:Assert-DefenseClawServiceName' -Value { }
+                Set-Item -LiteralPath 'function:script:Test-DefenseClawServiceExists' -Value { $true }
+                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceStartMode' -Value { $script:SmokeScMode }
+                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeScDelayed }
+                Set-Item -LiteralPath 'function:script:Invoke-DefenseClawNative' -Value {
+                    param([string]$File, [string[]]$Arguments, [int]$TimeoutSeconds, [switch]$Capture, [switch]$TolerateServicePendingDelete)
+                    $token = $Arguments[3]
+                    $script:SmokeScCalls.Add($token)
+                    $script:SmokeScMode = @{ 'auto' = 2; 'delayed-auto' = 2; 'demand' = 3; 'disabled' = 4 }[$token]
+                    $script:SmokeScDelayed = ($token -eq 'delayed-auto')
+                }
+                $setterRows = @(
+                    @{ Label = 'standalone, delayed-auto service disabled and restored'; Profile = 'Standalone'; Delayed = $true; Want = 'disabled|delayed-auto'; WantDelayed = $true },
+                    @{ Label = 'standalone, plain automatic service disabled and restored'; Profile = 'Standalone'; Delayed = $false; Want = 'disabled|auto'; WantDelayed = $false },
+                    @{ Label = 'standalone, delayed-auto service set to demand then automatic'; Profile = 'Standalone'; Delayed = $true; Want = 'demand|delayed-auto'; WantDelayed = $true; First = 3 },
+                    @{ Label = 'Secure Client, delayed-auto service disabled and restored'; Profile = 'SecureClient'; Delayed = $true; Want = 'disabled|auto'; WantDelayed = $false }
+                )
+                foreach ($row in $setterRows) {
+                    $script:DefenseClawDelayedAutoStartSeen.Clear()
+                    $script:SmokeScCalls.Clear(); $script:SmokeScMode = 2; $script:SmokeScDelayed = $row.Delayed
+                    Set-DefenseClawEnterpriseProfile -EnterpriseProfile $row.Profile
+                    try {
+                        $first = if ($row.ContainsKey('First')) { $row.First } else { 4 }
+                        Set-DefenseClawServiceStartMode -Name 'DcSmokeGuardian' -StartMode $first
+                        Set-DefenseClawServiceStartMode -Name 'DcSmokeGuardian' -StartMode 2
+                    }
+                    finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone }
+                    if (($script:SmokeScCalls -join '|') -ne $row.Want -or $script:SmokeScDelayed -ne $row.WantDelayed) { throw "$($row.Label): sc calls '$($script:SmokeScCalls -join '|')' delayed=$($script:SmokeScDelayed), want '$($row.Want)' delayed=$($row.WantDelayed)" }
+                }
+                $script:DefenseClawDelayedAutoStartSeen.Clear()
+            }
+            finally { foreach ($name in $replacedSetter) { Set-Item -LiteralPath "function:script:$name" -Value $originalSetter[$name] } }
             # S-H3: a holder that arrives during the rollback proof (after the check
             # before it) is resolved: the proof is deferred and the run continues.
             $late = [IO.FileStream]::new($class[1], [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)

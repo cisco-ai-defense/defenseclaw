@@ -974,13 +974,18 @@ def test_the_exact_start_mode_helpers_are_reached_only_from_the_standalone_hold(
     hold = _function_body(module, "Hold-DefenseClawEarlyHookGuard")
     assert hold.index("if (-not (Test-DefenseClawStandaloneProfile)") < hold.index("Get-DefenseClawServiceDelayedAutoStart")
     rest = module
+    setter = _function_body(module, "Set-DefenseClawServiceStartMode")
+    assert setter.index("if (Test-DefenseClawStandaloneProfile) {") < setter.index("Get-DefenseClawServiceDelayedAutoStart")
+    assert setter.index("Get-DefenseClawServiceDelayedAutoStart") < setter.index("'delayed-auto'")
     for name in (
         "Get-DefenseClawServiceDelayedAutoStart",
         "Set-DefenseClawServiceDelayedAutoStart",
         "Restore-DefenseClawServiceStartModeExact",
         "Hold-DefenseClawEarlyHookGuard",
+        "Set-DefenseClawServiceStartMode",
     ):
         rest = rest.replace(_function_body(module, name), "")
     assert rest.count("Restore-DefenseClawServiceStartModeExact") == 0
     assert rest.count("Get-DefenseClawServiceDelayedAutoStart") == 0
     assert rest.count("Set-DefenseClawServiceDelayedAutoStart") == 0
+    assert rest.count("DefenseClawDelayedAutoStartSeen") == 1  # its declaration; the setter holds the rest
