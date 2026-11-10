@@ -81,6 +81,7 @@ func TestReplayedToolUseIDBlockStillWritesItsAuditRow(t *testing.T) {
 	// The benign twin: a replayed allow stays silent.
 	step("replayed allow", "toolu_allowed", allow, true, 0)
 	// The id re-used by a denied call: its block row is written again.
+	step("block answering an id that earlier got an allow", "toolu_allowed", block, true, 1)
 	step("replayed block", "toolu_blocked", block, true, 1)
 	step("replayed block again", "toolu_blocked", block, true, 1)
 }
