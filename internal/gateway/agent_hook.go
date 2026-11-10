@@ -299,7 +299,7 @@ func (a *APIServer) hookDeliveredPersistenceContext(ctx context.Context, receipt
 		return ctx, nil
 	}
 	cfg := a.decisionConfig(ctx)
-	if cfg == nil || cfg.SecureClientIntegration() || cfg.DeploymentMode != "per_user" {
+	if cfg == nil || cfg.SecureClientIntegration() || !perUserHookInstall(cfg) {
 		return ctx, nil
 	}
 	durableCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -1537,18 +1537,9 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	delivered bool,
 ) hookFinalizationResult {
 	receipted, _ := ctx.Value(hookDeliveryReceiptContextKey{}).(bool)
-	if client, ok := ctx.Value(hookClientContextKey{}).(context.Context); ok && client.Err() != nil && resp.Action != "block" &&
+	if client, ok := ctx.Value(hookClientContextKey{}).(context.Context); ok && client.Err() != nil &&
 		resp.Action != hookActionUnconfirmed && !receipted {
-		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-			failed := a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, req.Payload, hookCheckFailure{
-				base:  agentHookResponse{Severity: "WARN", Reason: "hook client disconnected before the gateway decision was delivered"},
-				cause: "because the hook client disconnected before it received the gateway decision",
-			})
-			if failed.Action == "block" {
-				failed.EvaluationID = resp.EvaluationID
-				resp = failed
-			}
-		}
+		resp = a.clientLeftHookDecision(ctx, connectorName, req, rawBody, resp)
 	}
 	// Treat a block response as enforced unless identity stamping proves
 	// otherwise. If identity stamping itself panics, notification stays

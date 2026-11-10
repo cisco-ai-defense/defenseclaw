@@ -95,6 +95,8 @@ type APIServer struct {
 	// has sent its first per-user hook verdict.
 	firstHookAnswerRecorded atomic.Bool
 	firstHookAnswerMu       sync.Mutex
+	// hookShed remembers the refused hook calls that already have a shed row.
+	hookShed hookShedLedger
 
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).

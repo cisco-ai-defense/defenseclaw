@@ -139,6 +139,10 @@ func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
+	// This hook fails closed, so its fail-closed block is what the agent got
+	// when it left. A hook that may fail open is recorded unconfirmed
+	// (TestScriptHookCallWhoseClientLeftIsUnconfirmedWhenTheHookMayFailOpen).
+	cfg.Guardrail.HookFailMode = "closed"
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
 	bindHookLifecycleV8(t, api, fixture.runtime)
 
