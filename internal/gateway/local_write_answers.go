@@ -20,11 +20,16 @@ import (
 // user, so its walk is the client's: the physical file, or, for a directory
 // closed to the user, the file the link text leads to. A gateway that cannot
 // read the caller's home, or whose action runs elsewhere, adds nothing.
-func withLocalWriteAnswers(request trustedActionRequest, answers map[string]string) map[string]string {
+//
+// targets are the names the call writes, as written: those of a native
+// file-tool call, and, once the shell text is read, those of the apply_patch
+// envelope of a shell here-document (actionfacts.NativeCallWriteTargets), so a
+// patch header is placed by the same walk as a file-tool name.
+func withLocalWriteAnswers(request trustedActionRequest, answers map[string]string, targets []string) map[string]string {
 	if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
 		return answers
 	}
-	for _, target := range actionfacts.NativeFileWriteTargets(request.Input) {
+	for _, target := range targets {
 		// A name that steps up a directory is answered by its raw spelling as
 		// well as by the clean one the proofs of older rules read.
 		spellings := []string{actionfacts.OperandPath(target, request.Input.CWD)}
