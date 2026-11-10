@@ -2141,6 +2141,12 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	// exceeds the budget.
 	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3 +
 		len(jsonString(BudgetKey)) + 1 + 3 + 1
+	// The folder the call runs in, as the model gave it, is reserved here: a
+	// long operand list fills the map up to the budget, and this fact must
+	// not be what the budget is short of at the end (GAP-0991).
+	if callWorkdir != "" {
+		size += len(jsonString(CallWorkdirKey)) + 1 + len(jsonString(callWorkdir)) + 1
+	}
 	// overBudget is set when an operand or fact is left out only because the
 	// map is full (BudgetKey).
 	overBudget := false
@@ -2433,7 +2439,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if (isApplyPatchToolName(tool) || hermesV4A) && patchListed {
 		entry := len(jsonString(PatchCompleteKey)) + 1 + len(jsonString("1")) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
-			return incompleteEvidence(cwd)
+			return incompleteEvidenceKeeping(cwd, protectedDecision)
 		}
 		targets[PatchCompleteKey] = "1"
 		size += entry
@@ -2529,12 +2535,10 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if callWorkdir != "" {
 		// The folder the call runs in, as the model gave it: a gateway that
 		// cannot read the rollout judges the call there (GAP-0991).
-		entry := len(jsonString(CallWorkdirKey)) + 1 + len(jsonString(callWorkdir)) + 1
-		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
-			return incompleteEvidence(cwd)
+		if size > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			return incompleteEvidenceKeeping(cwd, protectedDecision)
 		}
 		targets[CallWorkdirKey] = callWorkdir
-		size += entry
 	}
 	identity := strings.Join(identities, "\x00")
 	// A script body this call could not read (the call wait for a network
@@ -2543,7 +2547,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if unread := shareBodyUnreadFact(); unread != "" {
 		entry := len(jsonString(ShareBodyUnreadKey)) + 1 + len(jsonString(unread)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
-			return unprovenEvidence(cwd, unprovenReason, identity)
+			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision)
 		}
 		targets[ShareBodyUnreadKey] = unread
 		size += entry
@@ -2551,7 +2555,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if unprovenReason != "" {
 		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
-			return unprovenEvidence(cwd, unprovenReason, identity)
+			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision)
 		}
 		targets[UnprovenReasonKey] = unprovenReason
 		size += entry
@@ -2559,7 +2563,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if identity != "" {
 		entry := len(jsonString(InstructionIdentityKey)) + 1 + len(jsonString(identity)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+3 {
-			return unprovenEvidence(cwd, unprovenReason, identity)
+			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision)
 		}
 		targets[InstructionIdentityKey] = identity
 		size += entry
@@ -2633,7 +2637,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	}
 	encoded, err := json.Marshal(targets)
 	if err != nil || len(encoded) > maxEncodedTargets {
-		return incompleteEvidence(cwd)
+		return incompleteEvidenceKeeping(cwd, protectedDecision)
 	}
 	if watch != nil {
 		*watch = patchTargetWatchOf(targets, home)
@@ -2951,9 +2955,20 @@ func resolveCopilotCalls(connector, surface, event string, envelope map[string]j
 }
 
 func incompleteEvidence(cwd string) string {
+	return incompleteEvidenceKeeping(cwd, false)
+}
+
+// incompleteEvidenceKeeping is incompleteEvidence for a call whose reading
+// already found a protected target: the decision is one small fact, and the
+// map that gives up its operands for the budget must still carry it, or a
+// protected name would read as an unresolved one (GAP-0943, GAP-0151).
+func incompleteEvidenceKeeping(cwd string, protectedDecision bool) string {
 	targets := map[string]string{TruncatedKey: "1"}
 	if cwd != "" && len(cwd) <= MaxWriteTargetPathBytes {
 		targets[CWDKey] = cwd
+	}
+	if protectedDecision {
+		targets[ActionDecisionKey] = ProtectedTargetDecision
 	}
 	encoded, err := json.Marshal(targets)
 	if err != nil {
@@ -2962,11 +2977,14 @@ func incompleteEvidence(cwd string) string {
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
-func unprovenEvidence(cwd, reason, identity string) string {
+func unprovenEvidence(cwd, reason, identity string, protectedDecision bool) string {
 	// The full target map overflowed while adding the class reason or the
 	// file-identity evidence. Keep the incomplete-map marker and both facts
 	// in the small header.
 	targets := map[string]string{CWDKey: cwd, TruncatedKey: "1"}
+	if protectedDecision {
+		targets[ActionDecisionKey] = ProtectedTargetDecision
+	}
 	if reason != "" {
 		targets[UnprovenReasonKey] = reason
 	}
