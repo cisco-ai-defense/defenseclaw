@@ -64,7 +64,7 @@ jobs:
     # package and shard N of 16 of the connector package, both balanced on
     # recorded Windows test times (scripts/test-timings/go-windows.json);
     # pkN one of eight timing-balanced parts of the remaining packages and hxN
-    # one of five test-level parts of hookexec (still -p=1 within each part).
+    # one of six test-level parts of hookexec (still -p=1 within each part).
     # The checks part runs DACL, redaction, isolated connector tests, vet, and
     # builds; stress runs the single-flight and executable
     # lifecycle stress loops; and tm0-tm2 repeat 20 times the Windows timing
@@ -104,6 +104,7 @@ jobs:
           - { shard: hx2, kind: hookexec, index: 2 }
           - { shard: hx3, kind: hookexec, index: 3 }
           - { shard: hx4, kind: hookexec, index: 4 }
+          - { shard: hx5, kind: hookexec, index: 5 }
           - { shard: checks, kind: checks, index: 0 }
           - { shard: stress, kind: stress, index: 0 }
           - { shard: tm0, kind: timing, index: 0 }
@@ -259,7 +260,7 @@ jobs:
           $matrixShard = [int]$env:GO_SUITE_INDEX
           $nativeTestShardCount = 16
           $remainingPackageShardCount = 8
-          $hookexecTestShardCount = 5
+          $hookexecTestShardCount = 6
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
           $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
           if ($suiteKind -notin @('gateway', 'packages', 'hookexec', 'checks')) {

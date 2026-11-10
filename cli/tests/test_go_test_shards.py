@@ -365,7 +365,7 @@ def test_windows_hookexec_matrix_covers_each_test_once_with_time_headroom() -> N
     job = workflow["jobs"]["windows-go"]
     entries = job["strategy"]["matrix"]["include"]
     hookexec_parts = [(part["shard"], part["index"]) for part in entries if part["kind"] == "hookexec"]
-    assert hookexec_parts == [(f"hx{index}", index) for index in range(5)]
+    assert hookexec_parts == [(f"hx{index}", index) for index in range(6)]
 
     uv_step = next(step for step in job["steps"] if step.get("uses", "").startswith("astral-sh/setup-uv@"))
     assert "matrix.kind == 'hookexec'" in uv_step["if"]
@@ -374,7 +374,7 @@ def test_windows_hookexec_matrix_covers_each_test_once_with_time_headroom() -> N
     )
     hookexec = run.split("if ($suiteKind -eq 'hookexec') {", 1)[1].split("if ($suiteKind -eq 'packages') {", 1)[0]
     packages = run.split("if ($suiteKind -eq 'packages') {", 1)[1].split("if ($suiteKind -eq 'gateway'", 1)[0]
-    assert "$hookexecTestShardCount = 5" in run
+    assert "$hookexecTestShardCount = 6" in run
     assert "'--package-dir', 'internal/gateway/connector/hookexec'" in hookexec
     assert "'--split-tests'" in hookexec
     assert "'--timings', 'scripts/test-timings/go-windows.json'" in hookexec
