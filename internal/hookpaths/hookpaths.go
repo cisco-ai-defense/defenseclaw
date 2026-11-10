@@ -2136,6 +2136,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	}
 	// A native patch call names its files in the call, not in a shell command.
 	nativePatch := isApplyPatchToolName(tool) || hermesV4A
+	// A delete of a typed file tool or a patch removes the final name, so
+	// the target map describes it as that entry (its directory followed, the
+	// final name kept), never as the file a link there reaches.
+	// An apply_patch command in a shell call removes the same names, so its
+	// Delete File entries are listed alike; the other deletes of a shell
+	// command (rm, unlink) keep their own reading.
+	deletedEntries := deletedFileEntries(facts, !nativePatch && !actionfacts.PathTool(tool))
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
@@ -2209,9 +2216,10 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			}
 		}
 		entryOnly := false
-		if replacedLinks[path] {
-			// mv replaces the link entry: only its directory is followed,
-			// the file the link names is not written (GAP-2558).
+		if replacedLinks[path] || deletedEntries[path] {
+			// mv replaces the link entry and a delete removes it: only its
+			// directory is followed, the file the link names is not written
+			// (GAP-2558).
 			if parent, parentOK := ResolveWriteTarget(filepath.Dir(path)); parentOK {
 				resolved, ok, entryOnly = filepath.Join(parent, filepath.Base(path)), true, true
 			}
@@ -2367,6 +2375,34 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		add(path, false, false)
 		if rawStepUp != "" {
 			add(rawStepUp, false, false)
+		}
+	}
+	// A typed file tool that reads a file reaches the file a link names, as
+	// a write does, and a managed gateway behind ProtectHome cannot follow a
+	// link in the project of the user: the file a read through a link
+	// reaches is listed, so the read gets the verdict of that file by name.
+	// A path that is no link names itself and needs no entry.
+	if actionfacts.PathTool(tool) {
+		for _, candidate := range facts.Paths {
+			if candidate.Access != actionfacts.PathAccessRead || !filepath.IsAbs(candidate.Resolved) ||
+				strings.ContainsAny(candidate.Resolved, "*?[]$`") {
+				continue
+			}
+			path := filepath.Clean(candidate.Resolved)
+			if _, listed := targets[path]; listed || len(path) > MaxWriteTargetPathBytes || len(targets)-1 >= MaxWriteTargets {
+				continue
+			}
+			physical, ok := ResolveWriteTarget(path)
+			if !ok || physical == path {
+				continue
+			}
+			cost := len(jsonString(path)) + 1 + len(jsonString(physical)) + 1
+			if size+cost > maxEncodedTargets {
+				truncated, overBudget = true, true
+				continue
+			}
+			size += cost
+			targets[path] = physical
 		}
 	}
 	// A delete removes the final name, so only its directory is followed.
@@ -3212,6 +3248,44 @@ func movedOntoLinkEntriesOf(destinations, noTarget map[string]bool) map[string]b
 		out[path] = true
 	}
 	return out
+}
+
+// deletedFileEntries lists the absolute names a typed file tool or a patch
+// deletes (Delete File), without a trailing separator. With patchCommandOnly
+// (a shell call) only the deletes of an apply_patch command are listed.
+func deletedFileEntries(facts actionfacts.Facts, patchCommandOnly bool) map[string]bool {
+	var out map[string]bool
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessDelete || strings.HasSuffix(candidate.Value, "/") {
+			continue
+		}
+		if patchCommandOnly && !applyPatchCommandOwns(facts, candidate) {
+			continue
+		}
+		path := candidate.Resolved
+		if path == "" {
+			path = candidate.Normalized
+		}
+		if !filepath.IsAbs(path) || strings.ContainsAny(path, "*?[]$\x60") {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[filepath.Clean(path)] = true
+	}
+	return out
+}
+
+// applyPatchCommandOwns reports whether a path fact belongs to an apply_patch
+// command of the action.
+func applyPatchCommandOwns(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	for _, command := range facts.Commands {
+		if command.ID == candidate.CommandID {
+			return command.Executable == "apply_patch"
+		}
+	}
+	return false
 }
 
 // PlainMoveDestinations lists, from the facts alone, the absolute move

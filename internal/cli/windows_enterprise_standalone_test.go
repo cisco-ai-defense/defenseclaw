@@ -363,7 +363,7 @@ func TestPlanWindowsEnterpriseEnsure(t *testing.T) {
 	t.Cleanup(func() { windowsEnterpriseEnsureDriftDetector = original })
 	full := windowsEnterpriseLifecycleOptions{
 		profile: "standalone", resolvedProfile: "standalone", productVersion: "1.4.0",
-		gatewayBinary: "g", acpBinary: "a", hookBinary: "h", hookGuardBinary: "hg", sensorHelperBinary: "s", configPath: "c",
+		gatewayBinary: "g", acpBinary: "a", hookBinary: "h", sensorHelperBinary: "s", configPath: "c",
 	}
 	for _, tc := range []struct {
 		name    string
@@ -1211,7 +1211,7 @@ func ensureTestOptions() *windowsEnterpriseLifecycleOptions {
 	return &windowsEnterpriseLifecycleOptions{
 		profile: "standalone", resolvedProfile: "standalone", productVersion: "1.4.0", trustMode: "authenticode",
 		gatewayBinary: `C:\stage\defenseclaw-gateway.exe`, acpBinary: `C:\stage\defenseclaw-acp.exe`,
-		hookBinary: `C:\stage\defenseclaw-hook.exe`, hookGuardBinary: `C:\stage\defenseclaw-hook-guard.exe`, sensorHelperBinary: `C:\stage\defenseclaw-sensor-helper.exe`,
+		hookBinary: `C:\stage\defenseclaw-hook.exe`, sensorHelperBinary: `C:\stage\defenseclaw-sensor-helper.exe`,
 		policyCompiler: `C:\stage\policy_compiler.py`,
 		configPath:     `C:\stage\config.yaml`, manifestPath: `C:\stage\targets.yaml`,
 		noStart: true, jsonOutput: true,

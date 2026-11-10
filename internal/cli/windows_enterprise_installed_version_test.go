@@ -158,7 +158,7 @@ func TestWindowsEnterpriseEnsureUpgradesAfterFinishingAPendingTransaction(t *tes
 	opts := &windowsEnterpriseLifecycleOptions{
 		profile: "standalone", resolvedProfile: "standalone", productVersion: "1.4.0", jsonOutput: true, trustMode: "authenticode",
 		gatewayBinary: `C:\p\defenseclaw-gateway.exe`, acpBinary: `C:\p\defenseclaw-acp.exe`,
-		hookBinary: `C:\p\defenseclaw-hook.exe`, hookGuardBinary: `C:\p\defenseclaw-hook-guard.exe`, sensorHelperBinary: `C:\p\defenseclaw-sensor-helper.exe`,
+		hookBinary: `C:\p\defenseclaw-hook.exe`, sensorHelperBinary: `C:\p\defenseclaw-sensor-helper.exe`,
 	}
 	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\p\install-enterprise.ps1`); err != nil {
 		t.Fatal(err)
@@ -270,7 +270,7 @@ func TestWindowsEnterpriseEnsureUpgradesAfterARecoveryDeferredActivation(t *test
 		opts := &windowsEnterpriseLifecycleOptions{
 			profile: "standalone", resolvedProfile: "standalone", productVersion: "1.0.50", jsonOutput: true, trustMode: "hash_pinned",
 			gatewayBinary: `C:\p\defenseclaw-gateway.exe`, acpBinary: `C:\p\defenseclaw-acp.exe`,
-			hookBinary: `C:\p\defenseclaw-hook.exe`, hookGuardBinary: `C:\p\defenseclaw-hook-guard.exe`, sensorHelperBinary: `C:\p\defenseclaw-sensor-helper.exe`,
+			hookBinary: `C:\p\defenseclaw-hook.exe`, sensorHelperBinary: `C:\p\defenseclaw-sensor-helper.exe`,
 		}
 		err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\p\install-enterprise.ps1`)
 		windowsEnterpriseStandaloneRunner = originalRunner
@@ -338,7 +338,7 @@ func TestWindowsEnterpriseEnsureRefusesAConnectorlessConfigForAProtectedDeployme
 	status := &windowsEnterpriseInstallerReport{OK: true, Installed: true, InstalledVersion: "1.0.921"}
 	opts := &windowsEnterpriseLifecycleOptions{
 		resolvedProfile: "standalone", productVersion: "1.0.921", configPath: `C:\stage\cfg-e7f.yaml`,
-		gatewayBinary: "g", acpBinary: "a", hookBinary: "h", hookGuardBinary: "hg", sensorHelperBinary: "s",
+		gatewayBinary: "g", acpBinary: "a", hookBinary: "h", sensorHelperBinary: "s",
 	}
 	_, err := planWindowsEnterpriseEnsure(status, opts, "")
 	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "claudecode, codex") {

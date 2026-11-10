@@ -849,7 +849,32 @@ func isDefiniteFixturePath(
 	}
 	// A call that runs in a profile found by its entries, or above it, is
 	// at the home of an account like one that runs in its Users folder.
-	return !profileHomeAtOrAbove(resolved, cwd)
+	// A home folder of the active account below the working directory is
+	// that account home reached under another parent, not a fixture of the
+	// project (nestedActiveHomeBelow).
+	return !profileHomeAtOrAbove(resolved, cwd) && !nestedActiveHomeBelow(resolved, cwd, facts.ActiveHome)
+}
+
+// nestedActiveHomeBelow reports, in the part of resolved below cwd, a Users or
+// home folder followed by the account folder of the active home and a name
+// below it, in any letter case: the home of the user under another parent (a
+// project folder, a mount, a copy), so the directory a call starts in decides
+// nothing for it. The home folders of other accounts below the working
+// directory stay fixtures (a project that keeps the homes of test accounts).
+// Both paths are in the folded spelling canonicalSemanticPath gives.
+func nestedActiveHomeBelow(resolved, cwd, activeHome string) bool {
+	account := path.Base(canonicalSemanticPath(activeHome))
+	if account == "." || account == "/" || account == "" {
+		return false
+	}
+	below := strings.TrimPrefix(strings.TrimRight(resolved, "/"), strings.TrimRight(cwd, "/"))
+	parts := strings.Split(strings.Trim(below, "/"), "/")
+	for index := 0; index+2 < len(parts); index++ {
+		if (parts[index] == "users" || parts[index] == "home") && parts[index+1] == account {
+			return true
+		}
+	}
+	return false
 }
 
 func canonicalSemanticPath(value string) string {

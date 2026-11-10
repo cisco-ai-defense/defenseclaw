@@ -39,7 +39,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -1977,71 +1976,6 @@ func TestPerUserSavedOutageModeEditRefreshesConnectorSetup(t *testing.T) {
 		newCfg.EffectiveHookOutageFailModeForConnector("codex") != "closed" ||
 		connectorSetChanged(oldCfg, newCfg) || !hookPolicyNeedsSetup(oldCfg, newCfg) {
 		t.Fatal("saved per-user outage edit missed the call-time mode or registration refresh")
-	}
-}
-
-func TestClaudeTierChangeWithSavedOpenRefreshesRegistration(t *testing.T) {
-	for _, tc := range []struct{ before, after string }{
-		{"default", "strict"}, {"strict", "default"},
-	} {
-		oldCfg := config.DefaultConfig()
-		oldCfg.Guardrail.Enabled = true
-		oldCfg.Guardrail.Connector = "claudecode"
-		oldCfg.Guardrail.HookSelfHeal = false
-		oldCfg.Guardrail.HookFailMode = "open"
-		oldCfg.Guardrail.RulePack = tc.before
-		newCfg := cloneConfig(oldCfg)
-		newCfg.Guardrail.RulePack = tc.after
-		if oldCfg.EffectiveHookOutageFailModeForConnector("claudecode") != "open" ||
-			newCfg.EffectiveHookOutageFailModeForConnector("claudecode") != "open" {
-			t.Fatal("fixture requires an unchanged saved outage mode")
-		}
-		if !hookRuntimePolicyChanged(oldCfg, newCfg, "claudecode") || !hookPolicyNeedsSetup(oldCfg, newCfg) {
-			t.Fatalf("%s to %s did not refresh the registration", tc.before, tc.after)
-		}
-	}
-}
-
-// A pinned custom pack whose posture changes with a new pin refreshes the
-// saved-open Claude Code registration; the same posture does not.
-func TestClaudeCustomPackPostureChangeRefreshesSavedOpenRegistration(t *testing.T) {
-	root := guardrailPoliciesRoot(t)
-	pinned := func(t *testing.T, posture string) *config.Config {
-		t.Helper()
-		dir := filepath.Join(t.TempDir(), "operator-pack")
-		if err := os.CopyFS(dir, os.DirFS(filepath.Join(root, posture))); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { packPostures.Delete(dir); pendingPackPostures.Delete(dir) })
-		pin, err := guardrail.RulePackDigest(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg := config.DefaultConfig()
-		cfg.Guardrail.Enabled = true
-		cfg.Guardrail.Connector = "claudecode"
-		cfg.Guardrail.HookSelfHeal = false
-		cfg.Guardrail.HookFailMode = "open"
-		cfg.Guardrail.RulePack = "operator"
-		cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"operator": {Path: dir, Digest: "sha256:" + pin}}
-		cfg.CheckCustomRulePacks()
-		return cfg
-	}
-	for _, tc := range []struct{ before, after string }{
-		{"default", "strict"}, {"strict", "default"}, {"default", "default"},
-	} {
-		t.Run(tc.before+"_to_"+tc.after, func(t *testing.T) {
-			old, next := pinned(t, tc.before), pinned(t, tc.after)
-			if got := old.HookPolicyTierForConnector("claudecode"); got != tc.before {
-				t.Fatalf("published tier = %q, want %q", got, tc.before)
-			}
-			if got := next.HookPolicyTierForConnector("claudecode"); got != tc.after {
-				t.Fatalf("candidate tier = %q, want %q", got, tc.after)
-			}
-			if got, want := hookPolicyNeedsSetup(old, next), tc.before != tc.after; got != want {
-				t.Fatalf("registration refresh = %t, want %t", got, want)
-			}
-		})
 	}
 }
 

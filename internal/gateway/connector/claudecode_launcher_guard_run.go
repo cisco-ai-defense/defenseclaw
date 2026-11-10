@@ -11,16 +11,27 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 )
 
+// RunClaudeCodeLauncherGuard runs launcher with hookArgs and passes its stdin,
+// stdout, stderr and exit code through, as the cmd.exe guard of the other
+// Claude Code events does. When the launcher is missing or cannot start it
+// prints a guard sentence that says which and exits 2, which Claude Code
+// treats as a block;
+// a direct start of a missing launcher was a non-blocking error that let the
+// tool call run unchecked.
+func RunClaudeCodeLauncherGuard(launcher string, hookArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	return hookguard.Run(launcher, hookArgs, stdin, stdout, stderr)
+}
+
 // ClaudeCodeGatewayPreToolGuard answers a start of defenseclaw-gateway.exe as
-// the one-line install's Windows Claude Code launcher guard: the
-// launcher-guard argv runs the launcher through the shared hook guard,
+// the one-line install's Windows Claude Code PreToolUse guard: the
+// launcher-guard argv runs the launcher through RunClaudeCodeLauncherGuard,
 // and on Windows a start without arguments and a Cursor event on stdin (Cursor
 // runs an imported handler's command without its args, GAP-1011) gets no
 // answer, exit 0. handled is false for every other start, which the gateway
 // runs as before.
 func ClaudeCodeGatewayPreToolGuard(goos string, args []string, stdin *os.File, stdout, stderr io.Writer) (code int, handled bool) {
-	if launcher, hookArgs, event, wrapped, open, ok := hookguard.ParseInvocationMode(args); ok {
-		return hookguard.RunEventMode(launcher, hookArgs, event, wrapped, open, stdin, stdout, stderr), true
+	if launcher, hookArgs, ok := ClaudeCodeLauncherGuardArgv(args); ok {
+		return RunClaudeCodeLauncherGuard(launcher, hookArgs, stdin, stdout, stderr), true
 	}
 	if goos == "windows" {
 		if dataDir, launcher, event, ok := hookguard.CoworkArgv(args); ok {

@@ -54,7 +54,6 @@ type windowsEnterpriseLifecycleOptions struct {
 	gatewayBinary       string
 	acpBinary           string
 	hookBinary          string
-	hookGuardBinary     string
 	sensorHelperBinary  string
 	policyCompiler      string
 	cliBinary           string
@@ -370,7 +369,6 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.StringVar(&opts.gatewayBinary, "gateway-binary", "", "source defenseclaw-gateway.exe")
 	flags.StringVar(&opts.acpBinary, "acp-binary", "", "source defenseclaw-acp.exe")
 	flags.StringVar(&opts.hookBinary, "hook-binary", "", "source defenseclaw-hook.exe")
-	flags.StringVar(&opts.hookGuardBinary, "hook-guard-binary", "", "source defenseclaw-hook-guard.exe (standalone profile)")
 	flags.StringVar(&opts.sensorHelperBinary, "sensor-helper-binary", "", "source defenseclaw-sensor-helper.exe")
 	flags.StringVar(&opts.policyCompiler, "policy-compiler", "", "standalone source policy_compiler.py")
 	flags.StringVar(&opts.cliBinary, "cli-binary", "", "optional source defenseclaw.exe")
@@ -473,7 +471,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 // windowsEnterpriseInspectionHiddenFlags are the lifecycle flags status and
 // verify leave out of their help.
 var windowsEnterpriseInspectionHiddenFlags = []string{
-	"broker-binary", "gateway-binary", "acp-binary", "hook-binary", "hook-guard-binary", "sensor-helper-binary", "policy-compiler", "cli-binary",
+	"broker-binary", "gateway-binary", "acp-binary", "hook-binary", "sensor-helper-binary", "policy-compiler", "cli-binary",
 	"install-root", "state-root", "gateway-service-name", "guardian-service-name",
 	"certification-codex-home", "core-hardening-certification",
 	"attest-agent-application-control", "attest-claude-effective-policy",
@@ -1091,7 +1089,6 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	appendValue("-GatewayBinary", opts.gatewayBinary)
 	appendValue("-ACPBinary", opts.acpBinary)
 	appendValue("-HookBinary", opts.hookBinary)
-	appendValue("-HookGuardBinary", opts.hookGuardBinary)
 	appendValue("-SensorHelperBinary", opts.sensorHelperBinary)
 	appendValue("-PolicyCompiler", opts.policyCompiler)
 	appendValue("-CLIBinary", opts.cliBinary)

@@ -43,7 +43,7 @@ func TestClaudeManagedPolicyMatchesTheContractItWasRenderedFor(t *testing.T) {
 		t.Log("every contract renders the version-less policy; the fallback was not exercised")
 	}
 	other := setup
-	other.HookExecutable = `C:\Program Files\Other\defenseclaw-hook.exe`
+	other.HookExecutable = `C:\Program Files\Other\hook.exe`
 	foreign, err := provider.ManagedHookPolicy(other)
 	if err != nil {
 		t.Fatalf("render foreign policy: %v", err)

@@ -23,7 +23,7 @@ import (
 func payloadlessRollbackHost(t *testing.T, bundleConfig, lastGood string) (*hotConfigHost, *windowsEnterpriseLifecycleOptions) {
 	t.Helper()
 	host, opts := newHotConfigHost(t, bundleConfig, lastGood)
-	opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.hookGuardBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", "", ""
+	opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", ""
 	opts.bundle, opts.bundleRollback = nil, true
 	savedDigest := windowsEnterprisePolicyDigest
 	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })

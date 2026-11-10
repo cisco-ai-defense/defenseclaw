@@ -1343,9 +1343,6 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 		appendValue("--gateway-binary", filepath.Join(stageRoot, "defenseclaw-gateway.exe"))
 		appendValue("--acp-binary", filepath.Join(stageRoot, "defenseclaw-acp.exe"))
 		appendValue("--hook-binary", filepath.Join(stageRoot, "defenseclaw-hook.exe"))
-		if opts.Standalone {
-			appendValue("--hook-guard-binary", filepath.Join(stageRoot, "defenseclaw-hook-guard.exe"))
-		}
 		appendValue("--sensor-helper-binary", filepath.Join(stageRoot, "defenseclaw-sensor-helper.exe"))
 		appendValue("--cli-binary", filepath.Join(stageRoot, "defenseclaw.exe"))
 		appendValue("--config", opts.Config)
