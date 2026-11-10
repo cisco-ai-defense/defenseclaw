@@ -133,7 +133,10 @@ func mcpLocalHost(host string) bool {
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil {
-		return false
+		var ok bool
+		if ip, ok = config.LegacyIPv4Host(host); !ok {
+			return false
+		}
 	}
 	ip = ip.Unmap()
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||

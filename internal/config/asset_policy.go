@@ -738,7 +738,13 @@ func assetRuleMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
 	}
 	if rule.URL != "" {
 		hasConstraint = true
-		if strings.TrimSpace(rule.URL) != strings.TrimSpace(in.URL) {
+		ruleURL, inURL := strings.TrimSpace(rule.URL), strings.TrimSpace(in.URL)
+		if !in.legacyConnectorMatch {
+			// The address the URL names, not its spelling (CanonicalMCPURL).
+			// Secure Client keeps the exact text.
+			ruleURL, inURL = CanonicalMCPURL(ruleURL), CanonicalMCPURL(inURL)
+		}
+		if ruleURL != inURL {
 			return false
 		}
 	}
