@@ -244,6 +244,16 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			value, fixed := "", false
 			if node.Value != nil {
 				value, fixed = StaticWord(node.Value, home)
+				if !fixed {
+					// NAME=${OTHER:-word} of a name no binding so far gives
+					// a value is the word.
+					if param := soleParameter(node.Value); param != nil {
+						if literal, isDefault := scalarDefaultWord(param, safe); isDefault &&
+							len(bound[param.Param.Value]) == 0 && len(loops[param.Param.Value]) == 0 {
+							value, fixed = literal, true
+						}
+					}
+				}
 			}
 			if node.Append || node.Naked || node.Array != nil || node.Index != nil || !fixed || !safe(value) {
 				unsafeNames[name] = true
@@ -282,7 +292,10 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				rejected = true
 				break
 			}
-			if node.Param != nil && node.Exp != nil {
+			// ${NAME:-word} and ${NAME-word} only read NAME; every other
+			// operator can assign it (${NAME:=word}) or fail on it.
+			if node.Param != nil && node.Exp != nil &&
+				node.Exp.Op != syntax.DefaultUnset && node.Exp.Op != syntax.DefaultUnsetOrNull {
 				unsafeNames[node.Param.Value] = true
 			}
 		case *syntax.CallExpr:
@@ -439,6 +452,36 @@ func simpleScalarParameter(param *syntax.ParamExp) bool {
 		}
 	}
 	return true
+}
+
+// soleParameter is the parameter expansion that is the whole of word, bare or
+// in double quotes.
+func soleParameter(word *syntax.Word) *syntax.ParamExp {
+	if word == nil || len(word.Parts) != 1 {
+		return nil
+	}
+	part := word.Parts[0]
+	if double, ok := part.(*syntax.DblQuoted); ok && len(double.Parts) == 1 {
+		part = double.Parts[0]
+	}
+	param, _ := part.(*syntax.ParamExp)
+	return param
+}
+
+// scalarDefaultWord is the word of ${NAME:-word} or ${NAME-word} of a plain
+// variable name, when the word is one plain literal that safe accepts.
+func scalarDefaultWord(param *syntax.ParamExp, safe func(string) bool) (string, bool) {
+	if param == nil || param.Exp == nil || param.Exp.Word == nil ||
+		param.Exp.Op != syntax.DefaultUnset && param.Exp.Op != syntax.DefaultUnsetOrNull {
+		return "", false
+	}
+	plain := *param
+	plain.Exp = nil
+	if !simpleScalarParameter(&plain) {
+		return "", false
+	}
+	literal, ok := plainLiteralWord(param.Exp.Word)
+	return literal, ok && safe(literal)
 }
 
 // staticDirectoryCall reports a directory-changing call whose words are all
