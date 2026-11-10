@@ -300,11 +300,11 @@ func readWindowsClaudeManagedPolicyTargetsForHook(expectedHook string) ([]string
 	var targets []string
 	active := false
 	err = withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
-		policy, err := snapshotWindowsManagedFile(path)
+		policy, err := snapshotWindowsManagedPolicy(path)
 		if err != nil {
 			return err
 		}
-		state, err := snapshotWindowsManagedFile(
+		state, err := snapshotWindowsManagedState(
 			statePath,
 		)
 		if err != nil {
@@ -358,11 +358,11 @@ func PublishWindowsClaudeManagedPolicyTargets(rawTargets []string) error {
 			return err
 		}
 		statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
-		policySnapshot, err := snapshotWindowsManagedFile(path)
+		policySnapshot, err := snapshotWindowsManagedPolicy(path)
 		if err != nil {
 			return err
 		}
-		stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+		stateSnapshot, err := snapshotWindowsManagedState(statePath)
 		if err != nil {
 			return err
 		}
@@ -475,11 +475,11 @@ func DeactivateWindowsClaudeManagedPolicy() error {
 			return err
 		}
 		statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
-		policy, err := snapshotWindowsManagedFile(path)
+		policy, err := snapshotWindowsManagedPolicy(path)
 		if err != nil {
 			return err
 		}
-		state, err := snapshotWindowsManagedFile(statePath)
+		state, err := snapshotWindowsManagedState(statePath)
 		if err != nil {
 			return err
 		}
@@ -1270,11 +1270,11 @@ func resolveWindowsClaudeManagedPolicyTarget() (windowsClaudeManagedPolicyTarget
 		return target, policyErr
 	}
 	statePath := filepath.Join(filepath.Dir(policyPath), windowsClaudeManagedStateFile)
-	policySnapshot, policyErr := snapshotWindowsManagedFile(policyPath)
+	policySnapshot, policyErr := snapshotWindowsManagedPolicy(policyPath)
 	if policyErr != nil {
 		return target, policyErr
 	}
-	stateSnapshot, stateErr := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, stateErr := snapshotWindowsManagedState(statePath)
 	if stateErr != nil {
 		return target, stateErr
 	}
@@ -1694,11 +1694,11 @@ func installWindowsClaudeManagedPolicyUnlocked(
 	if err := reclaimOrphanClaudeManagedPolicy(path, statePath); err != nil {
 		return "", nil, err
 	}
-	policySnapshot, err := snapshotWindowsManagedFile(path)
+	policySnapshot, err := snapshotWindowsManagedPolicy(path)
 	if err != nil {
 		return "", nil, err
 	}
-	stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, err := snapshotWindowsManagedState(statePath)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1856,11 +1856,11 @@ func removeWindowsClaudeManagedPolicyTargetUnlocked(targetSID *windows.SID) erro
 		return err
 	}
 	statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
-	policySnapshot, err := snapshotWindowsManagedFile(path)
+	policySnapshot, err := snapshotWindowsManagedPolicy(path)
 	if err != nil {
 		return err
 	}
-	stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, err := snapshotWindowsManagedState(statePath)
 	if err != nil {
 		return err
 	}
@@ -2988,7 +2988,13 @@ func reclaimOrphanClaudeManagedPolicy(policyPath, statePath string) error {
 	return nil
 }
 
-func snapshotWindowsManagedFile(path string) (windowsManagedFileSnapshot, error) {
+// The policy and its state record are bounded apart: the policy carries the
+// 29 hook handlers of the guarded Windows form, far over the state limit.
+func snapshotWindowsManagedPolicy(path string) (windowsManagedFileSnapshot, error) {
+	return snapshotWindowsManagedFileWithLimit(path, windowsClaudeManagedPolicyLimit)
+}
+
+func snapshotWindowsManagedState(path string) (windowsManagedFileSnapshot, error) {
 	return snapshotWindowsManagedFileWithLimit(path, windowsClaudeManagedStateLimit)
 }
 
