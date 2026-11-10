@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Codex requirements.toml is a single administrator file. DefenseClaw never
@@ -640,11 +641,28 @@ func (codexTarget) Verify(opts Options) (State, error) {
 		state.finish()
 		return state, nil
 	}
+	if len(bytes.TrimSpace(bytes.TrimPrefix(current, utf8BOM))) == 0 {
+		// GAP-1001: a Codex requirements file with nothing in it loads no
+		// DefenseClaw hook and no policy, so nothing guards Codex. It is said
+		// once, by name, with the way out, ahead of the per-entry conflicts.
+		state.conflict("%s is empty, so Codex loads no DefenseClaw hook or policy and nothing guards Codex until the policy is published again: %s",
+			path, codexRepublishAdvice(opts))
+	}
 	if err := inspectCodex(opts, current, policy, &state); err != nil {
 		return state, codexParseError(path, current, err)
 	}
 	state.finish()
 	return state, nil
+}
+
+// codexRepublishAdvice is the administrator's way to publish the Codex
+// requirements again.
+func codexRepublishAdvice(opts Options) string {
+	if opts.goos() == "windows" {
+		return "run " + managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", "standalone") +
+			" as an administrator (Setup /repair does the same)"
+	}
+	return "run `defenseclaw enterprise reconcile` as root"
 }
 
 // codexParseError names the file and the line of a requirements.toml that

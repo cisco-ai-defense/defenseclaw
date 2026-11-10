@@ -289,3 +289,28 @@ def test_a_busy_writer_never_reaches_the_recovery_that_rebuilds_the_policy_file(
     deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
     verify = deployment.index("-Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))")
     assert "New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout" in deployment[verify : verify + 1200]
+
+
+def test_a_rebuild_never_swaps_in_an_empty_or_unpublishable_requirements_file() -> None:
+    text = _text()
+    check = _function_body(text, "Assert-DefenseClawCodexRequirementsPublishable")
+    for needle in ("$Bytes.Length -eq 0", "IndexOf($Bytes, [byte]0)", "UTF8Encoding]::new($false, $true)", "IsNullOrWhiteSpace($text)"):
+        assert needle in check, needle
+    repair = _function_body(text, "Repair-DefenseClawRecoveredCodexRequirements")
+    guard = repair.index("Assert-DefenseClawCodexRequirementsPublishable -Bytes $base")
+    assert repair.index("# GAP-1001: the base is never an empty file") < guard < repair.index("[IO.File]::WriteAllBytes($staged, $base)")
+    assert guard < repair.index("Install-DefenseClawFileAtomic -Source $staged -Destination $path")
+
+
+def test_a_failed_rebuild_puts_the_original_requirements_file_back_through_the_same_swap() -> None:
+    # GAP-1001: the rebuild writes a base through a sibling and a swap; when the
+    # reconcile that follows fails, the bytes read first go back the same way,
+    # so no empty or partial file stays in place of the one the recovery found.
+    repair = _function_body(_text(), "Repair-DefenseClawRecoveredCodexRequirements")
+    assert "$edited = $null" in repair
+    rebuild = repair.index("$rebuildError = [string]$_.Exception.Message")
+    window = repair[rebuild : rebuild + 1800]
+    assert "[IO.File]::WriteAllBytes($restoreStaged, $edited)" in window
+    assert "Install-DefenseClawFileAtomic -Source $restoreStaged -Destination $path" in window
+    assert "the file was left as it was" in window
+    assert window.index("Install-DefenseClawFileAtomic") < window.index("throw (\"Codex requirements recovery could not republish")

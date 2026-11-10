@@ -36536,6 +36536,33 @@ function Get-DefenseClawBlockedCodexStatePath {
     return ''
 }
 
+function Assert-DefenseClawCodexRequirementsPublishable {
+    <#
+        GAP-1001: the bytes a rebuild swaps into the Codex requirements path.
+        An empty file loads no DefenseClaw hook and no policy, so Codex runs
+        unguarded; bytes that are not valid text cannot be a TOML document.
+        Both are refused before anything is written, and the file stays as it
+        was. (The reconcile that follows parses the document itself.)
+    #>
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
+    if ($Bytes.Length -eq 0) {
+        throw 'refusing to publish an empty Codex requirements file: Codex would load no DefenseClaw hook or policy'
+    }
+    if ([Array]::IndexOf($Bytes, [byte]0) -ge 0) {
+        throw 'refusing to publish a Codex requirements file that contains NUL bytes'
+    }
+    $text = ''
+    try {
+        $text = [Text.UTF8Encoding]::new($false, $true).GetString($Bytes)
+    }
+    catch {
+        throw 'refusing to publish a Codex requirements file that is not valid UTF-8'
+    }
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        throw 'refusing to publish a Codex requirements file with nothing in it: Codex would load no DefenseClaw hook or policy'
+    }
+}
+
 function Repair-DefenseClawRecoveredCodexRequirements {
     <#
         g582 round 11e (GAP-0802). A rollback puts back the requirements.toml
@@ -36605,6 +36632,7 @@ function Repair-DefenseClawRecoveredCodexRequirements {
     $backupPath = ''
     $editedSHA256 = ''
     $editedLength = 0
+    $edited = $null
     $directory = Microsoft.PowerShell.Management\Join-Path ([string]$Layout.InstallStateDirectory) 'recovered-policy'
     [void](New-DefenseClawProtectedDirectory -Path $directory)
     if ($exists) {
@@ -36670,6 +36698,12 @@ function Repair-DefenseClawRecoveredCodexRequirements {
         }
         $staged = Microsoft.PowerShell.Management\Join-Path $directory ('base.{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
         try {
+            if ($base.Length -eq 0 -or [string]::IsNullOrWhiteSpace([Text.Encoding]::UTF8.GetString($base))) {
+                # GAP-1001: the base is never an empty file; the reconcile that
+                # follows publishes the managed policy over this line.
+                $base = [Text.UTF8Encoding]::new($false).GetBytes("# DefenseClaw managed Codex requirements: the managed policy is published by the reconcile that follows`r`n")
+            }
+            Assert-DefenseClawCodexRequirementsPublishable -Bytes $base
             [IO.File]::WriteAllBytes($staged, $base)
             Install-DefenseClawFileAtomic -Source $staged -Destination $path
             [void](Invoke-DefenseClawCodexRequirementsCommand `
@@ -36678,7 +36712,28 @@ function Repair-DefenseClawRecoveredCodexRequirements {
                 -Action reconcile)
         }
         catch {
-            throw ("Codex requirements recovery could not republish the managed policy: merge: $mergeError; rebuild: " + [string]$_.Exception.Message + $(if ($backupPath) { "; the file as it was is kept at $backupPath" } else { '' }))
+            $rebuildError = [string]$_.Exception.Message
+            # GAP-1001: a failed rebuild never leaves an empty or partial
+            # file in place of the one it found. The bytes read above go back
+            # through the same sibling-and-swap, and the failure is named.
+            $restoredNote = ''
+            if ($exists -and $null -ne $edited) {
+                $restoreStaged = Microsoft.PowerShell.Management\Join-Path $directory ('restore.{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
+                try {
+                    [IO.File]::WriteAllBytes($restoreStaged, $edited)
+                    Install-DefenseClawFileAtomic -Source $restoreStaged -Destination $path
+                    $restoredNote = '; the file was left as it was'
+                }
+                catch {
+                    $restoredNote = '; putting the file back also failed (' + [string]$_.Exception.Message + ')'
+                }
+                finally {
+                    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $restoreStaged) {
+                        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $restoreStaged -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+            throw ("Codex requirements recovery could not republish the managed policy: merge: $mergeError; rebuild: " + $rebuildError + $restoredNote + $(if ($backupPath) { "; the file as it was is kept at $backupPath" } else { '' }))
         }
         finally {
             if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $staged) {

@@ -269,7 +269,7 @@ try {
         $recRequirements = [IO.Path]::Combine($recDir, 'requirements.toml')
         $recOwnership = [IO.Path]::Combine($recDir, 'ownership.json')
         $recInstallState = [IO.Path]::Combine($recDir, 'install-state'); [void][IO.Directory]::CreateDirectory($recInstallState)
-        $recLayout = @{ CodexMachinePolicyPath = $recRequirements; CodexRequirementsOwnershipPath = $recOwnership; InstallStateDirectory = $recInstallState; InstallRoot = $Scratch }
+        $recLayout = @{ CodexMachinePolicyPath = $recRequirements; CodexRequirementsOwnershipPath = $recOwnership; InstallStateDirectory = $recInstallState; InstallRoot = $Scratch; CodexManagedHooksStatePath = [IO.Path]::Combine($recDir, '.defenseclaw-managed-hooks.state') }
         $preimage = [Text.Encoding]::UTF8.GetBytes("[features]`nfoo = true`n")
         $sha = [Security.Cryptography.SHA256]::Create(); $preimageHash = ([BitConverter]::ToString($sha.ComputeHash($preimage)) -replace '-', '').ToLowerInvariant(); $sha.Dispose()
         function Write-Record([string]$RequirementsPath, [string]$Hash, [bool]$Existed) {
@@ -296,6 +296,8 @@ try {
             param($Layout, $GatewayServiceName, $Action)
             $step = $script:RecoverPlan[$script:RecoverCalls.Count]
             $script:RecoverCalls.Add($Action + ':' + [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($Layout.CodexMachinePolicyPath)))
+            if ($step.StartsWith('codex_state_unsettled: ')) { throw $step }
+            if ($step -eq 'partial') { [IO.File]::WriteAllText($Layout.CodexMachinePolicyPath, ''); throw "Codex requirements $Action failed: wrote nothing" }
             if ($step -ne 'ok') { throw "Codex requirements $Action failed: $step" }
             if ($Action -eq 'reconcile') { [IO.File]::WriteAllText($Layout.CodexMachinePolicyPath, 'canonical') }
         }
@@ -330,6 +332,33 @@ try {
             $message = ''
             try { Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway' } catch { $message = $_.Exception.Message }
             if (-not $message.Contains('could not republish the managed policy') -or @(Get-Backups).Count -ne 1) { throw "recovery: failure not named or edit not kept: '$message'" }
+            if ([IO.File]::ReadAllText($recRequirements) -ne 'edit' -or -not $message.Contains('the file was left as it was')) { throw "recovery: a failed republish left the file changed: '$([IO.File]::ReadAllText($recRequirements))' / '$message'" }
+            # GAP-1001: a rebuild that leaves an empty file puts the original back.
+            Reset-Recovery @('bad', 'bad merge', 'partial') 'edit'
+            $message = ''
+            try { Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway' } catch { $message = $_.Exception.Message }
+            if ([IO.File]::ReadAllText($recRequirements) -ne 'edit' -or $message -eq '') { throw "recovery: an empty rebuild was left in place: '$([IO.File]::ReadAllText($recRequirements))'" }
+            # GAP-1001: the base a rebuild swaps in is never an empty file (no recorded preimage), and unpublishable bytes are refused.
+            Write-Record $recRequirements $preimageHash $false
+            Reset-Recovery @('bad', 'bad merge', 'ok') 'allow = false'
+            Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway'
+            if ($script:RecoverCalls.Count -ne 3 -or -not $script:RecoverCalls[2].StartsWith('reconcile:# DefenseClaw managed Codex requirements')) { throw "recovery: a rebuild with no preimage published an empty or other base: $($script:RecoverCalls -join '|')" }
+            Write-Record $recRequirements $preimageHash $true
+            foreach ($bad in @(@{ Bytes = [byte[]]@(); Why = 'empty' }, @{ Bytes = [byte[]](0x20, 0x0d, 0x0a); Why = 'white space' }, @{ Bytes = [byte[]](0x61, 0x00, 0x62); Why = 'NUL' }, @{ Bytes = [byte[]](0xc3, 0x28); Why = 'invalid UTF-8' })) {
+                $refused = ''
+                try { Assert-DefenseClawCodexRequirementsPublishable -Bytes $bad.Bytes } catch { $refused = $_.Exception.Message }
+                if (-not $refused.StartsWith('refusing to publish')) { throw "publishable check: $($bad.Why) bytes were not refused: '$refused'" }
+            }
+            Assert-DefenseClawCodexRequirementsPublishable -Bytes ([Text.Encoding]::UTF8.GetBytes("[features]`nfoo = true`n"))
+            # GAP-1001: a Codex writer that holds the lock is never read as a hand edit: the file is not judged, not backed up, not rebuilt.
+            Reset-Recovery @('codex_state_unsettled: a Codex writer holds the writer lock') 'edit'
+            $message = ''
+            try { Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway' } catch { $message = $_.Exception.Message }
+            if (-not $message.StartsWith('codex_state_unsettled: ') -or -not $message.Contains('the rollback left that state as it is') -or [IO.File]::ReadAllText($recRequirements) -ne 'edit' -or @(Get-Backups).Count -ne 0 -or $script:RecoverCalls.Count -ne 1) { throw "recovery: a busy writer was read as a hand edit: '$message' calls=$($script:RecoverCalls.Count)" }
+            Reset-Recovery @('bad', 'codex_state_unsettled: a Codex writer holds the writer lock') 'edit'
+            $message = ''
+            try { Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway' } catch { $message = $_.Exception.Message }
+            if (-not $message.StartsWith('codex_state_unsettled: ') -or [IO.File]::ReadAllText($recRequirements) -ne 'edit' -or $script:RecoverCalls.Count -ne 2) { throw "recovery: a writer that got busy during the merge led to a rebuild: '$message' calls=$($script:RecoverCalls.Count)" }
             # Held: the retryable code, nothing saved, no reconcile.
             Reset-Recovery @('bad') 'edit'
             $handle = Open-Holder $recRequirements $READ_DATA ($SHARE_R -bor $SHARE_W)
