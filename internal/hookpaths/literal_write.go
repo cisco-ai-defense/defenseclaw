@@ -150,20 +150,21 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 			}
 		}
 	}
-	// A script a call names is read where the call runs, which is the
-	// starting folder only when no directory change comes before it.
+	// A call is read where it runs: the effective directory goes into the
+	// launcher descent (a shell -c body, eval), so a script the body names is
+	// the file of that name where the call stands, not in the folder the hook
+	// started in. Where the call runs in no other folder, the starting folder
+	// is the only reading (rel-1-0-9:GAP-1038).
 	placed := newPlacedCalls(file, command, cwd, home)
 	programOperands := func(words []string, stmt *syntax.Stmt, call *syntax.CallExpr, environment actionValues) []string {
-		if len(file.Stmts) != 1 {
-			return literalProgramOperandsKnown(words, stmt, cwd, home, depth, false, environment, include)
-		}
+		readFiles := len(file.Stmts) == 1
 		dirs := placed.of(call)
 		if len(dirs) == 1 && dirs[0] == cwd {
-			return literalProgramOperandsKnown(words, stmt, cwd, home, depth, true, environment, include)
+			return literalProgramOperandsKnown(words, stmt, cwd, home, depth, readFiles, environment, include)
 		}
-		names := literalProgramOperandsKnown(words, stmt, cwd, home, depth, false, environment, include)
+		var names []string
 		for _, dir := range dirs {
-			names = append(names, literalProgramOperandsKnown(words, stmt, dir, home, depth, true, environment, include)...)
+			names = append(names, literalProgramOperandsKnown(words, stmt, dir, home, depth, readFiles, environment, include)...)
 		}
 		return names
 	}

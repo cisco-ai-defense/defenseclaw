@@ -289,13 +289,17 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 				words = append(words, word)
 			}
 			if body, ok := shellCommandBodyIndex(words); ok {
-				if nested := unprovenProtectedWriteDepth(words[body], cwd, home, depth+1, budget); nested != "" {
-					set(nested, true)
-				} else if shellArgvIncomplete(program) && shellBodyProtectedWrite(words[body], cwd, home) {
-					// Zsh runs its startup files before the -c body, so argv
-					// alone cannot certify the action. A static write to a
-					// protected path in the visible body fails closed.
-					set("nested-shell", true)
+				// The body runs where the call stands (placedCalls), so a
+				// script it names is the file of that name there.
+				for _, dir := range placed.of(call) {
+					if nested := unprovenProtectedWriteDepth(words[body], dir, home, depth+1, budget); nested != "" {
+						set(nested, true)
+					} else if shellArgvIncomplete(program) && shellBodyProtectedWrite(words[body], dir, home) {
+						// Zsh runs its startup files before the -c body, so argv
+						// alone cannot certify the action. A static write to a
+						// protected path in the visible body fails closed.
+						set("nested-shell", true)
+					}
 				}
 				return true
 			}
