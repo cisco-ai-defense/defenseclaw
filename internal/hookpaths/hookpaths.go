@@ -2295,6 +2295,34 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 		add(path, false, false)
 	}
+	// A typed file tool that reads a file reaches the file a link names, as
+	// a write does, and a managed gateway behind ProtectHome cannot follow a
+	// link in the project of the user: the file a read through a link
+	// reaches is listed, so the read gets the verdict of that file by name.
+	// A path that is no link names itself and needs no entry.
+	if actionfacts.PathTool(tool) {
+		for _, candidate := range facts.Paths {
+			if candidate.Access != actionfacts.PathAccessRead || !filepath.IsAbs(candidate.Resolved) ||
+				strings.ContainsAny(candidate.Resolved, "*?[]$`") {
+				continue
+			}
+			path := filepath.Clean(candidate.Resolved)
+			if _, listed := targets[path]; listed || len(path) > MaxWriteTargetPathBytes || len(targets)-1 >= MaxWriteTargets {
+				continue
+			}
+			physical, ok := ResolveWriteTarget(path)
+			if !ok || physical == path {
+				continue
+			}
+			cost := len(jsonString(path)) + 1 + len(jsonString(physical)) + 1
+			if size+cost > maxEncodedTargets {
+				truncated, overBudget = true, true
+				continue
+			}
+			size += cost
+			targets[path] = physical
+		}
+	}
 	// A delete removes the final name, so only its directory is followed.
 	// Behind ProtectHome, PrivateTmp and PrivateDevices a managed gateway
 	// cannot follow that directory through a disk link or a link the command
