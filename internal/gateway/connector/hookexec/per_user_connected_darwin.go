@@ -29,6 +29,15 @@ func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 	return err
 }
 
+// tupleStillQueued reports whether no process of this account holds the
+// accepted socket of the held connection (the table was read, and listed none).
+func tupleStillQueued(client, server *net.TCPAddr) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	owners, err := darwinSocketOwnerPIDs(ctx, server, client, darwinTCPEstablished)
+	return err == nil && len(owners) == 0
+}
+
 // listenersHeldOnlyByPID reports whether process pid holds a listening socket
 // that can take a connection to server (its address or the wildcard address
 // of its family, or the dual-stack wildcard) and no other process of this

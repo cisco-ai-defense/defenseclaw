@@ -124,6 +124,13 @@ type InstallOptions struct {
 	// OpenCodeServicePortRequired refuses a managed Windows OpenCode install
 	// when the guardian could not assign that account a port.
 	OpenCodeServicePortRequired bool
+	// AcceptPriorReleaseRender makes a Windows Verify accept the render an
+	// earlier release wrote of a hook bridge (the Constrained Language
+	// fallback end that exited 0 when the launcher never started) as current,
+	// and change nothing else. The standalone guardian sets it on a second,
+	// read-only verify of a signed-out account's target to prove that the
+	// only difference is the earlier release's render (GAP-0980).
+	AcceptPriorReleaseRender bool
 }
 
 // WindowsTargetLogon is the logon whose token a Windows install impersonates.

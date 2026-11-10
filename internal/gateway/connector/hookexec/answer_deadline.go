@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -107,6 +108,10 @@ const HookAnswerWithinHeader = "X-DefenseClaw-Hook-Answer-Within-Ms"
 // The hook sends the receipt only after committing the answer to the agent.
 const HookDeliveryReceiptHeader = "X-DefenseClaw-Hook-Delivery-Receipt"
 
+// HookDeliveryCapabilityHeader identifies a gateway that can keep an
+// admitted hook request open for its delivery receipt.
+const HookDeliveryCapabilityHeader = "X-DefenseClaw-Hook-Delivery-Capability"
+
 const HookDeliveryPayloadBytesHeader = "X-DefenseClaw-Hook-Payload-Bytes"
 
 const HookDeliveryRequiredHeader = "X-DefenseClaw-Hook-Delivery-Required"
@@ -114,6 +119,11 @@ const HookDeliveryRequiredHeader = "X-DefenseClaw-Hook-Delivery-Required"
 const HookDeliveryReceiptAck = "ack\n"
 
 const HookDeliveryReceiptBlock = "block\n"
+
+// HookDeliveryReceiptLate and HookDeliveryReceiptOpen report the answer the
+// watchdog delivered when the gateway had not supplied a usable answer.
+const HookDeliveryReceiptLate = "late\n"
+const HookDeliveryReceiptOpen = "open\n"
 
 // HookDeliveryReleased ends the request body of a hook whose capability wait
 // passed without a 103: the hook takes the ordinary answer and sends no
@@ -158,6 +168,9 @@ func ManagedGatewayNoAnswer(err error) bool {
 // perUserGatewayNoAnswerReason is the hook-failure reason of a per-user hook
 // whose gateway gave no decision within hookAnswerBudget.
 const perUserGatewayNoAnswerReason = "gateway did not answer in time"
+
+// PerUserGatewayNoAnswerReason is the recorded reason of a per-user deadline.
+const PerUserGatewayNoAnswerReason = perUserGatewayNoAnswerReason
 
 // answerDeadline bounds hooks that hold an agent call waiting for a verdict.
 // Managed Codex also gates prompt submission and delivery of tool results;
@@ -315,18 +328,66 @@ func gatewayNoAnswer(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), errGatewayNoAnswer)
 }
 
-// noAnswerFailMode keeps a call with no gateway decision closed. A proven
-// outage has its own answer path; socket contact alone does not prove one.
-// Secure Client retains its established fail-mode behavior unless the local
-// answer budget was spent or the gateway already returned an error status.
+// noAnswerFailMode uses the current account outage tier for an ordinary
+// per-user call whose gateway did not answer. The shared protected-reach
+// reader must prove that the call names no protected target before the open
+// tier applies (lateOrdinaryLook, recorded in lateOrdinaryOpen); this
+// function reads nothing itself, because a watchdog renders its answer
+// before its deadline is armed. A managed call follows an administrator's open only after a
+// stopped-service proof; strict, unusable and unclassified calls stay closed.
+// Secure Client retains its established behavior.
 func noAnswerFailMode(opts Options, failMode string) string {
-	if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise {
-		return "closed"
-	}
 	if opts.SecureClient {
+		if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise {
+			return "closed"
+		}
 		return failMode
 	}
-	return "closed"
+	if opts.ManagedEnterprise {
+		if opts.managedOutageOpen && OrdinaryNoAnswerPayload(opts.failurePayload) && opts.answeredErrorStatus == 0 && !opts.StrictAvailability &&
+			normalizeFailMode(failMode) == "open" && !managedLifecycleHeldWithin(opts, installLockCheckWait) {
+			return "open"
+		}
+		return "closed"
+	}
+	// The install window is the bounded look at arming (installWindowSeen)
+	// and at the deadline (renderInstallAnswer of the open answer).
+	if !opts.lateOrdinaryOpen || opts.answeredErrorStatus != 0 || opts.ManagedUnixSocket != "" ||
+		opts.StrictAvailability || opts.installWindowSeen {
+		return "closed"
+	}
+	return "open"
+}
+
+// lateOrdinaryLookCall reports a per-user call whose no-answer outcome can
+// follow the account outage tier (noAnswerFailMode).
+func lateOrdinaryLookCall(opts Options) bool {
+	return !opts.SecureClient && !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" &&
+		!opts.StrictAvailability && !opts.installWindowSeen && opts.answeredErrorStatus == 0 &&
+		opts.OutageFailModeNow != nil && len(opts.failurePayload) != 0
+}
+
+// lateOrdinaryLook reads the account outage tier and the payload's
+// protected reach for the request path, which runs after the watchdog is
+// armed. The watchdog reads both itself (startOrdinaryLook, watch).
+func lateOrdinaryLook(opts Options) bool {
+	return lateOrdinaryLookCall(opts) && normalizeFailMode(opts.OutageFailModeNow()) == "open" &&
+		bothLateScansOrdinary(opts)
+}
+
+// bothLateScansOrdinary reports a per-user call that both late-call scans find
+// ordinary: the shared protected-reach reader (OrdinaryNoAnswerPayload) and
+// the word-by-word link-hop scan of the restart window
+// (hookpaths.LateOrdinaryCall, GAP-0518), which also reads a path out of a
+// key=value word, a sed write and a dash-named link target. The open tier
+// applies only when neither names a protected file, so a call that one of
+// them reaches stays closed. The link-hop scan is written for POSIX paths and
+// answers false for every call on Windows, where the shared reader (with the
+// Windows lexer) is the one scan.
+func bothLateScansOrdinary(opts Options) bool {
+	return toolGateEvent(opts.Connector, opts.Event) &&
+		(runtime.GOOS == "windows" || hookpaths.LateOrdinaryCall(opts.Connector, opts.failurePayload)) &&
+		OrdinaryNoAnswerPayload(opts.failurePayload)
 }
 
 // lateOrdinaryCheck is the scan of a per-user tool call that the verified
@@ -346,10 +407,22 @@ func lateOrdinaryCheck(opts Options, payload []byte) func() bool {
 }
 
 func failNoAnswer(opts Options, sp spec, failMode string) int {
+	if managedNativeDecision(opts) && opts.answerWatch.managedOutagePending() {
+		opts.managedOutageOpen = true
+		opts.managedNoAnswerCode = managedGatewayNotRunningReason
+	}
+	// The request path runs after the watchdog is armed.
+	opts.lateOrdinaryOpen = lateOrdinaryLook(opts)
+	mode, _, _ := lateAnswerOutcome(opts, sp, failMode)
+	return failNoAnswerInMode(opts, sp, mode)
+}
+
+// failNoAnswerInMode renders the already selected answer mode. The watchdog
+// uses the mode of its single pending outcome for both output and record.
+func failNoAnswerInMode(opts Options, sp spec, failMode string) int {
 	if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
 		return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
 	}
-	failMode = noAnswerFailMode(opts, failMode)
 	if opts.ManagedEnterprise {
 		return failUnreachable(opts, sp, failMode, managedNoAnswerReason(opts))
 	}

@@ -37,7 +37,10 @@ func withHookDeliveryReceipt(r *http.Request, delivery *hookDeliveryReceipt) *ht
 }
 
 func (a *APIServer) beginHookDeliveryReceipt(w http.ResponseWriter, r *http.Request) *hookDeliveryReceipt {
-	if a == nil || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() ||
+	if delivery := hookDeliveryReceiptForRequest(r); delivery != nil {
+		return delivery
+	}
+	if a == nil || a.scannerCfg == nil || a.scannerCfg.SecureClientIntegration() ||
 		r.Header.Get(hookexec.HookDeliveryReceiptHeader) != "1" {
 		return nil
 	}
@@ -69,6 +72,12 @@ func (d *hookDeliveryReceipt) readPayload() ([]byte, error) {
 	return body, err
 }
 
+// bindBody uses the body after API middleware has applied its size limit.
+// The capability can be advertised before that middleware runs.
+func (d *hookDeliveryReceipt) bindBody(body io.ReadCloser) {
+	d.reader = bufio.NewReader(body)
+}
+
 // offer writes one bounded JSON answer while the request remains open. The
 // receipt is an exact token, not a caller-supplied verdict: a different
 // verdict cannot be substituted after policy evaluation. No receipt means
@@ -80,17 +89,39 @@ func (d *hookDeliveryReceipt) offer(w http.ResponseWriter, answer func()) string
 	if err := controller.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return ""
 	}
+	// Start the read before writing the proposal. The watchdog can commit its
+	// own answer at any point during evaluation or response delivery.
+	receiptReady := make(chan string, 1)
+	go func() {
+		line, err := bufio.NewReader(io.LimitReader(d.reader, int64(len(hookexec.HookDeliveryReceiptBlock)))).ReadString('\n')
+		if err != nil {
+			line = ""
+		}
+		receiptReady <- line
+	}()
+	var line string
+	received := false
+	select {
+	case line = <-receiptReady:
+		received = true
+		if line == hookexec.HookDeliveryReceiptLate || line == hookexec.HookDeliveryReceiptOpen {
+			return line
+		}
+	default:
+	}
 	w.Header().Set(hookexec.HookDeliveryRequiredHeader, "1")
 	answer()
-	if err := controller.Flush(); err != nil {
-		return ""
+	flushErr := controller.Flush()
+	if !received {
+		line = <-receiptReady
 	}
-	line, err := bufio.NewReader(io.LimitReader(d.reader, int64(len(hookexec.HookDeliveryReceiptBlock)))).ReadString('\n')
-	if err != nil {
+	if flushErr != nil && line != hookexec.HookDeliveryReceiptLate && line != hookexec.HookDeliveryReceiptOpen {
 		return ""
 	}
 	switch line {
 	case hookexec.HookDeliveryReleased:
+		return line
+	case hookexec.HookDeliveryReceiptLate, hookexec.HookDeliveryReceiptOpen:
 		return line
 	case hookexec.HookDeliveryReceiptAck, hookexec.HookDeliveryReceiptBlock:
 		_, _ = io.WriteString(w, hookexec.HookDeliveryConfirmed)
@@ -120,6 +151,17 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 		return resp
 	case hookexec.HookDeliveryReceiptBlock:
 		return failedClosedHookDelivery(resp, hookDeliveryRejectedReason)
+	case hookexec.HookDeliveryReceiptLate:
+		if a.scannerCfg.DeploymentMode == "per_user" {
+			return failedClosedHookDelivery(resp, hookexec.PerUserGatewayNoAnswerReason)
+		}
+		return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
+	case hookexec.HookDeliveryReceiptOpen:
+		reason := hookexec.ManagedGatewayNoAnswerReason
+		if a.scannerCfg.DeploymentMode == "per_user" {
+			reason = hookexec.PerUserGatewayNoAnswerReason
+		}
+		return failedOpenHookDelivery(resp, reason)
 	}
 	if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open" {
 		// An outage can allow even if the offered policy answer blocked.
@@ -132,6 +174,19 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 	return unconfirmedHookDelivery(resp)
 }
 
+func failedOpenHookDelivery(resp agentHookResponse, reason string) agentHookResponse {
+	if resp.RawAction == "" {
+		resp.RawAction = resp.Action
+	}
+	resp.Action = "allow"
+	resp.Mode = "action"
+	resp.Reason = reason
+	resp.SourceReason = resp.Reason
+	resp.WouldBlock = false
+	resp.HookOutput = nil
+	return resp
+}
+
 // unreceiptedHookDecision is the decision of a standalone managed call that
 // sent no delivery receipt.
 //   - A caller that hung up before the answer was sent never got it, but an
@@ -139,7 +194,8 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 //   - A native hook's tool call without a receipt comes from an earlier hook
 //     binary (a package upgrade in flight) or a connection without full
 //     duplex. Its answer watchdog may have blocked after the gateway decided,
-//     so only a block is known.
+//     including after an on-time connection check, so only a block in closed
+//     mode is known.
 //   - A 1.0.4 hook that released its request before the gateway's late 103
 //     took the answer without a receipt, the same as an earlier binary.
 //   - A managed shell hook post (shellBridge, HookShellBridgeHeader) has no
@@ -148,7 +204,17 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 //   - Every other call keeps its evaluated decision. In-agent plugins, policy
 //     bridges and events without an answer deadline send no receipt.
 func (a *APIServer) unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer bool, connectorName, event string, resp agentHookResponse) agentHookResponse {
-	if a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() || hookexec.NeutralLifecycleEvent(connectorName, event) {
+	if a.scannerCfg == nil || a.scannerCfg.SecureClientIntegration() || hookexec.NeutralLifecycleEvent(connectorName, event) {
+		return resp
+	}
+	if !a.scannerCfg.StandaloneEnterprise() {
+		if a.scannerCfg.DeploymentMode == "per_user" && !shellBridge &&
+			hookexec.DeliveryReceiptEvent(connectorName, event) {
+			if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) != "open" && resp.Action == "block" {
+				return resp
+			}
+			return unconfirmedHookDelivery(resp)
+		}
 		return resp
 	}
 	closed := a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) != "open"

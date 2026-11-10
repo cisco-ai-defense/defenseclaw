@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"os"
 	pathpkg "path"
 	"strings"
 	"unicode/utf8"
@@ -74,17 +75,53 @@ func isPatchEnvelopeField(field string, value any) bool {
 // Copilot CLI apply such a target as given, so it is a write fact like a
 // relative one and every path rule judges it (rel-1-0-6:GAP-0361,
 // GAP-0398). Home forms (~) stay unread because the tool does not expand
-// them, and so do UNC shares (\\host) and drive-relative paths (C:x), which
-// name another host or the current directory of another drive.
+// them, and so do shares of another host (\\host\share) and drive-relative
+// paths (C:x), which name another host or the current directory of another
+// drive. A spelling of a local file is read: the extended-length and device
+// forms of a drive path (\\?\C:\x, \\.\C:\x) and the admin share of this
+// machine (\\localhost\C$\x, \\127.0.0.1\C$\x, \\<this host>\C$\x, also
+// below \\?\UNC\). Each opens the file of its drive path, so it is a write
+// fact like that path and the path rules judge what Windows opens, never the
+// spelling (rel-1-0-6:GAP-1004).
 func isAcceptedPatchPath(value string) bool {
+	if strings.HasPrefix(value, `\\`) {
+		return isLocalWindowsPatchTarget(value)
+	}
 	if value == "" || value == "~" || strings.HasPrefix(value, "~/") ||
-		strings.HasPrefix(value, `~\`) || strings.HasPrefix(value, `\\`) {
+		strings.HasPrefix(value, `~\`) {
 		return false
 	}
 	if len(value) >= 2 && isASCIILetter(value[0]) && value[1] == ':' {
 		return len(value) >= 3 && (value[2] == '/' || value[2] == '\\')
 	}
 	return true
+}
+
+// patchLocalHostname is the name of this machine, which names its own admin
+// shares like localhost does. A variable so a test can name the machine.
+var patchLocalHostname = os.Hostname
+
+// isLocalWindowsPatchTarget reports a patch target that begins with two
+// backslashes and opens a file of this machine: the extended-length or device
+// prefix before a drive path, or the admin share (X$) of a local server name,
+// bare or below \\?\UNC\. Any other share, device or namespace names a file
+// the rules cannot read as a local path and stays unread.
+func isLocalWindowsPatchTarget(value string) bool {
+	text := strings.TrimPrefix(strings.ReplaceAll(value, "/", `\`), `\\`)
+	if strings.HasPrefix(text, `?\`) || strings.HasPrefix(text, `.\`) {
+		text = text[2:]
+		if len(text) >= 3 && isASCIILetter(text[0]) && text[1] == ':' && text[2] == '\\' {
+			return true
+		}
+		if len(text) < 4 || !strings.EqualFold(text[:4], `unc\`) {
+			return false
+		}
+		text = text[4:]
+	}
+	parts := strings.SplitN(text, `\`, 3)
+	return len(parts) == 3 && parts[2] != "" && len(parts[1]) == 2 &&
+		isASCIILetter(parts[1][0]) && parts[1][1] == '$' &&
+		WindowsLocalHost(parts[0], patchLocalHostname)
 }
 
 func appendExtractedPatch(out *extractedInput, text string) {
@@ -275,17 +312,43 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 	}
 }
 
-// classifyPOSIXApplyPatchStdin gives a shell-fed, literal patch the same
-// path operations as the native apply_patch tool. A quoted heredoc preserves
-// the envelope bytes; other stdin forms have no authoritative patch text.
-func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
+// applyPatchStdinText is the envelope text of a POSIX apply_patch command
+// fed by a here-document, in every delimiter spelling: the document itself
+// when no shell expansion touches it, and for a document the shell expands,
+// the text it shows (LiteralStdinView) when no file directive of it holds an
+// expansion or a backslash. The expansions are then unknown content of the
+// lines that hold them; the files the patch names are as the text names them.
+// A document that is not read yields no text.
+func applyPatchStdinText(command CommandFact) (string, bool) {
 	if command.Dialect != DialectPOSIX || command.Executable != "apply_patch" ||
-		!command.ArgvComplete || len(command.Argv) != 1 ||
-		!command.LiteralStdinComplete || command.LiteralStdinAmbiguous {
+		!command.ArgvComplete || len(command.Argv) != 1 {
+		return "", false
+	}
+	if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
+		return command.LiteralStdin, true
+	}
+	if command.LiteralStdinComplete || command.LiteralStdinView == "" {
+		return "", false
+	}
+	for _, line := range strings.Split(command.LiteralStdinView, "\n") {
+		if strings.HasPrefix(line, "*** ") && strings.ContainsAny(line, "$\\") {
+			return "", false
+		}
+	}
+	return command.LiteralStdinView, true
+}
+
+// classifyPOSIXApplyPatchStdin gives a shell-fed, literal patch the same
+// path operations as the native apply_patch tool. A here-document keeps the
+// envelope bytes (applyPatchStdinText); other stdin forms have no
+// authoritative patch text.
+func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
+	text, ok := applyPatchStdinText(*command)
+	if !ok {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
-	patch := parsePatchEnvelope(command.LiteralStdin)
+	patch := parsePatchEnvelope(text)
 	if patch.status != StatusComplete {
 		if patch.status == StatusLimitExceeded {
 			out.markLimit(patch.issue)

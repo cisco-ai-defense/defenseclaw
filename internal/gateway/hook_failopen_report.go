@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/fsnotify/fsnotify"
 )
 
 // The hooks append one line to <home>/logs/hook-failures.jsonl for every
@@ -31,9 +32,9 @@ import (
 // defenseclaw_log_hook_failure, hookexec logHookFailure). A fail-open call
 // then ran without a DefenseClaw check, and the gateway that would have
 // recorded it was down, so nothing in the alerts or the audit history said so
-// (GAP-0414). On start, and about once a minute while it runs, the gateway
-// reads the lines it has not reported yet and records one guardrail-degraded
-// alert per connector.
+// (GAP-0414). On start, on append while it runs, and on a fallback poll, the
+// gateway reads the lines it has not reported yet and records one
+// guardrail-degraded alert per connector.
 //
 // A call the hook blocked itself (outcome fail_closed) gets its own audit
 // row too. Under load a per-user hook gives up at its answer budget and
@@ -78,13 +79,16 @@ var hookFailOpenReportMaxBytes int64 = 16 << 20
 // variable for tests.
 var hookFailureRowsPerReport = 1000
 
-// hookFailureBacklogInterval is how soon a running gateway reports again
-// while a run left calls without their rows (hookFailuresReported
-// AuditPending): with hookFailureRowsPerReport rows a run, at most 200 rows
-// a second. A run itself takes 5-10 s on a loaded Windows disk, so the
-// 15-17k hook-blocked calls of a par-128 flood took 3-5 minutes to record
-// (rel-1-0-6:GAP-0370). A variable for tests.
-var hookFailureBacklogInterval = 5 * time.Second
+// Each reporter transaction stays short, then gives live verdict writers a
+// chance to use the SQLite connection before the next marker group.
+const hookFailureBatchSize = 32
+const hookFailureLiveYield = 2 * time.Millisecond
+
+// hookFailureBacklogInterval schedules the next bounded report after a pass
+// leaves local rows pending. Each pass releases the writer between small
+// transactions, so a pending source does not wait for the idle poll.
+// A variable for tests.
+var hookFailureBacklogInterval = 250 * time.Millisecond
 
 // hookFailOpenReportInterval is how often a running per-user gateway looks
 // for new hook-failure lines. A call that ran fail-open while the gateway
@@ -232,6 +236,9 @@ func (s *Sidecar) reportHookFailureCalls() {
 		if err := reportHookFailureCallsIn(logDir, s.logger, time.Now().UTC()); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] hook failure report: %v\n", err)
 		}
+		if err := reportDroppedHookFailuresIn(logDir, s.logger); err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] hook failure marker report: %v\n", err)
+		}
 	}
 }
 
@@ -268,9 +275,9 @@ func hookFailOpenLogDirs(dataDir string) []string {
 }
 
 // watchHookFailureCalls reports new hook-failure lines while the gateway
-// runs (hookFailOpenReportInterval), so a call that ran fail-open while the
-// gateway was up is not left for the next start. It reads a folder only when
-// its file's size or time changed. A managed gateway starts no timer.
+// runs. File notifications wake it on append; hookFailOpenReportInterval
+// covers missed notifications. It reads a folder only when its file's size
+// or time changed. A managed gateway starts no watcher.
 func (s *Sidecar) watchHookFailureCalls(ctx context.Context) {
 	if s == nil || s.logger == nil || ManagedEnterpriseActive() {
 		return
@@ -282,6 +289,31 @@ func (s *Sidecar) watchHookFailureCalls(ctx context.Context) {
 		mod  time.Time
 	}
 	seen := map[string]stamp{}
+	watcher, watchErr := fsnotify.NewWatcher()
+	var events <-chan fsnotify.Event
+	var errorsCh <-chan error
+	watched := map[string]bool{}
+	if watchErr == nil {
+		defer watcher.Close()
+		events, errorsCh = watcher.Events, watcher.Errors
+	}
+	watchDirs := func(dirs []string) {
+		if watcher == nil {
+			return
+		}
+		for _, dir := range dirs {
+			path := dir
+			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+				path = filepath.Dir(path)
+			}
+			if !watched[path] && watcher.Add(path) == nil {
+				watched[path] = true
+			}
+		}
+	}
+	if cfg := s.currentConfig(); hookFailOpenReportApplies(cfg) {
+		watchDirs(hookFailOpenLogDirs(cfg.DataDir))
+	}
 	backlog := time.NewTimer(hookFailureBacklogInterval)
 	backlog.Stop()
 	defer backlog.Stop()
@@ -296,6 +328,21 @@ func (s *Sidecar) watchHookFailureCalls(ctx context.Context) {
 			return
 		case <-ticker.C:
 		case <-backlog.C:
+		case event, open := <-events:
+			if !open {
+				events = nil
+				continue
+			}
+			base := filepath.Base(event.Name)
+			logsCreated := event.Op&fsnotify.Create != 0 && base == "logs"
+			if base != hookFailuresFile && base != hookFailuresDroppedFile && !logsCreated {
+				continue
+			}
+		case _, open := <-errorsCh:
+			if !open {
+				errorsCh = nil
+			}
+			continue
 		}
 		hookFailureWatchWakes.Add(1)
 		cfg := s.currentConfig()
@@ -303,14 +350,18 @@ func (s *Sidecar) watchHookFailureCalls(ctx context.Context) {
 			continue
 		}
 		dirs := hookFailOpenLogDirs(cfg.DataDir)
+		watchDirs(dirs)
 		changed := false
 		for _, dir := range dirs {
-			var now stamp
-			if info, err := os.Stat(filepath.Join(dir, hookFailuresFile)); err == nil {
-				now = stamp{size: info.Size(), mod: info.ModTime()}
-			}
-			if seen[dir] != now {
-				seen[dir], changed = now, true
+			for _, name := range []string{hookFailuresFile, hookFailuresDroppedFile} {
+				var now stamp
+				if info, err := os.Stat(filepath.Join(dir, name)); err == nil {
+					now = stamp{size: info.Size(), mod: info.ModTime()}
+				}
+				key := filepath.Join(dir, name)
+				if seen[key] != now {
+					seen[key], changed = now, true
+				}
 			}
 		}
 		if changed || hookFailureRowsPending(dirs) {
@@ -331,6 +382,10 @@ func hookFailureRowsPending(dirs []string) bool {
 	defer hookFailOpenReportMu.Unlock()
 	for _, dir := range dirs {
 		if readHookFailuresReported(dir).AuditPending {
+			return true
+		}
+		if info, err := os.Stat(filepath.Join(dir, hookFailuresDroppedFile)); err == nil &&
+			info.Size() > readDroppedFailurePosition(dir).Offset {
 			return true
 		}
 	}
@@ -354,13 +409,36 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 		return nil
 	}
 	written, pending := 0, false
+	batch := make([]audit.HookFailureAuditRow, 0, hookFailureBatchSize)
+	ends := make([]int64, 0, hookFailureBatchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		settled, err := logger.LogHookFailureRowsAtomic(context.Background(), batch)
+		if settled > 0 {
+			read.start.AuditOffset = ends[settled-1]
+			written += settled
+		}
+		batch, ends = batch[:0], ends[:0]
+		if err != nil {
+			read.start.AuditPending = true
+			if read.start.AuditOffset < read.start.Offset {
+				read.start.AuditOffset = read.start.Offset
+			}
+			_ = writeHookFailuresReported(logDir, read.start)
+			return fmt.Errorf("record hook failure marker group: %w", err)
+		}
+		time.Sleep(hookFailureLiveYield)
+		return nil
+	}
 	for _, call := range read.calls {
 		if call.end <= read.start.AuditOffset {
 			// Recorded by a run whose later write failed (it kept Offset), or
 			// by the run that left the rest pending.
 			continue
 		}
-		if written >= hookFailureRowsPerReport {
+		if written+len(batch) >= hookFailureRowsPerReport {
 			// The next run goes on from here (AuditPending).
 			pending = true
 			break
@@ -370,24 +448,19 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 		if call.blocked {
 			env.ToolID = strings.TrimSpace(call.entry.ToolID)
 		}
-		ctx := audit.ContextWithEnvelope(context.Background(), env)
 		action, target, details, severity := hookFailureRow(call)
-		if err := logger.LogActionCtxSeverity(ctx, action, target, details, severity); err != nil {
-			// The calls after AuditOffset still need their rows: keep the
-			// running gateway's backlog cadence going. AuditOffset never
-			// stays below Offset: a state from before 1.0.5 has none (0), and
-			// a run that jumped to the last window starts with the old one,
-			// so the next run would read every line before Offset again
-			// (duplicate fail-open alerts and rows).
-			read.start.AuditPending = true
-			if read.start.AuditOffset < read.start.Offset {
-				read.start.AuditOffset = read.start.Offset
+		batch = append(batch, audit.HookFailureAuditRow{
+			Envelope: env, Action: action, Target: target, Details: details, Severity: severity,
+		})
+		ends = append(ends, call.end)
+		if len(batch) == hookFailureBatchSize {
+			if err := flush(); err != nil {
+				return err
 			}
-			_ = writeHookFailuresReported(logDir, read.start)
-			return fmt.Errorf("record %s hook call %s: %w", call.entry.Connector, action, err)
 		}
-		read.start.AuditOffset = call.end
-		written++
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 	if !pending {
 		read.start.AuditOffset = read.next
@@ -417,7 +490,31 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 		// fail-open lines up to here are already in an alert.
 		done.AuditPending, done.Done = true, read.start.Done
 	}
-	return writeHookFailuresReported(logDir, done)
+	if err := writeHookFailuresReported(logDir, done); err != nil {
+		return err
+	}
+	if read.start.AuditPending || done.AuditPending {
+		var bytesPending int64
+		if done.AuditPending {
+			if info, err := os.Stat(filepath.Join(logDir, hookFailuresFile)); err == nil {
+				bytesPending = max(0, info.Size()-done.AuditOffset)
+			}
+		}
+		var oldestAge time.Duration
+		oldestKnown := false
+		for _, call := range read.calls {
+			if done.AuditPending && call.end > done.AuditOffset {
+				if stamp, err := time.Parse(time.RFC3339Nano, call.entry.TS); err == nil {
+					oldestAge = max(0, now.Sub(stamp))
+					oldestKnown = true
+				}
+				break
+			}
+		}
+		fmt.Fprintf(os.Stderr, "[gateway] hook failure backlog bytes=%d oldest_age_seconds=%d age_known=%t\n",
+			bytesPending, int64(oldestAge/time.Second), oldestKnown)
+	}
+	return nil
 }
 
 // hookFailureRow is the audit row of one hook-failure line: a fail-open

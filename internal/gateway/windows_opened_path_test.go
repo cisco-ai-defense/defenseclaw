@@ -6,6 +6,7 @@ package gateway
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -343,3 +344,108 @@ type fakeEntry struct {
 }
 
 func (e fakeEntry) IsDir() bool { return e.folder }
+
+// useWindowsPathHost names this process a Windows host for the test.
+func useWindowsPathHost(t *testing.T, host bool) {
+	t.Helper()
+	previous := windowsPathHost
+	windowsPathHost = host
+	t.Cleanup(func() { windowsPathHost = previous })
+}
+
+// A Windows host walks the file Windows opens for a spelling, not the
+// characters the caller wrote: the device and share prefixes, trailing spaces
+// and dots, a folder followed by "..", short names and the admin share of
+// this machine all give the plain drive path. Every other host opens no
+// Windows path and keeps the spelling it has.
+func TestWindowsHostPathIsTheFileWindowsOpens(t *testing.T) {
+	useShortNames(t, map[string]string{"NETRC~1": ".netrc"})
+	useWindowsPathHost(t, true)
+	const want = "C:/Users/h/.netrc"
+	for _, spelling := range []string{
+		`C:\Users\h\.netrc`, `//./C:/Users/h/.netrc  `, `\\.\C:\Users\h\.netrc  `, `//?/C:/Users/h/.netrc.`,
+		`C:\Users\h\x \..\.netrc`, `C:\Users\h\NETRC~1`, `\\build-host\c$\Users\h\NETRC~1`, `\\localhost\C$\Users\h\.netrc::$DATA`,
+		`  C:\Users\h\.netrc`,
+	} {
+		got, ok := windowsHostPath(spelling)
+		if !ok || got != filepath.FromSlash(want) {
+			t.Errorf("windowsHostPath(%q) = %q, %v, want %q", spelling, got, ok, filepath.FromSlash(want))
+		}
+	}
+	for _, spelling := range []string{`relative\.netrc`, `.netrc`, `/usr/bin/env`, `~/.netrc`, ``} {
+		if got, ok := windowsHostPath(spelling); ok {
+			t.Errorf("windowsHostPath(%q) = %q, want no Windows path", spelling, got)
+		}
+	}
+	// The exact extended-length prefix is not normalized: a trailing space is
+	// part of the name there.
+	if got, ok := windowsHostPath(`\\?\C:\Users\h\.netrc `); !ok || got != filepath.FromSlash("C:/Users/h/.netrc ") {
+		t.Errorf("verbatim spelling = %q, %v, want the name with its space", got, ok)
+	}
+	useWindowsPathHost(t, false)
+	if got, ok := windowsHostPath(`C:\Users\h\.netrc  `); ok {
+		t.Errorf("a host that opens no Windows path read a Windows spelling: %q", got)
+	}
+}
+
+// A file-system call for an operand with the exact extended-length prefix
+// takes the prefix again: Win32 normalizes every other spelling (drops a
+// trailing space or dot), so the call would look up a sibling entry. The
+// lookup form that the rules and maps read stays without it, and an answer
+// that carries the prefix is read without it.
+func TestWindowsWalkPathKeepsTheExactExtendedLengthPrefixForTheFileSystem(t *testing.T) {
+	useShortNames(t, nil)
+	useWindowsPathHost(t, true)
+	for _, tc := range []struct{ operand, want string }{
+		{`\\?\C:\Users\h\link `, `\\?\C:\Users\h\link `},
+		{`\\?\C:\Users\h\x\..\link.`, `\\?\C:\Users\h\link.`},
+		{`  \\?\C:\Users\h\link `, `\\?\C:\Users\h\link `},
+		{`\\?\UNC\build-host\share\dir\link `, `\\?\UNC\build-host\share\dir\link `},
+		// Every other spelling is normalized by Win32 and walks as read.
+		{`C:\Users\h\link `, `C:\Users\h\link`},
+		{`//?/C:/Users/h/link `, `C:\Users\h\link`},
+		{`\\.\C:\Users\h\link `, `C:\Users\h\link`},
+	} {
+		host, ok := windowsHostPath(tc.operand)
+		if !ok {
+			t.Fatalf("windowsHostPath(%q) is no Windows path", tc.operand)
+		}
+		if got := strings.ReplaceAll(windowsWalkPath(host, tc.operand), "/", `\`); got != tc.want {
+			t.Errorf("windowsWalkPath(%q) = %q, want %q", tc.operand, got, tc.want)
+		}
+	}
+	for _, tc := range []struct{ answer, want string }{
+		{`\\?\C:\Users\h\.netrc`, `C:\Users\h\.netrc`},
+		{`\\?\UNC\build-host\share\.netrc`, `\\build-host\share\.netrc`},
+		{`C:\Users\h\.netrc`, `C:\Users\h\.netrc`},
+		{`\\?\GLOBALROOT\x`, `\\?\GLOBALROOT\x`},
+	} {
+		if got := windowsWalkResult(tc.answer); got != tc.want {
+			t.Errorf("windowsWalkResult(%q) = %q, want %q", tc.answer, got, tc.want)
+		}
+	}
+	useWindowsPathHost(t, false)
+	if got := windowsWalkPath(`C:/Users/h/link `, `\\?\C:\Users\h\link `); got != `C:/Users/h/link ` {
+		t.Errorf("a host that opens no Windows path rewrote a path: %q", got)
+	}
+}
+
+// A rooted Windows spelling is the file Windows opens for it. The analysis
+// leaves a device spelling with trailing spaces unresolved and not absolute,
+// and the spelling was then placed in the working directory as a relative
+// operand, which gave a link fact no rule could read; on a host that opens no
+// Windows path the spelling keeps its reading.
+func TestLinkTargetSpellingOfARootedWindowsPathIsNeverRelativeToTheWorkingDirectory(t *testing.T) {
+	useShortNames(t, nil)
+	request := trustedActionRequest{Input: actionfacts.Input{Tool: "Write", CWD: `C:\Users\h\project`, ActiveHome: `C:\Users\h`}}
+	candidate := actionfacts.PathFact{Value: `//./C:/Users/h/.netrc  `, Normalized: `//./C:/Users/h/.netrc  `, Access: actionfacts.PathAccessWrite}
+	useWindowsPathHost(t, true)
+	spelling, placed, reported := linkTargetSpelling(request, candidate)
+	if spelling != filepath.FromSlash("C:/Users/h/.netrc") || placed || reported {
+		t.Errorf("linkTargetSpelling = %q, %v, %v, want the opened path, not placed", spelling, placed, reported)
+	}
+	useWindowsPathHost(t, false)
+	if spelling, _, _ := linkTargetSpelling(request, candidate); spelling != "" {
+		t.Errorf("a host that opens no Windows path placed %q", spelling)
+	}
+}

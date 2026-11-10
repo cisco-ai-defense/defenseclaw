@@ -791,6 +791,29 @@ func windowsEnterpriseHotConfigApply(
 		}
 		opts.hotConfigRestoreFailed = true
 		installed := windowsEnterpriseHotConfigUndoState(layout.ConfigPath, previous, next, targetsRefreshed, targetsRepublished)
+		// The previous config is back and the gateway enforces it; what could
+		// not be proven is the guardian's own publication, because a program
+		// holds one of its state files open. That is not a verdict on any
+		// policy, so the gateway keeps running and no hook is closed over it:
+		// the error names the holder and the repair to run once it lets go
+		// (GAP-0967). The accounts whose hooks the roster change took away wait
+		// for the repair like an account that is signed out.
+		if restoreErr == nil && gatewayErr == nil && (targetsErr != nil || guardianErr != nil) {
+			if hold := windowsEnterpriseGuardianStateHeldNow(layout); hold != nil {
+				cause := targetsErr
+				if cause == nil {
+					cause = guardianErr
+				}
+				unprotected := ""
+				if len(lost) > 0 {
+					unprotected = "; these previously enrolled targets have no DefenseClaw hook until the repair: " + windowsEnterpriseBoundedDiagnostic(strings.Join(windowsHotConfigTargetLabels(lost), ", "))
+				}
+				result.AddError("guardian_state_held", "the previous config is back and the gateway enforces it, but "+hold.describe()+": "+
+					windowsEnterpriseBoundedDiagnostic(cause.Error())+"; "+installed+unprotected+"; the services were left running and no hook was closed. Next step: close that program, then from an elevated PowerShell prompt run "+
+					windowsEnterpriseAdminCommand("repair"))
+				return
+			}
+		}
 		gateway := "the gateway service was stopped after every standalone hook was durably forced closed; rerun ensure after repair to prove the live policy and release that closure"
 		if err := windowsEnterpriseHotConfigCloseHooks(layout); err != nil {
 			gateway = "the gateway service was left running because its hooks could not be durably forced closed (" +

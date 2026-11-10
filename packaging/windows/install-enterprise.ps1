@@ -4380,7 +4380,8 @@ function Add-DefenseClawLifecycleFailureEvidence {
         @('DefenseClaw.TransactionPending', 'transaction_pending'),
         @('DefenseClaw.RecoveryGatewayRuns', 'recovery_gateway_runs'),
         @('DefenseClaw.RecoveryGatewayRefusal', 'recovery_gateway_refusal'),
-        @('DefenseClaw.RollbackLeftovers', 'rollback_leftovers')
+        @('DefenseClaw.RollbackLeftovers', 'rollback_leftovers'),
+        @('DefenseClaw.GuardianRestartFailure', 'guardian_restart_failure')
     )) {
         if ($Evidence.Contains([string]$field[0])) {
             Microsoft.PowerShell.Utility\Add-Member `

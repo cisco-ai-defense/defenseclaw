@@ -284,6 +284,14 @@ type SetupOpts struct {
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
 
+	// AcceptPriorReleaseRender makes a read-only verification accept the render
+	// an earlier release wrote of a Windows awaited hook bridge (the
+	// Constrained Language fallback end of legacyWindowsAwaitedHookCommand) as
+	// the current one, where a connector's registration is compared with its
+	// render. Only the Windows enterprise guardian sets it, to prove that a
+	// signed-out account's only difference from this release is the render of
+	// an earlier one (GAP-0980). It never reaches a write.
+	AcceptPriorReleaseRender bool
 	// ManagedTargetSID is set only by the Windows enterprise guardian when it
 	// sets up or verifies one per-user target: the target account's SID.
 	// Custody checks then trust that account the way they trust the current

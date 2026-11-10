@@ -1514,11 +1514,27 @@ func matchesActiveSSHPrivateKey(
 }
 
 func matchesAWSCredentials(value string) bool {
+	name, ok := awsDirectoryEntry(value)
+	return ok && matchesAWSCredentialsName(name)
+}
+
+// matchesExactAWSCredentials is the credentials file itself: unlike
+// matchesAWSCredentials it does not take a copy named credentials.<suffix>.
+func matchesExactAWSCredentials(value string) bool {
+	name, ok := awsDirectoryEntry(value)
+	return ok && name == "credentials"
+}
+
+// awsDirectoryEntry is the part of value below an .aws folder.
+func awsDirectoryEntry(value string) (string, bool) {
 	if strings.HasPrefix(value, ".aws/") {
-		return matchesAWSCredentialsName(strings.TrimPrefix(value, ".aws/"))
+		return strings.TrimPrefix(value, ".aws/"), true
 	}
 	index := strings.LastIndex(value, "/.aws/")
-	return index >= 0 && matchesAWSCredentialsName(value[index+len("/.aws/"):])
+	if index < 0 {
+		return "", false
+	}
+	return value[index+len("/.aws/"):], true
 }
 
 func matchesAWSCredentialsName(name string) bool {

@@ -78,6 +78,7 @@ type windowsEnterpriseInstallerReport struct {
 	EnumeratorService                 string            `json:"enumerator_service"`
 	EnumeratorServiceState            string            `json:"enumerator_service_state"`
 	ServiceStartModes                 map[string]string `json:"service_start_modes"`
+	ServiceDelayedAutoStart           map[string]bool   `json:"service_delayed_auto_start"`
 	GatewayReady                      bool              `json:"gateway_ready"`
 	GuardianReady                     bool              `json:"guardian_ready"`
 	CodexMachineRequirementsReady     bool              `json:"codex_machine_requirements_ready"`
@@ -124,6 +125,10 @@ type windowsEnterpriseInstallerReport struct {
 	// could not remove ("user (SID) [connectors]: item", or a machine item).
 	// Decoded leniently, like the registration lists.
 	RollbackLeftovers json.RawMessage `json:"rollback_leftovers"`
+	// GuardianRestartFailure is why a recovery hold that failed could not put
+	// the hook guardian back (GAP-0989). The failed hold's own error is the
+	// failure; this is its context.
+	GuardianRestartFailure string `json:"guardian_restart_failure"`
 	// A linked or unreadable user agent file cannot be captured for rollback.
 	// Setup still proceeds with the machine transaction and reports each skip.
 	UserNativeOTLPCaptureSkipped json.RawMessage `json:"user_native_otlp_capture_skipped"`
@@ -1944,7 +1949,8 @@ func applyWindowsEnterpriseInstallerReport(
 		)
 		if windowsBundleHasCode(result.Errors[firstError:], "codex_requirements_held") ||
 			windowsBundleHasCode(result.Errors[firstError:], "codex_state_held") ||
-			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) {
+			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) ||
+			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "guardian_state_held")) {
 			next = windowsEnterpriseHeldRollbackNextStep(report.TransactionPending, windowsEnterpriseLiveStandaloneServices())
 		}
 		if next != "" {
@@ -2331,6 +2337,13 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 		decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
 	)
 	warnings = append(warnings, windowsEnterpriseRollbackLeftoverWarnings(report.RollbackLeftovers)...)
+	if failure := windowsEnterpriseBoundedText(report.GuardianRestartFailure, windowsEnterpriseGuardianRestartFailureMax); failure != "" {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "guardian_restart_failed",
+			Message: "after the failed step, Setup could not fully put the hook guardian back (" + failure +
+				"); run " + windowsEnterpriseAdminCommand("repair") + " from an elevated PowerShell prompt to put it back",
+		})
+	}
 	if skipped := windowsEnterpriseReportStrings(report.UserNativeOTLPCaptureSkipped); len(skipped) != 0 {
 		warnings = append(warnings, enterprisestatus.Message{
 			Code: "user_native_otlp_capture_skipped",
@@ -3432,7 +3445,7 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 // codex_state_held: ...", g582 round 11c, L3).
 func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
-	case "codex_state_held", "codex_requirements_held", "privileges_required":
+	case "codex_state_held", "codex_requirements_held", "privileges_required", "guardian_state_held":
 		return strings.TrimPrefix(message, code+": ")
 	}
 	return message
@@ -3491,6 +3504,11 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			// holds the Codex state of 1.0.8 or the Codex requirements open
 			// in a way that would fail the run after the services stopped
 			// (GAP-0765, g582 round 11c).
+			return enterprisestatus.WindowsExitBusy
+		case "guardian_state_held":
+			// A program holds a hook guardian state file open: the run
+			// changed nothing, or kept the previous config with the services
+			// running, and a retry after the release gets past it (GAP-0967).
 			return enterprisestatus.WindowsExitBusy
 		case "scanner_runtime_unavailable":
 			if strings.HasSuffix(message.Message, windowsScannerPrepareRetryNotice) {
@@ -4262,6 +4280,15 @@ func restoreWindowsEnterpriseStartModes(report *windowsEnterpriseInstallerReport
 					configErr = fmt.Errorf("service manager still reports startup mode %d", current.StartType)
 				}
 			}
+			// Any change away from disabled leaves the delayed start cleared. The
+			// mode is restored; a delayed start that cannot be put back is named
+			// and does not stop the other services (GAP-0989).
+			if configErr == nil && windowsEnterpriseDelayedStartToRestore(mode, report.ServiceDelayedAutoStart[name], current.StartType) {
+				info := windows.SERVICE_DELAYED_AUTO_START_INFO{IsDelayedAutoStartUp: 1}
+				if delayedErr := windows.ChangeServiceConfig2(handle, windows.SERVICE_CONFIG_DELAYED_AUTO_START_INFO, (*byte)(unsafe.Pointer(&info))); delayedErr != nil {
+					failures = append(failures, fmt.Errorf("restore service %s delayed start: %w", name, delayedErr))
+				}
+			}
 		}
 		_ = service.Close()
 		if configErr != nil {
@@ -4269,6 +4296,33 @@ func restoreWindowsEnterpriseStartModes(report *windowsEnterpriseInstallerReport
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// windowsEnterpriseDelayedStartToRestore reports whether a service that was
+// automatic with a delayed start must have the delayed start set again after
+// its mode was restored to automatic (GAP-0989).
+func windowsEnterpriseDelayedStartToRestore(recorded string, delayed bool, restored uint32) bool {
+	return recorded == "auto" && delayed && restored == windows.SERVICE_AUTO_START
+}
+
+// windowsEnterpriseGuardianRestartFailureMax bounds the failed-hold context in
+// the operator's warning.
+const windowsEnterpriseGuardianRestartFailureMax = 300
+
+// windowsEnterpriseBoundedText trims text, drops control characters and keeps
+// at most limit runes.
+func windowsEnterpriseBoundedText(text string, limit int) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, strings.TrimSpace(text))
+	runes := []rune(cleaned)
+	if len(runes) > limit {
+		return string(runes[:limit]) + "..."
+	}
+	return string(runes)
 }
 
 func windowsEnterpriseStartModeToRestore(recorded string, current uint32) (uint32, bool) {
@@ -4644,6 +4698,18 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 			result.Errors = []enterprisestatus.Message{}
 			result.AddError("preflight_failed", err.Error())
+			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+		}
+	}
+
+	// A hook guardian state file another program holds open keeps the
+	// guardian from publishing, so a change could be neither proven nor
+	// undone: say so before anything changes (GAP-0967).
+	if plan.Action == "upgrade" || plan.Action == "repair" {
+		if err := windowsEnterpriseGuardianStatePreflight(); err != nil {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("guardian_state_held", err.Error())
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
 	}

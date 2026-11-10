@@ -69,6 +69,34 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     assert restore.index("Start-DefenseClawTransactionServices") < restore.index("Restore-DefenseClawSnapshotHookAfterActivation")
     deferred = _function_body(module, "Restore-DefenseClawTransactionWithManagedHooksRollback")
     assert deferred.index("Start-DefenseClawTransactionServices") < deferred.index("Restore-DefenseClawSnapshotHookAfterActivation")
+    # GAP-0977: a retried recovery meets the guardian running (a held rollback
+    # leaves the services up), and the guardian puts any hook that is not its
+    # recorded release back over the guard. Every caller names the guardian,
+    # and the hold stops it before it writes the guard.
+    hold = _function_body(module, "Hold-DefenseClawEarlyHookGuard")
+    assert hold.index("Stop-DefenseClawService -Name $GuardianServiceName") < hold.index("Install-DefenseClawFileAtomic")
+    # S-I1: a failure after the stop starts the guardian again with its start mode.
+    assert hold.index("$guardianTouched = $true") < hold.index("Stop-DefenseClawService -Name $GuardianServiceName")
+    handler = hold[hold.index("catch {\n        $holdFailure = $_"):]
+    # GAP-0989: the exact mode comes back, a delayed-auto start included.
+    assert "$guardianPriorDelayed = [bool](Get-DefenseClawServiceDelayedAutoStart -Name $GuardianServiceName)" in hold
+    assert "-StartMode $guardianPriorMode" in handler and "-DelayedAutoStart $guardianPriorDelayed" in handler
+    assert "Restore-DefenseClawServiceStartModeExact" in handler
+    # GAP-0989: the original error is rethrown as it is (type and message prefix kept);
+    # a failed restart rides on its Data, the lifecycle log and the failure document.
+    assert 'throw "$($holdFailure' not in handler and "throw $holdFailure" in handler
+    assert "$holdFailure.Exception.Data['DefenseClaw.GuardianRestartFailure'] = $restartNote" in handler
+    assert "Write-DefenseClawLifecycleLogDiagnostic -Message $restartNote" in handler
+    installer = (ROOT / "packaging" / "windows" / "install-enterprise.ps1").read_text(encoding="utf-8")
+    assert "@('DefenseClaw.GuardianRestartFailure', 'guardian_restart_failure')" in installer
+    exact = _function_body(module, "Restore-DefenseClawServiceStartModeExact")
+    assert exact.index("Set-DefenseClawServiceStartMode -Name $Name -StartMode $StartMode") < exact.index("Set-DefenseClawServiceDelayedAutoStart -Name $Name -Enabled $DelayedAutoStart")
+    delayed = _function_body(module, "Set-DefenseClawServiceDelayedAutoStart")
+    assert "'delayed-auto'" in delayed and "'start='" in delayed
+    assert "Start-DefenseClawService -Name $GuardianServiceName" in handler
+    assert handler.rstrip().endswith("return $GuardSHA256\n}") or "throw $holdFailure" in handler
+    assert "-GuardianServiceName ([string]$snapshot.guardian_service)" in restore
+    assert "-GuardianServiceName $GuardianServiceName" in recovery
     # Install, Upgrade and Repair hand it the authenticated replacement hook.
     assert "-EarlyHookSource $earlyHookSource" in module
     assert "$earlyHookSource = $Sources['hook']" in module
@@ -936,3 +964,57 @@ def test_the_hook_payload_trust_is_unchanged(tmp_path: Path, case: str) -> None:
     else:
         assert result["pending"] is False, result
         assert result["hook"] == "hook-1.0.2", result
+
+
+def test_the_delayed_start_flag_is_journaled_and_restored_standalone_only() -> None:
+    # GAP-0989: the flag travels in the transaction journal beside start_mode (so a
+    # recovery in any process brings back delayed-auto), is read leniently from a
+    # journal without it, and Secure Client records and restores none of it.
+    module = _text()
+    new_transaction = _function_body(module, "New-DefenseClawTransaction")
+    record = new_transaction[new_transaction.index("$record = [ordered]@{") :]
+    assert "if ((Test-DefenseClawStandaloneProfile) -and $null -ne $service -and [int]$startMode -eq 2) {" in record
+    assert record.index("Test-DefenseClawStandaloneProfile") < record.index("$record['delayed_auto_start']") < record.index("$services.Add($record)")
+    reader = _function_body(module, "Get-DefenseClawTransactionServiceDelayedAutoStart")
+    assert "if ($null -eq $property) {\n        return $false" in reader
+    assert "-isnot [bool]" in reader and "$Mode -ne 2" in reader
+    states = _function_body(module, "Get-DefenseClawTransactionServiceStates")
+    assert states.count("delayed_auto_start = ") == 3
+    restore = _function_body(module, "Restore-DefenseClawTransactionServiceStartModes")
+    assert "-DelayedAutoStart ([bool]$state.delayed_auto_start)" in restore
+    exact = _function_body(module, "Restore-DefenseClawServiceStartModeExact")
+    assert exact.index("Set-DefenseClawServiceStartMode -Name $Name -StartMode $StartMode") < exact.index("if (-not (Test-DefenseClawStandaloneProfile)) {") < exact.index("Set-DefenseClawServiceDelayedAutoStart")
+    assert "[bool]$guardian.delayed_auto_start" in module and "[bool]$gateway.delayed_auto_start" in module
+    assert "-DelayedAutoStart ([bool]$service.delayed_auto_start)" in module
+    # The forward promotion of a completed upgrade or repair is plain automatic: the
+    # hardening writes DelayedAutoStart=0 and the verifier repairs a delayed start
+    # as drift. A rollback or recovery restores the recorded flag (above).
+    promotion = _function_body(module, "Set-DefenseClawVerifiedServiceBootPolicy")
+    promotion = promotion[promotion.index("#>") :]
+    assert "Delayed" not in promotion and "Exact" not in promotion and "keepDelayedStart" not in module
+    assert promotion.count("-StartMode 2") == 5
+    forward = module[module.index("Set-DefenseClawVerifiedServiceBootPolicy `") :]
+    assert forward.startswith("Set-DefenseClawVerifiedServiceBootPolicy `\n                -Layout $Layout")
+    # A flag that cannot be put back never aborts a recovery; the guardian is started
+    # again whatever the start mode did, and the failure note is bounded.
+    exact = _function_body(module, "Restore-DefenseClawServiceStartModeExact")
+    assert "try {" in exact and "delayed start could not be put back" in exact
+    hold = _function_body(module, "Hold-DefenseClawEarlyHookGuard")
+    handler = hold[hold.index("catch {\n        $holdFailure = $_"):]
+    assert handler.index("start mode could not be put back") < handler.index("Start-DefenseClawService -Name $GuardianServiceName") < handler.index("could not be started again")
+    assert "ConvertTo-DefenseClawBoundedDiagnostic -Value ($restartNotes -join '; ') -MaxLength 512" in handler
+    assert "$status['service_delayed_auto_start']" in module
+    # The start-mode setter itself is unchanged: plain sc config start= auto.
+    setter = _function_body(module, "Set-DefenseClawServiceStartMode")
+    assert "delayed" not in setter.lower()
+    # Outside their own bodies the flag helpers are named only by the hold, the
+    # journal recording and the restore sites.
+    rest = module
+    for name in (
+        "Get-DefenseClawServiceDelayedAutoStart",
+        "Set-DefenseClawServiceDelayedAutoStart",
+        "Restore-DefenseClawServiceStartModeExact",
+    ):
+        rest = rest.replace(_function_body(module, name), "")
+    assert rest.count("Set-DefenseClawServiceDelayedAutoStart") == 0
+    assert "DefenseClawDelayedAutoStartSeen" not in module

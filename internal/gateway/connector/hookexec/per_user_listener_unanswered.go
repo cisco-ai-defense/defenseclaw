@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,7 +22,13 @@ var errPerUserNotAccepted = errors.New("connected gateway server socket was not 
 // transport decides a still-queued connection, so the decision is made
 // before connectBy ends the try; queueDwell is the least time a connection
 // sat in the queue before it is decided, so a gateway that is about to accept
-// is never read as stopped.
+// is never read as stopped. A gateway that accepts up to the decision still
+// gets the call and answers it, so the margin stays short: it is not the time
+// the owner scan may take. The scan of a decided connection is not cut by the
+// connect deadline (ownerScanGrace in connectBy): a busy host reads every
+// process of the account for hundreds of milliseconds (560 ms measured at
+// load 130), and a scan cut at the deadline would end the try before the
+// owner was read.
 const (
 	unansweredMargin = 250 * time.Millisecond
 	queueDwell       = 500 * time.Millisecond
@@ -69,7 +76,16 @@ func verifyConnected(ctx context.Context, check *perUserPeerCheck, conn net.Conn
 		return classifyUnaccepted(ctx, verify(conn), server)
 	}
 	done := make(chan error, 1)
-	go func() { done <- verify(conn) }()
+	// settled is set once the wait ended in anything but "not accepted": the
+	// connection was accepted (its answer is the result) or failed on its own.
+	var settled atomic.Bool
+	go func() {
+		err := verify(conn)
+		if !errors.Is(err, errPerUserNotAccepted) {
+			settled.Store(true)
+		}
+		done <- err
+	}()
 	at := check.by.Add(-unansweredMargin)
 	if least := time.Now().Add(queueDwell); at.Before(least) {
 		at = least
@@ -86,10 +102,89 @@ func verifyConnected(ctx context.Context, check *perUserPeerCheck, conn net.Conn
 		return classifyUnaccepted(ctx, err, server)
 	default:
 	}
-	if ownGatewayHoldsQueue(ctx, server) {
+	// While the owner is read the connect deadline waits for the read
+	// (connectBy). A read that says no ends that wait, so a proof that comes
+	// after the deadline from anywhere else stays void. The read runs beside
+	// the wait: a connection the gateway accepted has its answer (or its own
+	// error) as soon as the peer check returns, however long the read of the
+	// owner takes.
+	check.deciding.Store(ownerScanSupported)
+	scanned := make(chan bool, 1)
+	go func() { scanned <- ownGatewayHoldsQueueRetried(ctx, check, conn, &settled) }()
+	var holds bool
+	select {
+	case err := <-done:
+		if !errors.Is(err, errPerUserNotAccepted) {
+			// deciding stays set until the dial returns this result
+			// (ownerScanEnded sees the check no longer pending).
+			return err
+		}
+		// The wait ended as not accepted: the finding of the scan decides.
+		if holds = <-scanned; !holds {
+			check.deciding.Store(false)
+			return err
+		}
+	case holds = <-scanned:
+		// A listener owned by the own gateway does not show that the
+		// connection was never accepted: a wait that ended another way
+		// than not accepted is the result.
+		select {
+		case err := <-done:
+			if !holds || !errors.Is(err, errPerUserNotAccepted) {
+				check.deciding.Store(false)
+				return err
+			}
+		default:
+		}
+	}
+	if holds {
+		// deciding stays set until the dial returns this answer
+		// (ownerScanEnded sees the check no longer pending). A scan that
+		// outlasted ownerScanGrace had its try ended by connectBy, whose
+		// cause is the answer (errPerUserOwnerScanUnfinished).
 		return fmt.Errorf("%w: %w", errPerUserListenerUnanswered, errPerUserNotAccepted)
 	}
-	return classifyUnaccepted(ctx, <-done, server)
+	check.deciding.Store(false)
+	// The owner was read and read again (ownGatewayHoldsQueueRetried): the
+	// error of the wait stands without a third read.
+	return <-done
+}
+
+// ownerScanRetry is how long a read of the owner of a queued connection that
+// says no is repeated before the no stands. A read on a busy host can fail for
+// a moment (a process of the account in the middle of exec, a table read cut
+// short), and a refusal blocks an ordinary call to the own frozen gateway of
+// the account in every fail mode. A holder that is not the gateway answers no
+// at every read, so the wait only delays that block.
+const (
+	ownerScanRetry = 500 * time.Millisecond
+	ownerScanPoll  = 50 * time.Millisecond
+)
+
+// ownGatewayHoldsQueueRetried is ownGatewayHoldsQueue repeated, while it says
+// no, for ownerScanRetry, and not after the try was abandoned (connectBy) or
+// once the wait settled (the connection was accepted or failed on its own;
+// the caller reads that result first). Its yes also needs conn itself to be
+// seen unaccepted in the socket table after the owner was read: the owner of
+// the listener does not show that this connection was never accepted, and a
+// gateway that accepted it has an answer that the peer check, which may still
+// be running, is about to release (a connection that cannot be seen queued
+// is left to that result, which is closed when the peer is not proved).
+func ownGatewayHoldsQueueRetried(ctx context.Context, check *perUserPeerCheck, conn net.Conn, settled *atomic.Bool) bool {
+	server, _ := conn.RemoteAddr().(*net.TCPAddr)
+	end := time.Now().Add(ownerScanRetry)
+	for {
+		if settled.Load() {
+			return false
+		}
+		if ownGatewayHoldsQueue(ctx, server) {
+			return connectionStillQueued(conn)
+		}
+		if !ownerScanSupported || check.abandoned.Load() || !time.Now().Add(ownerScanPoll).Before(end) {
+			return false
+		}
+		time.Sleep(ownerScanPoll)
+	}
 }
 
 // errPerUserListenerUnanswered ends a per-user try whose connection sat in
@@ -101,6 +196,17 @@ func verifyConnected(ctx context.Context, check *perUserPeerCheck, conn net.Conn
 // that took the call (errGatewayTookCallNoAnswer); the call follows the
 // account's outage mode (failPerUserListenerUnanswered).
 var errPerUserListenerUnanswered = errors.New("this account's gateway listener accepted no connection")
+
+// errPerUserOwnerScanUnfinished ends a per-user try whose queued connection
+// was waiting for the owner scan of its listener when ownerScanGrace ran out
+// (connectBy): neither the owner nor an accepting peer was shown in time,
+// and nothing was sent. It is the outage of an unanswered listener, not the
+// refusal of a peer found to be another process: the outage mode of the
+// account decides, so the default tiers allow an ordinary call with the
+// visible warning, strict stays closed, and so does a call that may reach a
+// protected file (failPerUserListenerUnanswered). A peer that is shown not
+// to be the gateway stays refused (errPerUserPeerUnverified).
+var errPerUserOwnerScanUnfinished = fmt.Errorf("%w: its owner was still being read at the connect deadline", errPerUserListenerUnanswered)
 
 // PerUserPostListenerUnanswered reports whether err, from PostPerUserHook, is
 // a connection that waited in the accept queue of this account's recorded

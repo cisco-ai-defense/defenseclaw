@@ -146,11 +146,16 @@ func overLimitWriteReduction(input Input, bounded bool) (Facts, overLimitReducti
 // file's class. No content rule can read the text left out, so callers take
 // the conservative block where the call is enforcement-capable (GAP-0687).
 // An ordinary file is never such a target, however large the write. For a
-// patch envelope only a file whose own text was left out counts. resolved
-// maps an operand to the file it reaches through links (nil when unknown).
+// patch envelope only a file whose own text was left out counts. A patch
+// envelope within maxArgsJSONBytes is not limit-exceeded; it counts the same
+// when a file text is still over maxCommandBytes without its white space
+// padding (unreadPatchContentTarget). resolved maps an operand to the file it
+// reaches through links (nil when unknown).
 func OverLimitWriteElidedContentTarget(input Input, facts Facts, resolved map[string]string) (string, bool) {
-	if !LimitExceededWriteTool(input, facts) ||
-		len(input.Args) > maxOverLimitWriteArgsBytes || !utf8.Valid(input.Args) {
+	if !LimitExceededWriteTool(input, facts) {
+		return unreadPatchContentTarget(input, facts, resolved)
+	}
+	if len(input.Args) > maxOverLimitWriteArgsBytes || !utf8.Valid(input.Args) {
 		return "", false
 	}
 	var view Facts
@@ -173,25 +178,88 @@ func OverLimitWriteElidedContentTarget(input Input, facts Facts, resolved map[st
 		if _, left := reduction.elidedPatchTargets[path.Value]; !reduction.elidedText && !left {
 			continue
 		}
-		// resolved is the file each operand reaches through the links on its
-		// way, as the hook client placed it: a link to a protected file is
-		// that file.
-		// The client keys an operand as OperandPath places it, so a relative
-		// operand is looked up by its placed spelling too.
-		cwd := view.CWD
-		if cwd == "" {
-			cwd = input.CWD
-		}
-		for _, value := range []string{
-			path.Normalized, path.Resolved, resolved[path.Value],
-			resolved[OperandPath(path.Value, cwd)], resolved[path.Normalized],
-		} {
-			if class := contentRuleWriteTarget(value); class != "" {
-				return class, true
-			}
+		if class := pathContentRuleClass(path, view.CWD, input.CWD, resolved); class != "" {
+			return class, true
 		}
 	}
 	return "", false
+}
+
+// pathContentRuleClass is the class (contentRuleWriteTarget) of the file a
+// write path reaches, "" for a file no content rule decides on. resolved is
+// the file each operand reaches through the links on its way, as the hook
+// client placed it: a link to a protected file is that file. The client keys
+// an operand as OperandPath places it, so a relative operand is looked up by
+// its placed spelling too.
+func pathContentRuleClass(path PathFact, viewCWD, inputCWD string, resolved map[string]string) string {
+	cwd := viewCWD
+	if cwd == "" {
+		cwd = inputCWD
+	}
+	for _, value := range []string{
+		path.Normalized, path.Resolved, resolved[path.Value],
+		resolved[OperandPath(path.Value, cwd)], resolved[path.Normalized],
+	} {
+		if class := contentRuleWriteTarget(value); class != "" {
+			return class
+		}
+	}
+	return ""
+}
+
+// unreadPatchContentTarget reports an apply_patch envelope that the analysis
+// read in full (it is within maxArgsJSONBytes) and that still holds, for a
+// file a content rule decides on, a text over maxCommandBytes after its white
+// space padding is removed (boundedNativeText): the content proofs read no
+// text that long, so no rule has judged it. It is the file the elided text of
+// an envelope past maxArgsJSONBytes is (OverLimitWriteElidedContentTarget):
+// the callers take the same conservative finding, and no size leaves a band in
+// which neither reading applies. An ordinary file is never such a target.
+func unreadPatchContentTarget(input Input, facts Facts, resolved map[string]string) (string, bool) {
+	if !isApplyPatchTool(input.Tool) || !facts.Authoritative() ||
+		input.Command != "" || len(input.Argv) != 0 {
+		return "", false
+	}
+	unread := map[string]struct{}{}
+	for _, write := range nativeFileWrites(input.Tool, input.Args) {
+		if write.target != "" && write.textOverProofBound() {
+			unread[write.target] = struct{}{}
+		}
+	}
+	if len(unread) == 0 {
+		return "", false
+	}
+	for _, path := range facts.Paths {
+		if path.Access != PathAccessWrite && path.Access != PathAccessAppend {
+			continue
+		}
+		if _, left := unread[path.Value]; !left {
+			continue
+		}
+		if class := pathContentRuleClass(path, facts.CWD, input.CWD, resolved); class != "" {
+			return class, true
+		}
+	}
+	return "", false
+}
+
+// textOverProofBound reports a text of the write, or a piece of it, that is
+// over what the content proofs read: the added text, the removed text (the PAM
+// and preload proofs read both the text a patch removes and the text it
+// adds), the text each hunk or step leaves in place, and the text each edit
+// step replaces.
+func (write nativeFileWrite) textOverProofBound() bool {
+	if len(write.added) > maxCommandBytes || len(write.replaced) > maxCommandBytes {
+		return true
+	}
+	for _, pieces := range [][]string{write.after, write.before} {
+		for _, piece := range pieces {
+			if len(piece) > maxCommandBytes {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // contentRuleWriteTarget is the class of a system file whose structured-write
@@ -477,12 +545,18 @@ func patchHunkMarker(line string) string {
 // boundedPatchHunkLine is a hunk line without the white space that pads it:
 // none at its end, and a long run inside it as one space.
 func boundedPatchHunkLine(line, marker string) string {
-	body := strings.TrimRightFunc(line[len(marker):], unicode.IsSpace)
+	return marker + boundedWhiteSpaceLine(line[len(marker):])
+}
+
+// boundedWhiteSpaceLine is a line of text without the white space that pads
+// it: none at its end, and a run longer than maxKeptWhiteSpaceRun inside it
+// as one space.
+func boundedWhiteSpaceLine(line string) string {
+	body := strings.TrimRightFunc(line, unicode.IsSpace)
 	if len(body) <= maxKeptWhiteSpaceRun {
-		return marker + body
+		return body
 	}
 	var out strings.Builder
-	out.WriteString(marker)
 	runStart := -1
 	endRun := func(end int) {
 		if run := body[runStart:end]; len(run) > maxKeptWhiteSpaceRun {
@@ -508,6 +582,24 @@ func boundedPatchHunkLine(line, marker string) string {
 		endRun(len(body))
 	}
 	return out.String()
+}
+
+// boundedWhiteSpaceText is a text without the white space that pads it:
+// each line as boundedWhiteSpaceLine reads it, and a run of blank lines as
+// one blank line. It reads the same in any proof that splits on white space
+// and on lines, as the bounded form of a patch file does
+// (reducePatchEnvelope).
+func boundedWhiteSpaceText(text string) string {
+	lines := strings.Split(text, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = boundedWhiteSpaceLine(line)
+		if line == "" && len(kept) > 0 && kept[len(kept)-1] == "" {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // patchEnvelopeSection is one file of a patch envelope: its lines in order,

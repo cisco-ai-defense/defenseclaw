@@ -152,6 +152,10 @@ func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, pu
 		os.Remove(tmpPath)
 		return &atomicPublishError{Path: writePath, Err: publishCause(err)}
 	}
+	// A gateway still running in a data folder `config set data_dir` moved
+	// away from writes the records uninstall removes by digest: record this
+	// write now it is published, so uninstall knows the copy as its own.
+	_ = RecordEarlierDataDirWrite(path, data)
 	// The staged file was synced before publication. POSIX rename additionally
 	// needs an explicit parent-directory fsync.
 	if runtime.GOOS != "windows" {

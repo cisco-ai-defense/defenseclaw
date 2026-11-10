@@ -5,9 +5,10 @@ package gateway
 
 import (
 	"errors"
-	"net"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"unicode"
 
@@ -141,6 +142,84 @@ func windowsOpenedPathOfFact(path actionfacts.PathFact) (string, bool, error) {
 	return windowsOpenedPath(trim(pathFactSpelling(path)), windowsVerbatimOperand(trim(path.Value)))
 }
 
+// windowsPathHost says a Windows file system opens the paths this process
+// walks, so a Windows spelling can be looked up on it. A variable so a test
+// can name such a host.
+var windowsPathHost = runtime.GOOS == "windows"
+
+// windowsHostPath is the path a Windows host opens for a Windows spelling
+// (windowsOpenedPath), in the spelling its file-system walks take. Win32
+// normalizes a path lexically before it opens it: the walk of a device or
+// share spelling, of a name with trailing spaces or dots, of a folder
+// followed by "..", and of a short name must follow that file, not the
+// characters the caller wrote (a folder that is no entry cannot be walked
+// through, and the host of a share may be this machine). The second result is
+// false on a host that opens no Windows path, and for a spelling that is no
+// rooted Windows path; the caller then keeps the spelling it has.
+func windowsHostPath(spelling string) (string, bool) {
+	if !windowsPathHost {
+		return "", false
+	}
+	spelling = strings.TrimLeftFunc(spelling, unicode.IsSpace)
+	return windowsHostOpenedPath(windowsOpenedPath(spelling, windowsVerbatimOperand(spelling)))
+}
+
+// windowsHostPathOfFact is windowsHostPath for a path fact (windowsOpenedPathOfFact).
+func windowsHostPathOfFact(path actionfacts.PathFact) (string, bool) {
+	if !windowsPathHost {
+		return "", false
+	}
+	return windowsHostOpenedPath(windowsOpenedPathOfFact(path))
+}
+
+// windowsHostOpenedPath spells an opened path for the host. A failure of the
+// file system to expand short names leaves the path as written, which is
+// still the lexically normalized file.
+func windowsHostOpenedPath(opened string, ok bool, _ error) (string, bool) {
+	if !ok {
+		return "", false
+	}
+	return filepath.FromSlash(opened), true
+}
+
+// windowsWalkPath is host, a path from windowsHostPath, in the spelling a
+// file-system call takes. Win32 normalizes a path lexically unless it has the
+// exact extended-length prefix: without it, a name with a trailing space or
+// dot is looked up as its sibling without that character. An operand written
+// with the prefix therefore walks with it again (\\?\C:\... for a drive path,
+// \\?\UNC\server\share\... for a share). The rules and the maps keyed by
+// the operand keep reading host, the semantic form; the file system is asked
+// with the walk path, and an answer goes back through windowsWalkResult.
+func windowsWalkPath(host, operand string) string {
+	if !windowsPathHost || !windowsVerbatimOperand(strings.TrimLeftFunc(operand, unicode.IsSpace)) {
+		return host
+	}
+	text := strings.ReplaceAll(host, "/", `\`)
+	if !windowsRootedSpelling(text) {
+		return host
+	}
+	if share, isShare := strings.CutPrefix(text, `\\`); isShare {
+		return `\\?\UNC\` + share
+	}
+	return `\\?\` + text
+}
+
+// windowsWalkResult is a path a file-system call answered for a walk path
+// (windowsWalkPath), without the extended-length prefix the answer may carry,
+// so the path rules and the protected-path comparison read it like any other.
+func windowsWalkResult(resolved string) string {
+	if !windowsPathHost {
+		return resolved
+	}
+	if share, ok := strings.CutPrefix(resolved, `\\?\UNC\`); ok {
+		return `\\` + share
+	}
+	if plain, ok := strings.CutPrefix(resolved, `\\?\`); ok && actionfacts.DriveLetterPath(plain) {
+		return plain
+	}
+	return resolved
+}
+
 // windowsRootedSpelling is the cheap test before windowsOpenedPath reads a
 // spelling: it starts with a drive letter or with two separators.
 func windowsRootedSpelling(spelling string) bool {
@@ -189,19 +268,7 @@ func windowsPathRoot(slashed string) (root, rest string, ok bool) {
 // windowsLocalHost reports a server name that is this machine: localhost,
 // a loopback address, or the machine name.
 func windowsLocalHost(host string) bool {
-	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
-		return true
-	}
-	// An IPv6 literal is spelled with dashes and a reserved domain in a
-	// share name (::1 is 0--1.ipv6-literal.net).
-	if literal, ok := strings.CutSuffix(strings.ToLower(host), ".ipv6-literal.net"); ok {
-		host = strings.ReplaceAll(literal, "-", ":")
-	}
-	if address := net.ParseIP(host); address != nil {
-		return address.IsLoopback()
-	}
-	name, err := windowsLocalHostname()
-	return err == nil && name != "" && strings.EqualFold(host, name)
+	return actionfacts.WindowsLocalHost(host, windowsLocalHostname)
 }
 
 // pathFactSpelling is the spelling a path fact is read by: the resolved path,
@@ -239,7 +306,7 @@ func pathFactSpellings(path actionfacts.PathFact) []string {
 func windowsRuleText(opened, home string) string {
 	text := activeHomeAsTilde(opened, home)
 	if rest, ok := strings.CutPrefix(text, "~/"); ok {
-		return "~/" + windowsNameFold(rest)
+		return "~/" + nestedHomeRuleText(windowsNameFold(rest))
 	}
 	parts := strings.Split(text, "/")
 	first := -1

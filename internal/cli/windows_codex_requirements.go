@@ -66,6 +66,7 @@ func newWindowsCodexRequirementsCommand() *cobra.Command {
 	for _, action := range []string{"inspect", "reconcile", "verify", "remove"} {
 		action := action
 		var jsonOutput, uninstall bool
+		var baseFile string
 		child := &cobra.Command{
 			Use:          action,
 			Short:        action + " protected Codex requirements",
@@ -73,7 +74,7 @@ func newWindowsCodexRequirementsCommand() *cobra.Command {
 			Args:         cobra.NoArgs,
 			SilenceUsage: true,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				return runWindowsCodexRequirementsAction(cmd, action, jsonOutput, uninstall)
+				return runWindowsCodexRequirementsAction(cmd, action, jsonOutput, uninstall, baseFile)
 			},
 		}
 		child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
@@ -81,12 +82,16 @@ func newWindowsCodexRequirementsCommand() *cobra.Command {
 			child.Flags().BoolVar(&uninstall, "uninstall", false,
 				"the uninstall's removal: keep, and do not read, a link at the Codex machine-policy folder")
 		}
+		if action == "reconcile" {
+			child.Flags().StringVar(&baseFile, "base-file", "",
+				"render the managed policy into this document (under the install state's recovered-policy folder) instead of the requirements file on disk")
+		}
 		command.AddCommand(child)
 	}
 	return command
 }
 
-func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOutput, uninstall bool) error {
+func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOutput, uninstall bool, baseFile string) error {
 	// Identity authorization intentionally precedes layout/config reads. A
 	// standard user cannot use this hidden parser as a protected-file oracle.
 	if err := enterpriseHooksPlatformPreflight(); err != nil {
@@ -102,6 +107,13 @@ func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOu
 	case "inspect":
 		report, err = windowsCodexRequirementsInspector(opts)
 	case "reconcile":
+		if baseFile != "" {
+			base, baseErr := readWindowsCodexRequirementsBaseFile(baseFile, opts.OwnershipPath)
+			if baseErr != nil {
+				return writeWindowsCodexRequirementsFailure(cmd, action, jsonOutput, baseErr)
+			}
+			opts.RenderBase, opts.RenderBaseSet = base, true
+		}
 		report, err = windowsCodexRequirementsReconciler(opts)
 	case "verify":
 		report, err = windowsCodexRequirementsVerifier(opts)
@@ -113,6 +125,9 @@ func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOu
 		}
 	default:
 		err = fmt.Errorf("unsupported Codex requirements action %q", action)
+	}
+	if err != nil && errors.Is(err, connector.ErrWindowsCodexWriterLockBusy) {
+		report.ErrorCode = windowsCodexRequirementsWriterLockBusyCode
 	}
 	if jsonOutput {
 		if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(report); encodeErr != nil && err == nil {
@@ -137,6 +152,10 @@ func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOu
 	}
 	return nil
 }
+
+// windowsCodexRequirementsWriterLockBusyCode is the error_code of a report
+// whose failure is a Codex writer holding the writer lock (GAP-1001).
+const windowsCodexRequirementsWriterLockBusyCode = "writer_lock_busy"
 
 func writeWindowsCodexRequirementsFailure(
 	cmd *cobra.Command,

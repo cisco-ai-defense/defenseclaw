@@ -102,6 +102,11 @@ type MCPServerEntry struct {
 	// bounded hook claim); an exact allow of the complete argument list does
 	// not match it (never serialized).
 	ArgsCut bool `json:"-"`
+	// Fingerprint is a digest of the complete definition (headers and
+	// environment included), set where an entry is kept without them so that
+	// two kept entries that differ only there stay two definitions (never
+	// serialized, never a secret value).
+	Fingerprint string `json:"-"`
 
 	// codexBuiltinShape records an exact parser-level match before the caller
 	// proves that the table came from a user-scope Codex config. It is never
@@ -1468,7 +1473,7 @@ func readMCPServersClaudeCodeAt(statePath, settingsPath, workspaceDir string) []
 	if cwd != "" {
 		mcpJSONPath := filepath.Join(cwd, ".mcp.json")
 		if e, err := readMCPFromDotMCPJSON(mcpJSONPath); err == nil {
-			entries = append(entries, e...)
+			entries = append(entries, inMCPProjectScope(e, cwd)...)
 		}
 	}
 	if stateErr == nil {
@@ -1511,6 +1516,7 @@ func readMCPFromClaudeState(path, workspaceDir string) (local, user []MCPServerE
 				}
 				if projectState, ok := projectValue.(map[string]any); ok {
 					local, _ = readMCPFromAnyPaths(projectState, []string{"mcpServers"})
+					local = inMCPProjectScope(local, workspace)
 				}
 				break
 			}
@@ -1518,6 +1524,18 @@ func readMCPFromClaudeState(path, workspaceDir string) (local, user []MCPServerE
 	}
 	user, _ = readMCPFromAnyPaths(state, []string{"mcpServers"})
 	return local, user, nil
+}
+
+// inMCPProjectScope names the project folder whose local or .mcp.json scope
+// lists entries, as the watcher reader does, so a record kept per config scope
+// tells a project server from a user-scope one and from the same definition in
+// another project.
+func inMCPProjectScope(entries []MCPServerEntry, project string) []MCPServerEntry {
+	project = filepath.Clean(project)
+	for index := range entries {
+		entries[index].Project = project
+	}
+	return entries
 }
 
 func sameClaudeWorkspace(left, right string) bool {

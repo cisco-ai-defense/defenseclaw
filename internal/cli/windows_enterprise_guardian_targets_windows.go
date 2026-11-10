@@ -31,4 +31,5 @@ var windowsEnterpriseInstalledConfigForStatus = func() (*config.Config, error) {
 // the targets' hook files to status and verify (GAP-0146).
 func applyWindowsEnterpriseGuardianTargets(result *enterprisestatus.Result) {
 	applyWindowsEnterpriseGuardianTargetsFrom(result, windowsEnterpriseGuardianStateForStatus, windowsEnterpriseInstalledConfigForStatus)
+	applyWindowsEnterpriseGuardianStateHold(result)
 }

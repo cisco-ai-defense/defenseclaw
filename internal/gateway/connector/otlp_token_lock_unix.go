@@ -36,6 +36,7 @@ func withOwnedFileLock(lockPath string, fn func() error) error {
 			file.Close()
 			return err
 		}
+		recordEmptyLockCreated(lockPath, file)
 		if err := acquireFlock(file, lockPath, &deadline); err != nil {
 			file.Close()
 			if errors.Is(err, errLockReplaced) && attempt < 8 {

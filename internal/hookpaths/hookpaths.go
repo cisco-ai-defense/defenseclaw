@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"maps"
 	"os"
@@ -516,6 +517,33 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 // it, and the gateway asks for them by the same function.
 func OperandPath(name, cwd string) string {
 	return actionfacts.OperandPath(name, cwd)
+}
+
+func init() { actionfacts.SetOperandLinkProbe(directoryHasLink) }
+
+// directoryHasLink reports a directory whose path, or the longest existing
+// part of it, passes through a link. A directory that does not exist yet is
+// read through its existing parents (a command such as pushd has not entered
+// it); a path that cannot be read (no permission, not a folder) has no link
+// to read, as before.
+func directoryHasLink(dir string) bool {
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	for current := filepath.Clean(dir); ; {
+		real, err := pathEvalSymlinks(current)
+		if err == nil {
+			return real != current
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
 }
 
 // parseShell parses a command of at most MaxPayloadBytes as bash, or else as
@@ -1082,6 +1110,138 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 	return filepath.Clean(current), forms, linkDepth, true
 }
 
+func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo,
+	lstat func(string) (os.FileInfo, error), readlink func(string) (string, error),
+	procLink func(path string, below bool) bool, tail bool,
+) (string, []string, int, bool) {
+	if linkDepth > SystemLinkLimit() {
+		return "", nil, linkDepth, false
+	}
+	current := base
+	absolute := filepath.IsAbs(path)
+	if absolute {
+		current = filepath.VolumeName(path) + string(filepath.Separator)
+		path = strings.TrimPrefix(path, filepath.VolumeName(path))
+	} else if !filepath.IsAbs(base) {
+		return "", nil, linkDepth, false
+	}
+	if memo != nil && (base != "" || linkDepth != 0 || collect || patchTarget || !absolute) {
+		memo = nil
+	}
+	var forms []string
+	if collect && absolute {
+		forms = append(forms, current)
+	}
+	add := func(form string) bool {
+		if collect {
+			forms = append(forms, form)
+			return len(forms) <= maxOpaquePathForms
+		}
+		return true
+	}
+	// The stack records whether a component added after base is missing.
+	// A resolved link is a physical directory, so ".." ascends from its
+	// target. A missing component cannot be crossed: it may become a link
+	// before the command executes.
+	var crossed []bool
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	start := 0
+	// key is the memo key of parts[:i+1]: the volume root and the
+	// components as written.
+	var key string
+	if memo != nil {
+		key = current
+		for i, part := range parts {
+			next := key + "\x00" + part
+			state, ok := memo.prefix(next)
+			if !ok {
+				break
+			}
+			if state.failed {
+				return "", nil, state.linkDepth, false
+			}
+			key, start = next, i+1
+			current, crossed, linkDepth = state.current, append([]bool(nil), state.crossed...), state.linkDepth
+		}
+	}
+	fail := func() (string, []string, int, bool) {
+		if memo != nil {
+			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true})
+		}
+		return "", nil, linkDepth, false
+	}
+	for i, part := range parts[start:] {
+		if memo != nil {
+			key += "\x00" + part
+		}
+		switch part {
+		case "", ".":
+		case "..":
+			if len(crossed) > 0 {
+				if crossed[len(crossed)-1] {
+					return fail()
+				}
+				crossed = crossed[:len(crossed)-1]
+			}
+			current = filepath.Dir(current)
+			if !add(current) {
+				return fail()
+			}
+		default:
+			candidate := filepath.Join(current, part)
+			if !add(candidate) {
+				return fail()
+			}
+			memo.noteWork()
+			info, err := lstat(candidate)
+			if err != nil && !os.IsNotExist(err) {
+				return fail()
+			}
+			unknown := os.IsNotExist(err)
+			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
+				// A process link the hook reads for another process than the
+				// one opening the operand would prove a different path. below
+				// tells whether the path goes on below the link.
+				below := tail || stepFollows(parts[start+i+1:])
+				if procLink(candidate, below) {
+					return fail()
+				}
+				link, err := readlink(candidate)
+				if err != nil {
+					return fail()
+				}
+				// A patch tool may reinterpret a link target with line breaks
+				// as multiple file directives. Ordinary file opens use the
+				// literal kernel path and retain their normal proof.
+				if patchTarget && strings.ContainsAny(link, "\r\n") {
+					return fail()
+				}
+				var extra []string
+				var nextDepth int
+				var ok bool
+				current, extra, nextDepth, ok = walkWritePathMemoWithReaders(current, link, linkDepth+1, collect, patchTarget, nil, lstat, readlink, procLink, below)
+				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
+					return fail()
+				}
+				linkDepth = nextDepth
+				forms = append(forms, extra...)
+				_, err = lstat(current)
+				if err != nil && !os.IsNotExist(err) {
+					return fail()
+				}
+				crossed = append(crossed, os.IsNotExist(err))
+			} else {
+				current = candidate
+				crossed = append(crossed, unknown)
+			}
+		}
+		if memo != nil {
+			memo.storePrefix(key, walkState{current: current, crossed: crossed, linkDepth: linkDepth})
+		}
+	}
+	return filepath.Clean(current), forms, linkDepth, true
+}
+
 // AuthorizedKeysFiles names the user's authorized-keys files under ~/.ssh:
 // the sshd default AuthorizedKeysFile (.ssh/authorized_keys and
 // .ssh/authorized_keys2), the same set the direct-write rule
@@ -1610,6 +1770,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
 	facts := actionfacts.Analyze(input)
+	if view, ok := overLimitBoundedTwinFacts(input, facts); ok {
+		// A command over the limit only by the white space and comments that
+		// pad it is judged by the gateway as the command without them, so the
+		// map describes that command and is not marked incomplete for the
+		// padding alone (GAP-1003).
+		facts = view
+	}
 	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(input, facts); ok {
 		// The gateway judges the reduced call: list its targets.
 		facts = view
@@ -1682,6 +1849,18 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
 				var concreteOperands actionConcreteOperands
+				// An apply_patch command is a patch envelope, and one over
+				// the analysis string limit is file content far past what a
+				// shell reader describes: its targets are read from the
+				// envelope below, and the gateway judges its reduced call.
+				// Reading that text as shell cost the client seconds for an
+				// ordinary 889 KB patch, past the managed hook window
+				// (GAP-1008). The map says only that it is incomplete, as the
+				// fallback reading of a command over the limit does.
+				if isApplyPatchToolName(tool) && actionfacts.CommandTextOverLimit(command) {
+					truncated = true
+					break
+				}
 				// A shell command nested past the reading bound is past the
 				// analysis limits: no reader below parses it (GAP-2556). Only
 				// the command is measured: a Write or Edit body of ordinary
@@ -1759,6 +1938,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
+				if twin, ok := actionfacts.OverLimitCommandBoundedTwin(fallback, fallbackFacts); ok {
+					fallback, fallbackFacts = twin, actionfacts.Analyze(twin)
+				}
 				// One per-command reading serves the move and the child
 				// readings below.
 				simples := actionfacts.SimpleCommands(fallback, fallbackFacts)
@@ -2314,6 +2496,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 	}
 	identity := strings.Join(identities, "\x00")
+	// A script body this call could not read (the call wait for a network
+	// share, or the links on its path past the bound) is told to the gateway:
+	// only this reader opens the user home (ShareBodyUnreadKey).
+	if unread := shareBodyUnreadFact(); unread != "" {
+		entry := len(jsonString(ShareBodyUnreadKey)) + 1 + len(jsonString(unread)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			return unprovenEvidence(cwd, unprovenReason, identity)
+		}
+		targets[ShareBodyUnreadKey] = unread
+		size += entry
+	}
 	if unprovenReason != "" {
 		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
@@ -2405,6 +2598,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		*watch = patchTargetWatchOf(targets, home)
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+// overLimitBoundedTwinFacts are the facts of the bounded twin of a limit-
+// exceeded shell call (actionfacts.OverLimitCommandBoundedTwin): the same call
+// within the limits, which the gateway judges in its place.
+func overLimitBoundedTwinFacts(input actionfacts.Input, facts actionfacts.Facts) (actionfacts.Facts, bool) {
+	twin, ok := actionfacts.OverLimitCommandBoundedTwin(input, facts)
+	if !ok {
+		return actionfacts.Facts{}, false
+	}
+	return actionfacts.Analyze(twin), true
 }
 
 // movedDirectorySightingPath names a directory a complete, plain move may
@@ -2674,6 +2878,8 @@ func resolveCopilotCalls(connector, surface, event string, envelope map[string]j
 				merged[key] = value
 			case key == FileIdentitiesKey:
 				merged[key] = previous + "," + value
+			case key == ShareBodyUnreadKey:
+				merged[key] = mergeShareBodyUnread(previous, value)
 			case key == InstructionIdentityKey:
 				merged[key] = previous + "\x00" + value
 			default:
@@ -2726,6 +2932,9 @@ func unprovenEvidence(cwd, reason, identity string) string {
 	if identity != "" {
 		targets[InstructionIdentityKey] = identity
 	}
+	if unread := shareBodyUnreadFact(); unread != "" {
+		targets[ShareBodyUnreadKey] = unread
+	}
 	encoded, _ := json.Marshal(targets)
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
@@ -2752,6 +2961,7 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[NoDereferenceTouchSafeKey] != "" && targets[NoDereferenceTouchSafeKey] != "1") ||
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
+		!validShareBodyUnreadFact(targets[ShareBodyUnreadKey]) ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}
@@ -7886,4 +8096,15 @@ func stateStatementReadOnlyWithBindings(text, home string, shadowed map[string]b
 		return true
 	})
 	return seen && safe
+}
+
+// stepFollows reports that a path goes on with a name or a dot-dot step after
+// the current component. Empty and dot components name the same directory.
+func stepFollows(parts []string) bool {
+	for _, part := range parts {
+		if part != "" && part != "." {
+			return true
+		}
+	}
+	return false
 }

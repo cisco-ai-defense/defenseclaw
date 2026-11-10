@@ -937,6 +937,24 @@ func migrateKiroGlobalHooksBackup(opts SetupOpts) error {
 func (c *KiroConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	command := c.hookCommand(opts)
 	v3Command := c.hookCommandForV3Surface(opts)
+	present, err := c.ownedHookContractPresentFor(opts, command, v3Command)
+	if err != nil || present || !opts.AcceptPriorReleaseRender {
+		return present, err
+	}
+	// A verification that accepts the render of releases up to 1.0.6 takes
+	// both configs when each holds exactly the bridge those releases wrote
+	// (legacyWindowsAwaitedHookCommand), and nothing else (GAP-0980).
+	legacy, ok := legacyWindowsAwaitedHookCommand(command)
+	legacyV3, okV3 := legacyWindowsAwaitedHookCommand(v3Command)
+	if !ok || !okV3 {
+		return false, nil
+	}
+	return c.ownedHookContractPresentFor(opts, legacy, legacyV3)
+}
+
+// ownedHookContractPresentFor is ownedHookContractPresent for the given CLI 2.x
+// agent command and v3 hook command.
+func (c *KiroConnector) ownedHookContractPresentFor(opts SetupOpts, command, v3Command string) (bool, error) {
 	for _, path := range c.hookConfigPaths(opts) {
 		present, err := kiroV3HooksCurrent(path, v3Command)
 		if err != nil {
