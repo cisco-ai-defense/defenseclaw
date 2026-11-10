@@ -17,9 +17,11 @@ import (
 // mutation of DefenseClaw state: self-protection blocks it in every profile.
 // Where it does not (POSIX homes), the call proves no target, so it alerts
 // outside the strict profile and blocks in strict (lead ruling,
-// rel-1-0-6:GAP-0675 round 12). The ordinary-file twin proves no target on
-// either system and alerts outside strict. The hook answers within its time
-// budget.
+// rel-1-0-6:GAP-0675 round 12). The ordinary-file twin follows the same
+// reading: on POSIX the unparsed statement leaves the call unanalysed, so it
+// alerts outside strict; on Windows the reader parses the whole call, finds an
+// ordinary file and allows it in every profile. The hook answers within its
+// time budget.
 func TestGAP0534PowerShellHookFixedPointBlocks(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -43,6 +45,9 @@ func TestGAP0534PowerShellHookFixedPointBlocks(t *testing.T) {
 		stateWant = map[string]string{"default": guardrailActionBlock, "strict": guardrailActionBlock}
 	}
 	ordinaryWant := map[string]string{"default": guardrailActionAlert, "strict": guardrailActionBlock}
+	if runtime.GOOS == "windows" {
+		ordinaryWant = map[string]string{"default": guardrailActionAllow, "strict": guardrailActionAllow}
+	}
 	for _, row := range []struct {
 		name, command string
 		want          map[string]string
