@@ -1610,6 +1610,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
 	facts := actionfacts.Analyze(input)
+	if view, ok := overLimitBoundedTwinFacts(input, facts); ok {
+		// A command over the limit only by the white space and comments that
+		// pad it is judged by the gateway as the command without them, so the
+		// map describes that command and is not marked incomplete for the
+		// padding alone (GAP-1003).
+		facts = view
+	}
 	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(input, facts); ok {
 		// The gateway judges the reduced call: list its targets.
 		facts = view
@@ -1759,6 +1766,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
+				if twin, ok := actionfacts.OverLimitCommandBoundedTwin(fallback, fallbackFacts); ok {
+					fallback, fallbackFacts = twin, actionfacts.Analyze(twin)
+				}
 				// One per-command reading serves the move and the child
 				// readings below.
 				simples := actionfacts.SimpleCommands(fallback, fallbackFacts)
@@ -2384,6 +2394,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		*watch = patchTargetWatchOf(targets, home)
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+// overLimitBoundedTwinFacts are the facts of the bounded twin of a limit-
+// exceeded shell call (actionfacts.OverLimitCommandBoundedTwin): the same call
+// within the limits, which the gateway judges in its place.
+func overLimitBoundedTwinFacts(input actionfacts.Input, facts actionfacts.Facts) (actionfacts.Facts, bool) {
+	twin, ok := actionfacts.OverLimitCommandBoundedTwin(input, facts)
+	if !ok {
+		return actionfacts.Facts{}, false
+	}
+	return actionfacts.Analyze(twin), true
 }
 
 // movedDirectorySightingPath names a directory a complete, plain move may
