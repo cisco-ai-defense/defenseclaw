@@ -36,7 +36,7 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 	if !known || !strings.Contains(strings.ToLower(command), "defenseclaw") {
 		return false
 	}
-	forms, bounded, ok := powerShellStateWriteForms(command)
+	forms, bounded, ok := powerShellStateWriteForms(command, home, request.Input.CWD)
 	if !ok {
 		return false
 	}
@@ -251,14 +251,22 @@ func newPSScan(runes []rune, budget *psBudget) *psStateScan {
 // cannot parse the command: a < that starts a token is a parse error there
 // (a Git Bash here-document or input redirect), so nothing runs in that
 // reading.
-func powerShellStateWriteForms(command string) (forms []string, bounded, ok bool) {
+func powerShellStateWriteForms(command, home, cwd string) (forms []string, bounded, ok bool) {
 	seen := map[string]bool{}
 	budget := &psBudget{}
-	bounded, ok = psCollectStateWriteForms(command, 0, seen, &forms, budget)
+	reading := psReading{home: home, cwd: cwd}
+	bounded, ok = reading.collect(command, 0, true, seen, &forms, budget)
 	return forms, bounded, ok
 }
 
-func psCollectStateWriteForms(command string, depth int, seen map[string]bool, forms *[]string, budget *psBudget) (bool, bool) {
+// psReading is the user home and working directory a command is read in.
+type psReading struct{ home, cwd string }
+
+// collect adds the state-naming twins of command to forms. A command with a
+// variable bound to a string is also read with the value in place of each
+// use (psBindStaticValues); bind is false for that reading, which has no
+// use left to bind.
+func (reading psReading) collect(command string, depth int, bind bool, seen map[string]bool, forms *[]string, budget *psBudget) (bool, bool) {
 	scan := newPSScan([]rune(command), budget)
 	scan.code(0, false)
 	if scan.overBound() {
@@ -266,6 +274,15 @@ func psCollectStateWriteForms(command string, depth int, seen map[string]bool, f
 	}
 	if scan.parseError {
 		return false, false
+	}
+	if bind {
+		if bound, changed := psBindStaticValues(command, reading.home, budget); budget.over {
+			return true, true
+		} else if changed {
+			if bounded, _ := reading.collect(bound, depth, false, seen, forms, budget); bounded {
+				return true, true
+			}
+		}
 	}
 	add := func(form string) {
 		form = strings.TrimSpace(form)
@@ -278,6 +295,9 @@ func psCollectStateWriteForms(command string, depth int, seen map[string]bool, f
 	}
 	for _, piece := range scan.pieces {
 		add(piece)
+		for _, target := range psPatchRunTargets(piece, reading.cwd, budget) {
+			add("Set-Content -LiteralPath " + target + " -Value x")
+		}
 		body, nested := psNestedShellBody(piece, budget)
 		if budget.over {
 			return true, true
@@ -289,7 +309,7 @@ func psCollectStateWriteForms(command string, depth int, seen map[string]bool, f
 			return true, true
 		}
 		// A body PowerShell cannot parse runs nothing; only its bound counts.
-		if bounded, _ := psCollectStateWriteForms(body, depth+1, seen, forms, budget); bounded {
+		if bounded, _ := reading.collect(body, depth+1, true, seen, forms, budget); bounded {
 			return true, true
 		}
 	}
@@ -300,7 +320,7 @@ func psCollectStateWriteForms(command string, depth int, seen map[string]bool, f
 		if depth >= psNestedShellDepth {
 			return true, true
 		}
-		if bounded, _ := psCollectStateWriteForms(body, depth+1, seen, forms, budget); bounded {
+		if bounded, _ := reading.collect(body, depth+1, true, seen, forms, budget); bounded {
 			return true, true
 		}
 	}
