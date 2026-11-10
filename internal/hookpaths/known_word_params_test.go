@@ -225,9 +225,12 @@ func TestCopyWordValueIsKnownOnlyWhenEveryBindingGivesTheSameValue(t *testing.T)
 }
 
 // GAP-0934: a name set from ${NAME:-word}, ${NAME-word} or $NAME is the word
-// when no binding gives NAME a value, and the value of NAME when one binding
-// that always ran before gives it; a name that may be unset, or that another
-// binding gives another value, has none, and the command stays unproven.
+// when no binding before it gives NAME a value, and the value of the last
+// binding of NAME before it when that binding always ran (the shell expands
+// the word where the assignment sits, so a later binding of NAME does not
+// change it; ${NAME:-word} takes the word for a null value too); a name that
+// may be unset or null at that point, or whose reading binding may not have
+// run, has none, and the command stays unproven.
 func TestCopyWordValueOfADefaultFollowsTheBindingThatAlwaysRan(t *testing.T) {
 	const home = "/home/u"
 	rows := []struct {
@@ -244,8 +247,27 @@ func TestCopyWordValueOfADefaultFollowsTheBindingThatAlwaysRan(t *testing.T) {
 		{`p=keylink; f=${p:-out.txt}; cp a.txt $f`, "keylink"},
 		{`p=keylink; f=${p-out.txt}; cp a.txt "$f"`, "keylink"},
 		{`f=${p:-keylink}; p=out.txt; cp a.txt $f`, "keylink"},
-		{`p=out.txt; f=${p:-keylink}; p=keylink; cp a.txt $f`, ""},
-		{`p=out.txt; f=${p:-keylink}; p+=x; cp a.txt $f`, ""},
+		{`p=out.txt; f=${p:-keylink}; p=keylink; cp a.txt $f`, "out.txt"},
+		{`p=out.txt; f=${p:-keylink}; p=other.txt; cp a.txt "$f"`, "out.txt"},
+		{`p=out.txt; f=${p-keylink}; p=other.txt; cp a.txt "$f"`, "out.txt"},
+		{`p=out.txt; f=$p; p=other.txt; cp a.txt "$f"`, "out.txt"},
+		{`p=out.txt; f=${p:-keylink}; p+=more; cp a.txt "$f"`, "out.txt"},
+		{`p=out.txt; f=${p:-keylink}; q=$f; p=other.txt; cp a.txt "$q"`, "out.txt"},
+		{`p=out.txt; f=${p:-keylink}; for p in x; do :; done; cp a.txt "$f"`, "out.txt"},
+		{`p=keylink; f=${p:-out.txt}; p=other.txt; cp a.txt "$f"`, "keylink"},
+		{`p=../.ssh/authorized_keys; f=${p:-out.txt}; p=other.txt; cp a.txt "$f"`, "../.ssh/authorized_keys"},
+		{`p=a.txt; p=out.txt; f=$p; cp a.txt "$f"`, "out.txt"},
+		{`if true; then p=x.txt; fi; p=out.txt; f=$p; cp a.txt "$f"`, "out.txt"},
+		{`p=; f=${p:-out.txt}; cp a.txt "$f"`, "out.txt"},
+		{`p=""; f=${p:-out.txt}; cp a.txt "$f"`, "out.txt"},
+		{`p=; f=${p-out.txt}; cp a.txt "$f"`, ""},
+		{`p=; f=$p; cp a.txt "$f"`, ""},
+		{`p=$q; f=${p:-out.txt}; cp a.txt "$f"`, ""},
+		{`p=out.txt; if true; then p=other.txt; fi; f=$p; cp a.txt "$f"`, ""},
+		{`p=out.txt; f=${p:-keylink}; echo ${p:=x}; q=$f; cp a.txt "$q"`, "out.txt"},
+		{`p=out.txt; echo ${p:=x}; f=$p; cp a.txt "$f"`, ""},
+		{`for i in 1 2; do f=${p:-out.txt}; p=other.txt; done; cp a.txt "$f"`, ""},
+		{`p=out.txt; f=${p:-keylink}; p+=x; g=$p; cp a.txt "$g"`, ""},
 		{`p=out.txt; f=${p:=keylink}; cp a.txt $f`, ""},
 		{`p=out.txt; f=${p:-$q}; cp a.txt $f`, ""},
 		{`f=$p; cp a.txt $f`, ""},
@@ -253,7 +275,7 @@ func TestCopyWordValueOfADefaultFollowsTheBindingThatAlwaysRan(t *testing.T) {
 		{`true && p=out.txt; f=${p:-keylink}; cp a.txt $f`, ""},
 		{`cd /nonexistent && p=out.txt; f=${p:-keylink}; cp a.txt $f`, ""},
 		{`for p in out.txt; do f=${p:-keylink}; cp a.txt $f; done`, ""},
-		{`if c; then p=out.txt; fi; f=${p:-keylink}; cp a.txt $f`, ""},
+		{`if true; then p=out.txt; fi; f=${p:-keylink}; cp a.txt $f`, ""},
 	}
 	for _, row := range rows {
 		file, ok := parseShell(row.command)
