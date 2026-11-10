@@ -177,3 +177,39 @@ func TestBoundOperandsCountsRedirectsWrittenAgainstAWord(t *testing.T) {
 		t.Errorf("attached targets: over %v, reduced ends %q", over, reduced[max(0, len(reduced)-30):])
 	}
 }
+
+// A word that stays past the bound is written once per statement, however
+// many times it is spelled: it adds nothing to the judgment and only makes
+// the reduced command long (GAP-0943). The last operand of the statement, the
+// word after an option, a redirect target and the next statement keep their
+// copy, so no role of the word is lost.
+func TestBoundOperandsWritesARepeatedWordOncePerStatement(t *testing.T) {
+	plain := boundTestWords("f", MaxOperandsPerCall)
+	repeats := strings.Repeat(" ../x f1", 3000)
+	cases := []struct {
+		name, command string
+		tail          string // the words after the first operands
+	}{
+		{"the first copy and the last operand", "cp " + plain + repeats, "../x ../x"},
+		{"a word between the copies", "cp " + plain + repeats + " ../y" + repeats, "../x ../y ../x"},
+		{"a repeat that ends the statement", "cp " + plain + " ../x ../y" + repeats, "../x ../y ../x"},
+		{"the argument of an option", "cp " + plain + " ../x ../x -t ../x", "../x -t ../x"},
+		{"each statement", "cp " + plain + " ../x ../x; cd d; cp ../x ../x", "../x ../x ; cd d ; cp ../x ../x"},
+		{"a redirect target apart from an operand", "echo " + plain + strings.Repeat(" ../x > ../x", 100), "../x > ../x ../x"},
+		{"redirect targets written together", "echo " + plain + strings.Repeat(" >../x > ../x", 100), ">../x > ../x"},
+		{"a plain name is still left out", "cp " + plain + strings.Repeat(" f1", 3000), ""},
+	}
+	for _, tc := range cases {
+		reduced, over := BoundOperands(tc.command, boundTestPlain)
+		if !over {
+			t.Fatalf("%s: not over the bound", tc.name)
+		}
+		words := strings.Fields(strings.ReplaceAll(reduced, ";", " ; "))
+		if got := strings.Join(words[len(words)-len(strings.Fields(tc.tail)):], " "); got != tc.tail && tc.tail != "" {
+			t.Errorf("%s: the reduced command ends with %q, want %q", tc.name, got, tc.tail)
+		}
+		if len(words) > MaxOperandsPerCall+1+len(strings.Fields(tc.tail)) {
+			t.Errorf("%s: %d words kept", tc.name, len(words))
+		}
+	}
+}
