@@ -75,10 +75,6 @@ func TestPendingAccountRefusalSaysTheAgentIsBlockedUntilSignIn(t *testing.T) {
 			t.Errorf("%s: the unregistered account took the pending text: %q", connector, other)
 		}
 	}
-	// The first line of the pending text fits what Claude Code shows of it.
-	if lead := "DefenseClaw: blocked until this account is enrolled; sign in or reconnect."; len(lead) > 80 {
-		t.Fatalf("lead is %d characters, Claude Code shows about 80", len(lead))
-	}
 	// Secure Client keeps the explanation it had.
 	if _, text := refusal("claudecode", managedEnrollmentPendingReason, true); strings.Contains(text, "stays blocked until it signs in") {
 		t.Errorf("Secure Client took the standalone pending text: %q", text)

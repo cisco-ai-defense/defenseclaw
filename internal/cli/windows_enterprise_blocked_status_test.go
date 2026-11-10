@@ -52,6 +52,20 @@ func TestWindowsEnterprisePendingMachineHookConnectorsAreNamedAsBlocked(t *testi
 			t.Fatalf("reason %q lacks %q", blocked, text)
 		}
 	}
+	// A row that waits for another cause has its runtime: its hook decides, so
+	// it is not named as blocked.
+	for _, cause := range []string{
+		enterpriseHookAwaitingSignInFailOpen, enterpriseHookAwaitingSignInFailClosed, enterpriseHookAwaitingSignInUntrustedFolder,
+	} {
+		waiting := enterpriseHookReconcileRow{
+			User: "dcw-std1", SID: sid, Connector: "codex",
+			Error: enterpriseHookAwaitingSignInPrefix + ": " + cause + ": detail",
+		}
+		accounts := windowsEnterpriseEnrollmentAccounts([]enterpriseHookReconcileRow{waiting})
+		if len(accounts) != 1 || strings.Contains(accounts[0].Reason, "blocked") || accounts[0].Connectors["codex"] != "pending" {
+			t.Fatalf("cause %q: %+v, want pending and not named as blocked", cause, accounts)
+		}
+	}
 	if got := reason("copilot"); got != windowsEnterpriseEnrollmentPending {
 		t.Fatalf("a connector with nothing running keeps the old reason: %q", got)
 	}

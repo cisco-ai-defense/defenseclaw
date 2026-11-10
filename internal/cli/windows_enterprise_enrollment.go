@@ -19,6 +19,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 
@@ -104,7 +105,18 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 		// (GAP-1026). The reason says so. The only caller is the standalone
 		// status (readWindowsEnterpriseStandaloneEnrollmentAt); Secure Client
 		// builds its reason elsewhere and keeps it word for word.
-		if blocked, rest := windowsEnterpriseSplitBlockedConnectors(unguarded); pending && len(blocked) > 0 {
+		var blocked []string
+		for _, row := range rows {
+			// Only a row that waits with no runtime at all is blocked: a row
+			// that waits for a hook fail mode change, an untrusted folder or
+			// another cause has its runtime, and its hook decides.
+			if windowsEnterpriseEnrollmentKey(row.SID, row.User, row.UserHome) ==
+				windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome) &&
+				row.Pending && !enterpriseHookAwaitingSignInError(row) && windowsEnterpriseMachineHookConnector(row.Connector) {
+				blocked = append(blocked, strings.TrimSpace(row.Connector))
+			}
+		}
+		if rest := windowsEnterpriseWithout(unguarded, blocked); pending && len(blocked) > 0 {
 			account.Reason = windowsEnterpriseStandaloneBlockedPendingReason(blocked, rest, keepsRunning, machineHook)
 			if failure := failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)]; failure != "" {
 				account.Reason += "; failed: " + failure
@@ -290,17 +302,15 @@ func windowsEnterpriseMachineHookConnector(name string) bool {
 	return false
 }
 
-// windowsEnterpriseSplitBlockedConnectors separates the machine-hook connectors
-// from the rest of a pending account's unguarded connectors.
-func windowsEnterpriseSplitBlockedConnectors(unguarded []string) (blocked, rest []string) {
-	for _, name := range unguarded {
-		if windowsEnterpriseMachineHookConnector(name) {
-			blocked = append(blocked, name)
-		} else {
+// windowsEnterpriseWithout returns names without the entries of drop.
+func windowsEnterpriseWithout(names, drop []string) []string {
+	var rest []string
+	for _, name := range names {
+		if !slices.Contains(drop, name) {
 			rest = append(rest, name)
 		}
 	}
-	return blocked, rest
+	return rest
 }
 
 // windowsEnterpriseStandaloneBlockedPendingReason is the reason of a pending
