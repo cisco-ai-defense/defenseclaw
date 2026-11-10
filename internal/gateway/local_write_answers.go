@@ -84,3 +84,33 @@ func analyzeWithPatchHeaderAnswers(request *trustedActionRequest) actionfacts.Fa
 	}
 	return actionfacts.Analyze(request.Input)
 }
+
+// clientStepUpAnswers maps the lexical placement of each name a native call
+// writes that steps up a directory (a file-tool name or the header of an
+// apply_patch here-document) to the files the hook client reports for its raw
+// spelling, the file the operating system opens. A clean placement is listed
+// only when every name that cleans to it has an answer; one without leaves the
+// placement to the checks that read it as unknown.
+func clientStepUpAnswers(input actionfacts.Input, facts actionfacts.Facts, cwd string, answers map[string]string) map[string][]string {
+	var physical map[string][]string
+	unanswered := map[string]bool{}
+	for _, name := range actionfacts.NativeCallWriteTargets(input, facts) {
+		raw, steps := actionfacts.StepUpSpelling(name, cwd)
+		if !steps {
+			continue
+		}
+		clean := filepath.Clean(raw)
+		if answer := answers[raw]; filepath.IsAbs(answer) {
+			if physical == nil {
+				physical = map[string][]string{}
+			}
+			physical[clean] = append(physical[clean], answer)
+		} else {
+			unanswered[clean] = true
+		}
+	}
+	for clean := range unanswered {
+		delete(physical, clean)
+	}
+	return physical
+}

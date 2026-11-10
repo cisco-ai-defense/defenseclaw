@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // stepUpRow is one write whose file name steps up a directory (a dot-dot
@@ -200,32 +202,103 @@ func TestStepUpWriteNamesAreJudgedAsThePhysicalFile(t *testing.T) {
 	}
 }
 
-// TestStepUpOrdinaryFileNamedAsASudoersDropInIsAllowedInBalanced: the per-user
-// gateway walks the home itself, so a file in the folders of the user whose
-// lexical name cleans to a sudoers drop-in is the ordinary file it is, for a
-// file tool and for the apply_patch header of a shell here-document, with the
-// same grant text that a drop-in would be blocked for. The strict tier keeps
-// its path rule on the lexical name of the file.
+// TestStepUpOrdinaryFileNamedAsASudoersDropInIsAllowedInBalanced: a file in the
+// folders of the user whose lexical name cleans to a sudoers drop-in is the
+// ordinary file it is, for a file tool and for the Add File and Update File
+// header of a shell here-document, with the same grant text that a drop-in
+// would be blocked for, on the per-user gateway and on the managed one (which
+// reads the walk of the hook client, for a lexical name in a folder the user
+// cannot open as well). The strict tier keeps its path rule on the lexical name
+// of the file.
 func TestStepUpOrdinaryFileNamedAsASudoersDropInIsAllowedInBalanced(t *testing.T) {
 	const grant = "reviewer ALL=(ALL) NOPASSWD: ALL\n"
-	calls := map[string]struct {
+	type row struct {
 		connector string
-		call      func(t *testing.T, project string) map[string]any
-	}{
-		"patch header": {"codex", func(t *testing.T, project string) map[string]any {
-			return codexBashCall(codexHeredocPatch("Add File", stepUpDeepOrdinaryName(t, project, "etc/sudoers.d/review"), "+"+grant))(project)
-		}},
-		"file tool": {"claudecode", func(t *testing.T, project string) map[string]any {
-			return stepUpClaude("Write", map[string]any{"file_path": stepUpDeepOrdinaryName(t, project, "etc/sudoers.d/review"), "content": grant})(t, project)
+		call      func(t *testing.T, home, project string) map[string]any
+	}
+	physicalFile := func(t *testing.T, home, project, spelling string, content string) {
+		t.Helper()
+		physical, ok := hookpaths.ResolvePatchWriteTarget(project + "/" + spelling)
+		if !ok || !strings.HasPrefix(physical, home+"/") {
+			t.Fatalf("physical = %q, known = %t", physical, ok)
+		}
+		if err := os.MkdirAll(filepath.Dir(physical), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if content != "" {
+			if err := os.WriteFile(physical, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	patch := func(directive string) row {
+		return row{"codex", func(t *testing.T, home, project string) map[string]any {
+			spelling := stepUpDeepOrdinaryName(t, project, "etc/sudoers.d/review")
+			body := "+" + grant
+			if directive == "Update File" {
+				physicalFile(t, home, project, spelling, "# old\n")
+				body = "@@\n # old\n+" + grant
+			} else {
+				physicalFile(t, home, project, spelling, "")
+			}
+			return codexBashCall(codexHeredocPatch(directive, spelling, body))(project)
+		}}
+	}
+	calls := map[string]row{
+		"patch Add File":    patch("Add File"),
+		"patch Update File": patch("Update File"),
+		"file tool": {"claudecode", func(t *testing.T, home, project string) map[string]any {
+			spelling := stepUpDeepOrdinaryName(t, project, "etc/sudoers.d/review")
+			physicalFile(t, home, project, spelling, "")
+			return stepUpClaude("Write", map[string]any{"file_path": spelling, "content": grant})(t, project)
 		}},
 	}
-	for name, row := range calls {
-		t.Run(name, func(t *testing.T) {
-			blocked, body := postConnectorHookBehindProtectHome(t, row.connector, false, "default",
-				func(home, project string) map[string]any { return row.call(t, project) })
-			if blocked {
-				t.Fatalf("an ordinary file is blocked: %.500s", body)
+	for _, managed := range []bool{false, true} {
+		for name, row := range calls {
+			t.Run(map[bool]string{false: "per-user", true: "managed"}[managed]+"/"+name, func(t *testing.T) {
+				blocked, body := postConnectorHookBehindProtectHome(t, row.connector, managed, "default",
+					func(home, project string) map[string]any { return row.call(t, home, project) })
+				if blocked {
+					t.Fatalf("an ordinary file is blocked: %.500s", body)
+				}
+			})
+		}
+	}
+}
+
+// TestStepUpPatchHeaderIsJudgedAsTheKeyFileItReaches: the header of a shell
+// here-document patch that steps up out of a link reaches a file the lexical
+// clean does not name. A link into a folder of the SSH folder reaches the
+// authorized-keys file and blocks, on the per-user and the managed gateway,
+// whatever the clean spelling is; the same name through a link to an ordinary
+// folder is an ordinary file and is allowed.
+func TestStepUpPatchHeaderIsJudgedAsTheKeyFileItReaches(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		for _, profile := range []string{"default", "strict"} {
+			for _, keys := range []bool{true, false} {
+				name := map[bool]string{false: "per-user", true: "managed"}[managed] + "/" + profile + "/" +
+					map[bool]string{true: "key file", false: "ordinary file"}[keys]
+				t.Run(name, func(t *testing.T) {
+					blocked, body := postConnectorHookBehindProtectHome(t, "codex", managed, profile, func(home, project string) map[string]any {
+						folder := filepath.Join(home, "other", "keys")
+						if keys {
+							folder = filepath.Join(home, ".ssh", "keys")
+						}
+						if err := os.MkdirAll(folder, 0o700); err != nil {
+							t.Fatal(err)
+						}
+						stepUpLink(t, project, "lnk-keys", folder)
+						physical, ok := hookpaths.ResolvePatchWriteTarget(project + "/lnk-keys/../authorized_keys")
+						if !ok || !strings.HasPrefix(physical, home+"/") {
+							t.Fatalf("physical = %q, known = %t", physical, ok)
+						}
+						return codexBashCall(codexHeredocPatch("Add File", "lnk-keys/../authorized_keys", "+ssh-ed25519 AAAAC3review review\n"))(project)
+					})
+					if blocked != keys {
+						t.Fatalf("blocked = %t, want %t: %.500s", blocked, keys, body)
+					}
+				})
 			}
-		})
+		}
 	}
 }
