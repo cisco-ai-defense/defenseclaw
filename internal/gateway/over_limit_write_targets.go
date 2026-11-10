@@ -181,7 +181,7 @@ func appendOverLimitElidedContentFinding(
 ) []RuleFinding {
 	title := overLimitElidedContentTitle
 	class, ok := actionfacts.OverLimitWriteElidedContentTarget(request.Input, facts, request.ResolvedWriteTargets)
-	if !ok && request.StrictPolicy {
+	if !ok && (request.StrictPolicy || request.ManagedInstall) {
 		class, ok = actionfacts.OverLimitCombinedPatchContentTarget(request.Input, facts, request.ResolvedWriteTargets)
 	}
 	if !ok {

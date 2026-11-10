@@ -984,6 +984,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	action trustedActionRequest,
 ) *ToolInspectVerdict {
 	action.StrictPolicy = a.strictPolicyTierForHook(ctx, action.Connector)
+	action.ManagedInstall = a.managedInstallForHook(ctx)
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
 	// Skip static block/allow + MCP-server block, connector regex packs,
 	// CodeGuard, and the judge lane; AID inspects the tool call directly
