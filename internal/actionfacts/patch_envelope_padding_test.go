@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -69,8 +70,8 @@ func TestPatchEnvelopePaddingOfOrdinaryFileStaysOrdinary(t *testing.T) {
 }
 
 // TestPatchEnvelopeOutsideTheMarkersStaysInvalid keeps the strict part: text
-// beside the markers, a padded marker line, a carriage return inside a line of
-// content (the tools take one only out of a file name, which GAP-1027 reads as
+// beside the markers, a marker the tool does not read as the marker, a
+// carriage return inside a line of content (the tools take one only out of a file name, which GAP-1027 reads as
 // the plain name) or a line of an update that only looks like a header is not
 // read as a patch of a protected file.
 func TestPatchEnvelopeOutsideTheMarkersStaysInvalid(t *testing.T) {
@@ -78,7 +79,8 @@ func TestPatchEnvelopeOutsideTheMarkersStaysInvalid(t *testing.T) {
 	for name, text := range map[string]string{
 		"text after":                             plain + "\ntrailing",
 		"text before":                            "note\n" + plain,
-		"begin marker with space":                strings.Replace(plain, "*** Begin Patch", "*** Begin Patch ", 1),
+		"marker with text":                       strings.Replace(plain, "*** Begin Patch", "*** Begin Patch x", 1),
+		"marker with zero width space":           strings.Replace(plain, "*** Begin Patch", "*** Begin Patch\u200b", 1),
 		"lone carriage return in a content line": strings.Replace(plain, "preload\n", "preload\n+a\rb\n", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -108,5 +110,70 @@ func TestPatchEnvelopeEmptyLineOfUpdateIsText(t *testing.T) {
 	input, facts := paddedPatchCall(t, "apply_patch", "command", text)
 	if !ExactGlobalLDPreloadFileWrite(input, facts) {
 		t.Fatalf("no loader-preload proof: status %s", facts.Parse.Status)
+	}
+}
+
+// patchToolTrimmedSpaces are the characters the patch tool trims from the ends
+// of a patch text and of its first and last line (measured with the tool
+// itself): every Unicode space.
+func patchToolTrimmedSpaces() []string {
+	spaces := []string{" ", "\t", "\v", "\f", "\r", "\u0085", "\u00a0", "\u1680", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000"}
+	for r := rune(0x2000); r <= 0x200a; r++ {
+		spaces = append(spaces, string(r))
+	}
+	return spaces
+}
+
+// TestPatchEnvelopeEdgeSpacesAreTheSpacesTheToolTrims pins that every space the
+// patch tool trims at the edge of the patch, or of its first or last line, is
+// padding for the loader-preload proof too: a lone carriage return, U+00A0,
+// U+202F and the other Unicode spaces do not take a protected patch out of
+// the content rules, and an ordinary file stays complete and unproven.
+func TestPatchEnvelopeEdgeSpacesAreTheSpacesTheToolTrims(t *testing.T) {
+	plain := "*** Begin Patch\n" + paddedPatchBody + "*** End Patch"
+	ordinary := "*** Begin Patch\n*** Add File: /srv/app/a.txt\n+hello\n*** End Patch"
+	for _, space := range patchToolTrimmedSpaces() {
+		for name, build := range map[string]func(string) string{
+			"trailing":   func(p string) string { return p + space },
+			"leading":    func(p string) string { return space + p },
+			"both":       func(p string) string { return space + p + space },
+			"begin line": func(p string) string { return strings.Replace(p, "*** Begin Patch", "*** Begin Patch"+space, 1) },
+			"end line":   func(p string) string { return strings.Replace(p, "*** End Patch", space+"*** End Patch", 1) },
+			"many":       func(p string) string { return p + strings.Repeat(space, 4096) },
+		} {
+			for _, key := range []string{"command", "patch", "input"} {
+				t.Run(fmt.Sprintf("%U/%s/%s", []rune(space)[0], name, key), func(t *testing.T) {
+					input, facts := paddedPatchCall(t, "apply_patch", key, build(plain))
+					if !ExactGlobalLDPreloadFileWrite(input, facts) {
+						t.Fatalf("no loader-preload proof: status %s", facts.Parse.Status)
+					}
+					input, facts = paddedPatchCall(t, "apply_patch", key, build(ordinary))
+					if facts.Parse.Status != StatusComplete || ExactGlobalLDPreloadFileWrite(input, facts) {
+						t.Fatalf("ordinary file: status %s", facts.Parse.Status)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestPatchEnvelopeEdgeCharactersTheToolKeepsStayInvalid is the strict twin:
+// characters the patch tool does not trim (zero width and control characters,
+// a byte order mark) beside a marker leave the envelope unread, so they are
+// never read as padding.
+func TestPatchEnvelopeEdgeCharactersTheToolKeepsStayInvalid(t *testing.T) {
+	plain := "*** Begin Patch\n" + paddedPatchBody + "*** End Patch"
+	for _, char := range []string{"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u180e", "\u200e", "\x1c", "\x1f", "\x7f", "\x01"} {
+		for name, text := range map[string]string{
+			"trailing": plain + char, "leading": char + plain,
+			"begin line": strings.Replace(plain, "*** Begin Patch", "*** Begin Patch"+char, 1),
+		} {
+			t.Run(fmt.Sprintf("%U/%s", []rune(char)[0], name), func(t *testing.T) {
+				_, facts := paddedPatchCall(t, "apply_patch", "command", text)
+				if facts.Parse.Status == StatusComplete {
+					t.Fatalf("read as a complete patch")
+				}
+			})
+		}
 	}
 }

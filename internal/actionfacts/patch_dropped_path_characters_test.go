@@ -71,13 +71,13 @@ func TestAnalyzeApplyPatchReadsTargetsSpelledWithTabsAndCarriageReturns(t *testi
 	}
 }
 
-// A carriage return outside a directive line still leaves no readable
-// envelope, and a spelling with a tab and the plain name are one file, read in
+// A carriage return outside a directive line (the padding of the patch itself
+// is read as the tool reads it, see TestPatchEnvelopeEdgeSpacesAreTheSpacesTheToolTrims)
+// still leaves no readable envelope, and a spelling with a tab and the plain name are one file, read in
 // each of the two blocks that name it (GAP-1037).
 func TestAnalyzeApplyPatchStillRejectsCarriageReturnsOutsideDirectives(t *testing.T) {
 	for _, patch := range []string{
 		"*** Begin Patch\n*** Add File: a.txt\n+x\ry\n*** End Patch",
-		"*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\r",
 		"*** Begin Patch\n*** Update File: a.txt\n@@\r x\n-a\n+b\n*** End Patch",
 		"*** Begin Patch\n*** Update File: a.txt\n@@\n-a\n+b\n*** End\rof File\n*** End Patch",
 	} {

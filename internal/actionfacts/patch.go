@@ -219,15 +219,23 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		return fail(StatusLimitExceeded, IssueInputLimit)
 	}
 
-	// The patch tool trims the white space around the patch text before it
-	// checks the Begin and End markers, and reads CRLF line ends as LF, so the
-	// envelope is judged in that form: the same text with any padding or line
-	// end style is the same patch. A carriage return that does not end a line
-	// is not padding: one beside a marker leaves the envelope unread.
-	normalized := strings.Trim(strings.ReplaceAll(text, "\r\n", "\n"), " \t\n\v\f")
+	// The patch tool trims the white space around the patch text, and around
+	// its first and last line, before it checks the Begin and End markers, and
+	// reads CRLF as LF. The white space it trims is every Unicode space (the
+	// ASCII ones, a lone carriage return, U+0085, U+00A0, U+1680, U+2000 to
+	// U+200A, U+2028, U+2029, U+202F, U+205F and U+3000), the set that
+	// strings.TrimSpace takes, so the envelope is judged in that form: the same
+	// text with any padding or line end style is the same patch. A carriage
+	// return that does not end a line and lies between the markers is not
+	// padding: one beside a directive keeps the envelope unread.
+	normalized := strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
 	lines := strings.Split(normalized, "\n")
-	if len(lines) < 3 || lines[0] != patchBeginLine ||
-		lines[len(lines)-1] != patchEndLine {
+	if len(lines) < 3 {
+		return fail(StatusInvalid, IssueInvalidSyntax)
+	}
+	lines[0] = strings.TrimSpace(lines[0])
+	lines[len(lines)-1] = strings.TrimSpace(lines[len(lines)-1])
+	if lines[0] != patchBeginLine || lines[len(lines)-1] != patchEndLine {
 		return fail(StatusInvalid, IssueInvalidSyntax)
 	}
 	canonical := make([]string, 0, len(lines))
