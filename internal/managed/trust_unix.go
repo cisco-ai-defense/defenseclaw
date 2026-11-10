@@ -36,13 +36,16 @@ import (
 func ValidatePathACL(path string) error { return validateStrictPathACL(path) }
 
 // ValidateTrustedInstallMarkerDir accepts a Secure Client install marker
-// only when root owns it and every ancestor, with no other or ACL writer and
-// no symlink. An advisory installer ancestor cannot certify a deployment
-// profile that changes hook availability. On macOS a group writer is accepted
-// only when the group is wheel (gid 0), whose only member is root: Cisco
-// Secure Client leaves /opt/cisco and /opt/cisco/secureclient at 0775
-// root:wheel, and refusing that would turn the Secure Client rules off on
-// every Secure Client Mac. Any other group writer is still refused.
+// only when root owns it, with no group, other or ACL writer and no symlink
+// in the path. An ancestor may also be written by the administrators the
+// Secure Client ACL rule already trusts: a group write bit for an
+// administrator group (administratorWriterGroup: wheel or admin on macOS)
+// is accepted and reported, and the operating system roots / and /opt keep
+// the advisory verdict every other managed walk gives them. Any other
+// writer of an ancestor (another group, other write, a write ACL entry for
+// another principal, a foreign owner below /opt) stays fatal, so only an
+// administrator can change what certifies a deployment profile that changes
+// hook availability. The marker folder itself is never relaxed.
 func ValidateTrustedInstallMarkerDir(path, label string) error {
 	if path == "" {
 		return fmt.Errorf("%s path is empty", label)
@@ -52,35 +55,22 @@ func ValidateTrustedInstallMarkerDir(path, label string) error {
 		return fmt.Errorf("resolve %s path: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		if err := validateTrustedMarkerElement(cur, label); err != nil {
+		var err error
+		switch {
+		case cur == clean:
+			err = validateTrustedPathElement(cur, true, label, false)
+		case osRootAncestor(cur):
+			err = validateTrustedPathElement(cur, true, label, true)
+		default:
+			err = validateTrustedPathElementWriters(cur, true, label, false, administratorWriterGroup)
+		}
+		if err != nil {
 			return err
 		}
 		if cur == filepath.Dir(cur) {
 			return nil
 		}
 	}
-}
-
-// validateTrustedMarkerElement is validateTrustedPathElement for one folder
-// of the install marker path, with the root-only group writer accepted
-// (markerGroupWriteTrusted).
-func validateTrustedMarkerElement(path, label string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("%s: cannot inspect file owner", path)
-	}
-	return validateTrustedPathElementWith(path, true, label, false, markerGroupWriteTrusted(runtime.GOOS, info.Mode().Perm(), st.Gid))
-}
-
-// markerGroupWriteTrusted reports a group writer the install marker check
-// accepts: on macOS, group write without other write when the group is wheel
-// (gid 0), whose only member is root.
-func markerGroupWriteTrusted(goos string, perm os.FileMode, gid uint32) bool {
-	return goos == "darwin" && gid == 0 && perm&0o020 != 0 && perm&0o002 == 0
 }
 
 // ValidateTrustedFilePath rejects managed_enterprise policy/input files that a
@@ -340,13 +330,14 @@ func validateTrustedRuntimeFileElement(path, label string) error {
 // equivalent of the stock known-folder create-child grant, so advisory is the
 // only ancestor relaxation this platform needs.
 func validateTrustedPathElement(path string, wantDir bool, label string, advisory bool) error {
-	return validateTrustedPathElementWith(path, wantDir, label, advisory, false)
+	return validateTrustedPathElementWriters(path, wantDir, label, advisory, nil)
 }
 
-// validateTrustedPathElementWith is validateTrustedPathElement; with
-// rootGroupWrite a group write bit is not a finding (the caller has checked
-// that the group is root-only), while other write still is.
-func validateTrustedPathElementWith(path string, wantDir bool, label string, advisory, rootGroupWrite bool) error {
+// validateTrustedPathElementWriters is validateTrustedPathElement that also
+// accepts, and reports, a group write bit when trustedGroup names the
+// element's group. Other write is never accepted that way, and the strict
+// ancestor switch (trustStrictAncestors) still makes the verdict fatal.
+func validateTrustedPathElementWriters(path string, wantDir bool, label string, advisory bool, trustedGroup func(gid uint32) bool) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
@@ -360,23 +351,20 @@ func validateTrustedPathElementWith(path string, wantDir bool, label string, adv
 	if !wantDir && !info.Mode().IsRegular() {
 		return fmt.Errorf("%s: expected regular %s file", path, label)
 	}
-	writable := os.FileMode(0o022)
-	if rootGroupWrite {
-		writable = 0o002
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot inspect file owner", path)
 	}
-	if info.Mode().Perm()&writable != 0 {
-		if err := relaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
-			"%s: group/other writable permissions %04o are not trusted", path, info.Mode().Perm(),
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		relax := advisory || (trustedGroup != nil && perm&0o002 == 0 && trustedGroup(st.Gid))
+		if err := relaxAncestorTrustVerdict(relax, path, label, fmt.Errorf(
+			"%s: group/other writable permissions %04o are not trusted", path, perm,
 		)); err != nil {
 			return err
 		}
 	}
 	if err := relaxAncestorTrustJudgement(advisory, path, label, validateTrustedPathACL(path)); err != nil {
 		return err
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("%s: cannot inspect file owner", path)
 	}
 	owner := hostOwnerUID(path, info, st.Uid)
 	if owner != 0 {

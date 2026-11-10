@@ -406,6 +406,103 @@ func TestRepairUserTargetRepairsAgentConfigFlagsAndMode(t *testing.T) {
 	}
 }
 
+// The guardian repairs the targets of one user one connector after another in
+// the same pass. The second connector's immutable config must be repaired
+// although the user's ~/.defenseclaw walk is still inside its interval; that
+// walk itself still runs once.
+func TestRepairUserTargetRepairsEveryConnectorsConfigWithinTheInterval(t *testing.T) {
+	f := newPerUserRepairFixture(t)
+	codexConfig := filepath.Join(f.home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.write(codexConfig, 0o600)
+	userAgentConfigPaths = func(opts InstallOptions) []string {
+		if opts.ConnectorName == "codex" {
+			return []string{codexConfig}
+		}
+		return []string{f.config}
+	}
+	now := time.Unix(1_800_000_000, 0)
+	previousNow := userRepairNow
+	userRepairNow = func() time.Time { return now }
+	t.Cleanup(func() { userRepairNow = previousNow })
+
+	codex := f.opts()
+	codex.ConnectorName = "codex"
+	if err := RepairUserTarget(codex, "user:fixture"); err != nil {
+		t.Fatalf("codex pass: %v", err)
+	}
+
+	// The user locks the Claude Code config and drifts a hook script.
+	hook := filepath.Join(f.dataDir, "hooks", "claude-code-hook.sh")
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Chflags(f.config, unix.UF_IMMUTABLE); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	claude := f.opts()
+	claude.ConnectorName = "claudecode"
+	if err := RepairUserTarget(claude, "user:fixture"); err != nil {
+		t.Fatalf("claudecode pass: %v", err)
+	}
+	if statOf(t, f.config).Flags&unix.UF_IMMUTABLE != 0 {
+		t.Fatal("the second connector's config kept uchg inside the interval")
+	}
+	if !f.marked(managed.MarkerRepair, f.config, "user_immutable_flag") {
+		t.Fatalf("missing the repair marker for the second connector's config: %+v", f.markers)
+	}
+	if got := uint32(statOf(t, hook).Mode) & 0o7777; got != 0o755 {
+		t.Fatalf("the shared ~/.defenseclaw walk ran again inside the interval (hook mode %04o)", got)
+	}
+
+	// After the interval the walk runs again.
+	now = now.Add(userRepairMinInterval)
+	if err := RepairUserTarget(claude, "user:fixture"); err != nil {
+		t.Fatalf("pass after the interval: %v", err)
+	}
+	if got := uint32(statOf(t, hook).Mode) & 0o7777; got != 0o700 {
+		t.Fatalf("hook mode after the interval = %04o, want 0700", got)
+	}
+}
+
+// A completed ~/.defenseclaw walk is recorded even when the agent config after
+// it skips the user (a symlinked folder above the config), so the user's next
+// connector inside the interval does not walk the tree again.
+func TestRepairUserTargetRecordsTheWalkWhenAnAgentConfigSkips(t *testing.T) {
+	f := newPerUserRepairFixture(t)
+	elsewhere := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Dir(f.config)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Dir(f.config)); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0)
+	previousNow := userRepairNow
+	userRepairNow = func() time.Time { return now }
+	t.Cleanup(func() { userRepairNow = previousNow })
+
+	var skip *UserSkipError
+	if err := RepairUserTarget(f.opts(), "user:fixture"); !errors.As(err, &skip) {
+		t.Fatalf("first pass: err=%v, want a skip for the symlinked folder above the config", err)
+	}
+	hook := filepath.Join(f.dataDir, "hooks", "claude-code-hook.sh")
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	_ = RepairUserTarget(f.opts(), "user:fixture")
+	if got := uint32(statOf(t, hook).Mode) & 0o7777; got != 0o755 {
+		t.Fatalf("the walk ran again inside the interval after a skipped config (hook mode %04o)", got)
+	}
+}
+
 func TestRepairUserTargetLeavesSymlinkedAgentConfigToSetup(t *testing.T) {
 	f := newPerUserRepairFixture(t)
 	dotfiles := filepath.Join(t.TempDir(), "settings.json")
