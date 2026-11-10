@@ -13,8 +13,8 @@ import (
 	"testing"
 )
 
-// GAP-0431: loop destination proofs keep entry-replacing moves ordinary and
-// retain copy writes through the same link in each hook configuration.
+// GAP-0431: loop destination proofs judge a move and a copy through the same
+// link alike in each hook configuration.
 func TestGAP0431LoopDestinationGuardsFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	t.Setenv("src", "a.txt")
@@ -28,7 +28,7 @@ func TestGAP0431LoopDestinationGuardsFourCell(t *testing.T) {
 	}{
 		{"L5-entry-move", `for f in ordinary; do mv a.txt keylink; done`, "allow"},
 		{"L5-copy", `for f in ordinary; do cp a.txt keylink; done`, "block"},
-		{"L6-entry-move", `for f in ordinary; do mv "$src" "$f/../keylink"; done`, "allow"},
+		{"L6-entry-move", `for f in ordinary; do mv "$src" "$f/../keylink"; done`, "block"},
 		{"L6-copy", `for f in ordinary; do cp a.txt "$f/../keylink"; done`, "block"},
 		{"L6-copy-ordinary", `for f in ordinary; do cp a.txt "$f/../out2.txt"; done`, "allow"},
 		{"L6-quoted-copy", `src=a.txt; for f in keylink; do cp "$src" "$f"; done`, "block"},
@@ -69,10 +69,9 @@ func TestGAP0431LoopDestinationGuardsFourCell(t *testing.T) {
 	}
 }
 
-// A loop that runs its body judges cp by its name as a writer whatever its
-// source operand holds, so a destination that reaches a protected file through
-// a link blocks in every profile; a move replaces the entry and stays ordinary
-// (rel-1-0-6:GAP-0880, GAP-0885).
+// A loop that runs its body judges cp and mv by their names as writers whatever
+// their source operands hold, so a destination that reaches a protected file
+// through a link blocks in every profile (rel-1-0-6:GAP-0880, GAP-0885).
 func TestGAP0431ManagedLoopSourcesAreJudgedAsWriters(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	for _, row := range []struct{ command, want string }{
@@ -85,7 +84,8 @@ func TestGAP0431ManagedLoopSourcesAreJudgedAsWriters(t *testing.T) {
 		{`OPTARG=; for f in keylink; do cp "$OPTARG" "$f"; done`, "block"},
 		{`BASH_ENV=; for f in keylink; do cp "$BASH_ENV" "$f"; done`, "block"},
 		{`IFS=; for f in keylink; do cp "$IFS" "$f"; done`, "block"},
-		{`src=a.txt; for f in keylink; do mv a.txt "$f"; done`, "allow"},
+		{`src=a.txt; for f in keylink; do mv a.txt "$f"; done`, "block"},
+		{`for f in keylink; do mv "$src" "$f"; done`, "block"},
 	} {
 		payload := f.payload(t, row.command)
 		header := f.clientHeader(t, payload)
