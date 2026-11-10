@@ -56,6 +56,10 @@ func repairWindowsEnterpriseClaudeDropIn() string {
 	if path == "" {
 		return ""
 	}
+	// The restore refuses a record or drop-in an untrusted account can write
+	// only under the standalone scope, which Setup's own process lacks
+	// (GAP-1048).
+	defer pinWindowsStandaloneTrustScope()()
 	if restored, err := windowsEnterpriseClaudeDropInRestore(); err != nil || !restored {
 		return ""
 	}

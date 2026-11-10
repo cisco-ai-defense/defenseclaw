@@ -7533,6 +7533,18 @@ function Assert-DefenseClawCanonicalRawPathAcl {
         if (-not (Test-DefenseClawExactRawDACL `
             -Actual $Actual `
             -Expected $expectedDescriptor)) {
+            if (Test-DefenseClawStandaloneProfile) {
+                # Name the account that can change the file, in the shape the
+                # result turns into the account and the icacls fix (GAP-0602).
+                $untrustedFinding = @(
+                    Get-DefenseClawRawDescriptorFindings -Path $Path -Actual $Actual -Expected $expectedDescriptor |
+                        Microsoft.PowerShell.Core\Where-Object { $_.Severity -eq 'Untrusted' } |
+                        Microsoft.PowerShell.Utility\Select-Object -First 1
+                )
+                if ($untrustedFinding.Count -gt 0) {
+                    throw "managed path does not have the exact canonical DACL: $Path ($([string]$untrustedFinding[0].Reason))"
+                }
+            }
             throw "managed path does not have the exact canonical DACL: $Path"
         }
         return
@@ -38589,6 +38601,60 @@ function Get-DefenseClawRepairRollbackApprovedConfigSource {
     return $approved
 }
 
+function Save-DefenseClawRejectedStandalonePolicy {
+    <#
+        Standalone Repair is about to replace an installed config.yaml or
+        targets.yaml with Setup's approved copy, because the file is not the
+        bytes that copy recorded or another account owns it or can change it.
+        The class rule (GAP-0590, GAP-1049): the replaced object is not lost.
+        Its bytes are kept as etc\rejected-config.yaml or
+        etc\rejected-targets.yaml under the administrator-only descriptor, as
+        Setup keeps them for CONFIG= and MANIFEST=, the run logs it, and the
+        result lists it. A file that cannot be kept stops the restore before
+        anything changes. Secure Client is not changed.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][ValidateSet('config', 'manifest')][string]$Name,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ApprovedPath
+    )
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+    $leaf = if ($Name -ceq 'config') { 'config.yaml' } else { 'targets.yaml' }
+    $kept = [IO.Path]::Combine([string]$Layout.ConfigDirectory, "rejected-$leaf")
+    $problem = 'did not match the approved copy Setup recorded'
+    try {
+        Assert-DefenseClawPathAcl -Path $Path `
+            -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+            -AllowInheritance -IgnoreCreatorTemplates
+    }
+    catch {
+        $problem = ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 400
+    }
+    try {
+        Assert-DefenseClawNoReparsePath -Path $kept -AllowMissingLeaf
+        $digest = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        Install-DefenseClawFileAtomic -Source $Path -Destination $kept -ExpectedSHA256 $digest
+        Set-DefenseClawPathAcl -Path $kept -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+    }
+    catch {
+        throw ("Repair could not keep the installed $leaf as $kept before it restored the file from " +
+            "Setup's approved copy, so it changed nothing: $($_.Exception.Message)")
+    }
+    $note = "the installed $leaf $problem; kept it as $kept and restored $leaf from Setup's approved copy $ApprovedPath, with Setup's access list"
+    Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+        path   = $Path
+        kind   = if ($Name -ceq 'config') { 'ConfigFile' } else { 'AdminFile' }
+        reason = $note
+    }
+    $script:DefenseClawRestoredPolicyNotes += $note
+}
+
 function Invoke-DefenseClawRepairApprovedPolicyRecovery {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -38633,6 +38699,8 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
                     }
                 }
                 if ($installedHash -cne $approvedHash) {
+                    Save-DefenseClawRejectedStandalonePolicy `
+                        -Layout $Layout -Name $name -Path $destination -ApprovedPath ([string]$handEditApproved.path)
                     Install-DefenseClawSourceDescriptor -Source $handEditApproved -Destination $destination
                     Set-DefenseClawPathAcl -Path $destination -Kind ConfigFile `
                         -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
@@ -38687,6 +38755,8 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
                 (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) +
                 ' on a signed-bundle deployment')
         }
+        Save-DefenseClawRejectedStandalonePolicy `
+            -Layout $Layout -Name $name -Path $destination -ApprovedPath ([string]$approved.path)
         Install-DefenseClawSourceDescriptor -Source $approved -Destination $destination
         $kind = if ($name -ceq 'config') { 'ConfigFile' } else { 'AdminFile' }
         Set-DefenseClawPathAcl -Path $destination -Kind $kind `
@@ -39160,6 +39230,9 @@ function Get-DefenseClawLifecycleStatus {
         }
         if (@($script:DefenseClawRecoveredCodexRequirementsNotes).Count -gt 0) {
             $status['recovered_codex_requirements'] = [string[]]@($script:DefenseClawRecoveredCodexRequirementsNotes)
+        }
+        if (@($script:DefenseClawRestoredPolicyNotes).Count -gt 0) {
+            $status['restored_policy_sources'] = [string[]]@($script:DefenseClawRestoredPolicyNotes)
         }
         if (@($script:DefenseClawTerminatedServiceProcesses).Count -gt 0) {
             $status['terminated_service_processes'] = [string[]]@($script:DefenseClawTerminatedServiceProcesses)
@@ -52591,6 +52664,10 @@ $script:DefenseClawSquattedRootNotes = @()
 # What a recovery replaced in the Codex requirements.toml (GAP-0802), for the result.
 $script:DefenseClawRecoveredCodexRequirementsNotes = @()
 
+# What standalone Repair restored from Setup's approved copies, and where it kept
+# the replaced bytes (GAP-1049), for the result.
+$script:DefenseClawRestoredPolicyNotes = @()
+
 function Format-DefenseClawSquattedRootCause {
     # Why a squatted root is refused, naming the account that created it
     # (Get-DefenseClawSquattedRootPlanter) rather than a bare SID or a
@@ -53510,6 +53587,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     $script:DefenseClawQuarantinedRoots = @()
     $script:DefenseClawSquattedRootNotes = @()
     $script:DefenseClawRecoveredCodexRequirementsNotes = @()
+    $script:DefenseClawRestoredPolicyNotes = @()
     $script:DefenseClawTerminatedServiceProcesses = @()
     $script:DefenseClawSkippedRuntimeFiles = @()
     Set-DefenseClawRecoveryGatewayCandidate `
