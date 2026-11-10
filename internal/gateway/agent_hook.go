@@ -1537,8 +1537,11 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	delivered bool,
 ) hookFinalizationResult {
 	receipted, _ := ctx.Value(hookDeliveryReceiptContextKey{}).(bool)
-	if client, ok := ctx.Value(hookClientContextKey{}).(context.Context); ok && client.Err() != nil &&
-		resp.Action != hookActionUnconfirmed && !receipted {
+	// clientLeft: a script caller that left without a delivery receipt. No
+	// answer reaches it, so what is recorded is only what the gateway can prove.
+	client, hasClient := ctx.Value(hookClientContextKey{}).(context.Context)
+	clientLeft := hasClient && client.Err() != nil && !receipted
+	if clientLeft && resp.Action != hookActionUnconfirmed {
 		resp = a.clientLeftHookDecision(ctx, connectorName, req, rawBody, resp)
 	}
 	// Treat a block response as enforced unless identity stamping proves
@@ -1694,7 +1697,12 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			// report a retroactive block the agent did not receive (s2-obs). An
 			// answer already on the wire (delivered) is never replaced either.
 			if !delivered && !recoverable && req.pendingOccurrenceID == "" {
-				adjusted, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+				if !clientLeft || resp.Action != hookActionUnconfirmed {
+					// An unconfirmed call whose client left stays unconfirmed:
+					// an audit fault must not turn a proposal nobody delivered
+					// into a block (GAP-1028, GAP-1031).
+					adjusted, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+				}
 				// The answer goes out with no row; keep the call's record
 				// outside the store for the failure report (GAP-1031).
 				a.recordUnauditedHookCall(connectorName, req, adjusted)

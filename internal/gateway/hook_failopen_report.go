@@ -126,7 +126,8 @@ type hookFailureLine struct {
 	Category string `json:"category"`
 	FailMode string `json:"fail_mode"`
 	// Outcome is what the call got: fail_open (it ran unchecked),
-	// fail_closed (it was blocked) or diagnostic (a record that is no
+	// fail_closed (it was blocked), unconfirmed (a gateway line for a call
+	// whose client left: no delivery proved) or diagnostic (a record that is no
 	// delivery decision, such as a rejected traceparent: the call still went
 	// to the gateway). A call that strict availability or an event contract
 	// blocked is logged with the connector's fail mode open and outcome
@@ -143,7 +144,7 @@ type hookFailureLine struct {
 // counts, so an upgrade never hides a call that ran unchecked.
 func (l hookFailureLine) ranUnchecked() bool {
 	switch strings.TrimSpace(l.Outcome) {
-	case "fail_open":
+	case "fail_open", hookActionUnconfirmed:
 		return true
 	case "fail_closed", "diagnostic":
 		return false
@@ -540,6 +541,16 @@ func hookFailureRow(call hookFailureCall) (action, target, details, severity str
 		event = event[:64]
 	}
 	if !call.blocked {
+		if hookFailureOwnsToolCall(call.entry) && call.entry.auditGap() &&
+			strings.TrimSpace(call.entry.Outcome) == hookActionUnconfirmed {
+			// The client left before the gateway answer was delivered and the
+			// audit write failed: no delivery is proved, so the row is the
+			// unconfirmed decision, never an allow or a block.
+			return string(audit.ActionConnectorHook), event,
+				fmt.Sprintf("connector=%s action=unconfirmed event=%s delivered=unconfirmed: the client left before the gateway "+
+					"answer was delivered and the gateway could not write its audit record (%s); see logs/%s",
+					connectorName, event, strconv.Quote(reason), hookFailuresFile), "HIGH"
+		}
 		if hookFailureOwnsToolCall(call.entry) && call.entry.auditGap() {
 			// The gateway answered the call and wrote this line because its
 			// audit write failed: the allow is the answer it gave.
