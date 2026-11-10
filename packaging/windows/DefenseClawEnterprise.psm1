@@ -16164,6 +16164,7 @@ function Invoke-DefenseClawStandaloneRecordRecovery {
         if ($null -ne $attestationPlan) {
             $attestationValue = New-DefenseClawNotAttestedRecord
         }
+        Assert-DefenseClawRebuiltRecordCoversArtifacts -Layout $Layout -Value $deploymentValue
         Publish-DefenseClawRecordKeepingOld `
             -Value $deploymentValue `
             -Path $Layout.MetadataPath `
@@ -31345,6 +31346,7 @@ $script:UninstallDeletedAccountPollSeconds = 10
 # records again, and how often it looks. Tests shorten them.
 $script:GuardianRepublishWaitSeconds = 60
 $script:GuardianRepublishPollSeconds = 1
+$script:GuardianRepublishRecheckSeconds = 2
 
 function Get-DefenseClawGuardianPublicationStamps {
     <#
@@ -31395,11 +31397,15 @@ function Resolve-DefenseClawGuardianPublicationBeforeTransaction {
         them from different publications for minutes. The classification then
         refuses, and it runs after the transaction has stopped every service:
         nothing is left that can publish them again. Here, before the
-        transaction opens, a running Guardian that does not have one
-        publication is restarted (the first pass of every Guardian process
-        publishes all three) and waited for. Nothing is stopped for good and
-        nothing is changed if it does not come right: the run ends with the
-        services running.
+        transaction opens, a running Guardian whose records are still from
+        different publications about two seconds after the first look (a look
+        between its three writes is not a fault, delta-4 F2) is restarted (the
+        first pass of every Guardian process publishes all three) and waited
+        for. Nothing is stopped for good: if the start fails after the stop,
+        the start mode is put back and the start is tried once more, and a
+        Guardian that still does not start ends the run naming both failures
+        (delta-4 F1). If the records do not come right the run ends with every
+        service running and nothing changed.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -31418,9 +31424,28 @@ function Resolve-DefenseClawGuardianPublicationBeforeTransaction {
         $guardian.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
         return
     }
+    Microsoft.PowerShell.Utility\Start-Sleep -Seconds $script:GuardianRepublishRecheckSeconds
+    if (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) {
+        return
+    }
+    $stamps = Get-DefenseClawGuardianPublicationStamps -Layout $Layout
     Write-DefenseClawLifecyclePhase -Stage 'the Guardian records are from different publications: restarting the Guardian so it publishes them again, before the transaction opens'
-    Stop-DefenseClawService -Name $GuardianServiceName
-    Start-DefenseClawService -Name $GuardianServiceName
+    $startMode = Get-DefenseClawServiceStartMode -Name $GuardianServiceName
+    try {
+        Stop-DefenseClawService -Name $GuardianServiceName
+        Start-DefenseClawService -Name $GuardianServiceName
+    }
+    catch {
+        $first = $_.Exception.Message
+        try {
+            Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode $startMode
+            Start-DefenseClawService -Name $GuardianServiceName
+        }
+        catch {
+            throw ("the hook Guardian was stopped to publish its records again and could not be started ($first; second try: $($_.Exception.Message)). " +
+                "Its start mode was put back. Start it with: sc.exe start $GuardianServiceName , then run the same command again. No transaction was opened and nothing else was changed.")
+        }
+    }
     $deadline = [DateTime]::UtcNow.AddSeconds($script:GuardianRepublishWaitSeconds)
     while ($true) {
         if (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) {
@@ -36931,15 +36956,60 @@ function Test-DefenseClawRebuiltDeploymentRecord {
     )
 }
 
+function Get-DefenseClawRebuiltRecordRequiredArtifacts {
+    # The programs the services run: the gateway (also the Guardian's image),
+    # the hook and the sensor helper. A rollback starts them, so the rebuilt
+    # record must name each with the digest it was rebuilt from.
+    return @('gateway', 'hook', 'sensor_helper')
+}
+
+function Format-DefenseClawRebuiltRecordArtifactRefusal {
+    param(
+        [Parameter(Mandatory)][string]$Artifact,
+        [Parameter(Mandatory)][string]$Because,
+        [switch]$BeforeAnyChange
+    )
+    $step = "run the Setup of the release that is installed with $(Format-DefenseClawSetupAction -Action '/repair') (it puts $Artifact back from its own payload), or $(Format-DefenseClawSetupAction -Action @('/uninstall', '/install'))"
+    if ($BeforeAnyChange) {
+        return "the deployment record cannot be rebuilt: $Because. Nothing was changed and every service is as it was; $step."
+    }
+    return "the rebuilt deployment record cannot vouch for $Artifact ($Because), so a rollback to it cannot check it; $step."
+}
+
+function Assert-DefenseClawRebuiltRecordCoversArtifacts {
+    <#
+        rel-1-0-6:GAP-0994 (delta-4 F3): before anything is swapped, the value
+        New-DefenseClawRebuiltDeploymentRecord built must name the gateway, the
+        hook and the sensor helper. It names an installed file only when the
+        file has the digest of the authenticated payload, so a missing digest
+        means the installed file differs from the payload (or is gone). The
+        rollback check below would then pass without checking it.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Value
+    )
+    $layoutKey = @{ gateway = 'GatewayPath'; hook = 'HookPath'; sensor_helper = 'SensorHelperPath' }
+    $hashes = $Value['hashes']
+    foreach ($artifact in (Get-DefenseClawRebuiltRecordRequiredArtifacts)) {
+        if ($null -ne $hashes -and $hashes.Contains($artifact)) { continue }
+        $path = if ($Layout.ContainsKey($layoutKey[$artifact])) { [string]$Layout[$layoutKey[$artifact]] } else { $artifact }
+        throw (Format-DefenseClawRebuiltRecordArtifactRefusal -Artifact $artifact -BeforeAnyChange `
+            -Because "the installed $artifact ($path) is missing or is not the file of this Setup's payload")
+    }
+}
+
 function Assert-DefenseClawRebuiltRecordArtifacts {
     <#
         rel-1-0-6:GAP-0994: what a rollback to a rebuilt deployment record can
         check. The record names no activation evidence and no pinned paths, so
         the full assertion cannot pass and a rollback that waited for it
         stopped with the services down and the transaction pending (Repair
-        then failed the same way; only a forced purge ended it). Every
-        artifact the record does name has the digest of the authenticated
-        payload it was rebuilt from, and each must still have it.
+        then failed the same way; only a forced purge ended it). The gateway,
+        the hook and the sensor helper must be named with the digest of the
+        authenticated payload the record was rebuilt from and must still have
+        it; any other artifact the record names must too. A record that names
+        none (or lacks one of the three) is refused by name, never passed.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -36950,22 +37020,29 @@ function Assert-DefenseClawRebuiltRecordArtifacts {
         cli = 'CLIPath'; installer = 'InstallerPath'; module = 'ModulePath'
     }
     $hashesProperty = $Metadata.PSObject.Properties['hashes']
-    if ($null -eq $hashesProperty -or $null -eq $hashesProperty.Value) {
-        throw 'the rebuilt deployment record names no artifact digests'
+    $hashes = if ($null -ne $hashesProperty) { $hashesProperty.Value } else { $null }
+    foreach ($artifact in (Get-DefenseClawRebuiltRecordRequiredArtifacts)) {
+        if ($null -eq $hashes -or $null -eq $hashes.PSObject.Properties[$artifact] -or
+            ([string]$hashes.PSObject.Properties[$artifact].Value) -cnotmatch '^[0-9a-f]{64}$') {
+            throw (Format-DefenseClawRebuiltRecordArtifactRefusal -Artifact $artifact -Because 'the record names no digest for it')
+        }
     }
     foreach ($artifact in $layoutKey.Keys) {
-        $recorded = $hashesProperty.Value.PSObject.Properties[$artifact]
-        if ($null -eq $recorded -or -not $Layout.ContainsKey($layoutKey[$artifact])) {
+        $recorded = $hashes.PSObject.Properties[$artifact]
+        if ($null -eq $recorded) {
             continue
+        }
+        if (-not $Layout.ContainsKey($layoutKey[$artifact])) {
+            throw (Format-DefenseClawRebuiltRecordArtifactRefusal -Artifact $artifact -Because 'the layout has no path for it')
         }
         $installed = [string]$Layout[$layoutKey[$artifact]]
         if ([string]::IsNullOrWhiteSpace($installed) -or
             -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $installed -PathType Leaf)) {
-            throw "the rebuilt deployment record names $artifact, which is missing at $installed"
+            throw (Format-DefenseClawRebuiltRecordArtifactRefusal -Artifact $artifact -Because "it is missing at $installed")
         }
         $digest = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($digest -cne ([string]$recorded.Value).ToLowerInvariant()) {
-            throw "the rebuilt deployment record names $artifact with another digest than the file at $installed"
+            throw (Format-DefenseClawRebuiltRecordArtifactRefusal -Artifact $artifact -Because "the file at $installed has another digest than the record names")
         }
     }
 }
