@@ -77,15 +77,19 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 	// and the connection the agent opens to it outlives the allow and the
 	// entry. The watcher names the scope that listed it, so a later hook of the
 	// session finds it whatever directory it reports (GAP-1018). The same holds
-	// for a first call an exact allow lets run while the watcher has not yet
-	// decided its admission (GAP-0998): that call opens the connection too, so
-	// the listed definition is held on the call the allow permits, not on the
-	// watcher answer that comes later. While the allow stands the hold answers
-	// nothing (the held definition is allowed).
+	// for a first call that policy lets run before the watcher has an admission
+	// to report, whether it answers pending or nothing yet (the watcher has not
+	// listed the server in its first cycle): an exact allow, or
+	// admission.mcp.scan_on_install off, admits the definition without a scan
+	// (GAP-0998). That call opens the connection too, so the listed definition
+	// is held on the call the policy permits, not on the watcher answer that
+	// comes later. While the allow stands the hold answers nothing (the held
+	// definition is allowed). With no way for policy to admit without a scan the
+	// ordinary call reads no config here.
 	admitted := status.Admitted
-	if admitted == nil && status.Pending {
+	if admitted == nil && !status.Unavailable && (status.Pending || mcpMayAdmitUnscanned(cfg)) {
 		if listed, isListed := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName); isListed &&
-			heldDefinitionAllowed(ctx, cfg, connector, probe, heldMCPDefinition(listed, connector, home)) {
+			heldDefinitionAdmitted(ctx, cfg, connector, probe, heldMCPDefinition(listed, connector, home)) {
 			admitted = &listed
 		}
 	}
@@ -144,6 +148,22 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 func heldDefinitionAllowed(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe, held config.MCPServerEntry) bool {
 	verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, held, true))
 	return verdict.Enabled && verdict.Source == "admin-allow"
+}
+
+// mcpMayAdmitUnscanned reports whether the policy in force can admit an MCP
+// definition without a scan at all: an administrator allow rule exists, or
+// admission.mcp.scan_on_install is off. Without either, a call that meets no
+// admission status is an ordinary one and nothing is held for it.
+func mcpMayAdmitUnscanned(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if len(cfg.AssetPolicy.MCP.Allowed) > 0 {
+		return true
+	}
+	off := func(scan *bool) bool { return scan != nil && !*scan }
+	adm := cfg.Admission
+	return off(adm.MCP.ScanOnInstall) || (adm.MCP.ScanOnInstall == nil && off(adm.Defaults.ScanOnInstall))
 }
 
 // heldDefinitionAdmitted reports whether the policy in force still admits the
