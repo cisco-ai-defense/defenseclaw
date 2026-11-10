@@ -20,7 +20,7 @@ import (
 //     and leaves a drive-relative name that no file has. It is read as the
 //     path it spells (lateWindowsPathWord).
 //   - A Git Bash drive mount (/c/dir, /cygdrive/c/dir) is the drive path.
-//   - A /proc/self or /dev/fd alias is read by the process that opens it,
+//   - A /proc/self or /dev/fd link is read by the process that opens it,
 //     which this reader cannot be (lateWindowsAlias).
 //
 // Linux and macOS read a backslash as an escape and have none of the others;
@@ -76,18 +76,14 @@ func lateWindowsPathWord(word *syntax.Word) *syntax.Word {
 }
 
 // lateWindowsAlias reports a rooted word the process that opens it reads
-// differently from the hook: a /proc/self or /proc/thread-self entry (any
-// spelling below it) and the /dev descriptor aliases. Git Bash provides them
-// on a Windows host; the hook cannot read them for that process, so they stay
-// unproved, as processRelativeLink leaves them on Linux.
+// differently from the hook: the process-relative links of processRelativeLink
+// (a /proc/self or /proc/thread-self cwd, root, exe, fd or map_files entry,
+// and the /dev descriptor aliases) in any separator spelling. Git Bash
+// provides them on a Windows host; the hook cannot read them for that
+// process, so they stay unproved. A plain /proc/self entry such as status is
+// an ordinary file.
 func lateWindowsAlias(word string) bool {
-	word = strings.ReplaceAll(word, "\\", "/")
-	for _, alias := range []string{"/proc/self", "/proc/thread-self", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"} {
-		if rest, found := strings.CutPrefix(word, alias); found && (rest == "" || rest[0] == '/') {
-			return true
-		}
-	}
-	return false
+	return processRelativeLink(strings.ReplaceAll(word, "\\", "/"))
 }
 
 // lateWindowsDrivePath is the drive path of a Git Bash drive mount, and word

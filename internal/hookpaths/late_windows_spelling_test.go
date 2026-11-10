@@ -4,6 +4,9 @@
 package hookpaths
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -80,8 +83,14 @@ func TestLateWindowsAliasIsAProcessRelativeSpelling(t *testing.T) {
 	}{
 		{"/proc/self/cwd/alias", true},
 		{"/proc/thread-self/cwd/alias", true},
-		{"/proc/self/root" + `C:\Users\me\alias`, true},
-		{"/proc/self", true},
+		{`/proc/self/root/C:\Users\me\alias`, true},
+		{"/proc/self/exe", true},
+		{"/proc/self/fd/3", true},
+		{"/proc/self/task/12/cwd/alias", true},
+		{"/proc/self/status", false},
+		{"/proc/self/environ", false},
+		{"/proc/thread-self/stat", false},
+		{"/proc/self", false},
 		{"/dev/fd/3", true},
 		{"/dev/stdin", true},
 		{`\dev\fd\3`, true},
@@ -109,6 +118,57 @@ func TestLateWindowsDrivePathMapsAGitBashDriveMount(t *testing.T) {
 	} {
 		if got := lateWindowsDrivePath(word); got != want {
 			t.Errorf("lateWindowsDrivePath(%q)=%q, want %q", word, got, want)
+		}
+	}
+}
+
+// The shell reads a backslash before a letter as an escape; Windows reads it
+// as a separator. A relative word that is a hard link to a protected file
+// under its shell spelling is graded by that reading, whatever the Windows
+// reading of the same word is.
+func TestLateCallReadingsDifferOnABackslashBeforeALetter(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	keyDir := filepath.Join(home, ".ssh")
+	for _, dir := range []string{filepath.Join(cwd, "key"), keyDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := filepath.Join(keyDir, "authorized_keys")
+	if err := os.WriteFile(key, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "key", "alias"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(key, filepath.Join(cwd, "keyalias")); err != nil {
+		t.Skipf("hard link unavailable: %v", err)
+	}
+	const command = `cat key\alias`
+	if got := lateCallGradeReading(command, cwd, home, false); got != GradeNamed {
+		t.Errorf("shell reading of %q = %v, want %v", command, got, GradeNamed)
+	}
+	if got := lateCallGradeReading(command, cwd, home, true); got != GradeNone {
+		t.Errorf("Windows reading of %q = %v, want %v", command, got, GradeNone)
+	}
+	if runtime.GOOS == "windows" {
+		if got := LateCallGrade(command, cwd, home); got != GradeNamed {
+			t.Errorf("LateCallGrade(%q) = %v, want %v", command, got, GradeNamed)
+		}
+	}
+}
+
+// A plain /proc/self entry is an ordinary file in every reading.
+func TestLateCallGradeKeepsAPlainProcessStatusOrdinary(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"cat /proc/self/status", "cat /proc/thread-self/stat"} {
+		if got := LateCallGrade(command, cwd, home); got != GradeNone {
+			t.Errorf("LateCallGrade(%q) = %v, want %v", command, got, GradeNone)
 		}
 	}
 }
