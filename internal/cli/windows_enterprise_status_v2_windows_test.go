@@ -291,6 +291,9 @@ func TestWindowsStatusV2CountsTheClaudeCodeDropInBeforeAnyAccountEnrolls(t *test
 	if err := os.WriteFile(opts.HookBinary, []byte("MZ"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(opts.HookBinary), "defenseclaw-hook-guard.exe"), []byte("MZ"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	body, err := connector.NewClaudeCodeConnector().ManagedHookPolicy(connector.SetupOpts{
 		APIAddr: "127.0.0.1:18970", HookFailMode: "closed", ManagedEnterprise: true,
 		HookExecutable: opts.HookBinary, ClaudeAllowManagedHooksOnly: true,

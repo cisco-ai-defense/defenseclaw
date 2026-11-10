@@ -95,8 +95,12 @@ def _isolated_windows_identity(tmp_path_factory, monkeypatch: pytest.MonkeyPatch
     yield
 
 
-# The module that tests the Windows launcher preflight itself.
-_LAUNCHER_PREFLIGHT_MODULES = frozenset({"test_cmd_setup_multi_connector"})
+# The modules that test the Windows launcher preflight, or fake the launcher it probes.
+_LAUNCHER_PREFLIGHT_MODULES = frozenset({
+    "test_cmd_setup_multi_connector",
+    "test_cmd_setup_codex_claudecode_alias",
+    "test_cmd_setup_fu_phase2",
+})
 
 
 @pytest.fixture(autouse=True)

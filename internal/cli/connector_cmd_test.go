@@ -63,6 +63,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the real per-user folders:", err)
 		os.Exit(1)
 	}
+	restoreChain := connector.UseClaudeCodeChainFixtureForTests()
 	restore := isolateTestHost()
 	// guardTestMachine first: guardTestProcessState marks the helper
 	// children it starts.
@@ -71,6 +72,7 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	processErr, sandboxErr := checkProcess(), checkSandbox()
 	restore()
+	restoreChain()
 	cleanupHermes()
 	for _, err := range []error{processErr, sandboxErr, checkMachine(), finishUserRoots()} {
 		if err != nil {

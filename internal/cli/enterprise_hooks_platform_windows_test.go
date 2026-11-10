@@ -573,7 +573,8 @@ func TestWindowsClaudeDeletedPolicyReconcileRetainsEnrolledTargets(t *testing.T)
 			t.Fatalf("reconcile publication (exact=%t): %v", publishExact, err)
 		}
 	}
-	if ensures != 1 || published != 2 {
+	// Every reconcile pass checks an active policy for an earlier command form.
+	if ensures != 2 || published != 2 {
 		t.Fatalf("reconcile ensured policy %d times and published targets %d times", ensures, published)
 	}
 }
