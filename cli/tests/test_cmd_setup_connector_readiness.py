@@ -177,6 +177,53 @@ def test_contract_lock_accepts_go_omitted_unversioned_fields(connector: str, tmp
     assert connector_lock_contract_invariant(connector, entry) == ""
 
 
+_HERMES_GIT_BUILD = "Hermes Agent vgit.74dc4ac (2026.9.24) - upstream 668ce5de"
+
+
+def _hermes_lock_entry(raw_version: str, tmp_path: Path) -> dict[str, object]:
+    entry = _entry("hermes", tmp_path)
+    compatibility = resolve_connector_contract("hermes", raw_version)
+    assert compatibility.contract is not None
+    entry["raw_agent_version"] = raw_version
+    entry["compatibility_status"] = compatibility.status
+    entry["contract_id"] = compatibility.contract.contract_id
+    entry["hook_script_version"] = compatibility.contract.hook_script_version
+    return entry
+
+
+def test_contract_lock_accepts_hermes_git_build_the_preflight_accepts(tmp_path: Path, monkeypatch) -> None:
+    """GAP-1043: a Hermes git checkout is the documented untested newer case end
+    to end. The preflight accepted it and the protected lock then failed its
+    version check, because this side read the commit hash as a version."""
+
+    signal = SimpleNamespace(version=_HERMES_GIT_BUILD, installed=True, error="", binary_path="")
+    assert cmd_setup._check_connector_version_supported_for_setup(
+        "hermes", mode="observe", emit=False, data_dir=str(tmp_path),
+        _discovery=SimpleNamespace(agents={"hermes": signal}),
+    )
+    compatibility = resolve_connector_contract("hermes", _HERMES_GIT_BUILD)
+    assert compatibility.untested and compatibility.normalized_version == ""
+    assert "git build" in compatibility.reason
+    entry = _hermes_lock_entry(_HERMES_GIT_BUILD, tmp_path)
+    entry["normalized_agent_version"] = ""
+    assert connector_lock_contract_invariant("hermes", entry) == ""
+    entry["normalized_agent_version"] = "74.0.0"
+    assert connector_lock_contract_invariant("hermes", entry) == "version"
+
+
+@pytest.mark.parametrize(
+    "raw_version",
+    ("Hermes Agent v0.21.5 (2026.10.1)", "Hermes Agent v0.21.5+2581.g74dc4ac", "Hermes Agent vgit.5bba024"),
+)
+def test_contract_lock_keeps_hermes_release_and_git_spellings(raw_version: str, tmp_path: Path) -> None:
+    # The gateway records a git build with no normalized version (Go
+    # ResolveHookContract) and a release with its release.
+    entry = _hermes_lock_entry(raw_version, tmp_path)
+    entry["normalized_agent_version"] = "" if "vgit." in raw_version else "0.21.5"
+    assert resolve_connector_contract("hermes", raw_version).contract is not None
+    assert connector_lock_contract_invariant("hermes", entry) == ""
+
+
 def test_contract_lock_rejects_explicit_null_agent_version(tmp_path: Path) -> None:
     entry = _entry("antigravity", tmp_path)
     entry["raw_agent_version"] = None
