@@ -18,10 +18,12 @@ import (
 
 // windowsManagedSettingsShortNames makes the managed agent settings files on
 // this volume (only those that are not there; the test removes what it
-// made), reads their real 8.3 names with GetShortPathName, and returns them
-// whole and with the long file name. The alias exists only where the volume
-// makes short names: with none the test skips, because there is no second
-// name to protect.
+// made), reads their real 8.3 names with GetShortPathName, and returns every
+// alias that exists, whole and with the long file name. A volume can name one
+// path and not another (short names can be stripped per folder), so each file
+// is judged on its own: a file with no alias adds none and the others still
+// count. The test skips only when no alias exists at all, because then there
+// is no second name to protect.
 func windowsManagedSettingsShortNames(t *testing.T) []string {
 	t.Helper()
 	files := []string{
@@ -29,27 +31,33 @@ func windowsManagedSettingsShortNames(t *testing.T) []string {
 		`C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`,
 		`C:\ProgramData\OpenAI\Codex\requirements.toml`,
 	}
-	var aliases []string
+	var aliases, notes []string
 	for _, file := range files {
-		createWindowsFixtureFile(t, file)
-		short := windowsShortPathOf(t, file)
-		if strings.EqualFold(short, file) {
-			t.Skipf("the volume generates no 8.3 short name for %s, so the alias does not exist", file)
+		if err := createWindowsFixtureFile(t, file); err != nil {
+			notes = append(notes, "cannot make "+file+" for the short-name fixture: "+err.Error())
+			continue
 		}
-		aliases = append(aliases, short)
+		if short := windowsShortPathOf(t, file); !strings.EqualFold(short, file) {
+			aliases = append(aliases, short)
+		} else {
+			notes = append(notes, "the volume generates no 8.3 short name for "+file)
+		}
 		dir, leaf := filepath.Dir(file), filepath.Base(file)
 		if shortDir := windowsShortPathOf(t, dir); !strings.EqualFold(shortDir, dir) {
 			aliases = append(aliases, shortDir+`\`+leaf)
 		}
+	}
+	if len(aliases) == 0 {
+		t.Skipf("no 8.3 alias of a managed settings file exists on this volume: %s", strings.Join(notes, "; "))
 	}
 	return aliases
 }
 
 // createWindowsFixtureFile makes file and the folders above it that are not
 // there, and removes at the end of the test what it made. A file that is
-// already there is left as it is. Where the files cannot be made (no
-// administrator) the test skips.
-func createWindowsFixtureFile(t *testing.T, file string) {
+// already there is left as it is. It returns the error where the files cannot
+// be made (no administrator), so the caller can go on with the other files.
+func createWindowsFixtureFile(t *testing.T, file string) error {
 	t.Helper()
 	var missing []string
 	for dir := filepath.Dir(file); ; {
@@ -65,19 +73,20 @@ func createWindowsFixtureFile(t *testing.T, file string) {
 	}
 	for _, dir := range missing {
 		if err := os.Mkdir(dir, 0o755); err != nil {
-			t.Skipf("cannot make %s for the short-name fixture: %v", dir, err)
+			return err
 		}
 		t.Cleanup(func() { _ = os.Remove(dir) })
 	}
 	handle, err := os.OpenFile(file, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if errors.Is(err, fs.ErrExist) {
-		return
+		return nil
 	}
 	if err != nil {
-		t.Skipf("cannot make %s for the short-name fixture: %v", file, err)
+		return err
 	}
 	_ = handle.Close()
 	t.Cleanup(func() { _ = os.Remove(file) })
+	return nil
 }
 
 // windowsShortPathOf is the path with every part that has an 8.3 name in that
