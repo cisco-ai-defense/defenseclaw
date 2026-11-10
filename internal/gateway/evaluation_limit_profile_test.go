@@ -32,6 +32,7 @@ func TestEvaluationLimitOnlyVerdictMapsByProfile(t *testing.T) {
 	}
 	limit := trustedActionLimitFindings(true)
 	observed := trustedActionLimitFindings(false)
+	omitted := withOmittedOperandLimitFinding(nil, true)
 	state := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "HIGH"}
 	keys := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL"}
 	advisory := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL", enforcement: findingEnforcementAlertOnly}
@@ -49,6 +50,10 @@ func TestEvaluationLimitOnlyVerdictMapsByProfile(t *testing.T) {
 		{"limit only, strict", limit, false, true, "block"},
 		{"limit only, Secure Client keeps the block", limit, true, false, "block"},
 		{"limit that cannot block changes nothing", observed, false, false, "allow"},
+		// A named operand the client map left out may be a link to a
+		// protected file: it keeps its block in every profile.
+		{"omitted operand, default", omitted, false, false, "block"},
+		{"omitted operand, strict", omitted, false, true, "block"},
 		{"limit and a proven keys finding block in default", with(limit, keys), false, false, "block"},
 		{"limit and self-protection block in default", with(limit, state), false, false, "block"},
 		{"limit and an advisory finding alert in default", with(limit, advisory), false, false, "alert"},

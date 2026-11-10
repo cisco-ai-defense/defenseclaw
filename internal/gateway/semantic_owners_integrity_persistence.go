@@ -1549,7 +1549,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		// not as a key write it does not name (GAP-0146); a protected target
 		// the client found is its ActionDecisionKey and is proved above.
 		symlinkWrite = false
-		findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+		findings = withOmittedOperandLimitFinding(findings, request.EnforcementCapable)
 	}
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&

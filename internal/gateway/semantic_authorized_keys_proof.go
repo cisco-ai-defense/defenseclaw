@@ -1061,6 +1061,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// so the gateway scopes both alike: an operand the client could not place
 	// (a target the call assigns inside a group) is judged by the shell
 	// reading, as the call is for a per-user gateway (rel-1-0-6:GAP-0675).
+	// Codex keeps every answer the client did place (placedByCodexClient), as
+	// it did before this scoping, so a call over the evaluation limit that
+	// the client placed in the project stays ordinary.
 	scopedClientEvidence := (request.Connector == "claudecode" || request.Connector == "codex") &&
 		request.ProtectedHomeHook
 	if scopedClientEvidence && len(request.ResolvedWriteTargets) != 0 {
@@ -1136,7 +1139,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				operand == hookpaths.LinksStableKey ||
 				operand == hookpaths.TruncatedKey ||
 				resolved == "" && (external(operand) && !truncated || closedDirectoryAnswer(operand)) ||
-				isProtected(resolved) {
+				isProtected(resolved) ||
+				placedByCodexClient(request.Connector, resolved) {
 				if scoped == nil {
 					scoped = make(map[string]string)
 				}
@@ -2270,4 +2274,12 @@ func nativeFileToolWriteOperand(input actionfacts.Input, facts actionfacts.Facts
 		}
 	}
 	return false
+}
+
+// placedByCodexClient reports a client answer that the scoping of a managed
+// Codex hook keeps whatever it names: the client resolved the operand, so it
+// is evidence, not a missing proof. Only the unplaced entries of its map are
+// left to the shell reading.
+func placedByCodexClient(connector, resolved string) bool {
+	return connector == "codex" && resolved != ""
 }

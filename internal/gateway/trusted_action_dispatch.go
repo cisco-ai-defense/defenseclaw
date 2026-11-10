@@ -9301,6 +9301,25 @@ func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bo
 	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
 }
 
+// withOmittedOperandLimitFinding adds the over-limit verdict for a named
+// write operand that the client map left out, and marks it: that finding
+// blocks in every profile, as the operand may be a link to a protected file.
+// A limit finding the call already carries is left as it is.
+func withOmittedOperandLimitFinding(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	had := slices.ContainsFunc(findings, func(finding RuleFinding) bool {
+		return finding.RuleID == "ACTION-COMPOUND-LIMIT"
+	})
+	findings = withTrustedActionLimitFinding(findings, enforcementCapable)
+	if !had {
+		for index := range findings {
+			if findings[index].RuleID == "ACTION-COMPOUND-LIMIT" {
+				findings[index].omittedOperand = true
+			}
+		}
+	}
+	return findings
+}
+
 // trustedActionLimitFindings is the over-limit verdict of a shell command
 // past the policy reading bounds.
 func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
