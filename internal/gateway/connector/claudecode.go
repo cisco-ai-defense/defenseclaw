@@ -1637,11 +1637,46 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 	if opts.ClaudeAllowManagedHooksOnly {
 		policy["allowManagedHooksOnly"] = true
 	}
-	body, err := json.MarshalIndent(policy, "", "  ")
+	body, err := marshalClaudeCodeManagedPolicy(policy, claudeCodeManagedPolicyIsCompact(opts))
 	if err != nil {
 		return nil, fmt.Errorf("marshal Claude Code managed hook policy: %w", err)
 	}
-	return append(body, '\n'), nil
+	return body, nil
+}
+
+// claudeCodeManagedPolicyIsCompact reports whether the policy carries the
+// Windows guard wrapper, which holds about 130 arguments for each of the 29
+// hook events. One argument to a line, indented nine levels deep, made that
+// document 105 KB, over the 64 KiB bound the managed state record is read
+// under, so the guardian refused the file and /ensure ended 1603 (GAP-1050).
+// Without whitespace and without HTML escapes (every & and > became a six
+// byte \u0026 or \u003e) it is a little over a third of that. Every other
+// managed policy, including the Secure Client exec form, keeps the indented
+// form byte for byte.
+func claudeCodeManagedPolicyIsCompact(opts SetupOpts) bool {
+	return claudeCodeWindowsHost() && opts.ManagedEnterprise && !opts.SecureClientHookDelivery
+}
+
+// claudeCodeWindowsHost reports whether the managed Claude Code hooks are
+// rendered for a Windows host. A test replaces it to render the Windows form
+// on any OS.
+var claudeCodeWindowsHost = func() bool { return runtime.GOOS == "windows" }
+
+func marshalClaudeCodeManagedPolicy(policy map[string]interface{}, compact bool) ([]byte, error) {
+	if !compact {
+		body, err := json.MarshalIndent(policy, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return append(body, '\n'), nil
+	}
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(policy); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 // VerifyManagedHookPolicy verifies the exact persisted managed-policy shape.
@@ -1726,7 +1761,7 @@ func appendClaudeCodeHookGroups(
 	hooks map[string]interface{}, hookCommand string, hookArgs []string, groups []claudeCodeHookGroup, unavailableOpen ...bool,
 ) {
 	open := len(unavailableOpen) > 0 && unavailableOpen[0]
-	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && runtime.GOOS == "windows"
+	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && claudeCodeWindowsHost()
 	fallback := false
 	if len(hookArgs) == 7 || len(hookArgs) == 9 {
 		fallback = claudeCodePerUserGuardTarget(
@@ -3221,7 +3256,7 @@ func verifyClaudeCodeHookGroups(
 	unavailableOpen ...bool,
 ) error {
 	open := len(unavailableOpen) > 0 && unavailableOpen[0]
-	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && runtime.GOOS == "windows"
+	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && claudeCodeWindowsHost()
 	expectedEvents := make(map[string]struct{}, len(groups))
 	for _, expected := range groups {
 		expectedEvents[expected.eventType] = struct{}{}

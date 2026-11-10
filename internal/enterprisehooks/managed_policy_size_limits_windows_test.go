@@ -7,6 +7,7 @@ package enterprisehooks
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -36,5 +37,28 @@ func TestManagedPolicySnapshotUsesThePolicyBoundNotTheStateBound(t *testing.T) {
 	}
 	if _, err := snapshotWindowsManagedPolicy(policy); err == nil {
 		t.Fatal("a policy over its bound was accepted")
+	}
+}
+
+// The policy a managed Windows install writes, every hook event wrapped by the
+// guard, is read under the state record bound too: the installed file is well
+// under it. With one wrapper argument to a line it rendered to 105 KB and the
+// managed install ended 1603 "guardian did not publish fresh required
+// coverage" (GAP-1050).
+func TestInstalledWindowsClaudePolicyFitsTheStateBound(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(fixture.policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("installed managed policy: %d bytes, state bound %d", info.Size(), windowsClaudeManagedStateLimit)
+	if info.Size() > windowsClaudeManagedStateLimit*7/8 {
+		t.Fatalf("installed managed policy is %d bytes, want well under the %d byte state bound", info.Size(), windowsClaudeManagedStateLimit)
+	}
+	if _, err := snapshotWindowsManagedFileWithLimit(fixture.policyPath, windowsClaudeManagedStateLimit); err != nil {
+		t.Fatalf("the policy is refused under the state bound: %v", err)
 	}
 }
