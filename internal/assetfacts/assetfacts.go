@@ -137,6 +137,12 @@ type Facts struct {
 	// call as unproven when it has a held or denied skill to protect, instead
 	// of judging only the folders it was told of.
 	SkillLinksTruncated bool `json:"skill_links_truncated,omitempty"`
+	// SkillLinksUnproven says a network share a path of the request is on did
+	// not answer within the hook call's wait for shares, so the links on it
+	// were not followed: a skill folder a link there leads to is not shown. The
+	// gateway judges it by the policy tier when it has a held or denied skill
+	// to protect, as it judges any check it could not finish.
+	SkillLinksUnproven bool `json:"skill_links_unproven,omitempty"`
 	// SkillsTruncated says Skills holds only the first maxSkills claims: a
 	// folder the request reaches into may declare a name no claim names, so
 	// a gateway that cannot read it cannot prove it is not a denied skill
@@ -259,7 +265,7 @@ func TailDigestAt(tail []byte, i int) []byte {
 func Encode(facts Facts) string {
 	facts.MCP = withLocalRefusal(facts.MCP)
 	facts = bounded(facts)
-	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && len(facts.SkillLinks) == 0 && !facts.SkillLinksTruncated && !facts.SkillsTruncated && len(facts.Contents) == 0 {
+	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && len(facts.SkillLinks) == 0 && !facts.SkillLinksTruncated && !facts.SkillLinksUnproven && !facts.SkillsTruncated && len(facts.Contents) == 0 {
 		return ""
 	}
 	var raw bytes.Buffer
@@ -352,7 +358,7 @@ func Decode(value string) (Facts, bool) {
 		return Facts{}, false
 	}
 	facts = bounded(facts)
-	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || len(facts.SkillLinks) > 0 || facts.SkillLinksTruncated || facts.SkillsTruncated || len(facts.Contents) > 0
+	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || len(facts.SkillLinks) > 0 || facts.SkillLinksTruncated || facts.SkillLinksUnproven || facts.SkillsTruncated || len(facts.Contents) > 0
 }
 
 // DeclaredFor returns the names the facts say folder declares.
@@ -603,6 +609,12 @@ func DeclaredSkillName(dir string) string {
 		return ""
 	}
 	path := filepath.Join(dir, "SKILL.md")
+	// A manifest on a network share that has not answered is not read: the
+	// hook would wait for the system connect timeout (ShareGate). That holds
+	// for the folder a link of the path leads to as for the path as spelled.
+	if !readableTarget(path) {
+		return ""
+	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return ""
@@ -697,6 +709,27 @@ func SkillRoots(connector, home, cwd string) []string {
 	return roots
 }
 
+// SkillLinkConnectors are the connectors that load skills from folders; a link
+// of any connector's call may lead into the skill root of another one (Codex
+// reading a folder of the Claude Code skill root).
+var SkillLinkConnectors = []string{"claudecode", "codex", "copilot"}
+
+// KnownSkillRoots lists the skill folders of every connector in
+// SkillLinkConnectors for a user with home and working folder cwd. A link is
+// judged by the folder it ends in, whatever connector's call followed it, so a
+// link claim is taken for a folder in any of these roots.
+func KnownSkillRoots(home, cwd string) []string {
+	var roots []string
+	for _, connector := range SkillLinkConnectors {
+		for _, root := range SkillRoots(connector, home, cwd) {
+			if !slices.Contains(roots, root) {
+				roots = append(roots, root)
+			}
+		}
+	}
+	return roots
+}
+
 // projectLevels lists the folders from cwd up to the repository root (or
 // maxProjectLevels folders, stopping at home) a project skill folder is
 // looked for in.
@@ -712,7 +745,7 @@ func projectLevels(home, cwd string) []string {
 			break
 		}
 		levels = append(levels, dir)
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		if pathExists(filepath.Join(dir, ".git")) {
 			break
 		}
 		parent := filepath.Dir(dir)
@@ -810,7 +843,7 @@ func launchWorkspaces(home, cwd, launch string) []string {
 	home = filepath.Clean(strings.TrimSpace(home))
 	outer, homeAbove := "", ""
 	for level := 0; level < maxProjectLevels; level++ {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		if pathExists(filepath.Join(dir, ".git")) {
 			outer = dir
 		}
 		if home != "" && home == dir {
@@ -894,52 +927,126 @@ type FolderRef struct {
 	// Linked is set when the folder is the target of a link the call's path
 	// goes through, not the spelling of the path.
 	Linked bool
+	// BareOperand is set when the call names the folder with a word that has
+	// no slash and names an existing entry in the working folder (a link, or
+	// SKILL.md from inside the folder): a gateway that cannot look into that
+	// folder cannot tell the word from any other, so the hook reports it.
+	BareOperand bool
 }
 
 // SkillFolderRefs lists the skill folders the strings of a tool input reach
 // into: every distinct path with a "skills/<name>" pair of components, in a command
 // line, a file path or a working folder. "~" and $HOME expand to home and
-// a relative path resolves against cwd.
-func SkillFolderRefs(input any, home, cwd string, caller ...string) []FolderRef {
-	account := ""
+// a relative path resolves against cwd. tool is the name of the tool the call
+// is for (it may be empty): a search tool that names no place searches cwd. A
+// slash-free word is a path only as the name of an existing entry that leads
+// into a skill folder: a command line that holds such a name anywhere in its
+// text, and a word that reads, copies, writes or runs, reads that folder in
+// every tier; the strict tier needs no such word (see operand_context.go).
+func SkillFolderRefs(tool string, input any, home, cwd string, caller ...string) []FolderRef {
+	return skillFolderRefsForCaller(tool, input, home, cwd, callerName(caller), os.Geteuid(), os.Getegid(), false)
+}
+
+// SkillFolderRefsStrict is SkillFolderRefs for the strict policy tier: a
+// command line that holds the name of an entry that leads into a skill folder
+// reads that folder, with or without a word that reads or runs.
+func SkillFolderRefsStrict(tool string, input any, home, cwd string, caller ...string) []FolderRef {
+	return skillFolderRefsForCaller(tool, input, home, cwd, callerName(caller), os.Geteuid(), os.Getegid(), true)
+}
+
+func callerName(caller []string) string {
 	if len(caller) > 0 {
-		account = caller[0]
+		return caller[0]
 	}
-	return skillFolderRefsForCaller(input, home, cwd, account, os.Geteuid(), os.Getegid())
+	return ""
 }
 
 // SkillFolderRefsForPeer resolves a managed hook request using the kernel
-// credentials of the caller, rather than the gateway service account.
-func SkillFolderRefsForPeer(input any, home, cwd, caller string, uid, gid int) []FolderRef {
-	return skillFolderRefsForCaller(input, home, cwd, caller, uid, gid)
+// credentials of the caller, rather than the gateway service account. strict
+// is as for SkillFolderRefsStrict.
+func SkillFolderRefsForPeer(tool string, input any, home, cwd, caller string, uid, gid int, strict bool) []FolderRef {
+	return skillFolderRefsForCaller(tool, input, home, cwd, caller, uid, gid, strict)
 }
 
-func skillFolderRefsForCaller(input any, home, cwd, account string, uid, gid int) []FolderRef {
-	var values []string
-	collectStrings(input, 0, &values)
+func skillFolderRefsForCaller(tool string, input any, home, cwd, account string, uid, gid int, strict bool) []FolderRef {
+	var fields []inputField
+	collectFields(tool, input, "", 0, &fields)
 	seen := map[string]int{}
 	var refs []FolderRef
-	add := func(value, dir string, explicit bool) {
-		for _, token := range commandPathTokens(value) {
-			for _, ref := range skillFolderRefs(token, home, dir, account) {
-				ref.ExplicitDirectory = explicit
-				if index, ok := seen[ref.Dir]; ok {
-					refs[index].Manifest = refs[index].Manifest || ref.Manifest
-					refs[index].ExplicitDirectory = refs[index].ExplicitDirectory && explicit
-					continue
+	scan := newEntryScan(home, account)
+	addRefs := func(found []FolderRef, explicit bool) {
+		for _, ref := range found {
+			ref.ExplicitDirectory = explicit
+			if index, ok := seen[ref.Dir]; ok {
+				refs[index].Manifest = refs[index].Manifest || ref.Manifest
+				refs[index].BareOperand = refs[index].BareOperand || ref.BareOperand
+				refs[index].ExplicitDirectory = refs[index].ExplicitDirectory && explicit
+				continue
+			}
+			seen[ref.Dir] = len(refs)
+			refs = append(refs, ref)
+		}
+	}
+	addToken := func(token, dir string, explicit bool) {
+		addRefs(skillFolderRefs(token, home, dir, account), explicit)
+	}
+	add := func(f inputField, text, dir string, explicit bool) {
+		kind := kindOfField(tool, f.key)
+		switch kind {
+		case kindPath:
+			// One path, judged whole as typed, with the spaces and tabs of
+			// its folder names.
+			addToken(text, dir, explicit)
+		case kindText:
+			for _, word := range slashWords(text) {
+				addToken(word, dir, explicit)
+			}
+		default:
+			if kind == kindOther && !strings.ContainsAny(text, " \t") {
+				// A field no rule knows may hold one path.
+				addToken(text, dir, explicit)
+			}
+			// A word with a slash in it is a path, whatever the program. A
+			// word without one is a path when it is the name of an entry of
+			// the folder and the line also holds a word that reads or runs
+			// something (any line in the strict tier); an argument vector
+			// is read as one line, its elements joined by one space, and
+			// each element with a slash is one path whole.
+			line := text
+			if f.argv != nil {
+				line = strings.Join(f.argv, " ")
+				for _, element := range f.argv {
+					if strings.ContainsAny(element, "/\\") {
+						addToken(element, dir, explicit)
+					}
 				}
-				seen[ref.Dir] = len(refs)
-				refs = append(refs, ref)
+			} else {
+				for _, word := range slashWords(line) {
+					addToken(word, dir, explicit)
+				}
+			}
+			if strict || kind == kindOther || holdsReaderWord(textForms(line)) {
+				addRefs(scan.folders(line, dir), explicit)
+			}
+			if runsFolderReader(line, f.argv, kind == kindCommand) {
+				addToken(dir, dir, explicit)
 			}
 		}
 	}
-	for _, value := range values {
+	if searchesWorkingFolder(tool, fields) {
+		addToken(cwd, cwd, false)
+	}
+	for _, field := range fields {
+		if field.argv != nil || !kindOfField(tool, field.key).isCommandField() {
+			add(field, field.text, cwd, false)
+			continue
+		}
 		type position struct {
 			value    string
 			dir      string
 			explicit bool
 		}
-		positions := []position{{value: value, dir: cwd}}
+		positions := []position{{value: field.text, dir: cwd}}
 		for i := 0; i < 8; i++ {
 			var nextPositions []position
 			changed := false
@@ -950,7 +1057,7 @@ func skillFolderRefsForCaller(input any, home, cwd, account string, uid, gid int
 					continue
 				}
 				changed = true
-				add(prefix, current.dir, current.explicit)
+				add(field, prefix, current.dir, current.explicit)
 				nextPositions = append(nextPositions, position{rest, next, true})
 				if sequential && !certain {
 					// A sequential successor runs in cwd when cd fails. A
@@ -972,7 +1079,7 @@ func skillFolderRefsForCaller(input any, home, cwd, account string, uid, gid int
 			}
 		}
 		for _, current := range positions {
-			add(current.value, current.dir, current.explicit)
+			add(field, current.value, current.dir, current.explicit)
 		}
 	}
 	return refs
@@ -1007,7 +1114,7 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) 
 		case quote == 0 && (ch == ';' || ch == '\n' ||
 			ch == '&' && i+1 < len(value) && value[i+1] == '&'):
 			prefix = value[:i]
-			words := commandPathTokens(prefix)
+			words := splitWords(prefix, false)
 			if len(words) != 2 || words[0] != "cd" || words[1] == "-" ||
 				strings.ContainsAny(words[1], "*?[]{}$`") {
 				return "", "", "", false, false, false
@@ -1023,19 +1130,17 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) 
 			if dir == "" || strings.HasPrefix(dir, "~") {
 				return "", "", "", false, false, false
 			}
-			if !filepath.IsAbs(dir) {
-				dir = filepath.Join(cwd, dir)
-			}
+			dir = filepath.Clean(placeIn(dir, cwd))
 			separatorWidth := 1
 			if ch == '&' {
 				separatorWidth = 2
 			}
+			// The links of the directory are followed as the path walk follows
+			// them: one part at a time, and on a network share only once it
+			// has answered. Entry is proven only for a directory that exists.
 			original := dir
-			resolved, err := filepath.EvalSymlinks(dir)
-			if err == nil {
-				dir = resolved
-			}
-			if err == nil {
+			dir = ResolveLinks(dir)
+			if shareAnswers(original) && shareAnswers(dir) {
 				if info, statErr := os.Stat(dir); statErr == nil && info.IsDir() {
 					certain = callerCanEnterDirectory(original, uid, gid) && callerCanEnterDirectory(dir, uid, gid)
 				}
@@ -1044,28 +1149,6 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) 
 		}
 	}
 	return "", "", "", false, false, false
-}
-
-func collectStrings(value any, depth int, out *[]string) {
-	if depth > maxInputDepth || len(*out) >= maxInputStrings {
-		return
-	}
-	switch v := value.(type) {
-	case string:
-		*out = append(*out, v)
-	case []any:
-		for _, item := range v {
-			collectStrings(item, depth+1, out)
-		}
-	case []string:
-		for _, item := range v {
-			collectStrings(item, depth+1, out)
-		}
-	case map[string]any:
-		for _, key := range inputKeys(v) {
-			collectStrings(v[key], depth+1, out)
-		}
-	}
 }
 
 // pathInputKeys are the tool-input fields that usually carry a path or a
@@ -1096,57 +1179,6 @@ func inputKeys(m map[string]any) []string {
 	return keys
 }
 
-func isCommandSeparator(r rune) bool {
-	switch r {
-	case 0x20, 0x09, 0x0a, 0x0d, 0x22, 0x27, 0x60, 0x3b, 0x7c, 0x26, 0x28, 0x29, 0x3c, 0x3e, 0x3d, 0x2c:
-		return true
-	}
-	return false
-}
-
-// commandPathTokens preserves spaces inside shell quotes and escaped spaces
-// while keeping command operators separate from candidate paths.
-func commandPathTokens(value string) []string {
-	var tokens []string
-	var current strings.Builder
-	var quote rune
-	flush := func() {
-		if current.Len() > 0 {
-			tokens = append(tokens, current.String())
-			current.Reset()
-		}
-	}
-	chars := []rune(value)
-	for i := 0; i < len(chars); i++ {
-		ch := chars[i]
-		if ch == 0x5c && quote != 0x27 && i+1 < len(chars) {
-			next := chars[i+1]
-			if next == 0x20 || next == 0x09 || next == 0x22 || next == 0x27 {
-				current.WriteRune(next)
-				i++
-				continue
-			}
-		}
-		if ch == 0x22 || ch == 0x27 {
-			if quote == 0 {
-				quote = ch
-				continue
-			}
-			if quote == ch {
-				quote = 0
-				continue
-			}
-		}
-		if quote == 0 && isCommandSeparator(ch) {
-			flush()
-			continue
-		}
-		current.WriteRune(ch)
-	}
-	flush()
-	return tokens
-}
-
 // msysDriveSpelling spells a Git Bash drive mount (/c/x, /cygdrive/c/x,
 // and //c/x) as the drive path C:/x on Windows, where Git Bash, the shell
 // Claude Code and other agents run, maps it to that drive: the deny list
@@ -1163,11 +1195,63 @@ func msysDriveSpelling(path string) string {
 	return actionfacts.MSYSDrivePath(path)
 }
 
+// placeIn spells path as an absolute path for a command that runs in cwd. An
+// absolute path stays as it is. A path that starts with a separator but names
+// no drive (/dev/null, \tmp\x) is rooted on the drive of cwd, as the system
+// reads it on Windows, and is not a path below cwd. A path with a drive and no
+// separator after it (C:link\SKILL.md) is relative to the working folder of
+// that drive: below cwd when the drive is the drive of cwd, in the spelling
+// given without the drive. The working folder of another drive is not in the
+// hook event, so that path cannot be placed: it stays as written and the call
+// is recorded as one whose links are unproven (UnprovenLinkNote). Any other
+// path is below cwd, in the spelling given (a parent segment is not folded
+// away: the links of the path are followed in order).
+func placeIn(path, cwd string) string {
+	if filepath.IsAbs(path) || cwd == "" {
+		return path
+	}
+	cwdVolume := filepath.VolumeName(cwd)
+	if volume := filepath.VolumeName(path); volume != "" {
+		if !strings.EqualFold(volume, cwdVolume) {
+			if UnprovenLinkNote != nil {
+				UnprovenLinkNote()
+			}
+			return path
+		}
+		path = path[len(volume):]
+		if path == "" {
+			return cwd
+		}
+	} else if cwdVolume != "" && path != "" && os.IsPathSeparator(path[0]) {
+		return cwdVolume + path
+	}
+	return cwd + string(filepath.Separator) + path
+}
+
+// UnprovenLinkNote tells the hook call that a path of the request could not be
+// placed, so the folder it reaches, and the links on the way, are unknown (a
+// drive-relative path on a drive other than the one of the working folder).
+// The hookpaths package, which keeps the call, sets it at start: the call is
+// then judged as one whose links are unproven (SkillLinksUnproven). With none
+// set the path is only left as written.
+var UnprovenLinkNote func()
+
 func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
-	if !strings.ContainsAny(token, "/\\") {
+	// A name with a drive in front and no separator after it (C:link) is the
+	// name of an entry of that drive's working folder, as the system reads it:
+	// of cwd when the drive is the drive of cwd. On another drive it is not
+	// shown to be a word, and placeIn records that it cannot be placed.
+	word := token
+	bare := true
+	if volume := filepath.VolumeName(token); volume != "" && !filepath.IsAbs(token) {
+		bare = strings.EqualFold(volume, filepath.VolumeName(cwd))
+		word = token[len(volume):]
+	}
+	bare = bare && !strings.ContainsAny(word, "/\\")
+	if bare && !namesEntryIn(cwd, word) && (word != "" || token == "") {
 		return nil
 	}
-	path := strings.ReplaceAll(token, "\\", "/")
+	path := trimExtendedPrefix(strings.ReplaceAll(token, "\\", "/"))
 	if caller != "" && !strings.ContainsAny(caller, "/\\") && strings.HasPrefix(path, "~"+caller+"/") && home != "" {
 		path = filepath.ToSlash(home) + "/" + strings.TrimPrefix(path, "~"+caller+"/")
 	}
@@ -1181,11 +1265,14 @@ func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 	// Resolve the entire path before selecting skills/<name> pairs. A
 	// parent segment can otherwise change which skill folders are reached.
 	raw := filepath.FromSlash(path)
-	if !filepath.IsAbs(raw) && strings.TrimSpace(cwd) != "" {
-		raw = cwd + string(filepath.Separator) + raw
+	if strings.TrimSpace(cwd) != "" {
+		raw = placeIn(raw, cwd)
 	}
 	dir := filepath.Clean(raw)
 	refs := skillFolderRefsIn(dir, false)
+	for i := range refs {
+		refs[i].BareOperand = bare
+	}
 	// A link anywhere on the path leads into a skill folder the spelling
 	// does not show. The folder it ends in is judged as the direct path is.
 	// The raw spelling is followed in the order the filesystem takes it: a
@@ -1193,9 +1280,40 @@ func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 	// folder that holds the link. A path that cannot be followed (a missing
 	// folder, one the caller may not enter) stays as written.
 	if real := ResolveLinks(raw); real != dir {
-		refs = append(refs, skillFolderRefsIn(real, true)...)
+		for _, ref := range skillFolderRefsIn(real, true) {
+			ref.BareOperand = bare
+			refs = append(refs, ref)
+		}
 	}
 	return refs
+}
+
+// namesEntryIn reports whether the slash-free word token names an entry that
+// exists in the folder cwd. A word that names one is a path, spelled as
+// ./token would be: a link, or SKILL.md read from inside a skill folder. Any
+// other word stays a word (a command, a flag, a pattern), so an ordinary call
+// is not read as naming a folder. On a network share the entry is looked up
+// only once the share has answered.
+func namesEntryIn(cwd, token string) bool {
+	if token == "" || !filepath.IsAbs(cwd) {
+		return false
+	}
+	path := cwd + string(filepath.Separator) + token
+	if !ShareAnswers(path) {
+		return false
+	}
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+// pathExists reports whether path exists; a path on a network share that has
+// not answered reads as missing.
+func pathExists(path string) bool {
+	if !readableTarget(path) {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // skillFolderRefsIn lists the skills/<name> pairs of the cleaned path dir.
@@ -1220,10 +1338,63 @@ func skillFolderRefsIn(dir string, linked bool) []FolderRef {
 // maxLinkHops bounds the links ResolveLinks follows.
 const maxLinkHops = 40
 
+// ShareGate tells ResolveLinks whether the file system under path may be
+// read: true for a local path and for a path on a network share that has
+// answered, false for a share that has not (within the wait the hook call has
+// for shares). The hookpaths package, which asks the shares, sets it at start
+// (it imports this package, so this one cannot ask); with none set every path
+// is read.
+var ShareGate func(path string) bool
+
+func shareAnswers(path string) bool { return ShareGate == nil || ShareGate(path) }
+
+// ShareAnswers reports whether the hook may look path up (Lstat): it is local
+// or on a network share that has answered (ShareGate), and so is the folder
+// that holds it once the links on its way are followed, since the lookup goes
+// where they lead. Lookups of a path a call names go through it.
+func ShareAnswers(path string) bool {
+	return ShareGate == nil || ShareGate(path) && ShareGate(ResolveLinks(filepath.Dir(path)))
+}
+
+// readableTarget reports whether the hook may read path: it, and the folder
+// every link on it leads to, are local or on a network share that has
+// answered. The read of a path whose folder is a link goes where the link
+// leads, not where the spelling shows.
+func readableTarget(path string) bool {
+	return ShareGate == nil || ShareGate(path) && ShareGate(ResolveLinks(path))
+}
+
+// trimExtendedPrefix spells a Windows extended-length path (//?/C:/x,
+// //./C:/x, //?/UNC/host/share/x, written with forward slashes) the usual way
+// (C:/x, //host/share/x), so the links of the path are followed once, from a
+// spelling the deny rules and the skill roots share. path uses forward
+// slashes. A path of any other shape (a volume GUID) is returned unchanged.
+func trimExtendedPrefix(path string) string {
+	rest, ok := strings.CutPrefix(path, "//?/")
+	if !ok {
+		rest, ok = strings.CutPrefix(path, "//./")
+	}
+	switch {
+	case !ok:
+		return path
+	case len(rest) >= 4 && strings.EqualFold(rest[:4], "unc/"):
+		return "//" + rest[4:]
+	case len(rest) >= 2 && rest[1] == 0x3a && (rest[0]|0x20) >= 0x61 && (rest[0]|0x20) <= 0x7a:
+		return rest
+	}
+	return path
+}
+
 // ResolveLinks follows every link (symlink, junction or reparse point) in
 // path, one component at a time in the order the filesystem takes them: a
 // parent segment removes the last component of the path as resolved so far,
 // so it leaves the folder a link leads to, not the folder that holds the link.
+// A part on a network share (a Windows UNC path, or a path a link leads onto
+// one) is examined only once the share has answered (ShareGate): reading its
+// attributes opens a session with another machine, and one that does not
+// answer holds the hook for the system connect timeout. A share that answers
+// is followed like any folder, links on it included; the rest of a path after
+// a share that did not answer stays as spelled.
 // Pass the path as it is spelled; cleaning it first would drop that segment
 // before the link in front of it is known. A link whose target is missing is
 // read and followed all the same, so a link placed before its target exists
@@ -1233,6 +1404,9 @@ const maxLinkHops = 40
 // relative path, or one with more than maxLinkHops links (a loop), comes back
 // cleaned and unresolved.
 func ResolveLinks(path string) string {
+	if runtime.GOOS == "windows" {
+		path = filepath.FromSlash(trimExtendedPrefix(filepath.ToSlash(path)))
+	}
 	volume := filepath.VolumeName(path)
 	rest := filepath.ToSlash(path[len(volume):])
 	if !strings.HasPrefix(rest, "/") {
@@ -1252,6 +1426,9 @@ func ResolveLinks(path string) string {
 			continue
 		}
 		next := filepath.Join(resolved, part)
+		if !shareAnswers(next) {
+			return filepath.Join(append([]string{next}, pending...)...)
+		}
 		info, err := os.Lstat(next)
 		if err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 			resolved = next
@@ -1278,6 +1455,9 @@ func ResolveLinks(path string) string {
 	// A path that exists and has no link left is spelled as the filesystem
 	// spells it (a Windows short name, the case of a folder); a missing one
 	// stays as written.
+	if !shareAnswers(resolved) {
+		return resolved
+	}
 	if real, err := filepath.EvalSymlinks(resolved); err == nil {
 		return real
 	}

@@ -34,10 +34,11 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 		return err
 	}
 	setup := withWindowsClaudeManagedHooksOnly(connector.SetupOpts{
-		APIAddr:           gatewayAddr,
-		HookFailMode:      "closed",
-		ManagedEnterprise: true,
-		HookExecutable:    hookExecutable,
+		APIAddr:                  gatewayAddr,
+		HookFailMode:             "closed",
+		ManagedEnterprise:        true,
+		SecureClientHookDelivery: secureClientHookDelivery(),
+		HookExecutable:           hookExecutable,
 	})
 	provider := connector.NewClaudeCodeConnector()
 	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
@@ -98,13 +99,21 @@ func claudeManagedPolicyMatchesKnownContract(
 	policy []byte,
 	setup connector.SetupOpts,
 ) bool {
-	for _, contract := range connector.KnownHookContracts("claudecode") {
+	for _, contractID := range windowsClaudeRecordedPolicyContracts() {
 		for _, lock := range []bool{setup.ClaudeAllowManagedHooksOnly, !setup.ClaudeAllowManagedHooksOnly} {
 			pinned := setup
-			pinned.HookContractID = contract.ContractID
+			pinned.HookContractID = contractID
 			pinned.ClaudeAllowManagedHooksOnly = lock
 			if provider.VerifyManagedHookPolicy(policy, pinned) == nil {
 				return true
+			}
+			// An authenticated standalone policy from the earlier direct
+			// delivery form remains this deployment's policy during upgrade.
+			if !setup.SecureClientHookDelivery {
+				pinned.SecureClientHookDelivery = true
+				if provider.VerifyManagedHookPolicy(policy, pinned) == nil {
+					return true
+				}
 			}
 		}
 	}

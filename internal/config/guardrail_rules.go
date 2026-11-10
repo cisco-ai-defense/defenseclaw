@@ -18,6 +18,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path"
@@ -180,6 +181,29 @@ func (c *Config) offlineVendorPath(dir string) string {
 // Setup /ensure exited 1639.
 func (c *Config) EmbeddedRulePack(ref RulePackRef) bool {
 	return c != nil && c.BuiltinRulePackFor(ref.Name) == "default" && strings.TrimSpace(c.PolicyDir) == ""
+}
+
+// WindowsBuiltinRulePackAdvice is what to do when a managed Windows
+// standalone install selects the strict or permissive rule pack and has no
+// pack folder ("" for default and for any other install). The Windows Setup is a signed,
+// fixed set of files with no policy folder, so strict and permissive have no
+// files there to default to (Linux and macOS ship them in the vendor folder).
+// The administrator brings the pack: a policy_dir with guardrail\<name>, or a
+// custom pack. The refusal names both properties (GAP-1041).
+func (c *Config) WindowsBuiltinRulePackAdvice(name string) string {
+	if c == nil || !c.StandaloneEnterprise() || (name != "strict" && name != "permissive") {
+		return ""
+	}
+	if _, onUnixLayout := standaloneUnixLayoutForConfig(c.ConfigFilePath); onUnixLayout {
+		return ""
+	}
+	if path := strings.TrimSpace(c.ConfigFilePath); path != "" && !strings.Contains(path, `:\`) && !strings.HasPrefix(path, `\\`) {
+		return ""
+	}
+	return fmt.Sprintf("the Windows Setup ships only the default rule pack, so %[1]s has no files here. "+
+		"Use rule_pack: default; or set policy_dir to an administrator-owned folder that holds guardrail\\%[1]s "+
+		"(copy policies\\guardrail\\%[1]s from the release); or select your own copy with guardrail.rule_pack and "+
+		"guardrail.custom_packs.<name>.path and .digest (Custom rule packs in the Windows enterprise guide)", name)
 }
 
 // vendorRulePackDir is the shipped built-in pack name of the Linux or macOS

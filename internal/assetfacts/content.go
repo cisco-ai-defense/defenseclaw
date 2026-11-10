@@ -123,6 +123,9 @@ var contentSkipDir = map[string]bool{".git": true, "node_modules": true, "__pyca
 // folder.
 func ReadContent(kind, name, dir string) (Content, bool) {
 	out := Content{Kind: kind, Name: name, Dir: filepath.Clean(dir)}
+	if !readableTarget(dir) {
+		return Content{}, false
+	}
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return Content{}, false
@@ -166,6 +169,10 @@ func ReadContent(kind, name, dir string) (Content, bool) {
 		depth := strings.Count(filepath.ToSlash(rel), "/")
 		switch {
 		case entry.Type()&fs.ModeSymlink != 0:
+			if !readableTarget(p) {
+				out.Truncated = true
+				return nil
+			}
 			target, statErr := os.Stat(p)
 			switch {
 			case statErr != nil || !target.Mode().IsRegular():
@@ -230,6 +237,9 @@ func ReadContent(kind, name, dir string) (Content, bool) {
 // readPrefix reads at most limit bytes of a regular file, or of the regular
 // file a link leads to; nil when it cannot.
 func readPrefix(p string, limit int) (data []byte, truncated bool) {
+	if !readableTarget(p) {
+		return nil, false
+	}
 	info, err := os.Stat(p)
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, false

@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // hookAssetFacts is the assetfacts.Header value of a standalone managed
@@ -29,12 +30,14 @@ import (
 // in their SKILL.md, the folders a skill selected by name (or typed as a
 // Claude Code /name) exists in, and the definition of the MCP server a tool
 // call names, read as the user (GAP-0570, GAP-0576, GAP-1212, GAP-0968).
-// The gateway, a service account, may not read this home.
+// The gateway, a service account, may not read this home. Every connector
+// reports the skill folders a link or a bare operand of the call leads into,
+// since the gateway judges the folder a link ends in whatever connector's call
+// followed it; only Claude Code, Codex and Copilot also report skills selected
+// by name, MCP servers and skill text.
 func hookAssetFacts(connector string, payload []byte) string {
 	connector = strings.ToLower(strings.TrimSpace(connector))
-	if connector != "claudecode" && connector != "codex" && connector != "copilot" {
-		return ""
-	}
+	selects := connector == "claudecode" || connector == "codex" || connector == "copilot"
 	var event struct {
 		ToolName      string          `json:"tool_name"`
 		ToolNameCamel string          `json:"toolName"`
@@ -55,6 +58,9 @@ func hookAssetFacts(connector string, payload []byte) string {
 		event.ToolInput = hookToolArgs(event.ToolArgs)
 	}
 	home, _ := os.UserHomeDir()
+	// The links of the call are followed on a network share only once it has
+	// answered, within the wait this call has for shares.
+	defer hookpaths.HookCall()()
 	var facts assetfacts.Facts
 	addSkill := func(folder, dir string) {
 		declared := assetfacts.DeclaredSkillName(dir)
@@ -62,27 +68,31 @@ func hookAssetFacts(connector string, payload []byte) string {
 			facts.Skills = append(facts.Skills, assetfacts.Skill{Folder: folder, Declared: declared})
 		}
 	}
-	if name := hookInvokedSkillName(connector, event.ToolName, event.ToolInput, event.Prompt); name != "" {
+	if name := hookInvokedSkillName(connector, event.ToolName, event.ToolInput, event.Prompt); name != "" && selects {
 		for _, root := range hookSkillRoots(connector, home, event.CWD) {
 			dir := filepath.Join(root, name)
 			addSkill(name, dir)
-			if _, err := os.Lstat(dir); err == nil {
+			if hookPathExists(dir) {
 				facts.SkillDirs = append(facts.SkillDirs, dir)
 			}
 		}
 	}
-	for _, ref := range assetfacts.SkillFolderRefs(event.ToolInput, home, event.CWD) {
+	for _, ref := range assetfacts.SkillFolderRefs(event.ToolName, event.ToolInput, home, event.CWD) {
 		addSkill(ref.Name, ref.Dir)
-		if ref.Linked && hookLinkedSkillFolder(connector, home, event.CWD, ref.Dir) && !slices.Contains(facts.SkillLinks, ref.Dir) {
-			// The gateway may not follow the link in this home; say where it
-			// leads.
+		if (ref.Linked || ref.BareOperand) && hookLinkedSkillFolder(connector, home, event.CWD, ref.Dir) && !slices.Contains(facts.SkillLinks, ref.Dir) {
+			// The gateway may not follow the link in this home, nor tell a
+			// bare word from a name there; say which folder the call reaches.
 			facts.SkillLinks = append(facts.SkillLinks, ref.Dir)
 		}
-		if _, err := os.Lstat(ref.Dir); errors.Is(err, os.ErrNotExist) {
+		if selects && hookPathMissing(ref.Dir) {
 			for _, root := range hookSkillRoots(connector, home, event.CWD) {
 				addSkill(ref.Name, filepath.Join(root, ref.Name))
 			}
 		}
+	}
+	facts.SkillLinksUnproven = hookpaths.SkillLinksUnproven()
+	if !selects {
+		return assetfacts.Encode(facts)
 	}
 	if server := hookMCPServerName(event.ToolName, event.MCPServerName); server != "" && connector != "copilot" {
 		entry, source, ok := hookCommandLineMCPServer(connector, event.CWD, server)
@@ -115,13 +125,40 @@ func hookAssetFacts(connector string, payload []byte) string {
 	return assetfacts.Encode(facts)
 }
 
+// hookPathExists and hookPathMissing look a path up only once a network share
+// on it has answered (assetfacts.ShareGate): a path on one that has not reads
+// as neither existing nor missing, as an unreadable one does.
+func hookPathExists(path string) bool {
+	if !assetfacts.ShareAnswers(path) {
+		return false
+	}
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+func hookPathMissing(path string) bool {
+	if !assetfacts.ShareAnswers(path) {
+		return false
+	}
+	_, err := os.Lstat(path)
+	return errors.Is(err, os.ErrNotExist)
+}
+
 // hookLinkedSkillFolder reports whether dir, where a link of the call ends, is
-// a folder directly in a skill root of the connector, spelled as the root or as
-// the root resolves: the only place the gateway takes a reported link, so the
-// claim carries nothing else.
+// a folder directly in a skill root of the connector or of any connector that
+// loads skills from folders, spelled as the root or as the root resolves: the
+// only place the gateway takes a reported link, so the claim carries nothing
+// else. The folder a link ends in is protected whichever connector's call
+// follows the link.
 func hookLinkedSkillFolder(connector, home, cwd, dir string) bool {
 	parent := filepath.Dir(dir)
-	for _, root := range hookSkillRoots(connector, home, cwd) {
+	roots := hookSkillRoots(connector, home, cwd)
+	for _, root := range assetfacts.KnownSkillRoots(home, cwd) {
+		if !slices.Contains(roots, root) {
+			roots = append(roots, root)
+		}
+	}
+	for _, root := range roots {
 		if parent == filepath.Clean(root) || parent == assetfacts.ResolveLinks(root) {
 			return true
 		}

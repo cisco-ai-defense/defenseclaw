@@ -126,7 +126,8 @@ type hookFailureLine struct {
 	Category string `json:"category"`
 	FailMode string `json:"fail_mode"`
 	// Outcome is what the call got: fail_open (it ran unchecked),
-	// fail_closed (it was blocked) or diagnostic (a record that is no
+	// fail_closed (it was blocked), unconfirmed (a gateway line for a call
+	// whose client left: no delivery proved) or diagnostic (a record that is no
 	// delivery decision, such as a rejected traceparent: the call still went
 	// to the gateway). A call that strict availability or an event contract
 	// blocked is logged with the connector's fail mode open and outcome
@@ -143,7 +144,7 @@ type hookFailureLine struct {
 // counts, so an upgrade never hides a call that ran unchecked.
 func (l hookFailureLine) ranUnchecked() bool {
 	switch strings.TrimSpace(l.Outcome) {
-	case "fail_open":
+	case "fail_open", hookActionUnconfirmed:
 		return true
 	case "fail_closed", "diagnostic":
 		return false
@@ -445,7 +446,10 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 		}
 		env := audit.CorrelationEnvelope{Connector: call.entry.Connector,
 			SessionID: call.entry.SessionID, RequestID: call.entry.CallID}
-		if call.blocked {
+		if call.blocked || hookFailureOwnsToolCall(call.entry) {
+			// A block, and the allow a hook gave a pre-execution event, are the
+			// record of that tool call: the row names its tool id, so the call
+			// can be found beside (or without) the gateway decision.
 			env.ToolID = strings.TrimSpace(call.entry.ToolID)
 		}
 		action, target, details, severity := hookFailureRow(call)
@@ -518,7 +522,9 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 }
 
 // hookFailureRow is the audit row of one hook-failure line: a fail-open
-// call ran unchecked (guardrail-warn, HIGH); a fail-closed one was blocked by
+// tool call of a pre-execution event is its decision row (connector-hook,
+// action=allow, HIGH, target the event); any other fail-open call ran
+// unchecked (guardrail-warn, HIGH); a fail-closed one was blocked by
 // the hook (guardrail-block, MEDIUM, target connector:event). Only the
 // block of a pre-execution event is the call's own block, the answer the
 // agent got for it; a post-execution event's tool had already run, and a
@@ -530,13 +536,41 @@ func hookFailureRow(call hookFailureCall) (action, target, details, severity str
 		reason = reason[:300]
 	}
 	connectorName := call.entry.Connector
-	if !call.blocked {
-		return string(audit.ActionGuardrailWarn), connectorName,
-			fmt.Sprintf("unchecked hook call during gateway outage: %s; see logs/%s", strconv.Quote(reason), hookFailuresFile), "HIGH"
-	}
 	event := strings.Join(strings.Fields(call.entry.Event), "")
 	if len(event) > 64 {
 		event = event[:64]
+	}
+	if !call.blocked {
+		if hookFailureOwnsToolCall(call.entry) && call.entry.auditGap() &&
+			strings.TrimSpace(call.entry.Outcome) == hookActionUnconfirmed {
+			// The client left before the gateway answer was delivered and the
+			// audit write failed: no delivery is proved, so the row is the
+			// unconfirmed decision, never an allow or a block.
+			return string(audit.ActionConnectorHook), event,
+				fmt.Sprintf("connector=%s action=unconfirmed event=%s delivered=unconfirmed: the client left before the gateway "+
+					"answer was delivered and the gateway could not write its audit record (%s); see logs/%s",
+					connectorName, event, strconv.Quote(reason), hookFailuresFile), "HIGH"
+		}
+		if hookFailureOwnsToolCall(call.entry) && call.entry.auditGap() {
+			// The gateway answered the call and wrote this line because its
+			// audit write failed: the allow is the answer it gave.
+			return string(audit.ActionConnectorHook), event,
+				fmt.Sprintf("connector=%s action=allow event=%s delivered=audit-recovered: the gateway allowed this tool call "+
+					"and could not write its audit record when it did (%s); see logs/%s",
+					connectorName, event, strconv.Quote(reason), hookFailuresFile), "HIGH"
+		}
+		if hookFailureOwnsToolCall(call.entry) {
+			// The hook wrote this line when it let the tool call go: the allow is
+			// proved by the hook itself. The row is the call's decision row (the
+			// kind and the action=allow field of a gateway decision), so a join
+			// by tool id finds the call whether or not the gateway recorded one.
+			return string(audit.ActionConnectorHook), event,
+				fmt.Sprintf("connector=%s action=allow event=%s delivered=fail-open: the hook allowed this tool call "+
+					"without a gateway decision (%s); see logs/%s",
+					connectorName, event, strconv.Quote(reason), hookFailuresFile), "HIGH"
+		}
+		return string(audit.ActionGuardrailWarn), connectorName,
+			fmt.Sprintf("unchecked hook call during gateway outage: %s; see logs/%s", strconv.Quote(reason), hookFailuresFile), "HIGH"
 	}
 	target = connectorName
 	if event != "" {
@@ -544,6 +578,8 @@ func hookFailureRow(call hookFailureCall) (action, target, details, severity str
 	}
 	var what string
 	switch {
+	case call.entry.auditGap():
+		what = fmt.Sprintf("the gateway blocked the call (%s) and could not write its audit record when it did", event)
 	case event == "":
 		what = "hook blocked a hook event itself (fail-closed; the line names no event, so this is not claimed as the call's verdict)"
 	case hookexec.ToolGateEvent(connectorName, event):
@@ -557,6 +593,14 @@ func hookFailureRow(call hookFailureCall) (action, target, details, severity str
 	}
 	return string(audit.ActionGuardrailBlock), target,
 		fmt.Sprintf("%s: %s; see logs/%s", what, strconv.Quote(reason), hookFailuresFile), "MEDIUM"
+}
+
+// hookFailureOwnsToolCall reports a line that is the record of one tool
+// call: it names a pre-execution event and the agent tool call id. A line of
+// a shell hook before 1.0.7 names no event and is not claimed as a call.
+func hookFailureOwnsToolCall(entry hookFailureLine) bool {
+	return strings.TrimSpace(entry.ToolID) != "" &&
+		hookexec.ToolGateEvent(entry.Connector, strings.Join(strings.Fields(entry.Event), ""))
 }
 
 // postExecutionHookEvent reports a hook event that runs after its tool
@@ -671,7 +715,7 @@ func readHookFailureCalls(logDir string, now time.Time) ([]hookFailOpenSummary, 
 		}
 		entry.Connector = connectorName
 		read.calls = append(read.calls, hookFailureCall{entry: entry, end: next, blocked: blocked})
-		if blocked || next <= state.Done[connectorName] {
+		if blocked || entry.auditGap() || next <= state.Done[connectorName] {
 			continue
 		}
 		sum := byConnector[connectorName]
