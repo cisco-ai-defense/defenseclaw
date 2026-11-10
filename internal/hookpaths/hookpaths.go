@@ -2841,6 +2841,14 @@ func (w *PatchTargetWatch) Changed() bool {
 	links := shellLinks{known: true}
 	for path, attested := range w.targets {
 		resolved, ok := links.resolve(path, w.protected)
+		if !ok && attested == "" {
+			// A spelling the hook could not place when it read the patch (a
+			// step up from a directory that does not exist, listed beside
+			// the clean spelling the gateway judged) and still cannot place
+			// leads nowhere new: the operating system cannot open it
+			// either. It reads as changed only once it leads somewhere.
+			continue
+		}
 		if !ok || resolved != attested || w.protected.has(resolved) {
 			return true
 		}
