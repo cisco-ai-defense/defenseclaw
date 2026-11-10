@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookguard"
@@ -289,6 +290,11 @@ func claudeCodeChainAdmission(opts SetupOpts, command string, args []string, goo
 		return nil
 	}
 	if opts.ManagedEnterprise {
+		// Per-user settings of a managed Setup carry the exec form of the
+		// launcher, which no cmd.exe wraps, so there is nothing to render.
+		if slices.Equal(args, []string{"hook", "--connector", "claudecode"}) {
+			return nil
+		}
 		if len(args) != 4 || args[0] != "hook" || args[1] != "--connector" ||
 			args[2] != "claudecode" || args[3] != "--enterprise-managed" ||
 			!hookguard.AbsoluteHookExecutable(command) || !claudeWrapperSafe(command) ||
