@@ -20,6 +20,7 @@ import (
 // account's hook-failure row and names it in its answer. A fail-open row,
 // and a call whose row could not be written, name none.
 func TestManagedLocalDenyNamesTheEventIDOfItsRecord(t *testing.T) {
+	shortRestartBudget(t)
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, mode := range []string{"closed", "open"} {
 			userHome := t.TempDir()
