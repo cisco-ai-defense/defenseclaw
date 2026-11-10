@@ -82,7 +82,7 @@ func TestHookAdmissionPendingIsNotCheckedOnSecureClient(t *testing.T) {
 	api := &APIServer{scannerCfg: cfg}
 	called := false
 	api.SetMCPAdmissionPending(func(_, server, _, _ string) (string, bool) { called = true; return server, true })
-	if _, refused := api.mcpAdmissionPendingDecision(context.Background(), "claudecode", "PreToolUse",
+	if _, refused, _ := api.mcpAdmissionPendingDecision(context.Background(), "claudecode", "PreToolUse",
 		mcpRuntimeProbe{ServerName: "gb05-decoy", ToolName: "mcp__gb05-decoy__ping", Surface: "hook", Matched: true}); refused || called {
 		t.Fatalf("refused=%v called=%v on Secure Client, want neither", refused, called)
 	}
