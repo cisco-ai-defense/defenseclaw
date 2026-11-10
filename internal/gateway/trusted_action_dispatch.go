@@ -6519,6 +6519,9 @@ func finalizeTrustedActionFindings(
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
 	findings = applyTrustedActionContextDisposition(generation, facts, findings, request.CopilotSharedLocalFile && request.Input.Tool == "read_file")
+	if !request.StrictPolicy {
+		findings = trustedActionOrdinaryCredentialCopyFindings(facts, findings)
+	}
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 
