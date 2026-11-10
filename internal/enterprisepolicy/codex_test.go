@@ -375,9 +375,9 @@ func TestCodexVerifyNamesAValidFileWithoutTheManagedHook(t *testing.T) {
 	moved := opts
 	moved.HookBinary = "/opt/elsewhere/defenseclaw-hook"
 	for name, content := range map[string]string{
-		"valid toml without a hook":    "[features]\nfoo = true\n",
-		"hook points at another file":  strings.ReplaceAll(good, opts.HookBinary, moved.HookBinary),
-		"comment only":                 "# nothing here\n",
+		"valid toml without a hook":   "[features]\nfoo = true\n",
+		"hook points at another file": strings.ReplaceAll(good, opts.HookBinary, moved.HookBinary),
+		"comment only":                "# nothing here\n",
 		"hooks table without a group": "[hooks]\nmanaged_dir = \"/x\"\n",
 	} {
 		writeFile(t, path, content)

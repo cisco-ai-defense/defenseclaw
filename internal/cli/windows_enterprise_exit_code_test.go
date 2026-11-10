@@ -167,9 +167,9 @@ func TestWindowsEnterpriseUnsettledCodexStateWithAPendingRollbackIsRetryable(t *
 		pending bool
 		want    int
 	}{
-		"rollback left pending":      {deferred, true, enterprisestatus.WindowsExitBusy},
-		"wrapped in the failure":     {"Ensure failed: " + deferred, true, enterprisestatus.WindowsExitBusy},
-		"clean rollback":             {strings.Replace(deferred, "the rollback left that state as it is and put everything else back, and the transaction is still pending", "this run stopped", 1), false, enterprisestatus.WindowsExitFailure},
+		"rollback left pending":                 {deferred, true, enterprisestatus.WindowsExitBusy},
+		"wrapped in the failure":                {"Ensure failed: " + deferred, true, enterprisestatus.WindowsExitBusy},
+		"clean rollback":                        {strings.Replace(deferred, "the rollback left that state as it is and put everything else back, and the transaction is still pending", "this run stopped", 1), false, enterprisestatus.WindowsExitFailure},
 		"refusal without a pending transaction": {"codex_state_unsettled: x", false, enterprisestatus.WindowsExitFailure},
 	} {
 		code := windowsEnterpriseMessageCode(test.message, "lifecycle_error")
