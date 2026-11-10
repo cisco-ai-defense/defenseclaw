@@ -755,9 +755,7 @@ func (s *entryScan) namedFolders(word, cwd string) []string {
 	if strings.HasPrefix(path, "~") || strings.Contains(path, "$") {
 		return nil
 	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(cwd, path)
-	}
+	path = placeIn(path, cwd)
 	var out []string
 	for _, dir := range []string{filepath.Clean(path), filepath.Dir(filepath.Clean(path))} {
 		if readableTarget(dir) {

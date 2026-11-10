@@ -1130,9 +1130,7 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) 
 			if dir == "" || strings.HasPrefix(dir, "~") {
 				return "", "", "", false, false, false
 			}
-			if !filepath.IsAbs(dir) {
-				dir = filepath.Join(cwd, dir)
-			}
+			dir = filepath.Clean(placeIn(dir, cwd))
 			separatorWidth := 1
 			if ch == '&' {
 				separatorWidth = 2
@@ -1197,6 +1195,22 @@ func msysDriveSpelling(path string) string {
 	return actionfacts.MSYSDrivePath(path)
 }
 
+// placeIn spells path as an absolute path for a command that runs in cwd. An
+// absolute path stays as it is. A path that starts with a separator but names
+// no drive (/dev/null, \tmp\x) is rooted on the drive of cwd, as the system
+// reads it on Windows, and is not a path below cwd. Any other path is below
+// cwd, in the spelling given (a parent segment is not folded away: the links
+// of the path are followed in order).
+func placeIn(path, cwd string) string {
+	if filepath.IsAbs(path) || cwd == "" {
+		return path
+	}
+	if volume := filepath.VolumeName(cwd); volume != "" && path != "" && os.IsPathSeparator(path[0]) {
+		return volume + path
+	}
+	return cwd + string(filepath.Separator) + path
+}
+
 func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 	bare := !strings.ContainsAny(token, "/\\")
 	if bare && !namesEntryIn(cwd, token) {
@@ -1216,8 +1230,8 @@ func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 	// Resolve the entire path before selecting skills/<name> pairs. A
 	// parent segment can otherwise change which skill folders are reached.
 	raw := filepath.FromSlash(path)
-	if !filepath.IsAbs(raw) && strings.TrimSpace(cwd) != "" {
-		raw = cwd + string(filepath.Separator) + raw
+	if strings.TrimSpace(cwd) != "" {
+		raw = placeIn(raw, cwd)
 	}
 	dir := filepath.Clean(raw)
 	refs := skillFolderRefsIn(dir, false)
