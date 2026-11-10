@@ -72,7 +72,6 @@ type hookRuntimePolicy struct {
 	// hookFailMode is the connector's hook outage mode
 	// (config.Config.EffectiveHookOutageFailModeForConnector).
 	hookFailMode  string
-	policyTier    string
 	guardrailMode string
 	hiltEnabled   bool
 }
@@ -677,11 +676,6 @@ func (g *HookConfigGuard) repairCurrent(
 			return errors.New("authoritative hook runtime fail mode is invalid")
 		}
 		opts.HookFailMode = policy.hookFailMode
-		// Only per-user hook availability follows the rule-pack tier.
-		// Managed and Secure Client registrations keep their own policy.
-		if !opts.ManagedEnterprise && !opts.SecureClientHookDelivery {
-			opts.PolicyTier = policy.policyTier
-		}
 		opts.GuardrailMode = policy.guardrailMode
 		opts.HILTEnabled = policy.hiltEnabled
 	}
@@ -703,7 +697,6 @@ func (g *HookConfigGuard) repairCurrent(
 	// (config.HookOutageFailMode), so a rule-pack change re-renders it.
 	policyDrift := policyResolver != nil &&
 		((installedFailMode != "" && installedFailMode != opts.HookFailMode) ||
-			!strings.EqualFold(strings.TrimSpace(renderedOpts.PolicyTier), strings.TrimSpace(opts.PolicyTier)) ||
 			!strings.EqualFold(strings.TrimSpace(renderedOpts.GuardrailMode), strings.TrimSpace(opts.GuardrailMode)) ||
 			renderedOpts.HILTEnabled != opts.HILTEnabled ||
 			installedOutage != connector.OutageHookFailMode(opts, conn))
@@ -887,7 +880,6 @@ func (g *HookConfigGuard) activeConnector() connector.Connector {
 func (g *HookConfigGuard) adoptRenderedPolicy(opts connector.SetupOpts) {
 	g.mu.Lock()
 	g.opts.HookFailMode = opts.HookFailMode
-	g.opts.PolicyTier = opts.PolicyTier
 	g.opts.GuardrailMode = opts.GuardrailMode
 	g.opts.HILTEnabled = opts.HILTEnabled
 	g.mu.Unlock()
@@ -1047,12 +1039,6 @@ func (g *HookConfigGuard) processPolicyAudit() {
 	}
 	if conn.Name() != "claudecode" && conn.Name() != "codex" {
 		return
-	}
-	if conn.Name() == "claudecode" {
-		if err := connector.EnsureClaudeCodeChain(opts); err != nil {
-			g.reportPolicyFailure(conn, err)
-			return
-		}
 	}
 	g.auditHookShellEnv(conn, opts)
 	reason := "periodic effective-policy audit"

@@ -774,7 +774,6 @@ func (s *Sidecar) publishConfig(cfg *config.Config) *config.Config {
 		return nil
 	}
 	snapshot := cloneConfig(cfg)
-	snapshot.BindRulePackPosturesFrom(cfg)
 	s.hookPolicyMu.Lock()
 	s.cfgCurrent.Store(snapshot)
 	s.hookPolicyMu.Unlock()
@@ -2262,6 +2261,8 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// skill and plugin dirs of the connectors. Secure Client never gets here
 	// with such a change: diffConfigs keeps it restart-required. A hook runtime
 	// policy change no hook guard rewrites re-runs the setup too.
+	guardrailRestart := connectorSetChanged(oldCfg, newCfg) || hookPolicyNeedsSetup(oldCfg, newCfg)
+	watcherRestart := watcherNeedsRestart(oldCfg, newCfg) || guardrailRestart
 	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || discoveryAssetsChanged(previousGen, newCfg)
 	privateUpstreamsReload := !reflect.DeepEqual(
 		oldCfg.Guardrail.AllowPrivateUpstreams,
@@ -2323,12 +2324,6 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets && generationUnchanged(previousGen, nextGen) {
 		return errGenerationUnchanged
 	}
-	oldHookCfg := oldCfg
-	if previousGen != nil && previousGen.Config != nil {
-		oldHookCfg = previousGen.Config
-	}
-	guardrailRestart := connectorSetChanged(oldCfg, newCfg) || hookPolicyNeedsSetup(oldHookCfg, nextGen.Config)
-	watcherRestart := watcherNeedsRestart(oldCfg, newCfg) || guardrailRestart
 	// Rule packs and the judge (which embeds the active pack's judge
 	// prompts) follow the generation instead of a restart.
 	rulePackChanged := activeRulePackKey(oldCfg) != activeRulePackKey(newCfg)
@@ -2455,16 +2450,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		s.health.beginConnectorSetup(next.ActiveConnectors())
 	}
 	if !onlyReloadModeChange {
-		next.BindRulePackPosturesFrom(nextGen.Config)
 		appliedCfg = s.publishConfig(&next)
-	} else {
-		// The reload mode belongs to the manager until a restart. Publish the
-		// candidate pack posture on a fresh copy of the live settings: the
-		// previous generation can still hold the current config for hook
-		// registration repair and in-flight decisions.
-		modeApplied := cloneConfig(current)
-		modeApplied.BindRulePackPosturesFrom(nextGen.Config)
-		appliedCfg = s.publishConfig(modeApplied)
 	}
 	nextGen.Config = appliedCfg
 	// The connector rule sets are replaced before the generation is
@@ -2475,7 +2461,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		rulePackCandidate.connectorRules,
 	)
 	s.publishGeneration(nextGen)
-	s.refreshHookGuardPolicies(oldHookCfg, appliedCfg)
+	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
 	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
 		// Installed skills, plugins and MCP servers affected by a list
 		// change are readmitted now, without waiting for content drift
@@ -2793,10 +2779,8 @@ func hookPolicyNeedsSetup(oldCfg, newCfg *config.Config) bool {
 }
 
 func hookRuntimePolicyChanged(oldCfg, newCfg *config.Config, name string) bool {
-	oldTier, newTier := oldCfg.HookPolicyTierForConnector(name), newCfg.HookPolicyTierForConnector(name)
 	return oldCfg.EffectiveHookFailModeForConnector(name) != newCfg.EffectiveHookFailModeForConnector(name) ||
-		oldCfg.EffectiveHookOutageFailModeForConnectorAtTier(name, oldTier) != newCfg.EffectiveHookOutageFailModeForConnectorAtTier(name, newTier) ||
-		oldTier != newTier ||
+		oldCfg.EffectiveHookOutageFailModeForConnector(name) != newCfg.EffectiveHookOutageFailModeForConnector(name) ||
 		oldCfg.EffectiveGuardrailModeForConnector(name) != newCfg.EffectiveGuardrailModeForConnector(name) ||
 		oldCfg.EffectiveHILTForConnector(name).Enabled != newCfg.EffectiveHILTForConnector(name).Enabled
 }
@@ -2981,10 +2965,8 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 			s.hookPolicyMu.RUnlock()
 			return hookRuntimePolicy{}, nil, false
 		}
-		tier := cfg.HookPolicyTierForConnector(connectorName)
 		return hookRuntimePolicy{
-			hookFailMode:  cfg.EffectiveHookOutageFailModeForConnectorAtTier(connectorName, tier),
-			policyTier:    tier,
+			hookFailMode:  cfg.EffectiveHookOutageFailModeForConnector(connectorName),
 			guardrailMode: cfg.EffectiveGuardrailModeForConnector(connectorName),
 			hiltEnabled:   cfg.EffectiveHILTForConnector(connectorName).Enabled,
 		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
@@ -7404,10 +7386,8 @@ func (s *Sidecar) publishMultiConnectorReadyState(
 }
 
 func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, proxyAddr, apiAddr string) (connector.SetupOpts, error) {
-	cfg := s.currentConfig()
-	policyTier := cfg.HookPolicyTierForConnector(conn.Name())
-	agentVersion := connector.LoadCachedAgentVersion(cfg.DataDir, conn.Name())
-	agentExecutable := connector.LoadCachedAgentExecutable(cfg.DataDir, conn.Name())
+	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
+	agentExecutable := connector.LoadCachedAgentExecutable(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	// F9: same evidence substitution as runGuardrail. SetupOpts carries the
 	// accepted harness version and contract, so every caller of this helper
@@ -7415,7 +7395,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 	// base, and the hook contract lock records it.
 	agentVersion, contractResolution = s.applyClaudeDesktopEngineEvidence(conn.Name(), agentVersion, contractResolution)
 	agentVersion, contractResolution = s.applySandboxHarnessEvidence(conn.Name(), agentVersion, agentExecutable, contractResolution)
-	setupTokens, err := connectorSetupTokensFor(cfg.DataDir, conn, apiToken, managed.IsManagedEnterprise(cfg.DeploymentMode))
+	setupTokens, err := connectorSetupTokensFor(s.currentConfig().DataDir, conn, apiToken, managed.IsManagedEnterprise(s.currentConfig().DeploymentMode))
 	if err != nil {
 		return connector.SetupOpts{}, err
 	}
@@ -7424,8 +7404,8 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		return connector.SetupOpts{}, err
 	}
 	return connector.SetupOpts{
-		DataDir:              cfg.DataDir,
-		CodexOtelEnvironment: cfg.Environment,
+		DataDir:              s.currentConfig().DataDir,
+		CodexOtelEnvironment: s.currentConfig().Environment,
 		ConfigHome:           configHome,
 		ProxyAddr:            proxyAddr,
 		APIAddr:              apiAddr,
@@ -7433,14 +7413,14 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		HookAPIToken:         setupTokens.hookToken,
 		HookAPITokenScoped:   setupTokens.hookTokenScoped,
 		GatewayToken:         strings.TrimSpace(apiToken),
-		WorkspaceDir:         cfg.ConnectorWorkspaceDir(),
+		WorkspaceDir:         s.currentConfig().ConnectorWorkspaceDir(),
 		// The hooks' outage mode (config.HookOutageFailMode); Secure Client
 		// renders the resolved mode as is (#1163).
-		HookFailMode:             cfg.EffectiveHookOutageFailModeForConnectorAtTier(conn.Name(), policyTier),
-		PolicyTier:               policyTier,
-		SecureClientHookDelivery: cfg.SecureClientIntegration(),
-		GuardrailMode:            cfg.EffectiveGuardrailModeForConnector(conn.Name()),
-		HILTEnabled:              cfg.EffectiveHILTForConnector(conn.Name()).Enabled,
+		HookFailMode:             s.currentConfig().EffectiveHookOutageFailModeForConnector(conn.Name()),
+		PolicyTier:               s.currentConfig().HookPolicyTierForConnector(conn.Name()),
+		SecureClientHookDelivery: s.currentConfig().SecureClientIntegration(),
+		GuardrailMode:            s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
+		HILTEnabled:              s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
 		InstallCodeGuard:         false,
 		AgentVersion:             agentVersion,
 		AgentExecutable:          agentExecutable,

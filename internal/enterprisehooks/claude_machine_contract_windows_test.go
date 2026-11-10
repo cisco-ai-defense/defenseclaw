@@ -103,7 +103,9 @@ func TestStandaloneDeferredClaudeStagingRendersTheDeploymentContract(t *testing.
 // failed the whole install before.
 func TestSecureClientClaudePolicyIdentityAcceptsTheRowContract(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
-	useWindowsSecureClientForTest(t)
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return false }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
 	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway")
 
 	opts := windowsManagedInstallOptions(fixture)

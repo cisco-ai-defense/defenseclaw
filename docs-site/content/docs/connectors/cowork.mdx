@@ -133,8 +133,6 @@ Options:
 | `--wait` / `--no-wait` | Waits for the first Cowork event. The default is to wait |
 | `--timeout SECONDS` | How long to wait. Default 900, from 10 to 3600 |
 
-On Windows, `defenseclaw status` and `defenseclaw doctor` flag a plugin archive built with an older hook command. Run `defenseclaw setup cowork` to rebuild it, then upload the new zip in Claude Desktop.
-
 What the plugin contains: `.claude-plugin/plugin.json` and `hooks/hooks.json`; on Windows it also contains a small guard at `hooks/defenseclaw-hook-guard.exe`. It has no `bin/` folder, because Cowork refuses a plugin that has one. The guard stays with the plugin after DefenseClaw is removed. While DefenseClaw is installed, it runs the Claude Code hook that the connector installed. The hooks use the same matchers and timeouts for the ten events above. Its version is `1.0.` followed by the build time, and it rises on every run.
 
 ### Check it
@@ -148,7 +146,6 @@ What the plugin contains: `.claude-plugin/plugin.json` and `hooks/hooks.json`; o
 | protected, with the mode, plugin version and last Cowork event | none | Nothing |
 | protected, with "none since the gateway restarted": the last Cowork event came before the gateway restarted | none | Nothing. The next Cowork task updates it |
 | not protected: Claude Desktop is installed, but Cowork has no DefenseClaw plugin | `cowork_plugin_not_built` | `defenseclaw setup cowork` |
-| plugin uses an older Windows hook command | `cowork_plugin_stale` | `defenseclaw setup cowork`, then upload the new zip |
 | not protected yet: no Cowork event since the plugin was built | `cowork_no_events` | Upload the zip, wait for the check, start a Cowork task |
 | not protected: the Claude Code connector is off | `cowork_claudecode_off` | `defenseclaw setup claude-code` |
 | not protected while the sidecar is not answering | `cowork_gateway_down` | `defenseclaw-gateway start` |

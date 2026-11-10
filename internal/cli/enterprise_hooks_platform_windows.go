@@ -386,7 +386,7 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		}
 		if cfg.StandaloneEnterprise() {
 			switch {
-			case configured["claudecode"]:
+			case configured["claudecode"] && !claudeActive:
 				if err := publishWindowsMachinePolicyClearingOffRoster("claudecode", func() error {
 					return enterpriseHookClaudePolicyEnsurer(connector.SetupOpts{
 						APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,

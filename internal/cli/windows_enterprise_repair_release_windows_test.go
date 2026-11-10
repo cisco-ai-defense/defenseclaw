@@ -46,7 +46,7 @@ func TestWindowsEnterpriseSetupRepairFromAnotherReleaseIsRefusedBeforeAnyChange(
 	setup := func(version string) *windowsEnterpriseLifecycleOptions {
 		return &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", jsonOutput: true,
 			productVersion: version, gatewayBinary: `C:\payload\defenseclaw-gateway.exe`, acpBinary: `C:\payload\defenseclaw-acp.exe`,
-			hookBinary: `C:\payload\defenseclaw-hook.exe`, hookGuardBinary: `C:\payload\defenseclaw-hook-guard.exe`, sensorHelperBinary: `C:\payload\defenseclaw-sensor-helper.exe`}
+			hookBinary: `C:\payload\defenseclaw-hook.exe`, sensorHelperBinary: `C:\payload\defenseclaw-sensor-helper.exe`}
 	}
 
 	for _, tc := range []struct{ setup, next string }{{"1.0.5", "/ensure JSON=1 to upgrade"}, {"1.0.1", "/upgrade JSON=1 to downgrade"}} {
