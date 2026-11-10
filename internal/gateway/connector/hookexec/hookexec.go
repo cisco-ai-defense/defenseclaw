@@ -619,6 +619,15 @@ func runHook(ctx context.Context, opts Options) int {
 		resolveManagedStandaloneFailureEvent(&opts, sp)
 		if opts.ExplainUnenrolledAccount && !sp.failOpenOnly &&
 			(reason == managedSIDUnregisteredReason || reason == managedEnrollmentPendingReason) {
+			// While the gateway service is proven stopped nothing enrolls
+			// an account, so the wait text is wrong for a new account and for
+			// an excluded one (its exclusion is read from the gateway). The
+			// call is refused, closed, with the outage text an enrolled
+			// account gets (GAP-1010). Such a failure resolved no gateway
+			// service, so the stopped test reads the standalone one.
+			if stoppedOpts := withStandaloneGatewayService(opts); managedGatewayProvenStopped(stoppedOpts) {
+				return failUnreachable(stoppedOpts, sp, "closed", managedGatewayNotRunningReason)
+			}
 			return failEnrollmentRefusal(opts, sp, reason)
 		}
 		return failUnreachable(
@@ -4199,6 +4208,17 @@ func managedFailClosedText(opts Options, layer, reason string) string {
 	return managedStandaloneFailClosedText(opts.Event, layer, reason)
 }
 
+// withStandaloneGatewayService is opts with the standalone gateway service
+// as the managed gateway service when the call resolved none, as every
+// runtime-state or enrollment refusal does (the service name is the compiled-in
+// standalone one, never read from user-controlled state).
+func withStandaloneGatewayService(opts Options) Options {
+	if strings.TrimSpace(opts.ManagedGatewayServiceName) == "" {
+		opts.ManagedGatewayServiceName = managed.StandaloneWindowsGatewaySvc
+	}
+	return opts
+}
+
 // managedInstallWindowText is what a managed hook says when the gateway is
 // stopped, restarting or silent while an enterprise lifecycle run (a package
 // install or upgrade, ensure, repair or rollback: managedLifecycleActive)
@@ -4221,9 +4241,7 @@ func managedInstallWindowText(opts Options, layer, reason string) string {
 		return ""
 	}
 	if managedLifecycleRuntimeStateReason(reason) {
-		if strings.TrimSpace(opts.ManagedGatewayServiceName) == "" {
-			opts.ManagedGatewayServiceName = managed.StandaloneWindowsGatewaySvc
-		}
+		opts = withStandaloneGatewayService(opts)
 	} else if !managedOutageShapedReason(reason) {
 		return ""
 	}
