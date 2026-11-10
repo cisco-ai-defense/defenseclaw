@@ -18,7 +18,6 @@ package actionfacts
 
 import (
 	"os"
-	pathpkg "path"
 	"strings"
 	"unicode/utf8"
 )
@@ -190,7 +189,6 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 	canonical = append(canonical, lines[0])
 
 	changes := make([]patchPathChange, 0, 8)
-	seenPaths := make(map[string]struct{})
 	directives := 0
 	pendingUpdate := -1
 	activeDirective := ""
@@ -290,18 +288,11 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		if directives > maxPatchDirectives {
 			return fail(StatusLimitExceeded, IssueFactLimit)
 		}
-		// The envelope can spell the same effective target through dot
-		// segments or either separator style. Key duplicate detection by that
-		// conservative lexical identity so conflicting access facts cannot regain
-		// authority after path normalization.
-		pathKey := pathpkg.Clean(strings.ReplaceAll(pathValue, `\`, "/"))
-		if _, duplicate := seenPaths[pathKey]; duplicate {
-			return fail(StatusAmbiguous, IssueConflictingSources)
-		}
-
+		// A file the envelope names in more than one block is changed by each
+		// block in order, so every block is a change of its own: each is judged
+		// by the path rules, and nativePatchEnvelopeWrites by the content rules.
 		switch kind {
 		case "add", "update":
-			seenPaths[pathKey] = struct{}{}
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessWrite,
 			})
@@ -314,7 +305,6 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 			updateHunk = false
 			updateContent = false
 		case "delete":
-			seenPaths[pathKey] = struct{}{}
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessDelete,
 			})
@@ -328,7 +318,6 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 				contentAfterDirective {
 				return fail(StatusInvalid, IssueInvalidSyntax)
 			}
-			seenPaths[pathKey] = struct{}{}
 			changes[pendingUpdate].access = PathAccessDelete
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessWrite,
