@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestGAP0295ShellFreshStartUsesConnectionTime covers hook-post's exit 10
@@ -68,7 +69,11 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 		}
 		client, server := conn.LocalAddr().(*net.TCPAddr), conn.RemoteAddr().(*net.TCPAddr)
 		owner, unique := 0, false
-		for end := time.Now().Add(2 * time.Second); time.Now().Before(end) && !unique; time.Sleep(10 * time.Millisecond) {
+		// The 2 s bounds of the two reads below are the product value plus the
+		// time the host kept this process waiting for a CPU in the same run
+		// (GAP-0889); on an idle host they are 2 s.
+		contention := testenv.StartContention()
+		for began := time.Now(); time.Since(began) < 2*time.Second+contention.Wait() && !unique; time.Sleep(10 * time.Millisecond) {
 			owner, unique = perUserConnectedPeerPID(client, server)
 		}
 		if !unique || owner != pid {
@@ -76,7 +81,11 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 		}
 		peer := NewPerUserPeerRecord()
 		peer.capture(conn.LocalAddr(), conn.RemoteAddr())
-		if got, known := peer.wait(2 * time.Second); !known || got.pid != pid {
+		got, known := peer.wait(2 * time.Second)
+		if !known {
+			got, known = peer.wait(contention.Wait())
+		}
+		if !known || got.pid != pid {
 			t.Fatalf("recorded peer = %+v %v", got, known)
 		}
 		return conn, peer

@@ -29,6 +29,12 @@ func TestGAP0540VersionProbeWorker(t *testing.T) {
 	if err := os.Setenv("TMPDIR", home); err != nil {
 		t.Fatal(err)
 	}
+	// The test starts its 5 s bound for the version command from this mark,
+	// not from the start of the process: a loaded host takes longer than that
+	// just to load a test binary (GAP-0889).
+	if err := os.WriteFile(filepath.Join(home, "worker.ready"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	_, _ = runUnixAgentVersion(context.Background(), filepath.Join(home, "hermes"), home, "HERMES_HOME")
 	t.Fatal("version command returned before the worker was stopped")
 }
@@ -64,13 +70,28 @@ func TestGAP0540VersionProbeEndsWithApplyWorker(t *testing.T) {
 	if err := worker.Start(); err != nil {
 		t.Fatal(err)
 	}
+	exited := make(chan error, 1)
+	go func() { exited <- worker.Wait() }()
 	workerReaped := false
 	t.Cleanup(func() {
 		if !workerReaped {
 			_ = worker.Process.Kill()
-			_ = worker.Wait()
+			<-exited
 		}
 	})
+	// The worker is ready once it runs the test; it has no wall-clock bound
+	// here, and a worker that ends first fails the test at once.
+	for ready := filepath.Join(home, "worker.ready"); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case err := <-exited:
+			workerReaped = true
+			t.Fatalf("the apply worker ended before it ran the version command: %v", err)
+		default:
+		}
+	}
 	var pid int
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
 		data, err := os.ReadFile(pidFile)
@@ -94,7 +115,7 @@ func TestGAP0540VersionProbeEndsWithApplyWorker(t *testing.T) {
 	if err := worker.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	err := worker.Wait()
+	err := <-exited
 	workerReaped = true
 	if err == nil {
 		t.Fatal("worker unexpectedly exited normally")

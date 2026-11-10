@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // rel-1-0-6 GAP-0648 (GAP-0167/GAP-0171 replay): a hook process the host
@@ -96,6 +98,7 @@ func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			stubManagedServiceRunning(t, func(name string) (bool, bool) { return test.running, name == "DefenseClawGateway" })
 			home := t.TempDir()
+			contention := testenv.StartContention()
 			result, elapsed := runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) {
 				managedWindowsStandalone(opts)
 				opts.ManagedGatewayServiceName = "DefenseClawGateway"
@@ -106,8 +109,12 @@ func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testin
 			if !blocked(result) {
 				t.Fatalf("after %s code=%d stdout=%q stderr=%q, want a block", elapsed, result.code, result.stdout, result.stderr)
 			}
-			if elapsed < test.atLeast || elapsed >= test.below {
-				t.Fatalf("blocked after %s, want in [%s, %s)", elapsed, test.atLeast, test.below)
+			// The bound is the product value plus the time the host kept this
+			// process waiting for a CPU in the same run (GAP-0889); on an idle
+			// host the two are the same.
+			below := test.below + contention.Wait()
+			if elapsed < test.atLeast || elapsed >= below {
+				t.Fatalf("blocked after %s, want in [%s, %s)", elapsed, test.atLeast, below)
 			}
 			entry := lastHookFailure(t, home)
 			if entry["reason"] != test.reason || entry["outcome"] != "fail_closed" {

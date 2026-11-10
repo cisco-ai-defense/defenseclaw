@@ -12,6 +12,25 @@ import (
 // a linear reader still judges a large crafted command inside it.
 const linearReaderHookBudget = 3500 * time.Millisecond
 
+// startWork starts timing one piece of work and returns the function that
+// ends it. The time is the wall time or, when the process used less CPU than
+// that, the CPU it used: a host that is busy with other programs makes a
+// reading wait for a CPU, and that wait is the host's, not the reading's
+// (GAP-0859). On an idle host the two are the same, so the ceiling and the
+// size ratio mean what they meant; a reading that costs more CPU, or grows
+// faster than its input, still fails them.
+func startWork() func() time.Duration {
+	wall := time.Now()
+	cpu, cpuKnown := processCPUTime()
+	return func() time.Duration {
+		took := time.Since(wall)
+		if now, ok := processCPUTime(); cpuKnown && ok && now-cpu < took {
+			took = now - cpu
+		}
+		return took
+	}
+}
+
 // assertLinearReaderTime is the time check of the reader linear-time tests
 // (rel-1-0-4 GAP-2545, LEAD 11:52 ruling). full is the time of the full-size
 // input; run(false) judges the half-size input and run(true) the full one
