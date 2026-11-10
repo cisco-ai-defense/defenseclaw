@@ -35,57 +35,131 @@ func TestCaseFoldingHostReadsAPathAsGivenToo(t *testing.T) {
 	}
 }
 
-func TestCaseFoldingHostLinkToACredentialFileBelowAParentGetsTheVerdictOfItsName(t *testing.T) {
-	withPathCaseFoldHost(t, true)
-	root := t.TempDir()
-	home := filepath.Join(root, "Users", "fixture")
+// caseFoldNestedVerdict is the action and the rules of a Write to file, with
+// the working folder of the call and the connector profile given.
+func caseFoldNestedVerdict(t *testing.T, connector, project, file string) (string, map[string]bool) {
+	t.Helper()
+	raw, err := json.Marshal(pathCaseFileCall("Write", file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := actionfacts.Input{Tool: "Write", Args: raw, CWD: project, ActiveHome: "/Users/alice"}
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input: input, LegacyText: string(raw), Connector: connector, EnforcementCapable: true,
+	})
+	rules := make(map[string]bool)
+	for _, finding := range findings {
+		rules[finding.RuleID] = true
+	}
+	return buildVerdict(findings, "tool_call").Action, rules
+}
+
+// caseFoldNestedFixture creates the file at relative below root, with its
+// folders, and a link to it in a project folder; it returns both names.
+func caseFoldNestedFixture(t *testing.T, root, relative string) (file, link string) {
+	t.Helper()
+	file = filepath.Join(root, relative)
 	project := filepath.Join(root, "project")
-	for _, dir := range []string{home, project} {
+	for _, dir := range []string{filepath.Dir(file), project} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	protected := filepath.Join(home, ".netrc")
-	ordinary := filepath.Join(project, "notes.txt")
-	for file, content := range map[string]string{protected: "machine example.invalid\n", ordinary: "notes"} {
-		if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	linked, benign := filepath.Join(project, "linked.txt"), filepath.Join(project, "ordinary-link.txt")
-	if err := os.Symlink(protected, linked); err != nil {
+	if err := os.WriteFile(file, []byte("machine example.invalid\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(ordinary, benign); err != nil {
+	link = filepath.Join(project, "linked-"+filepath.Base(relative))
+	if err := os.Symlink(file, link); err != nil {
 		t.Fatal(err)
 	}
+	return file, link
+}
+
+func TestCaseFoldingHostLinkToACredentialFileBelowAParentGetsTheVerdictOfItsName(t *testing.T) {
+	withPathCaseFoldHost(t, true)
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	protected, linked := caseFoldNestedFixture(t, root, "Users/fixture/.netrc")
+	_, benign := caseFoldNestedFixture(t, root, "project/notes.txt")
 	for _, profile := range []string{"default", "permissive", "strict"} {
 		connector := "case-fold-nested-home-" + profile
 		installToolCallCorpusProfileConnector(t, connector, profile)
-		verdict := func(file string) (string, map[string]bool) {
-			raw, err := json.Marshal(pathCaseFileCall("Write", file))
-			if err != nil {
-				t.Fatal(err)
-			}
-			input := actionfacts.Input{Tool: "Write", Args: raw, CWD: project, ActiveHome: "/Users/alice"}
-			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-				Input: input, LegacyText: string(raw), Connector: connector, EnforcementCapable: true,
-			})
-			rules := make(map[string]bool)
-			for _, finding := range findings {
-				rules[finding.RuleID] = true
-			}
-			return buildVerdict(findings, "tool_call").Action, rules
-		}
-		directAction, directRules := verdict(protected)
+		directAction, directRules := caseFoldNestedVerdict(t, connector, project, protected)
 		if !directRules["PATH-NETRC"] {
 			t.Fatalf("%s: the direct name matches %v, want PATH-NETRC", profile, directRules)
 		}
-		if action, rules := verdict(linked); action != directAction || !rules["PATH-NETRC"] {
+		if action, rules := caseFoldNestedVerdict(t, connector, project, linked); action != directAction || !rules["PATH-NETRC"] {
 			t.Errorf("%s: link to the credential file = %s %v, want %s with PATH-NETRC", profile, action, rules, directAction)
 		}
-		if action, rules := verdict(benign); action != "allow" {
+		if action, rules := caseFoldNestedVerdict(t, connector, project, benign); action != "allow" {
 			t.Errorf("%s: link to an ordinary file = %s %v, want allow", profile, action, rules)
+		}
+	}
+}
+
+// The file system names a file in any letter case, at every folder of the
+// path, so the spelling of the Users folder and of the credential names below
+// it decide nothing: a nested path in any case, and a link to it, is judged
+// as the exact-case name is.
+func TestCaseFoldingHostNestedCredentialFileIsJudgedInEveryLetterCase(t *testing.T) {
+	withPathCaseFoldHost(t, true)
+	cases := []struct{ relative, rule string }{
+		{"Users/fixture/.NETRC", "PATH-NETRC"},
+		{"users/fixture/.netrc", "PATH-NETRC"},
+		{"USERS/fixture/.Netrc", "PATH-NETRC"},
+		{"uSeRs/Fixture/.NetRC", "PATH-NETRC"},
+		{"Users/fixture/.GIT-CREDENTIALS", "PATH-GIT-CREDS"},
+		{"users/fixture/.Git-Credentials", "PATH-GIT-CREDS"},
+		{"users/fixture/.AWS/CREDENTIALS", "PATH-AWS-CREDS"},
+		{"Users/fixture/.AWS/credentials", "PATH-AWS-CREDS"},
+		{"HOME/fixture/.NETRC", "PATH-NETRC"},
+		{"Home/fixture/.Netrc", "PATH-NETRC"},
+		{"work/users/fixture/.netrc", "PATH-NETRC"},
+	}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "case-fold-nested-case-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, tc := range cases {
+			root := t.TempDir()
+			project := filepath.Join(root, "project")
+			file, link := caseFoldNestedFixture(t, root, tc.relative)
+			for name, target := range map[string]string{"direct": file, "link": link} {
+				if action, rules := caseFoldNestedVerdict(t, connector, project, target); action == "allow" || !rules[tc.rule] {
+					t.Errorf("%s %s %s: %s %v, want a block with %s", profile, tc.relative, name, action, rules, tc.rule)
+				}
+			}
+		}
+	}
+}
+
+// A name that only starts like a credential file, below a Users folder in any
+// letter case, is an ordinary file: its link is allowed. The AWS backup
+// spelling credentials.<suffix> is a credential copy by design (the matcher
+// matchesAWSCredentialsName), so its link is judged as its direct name is.
+func TestCaseFoldingHostLinkToAnOrdinaryNeighbourOfACredentialFileIsAllowed(t *testing.T) {
+	withPathCaseFoldHost(t, true)
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "case-fold-nested-neighbour-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, relative := range []string{
+			"Users/fixture/.netrc.bak", "users/fixture/.NETRC.old", "Users/fixture/.git-credentials.bak",
+			"USERS/fixture/notes.txt", "Users/fixture/.awsnotes", "Users/fixture/.aws/config.sample",
+		} {
+			root := t.TempDir()
+			project := filepath.Join(root, "project")
+			file, link := caseFoldNestedFixture(t, root, relative)
+			for name, target := range map[string]string{"direct": file, "link": link} {
+				if action, rules := caseFoldNestedVerdict(t, connector, project, target); action != "allow" {
+					t.Errorf("%s %s %s: %s %v, want allow", profile, relative, name, action, rules)
+				}
+			}
+		}
+		root := t.TempDir()
+		project := filepath.Join(root, "project")
+		file, link := caseFoldNestedFixture(t, root, "Users/fixture/.aws/credentials.bak")
+		directAction, _ := caseFoldNestedVerdict(t, connector, project, file)
+		if action, rules := caseFoldNestedVerdict(t, connector, project, link); action != directAction {
+			t.Errorf("%s: link to a credentials copy = %s %v, want %s as its direct name", profile, action, rules, directAction)
 		}
 	}
 }

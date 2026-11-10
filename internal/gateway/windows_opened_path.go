@@ -319,7 +319,7 @@ func pathFactSpellings(path actionfacts.PathFact) []string {
 func windowsRuleText(opened, home string) string {
 	text := activeHomeAsTilde(opened, home)
 	if rest, ok := strings.CutPrefix(text, "~/"); ok {
-		return "~/" + windowsNameFold(rest)
+		return "~/" + nestedHomeRuleText(windowsNameFold(rest))
 	}
 	parts := strings.Split(text, "/")
 	first := -1
