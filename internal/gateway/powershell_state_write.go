@@ -285,7 +285,7 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 		*forms = append(*forms, form)
 	}
 	if bind {
-		readings, dropped := psBindStaticValues(command, reading.home, budget)
+		readings := psBindStaticValues(command, reading.home, budget)
 		if budget.over {
 			return true, true
 		}
@@ -293,10 +293,6 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 			if bounded, _ := reading.collect(bound, depth, false, seen, forms, budget); bounded {
 				return true, true
 			}
-		}
-		// A value the bound dropped is judged as a write of its own path.
-		for _, value := range dropped {
-			add("Set-Content -LiteralPath " + psSingleQuoted(value) + " -Value x")
 		}
 	}
 	for _, piece := range scan.pieces {
