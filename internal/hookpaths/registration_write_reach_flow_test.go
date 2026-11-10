@@ -100,7 +100,17 @@ func TestRegistrationWriteReachFlowConstructs(t *testing.T) {
 		{"find lists with a dynamic path pattern", "find . -type f -path \"$pattern\" -mtime -1; cat " + hook, false},
 		{"find lists with a dynamic newer reference", "find . -newer \"$ref\" -newermt \"$when\"; cat " + hook, false},
 		{"find executes a copy onto the hook after a dynamic pattern", "echo a; find . -name \"$pattern\" -exec cp " + ordinary + "/tool " + hook + " \\;", true},
-		{"find with a dynamic word in an action position", "echo a; find . $action; cat " + hook, true},
+		// Only an action predicate writes; a root, a test value or the file of
+		// -files0-from that is not spelled out is never a writer by itself.
+		{"find lists from a dynamic root", "root=.; pattern=cp; find \"$root\" -name \"$pattern\"; cat " + hook, false},
+		{"find lists from the working-directory root", "find \"$PWD\" -name \"$pattern\"; cat " + hook, false},
+		{"find lists roots read from a dynamic file", "roots_file=/dev/null; find -files0-from \"$roots_file\" -name \"$pattern\"; cat " + hook, false},
+		{"find prints a format from a dynamic root", "find \"$root\" -name x -printf \"%p\\n\"; cat " + hook, false},
+		{"find with a dynamic word where an action could be", "find . $action; cat " + hook, false},
+		{"find prints into a file after a dynamic root", "echo a; find \"$root\" -fprint " + hook, true},
+		{"find deletes after a dynamic root", "echo a; find \"$root\" -name \"$pattern\" -delete; cat " + hook, true},
+		{"find executes a copy onto the hook from a dynamic root", "echo a; find \"$root\" -exec cp " + ordinary + "/tool " + hook + " \\;", true},
+		{"find files0-from then executes a copy onto the hook", "echo a; find -files0-from \"$roots_file\" -exec cp " + ordinary + "/tool " + hook + " \\;", true},
 		{"find deletes the hook after a dynamic pattern", "echo a; find " + hook + " -name \"$pattern\" -delete", true},
 		{"copy onto the hook through xargs", "echo a; printf x | xargs cp " + ordinary + "/tool " + hook, true},
 		{"copy onto the hook through xargs options", "echo a; printf x | xargs -n 1 cp " + ordinary + "/tool " + hook, true},
