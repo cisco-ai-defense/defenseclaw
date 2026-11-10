@@ -322,11 +322,19 @@ func (a *APIServer) profileSkillFolders(ctx context.Context, connector, cwd, nam
 // SKILL.md with a shell command and follows it, and no skill selection hook
 // sees that (GAP-0569). Only the denied list applies: reading any other skill
 // folder is not an asset load. Secure Client keeps main (issue #1092).
+//
+// A sandbox request whose binding maps no sandbox path to the host (a copy-mode
+// workdir) names paths in the sandbox, not on this host. The link walk below
+// reads the host, so it is not made for that request: the sandbox copy view
+// decides what the agent can read, and the host holds nothing the call names.
 func (a *APIServer) skillFolderAccessDecision(
 	ctx context.Context, connector, hookEvent, cwd, toolName string, toolInput map[string]interface{},
 ) (config.AssetPolicyDecision, bool) {
 	cfg := a.liveConfig()
 	if cfg == nil || cfg.SecureClientIntegration() || !runtimeAssetCanEnforce(hookEvent) {
+		return config.AssetPolicyDecision{}, false
+	}
+	if view, sandboxed := sandboxHookView(ctx); sandboxed && !view.HostAccess() {
 		return config.AssetPolicyDecision{}, false
 	}
 	if decision, matched := a.skillFolderRefsDecision(ctx, cfg, connector, hookEvent, cwd, toolName, toolInput); matched {
