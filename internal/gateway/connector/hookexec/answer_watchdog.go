@@ -1424,6 +1424,11 @@ func (w *answerWatchdog) answerLate() (code int, ok bool) {
 	}
 	// The watchdog's answer: watch finds the call finished and stays quiet.
 	w.fired, w.finished = true, true
+	// Whatever of the prepared failure log the record of this answer does not
+	// take is closed with it, as watch does for the answer it gives: watch
+	// finds the call finished and returns before its own close, and an open
+	// still in flight closes the file it opens (GAP-1022).
+	defer w.failureLog.close()
 	_, _ = w.stderr.Write(w.fallback.err)
 	_, _ = w.stdout.Write(w.fallback.out)
 	logged := w.failureLogDone
