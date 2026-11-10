@@ -14,11 +14,18 @@ import (
 // service is proven stopped nothing enrolls it, so the call is refused,
 // closed, with the outage text an enrolled account gets. A running service
 // keeps the enrollment text, and Secure Client keeps its fail-mode behaviour.
+// The options the CLI builds for that failure carry no gateway service name
+// (the runtime resolved none), so the empty name is a cell of its own: the
+// stopped test reads the standalone service then.
 func TestUnenrolledAccountWithAStoppedGatewayServiceSaysItIsNotRunning(t *testing.T) {
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, reason := range []string{managedSIDUnregisteredReason, managedEnrollmentPendingReason} {
-			for _, stopped := range []bool{true, false} {
-				name := connector + " " + reason
+			for _, cell := range []struct {
+				stopped bool
+				service string
+			}{{true, "DefenseClawGateway"}, {false, "DefenseClawGateway"}, {true, ""}, {false, ""}} {
+				stopped := cell.stopped
+				name := connector + " " + reason + " service=" + cell.service
 				if stopped {
 					name += " stopped"
 				}
@@ -30,7 +37,7 @@ func TestUnenrolledAccountWithAStoppedGatewayServiceSaysItIsNotRunning(t *testin
 					result := run(t, connector, rt, func(opts *Options) {
 						opts.ManagedEnterprise = true
 						opts.ExplainUnenrolledAccount = true
-						opts.ManagedGatewayServiceName = "DefenseClawGateway"
+						opts.ManagedGatewayServiceName = cell.service
 						opts.ManagedRuntimeFailure = reason
 					})
 					text := result.stdout + result.stderr
