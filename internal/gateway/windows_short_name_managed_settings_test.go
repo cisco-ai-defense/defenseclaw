@@ -3,7 +3,10 @@
 
 package gateway
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // rel-1-0-6:GAP-0734: the 8.3 short name of a managed agent settings file or
 // folder is the same file, so a file-tool write to it is self-protection in
@@ -25,6 +28,24 @@ func TestWindowsShortNamesOfManagedAgentSettingsStayBlocked(t *testing.T) {
 						t.Errorf("managed=%t pack=%s %v = %.160s, want protected block", managed, pack, input, got)
 					}
 				}
+			}
+		}
+	}
+}
+
+// rel-1-0-6:GAP-0734 benign twin: the 8.3 name the volume gives to another
+// file in the vendor folder of the managed settings is that file, not a
+// managed settings file, and stays allowed in every profile.
+func TestWindowsShortNameOfAnotherVendorFolderFileStaysAllowed(t *testing.T) {
+	const home = `C:\Users\vn`
+	short := windowsOrdinaryVendorFileShortName(t)
+	if short == "" {
+		t.Skip("the volume has no 8.3 name for an ordinary file in the vendor folder")
+	}
+	for _, managed := range []bool{false, true} {
+		for _, pack := range []string{"", "permissive", "strict"} {
+			if _, got := postFileToolCell(t, home, home+`\proj`, "Write", map[string]any{"file_path": short, "content": "x"}, managed, pack); strings.HasPrefix(got, fileToolBlockPrefix) {
+				t.Errorf("managed=%t pack=%s %s = %.160s, want allow (another file)", managed, pack, short, got)
 			}
 		}
 	}

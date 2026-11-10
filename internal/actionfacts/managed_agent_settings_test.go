@@ -88,44 +88,62 @@ func TestWindowsManagedAgentSettingsPath(t *testing.T) {
 		`//127.0.0.1/c$/ProgramData/Cursor/hooks.json`:                            true,
 		`//?/UNC/localhost/C$/Program Files/ClaudeCode/managed-settings.json`:     true,
 		`//otherhost/C$/Program Files/ClaudeCode/managed-settings.json`:           false,
-		`C:\PROGRA~1\ClaudeCode\managed-settings.json`:                            true,
-		`C:\PROGRA~1\CLAUDE~1\managed-settings.json`:                              true,
-		`C:\PROGRA~3\OpenAI\Codex\requirements.toml`:                              true,
-		`C:\PROGRA~1\Other\managed-settings.json`:                                 false,
 		`\\otherhost\C$\Program Files\ClaudeCode\managed-settings.json`:           false,
 		`\\localhost\C$\Program Files\Other\managed-settings.json`:                false,
 		`C:\Program Files\ClaudeCodeX\managed-settings.json`:                      false,
 		`C:\Program Files\ClaudeCode\notes.txt`:                                   false,
 		`C:\ProgramData\Cursor\other.json`:                                        false,
-		`C:\PROGRA~1\ClaudeCode\MANAGE~1.JSO`:                                     true,
-		`C:\PROGRA~1\ClaudeCode\MANAGE~1.D\90-defenseclaw.json`:                   true,
-		`C:\ProgramData\Cursor\HOOKS~1.JSO`:                                       true,
-		`C:\ProgramData\Cursor\DEFENS~1.PS1`:                                      true,
-		`C:\ProgramData\OpenAI\Codex\REQUIR~1.TOM`:                                true,
-		`C:\ProgramData\opencode\OPENCO~1.JSO`:                                    true,
-		`C:\PR1A2B~1\ClaudeCode\managed-settings.json`:                            true,
-		`C:\P~1\ClaudeCode\managed-settings.json`:                                 false,
-		`C:\PROG~1\ClaudeCode\managed-settings.json`:                              false,
-		`C:\XX1A2B~1\ClaudeCode\managed-settings.json`:                            false,
-		`C:\PR1A2G~1\ClaudeCode\managed-settings.json`:                            false,
-		`C:\PROGRA~1\ClaudeCode\MANAG~1.JSO`:                                      false,
-		`C:\PROGRA~1\ClaudeCode\MANAGE~1.TXT`:                                     false,
 		`C:\PROGRAM FILES\CLAUDECODE\MANAGED-SETTINGS.JSON`:                       true,
-		`C:\PR1A2B~5\ClaudeCode\managed-settings.json`:                            true,
-		`C:\PROGRA~5\ClaudeCode\managed-settings.json`:                            false,
-		`C:\PROGRA~0\ClaudeCode\managed-settings.json`:                            false,
-		`C:\PROGRA~10\ClaudeCode\managed-settings.json`:                           false,
-		`C:\PROGRA~1\ClaudeCode\MANAGE~5.JSO`:                                     false,
-		`C:\PROGRA~1\ClaudeCode\MANAGE~0.JSO`:                                     false,
-		`C:\ProgramData\OpenAI\CODEX~1\requirements.toml`:                         false,
-		`C:\ProgramData\CURSOR~1\hooks.json`:                                      false,
-		`C:\ProgramData\GitHub\COPILO~1\policy.d\90-defenseclaw.json`:             false,
 		`C:\Program Files\ClaudeCode\..\Other\a.json`:                             false,
 		`C:\ProgramData\OpenAI\Codex2\requirements.toml`:                          false,
 		`C:\Users\vn\ClaudeCode\managed-settings.json`:                            false,
 		`Program Files\ClaudeCode\managed-settings.json`:                          false,
 		"/etc/codex/requirements.toml":                                            false,
 		"":                                                                        false,
+	} {
+		if got := WindowsManagedAgentSettingsPath(path); got != want {
+			t.Errorf("WindowsManagedAgentSettingsPath(%q) = %t, want %t", path, got, want)
+		}
+	}
+}
+
+// rel-1-0-6:GAP-0734: where the volume cannot say what a short-name shaped
+// part stands for (another operating system, or a name that is not on the
+// volume), the shape of an 8.3 name decides, and only the shapes NTFS
+// generates count. The volume stands in as one that cannot say, so the rows
+// do not depend on the machine the test runs on; the names a real volume
+// gives come from TestWindowsManagedAgentSettingsPathShortNamesOfTheVolume.
+func TestWindowsManagedAgentSettingsPathShapeDecidesWhereTheVolumeCannotSay(t *testing.T) {
+	saved := windowsLongPath
+	t.Cleanup(func() { windowsLongPath = saved })
+	windowsLongPath = func(string) (string, bool) { return "", false }
+	for path, want := range map[string]bool{
+		`C:\PROGRA~1\ClaudeCode\managed-settings.json`:                true,
+		`C:\PROGRA~1\CLAUDE~1\managed-settings.json`:                  true,
+		`C:\PROGRA~3\OpenAI\Codex\requirements.toml`:                  true,
+		`C:\PROGRA~1\Other\managed-settings.json`:                     false,
+		`C:\PROGRA~1\ClaudeCode\MANAGE~1.JSO`:                         true,
+		`C:\PROGRA~1\ClaudeCode\MANAGE~1.D\90-defenseclaw.json`:       true,
+		`C:\ProgramData\Cursor\HOOKS~1.JSO`:                           true,
+		`C:\ProgramData\Cursor\DEFENS~1.PS1`:                          true,
+		`C:\ProgramData\OpenAI\Codex\REQUIR~1.TOM`:                    true,
+		`C:\ProgramData\opencode\OPENCO~1.JSO`:                        true,
+		`C:\PR1A2B~1\ClaudeCode\managed-settings.json`:                true,
+		`C:\P~1\ClaudeCode\managed-settings.json`:                     false,
+		`C:\PROG~1\ClaudeCode\managed-settings.json`:                  false,
+		`C:\XX1A2B~1\ClaudeCode\managed-settings.json`:                false,
+		`C:\PR1A2G~1\ClaudeCode\managed-settings.json`:                false,
+		`C:\PROGRA~1\ClaudeCode\MANAG~1.JSO`:                          false,
+		`C:\PROGRA~1\ClaudeCode\MANAGE~1.TXT`:                         false,
+		`C:\PR1A2B~5\ClaudeCode\managed-settings.json`:                true,
+		`C:\PROGRA~5\ClaudeCode\managed-settings.json`:                false,
+		`C:\PROGRA~0\ClaudeCode\managed-settings.json`:                false,
+		`C:\PROGRA~10\ClaudeCode\managed-settings.json`:               false,
+		`C:\PROGRA~1\ClaudeCode\MANAGE~5.JSO`:                         false,
+		`C:\PROGRA~1\ClaudeCode\MANAGE~0.JSO`:                         false,
+		`C:\ProgramData\OpenAI\CODEX~1\requirements.toml`:             false,
+		`C:\ProgramData\CURSOR~1\hooks.json`:                          false,
+		`C:\ProgramData\GitHub\COPILO~1\policy.d\90-defenseclaw.json`: false,
 	} {
 		if got := WindowsManagedAgentSettingsPath(path); got != want {
 			t.Errorf("WindowsManagedAgentSettingsPath(%q) = %t, want %t", path, got, want)

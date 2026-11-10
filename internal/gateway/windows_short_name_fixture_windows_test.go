@@ -53,6 +53,26 @@ func windowsManagedSettingsShortNames(t *testing.T) []string {
 	return aliases
 }
 
+// windowsOrdinaryVendorFileShortName makes an ordinary file in the vendor
+// folder of the managed Claude Code settings and returns its 8.3 name as the
+// volume gives it, or "" (with a note in the test log) where the volume gives
+// it none or the file cannot be made. The name is that of another file, not
+// of a managed settings file.
+func windowsOrdinaryVendorFileShortName(t *testing.T) string {
+	t.Helper()
+	file := `C:\Program Files\ClaudeCode\operations-notes.txt`
+	if err := createWindowsFixtureFile(t, file); err != nil {
+		t.Logf("ordinary vendor-folder file not made: %v", err)
+		return ""
+	}
+	short := windowsShortPathOf(t, file)
+	if strings.EqualFold(short, file) {
+		t.Logf("the volume generates no 8.3 short name for %s", file)
+		return ""
+	}
+	return short
+}
+
 // createWindowsFixtureFile makes file and the folders above it that are not
 // there, and removes at the end of the test what it made. A file that is
 // already there is left as it is. It returns the error where the files cannot
