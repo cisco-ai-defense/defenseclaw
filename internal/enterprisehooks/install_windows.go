@@ -353,12 +353,12 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
-	policySnapshot, err := snapshotWindowsManagedFile(policyPath)
+	policySnapshot, err := snapshotWindowsManagedPolicy(policyPath)
 	if err != nil {
 		return InstallResult{}, err
 	}
 	statePath := filepath.Join(filepath.Dir(policyPath), windowsClaudeManagedStateFile)
-	stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, err := snapshotWindowsManagedState(statePath)
 	if err != nil {
 		return InstallResult{}, err
 	}
