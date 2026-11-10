@@ -664,6 +664,27 @@ def test_protection_survives_a_gateway_restart(app) -> None:
     assert next(c for c in r.checks if c.get("check_id") == "doctor.cowork")["status"] == "pass"
 
 
+def _with_windows_drive_paths(data: bytes) -> bytes:
+    """Give the hook arguments of a built plugin the drive-letter paths a Windows
+    host writes. The builder runs here on the host path rules, but the status
+    reader judges the archive by Windows rules, and Python 3.13 no longer reads
+    a path with one leading slash as absolute there."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            body = src.read(info.filename)
+            if info.filename == "hooks/hooks.json":
+                doc = json.loads(body)
+                for groups in doc["hooks"].values():
+                    for group in groups:
+                        for handler in group["hooks"]:
+                            handler["args"][1] = "C:\\ProgramData\\DefenseClaw"
+                            handler["args"][2] = "C:\\Program Files\\DefenseClaw\\defenseclaw-hook.exe"
+                body = (json.dumps(doc, indent=2) + "\n").encode()
+            dst.writestr(info, body)
+    return out.getvalue()
+
+
 def test_released_windows_cowork_plugin_requires_rebuild(app, monkeypatch, tmp_path: Path) -> None:
     released = Path(__file__).resolve().parents[2] / (
         "internal/gateway/connector/testdata/released-carriers/1.0.8/cowork-plugin-hooks-windows.json"
@@ -691,7 +712,7 @@ def test_released_windows_cowork_plugin_requires_rebuild(app, monkeypatch, tmp_p
     source.parent.mkdir()
     source.write_bytes(b"MZ current guard")
     current = _windows_hooks_doc(source, tmp_path / "account", tmp_path / "bin" / "defenseclaw-hook.exe")
-    archive.write_bytes(cowork.plugin_zip_bytes(current, "1.0.9-test", "1.0.9"))
+    archive.write_bytes(_with_windows_drive_paths(cowork.plugin_zip_bytes(current, "1.0.9-test", "1.0.9")))
     assert cowork.cowork_status(app.cfg, health, gateway_running=True).protected
 
 
