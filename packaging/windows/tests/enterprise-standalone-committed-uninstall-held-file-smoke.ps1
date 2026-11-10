@@ -156,6 +156,30 @@ $fs.Dispose()
             finally { Stop-Holder $holder }
             if ($null -ne (ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message ($io -f $lock))) { throw 'classifier: named a file nobody holds' }
 
+            # A failure that quotes another file than the one held now is not read as this one.
+            $holder = Start-Holder $lock
+            try {
+                if ($null -ne (ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message ($io -f (Join-Path $Scratch 'other.txt')))) { throw 'classifier: a failure on another file was read as the held lock' }
+            }
+            finally { Stop-Holder $holder }
+
+            # The gateway's writer-lock timeout with nobody holding the lock now (a writer that stopped
+            # in the middle of its transaction): still the held code, with the original failure kept.
+            $text = [string](ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message 'managed-hook teardown prepare failed: timed out waiting 10s for a Codex machine policy transaction to finish')
+            if (-not $text.StartsWith('codex_state_held: ') -or -not $text.Contains('The failure was: managed-hook teardown prepare failed: timed out waiting 10s') -or $text -match 'FORCE') { throw "classifier, writer stopped mid-transaction: '$text'" }
+
+            # The lock of 1.0.8 and earlier is waited for too.
+            $legacy = [IO.Path]::Combine($codex, '.defenseclaw-managed-hooks.lock')
+            [IO.File]::WriteAllBytes($legacy, [byte[]]::new(2))
+            $holder = Start-Holder $legacy
+            try {
+                $text = ''
+                try { Wait-DefenseClawCommittedUninstallFileReleased -Layout $layout -Path $legacy } catch { $text = $_.Exception.Message }
+                if (-not $text.StartsWith('codex_state_held: ') -or -not $text.Contains($legacy)) { throw "the legacy lock was not named: '$text'" }
+            }
+            finally { Stop-Holder $holder }
+            [IO.File]::Delete($legacy)
+
             # requirements.toml and the hook get their own held codes.
             $holder = Start-Holder $requirements
             try {

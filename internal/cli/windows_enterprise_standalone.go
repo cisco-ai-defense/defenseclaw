@@ -3448,6 +3448,10 @@ func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
 	case "codex_state_held", "codex_requirements_held", "privileges_required", "guardian_state_held", "codex_state_unsettled":
 		return strings.TrimPrefix(message, code+": ")
+	case "hook_in_use":
+		// GAP-1042: the committed uninstall's hold on the hook files leads
+		// with the code too, like the other held codes.
+		return strings.TrimPrefix(message, code+": ")
 	}
 	return message
 }

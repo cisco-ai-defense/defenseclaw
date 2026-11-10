@@ -20775,7 +20775,14 @@ function Wait-DefenseClawCommittedUninstallFileReleased {
     }
     $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(0, [int]$script:CodexStateSettleSeconds))
     while ($true) {
-        $held = Get-DefenseClawCommittedUninstallHeldFile -Layout $Layout -Path $Path
+        # A probe that fails is not a held file: the delete that follows reports it.
+        $held = $null
+        try {
+            $held = Get-DefenseClawCommittedUninstallHeldFile -Layout $Layout -Path $Path
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "held-file probe failed: $($_.Exception.Message)"
+        }
         if ($null -eq $held) {
             return
         }
@@ -20828,13 +20835,20 @@ function ConvertTo-DefenseClawCommittedUninstallHeldMessage {
         }
         $held = Get-DefenseClawCommittedUninstallHeldFile -Layout $Layout -Hint $Message
         $why = 'open without delete sharing, so Setup could not remove or change it'
+        if ($null -ne $held -and -not $writerBusy -and
+            $Message -match "'[A-Za-z]:\\[^']+'" -and
+            $Message.IndexOf([string]$held.Path, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            # The failure quotes another file than the one held now: not this one.
+            return $null
+        }
         if ($null -eq $held) {
             $codexLock = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexManagedHooksLockPath)
             if (-not $writerBusy -or [string]::IsNullOrWhiteSpace($codexLock)) {
                 return $null
             }
             $held = [pscustomobject]@{ Path = $codexLock; Code = 'codex_state_held'; What = 'the Codex managed-hooks writer lock' }
-            $why = 'held by a Codex writer while the uninstall removed the Codex policy, so that removal could not finish'
+            $why = ('held by a Codex writer (or left in the middle of its transaction by one that stopped; the next Codex writer pass ends that) while the uninstall removed the Codex policy, so that removal could not finish. The failure was: ' +
+                (ConvertTo-DefenseClawBoundedDiagnostic -Value $Message -MaxLength 400))
         }
         return (New-DefenseClawCommittedUninstallHeldMessage `
             -Layout $Layout `
