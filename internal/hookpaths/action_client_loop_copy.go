@@ -35,14 +35,10 @@ func LoopCopyDestinationProtected(command, cwd, home string) bool {
 	}
 	scan := actionClientLoopScan{home: home, protected: newProtectedFiles(home), keyDir: filepath.Join(home, ".ssh")}
 	for _, top := range file.Stmts {
-		next, known := scan.statement(top, cwd)
+		cwd = scan.statement(top, cwd)
 		if scan.found {
 			return true
 		}
-		if !known {
-			return false
-		}
-		cwd = next
 	}
 	return false
 }
@@ -55,26 +51,25 @@ type actionClientLoopScan struct {
 }
 
 // statement judges every for loop in one statement and returns the directory
-// the next statement starts in. It reports false when the statement changes
-// the directory, HOME or PWD in a way that is not read, so later statements
-// have no known view.
-func (s *actionClientLoopScan) statement(stmt *syntax.Stmt, cwd string) (string, bool) {
+// the next statement starts in. A loop is judged by its word list and the
+// writer names in its body alone: what runs before it or inside it (eval, an
+// assignment, a directory change the walk cannot read) never ends the scan,
+// because none of it is proved harmless (rel-1-0-6:GAP-0880). A directory
+// change that is not read leaves the last known directory in place.
+func (s *actionClientLoopScan) statement(stmt *syntax.Stmt, cwd string) string {
 	switch cmd := stmt.Cmd.(type) {
 	case *syntax.BinaryCmd:
 		if cmd.Op == syntax.AndStmt {
-			next, known := s.statement(cmd.X, cwd)
-			if s.found || !known {
-				return "", false
+			next := s.statement(cmd.X, cwd)
+			if s.found {
+				return next
 			}
 			return s.statement(cmd.Y, next)
 		}
 	case *syntax.CallExpr:
 		if dir, ok := actionClientLoopCopyChdir(cmd, cwd, s.home); ok {
-			return dir, true
+			return dir
 		}
-	}
-	if actionClientLoopCopyChangesState(stmt, s.home) {
-		return "", false
 	}
 	syntax.Walk(stmt, func(node syntax.Node) bool {
 		if loop, ok := node.(*syntax.ForClause); ok && s.loop(loop, cwd) {
@@ -82,7 +77,7 @@ func (s *actionClientLoopScan) statement(stmt *syntax.Stmt, cwd string) (string,
 		}
 		return !s.found
 	})
-	return cwd, true
+	return cwd
 }
 
 // loop reports whether a writer in the loop body has a destination that names
@@ -148,32 +143,6 @@ func actionClientLoopCopyChdir(call *syntax.CallExpr, cwd, home string) (string,
 		return "", false
 	}
 	return OperandPath(value, cwd), true
-}
-
-// actionClientLoopCopyChangesState reports whether a statement moves the
-// directory (a plain cd to a fixed directory is read before this check), sets
-// HOME or PWD, or runs text the walk does not read.
-func actionClientLoopCopyChangesState(stmt *syntax.Stmt, home string) bool {
-	changes := false
-	syntax.Walk(stmt, func(node syntax.Node) bool {
-		call, ok := node.(*syntax.CallExpr)
-		if !ok {
-			return !changes
-		}
-		for _, assign := range call.Assigns {
-			if assign.Name != nil && (assign.Name.Value == "HOME" || assign.Name.Value == "PWD") {
-				changes = true
-			}
-		}
-		if program, _, fixed := actionClientLoopCallProgram(call, home); fixed {
-			switch program {
-			case "cd", "pushd", "popd", "eval", "source", ".":
-				changes = true
-			}
-		}
-		return !changes
-	})
-	return changes
 }
 
 // actionClientLoopCallProgram reads the program a call runs from its parsed
