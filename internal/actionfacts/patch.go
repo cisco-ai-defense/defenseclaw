@@ -20,6 +20,7 @@ import (
 	"os"
 	pathpkg "path"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -124,6 +125,15 @@ func isLocalWindowsPatchTarget(value string) bool {
 		WindowsLocalHost(parts[0], patchLocalHostname)
 }
 
+// patchDirectivePath is the path a directive line names. The apply_patch
+// readers take the directive line without the white space that ends it, so a
+// target spelled with trailing white space names the file without it, and a
+// Windows name then also drops trailing dots; the rules must judge that opened
+// name, not read the padded line as an unreadable envelope.
+func patchDirectivePath(line, prefix string) string {
+	return strings.TrimRightFunc(strings.TrimPrefix(line, prefix), unicode.IsSpace)
+}
+
 func appendExtractedPatch(out *extractedInput, text string) {
 	if out.patchSet {
 		out.mergeProblem(StatusAmbiguous, IssueConflictingSources)
@@ -224,12 +234,12 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		} {
 			if strings.HasPrefix(line, directive.prefix) {
 				kind = directive.kind
-				pathValue = strings.TrimPrefix(line, directive.prefix)
+				pathValue = patchDirectivePath(line, directive.prefix)
 				break
 			}
 		}
 		if kind == "" || pathValue == "" ||
-			strings.TrimSpace(pathValue) != pathValue ||
+			strings.TrimLeftFunc(pathValue, unicode.IsSpace) != pathValue ||
 			len(pathValue) > maxScalarBytes ||
 			strings.IndexByte(pathValue, 0) >= 0 ||
 			!isAcceptedPatchPath(pathValue) {
