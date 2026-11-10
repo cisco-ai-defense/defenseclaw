@@ -1442,10 +1442,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		}
 	}
 	if opts.oversizedReview && validUniqueGatewayResponse(body) {
-		var verdict struct {
-			Action string `json:"action"`
-		}
-		if json.Unmarshal(body, &verdict) == nil && (verdict.Action == "allow" || verdict.Action == "alert") {
+		if gatewayAllowed(body) {
 			quiet := opts
 			quiet.Stderr = io.Discard
 			logHookFailure(quiet, sp, "stdin body exceeded cap; oversize, command not inspected", "transport", "open", false)
@@ -1493,21 +1490,40 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	return code
 }
 
-// gatewayBlocked reports a gateway answer whose action is a block. Any other
-// action (allow, alert, confirm, none) can let the call run.
-func gatewayBlocked(body []byte) bool {
-	var verdict struct {
-		Action string `json:"action"`
+// gatewayAction reads the action of a gateway answer the way decide does: the
+// exact key "action", trimmed and lower-cased. ambiguous is set when the body
+// is not a unique-key JSON object or carries another key that differs from
+// "action" only in case; such a body is never taken as a block here, so no
+// protected-target check is skipped on a reading the decision does not share.
+func gatewayAction(body []byte) (action string, ambiguous bool) {
+	if !validUniqueGatewayResponse(body) {
+		return "", true
 	}
-	return json.Unmarshal(body, &verdict) == nil && verdict.Action == "block"
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil {
+		return "", true
+	}
+	for key := range fields {
+		if key != "action" && strings.EqualFold(key, "action") {
+			ambiguous = true
+		}
+	}
+	action, _ = rawString(fields, "action")
+	return action, ambiguous
 }
 
-// gatewayAllowed reports a gateway answer whose action lets the call run.
+// gatewayBlocked reports a gateway answer whose one unambiguous action is a
+// block. Any other action (allow, alert, confirm, none) can let the call run.
+func gatewayBlocked(body []byte) bool {
+	action, ambiguous := gatewayAction(body)
+	return !ambiguous && action == "block"
+}
+
+// gatewayAllowed reports a gateway answer whose action, as decide reads it,
+// lets the call run.
 func gatewayAllowed(body []byte) bool {
-	var verdict struct {
-		Action string `json:"action"`
-	}
-	return json.Unmarshal(body, &verdict) == nil && (verdict.Action == "allow" || verdict.Action == "alert")
+	action, _ := gatewayAction(body)
+	return action == "allow" || action == "alert"
 }
 
 // failAfterErrorStatus fails a call the gateway answered with the error

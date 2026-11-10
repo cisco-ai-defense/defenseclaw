@@ -33,6 +33,10 @@ func TestPatchOfProtectedTargetKeepsTheGatewayBlockAnswer(t *testing.T) {
 			func(home, _ string) string { return filepath.Join(home, ".ssh", "authorized_keys") }},
 		{"symlink, gateway allows", `{"action":"allow"}`, "a patch target changed after DefenseClaw reviewed it",
 			func(_, project string) string { return filepath.Join(project, "keys-soft") }},
+		{"allow with a case-variant block key after it", `{"action":"allow","Action":"block"}`, "a patch target changed after DefenseClaw reviewed it",
+			func(home, _ string) string { return filepath.Join(home, ".ssh", "authorized_keys") }},
+		{"allow with a case-variant block key before it", `{"ACTION":"block","action":"allow"}`, "a patch target changed after DefenseClaw reviewed it",
+			func(_, project string) string { return filepath.Join(project, "keys-soft") }},
 		{"ordinary file, gateway blocks", block, rule, func(_, project string) string { return filepath.Join(project, "notes.txt") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -77,6 +81,37 @@ func TestPatchOfProtectedTargetKeepsTheGatewayBlockAnswer(t *testing.T) {
 			}
 			if tc.want == rule && strings.Contains(message+result.stderr, "patch target changed") {
 				t.Fatalf("message %q, stderr %q: the gateway block was replaced by the target-changed refusal", message, result.stderr)
+			}
+		})
+	}
+}
+
+// The hook reads the action of a gateway answer once, as decide does: the
+// exact key, with another spelling of the key making the answer ambiguous.
+func TestGatewayActionReadingMatchesTheDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name, body       string
+		blocked, allowed bool
+	}{
+		{"block", `{"action":"block"}`, true, false},
+		{"block, mixed case value", `{"action":" Block "}`, true, false},
+		{"allow", `{"action":"allow"}`, false, true},
+		{"alert", `{"action":"alert"}`, false, true},
+		{"confirm", `{"action":"confirm"}`, false, false},
+		{"no action", `{"reason":"x"}`, false, false},
+		{"allow, then a variant block key", `{"action":"allow","Action":"block"}`, false, true},
+		{"variant block key, then allow", `{"Action":"block","action":"allow"}`, false, true},
+		{"block, then a variant allow key", `{"action":"block","Action":"allow"}`, false, false},
+		{"only a variant key", `{"Action":"block"}`, false, false},
+		{"duplicate action key", `{"action":"block","action":"allow"}`, false, false},
+		{"not an object", `[1]`, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := gatewayBlocked([]byte(tc.body)); got != tc.blocked {
+				t.Fatalf("gatewayBlocked(%s) = %v, want %v", tc.body, got, tc.blocked)
+			}
+			if got := gatewayAllowed([]byte(tc.body)); got != tc.allowed {
+				t.Fatalf("gatewayAllowed(%s) = %v, want %v", tc.body, got, tc.allowed)
 			}
 		})
 	}
