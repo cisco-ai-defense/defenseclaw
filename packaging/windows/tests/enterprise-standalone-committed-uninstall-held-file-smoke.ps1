@@ -81,6 +81,7 @@ $fs.Dispose()
         function script:Get-DefenseClawDeploymentMetadata { param([hashtable]$Layout) return [pscustomobject]@{ installed = $script:smokeInstalled } }
         function script:Test-DefenseClawMetadataInstalled { param($Metadata) return [bool]$Metadata.installed }
         $script:CodexStateSettleSeconds = 2
+        $script:DefenseClawCommittedUninstallHeldWaits = $true
 
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         try {
@@ -120,6 +121,19 @@ $fs.Dispose()
                 if (-not $text.Contains('/uninstall PURGE=1')) { throw "the purge rerun is not named: '$text'" }
             }
             finally { Stop-Holder $holder }
+
+            # A recovery (not the foreground Uninstall) does not wait: it names the holder at once, so the
+            # detached recovery Setup starts after a failed uninstall is over before the next run starts.
+            $script:DefenseClawCommittedUninstallHeldWaits = $false
+            $holder = Start-Holder $lock
+            try {
+                $text = ''
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                try { Wait-DefenseClawCommittedUninstallFileReleased -Layout $layout -Path $lock } catch { $text = $_.Exception.Message }
+                if ($timer.Elapsed.TotalSeconds -gt 1.5) { throw "a recovery waited for the holder ($($timer.Elapsed.TotalSeconds) s)" }
+                if (-not $text.StartsWith('codex_state_held: ') -or -not $text.Contains(('process id {0}' -f $holder.Id))) { throw "a recovery did not name the holder at once: '$text'" }
+            }
+            finally { Stop-Holder $holder; $script:DefenseClawCommittedUninstallHeldWaits = $true }
 
             # A holder that lets go inside the bound: the wait ends without an error.
             $holder = Start-Holder $lock 1

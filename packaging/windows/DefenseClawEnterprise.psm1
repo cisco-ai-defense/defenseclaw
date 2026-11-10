@@ -20757,6 +20757,14 @@ function New-DefenseClawCommittedUninstallHeldMessage {
     return ('{0}: {1} has {2}, {3}, {4}. The uninstall is already committed (the services are removed and nothing is rolled back); this step of its clean-up did not finish. Next step: close that program, then run {5} again; it finishes the clean-up (an MDM retries exit 1618 on its own)' -f $Code, $holders, $full, $What, $Why, $rerun)
 }
 
+# GAP-1042: whether the committed uninstall's lock-file delete waits for the
+# holder. Only the foreground Uninstall does (Invoke-DefenseClawEnterpriseLifecycle
+# sets it from its Action): the detached recovery Setup starts after a failed
+# uninstall (Recover) must not wait, or it would still be running when the
+# administrator runs the uninstall again after the holder let go, and the two
+# would finish the same clean-up side by side.
+$script:DefenseClawCommittedUninstallHeldWaits = $false
+
 function Wait-DefenseClawCommittedUninstallFileReleased {
     <#
         GAP-1042: before the committed uninstall deletes Path (a lock file),
@@ -20773,7 +20781,8 @@ function Wait-DefenseClawCommittedUninstallFileReleased {
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return
     }
-    $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(0, [int]$script:CodexStateSettleSeconds))
+    $bound = if ($script:DefenseClawCommittedUninstallHeldWaits) { [int]$script:CodexStateSettleSeconds } else { 0 }
+    $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(0, $bound))
     while ($true) {
         # A probe that fails is not a held file: the delete that follows reports it.
         $held = $null
@@ -53902,6 +53911,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     $script:DefenseClawLauncherTemp = [string]$LauncherTemp
     $script:DefenseClawRemoveLifecycleLockOnExit = $false
+    $script:DefenseClawCommittedUninstallHeldWaits = [bool]($Action -ceq 'Uninstall')
     $script:DefenseClawPurgeBundleLock = $null
     $script:DefenseClawUninstallPurgeUserState = (
         $Action -eq 'Uninstall' -and [bool]$Purge -and (Test-DefenseClawStandaloneProfile)
