@@ -538,6 +538,7 @@
   "cli/tests/test_windows_enterprise_rejected_policy_smoke.py": 20.0,
   "cli/tests/test_windows_enterprise_service_contract.py": 104.01,
   "cli/tests/test_windows_enterprise_standalone_contract.py": 482.27,
+  "cli/tests/test_windows_enterprise_verify_order.py": 15.0,
   "cli/tests/test_windows_installer_artifacts.py": 84.81,
   "cli/tests/test_windows_known_folder_contract.py": 0.02,
   "cli/tests/test_windows_local_observability_gates.py": 0.45,

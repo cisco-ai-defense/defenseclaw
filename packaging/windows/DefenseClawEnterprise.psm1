@@ -35489,6 +35489,28 @@ $script:DefenseClawVendorFolderRoots = @($script:ProgramData, $script:ProgramFil
 # only while it is true.
 $script:DefenseClawVendorLinkExcuse = $false
 
+function Assert-DefenseClawManifestNotUntrustedBeforeBinding {
+    <#
+        Standalone only, read-only. /verify finds targets.yaml's bytes are not
+        the ones the guardian activated. If an account other than SYSTEM,
+        Administrators and TrustedInstaller owns the file or can write it, that
+        is the finding to lead with: the refused path, the account and the
+        working recovery (the result turns this shape into the account and the
+        icacls fix, as it does for config.yaml and every Setup refusal).
+        "Wait for the guardian" is only true when nothing is untrusted: the
+        guardian never activates a file an untrusted account controls, so
+        waiting never ends (GAP-1061). Nothing is changed.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.ManifestPath `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -AllowInheritance -IgnoreCreatorTemplates
+}
+
 function Get-DefenseClawStandaloneManifestAdoption {
     <#
         Standalone only. The hook enumerator service republishes targets.yaml
@@ -37042,6 +37064,9 @@ function Assert-DefenseClawEnterpriseDeployment {
     ).Hash.ToLowerInvariant()
     if ([string]$managedHooksActivation.manifest_sha256 -cne
         $installedManifestSHA256) {
+        # An untrusted account's file is named first, before any wait for the
+        # guardian (GAP-1061).
+        Assert-DefenseClawManifestNotUntrustedBeforeBinding -Layout $Layout
         # Standalone: accept a manifest the enumerator republished after the
         # last transaction once the guardian has activated it exactly.
         $adoption = Get-DefenseClawStandaloneManifestAdoption `
