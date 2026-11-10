@@ -154,18 +154,40 @@ func TestLateCandidateDotDotRelativeAndNestedLinks(t *testing.T) {
 			}
 			linked := filepath.Join(project, "jump")
 			t.Chdir(linked)
-			data, err := os.ReadFile("../status")
-			if err != nil {
-				t.Fatal(err)
-			}
 			wantBytes := "ordinary"
 			want := GradeNone
 			twin := GradeNamed
 			if protectedPhysical {
 				wantBytes, want, twin = "protected", GradeNamed, GradeNone
 			}
-			if string(data) != wantBytes {
-				t.Fatalf("kernel read=%q want=%q", data, wantBytes)
+			// The reading that follows the link first: the parent of the
+			// folder the link reaches. POSIX opens this one.
+			resolved, err := filepath.EvalSymlinks(linked)
+			if err != nil {
+				t.Fatal(err)
+			}
+			physical, err := os.ReadFile(filepath.Join(filepath.Dir(resolved), "status"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(physical) != wantBytes {
+				t.Fatalf("physical read=%q want=%q", physical, wantBytes)
+			}
+			if runtime.GOOS != "windows" {
+				if data, err := os.ReadFile("../status"); err != nil || string(data) != wantBytes {
+					t.Fatalf("kernel read=%q err=%v want=%q", data, err, wantBytes)
+				}
+			} else {
+				// Win32 removes the step from the text before it opens the
+				// name, so a program that is not a shell opens the cleaned
+				// spelling. A name is ordinary only if both readings are.
+				lexical, err := os.ReadFile(filepath.Join(project, "status"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(lexical) == "protected" {
+					want = GradeNamed
+				}
 			}
 			for _, row := range []struct{ command, dir string }{
 				{"cat ../status", linked},
