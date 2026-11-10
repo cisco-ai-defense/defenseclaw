@@ -158,7 +158,7 @@ func TestRV2GX048Variants(t *testing.T) {
 		// protected env names (native)
 		{"E01 BASH_ENV added", "claudecode", "Edit", "native", e(user, `"FOO": "1"`, `"FOO": "1", "BASH_ENV": "/tmp/x"`)},
 		{"E02 DYLD_INSERT_LIBRARIES added", "claudecode", "Edit", "native", e(user, `"FOO": "1"`, `"FOO": "1", "DYLD_INSERT_LIBRARIES": "/tmp/x.dylib"`)},
-		{"E03 DEFENSECLAW_ var in project settings", "claudecode", "Write", "native", w(filepath.Join(proj, ".claude", "settings.local.json"), `{"env": {"DEFENSECLAW_HOOK_FAIL_MODE": "open"}}`)},
+		{"E03 DEFENSECLAW_ var in project settings", "claudecode", "Write", "native", w(filepath.Join(proj, ".claude", "settings.local.json"), `{"env": {"DEFENSECLAW_FAIL_MODE": "open"}}`)},
 		{"E04 NODE_OPTIONS via MultiEdit", "claudecode", "MultiEdit", "native", map[string]any{"file_path": user, "edits": []any{map[string]any{"old_string": `"model": "sonnet"`, "new_string": `"model": "opus"`}, map[string]any{"old_string": `"FOO": "1"`, "new_string": `"FOO": "1", "NODE_OPTIONS": "--require /tmp/x.js"`}}}},
 		{"E05 env non-object in old and new map (panic probe)", "claudecode", "Edit", "info", e(p2, `"model":"x"`, `"model":"y"`)},
 		// hard links by device and inode (native / shell)
