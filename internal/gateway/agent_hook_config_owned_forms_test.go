@@ -92,7 +92,10 @@ func TestAgentHookConfigOwnedTargetSpellings(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					got := rv3Judge(t, "claudecode", profile, h.project, managed, "Bash", map[string]any{"command": r.command})
 					want := "allow"
-					if r.block {
+					// The state tree is outside the agent hook config rule: a
+					// managed install keeps it with its file permissions, a
+					// per-user one with the state rules.
+					if r.block && (!managed || r.name != "install over hook script" && r.name != "folder holding hook scripts moved") {
 						want = "block"
 					}
 					if action := rv2Action(got); action != want {

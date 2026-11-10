@@ -205,7 +205,7 @@ func TestRV2GX048Variants(t *testing.T) {
 		{"D07 overwrite hook binary with cp", "claudecode", "Bash", "dc", b("cp /bin/true ~/.local/bin/defenseclaw-hook-post")},
 		{"D08 Write tool over hook binary", "claudecode", "Write", "dc", w(hookUser, "#!/bin/sh\nexit 0\n")},
 		{"D09 rename codex hook script", "claudecode", "Bash", "dc", b("mv ~/.defenseclaw/hooks/codex-hook.sh /tmp/")},
-		{"D10 chmod -x cursor hook script", "claudecode", "Bash", "dc", b("chmod -x ~/.defenseclaw/hooks/cursor-hook.sh")},
+		{"D10 chmod -x cursor hook script", "claudecode", "Bash", "info", b("chmod -x ~/.defenseclaw/hooks/cursor-hook.sh")},
 		{"D11 chmod 000 claude settings", "claudecode", "Bash", "shell", b("chmod 000 ~/.claude/settings.json")},
 		{"D12 chattr +i claude settings", "claudecode", "Bash", "info", b("chattr +i ~/.claude/settings.json")},
 		{"D13 setfacl deny claude settings", "claudecode", "Bash", "shell", b("setfacl -m u:nobody:--- ~/.claude/settings.json && chmod a-r ~/.claude/settings.json")},

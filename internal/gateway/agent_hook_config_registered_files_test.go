@@ -325,7 +325,7 @@ func TestGAP0048Review4(t *testing.T) {
 		{"R1P02 mv -t /tmp ~/.codex", "poss+", "Bash", SH, b(`mv -t /tmp ~/.codex`), ""},
 		{"R1P03 rsync --delete into codex", "poss+", "Bash", SH, b("rsync -a --delete " + X + "/empty/ ~/.codex/"), ""},
 		{"R1N04 rm -rf opencode plugins folder", "named", "Bash", SH, b(`rm -rf ~/.config/opencode/plugins`), ""},
-		{"R1N05 mv defenseclaw hooks dir", "named", "Bash", SH, b(`mv ~/.defenseclaw/hooks /tmp/h`), ""},
+		{"R1N05 mv defenseclaw hooks dir", "stateTree", "Bash", SH, b(`mv ~/.defenseclaw/hooks /tmp/h`), ""},
 		// item 2: explicit pathspecs that name no registration file allow in both
 		{"R2B01 checkout -- two files", "benign", "Bash", SH, b(`git checkout -- src/main.go README.md`), ""},
 		{"R2B02 restore --staged --worktree", "benign", "Bash", SH, b(`git restore --staged --worktree src/main.go`), ""},
@@ -460,7 +460,7 @@ func TestGAP0048Review4(t *testing.T) {
 		{"R6N09 sh -ec inline", "namedall", "Bash", SH, b(`sh -ec 'claude --settings '\''{"disableAllHooks":true}'\'' -p hi'`), ""},
 		{"R6N10 dash -lxc bridge", "named", "Bash", SH, b(`dash -lxc 'rm ~/.config/opencode/plugins/defenseclaw.js'`), ""},
 		{"R6N11 ksh -xelc inline", "namedall", "Bash", SH, b(`ksh -xelc 'claude -p hi --settings '\''{"disableAllHooks":true}'\'''`), ""},
-		{"R6N12 zsh -lexc owned folder", "named", "Bash", SH, b(`zsh -lexc 'mv ~/.defenseclaw/hooks /tmp/h'`), ""},
+		{"R6N12 zsh -lexc owned folder", "stateTree", "Bash", SH, b(`zsh -lexc 'mv ~/.defenseclaw/hooks /tmp/h'`), ""},
 		{"R6N13 bash -lc inherited home", "namedall", "Bash", SH, b(`HOME=/tmp/x bash -lc 'claude -p hi'`), ""},
 		{"R6B14 bash -lc benign settings", "benign", "Bash", SH, b(`bash -lc 'claude --settings '\''{"model":"opus"}'\'' -p hi'`), ""},
 		{"R6B15 dash -ec benign", "benign", "Bash", SH, b(`dash -ec 'git status'`), ""},
@@ -501,7 +501,7 @@ func TestGAP0048Review4(t *testing.T) {
 					}
 					want := ""
 					switch r.want {
-					case "named", "namedall":
+					case "named", "namedall", "stateTree":
 						want = "block"
 					case "poss+":
 						want = "alert|block"
@@ -515,6 +515,11 @@ func TestGAP0048Review4(t *testing.T) {
 					}
 					var status string
 					switch {
+					case managed && r.want == "stateTree":
+						// DefenseClaw state is outside the agent hook config
+						// rule: a managed install keeps it with its file
+						// permissions, a per-user one with the state rules.
+						status = "INFO"
 					case managed && r.want == "namedall" && action == "block":
 						status = "ok"
 					case managed && r.want == "namedall":

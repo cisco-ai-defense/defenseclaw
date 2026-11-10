@@ -130,7 +130,7 @@ func (g *agentHookConfigGuard) shellMentionsRegistryPath(text string) bool {
 			}
 		}
 	}
-	for _, name := range []string{"defenseclaw-hook", ".defenseclaw", ".local"} {
+	for _, name := range []string{"defenseclaw-hook", ".local"} {
 		if strings.Contains(text, name) {
 			return true
 		}
@@ -218,10 +218,6 @@ func (g *agentHookConfigGuard) ownedFile(raw string) bool {
 			place == filepath.Join(bin, "defenseclaw-hook-post") {
 			return true
 		}
-		hooks := filepath.Join(g.home, ".defenseclaw", "hooks")
-		if strings.HasPrefix(place, hooks+string(filepath.Separator)) {
-			return true
-		}
 	}
 	return false
 }
@@ -238,7 +234,6 @@ func (g *agentHookConfigGuard) ownedFolder(raw string) bool {
 		}
 		if g.home != "" {
 			for _, path := range []string{
-				filepath.Join(g.home, ".defenseclaw", "hooks"),
 				filepath.Join(g.home, ".local", "bin", "defenseclaw-hook-user"),
 				filepath.Join(g.home, ".local", "bin", "defenseclaw-hook-post"),
 			} {
@@ -276,14 +271,6 @@ func agentHookConfigRegistrationPaths(g *agentHookConfigGuard) []string {
 			// with it (rm -rf ~/.local/bin).
 			for path := filepath.Join(g.home, ".local", "bin", name); path != g.home && filepath.IsAbs(path); path = filepath.Dir(path) {
 				add(path)
-			}
-		}
-		hooks := filepath.Join(g.home, ".defenseclaw", "hooks")
-		add(hooks)
-		add(filepath.Dir(hooks))
-		if entries, err := os.ReadDir(hooks); err == nil && len(entries) <= 64 {
-			for _, entry := range entries {
-				add(filepath.Join(hooks, entry.Name()))
 			}
 		}
 	}

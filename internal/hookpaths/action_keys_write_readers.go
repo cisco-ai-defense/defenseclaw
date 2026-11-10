@@ -492,6 +492,14 @@ func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected p
 		roots = []string{"."}
 	}
 	for _, root := range roots {
+		// A root that is a link reaches the key files below the place it
+		// links to, which the protected set does not spell.
+		for _, key := range AuthorizedKeysFiles {
+			if matches, _ := filepath.Match(name, key); matches &&
+				actionClientProtectedPath(filepath.Join(root, key), cwd, protected, ssh) {
+				return true
+			}
+		}
 		absoluteRoot := OperandPath(root, cwd)
 		for _, target := range protected {
 			if target.path != absoluteRoot && !strings.HasPrefix(target.path, absoluteRoot+string(filepath.Separator)) {

@@ -1015,18 +1015,54 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected p
 	return found
 }
 
+// findChildRemovesTree reports whether the options of an rm-like find child
+// (the words after its program) ask it to remove folders with their content.
+func findChildRemovesTree(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "--recursive" || strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") &&
+			strings.ContainsAny(arg, "rR") {
+			return true
+		}
+	}
+	return false
+}
+
 func registrationFindReach(words []string, cwd string, protected protectedFiles) bool {
 	var roots, names []string
 	deletes, insensitive := false, false
+	// A walk cut at -maxdepth N reaches nothing deeper than N below a root.
+	// Several limits or one that is not a number leave the walk unbounded.
+	maxDepth, limits := 0, 0
+	// A child that removes a folder with what it holds, or moves it, takes
+	// the whole tree under a root whatever the depth limit.
+	tree := false
 	for i := 1; i < len(words); i++ {
 		switch word := words[i]; word {
 		case "-delete":
 			deletes = true
-		case "-exec", "-execdir", "-ok", "-okdir":
+		case "-maxdepth":
 			if i+1 < len(words) {
+				depth, err := strconv.Atoi(words[i+1])
+				if err != nil || depth < 0 {
+					depth = -1
+				}
+				maxDepth, limits = depth, limits+1
+				i++
+			}
+		case "-exec", "-execdir", "-ok", "-okdir":
+			// A child removes what the walk found only when it is handed the
+			// found name ({}); one that names its own operands is judged on
+			// those, as registrationFindActionTargets reads them.
+			if i+1 < len(words) && slices.ContainsFunc(words[i+1:], func(arg string) bool { return strings.Contains(arg, "{}") }) {
 				switch programBase(words[i+1]) {
-				case "rm", "unlink", "shred", "mv":
+				case "rm", "unlink", "shred":
 					deletes = true
+					tree = tree || findChildRemovesTree(words[i+2:])
+				case "mv":
+					deletes, tree = true, true
 				}
 			}
 		case "-name", "-iname":
@@ -1051,6 +1087,10 @@ func registrationFindReach(words []string, cwd string, protected protectedFiles)
 		root = OperandPath(root, cwd)
 		for _, target := range protected {
 			if target.path != root && !strings.HasPrefix(target.path, root+string(filepath.Separator)) {
+				continue
+			}
+			if !tree && limits == 1 && maxDepth >= 0 && target.path != root &&
+				strings.Count(strings.TrimPrefix(target.path, root+string(filepath.Separator)), string(filepath.Separator)) >= maxDepth {
 				continue
 			}
 			if len(names) == 0 {
