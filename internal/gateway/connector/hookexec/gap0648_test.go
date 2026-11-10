@@ -98,23 +98,26 @@ func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			stubManagedServiceRunning(t, func(name string) (bool, bool) { return test.running, name == "DefenseClawGateway" })
 			home := t.TempDir()
-			meter := testenv.StartMeter()
-			result, elapsed := runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) {
-				managedWindowsStandalone(opts)
-				opts.ManagedGatewayServiceName = "DefenseClawGateway"
-				opts.FailureLogHome = userLogHome(home)
-				opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ok"}}`)
-				opts.StartedAt = opts.StartedAt.Add(-gatewayRestartBudget + lead)
+			var result runResult
+			var elapsed time.Duration
+			reading := testenv.Measure(func() {
+				result, elapsed = runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) {
+					managedWindowsStandalone(opts)
+					opts.ManagedGatewayServiceName = "DefenseClawGateway"
+					opts.FailureLogHome = userLogHome(home)
+					opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ok"}}`)
+					opts.StartedAt = opts.StartedAt.Add(-gatewayRestartBudget + lead)
+				})
 			})
 			if !blocked(result) {
 				t.Fatalf("after %s code=%d stdout=%q stderr=%q, want a block", elapsed, result.code, result.stdout, result.stderr)
 			}
 			// The upper bound is the wall time of the call. Only a call that
-			// missed it is given the host (GAP-0889), and only the time this
-			// process was ready to run and had no CPU during that call
-			// (testenv.Meter, started just before it): a call that waited on
-			// anything else keeps the miss, and the lower bound is not moved.
-			if elapsed < test.atLeast || (elapsed >= test.below && !meter.Within(elapsed, test.below)) {
+			// missed it is given the host (GAP-0889), and only the time the
+			// thread that ran it was ready to run and had no CPU during that
+			// call (testenv.Measure): a call that waited on anything else
+			// keeps the miss, and the lower bound is not moved.
+			if elapsed < test.atLeast || (elapsed >= test.below && !reading.Within(elapsed, test.below)) {
 				t.Fatalf("blocked after %s, want in [%s, %s)", elapsed, test.atLeast, test.below)
 			}
 			entry := lastHookFailure(t, home)

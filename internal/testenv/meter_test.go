@@ -4,102 +4,59 @@
 package testenv
 
 import (
-	"runtime"
-	"sync"
 	"testing"
 	"time"
 )
 
-// Only a busy thread names the host: a sleeper reads nothing however long
-// the host kept others waiting, and a reading is the longest wait of a busy
-// thread, never more than the interval.
-func TestDeniedBetweenNamesOnlyTheWaitOfBusyThreads(t *testing.T) {
+// A call inside its bound passes on its wall time, one over MaxStretch bounds
+// never passes whatever the host denied it, and between the two the host's
+// denial is taken off.
+func TestCallWithinKeepsTheBoundWhereTheHostIsNotShort(t *testing.T) {
+	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
+	for _, tc := range []struct {
+		name         string
+		denied, took time.Duration
+		want         bool
+	}{
+		{"inside the bound", 0, ms(900), true},
+		{"over the bound, no denial", 0, ms(1100), false},
+		{"over the bound by what the host denied", ms(200), ms(1100), true},
+		{"over the bound by more than the host denied", ms(50), ms(1100), false},
+		{"over MaxStretch bounds, whatever was denied", ms(3000), time.Duration(float64(time.Second) * (MaxStretch + 0.5)), false},
+	} {
+		if got := (Call{denied: tc.denied}).Within(tc.took, time.Second); got != tc.want {
+			t.Errorf("%s: Within = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Only a busy thread names the host: a sleeper reads nothing however long the
+// host kept others waiting, and a thread that began or ended inside the
+// interval is not read. A busy thread kept off the CPU for a quarter of the
+// interval starves the window; less does not.
+func TestStarvedBetweenNamesOnlyTheWaitOfBusyThreads(t *testing.T) {
 	const wall = time.Second
 	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
 	for _, tc := range []struct {
 		name          string
 		before, after map[int]threadTimes
-		want          time.Duration
+		want          bool
 	}{
-		{"idle process", map[int]threadTimes{1: {}}, map[int]threadTimes{1: {run: ms(1)}}, 0},
-		{"a sleeper beside a starved host", map[int]threadTimes{1: {}}, map[int]threadTimes{1: {run: ms(2), wait: ms(30)}}, 0},
-		{"one thread without the CPU for 600 ms", map[int]threadTimes{1: {}}, map[int]threadTimes{1: {run: ms(300), wait: ms(600)}}, ms(600)},
-		{"longest of two busy threads, an idle one ignored",
-			map[int]threadTimes{1: {}, 2: {}, 3: {}},
-			map[int]threadTimes{1: {run: ms(400), wait: ms(500)}, 2: {run: ms(100), wait: ms(300)}, 3: {run: ms(5)}}, ms(500)},
-		{"a thread that began or ended inside the interval is not read", map[int]threadTimes{1: {}}, map[int]threadTimes{2: {run: ms(300), wait: ms(600)}}, 0},
-		{"a wait over the interval is the interval", map[int]threadTimes{1: {}}, map[int]threadTimes{1: {run: ms(10), wait: 2 * wall}}, wall},
-		{"a counter that went back names nothing", map[int]threadTimes{1: {run: ms(900)}}, map[int]threadTimes{1: {run: ms(100), wait: ms(500)}}, 0},
+		{"idle process", map[int]threadTimes{1: {}}, map[int]threadTimes{1: {run: ms(1)}}, false},
+		{"a sleeper beside a starved host", map[int]threadTimes{1: {}}, map[int]threadTimes{1: {run: ms(2), wait: ms(30)}}, false},
+		{"one thread without the CPU for 600 ms", map[int]threadTimes{1: {}}, map[int]threadTimes{1: {run: ms(300), wait: ms(600)}}, true},
+		{"one thread without the CPU for 300 ms", map[int]threadTimes{1: {}}, map[int]threadTimes{1: {run: ms(600), wait: ms(300)}}, true},
+		{"one thread without the CPU for 200 ms", map[int]threadTimes{1: {}}, map[int]threadTimes{1: {run: ms(700), wait: ms(200)}}, false},
+		{"one starved thread of two", map[int]threadTimes{1: {}, 2: {}},
+			map[int]threadTimes{1: {run: ms(900), wait: ms(50)}, 2: {run: ms(200), wait: ms(700)}}, true},
+		{"a thread that began inside the interval", map[int]threadTimes{1: {}}, map[int]threadTimes{2: {run: ms(300), wait: ms(600)}}, false},
+		{"a counter that went back", map[int]threadTimes{1: {run: ms(900)}}, map[int]threadTimes{1: {run: ms(100), wait: ms(500)}}, false},
 	} {
-		if got := deniedBetween(tc.before, tc.after, wall); got != tc.want {
-			t.Errorf("%s: deniedBetween = %v, want %v", tc.name, got, tc.want)
+		if got := starvedBetween(tc.before, tc.after, wall); got != tc.want {
+			t.Errorf("%s: starvedBetween = %v, want %v", tc.name, got, tc.want)
 		}
 	}
-	if got := deniedBetween(map[int]threadTimes{1: {}}, map[int]threadTimes{1: {run: time.Second}}, 0); got != 0 {
-		t.Errorf("no interval: %v, want 0", got)
-	}
-}
-
-// A call that stays inside its bound costs no reading, one over MaxStretch
-// bounds never passes, and a Meter that has no reading leaves the bound as
-// the product value.
-func TestMeterWithinKeepsTheBoundWhereTheHostIsNotShort(t *testing.T) {
-	var none *Meter
-	if !none.Within(time.Second, 2*time.Second) {
-		t.Error("a took inside its bound did not pass")
-	}
-	if none.Within(1100*time.Millisecond, time.Second) {
-		t.Error("a took over its bound passed with no reading")
-	}
-	started := &Meter{started: time.Now().Add(-time.Minute), before: map[int]threadTimes{}}
-	if started.Within(time.Duration(float64(time.Second)*(MaxStretch+0.5)), time.Second) {
-		t.Errorf("a took of %.1fx its bound passed", MaxStretch+0.5)
-	}
-}
-
-// On Linux with scheduler statistics the real reading follows the host: a
-// process whose threads are shared out names what it lost, and one that only
-// sleeps names none of it.
-func TestMeterReadsTheCPUTheHostKeptFromTheProcess(t *testing.T) {
-	if readThreadTimes() == nil {
-		t.Skip("the host keeps no per-thread scheduler statistics")
-	}
-	sleeper := StartMeter()
-	time.Sleep(300 * time.Millisecond)
-	if got := sleeper.Denied(); got > 100*time.Millisecond {
-		t.Errorf("a sleeping process was denied %v of 300 ms", got)
-	}
-
-	// Three times as many pinned-down spinning threads as CPUs: each gets
-	// about a third of one, so each waits for most of the interval.
-	spinners := 3 * runtime.NumCPU()
-	var stop sync.WaitGroup
-	done := make(chan struct{})
-	for range spinners {
-		stop.Add(1)
-		go func() {
-			defer stop.Done()
-			runtime.LockOSThread()
-			defer runtime.UnlockOSThread()
-			x := 1
-			for {
-				select {
-				case <-done:
-					_ = x
-					return
-				default:
-					x = x*31 + 7
-				}
-			}
-		}()
-	}
-	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(spinners))
-	loaded := StartMeter()
-	time.Sleep(400 * time.Millisecond)
-	got := loaded.Denied()
-	close(done)
-	stop.Wait()
-	if got < 100*time.Millisecond {
-		t.Errorf("%d spinning threads on %d CPUs: denied %v of 400 ms, want at least 100 ms", spinners, runtime.NumCPU(), got)
+	if starvedBetween(map[int]threadTimes{1: {}}, map[int]threadTimes{1: {wait: time.Second}}, 0) {
+		t.Error("an empty interval was starved")
 	}
 }

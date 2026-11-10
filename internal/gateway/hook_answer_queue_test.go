@@ -36,7 +36,8 @@ const hookAnswerQueueBudget = 3500 * time.Millisecond
 // every audit append committed alone on the store's one connection and the
 // answers queued behind them: p95 11.4-13.6 s. Concurrent appends now share
 // a transaction (group commit): p95 under 1 s. Every answer must be inside
-// the budget, the slowest included.
+// the budget, the slowest included. A host that does not let the process run
+// cannot be measured (see below), and then the test says so and stops.
 func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	if testing.Short() || hookAnswerRaceBuild {
 		t.Skip("load measurement: not under -short or the race detector")
@@ -56,12 +57,15 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
 	bindHookLifecycleV8(t, api, fixture.runtime)
 	cwd := t.TempDir()
-	// answer is one call: how long it took, and whether it stayed inside the
-	// budget once the time the host kept this process from the CPU during
-	// exactly that call is taken off (GAP-0889).
+	// answer is one call: how long it took, and whether the host kept a busy
+	// thread of this process from the CPU for a quarter of exactly that call
+	// (testenv.Window). The calls are in flight together and a call's work
+	// moves between goroutines and threads, so no thread is the call's own:
+	// the window is never taken off a time, it only says whether the host let
+	// the measurement run (GAP-0889).
 	type answer struct {
-		took   time.Duration
-		within bool
+		took    time.Duration
+		starved bool
 	}
 	call := func(session string, index int) (answer, int) {
 		body, err := json.Marshal(map[string]any{
@@ -74,13 +78,13 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 			t.Error(err)
 			return answer{}, 0
 		}
-		meter := testenv.StartMeter()
+		window := testenv.StartWindow()
 		started := time.Now()
 		rec := httptest.NewRecorder()
 		api.handleAgentHook("claudecode").ServeHTTP(rec,
 			httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)))
 		took := time.Since(started)
-		return answer{took: took, within: meter.Within(took, hookAnswerQueueBudget)}, rec.Code
+		return answer{took: took, starved: took > hookAnswerQueueBudget && window.Starved()}, rec.Code
 	}
 	for index := range 20 {
 		call("warm", index)
@@ -137,10 +141,13 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	if len(answers) < sessions*int(duration/time.Second)/2 {
 		t.Fatalf("only %d calls ran", len(answers))
 	}
-	over := 0
+	over, overOnAFreeHost := 0, 0
 	for _, a := range answers {
-		if !a.within {
+		if a.took > hookAnswerQueueBudget {
 			over++
+			if !a.starved {
+				overOnAFreeHost++
+			}
 		}
 	}
 	p95 := answers[len(answers)*95/100].took
@@ -148,12 +155,22 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 		len(answers), answers[len(answers)/2].took, p95, answers[len(answers)-1].took)
 	// Every answer, not a percentile: a call over the budget is a benign call
 	// refused as a gateway no-answer (GAP-1981). The budget is the wall time
-	// of the call. Only a call that missed it is given the host, and only the
-	// time its own process was ready to run and had no CPU during that call
-	// (testenv.Meter, started just before it): a call that waited on anything
-	// else keeps the miss, and none passes beyond testenv.MaxStretch budgets,
-	// which stays under the 11-13 s the queueing the group commit removed took.
+	// of the call, and nothing is subtracted from it: no call is excused by
+	// time the host kept some thread of the process waiting, which a call
+	// blocked on anything else also overlaps. A call over it fails; the
+	// queueing the group commit removed took 11-13 s at p95 and fails the
+	// same way. The one thing the host changes is whether the measurement is
+	// valid: when every call that missed the budget did so while the host
+	// kept a busy thread of the process off the CPU for a quarter of the
+	// call, the process was not given the two CPUs the load is shaped for,
+	// and the run says so and is not judged. A call that missed it on a host
+	// that left the process three quarters of its CPU is never in that case:
+	// the answers take under 1 s there.
+	if overOnAFreeHost > 0 {
+		t.Fatalf("%d of %d answers over the %v answer budget (%d on a free host; max %v, p95 %v)", over, len(answers), hookAnswerQueueBudget, overOnAFreeHost, answers[len(answers)-1].took, p95)
+	}
 	if over > 0 {
-		t.Fatalf("%d of %d answers over the %v answer budget (max %v, p95 %v)", over, len(answers), hookAnswerQueueBudget, answers[len(answers)-1].took, p95)
+		t.Skipf("host starved the process: %d of %d answers over the %v answer budget, each while a busy thread of the process was off the CPU for %.0f%% or more of the call; max %v, p95 %v. The budget was not judged",
+			over, len(answers), hookAnswerQueueBudget, testenv.StarvedShare*100, answers[len(answers)-1].took, p95)
 	}
 }

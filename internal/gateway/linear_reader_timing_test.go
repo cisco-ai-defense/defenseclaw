@@ -33,18 +33,18 @@ func assertLinearReaderTimeWith(t *testing.T, label string, full time.Duration, 
 	t.Helper()
 	bestFull, bestHalf := full, time.Duration(-1)
 	// withinBudget: some full-size run stayed inside the hook budget. A run
-	// that missed it is given only the time the host kept this process from
-	// the CPU during that run (testenv.Meter, started just before it): a
-	// reading that waited on anything else keeps the miss (GAP-0889). The
-	// caller's first reading has no meter and is judged by its wall time.
+	// that missed it is given only the time the host kept the thread that ran
+	// it from the CPU during that run (testenv.Measure): a reading that waited
+	// on anything else keeps the miss (GAP-0889). The caller's first reading
+	// has no meter and is judged by its wall time.
 	withinBudget := full <= linearReaderHookBudget
 	runFull := func() {
-		meter := testenv.StartMeter()
-		again := run(true)
+		var again time.Duration
+		reading := testenv.Measure(func() { again = run(true) })
 		if again < bestFull {
 			bestFull = again
 		}
-		withinBudget = withinBudget || meter.Within(again, linearReaderHookBudget)
+		withinBudget = withinBudget || reading.Within(again, linearReaderHookBudget)
 	}
 	linear := func() bool { return bestFull <= bestHalf*5/2+50*time.Millisecond }
 	for try := 0; try < 3; try++ {
