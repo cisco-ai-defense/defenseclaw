@@ -19,6 +19,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 
@@ -93,6 +94,34 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 			// name each group for what it really has, never the generic
 			// "its agents are not guarded" for all of them.
 			account.Reason = windowsEnterpriseStandalonePendingReason(unguarded, keepsRunning, machineHook)
+			if failure := failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)]; failure != "" {
+				account.Reason += "; failed: " + failure
+			}
+		}
+		// A machine-hook connector (Claude Code, Codex, Cursor) that waits for
+		// the sign-in is not merely unguarded: the machine hook is registered
+		// for the account and refuses every tool call until the guardian
+		// publishes the account's runtime in its connected session
+		// (GAP-1026). The reason says so. The only caller is the standalone
+		// status (readWindowsEnterpriseStandaloneEnrollmentAt); Secure Client
+		// builds its reason elsewhere and keeps it word for word.
+		var blocked []string
+		for _, row := range rows {
+			// Only a row of an account the guardian enrolled for the connector
+			// before is blocked (a never-enrolled account keeps the enrollment
+			// wait, GAP-1010). Only a row that waits with no runtime at all: a row
+			// that waits for a hook fail mode change, an untrusted folder or
+			// another cause is an awaiting-sign-in error, never Pending, has
+			// its runtime, and its hook decides.
+			if windowsEnterpriseEnrollmentKey(row.SID, row.User, row.UserHome) ==
+				windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome) &&
+				row.Pending && windowsEnterpriseMachineHookConnector(row.Connector) &&
+				enterpriseHomeConnectorEnrolledBefore(row.UserHome, row.Connector) {
+				blocked = append(blocked, strings.TrimSpace(row.Connector))
+			}
+		}
+		if rest := windowsEnterpriseWithout(unguarded, blocked); pending && len(blocked) > 0 {
+			account.Reason = windowsEnterpriseStandaloneBlockedPendingReason(blocked, rest, keepsRunning, machineHook)
 			if failure := failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)]; failure != "" {
 				account.Reason += "; failed: " + failure
 			}
@@ -248,6 +277,56 @@ func windowsEnterpriseStandalonePendingReason(unguarded, keepsRunning, machineHo
 		connectors []string
 		text       string
 	}{
+		{unguarded, windowsEnterpriseEnrollmentUnguarded},
+		{keepsRunning, windowsEnterpriseEnrollmentKeepsRunning},
+		{machineHook, windowsEnterpriseEnrollmentMachineHook},
+	} {
+		if len(group.connectors) > 0 {
+			groups = append(groups, strings.Join(group.connectors, ", ")+": "+group.text)
+		}
+	}
+	return windowsEnterpriseEnrollmentPendingLead + strings.Join(groups, "; ")
+}
+
+// windowsEnterpriseEnrollmentBlocked is what a pending machine-hook connector
+// (Claude Code, Codex, Cursor) has: the hook is in place and refuses every tool
+// call, so the agent is blocked, not unprotected, until the account has a
+// connected session in which the guardian publishes its runtime (GAP-1026).
+const windowsEnterpriseEnrollmentBlocked = "blocked until this account signs in or reconnects " +
+	"(DefenseClaw refuses every tool call of the agent)"
+
+// windowsEnterpriseMachineHookConnector reports a connector whose hook is
+// registered machine-wide for every enrolled account, so a pending account is
+// refused by it (the connectors of RetireWindowsUnregisteredRuntimeSelections).
+func windowsEnterpriseMachineHookConnector(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claudecode", "codex", "cursor":
+		return true
+	}
+	return false
+}
+
+// windowsEnterpriseWithout returns names without the entries of drop.
+func windowsEnterpriseWithout(names, drop []string) []string {
+	var rest []string
+	for _, name := range names {
+		if !slices.Contains(drop, name) {
+			rest = append(rest, name)
+		}
+	}
+	return rest
+}
+
+// windowsEnterpriseStandaloneBlockedPendingReason is the reason of a pending
+// account with at least one blocked connector: every group is named
+// "<connectors>: <what it has>", so the reason never says one thing of all.
+func windowsEnterpriseStandaloneBlockedPendingReason(blocked, unguarded, keepsRunning, machineHook []string) string {
+	var groups []string
+	for _, group := range []struct {
+		connectors []string
+		text       string
+	}{
+		{blocked, windowsEnterpriseEnrollmentBlocked},
 		{unguarded, windowsEnterpriseEnrollmentUnguarded},
 		{keepsRunning, windowsEnterpriseEnrollmentKeepsRunning},
 		{machineHook, windowsEnterpriseEnrollmentMachineHook},
