@@ -125,7 +125,9 @@ func psResolveRelative(cwd, path string) (string, bool) {
 // somewhere else (a link onto other state): the link itself, a path under it,
 // or a path text appended to the value completes to it (a directory that holds
 // the link, a name cut short). Where such a path lands cannot be read from its
-// shape, so it is never merged with another value.
+// shape, so it is never merged with another value. A sibling name that only
+// starts with the link text and goes on in the same segment (the link name
+// with more name after it) is another name and is not pinned.
 func (m psMerger) pinned(value string) bool {
 	if len(m.links) == 0 {
 		return false
@@ -136,12 +138,24 @@ func (m psMerger) pinned(value string) bool {
 	}
 	for _, candidate := range candidates {
 		for link := range m.links {
-			if strings.HasPrefix(link, candidate) || strings.HasPrefix(candidate, link) {
+			if strings.HasPrefix(link, candidate) || psIsOrUnderLink(candidate, link) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// psIsOrUnderLink reports a path key that is the link or goes on below it.
+// The link name followed by dots or blanks is the same name (Windows drops
+// them), and a stream suffix or a separator after it goes on below the link.
+// Any other text after the link name is a sibling name, not a path under it.
+func psIsOrUnderLink(path, link string) bool {
+	if !strings.HasPrefix(path, link) {
+		return false
+	}
+	rest := strings.TrimLeft(path[len(link):], ". ")
+	return rest == "" || rest[0] == '\\' || rest[0] == ':'
 }
 
 // psAddValue returns values with value added when it is new. From

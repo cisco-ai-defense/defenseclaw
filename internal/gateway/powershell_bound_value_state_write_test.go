@@ -264,6 +264,12 @@ func TestPowerShellPlainPathSignature(t *testing.T) {
 			t.Errorf("%q and %q: signatures %q (%t) and %q (%t), want different", pair[0], pair[1], a, okA, b, okB)
 		}
 	}
+	// A name that only starts with a known link's text is another name.
+	siblingA, okA := merger.signature(`C:\Users\Alice\project\defenseclaw_link.txt0.txt`)
+	siblingB, okB := merger.signature(`.\defenseclaw_link.txtother`)
+	if !okA || !okB || siblingA != siblingB {
+		t.Errorf("siblings of a known link: signatures %q (%t) and %q (%t), want the same", siblingA, okA, siblingB, okB)
+	}
 	for _, value := range []string{
 		`C:\Users\Alice\.defenseclaw\config.yaml`, `C:\Users\Alice\project\.DefenseClaw`, `C:\Users\Alice\.de`, `C:\Users\Alice\.`,
 		`C:\Users\Alice\project\..\x`, `C:\Users\Alice\project\.\x`, `\rooted\defenseclaw`, `..\defenseclaw`, `.\sub\..\defenseclaw`, `.`, `.\`,
@@ -272,6 +278,7 @@ func TestPowerShellPlainPathSignature(t *testing.T) {
 		`C:\Users\Alice\défenseclaw`, `C:defenseclaw`, "",
 		// A link or hard link the hook client resolved, however it is spelled.
 		`C:\Users\Alice\project\defenseclaw_link.txt`, `c:/users/alice/project/DEFENSECLAW_LINK.TXT`, `.\defenseclaw_link.txt`, `defenseclaw_link.txt`,
+		`C:\Users\Alice\project\defenseclaw_link.txt\child`, `C:\Users\Alice\project\defenseclaw_link.txt.`, `C:\Users\Alice\project\defenseclaw_link.txt:s`,
 		`C:\Users\Alice\project\jl`, `.\jl\`, `C:\Users\Alice\project\jl\x.txt`,
 		// A directory that holds a link, or a name cut short before one.
 		`C:\Users\Alice\project`, `C:\Users\Alice`, `.\`, `C:\Users\Alice\project\defenseclaw_li`, `.\defenseclaw_l`,
@@ -309,6 +316,10 @@ func TestPowerShellBoundValueMergeKeepsLinksAndReadsEveryOrdinaryFamily(t *testi
 		linked[spelling] = "C:/Users/Alice/.defenseclaw/config.yaml"
 	}
 	linked[`C:/Users/Alice/project/defenseclaw_dir/link.txt`] = "C:/Users/Alice/.defenseclaw/config.yaml"
+	// The client resolves a path under the link and a stream of it to the state too.
+	for _, suffix := range []string{`/child.txt`, `:s`} {
+		linked[strings.ReplaceAll(link, `\`, "/")+suffix] = "C:/Users/Alice/.defenseclaw/config.yaml"
+	}
 	// binding binds $p to n files (the tail reads the state too: a command that
 	// never names state has no link to follow) named prefix<i>.txt, then to last, in the
 	// branches of an if chain, then runs tail.
@@ -372,6 +383,22 @@ func TestPowerShellBoundValueMergeKeepsLinksAndReadsEveryOrdinaryFamily(t *testi
 			row{name: fmt.Sprintf("a directory that does not hold the link among %d", n), command: binding(`C:\Users\Alice\project\defenseclaw_other`, n, `C:\Users\Alice\project\defenseclaw_sub`, holder), links: true},
 			row{name: fmt.Sprintf("a name cut short before a known link among %d", n), command: binding(`C:\Users\Alice\project\defenseclaw_note`, n, `C:\Users\Alice\project\defenseclaw_li`, cutShort), block: true, links: true},
 			row{name: fmt.Sprintf("a name cut short before another name among %d", n), command: binding(`C:\Users\Alice\project\defenseclaw_note`, n, `C:\Users\Alice\project\defenseclaw_lx`, cutShort), links: true},
+		)
+	}
+	// A name that only starts with the known link's text and goes on in the same
+	// segment is another file, not the link and not a path under it; a path under
+	// the link and a stream of it are still the link.
+	const linkName = `C:\Users\Alice\project\defenseclaw_link.txt`
+	linkRead := `[IO.File]::ReadAllText('` + state + `'); [IO.File]::ReadAllText('` + linkName + `'); [IO.File]::WriteAllText($p, 'x')`
+	for _, n := range []int{3, 9, 40, 65, 90} {
+		rows = append(rows,
+			row{name: fmt.Sprintf("%d siblings that start with the known link's text, a state read, an ordinary write", n), command: binding(linkName, n, linkName+`last.txt`, readThenWrite), links: true},
+			row{name: fmt.Sprintf("%d siblings that start with the known link's text, a link read, an ordinary write", n), command: binding(linkName, n, linkName+`last.txt`, linkRead), links: true},
+			row{name: fmt.Sprintf("%d relative siblings that start with the known link's text", n), command: binding(`.\defenseclaw_link.txt`, n, `.\defenseclaw_link.txtlast.txt`, linkRead), links: true},
+			row{name: fmt.Sprintf("%d siblings of the known link, then the link itself", n), command: binding(linkName, n, linkName, readThenWrite), block: true, links: true},
+			row{name: fmt.Sprintf("%d siblings of the known link, then a path under it", n), command: binding(linkName, n, linkName+`\child.txt`, readThenWrite), block: true, links: true},
+			row{name: fmt.Sprintf("%d siblings of the known link, then a stream of it", n), command: binding(linkName, n, linkName+`:s`, readThenWrite), block: true, links: true},
+			row{name: fmt.Sprintf("%d siblings of the known link with no link in the map", n), command: binding(linkName, n, linkName+`last.txt`, linkRead)},
 		)
 	}
 	rows = append(rows, row{name: "ninety ordinary files with plain punctuation in their names", command: binding(`C:\Users\Alice\project\defenseclaw+note #@,=`, 90, `C:\Users\Alice\project\defenseclaw+last`, readThenWrite)})
