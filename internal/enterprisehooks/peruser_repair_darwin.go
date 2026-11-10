@@ -41,8 +41,10 @@ func (e *UserSkipError) Error() string {
 func (e *UserSkipError) Unwrap() error { return e.Err }
 
 const (
-	// userRepairMinInterval lets the connectors of one user share one repair
-	// pass per reconcile instead of walking the same tree once per connector.
+	// userRepairMinInterval lets the connectors of one user share one walk of
+	// ~/.defenseclaw per reconcile instead of walking the same tree once per
+	// connector. Each connector's own agent configs are not shared and are
+	// repaired on every pass.
 	userRepairMinInterval = 20 * time.Second
 	// userRepairEntryBudget bounds the walk of a user's ~/.defenseclaw.
 	userRepairEntryBudget = 4096
@@ -93,9 +95,12 @@ func RepairUserTarget(opts InstallOptions, unit string) error {
 	userRepairState.Lock()
 	last := userRepairState.lastRun[key]
 	userRepairState.Unlock()
-	if !last.IsZero() && userRepairNow().Sub(last) < userRepairMinInterval {
-		return nil
-	}
+	// Only the shared ~/.defenseclaw walk waits for the interval. The agent
+	// configs belong to this target's connector, so they are repaired on
+	// every pass: throttling the whole repair skipped every connector of the
+	// user after the first, and an emptied, immutable settings.json kept the
+	// Claude Code hooks out for as long as the user kept it so.
+	walkDataDir := last.IsZero() || userRepairNow().Sub(last) >= userRepairMinInterval
 
 	repairer := &userRepairer{
 		unit: unit,
@@ -103,14 +108,16 @@ func RepairUserTarget(opts InstallOptions, unit string) error {
 		uid:  uint32(opts.OwnerUID),
 		gid:  uint32(opts.OwnerGID),
 	}
-	err := repairer.run(opts)
+	err := repairer.run(opts, walkDataDir)
 	var skip *UserSkipError
 	switch {
 	case errors.As(err, &skip):
 		reportUserSkip(unit, key, skip)
 	case err == nil:
 		userRepairState.Lock()
-		userRepairState.lastRun[key] = userRepairNow()
+		if walkDataDir {
+			userRepairState.lastRun[key] = userRepairNow()
+		}
 		delete(userRepairState.skips, key)
 		userRepairState.Unlock()
 	}
@@ -165,7 +172,9 @@ func (r *userRepairer) skip(reason, path string, err error) error {
 	return &UserSkipError{Reason: reason, Path: path, Err: err}
 }
 
-func (r *userRepairer) run(opts InstallOptions) error {
+// run repairs the agent configs of opts, and ~/.defenseclaw first when
+// walkDataDir is set.
+func (r *userRepairer) run(opts InstallOptions, walkDataDir bool) error {
 	homeFD, err := r.openHome()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -177,12 +186,14 @@ func (r *userRepairer) run(opts InstallOptions) error {
 	}
 	defer unix.Close(homeFD)
 
-	dataDir := strings.TrimSpace(opts.DataDir)
-	if dataDir == "" {
-		dataDir = filepath.Join(r.home, ".defenseclaw")
-	}
-	if err := r.repairDataDir(homeFD, filepath.Clean(dataDir)); err != nil {
-		return err
+	if walkDataDir {
+		dataDir := strings.TrimSpace(opts.DataDir)
+		if dataDir == "" {
+			dataDir = filepath.Join(r.home, ".defenseclaw")
+		}
+		if err := r.repairDataDir(homeFD, filepath.Clean(dataDir)); err != nil {
+			return err
+		}
 	}
 
 	for _, path := range userAgentConfigPaths(opts) {
