@@ -1198,22 +1198,57 @@ func msysDriveSpelling(path string) string {
 // placeIn spells path as an absolute path for a command that runs in cwd. An
 // absolute path stays as it is. A path that starts with a separator but names
 // no drive (/dev/null, \tmp\x) is rooted on the drive of cwd, as the system
-// reads it on Windows, and is not a path below cwd. Any other path is below
-// cwd, in the spelling given (a parent segment is not folded away: the links
-// of the path are followed in order).
+// reads it on Windows, and is not a path below cwd. A path with a drive and no
+// separator after it (C:link\SKILL.md) is relative to the working folder of
+// that drive: below cwd when the drive is the drive of cwd, in the spelling
+// given without the drive. The working folder of another drive is not in the
+// hook event, so that path cannot be placed: it stays as written and the call
+// is recorded as one whose links are unproven (UnprovenLinkNote). Any other
+// path is below cwd, in the spelling given (a parent segment is not folded
+// away: the links of the path are followed in order).
 func placeIn(path, cwd string) string {
 	if filepath.IsAbs(path) || cwd == "" {
 		return path
 	}
-	if volume := filepath.VolumeName(cwd); volume != "" && path != "" && os.IsPathSeparator(path[0]) {
-		return volume + path
+	cwdVolume := filepath.VolumeName(cwd)
+	if volume := filepath.VolumeName(path); volume != "" {
+		if !strings.EqualFold(volume, cwdVolume) {
+			if UnprovenLinkNote != nil {
+				UnprovenLinkNote()
+			}
+			return path
+		}
+		path = path[len(volume):]
+		if path == "" {
+			return cwd
+		}
+	} else if cwdVolume != "" && path != "" && os.IsPathSeparator(path[0]) {
+		return cwdVolume + path
 	}
 	return cwd + string(filepath.Separator) + path
 }
 
+// UnprovenLinkNote tells the hook call that a path of the request could not be
+// placed, so the folder it reaches, and the links on the way, are unknown (a
+// drive-relative path on a drive other than the one of the working folder).
+// The hookpaths package, which keeps the call, sets it at start: the call is
+// then judged as one whose links are unproven (SkillLinksUnproven). With none
+// set the path is only left as written.
+var UnprovenLinkNote func()
+
 func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
-	bare := !strings.ContainsAny(token, "/\\")
-	if bare && !namesEntryIn(cwd, token) {
+	// A name with a drive in front and no separator after it (C:link) is the
+	// name of an entry of that drive's working folder, as the system reads it:
+	// of cwd when the drive is the drive of cwd. On another drive it is not
+	// shown to be a word, and placeIn records that it cannot be placed.
+	word := token
+	bare := true
+	if volume := filepath.VolumeName(token); volume != "" && !filepath.IsAbs(token) {
+		bare = strings.EqualFold(volume, filepath.VolumeName(cwd))
+		word = token[len(volume):]
+	}
+	bare = bare && !strings.ContainsAny(word, "/\\")
+	if bare && !namesEntryIn(cwd, word) && (word != "" || token == "") {
 		return nil
 	}
 	path := trimExtendedPrefix(strings.ReplaceAll(token, "\\", "/"))

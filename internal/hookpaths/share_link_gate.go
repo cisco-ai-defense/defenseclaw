@@ -21,6 +21,15 @@ import "github.com/defenseclaw/defenseclaw/internal/assetfacts"
 // others, as a script body the budget kept unread is (ShareBodyUnread).
 func init() {
 	assetfacts.ShareGate = shareAnswersForLinks
+	assetfacts.UnprovenLinkNote = noteSkillLinksUnproven
+}
+
+// noteSkillLinksUnproven records, for the hook call on the calling goroutine,
+// that a path of the request could not be placed (SkillLinksUnproven).
+func noteSkillLinksUnproven() {
+	if call := currentHookCall(); call != nil {
+		call.linksUnproven = true
+	}
 }
 
 // shareAnswersForLinks reports whether the walk may read path: it is local, or
