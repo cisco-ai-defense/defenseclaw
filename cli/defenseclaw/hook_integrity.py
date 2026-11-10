@@ -927,12 +927,20 @@ def _claude_chain_wrapper_parts(handler: Any) -> tuple[str, list[str], str, str]
     guard = args[6]
     if not _claude_wrapper_safe(guard) or ntpath.basename(guard).lower() != "defenseclaw-hook-guard.exe":
         return None
-    approved = next(
-        (args[i + 3] for i in range(8, len(args) - 3)
+    # Windows reports the system directory as C:\Windows\system32, not in the
+    # SystemRoot spelling built above. The program is the argument that names
+    # fc.exe of that directory as Windows compares paths, and the whole word
+    # list is then checked with the spelling Setup wrote.
+    compare_at = next(
+        (i for i in range(8, len(args) - 3)
          if ntpath.normcase(ntpath.normpath(args[i])) == ntpath.normcase(ntpath.normpath(compare))
          and args[i + 1:i + 3] == ["/b", guard]),
-        "",
+        -1,
     )
+    if compare_at < 0:
+        return None
+    compare = args[compare_at]
+    approved = args[compare_at + 3]
     if not _claude_wrapper_safe(approved) or ntpath.basename(approved).lower() != "defenseclaw-hook-guard.approved":
         return None
     for i in range(len(args) - 8):
