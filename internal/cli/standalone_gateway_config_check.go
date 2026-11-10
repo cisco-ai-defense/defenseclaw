@@ -443,6 +443,9 @@ func rulePackNestedCopyHint(dir string, err error) string {
 // Windows install: the Setup ships no such pack, so the message names the
 // property to set (GAP-1041). It is nil for any other folder or install.
 func builtinRulePackMissing(cfg *config.Config, configPath, dir string) error {
+	if cfg == nil {
+		return nil
+	}
 	policyDir := strings.TrimSpace(cfg.PolicyDir)
 	name := filepath.Base(filepath.Clean(dir))
 	advice := cfg.WindowsBuiltinRulePackAdvice(name)
@@ -452,8 +455,9 @@ func builtinRulePackMissing(cfg *config.Config, configPath, dir string) error {
 	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: rule pack directory_not_found at .: "+
-		"rule-pack directory does not exist; policy_dir is %s and has no guardrail\\%s folder: %s", dir, configPath, policyDir, name, advice)
+	_, loadErr := guardrail.LoadRulePack(dir)
+	return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v; policy_dir is %s and has no guardrail\\%s folder: %s",
+		dir, configPath, loadErr, policyDir, name, advice)
 }
 
 // standaloneServiceCanReadTree checks that the gateway service account can

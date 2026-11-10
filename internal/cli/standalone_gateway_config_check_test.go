@@ -471,6 +471,9 @@ func TestBuiltinRulePackMissingNamesPolicyDir(t *testing.T) {
 	if err := builtinRulePackMissing(cfg, "config.yaml", other); err != nil {
 		t.Errorf("a folder outside policy_dir/guardrail was claimed: %v", err)
 	}
+	if err := builtinRulePackMissing(cfg, "config.yaml", filepath.Join(policyDir, "guardrail", "default")); err != nil {
+		t.Errorf("the default pack got the strict advice: %v", err)
+	}
 	secure := *cfg
 	secure.Enterprise.Profile = "secure_client"
 	if err := builtinRulePackMissing(&secure, "config.yaml", filepath.Join(policyDir, "guardrail", "permissive")); err != nil {

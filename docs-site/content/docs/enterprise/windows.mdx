@@ -242,10 +242,24 @@ Setup refuses them with `1639` and changes nothing until you bring the pack:
 config rule pack "strict": policy_dir is not set; the Windows Setup ships only the default rule pack, so strict has no files here. ...
 ```
 
-To use `strict`, copy the `policies/guardrail/strict` folder of the DefenseClaw release to
-`guardrail\strict` under a folder of your own, give the root folder the owner and permissions
-shown for a [custom rule pack](#custom-rule-packs) (the `Set-Acl` step), and set `policy_dir`
-to it:
+To use `strict`, take the `policies/guardrail/strict` folder from the source archive of your
+DefenseClaw release (the Windows Setup does not contain it; `permissive` is the folder next to
+it), put it at `guardrail\strict` under a folder of your own, and make that folder
+administrator-owned with read access for the gateway service SID, as for a
+[custom rule pack](#custom-rule-packs):
+
+```powershell
+$Policies = 'C:\ProgramData\DefenseClaw-Policies'
+New-Item -ItemType Directory -Path "$Policies\guardrail" -Force | Out-Null
+$Acl = Get-Acl -LiteralPath $Policies
+$Acl.SetSecurityDescriptorSddlForm('O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274)', 'Owner, Access')
+Set-Acl -LiteralPath $Policies -AclObject $Acl
+if (Test-Path -LiteralPath "$Policies\guardrail\strict") { Remove-Item -LiteralPath "$Policies\guardrail\strict" -Recurse -Force }
+Copy-Item -LiteralPath .\strict -Destination "$Policies\guardrail\strict" -Recurse -ErrorAction Stop
+icacls "$Policies" /setowner '*S-1-5-32-544' /T /C | Out-Null
+```
+
+Then set `policy_dir` in the config:
 
 ```yaml title="config.yaml (excerpt)"
 policy_dir: 'C:\ProgramData\DefenseClaw-Policies'
