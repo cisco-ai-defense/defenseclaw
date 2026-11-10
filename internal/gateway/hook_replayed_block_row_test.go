@@ -13,7 +13,8 @@ import (
 
 // A call that carries the id of an earlier, already audited call is an exact
 // replay. A replay of an allow adds no second row, but a block always has its
-// own row: a denied call never vanishes from the audit (GAP-1060).
+// own row: a denied call never vanishes from the audit (GAP-1060). A replayed
+// allow collapses only into an earlier allow: after a block it has its own row.
 func TestReplayedToolUseIDBlockStillWritesItsAuditRow(t *testing.T) {
 	installCorrelationHMACForTest()
 	store, logger := testStoreAndLogger(t)
@@ -84,4 +85,12 @@ func TestReplayedToolUseIDBlockStillWritesItsAuditRow(t *testing.T) {
 	step("block answering an id that earlier got an allow", "toolu_allowed", block, true, 1)
 	step("replayed block", "toolu_blocked", block, true, 1)
 	step("replayed block again", "toolu_blocked", block, true, 1)
+	// The id re-sent after a block and now answered allow: the only earlier
+	// record is a block, so the allow is recorded too, then repeats stay silent.
+	step("allow answering an id that earlier got a block", "toolu_blocked", allow, true, 1)
+	step("replayed allow after that allow", "toolu_blocked", allow, true, 0)
+	// A non-allow, non-block answer is its own delivery as well.
+	alert := agentHookResponse{Action: "alert", RawAction: "alert", Mode: "action", Reason: "policy", Severity: "MEDIUM"}
+	step("alert answering an id that earlier got an allow", "toolu_allowed", alert, true, 1)
+	step("allow answering an id that earlier got an alert", "toolu_allowed", allow, true, 1)
 }

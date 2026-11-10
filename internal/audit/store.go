@@ -2431,6 +2431,30 @@ func (s *Store) StoredHookVerdict(ctx context.Context, id string) (verdict Store
 	return decision, true, nil
 }
 
+// LatestHookVerdictOfEvent returns the verdict of the newest hook record
+// (connector-hook or connector-hook-synthetic row, or its decision record)
+// observed for the semantic event id, so a repeat of that delivery can tell
+// what the audit last recorded for it. found is false when no hook record is
+// linked to the event (GAP-1060).
+func (s *Store) LatestHookVerdictOfEvent(ctx context.Context, semanticEventID string) (verdict StoredHookVerdict, found bool, err error) {
+	if s == nil || !s.Ready() || semanticEventID == "" {
+		return StoredHookVerdict{}, false, errors.New("audit: hook verdict lookup requires a ready store and a semantic event id")
+	}
+	var id string
+	err = s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx, `SELECT event.id
+		FROM correlation_observations AS observation JOIN audit_events AS event ON event.id = observation.record_id
+		WHERE observation.semantic_event_id = ? AND event.action IN (?, ?)
+		ORDER BY observation.observed_time_unix_nano DESC, event.timestamp DESC, event.rowid DESC LIMIT 1`,
+		semanticEventID, string(ActionConnectorHook), string(ActionConnectorHookSynthetic)), &id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StoredHookVerdict{}, false, nil
+	}
+	if err != nil {
+		return StoredHookVerdict{}, false, err
+	}
+	return s.StoredHookVerdict(ctx, id)
+}
+
 // DatabaseFileReplaced reports whether the database path no longer names
 // the file this store opened: it was deleted or replaced while the gateway
 // ran. SQLite keeps writing to the open, unlinked file, so every new audit

@@ -1488,14 +1488,24 @@ func validAntigravityHookEvent(event string) bool {
 	}
 }
 
-// hookReplayWritesNoRow reports an exact replay of a delivery whose audit row
-// is already persisted and whose answer is not a block. A block always writes
-// its own row and decision export, whatever id the call carries: a denied
-// call must never vanish from the audit because an earlier call used the same
-// tool_use_id (GAP-1060). A hook whose correlation ledger write failed is not
-// a replay (GAP-1536).
-func hookReplayWritesNoRow(req agentHookRequest, resp agentHookResponse) bool {
-	return req.SuppressCorrelationEmit && !req.CorrelationUnavailable && resp.Action != "block"
+// hookReplayWritesNoRow reports an exact replay of an allowed delivery whose
+// audit row is already persisted, answered allow again: the one case that
+// collapses into the earlier row. Everything else has its own row and decision
+// export: a block, an alert or an unconfirmed answer, and an allow whose
+// earlier record is a block, an alert or a record that does not say allow (a
+// block answered by an allow on a re-sent id keeps both rows, GAP-1060). A
+// lookup that fails proves nothing, so it writes; an event with no linked hook
+// record has nothing to contradict and stays silent. A hook whose correlation
+// ledger write failed is not a replay (GAP-1536).
+func (a *APIServer) hookReplayWritesNoRow(ctx context.Context, req agentHookRequest, resp agentHookResponse) bool {
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable || resp.Action != "allow" {
+		return false
+	}
+	if a.store == nil || req.SemanticEventID == "" {
+		return true
+	}
+	earlier, found, err := a.store.LatestHookVerdictOfEvent(ctx, req.SemanticEventID)
+	return err == nil && (!found || earlier.Action == "allow")
 }
 
 // hookLLMEventExportable reports whether the hook's prompt/tool/response
@@ -1658,7 +1668,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// enforcement companion that #850 wanted to persist here is not
 	// forward-ported; the primary hook_decision log + audit row are the
 	// only durable artefacts of this decision in Part 1.
-	replay := hookReplayWritesNoRow(req, resp)
+	replay := a.hookReplayWritesNoRow(ctx, req, resp)
 	// Every verdict has its audit row, save the exact replay of an allowed
 	// delivery whose row is already persisted: a hook whose correlation
 	// failed is audited too, and a block always has its own row (GAP-1060). The row is written first, so the export, the status
@@ -2208,12 +2218,13 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	// Keep observability and audit row gated by the same replay classification
 	// so a suppressed replay stays silent on both; the enforcement companion
 	// that #850 wanted here is not forward-ported in Part 1.
-	if !hookReplayWritesNoRow(req, resp) {
+	silent := a.hookReplayWritesNoRow(ctx, req, resp)
+	if !silent {
 		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 	}
 	// As in finalizeAgentHookAnswer: only an exact replay of an allow goes
 	// without its row.
-	if !hookReplayWritesNoRow(req, resp) {
+	if !silent {
 		if err := a.logConnectorHookAuditEnvelope(ctx, env); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] synthetic hook audit persistence failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
