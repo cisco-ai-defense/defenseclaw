@@ -32,41 +32,42 @@ func assertLinearReaderTime(t *testing.T, label string, full time.Duration, run 
 func assertLinearReaderTimeWith(t *testing.T, label string, full time.Duration, run func(full bool) time.Duration, ceiling bool) {
 	t.Helper()
 	bestFull, bestHalf := full, time.Duration(-1)
+	// withinBudget: some full-size run stayed inside the hook budget. A run
+	// that missed it is given only the time the host kept this process from
+	// the CPU during that run (testenv.Meter, started just before it): a
+	// reading that waited on anything else keeps the miss (GAP-0889). The
+	// caller's first reading has no meter and is judged by its wall time.
+	withinBudget := full <= linearReaderHookBudget
+	runFull := func() {
+		meter := testenv.StartMeter()
+		again := run(true)
+		if again < bestFull {
+			bestFull = again
+		}
+		withinBudget = withinBudget || meter.Within(again, linearReaderHookBudget)
+	}
 	linear := func() bool { return bestFull <= bestHalf*5/2+50*time.Millisecond }
 	for try := 0; try < 3; try++ {
 		if half := run(false); bestHalf < 0 || half < bestHalf {
 			bestHalf = half
 		}
 		if try > 0 {
-			if again := run(true); again < bestFull {
-				bestFull = again
-			}
+			runFull()
 		}
 		if linear() {
 			break
 		}
 	}
-	for try := 1; !hookAnswerRaceBuild && bestFull > linearReaderHookBudget && try < 3; try++ {
-		if again := run(true); again < bestFull {
-			bestFull = again
-		}
+	for try := 1; !hookAnswerRaceBuild && !withinBudget && try < 3; try++ {
+		runFull()
 	}
 	t.Logf("%s: full size %s, half size %s", label, bestFull, bestHalf)
 	if !linear() {
 		t.Errorf("%s: full size %s, half size %s: not linear (over 2.5x)", label, bestFull, bestHalf)
 	}
-	// The ceiling is the wall time. Only when the best run missed it, the
-	// host is measured (GAP-0889): a host that gives this process a third of
-	// a CPU stretches a CPU-bound reading by the same factor, up to
-	// testenv.MaxStretch, and a reading that waits on anything but the CPU
-	// is not stretched by it. On an idle host the ceiling is the hook budget.
-	limit := linearReaderHookBudget
-	if !hookAnswerRaceBuild && bestFull > limit {
-		limit = testenv.Limit(limit)
-	}
-	if !hookAnswerRaceBuild && bestFull > limit && !ceiling {
-		t.Logf("%s: full size judged in %s, over the %s hook budget (known, not failed here)", label, bestFull, limit)
-	} else if !hookAnswerRaceBuild && bestFull > limit {
-		t.Errorf("%s: full size judged in %s, over the %s hook budget", label, bestFull, limit)
+	if !hookAnswerRaceBuild && !withinBudget && !ceiling {
+		t.Logf("%s: full size judged in %s, over the %s hook budget (known, not failed here)", label, bestFull, linearReaderHookBudget)
+	} else if !hookAnswerRaceBuild && !withinBudget {
+		t.Errorf("%s: full size judged in %s, over the %s hook budget", label, bestFull, linearReaderHookBudget)
 	}
 }

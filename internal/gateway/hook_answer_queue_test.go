@@ -56,7 +56,14 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
 	bindHookLifecycleV8(t, api, fixture.runtime)
 	cwd := t.TempDir()
-	call := func(session string, index int) (time.Duration, int) {
+	// answer is one call: how long it took, and whether it stayed inside the
+	// budget once the time the host kept this process from the CPU during
+	// exactly that call is taken off (GAP-0889).
+	type answer struct {
+		took   time.Duration
+		within bool
+	}
+	call := func(session string, index int) (answer, int) {
 		body, err := json.Marshal(map[string]any{
 			"session_id": session, "transcript_path": filepath.Join(cwd, "transcript.jsonl"),
 			"cwd": cwd, "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -65,13 +72,15 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 		})
 		if err != nil {
 			t.Error(err)
-			return 0, 0
+			return answer{}, 0
 		}
+		meter := testenv.StartMeter()
 		started := time.Now()
 		rec := httptest.NewRecorder()
 		api.handleAgentHook("claudecode").ServeHTTP(rec,
 			httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)))
-		return time.Since(started), rec.Code
+		took := time.Since(started)
+		return answer{took: took, within: meter.Within(took, hookAnswerQueueBudget)}, rec.Code
 	}
 	for index := range 20 {
 		call("warm", index)
@@ -94,7 +103,7 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	const sessions = 10
 	const duration = 20 * time.Second
 	var mu sync.Mutex
-	var latencies []time.Duration
+	var answers []answer
 	var calls sync.WaitGroup
 	deadline := time.Now().Add(duration)
 	for session := range sessions {
@@ -109,12 +118,12 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 				inflight.Add(1)
 				go func() {
 					defer inflight.Done()
-					latency, code := call(fmt.Sprintf("load-%d", session), index)
+					result, code := call(fmt.Sprintf("load-%d", session), index)
 					if code != http.StatusOK {
 						t.Errorf("call %d of session %d: HTTP %d", index, session, code)
 					}
 					mu.Lock()
-					latencies = append(latencies, latency)
+					answers = append(answers, result)
 					mu.Unlock()
 				}()
 			}
@@ -124,25 +133,27 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	calls.Wait()
 	stopped.Store(true)
 	hogs.Wait()
-	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-	if len(latencies) < sessions*int(duration/time.Second)/2 {
-		t.Fatalf("only %d calls ran", len(latencies))
+	sort.Slice(answers, func(i, j int) bool { return answers[i].took < answers[j].took })
+	if len(answers) < sessions*int(duration/time.Second)/2 {
+		t.Fatalf("only %d calls ran", len(answers))
 	}
-	p95 := latencies[len(latencies)*95/100]
-	t.Logf("%d calls at 10/s on 2 CPUs with 6 busy goroutines: p50 %v p95 %v max %v",
-		len(latencies), latencies[len(latencies)/2], p95, latencies[len(latencies)-1])
-	// Every answer, not a percentile: a call over the budget is a benign call
-	// refused as a gateway no-answer (GAP-1981). The budget is the wall time.
-	// Only when an answer missed it, the host is measured (GAP-0889): a host
-	// that gives this process a third of a CPU stretches the answers by the
-	// same factor, at most testenv.MaxStretch, which stays under the 11-13 s
-	// the queueing the group commit removed took.
-	budget := hookAnswerQueueBudget
-	if worst := latencies[len(latencies)-1]; worst > budget {
-		budget = testenv.Limit(budget)
-		if worst > budget {
-			over := len(latencies) - sort.Search(len(latencies), func(i int) bool { return latencies[i] > budget })
-			t.Fatalf("%d of %d answers over the %v answer budget (max %v, p95 %v)", over, len(latencies), budget, worst, p95)
+	over := 0
+	for _, a := range answers {
+		if !a.within {
+			over++
 		}
+	}
+	p95 := answers[len(answers)*95/100].took
+	t.Logf("%d calls at 10/s on 2 CPUs with 6 busy goroutines: p50 %v p95 %v max %v",
+		len(answers), answers[len(answers)/2].took, p95, answers[len(answers)-1].took)
+	// Every answer, not a percentile: a call over the budget is a benign call
+	// refused as a gateway no-answer (GAP-1981). The budget is the wall time
+	// of the call. Only a call that missed it is given the host, and only the
+	// time its own process was ready to run and had no CPU during that call
+	// (testenv.Meter, started just before it): a call that waited on anything
+	// else keeps the miss, and none passes beyond testenv.MaxStretch budgets,
+	// which stays under the 11-13 s the queueing the group commit removed took.
+	if over > 0 {
+		t.Fatalf("%d of %d answers over the %v answer budget (max %v, p95 %v)", over, len(answers), hookAnswerQueueBudget, answers[len(answers)-1].took, p95)
 	}
 }

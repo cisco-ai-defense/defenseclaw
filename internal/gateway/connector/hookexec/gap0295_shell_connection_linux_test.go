@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
-	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestGAP0295ShellFreshStartUsesConnectionTime covers hook-post's exit 10
@@ -61,6 +60,7 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "gateway.pid"), record, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	const settleCap = 2 * time.Minute
 	connect := func() (net.Conn, *PerUserPeerRecord) {
 		t.Helper()
 		conn, err := net.Dial("tcp", address)
@@ -69,28 +69,21 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 		}
 		client, server := conn.LocalAddr().(*net.TCPAddr), conn.RemoteAddr().(*net.TCPAddr)
 		owner, unique := 0, false
-		// Both reads are bounded by 2 s of wall time. Only a read that missed
-		// it is given the host (GAP-0889): the helper process and this one are
-		// stretched alike by a host that is short of CPU (testenv.MaxStretch).
-		began := time.Now()
-		poll := func(limit time.Duration) {
-			for ; time.Since(began) < limit && !unique; time.Sleep(10 * time.Millisecond) {
-				owner, unique = perUserConnectedPeerPID(client, server)
-			}
-		}
-		poll(2 * time.Second)
-		if !unique {
-			poll(testenv.Limit(2 * time.Second))
+		// Both reads are setup: they state which process owns the accepted
+		// socket, and nothing is timed against them. They wait for that state
+		// to exist, not for a wall-clock time (GAP-0889), so a host that is
+		// slow to schedule the helper process or this one cannot fail them;
+		// the cap only keeps a socket that never gets an owner from holding
+		// the test for ever.
+		for hung := time.Now().Add(settleCap); !unique && time.Now().Before(hung); time.Sleep(10 * time.Millisecond) {
+			owner, unique = perUserConnectedPeerPID(client, server)
 		}
 		if !unique || owner != pid {
 			t.Fatalf("accepted socket owner = %d %v, want the fresh gateway", owner, unique)
 		}
 		peer := NewPerUserPeerRecord()
 		peer.capture(conn.LocalAddr(), conn.RemoteAddr())
-		got, known := peer.wait(2 * time.Second)
-		if !known {
-			got, known = peer.wait(testenv.Limit(2*time.Second) - 2*time.Second)
-		}
+		got, known := peer.wait(settleCap)
 		if !known || got.pid != pid {
 			t.Fatalf("recorded peer = %+v %v", got, known)
 		}

@@ -16,8 +16,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 const gap0540VersionWorker = "GAP0540_VERSION_WORKER"
@@ -117,16 +115,13 @@ func TestGAP0540VersionProbeEndsWithApplyWorker(t *testing.T) {
 	if err == nil {
 		t.Fatal("worker unexpectedly exited normally")
 	}
-	// The command ends within 2 s of wall time of the worker. Only when it
-	// outlives that, the host is measured (GAP-0889): a host that is short of
-	// CPU delays the command by the same factor (testenv.MaxStretch).
-	limit := 2 * time.Second
+	// The command ends with its worker when the kernel has carried that out,
+	// which is the event this waits for (GAP-0889): the kernel gives that no
+	// time contract, so a host that is slow to schedule the command cannot
+	// fail it. A command that is not tied to its worker keeps running for its
+	// whole 60 s, so the 30 s cap tells the two apart on any host.
 	for killed := time.Now(); versionProbeAlive(pid); time.Sleep(20 * time.Millisecond) {
-		if time.Since(killed) > limit {
-			if stretched := testenv.Limit(2 * time.Second); stretched > limit {
-				limit = stretched
-				continue
-			}
+		if time.Since(killed) > 30*time.Second {
 			t.Fatal("version command outlived its apply worker")
 		}
 	}
