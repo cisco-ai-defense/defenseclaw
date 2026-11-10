@@ -2062,10 +2062,31 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					// gateway reads the state names those targets reach behind
 					// ProtectHome only from this map (rel-1-0-6:GAP-0601,
 					// GAP-0630 review 2).
-					for _, simple := range simples {
+					for _, simple := range slices.Concat(simples, straightLineReadings(fallback, command)) {
 						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) &&
 							filepath.Clean(simple.CWD) != filepath.Clean(cwd) {
 							commandLinksWithFacts(simple.Text, simple.CWD, home, sourceFacts, true)
+						}
+						// A reading that spells a path through the login or a
+						// loop variable (u=$USER; ... /home/$u/f) names a file and a
+						// link the command text does not: it is described as the
+						// reading of a runtime-expanded word is, for a gateway that
+						// cannot walk the home itself. So is a reading that a variable
+						// the walk followed gives a path (d=ordinary; cp a b/$d.txt)
+						// when the link walk of the text is incomplete: the gateway
+						// judges the resolved path and finds its answer in the map,
+						// where an incomplete map alone leaves it unproven. Any other
+						// reading keeps the answer the command text has.
+						if simple.EvaluationFailure == "" && simple.Text != command &&
+							filepath.IsAbs(simple.CWD) && filepath.Clean(simple.CWD) == filepath.Clean(cwd) &&
+							!slices.Contains(dynamicReadings, simple.Text) &&
+							(simple.ResolvedVariable && links.opaque ||
+								simple.LoginGuess && readingReachesLink(simple.Text, cwd, home)) {
+							if len(dynamicReadings) >= maxResolvedReadings {
+								truncated = true
+							} else {
+								dynamicReadings = append(dynamicReadings, simple.Text)
+							}
 						}
 						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) {
 							stateOperands = append(stateOperands, childStateOperands(simple.Text, simple.CWD, home)...)
@@ -3753,6 +3774,44 @@ func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bo
 	}
 	return stackWords, stackStatic, expanded
 }
+
+// straightLineReadings are the readings of a command that the default and
+// permissive tiers of the gateway judge (Input.LoopBindsStraightLine), for a
+// command whose functions or IFS can make them differ from the whole-script
+// reading above: that reading counts any declaration or IFS in the script,
+// the gateway tier follows what each call of a function meets. The syntax
+// tree decides (actionfacts.StraightLineReadingDiffers), not the spelling of
+// the text. A gateway behind ProtectHome reads the links of both from the map.
+func straightLineReadings(input actionfacts.Input, command string) []actionfacts.SimpleCommand {
+	if file, parsed := parseShell(command); !parsed || !actionfacts.StraightLineReadingDiffers(file) {
+		return nil
+	}
+	input.LoopBindsStraightLine = true
+	return actionfacts.SimpleCommands(input, actionfacts.Analyze(input))
+}
+
+// readingReachesLink reports a reading with a write operand that lies behind a
+// link, the only reading whose map needs more than its text has: a reading
+// that names no link has the answer of the command text.
+func readingReachesLink(reading, cwd, home string) bool {
+	operands, _, _ := ShellWriteOperands(reading, cwd, home)
+	operands = append(operands, LiteralWriteOperands(reading, cwd, home)...)
+	for _, edit := range inPlaceStateOperands(reading, cwd, home, KnownUser{}) {
+		operands = append(operands, edit.path)
+	}
+	for _, operand := range operands {
+		path := OperandPath(operand, cwd)
+		if resolved, ok := ResolveWriteTarget(path); !ok || resolved != filepath.Clean(path) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxResolvedReadings is the most readings of a command, with a variable
+// resolved to the value the walk follows, that the map describes; past it the
+// map says it is incomplete.
+const maxResolvedReadings = 64
 
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
 	return commandLinks(command, cwd, home, facts, record, false)

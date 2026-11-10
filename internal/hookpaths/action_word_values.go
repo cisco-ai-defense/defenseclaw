@@ -2002,6 +2002,10 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 			return
 		}
 		value, fixed := actionWordValue(assign.Value, values, cwd, home)
+		if assign.Value == nil && !assign.Naked && assign.Array == nil && assign.Index == nil {
+			// name= holds the empty string.
+			value, fixed = "", true
+		}
 		if assign.Append {
 			old, known := values[name]
 			if known && fixed {

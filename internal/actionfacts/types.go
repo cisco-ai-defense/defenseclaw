@@ -70,6 +70,15 @@ type Input struct {
 	// command then resolve under it (GAP-2473); the whole action keeps its
 	// own reading.
 	MovedWindowsShellCWD bool `json:"-"`
+	// LoopBindsStraightLine is trusted caller context set by a gateway that
+	// judges the call in a tier that blocks only what the shell certainly
+	// runs (the default and permissive tiers). A function that replaces read,
+	// and an IFS assignment, then reach a loop that binds a variable only when
+	// a top-level statement before the loop runs them; code in a function body,
+	// a branch or after the loop is not followed. Left false (the strict tier
+	// and the hook client), every such code of the action counts, reached or
+	// not (rel-1-0-6:GAP-0880 review 6).
+	LoopBindsStraightLine bool `json:"-"`
 	// StraightLineFunctions is trusted caller context set by a gateway that
 	// judges the call in a tier that blocks only what the shell certainly
 	// runs (the default and permissive tiers). A function body then counts

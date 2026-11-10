@@ -191,7 +191,7 @@ func shortCircuitListSequence(source string, compound bool) (string, bool) {
 // and one where a statement could change what another runs (a function
 // definition) or where cutting the text could lose input (a here-document).
 func sequenceStatements(source string, compound bool) (statements []string, reduced, ok bool) {
-	parts, reduced, ok := sequenceStatementDetails(source, compound, false, false)
+	parts, reduced, ok := sequenceStatementDetails(source, compound, false, false, false)
 	if !ok {
 		return nil, false, false
 	}
@@ -216,6 +216,12 @@ type functionDefinition struct {
 type sequenceStatement struct {
 	text, scope string
 	sourceStart int
+	// maySkip marks a statement that is the right side of && or ||: it runs
+	// only when the left side lets it.
+	maySkip bool
+	// read is the value a read of one here-string word leaves its variable
+	// (simpleHereStringRead), nil for any other statement.
+	read *simpleReadWord
 	// binds holds the USER and LOGNAME names that a for or select loop
 	// around the statement binds, outermost first, with the list each
 	// takes its values from: the statement runs after the binding.
@@ -232,6 +238,27 @@ var loopScopeKinds = map[string]byte{"USER": 'u', "LOGNAME": 'o'}
 type simpleLoopBind struct {
 	name  string
 	items []*syntax.Word
+	// fork marks a variable other than USER and LOGNAME, read once for each
+	// word of its list (simpleForkLoopBind).
+	fork bool
+	// read marks a while read loop. Its IFS is the one fixed for it (fixedIFS,
+	// ifs): the one the read sets for itself, or in the straight-line reading
+	// the one a top-level statement before the loop leaves. Any other read has
+	// what readIFS finds: the value the walk holds where the loop starts and the
+	// assignments of outerIFS.
+	read, fixedIFS bool
+	ifs            []string
+	outerIFS       []*syntax.Assign
+	// rebound is where the body may hold another value of the variable than
+	// the loop gave it (simpleReboundSpans).
+	rebound []simpleSpan
+	// token is the placeholder that stands for the plain words of the list
+	// in one state (simplePlaceholderToken), "" when each is read alone.
+	token string
+	// certain marks a read loop that reads its word before every pass of the
+	// body (the straight-line reading, the builtin read): the body never runs
+	// with the variable as it was before the loop.
+	certain bool
 }
 
 // sequenceStatementDetails is the one full-parser flattening step. The
@@ -241,8 +268,9 @@ type simpleLoopBind struct {
 // also walks, where it is defined, the body of a function no call of the text
 // expands, for the apply_patch envelope in it; without it (a caller that
 // judges only what the shell runs, Input.StraightLineFunctions) such a body
-// contributes no statement and no state.
-func sequenceStatementDetails(source string, compound, allSimple, walkUncalled bool) (statements []sequenceStatement, reduced, ok bool) {
+// contributes no statement and no state. straight limits the code a loop
+// binding follows to the top-level statements before the loop (Input.LoopBindsStraightLine).
+func sequenceStatementDetails(source string, compound, allSimple, straight, walkUncalled bool) (statements []sequenceStatement, reduced, ok bool) {
 	if source == "" {
 		return nil, false, false
 	}
@@ -265,6 +293,15 @@ func sequenceStatementDetails(source string, compound, allSimple, walkUncalled b
 		return nil, false, false
 	}
 	statements = make([]sequenceStatement, 0, len(file.Stmts))
+	// order is the declared functions and loops of the call, read once and
+	// only for a call that has a loop to bind.
+	var codeOrder *simpleScriptOrder
+	order := func() *simpleScriptOrder {
+		if codeOrder == nil {
+			codeOrder = newSimpleScriptOrder(file, straight)
+		}
+		return codeOrder
+	}
 	text := func(from, to syntax.Pos) (string, bool) {
 		start, end := int(from.Offset()), int(to.Offset())
 		if start < 0 || end <= start || end > len(source) {
@@ -282,19 +319,27 @@ func sequenceStatementDetails(source string, compound, allSimple, walkUncalled b
 	// shell (its state joins the path that skipped it), f a function body
 	// run by this shell (its state replaces the caller state, less its
 	// local variables), e a function body run by a child shell.
-	childScope := func(kind byte, walk func() bool) bool {
+	namedScope := func(kind byte, name string, walk func() bool) bool {
 		parent := scope
 		nextScope++
 		scope = parent + "/" + string(kind) + strconv.Itoa(nextScope)
+		if name != "" {
+			// The variable of a forked loop, dropped where its body ends.
+			scope += "=" + name
+		}
 		defer func() { scope = parent }()
 		return walk()
 	}
+	childScope := func(kind byte, walk func() bool) bool { return namedScope(kind, "", walk) }
 	// assigned holds the static values the walk has seen assigned to each
 	// variable, so a program word such as $x can name the function it
 	// calls (GAP-0934); unbound holds the variables the action may also
 	// bind in a way the walk cannot read.
 	assigned := make(map[string][]string)
 	unbound := simpleUnreadBindings(file)
+	// calling is the chain of calls whose function bodies are being flattened,
+	// outermost first.
+	var calling []*syntax.CallExpr
 	var loopBinds []simpleLoopBind
 	// stateOnly is set while the walk is in the body of a function the text
 	// never calls: keep then drops every command but the ones that set what an
@@ -302,6 +347,16 @@ func sequenceStatementDetails(source string, compound, allSimple, walkUncalled b
 	// envelopes counts the envelopes it kept.
 	stateOnly := false
 	envelopes := 0
+	// enclosingLoops are the for and while loops being flattened, outermost
+	// first, through the functions they call.
+	var enclosingLoops []syntax.Node
+	// skippable counts the right sides of && and || around the statement
+	// being flattened.
+	skippable := 0
+	// pipeInput is the stage before the while loop being flattened, and
+	// hereString the word of a here-string it reads (done <<< word).
+	var pipeInput *syntax.Stmt
+	var hereString *syntax.Word
 	// keep adds the text of node, or of a command and its redirects.
 	keep := func(node syntax.Node, redirs ...*syntax.Redirect) bool {
 		if stateOnly {
@@ -329,8 +384,12 @@ func sequenceStatementDetails(source string, compound, allSimple, walkUncalled b
 		for index := len(redirects) - 1; index >= 0; index-- {
 			statement += " " + redirects[index]
 		}
+		var read *simpleReadWord
+		if call, ok := node.(*syntax.CallExpr); ok {
+			read = simpleHereStringRead(call, redirs, order, calling)
+		}
 		statements = append(statements, sequenceStatement{text: statement, scope: scope,
-			sourceStart: int(from.Offset()), binds: slices.Clone(loopBinds)})
+			sourceStart: int(from.Offset()), maySkip: skippable != 0, read: read, binds: slices.Clone(loopBinds)})
 		return true
 	}
 	subshells := 0
@@ -405,10 +464,21 @@ func sequenceStatementDetails(source string, compound, allSimple, walkUncalled b
 				return false, false
 			}
 			if allSimple && (typed.Op == syntax.Pipe || typed.Op == syntax.PipeAll) {
+				// The stage before a while loop is its input.
+				if _, loop := typed.Y.Cmd.(*syntax.WhileClause); loop && typed.Op == syntax.Pipe && len(typed.Y.Redirs) == 0 {
+					pipeInput = typed.X
+				}
 				return true, childScope('s', func() bool { return flatten(typed.X) }) &&
 					childScope('s', func() bool { return flatten(typed.Y) })
 			}
-			return true, flatten(typed.X) && flatten(typed.Y)
+			if !flatten(typed.X) {
+				return true, false
+			}
+			if typed.Op == syntax.AndStmt || typed.Op == syntax.OrStmt {
+				skippable++
+				defer func() { skippable-- }()
+			}
+			return true, flatten(typed.Y)
 		}
 		if !compound {
 			return false, false
@@ -441,8 +511,26 @@ func sequenceStatementDetails(source string, compound, allSimple, walkUncalled b
 			}
 			return true, true
 		case *syntax.WhileClause:
-			return true, flattenAll(typed.Cond) &&
-				childScope('c', func() bool { return flattenAll(typed.Do) })
+			kind, name := byte('c'), ""
+			word := simpleEchoWord(pipeInput)
+			if hereString != nil {
+				word = hereString
+			}
+			pipeInput, hereString = nil, nil
+			bind, forks := simpleReadLoopBind(typed, word, order(), enclosingLoops)
+			// The condition runs before the variable has its first word.
+			if !flattenAll(typed.Cond) {
+				return true, false
+			}
+			if forks {
+				outer := loopBinds
+				loopBinds = append(slices.Clone(outer), bind)
+				defer func() { loopBinds = outer }()
+				kind, name = forkedLoopScopeKind, bind.name
+			}
+			enclosingLoops = append(enclosingLoops, typed)
+			defer func() { enclosingLoops = enclosingLoops[:len(enclosingLoops)-1] }()
+			return true, namedScope(kind, name, func() bool { return flattenAll(typed.Do) })
 		case *syntax.ForClause:
 			switch iteration := typed.Loop.(type) {
 			case *syntax.WordIter:
@@ -459,7 +547,7 @@ func sequenceStatementDetails(source string, compound, allSimple, walkUncalled b
 			default:
 				return true, false
 			}
-			kind := byte('c')
+			kind, name := byte('c'), ""
 			if iteration, ok := typed.Loop.(*syntax.WordIter); ok && iteration.Name != nil &&
 				slices.Contains(simpleUserNames, iteration.Name.Value) {
 				outer := loopBinds
@@ -468,8 +556,17 @@ func sequenceStatementDetails(source string, compound, allSimple, walkUncalled b
 				// The scope kind names the login the loop binds, so the
 				// name has no value the walk can follow once the loop ends.
 				kind = loopScopeKinds[iteration.Name.Value]
+			} else if iteration, ok := typed.Loop.(*syntax.WordIter); ok && simpleLoopForks(iteration) {
+				outer := loopBinds
+				loopBinds = append(slices.Clone(outer), simpleLoopBind{name: iteration.Name.Value, items: iteration.Items, fork: true,
+					rebound: simpleReboundSpans(typed.Do, iteration.Name.Value, order()),
+					token:   simplePlaceholderToken(typed.Do, iteration.Name.Value, source)})
+				defer func() { loopBinds = outer }()
+				kind, name = forkedLoopScopeKind, iteration.Name.Value
 			}
-			return true, childScope(kind, func() bool { return flattenAll(typed.Do) })
+			enclosingLoops = append(enclosingLoops, typed)
+			defer func() { enclosingLoops = enclosingLoops[:len(enclosingLoops)-1] }()
+			return true, namedScope(kind, name, func() bool { return flattenAll(typed.Do) })
 		case *syntax.CaseClause:
 			if !allSimple && !inertPOSIXWords(typed.Word) ||
 				allSimple && !flattenSubstitutions(typed.Word) {
@@ -510,6 +607,10 @@ func sequenceStatementDetails(source string, compound, allSimple, walkUncalled b
 		saved := redirects
 		redirects = append(redirects[:len(redirects):len(redirects)], moved)
 		defer func() { redirects = saved }()
+		if _, loop := stmt.Cmd.(*syntax.WhileClause); loop && len(stmt.Redirs) == 1 &&
+			stmt.Redirs[0].Op == syntax.WordHdoc && stmt.Redirs[0].N == nil {
+			hereString = stmt.Redirs[0].Word
+		}
 		return flattenCompound(stmt.Cmd)
 	}
 	flatten = func(stmt *syntax.Stmt) bool {
@@ -627,8 +728,10 @@ func sequenceStatementDetails(source string, compound, allSimple, walkUncalled b
 							return false
 						}
 						functionDepth++
+						calling = append(calling, call)
 						expanded[body] = true
 						ok := childScope('f', func() bool { return flatten(body) })
+						calling = calling[:len(calling)-1]
 						functionDepth--
 						if !ok {
 							return false
@@ -676,8 +779,10 @@ func sequenceStatementDetails(source string, compound, allSimple, walkUncalled b
 			// variables stay there.
 			functionDepth++
 			subshells++
+			calling = append(calling, call)
 			expanded[body] = true
 			ok := childScope('e', func() bool { return flatten(body) })
+			calling = calling[:len(calling)-1]
 			subshells--
 			functionDepth--
 			if !ok {
