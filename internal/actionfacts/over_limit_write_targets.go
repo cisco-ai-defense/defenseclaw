@@ -243,15 +243,20 @@ func unreadPatchContentTarget(input Input, facts Facts, resolved map[string]stri
 	return "", false
 }
 
-// textOverProofBound reports a written text, or a piece of what a patch file
-// leaves in place, that is over what the content proofs read.
+// textOverProofBound reports a text of the write, or a piece of it, that is
+// over what the content proofs read: the added text, the removed text (the PAM
+// and preload proofs read both the text a patch removes and the text it
+// adds), the text each hunk or step leaves in place, and the text each edit
+// step replaces.
 func (write nativeFileWrite) textOverProofBound() bool {
-	if len(write.added) > maxCommandBytes {
+	if len(write.added) > maxCommandBytes || len(write.replaced) > maxCommandBytes {
 		return true
 	}
-	for _, piece := range write.after {
-		if len(piece) > maxCommandBytes {
-			return true
+	for _, pieces := range [][]string{write.after, write.before} {
+		for _, piece := range pieces {
+			if len(piece) > maxCommandBytes {
+				return true
+			}
 		}
 	}
 	return false
