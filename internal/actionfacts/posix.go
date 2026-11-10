@@ -844,6 +844,9 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 				}
 				fd = parsed
 			}
+			if fd == 0 {
+				posixLiteralStdinReplaced(command, out)
+			}
 			target := projectPOSIXWord(redirection.Word)
 			targetFD, targetFDErr := strconv.ParseInt(target.Value, 10, 64)
 			if !target.Expands && targetFDErr == nil &&
@@ -902,13 +905,8 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			}
 			fd = parsed
 		}
-		if fd == 0 && command.LiteralStdinComplete {
-			// Redirect ordering could replace the heredoc as stdin. The private
-			// projection deliberately does not model that mixed form.
-			command.LiteralStdin = ""
-			command.LiteralStdinComplete = false
-			command.LiteralStdinAmbiguous = true
-			out.markPartial(IssueUnsupportedConstruct)
+		if fd == 0 {
+			posixLiteralStdinReplaced(command, out)
 		}
 		target := projectPOSIXWord(redirection.Word)
 		if !target.Expands && len(target.Value) > maxScalarBytes {
@@ -938,6 +936,22 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 	}
 }
 
+// posixLiteralStdinReplaced drops the here-document text a command holds when a
+// later input redirect of descriptor 0 (a file, a descriptor copy, a here-string
+// or a close) takes over its stdin. The shell opens the redirects in order and
+// the last one wins, so the earlier document is no stdin of the command, in
+// whole or in the text it shows (LiteralStdinView).
+func posixLiteralStdinReplaced(command *CommandFact, out *parseOutput) {
+	if !command.LiteralStdinComplete && command.LiteralStdinView == "" {
+		return
+	}
+	command.LiteralStdin = ""
+	command.LiteralStdinView = ""
+	command.LiteralStdinComplete = false
+	command.LiteralStdinAmbiguous = true
+	out.markPartial(IssueUnsupportedConstruct)
+}
+
 func projectPOSIXLiteralHeredoc(
 	redirection *syntax.Redirect,
 	command *CommandFact,
@@ -964,12 +978,15 @@ func projectPOSIXLiteralHeredoc(
 			return
 		}
 	}
-	if posixDescriptorIsRedirected(command, 0) {
-		out.markPartial(IssueUnsupportedConstruct)
+	if command.Program == "apply_patch" {
+		// The shell opens the redirects in order and the last input redirect
+		// of descriptor 0 is the stdin: a here-document after an earlier
+		// input redirect is the stdin the command reads.
+		projectPOSIXPatchHeredoc(redirection, command, out)
 		return
 	}
-	if command.Program == "apply_patch" {
-		projectPOSIXPatchHeredoc(redirection, command, out)
+	if posixDescriptorIsRedirected(command, 0) {
+		out.markPartial(IssueUnsupportedConstruct)
 		return
 	}
 	delimiter := projectPOSIXWord(redirection.Word)

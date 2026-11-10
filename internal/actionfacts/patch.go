@@ -294,7 +294,7 @@ func applyPatchStdinText(command CommandFact) (string, bool) {
 		return "", false
 	}
 	for _, line := range strings.Split(command.LiteralStdinView, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "*** ") && strings.ContainsAny(line, "$\\") {
+		if strings.HasPrefix(line, "*** ") && strings.ContainsAny(line, "$\\") {
 			return "", false
 		}
 	}
