@@ -5,10 +5,24 @@ package gateway
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
+
+// hostFixturePath spells a fixture path written as /Users/alice/x or Users/alice/x
+// the way this host spells it: a Windows host reads a rooted path only with a
+// drive letter and uses backslashes, so the same fixture is the home and the
+// project of a Windows user there.
+func hostFixturePath(path string) string {
+	if runtime.GOOS == "windows" && strings.HasPrefix(path, "/") {
+		path = "C:" + path
+	}
+	return filepath.FromSlash(path)
+}
 
 // nestedHomeVerdict is the action and rules of one typed call (a Claude Code
 // Write, or a Codex apply_patch with the directive given) naming file, called
@@ -52,7 +66,7 @@ func nestedHomeVerdict(t *testing.T, connector, directive, home, cwd, file strin
 // typed apply_patch (Add, Update) and a Write get the same verdict from any
 // working directory, absolute or relative to it, in every profile.
 func TestNestedHomeCredentialBelowTheWorkingDirectoryIsJudgedLikeAnyOther(t *testing.T) {
-	const home = "/Users/alice"
+	home := hostFixturePath("/Users/alice")
 	cases := []struct{ relative, rule string }{
 		{"Users/alice/.netrc", "PATH-NETRC"},
 		{"a/b/Users/alice/.git-credentials", "PATH-GIT-CREDS"},
@@ -62,10 +76,10 @@ func TestNestedHomeCredentialBelowTheWorkingDirectoryIsJudgedLikeAnyOther(t *tes
 	for _, profile := range []string{"default", "permissive", "strict"} {
 		connector := "nested-home-below-cwd-" + profile
 		installToolCallCorpusProfileConnector(t, connector, profile)
-		for _, cwd := range []string{"/Users/alice/project", "/tmp/work", "/Users/alice"} {
+		for _, cwd := range []string{hostFixturePath("/Users/alice/project"), hostFixturePath("/tmp/work"), home} {
 			for _, tc := range cases {
 				for _, directive := range []string{"", "Add File", "Update File"} {
-					for _, file := range []string{cwd + "/" + tc.relative, tc.relative} {
+					for _, file := range []string{filepath.Join(cwd, hostFixturePath(tc.relative)), hostFixturePath(tc.relative)} {
 						if action, rules := nestedHomeVerdict(t, connector, directive, home, cwd, file); action != "block" || !rules[tc.rule] {
 							t.Errorf("%s cwd=%s %q %q: %s %v, want a block with %s", profile, cwd, directive, file, action, rules, tc.rule)
 						}
@@ -81,7 +95,7 @@ func TestNestedHomeCredentialBelowTheWorkingDirectoryIsJudgedLikeAnyOther(t *tes
 // project that is in no home folder or in the home folder of another account
 // (the project fixture rule: a project that keeps the homes of test accounts).
 func TestNestedHomeFolderBelowTheWorkingDirectoryKeepsOrdinaryFilesAllowed(t *testing.T) {
-	const home, cwd = "/Users/alice", "/Users/alice/project"
+	home, cwd := hostFixturePath("/Users/alice"), hostFixturePath("/Users/alice/project")
 	for _, profile := range []string{"default", "permissive"} {
 		connector := "nested-home-ordinary-" + profile
 		installToolCallCorpusProfileConnector(t, connector, profile)
@@ -91,7 +105,7 @@ func TestNestedHomeFolderBelowTheWorkingDirectoryKeepsOrdinaryFilesAllowed(t *te
 			"Users/bob/.netrc", "home/fixture/.git-credentials", "Users/bob/.aws/credentials",
 		} {
 			for _, directive := range []string{"", "Add File", "Delete File"} {
-				if action, rules := nestedHomeVerdict(t, connector, directive, home, cwd, cwd+"/"+relative); action != "allow" {
+				if action, rules := nestedHomeVerdict(t, connector, directive, home, cwd, filepath.Join(cwd, hostFixturePath(relative))); action != "allow" {
 					t.Errorf("%s %q %q: %s %v, want allow", profile, directive, relative, action, rules)
 				}
 			}
@@ -122,7 +136,7 @@ func TestNestedWindowsHomeCredentialBelowTheWorkingDirectoryIsJudgedLikeAnyOther
 // file the client resolved, as a write does, on a gateway that cannot follow
 // links itself: the read gets the finding of the direct name.
 func TestTypedReadThroughClientResolvedLinkGetsTheFindingOfTheDirectName(t *testing.T) {
-	const home, project = "/Users/alice", "/Users/alice/project"
+	home, project := hostFixturePath("/Users/alice"), hostFixturePath("/Users/alice/project")
 	installToolCallCorpusProfileConnector(t, "typed-read-link", "default")
 	read := func(path string, evidence map[string]string) map[string]bool {
 		raw, err := json.Marshal(map[string]string{"file_path": path})
@@ -143,14 +157,15 @@ func TestTypedReadThroughClientResolvedLinkGetsTheFindingOfTheDirectName(t *test
 	for _, target := range []string{
 		"/Users/alice/.netrc", "/Users/alice/.git-credentials", "/Users/alice/.aws/credentials", "/private/tmp/fx/Users/alice/.netrc",
 	} {
-		link := project + "/lnk"
+		target = hostFixturePath(target)
+		link := filepath.Join(project, "lnk")
 		direct := read(target, nil)
 		linked := read(link, map[string]string{link: target})
 		if len(direct) == 0 || !sameRules(ownerKeys(direct), ownerKeys(linked)) {
 			t.Errorf("%s: direct %v, through the link %v, want the same non-empty finding", target, direct, linked)
 		}
 	}
-	if rules := read(project+"/lnk", map[string]string{project + "/lnk": project + "/notes.txt"}); len(rules) != 0 {
+	if rules := read(filepath.Join(project, "lnk"), map[string]string{filepath.Join(project, "lnk"): filepath.Join(project, "notes.txt")}); len(rules) != 0 {
 		t.Errorf("a link to an ordinary file raises %v", rules)
 	}
 }

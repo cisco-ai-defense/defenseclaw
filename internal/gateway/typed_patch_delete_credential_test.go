@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -41,19 +42,20 @@ func patchDeleteVerdict(t *testing.T, connector, directive, home, cwd, file stri
 // form of the home, or relative to a working directory, and for a home folder
 // below the working directory (the home of the user under another parent).
 func TestTypedPatchDeleteOfCredentialFileIsJudgedLikeAnAdd(t *testing.T) {
-	const home = "/Users/alice"
+	home := hostFixturePath("/Users/alice")
 	// The copies are compared too: a profile that protects a copy of a credential file for a write protects it for a delete.
 	files := []string{".netrc", ".git-credentials", ".aws/credentials", ".kube/config", ".netrc.bak", ".aws/credentials.bak", ".aws/credentials.example"}
 	for _, profile := range []string{"default", "permissive", "strict"} {
 		connector := "typed-patch-delete-" + profile
 		installToolCallCorpusProfileConnector(t, connector, profile)
-		for _, cwd := range []string{home + "/project", "/tmp/work", home} {
-			for _, file := range files {
+		for _, cwd := range []string{filepath.Join(home, "project"), hostFixturePath("/tmp/work"), home} {
+			for _, slashed := range files {
+				file := filepath.FromSlash(slashed)
 				for _, name := range []string{
-					home + "/" + file, "~/" + file,
-					cwd + "/Users/alice/" + file, "Users/alice/" + file,
-					cwd + "/a/home/alice/" + file, "a/home/alice/" + file,
-					cwd + "/a/USERS/ALICE/" + file,
+					filepath.Join(home, file), filepath.FromSlash("~/") + file,
+					filepath.Join(cwd, "Users", "alice", file), filepath.Join("Users", "alice", file),
+					filepath.Join(cwd, "a", "home", "alice", file), filepath.Join("a", "home", "alice", file),
+					filepath.Join(cwd, "a", "USERS", "ALICE", file),
 				} {
 					added, addRules := patchDeleteVerdict(t, connector, "Add File", home, cwd, name, nil)
 					deleted, deleteRules := patchDeleteVerdict(t, connector, "Delete File", home, cwd, name, nil)
@@ -68,7 +70,7 @@ func TestTypedPatchDeleteOfCredentialFileIsJudgedLikeAnAdd(t *testing.T) {
 		}
 		// The files of the review, named from the working directory.
 		for _, name := range []string{"Users/alice/.netrc", "Users/alice/.git-credentials", "Users/alice/.aws/credentials"} {
-			if action, rules := patchDeleteVerdict(t, connector, "Delete File", home, home+"/project", name, nil); action != "block" {
+			if action, rules := patchDeleteVerdict(t, connector, "Delete File", home, filepath.Join(home, "project"), filepath.FromSlash(name), nil); action != "block" {
 				t.Errorf("%s Delete File %q from the project: %s %v, want block", profile, name, action, rules)
 			}
 		}
@@ -79,14 +81,15 @@ func TestTypedPatchDeleteOfCredentialFileIsJudgedLikeAnAdd(t *testing.T) {
 // credential file of a project fixture home of another account, and files
 // that are no credential file.
 func TestTypedPatchDeleteOfOrdinaryFileStaysAllowed(t *testing.T) {
-	const home, cwd = "/Users/alice", "/Users/alice/project"
+	home := hostFixturePath("/Users/alice")
+	cwd := filepath.Join(home, "project")
 	for _, profile := range []string{"default", "permissive"} {
 		connector := "typed-patch-delete-ordinary-" + profile
 		installToolCallCorpusProfileConnector(t, connector, profile)
 		for _, name := range []string{
-			home + "/.netrc.bak", home + "/.aws/credentials.example", home + "/.git-credentials.old", home + "/notes.txt",
-			cwd + "/Users/bob/.netrc", cwd + "/Users/alice/.netrc.bak", cwd + "/Users/alice/.aws/credentials.sample",
-			cwd + "/main.go", "src/main.go", ".netrc", "sub/.aws/credentials",
+			filepath.Join(home, ".netrc.bak"), filepath.Join(home, ".aws", "credentials.example"), filepath.Join(home, ".git-credentials.old"), filepath.Join(home, "notes.txt"),
+			filepath.Join(cwd, "Users", "bob", ".netrc"), filepath.Join(cwd, "Users", "alice", ".netrc.bak"), filepath.Join(cwd, "Users", "alice", ".aws", "credentials.sample"),
+			filepath.Join(cwd, "main.go"), filepath.Join("src", "main.go"), ".netrc", filepath.Join("sub", ".aws", "credentials"),
 		} {
 			if action, rules := patchDeleteVerdict(t, connector, "Delete File", home, cwd, name, nil); action != "allow" {
 				t.Errorf("%s Delete File %q: %s %v, want allow", profile, name, action, rules)
