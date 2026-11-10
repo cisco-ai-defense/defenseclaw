@@ -478,7 +478,6 @@ def test_windows_rollback_whose_installer_ends_before_its_log_is_an_error_not_rc
     assert "exit code 1 before it opened its log" in captured.err, captured.err
     assert "defenseclaw doctor" in captured.err
     assert "continues in a new window" not in captured.out
-    assert list((home.parent.parent / "tmp").iterdir()) == []
 
 
 def test_windows_rollback_whose_installer_holds_its_error_window_is_still_an_error(
@@ -579,18 +578,112 @@ def test_windows_installer_that_fails_after_opening_its_log_is_not_a_shim_error(
     assert "The installer continues in a new window" in capsys.readouterr().out
 
 
-def test_windows_installer_still_running_without_a_log_is_unconfirmed_not_failed(
+def test_windows_installer_still_running_without_a_log_is_an_unconfirmed_error_not_rc_0(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _windows_rollback_with_desktop(home, monkeypatch)
-    monkeypatch.setattr(upgrade_shim, "_INSTALLER_LOG_WAIT", 0.0)
+    clock = [0.0]
+    monkeypatch.setattr(upgrade_shim.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(upgrade_shim.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(lambda: None))
 
-    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
 
-    out = capsys.readouterr().out
-    assert "has not opened its log after 0 seconds, so the start is not confirmed" in out, out
-    assert "continues in a new window" not in out
+    captured = capsys.readouterr()
+    assert "still running and has not opened its log after 450 seconds, so the start is not confirmed" in captured.err
+    assert "continues in a new window" not in captured.out
+    assert clock[0] >= 450.0
+
+
+def test_windows_installer_that_waits_out_the_uninstall_cleanup_and_fails_is_an_error_not_rc_0(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Before it has a log the installer waits up to 300 s for an earlier
+    # uninstall's cleanup, then fails and keeps its console for 120 s: the
+    # process ends at 420 s, which the shim still waits for.
+    _windows_rollback_with_desktop(home, monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(upgrade_shim.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(upgrade_shim.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(
+        upgrade_shim.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _child(lambda: 1 if clock[0] >= 420.0 else None),
+    )
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    captured = capsys.readouterr()
+    assert "exit code 1 before it opened its log" in captured.err, captured.err
+    assert "still running" not in captured.err
+    assert "continues in a new window" not in captured.out
+
+
+def test_windows_installer_that_fails_without_a_log_does_not_claim_that_nothing_changed(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # install.ps1 goes on without a transcript when Start-Transcript fails, so
+    # it can reach a changing step and then fail with no log: no log is not
+    # proof of no change, and the staged installer stays for a recovery run.
+    _windows_rollback_with_desktop(home, monkeypatch)
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(lambda: 1))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    err = capsys.readouterr().err
+    assert "result is not known" in err, err
+    assert "no change" not in err.lower() and "nothing was changed" not in err.lower()
+    assert "may have stopped before changing anything" in err
+    assert "defenseclaw --version" in err and "run this command again" in err
+    command = next(line.strip() for line in err.splitlines() if line.strip().startswith("powershell "))
+    assert command.endswith("-Rollback -Yes"), command
+    assert os.path.isfile(command.split('"')[1])
+
+
+def test_windows_installer_that_appends_beyond_the_first_chunk_of_a_same_second_log_has_opened_its_log(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Another run appends more than a read chunk to the same-second log before
+    # this installer's header: the scan goes on through the later bytes.
+    logs = home / "logs"
+    _write_transcript(home, pid=999)
+    known = upgrade_shim._install_logs(str(logs))
+    with open(logs / _LOG_NAME, "ab") as stream:
+        stream.write(b"x" * (upgrade_shim._INSTALLER_LOG_CHUNK * 2 + 17))
+    _write_transcript(home)
+
+    assert upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID)
+    assert not upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID + 1)
+
+
+def test_windows_installer_header_cut_by_a_chunk_edge_and_utf16_is_found(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(upgrade_shim, "_INSTALLER_LOG_CHUNK", 1024)
+    logs = home / "logs"
+    logs.mkdir()
+    known = upgrade_shim._install_logs(str(logs))
+    header = f"Windows PowerShell transcript start\r\nProcess ID: {_INSTALLER_PID}\r\n".encode("utf-16-le")
+    for lead in range(1000, 1030):
+        (logs / _LOG_NAME).write_bytes("\ufeff".encode("utf-16-le") + b"y" * lead + header)
+        assert upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID), lead
+        assert not upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID + 1), lead
+
+
+def test_windows_installer_log_scan_reads_only_new_bytes_on_later_polls(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logs = home / "logs"
+    _write_transcript(home, pid=999)
+    known = upgrade_shim._install_logs(str(logs))
+    scanned: dict[str, int] = {}
+    assert not upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID, scanned)
+    with open(logs / _LOG_NAME, "ab") as stream:
+        stream.write(b"z" * 5000)
+    assert not upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID, scanned)
+    assert scanned[_LOG_NAME] == known[_LOG_NAME] + 5000
+    _write_transcript(home)
+    assert upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID, scanned)
 
 
 def test_windows_installer_that_ends_with_rc_0_and_no_log_says_so(
