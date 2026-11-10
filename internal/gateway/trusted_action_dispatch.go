@@ -173,6 +173,9 @@ type trustedActionRequest struct {
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
 	DowngradeReadOnlyDataArgs bool
+	// operandBounded marks the bounded reading of a call over the operand
+	// bound (operandBoundTwinRequest): it is judged once, not bounded again.
+	operandBounded bool
 	// A sandbox action may execute in a filesystem the gateway cannot see.
 	SkipLocalFilesystemResolution bool
 	// CopilotSharedLocalFile marks an exact file call decoded from a Local
@@ -336,6 +339,12 @@ func dispatchTrustedAction(
 		// Past the reading bounds: no reader below parses it, and the call
 		// takes the over-limit path (GAP-2537).
 		return trustedActionLimitFindings(request.EnforcementCapable)
+	}
+	if twin, over := operandBoundTwinRequest(request); over {
+		// A statement past actionfacts.MaxOperandsPerCall operands is
+		// unresolved (GAP-0943, GAP-0963): the bounded reading is judged
+		// as any call, and the tier adds its verdict (operandBoundFindings).
+		return operandBoundFindings(parent, dispatchTrustedAction(parent, twin), request.EnforcementCapable)
 	}
 	var (
 		facts     actionfacts.Facts

@@ -1725,6 +1725,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					command = reduced
 					truncated = true
 				}
+				// A call of more operands than the readers resolve
+				// (actionfacts.MaxOperandsPerCall) is described by its
+				// first operands and the later words that are not plain
+				// names; the map says it is incomplete, and the gateway
+				// judges the call as unresolved (GAP-0943, GAP-0963).
+				if !isApplyPatchToolName(tool) {
+					if reduced, over := BoundCommandOperands(command); over {
+						command = reduced
+						truncated = true
+					}
+				}
 				// A ~<login> tilde-prefix names this user's home from the
 				// password database. The gateway judges that spelling as the
 				// home (actionfacts.ActiveUserTildeTwin) and, behind
