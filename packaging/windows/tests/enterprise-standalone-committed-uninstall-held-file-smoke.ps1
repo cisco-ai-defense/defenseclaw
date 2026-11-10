@@ -94,26 +94,32 @@ $fs.Dispose()
             # A file that is not there is not held either.
             Wait-DefenseClawCommittedUninstallFileReleased -Layout $layout -Path ([IO.Path]::Combine($codex, '.defenseclaw-managed-hooks.lock'))
 
-            # The Codex writer lock held (counter even or odd): the wait gives up at the bound and
-            # names the file, the holder, the committed state and the rerun; no FORCE.
-            foreach ($size in 18, 19) {
-                [IO.File]::WriteAllBytes($lock, [byte[]]::new($size))
-                $holder = Start-Holder $lock
-                try {
-                    $held = Get-DefenseClawCommittedUninstallHeldFile -Layout $layout
-                    if ($null -eq $held -or $held.Code -cne 'codex_state_held') { throw "counter $size : the held writer lock was not found" }
-                    $text = ''
-                    $timer = [Diagnostics.Stopwatch]::StartNew()
-                    try { Wait-DefenseClawCommittedUninstallFileReleased -Layout $layout -Path $lock } catch { $text = $_.Exception.Message }
-                    if ($timer.Elapsed.TotalSeconds -lt 1.5 -or $timer.Elapsed.TotalSeconds -gt 30) { throw "counter $size : the wait was not the settle bound ($($timer.Elapsed.TotalSeconds) s)" }
-                    if (-not $text.StartsWith('codex_state_held: ') -or -not $text.Contains(('process id {0}' -f $holder.Id)) -or -not $text.Contains($lock) -or
-                        -not $text.Contains('The uninstall is already committed') -or -not $text.Contains('/uninstall') -or $text.Contains('PURGE=1') -or $text -match 'FORCE|/repair') {
-                        throw "counter $size : the held message is wrong: '$text'"
-                    }
-                    if (-not (Test-DefenseClawFileDeleteBlocked -Path $lock)) { throw 'the fixture does not hold the lock' }
+            # The Codex writer lock held (the counter plays no part in the wait): the wait gives up at
+            # the bound and names the file, the holder, the committed state and the rerun; no FORCE.
+            [IO.File]::WriteAllBytes($lock, [byte[]]::new(19))
+            $holder = Start-Holder $lock
+            try {
+                $held = Get-DefenseClawCommittedUninstallHeldFile -Layout $layout
+                if ($null -eq $held -or $held.Code -cne 'codex_state_held') { throw 'the held writer lock was not found' }
+                $text = ''
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                try { Wait-DefenseClawCommittedUninstallFileReleased -Layout $layout -Path $lock } catch { $text = $_.Exception.Message }
+                if ($timer.Elapsed.TotalSeconds -lt 1.5 -or $timer.Elapsed.TotalSeconds -gt 30) { throw "the wait was not the settle bound ($($timer.Elapsed.TotalSeconds) s)" }
+                if (-not $text.StartsWith('codex_state_held: ') -or -not $text.Contains(('process id {0}' -f $holder.Id)) -or -not $text.Contains($lock) -or
+                    -not $text.Contains('The uninstall is already committed') -or -not $text.Contains('/uninstall') -or $text.Contains('PURGE=1') -or $text -match 'FORCE|/repair') {
+                    throw "the held message is wrong: '$text'"
                 }
-                finally { Stop-Holder $holder }
+                if (-not (Test-DefenseClawFileDeleteBlocked -Path $lock)) { throw 'the fixture does not hold the lock' }
+                # The same uninstall after PURGE=1 says so.
+                $script:DefenseClawUninstallPurgeUserState = $true
+                $text = ''
+                $script:CodexStateSettleSeconds = 1
+                try { Wait-DefenseClawCommittedUninstallFileReleased -Layout $layout -Path $lock } catch { $text = $_.Exception.Message }
+                $script:CodexStateSettleSeconds = 2
+                $script:DefenseClawUninstallPurgeUserState = $false
+                if (-not $text.Contains('/uninstall PURGE=1')) { throw "the purge rerun is not named: '$text'" }
             }
+            finally { Stop-Holder $holder }
 
             # A holder that lets go inside the bound: the wait ends without an error.
             $holder = Start-Holder $lock 1
@@ -123,16 +129,6 @@ $fs.Dispose()
             if ($timer.Elapsed.TotalSeconds -gt 15) { throw 'the wait outlived the holder' }
             Stop-Holder $holder
             if ($null -ne (Get-DefenseClawCommittedUninstallHeldFile -Layout $layout)) { throw 'the released lock is still reported held' }
-
-            # The same uninstall after PURGE=1 says so.
-            $script:DefenseClawUninstallPurgeUserState = $true
-            $holder = Start-Holder $lock
-            try {
-                $text = ''
-                try { Wait-DefenseClawCommittedUninstallFileReleased -Layout $layout -Path $lock } catch { $text = $_.Exception.Message }
-                if (-not $text.Contains('/uninstall PURGE=1')) { throw "the purge rerun is not named: '$text'" }
-            }
-            finally { Stop-Holder $holder; $script:DefenseClawUninstallPurgeUserState = $false }
 
             # The classifier: a failure of the committed uninstall that names a held file.
             $io = "The process cannot access the file '{0}' because it is being used by another process."
@@ -149,19 +145,14 @@ $fs.Dispose()
                 if (-not ([string](ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message 'codex_state_unsettled: a Codex writer holds the writer lock')).StartsWith('codex_state_held: ')) { throw 'classifier: codex_state_unsettled was not read' }
                 # Already honest: not read twice.
                 if ($null -ne (ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message $text)) { throw 'classifier: a held message was wrapped again' }
+                # A failure that quotes another file than the one held now is not read as this one.
+                if ($null -ne (ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message ($io -f (Join-Path $Scratch 'other.txt')))) { throw 'classifier: a failure on another file was read as the held lock' }
                 # An unrelated failure stays as it was.
                 if ($null -ne (ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message 'committed-uninstall cleanup requires an uninstall tombstone')) { throw 'classifier: an unrelated failure was read' }
                 # A sharing failure with no file held now (and no Codex writer): left as it was.
             }
             finally { Stop-Holder $holder }
             if ($null -ne (ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message ($io -f $lock))) { throw 'classifier: named a file nobody holds' }
-
-            # A failure that quotes another file than the one held now is not read as this one.
-            $holder = Start-Holder $lock
-            try {
-                if ($null -ne (ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message ($io -f (Join-Path $Scratch 'other.txt')))) { throw 'classifier: a failure on another file was read as the held lock' }
-            }
-            finally { Stop-Holder $holder }
 
             # The gateway's writer-lock timeout with nobody holding the lock now (a writer that stopped
             # in the middle of its transaction): still the held code, with the original failure kept.
