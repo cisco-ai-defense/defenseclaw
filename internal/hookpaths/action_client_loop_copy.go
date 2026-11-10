@@ -14,7 +14,9 @@ import (
 // A fixed for-word list gives each writer destination one concrete value.
 // This positive client fact lets a managed gateway judge a link it cannot
 // follow through ProtectHome. Earlier statements and other body calls must
-// leave the current directory, iterator and link unchanged.
+// leave the current directory, iterator and link unchanged. The scan itself
+// continues across earlier statements and other body calls: it judges the
+// loop by its word list and the writer names in its body alone.
 func actionClientLoopCopyDestinationProtected(command, cwd, home string) bool {
 	return LoopCopyDestinationProtected(command, cwd, home)
 }

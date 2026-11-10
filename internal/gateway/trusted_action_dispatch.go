@@ -1147,6 +1147,15 @@ func withActiveStateTargetMention(
 	// that the POSIX link, pattern and xargs checks do not read as absolute:
 	// they also judge its drive view (GAP-2577).
 	driveFacts, driveRequest, driven := gitBashDriveView(facts, request)
+	// A for loop whose body writes a path that some value of its variable (or
+	// of a variable the walk cannot read) makes active state is judged by that
+	// target, whatever the list holds and whatever runs before the loop
+	// (rel-1-0-6:GAP-0880). The match is on the spelling, so a gateway that
+	// cannot open the user home reads it as a per-user one does.
+	if command, known := trustedBashCommandInput(request.Input); known && trustedPOSIXShellCall(request.Input, facts) &&
+		hookpaths.LoopWriterReachesState(command, request.Input.CWD, request.Input.ActiveHome) {
+		return withProvenActiveStateMutation(request, findings)
+	}
 	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)
 	xargsMutates := xargsStaticInputStateMutation(facts, request) ||
 		driven && xargsStaticInputStateMutation(driveFacts, driveRequest)
