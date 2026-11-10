@@ -45,6 +45,15 @@ func TestAgentHookConfigKnownLinkPlacement(t *testing.T) {
 		{"read after echo of a writer name", "echo rm; cat " + hook, "allow"},
 		{"read after printf of a writer name", "printf \"%s\\n\" ln && cat " + hook, "allow"},
 		{"checksum after echo of a shell name", "echo bash; sha256sum " + hook, "allow"},
+		// A dispatcher is judged by the program it runs.
+		{"search for a writer name through git", "git grep cp -- README.md; cat " + hook, "allow"},
+		{"echo of a writer name through busybox", "busybox echo cp; cat " + hook, "allow"},
+		{"echo of a writer name through flock", "flock /tmp/lock echo cp; cat " + hook, "allow"},
+		{"echo of a writer name through xargs", "printf x | xargs echo cp; cat " + hook, "allow"},
+		{"remove the hook through git", "echo a; git rm " + hook, "block"},
+		{"copy onto the hook through flock", "echo a; flock /tmp/lock cp " + ordinary + " " + hook, "block"},
+		{"copy onto the hook through busybox", "echo a; busybox cp " + ordinary + " " + hook, "block"},
+		{"copy onto the hook through xargs", "echo a; printf x | xargs cp " + ordinary + " " + hook, "block"},
 		{"copy onto the hook after echo", "echo a; cp " + ordinary + " " + hook, "block"},
 		{"copy onto the hook through a wrapper after echo", "echo a; nice -n 5 cp " + ordinary + " " + hook, "block"},
 	}

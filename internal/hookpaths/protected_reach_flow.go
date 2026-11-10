@@ -36,9 +36,9 @@ var registrationFlowBuiltins = map[string]bool{
 // they edit in place or write (registrationEditsInPlace).
 var registrationWriteWords = []string{
 	"rm", "rmdir", "unlink", "shred", "mv", "cp", "gcp", "ln", "gln", "patch",
-	"chmod", "chown", "chgrp", "setfacl", "chattr", "find", "truncate", "touch",
+	"chmod", "chown", "chgrp", "setfacl", "chattr", "truncate", "touch",
 	"install", "rsync", "tar", "unzip", "dd", "tee", "sponge", "python", "node",
-	"ruby", "bash", "zsh", "dash", "ksh", "sh", "xargs",
+	"ruby", "bash", "zsh", "dash", "ksh", "sh",
 }
 
 // registrationInPlaceFlag matches the sed and perl options that edit a file
@@ -183,24 +183,140 @@ func registrationWriteCapable(file *syntax.File, home string) bool {
 	return capable
 }
 
-// registrationDispatchers are programs that run another program or a
-// subcommand named in their arguments, beyond the wrappers the literal
-// command reader strips: for these the arguments are searched for a writer.
-var registrationDispatchers = map[string]bool{
-	"git": true, "busybox": true, "toybox": true, "make": true, "gmake": true, "docker": true,
-	"podman": true, "nerdctl": true, "kubectl": true, "watch": true, "parallel": true, "flock": true,
-	"strace": true, "ltrace": true, "nsenter": true, "unshare": true, "chronic": true, "su": true,
-	"runuser": true, "pkexec": true, "setpriv": true, "fakeroot": true, "chroot": true, "script": true,
-	"screen": true, "tmux": true, "at": true, "ssh": true,
+// registrationRunner describes how a program that runs another program names
+// it: the options it reads before the program (short letters that take a
+// value, short letters that do not, long names and whether they take a value)
+// and the operands it reads first (flock reads the lock file, chroot the new
+// root). A program the reader cannot place after these is not narrowed.
+type registrationRunner struct {
+	operands int
+	short    string
+	flag     string
+	long     map[string]bool
+}
+
+// registrationRunners are the dispatchers whose own grammar is known: the
+// program they run is the first word after their options and operands, and
+// only that program is judged. Text further along belongs to that program.
+var registrationRunners = map[string]registrationRunner{
+	"xargs": {short: "adEILnPsJ", flag: "0eiloprtx", long: map[string]bool{
+		"arg-file": true, "delimiter": true, "eof": true, "replace": true, "max-lines": true,
+		"max-args": true, "max-procs": true, "max-chars": true, "null": false, "no-run-if-empty": false,
+		"verbose": false, "interactive": false, "open-tty": false, "exit": false, "show-limits": false,
+	}},
+	"flock": {operands: 1, short: "wE", flag: "sxenouF", long: map[string]bool{
+		"timeout": true, "conflict-exit-code": true, "shared": false, "exclusive": false,
+		"nonblock": false, "nb": false, "close": false, "no-fork": false, "unlock": false,
+	}},
+	"chroot": {operands: 1, long: map[string]bool{"userspec": true, "groups": true, "skip-chdir": false}},
+	"git": {short: "Cc", flag: "p", long: map[string]bool{
+		"git-dir": true, "work-tree": true, "namespace": true, "exec-path": false, "no-pager": false,
+		"paginate": false, "bare": false, "no-replace-objects": false,
+	}},
+	"busybox":  {},
+	"toybox":   {},
+	"fakeroot": {},
+	"chronic":  {},
+	"time":     {flag: "p"},
+}
+
+// registrationScanRunners are programs that run what their arguments name in
+// a grammar the reader does not model (containers, remote and multiplexer
+// shells, build tools, privilege switches, tracers): every later word stays
+// in play, so a writer named there is read as a writer.
+var registrationScanRunners = map[string]bool{
+	"make": true, "gmake": true, "docker": true, "podman": true, "nerdctl": true, "kubectl": true,
+	"watch": true, "parallel": true, "strace": true, "ltrace": true, "nsenter": true, "unshare": true,
+	"su": true, "runuser": true, "pkexec": true, "setpriv": true, "script": true, "screen": true,
+	"tmux": true, "at": true, "ssh": true, "chrt": true, "taskset": true, "unbuffer": true,
+	"caffeinate": true,
+}
+
+// registrationRunWords returns the words a runner runs: what follows its
+// options and operands. ok is false when an option is not one the runner is
+// known to have, so the caller keeps every word in play.
+func registrationRunWords(spec registrationRunner, args []*syntax.Word, home string) (run []*syntax.Word, ok bool) {
+	index := 0
+	for ; index < len(args); index++ {
+		word, fixed := StaticWord(args[index], home)
+		if !fixed {
+			return nil, false
+		}
+		if word == "--" {
+			index++
+			break
+		}
+		if !strings.HasPrefix(word, "-") || word == "-" {
+			break
+		}
+		if strings.HasPrefix(word, "--") {
+			name, _, attached := strings.Cut(word[2:], "=")
+			takes, known := spec.long[name]
+			if !known {
+				return nil, false
+			}
+			if takes && !attached {
+				index++
+			}
+			continue
+		}
+		for at := 1; at < len(word); at++ {
+			if strings.IndexByte(spec.short, word[at]) >= 0 {
+				if at+1 == len(word) {
+					index++
+				}
+				break
+			}
+			if strings.IndexByte(spec.flag, word[at]) < 0 {
+				return nil, false
+			}
+		}
+	}
+	index += spec.operands
+	if index > len(args) {
+		return nil, true
+	}
+	return args[index:], true
+}
+
+// registrationFindWrites reports whether a find call can write: it deletes
+// or prints into a file, runs a program that writes, or has a word that is
+// not spelled out.
+func registrationFindWrites(args []*syntax.Word, home string) bool {
+	for index, word := range args {
+		value, fixed := StaticWord(word, home)
+		if !fixed {
+			return true
+		}
+		switch value {
+		case "-delete", "-fprint", "-fprint0", "-fprintf", "-fls":
+			return true
+		case "-exec", "-execdir", "-ok", "-okdir":
+			run := args[index+1:]
+			for end, next := range run {
+				if text, _ := StaticWord(next, home); text == ";" || text == "+" {
+					run = run[:end]
+					break
+				}
+			}
+			if len(run) > 0 && registrationCallWrites(&syntax.CallExpr{Args: run}, home) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // registrationCallWrites reports whether the program a call runs writes its
 // operands or runs text of its own. A writer is recognised where a program is
 // named: the command word, after the wrappers that pass argv on. As an
 // operand of another program its name is text (echo cp && sha256sum FILE
-// reads). A wrapper whose options the reader does not know, and a dispatcher,
-// keep every later word in play, as does a command word that is not spelled
-// out.
+// reads; so does git grep cp). A dispatcher runs another program: the
+// program it runs is judged, in the position its grammar gives it (xargs,
+// flock, chroot, busybox, git ...), and find by its actions. A wrapper or
+// dispatcher whose options the reader does not know, a runner it does not
+// model, and a command word that is not spelled out keep every later word in
+// play.
 func registrationCallWrites(call *syntax.CallExpr, home string) bool {
 	if len(call.Args) == 0 {
 		return false
@@ -217,9 +333,17 @@ func registrationCallWrites(call *syntax.CallExpr, home string) bool {
 		return true
 	}
 	base := programBase(program)
+	if base == "find" {
+		return registrationFindWrites(words[1:], home)
+	}
+	if spec, runner := registrationRunners[base]; runner {
+		if run, ok := registrationRunWords(spec, words[1:], home); ok {
+			return len(run) > 0 && registrationCallWrites(&syntax.CallExpr{Args: run}, home)
+		}
+		return registrationNamesWriter(words[1:], home, false)
+	}
 	return registrationNamesWriter(words[:1], home, true) ||
-		(registrationDispatchers[base] || actionInterpreterWrappers[base]) &&
-			registrationNamesWriter(words[1:], home, false)
+		registrationScanRunners[base] && registrationNamesWriter(words[1:], home, false)
 }
 
 // registrationNamesWriter reports whether a static word names a program that
