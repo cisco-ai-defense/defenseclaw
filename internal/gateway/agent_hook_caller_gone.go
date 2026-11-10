@@ -168,10 +168,18 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 	if shed {
 		extra = map[string]string{"hook_shed": "admission_refused"}
 	}
+	shedKey := ""
 	if id := hookCallerGoneString(payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"); id != "" {
-		if shed && !a.hookShed.first(env.SessionID+"\x00"+id) {
-			// The hook retries a refused call: one row names the call.
-			return
+		if shed {
+			// The hook retries a refused call: one row names the call. The
+			// session and tool id come from the agent, so the verified
+			// account is part of the key: two accounts that send the same ids
+			// are two calls, each with its own row.
+			caller, _ := verifiedAuditCaller(ctx)
+			shedKey = caller.IDKind + "\x00" + caller.ID + "\x00" + env.SessionID + "\x00" + id
+			if !a.hookShed.first(shedKey) {
+				return
+			}
 		}
 		extra["tool_use_id"] = id
 		// The row is found by its tool id like every other row of the call.
@@ -188,6 +196,11 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 		Mode:      a.agentHookMode(ctx, connectorName),
 		Extra:     extra,
 	}); err != nil {
+		// A row that was not written is not remembered: the hook's retry of
+		// the refused call is the next try.
+		if shedKey != "" {
+			a.hookShed.forget(shedKey)
+		}
 		fmt.Fprintf(os.Stderr, "[gateway] hook call whose client left before admission not audited connector=%s: %v\n",
 			connectorName, err)
 	}
@@ -221,6 +234,23 @@ func (l *hookShedLedger) first(key string) bool {
 	l.seen[key] = struct{}{}
 	l.order = append(l.order, key)
 	return true
+}
+
+// forget drops key, so a call whose row failed to persist is recorded by its
+// next try.
+func (l *hookShedLedger) forget(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.seen[key]; !ok {
+		return
+	}
+	delete(l.seen, key)
+	for i, queued := range l.order {
+		if queued == key {
+			l.order = append(l.order[:i], l.order[i+1:]...)
+			break
+		}
+	}
 }
 
 // hookCallerGoneString is the first string value of keys in payload.
