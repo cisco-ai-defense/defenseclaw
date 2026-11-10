@@ -169,6 +169,41 @@ func TestValidateTrustedInstallMarkerDirRefusesReplaceableAncestor(t *testing.T)
 	}
 }
 
+// A replaceable Cisco folder above the marker, under a registered machine
+// base, is advisory drift: validation goes on to the marker itself and
+// refuses the Administrators-owned marker, not the ancestor. With
+// TrustStrictAncestorsEnv pinned, the same ancestor is refused.
+func TestValidateTrustedInstallMarkerDirAdvisoryInstallerAncestor(t *testing.T) {
+	cisco, root := testenv.CiscoRuntimeTree(t, "DefenseClaw")
+	// The tree's base stands for the registered ProgramData, so its Cisco
+	// folder is installer-owned as on a real host.
+	t.Cleanup(AddTrustedMachineInstallBaseForTest(filepath.Dir(cisco)))
+	if !PlatformInstallerOwnedPath(cisco) {
+		t.Fatalf("precondition: %s must be installer-owned", cisco)
+	}
+	marker := filepath.Join(root, "secure-client.install")
+	if err := os.Mkdir(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testenv.SetSecurity(t, marker, testenv.AdminOnlySDDL)
+	testenv.SetSecurity(t, cisco, "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;;0x1200e9;;;BU)")
+
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker")
+	if err == nil || !strings.Contains(err.Error(), marker) {
+		t.Fatalf("advisory Cisco ancestor = %v, want the Administrators-owned marker refused", err)
+	}
+	if strings.Contains(strings.ReplaceAll(err.Error(), marker, ""), cisco) {
+		t.Fatalf("advisory Cisco ancestor was refused instead of the marker: %v", err)
+	}
+
+	t.Setenv(TrustStrictAncestorsEnv, "1")
+	err = ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker")
+	if err == nil || !strings.Contains(strings.ReplaceAll(err.Error(), marker, ""), cisco) {
+		t.Fatalf("strict ancestors = %v, want the replaceable Cisco ancestor %s refused", err, cisco)
+	}
+}
+
 // The Secure Client host classification checks the install root, the marker
 // and the gateway executable together. The marker's ancestors take the same
 // scope as the other two: drift on the system drive root or the shared Cisco
