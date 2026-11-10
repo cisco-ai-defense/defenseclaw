@@ -149,7 +149,42 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 		{"ordinary path built from nine directories", chain("d", 8, `C:\Users\Alice\project\defenseclaw_last`, -1, `$p = "$d\notes.txt"; [IO.File]::WriteAllText($p, 'x')`), false},
 		{"sixty ordinary alternatives", alternatives(59, ordinaryLast, -1, ""), false},
 		{"seventy alternatives, state last", alternatives(69, state, -1, ""), true},
+		{"sixty-five alternatives, state last, only read", chain("p", 64, state, -1, `[IO.File]::ReadAllText($p)`), false},
+		{"sixty-five ordinary alternatives, ordinary write", chain("p", 64, ordinaryLast, -1, `[IO.File]::WriteAllText($p, 'x')`), false},
+		{"sixty-five ordinary alternatives, state read separately, ordinary write", chain("p", 64, ordinaryLast, -1, `[IO.File]::ReadAllText('`+state+`'); [IO.File]::WriteAllText($p, 'x')`), false},
+		{"ninety ordinary alternatives", chain("p", 89, ordinaryLast, -1, `[IO.File]::WriteAllText($p, 'x')`), false},
+		{"ninety alternatives, state last, only read", chain("p", 89, state, -1, `[IO.File]::ReadAllText($p)`), false},
+		{"ninety alternatives, state last, written", chain("p", 89, state, -1, `[IO.File]::WriteAllText($p, 'x')`), true},
+		{"ninety alternatives, state is the fiftieth, written", chain("p", 89, ordinaryLast, 49, `[IO.File]::WriteAllText($p, 'x')`), true},
+		{"sixty-five ordinary directories, a child written", chain("d", 64, `C:\Users\Alice\project\defenseclaw_last`, -1, `$p = "$d\notes.txt"; [IO.File]::WriteAllText($p, 'x')`), false},
+		{"sixty-five directories, a walk up from each stays outside the state directory", chain("d", 64, `C:\Users\Alice\project\defenseclaw_last`, -1, `$p = "$d\..\.defenseclaw\config.yaml"; [IO.File]::WriteAllText($p, 'x')`), false},
+		{"sixty-five directories, a walk up from one shallower directory reaches the state directory", chain("d", 64, `C:\Users\Alice\defenseclaw_last`, -1, `$p = "$d\..\.defenseclaw\config.yaml"; [IO.File]::WriteAllText($p, 'x')`), true},
 		{"values carried around a loop", `$a = '` + state + `'; $b = '` + project + `defenseclaw1'; $c = '` + project + `defenseclaw2'; $d = '` + project + `defenseclaw3'; foreach ($i in 1..4) { [IO.File]::WriteAllText($d, 'x'); $d = $c; $c = $b; $b = $a }`, true},
+		{"cmd start /machine option then codex", `$patch = "` + envelope + `"; & cmd.exe /c 'start /machine amd64 C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"cmd start /machine option then another program", `$patch = "` + envelope + `"; & cmd.exe /c 'start /machine amd64 whoami.exe C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd if with a false literal comparison never runs codex", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==2 C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd if not with a true literal comparison never runs codex", `$patch = "` + envelope + `"; & cmd.exe /c 'if not 1==1 C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd if with a false comparison never starts codex", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==2 start /b C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd if with a false numeric operator never runs codex", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1 GTR 2 C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd if with a true numeric operator runs codex", `$patch = "` + envelope + `"; & cmd.exe /c 'if 2 GTR 1 C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"cmd if compares case-sensitively without /i", `$patch = "` + envelope + `"; & cmd.exe /c 'if A==a C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd if compares without case with /i", `$patch = "` + envelope + `"; & cmd.exe /c 'if /i A==a C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"cmd if not with a false comparison runs codex", `$patch = "` + envelope + `"; & cmd.exe /c 'if not 1==2 C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"cmd if on a variable runs codex when cmd decides", `$patch = "` + envelope + `"; & cmd.exe /c 'if %X%==1 C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"cmd if true, codex only in the else", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==1 (whoami.exe) else (C:\dc\codex.exe --codex-run-as-apply-patch)' $patch`, false},
+		{"cmd if false, codex in the else", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==2 (whoami.exe) else (C:\dc\codex.exe --codex-run-as-apply-patch)' $patch`, true},
+		{"cmd if true, codex in the then group", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==1 (C:\dc\codex.exe --codex-run-as-apply-patch) else (whoami.exe)' $patch`, true},
+		{"cmd if false, codex in the then group", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==2 (C:\dc\codex.exe --codex-run-as-apply-patch) else (whoami.exe)' $patch`, false},
+		{"cmd if true with an unparenthesised else", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==1 (whoami.exe) else C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd if false, codex later on the same line", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==2 echo hi & C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd if true, codex later on the same line", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==1 echo hi & C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"cmd codex after a closed false if", `$patch = "` + envelope + `"; & cmd.exe /c '(if 1==2 echo hi) & C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"cmd nested if false inside a true if", `$patch = "` + envelope + `"; & cmd.exe /c 'if 1==1 (if 1==2 C:\dc\codex.exe --codex-run-as-apply-patch)' $patch`, false},
+		{"cmd for loop over a false if", `$patch = "` + envelope + `"; & cmd.exe /c 'for %i in (1) do if 1==2 C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, false},
+		{"cmd for loop over a true if", `$patch = "` + envelope + `"; & cmd.exe /c 'for %i in (1) do if 1==1 C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, true},
+		{"codex receives a different long option", `$patch = "` + envelope + `"; & 'C:\dc\codex.exe' --codex-run-as-apply-patch-help $patch`, false},
+		{"cmd codex receives a different long option", `$patch = "` + envelope + `"; & cmd.exe /c 'C:\dc\codex.exe --codex-run-as-apply-patch-help' $patch`, false},
+		{"codex receives the option in a list", `$patch = "` + envelope + `"; & cmd.exe /c 'C:\dc\codex.exe -x,--codex-run-as-apply-patch' $patch`, true},
 		{"bound read", `$p = '` + state + `'; [IO.File]::ReadAllText($p)`, false},
 		{"bound read in pwsh", pwsh(`$p = ''` + state + `''; if (Test-Path -LiteralPath $p) { Get-Content -LiteralPath $p -Raw }`), false},
 		{"bound project write", `$p = 'C:\Users\Alice\project\notes.txt'; [IO.File]::WriteAllText($p, 'x')`, false},
@@ -174,6 +209,50 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 					t.Fatalf("observe-mode hard block=%t, want %t", got, tc.block)
 				}
 			})
+		}
+	}
+}
+
+// TestPowerShellPlainPathSignature: values share a signature only when the
+// proof cannot read them differently at any use, in any path built from them.
+func TestPowerShellPlainPathSignature(t *testing.T) {
+	const home = `C:\Users\Alice`
+	same := [][2]string{
+		{`C:\Users\Alice\project\defenseclaw_a`, `c:/users/alice/project/defenseclaw_b.txt`},
+		{`C:\Users\Alice\a\b\defenseclaw one`, `C:\Users\Alice\other\c\defenseclaw-two(1)`},
+		{`C:\Users\Bob\a\defenseclaw_a`, `C:\Users\Carol\b\defenseclaw_b`},
+		{`D:\work\defenseclaw_a`, `E:\other\defenseclaw_b`},
+	}
+	for _, pair := range same {
+		a, okA := psPlainPathSignature(pair[0], home)
+		b, okB := psPlainPathSignature(pair[1], home)
+		if !okA || !okB || a != b {
+			t.Errorf("%q and %q: signatures %q (%t) and %q (%t), want the same", pair[0], pair[1], a, okA, b, okB)
+		}
+	}
+	different := [][2]string{
+		{`C:\Users\Alice\project\defenseclaw_a`, `C:\Users\Alice\defenseclaw_a`},
+		{`C:\Users\Alice\project\defenseclaw_a`, `C:\Users\Bob\project\defenseclaw_a`},
+		{`C:\Users\Alice\project\defenseclaw_a`, `C:\Users\Alice\project\defenseclaw_a\`},
+		{`C:\Users\Alice\project\defenseclaw_a`, `D:\Users\Alice\project\defenseclaw_a`},
+		{`C:\Users\Alice`, `C:\Users\Alice\project`},
+	}
+	for _, pair := range different {
+		a, okA := psPlainPathSignature(pair[0], home)
+		b, okB := psPlainPathSignature(pair[1], home)
+		if !okA || !okB || a == b {
+			t.Errorf("%q and %q: signatures %q (%t) and %q (%t), want different", pair[0], pair[1], a, okA, b, okB)
+		}
+	}
+	for _, value := range []string{
+		`C:\Users\Alice\.defenseclaw\config.yaml`, `C:\Users\Alice\project\.DefenseClaw`, `C:\Users\Alice\.de`, `C:\Users\Alice\.`,
+		`C:\Users\Alice\project\..\x`, `C:\Users\Alice\project\.\x`, `\\srv\share\defenseclaw`, `relative\defenseclaw`, `\rooted\defenseclaw`,
+		`C:\Users\Alice\defenseclaw~1`, `C:\Users\Alice\defenseclaw$x`, `C:\Users\Alice\defenseclaw.`, `C:\Users\Alice\defenseclaw `,
+		`C:\Users\Alice\defenseclaw:stream`, `C:\Users\Alice\project*\defenseclaw`, `C:\Users\Alice\\defenseclaw`, `C:\Users\Alice\defenseclaw%x%`,
+		`C:\Users\Alice\défenseclaw`, `C:defenseclaw`, "",
+	} {
+		if signature, ok := psPlainPathSignature(value, home); ok {
+			t.Errorf("%q has signature %q, want none", value, signature)
 		}
 	}
 }
