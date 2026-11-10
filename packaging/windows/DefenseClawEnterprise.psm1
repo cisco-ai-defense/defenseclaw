@@ -23336,6 +23336,23 @@ function Restore-DefenseClawTransaction {
         if ([bool]$file.existed) {
             $backup = [string]$file.backup
             Assert-DefenseClawDescendant -Path $backup -Root $Layout.StateRoot -Label 'transaction backup' | Microsoft.PowerShell.Core\Out-Null
+            if ($isCodexMachinePolicy -and (Test-DefenseClawStandaloneProfile) -and
+                (Microsoft.PowerShell.Management\Test-Path -LiteralPath $destination -PathType Leaf)) {
+                # GAP-1001: the rollback never swaps an unguarded requirements.toml
+                # (empty, not text, or without the DefenseClaw hook) over one that
+                # carries the hook: the file in place stays, the rest is put back.
+                $backupProblem = Get-DefenseClawCodexRequirementsGuardProblem -Bytes ([IO.File]::ReadAllBytes($backup))
+                $currentProblem = 'unknown'
+                try { $currentProblem = Get-DefenseClawCodexRequirementsGuardProblem -Bytes ([IO.File]::ReadAllBytes($destination)) } catch { $currentProblem = 'unknown' }
+                if ($backupProblem -ne '' -and $currentProblem -eq '') {
+                    Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                        subsystem = 'rollback'
+                        path      = $destination
+                        reason    = "the Codex requirements recorded by the transaction would leave Codex unguarded ($backupProblem); the file in place carries the DefenseClaw hook and was not replaced"
+                    }
+                    continue
+                }
+            }
             try {
                 Install-DefenseClawFileAtomic `
                     -Source $backup `
@@ -36464,6 +36481,33 @@ function Get-DefenseClawBlockedCodexStatePath {
             (Test-DefenseClawFileDeleteBlocked -Path $candidate)) {
             return $candidate
         }
+    }
+    return ''
+}
+
+function Get-DefenseClawCodexRequirementsGuardProblem {
+    <#
+        GAP-1001: why a Codex requirements document would leave Codex
+        unguarded, or '' when it carries a DefenseClaw managed hook. A
+        structural look for the rollback, which holds bytes and no gateway: not
+        empty or white space, valid UTF-8 without NUL bytes, at least one
+        [[hooks.<Event>]] entry, and a command that runs the DefenseClaw hook.
+        The gateway parses the document and checks every event on every publish
+        and verify (enterprisepolicy), so this is the second look, not the only one.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
+    try {
+        Assert-DefenseClawCodexRequirementsPublishable -Bytes $Bytes
+    }
+    catch {
+        return [string]$_.Exception.Message
+    }
+    $text = [Text.UTF8Encoding]::new($false, $true).GetString($Bytes)
+    if ($text -notmatch '(?m)^\s*\[\[\s*hooks\.[A-Za-z]+\s*\]\]') {
+        return 'it has no [[hooks.<Event>]] entry, so Codex would load no DefenseClaw hook'
+    }
+    if ($text -notmatch '(?i)defenseclaw-hook') {
+        return 'no entry runs the DefenseClaw hook'
     }
     return ''
 }

@@ -350,6 +350,18 @@ try {
                 if (-not $refused.StartsWith('refusing to publish')) { throw "publishable check: $($bad.Why) bytes were not refused: '$refused'" }
             }
             Assert-DefenseClawCodexRequirementsPublishable -Bytes ([Text.Encoding]::UTF8.GetBytes("[features]`nfoo = true`n"))
+            # GAP-1001: the rollback's second look finds the document that guards nothing.
+            $guardRows = @(
+                @{ Text = ''; Guarded = $false },
+                @{ Text = "[features]`nfoo = true`n"; Guarded = $false },
+                @{ Text = "# comment only`n"; Guarded = $false },
+                @{ Text = "[[hooks.PreToolUse]]`n[[hooks.PreToolUse.hooks]]`ncommand = 'C:\\other\\tool.exe'`n"; Guarded = $false },
+                @{ Text = "[[hooks.SessionStart]]`n[[hooks.SessionStart.hooks]]`ncommand = 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe hook --connector codex'`n"; Guarded = $true }
+            )
+            foreach ($row in $guardRows) {
+                $reason = Get-DefenseClawCodexRequirementsGuardProblem -Bytes ([Text.Encoding]::UTF8.GetBytes([string]$row.Text))
+                if (([string]::IsNullOrEmpty($reason)) -ne [bool]$row.Guarded) { throw "guard problem: wrong answer '$reason' for '$($row.Text)'" }
+            }
             # GAP-1001: a Codex writer that holds the lock is never read as a hand edit: the file is not judged, not backed up, not rebuilt.
             Reset-Recovery @('codex_state_unsettled: a Codex writer holds the writer lock') 'edit'
             $message = ''
