@@ -1941,11 +1941,21 @@ func TestWindowsManagedHooksTeardownRollbackDoesNotRestoreBehindAKeptPerUserLink
 func TestWindowsManagedHooksTeardownReportsABusyCodexWriterByCode(t *testing.T) {
 	busy := fmt.Errorf("restore Codex managed hooks: timed out waiting 10s for Codex machine policy lock: %w", connector.ErrWindowsCodexWriterLockBusy)
 	for name, err := range map[string]error{
-		"direct": busy,
-		"joined": errors.Join(errors.New("restore pre-rollback Claude policy"), busy),
+		"direct":      busy,
+		"joined busy": errors.Join(busy, fmt.Errorf("again: %w", connector.ErrWindowsCodexWriterLockBusy)),
 	} {
 		if got := windowsManagedHooksTeardownErrorCode(err); got != "writer_lock_busy" {
 			t.Fatalf("%s: code = %q, want writer_lock_busy", name, got)
+		}
+	}
+	// A busy Codex writer next to another failure (a compensation that failed too) is not a
+	// writer-only failure: no code, so the caller throws as before.
+	for name, err := range map[string]error{
+		"busy plus compensation": errors.Join(busy, errors.New("restore pre-rollback Claude policy after Codex failure: access denied")),
+		"compensation first":     errors.Join(errors.New("restore pre-rollback Cursor policy after Codex failure: access denied"), busy),
+	} {
+		if got := windowsManagedHooksTeardownErrorCode(err); got != "" {
+			t.Fatalf("%s: code = %q, want none", name, got)
 		}
 	}
 	if got := windowsManagedHooksTeardownErrorCode(errors.New("Codex machine policy is not clean after teardown rollback")); got != "" {

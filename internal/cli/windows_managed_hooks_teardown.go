@@ -132,10 +132,33 @@ type windowsManagedHooksTeardownReport struct {
 // windowsManagedHooksTeardownErrorCode is the stable code of a teardown
 // failure, or "" when it has none.
 func windowsManagedHooksTeardownErrorCode(err error) string {
-	if err != nil && errors.Is(err, connector.ErrWindowsCodexWriterLockBusy) {
+	if windowsManagedHooksTeardownOnlyBusyWriter(err) {
 		return windowsCodexRequirementsWriterLockBusyCode
 	}
 	return ""
+}
+
+// windowsManagedHooksTeardownOnlyBusyWriter reports a failure whose every
+// cause is a busy Codex writer. A joined failure (a Claude or Cursor
+// compensation that failed next to the Codex busy answer) is not one: the
+// caller defers a writer-only failure and throws the rest.
+func windowsManagedHooksTeardownOnlyBusyWriter(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !windowsManagedHooksTeardownOnlyBusyWriter(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	return errors.Is(err, connector.ErrWindowsCodexWriterLockBusy)
 }
 
 // windowsManagedHooksKeptUntrustedPolicyFiles lists the vendor policy files

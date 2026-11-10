@@ -24694,6 +24694,7 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
             # The connector hooks are not put back yet: the prepared receipt and the
             # journal stay for the /repair that runs this rollback again.
             $journalPreserved = $false
+            $script:DefenseClawTeardownRollbackDeferred = $false
         }
     }
     # Prepare publishes this receipt before the first per-user teardown
@@ -30483,8 +30484,32 @@ function Test-DefenseClawCodexWriterLockBusyMessage {
     if ($Message -match 'timed out waiting \S+ for a Codex machine policy transaction to finish') {
         return $true
     }
+    if ($Message -match 'open Codex machine policy lock: .*locked a portion of the file') {
+        # ERROR_LOCK_VIOLATION on the open of the writer lock: a Codex writer's byte-range lock.
+        return $true
+    }
     return ($Message -match 'timed out waiting \S+ for Codex machine policy lock' -or
         $Message -match 'open Codex machine policy lock: .*(being used by another process|sharing violation)')
+}
+
+function Test-DefenseClawBusyWriterIsTheOnlyFailure {
+    <#
+        GAP-0999: a teardown rollback report whose error text (one line per joined error) is
+        nothing but busy-writer answers. A joined failure (a Claude or Cursor compensation
+        that failed too, next to the Codex busy answer) has a line that is not one, so it is
+        not deferred as a writer-only hold.
+    #>
+    param([AllowEmptyString()][string]$Message)
+    $lines = @(($Message -split '\r?\n') | Microsoft.PowerShell.Core\Where-Object { $_.Trim() -ne '' })
+    if ($lines.Count -eq 0) {
+        return $false
+    }
+    foreach ($line in $lines) {
+        if (-not (Test-DefenseClawCodexWriterLockBusyMessage -Message $line)) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function New-DefenseClawCodexWriterBusyRefusal {
@@ -31527,13 +31552,18 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         }
         if ($Action -ceq 'rollback' -and $script:DefenseClawTeardownRollbackDeferBusy -and
             (Test-DefenseClawStandaloneProfile) -and
-            ($teardownErrorCode -ceq 'writer_lock_busy' -or (Test-DefenseClawCodexWriterLockBusyMessage -Message $detail))) {
+            ($teardownErrorCode -ceq 'writer_lock_busy' -or
+                (Test-DefenseClawBusyWriterIsTheOnlyFailure -Message ([string]$report.error)))) {
             # GAP-0999: the Codex step of the teardown rollback met a Codex writer
             # that holds the lock (the installed gateway of an older release says it
             # in text only, a current one by error_code). Only the call of the
             # rollback of a transaction sets the flag. The rollback is deferred like
             # a held file: the caller starts the restored services and the run ends
             # 1618 with the transaction pending; /repair runs this rollback again.
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'rollback'
+                reason    = "the managed-hook teardown rollback met a Codex writer that holds the lock (error_code [$teardownErrorCode]): $detail"
+            }
             Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout -TeardownRollback)
             $script:DefenseClawTeardownRollbackDeferred = $true
             return $null
@@ -36705,7 +36735,7 @@ function New-DefenseClawCodexWriterUnsettledHeldMessage {
         $what = ''
     }
     if ($TeardownRollback) {
-        $message += (". The managed-hook teardown of the uninstall was not rolled back: the hooks it removed from user accounts stay removed, and those agents are not guarded until {0} runs" -f $repair)
+        $message += (". The managed-hook teardown of the uninstall was not fully rolled back: the runtime selectors and the per-user enrollments it removed are back, but the Claude Code, Cursor and Codex machine-policy hooks stay as the uninstall left them, so those agents may be unguarded until {0} runs" -f $repair)
     }
     if ($what -ne '') {
         $message += ('. Codex is not guarded right now: {0} {1}, so nothing guards Codex until the policy is published again: run {2} as an administrator' -f $policyPath, $what, $repair)
