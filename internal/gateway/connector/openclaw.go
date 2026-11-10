@@ -210,7 +210,7 @@ func isDefenseClawPluginApprovals(plugin map[string]interface{}) bool {
 // to configPath and rewrites it only when the block was there. The caller
 // holds the openclaw.json lock (see openClawConfigLocked).
 func dropDefenseClawPluginApprovalsFile(configPath string) error {
-	data, err := os.ReadFile(configPath)
+	data, err := readConnectorStateFile(configPath)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -227,6 +227,11 @@ func dropDefenseClawPluginApprovalsFile(configPath string) error {
 // openClawTeardownNoticeOutput receives the notice that teardown kept a changed
 // openclaw.json; tests replace it.
 var openClawTeardownNoticeOutput io.Writer = os.Stderr
+
+// Every read of openclaw.json goes through readConnectorStateFile: on Windows
+// another process (OpenClaw saving the file, or a concurrent patcher) replaces
+// it by rename, and a plain os.ReadFile open then fails with a sharing
+// violation instead of reading the old or new document.
 
 // openClawConfigLocked runs fn holding the cross-process lock on
 // openclaw.json. Setup and Teardown take it around every read, record update
@@ -421,7 +426,7 @@ func openClawSnapshotUsable(dataDir, connectorName, configPath string) (bool, er
 // openClawConfigRegistersDefenseClaw reports whether openclaw.json already
 // lists the DefenseClaw plugin, so a snapshot of it would not be pre-setup.
 func openClawConfigRegistersDefenseClaw(configPath string) bool {
-	data, err := os.ReadFile(configPath)
+	data, err := readConnectorStateFile(configPath)
 	if err != nil {
 		return false
 	}
@@ -605,7 +610,7 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool) error {
 	cfg := map[string]interface{}{}
 	var before map[string]interface{}
-	original, readErr := os.ReadFile(configPath)
+	original, readErr := readConnectorStateFile(configPath)
 	if readErr == nil && len(original) > 0 {
 		parsed, err := parseOpenClawConfig(configPath, original)
 		if err != nil {
@@ -707,7 +712,7 @@ func uninstallOpenClawExtension(ocHome string, dropRejectedApprovals bool, grant
 	}
 
 	configPath := filepath.Join(ocHome, "openclaw.json")
-	data, err := os.ReadFile(configPath)
+	data, err := readConnectorStateFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if len(errs) > 0 {
@@ -894,7 +899,7 @@ func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 
 	// Check openclaw.json for defenseclaw entries
 	configPath := filepath.Join(openClawHome(), "openclaw.json")
-	if data, err := os.ReadFile(configPath); err == nil {
+	if data, err := readConnectorStateFile(configPath); err == nil {
 		if cfg, err := parseOpenClawConfig(configPath, data); err == nil {
 			if plugins, ok := cfg["plugins"].(map[string]interface{}); ok {
 				if entries, ok := plugins["entries"].(map[string]interface{}); ok {
