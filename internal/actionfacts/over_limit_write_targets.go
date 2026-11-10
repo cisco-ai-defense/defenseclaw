@@ -651,11 +651,18 @@ func compactPatchSectionLines(lines []string) (kept []string, dropped bool) {
 // elided; unscoped is set when a hunk line outside any file was dropped.
 // Files that were not compacted lose nothing.
 func reducePatchEnvelope(text string, bounded bool, budget *int) (reduced string, elided []string, unscoped, ok bool) {
-	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	// The padding around the patch is dropped, as the tool drops it; the line
+	// end that closes the patch is kept.
+	closingLineEnd := ""
+	if strings.HasSuffix(strings.TrimRight(text, " \t\r"), "\n") {
+		closingLineEnd = "\n"
+	}
+	normalized := strings.ReplaceAll(strings.TrimSpace(text), "\r\n", "\n")
 	if strings.ContainsRune(normalized, '\r') {
 		return "", nil, false, false
 	}
 	var out []string
+	inUpdate := false
 	section := &patchEnvelopeSection{}
 	flush := func() {
 		lines, dropped := section.lines, false
@@ -674,6 +681,15 @@ func reducePatchEnvelope(text string, bounded bool, budget *int) (reduced string
 	}
 	previous := ""
 	for _, line := range strings.Split(normalized, "\n") {
+		// The tool reads a file header without the white space around it
+		// (parsePatchEnvelope), so the header is kept in that form.
+		if header := strings.TrimSpace(line); header != line &&
+			isPatchFileHeader(header) && (!inUpdate || line[0] != ' ') {
+			line = header
+		}
+		if isPatchFileHeader(line) {
+			inUpdate = strings.HasPrefix(line, "*** Update File: ")
+		}
 		switch {
 		case strings.HasPrefix(line, "*** Add File: "), strings.HasPrefix(line, "*** Update File: "),
 			strings.HasPrefix(line, "*** Delete File: "):
@@ -700,5 +716,5 @@ func reducePatchEnvelope(text string, bounded bool, budget *int) (reduced string
 		section.hunkBytes += len(line) + 1
 	}
 	flush()
-	return strings.Join(out, "\n"), elided, unscoped, true
+	return strings.Join(out, "\n") + closingLineEnd, elided, unscoped, true
 }
