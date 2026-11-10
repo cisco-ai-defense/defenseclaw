@@ -235,6 +235,9 @@ type Text struct {
 	mu     sync.Mutex
 	folded string
 	done   bool
+	// runMu guards runs, the runs of the text per set of bytes (windows.go).
+	runMu sync.Mutex
+	runs  map[runKey]runSet
 }
 
 // NewText returns the check state for text.
