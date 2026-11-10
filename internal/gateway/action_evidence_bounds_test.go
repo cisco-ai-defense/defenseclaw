@@ -134,7 +134,10 @@ func TestR103B36RealBoundedHeaderKeepsTruncation(t *testing.T) {
 	} {
 		var command strings.Builder
 		command.WriteString("echo hi")
-		for i := 0; i < 530; i++ {
+		// Plain operands past the map budget are named in a short list
+		// (hookpaths.OmittedPlainKey), so more of them are needed to fill the
+		// map; the last operand is then still the one it leaves out.
+		for i := 0; i < 1000; i++ {
 			fmt.Fprintf(&command, " > ordinary/filler%03d", i)
 		}
 		command.WriteString(" > " + last)
@@ -274,8 +277,10 @@ func TestCommandHookResolvedWritesScope(t *testing.T) {
 // and link forms of a protected write after a full map, a Unicode HOME
 // alias of the account home, and a real bounded header reused on another
 // call. A large benign command whose write operands do not fit the map is
-// also denied, as over the evaluation budget (ACTION-COMPOUND-LIMIT,
-// GAP-0146): the documented managed known limit (rel-1-0-3 GAP-0291).
+// also denied in the strict tier, as over the evaluation budget
+// (ACTION-COMPOUND-LIMIT, GAP-0146): the documented managed known limit
+// (rel-1-0-3 GAP-0291). The other tiers allow it, since the client names the
+// plain operands its map leaves out (GAP-1058).
 func TestR103B36BoundedHeaderOmittedOperandsStayUnknown(t *testing.T) {
 	f := newB36ManagedHookFixture(t).strict(t)
 	if err := os.Symlink("../.ssh", filepath.Join(f.project, "dirlink")); err != nil {

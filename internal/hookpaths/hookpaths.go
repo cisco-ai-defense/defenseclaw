@@ -193,6 +193,41 @@ const ReadingTargetPrefix = "\x00reading-target:"
 // before any operand.
 const BudgetKey = "\x00budget"
 
+// OmittedPlainKey lists, in a map that carries BudgetKey, the operands the map
+// left out for its byte budget that the client had resolved as plain: a name
+// the file system reads as itself (below the call folder as the folder it
+// reads as), no link, no copy or link operation of the call, no instruction
+// file identity, no protected file. Each is one line, relative to CWDKey when
+// it lies below it. A gateway that cannot read the home of the user judges
+// exactly the listed operands as ordinary and still fails closed on every
+// other omitted one, so a long operand list in a deep working folder is
+// allowed while a link or a name the client could not place stays refused
+// (GAP-1058).
+const OmittedPlainKey = "\x00omitted-plain"
+
+// omittedPlainReserve is the part of the map bytes kept for OmittedPlainKey and
+// the facts that follow the operands: a plain operand that would pass the rest
+// goes to that list instead of the map.
+const omittedPlainReserve = maxEncodedTargets / 4
+
+// OmittedPlainOperands is the set of absolute operands of OmittedPlainKey in
+// targets; nil when the map carries none or is not a budget-bounded one.
+func OmittedPlainOperands(targets map[string]string) map[string]bool {
+	value := targets[OmittedPlainKey]
+	cwd := targets[CWDKey]
+	if value == "" || targets[BudgetKey] != "1" || !filepath.IsAbs(cwd) {
+		return nil
+	}
+	set := make(map[string]bool)
+	for _, name := range strings.Split(value, "\n") {
+		if name == "" {
+			continue
+		}
+		set[OperandPath(name, cwd)] = true
+	}
+	return set
+}
+
 // SystemLinkLimit is the number of links the system follows in one path
 // resolution before it fails the path: 32 on macOS (MAXSYMLINKS), 40 on Linux
 // and 63 on Windows (the reparse attempt limit). It is the one place the limit
@@ -2157,6 +2192,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	// overBudget is set when an operand or fact is left out only because the
 	// map is full (BudgetKey).
 	overBudget := false
+	// omittedPlain holds the plain operands left out for the byte budget
+	// (OmittedPlainKey); omittedPlainBytes is their size in the fact.
+	var omittedPlain []string
+	omittedPlainSeen := map[string]bool{}
+	omittedPlainBytes := 0
+	var cwdPhysical string
+	cwdPhysicalRead := false
 	if protectedDecision {
 		// The protected-target reading goes in first, so no operand list,
 		// however long, can push it out of the bounded map (GAP-0151): an
@@ -2271,6 +2313,29 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		linkKey, linkCost := LinkTextFactPrefix+path, 0
 		if linkText != "" {
 			linkCost = len(jsonString(linkKey)) + 1 + len(jsonString(linkText)) + 1
+		}
+		if size+entry+linkCost > maxEncodedTargets-omittedPlainReserve && ok && linkText == "" && !entryOnly &&
+			!nativePatch && aliasKnown && !links.opaque && links.copyDestinationCount(resolutionPath) == 0 &&
+			!protected.has(resolved) && len(instructions.Identities(resolved)) == 0 {
+			if !cwdPhysicalRead {
+				cwdPhysical, _ = ResolveWriteTarget(cwd)
+				cwdPhysicalRead = true
+			}
+			name, plain := path, resolved == path
+			if rest, below := strings.CutPrefix(path, cwd+string(filepath.Separator)); below && filepath.IsAbs(cwd) {
+				name = rest
+				plain = plain || cwdPhysical != "" && resolved == filepath.Join(cwdPhysical, rest)
+			}
+			if plain && !strings.ContainsAny(name, "\n\x00") &&
+				(omittedPlainSeen[name] || omittedPlainBytes+len(name)+2 <= omittedPlainReserve/2) {
+				if !omittedPlainSeen[name] {
+					omittedPlainSeen[name] = true
+					omittedPlain = append(omittedPlain, name)
+					omittedPlainBytes += len(name) + 2
+				}
+				truncated, overBudget = true, true
+				return
+			}
 		}
 		if size+entry+linkCost > maxEncodedTargets {
 			truncated, overBudget = true, true
@@ -2669,6 +2734,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		targets[TruncatedKey] = "1"
 		if overBudget {
 			targets[BudgetKey] = "1"
+			if len(omittedPlain) > 0 {
+				value := strings.Join(omittedPlain, "\n")
+				entry := len(jsonString(OmittedPlainKey)) + 1 + len(jsonString(value)) + 1
+				if size+entry <= maxEncodedTargets && len(targets) < 2*MaxWriteTargets+5 {
+					targets[OmittedPlainKey] = value
+				}
+			}
 		}
 	}
 	encoded, err := json.Marshal(targets)
@@ -3052,6 +3124,7 @@ func Decode(value string) (map[string]string, bool) {
 	if json.Unmarshal(data, &targets) != nil || len(targets) > 2*MaxWriteTargets+7 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
 		(targets[BudgetKey] != "" && (targets[BudgetKey] != "1" || targets[TruncatedKey] != "1")) ||
+		(targets[OmittedPlainKey] != "" && targets[BudgetKey] != "1") ||
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[NoDereferenceTouchSafeKey] != "" && targets[NoDereferenceTouchSafeKey] != "1") ||
