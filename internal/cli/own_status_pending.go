@@ -12,7 +12,7 @@ import "encoding/json"
 // fact.
 const (
 	ownStatusBlockedCode   = "pending_sign_in"
-	ownStatusBlockedReason = "blocked until this account signs in or reconnects (DefenseClaw refuses every tool call of the agent)"
+	ownStatusBlockedReason = windowsEnterpriseEnrollmentBlocked
 	ownStatusBlockedNext   = "Stay signed in to Windows in a connected session (console or Remote Desktop; not SSH or a scheduled task); " +
 		"DefenseClaw enrolls the account within about 5 minutes, then restart the agent and run defenseclaw status again, " +
 		"and ask IT if it stays blocked"
