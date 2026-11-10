@@ -642,8 +642,19 @@ func enterpriseHookStandalonePlatformRevokeUsers(ctx context.Context, stderr io.
 	if authorization, _, err := loadEnterpriseHookGuardianAuthorization(cfg.DataDir); err == nil {
 		held = append(held, authorization.ProtectedTargets...)
 	}
-	if err := recordEnterpriseHookRemovedConnectors(cfg.DataDir, held, manifest, published,
-		enterprisehooks.WindowsMachineScopeUserRuntimeConnector, time.Now()); err != nil {
+	// The files of a connector that left the roster are found in the accounts'
+	// own folders, not only through the rows the guardian held, and an account
+	// found that way is recorded as not managed like any other (GAP-0964).
+	now := time.Now()
+	discovered := windowsStandaloneOffRosterRuntimeCleanups(ctx, stderr, published, held, now)
+	recorded := held
+	for _, entry := range discovered {
+		recorded = append(recorded, enterpriseHookReconcileRow{
+			UserHome: entry.UserHome, SID: entry.SID, Connector: entry.Connector,
+		})
+	}
+	if err := recordEnterpriseHookRemovedConnectors(cfg.DataDir, recorded, manifest, published,
+		enterprisehooks.WindowsMachineScopeUserRuntimeConnector, now); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise removed connectors record: %v\n", err)
 	}
 	return reconcileEnterpriseHookUserCleanups(
@@ -652,9 +663,135 @@ func enterpriseHookStandalonePlatformRevokeUsers(ctx context.Context, stderr io.
 		cfg.DataDir,
 		manifest,
 		windowsStandaloneRevokedUserCleanupConnector,
+		discovered,
+		windowsStandaloneReAddedHold(ctx, published),
 		enterpriseHookWindowsUserCleanupAttempt,
-		time.Now(),
+		now,
 	)
+}
+
+// enterpriseHookWindowsConnectorUserRuntimeLeftovers is replaceable in tests.
+var enterpriseHookWindowsConnectorUserRuntimeLeftovers = enterprisehooks.WindowsConnectorUserRuntimeLeftovers
+
+// The scan of the accounts' folders for a removed connector's files is not
+// made on every pass: when the set of connectors off the roster changes, and
+// then at most once in the interval, as the foreign-hook step does.
+var (
+	enterpriseHookWindowsOffRosterScanState struct {
+		sync.Mutex
+		last        time.Time
+		fingerprint string
+	}
+	enterpriseHookWindowsOffRosterScanInterval = 5 * time.Minute
+)
+
+// windowsStandaloneOffRosterRuntimeCleanups lists a cleanup for each account
+// whose own DefenseClaw folder still holds files of a machine-scope connector
+// (Claude Code, Codex, Cursor) the loaded config no longer publishes. The
+// guardian used to plan the cleanup only from the account's previously
+// protected row, so an account that had no protected row when the connector
+// left the roster kept its files for good: one whose row was only pending
+// (its session was disconnected or it was signed out when the connector was
+// installed or when an earlier roster change was undone) or whose ledger had
+// been rebuilt. The files are the fact, not the row, and removing them needs
+// no session (the machine enrollment is revoked and LocalSystem does it), so
+// every account with the files is cleaned the same way, whatever its Windows
+// session is doing. The accounts are the enrollment's eligible profiles and
+// the accounts of the rows the guardian held. Each folder is looked at through
+// the removal's own no-follow gates
+// (enterprisehooks.WindowsConnectorUserRuntimeLeftovers), one listing for all
+// the connectors that are off the roster (GAP-0964).
+func windowsStandaloneOffRosterRuntimeCleanups(
+	ctx context.Context,
+	stderr io.Writer,
+	published func(string) bool,
+	held []enterpriseHookReconcileRow,
+	now time.Time,
+) []enterpriseHookUserCleanup {
+	var offRoster []string
+	for _, name := range enterprisehooks.WindowsMachineScopeUserRuntimeConnectorNames() {
+		if !published(name) {
+			offRoster = append(offRoster, name)
+		}
+	}
+	fingerprint := strings.Join(offRoster, ",")
+	enterpriseHookWindowsOffRosterScanState.Lock()
+	due := fingerprint != "" && (fingerprint != enterpriseHookWindowsOffRosterScanState.fingerprint ||
+		now.Sub(enterpriseHookWindowsOffRosterScanState.last) >= enterpriseHookWindowsOffRosterScanInterval)
+	if due || fingerprint == "" {
+		enterpriseHookWindowsOffRosterScanState.last = now
+		enterpriseHookWindowsOffRosterScanState.fingerprint = fingerprint
+	}
+	enterpriseHookWindowsOffRosterScanState.Unlock()
+	if !due {
+		return nil
+	}
+	type account struct{ sid, home string }
+	var accounts []account
+	seen := map[string]bool{}
+	add := func(sid, home string) {
+		sid, home = strings.TrimSpace(sid), strings.TrimSpace(home)
+		key := strings.ToUpper(sid)
+		if sid == "" || home == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		accounts = append(accounts, account{sid: sid, home: home})
+	}
+	for _, row := range held {
+		add(row.SID, row.UserHome)
+	}
+	profiles, err := enterpriseHookWindowsEligibleProfiles(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise per-user cleanup: eligible profiles for the removed-connector scan: %v\n", err)
+	}
+	for _, profile := range profiles {
+		add(profile.SID, profile.UserHome)
+	}
+	var found []enterpriseHookUserCleanup
+	for _, one := range accounts {
+		home := filepath.Clean(one.home)
+		if !filepath.IsAbs(home) {
+			continue
+		}
+		for _, name := range enterpriseHookWindowsConnectorUserRuntimeLeftovers(home, one.sid, "", offRoster) {
+			found = append(found, enterpriseHookUserCleanup{
+				Connector:  name,
+				SID:        one.sid,
+				UserHome:   home,
+				RecordedAt: now.UTC().Format(time.RFC3339Nano),
+			})
+		}
+	}
+	return found
+}
+
+// windowsStandaloneReAddedHold keeps an entry for a machine-scope connector
+// that the config publishes again: when it was queued the connector was off the
+// roster, and an account the enrollment admits is about to be enrolled for it
+// again, so its token and hook config are not removed in the window before the
+// manifest admits the pair. An account the enrollment does not admit (an
+// excluded user) is cleaned all the same (GAP-0964).
+func windowsStandaloneReAddedHold(ctx context.Context, published func(string) bool) func(connectorName, sid string) bool {
+	var eligible map[string]bool
+	listFailed := false
+	return func(connectorName, sid string) bool {
+		if !enterprisehooks.WindowsMachineScopeUserRuntimeConnector(connectorName) || !published(connectorName) {
+			return false
+		}
+		if eligible == nil {
+			eligible = map[string]bool{}
+			profiles, err := enterpriseHookWindowsEligibleProfiles(ctx)
+			listFailed = err != nil
+			for _, profile := range profiles {
+				eligible[strings.ToUpper(strings.TrimSpace(profile.SID))] = true
+			}
+		}
+		// A profile list that failed says nothing about the account: hold the
+		// entry (the held-pass count still ends it) instead of removing files
+		// of an account the enrollment may admit.
+		return listFailed || eligible[strings.ToUpper(strings.TrimSpace(sid))]
+	}
 }
 
 // enterpriseHookWindowsUserProfileRemoved is replaceable in tests.
@@ -713,6 +850,15 @@ func attemptWindowsStandaloneUserCleanup(
 		// left. LocalSystem removes them whether or not the account is signed
 		// in; no session token is needed and none is waited for (GAP-0916).
 		if err := enterpriseHookWindowsConnectorUserRuntimeRemover(home, entry.SID, entry.DataDir, entry.Connector); err != nil {
+			var left *enterprisehooks.WindowsConnectorUserRuntimeLinksLeft
+			if errors.As(err, &left) {
+				// Everything the connector owned is gone; a link where one of
+				// its files should be is left as found. Said once: the entry
+				// is done and the scan does not offer a link again.
+				fmt.Fprintf(os.Stderr, "defenseclaw: enterprise per-user cleanup: %s/%s: %v\n",
+					strings.ToLower(strings.TrimSpace(entry.Connector)), entry.SID, left)
+				return enterpriseHookUserCleanupDone, nil
+			}
 			return enterpriseHookUserCleanupFailed, err
 		}
 		return enterpriseHookUserCleanupDone, nil

@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"os"
@@ -76,7 +77,7 @@ func TestRemoveWindowsConnectorUserRuntimeEntriesTakesOnlyTheConnectorsFiles(t *
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := removeWindowsConnectorUserRuntimeEntries(root, windows.Handle(0), tc.name, leaves); err != nil {
+		if _, err := removeWindowsConnectorUserRuntimeEntries(root, windows.Handle(0), tc.name, leaves); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		left := connectorRuntimeLeft(t, dataDir)
@@ -87,7 +88,7 @@ func TestRemoveWindowsConnectorUserRuntimeEntriesTakesOnlyTheConnectorsFiles(t *
 			delete(left, rel)
 		}
 		// A second run finds nothing to do.
-		if err := removeWindowsConnectorUserRuntimeEntries(root, windows.Handle(0), tc.name, leaves); err != nil {
+		if _, err := removeWindowsConnectorUserRuntimeEntries(root, windows.Handle(0), tc.name, leaves); err != nil {
 			t.Fatalf("%s again: %v", tc.name, err)
 		}
 	}
@@ -131,7 +132,7 @@ func TestRemoveWindowsConnectorUserRuntimeLeavesALinkedHooksFolderAsFound(t *tes
 	}
 	defer root.Close()
 	leaves, _ := windowsConnectorUserRuntimeLeaves("cursor")
-	if err := removeWindowsConnectorUserRuntimeEntries(root, windows.Handle(0), "cursor", leaves); err == nil {
+	if _, err := removeWindowsConnectorUserRuntimeEntries(root, windows.Handle(0), "cursor", leaves); err == nil {
 		t.Fatal("a linked hooks folder was not refused")
 	}
 	if _, err := os.Stat(filepath.Join(target, ".hook-cursor.token")); err != nil {
@@ -360,4 +361,187 @@ func TestRemoveWindowsConnectorUserRuntimeWaitsForTheRuntimeTransactionLock(t *t
 	if present := connectorRuntimeExists(t, dataDir, `hooks\.hook-cursor.token`); present[0] {
 		t.Fatal("the file stays after the lock was released")
 	}
+}
+
+// GAP-0964: the guardian asks, for every account, whether a removed connector
+// left any of its own files, and queues the removal only where it did. Another
+// connector's files, the shared scripts and the account's own files do not
+// count, and a folder that holds a per-user install is not offered (the removal
+// leaves it as found).
+func TestWindowsConnectorUserRuntimeLeftoversSeesOnlyTheConnectorsOwnFiles(t *testing.T) {
+	home, dataDir, sid := connectorRuntimeFixture(t, connectorRuntimeGateway)
+	writeConnectorRuntimeFixture(t, dataDir, "hooks/_hardening.sh", "hooks/inspect-tool.sh", "hooks/.hookcfg", "hooks/.hookcfg.lock",
+		"hooks/.managed-runtime-cursorish-0123abcd.json", "notes.txt")
+	all := []string{"claudecode", "codex", "cursor"}
+	if got := strings.Join(WindowsConnectorUserRuntimeLeftovers(home, sid.String(), "", all), ","); got != "claudecode,cursor" {
+		t.Fatalf("leftovers = %q, want claudecode,cursor (codex has no file)", got)
+	}
+	if got := WindowsConnectorUserRuntimeLeftovers(home, sid.String(), "", []string{"Cursor", "hermes", "", "../cursor"}); strings.Join(got, ",") != "cursor" {
+		t.Fatalf("only a machine-scope connector counts: %v", got)
+	}
+	if got := WindowsConnectorUserRuntimeLeftovers(home, sid.String(), filepath.Join(t.TempDir(), "elsewhere"), all); got != nil {
+		t.Fatalf("a data folder outside the profile reported %v", got)
+	}
+	if got := WindowsConnectorUserRuntimeLeftovers("relative", sid.String(), "", all); got != nil {
+		t.Fatalf("a relative home reported %v", got)
+	}
+	// A per-user DefenseClaw install in the folder is left as found by the
+	// removal, so it is not offered for it.
+	writeConnectorRuntimeFixture(t, dataDir, "config.yaml")
+	if got := WindowsConnectorUserRuntimeLeftovers(home, sid.String(), "", all); got != nil {
+		t.Fatalf("a folder that holds a per-user install was offered: %v", got)
+	}
+	if err := os.Remove(filepath.Join(dataDir, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveWindowsConnectorUserRuntime(home, sid.String(), "", "cursor"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(WindowsConnectorUserRuntimeLeftovers(home, sid.String(), "", all), ","); got != "claudecode" {
+		t.Fatalf("after the Cursor removal leftovers = %q, want claudecode", got)
+	}
+}
+
+// decoyTree is a folder outside any profile that holds files named like the
+// connector's: nothing the guardian does may read through a link to it or
+// change it.
+type decoyTree struct {
+	root   string
+	hashes map[string][32]byte
+}
+
+func newDecoyTree(t *testing.T, parent, name string) decoyTree {
+	t.Helper()
+	tree := decoyTree{root: filepath.Join(parent, name), hashes: map[string][32]byte{}}
+	for rel, body := range map[string]string{
+		`hooks\.hook-cursor.token`: "decoy token",
+		`hooks\.hookcfg.cursor`:    "decoy hook config",
+		`.hook-cursor.token`:       "decoy token at the root",
+		`.hookcfg.cursor`:          "decoy hook config at the root",
+	} {
+		path := filepath.Join(tree.root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		tree.hashes[path] = sha256.Sum256([]byte(body))
+	}
+	return tree
+}
+
+func (d decoyTree) requireUnchanged(t *testing.T) {
+	t.Helper()
+	for path, want := range d.hashes {
+		got, err := os.ReadFile(path)
+		if err != nil || sha256.Sum256(got) != want {
+			t.Fatalf("decoy %s changed: %v", path, err)
+		}
+	}
+}
+
+// GAP-0964, lead ruling: the scan never follows a link or junction out of a
+// profile, and the removal never reads or changes what a link names.
+func TestWindowsConnectorUserRuntimeLeftoversNeverFollowAJunction(t *testing.T) {
+	all := []string{"claudecode", "codex", "cursor"}
+
+	// A junction at the profile folder itself.
+	realHome, _, sid := connectorRuntimeFixture(t, connectorRuntimeGateway)
+	linkHome := filepath.Join(t.TempDir(), "link-home")
+	plantWindowsAccountJunction(t, linkHome, realHome, sid)
+	if got := WindowsConnectorUserRuntimeLeftovers(linkHome, sid.String(), "", all); got != nil {
+		t.Fatalf("a junction at the profile folder was followed: %v", got)
+	}
+	if err := RemoveWindowsConnectorUserRuntime(linkHome, sid.String(), "", "cursor"); err == nil {
+		t.Fatal("the removal accepted a junction at the profile folder")
+	}
+	if present := connectorRuntimeExists(t, filepath.Join(realHome, ".defenseclaw"), `hooks\.hook-cursor.token`, `hooks\.hookcfg.cursor`); !present[0] || !present[1] {
+		t.Fatal("the files behind the profile junction were touched")
+	}
+
+	// A junction at the DefenseClaw folder.
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gap45Own(t, sid, home)
+	decoys := newDecoyTree(t, filepath.Dir(home), "outside-defenseclaw")
+	plantWindowsAccountJunction(t, filepath.Join(home, ".defenseclaw"), decoys.root, sid)
+	if got := WindowsConnectorUserRuntimeLeftovers(home, sid.String(), "", all); got != nil {
+		t.Fatalf("a junction at .defenseclaw was followed: %v", got)
+	}
+	if err := RemoveWindowsConnectorUserRuntime(home, sid.String(), "", "cursor"); err == nil || !strings.Contains(err.Error(), "left as found") {
+		t.Fatalf("junction at .defenseclaw removal = %v", err)
+	}
+	decoys.requireUnchanged(t)
+
+	// A junction at hooks.
+	home2, dataDir2, sid2 := connectorRuntimeFixture(t, connectorRuntimeGateway)
+	decoys2 := newDecoyTree(t, filepath.Dir(home2), "outside-hooks")
+	if err := os.RemoveAll(filepath.Join(dataDir2, "hooks")); err != nil {
+		t.Fatal(err)
+	}
+	plantWindowsAccountJunction(t, filepath.Join(dataDir2, "hooks"), filepath.Join(decoys2.root, "hooks"), sid2)
+	if got := WindowsConnectorUserRuntimeLeftovers(home2, sid2.String(), "", all); got != nil {
+		t.Fatalf("a junction at hooks was followed: %v", got)
+	}
+	if err := RemoveWindowsConnectorUserRuntime(home2, sid2.String(), "", "cursor"); err == nil {
+		t.Fatal("the removal accepted a junction at hooks")
+	}
+	decoys2.requireUnchanged(t)
+}
+
+// A symlink where the token should be is not a file the connector owns: it is
+// not counted, not followed, and left in place; a hard link is the connector's
+// own name, which is unlinked without touching the file it shares.
+func TestWindowsConnectorUserRuntimeLinkLeaves(t *testing.T) {
+	home, dataDir, sid := connectorRuntimeFixture(t, connectorRuntimeGateway)
+	decoys := newDecoyTree(t, filepath.Dir(home), "outside-leaf")
+	token := filepath.Join(dataDir, "hooks", ".hook-cursor.token")
+	for _, rel := range []string{`hooks\.hook-cursor.token`, `hooks\.hookcfg.cursor`} {
+		if err := os.Remove(filepath.Join(dataDir, rel)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record, err := filepath.Glob(filepath.Join(dataDir, "hooks", ".managed-runtime-cursor-*.json"))
+	if err != nil || len(record) != 1 {
+		t.Fatalf("runtime record: %v %v", record, err)
+	}
+	if err := os.Remove(record[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(decoys.root, ".hook-cursor.token"), token); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	if got := WindowsConnectorUserRuntimeLeftovers(home, sid.String(), "", []string{"cursor"}); got != nil {
+		t.Fatalf("a symlink leaf was counted as a leftover: %v", got)
+	}
+	err = RemoveWindowsConnectorUserRuntime(home, sid.String(), "", "cursor")
+	var left *WindowsConnectorUserRuntimeLinksLeft
+	if !errors.As(err, &left) || len(left.Links) != 1 {
+		t.Fatalf("symlink leaf removal = %v, want the link named and left", err)
+	}
+	if info, lerr := os.Lstat(token); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the symlink was not left in place: %v", lerr)
+	}
+	decoys.requireUnchanged(t)
+
+	// A hard link to an outside file at a leaf.
+	if err := os.Remove(token); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(decoys.root, ".hook-cursor.token"), token); err != nil {
+		t.Skipf("cannot create a hard link here: %v", err)
+	}
+	if got := WindowsConnectorUserRuntimeLeftovers(home, sid.String(), "", []string{"cursor"}); strings.Join(got, ",") != "cursor" {
+		t.Fatalf("a hard-linked token name was not seen: %v", got)
+	}
+	if err := RemoveWindowsConnectorUserRuntime(home, sid.String(), "", "cursor"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(token); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the hard-linked name stayed: %v", err)
+	}
+	decoys.requireUnchanged(t)
 }

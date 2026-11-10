@@ -118,7 +118,7 @@ func TestGAP0596OpenClawTeardownKeepsOperatorEntryKeys(t *testing.T) {
 		},
 	})
 
-	if err := uninstallOpenClawExtension(ocHome, false); err != nil {
+	if err := uninstallOpenClawExtension(ocHome, false, openClawSetupGrant{}); err != nil {
 		t.Fatalf("uninstallOpenClawExtension: %v", err)
 	}
 	entries := readOpenClawEntries(t, configPath)

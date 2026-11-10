@@ -29,6 +29,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // hermesStoreFileName is the file, in the data directory, that keeps the last
@@ -191,7 +193,15 @@ func (s *hermesAnswerStore) writeLocked() error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic0600(s.path, data)
+	if err := writeFileAtomic0600(s.path, data); err != nil {
+		return err
+	}
+	// The gateway in a folder the account moved the stores away from keeps
+	// answering; record the write so uninstall removes this copy as its own.
+	if err := gatewayconnector.RecordEarlierDataDirWrite(s.path, data); err != nil {
+		return fmt.Errorf("the answer was written but could not be recorded for uninstall: %w", err)
+	}
+	return nil
 }
 
 // writeFileAtomic0600 replaces path with data through a temporary file in the

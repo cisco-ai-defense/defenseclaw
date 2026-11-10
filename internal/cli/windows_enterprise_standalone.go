@@ -1977,7 +1977,8 @@ func applyWindowsEnterpriseInstallerReport(
 		)
 		if windowsBundleHasCode(result.Errors[firstError:], "codex_requirements_held") ||
 			windowsBundleHasCode(result.Errors[firstError:], "codex_state_held") ||
-			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) {
+			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) ||
+			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "guardian_state_held")) {
 			next = windowsEnterpriseHeldRollbackNextStep(report.TransactionPending, windowsEnterpriseLiveStandaloneServices())
 		}
 		if next != "" {
@@ -3465,7 +3466,7 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 // codex_state_held: ...", g582 round 11c, L3).
 func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
-	case "codex_state_held", "codex_requirements_held", "privileges_required", "untrusted_record":
+	case "codex_state_held", "codex_requirements_held", "privileges_required", "untrusted_record", "guardian_state_held":
 		return strings.TrimPrefix(message, code+": ")
 	}
 	return message
@@ -3527,6 +3528,11 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			// holds the Codex state of 1.0.8 or the Codex requirements open
 			// in a way that would fail the run after the services stopped
 			// (GAP-0765, g582 round 11c).
+			return enterprisestatus.WindowsExitBusy
+		case "guardian_state_held":
+			// A program holds a hook guardian state file open: the run
+			// changed nothing, or kept the previous config with the services
+			// running, and a retry after the release gets past it (GAP-0967).
 			return enterprisestatus.WindowsExitBusy
 		case "scanner_runtime_unavailable":
 			if strings.HasSuffix(message.Message, windowsScannerPrepareRetryNotice) {
@@ -4693,6 +4699,18 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 			result.Errors = []enterprisestatus.Message{}
 			result.AddError("preflight_failed", err.Error())
+			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+		}
+	}
+
+	// A hook guardian state file another program holds open keeps the
+	// guardian from publishing, so a change could be neither proven nor
+	// undone: say so before anything changes (GAP-0967).
+	if plan.Action == "upgrade" || plan.Action == "repair" {
+		if err := windowsEnterpriseGuardianStatePreflight(); err != nil {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("guardian_state_held", err.Error())
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
 	}

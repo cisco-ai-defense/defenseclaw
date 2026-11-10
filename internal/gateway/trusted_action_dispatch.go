@@ -328,6 +328,7 @@ func dispatchTrustedAction(
 		request, clientResolvedPathTargets(request.ResolvedWriteTargets),
 	)
 	request.Input.ClientWorkingDirectories = clientWorkingDirectories(request.ResolvedWriteTargets, request.Input.CWD)
+	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
 	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
 		return trustedActionLimitFindings(true)
 	}
@@ -455,6 +456,11 @@ func dispatchTrustedAction(
 		}
 	}
 	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	if twin, ok := overLimitCommandBoundedTwinRequest(request, facts); ok {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 		}()
@@ -1051,6 +1057,7 @@ func dispatchTrustedActionWith(
 		// findings, never the state-write proof a stateProofOnly reading keeps.
 		finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
 		finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
+		finalized = appendWindowsPathUnverifiedFinding(finalized, request, facts)
 	}
 	if staticTargetTwin == nil {
 		return finalized
@@ -10127,8 +10134,12 @@ func appendTrustedWindowsPathFactFindings(
 		seen[finding.RuleID] = struct{}{}
 	}
 	for _, candidate := range facts.Paths {
+		// A path with an extended-length prefix has the device flavor, though
+		// it names the same drive path.
 		if candidate.Flavor != actionfacts.PathFlavorWindows {
-			continue
+			if _, opened, _ := windowsOpenedPathOfFact(candidate); !opened {
+				continue
+			}
 		}
 		switch candidate.Access {
 		case actionfacts.PathAccessRead,
@@ -10138,7 +10149,7 @@ func appendTrustedWindowsPathFactFindings(
 		default:
 			continue
 		}
-		values := []string{candidate.Value, candidate.Normalized, candidate.Resolved}
+		values := pathFactSpellings(candidate)
 		seenValues := make(map[string]struct{}, len(values))
 		for _, value := range values {
 			if strings.TrimSpace(value) == "" {
@@ -10482,10 +10493,10 @@ func trustedLegacyPathRuleMatches(
 			path.Access == actionfacts.PathAccessAppend ||
 			path.Access == actionfacts.PathAccessDelete
 		seenValues := make(map[string]struct{}, 4)
-		for _, value := range []string{
-			path.Value, path.Normalized, path.Resolved,
-			typedTargetRuleText(path.Resolved, input.ActiveHome),
-		} {
+		for _, value := range append(
+			pathFactSpellings(path),
+			typedTargetRuleText(pathFactSpelling(path), input.ActiveHome, windowsVerbatimOperand(path.Value)),
+		) {
 			if strings.TrimSpace(value) == "" {
 				continue
 			}

@@ -22,3 +22,20 @@ func TestWindowsEnterpriseTrimHeldCodePrefixDropsTheRepeatedPrivilegesRequiredCo
 		}
 	}
 }
+
+// GAP-0994 merge: the codes the module puts at the start of a message are all
+// trimmed from it, the Codex holds, privileges_required, untrusted_record
+// (GAP-0602) and guardian_state_held (GAP-0967); another code keeps its text.
+func TestWindowsEnterpriseTrimHeldCodePrefixDropsEveryCodeTheModulePrefixes(t *testing.T) {
+	for _, code := range []string{
+		"codex_state_held", "codex_requirements_held", "privileges_required", "untrusted_record", "guardian_state_held",
+	} {
+		const detail = "the detail of the refusal"
+		if got := windowsEnterpriseTrimHeldCodePrefix(code, code+": "+detail); got != detail {
+			t.Fatalf("%s: message = %q, want %q", code, got, detail)
+		}
+	}
+	if got := windowsEnterpriseTrimHeldCodePrefix("codex_state_unsettled", "codex_state_unsettled: same"); got != "codex_state_unsettled: same" {
+		t.Fatalf("a code that is not trimmed was changed: %q", got)
+	}
+}

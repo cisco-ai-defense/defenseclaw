@@ -4632,19 +4632,30 @@ func hermesEarlierDataDir(root string) bool {
 		return false
 	}
 	root = filepath.Clean(root)
-	homes := []string{filepath.Join(userHomeDir(), ".defenseclaw")}
-	if env := strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")); env != "" {
-		homes = append(homes, env)
-	}
-	for _, home := range homes {
-		if !filepath.IsAbs(home) || filepath.Clean(home) != home {
-			continue
-		}
+	for _, home := range installHomeCandidates() {
 		if root == home || hermesDataDirListed(home, root) {
 			return true
 		}
 	}
 	return false
+}
+
+// installHomeCandidates are the install homes this process can name, each an
+// absolute clean path: ~/.defenseclaw and, when the process has it,
+// DEFENSECLAW_HOME. A process started with its data folder as DEFENSECLAW_HOME
+// is not told where the install home is, so both are read.
+func installHomeCandidates() []string {
+	homes := []string{filepath.Join(userHomeDir(), ".defenseclaw")}
+	if env := strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")); env != "" {
+		homes = append(homes, env)
+	}
+	valid := homes[:0]
+	for _, home := range homes {
+		if filepath.IsAbs(home) && filepath.Clean(home) == home {
+			valid = append(valid, home)
+		}
+	}
+	return valid
 }
 
 func hermesDataDirListed(home, root string) bool {
@@ -5157,11 +5168,17 @@ const hermesHookScriptName = "hermes-hook.sh"
 // and verification share for a Hermes hook entry. An entry is DefenseClaw owned
 // only by identity: its command is one of the strings DefenseClaw writes (the
 // recognized commands: the current command and the historical and native
-// launcher forms, compared byte for byte), or it is the generated script at an
-// edited path (GAP-0906). A command is never cleaned, unquoted or searched for
-// a directory, so a user command that mentions or reaches a managed file in
-// some other way belongs to the user: Setup, repair and teardown keep it and
-// warn (warnHermesKeptHookEntries).
+// launcher forms, compared byte for byte), a plain spelling of the current
+// command (hermesCommandSpellsTheHookScript: another quoting, blanks around it,
+// plain arguments after it), or the generated script at an edited path
+// (GAP-0906). Only the first word of a command is ever unquoted, and only to
+// compare it with the script; a command is never cleaned or searched for a
+// directory, so a user command that mentions or reaches a managed file in
+// some other way belongs to the user: Setup, repair and teardown keep it, and
+// warn (warnHermesKeptHookEntries) only when the Setup record says Setup wrote
+// the entry it replaces. A spelling of the current command is the current
+// entry: kept beside the one Setup adds it would run the hook twice and fail
+// the registration check (GAP-0873).
 func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedCommands map[string]struct{}) bool {
 	command, ok := hermesHookEntryCommand(entry)
 	if !ok {
@@ -5173,11 +5190,71 @@ func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedComman
 	if _, recognized := recognizedCommands[command]; recognized {
 		return true
 	}
+	if hermesCommandSpellsTheHookScript(command, hookScript) {
+		return true
+	}
 	// The generated script at an edited path. Its matchers trim blanks, which
 	// would claim a command Setup did not write, so a command with a blank at
 	// either end is the user's.
 	return command == strings.TrimSpace(command) &&
 		editedDefenseClawHookCommand(command, hookScriptBaseName(hookScript))
+}
+
+// hermesCommandSpellsTheHookScript reports whether command runs the generated
+// script hookScript by a plain spelling: its first shell word, quoted with
+// single or double quotes or not at all, with blanks around the command or
+// inside the quotes, names exactly hookScript, and whatever follows is plain
+// words (letters, digits and / . _ - + = : , @ % between blanks). A word
+// outside that set, anywhere, means the command does more than run the script
+// (a second command, a redirection, an expansion), so it is the user's. The
+// Python registration checks apply the same test (hermes_command_written in
+// cli/defenseclaw/hook_integrity.py). Windows registers native launcher
+// commands and has no script to spell.
+func hermesCommandSpellsTheHookScript(command, hookScript string) bool {
+	if runtime.GOOS == "windows" || hookScript == "" || isNativeHookCommand(hookScript) {
+		return false
+	}
+	text := strings.Trim(command, " \t")
+	var word strings.Builder
+	i := 0
+scan:
+	for i < len(text) {
+		switch c := text[i]; {
+		case c == ' ' || c == '\t':
+			break scan
+		case c == '\'':
+			end := strings.IndexByte(text[i+1:], '\'')
+			if end < 0 {
+				return false
+			}
+			word.WriteString(text[i+1 : i+1+end])
+			i += end + 2
+		case c == '"':
+			end := strings.IndexByte(text[i+1:], '"')
+			if end < 0 || strings.ContainsAny(text[i+1:i+1+end], "$`\\!") {
+				return false
+			}
+			word.WriteString(text[i+1 : i+1+end])
+			i += end + 2
+		case strings.HasPrefix(text[i:], `\'`):
+			word.WriteByte('\'')
+			i += 2
+		case !posixShellUnsafeRune(rune(c)):
+			word.WriteByte(c)
+			i++
+		default:
+			return false
+		}
+	}
+	if strings.Trim(word.String(), " \t") != hookScript {
+		return false
+	}
+	for _, r := range text[i:] {
+		if r != ' ' && r != '\t' && posixShellUnsafeRune(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func hermesRecognizedHookCommands(current string) map[string]struct{} {

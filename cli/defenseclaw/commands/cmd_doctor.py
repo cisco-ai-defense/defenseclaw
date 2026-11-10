@@ -12320,6 +12320,10 @@ def _hermes_registration_problem(cfg, config_path: str) -> str:
     if not isinstance(hooks, dict):
         return "Hermes active registration has no hooks table"
     registered_commands: set[str] = set()
+    # An entry is DefenseClaw's by the one identity test Setup, repair and teardown use
+    # (hermes_command_written), not by a command that merely names the script: an entry Setup
+    # keeps for the user is not a second DefenseClaw command here either (GAP-0873).
+    current = {expected, os.path.realpath(expected)}
     for event, matcher in _HERMES_REQUIRED_HOOKS.items():
         entries = hooks.get(event)
         if not isinstance(entries, list):

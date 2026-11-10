@@ -2788,7 +2788,7 @@ func matchesActiveDefenseClawStateInLine(
 	clientTargets map[string]string,
 ) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
-	if runtime.GOOS == "linux" && candidate.Flavor == actionfacts.PathFlavorPOSIX {
+	if runtime.GOOS == "linux" && !pathCaseFoldHost && candidate.Flavor == actionfacts.PathFlavorPOSIX {
 		relative, ok = exactActiveDefenseClawRelative(facts, candidate)
 	}
 	relative = strings.TrimRight(relative, "/")
@@ -3911,7 +3911,7 @@ func matchesSafeDefenseClawStateCandidate(
 	}
 	// POSIX Linux names are case-sensitive. A distinct .DefenseClaw tree is
 	// ordinary user work even though the catalog's regex is case-insensitive.
-	if runtime.GOOS == "linux" && candidate.Flavor == actionfacts.PathFlavorPOSIX {
+	if runtime.GOOS == "linux" && !pathCaseFoldHost && candidate.Flavor == actionfacts.PathFlavorPOSIX {
 		exact, inside := exactActiveDefenseClawRelative(facts, candidate)
 		if !inside || !strings.HasPrefix(exact, ".defenseclaw/") {
 			return true

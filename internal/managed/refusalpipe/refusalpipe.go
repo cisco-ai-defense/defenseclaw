@@ -28,6 +28,7 @@
 package refusalpipe
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -48,6 +49,13 @@ const OwnStatusPipeName = `\\.\pipe\` + managed.StandaloneWindowsGatewaySvc + `-
 // OwnStatusRequest is the only message the own-status pipe takes. It names
 // no account: the gateway answers for the pipe client token.
 const OwnStatusRequest = `{"request":"own-status"}`
+
+// ExcludedRequest is the other message the own-status pipe takes: whether the
+// machine policy excludes the calling account from enrollment. It names no
+// account either. The standalone hook asks it of an account the protected
+// target set does not register, so the pass for an excluded account rests on
+// the gateway's current configuration and on nothing a file can say.
+const ExcludedRequest = `{"request":"excluded"}`
 
 // MaxOwnStatusBytes bounds an own-status answer.
 const MaxOwnStatusBytes = 16 << 10
@@ -182,4 +190,26 @@ func Decode(message []byte) (Report, error) {
 // account (S-1-12-1-). Service, system and other well-known SIDs are not.
 func AccountSID(sid string) bool {
 	return strings.HasPrefix(sid, "S-1-5-21-") || strings.HasPrefix(sid, "S-1-12-1-")
+}
+
+// ExcludedAnswer is the gateway's answer to ExcludedRequest.
+func ExcludedAnswer(excluded bool) []byte {
+	if excluded {
+		return []byte(`{"excluded":true}`)
+	}
+	return []byte(`{"excluded":false}`)
+}
+
+// ParseExcludedAnswer reads an answer to ExcludedRequest. Only exactly
+// {"excluded":true} is an exclusion; anything else is an error or false.
+func ParseExcludedAnswer(answer []byte) (bool, error) {
+	var parsed struct {
+		Excluded *bool `json:"excluded"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(answer))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&parsed); err != nil || parsed.Excluded == nil || decoder.More() {
+		return false, errors.New("the gateway's exclusion answer is malformed")
+	}
+	return *parsed.Excluded, nil
 }
