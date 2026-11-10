@@ -141,6 +141,8 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 		}
 		return reachable
 	}
+	// A script a call names is read where the call runs (placedCalls).
+	placed := newPlacedCalls(file, command, cwd, home)
 	reason := ""
 	set := func(class string, dynamicPath bool) {
 		if reason == "" && (dynamicPath || checkReach()) {
@@ -213,9 +215,11 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 			}
 			if (program == "source" || program == ".") && len(call.Args) >= 2 {
 				if name, ok := StaticWord(call.Args[1], home); ok {
-					if content, ok := readActionScript(name, cwd); ok && protectedReachFromText(content, cwd, home) {
-						set("eval-source", true)
-						return true
+					for _, dir := range placed.of(call) {
+						if content, ok := readActionScript(name, dir); ok && protectedReachFromText(content, dir, home) {
+							set("eval-source", true)
+							return true
+						}
 					}
 				}
 			}
@@ -301,12 +305,20 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 			// shell's visible words fail closed when they reach a protected
 			// path, because the contents it will run are not bounded here.
 			if script, ok := shellScriptOperand(words); ok {
-				if content, read := readActionScript(script, cwd); read {
-					if nested := unprovenProtectedWriteDepth(content, cwd, home, depth+1, budget); nested != "" {
+				scriptRead := false
+				for _, dir := range placed.of(call) {
+					content, read := readActionScript(script, dir)
+					if !read {
+						continue
+					}
+					scriptRead = true
+					if nested := unprovenProtectedWriteDepth(content, dir, home, depth+1, budget); nested != "" {
 						set(nested, true)
-					} else if shellBodyProtectedWrite(content, cwd, home) {
+					} else if shellBodyProtectedWrite(content, dir, home) {
 						set("nested-shell", true)
 					}
+				}
+				if scriptRead {
 					return true
 				}
 			}

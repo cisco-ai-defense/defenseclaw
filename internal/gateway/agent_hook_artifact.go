@@ -328,7 +328,9 @@ func promotedArtifactCandidates(facts actionfacts.Facts) []promotedArtifactCandi
 			continue
 		}
 		resolved = filepath.Clean(resolved)
-		if opened, stepsUp := promotedArtifactOpenedPath(path.Value, facts.CWD, facts.ActiveHome); stepsUp {
+		if opened, stepsUp := promotedArtifactOpenedPath(
+			path.Value, facts.CWD, facts.ActiveHome, promotedArtifactAfterDirectoryChange(facts, command),
+		); stepsUp {
 			if opened == "" {
 				continue
 			}
@@ -539,7 +541,7 @@ func promotedArtifactCandidateKey(candidate promotedArtifactCandidate) string {
 // when the system opens no file for the spelling (or the spelling needs an
 // expansion that is not known here). Windows resolves .. as text before it
 // follows a link, so its fact is already the file opened.
-func promotedArtifactOpenedPath(value, cwd, home string) (opened string, stepsUp bool) {
+func promotedArtifactOpenedPath(value, cwd, home string, moved bool) (opened string, stepsUp bool) {
 	if runtime.GOOS == "windows" || !slices.Contains(strings.Split(value, "/"), "..") {
 		return "", false
 	}
@@ -553,16 +555,33 @@ func promotedArtifactOpenedPath(value, cwd, home string) (opened string, stepsUp
 		return "", true
 	}
 	if !filepath.IsAbs(value) {
-		if !filepath.IsAbs(cwd) {
+		if !filepath.IsAbs(cwd) || moved {
 			return "", true
 		}
 		value = strings.TrimRight(cwd, "/") + "/" + value
+	}
+	// The system answers first: a pathname it refuses (more links than it
+	// follows in one name, a folder it cannot search) opens no script,
+	// while EvalSymlinks follows many more links than the system does.
+	if _, err := os.Stat(value); err != nil {
+		return "", true
 	}
 	physical, err := filepath.EvalSymlinks(value)
 	if err != nil {
 		return "", true
 	}
 	return physical, true
+}
+
+// promotedArtifactAfterDirectoryChange reports that command runs after a
+// command of the action that may have changed the directory a relative name
+// resolves against. The facts keep the folder the hook started in, so the
+// file such a name opens is not known here; the hook client and the gateway
+// reader of the placed statements judge it in the folder it runs in.
+func promotedArtifactAfterDirectoryChange(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	return slices.ContainsFunc(facts.Commands, func(earlier actionfacts.CommandFact) bool {
+		return earlier.ID < command.ID && actionfacts.ChangesShellDirectory(earlier)
+	})
 }
 
 func promotedArtifactPathIsLocal(path string) bool {
