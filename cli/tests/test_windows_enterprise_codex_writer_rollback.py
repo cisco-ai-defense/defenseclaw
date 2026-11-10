@@ -142,7 +142,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseClawCodexWriterBusyRefusal', 'Get-DefenseClawOptionalLayoutValue', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Test-DefenseClawRollbackHeldMessage', 'New-DefenseClawCodexWriterUnsettledHeldMessage', 'Test-DefenseClawGuardianProofDeferredByCodexWriter', 'Test-DefenseClawCodexWriterLockNamed', 'Get-DefenseClawRollbackCodexWriterHolds', 'Restore-DefenseClawRollbackCodexWriterHolds', 'Get-DefenseClawCodexRequirementsGuardProblem', 'Assert-DefenseClawCodexRequirementsPublishable', 'Clear-DefenseClawRollbackDeferredHolds', 'Assert-DefenseClawRestoredTransactionReadyForActivation', 'Invoke-DefenseClawManagedHooksTeardownCommand', 'ConvertTo-DefenseClawBoundedDiagnostic', 'Test-DefenseClawRollbackCoverageDeferred', 'Get-DefenseClawHeldMessagePath', 'Add-DefenseClawRollbackDeferredHold', 'Assert-DefenseClawRollbackHoldsResolved')) {
+foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseClawCodexWriterBusyRefusal', 'Get-DefenseClawOptionalLayoutValue', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Test-DefenseClawRollbackHeldMessage', 'New-DefenseClawCodexWriterUnsettledHeldMessage', 'Test-DefenseClawGuardianProofDeferredByCodexWriter', 'Test-DefenseClawCodexWriterLockNamed', 'Get-DefenseClawRollbackCodexWriterHolds', 'Restore-DefenseClawRollbackCodexWriterHolds', 'Get-DefenseClawCodexRequirementsGuardProblem', 'Assert-DefenseClawCodexRequirementsPublishable', 'Clear-DefenseClawRollbackDeferredHolds', 'Assert-DefenseClawRestoredTransactionReadyForActivation', 'Invoke-DefenseClawManagedHooksTeardownCommand', 'ConvertTo-DefenseClawBoundedDiagnostic', 'Test-DefenseClawBusyWriterIsTheOnlyFailure', 'Test-DefenseClawRollbackCoverageDeferred', 'Get-DefenseClawHeldMessagePath', 'Add-DefenseClawRollbackDeferredHold', 'Assert-DefenseClawRollbackHoldsResolved')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -222,6 +222,8 @@ switch ($Case) {
         $busyJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"timed out waiting 10s for Codex machine policy lock","error_code":"writer_lock_busy","results":[]}'
         $oldJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"timed out waiting 10s for Codex machine policy lock","results":[]}'
         $otherJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"Codex machine policy is not clean after teardown rollback","results":[]}'
+        $joinedJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"restore pre-rollback Claude policy after Codex failure: access denied\ntimed out waiting 10s for Codex machine policy lock","results":[]}'
+        $lockViolationJson = '{"schema_version":4,"action":"rollback","ok":false,"error":"open Codex machine policy lock: The process cannot access the file because another process has locked a portion of the file.","results":[]}'
         function Try-Rollback([string]$Json, [bool]$Flag) {
             $script:probe = [pscustomobject]@{ exit_code = 1; output = @($Json) }
             $script:DefenseClawTeardownRollbackDeferred = $false
@@ -235,6 +237,8 @@ switch ($Case) {
         $out.byText = Try-Rollback $oldJson $true
         $out.flagOff = Try-Rollback $busyJson $false
         $out.other = Try-Rollback $otherJson $true
+        $out.joined = Try-Rollback $joinedJson $true
+        $out.lockViolation = Try-Rollback $lockViolationJson $true
     }
     'even' {
         $script:Named = $false
@@ -410,10 +414,17 @@ def test_the_teardown_rollback_defers_a_busy_codex_writer_only_where_the_rollbac
         assert got["threw"] == "" and got["deferred"] is True, (key, result)
         (hold,) = got["holds"]
         assert hold.startswith("codex_state_unsettled: ") and "the rollback left that state as it is" in hold, (key, result)
-        assert "The managed-hook teardown of the uninstall was not rolled back" in hold, (key, result)
+        assert "The managed-hook teardown of the uninstall was not fully rolled back" in hold, (key, result)
+        # What the Go rollback already restored (selectors, per-user enrollments) is said apart from what stays as the uninstall left it.
+        assert "runtime selectors and the per-user enrollments it removed are back" in hold, (key, result)
+        assert "Claude Code, Cursor and Codex machine-policy hooks stay as the uninstall left them" in hold, (key, result)
         assert "run Setup /repair" in hold and "FORCE" not in hold, (key, result)
     # Not asked for (a forward step, Secure Client) or not a busy writer: the failure stands.
-    for key in ("flagOff", "other"):
+    # An old gateway's open-time LOCK_VIOLATION text is the same cause.
+    assert result["lockViolation"]["deferred"] is True and result["lockViolation"]["threw"] == "", result
+    # A busy writer next to another failure (a compensation that failed too) is not a writer-only
+    # failure: thrown as before, nothing deferred.
+    for key in ("flagOff", "other", "joined"):
         got = result[key]
         assert got["threw"].startswith("managed-hook teardown rollback failed: "), (key, result)
         assert got["deferred"] is False and got["holds"] == [], (key, result)
@@ -439,7 +450,9 @@ def test_the_teardown_rollback_call_defers_and_keeps_the_receipt_for_the_repair(
     wrapper = _function_body(text, "Invoke-DefenseClawManagedHooksTeardownCommand")
     gate = wrapper.index("if ($Action -ceq 'rollback' -and $script:DefenseClawTeardownRollbackDeferBusy -and")
     assert wrapper.index("Test-DefenseClawStandaloneProfile", gate) < wrapper.index("return $null", gate) < wrapper.index('throw "managed-hook teardown $Action failed: $detail"')
-    assert "error_code" in wrapper[gate - 400 : gate] and "Test-DefenseClawCodexWriterLockBusyMessage" in wrapper[gate : gate + 400]
+    assert "error_code" in wrapper[gate - 400 : gate] and "Test-DefenseClawBusyWriterIsTheOnlyFailure" in wrapper[gate : gate + 400]
+    # The flag that says a teardown rollback was deferred is reset once it has been used.
+    assert restore.index("$script:DefenseClawTeardownRollbackDeferred = $false", keep) < restore.index("$rollbackReceipt = Get-DefenseClawManagedHookContractCleanupReceipt")
 
 
 def test_the_readiness_assertion_sets_the_flag_for_the_check_and_always_resets_it(tmp_path: Path) -> None:
