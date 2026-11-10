@@ -149,7 +149,9 @@ def test_a_writer_lock_failure_is_classified_by_its_error_code_not_only_by_text(
     assert go.count("windowsCodexLockRangeBusy(err)") == 2 and go.count("windowsCodexLockOpenBusy(err)") == 2
     assert "errors.Is(err, windows.ERROR_IO_PENDING)" in go
     cli = (ROOT / "internal" / "cli" / "windows_codex_requirements.go").read_text(encoding="utf-8")
-    assert "report.ErrorCode = windowsCodexRequirementsWriterLockBusyCode" in cli
+    assert "annotateWindowsCodexRequirementsFailure(&report, err)" in cli
+    neutral = (ROOT / "internal" / "cli" / "windows_codex_requirements_basefile.go").read_text(encoding="utf-8")
+    assert "report.ErrorCode = windowsCodexRequirementsWriterLockBusyCode" in neutral
     assert '"--base-file"' not in cli and 'StringVar(&baseFile, "base-file"' in cli
 
 
