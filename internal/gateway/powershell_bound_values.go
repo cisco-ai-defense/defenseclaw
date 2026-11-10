@@ -17,6 +17,9 @@ const (
 	psBoundAlternatives = 8
 	// psBoundTextMaxBytes bounds the text of one value being built.
 	psBoundTextMaxBytes = 4 * psBoundValueMaxRunes
+	// psBoundLoopRounds bounds the extra passes over a loop whose values are
+	// still growing; past it the command counts as past its bound.
+	psBoundLoopRounds = 2
 )
 
 // psBindings maps a variable (lower case) to the values it can hold at the
@@ -41,28 +44,30 @@ func (b psBindings) size() int {
 	return n
 }
 
-// psAddValue returns values with value added when it is new and there is
-// room.
-func psAddValue(values []string, value string) []string {
-	if len(values) >= psBoundAlternatives {
-		return values
-	}
+// psAddValue returns values with value added when it is new. A new value
+// that does not fit sets *overflow: a value dropped without a trace could be
+// the protected one, so the caller counts the command as past its bound.
+func psAddValue(values []string, value string, overflow *bool) []string {
 	for _, v := range values {
 		if v == value {
 			return values
 		}
+	}
+	if len(values) >= psBoundAlternatives {
+		*overflow = true
+		return values
 	}
 	return append(values[:len(values):len(values)], value)
 }
 
 // psUnionBindings returns what a variable can hold after either path: every
 // value it holds on one path or the other.
-func psUnionBindings(a, b psBindings) psBindings {
+func psUnionBindings(a, b psBindings, overflow *bool) psBindings {
 	out := a.clone()
 	for name, values := range b {
 		merged := out[name]
 		for _, value := range values {
-			merged = psAddValue(merged, value)
+			merged = psAddValue(merged, value, overflow)
 		}
 		out[name] = merged
 	}
@@ -103,6 +108,11 @@ func psBindStaticValues(command, home string, budget *psBudget) []string {
 	for choice := 0; choice < readingCount && choice < psBoundAlternatives; choice++ {
 		binder := &psBinder{r: r, scan: newPSScan(r, budget), budget: budget, home: home, choice: choice, readings: 1}
 		binder.run(0, psBindings{}, false)
+		// Past a bound a protected value may have been dropped: the command
+		// counts as the write, as for every other bound of this proof.
+		if binder.overflow {
+			budget.over = true
+		}
 		if budget.over {
 			return nil
 		}
@@ -133,6 +143,8 @@ type psBinder struct {
 	readings int // most values any one use could read
 	changed  bool
 	out      []rune
+	dead     int  // depth of the never-run blocks being read: nothing binds or expands there
+	overflow bool // a value or a loop pass past its bound was dropped
 }
 
 // psBindChain is an if / elseif / else chain being read.
@@ -183,6 +195,8 @@ func (b *psBinder) run(i int, st psBindings, inBlock bool) (int, psBindings) {
 			copyTo(b.scan.singleQuoted(i))
 		case c == '@' && i+1 < len(r) && (psSingleQuote(r[i+1]) || psDoubleQuote(r[i+1])) && b.scan.hereStringOpen(i+2):
 			copyTo(b.scan.hereString(i))
+		case psDoubleQuote(c) && b.dead > 0:
+			copyTo(b.scan.doubleQuoted(i))
 		case psDoubleQuote(c):
 			end := b.scan.doubleQuoted(i)
 			text, bound := psExpandBound(string(r[i:end]), lookup)
@@ -225,6 +239,10 @@ func (b *psBinder) run(i int, st psBindings, inBlock bool) (int, psBindings) {
 			if keyword := b.keyword(strings.ToLower(string(r[start:j])), start); keyword.kind != "" {
 				pending = keyword
 			}
+		case c == '$' && b.dead > 0:
+			// A block that never runs binds nothing and writes nothing.
+			_, end, _ := psVariableName(r, i)
+			copyTo(max(end, i+1))
 		case c == '$':
 			name, end, braced := psVariableName(r, i)
 			if name == "" {
@@ -249,7 +267,7 @@ func (b *psBinder) run(i int, st psBindings, inBlock bool) (int, psBindings) {
 				var kept []string
 				for _, value := range values {
 					if strings.Contains(strings.ToLower(value), "defenseclaw") && len([]rune(value)) <= psBoundValueMaxRunes {
-						kept = psAddValue(kept, value)
+						kept = psAddValue(kept, value, &b.overflow)
 					}
 				}
 				if len(kept) > 0 {
@@ -365,11 +383,13 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 			constant = psConstCondition(cond)
 		}
 		dead := ch.sealed || constant < 0
-		entry := psBindings{} // a branch that never runs binds and reads nothing
-		if !dead {
-			entry = ch.before.clone()
+		var next int
+		var end psBindings
+		if dead {
+			next = b.runDead(i)
+		} else {
+			next, end = b.run(i, ch.before.clone(), true)
 		}
-		next, end := b.run(i, entry, true)
 		next = b.closeBlock(next)
 		if !dead {
 			ch.ends = append(ch.ends, end)
@@ -381,17 +401,16 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 		}
 		result := psBindings{}
 		for _, end := range ch.ends {
-			result = psUnionBindings(result, end)
+			result = psUnionBindings(result, end, &b.overflow)
 		}
 		if !ch.sealed && !ch.hasElse {
-			result = psUnionBindings(result, ch.before)
+			result = psUnionBindings(result, ch.before, &b.overflow)
 		}
 		*chain = nil
 		return next, result
 	}
 	if kind == "while" && psConstCondition(cond) < 0 {
-		next, _ := b.run(i, psBindings{}, true)
-		return b.closeBlock(next), st
+		return b.closeBlock(b.runDead(i)), st
 	}
 	// A loop or a script block runs not at all, once or again: what it binds
 	// reaches its own earlier uses, and what follows it.
@@ -401,14 +420,27 @@ func (b *psBinder) block(i int, kind, cond string, st psBindings, chain **psBind
 	var end psBindings
 	for round := 0; ; round++ {
 		next, end = b.run(i, entry.clone(), true)
-		merged := psUnionBindings(entry, end)
-		if round >= 2 || merged.size() == entry.size() {
+		merged := psUnionBindings(entry, end, &b.overflow)
+		if merged.size() == entry.size() {
+			break
+		}
+		if round >= psBoundLoopRounds {
+			b.overflow = true // the values are still growing: not all are known
 			break
 		}
 		b.out = b.out[:mark]
 		entry = merged
 	}
-	return b.closeBlock(next), psUnionBindings(st, end)
+	return b.closeBlock(next), psUnionBindings(st, end, &b.overflow)
+}
+
+// runDead reads the block whose { was just copied (i is the index after it)
+// as text that never runs, and returns the index of its }.
+func (b *psBinder) runDead(i int) int {
+	b.dead++
+	next, _ := b.run(i, psBindings{}, true)
+	b.dead--
+	return next
 }
 
 // closeBlock copies the } at i and returns the index after it.
@@ -486,7 +518,7 @@ func (b *psBinder) assignedValues(eq int, st psBindings) (values []string, end i
 	case psDoubleQuote(r[start]):
 		literalEnd = b.scan.doubleQuoted(start)
 		var expanded bool
-		values, expanded = psDoubleQuotedValues(string(r[start:literalEnd]), st, b.home)
+		values, expanded = psDoubleQuotedValues(string(r[start:literalEnd]), st, b.home, &b.overflow)
 		if !expanded {
 			return nil, 0, false
 		}
@@ -514,9 +546,9 @@ func (b *psBinder) assignedValues(eq int, st psBindings) (values []string, end i
 // psDoubleQuotedValues returns the strings a double-quoted PowerShell literal
 // can hold: escapes decoded, $name and ${name} of bound variables and the
 // user home expanded, one string per combination of the values the variables
-// hold. expanded is false for any other expansion ($(...), an unbound
+// hold; combinations past the bound set *overflow. expanded is false for any other expansion ($(...), an unbound
 // variable), whose value is not known.
-func psDoubleQuotedValues(literal string, st psBindings, home string) (values []string, expanded bool) {
+func psDoubleQuotedValues(literal string, st psBindings, home string, overflow *bool) (values []string, expanded bool) {
 	r := []rune(literal)
 	if len(r) < 2 {
 		return nil, false
@@ -572,9 +604,11 @@ func psDoubleQuotedValues(literal string, st psBindings, home string) (values []
 			var next []string
 			for _, part := range parts {
 				for _, alternative := range alternatives {
-					if len(next) < 2*psBoundAlternatives {
-						next = append(next, part+alternative)
+					if len(next) >= 2*psBoundAlternatives {
+						*overflow = true
+						continue
 					}
+					next = append(next, part+alternative)
 				}
 			}
 			parts = next
@@ -686,9 +720,11 @@ func psPatchRunTargets(statement, cwd string, budget *psBudget) []string {
 	return targets
 }
 
-// psRunsPatch reports that the statement's command is apply_patch, or an
-// external program (a path, an executable file name, or Codex) given
-// --codex-run-as-apply-patch as one of its arguments.
+// psRunsPatch reports that the statement runs the patch tool: its command is
+// apply_patch, or Codex's own program (a name with codex in it) given
+// --codex-run-as-apply-patch, also behind cmd /c or Start-Process. A program
+// that only carries the flag as text (whoami.exe, cmd /c echo) applies
+// nothing.
 func psRunsPatch(words []psWord, budget *psBudget) bool {
 	k := 0
 	if len(words) > 1 && (words[0].text == "&" || words[0].text == ".") {
@@ -697,25 +733,49 @@ func psRunsPatch(words []psWord, budget *psBudget) bool {
 	if k >= len(words) {
 		return false
 	}
-	command := psUnquote(words[k].text, budget)
-	program := strings.TrimSuffix(strings.TrimSuffix(psProgramName(command), ".bat"), ".cmd")
-	if program == "apply_patch" || program == "applypatch" {
+	program := psExecutableName(psUnquote(words[k].text, budget))
+	switch {
+	case program == "apply_patch" || program == "applypatch":
 		return true
+	case strings.Contains(program, "codex"):
+		return psHasPatchFlag(words[k+1:], budget)
+	case program == "start-process" || program == "start" || program == "saps" || program == "cmd":
+		return psLaunchesCodex(words[k+1:], budget)
 	}
-	external := strings.ContainsAny(command, `\/`) || strings.Contains(program, "codex")
-	switch strings.ToLower(command[max(len(command)-4, 0):]) {
-	case ".exe", ".cmd", ".bat", ".com":
-		external = true
+	return false
+}
+
+// psLaunchesCodex reports arguments that start Codex's own program and give
+// it the patch flag, as cmd /c codex.exe or Start-Process codex.exe do. A
+// launcher with no Codex program among its arguments, such as cmd /c echo,
+// starts no patch.
+func psLaunchesCodex(args []psWord, budget *psBudget) bool {
+	for _, word := range args {
+		text := psUnquote(word.text, budget)
+		if !strings.Contains(text, "--codex-run-as-apply-patch") && strings.Contains(psExecutableName(text), "codex") {
+			return psHasPatchFlag(args, budget)
+		}
 	}
-	if !external {
-		return false
-	}
-	for _, word := range words[k+1:] {
-		if psUnquote(word.text, budget) == "--codex-run-as-apply-patch" {
+	return false
+}
+
+// psHasPatchFlag reports a word that is, or lists, --codex-run-as-apply-patch.
+func psHasPatchFlag(words []psWord, budget *psBudget) bool {
+	for _, word := range words {
+		if strings.Contains(psUnquote(word.text, budget), "--codex-run-as-apply-patch") {
 			return true
 		}
 	}
 	return false
+}
+
+// psExecutableName is the program name with the script suffixes dropped too.
+func psExecutableName(word string) string {
+	name := psProgramName(word)
+	for _, suffix := range []string{".bat", ".cmd", ".com"} {
+		name = strings.TrimSuffix(name, suffix)
+	}
+	return name
 }
 
 // psAbsolutePath reports a drive, UNC or rooted path.
