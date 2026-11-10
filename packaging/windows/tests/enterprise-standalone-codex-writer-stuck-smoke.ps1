@@ -28,7 +28,7 @@ try {
         param($Scratch, $Engine, $Children)
         $state = [IO.Path]::Combine($Scratch, '.defenseclaw-managed-hooks.state')
         $lock = [IO.Path]::Combine($Scratch, '.defenseclaw-managed-hooks.writer.lock')
-        $layout = @{ CodexManagedHooksStatePath = $state; InstallRoot = $Scratch; StateRoot = $Scratch }
+        $layout = @{ CodexManagedHooksStatePath = $state; CodexMachinePolicyPath = [IO.Path]::Combine($Scratch, 'requirements.toml'); InstallRoot = $Scratch; StateRoot = $Scratch }
         $childScript = [IO.Path]::Combine($Scratch, 'writer.ps1')
         [IO.File]::WriteAllText($childScript, @'
 param([string]$Lock, [string]$Stop, [string]$Ready, [int]$Size, [int]$EndSize)
