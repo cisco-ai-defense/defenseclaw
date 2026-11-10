@@ -36,7 +36,7 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 	if !known || !strings.Contains(strings.ToLower(command), "defenseclaw") {
 		return false
 	}
-	forms, bounded, ok := powerShellStateWriteForms(command, home, request.Input.CWD)
+	forms, bounded, ok := powerShellStateWriteForms(command, home, request.Input.CWD, request.ResolvedWriteTargets)
 	if !ok {
 		return false
 	}
@@ -251,16 +251,17 @@ func newPSScan(runes []rune, budget *psBudget) *psStateScan {
 // cannot parse the command: a < that starts a token is a parse error there
 // (a Git Bash here-document or input redirect), so nothing runs in that
 // reading.
-func powerShellStateWriteForms(command, home, cwd string) (forms []string, bounded, ok bool) {
+func powerShellStateWriteForms(command, home, cwd string, targets map[string]string) (forms []string, bounded, ok bool) {
 	seen := map[string]bool{}
 	budget := &psBudget{}
-	reading := psReading{home: home, cwd: cwd}
+	reading := psReading{newPSMerger(home, cwd, targets)}
 	bounded, ok = reading.collect(command, 0, true, seen, &forms, budget)
 	return forms, bounded, ok
 }
 
-// psReading is the user home and working directory a command is read in.
-type psReading struct{ home, cwd string }
+// psReading is the user home, working directory and known links a command
+// is read in.
+type psReading struct{ merge psMerger }
 
 // collect adds the state-naming twins of command to forms. A command with a
 // variable bound to a string is also read with the value in place of each
@@ -285,7 +286,7 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 		*forms = append(*forms, form)
 	}
 	if bind {
-		readings := psBindStaticValues(command, reading.home, budget)
+		readings := psBindStaticValues(command, reading.merge, budget)
 		if budget.over {
 			return true, true
 		}
@@ -297,7 +298,7 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 	}
 	for _, piece := range scan.pieces {
 		add(piece)
-		for _, target := range psPatchRunTargets(piece, reading.cwd, budget) {
+		for _, target := range psPatchRunTargets(piece, reading.merge.cwd, budget) {
 			add("Set-Content -LiteralPath " + target + " -Value x")
 		}
 		body, nested := psNestedShellBody(piece, budget)
