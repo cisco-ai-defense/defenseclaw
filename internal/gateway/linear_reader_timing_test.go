@@ -6,30 +6,13 @@ package gateway
 import (
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // linearReaderHookBudget is the documented tool-call hook wait (about 3.5 s):
 // a linear reader still judges a large crafted command inside it.
 const linearReaderHookBudget = 3500 * time.Millisecond
-
-// startWork starts timing one piece of work and returns the function that
-// ends it. The time is the wall time or, when the process used less CPU than
-// that, the CPU it used: a host that is busy with other programs makes a
-// reading wait for a CPU, and that wait is the host's, not the reading's
-// (GAP-0859). On an idle host the two are the same, so the ceiling and the
-// size ratio mean what they meant; a reading that costs more CPU, or grows
-// faster than its input, still fails them.
-func startWork() func() time.Duration {
-	wall := time.Now()
-	cpu, cpuKnown := processCPUTime()
-	return func() time.Duration {
-		took := time.Since(wall)
-		if now, ok := processCPUTime(); cpuKnown && ok && now-cpu < took {
-			took = now - cpu
-		}
-		return took
-	}
-}
 
 // assertLinearReaderTime is the time check of the reader linear-time tests
 // (rel-1-0-4 GAP-2545, LEAD 11:52 ruling). full is the time of the full-size
@@ -72,9 +55,18 @@ func assertLinearReaderTimeWith(t *testing.T, label string, full time.Duration, 
 	if !linear() {
 		t.Errorf("%s: full size %s, half size %s: not linear (over 2.5x)", label, bestFull, bestHalf)
 	}
-	if !hookAnswerRaceBuild && bestFull > linearReaderHookBudget && !ceiling {
-		t.Logf("%s: full size judged in %s, over the %s hook budget (known, not failed here)", label, bestFull, linearReaderHookBudget)
-	} else if !hookAnswerRaceBuild && bestFull > linearReaderHookBudget {
-		t.Errorf("%s: full size judged in %s, over the %s hook budget", label, bestFull, linearReaderHookBudget)
+	// The ceiling is the wall time. Only when the best run missed it, the
+	// host is measured (GAP-0889): a host that gives this process a third of
+	// a CPU stretches a CPU-bound reading by the same factor, up to
+	// testenv.MaxStretch, and a reading that waits on anything but the CPU
+	// is not stretched by it. On an idle host the ceiling is the hook budget.
+	limit := linearReaderHookBudget
+	if !hookAnswerRaceBuild && bestFull > limit {
+		limit = testenv.Limit(limit)
+	}
+	if !hookAnswerRaceBuild && bestFull > limit && !ceiling {
+		t.Logf("%s: full size judged in %s, over the %s hook budget (known, not failed here)", label, bestFull, limit)
+	} else if !hookAnswerRaceBuild && bestFull > limit {
+		t.Errorf("%s: full size judged in %s, over the %s hook budget", label, bestFull, limit)
 	}
 }

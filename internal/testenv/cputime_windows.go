@@ -3,7 +3,7 @@
 
 //go:build windows
 
-package gateway
+package testenv
 
 import (
 	"syscall"

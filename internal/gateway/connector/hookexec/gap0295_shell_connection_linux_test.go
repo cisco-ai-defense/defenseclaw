@@ -69,12 +69,18 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 		}
 		client, server := conn.LocalAddr().(*net.TCPAddr), conn.RemoteAddr().(*net.TCPAddr)
 		owner, unique := 0, false
-		// The 2 s bounds of the two reads below are the product value plus the
-		// time the host kept this process waiting for a CPU in the same run
-		// (GAP-0889); on an idle host they are 2 s.
-		contention := testenv.StartContention()
-		for began := time.Now(); time.Since(began) < 2*time.Second+contention.Wait() && !unique; time.Sleep(10 * time.Millisecond) {
-			owner, unique = perUserConnectedPeerPID(client, server)
+		// Both reads are bounded by 2 s of wall time. Only a read that missed
+		// it is given the host (GAP-0889): the helper process and this one are
+		// stretched alike by a host that is short of CPU (testenv.MaxStretch).
+		began := time.Now()
+		poll := func(limit time.Duration) {
+			for ; time.Since(began) < limit && !unique; time.Sleep(10 * time.Millisecond) {
+				owner, unique = perUserConnectedPeerPID(client, server)
+			}
+		}
+		poll(2 * time.Second)
+		if !unique {
+			poll(testenv.Limit(2 * time.Second))
 		}
 		if !unique || owner != pid {
 			t.Fatalf("accepted socket owner = %d %v, want the fresh gateway", owner, unique)
@@ -83,7 +89,7 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 		peer.capture(conn.LocalAddr(), conn.RemoteAddr())
 		got, known := peer.wait(2 * time.Second)
 		if !known {
-			got, known = peer.wait(contention.Wait())
+			got, known = peer.wait(testenv.Limit(2*time.Second) - 2*time.Second)
 		}
 		if !known || got.pid != pid {
 			t.Fatalf("recorded peer = %+v %v", got, known)

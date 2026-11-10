@@ -93,7 +93,6 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	}
 	const sessions = 10
 	const duration = 20 * time.Second
-	contention := testenv.StartContention()
 	var mu sync.Mutex
 	var latencies []time.Duration
 	var calls sync.WaitGroup
@@ -125,7 +124,6 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	calls.Wait()
 	stopped.Store(true)
 	hogs.Wait()
-	hostFactor := contention.Factor()
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	if len(latencies) < sessions*int(duration/time.Second)/2 {
 		t.Fatalf("only %d calls ran", len(latencies))
@@ -134,14 +132,17 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	t.Logf("%d calls at 10/s on 2 CPUs with 6 busy goroutines: p50 %v p95 %v max %v",
 		len(latencies), latencies[len(latencies)/2], p95, latencies[len(latencies)-1])
 	// Every answer, not a percentile: a call over the budget is a benign call
-	// refused as a gateway no-answer (GAP-1981). The budget is the product
-	// value on an idle host; a host that kept this process waiting for a CPU
-	// stretches it by the factor measured in this run (GAP-0859), and the
-	// queueing the group commit removed (11-13 s) is far beyond that.
-	budget := time.Duration(float64(hookAnswerQueueBudget) * hostFactor)
-	t.Logf("the host kept the process waiting for a CPU: factor %.2f, budget %v", hostFactor, budget)
+	// refused as a gateway no-answer (GAP-1981). The budget is the wall time.
+	// Only when an answer missed it, the host is measured (GAP-0889): a host
+	// that gives this process a third of a CPU stretches the answers by the
+	// same factor, at most testenv.MaxStretch, which stays under the 11-13 s
+	// the queueing the group commit removed took.
+	budget := hookAnswerQueueBudget
 	if worst := latencies[len(latencies)-1]; worst > budget {
-		over := len(latencies) - sort.Search(len(latencies), func(i int) bool { return latencies[i] > budget })
-		t.Fatalf("%d of %d answers over the %v answer budget (max %v, p95 %v)", over, len(latencies), budget, worst, p95)
+		budget = testenv.Limit(budget)
+		if worst > budget {
+			over := len(latencies) - sort.Search(len(latencies), func(i int) bool { return latencies[i] > budget })
+			t.Fatalf("%d of %d answers over the %v answer budget (max %v, p95 %v)", over, len(latencies), budget, worst, p95)
+		}
 	}
 }

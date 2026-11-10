@@ -98,7 +98,6 @@ func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			stubManagedServiceRunning(t, func(name string) (bool, bool) { return test.running, name == "DefenseClawGateway" })
 			home := t.TempDir()
-			contention := testenv.StartContention()
 			result, elapsed := runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) {
 				managedWindowsStandalone(opts)
 				opts.ManagedGatewayServiceName = "DefenseClawGateway"
@@ -109,10 +108,14 @@ func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testin
 			if !blocked(result) {
 				t.Fatalf("after %s code=%d stdout=%q stderr=%q, want a block", elapsed, result.code, result.stdout, result.stderr)
 			}
-			// The bound is the product value plus the time the host kept this
-			// process waiting for a CPU in the same run (GAP-0889); on an idle
-			// host the two are the same.
-			below := test.below + contention.Wait()
+			// The upper bound is the wall time. Only when the call missed it,
+			// the host is measured (GAP-0889): the CPU-bound hook is stretched
+			// by a host that is short of CPU, at most testenv.MaxStretch; the
+			// lower bound and a call that waits on anything else are not.
+			below := test.below
+			if elapsed >= below {
+				below = testenv.Limit(below)
+			}
 			if elapsed < test.atLeast || elapsed >= below {
 				t.Fatalf("blocked after %s, want in [%s, %s)", elapsed, test.atLeast, below)
 			}

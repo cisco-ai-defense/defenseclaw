@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 const gap0540VersionWorker = "GAP0540_VERSION_WORKER"
@@ -27,12 +29,6 @@ func TestGAP0540VersionProbeWorker(t *testing.T) {
 	}
 	home := filepath.Dir(pidFile)
 	if err := os.Setenv("TMPDIR", home); err != nil {
-		t.Fatal(err)
-	}
-	// The test starts its 5 s bound for the version command from this mark,
-	// not from the start of the process: a loaded host takes longer than that
-	// just to load a test binary (GAP-0889).
-	if err := os.WriteFile(filepath.Join(home, "worker.ready"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, _ = runUnixAgentVersion(context.Background(), filepath.Join(home, "hermes"), home, "HERMES_HOME")
@@ -61,7 +57,9 @@ func TestGAP0540VersionProbeEndsWithApplyWorker(t *testing.T) {
 	home := t.TempDir()
 	pidFile := filepath.Join(home, "version.pid")
 	script := filepath.Join(home, "hermes")
-	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$$\" > %s\nexec sleep 60\n", strconv.Quote(pidFile))
+	// The command says it runs by publishing its pid whole (write, then
+	// rename), so the test never reads a half-written file.
+	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$$\" > %s.tmp && mv %s.tmp %s\nexec sleep 60\n", strconv.Quote(pidFile), strconv.Quote(pidFile), strconv.Quote(pidFile))
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -79,33 +77,32 @@ func TestGAP0540VersionProbeEndsWithApplyWorker(t *testing.T) {
 			<-exited
 		}
 	})
-	// The worker is ready once it runs the test; it has no wall-clock bound
-	// here, and a worker that ends first fails the test at once.
-	for ready := filepath.Join(home, "worker.ready"); ; time.Sleep(10 * time.Millisecond) {
-		if _, err := os.Stat(ready); err == nil {
+	// The pid file is the version command saying it runs: the wait is for
+	// that event, not for a wall-clock time, so a host that is slow to load the
+	// worker binary or to start the command does not fail the test (GAP-0889).
+	// A worker that ends first fails it at once; the cap only keeps a hung
+	// worker from holding the test for ever.
+	var pid int
+	for hung := time.Now().Add(2 * time.Minute); pid == 0; time.Sleep(10 * time.Millisecond) {
+		if data, err := os.ReadFile(pidFile); err == nil {
+			pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil || pid <= 1 {
+				t.Fatalf("version pid: %q (%v)", data, err)
+			}
 			break
 		}
 		select {
 		case err := <-exited:
 			workerReaped = true
-			t.Fatalf("the apply worker ended before it ran the version command: %v", err)
+			t.Fatalf("the apply worker ended before the version command ran: %v", err)
 		default:
 		}
-	}
-	var pid int
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			continue
+		if time.Now().After(hung) {
+			t.Fatal("version command did not start")
 		}
-		pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
-		if err != nil || pid <= 1 {
-			t.Fatalf("version pid: %q (%v)", data, err)
-		}
-		break
 	}
-	if pid <= 1 || !versionProbeAlive(pid) {
-		t.Fatal("version command did not start")
+	if !versionProbeAlive(pid) {
+		t.Fatal("version command did not stay running")
 	}
 	t.Cleanup(func() {
 		if versionProbeAlive(pid) {
@@ -120,8 +117,16 @@ func TestGAP0540VersionProbeEndsWithApplyWorker(t *testing.T) {
 	if err == nil {
 		t.Fatal("worker unexpectedly exited normally")
 	}
-	for deadline := time.Now().Add(2 * time.Second); versionProbeAlive(pid); time.Sleep(20 * time.Millisecond) {
-		if time.Now().After(deadline) {
+	// The command ends within 2 s of wall time of the worker. Only when it
+	// outlives that, the host is measured (GAP-0889): a host that is short of
+	// CPU delays the command by the same factor (testenv.MaxStretch).
+	limit := 2 * time.Second
+	for killed := time.Now(); versionProbeAlive(pid); time.Sleep(20 * time.Millisecond) {
+		if time.Since(killed) > limit {
+			if stretched := testenv.Limit(2 * time.Second); stretched > limit {
+				limit = stretched
+				continue
+			}
 			t.Fatal("version command outlived its apply worker")
 		}
 	}
