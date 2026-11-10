@@ -94,6 +94,7 @@ func readOwnStatus(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the managed gateway service did not answer (%v); try again, and if it keeps failing contact your IT help desk", err)
 	}
+	body = overlayOwnStatusPending(body, ownStatusPendingFor)
 	return body, nil
 }
 
