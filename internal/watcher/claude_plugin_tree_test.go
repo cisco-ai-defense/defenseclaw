@@ -236,6 +236,77 @@ func TestIsClaudePluginUpdateClone(t *testing.T) {
 	}
 }
 
+func TestIsClaudePluginGitClone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"temp_git_1775652472167_8bp378", true},
+		{"TEMP_GIT_1_ABC", true},
+		{"temp_git_tools", false},
+		{"temp_git_1", false},
+		{"temp_git__abc", false},
+		{"temp_git_1_", false},
+		{"temp_git_x1_abc", false},
+		{"temp_git_1_ab-c", false},
+		{"temp_git_1_abc.clone", false},
+		{"temp_git_1_abc_def", false},
+	} {
+		if got := isClaudePluginGitClone(tc.name); got != tc.want {
+			t.Errorf("isClaudePluginGitClone(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// CodeRabbit on #1432: installing from a Git URL clones the source into
+// cache/temp_git_<n>_<rand> first. While Claude Code is still copying from
+// it, the clone is staging: live events skip it and the rescan leaves it
+// alone. A leftover clone older than the grace is scanned again, and a
+// marketplace named temp_git_tools is never staging.
+func TestClaudePluginGitCloneIsStagingOnlyDuringGrace(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
+	clone := filepath.Join(cache, "temp_git_1775652472167_8bp378")
+	cloneSkill := filepath.Join(clone, "skills", "brainstorming")
+	marketplace := filepath.Join(cache, "temp_git_tools", "tool-plug", "1.0.0")
+	final := filepath.Join(cache, "epa-market", "epa-plug-ok", "1.0.0")
+	for _, dir := range []string{cloneSkill, marketplace, final} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+
+	if !w.inClaudePluginStaging(cloneSkill, 0) || !w.inClaudePluginStaging(cloneSkill, claudeStagingGrace) {
+		t.Fatal("a fresh temp_git clone must be staging")
+	}
+	if w.inClaudePluginStaging(marketplace, 0) || w.inClaudePluginStaging(final, 0) {
+		t.Fatal("marketplace and final version folders must not be staging")
+	}
+	targets := func() []string {
+		var plugins []string
+		for _, evt := range w.enumerateTargets() {
+			plugins = append(plugins, evt.Path)
+		}
+		return plugins
+	}
+	if got := targets(); len(got) != 2 || !slices.Contains(got, marketplace) || !slices.Contains(got, final) {
+		t.Fatalf("rescan targets %v, want %s and %s", got, marketplace, final)
+	}
+
+	old := time.Now().Add(-2 * claudeStagingGrace)
+	if err := os.Chtimes(clone, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if w.inClaudePluginStaging(cloneSkill, claudeStagingGrace) {
+		t.Fatal("a temp_git clone older than the grace must be scanned again")
+	}
+	if got := targets(); !slices.Contains(got, cloneSkill) {
+		t.Fatalf("rescan targets %v, want the leftover clone %s", got, cloneSkill)
+	}
+}
+
 // CodeRabbit on #1432: marketplace names may use ".", "_" and "-", so a
 // registered marketplace named temp_subdir_tools.clone is valid. Its plugin
 // versions must still be admitted by live events, rescans and the startup walk.

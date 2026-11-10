@@ -3680,7 +3680,8 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 const claudeStagingGrace = 15 * time.Minute
 
 // inClaudePluginStaging reports a path below a Claude Code plugin staging
-// folder (cache/temp_local_<id> or cache/temp_subdir_<id>.clone), younger
+// folder (cache/temp_local_<id>, cache/temp_git_<id> or
+// cache/temp_subdir_<id>.clone), younger
 // than grace when grace is set. Claude Code builds or updates a plugin
 // there and then moves it to <marketplace>/<plugin>/<version>: the watcher
 // scanned the staging copy (and its .git internals) as plugins, blocked
@@ -3725,8 +3726,9 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 }
 
 // isPluginStagingFolder names a staging folder in a plugin cache: Claude
-// Code's temp_local_<id> (install) and temp_subdir_<id>.clone (plugin
-// update), and the .dclaw-stage-<name>-<random> folder that
+// Code's temp_local_<id> (install), temp_git_<id> (install from a Git URL)
+// and temp_subdir_<id>.clone (plugin update), and the
+// .dclaw-stage-<name>-<random> folder that
 // "defenseclaw plugin install" copies a plugin into, scans and decides
 // itself before it moves the copy to cache/<name> (GAP-0017, #1428).
 // Marketplace folders such as temp_subdir_tools or temp_subdir_tools.clone
@@ -3736,7 +3738,7 @@ func isPluginStagingFolder(name string) bool {
 	if strings.HasPrefix(lower, "temp_local_") && len(lower) > len("temp_local_") {
 		return true
 	}
-	if isClaudePluginUpdateClone(lower) {
+	if isClaudePluginUpdateClone(lower) || isClaudePluginGitClone(lower) {
 		return true
 	}
 	if strings.HasPrefix(lower, ".dclaw-stage-") && len(lower) > len(".dclaw-stage-") {
@@ -3758,6 +3760,24 @@ func isClaudePluginUpdateClone(name string) bool {
 		return false
 	}
 	stamp, random, ok := strings.Cut(lower[len(prefix):len(lower)-len(suffix)], "_")
+	return ok && isASCIIDigits(stamp) && isASCIIAlnum(random)
+}
+
+// isClaudePluginGitClone names the folder Claude Code clones a Git URL
+// plugin source into before it copies the plugin to its versioned folder:
+// cache/temp_git_<n>_<rand>, with the same <n> and <rand> as the update
+// clone and no suffix. Unlike update clones these are left alone only for
+// the staging grace: Claude Code does not always remove them, and leftover
+// ones are read as skills (anthropics/claude-code#46566), so the rescan
+// scans them once they are older. A marketplace named temp_git_tools is not
+// staging.
+func isClaudePluginGitClone(name string) bool {
+	lower := strings.ToLower(name)
+	const prefix = "temp_git_"
+	if !strings.HasPrefix(lower, prefix) {
+		return false
+	}
+	stamp, random, ok := strings.Cut(lower[len(prefix):], "_")
 	return ok && isASCIIDigits(stamp) && isASCIIAlnum(random)
 }
 
