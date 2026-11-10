@@ -797,6 +797,34 @@ func TestLoadPreviousManifestForEnumerationHandlesMissingFile(t *testing.T) {
 	}
 }
 
+// An enabled row with no agent_version fails validation while the Secure
+// Client deployment check fails. The enumerator must still keep every row's
+// recorded state, so an operator-disabled row stays disabled.
+func TestLoadPreviousManifestForEnumerationKeepsStateOnValidationFailure(t *testing.T) {
+	saved := secureClientHookDeliveryHost
+	secureClientHookDeliveryHost = false
+	t.Cleanup(func() { secureClientHookDeliveryHost = saved })
+	const sid = "S-1-5-21-1111-2222-3333-1001"
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	body := "version: 1\ntargets:\n" +
+		"  - sid: " + sid + "\n    user_home: 'C:\\Users\\tester'\n    connector: codex\n    enabled: true\n" +
+		"  - sid: " + sid + "\n    user_home: 'C:\\Users\\tester'\n    connector: cursor\n    enabled: false\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadManifest(path); err == nil || !strings.Contains(err.Error(), "requires explicit agent_version") {
+		t.Fatalf("LoadManifest = %v, want the agent_version refusal this test depends on", err)
+	}
+	got := loadPreviousManifestForEnumeration(path, nil)
+	cursor, ok := got[previousManifestKey(sid, "cursor")]
+	if !ok || cursor.Enabled == nil || *cursor.Enabled {
+		t.Fatalf("cursor row = %+v (found %v), want the recorded enabled: false", cursor, ok)
+	}
+	if codex, ok := got[previousManifestKey(sid, "codex")]; !ok || codex.Enabled == nil || !*codex.Enabled {
+		t.Fatalf("codex row = %+v (found %v), want the recorded enabled: true", codex, ok)
+	}
+}
+
 // TestLoadPreviousManifestForEnumerationHandlesEmptyPath asserts an
 // empty path (the target-uninstall regenerate-from-scratch case)
 // returns nil without an error.

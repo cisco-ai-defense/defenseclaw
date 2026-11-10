@@ -34,9 +34,6 @@ func TestValidateTrustedInstallMarkerDirRejectsUserPathAndSymlink(t *testing.T) 
 // The marker folder itself keeps the strict rule: a group write bit on it is
 // refused for the permissions, before its owner is judged.
 func TestValidateTrustedInstallMarkerDirRefusesGroupWritableMarker(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("this test needs an unprivileged owner")
-	}
 	marker := t.TempDir()
 	if err := os.Chmod(marker, 0o775); err != nil {
 		t.Fatal(err)
