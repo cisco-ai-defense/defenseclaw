@@ -326,6 +326,7 @@ func dispatchTrustedAction(
 	request.Input.StraightLineFunctions = !request.StrictPolicy
 	request.Input.ClientResolvedTargets = withLocalWriteAnswers(
 		request, clientResolvedPathTargets(request.ResolvedWriteTargets),
+		actionfacts.NativeFileWriteTargets(request.Input),
 	)
 	request.Input.ClientWorkingDirectories = clientWorkingDirectories(request.ResolvedWriteTargets, request.Input.CWD)
 	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
@@ -362,6 +363,14 @@ func dispatchTrustedAction(
 	if !request.simpleCommandPass {
 		facts = actionfacts.Analyze(request.Input)
 		analyzed = true
+		// The headers of a here-document apply_patch are known only now that
+		// the shell text is read: they are placed as a file-tool name is.
+		if len(facts.Commands) != 0 {
+			request.Input.ClientResolvedTargets = withLocalWriteAnswers(
+				request, request.Input.ClientResolvedTargets,
+				actionfacts.NativeCallWriteTargets(request.Input, facts),
+			)
+		}
 		if trustedCallOverStatementBudget(request.Input, facts) {
 			// Over the statement budget the call blocks with
 			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is
