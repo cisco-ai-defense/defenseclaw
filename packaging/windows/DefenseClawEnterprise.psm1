@@ -36009,6 +36009,21 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
         -not (Test-DefenseClawInstalledGatewayRecorded -Layout $Layout -Metadata $metadata)) {
         $probeGatewaySource = $GatewaySource
     }
+    # A targets.yaml another account owns or can change is never one the
+    # guardian activated, so there is nothing to adopt and "wait for the
+    # guardian" never ends. Leave it to the steps that judge it: Repair
+    # restores it from Setup's approved copy and keeps the replaced file, and
+    # every other action refuses it by name before it changes anything
+    # (GAP-1048).
+    try {
+        Assert-DefenseClawPathAcl `
+            -Path $Layout.ManifestPath `
+            -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+            -AllowInheritance -IgnoreCreatorTemplates
+    }
+    catch {
+        return $false
+    }
     $adoption = Get-DefenseClawStandaloneManifestAdoption `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `

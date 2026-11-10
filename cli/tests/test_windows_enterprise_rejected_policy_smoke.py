@@ -82,6 +82,14 @@ def test_setup_process_reads_of_the_manifest_never_restamp_it() -> None:
     assert record.index("pinWindowsStandaloneTrustScope()") < record.index("WriteTargetsManifestAtomic")
 
 
+def test_the_activation_rebind_leaves_an_untrusted_manifest_to_the_restore_and_the_gate() -> None:
+    sync = _function(_text(MODULE), "Sync-DefenseClawStandaloneManagedHooksActivationBinding")
+    acl = sync.index("Assert-DefenseClawPathAcl")
+    adoption = sync.index("Get-DefenseClawStandaloneManifestAdoption `\n        -Layout")
+    assert acl < adoption
+    assert "return $false" in sync[acl:adoption]
+
+
 def _engines() -> list[str]:
     found = [shutil.which("pwsh"), shutil.which("powershell.exe")]
     return [engine for engine in found if engine]
