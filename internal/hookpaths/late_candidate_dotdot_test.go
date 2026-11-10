@@ -48,8 +48,8 @@ func dotDotFixture(t *testing.T) (home, cwd, other string) {
 // that the physical path reaches; the clean twin stays ordinary.
 func TestGAP0641LinkBeforeDotDotKeepsProtectedLinkNamed(t *testing.T) {
 	home, cwd, other := dotDotFixture(t)
-	if data, err := os.ReadFile(cwd + "/jump/../status"); err != nil || string(data) != "protected-entry" {
-		t.Fatalf("kernel read %q err=%v", data, err)
+	if got := readParentThroughLink(t, filepath.Join(cwd, "jump"), "status"); got != "protected-entry" {
+		t.Fatalf("followed-link read %q", got)
 	}
 	for _, row := range []struct {
 		name, command string
@@ -113,8 +113,8 @@ func TestGAP0641LeadingParentFromLinkedWorkingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(linked)
-	if data, err := os.ReadFile("../status"); err != nil || string(data) != "protected-entry" {
-		t.Fatalf("kernel read %q err=%v", data, err)
+	if got := readParentThroughLink(t, linked, "status"); got != "protected-entry" {
+		t.Fatalf("followed-link read %q", got)
 	}
 	for _, row := range []struct {
 		name, command string

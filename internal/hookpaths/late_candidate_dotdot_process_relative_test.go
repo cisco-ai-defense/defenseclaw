@@ -173,7 +173,7 @@ func TestLateCandidateDotDotRelativeAndNestedLinks(t *testing.T) {
 			if string(physical) != wantBytes {
 				t.Fatalf("physical read=%q want=%q", physical, wantBytes)
 			}
-			if runtime.GOOS != "windows" {
+			if !dotDotReadsLexically {
 				if data, err := os.ReadFile("../status"); err != nil || string(data) != wantBytes {
 					t.Fatalf("kernel read=%q err=%v want=%q", data, err, wantBytes)
 				}

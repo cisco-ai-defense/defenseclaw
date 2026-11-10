@@ -77,3 +77,32 @@ func TestDotDotAfterALinkIsOrdinaryOnlyWhenEveryReadingIs(t *testing.T) {
 		}
 	}
 }
+
+// readParentThroughLink reads name in the parent of the folder the link at
+// dir reaches: the reading that follows the link first, which POSIX opens for
+// dir/../name and which Git Bash and the hook walk on Windows. The Go
+// os.ReadFile of a dot-dot path is not an oracle for it on Windows, where
+// Win32 removes the step from the text first.
+func readParentThroughLink(t *testing.T, dir, name string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(resolved), name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// readParentOfText reads name in the parent of dir as written, the reading in
+// which Win32 removes the dot-dot step from the text.
+func readParentOfText(t *testing.T, dir, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(dir), name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
