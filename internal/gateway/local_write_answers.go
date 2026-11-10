@@ -25,29 +25,33 @@ func withLocalWriteAnswers(request trustedActionRequest, answers map[string]stri
 		return answers
 	}
 	for _, target := range actionfacts.NativeFileWriteTargets(request.Input) {
-		spelling := actionfacts.OperandPath(target, request.Input.CWD)
-		if raw, steps := actionfacts.StepUpSpelling(target, request.Input.CWD); steps {
-			spelling = raw
+		// A name that steps up a directory is answered by its raw spelling as
+		// well as by the clean one the proofs of older rules read.
+		spellings := []string{actionfacts.OperandPath(target, request.Input.CWD)}
+		if raw, steps := actionfacts.StepUpSpelling(target, request.Input.CWD); steps && raw != spellings[0] {
+			spellings = append(spellings, raw)
 		}
-		if !filepath.IsAbs(spelling) || len(spelling) > hookpaths.MaxWriteTargetPathBytes {
-			continue
+		for _, spelling := range spellings {
+			if !filepath.IsAbs(spelling) || len(spelling) > hookpaths.MaxWriteTargetPathBytes {
+				continue
+			}
+			if _, answered := request.ResolvedWriteTargets[spelling]; answered {
+				continue
+			}
+			answer := ""
+			if physical, ok := request.targetMemo.ResolveWriteTarget(spelling); ok {
+				answer = physical
+			} else if text, reached := hookpaths.LinkTextWriteTarget(spelling); reached {
+				answer = text
+			}
+			if answer == "" || filepath.Clean(answer) == filepath.Clean(spelling) {
+				continue
+			}
+			if answers == nil {
+				answers = map[string]string{}
+			}
+			answers[spelling] = answer
 		}
-		if _, answered := request.ResolvedWriteTargets[spelling]; answered {
-			continue
-		}
-		answer := ""
-		if physical, ok := request.targetMemo.ResolveWriteTarget(spelling); ok {
-			answer = physical
-		} else if text, reached := hookpaths.LinkTextWriteTarget(spelling); reached {
-			answer = text
-		}
-		if answer == "" || filepath.Clean(answer) == filepath.Clean(spelling) {
-			continue
-		}
-		if answers == nil {
-			answers = map[string]string{}
-		}
-		answers[spelling] = answer
 	}
 	return answers
 }

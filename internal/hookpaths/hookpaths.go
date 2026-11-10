@@ -2127,7 +2127,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
 			continue
 		}
-		path := candidate.Resolved
+		path, rawStepUp := candidate.Resolved, ""
 		if path == "" {
 			path = candidate.Normalized
 		}
@@ -2136,11 +2136,12 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		} else if pathFactIsNativeWrite(tool, candidate, facts.Commands) &&
 			!strings.ContainsAny(candidate.Value, "*?[]$\x60~") {
 			// A write of a file tool or an apply_patch header that steps up
-			// a directory is listed by the raw spelling too, so its links
-			// (the working directory of the call is one) are walked before
-			// the step and the gateway finds the answer by the same key.
+			// a directory is listed by the raw spelling as well as by the
+			// clean one: the links before the step (the working directory of
+			// the call is one) are walked as the operating system walks
+			// them, and the gateway finds the answer by the same key.
 			if raw, steps := actionfacts.StepUpSpelling(candidate.Value, cwd); steps {
-				path = raw
+				rawStepUp = raw
 			}
 		}
 		if value := filepath.ToSlash(candidate.Value); value == ".." || strings.HasPrefix(value, "../") {
@@ -2150,6 +2151,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			continue
 		}
 		add(path, false, false)
+		if rawStepUp != "" {
+			add(rawStepUp, false, false)
+		}
 	}
 	// A delete removes the final name, so only its directory is followed.
 	// Behind ProtectHome, PrivateTmp and PrivateDevices a managed gateway
