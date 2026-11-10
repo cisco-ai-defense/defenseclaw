@@ -1,5 +1,5 @@
 """Windows CI runs every standalone PowerShell smoke of this half on each installed engine
-(Windows PowerShell 5.1 and 7); see tests/standalone_smokes.py."""
+(Windows PowerShell 5.1 and 7); see tests/enterprise_standalone_smokes.py."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from tests.standalone_smokes import SMOKES_A, engine_id, run_standalone_smoke, standalone_smoke_engines
+from tests.enterprise_standalone_smokes import SMOKES_A, engine_id, run_standalone_smoke, standalone_smoke_engines
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows PowerShell")

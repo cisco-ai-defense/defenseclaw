@@ -2,7 +2,7 @@
 
 Each smoke runs in a disposable scratch directory and never touches a service or a
 real machine root, so Windows CI runs every one of them on each installed engine
-(Windows PowerShell 5.1 and 7). They run from two test files (the halves below) so the
+(Windows PowerShell 5.1 and 7). They run from three test files (the groups below) so the
 Python shards can carry them apart from the contract checks of
 test_windows_enterprise_standalone_contract.py; together they are every smoke, on
 both engines.
@@ -61,10 +61,20 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-user-cleanup-report-smoke.ps1",
 )
 
-# The two halves. held-file-restamp (about two minutes per engine) and
-# state-files-in-use sit in different halves.
-SMOKES_A = STANDALONE_SMOKES[:19]
-SMOKES_B = STANDALONE_SMOKES[19:]
+# The three groups, balanced by the run time on the Windows CI runners (about 930 s for all
+# of them on both engines, measured from the JUnit of a full run): held-file-restamp and
+# the w2b lifecycle smoke; the install-tree, state-files-in-use and guardian first-reconcile
+# smokes; everything else.
+SMOKES_A = (
+    "enterprise-standalone-held-file-restamp-smoke.ps1",
+    "enterprise-standalone-w2b-lifecycle-smoke.ps1",
+)
+SMOKES_B = (
+    "enterprise-standalone-install-tree-smoke.ps1",
+    "enterprise-standalone-state-files-in-use-smoke.ps1",
+    "enterprise-standalone-guardian-first-reconcile-wait-smoke.ps1",
+)
+SMOKES_C = tuple(name for name in STANDALONE_SMOKES if name not in SMOKES_A and name not in SMOKES_B)
 
 
 def standalone_smoke_engines() -> list[str]:

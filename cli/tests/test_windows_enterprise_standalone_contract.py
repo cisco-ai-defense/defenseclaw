@@ -905,7 +905,7 @@ def test_the_purge_walks_of_state_root_retry_with_call_scoped_privileges_for_a_d
     assert tree.index("Invoke-DefenseClawStateRootWalk") < tree.index("Remove-Item")
 
 
-from tests.standalone_smokes import SMOKES_A, SMOKES_B, STANDALONE_SMOKES  # noqa: E402
+from tests.enterprise_standalone_smokes import SMOKES_A, SMOKES_B, SMOKES_C, STANDALONE_SMOKES  # noqa: E402
 
 
 def test_every_standalone_smoke_is_wired() -> None:
@@ -928,14 +928,15 @@ def test_runtime_env_acl_smoke_is_in_native_workflow() -> None:
 
 
 def test_every_standalone_smoke_runs_from_exactly_one_smoke_file() -> None:
-    # The runner moved to test_windows_enterprise_standalone_smokes_a.py and _b.py so the
+    # The runner moved to test_windows_enterprise_standalone_smokes_a.py, _b.py and _c.py so the
     # Python shards carry the smokes apart from these contract checks; each smoke still
     # runs on both engines, from exactly one of them.
     assert len(STANDALONE_SMOKES) == len(set(STANDALONE_SMOKES))
-    assert set(SMOKES_A).isdisjoint(SMOKES_B)
-    assert set(SMOKES_A) | set(SMOKES_B) == set(STANDALONE_SMOKES)
+    groups = (SMOKES_A, SMOKES_B, SMOKES_C)
+    assert sum(len(group) for group in groups) == len(STANDALONE_SMOKES)
+    assert set().union(*groups) == set(STANDALONE_SMOKES)
     tests = MODULE.parent / "tests"
-    for letter in ("a", "b"):
+    for letter in ("a", "b", "c"):
         body = (ROOT / "cli" / "tests" / f"test_windows_enterprise_standalone_smokes_{letter}.py").read_text(encoding="utf-8")
         assert "run_standalone_smoke(engine, smoke)" in body and "standalone_smoke_engines()" in body
     assert "enterprise-standalone-codex-writer-stuck-smoke.ps1" in STANDALONE_SMOKES
