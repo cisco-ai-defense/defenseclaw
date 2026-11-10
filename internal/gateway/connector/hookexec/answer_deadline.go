@@ -375,11 +375,17 @@ func managedNoAnswerReason(opts Options) string {
 	if opts.managedNoAnswerCode != "" {
 		return opts.managedNoAnswerCode
 	}
-	name := strings.TrimSpace(opts.ManagedGatewayServiceName)
-	if !opts.SecureClient && name != "" && managedGatewayServiceStopped(name) {
+	if managedGatewayProvenStopped(opts) {
 		return managedGatewayNotRunningReason
 	}
 	return managedGatewayNoAnswerReason
+}
+
+// managedGatewayProvenStopped reports whether the managed gateway service of
+// a hook outside Secure Client is proven stopped now.
+func managedGatewayProvenStopped(opts Options) bool {
+	name := strings.TrimSpace(opts.ManagedGatewayServiceName)
+	return !opts.SecureClient && name != "" && managedGatewayServiceStopped(name)
 }
 
 // noAnswerReason is the hook-failure reason of a call whose gateway gave no

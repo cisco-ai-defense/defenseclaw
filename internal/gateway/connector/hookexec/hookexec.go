@@ -616,6 +616,14 @@ func runHook(ctx context.Context, opts Options) int {
 		resolveManagedStandaloneFailureEvent(&opts, sp)
 		if opts.ExplainUnenrolledAccount && !sp.failOpenOnly &&
 			(reason == managedSIDUnregisteredReason || reason == managedEnrollmentPendingReason) {
+			// While the gateway service is proven stopped nothing enrolls
+			// an account, so the wait text is wrong for a new account and for
+			// an excluded one (its exclusion is read from the gateway). The
+			// call is refused, closed, with the outage text an enrolled
+			// account gets (GAP-1010).
+			if managedGatewayProvenStopped(opts) {
+				return failUnreachable(opts, sp, "closed", managedGatewayNotRunningReason)
+			}
 			return failEnrollmentRefusal(opts, sp, reason)
 		}
 		return failUnreachable(
