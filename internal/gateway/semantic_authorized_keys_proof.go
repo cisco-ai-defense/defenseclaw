@@ -1698,7 +1698,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if lexical, parsed := hookpaths.ApplyPatchLexicalCommandTargets(
 			request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome,
 		); parsed && filepath.IsAbs(clientCWD) {
-			physicalOfClean := clientStepUpAnswers(request.Input, facts, clientCWD, clientTargets)
+			physicalOfClean := clientStepUpAnswers(input, facts, clientCWD, clientTargets)
 			for _, target := range lexical {
 				operand := hookpaths.OperandPath(target, clientCWD)
 				if physical, stepsUp := physicalOfClean[operand]; stepsUp {

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"path/filepath"
+	"slices"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -94,7 +95,17 @@ func analyzeWithPatchHeaderAnswers(request *trustedActionRequest) actionfacts.Fa
 func clientStepUpAnswers(input actionfacts.Input, facts actionfacts.Facts, cwd string, answers map[string]string) map[string][]string {
 	var physical map[string][]string
 	unanswered := map[string]bool{}
-	for _, name := range actionfacts.NativeCallWriteTargets(input, facts) {
+	// The names a shell command holds in apply_patch envelopes of its own text
+	// are read as well: the shell parse projects none of a function body, but
+	// the hook client walked each header it holds, and a header that steps up a
+	// directory has the answer of its raw spelling there.
+	names := actionfacts.NativeCallWriteTargets(input, facts)
+	for _, name := range hookpaths.ApplyPatchCommandHeaderNames(input.Command) {
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	for _, name := range names {
 		raw, steps := actionfacts.StepUpSpelling(name, cwd)
 		if !steps {
 			continue
