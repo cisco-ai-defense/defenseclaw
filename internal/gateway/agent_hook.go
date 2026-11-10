@@ -1488,6 +1488,16 @@ func validAntigravityHookEvent(event string) bool {
 	}
 }
 
+// hookReplayWritesNoRow reports an exact replay of a delivery whose audit row
+// is already persisted and whose answer is not a block. A block always writes
+// its own row and decision export, whatever id the call carries: a denied
+// call must never vanish from the audit because an earlier call used the same
+// tool_use_id (GAP-1060). A hook whose correlation ledger write failed is not
+// a replay (GAP-1536).
+func hookReplayWritesNoRow(req agentHookRequest, resp agentHookResponse) bool {
+	return req.SuppressCorrelationEmit && !req.CorrelationUnavailable && resp.Action != "block"
+}
+
 // hookLLMEventExportable reports whether the hook's prompt/tool/response
 // event (the invoke_agent and execute_tool spans Galileo receives) is
 // exported. A hook whose correlation ledger write failed (disk full) is
@@ -1648,10 +1658,10 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// enforcement companion that #850 wanted to persist here is not
 	// forward-ported; the primary hook_decision log + audit row are the
 	// only durable artefacts of this decision in Part 1.
-	replay := req.SuppressCorrelationEmit && !req.CorrelationUnavailable
-	// Every verdict has its audit row, save the exact replay of a delivery
-	// whose row is already persisted: a hook whose correlation failed is
-	// audited too. The row is written first, so the export, the status
+	replay := hookReplayWritesNoRow(req, resp)
+	// Every verdict has its audit row, save the exact replay of an allowed
+	// delivery whose row is already persisted: a hook whose correlation
+	// failed is audited too, and a block always has its own row (GAP-1060). The row is written first, so the export, the status
 	// counters, the sandbox's record, the managed hook join and the span all
 	// carry the verdict the agent gets: a call whose row could not be written
 	// gets the fail-mode verdict instead of its computed allow, unless that
@@ -2198,11 +2208,12 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	// Keep observability and audit row gated by the same replay classification
 	// so a suppressed replay stays silent on both; the enforcement companion
 	// that #850 wanted here is not forward-ported in Part 1.
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
+	if !hookReplayWritesNoRow(req, resp) {
 		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 	}
-	// As in finalizeAgentHookAnswer: only an exact replay goes without its row.
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
+	// As in finalizeAgentHookAnswer: only an exact replay of an allow goes
+	// without its row.
+	if !hookReplayWritesNoRow(req, resp) {
 		if err := a.logConnectorHookAuditEnvelope(ctx, env); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] synthetic hook audit persistence failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
