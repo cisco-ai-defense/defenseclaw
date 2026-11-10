@@ -206,3 +206,33 @@ func TestWindowsEnterpriseUnsettledDeferralDoesNotRepeatItsCode(t *testing.T) {
 		t.Fatal("a plain refusal was read as the rollback's deferral")
 	}
 }
+
+// GAP-1042: an uninstall that already committed and then met a file a program
+// holds open (the Codex writer lock, requirements.toml, the hook, a guardian
+// state file) ends with the module's held code at the front, exit 1618 (the
+// MDM retries and the same uninstall finishes the clean-up), with no pending
+// transaction and no FORCE in the next step.
+func TestWindowsEnterpriseCommittedUninstallHeldFileIsRetryable(t *testing.T) {
+	tail := ". The uninstall is already committed (the services are removed and nothing is rolled back); this step of its clean-up did not finish. Next step: close that program, then run & '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall again; it finishes the clean-up (an MDM retries exit 1618 on its own)"
+	for code, message := range map[string]string{
+		"codex_state_held":        "codex_state_held: pwsh.exe (process id 4242, NT AUTHORITY\\SYSTEM) has C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.writer.lock, the Codex managed-hooks writer lock, open without delete sharing, so Setup could not remove it" + tail,
+		"codex_requirements_held": "codex_requirements_held: notepad.exe (process id 7) has C:\\ProgramData\\OpenAI\\Codex\\requirements.toml, the Codex machine requirements, open without delete sharing, so Setup could not remove or change it" + tail,
+		"hook_in_use":             "hook_in_use: a program that Windows did not name (it may run as SYSTEM, so no process id is available) has C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe, the installed hook, open without delete sharing, so Setup could not remove it" + tail,
+		"guardian_state_held":     "guardian_state_held: backup.exe (process id 9) has C:\\ProgramData\\Cisco\\DefenseClaw\\runtime\\hook_guardian_state.json, the hook guardian state file, open without delete sharing, so Setup could not remove it" + tail,
+	} {
+		if got := windowsEnterpriseMessageCode(message, "lifecycle_error"); got != code {
+			t.Fatalf("%s: code = %q", code, got)
+		}
+		result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "9.9.9")
+		result.AddError(code, windowsEnterpriseTrimHeldCodePrefix(code, message))
+		if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitBusy {
+			t.Fatalf("%s: exit = %d, want %d", code, got, enterprisestatus.WindowsExitBusy)
+		}
+		if strings.HasPrefix(result.Errors[0].Message, code+":") || strings.Contains(result.Errors[0].Message, "FORCE") {
+			t.Fatalf("%s: message = %q", code, result.Errors[0].Message)
+		}
+		if next := windowsEnterpriseHeldRollbackNextStep(false, nil); next != "" {
+			t.Fatalf("%s: a committed uninstall with no pending transaction got a next step %q", code, next)
+		}
+	}
+}

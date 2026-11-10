@@ -917,6 +917,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-config-acl-repair-smoke.ps1",
     "enterprise-standalone-held-file-restamp-smoke.ps1",
     "enterprise-standalone-codex-writer-stuck-smoke.ps1",
+    "enterprise-standalone-committed-uninstall-held-file-smoke.ps1",
     "enterprise-standalone-cowork-delivery-smoke.ps1",
     "enterprise-standalone-enumerator-environment-smoke.ps1",
     "enterprise-standalone-forced-uninstall-residue-smoke.ps1",
