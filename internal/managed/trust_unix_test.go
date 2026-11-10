@@ -31,6 +31,50 @@ func TestValidateTrustedInstallMarkerDirRejectsUserPathAndSymlink(t *testing.T) 
 	}
 }
 
+// Cisco Secure Client leaves /opt/cisco and /opt/cisco/secureclient at 0775
+// root:wheel on macOS. wheel's only member is root, so that group writer must
+// not refuse the install marker (and with it the Secure Client rules). Any
+// other group, other write, and every other OS keep the refusal.
+func TestMarkerGroupWriteTrustedOnlyForMacOSWheel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		goos string
+		perm os.FileMode
+		gid  uint32
+		want bool
+	}{
+		{name: "Secure Client 0775 root:wheel", goos: "darwin", perm: 0o775, gid: 0, want: true},
+		{name: "group write by admin", goos: "darwin", perm: 0o775, gid: 80, want: false},
+		{name: "group write by staff", goos: "darwin", perm: 0o775, gid: 20, want: false},
+		{name: "other write with wheel", goos: "darwin", perm: 0o777, gid: 0, want: false},
+		{name: "other write only", goos: "darwin", perm: 0o757, gid: 0, want: false},
+		{name: "no group write", goos: "darwin", perm: 0o755, gid: 0, want: false},
+		{name: "Linux root group", goos: "linux", perm: 0o775, gid: 0, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := markerGroupWriteTrusted(tc.goos, tc.perm, tc.gid); got != tc.want {
+				t.Fatalf("markerGroupWriteTrusted(%s, %04o, %d) = %v, want %v", tc.goos, tc.perm, tc.gid, got, tc.want)
+			}
+		})
+	}
+}
+
+// A group writer that is not root-only still refuses the marker: a temp
+// folder made group writable by the test user's own group is refused.
+func TestValidateTrustedInstallMarkerDirRefusesNonWheelGroupWriter(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("this test needs an unprivileged owner")
+	}
+	marker := t.TempDir()
+	if err := os.Chmod(marker, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker")
+	if err == nil {
+		t.Fatal("group-writable user-owned marker selected Secure Client delivery")
+	}
+}
+
 func TestValidateTrustedRuntimeDirRejectsStandardUserOwnedPath(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root-owned temp dirs are valid managed runtime dirs")

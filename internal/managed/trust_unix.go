@@ -36,9 +36,13 @@ import (
 func ValidatePathACL(path string) error { return validateStrictPathACL(path) }
 
 // ValidateTrustedInstallMarkerDir accepts a Secure Client install marker
-// only when root owns it and every ancestor, with no group, other or ACL
-// writer and no symlink. An advisory installer ancestor cannot certify a
-// deployment profile that changes hook availability.
+// only when root owns it and every ancestor, with no other or ACL writer and
+// no symlink. An advisory installer ancestor cannot certify a deployment
+// profile that changes hook availability. On macOS a group writer is accepted
+// only when the group is wheel (gid 0), whose only member is root: Cisco
+// Secure Client leaves /opt/cisco and /opt/cisco/secureclient at 0775
+// root:wheel, and refusing that would turn the Secure Client rules off on
+// every Secure Client Mac. Any other group writer is still refused.
 func ValidateTrustedInstallMarkerDir(path, label string) error {
 	if path == "" {
 		return fmt.Errorf("%s path is empty", label)
@@ -48,13 +52,35 @@ func ValidateTrustedInstallMarkerDir(path, label string) error {
 		return fmt.Errorf("resolve %s path: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		if err := validateTrustedPathElement(cur, true, label, false); err != nil {
+		if err := validateTrustedMarkerElement(cur, label); err != nil {
 			return err
 		}
 		if cur == filepath.Dir(cur) {
 			return nil
 		}
 	}
+}
+
+// validateTrustedMarkerElement is validateTrustedPathElement for one folder
+// of the install marker path, with the root-only group writer accepted
+// (markerGroupWriteTrusted).
+func validateTrustedMarkerElement(path, label string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot inspect file owner", path)
+	}
+	return validateTrustedPathElementWith(path, true, label, false, markerGroupWriteTrusted(runtime.GOOS, info.Mode().Perm(), st.Gid))
+}
+
+// markerGroupWriteTrusted reports a group writer the install marker check
+// accepts: on macOS, group write without other write when the group is wheel
+// (gid 0), whose only member is root.
+func markerGroupWriteTrusted(goos string, perm os.FileMode, gid uint32) bool {
+	return goos == "darwin" && gid == 0 && perm&0o020 != 0 && perm&0o002 == 0
 }
 
 // ValidateTrustedFilePath rejects managed_enterprise policy/input files that a
@@ -314,6 +340,13 @@ func validateTrustedRuntimeFileElement(path, label string) error {
 // equivalent of the stock known-folder create-child grant, so advisory is the
 // only ancestor relaxation this platform needs.
 func validateTrustedPathElement(path string, wantDir bool, label string, advisory bool) error {
+	return validateTrustedPathElementWith(path, wantDir, label, advisory, false)
+}
+
+// validateTrustedPathElementWith is validateTrustedPathElement; with
+// rootGroupWrite a group write bit is not a finding (the caller has checked
+// that the group is root-only), while other write still is.
+func validateTrustedPathElementWith(path string, wantDir bool, label string, advisory, rootGroupWrite bool) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
@@ -327,7 +360,11 @@ func validateTrustedPathElement(path string, wantDir bool, label string, advisor
 	if !wantDir && !info.Mode().IsRegular() {
 		return fmt.Errorf("%s: expected regular %s file", path, label)
 	}
-	if info.Mode().Perm()&0o022 != 0 {
+	writable := os.FileMode(0o022)
+	if rootGroupWrite {
+		writable = 0o002
+	}
+	if info.Mode().Perm()&writable != 0 {
 		if err := relaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
 			"%s: group/other writable permissions %04o are not trusted", path, info.Mode().Perm(),
 		)); err != nil {
