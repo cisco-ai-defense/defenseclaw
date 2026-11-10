@@ -21,8 +21,10 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 if __package__:
+    from .connector_delta import aws_bedrock
     from .connector_delta.registry import CONNECTORS
 else:
+    from connector_delta import aws_bedrock
     from connector_delta.registry import CONNECTORS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -165,11 +167,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def request(url, payload=None, *, ai=False, method=None):
     parsed = urllib.parse.urlsplit(url)
-    allowed = (
-        {"api.anthropic.com", "bedrock-runtime.us-east-1.amazonaws.com"}
-        if ai
-        else {"api.github.com", "raw.githubusercontent.com"}
-    )
+    bedrock = ai and aws_bedrock.enabled()
+    allowed = {"api.anthropic.com"} if ai else {"api.github.com", "raw.githubusercontent.com"}
+    if bedrock:
+        if url != aws_bedrock.endpoint(os.environ.get("CONNECTOR_DELTA_MODEL", "")):
+            raise ValueError("unapproved Bedrock request destination")
+        allowed = {parsed.netloc}
     foundry = bool(re.fullmatch(r"[a-z0-9-]+\.services\.ai\.azure\.com", parsed.netloc))
     if ai and foundry and parsed.path == "/anthropic/v1/messages" and not (parsed.query or parsed.fragment):
         allowed.add(parsed.netloc)
@@ -190,11 +193,9 @@ def request(url, payload=None, *, ai=False, method=None):
         "Accept": "application/json" if ai else "application/vnd.github+json",
         "User-Agent": "DefenseClaw-Connector-Monitor",
     }
-    if ai and parsed.netloc == "bedrock-runtime.us-east-1.amazonaws.com":
-        headers["Authorization"] = "Bearer " + os.environ["CONNECTOR_DELTA_BEDROCK_API_KEY"]
-    elif ai and azure:
+    if ai and azure and not bedrock:
         headers["api-key"] = os.environ["CONNECTOR_DELTA_AI_API_KEY"]
-    elif ai:
+    elif ai and not bedrock:
         headers.update(
             {
                 "x-api-key": os.environ.get("CONNECTOR_DELTA_AI_API_KEY")
@@ -206,6 +207,8 @@ def request(url, payload=None, *, ai=False, method=None):
         headers["Authorization"] = "Bearer " + os.environ["GH_TOKEN"]
     data = None if payload is None else json.dumps(payload).encode()
     headers["Content-Type"] = "application/json"
+    if bedrock:
+        headers.update(aws_bedrock.signed_headers(url, data))
     context = ssl.create_default_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_3
     opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=context))
@@ -482,12 +485,10 @@ def ai_review(packet, fetch=request, *, verify=False):
     if len(json.dumps(wire)) > MAX_CONTEXT:
         raise AIUnavailableError("AI evidence context exceeds bound; manual review required")
     prompt = PROMPT + COUNTER_REVIEW_PROMPT if verify else PROMPT
-    bedrock = bool(os.environ.get("CONNECTOR_DELTA_BEDROCK_API_KEY")) and not os.environ.get(
-        "CONNECTOR_DELTA_AI_ENDPOINT"
-    )
-    model = os.environ.get("CONNECTOR_DELTA_MODEL") or (
-        "us.anthropic.claude-haiku-4-5-20251001-v1:0" if bedrock else "claude-haiku-4-5-20251001"
-    )
+    bedrock = aws_bedrock.enabled()
+    if bedrock and os.environ.get("CONNECTOR_DELTA_AI_ENDPOINT"):
+        raise ValueError("Bedrock does not accept an endpoint override")
+    model = os.environ.get("CONNECTOR_DELTA_MODEL") or "claude-haiku-4-5-20251001"
     payload = {"max_tokens": 4000, "system": prompt, "messages": [{"role": "user", "content": json.dumps(wire)}]}
     url = os.environ.get("CONNECTOR_DELTA_AI_ENDPOINT") or "https://api.anthropic.com/v1/messages"
     azure = bool(re.fullmatch(r"[a-z0-9-]+\.openai\.azure\.com", urllib.parse.urlsplit(url).netloc))
@@ -555,13 +556,13 @@ def ai_review(packet, fetch=request, *, verify=False):
         if effort := os.environ.get("CONNECTOR_DELTA_REASONING_EFFORT"):
             payload["reasoning_effort"] = effort
     elif bedrock:
-        url = "https://bedrock-runtime.us-east-1.amazonaws.com/model/" + urllib.parse.quote(model, safe="") + "/invoke"
+        url = aws_bedrock.endpoint(model)
         payload["anthropic_version"] = "bedrock-2023-05-31"
     else:
         payload["model"] = model
     if not azure:
         payload["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
-        if "opus-4-5" in model and os.environ.get("CONNECTOR_DELTA_REASONING_EFFORT") == "high":
+        if os.environ.get("CONNECTOR_DELTA_REASONING_EFFORT") == "high":
             payload.update(max_tokens=8000, thinking={"type": "enabled", "budget_tokens": 2048})
     try:
         response = fetch(url, payload, ai=True)

@@ -34,6 +34,10 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && vars.CONNECTOR_DELTA_MONITOR_ENABLED == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     outputs:
       ready: ${{ steps.bundle.outputs.ready }}
     steps:
@@ -60,10 +64,32 @@ jobs:
           done < <(jq -r '.[].id' monitor/prior.json)
           echo '::error::Prior monitor runs exist but no checkpoint is recoverable. Restore state; do not reset history.'
           exit 1
+      - name: Assume the SRE Bedrock role with GitHub OIDC
+        id: bedrock
+        if: ${{ vars.CONNECTOR_DELTA_AI_ENABLED == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::422940237045:role/defenseclaw-connector-delta-gha-oidc-role
+          aws-region: us-west-2
+          allowed-account-ids: '422940237045'
+          mask-aws-account-id: true
+          role-duration-seconds: 1800
+          retry-max-attempts: 3
+          action-timeout-s: 120
+          output-env-credentials: false
+          output-credentials: true
+          unset-current-credentials: true
       - name: Compare unseen merged PRs with current DefenseClaw main
         env:
           GH_TOKEN: ${{ github.token }}
-          CONNECTOR_DELTA_AI_ENABLED: 'false' # Local LLM evaluation first; SRE will provision CI access.
+          CONNECTOR_DELTA_AI_ENABLED: ${{ vars.CONNECTOR_DELTA_AI_ENABLED == 'true' }}
+          CONNECTOR_DELTA_AI_PROVIDER: bedrock
+          CONNECTOR_DELTA_MODEL: arn:aws:bedrock:us-west-2:422940237045:application-inference-profile/j71zf47bc2t6
+          CONNECTOR_DELTA_REASONING_EFFORT: high
+          AWS_REGION: us-west-2
+          AWS_ACCESS_KEY_ID: ${{ steps.bedrock.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.bedrock.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.bedrock.outputs.aws-session-token }}
         run: python3 scripts/connector_delta_monitor.py analyze --state monitor/checkpoint/state.json --output monitor --limit 100
       - name: Prepare metadata-only notices and candidate checkpoint
         id: bundle

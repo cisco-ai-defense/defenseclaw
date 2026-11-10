@@ -55,12 +55,16 @@ Conflict classifications, evidence and model output stay in the owner-readable
 `private-report.json`, never uploaded or included in notices/logs. On hosted CI
 this file is ephemeral; reproduce a PR locally to inspect it. There is no durable
 private report archive or private email delivery in this version.
-AI is a second layer after file selection and static checks. CI keeps it off until
-SRE provisions access; local use accepts `CONNECTOR_DELTA_AI_ENDPOINT`,
+AI is a second layer after static checks. CI opts in with `CONNECTOR_DELTA_AI_ENABLED=true`
+and uses main-only GitHub OIDC, not API keys. Temporary AWS credentials reach only the
+analysis step. Bedrock selects `CONNECTOR_DELTA_AI_PROVIDER=bedrock`, a regional
+application inference-profile ARN in `CONNECTOR_DELTA_MODEL`, and `AWS_REGION=us-west-2`.
+The endpoint/region must match; no direct-model or bearer-key fallback exists.
+Other local routes accept `CONNECTOR_DELTA_AI_ENDPOINT`,
 `CONNECTOR_DELTA_AI_API_KEY` and `CONNECTOR_DELTA_MODEL` in the process environment.
 Supported routes are Anthropic, Azure Foundry Claude, Azure OpenAI chat completions
 and Bedrock. Azure endpoints must match the vendor host/path allowlist; redirects
-are refused. Optional `CONNECTOR_DELTA_REASONING_EFFORT` controls reasoning effort.
+are refused. `CONNECTOR_DELTA_REASONING_EFFORT=high` enables Claude thinking even with a profile ARN.
 Selected snippets/deltas leave the host; no model tools or execution are granted.
 
 State is a main-only Actions artifact retained 90 days. Missing state after prior
