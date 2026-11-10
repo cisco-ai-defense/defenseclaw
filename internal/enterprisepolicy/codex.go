@@ -689,7 +689,7 @@ func codexMissingHookConflicts(state State) []string {
 func codexRepublishAdvice(opts Options) string {
 	if opts.goos() == "windows" {
 		return "run " + managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", "standalone") +
-			" as an administrator (Setup /repair does the same)"
+			" as an administrator"
 	}
 	group := "linux"
 	if opts.goos() == "darwin" {
