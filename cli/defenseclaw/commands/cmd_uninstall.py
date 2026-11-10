@@ -1334,6 +1334,82 @@ def _top_level_backup_records(connector: str) -> tuple[str, ...]:
     )
 
 
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """json.loads hook: a key given twice is an error, not a silent last-one-wins.
+
+    The Go writers marshal structs and maps, so they cannot emit a duplicate key. A file that has one was not
+    written by DefenseClaw, and a plain parse would show only the last copy of the key and hide what an earlier
+    copy held (GAP-0945).
+    """
+    found: dict[str, object] = {}
+    for key, value in pairs:
+        if key in found:
+            raise ValueError(f"the key {key!r} is given twice")
+        found[key] = value
+    return found
+
+
+# The deepest nesting a file DefenseClaw wrote can hold (its records nest a few levels); a deeper document is
+# not one of its files, and the walk below is iterative so a small deeply nested file cannot exhaust the stack.
+_JSON_MAX_DEPTH = 256
+
+
+def _check_utf8_strings(value: object) -> None:
+    """Raise ValueError for a string holding an unpaired surrogate, or for nesting deeper than _JSON_MAX_DEPTH.
+
+    The Go writers marshal valid UTF-8 and cannot emit one; Python parses the escape into a string it cannot
+    encode, so a file that has one was not written by DefenseClaw (GAP-0945). The walk keeps its own stack, so
+    no document, however deep, can raise RecursionError here.
+    """
+    pending: list[tuple[object, int]] = [(value, 1)]
+    while pending:
+        item, depth = pending.pop()
+        if isinstance(item, str):
+            _check_no_surrogate(item)
+        elif isinstance(item, (list, dict)):
+            if depth > _JSON_MAX_DEPTH:
+                raise ValueError(f"it is nested deeper than {_JSON_MAX_DEPTH} levels")
+            if isinstance(item, dict):
+                for key in item:
+                    _check_no_surrogate(key)
+                item = list(item.values())
+            pending.extend((child, depth + 1) for child in item)
+
+
+def _check_no_surrogate(text: str) -> None:
+    if re.search("[\ud800-\udfff]", text):
+        raise ValueError("a string holds an unpaired surrogate")
+
+
+def _json_loads(raw: bytes | str) -> object:
+    """json.loads with no repeated key at any level; a document too deep for the parser is a ValueError."""
+    try:
+        return json.loads(raw, object_pairs_hook=_unique_keys)
+    except RecursionError as exc:
+        raise ValueError("it is nested too deeply to read") from exc
+
+
+def _loads_as_written(raw: bytes | str) -> object:
+    """Parse JSON the way a file DefenseClaw wrote can read: no repeated key at any level, no unpaired surrogate,
+    nesting within _JSON_MAX_DEPTH. Anything else raises ValueError (a malformed file, never a crash)."""
+    document = _json_loads(raw)
+    _check_utf8_strings(document)
+    return document
+
+
+def _loads_top_level_record(raw: bytes | str) -> object:
+    """Parse a backup record Setup copied byte for byte: only its top level is judged, so the depth of a captured
+    value (the extra fields of a hook handler) never rejects it. Repeated keys are still refused; an unpaired
+    surrogate is refused in the top-level keys and string values the record shape reads."""
+    document = _json_loads(raw)
+    if isinstance(document, dict):
+        for key, value in document.items():
+            _check_no_surrogate(key)
+            if isinstance(value, str):
+                _check_no_surrogate(value)
+    return document
+
+
 # The keys of each top-level record, from the structs that write it
 # (claudeCodeBackup, codexConfigBackup and the earlier codexBackup): the keys
 # every record carries, and every key a record may carry. A file at the name
@@ -1372,7 +1448,7 @@ def _is_setup_top_level_backup(path: str, move_digests: dict[str, str] | None = 
     required, allowed = shape
     raw = _small_file_bytes(path)
     try:
-        document = json.loads(raw) if raw is not None else None
+        document = _loads_top_level_record(raw) if raw is not None else None
     except ValueError:
         return False
     if raw is None:
@@ -1397,18 +1473,71 @@ _CONNECTOR_HOOK_SCRIPTS = {
 _CONNECTOR_SETUP_RECORDS = {"hermes": ("hermes-home-setup.json",)}
 
 
-def _is_empty_lock(raw: bytes) -> bool:
-    """The lifecycle lock Setup creates is an empty file."""
-    return raw == b""
+def _empty_lock_flaw(raw: bytes) -> str:
+    """Why *raw* is not the lifecycle lock Setup creates (an empty file), or ""."""
+    return "" if raw == b"" else "it is not empty"
 
 
-def _is_plugin_answer_store(raw: bytes) -> bool:
-    """hermes-plugin-entrypoints.json: one object whose only key is "answers" (hermes_vendor_manifest_store.go)."""
+# The most answers the gateway keeps (hermesStoreMaxEntries) and the key of one (hermesManifestDigest: a sha256 in hex).
+_PLUGIN_ANSWER_MAX = 256
+_PLUGIN_ANSWER_KEY = re.compile(r"[0-9a-f]{64}")
+_GO_JSON_SHORT_ESCAPES = {'"': '\\"', "\\": "\\\\", "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _go_json_string(text: str) -> str:
+    """*text* as Go's encoding/json writes a string: HTML characters and U+2028/U+2029 as \\u escapes, the rest raw."""
+    return '"' + "".join(
+        _GO_JSON_SHORT_ESCAPES.get(ch)
+        or (f"\\u{ord(ch):04x}" if ord(ch) < 0x20 or ch in "<>&\u2028\u2029" else ch)
+        for ch in text
+    ) + '"'
+
+
+def _plugin_answer_flaw(answer: object) -> str:
+    """Why *answer* is not one answer as the gateway writes it (hermesStoredAnswer), or "".
+
+    The shape is "entrypoints" (strings) and "seen" (an int64).
+    """
+    if not isinstance(answer, dict) or set(answer) != {"entrypoints", "seen"}:
+        return "an answer does not have exactly the keys entrypoints and seen"
+    entrypoints, seen = answer["entrypoints"], answer["seen"]
+    if not isinstance(entrypoints, list) or not all(isinstance(entrypoint, str) for entrypoint in entrypoints):
+        return "an answer lists entrypoints that are not strings"
+    if type(seen) is not int or not -(2**63) <= seen < 2**63:
+        return "an answer has a seen value that is not a 64-bit integer"
+    return ""
+
+
+def _plugin_answer_store_flaw(raw: bytes) -> str:
+    """Why *raw* is not hermes-plugin-entrypoints.json as the gateway writes it, or "".
+
+    The gateway writes json.Marshal of one object whose only key is "answers": at most 256 answers, each keyed by
+    a manifest digest (64 lowercase hex digits) and shaped as hermesStoredAnswer, keys sorted, no space, no
+    repeated key, no unpaired surrogate. A file that is anything else, down to the last byte, was not written
+    by it, and its answers are the account's (GAP-0945).
+    """
     try:
-        document = json.loads(raw)
-    except ValueError:
-        return False
-    return isinstance(document, dict) and set(document) == {"answers"} and isinstance(document["answers"], dict)
+        document = _loads_as_written(raw)
+    except ValueError as exc:
+        return f"it is not JSON the gateway writes ({exc})"
+    if not isinstance(document, dict) or set(document) != {"answers"} or not isinstance(document["answers"], dict):
+        return "it is not one object whose only key is answers"
+    answers = document["answers"]
+    if len(answers) > _PLUGIN_ANSWER_MAX:
+        return "it holds more answers than the gateway keeps"
+    for key, answer in answers.items():
+        if not _PLUGIN_ANSWER_KEY.fullmatch(key):
+            return "an answer is not keyed by a manifest digest"
+        if flaw := _plugin_answer_flaw(answer):
+            return flaw
+    written = "".join(
+        f'{_go_json_string(key)}:{{"entrypoints":[{",".join(_go_json_string(e) for e in answers[key]["entrypoints"])}],'
+        f'"seen":{answers[key]["seen"]}}}{"," if index < len(answers) - 1 else ""}'
+        for index, key in enumerate(sorted(answers))
+    )
+    if raw != ('{"answers":{' + written + "}}").encode():
+        return "its bytes are not what the gateway writes (spacing, order or spelling of the JSON differs)"
+    return ""
 
 
 _FLAT_HOOK_RECORD_LINE = re.compile(
@@ -1416,29 +1545,45 @@ _FLAT_HOOK_RECORD_LINE = re.compile(
 )
 
 
-def _is_hermes_flat_hook_record(raw: bytes) -> bool:
-    """hooks/.hookcfg.hermes: the connector, fail mode and optional source lines (hookRuntimeFlatRecord)."""
+def _hermes_flat_hook_record_flaw(raw: bytes) -> str:
+    """Why *raw* is not hooks/.hookcfg.hermes (the connector, fail mode and optional source lines), or ""."""
     try:
         lines = raw.decode("ascii").splitlines()
     except UnicodeDecodeError:
-        return False
-    return (
+        return "it is not ASCII text"
+    if (
         "DEFENSECLAW_CONNECTOR=hermes" in lines
         and any(line.startswith("DEFENSECLAW_FAIL_MODE=") for line in lines)
         and all(_FLAT_HOOK_RECORD_LINE.fullmatch(line) for line in lines)
-    )
+    ):
+        return ""
+    return "it is not the connector, fail mode and source lines Setup writes"
 
 
 # The other records Setup and the gateway keep for a connector in the folder they ran in, by path
-# below the folder and the test of the bytes Setup writes there. A file of another shape at the
-# name belongs to the account and stays (GAP-0945).
+# below the folder, the test of the bytes Setup writes there, and whether the gateway running in that
+# folder rewrites the file as it works (its scanner answers). A file of another shape at the name
+# belongs to the account and stays (GAP-0945).
 _CONNECTOR_STATE_RECORD_SHAPES = {
     "hermes": (
-        ((".hermes-lifecycle.lock",), _is_empty_lock),
-        (("hermes-plugin-entrypoints.json",), _is_plugin_answer_store),
-        (("hooks", ".hookcfg.hermes"), _is_hermes_flat_hook_record),
+        ((".hermes-lifecycle.lock",), _empty_lock_flaw, False),
+        (("hermes-plugin-entrypoints.json",), _plugin_answer_store_flaw, True),
+        (("hooks", ".hookcfg.hermes"), _hermes_flat_hook_record_flaw, False),
     ),
 }
+
+
+def _move_aside(path: str) -> str:
+    """Rename *path* to a free name beside it and return that name; nothing is overwritten or deleted."""
+    for number in range(1, 100):
+        aside = f"{path}.moved-aside" + ("" if number == 1 else f"-{number}")
+        try:
+            os.link(path, aside)
+        except FileExistsError:
+            continue
+        os.unlink(path)
+        return aside
+    raise OSError(errno.EEXIST, "every moved-aside name is taken")
 
 
 def _small_file_bytes(path: str) -> bytes | None:
@@ -1457,7 +1602,7 @@ def _small_file_bytes(path: str) -> bytes | None:
 
 def move_recorded_record_paths() -> tuple[str, ...]:
     """The paths below a data folder, with "/" separators, of the records whose digest a data_dir move records."""
-    state = ("/".join(parts) for records in _CONNECTOR_STATE_RECORD_SHAPES.values() for parts, _ in records)
+    state = ("/".join(parts) for records in _CONNECTOR_STATE_RECORD_SHAPES.values() for parts, _, _ in records)
     return (*_TOP_LEVEL_BACKUP_SHAPES, *state)
 
 
@@ -1504,7 +1649,9 @@ def _remove_earlier_folder_connector_records(plan: UninstallPlan) -> list[str]:
     a regular file this account owns, in a real folder this account owns, for a
     connector this uninstall tore down; the folder, the config, the audit store
     and every other file stay. Returns what DefenseClaw wrote and could not
-    remove, one line each, so the caller does not report a clean uninstall.
+    remove, one line each, so the caller does not report a clean uninstall. The scanner
+    answers the gateway rewrote after the move are kept and named in a warning; they hold
+    no credential, so they do not fail the uninstall.
     """
     names = tuple(name for name in plan.connectors if name in _MOVED_RECORD_CONNECTORS)
     stayed: list[str] = []
@@ -1513,8 +1660,10 @@ def _remove_earlier_folder_connector_records(plan: UninstallPlan) -> list[str]:
     for folder in plan.record_dirs:
         if config_module._same_folder(folder, plan.records_dir):
             continue
-        removed, left = _remove_connector_records_in(folder, names)
+        removed, left, kept = _remove_connector_records_in(folder, names)
         stayed.extend(left)
+        for note in kept:
+            ux.warn(f"kept in the earlier data folder {folder}: {note}")
         if removed:
             ux.ok(f"removed {removed} connector record(s) the earlier data folder {folder} still held")
     return stayed
@@ -1592,7 +1741,7 @@ def _setup_backup_record_stem(path: str, connector: str) -> str:
     name = os.path.basename(path)
     raw = _small_file_bytes(path)
     try:
-        document = json.loads(raw) if raw is not None else None
+        document = _loads_as_written(raw) if raw is not None else None
     except ValueError:
         return ""
     if not isinstance(document, dict) or document.get("connector") != connector:
@@ -1610,17 +1759,22 @@ def _setup_backup_record_stem(path: str, connector: str) -> str:
     return stem if name == f"{stem}.json" else ""
 
 
-def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[int, list[str]]:
-    """Remove *names*' records from one earlier folder; return the count removed and what stayed."""
+def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[int, list[str], list[str]]:
+    """Remove *names*' records from one earlier folder.
+
+    Returns the count removed, what stayed that DefenseClaw wrote or could not safely open (an error), and
+    what was kept without being an error: scanner answers the gateway wrote after the move.
+    """
     removed = 0
     stayed: list[str] = []
+    kept: list[str] = []
     if not os.path.lexists(folder):
-        return removed, stayed
+        return removed, stayed, kept
     linked = _link_on_path(folder)
     if linked or not _account_owned_real_dir(folder):
         # Replaced since the plan was read, or reached through a link: nothing under it is ours to follow.
         why = f"{linked} is a link on its path" if linked else "not a folder this account owns"
-        return removed, [f"{folder} ({why}, so it was not entered)"]
+        return removed, [f"{folder} ({why}, so it was not entered)"], kept
     hooks = os.path.join(folder, "hooks")
     backups = os.path.join(folder, "connector_backups")
     # What the move recorded of this folder; a folder it did not record has nothing proven unchanged.
@@ -1664,7 +1818,7 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 drop(os.path.join(hooks, script))
         for record in _CONNECTOR_SETUP_RECORDS.get(name, ()):
             drop(os.path.join(folder, record))
-        for parts, written_by_setup in _CONNECTOR_STATE_RECORD_SHAPES.get(name, ()):
+        for parts, flaw_of, gateway_rewrites in _CONNECTOR_STATE_RECORD_SHAPES.get(name, ()):
             path = os.path.join(folder, *parts)
             if len(parts) > 1 and not real_dir(os.path.join(folder, *parts[:-1])):
                 continue
@@ -1674,16 +1828,38 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 drop(path)  # a link or another account's file is reported and never opened
                 continue
             raw = _small_file_bytes(path)
-            # The shape says it is the record Setup writes; the digest says it is still the copy the move left.
-            if (
-                raw is not None
-                and written_by_setup(raw)
-                and hashlib.sha256(raw).hexdigest() == move_digests.get("/".join(parts))
-            ):
+            # The shape says it is a record DefenseClaw writes; the digest says it is still the copy DefenseClaw last
+            # recorded: Setup at the move, or the gateway that ran in this folder as it wrote the file (the
+            # connector package records each such write beside the move). A copy that differs was changed by the
+            # account, or by a gateway that did not record, and DefenseClaw cannot tell which, so it is kept. The
+            # scanner answers hold no credential: keeping them is reported, not an error, so a clean uninstall does
+            # not fail because a gateway of an older release answered once after the move.
+            flaw = flaw_of(raw) if raw is not None else "it could not be read"
+            if flaw and gateway_rewrites:
+                # Scanner answers of a shape the gateway cannot write are the account's: moved off the name the
+                # gateway reads, never deleted, and named with the reason. They hold no credential, so this is
+                # a notice, not a failure.
+                why = f"{path} (not the record DefenseClaw writes: {flaw}; "
+                try:
+                    aside = _move_aside(path)
+                except OSError as exc:
+                    stayed.append(f"{why}it could not be moved aside: {exc})")
+                else:
+                    kept.append(f"{why}it was moved aside to {aside}, not deleted)")
+            elif flaw:
+                # The name belongs to DefenseClaw, so a file of another shape there is reported, not removed.
+                stayed.append(f"{path} (not the record DefenseClaw writes, so it was kept: {flaw})")
+            elif hashlib.sha256(raw).hexdigest() == move_digests.get("/".join(parts)):
                 drop(path)
             else:
-                # The name belongs to DefenseClaw, so a file of another shape there is reported, not removed.
-                stayed.append(f"{path} (not the record Setup writes, so it was kept)")
+                note = (
+                    f"{path} (no longer the copy DefenseClaw recorded: it was changed since, by you or by a gateway "
+                    "that did not record its write, so it was kept"
+                )
+                if gateway_rewrites:
+                    kept.append(note + "; it holds scanner answers and no credential, and you can delete it)")
+                else:
+                    stayed.append(note + ")")
         for record in _top_level_backup_records(name):
             path = os.path.join(folder, record)
             # A file of another shape at the name is the account's own; a link there is reported by drop.
@@ -1717,14 +1893,14 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
             with contextlib.suppress(OSError):
                 os.rmdir(backup)
     if _connector_state_remains(folder):
-        return removed, stayed
+        return removed, stayed, kept
     for record in _FOLDER_RECORDS:
         drop(os.path.join(folder, record))
     for path in (hooks, backups):
         if real_dir(path):
             with contextlib.suppress(OSError):
                 os.rmdir(path)
-    return removed, stayed
+    return removed, stayed, kept
 
 
 def _is_generated_hook_script(path: str) -> bool:
@@ -3192,6 +3368,7 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         ux.echo(
             f"  • {ux.bold('earlier data_dir:')} {folder}: the setup records left there are read; "
             "the ones Setup wrote and nobody changed are removed; "
+            "scanner answers the gateway wrote there since the move are kept and named; "
             "this uninstall does not remove that folder"
         )
     if plan.store_dir and plan.connectors and not plan.remove_data_dir:

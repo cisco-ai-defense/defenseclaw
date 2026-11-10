@@ -58,7 +58,7 @@ func (h *hookReportedMCPServers) retainRefused(connector, home, session, cwd, na
 	}
 	set.seen = now
 	for i, held := range set.defs {
-		if sameMCPDefinition(held, entry) {
+		if sameHeldDefinition(held, entry) {
 			// The latest report is the last, so the listed record names it.
 			set.defs = append(append(set.defs[:i:i], set.defs[i+1:]...), entry)
 			return true
@@ -146,11 +146,11 @@ func (a *APIServer) heldRefusalsAllowed(ctx context.Context, cfg *config.Config,
 		return false
 	}
 	home, _ := callerHomeForAssets(ctx)
-	defs, overflow := a.hookMCP.heldRefusals(connector, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, time.Now())
+	held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, heldScopes(probe.WorkspaceDir), time.Now())
 	if overflow {
 		return false
 	}
-	for _, def := range defs {
+	for _, def := range held {
 		verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, def, true))
 		if !verdict.Enabled || verdict.Source != "admin-allow" {
 			return false
@@ -197,6 +197,9 @@ type overflowHold struct {
 	until   time.Time
 	session string
 	entry   config.MCPServerEntry
+	// more says the session met another definition of the name that was not
+	// kept: the hold is then never released by the admission of entry.
+	more bool
 }
 
 func unrecordedKey(connector, home string) string {
@@ -225,6 +228,7 @@ func (h *hookReportedMCPServers) holdOverflow(connector, home, session, cwd, nam
 	held, present := holds[key]
 	if present && now.Before(held.until) {
 		held.until = now.Add(mcpResolvedTTL)
+		held.more = held.more || !sameHeldDefinition(held.entry, entry)
 		return
 	}
 	if !present && len(holds) >= hookOverflowPerAccount {

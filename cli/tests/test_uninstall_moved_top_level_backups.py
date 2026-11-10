@@ -227,3 +227,45 @@ def test_many_other_backup_named_files_do_not_make_the_folder_history_unreadable
     assert stayed == []
     assert not (home / "claudecode_backup.json").exists()
     assert (home / ("0000-" + "x" * 125 + "_backup.json")).exists(), "a file of the account at another name stays"
+
+
+def _deep_claude_backup(depth):
+    # Built as text: a hook handler may carry extra fields of any shape, and the writer copies them as they are.
+    nested = "[" * depth + "0" + "]" * depth
+    return (
+        "{\"original_hooks\": {\"PreToolUse\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"echo hello\", "
+        f"\"metadata\": {nested}}}]}}]}}, \"had_hooks_key\": true, \"had_env_key\": false}}\n"
+    )
+
+
+def test_a_backup_setup_wrote_with_deeply_nested_hook_fields_is_removed_after_a_move(tmp_path, monkeypatch):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    _setup_backups(home)
+    (home / "claudecode_backup.json").write_text(_deep_claude_backup(970))
+    first, second = tmp_path / "state", tmp_path / "state2"
+    _move(first)
+    _move(second)
+    assert (first / "claudecode_backup.json").is_file()
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, second, ["claudecode", "codex"]))
+
+    assert stayed == []
+    for folder in (home, first):
+        assert not (folder / "claudecode_backup.json").exists(), folder
+
+
+def test_a_backup_too_deep_for_the_parser_is_kept_without_failing_the_uninstall(tmp_path, monkeypatch):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    _setup_backups(home)
+    deep = _deep_claude_backup(20000)
+    (home / "claudecode_backup.json").write_text(deep)
+    first = tmp_path / "state"
+    _move(first)
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, first, ["claudecode", "codex"]))
+
+    assert stayed == []
+    assert (home / "claudecode_backup.json").read_text() == deep
+    assert not (home / "codex_config_backup.json").exists()
