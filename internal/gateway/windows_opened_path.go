@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -269,19 +268,7 @@ func windowsPathRoot(slashed string) (root, rest string, ok bool) {
 // windowsLocalHost reports a server name that is this machine: localhost,
 // a loopback address, or the machine name.
 func windowsLocalHost(host string) bool {
-	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
-		return true
-	}
-	// An IPv6 literal is spelled with dashes and a reserved domain in a
-	// share name (::1 is 0--1.ipv6-literal.net).
-	if literal, ok := strings.CutSuffix(strings.ToLower(host), ".ipv6-literal.net"); ok {
-		host = strings.ReplaceAll(literal, "-", ":")
-	}
-	if address := net.ParseIP(host); address != nil {
-		return address.IsLoopback()
-	}
-	name, err := windowsLocalHostname()
-	return err == nil && name != "" && strings.EqualFold(host, name)
+	return actionfacts.WindowsLocalHost(host, windowsLocalHostname)
 }
 
 // pathFactSpelling is the spelling a path fact is read by: the resolved path,
