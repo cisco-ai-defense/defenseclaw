@@ -356,7 +356,7 @@ def test_claude_chain_view_and_guard_drift(tmp_path, monkeypatch):
     problems = hook_integrity.hook_launcher_problems(cfg, "claudecode")
     assert len(problems) == 1 and "missing or changed" in problems[0]
     assert "defenseclaw setup claude-code" in problems[0].repair
-    edited = {**handler, "args": [*words[:-1], "0"]}
+    edited = {**handler, "args": [*words[:-2], "0", ")"]}
     assert hook_integrity.claude_launcher_guard_view(edited) is edited
     neutral = hook_integrity._claude_chain_wrapper_words(compare, str(guard), str(approved), launcher, "Stop")
     assert neutral[-2] == "1"
@@ -377,7 +377,7 @@ def test_claude_chain_profile_bound_open_answer_is_owned(tmp_path):
     handler = {"command": command, "args": words}
     assert words[-2] == "1"
     assert hook_integrity.claude_launcher_guard_view(handler)["command"] == launcher
-    changed = {**handler, "args": [*words[:-1], "2"]}
+    changed = {**handler, "args": [*words[:-2], "2", ")"]}
     assert hook_integrity.claude_launcher_guard_view(changed) is changed
     direct = {"command": guard, "args": [
         "launcher-guard", launcher, "hook", "--connector", "claudecode",
@@ -410,7 +410,7 @@ def test_claude_chain_view_reads_the_system_directory_as_windows_spells_it(monke
     ]
     # The benign twin stays protected: an edited answer, a compare program
     # that is not the system directory's, and a changed word stay unowned.
-    edited = {**handler, "args": [*words[:-1], "0"]}
+    edited = {**handler, "args": [*words[:-2], "0", ")"]}
     assert hook_integrity.claude_launcher_guard_view(edited) is edited
     elsewhere = {**handler, "args": hook_integrity._claude_chain_wrapper_words(
         "C:\\Temp\\fc.exe", guard, approved, launcher, event)}
@@ -439,7 +439,7 @@ def test_managed_claude_guard_view_carries_closed_and_neutral_answers(monkeypatc
             "command": launcher,
             "args": ["hook", "--connector", "claudecode", "--enterprise-managed"],
         }
-        edited = {**handler, "args": [*words[:-1], "0"]}
+        edited = {**handler, "args": [*words[:-2], "0", ")"]}
         assert hook_integrity.claude_launcher_guard_view(edited) is edited
 
 

@@ -103,6 +103,17 @@ func TestManagedClaudeCodeWrapperRunsUnderCmdExe(t *testing.T) {
 				tc.event, tc.status, got.code, strings.Contains(got.stdout, "guard-ran"), tc.wantCode, tc.guardRuns, got.stdout, got.stderr)
 		}
 	}
+	// A guard that is there but is not a program answers by the event's code
+	// too: cmd.exe cannot start it, and the exit must not be read as success.
+	if err := os.WriteFile(guard, []byte("not a program"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for event, want := range map[string]int{"PreToolUse": 2, "UserPromptSubmit": 2, "Stop": 1} {
+		command, args := claudeManagedGuardWrapperInvocation(event, launcher, hookArgs)
+		if got := runRegisteredWrapper(t, command, args, "0"); got.code != want {
+			t.Errorf("%s, guard is not a program: exit %d (want %d), stdout %q, stderr %q", event, got.code, want, got.stdout, got.stderr)
+		}
+	}
 	// A guard that is not there answers by the event's documented code and
 	// names the guard and the repair.
 	if err := os.Remove(guard); err != nil {
@@ -144,8 +155,14 @@ func TestPerUserClaudeCodeChainWrapperRunsUnderCmdExe(t *testing.T) {
 			t.Errorf("%s (open %t), guard status %s: exit %d, stdout %q, stderr %q; want exit %d", tc.event, tc.open, tc.status, got.code, got.stdout, got.stderr, tc.wantCode)
 		}
 	}
-	// A guard that differs from the approved copy is not started.
-	if err := os.WriteFile(guard, []byte("changed"), 0o700); err != nil {
+	// A guard that differs from the approved copy is not started. The changed
+	// file is the same program with a byte appended, so it would run and print
+	// if the compare let it through.
+	body, err := os.ReadFile(approved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(guard, append(body, 0), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	command, args := wrapper("UserPromptSubmit", false)
