@@ -125,13 +125,50 @@ func isLocalWindowsPatchTarget(value string) bool {
 		WindowsLocalHost(parts[0], patchLocalHostname)
 }
 
-// patchDirectivePath is the path a directive line names. The apply_patch
-// readers take the directive line without the white space that ends it, so a
-// target spelled with trailing white space names the file without it, and a
-// Windows name then also drops trailing dots; the rules must judge that opened
-// name, not read the padded line as an unreadable envelope.
+// patchDirectives are the directive lines of an apply_patch envelope that name
+// a file, with the operation each one gives.
+var patchDirectives = []struct {
+	prefix string
+	kind   string
+}{
+	{prefix: "*** Add File: ", kind: "add"},
+	{prefix: "*** Update File: ", kind: "update"},
+	{prefix: "*** Delete File: ", kind: "delete"},
+	{prefix: "*** Move to: ", kind: "move"},
+}
+
+// isPatchDirectiveLine reports a line that names a file of the envelope.
+func isPatchDirectiveLine(line string) bool {
+	for _, directive := range patchDirectives {
+		if strings.HasPrefix(line, directive.prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// PatchTargetName is the name an apply_patch tool opens for the text a
+// directive line gives after its prefix. The tools take that text without any
+// tab or carriage return, wherever it stands, and without the white space that
+// ends it; a Windows name then also drops trailing dots. A spelling with such
+// characters therefore names the plain file, so every reader of an envelope
+// judges this name and none reads the spelling or treats it as an unreadable
+// envelope. White space that begins the name is part of the file name.
+func PatchTargetName(text string) string {
+	if strings.ContainsAny(text, "\t\r") {
+		text = strings.Map(func(r rune) rune {
+			if r == '\t' || r == '\r' {
+				return -1
+			}
+			return r
+		}, text)
+	}
+	return strings.TrimRightFunc(text, unicode.IsSpace)
+}
+
+// patchDirectivePath is the name a directive line gives its file.
 func patchDirectivePath(line, prefix string) string {
-	return strings.TrimRightFunc(strings.TrimPrefix(line, prefix), unicode.IsSpace)
+	return PatchTargetName(strings.TrimPrefix(line, prefix))
 }
 
 func appendExtractedPatch(out *extractedInput, text string) {
@@ -162,9 +199,6 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 	}
 
 	normalized := strings.ReplaceAll(text, "\r\n", "\n")
-	if strings.ContainsRune(normalized, '\r') {
-		return fail(StatusInvalid, IssueInvalidSyntax)
-	}
 	normalized = strings.TrimSuffix(normalized, "\n")
 	lines := strings.Split(normalized, "\n")
 	if len(lines) < 3 || lines[0] != "*** Begin Patch" ||
@@ -182,6 +216,11 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 	updateContent := false
 	hasMove := false
 	for _, line := range lines[1 : len(lines)-1] {
+		// A carriage return that does not end a line is read only in a
+		// directive name, which the tools take without it.
+		if strings.ContainsRune(line, '\r') && !isPatchDirectiveLine(line) {
+			return fail(StatusInvalid, IssueInvalidSyntax)
+		}
 		if line == "*** End of File" {
 			if activeDirective != "update" || !updateHunk || !updateContent {
 				return fail(StatusInvalid, IssueInvalidSyntax)
@@ -223,15 +262,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 
 		kind := ""
 		pathValue := ""
-		for _, directive := range []struct {
-			prefix string
-			kind   string
-		}{
-			{prefix: "*** Add File: ", kind: "add"},
-			{prefix: "*** Update File: ", kind: "update"},
-			{prefix: "*** Delete File: ", kind: "delete"},
-			{prefix: "*** Move to: ", kind: "move"},
-		} {
+		for _, directive := range patchDirectives {
 			if strings.HasPrefix(line, directive.prefix) {
 				kind = directive.kind
 				pathValue = patchDirectivePath(line, directive.prefix)
