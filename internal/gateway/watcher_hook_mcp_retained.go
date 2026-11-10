@@ -165,8 +165,7 @@ func (a *APIServer) unallowedHeldRefusal(ctx context.Context, cfg *config.Config
 		if except != nil && sameMCPDefinition(held[i], *except) {
 			continue
 		}
-		verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, held[i], true))
-		if !verdict.Enabled || verdict.Source != "admin-allow" {
+		if !heldDefinitionAllowed(ctx, cfg, connector, probe, held[i]) {
 			return held[i], true
 		}
 	}

@@ -86,6 +86,7 @@ func (f b36ManagedHookFixture) serve(call *hookCall) (string, string) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = call.connector
+	cfg.Guardrail.RulePackDir = f.packDir
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(call.payload)))
 	if call.managed && call.header != "" {
@@ -103,6 +104,8 @@ func (f b36ManagedHookFixture) serve(call *hookCall) (string, string) {
 	switch {
 	case strings.HasPrefix(body, `{"action":"block"`):
 		return "block", body
+	case strings.HasPrefix(body, `{"action":"alert"`):
+		return "alert", body
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow", body
 	}

@@ -117,7 +117,15 @@ func mcpScanTargetTextRefusal(target string) (kind MCPTargetRefusal, literal boo
 	if lowerHost == "metadata.google.internal" {
 		return MCPTargetRefusalAddress, false, host, fmt.Errorf("MCP scan target %q points at cloud metadata host", host)
 	}
-	if ip := net.ParseIP(host); ip != nil {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// An address the resolvers read from a shorthand (127.1, 0,
+		// 2130706433, 0x7f000001, 0177.0.0.1) is the address it names.
+		if addr, ok := config.LegacyIPv4Host(host); ok {
+			ip = net.IP(addr.AsSlice())
+		}
+	}
+	if ip != nil {
 		if ip.IsLoopback() ||
 			ip.IsPrivate() ||
 			ip.IsLinkLocalUnicast() ||

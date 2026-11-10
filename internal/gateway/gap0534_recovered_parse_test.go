@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// A statement the reader cannot parse, then a removal of the state folder
+// the reader does not resolve to a target: the call proves no target, so it
+// alerts outside the strict profile and blocks in strict (lead ruling,
+// rel-1-0-6:GAP-0675 round 12). The hook answers within its time budget.
 func TestGAP0534PowerShellHookFixedPointBlocks(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -23,20 +27,22 @@ func TestGAP0534PowerShellHookFixedPointBlocks(t *testing.T) {
 	t.Setenv("HOME", home)
 	const command = `Write-Output $(.\a[1]<#x#>); Remove-Item -Recurse -Force ~/.defenseclaw`
 	for _, connector := range []string{"claudecode", "codex"} {
-		t.Run(connector, func(t *testing.T) {
-			api := instructionProtectionTestAPI(t, connector, "action", "HIGH")
-			start := time.Now()
-			tool := "PowerShell"
-			if connector == "codex" {
-				tool = "exec_command"
-			}
-			if action := gap0568ToolHookAction(t, api, connector, tool, home, cwd, command, true, false); action != guardrailActionBlock {
-				t.Fatalf("hook action = %s, want block", action)
-			}
-			if elapsed := time.Since(start); elapsed > 5*time.Second {
-				t.Fatalf("hook answer took %s", elapsed)
-			}
-		})
+		for posture, want := range map[string]string{"default": guardrailActionAlert, "strict": guardrailActionBlock} {
+			t.Run(connector+"/"+posture, func(t *testing.T) {
+				api := instructionProtectionTestAPIWithPack(t, connector, "action", "HIGH", posture)
+				start := time.Now()
+				tool := "PowerShell"
+				if connector == "codex" {
+					tool = "exec_command"
+				}
+				if action := gap0568ToolHookAction(t, api, connector, tool, home, cwd, command, true, false); action != want {
+					t.Fatalf("hook action = %s, want %s", action, want)
+				}
+				if elapsed := time.Since(start); elapsed > 5*time.Second {
+					t.Fatalf("hook answer took %s", elapsed)
+				}
+			})
+		}
 	}
 }
 

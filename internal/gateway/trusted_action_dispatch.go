@@ -27,6 +27,7 @@ import (
 	osuser "os/user"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -266,6 +267,40 @@ type trustedActionRequest struct {
 	// (hookpaths.TargetMemo, rel-1-0-2:GAP-0568). dispatchTrustedAction
 	// makes it; a copy of the request shares it.
 	targetMemo *hookpaths.TargetMemo
+	// simpleMemo keeps the simple commands of the call, read once for the
+	// statement budget and again for the pass of every profile member over the
+	// same input and facts. dispatchTrustedAction makes it; a copy of the
+	// request shares it, and a child command with another input reads its own.
+	simpleMemo *trustedSimpleMemo
+}
+
+// trustedSimpleMemo holds the first simple-command split asked of it.
+type trustedSimpleMemo struct {
+	mu      sync.Mutex
+	set     bool
+	input   actionfacts.Input
+	facts   actionfacts.Facts
+	simples []actionfacts.SimpleCommand
+}
+
+// commands returns actionfacts.SimpleCommands(input, facts): the split the memo
+// holds when input and facts are the ones it was made for, a fresh one
+// otherwise. The first split asked of an empty memo is kept.
+func (memo *trustedSimpleMemo) commands(input actionfacts.Input, facts actionfacts.Facts) []actionfacts.SimpleCommand {
+	if memo == nil {
+		return actionfacts.SimpleCommands(input, facts)
+	}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if memo.set {
+		if reflect.DeepEqual(memo.input, input) && reflect.DeepEqual(memo.facts, facts) {
+			return slices.Clone(memo.simples)
+		}
+		return actionfacts.SimpleCommands(input, facts)
+	}
+	memo.set, memo.input, memo.facts = true, input, facts
+	memo.simples = actionfacts.SimpleCommands(input, facts)
+	return slices.Clone(memo.simples)
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
@@ -302,6 +337,7 @@ func dispatchTrustedAction(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	if ManagedEnterpriseActive() {
 		return nil
 	}
@@ -326,6 +362,9 @@ func dispatchTrustedAction(
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
+	if request.simpleMemo == nil {
+		request.simpleMemo = &trustedSimpleMemo{}
+	}
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
 	// Only the strict tier judges the body of a function the text never
 	// calls; the other tiers follow the functions a call runs.
@@ -335,6 +374,9 @@ func dispatchTrustedAction(
 		actionfacts.NativeFileWriteTargets(request.Input),
 	)
 	request.Input.ClientWorkingDirectories = clientWorkingDirectories(request.ResolvedWriteTargets, request.Input.CWD)
+	// Only the strict tier follows code the shell may never run into a loop
+	// binding; the other tiers follow the top-level statements before it.
+	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
 	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
 		return trustedActionLimitFindings(true)
@@ -370,7 +412,7 @@ func dispatchTrustedAction(
 	if !request.simpleCommandPass {
 		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
-		if trustedCallOverStatementBudget(request.Input, facts) {
+		if trustedCallOverStatementBudgetWith(request.Input, facts, request.simpleMemo.commands(request.Input, facts)) {
 			// Over the statement budget the call blocks with
 			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is
 			// refused here, before the twins, the readers and the
@@ -478,7 +520,7 @@ func dispatchTrustedAction(
 	request.UnknownKeyPossibleOverflow = request.UnknownKeyPossibleOverflow || overflow
 	for _, twin := range twins {
 		defer func() {
-			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+			findings = withOverLimitTwinFindings(findings, twin.findings(parent))
 		}()
 	}
 	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {
@@ -552,7 +594,7 @@ func dispatchTrustedActionWith(
 			checkedLocalOrdinary := false
 			localOrdinary := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
-			simples := actionfacts.SimpleCommands(request.Input, facts)
+			simples := request.simpleMemo.commands(request.Input, facts)
 			if len(simples) == 0 && wholeCommandKnown &&
 				(facts.Parse.Dialect != actionfacts.DialectPOSIX || facts.Parse.Status == actionfacts.StatusLimitExceeded) &&
 				trustedStatementBudgetExceeded(request.Input, facts, wholeCommand) {
@@ -588,7 +630,7 @@ func dispatchTrustedActionWith(
 					// before a write does not hide the write.
 					child.Input.CWD = request.Input.CWD
 				}
-				if simple.LoginGuess && !loginGuessReadingMayProveStateWrite(request, simple.Text, child.Input.CWD) {
+				if simple.LoginGuess && !loginGuessReadingMayProveStateWrite(request, simple, child.Input.CWD) {
 					continue
 				}
 				if simple.UnboundUser {
@@ -1113,6 +1155,15 @@ func withActiveStateTargetMention(
 	// that the POSIX link, pattern and xargs checks do not read as absolute:
 	// they also judge its drive view (GAP-2577).
 	driveFacts, driveRequest, driven := gitBashDriveView(facts, request)
+	// A for loop whose body writes a path that some value of its variable (or
+	// of a variable the walk cannot read) makes active state is judged by that
+	// target, whatever the list holds and whatever runs before the loop
+	// (rel-1-0-6:GAP-0880). The match is on the spelling, so a gateway that
+	// cannot open the user home reads it as a per-user one does.
+	if command, known := trustedBashCommandInput(request.Input); known && trustedPOSIXShellCall(request.Input, facts) &&
+		hookpaths.LoopWriterReachesState(command, request.Input.CWD, request.Input.ActiveHome, request.StrictPolicy) {
+		return withProvenActiveStateMutation(request, findings)
+	}
 	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)
 	xargsMutates := xargsStaticInputStateMutation(facts, request) ||
 		driven && xargsStaticInputStateMutation(driveFacts, driveRequest)
@@ -4578,10 +4629,11 @@ func loginGuessProvesRule(ruleID string) bool {
 // (ActionStateTargetMention, the scan withActiveStateTargetMention opens
 // with). A reading that does neither would add only its cost to a command
 // that merely names USER or LOGNAME. A managed hook proves the write from
-// the client evidence instead, so its readings are all judged.
-func loginGuessReadingMayProveStateWrite(request trustedActionRequest, text, cwd string) bool {
-	return request.ProtectedHomeHook || hookpaths.MayNameState(text) ||
-		request.targetMemo.ActionStateTargetMention(text, cwd, request.Input.ActiveHome)
+// the client evidence instead, so its readings are all judged, except the
+// readings of one loop iteration, whose spelled path no client evidence keys.
+func loginGuessReadingMayProveStateWrite(request trustedActionRequest, simple actionfacts.SimpleCommand, cwd string) bool {
+	return request.ProtectedHomeHook && !simple.LoopReading || hookpaths.MayNameState(simple.Text) ||
+		request.targetMemo.ActionStateTargetMention(simple.Text, cwd, request.Input.ActiveHome)
 }
 
 // withSimpleCommandFindings adds each command's ordinary standalone result
@@ -9209,7 +9261,12 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 // stopped early is counted past the stop (rel-1-0-6:GAP-0331), so its call
 // is over the budget even where the split it made is short.
 func trustedCallOverStatementBudget(input actionfacts.Input, facts actionfacts.Facts) bool {
-	simples := actionfacts.SimpleCommands(input, facts)
+	return trustedCallOverStatementBudgetWith(input, facts, actionfacts.SimpleCommands(input, facts))
+}
+
+// trustedCallOverStatementBudgetWith is trustedCallOverStatementBudget over
+// simples, the split of input and facts.
+func trustedCallOverStatementBudgetWith(input actionfacts.Input, facts actionfacts.Facts, simples []actionfacts.SimpleCommand) bool {
 	if slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
 		return simple.EvaluationFailure == "limit"
 	}) {
@@ -9242,6 +9299,25 @@ func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bo
 		}
 	}
 	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
+}
+
+// withOmittedOperandLimitFinding adds the over-limit verdict for a named
+// write operand that the client map left out, and marks it: that finding
+// blocks in every profile, as the operand may be a link to a protected file.
+// A limit finding the call already carries is left as it is.
+func withOmittedOperandLimitFinding(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	had := slices.ContainsFunc(findings, func(finding RuleFinding) bool {
+		return finding.RuleID == "ACTION-COMPOUND-LIMIT"
+	})
+	findings = withTrustedActionLimitFinding(findings, enforcementCapable)
+	if !had {
+		for index := range findings {
+			if findings[index].RuleID == "ACTION-COMPOUND-LIMIT" {
+				findings[index].omittedOperand = true
+			}
+		}
+	}
+	return findings
 }
 
 // trustedActionLimitFindings is the over-limit verdict of a shell command

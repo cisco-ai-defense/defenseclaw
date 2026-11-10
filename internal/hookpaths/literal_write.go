@@ -150,10 +150,6 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 			}
 		}
 	}
-	var noEffectCopies map[*syntax.CallExpr]bool
-	if strings.Contains(command, "for") && strings.Contains(command, "cp") {
-		noEffectCopies = actionClientLoopCopyNoEffectCalls(file, cwd, home)
-	}
 	var knownValues map[*syntax.Word]string
 	knownValuesRead := false
 	var shadow *knownShadow
@@ -229,9 +225,6 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 			}
 			call, ok := stmt.Cmd.(*syntax.CallExpr)
 			if !ok || len(call.Args) == 0 {
-				return true
-			}
-			if noEffectCopies[call] {
 				return true
 			}
 			// A copy operand with one known parameter value can also be a

@@ -17,12 +17,21 @@ import (
 
 func instructionProtectionTestAPI(t *testing.T, connector, mode, blockAt string) *APIServer {
 	t.Helper()
-	installToolCallCorpusProfileConnector(t, connector, "default")
+	return instructionProtectionTestAPIWithPack(t, connector, mode, blockAt, "default")
+}
+
+// instructionProtectionTestAPIWithPack is instructionProtectionTestAPI with
+// the rule pack of posture ("default", "permissive" or "strict"). The tests
+// that expect a call over the evaluation limit to block run in "strict"
+// (rel-1-0-6:GAP-0675 round 10: outside strict that call alerts).
+func instructionProtectionTestAPIWithPack(t *testing.T, connector, mode, blockAt, posture string) *APIServer {
+	t.Helper()
+	installToolCallCorpusProfileConnector(t, connector, posture)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = mode
 	cfg.Guardrail.Connector = connector
 	cfg.Guardrail.BlockAt = blockAt
-	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "default")
+	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), posture)
 	return &APIServer{scannerCfg: cfg}
 }
 

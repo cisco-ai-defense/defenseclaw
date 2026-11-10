@@ -124,10 +124,7 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 	if decision, refused := a.noteHookReportedMCPServer(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
-	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "claudecode", req.HookEventName, probe); refused {
-		return decision, true
-	}
-	return a.evaluateRuntimeMCPAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
+	return a.mcpAdmissionAndAssetDecision(ctx, "claudecode", req.HookEventName, probe)
 }
 
 // claudeCodePluginMCPServerName is the configured name of an MCP server a
@@ -284,12 +281,14 @@ func mcpCallAboutToRun(hookEvent string) bool {
 // calls about to run. The default and permissive OSS tiers allow a pending
 // call with a visible warning; strict and managed tiers wait for the scan.
 // A completed scan failure and an existing asset-policy block always refuse
-// the call. Secure Client keeps its existing path.
-func (a *APIServer) mcpAdmissionPendingDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+// the call. Secure Client keeps its existing path. The third result is the
+// definition the call opens the connection to, to be held once the call runs
+// (mcpAdmissionAndAssetDecision).
+func (a *APIServer) mcpAdmissionPendingDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool, *config.MCPServerEntry) {
 	cfg := a.requestConfig(ctx)
 	if (a.mcpAdmissionPending == nil && a.mcpAdmissionStatus == nil) || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
 		probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
-		return config.AssetPolicyDecision{}, false
+		return config.AssetPolicyDecision{}, false, nil
 	}
 	home, _ := callerHomeForAssets(ctx)
 	status := watcher.MCPAdmissionStatus{}
@@ -299,8 +298,28 @@ func (a *APIServer) mcpAdmissionPendingDecision(ctx context.Context, connectorNa
 		status.Name, status.Pending = a.mcpAdmissionPending(connectorName, probe.ServerName, home, probe.WorkspaceDir)
 		status.RetryAfter = time.Minute
 	}
-	status = a.failedMCPSessionHold(ctx, cfg, connectorName, probe, status)
-	return a.mcpAdmissionStatusDecision(ctx, cfg, connectorName, hookEvent, probe, status)
+	status, opened := a.failedMCPSessionHold(ctx, cfg, connectorName, probe, status)
+	decision, refused := a.mcpAdmissionStatusDecision(ctx, cfg, connectorName, hookEvent, probe, status)
+	return decision, refused, opened
+}
+
+// mcpAdmissionAndAssetDecision is the decision on an MCP call about to run:
+// the admission decision, else the asset policy verdict, which weighs the
+// definitions the session met before. The connection to a definition is
+// opened by a call that runs, so the hold of the session is kept only once
+// this complete decision has let the call run: a call that an earlier denied
+// definition or the tier refuses opens nothing, and the replacement that is
+// allowed later is an ordinary one.
+func (a *APIServer) mcpAdmissionAndAssetDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	decision, refused, opened := a.mcpAdmissionPendingDecision(ctx, connectorName, hookEvent, probe)
+	if !refused {
+		decision, refused = a.evaluateRuntimeMCPAssetPolicy(ctx, connectorName, hookEvent, probe)
+	}
+	if opened != nil && mcpDecisionRank(decision) < 2 {
+		home, _ := callerHomeForAssets(ctx)
+		a.holdFailedMCP(connectorName, home, probe, *opened, time.Now())
+	}
+	return decision, refused
 }
 
 func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.Config, connectorName, hookEvent string,
@@ -440,10 +459,7 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 	if decision, refused := a.noteHookReportedMCPServer(ctx, "codex", req.HookEventName, probe); refused {
 		return decision, true
 	}
-	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "codex", req.HookEventName, probe); refused {
-		return decision, true
-	}
-	return a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe)
+	return a.mcpAdmissionAndAssetDecision(ctx, "codex", req.HookEventName, probe)
 }
 
 // codexMCPServerAmbiguous applies only when the hook did not provide an

@@ -33,6 +33,15 @@ func TestMCPScanTargetRefusalIsWhatTheScanGuardRefusesFromText(t *testing.T) {
 		{"http://ip6-loopback:18795/mcp", MCPTargetRefusalAddress},
 		{"http://tools.localhost/mcp", MCPTargetRefusalAddress},
 		{"http://metadata.google.internal/mcp", MCPTargetRefusalAddress},
+		// An address written as a shorthand the resolvers read is the address
+		// it names (GAP-1019, GAP-1020).
+		{"http://127.1:18795/mcp", MCPTargetRefusalAddress},
+		{"http://0:18795/mcp", MCPTargetRefusalAddress},
+		{"http://2130706433:18795/mcp", MCPTargetRefusalAddress},
+		{"http://0x7f000001:18795/mcp", MCPTargetRefusalAddress},
+		{"http://0177.0.0.1:18795/mcp", MCPTargetRefusalAddress},
+		{"http://10.1/mcp", MCPTargetRefusalAddress},
+		{"http://0xa9fea9fe/mcp", MCPTargetRefusalAddress},
 		{"https://user:pass@mcp.example.test/mcp", MCPTargetRefusalCredentials},
 		{"https://user@mcp.example.test/mcp", MCPTargetRefusalCredentials},
 		{"https:///mcp", MCPTargetRefusalMalformed},
@@ -41,6 +50,11 @@ func TestMCPScanTargetRefusalIsWhatTheScanGuardRefusesFromText(t *testing.T) {
 		// resolver, and a target that is not a URL.
 		{"https://93.184.216.34/mcp", MCPTargetRefusalNone},
 		{"https://mcp.example.test/mcp", MCPTargetRefusalNone},
+		// Numbers that are not an address, and a public one in shorthand, are
+		// left to the resolver.
+		{"https://256.1.1.1/mcp", MCPTargetRefusalNone},
+		{"https://1e100.example.test/mcp", MCPTargetRefusalNone},
+		{"https://0x/mcp", MCPTargetRefusalNone},
 		{"notes", MCPTargetRefusalNone},
 		{"", MCPTargetRefusalNone},
 	} {
