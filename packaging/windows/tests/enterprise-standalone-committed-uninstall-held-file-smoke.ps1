@@ -187,6 +187,19 @@ $fs.Dispose()
             finally { Stop-Holder $holder }
             [IO.File]::Delete($legacy)
 
+            # A teardown journal that cannot be trusted for this deployment: the refusal names the file and the next step.
+            $layout['ManagedHooksTeardownJournalPath'] = [IO.Path]::Combine($Scratch, 'state', 'managed-hooks-teardown-journal.json')
+            $untrusted = 'schema-6 managed-hook teardown journal activation binding is invalid'
+            $text = [string](ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message $untrusted)
+            if (-not $text.StartsWith($untrusted) -or -not $text.Contains($layout['ManagedHooksTeardownJournalPath']) -or -not $text.Contains('/verify') -or
+                -not $text.Contains('This run changed nothing') -or $text -match 'FORCE') { throw "journal refusal: '$text'" }
+            if ($null -ne (ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message $text)) { throw 'journal refusal: a named refusal was named again' }
+            if ($null -ne (ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message 'managed-hook teardown journal is missing or is not a regular file')) { throw 'journal refusal: a missing journal was refused' }
+            if ($null -ne (ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message 'some other failure')) { throw 'journal refusal: an unrelated failure was read' }
+            $script:smokeInstalled = $true
+            if ($null -ne (ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message $untrusted)) { throw 'journal refusal: an uninstall that is not committed was read' }
+            $script:smokeInstalled = $false
+
             # requirements.toml and the hook get their own held codes.
             $holder = Start-Holder $requirements
             try {
@@ -213,6 +226,7 @@ $fs.Dispose()
         finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient }
 
         # Secure Client keeps its text: nothing waits and nothing is read.
+        if ($null -ne (ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message 'schema-6 managed-hook teardown journal activation binding is invalid')) { throw 'Secure Client: a journal refusal was rewritten' }
         $holder = Start-Holder $lock
         try {
             $timer = [Diagnostics.Stopwatch]::StartNew()

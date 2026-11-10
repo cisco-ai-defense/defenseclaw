@@ -20875,6 +20875,49 @@ function ConvertTo-DefenseClawCommittedUninstallHeldMessage {
     }
 }
 
+function ConvertTo-DefenseClawCommittedUninstallJournalMessage {
+    <#
+        GAP-1062: the refusal of a standalone uninstall that already committed
+        because its managed-hook teardown journal cannot be trusted for this
+        deployment (the journal is not this uninstall's: another deployment,
+        another manifest, a record that fails its binding). Nothing was
+        changed; Setup never deletes the record. The message names the file and
+        the next step. A missing journal is not a refusal (a fresh teardown
+        starts). Not committed, not standalone, or any other failure: $null.
+    #>
+    param(
+        [AllowNull()]$Layout,
+        [AllowEmptyString()][string]$Message
+    )
+    if ($null -eq $Layout -or -not (Test-DefenseClawStandaloneProfile)) {
+        return $null
+    }
+    if ($Message -notmatch 'managed-hook teardown journal' -or
+        $Message -match 'journal is missing or is not a regular file|journal disappeared|Next step: leave ') {
+        return $null
+    }
+    try {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
+            return $null
+        }
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+        if ($null -eq $metadata -or (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
+            return $null
+        }
+        $journal = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ManagedHooksTeardownJournalPath)
+        if ([string]::IsNullOrWhiteSpace($journal)) {
+            return $null
+        }
+        return ('{0}. This run changed nothing: the file is the teardown record of the uninstall and it cannot be trusted for this deployment. Next step: leave {1} as it is, run {2} to see what is left, and send both results with the lifecycle log to DefenseClaw support' -f
+            $Message.TrimEnd('.', ' '),
+            $journal,
+            (Format-DefenseClawSetupAction -Action '/verify'))
+    }
+    catch {
+        return $null
+    }
+}
+
 # The hooks keep a runtime selector (state and lock) for Claude Code, Codex
 # and Cursor in each agent's machine-policy folder. Both files are
 # DefenseClaw's, and a selection left behind made every later ensure refuse
@@ -54969,6 +55012,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             $committedHeld = ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message ([string]$_.Exception.Message)
             if ($null -ne $committedHeld) {
                 throw $committedHeld
+            }
+            $committedJournal = ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message ([string]$_.Exception.Message)
+            if ($null -ne $committedJournal) {
+                throw $committedJournal
             }
         }
         throw
