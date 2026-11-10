@@ -289,9 +289,6 @@ def test_a_busy_writer_never_reaches_the_recovery_that_rebuilds_the_policy_file(
     # The rollback turns the recovery's busy answer into its own deferral.
     deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
     assert "$recoveryMessage = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout" in deployment
-    deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
-    verify = deployment.index("-Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))")
-    assert "New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout" in deployment[verify : verify + 1200]
 
 
 def test_a_rollback_that_keeps_a_guarded_requirements_file_says_so_in_the_failed_run() -> None:

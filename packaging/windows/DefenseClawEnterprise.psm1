@@ -23803,10 +23803,18 @@ function Restore-DefenseClawTransaction {
         -Snapshot $snapshot `
         -Layout $Layout
     if (-not $DeferServiceRestart) {
-        $activationRequired =
-            Assert-DefenseClawRestoredTransactionReadyForActivation `
-                -Snapshot $snapshot `
-                -Layout $Layout
+        # GAP-0999: a busy Codex writer defers the Codex check of the readiness
+        # assertion instead of failing the rollback (standalone only).
+        $script:DefenseClawRollbackDeferBusyWriter = [bool](Test-DefenseClawStandaloneProfile)
+        try {
+            $activationRequired =
+                Assert-DefenseClawRestoredTransactionReadyForActivation `
+                    -Snapshot $snapshot `
+                    -Layout $Layout
+        }
+        finally {
+            $script:DefenseClawRollbackDeferBusyWriter = $false
+        }
         if ($activationRequired) {
             Set-DefenseClawServiceActivationPhase `
                 -State $snapshot `
@@ -30400,6 +30408,15 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         $reportedCode = if ($null -ne $report.PSObject.Properties['error_code']) { [string]$report.error_code } else { '' }
         if ((Test-DefenseClawStandaloneProfile) -and
             ($reportedCode -ceq 'writer_lock_busy' -or (Test-DefenseClawCodexWriterLockBusyMessage -Message $detail))) {
+            if ($script:DefenseClawRollbackDeferBusyWriter -and $Action -in @('verify', 'inspect')) {
+                # GAP-0999: the Codex check of a rollback's readiness met a Codex
+                # writer that holds the lock. The check is deferred like a held
+                # file (the rollback goes on, starts the restored services and
+                # ends 1618 with the transaction pending); nothing is judged.
+                Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout)
+                $script:DefenseClawRollbackCoverageDeferred = $true
+                return $null
+            }
             # GAP-0999: not a defect of the policy file.
             throw (New-DefenseClawCodexWriterBusyRefusal -Layout $Layout -Action $Action -Detail "Codex requirements $Action failed: $detail")
         }
@@ -36295,6 +36312,9 @@ $script:DefenseClawRollbackCoverageDeferred = $false
 # instead of putting back a recorded one that would leave Codex unguarded; the
 # failed run says so (Invoke-DefenseClawInstallLikeLifecycle).
 $script:DefenseClawRollbackKeptGuardedNote = ''
+# GAP-0999: set around the readiness check of a standalone rollback so a busy
+# Codex writer defers the Codex check (Invoke-DefenseClawCodexRequirementsCommand).
+$script:DefenseClawRollbackDeferBusyWriter = $false
 
 function Test-DefenseClawRollbackHeldMessage {
     param([AllowEmptyString()][string]$Message)
@@ -37837,24 +37857,10 @@ function Assert-DefenseClawEnterpriseDeployment {
         }
     }
     if (-not $codexRequirementsDeferred) {
-        try {
-            [void](Invoke-DefenseClawCodexRequirementsCommand `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
-        }
-        catch {
-            # GAP-0999: the Codex verify of a rollback could not take the lock
-            # a Codex writer holds; the restored services still start.
-            if (-not ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and
-                    (Test-DefenseClawStandaloneProfile) -and
-                    ([string]$_.Exception.Message).StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal))) {
-                throw
-            }
-            Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout)
-            $codexRequirementsDeferred = $true
-            $script:DefenseClawRollbackCoverageDeferred = $true
-        }
+        [void](Invoke-DefenseClawCodexRequirementsCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
     }
     }
 
