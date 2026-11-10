@@ -74,11 +74,11 @@ try {
             if (-not [IO.File]::Exists($kept) -or [IO.File]::ReadAllText($kept) -ne $body) {
                 throw "$($case.Leaf): the replaced bytes were not kept as $kept"
             }
-            if ((Get-UsersEntries -Path $kept).Count -ne 0 -or
+            if (@(Get-UsersEntries -Path $kept).Count -ne 0 -or
                 (Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $kept)) -ne $script:AdministratorsSID) {
                 throw "$($case.Leaf): the kept file is not administrator-only"
             }
-            if ((Get-UsersEntries -Path $installed).Count -eq 0 -or [IO.File]::ReadAllText($installed) -ne $body) {
+            if (@(Get-UsersEntries -Path $installed).Count -eq 0 -or [IO.File]::ReadAllText($installed) -ne $body) {
                 throw "$($case.Leaf): keeping the evidence changed the installed file"
             }
             $notes = @($script:DefenseClawRestoredPolicyNotes)
