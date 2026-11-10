@@ -191,7 +191,8 @@ def test_a_forward_run_replaces_a_hand_edited_requirements_file_instead_of_faili
     assert body.index("-Action reconcile") < body.index("$reconcileFailure = $_")
     assert body.index("Test-DefenseClawStandaloneProfile") < body.index("Repair-DefenseClawRecoveredCodexRequirements")
     # A failure the recovery did not explain is the failure of the run.
-    assert body.index("Repair-DefenseClawRecoveredCodexRequirements") < body.index("throw $reconcileFailure")
+    # (GAP-1001: an earlier throw leaves a busy Codex writer alone, ahead of the recovery.)
+    assert body.index("Repair-DefenseClawRecoveredCodexRequirements") < body.rindex("throw $reconcileFailure")
     assert "DefenseClawRecoveredCodexRequirementsNotes).Count -eq $recoveredBefore" in body
     # The caller runs the ACLs and the checks after it, unchanged.
     call = text.index("Invoke-DefenseClawCodexRequirementsReconcileOrRecover `\n")

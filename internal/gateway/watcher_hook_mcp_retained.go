@@ -36,8 +36,8 @@ type heldMCPRefusals struct {
 // false only when the store is full (the caller then holds the session in the
 // overflow store, holdOverflow). A session that met more definitions of the
 // name than it can keep is tracked, marked overflow.
-func (h *hookReportedMCPServers) retainRefused(connector, home, session, cwd, name string, entry config.MCPServerEntry, now time.Time) bool {
-	key := mcpResolvedKey(connector, home, session, cwd, name)
+func (h *hookReportedMCPServers) retainRefused(connector, home, session, name string, entry config.MCPServerEntry, now time.Time) bool {
+	key := mcpResolvedKey(connector, home, session, "", name)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	set, ok := h.refused[key]
@@ -75,11 +75,11 @@ func (h *hookReportedMCPServers) retainRefused(connector, home, session, cwd, na
 // heldRefusals returns, within the memory time limit, the refused definitions
 // the session reported for name, the latest last, and whether it met more
 // than it could keep.
-func (h *hookReportedMCPServers) heldRefusals(connector, home, session, cwd, name string, now time.Time) (defs []config.MCPServerEntry, overflow bool) {
+func (h *hookReportedMCPServers) heldRefusals(connector, home, session, name string, now time.Time) (defs []config.MCPServerEntry, overflow bool) {
 	if h == nil {
 		return nil, false
 	}
-	key := mcpResolvedKey(connector, home, session, cwd, name)
+	key := mcpResolvedKey(connector, home, session, "", name)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	set, ok := h.refused[key]
@@ -145,18 +145,63 @@ func (a *APIServer) heldRefusalsAllowed(ctx context.Context, cfg *config.Config,
 		// has a record to release.
 		return false
 	}
+	_, unallowed := a.unallowedHeldRefusal(ctx, cfg, connector, probe, nil)
+	return !unallowed
+}
+
+// unallowedHeldRefusal returns the latest definition the session reported
+// for the server of probe that no administrator rule on the policy in force
+// allows, skipping except (the definition the config lists, whose own
+// admission decides it). A session marked overflow has definitions it
+// forgot, so no allow covers it: the answer is the server by name.
+func (a *APIServer) unallowedHeldRefusal(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe,
+	except *config.MCPServerEntry) (config.MCPServerEntry, bool) {
 	home, _ := callerHomeForAssets(ctx)
-	held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, heldScopes(probe.WorkspaceDir), time.Now())
+	held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, time.Now())
 	if overflow {
-		return false
+		return config.MCPServerEntry{Name: probe.ServerName}, true
 	}
-	for _, def := range held {
-		verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, def, true))
+	for i := len(held) - 1; i >= 0; i-- {
+		if except != nil && sameMCPDefinition(held[i], *except) {
+			continue
+		}
+		verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, held[i], true))
 		if !verdict.Enabled || verdict.Source != "admin-allow" {
-			return false
+			return held[i], true
 		}
 	}
-	return true
+	return config.MCPServerEntry{}, false
+}
+
+// hookReportedSessionHold is the hold of the running connection on a managed
+// Linux or macOS gateway. The agent keeps the connection it opened to a
+// definition for as long as it lives, whatever its config lists later, and
+// the hook names the server, not the connection. A session that met a refused
+// definition other than the listed one is therefore judged on that definition
+// for the rest of its life: an allow or a clean admission of the listed
+// replacement never speaks for the connection to the earlier one, and the
+// calls stay failed admissions of it until every definition the session met
+// is allowed by an administrator rule, or the agent starts again
+// (mcpSessionStarted). A listed definition whose admission already failed is
+// decided by mcpAdmissionStatusDecision with the same rule (GAP-0925).
+func (a *APIServer) hookReportedSessionHold(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe,
+	status watcher.MCPAdmissionStatus) watcher.MCPAdmissionStatus {
+	if status.Failed {
+		return status
+	}
+	home, _ := callerHomeForAssets(ctx)
+	// The ordinary call, with nothing held, reads no config.
+	if held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, time.Now()); len(held) == 0 && !overflow {
+		return status
+	}
+	var listed *config.MCPServerEntry
+	if entry, ok := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName); ok {
+		listed = &entry
+	}
+	if held, unallowed := a.unallowedHeldRefusal(ctx, cfg, connector, probe, listed); unallowed {
+		return watcher.FailedMCPStatus(held)
+	}
+	return status
 }
 
 // listedAs reports whether the report list holds entry as reported.
@@ -208,8 +253,8 @@ func unrecordedKey(connector, home string) string {
 
 // holdOverflow keeps, for a session the full session store could not track,
 // the first refused definition it met for the server name, in a store per
-// connector and account keyed by the complete identity of the session, the
-// workspace and the name. The agent keeps its connection to the refused
+// connector and account keyed by the session and the name, whatever directory
+// a hook reports. The agent keeps its connection to the refused
 // definition for as long as it lives, so the name of that session stays
 // refused after the config is edited, with the cause of the definition it met
 // first: a later report of another definition of the name does not replace
@@ -219,8 +264,8 @@ func unrecordedKey(connector, home string) string {
 // it. A store that is full of live holds first gives up the expired ones; when
 // every hold is live the new session is not kept, and the call itself is
 // decided as a failed admission (unrecordedMCPDecision).
-func (h *hookReportedMCPServers) holdOverflow(connector, home, session, cwd, name string, entry config.MCPServerEntry, now time.Time) {
-	key := mcpResolvedKey(connector, home, session, cwd, name)
+func (h *hookReportedMCPServers) holdOverflow(connector, home, session, name string, entry config.MCPServerEntry, now time.Time) {
+	key := mcpResolvedKey(connector, home, session, "", name)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	account := unrecordedKey(connector, home)
@@ -253,11 +298,11 @@ func (h *hookReportedMCPServers) holdOverflow(connector, home, session, cwd, nam
 
 // overflowHeld returns the refused definition the overflow store holds for the
 // session and name of a call.
-func (h *hookReportedMCPServers) overflowHeld(connector, home, session, cwd, name string, now time.Time) (config.MCPServerEntry, bool) {
+func (h *hookReportedMCPServers) overflowHeld(connector, home, session, name string, now time.Time) (config.MCPServerEntry, bool) {
 	if h == nil || session == "" {
 		return config.MCPServerEntry{}, false
 	}
-	key := mcpResolvedKey(connector, home, session, cwd, name)
+	key := mcpResolvedKey(connector, home, session, "", name)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	holds := h.overflow[unrecordedKey(connector, home)]

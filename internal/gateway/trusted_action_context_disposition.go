@@ -1177,6 +1177,45 @@ func trustedActionExecutingCommand(
 	return false
 }
 
+// trustedActionOrdinaryCredentialCopyFindings is the balanced reading of a
+// name that only starts like the AWS credentials file. Outside the strict
+// tier a file such as credentials.bak is an ordinary file: its path finding
+// stays visible but does not block, as for the other near names of a
+// credentials file (credentials-old, .netrc.bak). The credentials file
+// itself keeps its verdict in every tier, named directly or through a link (a
+// path fact carries the target of a link), and so does an action that also
+// names it. Only a finding whose path facts are all copies is lowered; a
+// finding with no path fact for the rule keeps its verdict. The strict tier
+// keeps every copy protected.
+func trustedActionOrdinaryCredentialCopyFindings(
+	facts actionfacts.Facts,
+	findings []RuleFinding,
+) []RuleFinding {
+	if !facts.Authoritative() {
+		return findings
+	}
+	copies, exact := false, false
+	for _, candidate := range facts.Paths {
+		value := semanticPathValue(candidate)
+		switch {
+		case matchesExactAWSCredentials(value):
+			exact = true
+		case matchesAWSCredentials(value):
+			copies = true
+		}
+	}
+	if !copies || exact {
+		return findings
+	}
+	for index, finding := range findings {
+		if (finding.RuleID == "PATH-AWS-CREDS" || finding.RuleID == "PATH-WIN-AWS-CREDS") &&
+			finding.contributesToEnforcement() {
+			findings[index] = trustedActionAuditFinding(finding)
+		}
+	}
+	return findings
+}
+
 func trustedActionAuditFinding(finding RuleFinding) RuleFinding {
 	finding.enforcement = findingEnforcementDetectionOnly
 	finding.disposition = findingDispositionAudit

@@ -56,7 +56,7 @@ func TestWindowsHiddenHooksCommandsRefuseOnThePlatformPreflightFirst(t *testing.
 		name string
 		run  func() error
 	}{
-		{"codex requirements", func() error { return runWindowsCodexRequirementsAction(quiet(), "inspect", false, false) }},
+		{"codex requirements", func() error { return runWindowsCodexRequirementsAction(quiet(), "inspect", false, false, "") }},
 		{"target-runtime", func() error {
 			return runWindowsTargetRuntimeAction(quiet(), "inspect", &windowsTargetRuntimeOptions{
 				manifest: missing("targets.yaml"), request: missing("request.json"), claims: missing("claims.json"), output: missing("report.json")})

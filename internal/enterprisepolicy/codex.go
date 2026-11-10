@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Codex requirements.toml is a single administrator file. DefenseClaw never
@@ -588,6 +589,15 @@ func (codexTarget) Reconcile(opts Options) (State, error) {
 		state.finish()
 		return state, nil
 	}
+	if missing := codexMissingHookConflicts(probe); len(missing) > 0 {
+		// GAP-1001: a document that lacks, duplicates or points elsewhere the
+		// DefenseClaw managed hook would leave Codex unguarded. It is never
+		// swapped in, whoever asked (a lifecycle run, the guardian): the file
+		// on disk stays as it is.
+		state.conflict("refusing to publish %s: the merged document would leave Codex unguarded (%s)", path, strings.Join(missing, "; "))
+		state.finish()
+		return state, nil
+	}
 	ownedBefore := false
 	if exists {
 		before := State{}
@@ -640,11 +650,52 @@ func (codexTarget) Verify(opts Options) (State, error) {
 		state.finish()
 		return state, nil
 	}
+	if len(bytes.TrimSpace(bytes.TrimPrefix(current, utf8BOM))) == 0 {
+		// GAP-1001: a Codex requirements file with nothing in it loads no
+		// DefenseClaw hook and no policy, so nothing guards Codex. It is said
+		// once, by name, with the way out, ahead of the per-entry conflicts.
+		state.conflict("%s is empty, so Codex loads no DefenseClaw hook or policy and nothing guards Codex until the policy is published again: %s",
+			path, codexRepublishAdvice(opts))
+	}
 	if err := inspectCodex(opts, current, policy, &state); err != nil {
 		return state, codexParseError(path, current, err)
 	}
+	if missing := codexMissingHookConflicts(state); len(missing) > 0 && len(bytes.TrimSpace(bytes.TrimPrefix(current, utf8BOM))) > 0 {
+		// GAP-1001: valid TOML that lacks, duplicates or points elsewhere the
+		// DefenseClaw managed hook guards nothing for those events. Said once,
+		// by name, ahead of the per-entry conflicts, as for an empty file.
+		state.Conflicts = append([]string{fmt.Sprintf("%s does not carry the DefenseClaw managed hook for %d Codex event(s), so nothing guards Codex for them until the policy is published again: %s",
+			path, len(missing), codexRepublishAdvice(opts))}, state.Conflicts...)
+	}
 	state.finish()
 	return state, nil
+}
+
+// codexMissingHookConflicts is the per-event conflicts of an inspected
+// document whose DefenseClaw managed hook is missing, duplicated or changed
+// (a hook that points at another command counts as missing).
+func codexMissingHookConflicts(state State) []string {
+	var out []string
+	for _, conflict := range state.Conflicts {
+		if strings.Contains(conflict, "DefenseClaw managed group") {
+			out = append(out, conflict)
+		}
+	}
+	return out
+}
+
+// codexRepublishAdvice is the administrator's way to publish the Codex
+// requirements again.
+func codexRepublishAdvice(opts Options) string {
+	if opts.goos() == "windows" {
+		return "run " + managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", "standalone") +
+			" as an administrator"
+	}
+	group := "linux"
+	if opts.goos() == "darwin" {
+		group = "macos"
+	}
+	return "run `defenseclaw-gateway enterprise " + group + " ensure` as root"
 }
 
 // codexParseError names the file and the line of a requirements.toml that

@@ -6519,6 +6519,9 @@ func finalizeTrustedActionFindings(
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
 	findings = applyTrustedActionContextDisposition(generation, facts, findings, request.CopilotSharedLocalFile && request.Input.Tool == "read_file")
+	if !request.StrictPolicy {
+		findings = trustedActionOrdinaryCredentialCopyFindings(facts, findings)
+	}
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 
@@ -10495,7 +10498,7 @@ func trustedLegacyPathRuleMatches(
 		seenValues := make(map[string]struct{}, 4)
 		for _, value := range append(
 			pathFactSpellings(path),
-			typedTargetRuleText(pathFactSpelling(path), input.ActiveHome, windowsVerbatimOperand(path.Value)),
+			typedTargetRuleTexts(pathFactSpelling(path), input.ActiveHome, windowsVerbatimOperand(path.Value))...,
 		) {
 			if strings.TrimSpace(value) == "" {
 				continue
