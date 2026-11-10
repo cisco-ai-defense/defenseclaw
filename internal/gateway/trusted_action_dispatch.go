@@ -1153,7 +1153,7 @@ func withActiveStateTargetMention(
 	// (rel-1-0-6:GAP-0880). The match is on the spelling, so a gateway that
 	// cannot open the user home reads it as a per-user one does.
 	if command, known := trustedBashCommandInput(request.Input); known && trustedPOSIXShellCall(request.Input, facts) &&
-		hookpaths.LoopWriterReachesState(command, request.Input.CWD, request.Input.ActiveHome) {
+		hookpaths.LoopWriterReachesState(command, request.Input.CWD, request.Input.ActiveHome, request.StrictPolicy) {
 		return withProvenActiveStateMutation(request, findings)
 	}
 	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)

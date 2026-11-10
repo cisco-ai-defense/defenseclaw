@@ -26,7 +26,13 @@ const loopWriterMaxValues = 32
 // read word by word, so a loop over other names stays allowed. What ran
 // before the loop (a sourced file, eval, an assignment) leaves no variable
 // known unless the walk proves its value (rel-1-0-6:GAP-0880).
-func LoopWriterReachesState(command, cwd, home string) bool {
+//
+// A list the walk proves empty never runs its body; a body assignment to the
+// loop variable, and a HOME assignment, change what the later words read. Only
+// the strict tier (strict) reads code the shell certainly never runs: outside
+// it a function nothing calls, the branch a literal true or false condition
+// skips and the right side of a literal && or || are left out.
+func LoopWriterReachesState(command, cwd, home string, strict bool) bool {
 	if len(command) > MaxPayloadBytes || !strings.Contains(command, "for") || !strings.ContainsAny(command, "$`") ||
 		!strings.HasPrefix(cwd, "/") || !strings.HasPrefix(home, "/") {
 		return false
@@ -35,7 +41,7 @@ func LoopWriterReachesState(command, cwd, home string) bool {
 	if !ok {
 		return false
 	}
-	scan := loopWriterScan{home: path.Clean(home), elsewhere: loopWriterReadNames(file, home)}
+	scan := loopWriterScan{home: path.Clean(home), strict: strict, file: file, elsewhere: loopWriterReadNames(file, home)}
 	scan.roots = []string{scan.home}
 	if resolved, ok := ResolveWriteTarget(home); ok && path.Clean(resolved) != scan.home {
 		scan.roots = append(scan.roots, path.Clean(resolved))
@@ -61,8 +67,13 @@ func LoopWriterReachesState(command, cwd, home string) bool {
 }
 
 type loopWriterScan struct {
-	home  string
-	roots []string
+	home   string
+	strict bool
+	roots  []string
+	file   *syntax.File
+	// called holds the names the command calls, read once outside the strict
+	// tier (nil until a function declaration needs it).
+	called map[string]bool
 	// elsewhere holds the names a read, mapfile or printf -v binds, and the
 	// names a function body assigns: the login-loop readings follow those
 	// bindings (a here-string, a call, declare -g), so a word spelled through
@@ -152,16 +163,94 @@ func (s *loopWriterScan) opaque(call *syntax.CallExpr) bool {
 // statement judges every for loop in one statement with the values the walk
 // holds where the statement starts.
 func (s *loopWriterScan) statement(stmt *syntax.Stmt, values actionValues, cwd string) {
-	syntax.Walk(stmt, func(node syntax.Node) bool {
-		if s.found {
-			return false
-		}
+	s.walk(stmt, func(node syntax.Node) bool {
 		if loop, ok := node.(*syntax.ForClause); ok {
 			s.loop(loop, values, cwd)
 			return false
 		}
 		return true
 	})
+}
+
+// walk visits root and its descendants as syntax.Walk does. Outside the
+// strict tier it leaves out code the shell certainly never runs: the body of
+// a function the command never calls, the branch a literal true or false
+// condition skips, and the right side of a literal && or || that is not
+// reached. The reachability is not proved further than these spellings.
+func (s *loopWriterScan) walk(root syntax.Node, visit func(syntax.Node) bool) {
+	syntax.Walk(root, func(node syntax.Node) bool {
+		if s.found {
+			return false
+		}
+		if !s.strict {
+			switch node := node.(type) {
+			case *syntax.FuncDecl:
+				return node.Name != nil && s.callsFunction(node.Name.Value)
+			case *syntax.IfClause:
+				if truth, known := loopWriterLiteralTruth(node.Cond); known {
+					s.walkStmts(node.Cond, visit)
+					if truth {
+						s.walkStmts(node.Then, visit)
+					} else if node.Else != nil {
+						s.walk(node.Else, visit)
+					}
+					return false
+				}
+			case *syntax.WhileClause:
+				if truth, known := loopWriterLiteralTruth(node.Cond); known && truth == node.Until {
+					s.walkStmts(node.Cond, visit)
+					return false
+				}
+			case *syntax.BinaryCmd:
+				if truth, known := loopWriterLiteralTruth([]*syntax.Stmt{node.X}); known &&
+					(node.Op == syntax.AndStmt && !truth || node.Op == syntax.OrStmt && truth) {
+					s.walk(node.X, visit)
+					return false
+				}
+			}
+		}
+		return visit(node)
+	})
+}
+
+func (s *loopWriterScan) walkStmts(stmts []*syntax.Stmt, visit func(syntax.Node) bool) {
+	for _, stmt := range stmts {
+		s.walk(stmt, visit)
+	}
+}
+
+// callsFunction reports a call of the name anywhere in the command.
+func (s *loopWriterScan) callsFunction(name string) bool {
+	if s.called == nil {
+		s.called = map[string]bool{}
+		syntax.Walk(s.file, func(node syntax.Node) bool {
+			if call, ok := node.(*syntax.CallExpr); ok && len(call.Args) != 0 {
+				if text, whole := wordLiteralPrefix(call.Args[0]); whole {
+					s.called[text] = true
+				}
+			}
+			return true
+		})
+	}
+	return s.called[name]
+}
+
+// loopWriterLiteralTruth reads a condition that is only the word true, : or
+// false, with no argument, assignment or redirect: its exit status is fixed.
+func loopWriterLiteralTruth(cond []*syntax.Stmt) (truth, known bool) {
+	if len(cond) != 1 {
+		return false, false
+	}
+	stmt := cond[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) != 1 || len(call.Assigns) != 0 || len(stmt.Redirs) != 0 || stmt.Background || stmt.Coprocess {
+		return false, false
+	}
+	text, whole := wordLiteralPrefix(call.Args[0])
+	if !whole || text != "true" && text != ":" && text != "false" {
+		return false, false
+	}
+	return (text != "false") != stmt.Negated, true
 }
 
 // loop reads the body once for each fixed word of the list and once more
@@ -175,17 +264,22 @@ func (s *loopWriterScan) loop(loop *syntax.ForClause, values actionValues, cwd s
 	s.bound = append(s.bound, name)
 	defer func() { s.bound = s.bound[:len(s.bound)-1] }()
 	var fixed []string
-	unknown := len(iter.Items) == 0
+	// for u in (a list with no word) runs nothing; for u (no list) reads the
+	// positional parameters, which the walk cannot read.
+	unknown := !iter.InPos.IsValid()
 	for _, item := range iter.Items {
 		if s.tracked(item) {
 			continue
 		}
 		value, known := actionWordValue(item, values, cwd, s.home)
-		if !known || value == "" || strings.ContainsAny(value, " \t\n*?[") {
+		switch {
+		case !known || strings.ContainsAny(value, " \t\n*?["):
 			unknown = true
-			continue
+		case value == "" && !loopWordQuoted(item):
+			// An unquoted word that expands to nothing is no word.
+		default:
+			fixed = append(fixed, value)
 		}
-		fixed = append(fixed, value)
 	}
 	if len(fixed) > loopWriterMaxValues {
 		fixed, unknown = fixed[:loopWriterMaxValues], true
@@ -202,13 +296,22 @@ func (s *loopWriterScan) loop(loop *syntax.ForClause, values actionValues, cwd s
 	}
 }
 
+// loopWordQuoted reports a word with a quoted part: it is one word even when
+// its text is empty.
+func loopWordQuoted(word *syntax.Word) bool {
+	for _, part := range word.Parts {
+		switch part.(type) {
+		case *syntax.DblQuoted, *syntax.SglQuoted:
+			return true
+		}
+	}
+	return false
+}
+
 func (s *loopWriterScan) body(stmts []*syntax.Stmt, values actionValues, cwd string) {
 	var stack []string
 	for _, stmt := range stmts {
-		syntax.Walk(stmt, func(node syntax.Node) bool {
-			if s.found {
-				return false
-			}
+		s.walk(stmt, func(node syntax.Node) bool {
 			switch node := node.(type) {
 			case *syntax.ForClause:
 				s.loop(node, values, cwd)
@@ -225,8 +328,20 @@ func (s *loopWriterScan) body(stmts []*syntax.Stmt, values actionValues, cwd str
 				}
 				actionPosixAdvanceDirectory(node, values, s.home, &cwd, &stack)
 			}
-			return !s.found
+			return true
 		})
+		// An assignment in the body changes what the later words read, the
+		// loop variable included. Only an assignment is followed: what a
+		// called program, eval or source may bind stays as it was before the
+		// body, as it does for the loop variable itself.
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.CallExpr:
+			if len(cmd.Args) == 0 {
+				actionUpdateValues(stmt, values, cwd, s.home)
+			}
+		case *syntax.DeclClause:
+			actionUpdateValues(stmt, values, cwd, s.home)
+		}
 	}
 }
 
@@ -290,6 +405,10 @@ func loopWriterOperands(call *syntax.CallExpr, home string) []*syntax.Word {
 // substitution) is one unknown path segment text (*). Empty when the word
 // has no usable text.
 func loopWriterPattern(word *syntax.Word, values actionValues, cwd, home string) string {
+	tilde := home
+	if current := values["HOME"]; current != "" {
+		tilde = current
+	}
 	var out strings.Builder
 	var walk func(parts []syntax.WordPart, first bool)
 	walk = func(parts []syntax.WordPart, first bool) {
@@ -298,7 +417,7 @@ func loopWriterPattern(word *syntax.Word, values actionValues, cwd, home string)
 			case *syntax.Lit:
 				text := unescapedLiteral(part.Value)
 				if first && i == 0 && (text == "~" || strings.HasPrefix(text, "~/")) {
-					text = home + text[1:]
+					text = tilde + text[1:]
 				}
 				out.WriteString(loopPatternEscape(text))
 			case *syntax.SglQuoted:
@@ -375,7 +494,7 @@ func loopPatternReachesState(pattern string, roots []string) bool {
 		}
 		for _, tree := range activeStateTrees {
 			names := strings.Split(tree, "/")
-			if len(state) <= len(names) {
+			if len(state) < len(names) {
 				continue
 			}
 			inside := true
