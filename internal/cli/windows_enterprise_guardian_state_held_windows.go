@@ -83,7 +83,9 @@ var (
 // Everyone, Interactive or a user SID named directly) can then open it and hold
 // it with read sharing, so it is not a file a lifecycle run may wait for. The
 // gated set holds only files just SYSTEM, Administrators and the service SIDs
-// can open. Deny entries grant nothing. Replaceable in tests.
+// can open. Deny entries grant nothing, and neither does an inherit-only entry,
+// which applies to what a folder holds and not to the object itself (GAP-0989).
+// Replaceable in tests.
 var windowsEnterpriseGuardianStateUserOpenable = func(path string) bool {
 	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -93,6 +95,12 @@ var windowsEnterpriseGuardianStateUserOpenable = func(path string) bool {
 	if err != nil {
 		return false
 	}
+	return windowsEnterpriseGuardianStateACLUserOpenable(acl)
+}
+
+// windowsEnterpriseGuardianStateACLUserOpenable applies the rule of
+// windowsEnterpriseGuardianStateUserOpenable to an access list.
+func windowsEnterpriseGuardianStateACLUserOpenable(acl *windows.ACL) bool {
 	if acl == nil {
 		return true // no access list: everyone
 	}
@@ -101,7 +109,7 @@ var windowsEnterpriseGuardianStateUserOpenable = func(path string) bool {
 		if err := windows.GetAce(acl, index, &ace); err != nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 			continue
 		}
-		if ace.Mask == 0 {
+		if ace.Mask == 0 || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
 			continue
 		}
 		if !windowsEnterpriseGuardianStateSIDIsAdminOnly((*windows.SID)(unsafe.Pointer(&ace.SidStart))) {

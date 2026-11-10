@@ -21,6 +21,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -257,10 +259,11 @@ def test_installer_handoff_keeps_relative_retired_config_paths_bound_to_the_call
     monkeypatch.setattr(
         upgrade_shim.subprocess,
         "Popen",
-        lambda *args, **kwargs: called.update({"env": kwargs["env"], "cwd": kwargs["cwd"]}),
+        lambda *args, **kwargs: called.update({"env": kwargs["env"], "cwd": kwargs["cwd"]})
+        or _child(lambda: 0),
     )
 
-    assert upgrade_shim._run_installer(str(staged / "install.sh"), [], str(staged)) == 0
+    assert upgrade_shim._run_installer(str(staged / "install.sh"), [], str(staged), rerun="defenseclaw upgrade") == 0
     assert "chdir" not in called
     if platform == "nt":
         assert called["cwd"] == str(staged)
@@ -390,11 +393,14 @@ def test_windows_starts_the_installer_detached(
     monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
     started: list[list[str]] = []
     envs: list[dict[str, str]] = []
-    monkeypatch.setattr(
-        upgrade_shim.subprocess,
-        "Popen",
-        lambda argv, **kwargs: (started.append(argv), envs.append(kwargs["env"])),
-    )
+
+    def popen(argv: list[str], **kwargs: object) -> types.SimpleNamespace:
+        started.append(argv)
+        envs.append(kwargs["env"])  # type: ignore[arg-type]
+        _write_transcript(home)
+        return _child(lambda: None)
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", popen)
     monkeypatch.setattr(subprocess, "CREATE_NEW_CONSOLE", 16, raising=False)
 
     assert upgrade_shim.run(["upgrade", "--yes"]) == 0
@@ -430,6 +436,434 @@ def test_windows_rollback_over_ssh_gives_the_command_for_this_terminal(
     assert command.endswith("install.ps1\" -Rollback -Yes"), command
     staged = command.split('"')[1]
     assert os.path.isfile(staged) and staged != str(home / "installer" / "install.ps1")
+
+
+_INSTALLER_PID = 4242
+_LOG_NAME = "install-20261110T022503.log"
+
+
+def _child(poll: object, pid: int = _INSTALLER_PID) -> types.SimpleNamespace:
+    return types.SimpleNamespace(poll=poll, pid=pid)
+
+
+def _write_transcript(home: Path, pid: int = _INSTALLER_PID, name: str = _LOG_NAME) -> None:
+    """Append the header a PowerShell transcript of process *pid* starts with."""
+    logs = home / "logs"
+    logs.mkdir(exist_ok=True)
+    header = f"**********************\nWindows PowerShell transcript start\nProcess ID: {pid}\nPSVersion: 5.1\n"
+    with open(logs / name, "ab") as stream:
+        stream.write(header.encode("utf-8"))
+
+
+def _windows_rollback_with_desktop(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw import __version__
+
+    (home / "installer").mkdir()
+    (home / "installer" / "install.ps1").write_text(f'$DcVersion = "{__version__}"\n', encoding="utf-8")
+    _record(home, home / "installer" / "install.ps1")
+    monkeypatch.setattr(upgrade_shim.os, "name", "nt")
+    monkeypatch.setattr(upgrade_shim, "_windows_terminal_without_desktop", lambda: False)
+    monkeypatch.setattr(upgrade_shim.time, "sleep", lambda seconds: None)
+
+
+def test_windows_rollback_whose_installer_ends_before_its_log_is_an_error_not_rc_0(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GAP-1011: the installer window closed before the installer opened its
+    # log; the shim had printed "continues in a new window" and returned 0.
+    _windows_rollback_with_desktop(home, monkeypatch)
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(lambda: 1))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    captured = capsys.readouterr()
+    assert "exit code 1 before it opened its log" in captured.err, captured.err
+    assert "defenseclaw doctor" in captured.err
+    assert "continues in a new window" not in captured.out
+
+
+def test_windows_rollback_whose_installer_holds_its_error_window_is_still_an_error(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A --yes installer that ends with an error keeps its console for 120
+    # seconds (Wait-BeforeClose) before the process exits: the shim must still
+    # be waiting then, not have reported a running install at 60 seconds.
+    _windows_rollback_with_desktop(home, monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(upgrade_shim.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(upgrade_shim.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(
+        upgrade_shim.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _child(lambda: 1 if clock[0] >= 120.0 else None),
+    )
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    captured = capsys.readouterr()
+    assert "exit code 1 before it opened its log" in captured.err, captured.err
+    assert "continues in a new window" not in captured.out
+
+
+def test_windows_rollback_whose_installer_opens_its_log_keeps_the_new_window_notice(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+    polls: list[int] = []
+
+    def poll() -> None:
+        polls.append(1)
+        if len(polls) == 3:
+            _write_transcript(home)
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+
+    captured = capsys.readouterr()
+    assert "The installer continues in a new window" in captured.out
+    assert "not confirmed" not in captured.out
+    assert len(polls) == 3
+
+
+def test_windows_installer_that_appends_to_a_same_second_log_has_opened_its_log(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The installer names a log to the second and opens it with -Append: a
+    # name that was already there is not proof of nothing.
+    _windows_rollback_with_desktop(home, monkeypatch)
+    _write_transcript(home, pid=999)
+
+    def poll() -> int:
+        _write_transcript(home)
+        return 1
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+
+    # The log is the proof the installer ran; its own window shows a failure.
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+    assert "The installer continues in a new window" in capsys.readouterr().out
+
+
+def test_windows_installer_whose_log_name_is_taken_by_another_run_is_not_confirmed_by_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Another install's log that grows while ours ends before opening one is
+    # not ours: the transcript header names the process.
+    _windows_rollback_with_desktop(home, monkeypatch)
+    _write_transcript(home, pid=999)
+
+    def poll() -> int:
+        _write_transcript(home, pid=999)
+        _write_transcript(home, pid=42420, name="install-20261110T022504.log")
+        return 1
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+    assert "exit code 1 before it opened its log" in capsys.readouterr().err
+
+
+def test_windows_installer_that_fails_after_opening_its_log_is_not_a_shim_error(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+
+    def poll() -> int:
+        _write_transcript(home)
+        return 1
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+
+    # The log is the proof the installer ran; its own window shows a failure.
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+    assert "The installer continues in a new window" in capsys.readouterr().out
+
+
+def test_windows_installer_still_running_without_a_log_is_an_unconfirmed_error_not_rc_0(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(upgrade_shim.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(upgrade_shim.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(lambda: None))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    captured = capsys.readouterr()
+    assert "still running and has not opened its log after 450 seconds, so the start is not confirmed" in captured.err
+    assert "continues in a new window" not in captured.out
+    assert clock[0] >= 450.0
+
+
+def test_windows_installer_that_waits_out_the_uninstall_cleanup_and_fails_is_an_error_not_rc_0(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Before it has a log the installer waits up to 300 s for an earlier
+    # uninstall's cleanup, then fails and keeps its console for 120 s: the
+    # process ends at 420 s, which the shim still waits for.
+    _windows_rollback_with_desktop(home, monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(upgrade_shim.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(upgrade_shim.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(
+        upgrade_shim.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _child(lambda: 1 if clock[0] >= 420.0 else None),
+    )
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    captured = capsys.readouterr()
+    assert "exit code 1 before it opened its log" in captured.err, captured.err
+    assert "still running" not in captured.err
+    assert "continues in a new window" not in captured.out
+
+
+def test_windows_installer_that_fails_without_a_log_does_not_claim_that_nothing_changed(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # install.ps1 goes on without a transcript when Start-Transcript fails, so
+    # it can reach a changing step and then fail with no log: no log is not
+    # proof of no change, and the staged installer stays for a recovery run.
+    _windows_rollback_with_desktop(home, monkeypatch)
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(lambda: 1))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    err = capsys.readouterr().err
+    assert "result is not known" in err, err
+    assert "no change" not in err.lower() and "nothing was changed" not in err.lower()
+    assert "may have stopped before changing anything" in err
+    assert "defenseclaw --version" in err and "run this command again" in err
+    command = next(line.strip() for line in err.splitlines() if line.strip().startswith("powershell "))
+    assert command.endswith("-Rollback -Yes"), command
+    assert os.path.isfile(command.split('"')[1])
+
+
+_INSTALLER_CLEANUP_LEAF = re.compile(r"^defenseclaw-(upgrade|rollback)-[a-z0-9_]+$")
+
+
+def _installer_that_cleans_up_then_fails(created: list[str]) -> object:
+    """A Popen stand-in whose child does what install.ps1 does in its finally block, then ends with exit 1."""
+
+    def popen(argv: list[str], **kwargs: object) -> types.SimpleNamespace:
+        script = argv[argv.index("-File") + 1]
+        launch_dir = os.path.dirname(script)
+        created.append(launch_dir)
+
+        def poll() -> int:
+            names = set(os.listdir(launch_dir)) if os.path.isdir(launch_dir) else set()
+            if _INSTALLER_CLEANUP_LEAF.match(os.path.basename(launch_dir)) and names <= {
+                "install.ps1",
+                "checksums.txt",
+                "checksums.txt.bundle",
+            }:
+                shutil.rmtree(launch_dir)
+            return 1
+
+        return _child(poll)
+
+    return popen
+
+
+def _recovery_dirs(home: Path) -> list[Path]:
+    return list((home.parent.parent / "tmp").glob("defenseclaw-recovery-*"))
+
+
+def _printed_target(err: str) -> str:
+    command = next(line.strip() for line in err.splitlines() if line.strip().startswith("powershell "))
+    return command.split('"')[1]
+
+
+def test_windows_no_log_failure_names_a_verified_installer_that_outlives_the_installer_cleanup(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # install.ps1 deletes the temporary directory it runs from before it
+    # exits; the command in the message must name a copy that survives that.
+    _windows_rollback_with_desktop(home, monkeypatch)
+    created: list[str] = []
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", _installer_that_cleans_up_then_fails(created))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    err = capsys.readouterr().err
+    assert created and not os.path.exists(created[0]), "the fake child did not perform the installer cleanup"
+    target = _printed_target(err)
+    assert os.path.isfile(target), err
+    assert not _INSTALLER_CLEANUP_LEAF.match(os.path.basename(os.path.dirname(target)))
+    saved = (home / "installer" / "install.ps1").read_bytes()
+    assert Path(target).read_bytes() == saved
+    assert hashlib.sha256(saved).hexdigest() in err
+
+
+@pytest.mark.parametrize("damage", ["missing", "changed"])
+def test_windows_no_log_failure_prints_the_release_command_when_the_recovery_copy_does_not_verify(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], damage: str
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+    created: list[str] = []
+    cleanup = _installer_that_cleans_up_then_fails(created)
+
+    def popen(argv: list[str], **kwargs: object) -> types.SimpleNamespace:
+        child = cleanup(argv, **kwargs)
+        recovery = _recovery_dirs(home)[0]
+        if damage == "missing":
+            shutil.rmtree(recovery)
+        else:
+            (recovery / "install.ps1").write_bytes(b"changed")
+        return child
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", popen)
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    err = capsys.readouterr().err
+    assert "powershell -NoProfile" not in err, err
+    # The command the user ran goes back through the shim; no release URL.
+    assert "run this command again (the kept copy is not available)" in err, err
+    assert err.rstrip().splitlines()[-2].strip() == "defenseclaw rollback --yes", err
+    assert "releases/" not in err and "irm " not in err, err
+    assert _recovery_dirs(home) == []
+
+
+@pytest.mark.parametrize("damage", ["missing", "changed"])
+def test_windows_downgrade_no_log_failure_with_a_damaged_recovery_copy_names_the_command_the_user_ran(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], damage: str
+) -> None:
+    # A downgrade stages the current saved installer, because an older one
+    # cannot read the recovery receipts of this install. When the kept copy is
+    # damaged, the fallback must not hand the user the older release installer.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.9")
+    _windows_rollback_with_desktop(home, monkeypatch)
+    created: list[str] = []
+    cleanup = _installer_that_cleans_up_then_fails(created)
+    launched: list[list[str]] = []
+
+    def popen(argv: list[str], **kwargs: object) -> types.SimpleNamespace:
+        if "-File" not in argv:  # a hardware probe of the upgrade, not the installer
+            raise FileNotFoundError(argv[0])
+        launched.append(argv)
+        child = cleanup(argv, **kwargs)
+        recovery = _recovery_dirs(home)[0]
+        if damage == "missing":
+            shutil.rmtree(recovery)
+        else:
+            (recovery / "install.ps1").write_bytes(b"changed")
+        return child
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", popen)
+
+    assert upgrade_shim.run(["upgrade", "--version", "v1.0.5", "--yes"]) == 1
+
+    err = capsys.readouterr().err
+    assert "-Version 1.0.5" in " ".join(launched[0]), launched
+    assert "run this command again (the kept copy is not available)" in err, err
+    assert err.rstrip().splitlines()[-2].strip() == "defenseclaw upgrade --version 1.0.5 --yes", err
+    assert "releases/" not in err and "irm " not in err and "scriptblock" not in err, err
+    assert _recovery_dirs(home) == []
+
+
+def test_windows_recovery_copy_is_removed_when_the_installer_ended_with_exit_code_0(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(lambda: 0))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+    assert _recovery_dirs(home) == []
+
+
+def test_windows_recovery_copy_is_kept_when_the_installer_opened_its_log_and_then_failed(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An open log is a start, not a result: the installer may fail later and
+    # delete the folder it runs from, so the verified copy is the way back.
+    _windows_rollback_with_desktop(home, monkeypatch)
+
+    def poll() -> int:
+        _write_transcript(home)
+        return 1
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+    kept = _recovery_dirs(home)
+    assert len(kept) == 1
+    assert (kept[0] / "install.ps1").read_bytes() == (home / "installer" / "install.ps1").read_bytes()
+
+
+def test_windows_recovery_copy_is_kept_when_the_installer_still_runs_without_a_log(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(upgrade_shim.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(upgrade_shim.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(lambda: None))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+    assert len(_recovery_dirs(home)) == 1
+
+
+def test_windows_installer_that_appends_beyond_the_first_chunk_of_a_same_second_log_has_opened_its_log(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Another run appends more than a read chunk to the same-second log before
+    # this installer's header: the scan goes on through the later bytes.
+    logs = home / "logs"
+    _write_transcript(home, pid=999)
+    known = upgrade_shim._install_logs(str(logs))
+    with open(logs / _LOG_NAME, "ab") as stream:
+        stream.write(b"x" * (upgrade_shim._INSTALLER_LOG_CHUNK * 2 + 17))
+    _write_transcript(home)
+
+    assert upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID)
+    assert not upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID + 1)
+
+
+def test_windows_installer_header_cut_by_a_chunk_edge_and_utf16_is_found(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(upgrade_shim, "_INSTALLER_LOG_CHUNK", 1024)
+    logs = home / "logs"
+    logs.mkdir()
+    known = upgrade_shim._install_logs(str(logs))
+    header = f"Windows PowerShell transcript start\r\nProcess ID: {_INSTALLER_PID}\r\n".encode("utf-16-le")
+    for lead in range(1000, 1030):
+        (logs / _LOG_NAME).write_bytes("\ufeff".encode("utf-16-le") + b"y" * lead + header)
+        assert upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID), lead
+        assert not upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID + 1), lead
+
+
+def test_windows_installer_log_scan_reads_only_new_bytes_on_later_polls(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logs = home / "logs"
+    _write_transcript(home, pid=999)
+    known = upgrade_shim._install_logs(str(logs))
+    scanned: dict[str, int] = {}
+    assert not upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID, scanned)
+    with open(logs / _LOG_NAME, "ab") as stream:
+        stream.write(b"z" * 5000)
+    assert not upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID, scanned)
+    assert scanned[_LOG_NAME] == known[_LOG_NAME] + 5000
+    _write_transcript(home)
+    assert upgrade_shim._log_opened_by(str(logs), known, _INSTALLER_PID, scanned)
+
+
+def test_windows_installer_that_ends_with_rc_0_and_no_log_says_so(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(lambda: 0))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+
+    out = capsys.readouterr().out
+    assert "ended with exit code 0 without opening an install log" in out
+    assert "continues in a new window" not in out
 
 
 def test_rollback_uses_the_saved_installer(home: Path, execs: list[list[str]]) -> None:
@@ -1300,7 +1734,7 @@ def test_rollback_runs_the_recorded_saved_installer(
     _record(home, saved)
     ran: list[tuple[str, list[str], bytes]] = []
     monkeypatch.setattr(
-        upgrade_shim, "_run_installer", lambda path, args, workdir: ran.append((path, args, Path(path).read_bytes())) or 0
+        upgrade_shim, "_run_installer", lambda path, args, workdir, *, rerun: ran.append((path, args, Path(path).read_bytes())) or 0
     )
     monkeypatch.setattr(upgrade_shim.os, "name", platform)
 

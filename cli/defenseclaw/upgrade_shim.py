@@ -46,6 +46,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -116,6 +117,16 @@ class ShimError(RuntimeError):
     """A user-facing failure; nothing on the machine was changed."""
 
     exit_code = 1
+    changed_nothing = True
+
+
+class ShimOutcomeUnknownError(ShimError):
+    """The installer was started and ended, or is still running, with a result the shim cannot prove.
+
+    The machine may have changed, so the failure must not say it did not.
+    """
+
+    changed_nothing = False
 
 
 class ShimUsageError(ShimError):
@@ -195,7 +206,8 @@ def run(argv: list[str]) -> int:
         return _upgrade(options["version"], yes=options["yes"])
     except ShimError as exc:
         print(f"  ✗ {exc}", file=sys.stderr)
-        print("    Nothing was changed.", file=sys.stderr)
+        if exc.changed_nothing:
+            print("    Nothing was changed.", file=sys.stderr)
         return exc.exit_code
     except KeyboardInterrupt:
         return 130
@@ -337,6 +349,9 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     repo = release_source()
     local_dir = os.environ.get(LOCAL_DIR_ENV)
     explicit = version is not None
+    # The command as the user ran it, for a message that sends them back
+    # through this shim and the current controller.
+    rerun = " ".join(["defenseclaw upgrade", *(["--version", version] if version else []), *(["--yes"] if yes else [])])
     if version is None:
         version = _local_version(local_dir) if local_dir else _latest_version(repo)
     if not explicit and _key(version) <= _key(installed):
@@ -385,7 +400,7 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     # Only a downgrade to a release that keeps the newer hook helper waits
     # for its installer and drops the helper (rel-1-0-4:GAP-2503).
     newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
-    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer)
+    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer, rerun=rerun)
 
 
 def _refuse_unguarding_downgrade(version: str) -> None:
@@ -648,7 +663,8 @@ def _rollback(*, yes: bool) -> int:
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
-    return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir)
+    rerun = "defenseclaw rollback" + (" --yes" if yes else "")
+    return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir, rerun=rerun)
 
 
 INSTALLER_RECORD = os.path.join("receipts", "installer.sha256")
@@ -711,7 +727,157 @@ def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str
     )
 
 
-def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | None = None) -> int:
+# How long the shim waits for a started Windows installer to open its log. Before
+# it has one the installer can wait up to 300 seconds for an earlier uninstall's
+# cleanup (Wait-UninstallCleanup in install.ps1) and then fails; an installer run
+# with --yes that fails keeps its console for up to 120 seconds (Wait-BeforeClose)
+# before the process exits. The wait covers both and a margin, so the exit code is
+# known before the shim reports.
+_INSTALLER_CLEANUP_WAIT = 300.0
+_INSTALLER_ERROR_WINDOW = 120.0
+_INSTALLER_LOG_WAIT = _INSTALLER_CLEANUP_WAIT + _INSTALLER_ERROR_WINDOW + 30.0
+_INSTALLER_LOG_POLL = 0.25
+# A log's new bytes are read in chunks that overlap by more than a transcript
+# header line is long, so a header cut by a chunk edge is still found.
+_INSTALLER_LOG_CHUNK = 1 << 20
+_INSTALLER_LOG_OVERLAP = 256
+
+
+def _terminal_command(script: str, ps_args: list[str]) -> str:
+    """The command that runs *script* in the current terminal, for a message."""
+    return " ".join(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f'"{script}"', *ps_args])
+
+
+_RECOVERY_COMPANIONS = ("checksums.txt", "checksums.txt.bundle")
+
+
+def _stage_recovery_copy(path: str) -> tuple[str, str] | None:
+    """Copy the verified installer and its checksum files to a directory only the shim owns (GAP-1011).
+
+    install.ps1 deletes the temporary directory it runs from (a leaf named
+    defenseclaw-upgrade-* or defenseclaw-rollback-*) before the process ends,
+    so a command printed for a file in that directory names a file that is
+    gone. This directory has a different leaf name, which that cleanup never
+    matches. Returns (installer copy, SHA-256 of the verified bytes), or
+    ``None`` when the copy could not be made.
+    """
+    directory: str | None = None
+    try:
+        directory = tempfile.mkdtemp(prefix="defenseclaw-recovery-")
+        with open(path, "rb") as stream:
+            body = stream.read()
+        copy = os.path.join(directory, os.path.basename(path))
+        with open(copy, "xb") as target:
+            target.write(body)
+        for name in _RECOVERY_COMPANIONS:
+            try:
+                shutil.copyfile(os.path.join(os.path.dirname(path), name), os.path.join(directory, name))
+            except FileNotFoundError:
+                continue
+    except OSError:
+        if directory:
+            shutil.rmtree(directory, ignore_errors=True)
+        return None
+    return copy, hashlib.sha256(body).hexdigest()
+
+
+def _drop_recovery_copy(recovery: tuple[str, str] | None) -> None:
+    if recovery:
+        shutil.rmtree(os.path.dirname(recovery[0]), ignore_errors=True)
+
+
+def _recovery_copy_verifies(recovery: tuple[str, str] | None) -> bool:
+    if not recovery:
+        return False
+    try:
+        with open(recovery[0], "rb") as stream:
+            return hashlib.sha256(stream.read()).hexdigest() == recovery[1]
+    except OSError:
+        return False
+
+
+def _install_logs(logs: str) -> dict[str, int]:
+    """The install logs (name -> size) in *logs*."""
+    sizes: dict[str, int] = {}
+    try:
+        names = os.listdir(logs)
+    except OSError:
+        return sizes
+    for name in names:
+        if name.startswith("install-") and name.endswith(".log"):
+            try:
+                sizes[name] = os.stat(os.path.join(logs, name)).st_size
+            except OSError:
+                continue
+    return sizes
+
+
+def _log_opened_by(logs: str, known: dict[str, int], pid: int, scanned: dict[str, int] | None = None) -> bool:
+    """Whether the process *pid* wrote a transcript header into *logs* since *known*.
+
+    The installer names a log to the second and opens it with ``-Append``, so
+    a name already in *known* may be the installer's own log, and a log that
+    appeared or grew may be another run's. The transcript header names the
+    process (``Process ID: <pid>``): only the bytes added since the snapshot
+    count, however many another run added before this header, and only a
+    header with this process's id. *scanned* (name -> bytes read so far) lets
+    a poll read only what is new.
+    """
+    if scanned is None:
+        scanned = {}
+    marker = re.compile(rb"Process ID:\s*" + str(pid).encode("ascii") + rb"(?!\d)")
+    for name, size in _install_logs(logs).items():
+        floor = known.get(name, 0)
+        if size < floor:  # replaced by a shorter file: all of it is new
+            floor = 0
+        done = scanned.get(name, floor)
+        if size < done:
+            done = floor
+        if size == done:
+            continue
+        pos = max(floor, done - _INSTALLER_LOG_OVERLAP)
+        try:
+            with open(os.path.join(logs, name), "rb") as stream:
+                stream.seek(pos)
+                while True:
+                    chunk = stream.read(_INSTALLER_LOG_CHUNK)
+                    # A UTF-16 transcript spaces every character with a NUL.
+                    if marker.search(chunk.replace(b"\x00", b"")):
+                        return True
+                    pos += len(chunk)
+                    if len(chunk) < _INSTALLER_LOG_CHUNK:
+                        break
+                    pos -= _INSTALLER_LOG_OVERLAP
+                    stream.seek(pos)
+        except OSError:
+            continue
+        scanned[name] = pos
+    return False
+
+
+def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: dict[str, int]) -> tuple[bool, int | None]:
+    """Wait until the started installer opens its install log or ends.
+
+    Returns (log opened, exit code or None while it still runs). It gives up
+    waiting after ``_INSTALLER_LOG_WAIT`` seconds, which outlasts the
+    installer's own 300-second wait for an earlier uninstall and its 120-second
+    error window; the caller reports an installer that still runs then as
+    unconfirmed.
+    """
+    deadline = time.monotonic() + _INSTALLER_LOG_WAIT
+    scanned: dict[str, int] = {}
+    while True:
+        rc = proc.poll()
+        if _log_opened_by(logs, known, proc.pid, scanned):
+            return True, rc
+        if rc is not None:
+            return False, rc
+        if time.monotonic() >= deadline:
+            return False, None
+        time.sleep(_INSTALLER_LOG_POLL)
+
+
+def _run_installer(path: str, args: list[str], workdir: str, *, rerun: str, newer: str | None = None) -> int:
     # The installer downloads the release assets: hand it update.source
     # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
     configured = _configured_update_source()
@@ -738,17 +904,21 @@ def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | Non
             # An SSH session has no desktop: the new window never appears and
             # the result would only be in the install log (GAP-1993). Keep the
             # staged installer and give the command that runs it right here.
-            command = " ".join(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f'"{path}"', *ps_args]
-            )
+            command = _terminal_command(path, ps_args)
             raise ShimError(
                 "this terminal has no desktop (SSH session), so the installer's window would not be "
                 "visible here.\n"
                 "    Run the installer in this terminal instead; it shows the result and sets the exit code:\n"
                 f"      {command}"
             )
+        home = _data_home()
+        logs = os.path.join(home, "logs")
+        known = _install_logs(logs)
+        # The installer deletes the directory it runs from; keep a verified
+        # copy elsewhere for the recovery command of a failed run.
+        recovery = _stage_recovery_copy(path)
         try:
-            subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
+            proc = subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, *ps_args],
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
                 cwd=workdir,
@@ -756,10 +926,56 @@ def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | Non
             )
         except OSError as exc:
             shutil.rmtree(workdir, ignore_errors=True)
+            _drop_recovery_copy(recovery)
             raise ShimError(f"could not start {powershell}: {exc}") from None
-        home = _data_home()
-        print("  → The installer continues in a new window, which shows the result when it ends.")
-        print(f"    Its log is saved in {os.path.join(home, 'logs')} (install-<time>.log).")
+        # A started process is not a running install (GAP-1011): the installer
+        # opens its log only after it has the install lock, and an installer
+        # that ends before then leaves nothing but a window that closes.
+        print(f"  → Waiting for the installer to open its log (up to {int(_INSTALLER_LOG_WAIT)} s)...", flush=True)
+        opened, rc = _await_installer_log(proc, logs, known)
+        if opened:
+            # An open log is a start, not a result: the installer may still
+            # fail and delete the folder it runs from, so the verified copy
+            # stays. Only an exit code 0 the shim has seen removes it.
+            print("  → The installer continues in a new window, which shows the result when it ends.")
+            print(f"    Its log is saved in {logs} (install-<time>.log).")
+        elif rc == 0:
+            shutil.rmtree(workdir, ignore_errors=True)
+            _drop_recovery_copy(recovery)
+            print("  → The installer ran in its own window and ended with exit code 0 without opening an install log.")
+        elif rc is not None:
+            # No log is not proof that nothing changed: the installer goes on
+            # without a transcript when it cannot write one. Keep the staged
+            # installer, so the result can be read in this terminal.
+            shutil.rmtree(workdir, ignore_errors=True)
+            if recovery and _recovery_copy_verifies(recovery):
+                route = (
+                    "run the kept installer copy, verified against SHA-256 "
+                    f"{recovery[1]}, in this terminal:\n      {_terminal_command(recovery[0], ps_args)}\n"
+                    f"    or run this command again:\n      {rerun}\n"
+                )
+            else:
+                # A release installer of a lower target cannot read the recovery
+                # receipts of this install: go back through the shim, which
+                # picks the current controller again.
+                _drop_recovery_copy(recovery)
+                route = f"run this command again (the kept copy is not available):\n      {rerun}\n"
+            raise ShimOutcomeUnknownError(
+                f"the installer ended with exit code {rc} before it opened its log. It may have stopped before "
+                "changing anything, or later if it could not write its log, so the result is not known; the "
+                "reason was shown only in its window, which has closed. Check the install with: "
+                "defenseclaw --version and defenseclaw doctor. To read the result, "
+                f"{route}"
+                "    The installer first restores an install it was replacing."
+            )
+        else:
+            # Still running, so no result: the verified copy stays.
+            raise ShimOutcomeUnknownError(
+                f"the installer is still running and has not opened its log after {int(_INSTALLER_LOG_WAIT)} "
+                "seconds, so the start is not confirmed: it may wait on an earlier uninstall's cleanup or another "
+                "install, or hold an error in its window. Read that window and let the installer end before you "
+                "start another install; then check: defenseclaw --version and defenseclaw doctor"
+            )
         print("    Confirm the result afterwards with: defenseclaw --version")
         return 0
     bash = "/bin/bash" if os.path.exists("/bin/bash") else (shutil.which("bash") or "bash")
