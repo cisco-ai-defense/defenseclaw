@@ -83,3 +83,53 @@ func TestPatchEnvelopeRepeatedTargetKeepsContentRuleVerdict(t *testing.T) {
 		}
 	}
 }
+
+// TestPatchEnvelopeRepeatedTargetPastProofBoundIsStrictOnly pins that two
+// readable comment-only blocks of one content-rule file, which together make a
+// text past the proof bound, stay allowed in the default and permissive tiers
+// (each block is read and judged, as the same blocks in one call each are) and
+// take the conservative block of the file rule in the strict tier only (the
+// typed call; the here-document routes are not changed by this reading). On every route the same two blocks of an ordinary
+// file, and one such block alone, are allowed in every tier.
+func TestPatchEnvelopeRepeatedTargetPastProofBoundIsStrictOnly(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	half := strings.Repeat("+# no libraries are preloaded on this host\n", 40<<10/len("+# no libraries are preloaded on this host\n"))
+	add := func(target string) string { return "*** Add File: " + target + "\n" + half }
+	ordinary := filepath.Join(project, "notes.txt")
+	for _, row := range []struct {
+		name, blocks string
+		rule         string // empty: allowed in every tier
+	}{
+		{"preload twice", add("/etc/ld.so.preload") + add("/etc/ld.so.preload"), "persistence.global_ld_preload_install"},
+		{"daemon.json twice", add("/etc/docker/daemon.json") + add("/etc/docker/daemon.json"), "tamper.docker_insecure_http_registry"},
+		{"preload once", add("/etc/ld.so.preload"), ""},
+		{"ordinary twice", add(ordinary) + add(ordinary), ""},
+	} {
+		patch := "*** Begin Patch\n" + row.blocks + "*** End Patch\n"
+		for _, pack := range []string{"", "permissive", "strict"} {
+			for _, route := range []string{"typed", "codex heredoc", "claudecode heredoc"} {
+				t.Run(fmt.Sprintf("%s/%q/%s", row.name, pack, route), func(t *testing.T) {
+					connector, tool, input := "codex", "apply_patch", map[string]any{"command": patch}
+					if route != "typed" {
+						command := "apply_patch <<\x27PATCH\x27\n" + patch + "PATCH"
+						if route == "codex heredoc" {
+							tool, input = "exec_command", map[string]any{"cmd": command}
+						} else {
+							connector, tool, input = "claudecode", "Bash", map[string]any{"command": command}
+						}
+					}
+					body := (nativeWriteCall{connector, tool, func(string) map[string]any { return input }}).body(t, project, project)
+					got := overLimitHostHookInPack(t, connector, pack, home, body,
+						hookpaths.ResolveConnector(connector, "", "preToolUse", []byte(body)))
+					action := overLimitHookAction(t, got)
+					if want := row.rule != "" && pack == "strict" && route == "typed"; (action == "block") != want {
+						t.Fatalf("blocked = %t, want %t: %.600s", action == "block", want, got)
+					}
+					if action == "block" && !strings.Contains(got, row.rule) {
+						t.Fatalf("not blocked by %s: %.600s", row.rule, got)
+					}
+				})
+			}
+		}
+	}
+}

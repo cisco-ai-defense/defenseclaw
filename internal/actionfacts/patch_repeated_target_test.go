@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -41,6 +42,42 @@ func TestPatchEnvelopeRepeatedTargetIsReadBlockByBlock(t *testing.T) {
 			}
 			if got := ExactGlobalLDPreloadFileWrite(input, facts); got != c.proof {
 				t.Fatalf("loader-preload proof = %v, want %v", got, c.proof)
+			}
+		})
+	}
+}
+
+// TestPatchEnvelopeRepeatedTargetOverProofBoundIsStrictOnly pins that blocks
+// of one content-rule file that are each read, but make a text past the proof
+// bound together, are no unread block of the default reading
+// (OverLimitWriteElidedContentTarget) and are reported by the combined reading
+// alone; a block that is itself past the bound stays unread, and an ordinary
+// file is never a target.
+func TestPatchEnvelopeRepeatedTargetOverProofBoundIsStrictOnly(t *testing.T) {
+	line := "+# no libraries are preloaded on this host\n"
+	half := strings.Repeat(line, (maxCommandBytes*5/8)/len(line))
+	whole := strings.Repeat(line, (maxCommandBytes*5/4)/len(line))
+	add := func(path, body string) string { return "*** Add File: " + path + "\n" + body }
+	for _, c := range []struct {
+		name, text       string
+		unread, combined bool
+	}{
+		{"two readable blocks", add("/etc/ld.so.preload", half) + add("/etc/ld.so.preload", half), false, true},
+		{"two readable blocks, dot spelling", add("/etc/ld.so.preload", half) + add("/etc/./ld.so.preload", half), false, true},
+		{"two readable blocks of daemon.json", add("/etc/docker/daemon.json", half) + add("/etc/docker/daemon.json", half), false, true},
+		{"one readable block", add("/etc/ld.so.preload", half), false, false},
+		{"two small blocks", add("/etc/ld.so.preload", "+# a\n") + add("/etc/ld.so.preload", "+# b\n"), false, false},
+		{"one block past the bound", add("/etc/ld.so.preload", whole), true, false},
+		{"two readable blocks of an ordinary file", add("/srv/app/a.txt", half) + add("/srv/app/a.txt", half), false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			text := "*** Begin Patch\n" + c.text + "*** End Patch"
+			input, facts := paddedPatchCall(t, "apply_patch", "command", text)
+			if _, got := OverLimitWriteElidedContentTarget(input, facts, nil); got != c.unread {
+				t.Fatalf("unread block = %v, want %v", got, c.unread)
+			}
+			if _, got := OverLimitCombinedPatchContentTarget(input, facts, nil); got != c.combined {
+				t.Fatalf("combined text unread = %v, want %v", got, c.combined)
 			}
 		})
 	}

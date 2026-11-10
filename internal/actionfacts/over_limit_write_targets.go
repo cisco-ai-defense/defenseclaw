@@ -153,7 +153,7 @@ func overLimitWriteReduction(input Input, bounded bool) (Facts, overLimitReducti
 // reaches through links (nil when unknown).
 func OverLimitWriteElidedContentTarget(input Input, facts Facts, resolved map[string]string) (string, bool) {
 	if !LimitExceededWriteTool(input, facts) {
-		return unreadPatchContentTarget(input, facts, resolved)
+		return unreadPatchContentTarget(input, facts, resolved, false)
 	}
 	if len(input.Args) > maxOverLimitWriteArgsBytes || !utf8.Valid(input.Args) {
 		return "", false
@@ -215,14 +215,16 @@ func pathContentRuleClass(path PathFact, viewCWD, inputCWD string, resolved map[
 // an envelope past maxArgsJSONBytes is (OverLimitWriteElidedContentTarget):
 // the callers take the same conservative finding, and no size leaves a band in
 // which neither reading applies. An ordinary file is never such a target.
-func unreadPatchContentTarget(input Input, facts Facts, resolved map[string]string) (string, bool) {
+// With combined it reads the write the blocks of one file make together
+// (OverLimitCombinedPatchContentTarget) instead of the blocks themselves.
+func unreadPatchContentTarget(input Input, facts Facts, resolved map[string]string, combined bool) (string, bool) {
 	if !isApplyPatchTool(input.Tool) || !facts.Authoritative() ||
 		input.Command != "" || len(input.Argv) != 0 {
 		return "", false
 	}
 	unread := map[string]struct{}{}
 	for _, write := range nativeFileWrites(input.Tool, input.Args) {
-		if write.target != "" && write.textOverProofBound() {
+		if write.target != "" && write.combined == combined && write.textOverProofBound() {
 			unread[write.target] = struct{}{}
 		}
 	}
@@ -241,6 +243,16 @@ func unreadPatchContentTarget(input Input, facts Facts, resolved map[string]stri
 		}
 	}
 	return "", false
+}
+
+// OverLimitCombinedPatchContentTarget is unreadPatchContentTarget for the
+// blocks of one file taken together: every block alone is within the proof
+// bound (and so read), but the text they make together is not, so no rule has
+// judged a document that one block opens and a later block finishes. Only the
+// strict tier acts on it: in the default and permissive tiers such blocks stay
+// allowed, as a file written by separate calls does.
+func OverLimitCombinedPatchContentTarget(input Input, facts Facts, resolved map[string]string) (string, bool) {
+	return unreadPatchContentTarget(input, facts, resolved, true)
 }
 
 // textOverProofBound reports a text of the write, or a piece of it, that is
