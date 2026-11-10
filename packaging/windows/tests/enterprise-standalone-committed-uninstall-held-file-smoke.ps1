@@ -122,8 +122,9 @@ $fs.Dispose()
             }
             finally { Stop-Holder $holder }
 
-            # A recovery (not the foreground Uninstall) does not wait: it names the holder at once, so the
-            # detached recovery Setup starts after a failed uninstall is over before the next run starts.
+            # A recovery (not the foreground Uninstall) does not wait and does not read the file: the call
+            # returns at once and the delete that follows is the one it always was. The detached recovery
+            # Setup starts behind every uninstall is then over before the next run starts.
             $script:DefenseClawCommittedUninstallHeldWaits = $false
             $holder = Start-Holder $lock
             try {
@@ -131,7 +132,8 @@ $fs.Dispose()
                 $timer = [Diagnostics.Stopwatch]::StartNew()
                 try { Wait-DefenseClawCommittedUninstallFileReleased -Layout $layout -Path $lock } catch { $text = $_.Exception.Message }
                 if ($timer.Elapsed.TotalSeconds -gt 1.5) { throw "a recovery waited for the holder ($($timer.Elapsed.TotalSeconds) s)" }
-                if (-not $text.StartsWith('codex_state_held: ') -or -not $text.Contains(('process id {0}' -f $holder.Id))) { throw "a recovery did not name the holder at once: '$text'" }
+                if ($text -ne '') { throw "a recovery threw: '$text'" }
+                if (-not (Test-DefenseClawFileDeleteBlocked -Path $lock)) { throw 'the fixture no longer holds the lock' }
             }
             finally { Stop-Holder $holder; $script:DefenseClawCommittedUninstallHeldWaits = $true }
 

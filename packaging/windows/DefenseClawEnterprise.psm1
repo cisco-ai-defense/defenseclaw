@@ -20759,10 +20759,9 @@ function New-DefenseClawCommittedUninstallHeldMessage {
 
 # GAP-1042: whether the committed uninstall's lock-file delete waits for the
 # holder. Only the foreground Uninstall does (Invoke-DefenseClawEnterpriseLifecycle
-# sets it from its Action): the detached recovery Setup starts after a failed
-# uninstall (Recover) must not wait, or it would still be running when the
-# administrator runs the uninstall again after the holder let go, and the two
-# would finish the same clean-up side by side.
+# sets it from its Action): the detached recovery Setup arms behind every uninstall
+# (Recover) goes straight to the delete as it always did, so its outcome and
+# its timing are those of every earlier release.
 $script:DefenseClawCommittedUninstallHeldWaits = $false
 
 function Wait-DefenseClawCommittedUninstallFileReleased {
