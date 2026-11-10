@@ -443,8 +443,12 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 	} else if isSandboxHookClassKey(key) {
 		message = sandboxHookBudgetMessage()
 	}
+	// Take what a managed hook already sent before the 429 is written: the
+	// server discards an unread body once the response starts. The caller
+	// records the shed call from it (GAP-1029).
+	shed := a.shedHookRequest(w, r)
 	writeHookRateLimited(w, refusal, message)
-	return r, nil
+	return shed, nil
 }
 
 // writeHookRateLimited answers 429 with the stable reason and a readable

@@ -445,7 +445,10 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 		}
 		env := audit.CorrelationEnvelope{Connector: call.entry.Connector,
 			SessionID: call.entry.SessionID, RequestID: call.entry.CallID}
-		if call.blocked {
+		if call.blocked || hookFailureOwnsToolCall(call.entry) {
+			// A block, and the allow a hook gave a pre-execution event, are the
+			// record of that tool call: the row names its tool id, so the call
+			// can be found beside (or without) the gateway decision.
 			env.ToolID = strings.TrimSpace(call.entry.ToolID)
 		}
 		action, target, details, severity := hookFailureRow(call)
@@ -518,7 +521,9 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 }
 
 // hookFailureRow is the audit row of one hook-failure line: a fail-open
-// call ran unchecked (guardrail-warn, HIGH); a fail-closed one was blocked by
+// tool call of a pre-execution event is its decision row (connector-hook,
+// action=allow, HIGH, target the event); any other fail-open call ran
+// unchecked (guardrail-warn, HIGH); a fail-closed one was blocked by
 // the hook (guardrail-block, MEDIUM, target connector:event). Only the
 // block of a pre-execution event is the call's own block, the answer the
 // agent got for it; a post-execution event's tool had already run, and a
@@ -530,13 +535,23 @@ func hookFailureRow(call hookFailureCall) (action, target, details, severity str
 		reason = reason[:300]
 	}
 	connectorName := call.entry.Connector
-	if !call.blocked {
-		return string(audit.ActionGuardrailWarn), connectorName,
-			fmt.Sprintf("unchecked hook call during gateway outage: %s; see logs/%s", strconv.Quote(reason), hookFailuresFile), "HIGH"
-	}
 	event := strings.Join(strings.Fields(call.entry.Event), "")
 	if len(event) > 64 {
 		event = event[:64]
+	}
+	if !call.blocked {
+		if hookFailureOwnsToolCall(call.entry) {
+			// The hook wrote this line when it let the tool call go: the allow is
+			// proved by the hook itself. The row is the call's decision row (the
+			// kind and the action=allow field of a gateway decision), so a join
+			// by tool id finds the call whether or not the gateway recorded one.
+			return string(audit.ActionConnectorHook), event,
+				fmt.Sprintf("connector=%s action=allow event=%s delivered=fail-open: the hook allowed this tool call "+
+					"without a gateway decision (%s); see logs/%s",
+					connectorName, event, strconv.Quote(reason), hookFailuresFile), "HIGH"
+		}
+		return string(audit.ActionGuardrailWarn), connectorName,
+			fmt.Sprintf("unchecked hook call during gateway outage: %s; see logs/%s", strconv.Quote(reason), hookFailuresFile), "HIGH"
 	}
 	target = connectorName
 	if event != "" {
@@ -557,6 +572,14 @@ func hookFailureRow(call hookFailureCall) (action, target, details, severity str
 	}
 	return string(audit.ActionGuardrailBlock), target,
 		fmt.Sprintf("%s: %s; see logs/%s", what, strconv.Quote(reason), hookFailuresFile), "MEDIUM"
+}
+
+// hookFailureOwnsToolCall reports a line that is the record of one tool
+// call: it names a pre-execution event and the agent tool call id. A line of
+// a shell hook before 1.0.7 names no event and is not claimed as a call.
+func hookFailureOwnsToolCall(entry hookFailureLine) bool {
+	return strings.TrimSpace(entry.ToolID) != "" &&
+		hookexec.ToolGateEvent(entry.Connector, strings.Join(strings.Fields(entry.Event), ""))
 }
 
 // postExecutionHookEvent reports a hook event that runs after its tool
