@@ -324,27 +324,75 @@ func TestOverLimitCommandPaddingKeepsHeredocMeaning(t *testing.T) {
 // is code. The ordinary statements and the protected ones are shared among
 // several tests, so that no test is longer than the CI budget of one.
 func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart1(t *testing.T) {
-	dataPadding(t, true, 0, 6)
+	dataPadding(t, true, 0, 18)
 }
 
 func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart2(t *testing.T) {
-	dataPadding(t, true, 1, 6)
+	dataPadding(t, true, 1, 18)
 }
 
 func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart3(t *testing.T) {
-	dataPadding(t, true, 2, 6)
+	dataPadding(t, true, 2, 18)
 }
 
 func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart4(t *testing.T) {
-	dataPadding(t, true, 3, 6)
+	dataPadding(t, true, 3, 18)
 }
 
 func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart5(t *testing.T) {
-	dataPadding(t, true, 4, 6)
+	dataPadding(t, true, 4, 18)
 }
 
 func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart6(t *testing.T) {
-	dataPadding(t, true, 5, 6)
+	dataPadding(t, true, 5, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart7(t *testing.T) {
+	dataPadding(t, true, 6, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart8(t *testing.T) {
+	dataPadding(t, true, 7, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart9(t *testing.T) {
+	dataPadding(t, true, 8, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart10(t *testing.T) {
+	dataPadding(t, true, 9, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart11(t *testing.T) {
+	dataPadding(t, true, 10, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart12(t *testing.T) {
+	dataPadding(t, true, 11, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart13(t *testing.T) {
+	dataPadding(t, true, 12, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart14(t *testing.T) {
+	dataPadding(t, true, 13, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart15(t *testing.T) {
+	dataPadding(t, true, 14, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart16(t *testing.T) {
+	dataPadding(t, true, 15, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart17(t *testing.T) {
+	dataPadding(t, true, 16, 18)
+}
+
+func TestOverLimitCommandDataPaddingKeepsOrdinaryStatementsAllowedPart18(t *testing.T) {
+	dataPadding(t, true, 17, 18)
 }
 
 func TestOverLimitCommandDataPaddingKeepsShellOrderAttacksBlockedPart1(t *testing.T) {
@@ -387,8 +435,9 @@ func TestOverLimitCommandDataPaddingKeepsShellOrderAttacksBlockedPart10(t *testi
 	dataPadding(t, false, 9, 10)
 }
 
-// dataPadding judges the statements number part of parts (in the order of
-// their names): the ordinary ones, or the protected ones.
+// dataPadding judges the part-th of parts shares of the rows: the ordinary
+// statements under each padding, or the protected ones. The ordinary rows are
+// shared by statement and padding together, the protected ones by statement.
 func dataPadding(t *testing.T, ordinary bool, part, parts int) {
 	home, project := hermesPatchHome(t)
 	notes := filepath.Join(project, "notes.txt")
@@ -402,10 +451,8 @@ func dataPadding(t *testing.T, ordinary bool, part, parts int) {
 		},
 	}
 	// The three paddings put the data before, after and in a document beside
-	// the statement. Every statement is judged under each of them when it is a
-	// protected write (the attack rows); an ordinary statement is judged under
-	// one of them, taken in turn in the order of its name, so each family of
-	// ordinary statements meets all three.
+	// the statement. Every statement, ordinary or protected, is judged under
+	// each of them.
 	paddingNames := make([]string, 0, len(paddings))
 	for name := range paddings {
 		paddingNames = append(paddingNames, name)
@@ -496,17 +543,19 @@ func dataPadding(t *testing.T, ordinary bool, part, parts int) {
 	}
 	sort.Strings(benignNames)
 	for index, name := range benignNames {
-		if !ordinary || index%parts != part {
-			continue
-		}
-		statement, padName := benign[name], paddingNames[index%len(paddingNames)]
-		t.Run("benign/"+name+"/"+padName, func(t *testing.T) {
-			t.Parallel()
-			got := overLimitCommandVerdictPast(t, home, project, paddings[padName](statement))
-			if action := overLimitHookAction(t, got); action == "block" {
-				t.Fatalf("ordinary oversize command blocked: %.600s", got)
+		statement := benign[name]
+		for padIndex, padName := range paddingNames {
+			if !ordinary || (index*len(paddingNames)+padIndex)%parts != part {
+				continue
 			}
-		})
+			t.Run("benign/"+name+"/"+padName, func(t *testing.T) {
+				t.Parallel()
+				got := overLimitCommandVerdictPast(t, home, project, paddings[padName](statement))
+				if action := overLimitHookAction(t, got); action == "block" {
+					t.Fatalf("ordinary oversize command blocked: %.600s", got)
+				}
+			})
+		}
 	}
 	attacks := map[string]string{
 		"known relative value":                   "cd /etc; F=ld.so.preload; echo " + lib + " > \"$F\"",
