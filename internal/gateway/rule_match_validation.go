@@ -92,13 +92,28 @@ var ibanLengthsByCountry = map[string]int{
 // a rejected candidate prevents an obvious placeholder near the start of a
 // document from hiding a real value later in the same content.
 func firstAcceptedRuleMatch(rule PatternRule, text string) []int {
+	return firstAcceptedRuleMatchBy(rule, text, textMatches{
+		first: func() []int { return rule.Pattern.FindStringIndex(text) },
+		all:   func() [][]int { return rule.Pattern.FindAllStringIndex(text, -1) },
+	})
+}
+
+// textMatches finds the matches of one regex in one text: the first, and all
+// of them. A scan of a large text supplies the search in windows
+// (rxprefilter.Text); the others the plain regex methods.
+type textMatches struct {
+	first func() []int
+	all   func() [][]int
+}
+
+func firstAcceptedRuleMatchBy(rule PatternRule, text string, matches textMatches) []int {
 	if ruleMatchValidator(rule.ID) == nil {
 		if rule.Pattern == nil || text == "" {
 			return nil
 		}
-		return rule.Pattern.FindStringIndex(text)
+		return matches.first()
 	}
-	return firstAcceptedRegexMatchAt(rule.Pattern, text, func(match string, start, end int) bool {
+	return firstAcceptedMatchBy(rule.Pattern, text, matches, func(match string, start, end int) bool {
 		return acceptedRuleMatchAt(rule.ID, text, match, start, end)
 	})
 }
@@ -110,12 +125,19 @@ func firstAcceptedRegexMatch(pattern *regexp.Regexp, text string, accept func(st
 }
 
 func firstAcceptedRegexMatchAt(pattern *regexp.Regexp, text string, accept func(match string, start, end int) bool) []int {
+	return firstAcceptedMatchBy(pattern, text, textMatches{
+		first: func() []int { return pattern.FindStringIndex(text) },
+		all:   func() [][]int { return pattern.FindAllStringIndex(text, -1) },
+	}, accept)
+}
+
+func firstAcceptedMatchBy(pattern *regexp.Regexp, text string, matches textMatches, accept func(match string, start, end int) bool) []int {
 	if pattern == nil || text == "" {
 		return nil
 	}
 	// The first candidate is usually decisive: accept it without enumerating
 	// every later candidate of a large document.
-	first := pattern.FindStringIndex(text)
+	first := matches.first()
 	if first == nil {
 		return nil
 	}
@@ -126,7 +148,7 @@ func firstAcceptedRegexMatchAt(pattern *regexp.Regexp, text string, accept func(
 	// text[offset:] changes the meaning of ^ and word-boundary assertions after
 	// a rejected candidate, allowing a non-match in the original text to become
 	// a match solely because the validation cursor moved.
-	for _, loc := range pattern.FindAllStringIndex(text, -1)[1:] {
+	for _, loc := range matches.all()[1:] {
 		start, end := loc[0], loc[1]
 		if accept(text[start:end], start, end) {
 			return []int{start, end}

@@ -15,5 +15,8 @@ func firstAcceptedRuleMatchIn(rule PatternRule, scan *rxprefilter.Text) []int {
 	if !scan.MayMatch(rule.Pattern) {
 		return nil
 	}
-	return firstAcceptedRuleMatch(rule, scan.String())
+	return firstAcceptedRuleMatchBy(rule, scan.String(), textMatches{
+		first: func() []int { return scan.FindStringIndex(rule.Pattern) },
+		all:   func() [][]int { return scan.FindAllStringIndex(rule.Pattern) },
+	})
 }
