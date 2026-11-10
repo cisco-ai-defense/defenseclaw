@@ -142,6 +142,25 @@ func TestManagedClaudeCodeWrapperAnswersEveryEvent(t *testing.T) {
 	}
 }
 
+// A per-user Setup that carries the managed flag writes the launcher's exec
+// form into the user's settings: no cmd.exe wraps it, so any launcher path
+// renders, and Setup must not refuse it as it refuses a managed-policy path
+// that cmd.exe would expand.
+func TestClaudeCodeChainAdmissionAcceptsTheExecFormOfAManagedPerUserSetup(t *testing.T) {
+	launcher := `C:\Program%Files\DefenseClaw\bin\defenseclaw-hook.exe`
+	perUser := []string{"hook", "--connector", "claudecode"}
+	managed := SetupOpts{ManagedEnterprise: true}
+	if err := claudeCodeChainAdmission(managed, launcher, perUser, "windows"); err != nil {
+		t.Fatalf("exec form of a managed per-user setup refused: %v", err)
+	}
+	if err := claudeCodeChainAdmission(managed, launcher, append(slices.Clone(perUser), "--enterprise-managed"), "windows"); err == nil {
+		t.Fatal("managed policy path that cmd.exe would expand was admitted")
+	}
+	if err := claudeCodeChainAdmission(managed, launcher, append(slices.Clone(perUser), "--unexpected"), "windows"); err == nil {
+		t.Fatal("an unknown managed argument shape was admitted")
+	}
+}
+
 func TestManagedClaudeCodeSetupPublishesAvailabilityParent(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows managed registration")
