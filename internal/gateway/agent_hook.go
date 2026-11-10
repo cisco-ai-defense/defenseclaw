@@ -299,7 +299,7 @@ func (a *APIServer) hookDeliveredPersistenceContext(ctx context.Context, receipt
 		return ctx, nil
 	}
 	cfg := a.decisionConfig(ctx)
-	if cfg == nil || cfg.SecureClientIntegration() || cfg.DeploymentMode != "per_user" {
+	if cfg == nil || cfg.SecureClientIntegration() || !perUserHookInstall(cfg) {
 		return ctx, nil
 	}
 	durableCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -1540,13 +1540,23 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	if client, ok := ctx.Value(hookClientContextKey{}).(context.Context); ok && client.Err() != nil && resp.Action != "block" &&
 		resp.Action != hookActionUnconfirmed && !receipted {
 		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-			failed := a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, req.Payload, hookCheckFailure{
-				base:  agentHookResponse{Severity: "WARN", Reason: "hook client disconnected before the gateway decision was delivered"},
-				cause: "because the hook client disconnected before it received the gateway decision",
-			})
-			if failed.Action == "block" {
-				failed.EvaluationID = resp.EvaluationID
-				resp = failed
+			if cfg != nil && cfg.EffectiveHookOutageFailModeForConnector(connectorName) == "open" {
+				// A hook that may fail open gave the agent its own answer when
+				// it left (a script hook whose curl times out exits 0 in the
+				// default and permissive tiers). Nothing shows which answer
+				// that was, so the row says unconfirmed and keeps the
+				// proposal; it never records a block the agent was not given
+				// (GAP-1028).
+				resp = unconfirmedHookDelivery(resp)
+			} else {
+				failed := a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, req.Payload, hookCheckFailure{
+					base:  agentHookResponse{Severity: "WARN", Reason: "hook client disconnected before the gateway decision was delivered"},
+					cause: "because the hook client disconnected before it received the gateway decision",
+				})
+				if failed.Action == "block" {
+					failed.EvaluationID = resp.EvaluationID
+					resp = failed
+				}
 			}
 		}
 	}

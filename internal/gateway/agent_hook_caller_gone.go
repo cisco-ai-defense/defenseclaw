@@ -113,11 +113,15 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 	if env.SessionID == "" {
 		env.SessionID = hookCallerGoneString(payload, "session_id", "sessionId", "conversation_id", "conversationId")
 	}
-	ctx = audit.ContextWithEnvelope(ctx, env)
 	extra := map[string]string{"hook_client_left": "before_admission"}
 	if id := hookCallerGoneString(payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"); id != "" {
 		extra["tool_use_id"] = id
+		// The row is found by its tool id like every other row of the call.
+		if env.ToolID == "" {
+			env.ToolID = id
+		}
 	}
+	ctx = audit.ContextWithEnvelope(ctx, env)
 	if err := a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
 		Connector: connectorName,
 		Event:     event,

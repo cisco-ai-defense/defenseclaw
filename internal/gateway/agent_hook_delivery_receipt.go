@@ -11,7 +11,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // hookDeliveryReceipt keeps the managed hook's request open until the hook
@@ -140,6 +142,15 @@ const hookActionUnconfirmed = "unconfirmed"
 // enforced when it refused the proposed answer.
 const hookDeliveryRejectedReason = "managed hook rejected the proposed answer"
 
+// perUserHookInstall reports a per-user (OSS) install: any deployment that is
+// not managed enterprise. The deployment mode of such an install is empty (or
+// one of the other validated modes); it is never the literal per_user, which
+// config validation rejects, so the checks that compared against that literal
+// never ran outside tests (GAP-1028).
+func perUserHookInstall(cfg *config.Config) bool {
+	return cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode)
+}
+
 // deliveredHookDecision is the decision of a call that asked for a delivery
 // receipt: the offered answer once the hook acknowledged it, and the hook's
 // own block when it refused it. A missing receipt cannot prove what an older
@@ -152,13 +163,13 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 	case hookexec.HookDeliveryReceiptBlock:
 		return failedClosedHookDelivery(resp, hookDeliveryRejectedReason)
 	case hookexec.HookDeliveryReceiptLate:
-		if a.scannerCfg.DeploymentMode == "per_user" {
+		if perUserHookInstall(a.scannerCfg) {
 			return failedClosedHookDelivery(resp, hookexec.PerUserGatewayNoAnswerReason)
 		}
 		return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
 	case hookexec.HookDeliveryReceiptOpen:
 		reason := hookexec.ManagedGatewayNoAnswerReason
-		if a.scannerCfg.DeploymentMode == "per_user" {
+		if perUserHookInstall(a.scannerCfg) {
 			reason = hookexec.PerUserGatewayNoAnswerReason
 		}
 		return failedOpenHookDelivery(resp, reason)

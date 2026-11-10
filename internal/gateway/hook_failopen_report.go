@@ -445,7 +445,10 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 		}
 		env := audit.CorrelationEnvelope{Connector: call.entry.Connector,
 			SessionID: call.entry.SessionID, RequestID: call.entry.CallID}
-		if call.blocked {
+		if call.blocked || hookFailureOwnsToolCall(call.entry) {
+			// A block, and the allow a hook gave a pre-execution event, are the
+			// record of that tool call: the row names its tool id, so the call
+			// can be found beside (or without) the gateway decision.
 			env.ToolID = strings.TrimSpace(call.entry.ToolID)
 		}
 		action, target, details, severity := hookFailureRow(call)
@@ -531,8 +534,12 @@ func hookFailureRow(call hookFailureCall) (action, target, details, severity str
 	}
 	connectorName := call.entry.Connector
 	if !call.blocked {
+		what := "unchecked hook call during gateway outage"
+		if hookFailureOwnsToolCall(call.entry) {
+			what += " (the hook allowed this tool call; the gateway recorded no decision for it)"
+		}
 		return string(audit.ActionGuardrailWarn), connectorName,
-			fmt.Sprintf("unchecked hook call during gateway outage: %s; see logs/%s", strconv.Quote(reason), hookFailuresFile), "HIGH"
+			fmt.Sprintf("%s: %s; see logs/%s", what, strconv.Quote(reason), hookFailuresFile), "HIGH"
 	}
 	event := strings.Join(strings.Fields(call.entry.Event), "")
 	if len(event) > 64 {
@@ -557,6 +564,14 @@ func hookFailureRow(call hookFailureCall) (action, target, details, severity str
 	}
 	return string(audit.ActionGuardrailBlock), target,
 		fmt.Sprintf("%s: %s; see logs/%s", what, strconv.Quote(reason), hookFailuresFile), "MEDIUM"
+}
+
+// hookFailureOwnsToolCall reports a line that is the record of one tool
+// call: it names a pre-execution event and the agent tool call id. A line of
+// a shell hook before 1.0.7 names no event and is not claimed as a call.
+func hookFailureOwnsToolCall(entry hookFailureLine) bool {
+	return strings.TrimSpace(entry.ToolID) != "" &&
+		hookexec.ToolGateEvent(entry.Connector, strings.Join(strings.Fields(entry.Event), ""))
 }
 
 // postExecutionHookEvent reports a hook event that runs after its tool
