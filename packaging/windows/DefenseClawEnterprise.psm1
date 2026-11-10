@@ -30279,7 +30279,7 @@ function Assert-DefenseClawCodexRequirementsPublishable {
     catch {
         throw 'refusing to publish a Codex requirements file that is not valid UTF-8'
     }
-    if ([string]::IsNullOrWhiteSpace($text)) {
+    if ([string]::IsNullOrWhiteSpace($text.TrimStart([char]0xFEFF))) {
         throw 'refusing to publish a Codex requirements file with nothing in it: Codex would load no DefenseClaw hook or policy'
     }
 }
@@ -30298,11 +30298,17 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         # codex_requirements_uninstall: the gateways of 1.0.3 and 1.0.8 define
         # only --json and refuse --uninstall, so a newer Setup uninstalling an
         # older deployment runs the plain removal, as that release did.
-        [switch]$Teardown
+        [switch]$Teardown,
+        # GAP-1001: the document the reconcile renders the managed policy into
+        # instead of the file on disk (reconcile only; under recovered-policy).
+        [string]$BaseFile = ''
     )
     Assert-DefenseClawAdministrator
     if ($Teardown -and $Action -cne 'remove') {
         throw 'the Codex requirements teardown option applies to the remove action only'
+    }
+    if ($BaseFile -ne '' -and $Action -cne 'reconcile') {
+        throw 'the Codex requirements base file applies to the reconcile action only'
     }
     $codexRequirementsArguments = @(
         'enterprise',
@@ -30311,6 +30317,9 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         $Action,
         '--json'
     )
+    if ($BaseFile -ne '') {
+        $codexRequirementsArguments += @('--base-file', $BaseFile)
+    }
     if ($Teardown -and (Test-DefenseClawManagedHooksCommittedTeardownSupported `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -30360,7 +30369,9 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         else {
             (($probe.output | Microsoft.PowerShell.Utility\Out-String).Trim())
         }
-        if ((Test-DefenseClawStandaloneProfile) -and (Test-DefenseClawCodexWriterLockBusyMessage -Message $detail)) {
+        $reportedCode = if ($null -ne $report.PSObject.Properties['error_code']) { [string]$report.error_code } else { '' }
+        if ((Test-DefenseClawStandaloneProfile) -and
+            ($reportedCode -ceq 'writer_lock_busy' -or (Test-DefenseClawCodexWriterLockBusyMessage -Message $detail))) {
             # GAP-0999: not a defect of the policy file.
             throw (New-DefenseClawCodexWriterBusyRefusal -Layout $Layout -Action $Action -Detail "Codex requirements $Action failed: $detail")
         }
@@ -30727,12 +30738,13 @@ function Test-DefenseClawManagedHooksCommittedTeardownSupported {
         -Capability precommit_check asks instead whether the helper accepts
         the read-only "check" action (GAP-0571); -Capability
         codex_requirements_uninstall whether "codex-requirements remove"
-        accepts --uninstall (GAP-0773).
+        accepts --uninstall (GAP-0773); -Capability codex_requirements_base_file
+        whether "codex-requirements reconcile" accepts --base-file (GAP-1001).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [ValidateSet('committed_standalone_prepare', 'precommit_check', 'codex_requirements_uninstall')]
+        [ValidateSet('committed_standalone_prepare', 'precommit_check', 'codex_requirements_uninstall', 'codex_requirements_base_file')]
         [string]$Capability = 'committed_standalone_prepare'
     )
     $probe = Invoke-DefenseClawGatewayCommand `
@@ -36581,7 +36593,6 @@ function Repair-DefenseClawRecoveredCodexRequirements {
     $backupPath = ''
     $editedSHA256 = ''
     $editedLength = 0
-    $edited = $null
     $directory = Microsoft.PowerShell.Management\Join-Path ([string]$Layout.InstallStateDirectory) 'recovered-policy'
     [void](New-DefenseClawProtectedDirectory -Path $directory)
     if ($exists) {
@@ -36645,44 +36656,38 @@ function Repair-DefenseClawRecoveredCodexRequirements {
         if ($base.Length -eq 0) {
             $mode = 'it was rebuilt as the managed policy alone (DefenseClaw recorded no preimage for it)'
         }
+        $keptNote = if ($backupPath) { "; the file as it was is kept at $backupPath" } else { '' }
+        # GAP-1001: the live file only ever holds the last file it had or a
+        # new one the gateway rendered and checked (it parses, and carries every
+        # DefenseClaw managed hook). The base is rendered into beside it; nothing
+        # is swapped over the path first, so a failure leaves the file as it was.
+        if (-not (Test-DefenseClawManagedHooksCommittedTeardownSupported `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Capability codex_requirements_base_file)) {
+            throw ("Codex requirements recovery could not republish the managed policy: merge: $mergeError; the installed gateway cannot render the managed policy beside the file (its codex-requirements reconcile has no --base-file), so the file was left as it was" + $keptNote +
+                ". Next step: run " + (Format-DefenseClawSetupAction -Action '/repair') + " with the Setup of this release after the installed release is restored")
+        }
         $staged = Microsoft.PowerShell.Management\Join-Path $directory ('base.{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
         try {
-            if ($base.Length -eq 0 -or [string]::IsNullOrWhiteSpace([Text.Encoding]::UTF8.GetString($base))) {
-                # GAP-1001: the base is never an empty file; the reconcile that
-                # follows publishes the managed policy over this line.
-                $base = [Text.UTF8Encoding]::new($false).GetBytes("# DefenseClaw managed Codex requirements: the managed policy is published by the reconcile that follows`r`n")
+            if ([Array]::IndexOf($base, [byte]0) -ge 0) {
+                throw 'the recorded preimage contains NUL bytes'
             }
-            Assert-DefenseClawCodexRequirementsPublishable -Bytes $base
+            try { [void][Text.UTF8Encoding]::new($false, $true).GetString($base) } catch { throw 'the recorded preimage is not valid UTF-8' }
             [IO.File]::WriteAllBytes($staged, $base)
-            Install-DefenseClawFileAtomic -Source $staged -Destination $path
             [void](Invoke-DefenseClawCodexRequirementsCommand `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -Action reconcile)
+                -Action reconcile `
+                -BaseFile $staged)
         }
         catch {
             $rebuildError = [string]$_.Exception.Message
-            # GAP-1001: a failed rebuild never leaves an empty or partial
-            # file in place of the one it found. The bytes read above go back
-            # through the same sibling-and-swap, and the failure is named.
-            $restoredNote = ''
-            if ($exists -and $null -ne $edited) {
-                $restoreStaged = Microsoft.PowerShell.Management\Join-Path $directory ('restore.{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
-                try {
-                    [IO.File]::WriteAllBytes($restoreStaged, $edited)
-                    Install-DefenseClawFileAtomic -Source $restoreStaged -Destination $path
-                    $restoredNote = '; the file was left as it was'
-                }
-                catch {
-                    $restoredNote = '; putting the file back also failed (' + [string]$_.Exception.Message + ')'
-                }
-                finally {
-                    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $restoreStaged) {
-                        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $restoreStaged -Force -ErrorAction SilentlyContinue
-                    }
-                }
+            if ($rebuildError.StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+                # A Codex writer turned up during the render: the refusal as it is.
+                throw $rebuildError
             }
-            throw ("Codex requirements recovery could not republish the managed policy: merge: $mergeError; rebuild: " + $rebuildError + $restoredNote + $(if ($backupPath) { "; the file as it was is kept at $backupPath" } else { '' }))
+            throw ("Codex requirements recovery could not republish the managed policy: merge: $mergeError; rebuild: " + $rebuildError + '; the file was left as it was' + $keptNote)
         }
         finally {
             if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $staged) {

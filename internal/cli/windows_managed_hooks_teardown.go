@@ -861,6 +861,12 @@ type windowsManagedHooksTeardownCapabilities struct {
 	// helper that reports this; the helpers of 1.0.3 and 1.0.8 define only
 	// --json and refuse the flag, and Setup runs their plain removal.
 	CodexRequirementsUninstall bool `json:"codex_requirements_uninstall"`
+	// CodexRequirementsBaseFile says "codex-requirements reconcile" accepts
+	// --base-file, the document the managed policy is rendered into instead of
+	// the file on disk (GAP-1001). Setup rebuilds a hand-edited requirements
+	// file only through a helper that reports this; an older helper leaves
+	// the file as it is and the recovery says so.
+	CodexRequirementsBaseFile bool `json:"codex_requirements_base_file"`
 }
 
 func newWindowsManagedHooksTeardownCapabilitiesCommand() *cobra.Command {
@@ -879,6 +885,7 @@ func newWindowsManagedHooksTeardownCapabilitiesCommand() *cobra.Command {
 				CommittedStandalonePrepare: true,
 				PrecommitCheck:             true,
 				CodexRequirementsUninstall: true,
+				CodexRequirementsBaseFile:  true,
 			}
 			if jsonOutput {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)

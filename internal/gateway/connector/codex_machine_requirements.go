@@ -61,6 +61,16 @@ const (
 // from Windows Known Folders, the running installed gateway, and protected
 // deployment metadata; none of them are accepted as public CLI flags.
 type WindowsCodexMachineRequirementsOptions struct {
+	// RenderBase, when RenderBaseSet, is the document a reconcile merges the
+	// managed policy into instead of the requirements file on disk (GAP-1001):
+	// the recovery of a hand-edited file renders from the recorded preimage
+	// off to the side, and only the validated, hook-bearing result is swapped
+	// in. The file on disk is read for the compare-and-swap, never used as
+	// the base, and stays as it is when the render or its check fails. An
+	// empty RenderBase renders the managed policy alone.
+	RenderBase    []byte
+	RenderBaseSet bool
+
 	RequirementsPath   string
 	ManagedDir         string
 	HookBinary         string
@@ -117,6 +127,10 @@ type WindowsCodexManagedRuntimeRegistry struct {
 // the installer and guardian. Disposition distinguishes exact preimage restore
 // from surgical removal that preserves later unrelated administrator edits.
 type WindowsCodexMachineRequirementsReport struct {
+	// ErrorCode is a stable code for the failures a caller acts on without
+	// reading text: writer_lock_busy when a Codex writer holds the writer lock
+	// (GAP-1001).
+	ErrorCode                           string `json:"error_code,omitempty"`
 	SchemaVersion                       int    `json:"schema_version"`
 	Action                              string `json:"action"`
 	OK                                  bool   `json:"ok"`
@@ -1584,4 +1598,18 @@ func windowsCodexAdoptPreimageBaseline(preimage []byte) ([]byte, error) {
 		return nil, fmt.Errorf("marshal Codex adopt baseline: %w", err)
 	}
 	return rendered, nil
+}
+
+// ErrWindowsCodexWriterLockBusy is what a failure of the Codex writer lock
+// matches when another program holds it (a sharing violation on the open, a
+// lock violation or a pending lock that the bound ran out on). The error text
+// is unchanged; callers read the class with errors.Is (GAP-1001).
+var ErrWindowsCodexWriterLockBusy = errors.New("a Codex writer holds the writer lock")
+
+type windowsCodexWriterLockBusyError struct{ err error }
+
+func (e windowsCodexWriterLockBusyError) Error() string { return e.err.Error() }
+func (e windowsCodexWriterLockBusyError) Unwrap() error { return e.err }
+func (e windowsCodexWriterLockBusyError) Is(target error) bool {
+	return target == ErrWindowsCodexWriterLockBusy
 }

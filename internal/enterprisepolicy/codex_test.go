@@ -344,7 +344,7 @@ func TestCodexVerifyNamesAnEmptyRequirementsFile(t *testing.T) {
 			t.Fatalf("%s: an empty requirements file must not verify as covered: %+v", name, state)
 		}
 		first := state.Conflicts[0]
-		if !strings.Contains(first, path+" is empty") || !strings.Contains(first, "nothing guards Codex") || !strings.Contains(first, "repair") && !strings.Contains(first, "reconcile") {
+		if !strings.Contains(first, path+" is empty") || !strings.Contains(first, "nothing guards Codex") || !strings.Contains(first, "repair") && !strings.Contains(first, "ensure") {
 			t.Fatalf("%s: the first conflict does not name the empty file and the recovery: %q", name, first)
 		}
 	}
@@ -389,7 +389,7 @@ func TestCodexVerifyNamesAValidFileWithoutTheManagedHook(t *testing.T) {
 			t.Fatalf("%s: must not verify as covered: %+v", name, state)
 		}
 		first := state.Conflicts[0]
-		if !strings.Contains(first, "does not carry the DefenseClaw managed hook") || !strings.Contains(first, "nothing guards Codex") || !strings.Contains(first, "reconcile") {
+		if !strings.Contains(first, "does not carry the DefenseClaw managed hook") || !strings.Contains(first, "nothing guards Codex") || !strings.Contains(first, "enterprise linux ensure") {
 			t.Fatalf("%s: the first conflict does not name the missing hook and the recovery: %q", name, first)
 		}
 	}
