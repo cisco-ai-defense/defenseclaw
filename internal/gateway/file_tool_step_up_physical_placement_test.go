@@ -50,6 +50,26 @@ func stepUpOrdinaryFolder(t *testing.T, project string) string {
 	return folder
 }
 
+// stepUpDeepOrdinaryName returns the name of a link in the project to a folder
+// of the user that lies deeper than the project does, climbed out of as many
+// times as the lexical path of the project is deep: cleaned lexically the name
+// reaches the root and spells the system loader file, while the operating
+// system, which walks the link first, opens an ordinary file inside the user
+// folders.
+func stepUpDeepOrdinaryName(t *testing.T, project, leaf string) string {
+	t.Helper()
+	ups := strings.Count(filepath.ToSlash(filepath.Clean(project)), "/") + 1
+	folder := filepath.Join(filepath.Dir(project), "other")
+	for i := 0; i < ups+2; i++ {
+		folder = filepath.Join(folder, "d")
+	}
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stepUpLink(t, project, "lnk-deep", folder)
+	return "lnk-deep/" + strings.Repeat("../", ups) + leaf
+}
+
 func stepUpClaude(tool string, input map[string]any) func(t *testing.T, project string) map[string]any {
 	return func(t *testing.T, project string) map[string]any {
 		return sudoersClaudeCall(tool, sudoersFixed(input))(project)
@@ -118,6 +138,12 @@ func stepUpRows() []stepUpRow {
 				t.Fatal(err)
 			}
 			return stepUpClaude("Write", map[string]any{"file_path": "sub/../ld.so.preload", "content": preload["content"]})(t, project)
+		}},
+		{"ordinary physical file whose lexical name is the loader file", "claudecode", "", func(t *testing.T, project string) map[string]any {
+			return stepUpClaude("Write", map[string]any{"file_path": stepUpDeepOrdinaryName(t, project, "etc/ld.so.preload"), "content": preload["content"]})(t, project)
+		}},
+		{"ordinary physical file by a patch header whose lexical name is the loader file", "codex", "", func(t *testing.T, project string) map[string]any {
+			return codexBashCall(codexHeredocPatch("Add File", stepUpDeepOrdinaryName(t, project, "etc/ld.so.preload"), "+/opt/lib/libreview.so\n"))(project)
 		}},
 		{"comment in the pam file after a link", "claudecode", "", withLink("lnk-sys", stepUpClaude("Edit", map[string]any{
 			"file_path": "lnk-sys/../pam.d/sshd", "old_string": "# review", "new_string": "# review comment"}))},
