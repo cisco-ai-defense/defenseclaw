@@ -422,21 +422,29 @@ var enterprisePolicyResolveTarget = enterprisePolicyTarget
 // its calls exempt, and enrollment.root decides them (GAP-0555).
 const enrollmentExcludedPrefix = "excluded by enterprise.enrollment.exclude_users"
 
-// excludedOpenCodeNote is the line that keeps a covered OpenCode machine-policy
-// row from reading as protection for an excluded account. The install scan
-// skips an excluded account before it finds the OpenCode it runs, so no
+// excludedOpenCodeNote is the line that keeps an OpenCode machine-policy row
+// from reading as protection for an excluded account. The install scan skips
+// an excluded account before it finds the OpenCode it runs, so no
 // unprotected-agent entry can name V1; only OpenCode V2 registers the plugin
-// hooks, and V1 runs every tool call unchecked (GAP-0949).
+// hooks, and V1 runs every tool call unchecked. The line claims V2 coverage
+// only when the row is verified covered; an uncovered row says the policy
+// must be repaired first (GAP-0949).
 func excludedOpenCodeNote(enrollment string, states []enterprisepolicy.State) string {
 	if !strings.HasPrefix(enrollment, enrollmentExcludedPrefix) {
 		return ""
 	}
 	for _, state := range states {
-		if state.Connector == enterprisepolicy.ConnectorOpenCode && state.Route == enterprisepolicy.RouteMachinePolicy &&
-			state.Ownership != config.MachinePolicyOwnershipOff {
-			return "OpenCode V1 (opencode-ai) is not protected for this account: the machine policy covers OpenCode V2 (@opencode/cli 2.x) calls only, " +
-				"the install scan does not look at excluded accounts, so V2 is required"
+		if state.Connector != enterprisepolicy.ConnectorOpenCode || state.Route != enterprisepolicy.RouteMachinePolicy ||
+			state.Ownership == config.MachinePolicyOwnershipOff {
+			continue
 		}
+		const v1 = "OpenCode V1 (opencode-ai) is not protected for this account: "
+		if !state.Covered {
+			return v1 + "the OpenCode machine policy is not covered either (see the opencode row above), so repair it and run enterprise policy verify; " +
+				"even then it covers OpenCode V2 (@opencode/cli 2.x) calls only, and the install scan does not look at excluded accounts, so V2 is required"
+		}
+		return v1 + "the machine policy covers OpenCode V2 (@opencode/cli 2.x) calls only, " +
+			"the install scan does not look at excluded accounts, so V2 is required"
 	}
 	return ""
 }

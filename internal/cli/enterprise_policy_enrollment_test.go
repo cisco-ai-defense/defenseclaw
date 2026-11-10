@@ -197,13 +197,15 @@ func TestEnterprisePolicyShowExcludedAccountSaysOpenCodeV1IsNotProtected(t *test
 		enrollment string
 		states     []enterprisepolicy.State
 		want       bool
+		// claimsCoverage: the line says the machine policy covers V2 calls.
+		claimsCoverage bool
 	}{
-		{"excluded with a covered OpenCode row", excluded, []enterprisepolicy.State{claude, openCode}, true},
-		{"excluded with an uncovered OpenCode row", excluded, []enterprisepolicy.State{{Connector: "opencode", Route: enterprisepolicy.RouteMachinePolicy}}, true},
-		{"excluded, OpenCode ownership off", excluded, []enterprisepolicy.State{off}, false},
-		{"excluded, no OpenCode row", excluded, []enterprisepolicy.State{claude}, false},
-		{"enrolled account", "", []enterprisepolicy.State{claude, openCode}, false},
-		{"exempt account", exempt, []enterprisepolicy.State{claude, openCode}, false},
+		{"excluded with a covered OpenCode row", excluded, []enterprisepolicy.State{claude, openCode}, true, true},
+		{"excluded with an uncovered OpenCode row", excluded, []enterprisepolicy.State{{Connector: "opencode", Route: enterprisepolicy.RouteMachinePolicy}}, true, false},
+		{"excluded, OpenCode ownership off", excluded, []enterprisepolicy.State{off}, false, false},
+		{"excluded, no OpenCode row", excluded, []enterprisepolicy.State{claude}, false, false},
+		{"enrolled account", "", []enterprisepolicy.State{claude, openCode}, false, false},
+		{"exempt account", exempt, []enterprisepolicy.State{claude, openCode}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			report := enterprisePolicyReport{
@@ -222,6 +224,16 @@ func TestEnterprisePolicyShowExcludedAccountSaysOpenCodeV1IsNotProtected(t *test
 				got := strings.Contains(text, "OpenCode V1 (opencode-ai) is not protected") && strings.Contains(text, "V2 is required")
 				if got != tc.want {
 					t.Fatalf("json %t: V1 warning present=%t, want %t:\n%s", asJSON, got, tc.want, text)
+				}
+				// The line may say the machine policy covers V2 calls only
+				// when the row is verified covered; an uncovered row asks for
+				// the repair instead (GAP-0949).
+				claims := strings.Contains(text, "the machine policy covers OpenCode V2")
+				if tc.want && claims != tc.claimsCoverage {
+					t.Fatalf("json %t: coverage claim present=%t, want %t:\n%s", asJSON, claims, tc.claimsCoverage, text)
+				}
+				if tc.want && !tc.claimsCoverage && !strings.Contains(text, "not covered either") {
+					t.Fatalf("json %t: uncovered row does not ask for the repair:\n%s", asJSON, text)
 				}
 			}
 		})
