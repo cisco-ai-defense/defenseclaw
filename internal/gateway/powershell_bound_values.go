@@ -926,12 +926,24 @@ func psPatchRunTargets(statement, cwd string, budget *psBudget) []string {
 			if path == "" {
 				continue
 			}
-			if cwd != "" && !psAbsolutePath(path) {
-				path = strings.TrimRight(cwd, `\/`) + `\` + path
+			// The envelope is read as the text of a statement, so a target
+			// inside a single-quoted literal (a bound $patch is replaced by
+			// one) holds each quote of its path doubled. The target is its
+			// value, quoted once; the text as written is judged too, for an
+			// envelope in a here-string or a double-quoted string, where a
+			// doubled quote is two characters.
+			spellings := []string{path}
+			if value := managed.PowerShellLiteralValue(path); value != path {
+				spellings = []string{value, path}
 			}
-			targets = append(targets, managed.PowerShellLiteral(path))
-			if len(targets) >= maxTargets {
-				return targets
+			for _, spelling := range spellings {
+				if cwd != "" && !psAbsolutePath(spelling) {
+					spelling = strings.TrimRight(cwd, `\/`) + `\` + spelling
+				}
+				targets = append(targets, managed.PowerShellLiteral(spelling))
+				if len(targets) >= maxTargets {
+					return targets
+				}
 			}
 		}
 	}
