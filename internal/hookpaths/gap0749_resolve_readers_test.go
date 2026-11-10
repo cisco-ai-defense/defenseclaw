@@ -27,6 +27,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	dialect := hookShellDialect("", "Bash")
 	_ = actionfacts.CommandTextOverLimit(command)
 	shellparse.TooDeep(command)
+	BoundCommandOperands(command, cwd, home)
 	ActionCommandAuditReasonWithDialect(command, cwd, home, dialect)
 	MayNameState(command)
 	StateNamingReading(command, home, false)
@@ -109,7 +110,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 // TestGAP0749ResolveReadersCoverResolve fails when the two differ.
 var gap0749ResolveReaderCalls = []string{
 	"ActionCommandAuditReasonWithDialect", "ActionCommandDecision", "AdjacentAssignedWriteOperands",
-	"BoundedGlobLoopCopyDestinations", "BoundedLoopCopyDestinations", "BoundedShellWriteOperands",
+	"BoundCommandOperands", "BoundedGlobLoopCopyDestinations", "BoundedLoopCopyDestinations", "BoundedShellWriteOperands",
 	"CopySourceGlobDestinations", "DeclaredRedirectWriteOperands", "LinkWalkFacts", "LiteralWriteOperands",
 	"MayNameState", "NoDereferenceTouchShape", "QuotedDynamicCopyDestinations",
 	"SafeShellRedirectOccurrencesWithFacts", "ShellDirectoryWriteOperands", "ShellWriteOperands",
