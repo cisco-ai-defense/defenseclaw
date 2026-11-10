@@ -540,6 +540,14 @@ func hookFailureRow(call hookFailureCall) (action, target, details, severity str
 		event = event[:64]
 	}
 	if !call.blocked {
+		if hookFailureOwnsToolCall(call.entry) && call.entry.auditGap() {
+			// The gateway answered the call and wrote this line because its
+			// audit write failed: the allow is the answer it gave.
+			return string(audit.ActionConnectorHook), event,
+				fmt.Sprintf("connector=%s action=allow event=%s delivered=audit-recovered: the gateway allowed this tool call "+
+					"and could not write its audit record when it did (%s); see logs/%s",
+					connectorName, event, strconv.Quote(reason), hookFailuresFile), "HIGH"
+		}
 		if hookFailureOwnsToolCall(call.entry) {
 			// The hook wrote this line when it let the tool call go: the allow is
 			// proved by the hook itself. The row is the call's decision row (the
@@ -559,6 +567,8 @@ func hookFailureRow(call hookFailureCall) (action, target, details, severity str
 	}
 	var what string
 	switch {
+	case call.entry.auditGap():
+		what = fmt.Sprintf("the gateway blocked the call (%s) and could not write its audit record when it did", event)
 	case event == "":
 		what = "hook blocked a hook event itself (fail-closed; the line names no event, so this is not claimed as the call's verdict)"
 	case hookexec.ToolGateEvent(connectorName, event):
@@ -694,7 +704,7 @@ func readHookFailureCalls(logDir string, now time.Time) ([]hookFailOpenSummary, 
 		}
 		entry.Connector = connectorName
 		read.calls = append(read.calls, hookFailureCall{entry: entry, end: next, blocked: blocked})
-		if blocked || next <= state.Done[connectorName] {
+		if blocked || entry.auditGap() || next <= state.Done[connectorName] {
 			continue
 		}
 		sum := byConnector[connectorName]

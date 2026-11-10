@@ -17,11 +17,14 @@ import (
 // authentication as peer uid 1004. A call the limits admit reaches next, which
 // answers 200; the response is returned.
 func serveShedOnSocket(f managedHookAuditFixture, authorizer *managedHookAuthorizer, body string) *httptest.ResponseRecorder {
+	return serveShedOnSocketAs(f, authorizer, body, managedHookPeer{UID: 1004, Name: "shed-alice"})
+}
+
+func serveShedOnSocketAs(f managedHookAuditFixture, authorizer *managedHookAuthorizer, body string, peer managedHookPeer) *httptest.ResponseRecorder {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	r := httptest.NewRequest(http.MethodPost, goneHookPath, strings.NewReader(body))
 	reply := httptest.NewRecorder()
-	f.api.managedHookPeerAuth(authorizer, next).ServeHTTP(reply,
-		r.WithContext(withManagedHookPeer(r.Context(), managedHookPeer{UID: 1004, Name: "shed-alice"})))
+	f.api.managedHookPeerAuth(authorizer, next).ServeHTTP(reply, r.WithContext(withManagedHookPeer(r.Context(), peer)))
 	return reply
 }
 
@@ -105,4 +108,42 @@ func TestManagedHookCallShedWith429IsAuditedOnlyWhenTheSocketWouldServeIt(t *tes
 			t.Fatalf("%s: a call the socket would not have served got %d rows", tc.name, len(rows))
 		}
 	}
+}
+
+// GAP-1029: the session and tool id of a call come from the agent, so two
+// verified accounts that send the same ids are two shed calls with a row
+// each, and one account's retries still leave one.
+func TestShedRowsAreScopedToTheVerifiedAccount(t *testing.T) {
+	f := newManagedHookAuditFixture(t, nil)
+	f.api.hookCallerLimits = hookCallerLimiter{rate: 1, burst: 1}
+	alice := managedHookPeer{UID: 1004, Name: "shed-alice"}
+	bob := managedHookPeer{UID: 1005, Name: "shed-bob"}
+	for _, peer := range []managedHookPeer{alice, bob} {
+		if reply := serveShedOnSocketAs(f, machinePolicyAuthorizer(), managedHookBody("shed-warm", "PreToolUse"), peer); reply.Code != http.StatusOK {
+			t.Fatalf("uid %d: the first call was refused: %d", peer.UID, reply.Code)
+		}
+		for attempt := 0; attempt < 2; attempt++ {
+			if reply := serveShedOnSocketAs(f, machinePolicyAuthorizer(), managedHookBody("shed-same", "PreToolUse"), peer); reply.Code != http.StatusTooManyRequests {
+				t.Fatalf("uid %d attempt %d: status %d, want the 429", peer.UID, attempt, reply.Code)
+			}
+		}
+	}
+	users := goneRowUsers(t, f, "shed-same")
+	if len(users) != 2 || users[0] == users[1] {
+		t.Fatalf("rows for the same ids = %v, want one row per verified account", users)
+	}
+}
+
+// A shed call whose row was not written is not remembered as recorded: its
+// next send is the retry that writes it.
+func TestShedLedgerForgetsACallWhoseRowFailed(t *testing.T) {
+	var ledger hookShedLedger
+	if !ledger.first("a") || ledger.first("a") {
+		t.Fatal("a call is new once")
+	}
+	ledger.forget("a")
+	if !ledger.first("a") {
+		t.Fatal("a forgotten call must be recorded by its next try")
+	}
+	ledger.forget("never-seen")
 }
