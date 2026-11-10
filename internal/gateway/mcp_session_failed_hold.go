@@ -73,7 +73,7 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 	}
 	// The ordinary call, with nothing held, reads no config: the agent state
 	// file can be large and this runs at every MCP call.
-	held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, heldScopes(probe.WorkspaceDir), now)
+	held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, now)
 	if len(held) == 0 && !overflow {
 		return status
 	}
@@ -137,59 +137,34 @@ func heldScope(entry config.MCPServerEntry) string {
 	return ""
 }
 
-// heldScopes are the scopes a hold of a call from cwd can be under: the user
-// scope, then each folder from the root down to the working directory, the
-// folder of the call last.
-func heldScopes(cwd string) []string {
-	scopes := []string{""}
-	cwd = strings.TrimSpace(cwd)
-	if cwd == "" {
-		return scopes
-	}
-	var chain []string
-	for dir := filepath.Clean(cwd); ; {
-		chain = append(chain, dir)
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	slices.Reverse(chain)
-	return append(scopes, chain...)
-}
-
 // heldFailures returns, within the memory time limit, the failed definitions
 // the session holds for name, the latest last, and whether it met more than it
-// could keep. The holds of the per-user gateway are under the session and the
-// name alone (the empty scope); scopes adds the working directories a managed
-// hook reported a refusal under.
-func (h *hookReportedMCPServers) heldFailures(connector, home, session, name string, scopes []string, now time.Time) (held []config.MCPServerEntry, overflow bool) {
+// could keep. Every hold, the per-user gateway and the managed hook alike, is
+// under the session and the name alone, whatever directory the hook reports.
+func (h *hookReportedMCPServers) heldFailures(connector, home, session, name string, now time.Time) (held []config.MCPServerEntry, overflow bool) {
 	if h == nil || session == "" {
 		return nil, false
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	holds := h.overflow[unrecordedKey(connector, home)]
-	for _, scope := range scopes {
-		key := mcpResolvedKey(connector, home, session, scope, name)
-		if set, ok := h.refused[key]; ok {
-			if now.Sub(set.seen) > mcpResolvedTTL {
-				delete(h.refused, key)
-			} else {
-				set.seen = now
-				overflow = overflow || set.overflow
-				held = append(held, set.defs...)
-			}
+	key := mcpResolvedKey(connector, home, session, "", name)
+	if set, ok := h.refused[key]; ok {
+		if now.Sub(set.seen) > mcpResolvedTTL {
+			delete(h.refused, key)
+		} else {
+			set.seen = now
+			overflow = set.overflow
+			held = append(held, set.defs...)
 		}
-		if hold, ok := holds[key]; ok {
-			if !now.Before(hold.until) {
-				delete(holds, key)
-			} else {
-				hold.until = now.Add(mcpResolvedTTL)
-				overflow = overflow || hold.more
-				held = append(held, hold.entry)
-			}
+	}
+	if hold, ok := holds[key]; ok {
+		if !now.Before(hold.until) {
+			delete(holds, key)
+		} else {
+			hold.until = now.Add(mcpResolvedTTL)
+			overflow = overflow || hold.more
+			held = append(held, hold.entry)
 		}
 	}
 	return held, overflow
@@ -198,8 +173,8 @@ func (h *hookReportedMCPServers) heldFailures(connector, home, session, name str
 // holdFailedMCP keeps entry for the session; a session the full store cannot
 // track is kept in the overflow store, by its own session and name.
 func (a *APIServer) holdFailedMCP(connector, home string, probe mcpRuntimeProbe, entry config.MCPServerEntry, now time.Time) {
-	if !a.hookMCP.retainRefused(connector, home, probe.SessionID, "", probe.ServerName, entry, now) {
-		a.hookMCP.holdOverflow(connector, home, probe.SessionID, "", probe.ServerName, entry, now)
+	if !a.hookMCP.retainRefused(connector, home, probe.SessionID, probe.ServerName, entry, now) {
+		a.hookMCP.holdOverflow(connector, home, probe.SessionID, probe.ServerName, entry, now)
 	}
 }
 

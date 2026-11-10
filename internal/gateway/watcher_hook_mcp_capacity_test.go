@@ -39,7 +39,7 @@ func TestManagedUnixHookReportedMCPRefusalSurvivesEditWhenSessionStoreIsFull(t *
 	entry := config.MCPServerEntry{Name: "review", Command: "python3", Args: []string{"/opt/old.py"},
 		Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
 	for i := 0; i < hookReportedMCPPerHomeLimit; i++ {
-		if !h.reported.retainRefused("claudecode", sessionTestHome, fmt.Sprintf("prior-%d", i), sessionTestHome+"/proj", "review", entry, time.Now()) {
+		if !h.reported.retainRefused("claudecode", sessionTestHome, fmt.Sprintf("prior-%d", i), "review", entry, time.Now()) {
 			t.Fatalf("setup: session slot %d not filled", i)
 		}
 	}
@@ -117,7 +117,7 @@ func TestManagedUnixHookReportedMCPRefusalWhenEveryStoredSessionIsListed(t *test
 	for i := 0; i < hookReportedMCPPerHomeLimit; i++ {
 		entry := config.MCPServerEntry{Name: fmt.Sprintf("srv-%d", i), Command: "python3", Args: []string{"/opt/old.py"},
 			Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
-		if !h.reported.note(entry) || !h.reported.retainRefused("claudecode", sessionTestHome, fmt.Sprintf("prior-%d", i), sessionTestHome+"/proj", entry.Name, entry, now) {
+		if !h.reported.note(entry) || !h.reported.retainRefused("claudecode", sessionTestHome, fmt.Sprintf("prior-%d", i), entry.Name, entry, now) {
 			t.Fatalf("setup: slot %d not filled", i)
 		}
 	}
@@ -162,7 +162,7 @@ func TestManagedUnixHookReportedMCPRefusalCauseSurvivesURLEditWhenBothStoresAreF
 	entry := config.MCPServerEntry{Name: "review", Command: "python3", Args: []string{"/opt/server.py"},
 		Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
 	for i := 0; i < hookReportedMCPPerHomeLimit; i++ {
-		if !h.reported.retainRefused("claudecode", sessionTestHome, fmt.Sprintf("prior-%d", i), sessionTestHome+"/proj", "review", entry, time.Now()) {
+		if !h.reported.retainRefused("claudecode", sessionTestHome, fmt.Sprintf("prior-%d", i), "review", entry, time.Now()) {
 			t.Fatalf("setup: session slot %d not filled", i)
 		}
 	}
@@ -192,13 +192,13 @@ func TestManagedUnixHookReportedMCPExpiredRecordsNeverBlockAnOrdinaryServer(t *t
 		entry := config.MCPServerEntry{Name: fmt.Sprintf("old-%d", i), Command: "python3", Args: []string{"/opt/old.py"},
 			Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
 		h.reported.noteAt(entry, stale)
-		h.reported.retainRefused("claudecode", sessionTestHome, "old-session", sessionTestHome+"/proj", entry.Name, entry, stale)
+		h.reported.retainRefused("claudecode", sessionTestHome, "old-session", entry.Name, entry, stale)
 	}
 	liveEntry := config.MCPServerEntry{Name: "old-0", Command: "python3", Args: []string{"/opt/old.py"},
 		Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
-	h.reported.retainRefused("claudecode", sessionTestHome, "other-session", sessionTestHome+"/proj", "old-0", liveEntry, live)
-	h.reported.holdOverflow("claudecode", sessionTestHome, "old-session", sessionTestHome+"/proj", "old-3", liveEntry, stale)
-	h.reported.holdOverflow("claudecode", sessionTestHome, "other-session", sessionTestHome+"/proj", "old-0", liveEntry, live)
+	h.reported.retainRefused("claudecode", sessionTestHome, "other-session", "old-0", liveEntry, live)
+	h.reported.holdOverflow("claudecode", sessionTestHome, "old-session", "old-3", liveEntry, stale)
+	h.reported.holdOverflow("claudecode", sessionTestHome, "other-session", "old-0", liveEntry, live)
 	ordinary := assetfacts.MCPServer{Name: "fine", Command: "npx", Args: []string{"-y", "pkg"}}
 	if got := h.callInSession(t, "old-session", assetfacts.MCPServer{Name: "old-3", Command: "npx", Args: []string{"-y", "pkg"}}); got.Action != "allow" {
 		t.Errorf("a session whose overflow hold expired: action=%q reason=%q, want allow", got.Action, got.Reason)
@@ -251,7 +251,7 @@ func fillRefusedSessions(t *testing.T, h *reportedMCPHarness) {
 	entry := config.MCPServerEntry{Name: "filler", Command: "python3", Args: []string{"/opt/old.py"},
 		Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
 	for i := 0; i < hookReportedMCPPerHomeLimit; i++ {
-		if !h.reported.retainRefused("claudecode", sessionTestHome, fmt.Sprintf("prior-%d", i), sessionTestHome+"/proj", "filler", entry, time.Now()) {
+		if !h.reported.retainRefused("claudecode", sessionTestHome, fmt.Sprintf("prior-%d", i), "filler", entry, time.Now()) {
 			t.Fatalf("setup: session slot %d not filled", i)
 		}
 	}
@@ -338,7 +338,7 @@ func TestManagedUnixHookReportedMCPOverflowStoreBoundGivesUpExpiredHoldsFirst(t 
 		if i%2 == 1 {
 			at = stale
 		}
-		h.reported.holdOverflow("claudecode", sessionTestHome, fmt.Sprintf("bulk-%d", i), sessionTestHome+"/proj", "review", entry, at)
+		h.reported.holdOverflow("claudecode", sessionTestHome, fmt.Sprintf("bulk-%d", i), "review", entry, at)
 	}
 	refused := assetfacts.MCPServer{Name: "review", Command: "python3", Args: []string{"/opt/new.py"}}
 	edited := assetfacts.MCPServer{Name: "review", Command: "npx", Args: []string{"-y", "pkg"}}
@@ -348,11 +348,11 @@ func TestManagedUnixHookReportedMCPOverflowStoreBoundGivesUpExpiredHoldsFirst(t 
 	if got := h.callInSession(t, "late", edited); got.Action != "block" {
 		t.Errorf("the session after an edit, once the expired holds gave way: action=%q reason=%q, want its hold kept", got.Action, got.Reason)
 	}
-	if _, ok := h.reported.overflowHeld("claudecode", sessionTestHome, "bulk-0", sessionTestHome+"/proj", "review", now); !ok {
+	if _, ok := h.reported.overflowHeld("claudecode", sessionTestHome, "bulk-0", "review", now); !ok {
 		t.Error("a live hold was given up")
 	}
 	for i := 0; i < hookOverflowPerAccount; i++ {
-		h.reported.holdOverflow("claudecode", sessionTestHome, fmt.Sprintf("more-%d", i), sessionTestHome+"/proj", "review", entry, now)
+		h.reported.holdOverflow("claudecode", sessionTestHome, fmt.Sprintf("more-%d", i), "review", entry, now)
 	}
 	if got := h.callInSession(t, "latest", refused); got.Action != "block" || !strings.Contains(got.Reason, "launcher") {
 		t.Errorf("refused call beside a store of live holds: action=%q reason=%q, want a launcher block", got.Action, got.Reason)

@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/mcpkey"
 	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 // MCPAdmissionQuery names the MCP server a tool call reaches.
@@ -79,11 +80,16 @@ func MCPLocalRefused(server config.MCPServerEntry) bool {
 }
 
 // MCPScanRefused reports a definition the scanner refuses from the definition
-// alone: a local server MCPLocalRefused names, or a URL on a loopback,
-// private, link-local or multicast address, which the scanner never dials. A
-// managed gateway that cannot read the agent config of its users keeps such a
-// definition for the session that met it (GAP-0925).
+// alone: a local server MCPLocalRefused names, or a URL the scanner refuses
+// from its text (scanner.MCPScanTargetRefusal: a loopback, private,
+// link-local or multicast address, a loopback alias or the metadata host,
+// inline credentials, or no host), which it never dials. A managed gateway
+// that cannot read the agent config of its users keeps such a definition for
+// the session that met it (GAP-0925).
 func MCPScanRefused(server config.MCPServerEntry) bool {
+	if rawURL := strings.TrimSpace(server.URL); rawURL != "" && scanner.MCPScanTargetRefusal(rawURL) != scanner.MCPTargetRefusalNone {
+		return true
+	}
 	return mcpScanIssue(server) != ""
 }
 
@@ -91,6 +97,9 @@ func MCPScanRefused(server config.MCPServerEntry) bool {
 // alone: the scanner stays the judge, this only words the refusal.
 func mcpScanIssue(server config.MCPServerEntry) string {
 	if rawURL := strings.TrimSpace(server.URL); rawURL != "" {
+		if scanner.MCPScanTargetRefusal(rawURL) == scanner.MCPTargetRefusalAddress {
+			return MCPScanIssueAddress
+		}
 		if parsed, err := url.Parse(rawURL); err == nil && mcpLocalHost(parsed.Hostname()) {
 			return MCPScanIssueAddress
 		}
