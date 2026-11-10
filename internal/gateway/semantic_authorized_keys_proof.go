@@ -1698,8 +1698,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if lexical, parsed := hookpaths.ApplyPatchLexicalCommandTargets(
 			request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome,
 		); parsed && filepath.IsAbs(clientCWD) {
+			physicalOfClean := clientStepUpAnswers(request.Input, facts, clientCWD, clientTargets)
 			for _, target := range lexical {
 				operand := hookpaths.OperandPath(target, clientCWD)
+				if physical, stepsUp := physicalOfClean[operand]; stepsUp {
+					// The header steps up a directory: the file it writes is
+					// the one the client walked for the raw spelling, not the
+					// lexical clean (which the client may not be able to
+					// open). The physical answer decides, in both directions.
+					if slices.ContainsFunc(physical, isProtected) {
+						return true
+					}
+					continue
+				}
 				if _, described := clientTargets[operand]; !described && truncated {
 					// The bounded map omits this target: the protected-name
 					// check below decides, as it did before the map was read.
