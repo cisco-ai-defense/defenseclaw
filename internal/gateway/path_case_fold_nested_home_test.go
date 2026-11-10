@@ -39,6 +39,13 @@ func TestCaseFoldingHostReadsAPathAsGivenToo(t *testing.T) {
 // the working folder of the call and the connector profile given.
 func caseFoldNestedVerdict(t *testing.T, connector, project, file string) (string, map[string]bool) {
 	t.Helper()
+	return caseFoldNestedVerdictInTier(t, connector, project, file, false)
+}
+
+// caseFoldNestedVerdictInTier is caseFoldNestedVerdict in the strict policy
+// tier when strict is set.
+func caseFoldNestedVerdictInTier(t *testing.T, connector, project, file string, strict bool) (string, map[string]bool) {
+	t.Helper()
 	raw, err := json.Marshal(pathCaseFileCall("Write", file))
 	if err != nil {
 		t.Fatal(err)
@@ -46,6 +53,7 @@ func caseFoldNestedVerdict(t *testing.T, connector, project, file string) (strin
 	input := actionfacts.Input{Tool: "Write", Args: raw, CWD: project, ActiveHome: "/Users/alice"}
 	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 		Input: input, LegacyText: string(raw), Connector: connector, EnforcementCapable: true,
+		StrictPolicy: strict,
 	})
 	rules := make(map[string]bool)
 	for _, finding := range findings {
@@ -133,9 +141,10 @@ func TestCaseFoldingHostNestedCredentialFileIsJudgedInEveryLetterCase(t *testing
 }
 
 // A name that only starts like a credential file, below a Users folder in any
-// letter case, is an ordinary file: its link is allowed. The AWS backup
-// spelling credentials.<suffix> is a credential copy by design (the matcher
-// matchesAWSCredentialsName), so its link is judged as its direct name is.
+// letter case, is an ordinary file: it and its link are allowed. That includes
+// a copy of the AWS credentials file (credentials.bak) in the default and
+// permissive tiers; the strict tier keeps such a copy protected, and the
+// credentials file itself is protected in every tier (the test above).
 func TestCaseFoldingHostLinkToAnOrdinaryNeighbourOfACredentialFileIsAllowed(t *testing.T) {
 	withPathCaseFoldHost(t, true)
 	for _, profile := range []string{"default", "permissive", "strict"} {
@@ -154,12 +163,21 @@ func TestCaseFoldingHostLinkToAnOrdinaryNeighbourOfACredentialFileIsAllowed(t *t
 				}
 			}
 		}
-		root := t.TempDir()
-		project := filepath.Join(root, "project")
-		file, link := caseFoldNestedFixture(t, root, "Users/fixture/.aws/credentials.bak")
-		directAction, _ := caseFoldNestedVerdict(t, connector, project, file)
-		if action, rules := caseFoldNestedVerdict(t, connector, project, link); action != directAction {
-			t.Errorf("%s: link to a credentials copy = %s %v, want %s as its direct name", profile, action, rules, directAction)
+		for _, relative := range []string{
+			"Users/fixture/.aws/credentials.bak", "users/fixture/.AWS/Credentials.Sample", "Users/fixture/.aws/credentials.old",
+		} {
+			root := t.TempDir()
+			project := filepath.Join(root, "project")
+			file, link := caseFoldNestedFixture(t, root, relative)
+			for name, target := range map[string]string{"direct": file, "link": link} {
+				action, rules := caseFoldNestedVerdictInTier(t, connector, project, target, profile == "strict")
+				if profile == "strict" && (action != "block" || !rules["PATH-AWS-CREDS"]) {
+					t.Errorf("strict %s %s: %s %v, want a block with PATH-AWS-CREDS", relative, name, action, rules)
+				}
+				if profile != "strict" && action != "allow" {
+					t.Errorf("%s %s %s: %s %v, want allow", profile, relative, name, action, rules)
+				}
+			}
 		}
 	}
 }
