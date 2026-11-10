@@ -139,6 +139,9 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		if err := standaloneServiceCanReadTree(pack.dir, pack.label, serviceAccount); err != nil {
 			return fmt.Errorf("%s that %s names: %v", standaloneRulePackUnreadableText, configPath, err)
 		}
+		if missing := builtinRulePackMissing(runtimeConfig, configPath, pack.dir); missing != nil {
+			return missing
+		}
 		if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
 			return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v%s",
 				pack.dir, configPath, err, rulePackNestedCopyHint(pack.dir, err))
@@ -241,6 +244,9 @@ func compileStandaloneGatewayRepairRollbackConfig(configPath, dataDir string) (*
 			return nil, fmt.Errorf("the gateway cannot use the guardrail rule packs that %s selects: %w", configPath, err)
 		}
 		for _, pack := range standaloneGatewayRulePackDirs(loaded.runtime) {
+			if missing := builtinRulePackMissing(loaded.runtime, configPath, pack.dir); missing != nil {
+				return nil, missing
+			}
 			if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
 				return nil, fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %w",
 					pack.dir, configPath, err)
@@ -430,6 +436,24 @@ func rulePackNestedCopyHint(dir string, err error) string {
 		return fmt.Sprintf("; %s is a copy of the pack inside itself (copying the pack folder onto an existing one creates it): remove that folder and run again", nested)
 	}
 	return fmt.Sprintf("; the stray folder is %s: move it out of the pack folder or remove it, then run again", nested)
+}
+
+// builtinRulePackMissing is the refusal of a built-in rule pack other than
+// default whose folder is not under the config's policy_dir on a managed
+// Windows install: the Setup ships no such pack, so the message names the
+// property to set (GAP-1041). It is nil for any other folder or install.
+func builtinRulePackMissing(cfg *config.Config, configPath, dir string) error {
+	policyDir := strings.TrimSpace(cfg.PolicyDir)
+	name := filepath.Base(filepath.Clean(dir))
+	advice := cfg.WindowsBuiltinRulePackAdvice(name)
+	if advice == "" || policyDir == "" || filepath.Clean(dir) != filepath.Join(policyDir, "guardrail", name) {
+		return nil
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: rule pack directory_not_found at .: "+
+		"rule-pack directory does not exist; policy_dir is %s and has no guardrail\\%s folder: %s", dir, configPath, policyDir, name, advice)
 }
 
 // standaloneServiceCanReadTree checks that the gateway service account can
