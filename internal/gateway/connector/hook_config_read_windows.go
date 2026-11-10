@@ -23,6 +23,31 @@ func openHookConfigForRead(path string) (*os.File, error) {
 	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
 		return nil, err
 	}
+	return openSharedForRead(path)
+}
+
+// openManagedTargetForRead opens a managed target for reading. An agent saves
+// its own config by replacing the file, and a vendor tool or an indexer can
+// hold it briefly, so a plain os.Open fails with a sharing violation in the
+// middle of a Setup or Teardown that inspects the file. The open shares read,
+// write and delete and waits a bounded time for a lock another process holds,
+// like every other connector state read. It opens directories and other
+// non-file paths the way os.Open does, so readManagedTarget still refuses
+// them by their mode. A Windows named pipe is opened by a name in the
+// \\.\pipe\ namespace; a managed target is a file path, so this open is not
+// expected to wait for a writer.
+func openManagedTargetForRead(path string) (*os.File, error) {
+	for attempt := 1; ; attempt++ {
+		file, err := openSharedForRead(path)
+		if err == nil || !connectorStateFileBusy(err) || attempt >= connectorStateReadAttempts {
+			return file, err
+		}
+		connectorStateReadSleep(connectorStateReadRetryDelay)
+	}
+}
+
+// openSharedForRead opens path read-only with read, write and delete sharing.
+func openSharedForRead(path string) (*os.File, error) {
 	name, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		return nil, err
@@ -40,11 +65,4 @@ func openHookConfigForRead(path string) (*os.File, error) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	return os.NewFile(uintptr(handle), path), nil
-}
-
-// openManagedTargetForRead opens a managed target for reading. A Windows named
-// pipe is opened by a name in the \\.\pipe\ namespace; a managed target is a
-// file path, so the plain open is not expected to wait for a writer.
-func openManagedTargetForRead(path string) (*os.File, error) {
-	return os.Open(path)
 }
