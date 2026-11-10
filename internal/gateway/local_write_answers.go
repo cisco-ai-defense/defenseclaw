@@ -60,3 +60,27 @@ func withLocalWriteAnswers(request trustedActionRequest, answers map[string]stri
 	}
 	return answers
 }
+
+// analyzeWithPatchHeaderAnswers reads the call and, when its shell text holds
+// the apply_patch envelope of a here-document, places the headers as a
+// file-tool name is placed and reads the call again with those answers. The
+// proofs formed while the call is read (the sudoers grant) judge a write by the
+// physical file the client answers for, so a header that steps up a directory
+// after a link must have its answer before they run, not after. The second
+// reading happens only when the walk found a file other than the one the name
+// spells.
+func analyzeWithPatchHeaderAnswers(request *trustedActionRequest) actionfacts.Facts {
+	facts := actionfacts.Analyze(request.Input)
+	if len(facts.Commands) == 0 {
+		return facts
+	}
+	answered := len(request.Input.ClientResolvedTargets)
+	request.Input.ClientResolvedTargets = withLocalWriteAnswers(
+		*request, request.Input.ClientResolvedTargets,
+		actionfacts.NativeCallWriteTargets(request.Input, facts),
+	)
+	if len(request.Input.ClientResolvedTargets) == answered {
+		return facts
+	}
+	return actionfacts.Analyze(request.Input)
+}
