@@ -247,5 +247,9 @@ def test_the_rebuilt_record_must_name_the_programs_the_services_run() -> None:
     assert body.index("Assert-DefenseClawRebuiltRecordCoversArtifacts -Layout $Layout -Value $deploymentValue") < body.index(
         "Publish-DefenseClawRecordKeepingOld `\n"
     )
+    unreadable = _function(text, "Repair-DefenseClawUnreadableDeploymentMetadata")
+    assert unreadable.index("Assert-DefenseClawRebuiltRecordCoversArtifacts -Layout $Layout -Value $rebuilt") < unreadable.index(
+        "Write-DefenseClawJsonAtomic -Path $Layout.MetadataPath"
+    )
     refusal = _function(text, "Format-DefenseClawRebuiltRecordArtifactRefusal")
     assert "Nothing was changed and every service is as it was" in refusal and "/repair" in refusal

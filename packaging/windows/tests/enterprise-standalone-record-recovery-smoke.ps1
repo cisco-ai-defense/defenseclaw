@@ -542,6 +542,38 @@ try {
         [void][IO.Directory]::CreateDirectory($auth); [void][IO.Directory]::CreateDirectory($run)
         Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
         if ($script:restarts -ne 0) { throw 'a deployment with no Guardian record at all was restarted' }
+
+        # Delta-5 F4: the non-JSON rebuild (Repair-DefenseClawUnreadableDeploymentMetadata)
+        # refuses a rebuilt record that cannot name the gateway, hook and sensor
+        # helper before it writes: the garbage record stays, and the text says
+        # nothing was changed and every service is as it was. With the digests
+        # it writes the record.
+        $rpath = [IO.Path]::Combine($State, 'unreadable-deployment.json')
+        $rlayout = @{ MetadataPath = $rpath; PendingPath = [IO.Path]::Combine($State, 'no-pending.json') }
+        $script:rwrites = 0
+        $script:romit = ''
+        function Test-DefenseClawDeploymentMetadataPresent { param([string]$Path) return $true }
+        function Get-DefenseClawDeploymentMetadata { param($Layout, [switch]$Required) throw "$($script:UnreadableMetadataMessage) $($Layout.MetadataPath)" }
+        function Assert-DefenseClawMetadataRebuildReady { param($Layout, $Sources, $GatewayServiceName, $Reason) }
+        function New-DefenseClawRebuiltDeploymentRecord {
+            param($Layout, $Sources, $GatewayServiceName, $GuardianServiceName, $ApprovedPolicySources = $null)
+            $h = [ordered]@{ gateway = ('a' * 64); hook = ('a' * 64); sensor_helper = ('a' * 64) }
+            if ($script:romit) { $h.Remove($script:romit) }
+            return [ordered]@{ installed = $true; hashes = $h; record_rebuilt_by_setup = $true }
+        }
+        function Write-DefenseClawJsonAtomic { param($Path, $Value, $Kind) $script:rwrites++; [IO.File]::WriteAllText($Path, 'rebuilt') }
+        [IO.File]::WriteAllText($rpath, 'this is not json')
+        foreach ($stale in @('gateway', 'hook', 'sensor_helper')) {
+            $script:romit = $stale; $refusal = ''
+            try { [void](Repair-DefenseClawUnreadableDeploymentMetadata -Layout $rlayout -Sources @{} -GatewayServiceName 'G' -GuardianServiceName 'H' -WarningAction SilentlyContinue) } catch { $refusal = $_.Exception.Message }
+            if ($refusal -notmatch 'Nothing was changed and every service is as it was' -or $refusal -notmatch [regex]::Escape($stale) -or $script:rwrites -ne 0 -or [IO.File]::ReadAllText($rpath) -cne 'this is not json') {
+                throw "a non-JSON rebuild with a stale $stale was not refused before the write: $refusal"
+            }
+        }
+        $script:romit = ''
+        if (-not (Repair-DefenseClawUnreadableDeploymentMetadata -Layout $rlayout -Sources @{} -GatewayServiceName 'G' -GuardianServiceName 'H' -WarningAction SilentlyContinue) -or $script:rwrites -ne 1) {
+            throw 'a non-JSON rebuild that names all three digests was not written'
+        }
     } $state
     'enterprise-standalone-record-recovery-smoke: OK'
 }
