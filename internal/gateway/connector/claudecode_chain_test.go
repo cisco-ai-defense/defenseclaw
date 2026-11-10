@@ -53,8 +53,8 @@ func TestClaudeCodeChainRendersEveryEventAndKeepsForeignCommands(t *testing.T) {
 			if hookguard.NeutralEvent(group.eventType) {
 				code = "1"
 			}
-			if args[len(args)-1] != code {
-				t.Fatalf("%s unavailable answer = %q, want %s", group.eventType, args[len(args)-1], code)
+			if args[len(args)-2] != code {
+				t.Fatalf("%s unavailable answer = %q, want %s", group.eventType, args[len(args)-2], code)
 			}
 		}
 		if got, gotArgs, ok := claudeCodeLauncherGuardParts(handler); !ok || got != launcher || !slices.Equal(gotArgs, hookArgs) {
@@ -92,7 +92,7 @@ func TestClaudeCodeChainRendersEveryEventAndKeepsForeignCommands(t *testing.T) {
 	}
 	wrappedCommand, wrappedArgs := claudeCodeHandlerInvocation("UserPromptSubmit", baseCommand, baseArgs)
 	wrappedArgs = slices.Clone(wrappedArgs)
-	wrappedArgs[len(wrappedArgs)-1] = "0"
+	wrappedArgs[len(wrappedArgs)-2] = "0"
 	if _, _, ok := claudeCodeLauncherGuardParts(map[string]interface{}{"command": wrappedCommand, "args": wrappedArgs}); ok {
 		t.Fatal("an edited wrapper was accepted as owned")
 	}
@@ -116,8 +116,8 @@ func TestManagedClaudeCodeWrapperAnswersEveryEvent(t *testing.T) {
 		if hookguard.NeutralEvent(group.eventType) {
 			want = "1"
 		}
-		if args[len(args)-1] != want {
-			t.Fatalf("%s unavailable exit = %q, want %s", group.eventType, args[len(args)-1], want)
+		if args[len(args)-2] != want {
+			t.Fatalf("%s unavailable exit = %q, want %s", group.eventType, args[len(args)-2], want)
 		}
 		handler := map[string]interface{}{"command": command, "args": args}
 		if got, inner, ok := claudeCodeLauncherGuardParts(handler); !ok || got != launcher || !slices.Equal(inner, hookArgs) {
@@ -179,7 +179,7 @@ func TestClaudeCodeManagedGuardLauncherReadsTheRenderedManagedForm(t *testing.T)
 			t.Fatalf("%s: managed form not read: %q %q %v", group.eventType, got, gotArgs, ok)
 		}
 		edited := append([]interface{}(nil), raw...)
-		edited[len(edited)-1] = "0"
+		edited[len(edited)-2] = "0"
 		if _, _, ok := ClaudeCodeManagedGuardLauncher(map[string]interface{}{"type": "command", "command": command, "args": edited}); ok {
 			t.Fatalf("%s: an edited unavailable answer was read as the managed form", group.eventType)
 		}
@@ -298,8 +298,8 @@ func TestClaudeCodeChainAvailabilityFollowsPolicyTier(t *testing.T) {
 			if command != baseCommand || !slices.Equal(args, want) {
 				t.Fatalf("prompt handler = %q %q, want %q %q", command, args, baseCommand, want)
 			}
-			if args[len(args)-1] != map[bool]string{true: "1", false: "2"}[tc.open] {
-				t.Fatalf("unavailable answer = %q", args[len(args)-1])
+			if args[len(args)-2] != map[bool]string{true: "1", false: "2"}[tc.open] {
+				t.Fatalf("unavailable answer = %q", args[len(args)-2])
 			}
 			if got, _, ok := claudeGuardWrapperParts(map[string]interface{}{"command": command, "args": args}); !ok || got != launcher {
 				t.Fatal("profile-bound wrapper was not recognized")

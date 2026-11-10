@@ -365,6 +365,31 @@ func claudeGuardCompareProgram() string {
 	return strings.TrimRight(windowsSystemDirectory(), `\/`) + `\fc.exe`
 }
 
+// claudeWrapperStatusWords reads the status the guard answered with and maps
+// it to the hook status: 0 and 2 pass through, a status offset by
+// WrappedExitBase is the native hook status, and anything else (cmd.exe could
+// not start the guard) falls through to the caller's warning and its code.
+// The status is stored with set /a: "set name=!errorlevel! &" keeps the space
+// before the "&" in the value, so "0 " never equals 0 and every answer of the
+// guard was read as "could not start".
+//
+// cmd.exe reads everything after an unparenthesized if on the same line as the
+// body of that if, so a later "&" never runs when the condition is false: the
+// first form of this wrapper exited 0 without starting the guard whenever the
+// guard existed. Each if therefore sits in its own parentheses, and the whole
+// guarded run is the else branch of the missing-guard if.
+func claudeWrapperStatusWords() []string {
+	return []string{
+		"&", "set", "/a", "dc_hook_status=!errorlevel!", ">nul",
+		"&", "(", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0", ")",
+		"&", "(", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2", ")",
+		"&", "(", "if", "!dc_hook_status!", "geq", strconv.Itoa(hookguard.WrappedExitBase + 1),
+		"if", "!dc_hook_status!", "leq", strconv.Itoa(2*hookguard.WrappedExitBase - 1),
+		"(", "set", "/a", "dc_hook_result=!dc_hook_status!-" + strconv.Itoa(hookguard.WrappedExitBase), ">nul",
+		"&", "exit", "/b", "!dc_hook_result!", ")", ")", "&",
+	}
+}
+
 func claudeGuardWrapperArgs(guard, approved, launcher, event string, hookArgs []string, unavailableOpen ...bool) []string {
 	open := len(unavailableOpen) > 0 && unavailableOpen[0]
 	return claudeGuardWrapperArgsWith(claudeGuardCompareProgram(), guard, approved, launcher, event, hookArgs, open)
@@ -380,19 +405,13 @@ func claudeGuardWrapperArgsWith(compare, guard, approved, launcher, event string
 	fail := func() []string { return append([]string(nil), warning...) }
 	args := []string{"/d", "/v:on", "/c", "if", "not", "exist", guard, "("}
 	args = append(args, fail()...)
-	args = append(args, ")", "&", compare, "/b", guard, approved, ">nul", "2>&1", "||", "(")
+	args = append(args, ")", "else", "(", compare, "/b", guard, approved, ">nul", "2>&1", "||", "(")
 	args = append(args, fail()...)
 	args = append(args, ")", "&", guard)
 	args = append(args, claudeGuardEventArgs(launcher, hookArgs, event, true, unavailableOpen)...)
-	args = append(args,
-		"&", "set", "dc_hook_status=!errorlevel!",
-		"&", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0",
-		"&", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2",
-		"&", "if", "!dc_hook_status!", "geq", strconv.Itoa(hookguard.WrappedExitBase+1),
-		"if", "!dc_hook_status!", "leq", strconv.Itoa(2*hookguard.WrappedExitBase-1),
-		"(", "set", "/a", "dc_hook_result=!dc_hook_status!-"+strconv.Itoa(hookguard.WrappedExitBase), ">nul",
-		"&", "exit", "/b", "!dc_hook_result!", ")", "&")
-	return append(args, fail()...)
+	args = append(args, claudeWrapperStatusWords()...)
+	args = append(args, fail()...)
+	return append(args, ")")
 }
 
 func claudeManagedGuardPath(launcher string) string {
@@ -441,17 +460,11 @@ func claudeManagedGuardWrapperArgs(guard, launcher, event string, hookArgs []str
 		"Run", "the", "DefenseClaw", "installer", "again", "to", "repair", "it.", "1>&2", "&", "exit", "/b", failCode}
 	args := []string{"/d", "/v:on", "/c", "if", "not", "exist", guard, "("}
 	args = append(args, missing...)
-	args = append(args, ")", "&", guard)
+	args = append(args, ")", "else", "(", guard)
 	args = append(args, claudeGuardEventArgs(launcher, hookArgs, event, true)...)
-	args = append(args,
-		"&", "set", "dc_hook_status=!errorlevel!",
-		"&", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0",
-		"&", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2",
-		"&", "if", "!dc_hook_status!", "geq", strconv.Itoa(hookguard.WrappedExitBase+1),
-		"if", "!dc_hook_status!", "leq", strconv.Itoa(2*hookguard.WrappedExitBase-1),
-		"(", "set", "/a", "dc_hook_result=!dc_hook_status!-"+strconv.Itoa(hookguard.WrappedExitBase), ">nul",
-		"&", "exit", "/b", "!dc_hook_result!", ")", "&")
-	return append(args, warning...)
+	args = append(args, claudeWrapperStatusWords()...)
+	args = append(args, warning...)
+	return append(args, ")")
 }
 
 // ClaudeCodeManagedGuardLauncher reads a managed policy handler that is

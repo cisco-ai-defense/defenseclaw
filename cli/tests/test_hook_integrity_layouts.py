@@ -359,7 +359,7 @@ def test_claude_chain_view_and_guard_drift(tmp_path, monkeypatch):
     edited = {**handler, "args": [*words[:-1], "0"]}
     assert hook_integrity.claude_launcher_guard_view(edited) is edited
     neutral = hook_integrity._claude_chain_wrapper_words(compare, str(guard), str(approved), launcher, "Stop")
-    assert neutral[-1] == "1"
+    assert neutral[-2] == "1"
     direct = {"command": str(guard),
               "args": ["launcher-guard", launcher, "hook", "--connector", "claudecode", "--event", "PreToolUse"]}
     assert hook_integrity.claude_launcher_guard_view(direct)["command"] == launcher
@@ -375,7 +375,7 @@ def test_claude_chain_profile_bound_open_answer_is_owned(tmp_path):
         compare, guard, approved, launcher, "UserPromptSubmit", unavailable_open=True
     )
     handler = {"command": command, "args": words}
-    assert words[-1] == "1"
+    assert words[-2] == "1"
     assert hook_integrity.claude_launcher_guard_view(handler)["command"] == launcher
     changed = {**handler, "args": [*words[:-1], "2"]}
     assert hook_integrity.claude_launcher_guard_view(changed) is changed
@@ -427,7 +427,7 @@ def test_managed_claude_guard_view_carries_closed_and_neutral_answers(monkeypatc
                                     ("Stop", "1"), ("SubagentStop", "1")):
         words = hook_integrity._claude_managed_wrapper_words(guard, launcher, event)
         handler = {"command": "C:\\Windows\\System32\\cmd.exe", "args": words}
-        assert words[-1] == unavailable_exit
+        assert words[-2] == unavailable_exit and words[-1] == ")"
         # A missing guard gives the reason that names it and the repair command.
         missing = " ".join(words[words.index("(") + 1:words.index(")")])
         assert "defenseclaw-hook-guard.exe" in missing

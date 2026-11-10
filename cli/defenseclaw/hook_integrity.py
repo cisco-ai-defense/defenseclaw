@@ -890,6 +890,22 @@ def _claude_wrapper_safe(path: str) -> bool:
     )
 
 
+def _claude_wrapper_status_words() -> list[str]:
+    """Mirror of claudeWrapperStatusWords in claudecode_chain.go: each if sits
+    in its own parentheses, because cmd.exe reads the rest of the line after an
+    unparenthesized if as that if's body, and the status is stored with set /a,
+    because "set name=!errorlevel! &" keeps the space before the "&" in the value."""
+    return [
+        "&", "set", "/a", "dc_hook_status=!errorlevel!", ">nul",
+        "&", "(", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0", ")",
+        "&", "(", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2", ")",
+        "&", "(", "if", "!dc_hook_status!", "geq", str(_CLAUDE_WRAPPED_EXIT_BASE + 1),
+        "if", "!dc_hook_status!", "leq", str(2 * _CLAUDE_WRAPPED_EXIT_BASE - 1),
+        "(", "set", "/a", f"dc_hook_result=!dc_hook_status!-{_CLAUDE_WRAPPED_EXIT_BASE}", ">nul",
+        "&", "exit", "/b", "!dc_hook_result!", ")", ")", "&",
+    ]
+
+
 def _claude_chain_wrapper_words(
     compare: str, guard: str, approved: str, launcher: str, event: str, unavailable_open: bool = False,
 ) -> list[str]:
@@ -898,16 +914,10 @@ def _claude_chain_wrapper_words(
     mode = ["--unavailable-mode", "open"] if unavailable_open else []
     return [
         "/d", "/v:on", "/c", "if", "not", "exist", guard, "(", *warning, ")",
-        "&", compare, "/b", guard, approved, ">nul", "2>&1", "||", "(", *warning, ")",
+        "else", "(", compare, "/b", guard, approved, ">nul", "2>&1", "||", "(", *warning, ")",
         "&", guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND, launcher, "hook", "--connector", "claudecode",
         "--event", event, *mode,
-        "&", "set", "dc_hook_status=!errorlevel!",
-        "&", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0",
-        "&", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2",
-        "&", "if", "!dc_hook_status!", "geq", str(_CLAUDE_WRAPPED_EXIT_BASE + 1),
-        "if", "!dc_hook_status!", "leq", str(2 * _CLAUDE_WRAPPED_EXIT_BASE - 1),
-        "(", "set", "/a", f"dc_hook_result=!dc_hook_status!-{_CLAUDE_WRAPPED_EXIT_BASE}", ">nul",
-        "&", "exit", "/b", "!dc_hook_result!", ")", "&", *warning,
+        *_claude_wrapper_status_words(), *warning, ")",
     ]
 
 
@@ -967,15 +977,9 @@ def _claude_managed_wrapper_words(guard: str, launcher: str, event: str) -> list
     warning = ["echo", *_CLAUDE_CHAIN_WARNING, "1>&2", "&", "exit", "/b", fail_code]
     return [
         "/d", "/v:on", "/c", "if", "not", "exist", guard, "(", *missing, ")",
-        "&", guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND, launcher,
+        "else", "(", guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND, launcher,
         "hook", "--connector", "claudecode", "--enterprise-managed", "--event", event,
-        "&", "set", "dc_hook_status=!errorlevel!",
-        "&", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0",
-        "&", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2",
-        "&", "if", "!dc_hook_status!", "geq", str(_CLAUDE_WRAPPED_EXIT_BASE + 1),
-        "if", "!dc_hook_status!", "leq", str(2 * _CLAUDE_WRAPPED_EXIT_BASE - 1),
-        "(", "set", "/a", f"dc_hook_result=!dc_hook_status!-{_CLAUDE_WRAPPED_EXIT_BASE}", ">nul",
-        "&", "exit", "/b", "!dc_hook_result!", ")", "&", *warning,
+        *_claude_wrapper_status_words(), *warning, ")",
     ]
 
 
