@@ -64,7 +64,9 @@ func TestLongOperandListAnswersInsideHookDeadlineAndKeepsProtectedBlocks(t *test
 			t.Fatal(err)
 		}
 		t.Logf("%.40s...: slowest call %s", row.command, slowest.Round(time.Millisecond))
-		if slowest > perCall {
+		// Under -race the same call takes tens of seconds, so only the
+		// verdicts above are checked; the non-race budget is unchanged.
+		if !hookAnswerRaceBuild && slowest > perCall {
 			t.Errorf("%.40s...: slowest call took %s, want under %s", row.command, slowest.Round(time.Millisecond), perCall)
 		}
 	}
