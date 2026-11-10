@@ -23,28 +23,28 @@ func readWindowsCodexRequirementsBaseFile(path, ownershipPath string) ([]byte, e
 	allowed := filepath.Join(filepath.Dir(ownershipPath), "recovered-policy")
 	full, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("Codex requirements base file: %w", err)
+		return nil, fmt.Errorf("the Codex requirements base file: %w", err)
 	}
 	rel, err := filepath.Rel(allowed, full)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return nil, fmt.Errorf("Codex requirements base file %s is not inside %s", path, allowed)
+		return nil, fmt.Errorf("the Codex requirements base file %s is not inside %s", path, allowed)
 	}
 	info, err := os.Lstat(full)
 	if err != nil {
-		return nil, fmt.Errorf("Codex requirements base file: %w", err)
+		return nil, fmt.Errorf("the Codex requirements base file: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("Codex requirements base file %s is not a regular file", full)
+		return nil, fmt.Errorf("the Codex requirements base file %s is not a regular file", full)
 	}
 	if info.Size() > windowsCodexRequirementsBaseFileLimit {
-		return nil, fmt.Errorf("Codex requirements base file %s exceeds %d bytes", full, windowsCodexRequirementsBaseFileLimit)
+		return nil, fmt.Errorf("the Codex requirements base file %s exceeds %d bytes", full, windowsCodexRequirementsBaseFileLimit)
 	}
 	data, err := os.ReadFile(full)
 	if err != nil {
-		return nil, fmt.Errorf("Codex requirements base file: %w", err)
+		return nil, fmt.Errorf("the Codex requirements base file: %w", err)
 	}
 	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
-		return nil, fmt.Errorf("Codex requirements base file %s is not valid UTF-8 text", full)
+		return nil, fmt.Errorf("the Codex requirements base file %s is not valid UTF-8 text", full)
 	}
 	return data, nil
 }
