@@ -385,6 +385,18 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 				}
 			}
 		}
+		if known && inert == 0 && base == "find" {
+			// find writes through its action predicates: the file of -fprint,
+			// -fprint0, -fprintf and -fls, and what an -exec child writes. The
+			// values the command bound so far resolve a name, so a link or a
+			// folder spelled through a variable is read like a literal one.
+			for _, path := range registrationFindActionTargets(call.Args[1:], values, currentCWD, home) {
+				if protectedReachPath(OperandPath(path, currentCWD), protected, "") {
+					found = true
+					return false
+				}
+			}
+		}
 		if inert == 0 {
 			actionPosixAdvanceDirectory(call, values, home, &currentCWD, &stack)
 		}
@@ -751,6 +763,34 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 			}
 		}
 	}
+	return targets
+}
+
+// registrationFindActionTargets lists the paths the output and command
+// actions of a find call write (args are the words after the program): the
+// file of -fprint, -fprint0, -fprintf and -fls, and the targets of the program
+// an -exec, -execdir, -ok or -okdir action runs, read by the loop-statement
+// reader with the given values bound. -delete names no path of its own; the
+// folder reader judges it by the search root.
+func registrationFindActionTargets(args []*syntax.Word, values actionValues, cwd, home string) []string {
+	var targets []string
+	registrationFindActions(args, home, func(action string, operands []*syntax.Word) bool {
+		switch action {
+		case "-delete":
+		case "-exec", "-execdir", "-ok", "-okdir":
+			if len(operands) > 0 {
+				stmt := &syntax.Stmt{Cmd: &syntax.CallExpr{Args: operands}}
+				targets = append(targets, registrationLoopStatementTargets(stmt, values, cwd, home)...)
+			}
+		default:
+			if len(operands) > 0 {
+				if path, fixed := actionWordValue(operands[0], values, cwd, home); fixed && path != "" {
+					targets = append(targets, path)
+				}
+			}
+		}
+		return false
+	})
 	return targets
 }
 

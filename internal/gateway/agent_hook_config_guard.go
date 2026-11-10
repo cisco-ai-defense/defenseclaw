@@ -1121,14 +1121,19 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 		}
 	}
 	text := strings.ToLower(request.LegacyText + "\n" + request.Input.Command + "\n" + string(request.Input.Args) + "\n" + strings.Join(request.Input.Argv, "\n"))
-	if !guard.shellMentionsRegistryPath(text) &&
+	rawCommand := agentHookConfigRawShellCommand(request.Input)
+	// A command that spells a link only through a variable (dest=LINK; then
+	// the variable as an operand) never names the registered file in its
+	// text; the shared reader resolves the values the command binds, as the
+	// managed route does.
+	namesByVariable := agentHookConfigBindsValues(rawCommand) && hookpaths.RegistrationWriteCandidate(rawCommand)
+	if !guard.shellMentionsRegistryPath(text) && !namesByVariable &&
 		!slices.ContainsFunc([]string{"git ", "patch ", "claude ", "codex ", "opencode ", "amp ", "copilot ", "kiro-cli ", "hermes ", "cursor-agent ", "devin ", "gemini ", "npx "},
 			func(name string) bool { return strings.Contains(text, name) }) {
 		return out
 	}
 	// The registration set is read by hookpaths' shared shell writer. A
 	// placed statement carries its own directory, including after literal cd.
-	rawCommand := agentHookConfigRawShellCommand(request.Input)
 	parts := agentHookConfigPlacedCommands(rawCommand, guard.cwd, guard.home, 0)
 	for _, part := range parts {
 		if len(parts) > 1 && part.Command == rawCommand &&
@@ -1197,6 +1202,16 @@ func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHoo
 		}
 	}
 	return owned, other
+}
+
+// agentHookConfigBindsValues reports whether a command can carry a name in a
+// shell variable of its own: it expands one and binds one (an assignment, a
+// loop, read, mapfile, readarray or printf -v). A command that only expands
+// the environment names no path the reader could resolve beyond its text.
+func agentHookConfigBindsValues(command string) bool {
+	return strings.Contains(command, "$") &&
+		slices.ContainsFunc([]string{"=", "for", "read", "mapfile", "readarray", "printf"},
+			func(binder string) bool { return strings.Contains(command, binder) })
 }
 
 func agentHookConfigRawShellCommand(input actionfacts.Input) string {
