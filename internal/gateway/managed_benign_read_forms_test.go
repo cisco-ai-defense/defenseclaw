@@ -76,13 +76,12 @@ func r106Reader2CheckWith(t *testing.T, rows []r106Reader2Row, setup func(*testi
 			}
 			// want is one verdict for both cells, or per-user/managed
 			// ("allow/block") where the managed gateway keeps a reading it
-			// cannot verify behind ProtectHome. A managed verdict of "-" is
-			// not checked: the row is about the per-user gateway.
+			// cannot verify behind ProtectHome.
 			wantPerUser, wantManaged, split := strings.Cut(row.want, "/")
 			if !split {
 				wantManaged = wantPerUser
 			}
-			if perUser != wantPerUser || managed != wantManaged && wantManaged != "-" {
+			if perUser != wantPerUser || managed != wantManaged {
 				t.Errorf("%s %s: per-user %s, managed %s, want %s", connector, row.name, perUser, managed, row.want)
 			}
 		}

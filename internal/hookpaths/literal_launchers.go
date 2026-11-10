@@ -209,8 +209,9 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 				return operands
 			}
 			if allowFileRead {
-				if script, ok := shellScriptOperand(words); ok && actionScriptReadable(script, cwd, home) {
-					return literalLocalShellScriptOperands(script, cwd, home, depth)
+				if script, ok := shellScriptOperand(words); ok {
+					operands, _ := literalLocalShellScriptOperands(script, cwd, home, depth)
+					return operands
 				}
 			}
 			return nil
@@ -245,8 +246,10 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 		case "xargs":
 			return nil // A producer must prove the replacement text first.
 		default:
-			if allowFileRead && strings.HasSuffix(program, ".sh") && actionScriptReadable(words[0], cwd, home) {
-				return literalLocalShellScriptOperands(words[0], cwd, home, depth)
+			if allowFileRead && strings.HasSuffix(program, ".sh") {
+				if operands, read := literalLocalShellScriptOperands(words[0], cwd, home, depth); read {
+					return operands
+				}
 			}
 			operands := directLiteralProgramOperands(words, stmt, cwd, home, allowFileRead)
 			if include != nil {
@@ -258,13 +261,15 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 	return nil
 }
 
-func literalLocalShellScriptOperands(script, cwd, home string, depth int) []string {
-	content, read := readActionScript(script, cwd, home)
+// literalLocalShellScriptOperands is the write operands of the script a shell
+// or a .sh program runs, and whether the script was read.
+func literalLocalShellScriptOperands(script, cwd, home string, depth int) ([]string, bool) {
+	content, read := readActionScript(script, cwd)
 	if !read {
-		return nil
+		return nil, false
 	}
 	writes, _, _ := ShellWriteOperands(content, cwd, home)
-	return append(writes, literalWriteOperandsDepth(content, cwd, home, depth+1)...)
+	return append(writes, literalWriteOperandsDepth(content, cwd, home, depth+1)...), true
 }
 
 func literalInteger(value string) bool {

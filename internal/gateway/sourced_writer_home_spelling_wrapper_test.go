@@ -72,18 +72,18 @@ func TestSourcedWriterNamedByHomeSpellingInAWrapperIsBlockedFromAnyFolder(t *tes
 							continue
 						}
 						rows = append(rows,
-							r106Reader2Row{launcher + " " + builtin + " " + spelling + " writer", "project", form("wk.sh"), "block/-"},
+							r106Reader2Row{launcher + " " + builtin + " " + spelling + " writer", "project", form("wk.sh"), "block"},
 							r106Reader2Row{launcher + " " + builtin + " " + spelling + " ordinary", "project", form("ok.sh"), "allow"},
 						)
 					}
 				}
 			}
 			rows = append(rows,
-				r106Reader2Row{"nested sh in bash", "project", `bash -c "sh -c \". ~/chain/` + dir + `/wk.sh\""`, "block/-"},
-				r106Reader2Row{"chained after echo", "project", `bash -c "echo go && . ~/chain/` + dir + `/wk.sh"`, "block/-"},
+				r106Reader2Row{"nested sh in bash", "project", `bash -c "sh -c \". ~/chain/` + dir + `/wk.sh\""`, "block"},
+				r106Reader2Row{"chained after echo", "project", `bash -c "echo go && . ~/chain/` + dir + `/wk.sh"`, "block"},
 				r106Reader2Row{"chained ordinary", "project", `bash -c "echo go && . ~/chain/` + dir + `/ok.sh"`, "allow"},
-				r106Reader2Row{"absolute spelling", "project", `bash -c ". ` + "{H}" + `/chain/` + dir + `/wk.sh"`, "block/-"},
-				r106Reader2Row{"from home", "home", `bash -c ". ~/chain/` + dir + `/wk.sh"`, "block/-"},
+				r106Reader2Row{"absolute spelling", "project", `bash -c ". ` + "{H}" + `/chain/` + dir + `/wk.sh"`, "block"},
+				r106Reader2Row{"from home", "home", `bash -c ". ~/chain/` + dir + `/wk.sh"`, "block"},
 			)
 			r106Reader2CheckWith(t, rows, func(t *testing.T, f b36ManagedHookFixture) { homeScriptFolder(t, f, links) })
 		})
