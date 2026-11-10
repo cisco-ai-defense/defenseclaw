@@ -26,8 +26,12 @@ import (
 type nativeFileWrite struct {
 	target, added, replaced string
 	whole, edit             bool
-	after, before           []string
-	all                     []bool
+	// combined marks the write withRepeatedTargetResults makes of the blocks
+	// of one file taken together: a text for the content proofs only, no
+	// block the tool applies.
+	combined      bool
+	after, before []string
+	all           []bool
 }
 
 // NativeEditContentLimit is the largest file text a proof reads for an Edit
@@ -426,7 +430,7 @@ func withRepeatedTargetResults(writes []nativeFileWrite) []nativeFileWrite {
 		if len(blocks[name]) < 2 {
 			continue
 		}
-		merged := nativeFileWrite{target: writes[blocks[name][0]].target}
+		merged := nativeFileWrite{target: writes[blocks[name][0]].target, combined: true}
 		for _, index := range blocks[name] {
 			merged.added += writes[index].added
 			merged.replaced += writes[index].replaced
