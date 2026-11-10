@@ -38,7 +38,7 @@ func TestOwnStatusForWindowsAccountSaysBlockedForAPendingAccount(t *testing.T) {
 		return sid == alice && pending[connector]
 	}
 	type rows struct {
-		Cowork     map[string]any            `json:"cowork"`
+		Cowork     map[string]any           `json:"cowork"`
 		ClaudeCode struct{ Protected bool } `json:"claude_code"`
 		Connectors map[string]struct {
 			Protected  bool   `json:"protected"`

@@ -8,9 +8,10 @@ package enterprisehooks
 import "testing"
 
 // GAP-1034: only Claude Code, Codex and Cursor are judged, an empty SID and a
-// process that is not the standalone service claim nothing, and a policy that
-// cannot be read claims nothing; a registered SID with no selected runtime is
-// pending, one with a selected runtime (whatever its state) is not.
+// process that is not the standalone service claim nothing, and a SID the
+// machine policy does not register is the unregistered refusal, not pending.
+// The selector half (no entry is pending, an entry is not) is proven natively
+// on the machine files by the g1026 r2 cells.
 func TestWindowsManagedRuntimePendingForSID(t *testing.T) {
 	const sid = "S-1-5-21-1-2-3-1001"
 	previousStandalone, previousRegistered := windowsEnterpriseStandaloneProcess, windowsMachinePolicyRegisteredSIDs
