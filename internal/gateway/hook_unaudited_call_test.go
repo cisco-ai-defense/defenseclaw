@@ -4,6 +4,9 @@
 package gateway
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,4 +69,69 @@ func TestToolCallAnsweredWhileTheAuditWriteFailedGetsItsRowFromTheFailureLog(t *
 			}
 		})
 	}
+}
+
+// serveAuditFaultCall posts one PreToolUse to the fixture the way a script
+// hook does (no delivery receipt) while its audit write fails; a client that
+// has already left carries a cancelled context.
+func serveAuditFaultCall(t *testing.T, f auditFailureHookFixture, body string, clientLeft bool) {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", strings.NewReader(body))
+	if clientLeft {
+		gone, hangUp := context.WithCancel(t.Context())
+		hangUp()
+		request = request.WithContext(gone)
+	}
+	f.emitter.fail = true
+	f.api.handleAgentHook("claudecode").ServeHTTP(httptest.NewRecorder(), request)
+	f.emitter.fail = false
+}
+
+// GAP-1028 and GAP-1031 together: a script call whose client left cannot show
+// which answer the agent got. When the audit write of that same call also
+// fails, the recovery line and the row the report writes from it stay
+// unconfirmed, whatever the gateway proposed: an ordinary call and a call the
+// policy proposed to block alike. The call answered to its present client and
+// the call under a hook that fails closed keep their allow and block rows.
+func TestAuditFaultOnACallWhoseClientLeftKeepsItUnconfirmed(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		strict     bool
+		body       string
+		clientLeft bool
+		want       string
+	}{
+		{"ordinary call, client left", false, preToolUseBodyOf(t, "toolu_gap"), true, "unconfirmed"},
+		{"proposed block, client left", false, protectedWriteBody("gap"), true, "unconfirmed"},
+		{"ordinary call, client present", false, preToolUseBodyOf(t, "toolu_gap"), false, "allow"},
+		{"proposed block, client present", false, protectedWriteBody("gap"), false, "block"},
+		{"ordinary call, client left, hook fails closed", true, preToolUseBodyOf(t, "toolu_gap"), true, "block"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAuditFailureHookFixture(t, "")
+			if tc.strict {
+				f.api.scannerCfg.Guardrail.RulePack = "strict"
+				f.api.scannerCfg.Guardrail.HookFailMode = "closed"
+			}
+			data := t.TempDir()
+			f.api.scannerCfg.DataDir = data
+			serveAuditFaultCall(t, f, tc.body, tc.clientLeft)
+			if err := reportHookFailureCallsIn(filepath.Join(data, "logs"), f.api.logger, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			toolID := "toolu_gap"
+			if strings.Contains(tc.body, "gap-tool") {
+				toolID = "gap-tool"
+			}
+			got := joinByToolID(t, f.api.store)[toolID]
+			if len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("rows for the call = %v, want exactly one %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func preToolUseBodyOf(t *testing.T, toolUseID string) string {
+	t.Helper()
+	return string(preToolUseBody(t, toolUseID))
 }
