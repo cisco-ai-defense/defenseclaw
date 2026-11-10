@@ -20,150 +20,189 @@ func actionClientLoopCopyDestinationProtected(command, cwd, home string) bool {
 }
 
 // LoopCopyDestinationProtected checks fixed loop destinations of the calls
-// named cp, mv, install, ln and tee in the gateway's own filesystem view. The
-// destination is judged by the program's name, whatever its options and
-// source words hold (rel-1-0-6:GAP-0880, GAP-0885).
+// named cp, mv, install, ln and tee in the gateway filesystem view. The
+// destination is judged by the program name alone, whatever its spelling,
+// options and source words hold (rel-1-0-6:GAP-0880, GAP-0885). Per call the
+// order is fixed: read the program name from the parsed word, then read the
+// destination operand and judge it; nothing else decides before that.
 func LoopCopyDestinationProtected(command, cwd, home string) bool {
-	if !filepath.IsAbs(cwd) || home == "" || !strings.Contains(command, "for") || !actionClientLoopWriterNamed(command) {
+	if !filepath.IsAbs(cwd) || home == "" || !strings.Contains(command, "for") {
 		return false
 	}
 	file, ok := parseShell(command)
 	if !ok {
 		return false
 	}
-	protected := newProtectedFiles(home)
-	keyDir := filepath.Join(home, ".ssh")
+	scan := actionClientLoopScan{home: home, protected: newProtectedFiles(home), keyDir: filepath.Join(home, ".ssh")}
 	for _, top := range file.Stmts {
-		loop, ok := actionClientLoopCopyTop(top, cwd, home)
-		if !ok {
-			if !actionClientLoopCopyAssignment(top, home) && !actionClientLoopCopyNoop(top, cwd, home) {
-				return false
-			}
-			continue
-		}
-		iter, ok := loop.Loop.(*syntax.WordIter)
-		if !ok || iter.Name == nil || len(iter.Items) == 0 {
-			return false
-		}
-		var destinations []*syntax.Word
-		for _, stmt := range loop.Do {
-			call, ok := stmt.Cmd.(*syntax.CallExpr)
-			if !ok || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 || len(call.Assigns) != 0 || len(call.Args) == 0 {
-				return false
-			}
-			if words := actionClientLoopWriterDestinations(call, home); len(words) != 0 {
-				destinations = append(destinations, words...)
-			} else if !actionClientLoopCopyNoop(stmt, cwd, home) {
-				return false
-			}
-		}
-		// A destination that does not name the iterator is a direct name that
-		// the other readers judge.
-		named := destinations[:0]
-		for _, destination := range destinations {
-			syntax.Walk(destination, func(part syntax.Node) bool {
-				if param, ok := part.(*syntax.ParamExp); ok && param.Param != nil && param.Param.Value == iter.Name.Value {
-					named = append(named, destination)
-					return false
-				}
-				return true
-			})
-		}
-		if len(named) == 0 {
-			return false
-		}
-		for _, item := range iter.Items {
-			value, fixed := StaticWord(item, home)
-			if !fixed || value == "" || strings.ContainsAny(value, "*?[]\x00\x1f") {
-				return false
-			}
-			loopValues := actionValues{"HOME": home, "PWD": cwd, iter.Name.Value: value}
-			for _, destination := range named {
-				if target, known := actionWordValue(destination, loopValues, cwd, home); known &&
-					actionClientProtectedPath(target, cwd, protected, keyDir) {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-func actionClientLoopWriterNamed(command string) bool {
-	for _, name := range []string{"cp", "mv", "install", "ln", "tee"} {
-		if strings.Contains(command, name) {
+		next, known := scan.statement(top, cwd)
+		if scan.found {
 			return true
 		}
-	}
-	return false
-}
-
-// actionClientLoopCopyAssignment is a plain assignment of a fixed value to a
-// name other than HOME and PWD.
-func actionClientLoopCopyAssignment(stmt *syntax.Stmt, home string) bool {
-	if stmt == nil || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 {
-		return false
-	}
-	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) != 0 || len(call.Assigns) != 1 {
-		return false
-	}
-	assign := call.Assigns[0]
-	if assign.Name == nil || assign.Append || assign.Array != nil || assign.Index != nil ||
-		assign.Name.Value == "HOME" || assign.Name.Value == "PWD" {
-		return false
-	}
-	if assign.Value == nil {
-		return true
-	}
-	value, fixed := StaticWord(assign.Value, home)
-	return fixed && !strings.ContainsAny(value, "*?[]\x00\x1f")
-}
-
-func actionClientLoopCopyTop(stmt *syntax.Stmt, cwd, home string) (*syntax.ForClause, bool) {
-	if stmt == nil || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 {
-		return nil, false
-	}
-	if loop, ok := stmt.Cmd.(*syntax.ForClause); ok {
-		return loop, true
-	}
-	if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && pair.Op == syntax.AndStmt &&
-		actionClientLoopCopyNoop(pair.X, cwd, home) {
-		return actionClientLoopCopyTop(pair.Y, cwd, home)
-	}
-	return nil, false
-}
-
-func actionClientLoopCopyNoop(stmt *syntax.Stmt, cwd, home string) bool {
-	if stmt == nil || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 {
-		return false
-	}
-	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
-		return false
-	}
-	program, fixed := staticProgramWord(call.Args[0], home)
-	if !fixed {
-		return false
-	}
-	switch program {
-	case "true", ":":
-		return len(call.Args) == 1
-	case "cd":
-		if len(call.Args) != 2 {
+		if !known {
 			return false
 		}
-		value, fixed := StaticWord(call.Args[1], home)
-		return fixed && samePathName(OperandPath(value, cwd), cwd)
-	case "echo":
-		for _, arg := range call.Args[1:] {
-			if _, fixed := StaticWord(arg, home); !fixed {
-				return false
-			}
-		}
-		return true
+		cwd = next
 	}
 	return false
+}
+
+type actionClientLoopScan struct {
+	home      string
+	protected protectedFiles
+	keyDir    string
+	found     bool
+}
+
+// statement judges every for loop in one statement and returns the directory
+// the next statement starts in. It reports false when the statement changes
+// the directory, HOME or PWD in a way that is not read, so later statements
+// have no known view.
+func (s *actionClientLoopScan) statement(stmt *syntax.Stmt, cwd string) (string, bool) {
+	switch cmd := stmt.Cmd.(type) {
+	case *syntax.BinaryCmd:
+		if cmd.Op == syntax.AndStmt {
+			next, known := s.statement(cmd.X, cwd)
+			if s.found || !known {
+				return "", false
+			}
+			return s.statement(cmd.Y, next)
+		}
+	case *syntax.CallExpr:
+		if dir, ok := actionClientLoopCopyChdir(cmd, cwd, s.home); ok {
+			return dir, true
+		}
+	}
+	if actionClientLoopCopyChangesState(stmt, s.home) {
+		return "", false
+	}
+	syntax.Walk(stmt, func(node syntax.Node) bool {
+		if loop, ok := node.(*syntax.ForClause); ok && s.loop(loop, cwd) {
+			s.found = true
+		}
+		return !s.found
+	})
+	return cwd, true
+}
+
+// loop reports whether a writer in the loop body has a destination that names
+// the loop variable and reaches a protected path for one of its fixed values.
+func (s *actionClientLoopScan) loop(loop *syntax.ForClause, cwd string) bool {
+	iter, ok := loop.Loop.(*syntax.WordIter)
+	if !ok || iter.Name == nil || len(iter.Items) == 0 {
+		return false
+	}
+	var named []*syntax.Word
+	for _, stmt := range loop.Do {
+		syntax.Walk(stmt, func(node syntax.Node) bool {
+			if call, ok := node.(*syntax.CallExpr); ok {
+				for _, destination := range actionClientLoopWriterDestinations(call, s.home) {
+					if actionClientWordNamesVariable(destination, iter.Name.Value) {
+						named = append(named, destination)
+					}
+				}
+			}
+			return true
+		})
+	}
+	// A destination that does not name the iterator is a direct name that the
+	// other readers judge.
+	for _, item := range iter.Items {
+		value, fixed := StaticWord(item, s.home)
+		if !fixed || value == "" || strings.ContainsAny(value, "*?[]\x00\x1f") {
+			continue
+		}
+		loopValues := actionValues{"HOME": s.home, "PWD": cwd, iter.Name.Value: value}
+		for _, destination := range named {
+			if target, known := actionWordValue(destination, loopValues, cwd, s.home); known &&
+				actionClientProtectedPath(target, cwd, s.protected, s.keyDir) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func actionClientWordNamesVariable(word *syntax.Word, name string) bool {
+	named := false
+	syntax.Walk(word, func(part syntax.Node) bool {
+		if param, ok := part.(*syntax.ParamExp); ok && param.Param != nil && param.Param.Value == name {
+			named = true
+		}
+		return !named
+	})
+	return named
+}
+
+// actionClientLoopCopyChdir reads a plain cd to one fixed directory.
+func actionClientLoopCopyChdir(call *syntax.CallExpr, cwd, home string) (string, bool) {
+	if len(call.Assigns) != 0 || len(call.Args) != 2 {
+		return "", false
+	}
+	program, args, fixed := actionClientLoopCallProgram(call, home)
+	if !fixed || program != "cd" || len(args) != 2 {
+		return "", false
+	}
+	value, fixed := StaticWord(args[1], home)
+	if !fixed || value == "" || strings.HasPrefix(value, "-") {
+		return "", false
+	}
+	return OperandPath(value, cwd), true
+}
+
+// actionClientLoopCopyChangesState reports whether a statement moves the
+// directory (a plain cd to a fixed directory is read before this check), sets
+// HOME or PWD, or runs text the walk does not read.
+func actionClientLoopCopyChangesState(stmt *syntax.Stmt, home string) bool {
+	changes := false
+	syntax.Walk(stmt, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return !changes
+		}
+		for _, assign := range call.Assigns {
+			if assign.Name != nil && (assign.Name.Value == "HOME" || assign.Name.Value == "PWD") {
+				changes = true
+			}
+		}
+		if program, _, fixed := actionClientLoopCallProgram(call, home); fixed {
+			switch program {
+			case "cd", "pushd", "popd", "eval", "source", ".":
+				changes = true
+			}
+		}
+		return !changes
+	})
+	return changes
+}
+
+// actionClientLoopCallProgram reads the program a call runs from its parsed
+// words, as Bash reads them (quotes and backslashes removed), after any
+// command or builtin prefix. It returns the name and the words from the
+// program on.
+func actionClientLoopCallProgram(call *syntax.CallExpr, home string) (string, []*syntax.Word, bool) {
+	args := call.Args
+	for len(args) != 0 {
+		program, fixed := staticProgramWord(args[0], home)
+		if !fixed {
+			return "", nil, false
+		}
+		if program != "command" && program != "builtin" {
+			return program, args, true
+		}
+		args = args[1:]
+		for len(args) != 0 {
+			text, whole := wordLiteralPrefix(args[0])
+			if !whole || text != "-p" && text != "--" {
+				break
+			}
+			args = args[1:]
+			if text == "--" {
+				break
+			}
+		}
+	}
+	return "", nil, false
 }
 
 // actionClientLoopWriterDestinations returns the destination operands of a
@@ -172,11 +211,8 @@ func actionClientLoopCopyNoop(stmt *syntax.Stmt, cwd, home string) bool {
 // target-directory option names the destination; otherwise it is the last
 // operand (every operand of tee).
 func actionClientLoopWriterDestinations(call *syntax.CallExpr, home string) []*syntax.Word {
-	if len(call.Args) < 2 {
-		return nil
-	}
-	program, fixed := staticProgramWord(call.Args[0], home)
-	if !fixed {
+	program, words, fixed := actionClientLoopCallProgram(call, home)
+	if !fixed || len(words) < 2 {
 		return nil
 	}
 	base := programBase(program)
@@ -185,7 +221,7 @@ func actionClientLoopWriterDestinations(call *syntax.CallExpr, home string) []*s
 	default:
 		return nil
 	}
-	args := call.Args[1:]
+	args := words[1:]
 	var operands, directories []*syntax.Word
 	for i := 0; i < len(args); i++ {
 		text, whole := wordLiteralPrefix(args[i])
