@@ -159,6 +159,11 @@ type windowsEnterpriseInstallerReport struct {
 	// RecoveredCodexRequirements says what a recovery replaced in the Codex
 	// requirements.toml and where the hand-edited file is kept (GAP-0802).
 	RecoveredCodexRequirements []string `json:"recovered_codex_requirements"`
+	// RestoredPolicySources says, for each config.yaml or targets.yaml a
+	// standalone Repair restored from Setup's approved copy, what was replaced
+	// and where its bytes are kept (rejected-config.yaml,
+	// rejected-targets.yaml; GAP-1049).
+	RestoredPolicySources []string `json:"restored_policy_sources"`
 	// SquattedRootNotes says what Install did with each standalone root a
 	// standard user created first: a link removed, a folder moved aside.
 	SquattedRootNotes []string `json:"squatted_root_notes"`
@@ -246,7 +251,10 @@ var windowsEnterpriseRepairDataDirBeforePlan = func() string {
 		return ""
 	}
 	// On standalone a runtime folder another account can write or owns is
-	// left for the strict trust walk to refuse and name (g582 round 4).
+	// left for the strict trust walk to refuse and name (g582 round 4). The
+	// refusal and the repair judge by the standalone scope, which Setup's own
+	// process lacks, so both run under the pin (GAP-1048).
+	defer pinWindowsStandaloneTrustScope()()
 	if managed.RefuseStandaloneInPlaceRepair(layout.DataDir, managed.ObjectRuntimeDirectory) != nil {
 		return ""
 	}
@@ -1980,6 +1988,7 @@ func applyWindowsEnterpriseInstallerReport(
 	}
 	addWindowsEnterpriseUserRegistrationWarnings(result, report, opts != nil && opts.purge)
 	addWindowsEnterpriseUserSettingsChanges(result, report)
+	addWindowsEnterpriseRestoredPolicyChanges(result, report)
 	if opts != nil && opts.purge {
 		addWindowsEnterpriseUserStateWarning(result, report)
 	}
@@ -2545,6 +2554,20 @@ func windowsEnterpriseBoundedDiagnostic(message string) string {
 		return message[:windowsEnterpriseDiagnosticMax] + "..."
 	}
 	return message
+}
+
+// addWindowsEnterpriseRestoredPolicyChanges lists in Changes each config.yaml
+// or targets.yaml the lifecycle replaced from Setup's approved copy, with the
+// account that could change the replaced file and the fix named, and where the
+// replaced bytes are kept. The repair used to replace it and keep nothing
+// (GAP-1049).
+func addWindowsEnterpriseRestoredPolicyChanges(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	for _, note := range report.RestoredPolicySources {
+		line := windowsEnterpriseBoundedDiagnostic(windowsEnterpriseNamePrincipals(note))
+		if !slices.Contains(result.Changes, line) {
+			result.Changes = append(result.Changes, line)
+		}
+	}
 }
 
 // addWindowsEnterpriseUserSettingsChanges lists each user settings file an
@@ -5126,6 +5149,7 @@ func windowsEnterpriseEnsureProbeFailure(status *windowsEnterpriseInstallerRepor
 		return fmt.Errorf("ensure_refused: %s", message)
 	}
 	message += windowsEnterpriseRecordOwnerMismatchNextStep(message)
+	message = windowsEnterpriseNamePrincipals(message)
 	return fmt.Errorf("status_failed: ensure could not read the deployment state: %s", message)
 }
 

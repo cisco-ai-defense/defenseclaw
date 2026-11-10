@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
@@ -173,5 +175,18 @@ func writeEnterpriseHookAdminOnlyFile(path string, data []byte) error {
 // LocalSystem guardian or enumerator, or the elevated installer); the
 // protect helper refuses a reparse point or multiply-linked file first.
 func repairEnterpriseHookManifestACL(path string) error {
+	// On a standalone computer a manifest an untrusted account can write or
+	// owns is never re-stamped in place, in whichever process asks. The
+	// scope-gated refusals in front of this repair are inert in a process
+	// that carries no standalone scope (Setup's own, a copied binary), so the
+	// repair reads the file's own descriptor first (GAP-1048).
+	if _, standalone := managedHostWindowsStandalone(); standalone {
+		result, err := managed.AssessCanonical(path, managed.ObjectAdminFile, managed.CanonicalOptions{Quiet: true})
+		if err != nil || result.Outcome == managed.CanonicalBoundary {
+			return managed.RefuseStandaloneContentDrift(fmt.Errorf(
+				"the hook guardian manifest %s is not repaired in place: an untrusted principal can write or owns it (%s)",
+				path, strings.Join(result.Drift, "; ")))
+		}
+	}
 	return enterprisehooks.ProtectWindowsManagedRuntimeAdminFile(path)
 }
