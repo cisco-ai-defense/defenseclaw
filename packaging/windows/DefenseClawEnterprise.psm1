@@ -309,6 +309,9 @@ $script:DefenseClawCursorAdapterRestored = $false
 # (the managed-hook lifecycle retire report's leftovers). Reset per lifecycle
 # run.
 $script:DefenseClawRollbackLeftovers = @()
+# GAP-0989: services (standalone) seen with the delayed-start flag before a
+# start-mode change took it away, so a later change back to automatic gives it back.
+$script:DefenseClawDelayedAutoStartSeen = @{}
 $script:DefenseClawUserNativeOTLPCaptureSkipped = @()
 # Standalone: each account whose old managed runtime generations a
 # managed-hook lifecycle retire left in place, because DefenseClaw could not
@@ -12890,8 +12893,20 @@ function Set-DefenseClawServiceStartMode {
     if (-not (Test-DefenseClawServiceExists -Name $Name)) {
         throw "cannot set startup mode for missing Windows service $Name"
     }
+    # GAP-0989: any start= other than delayed-auto clears the delayed-start flag
+    # (disabled and demand included), so a service disabled for a transaction and
+    # restored to automatic came back as plain automatic. Standalone notes the
+    # flag before it changes the mode and restores automatic as delayed-auto for
+    # a service it saw delayed. Secure Client is unchanged.
+    $keepDelayed = $false
+    if (Test-DefenseClawStandaloneProfile) {
+        if (Get-DefenseClawServiceDelayedAutoStart -Name $Name) {
+            $script:DefenseClawDelayedAutoStartSeen[$Name] = $true
+        }
+        $keepDelayed = ($StartMode -eq 2 -and $script:DefenseClawDelayedAutoStartSeen.ContainsKey($Name))
+    }
     $token = switch ($StartMode) {
-        2 { 'auto' }
+        2 { if ($keepDelayed) { 'delayed-auto' } else { 'auto' } }
         3 { 'demand' }
         4 { 'disabled' }
     }
