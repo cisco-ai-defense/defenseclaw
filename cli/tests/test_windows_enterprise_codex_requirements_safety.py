@@ -49,6 +49,7 @@ foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseCl
     if ($null -eq $definition) { throw "missing $name" }
     . ([ScriptBlock]::Create($definition.Extent.Text))
 }
+$script:DefenseClawRollbackDeferBusyWriter = $false
 function Format-DefenseClawSetupAction { param([string]$Action) "Setup $Action" }
 function Get-DefenseClawCodexWriterHolderText { param([string]$Path) 'the writer is writer.exe (pid 4242, account NT AUTHORITY\SYSTEM)' }
 $layout = @{ CodexManagedHooksStatePath = (Join-Path $Scratch '.defenseclaw-managed-hooks.state') }

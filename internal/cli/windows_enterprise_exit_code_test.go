@@ -171,6 +171,10 @@ func TestWindowsEnterpriseUnsettledCodexStateWithAPendingRollbackIsRetryable(t *
 		"wrapped in the failure":                {"Ensure failed: " + deferred, true, enterprisestatus.WindowsExitBusy},
 		"clean rollback":                        {strings.Replace(deferred, "the rollback left that state as it is and put everything else back, and the transaction is still pending", "this run stopped", 1), false, enterprisestatus.WindowsExitFailure},
 		"refusal without a pending transaction": {"codex_state_unsettled: x", false, enterprisestatus.WindowsExitFailure},
+		// The forward run was refused for the writer, then its rollback failed for
+		// another reason and left the transaction pending (services may be
+		// stopped): that is not the rollback's deferral, so it stays 1603.
+		"forward unsettled, rollback failed otherwise": {"codex_state_unsettled: the Codex writer transaction counter next to C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state stayed at 3 (odd: a transaction is open) for 30 seconds (the writer is writer.exe (pid 4242)), so the Codex managed-hooks state could not be judged and this run stopped (an install, repair, ensure or upgrade that had started is rolled back, an upgrade to the release it came from; a verify changes nothing). Next step: run Setup /repair again. The rollback then failed: restored deployment retained an Enumerator absent from its authenticated transaction preimage", true, enterprisestatus.WindowsExitFailure},
 	} {
 		code := windowsEnterpriseMessageCode(test.message, "lifecycle_error")
 		if code != "codex_state_unsettled" {
@@ -183,5 +187,22 @@ func TestWindowsEnterpriseUnsettledCodexStateWithAPendingRollbackIsRetryable(t *
 		if got != test.want || !slices.Contains(windowsLifecycleExitCodes, got) {
 			t.Fatalf("%s: exit = %d, want %d (one of %v)", name, got, test.want, windowsLifecycleExitCodes)
 		}
+	}
+}
+
+// GAP-0999: the module puts the code in front of the rollback's deferral, like
+// the two Codex holds, so the result does not print it twice.
+func TestWindowsEnterpriseUnsettledDeferralDoesNotRepeatItsCode(t *testing.T) {
+	message := "codex_state_unsettled: the Codex writer transaction counter next to X stayed at 3, so the rollback could not judge the Codex managed-hooks state; the rollback left that state as it is"
+	got := windowsEnterpriseTrimHeldCodePrefix("codex_state_unsettled", message)
+	if strings.HasPrefix(got, "codex_state_unsettled:") || !strings.HasPrefix(got, "the Codex writer transaction counter") {
+		t.Fatalf("trimmed = %q", got)
+	}
+	messages := []enterprisestatus.Message{{Code: "codex_state_unsettled", Message: got}}
+	if !windowsEnterpriseUnsettledRollbackDeferred(messages) {
+		t.Fatal("the trimmed deferral is no longer recognised as the rollback's own")
+	}
+	if windowsEnterpriseUnsettledRollbackDeferred([]enterprisestatus.Message{{Code: "codex_state_unsettled", Message: "this run stopped"}}) {
+		t.Fatal("a plain refusal was read as the rollback's deferral")
 	}
 }

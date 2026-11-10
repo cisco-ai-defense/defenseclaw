@@ -1945,7 +1945,7 @@ func applyWindowsEnterpriseInstallerReport(
 		if windowsBundleHasCode(result.Errors[firstError:], "codex_requirements_held") ||
 			windowsBundleHasCode(result.Errors[firstError:], "codex_state_held") ||
 			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) ||
-			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "codex_state_unsettled")) ||
+			(report.TransactionPending && windowsEnterpriseUnsettledRollbackDeferred(result.Errors[firstError:])) ||
 			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "guardian_state_held")) {
 			next = windowsEnterpriseHeldRollbackNextStep(report.TransactionPending, windowsEnterpriseLiveStandaloneServices())
 		}
@@ -3434,10 +3434,27 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 // codex_state_held: ...", g582 round 11c, L3).
 func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
-	case "codex_state_held", "codex_requirements_held", "privileges_required", "guardian_state_held":
+	case "codex_state_held", "codex_requirements_held", "privileges_required", "guardian_state_held", "codex_state_unsettled":
 		return strings.TrimPrefix(message, code+": ")
 	}
 	return message
+}
+
+// windowsEnterpriseUnsettledRollbackDeferredText is the wording only the
+// rollback's own deferral for a Codex writer that never settles carries
+// (DefenseClawEnterprise.psm1 New-DefenseClawCodexWriterUnsettledHeldMessage,
+// GAP-0999). The refusal of a forward run does not have it.
+const windowsEnterpriseUnsettledRollbackDeferredText = "the rollback left that state as it is"
+
+// windowsEnterpriseUnsettledRollbackDeferred reports whether one of the
+// messages is the rollback's deferral for a Codex writer that never settled.
+func windowsEnterpriseUnsettledRollbackDeferred(messages []enterprisestatus.Message) bool {
+	for _, m := range messages {
+		if m.Code == "codex_state_unsettled" && strings.Contains(m.Message, windowsEnterpriseUnsettledRollbackDeferredText) {
+			return true
+		}
+	}
+	return false
 }
 
 // windowsEnterpriseKnownCodes are the stable refusal codes the standalone
@@ -3506,7 +3523,10 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			// and left the transaction pending, the restored services run and
 			// /repair finishes the rollback once the writer is gone: the
 			// held-rollback convention, so an MDM retries (1618).
-			if result.TransactionPending {
+			// Only the rollback's own deferral counts: a refusal whose rollback
+			// then failed for another reason stays 1603 (the services may be
+			// stopped; a retry of the same delivery does not help).
+			if result.TransactionPending && strings.Contains(message.Message, windowsEnterpriseUnsettledRollbackDeferredText) {
 				return enterprisestatus.WindowsExitBusy
 			}
 		case "scanner_runtime_unavailable":

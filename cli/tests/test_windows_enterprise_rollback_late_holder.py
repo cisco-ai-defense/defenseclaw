@@ -47,9 +47,9 @@ def test_every_deferral_is_standalone_only() -> None:
     sites = [m.start() for m in re.finditer(r"Add-DefenseClawRollbackDeferredHold -Message", text)]
     # The definition is a function, not a call.
     sites = [s for s in sites if not text[max(0, s - 40) : s].rstrip().endswith("function")]
-    # GAP-0977 added the eighth (a guardian state file a holder keeps the guardian from publishing);
-    # GAP-0999 the ninth to the eleventh (a stuck Codex writer: found by the state check of the readiness
-    # check, by the Codex verify of it, and by a guardian proof that cannot publish).
+    # GAP-0977 added the eighth: a guardian state file a holder keeps the guardian from publishing.
+    # GAP-0999 added the ninth to the eleventh: a stuck Codex writer (the state check of the readiness
+    # check, the Codex verify of it, the guardian proof that cannot publish).
     assert len(sites) == 11, len(sites)
     for site in sites:
         window = text[max(0, site - 1700) : site]
@@ -122,8 +122,8 @@ def test_the_second_holder_does_not_cost_another_full_wait() -> None:
 def test_the_guardian_coverage_proof_is_deferred_only_for_a_republish_a_holder_blocked() -> None:
     text = _text()
     # Set in five places, all in the rollback: the held republish of the Codex requirements, the held state check, and (GAP-0977) a held
-    # guardian state file, which the guardian cannot publish over, and (GAP-0999) the Codex verify and the guardian proof a stuck Codex
-    # writer keeps from passing.
+    # guardian state file, which the guardian cannot publish over; and (GAP-0999) the Codex verify and the guardian proof that a
+    # Codex writer holding the lock keeps from passing.
     assert text.count("$script:DefenseClawRollbackCoverageDeferred = $true") == 5
     deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
     assert "$script:DefenseClawRollbackCoverageDeferred = $true" in deployment
@@ -179,7 +179,7 @@ def test_a_held_codex_state_copy_defers_the_state_check_of_a_rollback() -> None:
     window = body[check:catch]
     assert "$RepairRecoveredCodexRequirements -and $ServicingTransaction" in window
     assert "Test-DefenseClawStandaloneProfile" in window
-    assert "if ($blockedState -eq '') {\n                    throw" in body[catch : catch + 300]
+    assert "if ($blockedState -eq '') {\n                throw" in body[catch : catch + 300]
     # The republish and the Codex verify are skipped once the state check deferred.
     gate = body.index("if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and", catch)
     assert "-not $codexRequirementsDeferred) {" in body[gate : gate + 300]

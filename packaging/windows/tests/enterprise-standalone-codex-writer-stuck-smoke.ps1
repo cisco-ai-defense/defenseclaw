@@ -94,11 +94,24 @@ $fs.Dispose()
                 # The recovery that started the services keeps only this deferral.
                 [void](Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $layout)
                 Add-DefenseClawRollbackDeferredHold -Message 'hook_in_use: x has C:\h.exe, the installed hook, open'
-                Clear-DefenseClawRollbackDeferredHolds -KeepCodexWriter
+                $kept = Get-DefenseClawRollbackCodexWriterHolds
+                Clear-DefenseClawRollbackDeferredHolds
+                Restore-DefenseClawRollbackCodexWriterHolds -Kept $kept
                 if ($script:DefenseClawRollbackDeferredHolds.Count -ne 1 -or -not $script:DefenseClawRollbackDeferredHolds[0].StartsWith('codex_state_unsettled: ')) { throw 'KeepCodexWriter kept the wrong holds' }
                 Clear-DefenseClawRollbackDeferredHolds
             }
             finally { Stop-Writer $writer }
+
+            # A program holds the lock with the counter EVEN (an antivirus scanner, a backup
+            # program): it is a named holder, so the proof is deferred the same way.
+            $holder = Start-Writer 18 18
+            try {
+                if (-not (Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $layout)) { throw 'a named holder with an even counter did not defer the guardian proof' }
+                $even = [string]$script:DefenseClawRollbackDeferredHolds[0]
+                if (-not $even.Contains('stayed at 18 (even, but a writer holds the lock') -or -not $even.Contains(('pid {0}' -f $holder.Id))) { throw "the even-counter deferral did not name the holder: '$even'" }
+                Clear-DefenseClawRollbackDeferredHolds
+            }
+            finally { Stop-Writer $holder }
 
             # The writer ended its transaction (the size is even again): nothing is deferred.
             if ((Get-DefenseClawCodexManagedHooksWriterCounter -Path $state) % 2 -ne 0) { throw 'the writer fixture did not end its transaction' }

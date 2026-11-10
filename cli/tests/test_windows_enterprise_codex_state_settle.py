@@ -135,7 +135,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Resolve-DefenseClawCodexManagedHooksStateCopy', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Wait-DefenseClawCodexManagedHooksStateSettled', 'Resolve-DefenseClawCodexManagedHooksStateCopySettled', 'Assert-DefenseClawCodexManagedHooksStateFile')) {
+foreach ($name in @('Resolve-DefenseClawCodexManagedHooksStateCopy', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Wait-DefenseClawCodexManagedHooksStateSettled', 'New-DefenseClawCodexStateUnsettledRefusal', 'Resolve-DefenseClawCodexManagedHooksStateCopySettled', 'Assert-DefenseClawCodexManagedHooksStateFile')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -144,6 +144,7 @@ foreach ($name in @('Resolve-DefenseClawCodexManagedHooksStateCopy', 'Get-Defens
     . ([ScriptBlock]::Create($definition.Extent.Text))
 }
 $script:CodexStateSettleSeconds = 30
+$script:DefenseClawRollbackDeferBusyWriter = $false
 $script:SystemSID = 'S-1-5-18'; $script:AdministratorsSID = 'S-1-5-32-544'; $script:TrustedInstallerSID = 'S-1-5-80'; $script:UsersSID = 'S-1-5-32-545'
 $script:judged = [Collections.Generic.List[string]]::new()
 $script:events = [Collections.Generic.List[string]]::new()

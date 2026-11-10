@@ -49,28 +49,40 @@ def test_the_refusal_of_the_forward_run_names_the_writer() -> None:
 
 
 def test_the_rollback_state_check_defers_a_stuck_writer_on_the_standalone_profile_only() -> None:
-    body = _function_body(_text(), "Assert-DefenseClawEnterpriseDeployment")
-    start = body.index("Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout")
-    window = body[start : start + 3200]
-    assert "$rollbackStateCheck = [bool]($RepairRecoveredCodexRequirements -and $ServicingTransaction -and" in window
-    assert "(Test-DefenseClawStandaloneProfile))" in window
-    assert "if ($rollbackStateCheck -and" in window
+    text = _text()
+    # The state check itself defers, under the flag only a standalone rollback sets; the
+    # lines of Assert-DefenseClawEnterpriseDeployment around it stay rel's.
+    check = _function_body(text, "Assert-DefenseClawCodexManagedHooksStateFile")
+    gate = check.index("if ($script:DefenseClawRollbackDeferBusyWriter) {")
+    wait = check.index("$settled = Wait-DefenseClawCodexManagedHooksStateSettled")
+    assert check.index("Assert-DefenseClawCodexManagedHooksStateFilePreflight") < gate < wait
+    window = check[gate:wait]
     assert "StartsWith('codex_state_unsettled: '" in window
     assert "New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout" in window
-    # A forward run keeps the throw: the deferral needs the rollback flags.
-    assert window.index("$rollbackStateCheck = ") < window.index("else {")
+    assert "return\n" in window and "throw\n" in window
+    body = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
+    assert "GAP-0999" not in body
 
 
-def test_the_guardian_proof_is_deferred_for_a_stuck_writer_only_after_it_failed() -> None:
-    body = _function_body(_text(), "Start-DefenseClawTransactionServices")
-    proof = body.index("Wait-DefenseClawFreshGuardianReconcile")
-    deferral = body.index("Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $Layout")
-    assert proof < body.index("catch {", proof) < deferral
-    # Any other proof failure still fails the recovery.
-    assert "else {\n                        throw" in body[deferral : deferral + 1800]
-    helper = _function_body(_text(), "Test-DefenseClawGuardianProofDeferredByCodexWriter")
+def test_the_guardian_proof_defers_for_any_holder_of_the_writer_lock_standalone_only() -> None:
+    text = _text()
+    # Start-DefenseClawTransactionServices keeps its text: the deferral is made by the
+    # two helpers it already calls, before the proof and after a failed one.
+    services = _function_body(text, "Start-DefenseClawTransactionServices")
+    assert "Test-DefenseClawGuardianProofDeferredByCodexWriter" not in services
+    assert "Set-DefenseClawRollbackGuardianStateDeferral -Layout $Layout" in services
+    assert "if (-not (Resolve-DefenseClawRollbackLateGuardianHold `\n" in services
+    before = _function_body(text, "Set-DefenseClawRollbackGuardianStateDeferral")
+    assert before.index("Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $Layout") < before.index("Get-DefenseClawGuardianStateHold")
+    late = _function_body(text, "Resolve-DefenseClawRollbackLateGuardianHold")
+    gate = late.index("Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $Layout")
+    assert late.index("(Test-DefenseClawStandaloneProfile) -and") < gate < late.index("if (-not (Test-DefenseClawStandaloneProfile) -or")
+    assert "-notmatch '^guardian_state_held: '" in late[:gate]
+    helper = _function_body(text, "Test-DefenseClawGuardianProofDeferredByCodexWriter")
     assert helper.index("Test-DefenseClawStandaloneProfile") < helper.index("Add-DefenseClawRollbackDeferredHold")
-    assert "% 2) -eq 0" in helper and "return $false" in helper
+    # Any named holder defers, whatever the counter parity (an odd counter alone defers too).
+    assert "% 2) -ne 0) -or" in helper and "Test-DefenseClawCodexWriterLockNamed -Path $statePath" in helper
+    assert "% 2) -eq 0" not in helper
 
 
 def test_a_refusal_whose_rollback_met_the_writer_again_is_named_once() -> None:
@@ -81,21 +93,45 @@ def test_a_refusal_whose_rollback_met_the_writer_again_is_named_once() -> None:
 
 def test_the_recoveries_that_start_the_services_keep_the_writer_deferral() -> None:
     text = _text()
-    assert text.count("Clear-DefenseClawRollbackDeferredHolds -KeepCodexWriter") == 2
-    # The rest clear everything, as before.
-    assert text.count("Clear-DefenseClawRollbackDeferredHolds\n") >= 2
+    assert text.count("$codexWriterKept = Get-DefenseClawRollbackCodexWriterHolds") == 2
+    assert text.count("Restore-DefenseClawRollbackCodexWriterHolds -Kept $codexWriterKept") == 2
+    # The call that clears is rel's, untouched.
+    assert text.count("Clear-DefenseClawRollbackDeferredHolds\n") >= 4
+
+
+def test_every_rollback_readiness_assertion_defers_a_busy_writer() -> None:
+    # Both rollbacks (the restore of a transaction and the restore that ends a
+    # managed-hook teardown) end in this assertion, so the flag is set here and reset
+    # whatever happens; the callers keep rel's text.
+    text = _text()
+    ready = _function_body(text, "Assert-DefenseClawRestoredTransactionReadyForActivation")
+    flag = ready.index("$script:DefenseClawRollbackDeferBusyWriter = [bool](Test-DefenseClawStandaloneProfile)")
+    call = ready.index("Assert-DefenseClawEnterpriseDeployment `\n")
+    final = ready.index("$script:DefenseClawRollbackDeferBusyWriter = $false")
+    assert flag < ready.index("try {", flag) < call < ready.index("finally {", call) < final < ready.index("return $true")
+    for name in ("Restore-DefenseClawTransaction", "Restore-DefenseClawTransactionWithManagedHooksRollback"):
+        assert "DefenseClawRollbackDeferBusyWriter" not in _function_body(text, name), name
+    assert text.count("Assert-DefenseClawRestoredTransactionReadyForActivation `\n") == 2
+    command = _function_body(text, "Invoke-DefenseClawCodexRequirementsCommand")
+    gate = command.index("if ($script:DefenseClawRollbackDeferBusyWriter -and $Action -in @('verify', 'inspect')) {")
+    assert command.index("Test-DefenseClawStandaloneProfile") < gate < command.index("New-DefenseClawCodexWriterBusyRefusal")
+    assert "return $null" in command[gate : gate + 700]
+    # Any other action inside the rollback meets the held form, which the recovery defers.
+    refusal = _function_body(text, "New-DefenseClawCodexWriterBusyRefusal")
+    assert refusal.index("if ($script:DefenseClawRollbackDeferBusyWriter) {") < refusal.index("$path = [string]$Layout.CodexManagedHooksStatePath")
 
 
 def test_the_exit_code_is_the_held_rollback_convention_when_the_rollback_is_pending() -> None:
     go = GO.read_text(encoding="utf-8")
     start = go.index('case "codex_state_unsettled":')
-    window = go[start : start + 700]
-    assert "if result.TransactionPending {" in window
+    window = go[start : start + 900]
+    assert "if result.TransactionPending && strings.Contains(message.Message, windowsEnterpriseUnsettledRollbackDeferredText) {" in window
     assert "return enterprisestatus.WindowsExitBusy" in window
     assert (
-        '(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "codex_state_unsettled"))'
+        "(report.TransactionPending && windowsEnterpriseUnsettledRollbackDeferred(result.Errors[firstError:]))"
         in go
     )
+    assert 'case "codex_state_held", "codex_requirements_held", "privileges_required", "guardian_state_held", "codex_state_unsettled":' in go
 
 
 _HARNESS = r"""
@@ -106,7 +142,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseClawCodexWriterBusyRefusal', 'Get-DefenseClawOptionalLayoutValue', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Test-DefenseClawRollbackHeldMessage', 'New-DefenseClawCodexWriterUnsettledHeldMessage', 'Test-DefenseClawGuardianProofDeferredByCodexWriter', 'Clear-DefenseClawRollbackDeferredHolds', 'Test-DefenseClawRollbackCoverageDeferred', 'Get-DefenseClawHeldMessagePath', 'Add-DefenseClawRollbackDeferredHold', 'Assert-DefenseClawRollbackHoldsResolved')) {
+foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseClawCodexWriterBusyRefusal', 'Get-DefenseClawOptionalLayoutValue', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Test-DefenseClawRollbackHeldMessage', 'New-DefenseClawCodexWriterUnsettledHeldMessage', 'Test-DefenseClawGuardianProofDeferredByCodexWriter', 'Test-DefenseClawCodexWriterLockNamed', 'Get-DefenseClawRollbackCodexWriterHolds', 'Restore-DefenseClawRollbackCodexWriterHolds', 'Get-DefenseClawCodexRequirementsGuardProblem', 'Assert-DefenseClawCodexRequirementsPublishable', 'Clear-DefenseClawRollbackDeferredHolds', 'Test-DefenseClawRollbackCoverageDeferred', 'Get-DefenseClawHeldMessagePath', 'Add-DefenseClawRollbackDeferredHold', 'Assert-DefenseClawRollbackHoldsResolved')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -116,15 +152,18 @@ foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseCl
 }
 $script:DefenseClawRollbackDeferredHolds = [Collections.Generic.List[string]]::new()
 $script:DefenseClawRollbackCoverageDeferred = $false
+$script:DefenseClawRollbackDeferBusyWriter = $false
 $script:events = [Collections.Generic.List[string]]::new()
 function Test-DefenseClawStandaloneProfile { [bool]$Standalone }
 function Write-DefenseClawResilienceEvent { param([string]$Marker, [hashtable]$Fields) $script:events.Add($Marker + ': ' + $Fields['reason']) }
 function Format-DefenseClawSetupAction { param([string]$Action) "Setup $Action" }
-function Get-DefenseClawCodexWriterHolderText { param([string]$Path) 'the writer is writer.exe (pid 4242, account NT AUTHORITY\SYSTEM)' }
+$script:Named = $true
+function Get-DefenseClawCodexWriterHolderText { param([string]$Path) if ($script:Named) { 'the writer is writer.exe (pid 4242, account NT AUTHORITY\SYSTEM)' } else { 'no program this account can name has the writer lock open: the writer stopped in the middle of its transaction or runs as SYSTEM' } }
 $state = Join-Path $Scratch '.defenseclaw-managed-hooks.state'
 $lock = Join-Path $Scratch '.defenseclaw-managed-hooks.writer.lock'
 function Set-Counter([int]$Size) { [IO.File]::WriteAllBytes($lock, [byte[]]::new($Size)) }
-$layout = @{ CodexManagedHooksStatePath = $state }
+$policy = Join-Path $Scratch 'requirements.toml'
+$layout = @{ CodexManagedHooksStatePath = $state; CodexMachinePolicyPath = $policy }
 $out = [ordered]@{}
 switch ($Case) {
     'odd' {
@@ -143,13 +182,33 @@ switch ($Case) {
         $out.after = @($script:DefenseClawRollbackDeferredHolds).Count
         $out.coverageAfter = [bool]$script:DefenseClawRollbackCoverageDeferred
     }
+    'even-held' {
+        Set-Counter 18
+        $out.deferred = [bool](Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $layout)
+        $out.holds = @($script:DefenseClawRollbackDeferredHolds)
+        $out.coverage = [bool]$script:DefenseClawRollbackCoverageDeferred
+    }
+    'hookless' {
+        Set-Counter 19
+        $out.messages = [ordered]@{}
+        [IO.File]::WriteAllBytes($policy, [byte[]]@())
+        $out.messages.empty = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $layout
+        [IO.File]::WriteAllText($policy, "allow_managed_hooks_only = true`n")
+        $out.messages.nohook = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $layout
+        Remove-Item -LiteralPath $policy -Force
+        $out.messages.missing = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $layout
+        [IO.File]::WriteAllText($policy, "[[hooks.SessionStart]]`ncommand = 'defenseclaw-hook.exe'`n")
+        $out.messages.guarded = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $layout
+    }
     'even' {
+        $script:Named = $false
         Set-Counter 18
         $out.deferred = [bool](Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $layout)
         $out.holds = @($script:DefenseClawRollbackDeferredHolds)
         $out.coverage = [bool]$script:DefenseClawRollbackCoverageDeferred
     }
     'no-lock' {
+        $script:Named = $false
         $out.deferred = [bool](Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $layout)
         $out.holds = @($script:DefenseClawRollbackDeferredHolds)
     }
@@ -170,6 +229,13 @@ switch ($Case) {
         $out.refusal = New-DefenseClawCodexWriterBusyRefusal -Layout $layout -Action 'reconcile' -Detail $busy[0]
         $out.refusalIsRollbackHeld = [bool](Test-DefenseClawRollbackHeldMessage -Message $out.refusal)
     }
+    'busy-in-rollback' {
+        # The flag a rollback's readiness assertion sets: the refusal is the rollback's own held form.
+        Set-Counter 18
+        $script:DefenseClawRollbackDeferBusyWriter = $true
+        $out.refusal = New-DefenseClawCodexWriterBusyRefusal -Layout $layout -Action 'reconcile' -Detail 'timed out waiting 10s for Codex machine policy lock'
+        $out.held = [bool](Test-DefenseClawRollbackHeldMessage -Message $out.refusal)
+    }
     'forward-refusal' {
         $refusal = 'codex_state_unsettled: the Codex writer transaction counter next to X stayed at 3 (odd: a transaction is open) for 30 seconds (the writer is writer.exe (pid 4242)), so the Codex managed-hooks state could not be judged and this run stopped (an install, repair, ensure or upgrade that had started is rolled back, an upgrade to the release it came from; a verify changes nothing). Next step: run Setup /repair again once no Codex writer is running'
         $out.held = [bool](Test-DefenseClawRollbackHeldMessage -Message $refusal)
@@ -178,7 +244,9 @@ switch ($Case) {
         Set-Counter 19
         [void](Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $layout)
         Add-DefenseClawRollbackDeferredHold -Message 'hook_in_use: x has C:\h.exe, the installed hook, open'
-        Clear-DefenseClawRollbackDeferredHolds -KeepCodexWriter
+        $kept = Get-DefenseClawRollbackCodexWriterHolds
+        Clear-DefenseClawRollbackDeferredHolds
+        Restore-DefenseClawRollbackCodexWriterHolds -Kept $kept
         $out.kept = @($script:DefenseClawRollbackDeferredHolds | ForEach-Object { $_.Substring(0, 22) })
         $out.coverageKept = [bool]$script:DefenseClawRollbackCoverageDeferred
         Clear-DefenseClawRollbackDeferredHolds
@@ -230,6 +298,33 @@ def test_a_stuck_writer_defers_the_proof_and_ends_the_rollback_retryable(tmp_pat
     assert result["after"] == 0 and result["coverageAfter"] is False, result
 
 
+def test_a_named_holder_defers_the_proof_with_an_even_counter(tmp_path: Path) -> None:
+    # GAP-0999 review: an antivirus scanner or a program that does not follow the
+    # counter protocol holds the writer lock with the counter even; the guardian
+    # still cannot publish, so the proof is deferred the same way.
+    result = _run(tmp_path, "even-held")
+    assert result["deferred"] is True and result["coverage"] is True, result
+    (hold,) = result["holds"]
+    assert hold.startswith("codex_state_unsettled: "), result
+    assert "the writer is writer.exe (pid 4242, account NT AUTHORITY\\SYSTEM)" in hold, result
+    assert "stayed at 18 (even, but a writer holds the lock or keeps changing it" in hold, result
+    assert "run Setup /repair" in hold and "FORCE" not in hold, result
+
+
+def test_a_hookless_requirements_file_is_said_plainly_in_the_deferral(tmp_path: Path) -> None:
+    # GAP-1001 wording: nothing guards Codex until the policy is published again.
+    messages = _run(tmp_path, "hookless")["messages"]
+    for key, what in (
+        ("empty", "requirements.toml is empty, so nothing guards Codex until the policy is published again: run Setup /repair as an administrator"),
+        ("nohook", "does not carry the DefenseClaw managed hook (it has no [[hooks.<Event>]] entry"),
+        ("missing", "requirements.toml does not exist, so nothing guards Codex until the policy is published again"),
+    ):
+        assert "Codex is not guarded right now: " in messages[key], messages[key]
+        assert what in messages[key], messages[key]
+    assert "Codex is not guarded" not in messages["guarded"], messages["guarded"]
+    assert messages["guarded"].startswith("codex_state_unsettled: ")
+
+
 def test_a_settled_writer_defers_nothing(tmp_path: Path) -> None:
     for case in ("even", "no-lock"):
         (tmp_path / case).mkdir()
@@ -244,6 +339,14 @@ def test_secure_client_has_no_writer_lock_and_defers_nothing(tmp_path: Path) -> 
     assert result["deferred"] is False, result
     assert result["holds"] == [], result
     assert result["coverage"] is False, result
+
+
+def test_a_busy_writer_inside_a_rollback_is_the_rollbacks_held_form(tmp_path: Path) -> None:
+    result = _run(tmp_path, "busy-in-rollback")
+    assert result["held"] is True, result
+    assert result["refusal"].startswith("codex_state_unsettled: "), result
+    assert "the rollback left that state as it is" in result["refusal"], result
+    assert "FORCE" not in result["refusal"], result
 
 
 def test_the_refusal_of_a_forward_run_is_not_a_rollback_deferral(tmp_path: Path) -> None:
@@ -286,9 +389,10 @@ def test_a_busy_writer_never_reaches_the_recovery_that_rebuilds_the_policy_file(
     assert repair.index("$verifyError.StartsWith('codex_state_unsettled: '") < repair.index("$backupPath = ''")
     assert repair.index("$mergeError.StartsWith('codex_state_unsettled: '") < repair.index("Get-DefenseClawRecordedCodexRequirementsPreimage")
     assert "throw $verifyError" in repair and "throw $mergeError" in repair
-    # The rollback turns the recovery's busy answer into its own deferral.
+    # Inside a rollback the recovery's busy answer is the rollback's own held form, which
+    # the recovery's catch (rel's) defers.
     deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
-    assert "$recoveryMessage = New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout" in deployment
+    assert "Test-DefenseClawRollbackHeldMessage -Message ([string]$_.Exception.Message)" in deployment
 
 
 def test_a_rollback_that_keeps_a_guarded_requirements_file_says_so_in_the_failed_run() -> None:
