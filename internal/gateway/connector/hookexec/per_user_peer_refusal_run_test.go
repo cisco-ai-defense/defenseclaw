@@ -75,9 +75,13 @@ func verifiedTestClient(addr string, verify func(net.Conn) error) *http.Client {
 // accepted and closed at once while the Windows owner check waited past the
 // connect deadline, and one that vanished after the refusal.
 func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing.T) {
+	shortRestartBudget(t)
 	fastRestartRetries(t)
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
+	// Read once here: a dial that outlives its request must not read the
+	// variable while shortRestartBudget's cleanup restores it.
+	ownerCheckWait := max(gatewayRestartBudget, firstTryConnectWindow) + 300*time.Millisecond
 	type scenario struct {
 		name string
 		// setup returns the client and the listener whose bytes must stay 0.
@@ -100,12 +104,14 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 		{"check error at the restart deadline", refusing(fmt.Errorf("%w: owner check", errGatewayNotConnected))},
 		{"accepts and closes at once, owner check past the connect deadline", func(t *testing.T, opts *Options) *peerListener {
 			// The Windows tuple wait: the accepted row left the table, so
-			// the check waits its own 3 s, past the try's connect deadline.
+			// the check waits its own 3 s, past the try's connect deadline
+			// (the restart budget, and at least the first try's connect
+			// window).
 			peer := newPeerListener(t, "127.0.0.1:0", true)
 			opts.APIAddr = peer.addr()
 			opts.HTTPClient = verifiedTestClient(peer.addr(), func(net.Conn) error {
 				select {
-				case <-time.After(gatewayRestartBudget + 300*time.Millisecond):
+				case <-time.After(ownerCheckWait):
 				case <-stop:
 				}
 				return errors.New("connected gateway server socket was not found")
@@ -195,6 +201,7 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 // The controls: this account's gateway still answers through the same
 // transport, and a port nobody listens on is still an outage.
 func TestPerUserNativeHookOutageStillOpensForThisAccountsGateway(t *testing.T) {
+	shortRestartBudget(t)
 	fastRestartRetries(t)
 	gateway := newPeerListener(t, "127.0.0.1:0", false)
 	addr := gateway.addr()

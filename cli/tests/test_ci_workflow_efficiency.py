@@ -153,19 +153,34 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "--package-dir internal/audit" in workflow
     assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
     assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
-    assert "GO_PACKAGE_SHARDS: 12" in workflow
+    assert "GO_PACKAGE_SHARDS: 16" in workflow
     assert "GO_TEST_SHARDS: 36" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
     assert workflow.count("--timings scripts/test-timings/go-linux.json") == 3
-    # 36 gateway + 4 audit + 12 remaining-package shards, one profile each.
-    assert 'test "${#coverage_parts[@]}" -eq 52' in workflow
+    # One coverage profile per gateway, audit and remaining-package shard: the
+    # count Combine Go coverage requires follows the shard counts (it stayed 52
+    # when the remaining packages went from 12 to 16 shards and would have
+    # failed the first run on which every shard passed).
+    jobs = yaml.safe_load(workflow)["jobs"]
+    profiles = sum(
+        len(jobs[name]["strategy"]["matrix"]["shard"]) for name in ("go-test-gateway", "go-test-audit", "go-test-other")
+    )
+    assert profiles == 56
+    assert f'test "${{#coverage_parts[@]}}" -eq {profiles}' in workflow
     # checkptr in the transpiled SQLite doubled the cost of every race shard.
     # A hang fails at go test's -timeout, well inside the job's budget, and
     # go_test_report.py names the test still running.
     race = "go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m "
     assert workflow.count("go test -race") == 0
-    assert workflow.count(race) == 3
+    assert workflow.count(race) == 2
+    # The remaining-package shards run several go test runs in one step: they
+    # share one deadline inside the step budget, and each run is stopped at
+    # most 11 minutes in or when the deadline is up, whichever comes first.
+    shared = 'go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout "$limit" '
+    assert workflow.count(shared) == 1
+    assert "deadline=$((SECONDS + 960))" in workflow
+    assert 'echo "$((left < 660 ? left : 660))s"' in workflow
     # The three Linux race jobs and the darwin connector parts.
     assert workflow.count("python3 scripts/go_test_report.py --timings") == 4
     assert workflow.count("label: macos-latest darwin connector ") == 4
