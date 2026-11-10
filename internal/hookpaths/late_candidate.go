@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"mvdan.cc/sh/v3/expand"
@@ -28,7 +29,16 @@ func LateCallGrade(command, cwd, home string) Grade {
 		if word == "" {
 			return GradeNone
 		}
-		return ProtectedReach(OperandPath(word, cwd), home, memo)
+		grade := ProtectedReach(OperandPath(word, cwd), home, memo)
+		if runtime.GOOS == "windows" {
+			if lateWindowsAlias(word) {
+				return GradePossible
+			}
+			if drive := lateWindowsDrivePath(word); drive != word {
+				grade = grade.Max(ProtectedReach(OperandPath(drive, cwd), home, memo))
+			}
+		}
+		return grade
 	}
 	for _, words := range calls {
 		if len(words) == 0 {
@@ -550,6 +560,9 @@ func lateChangesShellContext(program string) bool {
 func lateKnownWord(word *syntax.Word, cwd, home string) (string, bool) {
 	if !lateKnownWordParts(word) {
 		return "", false
+	}
+	if runtime.GOOS == "windows" {
+		word = lateWindowsPathWord(word)
 	}
 	fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron(
 		"HOME="+home, "PWD="+cwd,
