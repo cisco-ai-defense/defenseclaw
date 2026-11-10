@@ -369,12 +369,12 @@ func nativePatchEnvelopeWrites(text string) []nativeFileWrite {
 		switch {
 		case strings.HasPrefix(line, "*** Add File: "), strings.HasPrefix(line, "*** Update File: "):
 			writes = append(writes, nativeFileWrite{
-				target: line[strings.Index(line, ": ")+2:],
+				target: patchDirectivePath(line, line[:strings.Index(line, ": ")+2]),
 				whole:  strings.HasPrefix(line, "*** Add File: "),
 			})
 			current = []int{len(writes) - 1}
 		case strings.HasPrefix(line, "*** Move to: "):
-			writes = append(writes, nativeFileWrite{target: strings.TrimPrefix(line, "*** Move to: ")})
+			writes = append(writes, nativeFileWrite{target: patchDirectivePath(line, "*** Move to: ")})
 			current = append(current, len(writes)-1)
 		case strings.HasPrefix(line, "*** Delete File: "):
 			current = nil
