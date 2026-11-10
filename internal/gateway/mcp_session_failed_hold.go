@@ -82,16 +82,22 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 	// cannot be read, so the balanced tier warns and runs the call) or nothing
 	// yet (the watcher has not listed the server in its first cycle): an exact
 	// allow, or admission.mcp.scan_on_install off, admits the definition without
-	// a scan (GAP-0998, GAP-1018). That call opens the connection too, so the listed definition
-	// is held on the call the policy permits, not on the watcher answer that
-	// comes later. While the allow stands the hold answers nothing (the held
-	// definition is allowed). With no way for policy to admit without a scan the
+	// a scan (GAP-0998, GAP-1018). So does a pending or unreadable admission
+	// the tier lets run with a warning, with or without an allow
+	// (pendingCallRuns). Each of these calls opens the connection, so the listed
+	// definition is held on the call the policy permits, not on the watcher
+	// answer that comes later. While the allow stands the hold answers nothing
+	// (the held definition is allowed). With no way for policy to admit without a scan the
 	// ordinary call reads no config here.
 	admitted := status.Admitted
 	if admitted == nil && (status.Pending || status.Unavailable || mcpMayAdmitUnscanned(cfg)) {
-		if listed, isListed := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName); isListed &&
-			heldDefinitionAdmitted(ctx, cfg, connector, probe, heldMCPDefinition(listed, connector, home)) {
-			admitted = &listed
+		if listed, isListed := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName); isListed {
+			definition := heldMCPDefinition(listed, connector, home)
+			runs := heldDefinitionAdmitted(ctx, cfg, connector, probe, definition) ||
+				((status.Pending || status.Unavailable) && pendingCallRuns(ctx, cfg, connector, probe, definition))
+			if runs {
+				admitted = &listed
+			}
 		}
 	}
 	var admittedHeld *config.MCPServerEntry
@@ -165,6 +171,19 @@ func mcpMayAdmitUnscanned(cfg *config.Config) bool {
 	off := func(scan *bool) bool { return scan != nil && !*scan }
 	adm := cfg.Admission
 	return off(adm.MCP.ScanOnInstall) || (adm.MCP.ScanOnInstall == nil && off(adm.Defaults.ScanOnInstall))
+}
+
+// pendingCallRuns reports whether the call of a definition whose admission is
+// pending or cannot be read runs on the tier in force: no explicit deny
+// refuses it and the tier does not fail closed, so it warns and runs, with or
+// without an administrator rule. That call opens the connection of the agent
+// to the definition, which the session then holds whatever tier judges its
+// later calls. A call the tier blocks opens nothing and holds nothing.
+func pendingCallRuns(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe, held config.MCPServerEntry) bool {
+	if cfg.MCPAdmissionFailsClosed(connector) {
+		return false
+	}
+	return mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, held, true)).Action != "block"
 }
 
 // heldDefinitionAdmitted reports whether the policy in force still admits the
