@@ -137,6 +137,18 @@ func TestBoundOperandsCountsRedirectsWrittenAgainstAWord(t *testing.T) {
 		{"in the next word of a spaced redirect", "echo x > f1" + strings.Repeat(">f1", bound+1), true},
 		{"within the bound", "echo x" + strings.Repeat(">f1", bound-1), false},
 		{"descriptor copies are no file targets", "echo x" + strings.Repeat(">&2", 3000), false},
+		{"descriptor copies written 2>&1", "echo x" + strings.Repeat(" 2>&1", 3000), false},
+		{"descriptor copies written with a blank", "echo x" + strings.Repeat(" >& 2", 3000), false},
+		{"descriptor closes", "echo x" + strings.Repeat(" >&-", 3000), false},
+		{"descriptor copies of an expanding word", "echo x" + strings.Repeat(" >&$fd", 3000), false},
+		{"descriptor copies of a quoted expanding word", "echo x" + strings.Repeat(" >&\"$fd\"", 3000), false},
+		{"a file named by both streams", "echo x" + strings.Repeat(" >&f1", bound+1), true},
+		{"a file named by stdout", "echo x" + strings.Repeat(" 1>&f1", bound+1), true},
+		{"a file named by both streams, attached", "echo x" + strings.Repeat(">&f1", bound+1), true},
+		{"a file named by stdout, attached", "echo x" + strings.Repeat("1>&f1", bound+1), true},
+		{"a file named by both streams after a blank", "echo x" + strings.Repeat(" >& f1", bound+1), true},
+		{"a file named in a quote with a folder", "echo x" + strings.Repeat(" >&\"$d/f1\"", bound+1), true},
+		{"file names within the bound", "echo x" + strings.Repeat(" >&f1", bound-1), false},
 		{"the operator of a quoted word is no redirect", "echo \"x" + strings.Repeat(">f1", 3000) + "\"", false},
 		{"an escaped operator is no redirect", "echo x" + strings.Repeat("\\>f1", 3000), false},
 		{"the body of an attached here-document is no operand list", "cat<<EOF\n" + boundTestWords("f", 5000) + "\nEOF\n", false},
@@ -150,10 +162,17 @@ func TestBoundOperandsCountsRedirectsWrittenAgainstAWord(t *testing.T) {
 			t.Errorf("%s: a command within the bound changed", tc.name)
 		}
 	}
+	// A plain file named by >&word goes whole past the bound, a descriptor copy
+	// between them stays, and a protected-looking name stays too.
+	reduced, over := BoundOperands("echo "+strings.Repeat(">&f1 ", bound)+">&f2 >&2 1>& f3 2>&1 >&../keys", boundTestPlain)
+	if !over || strings.Contains(reduced, "f2") || strings.Contains(reduced, "f3") ||
+		!strings.Contains(reduced, ">&2") || !strings.Contains(reduced, "2>&1") || !strings.Contains(reduced, ">&../keys") {
+		t.Errorf("file names of >&word: over %v, reduced ends %q", over, reduced[max(0, len(reduced)-40):])
+	}
 	// A plain target written against a word is left out whole; another one
 	// stays with its operator.
 	plain := boundTestWords("f", bound+10)
-	reduced, over := BoundOperands("echo "+plain+">f5000>../link>f6000", boundTestPlain)
+	reduced, over = BoundOperands("echo "+plain+">f5000>../link>f6000", boundTestPlain)
 	if !over || !strings.Contains(reduced, ">../link") || strings.Contains(reduced, "f5000") || strings.Contains(reduced, "f6000") {
 		t.Errorf("attached targets: over %v, reduced ends %q", over, reduced[max(0, len(reduced)-30):])
 	}

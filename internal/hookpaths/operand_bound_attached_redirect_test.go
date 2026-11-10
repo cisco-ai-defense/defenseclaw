@@ -13,6 +13,9 @@ func TestRedirectsWrittenAgainstAWordCountTowardTheCallBound(t *testing.T) {
 		{"after an argument", "echo x" + strings.Repeat(">f", 5000)},
 		{"after the program", "echo" + strings.Repeat(">f", 5000)},
 		{"after a quoted argument", "echo \"x\"" + strings.Repeat(">f", 5000)},
+		{"both streams to a file", "echo x" + strings.Repeat(" >&f", 5000)},
+		{"stdout to a file", "echo x" + strings.Repeat(" 1>&f", 5000)},
+		{"both streams to a file, attached", "echo x" + strings.Repeat(">&f", 5000)},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			_, over := BoundCommandOperands(row.command, "", "")
