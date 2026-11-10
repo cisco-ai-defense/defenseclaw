@@ -454,6 +454,15 @@ func claudeManagedGuardWrapperArgs(guard, launcher, event string, hookArgs []str
 	return append(args, warning...)
 }
 
+// ClaudeCodeManagedGuardLauncher reads a managed policy handler that is
+// exactly the guarded cmd.exe form Windows managed Setup writes, and returns
+// the launcher and hook arguments it runs. The policy checks of the enterprise
+// status read the handler through it, so the form they verify is the form
+// Setup installs.
+func ClaudeCodeManagedGuardLauncher(handler map[string]interface{}) (string, []string, bool) {
+	return claudeManagedGuardWrapperParts(handler)
+}
+
 func claudeManagedGuardWrapperParts(hook map[string]interface{}) (string, []string, bool) {
 	command, _ := hook["command"].(string)
 	if normalizeWindowsHookExecutable(command) != normalizeWindowsHookExecutable(claudeCodeWindowsCommandProcessor()) {

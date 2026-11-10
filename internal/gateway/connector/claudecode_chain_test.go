@@ -161,6 +161,35 @@ func TestClaudeCodeChainAdmissionAcceptsTheExecFormOfAManagedPerUserSetup(t *tes
 	}
 }
 
+// The enterprise status verifies the managed policy by reading each handler
+// through ClaudeCodeManagedGuardLauncher, so it must read exactly the form the
+// managed Setup renders for every event, and no edited one.
+func TestClaudeCodeManagedGuardLauncherReadsTheRenderedManagedForm(t *testing.T) {
+	launcher := `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`
+	hookArgs := []string{"hook", "--connector", "claudecode", "--enterprise-managed"}
+	for _, group := range claudeCodeAllHookGroups {
+		command, args := claudeManagedGuardWrapperInvocation(group.eventType, launcher, hookArgs)
+		raw := make([]interface{}, len(args))
+		for i, arg := range args {
+			raw[i] = arg
+		}
+		handler := map[string]interface{}{"type": "command", "command": command, "args": raw}
+		got, gotArgs, ok := ClaudeCodeManagedGuardLauncher(handler)
+		if !ok || got != launcher || !slices.Equal(gotArgs, hookArgs) {
+			t.Fatalf("%s: managed form not read: %q %q %v", group.eventType, got, gotArgs, ok)
+		}
+		edited := append([]interface{}(nil), raw...)
+		edited[len(edited)-1] = "0"
+		if _, _, ok := ClaudeCodeManagedGuardLauncher(map[string]interface{}{"type": "command", "command": command, "args": edited}); ok {
+			t.Fatalf("%s: an edited unavailable answer was read as the managed form", group.eventType)
+		}
+	}
+	plain := map[string]interface{}{"type": "command", "command": launcher, "args": []interface{}{"hook", "--connector", "claudecode", "--enterprise-managed"}}
+	if _, _, ok := ClaudeCodeManagedGuardLauncher(plain); ok {
+		t.Fatal("the plain exec form was read as the guarded form")
+	}
+}
+
 func TestManagedClaudeCodeSetupPublishesAvailabilityParent(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows managed registration")
