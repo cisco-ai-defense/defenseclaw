@@ -6,6 +6,7 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -29,6 +30,19 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 	api := &APIServer{}
 	pwsh := func(body string) string {
 		return `"C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile -Command ` + "'" + body + "'"
+	}
+	// alternatives binds $p to n ordinary files named for DefenseClaw, one per
+	// branch of an if / elseif chain, and to last in the else branch.
+	alternatives := func(n int, last string) string {
+		var chain strings.Builder
+		for i := 0; i < n; i++ {
+			keyword := "if"
+			if i > 0 {
+				keyword = " elseif"
+			}
+			fmt.Fprintf(&chain, `%s ($c%d) { $p = 'C:\Users\Alice\project\defenseclaw_note%d.txt' }`, keyword, i, i)
+		}
+		return `$p = '` + project + `'; ` + chain.String() + ` else { $p = '` + last + `' }; [IO.File]::WriteAllText($p, 'x')`
 	}
 	for _, tc := range []struct {
 		name, command string
@@ -64,6 +78,19 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 		{"always-true branch rebinds", `$p = '` + state + `'; if ($true) { $p = '` + project + `' }; [IO.File]::WriteAllText($p, 'x')`, false},
 		{"patch text printed, not run", `$patch = "` + envelope + `"; Write-Output '--codex-run-as-apply-patch' $patch`, false},
 		{"patch text echoed with the flag", `$patch = "` + envelope + `"; echo --codex-run-as-apply-patch $patch`, false},
+		{"dead branch binds and writes the state", `if ($false) { $p = '` + state + `'; [IO.File]::WriteAllText($p, 'x') }; [IO.File]::WriteAllText('` + project + `', 'x')`, false},
+		{"dead else binds and writes the state", `if ($true) { [IO.File]::WriteAllText('` + project + `', 'x') } else { $p = '` + state + `'; [IO.File]::WriteAllText($p, 'x') }`, false},
+		{"dead loop binds and writes the state", `while ($false) { $p = '` + state + `'; [IO.File]::WriteAllText($p, 'x') }`, false},
+		{"live branch binds and writes the state", `if ($c) { $p = '` + state + `'; [IO.File]::WriteAllText($p, 'x') }`, true},
+		{"patch flag on an unrelated program", `$patch = "` + envelope + `"; & 'C:\Windows\System32\whoami.exe' --codex-run-as-apply-patch $patch`, false},
+		{"patch flag echoed by cmd", `$patch = "` + envelope + `"; & 'C:\Windows\System32\cmd.exe' /c echo --codex-run-as-apply-patch $patch`, false},
+		{"patch run by codex behind cmd", `$patch = "` + envelope + `"; & 'C:\Windows\System32\cmd.exe' /c 'C:\dc\codex.exe' --codex-run-as-apply-patch $patch`, true},
+		{"patch run by codex behind Start-Process", `$patch = "` + envelope + `"; Start-Process 'C:\dc\codex.exe' -ArgumentList '--codex-run-as-apply-patch', $patch`, true},
+		{"eight alternatives, state last", alternatives(7, state), true},
+		{"nine alternatives, state last", alternatives(8, state), true},
+		{"twelve alternatives, state last", alternatives(11, state), true},
+		{"eight ordinary alternatives", alternatives(7, `C:\Users\Alice\project\defenseclaw_last.txt`), false},
+		{"values carried around a loop", `$a = '` + state + `'; $b = '` + project + `defenseclaw1'; $c = '` + project + `defenseclaw2'; $d = '` + project + `defenseclaw3'; foreach ($i in 1..4) { [IO.File]::WriteAllText($d, 'x'); $d = $c; $c = $b; $b = $a }`, true},
 		{"bound read", `$p = '` + state + `'; [IO.File]::ReadAllText($p)`, false},
 		{"bound read in pwsh", pwsh(`$p = ''` + state + `''; if (Test-Path -LiteralPath $p) { Get-Content -LiteralPath $p -Raw }`), false},
 		{"bound project write", `$p = 'C:\Users\Alice\project\notes.txt'; [IO.File]::WriteAllText($p, 'x')`, false},
