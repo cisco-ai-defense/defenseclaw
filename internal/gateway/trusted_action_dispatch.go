@@ -588,6 +588,11 @@ func dispatchTrustedActionWith(
 		defer func() {
 			findings = withSSHControlFileTitle(facts, findings)
 		}()
+		// Registered with it, so it runs after every lane that adds a
+		// finding, including the pass of each simple command below.
+		defer func() {
+			findings = withProvenFindingsBeforeUnprovenKeysBlock(findings)
+		}()
 	}
 	// After every lane below, on what it returns (GAP-1469, GAP-1478).
 	defer func() {
@@ -4643,6 +4648,46 @@ func loginGuessProvesRule(ruleID string) bool {
 func loginGuessReadingMayProveStateWrite(request trustedActionRequest, simple actionfacts.SimpleCommand, cwd string) bool {
 	return request.ProtectedHomeHook && !simple.LoopReading || hookpaths.MayNameState(simple.Text) ||
 		request.targetMemo.ActionStateTargetMention(simple.Text, cwd, request.Input.ActiveHome)
+}
+
+// withProvenFindingsBeforeUnprovenKeysBlock puts the authorized-keys block
+// that no proof backs (a write the hook could not resolve, so the managed
+// gateway fails closed) after the findings a proof backs. The block names
+// the call all the same, but the first rule names its cause: a content rule
+// proved on a function body or an if block (an unrestricted sudoers grant)
+// led the label at the top level and trailed the keys rule in a compound
+// call, because the compound pass lists its own finding before the finding
+// of each simple command (GAP-1045). The decision and the set of findings
+// do not change.
+func withProvenFindingsBeforeUnprovenKeysBlock(findings []RuleFinding) []RuleFinding {
+	const keysRule = "persistence.ssh_authorized_keys_command"
+	unproven := func(finding RuleFinding) bool {
+		return finding.RuleID == keysRule && !finding.proof.authorizes(finding.RuleID)
+	}
+	first := slices.IndexFunc(findings, unproven)
+	if first < 0 {
+		return findings
+	}
+	proven := func(finding RuleFinding) bool {
+		return finding.RuleID != keysRule && finding.contributesToEnforcement() &&
+			finding.proof.authorizes(finding.RuleID)
+	}
+	if !slices.ContainsFunc(findings[first+1:], proven) {
+		return findings
+	}
+	ordered := make([]RuleFinding, 0, len(findings))
+	ordered = append(ordered, findings[:first]...)
+	for _, finding := range findings[first:] {
+		if proven(finding) {
+			ordered = append(ordered, finding)
+		}
+	}
+	for _, finding := range findings[first:] {
+		if !proven(finding) {
+			ordered = append(ordered, finding)
+		}
+	}
+	return ordered
 }
 
 // withSimpleCommandFindings adds each command's ordinary standalone result
