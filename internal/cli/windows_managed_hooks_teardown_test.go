@@ -1966,3 +1966,69 @@ func TestWindowsManagedHooksTeardownReportsABusyCodexWriterByCode(t *testing.T) 
 		t.Fatalf("nil error got code %q", got)
 	}
 }
+
+// GAP-1062: a committed uninstall whose first attempt stopped after it took
+// the Codex policy off leaves a captured journal. The rerun puts the preimage
+// back and prepares again, so the zero-target Codex bit of the new identity
+// must be the journal's: the one read from the half-removed machine made the
+// verification of the restored state refuse it ("Codex machine enrollment does
+// not match the authenticated activation state").
+func TestWindowsManagedHooksTeardownRestoredIdentityTakesTheJournalsZeroTargetCodexBit(t *testing.T) {
+	alice := connector.WindowsCodexManagedRuntimeTarget{
+		SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`,
+	}
+	journal := windowsManagedHooksTeardownJournal{Phase: "captured", CodexPolicyActive: true}
+	identity := windowsManagedHooksTeardownJournal{Phase: "prepared", CodexPolicyActive: false, GatewayAddr: "127.0.0.1:18970"}
+	got := windowsManagedHooksTeardownRestoredIdentity(identity, journal)
+	if !got.CodexPolicyActive || got.Phase != "prepared" || got.GatewayAddr != identity.GatewayAddr {
+		t.Fatalf("restored identity = %+v, want the journal's Codex bit and nothing else changed", got)
+	}
+	// The restored machine is the one the journal recorded: it passes the check
+	// the stale bit failed.
+	restoredRegistry := connector.WindowsCodexManagedRuntimeRegistry{Active: true}
+	if err := validateWindowsManagedHooksTeardownEnrollment(identity, nil, false, restoredRegistry, nil, false); err == nil {
+		t.Fatal("fixture: the stale bit no longer refuses the restored Codex policy")
+	}
+	if err := validateWindowsManagedHooksTeardownEnrollment(got, nil, false, restoredRegistry, nil, false); err != nil {
+		t.Fatalf("the restored identity refused the restored Codex policy: %v", err)
+	}
+	// A legacy zero-target preimage (inactive) comes back inactive.
+	inactive := windowsManagedHooksTeardownRestoredIdentity(
+		windowsManagedHooksTeardownJournal{CodexPolicyActive: true},
+		windowsManagedHooksTeardownJournal{CodexPolicyActive: false},
+	)
+	if inactive.CodexPolicyActive {
+		t.Fatal("a journal of an inactive Codex policy was read as active")
+	}
+	// Enrolled Codex accounts come from the manifest: the identity keeps its value.
+	enrolled := windowsManagedHooksTeardownRestoredIdentity(
+		windowsManagedHooksTeardownJournal{CodexPolicyActive: true, CodexTargets: []connector.WindowsCodexManagedRuntimeTarget{alice}},
+		windowsManagedHooksTeardownJournal{CodexPolicyActive: false, CodexTargets: []connector.WindowsCodexManagedRuntimeTarget{alice}},
+	)
+	if !enrolled.CodexPolicyActive {
+		t.Fatal("an enrolled Codex account's bit was replaced by the journal's")
+	}
+}
+
+// GAP-1062: a committed uninstall that meets a teardown journal of another
+// deployment refuses, changes nothing and names the next step. No FORCE.
+func TestWindowsManagedHooksTeardownForeignJournalNamesTheNextStep(t *testing.T) {
+	const path = `C:\ProgramData\Cisco\DefenseClaw\install\managed-hooks-teardown-journal.json`
+	if windowsManagedHooksTeardownForeignJournalNextStep(nil, path) != nil {
+		t.Fatal("no error became an error")
+	}
+	other := errors.New("Codex machine enrollment does not match the authenticated activation state")
+	if got := windowsManagedHooksTeardownForeignJournalNextStep(other, path); got != other {
+		t.Fatalf("an unrelated refusal was rewritten: %v", got)
+	}
+	foreign := fmt.Errorf("%w: %s (phase captured)", errors.New("managed-hook teardown journal does not match the protected deployment"), path)
+	got := windowsManagedHooksTeardownForeignJournalNextStep(foreign, path).Error()
+	for _, want := range []string{"does not match the protected deployment", path, "changed nothing", "Next step:", "Setup /verify", "lifecycle log"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the foreign journal refusal lacks %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "FORCE") {
+		t.Fatalf("the refusal names FORCE: %s", got)
+	}
+}
