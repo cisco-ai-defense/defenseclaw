@@ -78,16 +78,17 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 	// entry. The watcher names the scope that listed it, so a later hook of the
 	// session finds it whatever directory it reports (GAP-1018). The same holds
 	// for a first call that policy lets run before the watcher has an admission
-	// to report, whether it answers pending or nothing yet (the watcher has not
-	// listed the server in its first cycle): an exact allow, or
-	// admission.mcp.scan_on_install off, admits the definition without a scan
-	// (GAP-0998). That call opens the connection too, so the listed definition
+	// to report, whether it answers pending, unavailable (the admission store
+	// cannot be read, so the balanced tier warns and runs the call) or nothing
+	// yet (the watcher has not listed the server in its first cycle): an exact
+	// allow, or admission.mcp.scan_on_install off, admits the definition without
+	// a scan (GAP-0998, GAP-1018). That call opens the connection too, so the listed definition
 	// is held on the call the policy permits, not on the watcher answer that
 	// comes later. While the allow stands the hold answers nothing (the held
 	// definition is allowed). With no way for policy to admit without a scan the
 	// ordinary call reads no config here.
 	admitted := status.Admitted
-	if admitted == nil && !status.Unavailable && (status.Pending || mcpMayAdmitUnscanned(cfg)) {
+	if admitted == nil && (status.Pending || status.Unavailable || mcpMayAdmitUnscanned(cfg)) {
 		if listed, isListed := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName); isListed &&
 			heldDefinitionAdmitted(ctx, cfg, connector, probe, heldMCPDefinition(listed, connector, home)) {
 			admitted = &listed
