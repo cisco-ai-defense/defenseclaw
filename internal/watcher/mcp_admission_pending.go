@@ -481,6 +481,11 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		hash, _ := mcpDefinitionHash(server)
 		failed, decided, unscanned := w.mcpDecidedAdmission(path, hash, row)
 		if failed {
+			if w.admitsMCPWithoutScan(context.Background(), InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector}) {
+				// The allow that came after the failure ends it: admission runs
+				// now, so the block it left is released for the next session.
+				w.AdmitAddedMCPServers([]string{server.Name})
+			}
 			// The most restrictive verdict of the definitions the agent may
 			// still run: a revoked earlier one beats the listed one, whose
 			// allow cannot speak for it.
@@ -682,6 +687,17 @@ func mcpFailedSnapshotServesQuery(path string, row *audit.SnapshotRow, q MCPAdmi
 
 func mcpSnapshotFailed(row *audit.SnapshotRow) bool {
 	return row != nil && mcpFingerprintFailed(row.ScannerFingerprint)
+}
+
+// mcpFailureAllowed reports an unchanged MCP server whose baseline records a
+// failed admission (a scan that failed, a refused launcher, a server kept
+// unverified) of a definition that an allow rule now admits without a scan.
+// The allow was written after the failure, so nothing but this check sends the
+// definition to admission again: a refused launcher is never retried, and the
+// block and runtime disable the failure left would outlive the exact allow of
+// that very definition for every session that starts after it.
+func (w *InstallWatcher) mcpFailureAllowed(evt InstallEvent, baseline *audit.SnapshotRow) bool {
+	return baseline != nil && mcpSnapshotFailed(baseline) && w.admitsMCPWithoutScan(context.Background(), evt)
 }
 
 // mcpFingerprintFailed reports a scanner fingerprint that marks a failed
