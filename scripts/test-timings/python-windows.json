@@ -535,6 +535,7 @@
   "cli/tests/test_windows_enterprise_early_hook.py": 85.57,
   "cli/tests/test_windows_enterprise_exact_acl.py": 8.39,
   "cli/tests/test_windows_enterprise_hot_config_contract.py": 0.59,
+  "cli/tests/test_windows_enterprise_rejected_policy_smoke.py": 20.0,
   "cli/tests/test_windows_enterprise_service_contract.py": 104.01,
   "cli/tests/test_windows_enterprise_standalone_contract.py": 482.27,
   "cli/tests/test_windows_installer_artifacts.py": 84.81,
