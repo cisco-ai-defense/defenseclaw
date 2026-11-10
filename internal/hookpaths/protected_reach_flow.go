@@ -295,12 +295,15 @@ var registrationFindValueOptions = func() map[string]bool {
 	return options
 }()
 
-// registrationFindWrites reports whether a find call can write: only an action
-// predicate does (-delete, -fprint, -fprint0, -fprintf, -fls, or -exec,
-// -execdir, -ok, -okdir running a program that writes). A word that is not
-// spelled out (a search root, a test value, the file of -files0-from) is never
-// a writer by itself: find only searches and reads without an action.
-func registrationFindWrites(args []*syntax.Word, home string) bool {
+// registrationFindActions calls visit for each action predicate of a find call
+// (args are the words after the program): -delete, with no operands;
+// -fprint, -fprint0, -fprintf and -fls, with the file they write as the only
+// operand; and -exec, -execdir, -ok and -okdir, with the command they run (up
+// to ; or +) as the operands. It reports whether visit did. Only an action
+// writes: a word that is not spelled out (a search root, a test value, the file
+// of -files0-from) is never an action by itself, and the value of a test
+// option is a pattern, never an action.
+func registrationFindActions(args []*syntax.Word, home string, visit func(action string, operands []*syntax.Word) bool) bool {
 	for index := 0; index < len(args); index++ {
 		value, fixed := StaticWord(args[index], home)
 		if !fixed {
@@ -311,8 +314,22 @@ func registrationFindWrites(args []*syntax.Word, home string) bool {
 			continue
 		}
 		switch value {
-		case "-delete", "-fprint", "-fprint0", "-fprintf", "-fls":
-			return true
+		case "-delete":
+			if visit(value, nil) {
+				return true
+			}
+		case "-fprint", "-fprint0", "-fprintf", "-fls":
+			var operands []*syntax.Word
+			if index+1 < len(args) {
+				operands = args[index+1 : index+2]
+			}
+			if visit(value, operands) {
+				return true
+			}
+			index++
+			if value == "-fprintf" {
+				index++ // the format that follows the file
+			}
 		case "-exec", "-execdir", "-ok", "-okdir":
 			run := args[index+1:]
 			for end, next := range run {
@@ -321,13 +338,26 @@ func registrationFindWrites(args []*syntax.Word, home string) bool {
 					break
 				}
 			}
-			if len(run) > 0 && registrationCallWrites(&syntax.CallExpr{Args: run}, home) {
+			if visit(value, run) {
 				return true
 			}
 			index += len(run)
 		}
 	}
 	return false
+}
+
+// registrationFindWrites reports whether a find call can write: only an action
+// predicate does (-delete, -fprint, -fprint0, -fprintf, -fls, or -exec,
+// -execdir, -ok, -okdir running a program that writes).
+func registrationFindWrites(args []*syntax.Word, home string) bool {
+	return registrationFindActions(args, home, func(action string, operands []*syntax.Word) bool {
+		switch action {
+		case "-exec", "-execdir", "-ok", "-okdir":
+			return len(operands) > 0 && registrationCallWrites(&syntax.CallExpr{Args: operands}, home)
+		}
+		return true
+	})
 }
 
 // registrationCallWrites reports whether the program a call runs writes its
