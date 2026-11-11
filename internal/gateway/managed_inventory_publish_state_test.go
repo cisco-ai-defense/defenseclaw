@@ -23,6 +23,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,6 +107,8 @@ func managedPublishFullComponent() endpointInventoryComponent {
 		agentVersion:                "1.2.3",
 		agentProbeStatus:            "ok",
 		agentScannedAt:              "2026-09-15T10:00:00Z",
+		skillContentHash:            "sha256:" + strings.Repeat("a", 64),
+		skillContentStatus:          "ok",
 	}
 }
 
@@ -214,6 +217,8 @@ func TestManagedInventoryDigestDetectsMeaningfulFields(t *testing.T) {
 		"agentBinaryBasename":         func(c *endpointInventoryComponent) { c.agentBinaryBasename = "codex" },
 		"agentBinaryPathHash":         func(c *endpointInventoryComponent) { c.agentBinaryPathHash = "bin-hash-2" },
 		"agentVersion":                func(c *endpointInventoryComponent) { c.agentVersion = "1.2.4" },
+		"skillContentHash":            func(c *endpointInventoryComponent) { c.skillContentHash = "sha256:" + strings.Repeat("b", 64) },
+		"skillContentStatus":          func(c *endpointInventoryComponent) { c.skillContentStatus = "too_large" },
 	}
 	for name, mutate := range componentCases {
 		t.Run("component/"+name, func(t *testing.T) {

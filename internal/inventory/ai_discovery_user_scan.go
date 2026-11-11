@@ -512,6 +512,11 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 			if !userScanText(ev.RawPath, 4096) {
 				return errors.New("evidence paths must be printable")
 			}
+			if ev.Skill != nil {
+				if err := validateSkillFacts(*ev.Skill); err != nil {
+					return err
+				}
+			}
 		}
 		for _, value := range fields {
 			if !userScanText(value, maxUserScanField) {
