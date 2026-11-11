@@ -279,6 +279,16 @@ func alignEnterpriseWindowsTokenOwner(dataDir, path, label string) error {
 	// NTFS splits its inheritable entries, which the canonical check reads as
 	// a missing gateway write entry.
 	dir := filepath.Dir(path)
+	// On standalone a token folder or token another account can write or owns
+	// is refused and named, never re-stamped in place (GAP-0651). The shared
+	// canonical repair above refuses it too, and its refusal used to fall
+	// through to the generic stamp below.
+	if refused := managed.RefuseStandaloneInPlaceRepair(dir, managed.ObjectRuntimeDirectory); refused != nil {
+		return fmt.Errorf("enterprise hooks: %s directory was not hardened: %w", label, refused)
+	}
+	if refused := managed.RefuseStandaloneInPlaceRepair(path, managed.ObjectRuntimeSecretFile); refused != nil {
+		return fmt.Errorf("enterprise hooks: %s was not hardened: %w", label, refused)
+	}
 	if !enterpriseWindowsTokenDirectoryCanonical(dir) {
 		if err := setEnterpriseWindowsRuntimeProtection(dir, owner, serviceSID, true); err != nil {
 			return fmt.Errorf("enterprise hooks: harden %s directory: %w", label, err)

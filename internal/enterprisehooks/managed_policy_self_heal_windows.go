@@ -255,7 +255,7 @@ func windowsManagedPolicySelfHealRefusal(path string, kind managed.ObjectKind, s
 	if err == nil {
 		return nil
 	}
-	return managed.RefuseStandaloneMachinePolicyDrift(err)
+	return managed.RefuseStandaloneMachinePolicyDrift(path, err)
 }
 
 // windowsManagedPolicyLeafTrust judges only the object's own descriptor: it

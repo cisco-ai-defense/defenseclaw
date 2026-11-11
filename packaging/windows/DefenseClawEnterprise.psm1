@@ -15833,6 +15833,587 @@ function New-DefenseClawManagedHooksActivationRecord {
         -ExpectedDeploymentGenerationID $DeploymentGenerationID
 }
 
+# GAP-0602, GAP-0603: a Setup-owned record that another account owns or can
+# write is never trusted in place (GAP-0561 class rule). Setup keeps the
+# changed file for the administrator, next to where it was, and writes the
+# record again from what it can prove (the authenticated payload and the
+# machine's own services, as the unreadable-record rebuild does), or refuses
+# it by name with the exact command. These helpers are standalone only.
+function Get-DefenseClawStandaloneRecordUntrustedReason {
+    <#
+        Read only. Every reason (joined by '; ') another account owns or can
+        write the Setup-owned record Path (an owner that is not SYSTEM,
+        Administrators, TrustedInstaller or Setup's own account, a writer
+        outside those, or no access list), or '' when Path is absent or
+        trusted. It is the owner
+        and writer rule of Assert-DefenseClawStandaloneContentTrusted, without
+        its trusted-only drift, which the repair puts back (GAP-0920).
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return ''
+    }
+    $writers = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    $owners = @($writers + @(Get-DefenseClawCurrentProcessUserSID))
+    $verdicts = @(Get-DefenseClawPathAclVerdicts `
+        -Path $Path `
+        -AllowedWriterSIDs $writers `
+        -AllowedOwnerSIDs $owners `
+        -AllowInheritance `
+        -IgnoreCreatorTemplates)
+    $reasons = [Collections.Generic.List[string]]::new()
+    foreach ($verdict in $verdicts) {
+        $severity = Get-DefenseClawPathAclVerdictSeverity -Verdict $verdict
+        if (($verdict.Kind -ceq 'Contract' -and $severity -in @('Dacl', 'Owner', '')) -or
+            ($verdict.Kind -ceq 'Access' -and $severity -in @('Write', 'CreateChild'))) {
+            $reasons.Add([string]$verdict.Reason)
+        }
+    }
+    return ($reasons.ToArray() -join '; ')
+}
+
+function Format-DefenseClawUntrustedRecordRefusal {
+    <#
+        The refusal of a record another account owns or can write, with the
+        exact commands that recover it: the Setup repair that writes it again,
+        and the icacls command that takes the account's access away by hand.
+        It starts with the stable code untrusted_record, which the Go side
+        turns into a repair for an ensure that carries the payload.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Reason,
+        # What the repair does with this record, for the hint.
+        [string]$Rewrite = 'keeps the changed file next to it (administrators only) and writes the record again from the signed Setup payload'
+    )
+    # Every account the reasons name, owner and writers: one command each.
+    $accounts = [Collections.Generic.List[string]]::new()
+    $commands = [Collections.Generic.List[string]]::new()
+    $ownerSeen = $false
+    foreach ($match in [regex]::Matches($Reason, 'untrusted (owner|principal) (S-1-[0-9-]+)')) {
+        $sid = $match.Groups[2].Value
+        if ($match.Groups[1].Value -ceq 'owner') {
+            $accounts.Add("the account $sid (its owner)")
+            $ownerSeen = $true
+        }
+        else {
+            $accounts.Add("the account $sid")
+            $command = "icacls `"$Path`" /remove:g *$sid"
+            if (-not $commands.Contains($command)) { $commands.Add($command) }
+        }
+    }
+    if ($accounts.Count -eq 0) {
+        $accounts.Add('an account that is not SYSTEM, Administrators or TrustedInstaller')
+        $commands.Add("icacls `"$Path`" /inheritance:r /grant:r `"*S-1-5-18:(F)`" `"*S-1-5-32-544:(F)`"")
+    }
+    # Administrators take the record back whoever owned it.
+    $commands.Add("icacls `"$Path`" /setowner *S-1-5-32-544")
+    $byHand = $commands.ToArray() -join ' and '
+    return ("untrusted_record: $Path can be changed by $($accounts.ToArray() -join ' and '), so Setup does not trust what is in it and changed nothing. " +
+        "Fix, from an elevated prompt: run $(Format-DefenseClawSetupAction -Action '/repair'), which $Rewrite. " +
+        "If you checked the file and it is yours, give it back with: $byHand (an entry that is inherited cannot be removed from the file itself: run icacls `"$Path`" /inheritance:d first, which keeps copies of the inherited entries), then $(Format-DefenseClawRerunStep). " +
+        'Removing an entry does not close a handle the account opened while it could write the file; the repair does, because it writes a new file.')
+}
+
+function Get-DefenseClawStandaloneKeptRecordPath {
+    <#
+        Read only. The name a Setup-owned record that another account owns or
+        can write is kept under, <name>.rejected-<UTC time>-<first 12 hex of
+        its SHA-256>, in the same administrator-only folder. A folder that
+        account can change is refused: it may already hold other planted
+        objects. Nothing is moved here: Publish-DefenseClawRecordKeepingOld
+        puts the new record in place and keeps the old object under this name
+        in one step, so a record is in place at every moment (GAP-0602 review
+        D1). Returns the kept path.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Reason
+    )
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    $folderReason = ''
+    $writers = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    foreach ($verdict in @(Get-DefenseClawPathAclVerdicts `
+            -Path $directory `
+            -AllowedWriterSIDs $writers `
+            -AllowedOwnerSIDs @($writers + @(Get-DefenseClawCurrentProcessUserSID)) `
+            -AllowInheritance `
+            -IgnoreCreatorTemplates)) {
+        $severity = Get-DefenseClawPathAclVerdictSeverity -Verdict $verdict
+        if (($verdict.Kind -ceq 'Contract' -and $severity -in @('Dacl', 'Owner', '')) -or
+            ($verdict.Kind -ceq 'Access' -and $severity -in @('Write', 'CreateChild'))) {
+            $folderReason = [string]$verdict.Reason
+            break
+        }
+    }
+    if (-not [string]::IsNullOrEmpty($folderReason)) {
+        throw (Format-DefenseClawUntrustedRecordRefusal -Path $directory -Reason $folderReason `
+            -Rewrite 'refuses to use a folder another account can change; it only checks the folder')
+    }
+    Assert-DefenseClawNoReparsePath -Path $Path
+    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer) {
+        throw "untrusted_record: $Path is a folder, not a record file; remove it from an elevated prompt after checking what is in it (Remove-Item -LiteralPath `"$Path`" -Recurse -Force), then $(Format-DefenseClawRerunStep)"
+    }
+    $sha = 'unreadable'
+    try {
+        $sha = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 12)
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "record not hashed: $($_.Exception.Message)"
+    }
+    $kept = [IO.Path]::Combine($directory, ('{0}.rejected-{1}-{2}' -f $item.Name, [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), $sha))
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $kept) {
+        throw "untrusted_record: the place to keep $Path, $kept, is already taken; remove it from an elevated prompt (Remove-Item -LiteralPath `"$kept`" -Force), then $(Format-DefenseClawRerunStep)"
+    }
+    return $kept
+}
+
+function Publish-DefenseClawRecordKeepingOld {
+    <#
+        Puts Value at Path as the record, with a record in place at every
+        moment (GAP-0602 review D1). The new JSON is written as a sibling of
+        Path and given the administrator-only access list there, before it has
+        its name; one atomic step then puts it at Path and keeps the old object
+        as Kept. The step is the one-step swap of GAP-0240 (a second name of the
+        old file, then a POSIX rename over Path). A volume that refuses it falls
+        back to two renames, which leave Path absent for a moment, never for the
+        seconds the rebuild takes; the old file is put back if the second one
+        fails. A hard kill or a Setup timeout before the step leaves the old
+        record and a stray *.new.* sibling; after it, the new record. Kept is
+        the old object itself, so a handle the other account holds points at it,
+        not at the record Setup writes. With no Kept (or no record at Path) the
+        new record replaces Path as Write-DefenseClawJsonAtomic does.
+    #>
+    param(
+        [Parameter(Mandatory)]$Value,
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Kept = ''
+    )
+    New-DefenseClawDirectory -Path ([IO.Path]::GetDirectoryName($Path))
+    $temporary = "$Path.new.$([Guid]::NewGuid().ToString('N'))"
+    try {
+        [IO.File]::WriteAllText(
+            $temporary,
+            ($Value | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 12),
+            [Text.UTF8Encoding]::new($false))
+        Set-DefenseClawPathAcl -Path $temporary -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        if ([string]::IsNullOrEmpty($Kept) -or
+            -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf)) {
+            [void](Clear-DefenseClawRestrictiveFileAttributes -Path $Path)
+            Move-DefenseClawNonImageFileReplacing -Source $temporary -Destination $Path
+            return
+        }
+        [void](Clear-DefenseClawRestrictiveFileAttributes -Path $Path)
+        try {
+            $swapped = Invoke-DefenseClawLaunchableFileSwap `
+                -Temporary $temporary `
+                -Destination $Path `
+                -Backup $Kept `
+                -KeepReplacementAccess
+            if (-not $swapped) {
+                Microsoft.PowerShell.Management\Move-Item -LiteralPath $Path -Destination $Kept -ErrorAction Stop
+                try {
+                    Move-DefenseClawNonImageFileReplacing -Source $temporary -Destination $Path
+                }
+                catch {
+                    Microsoft.PowerShell.Management\Move-Item -LiteralPath $Kept -Destination $Path -ErrorAction Stop
+                    throw
+                }
+            }
+        }
+        catch {
+            # A program that opened the file without delete sharing blocks the
+            # rename, and changing the owner does not close its handle.
+            throw ("untrusted_record: $Path could not be replaced ($($_.Exception.Message)), and nothing was changed. A program holds it open without delete sharing. " +
+                "Find it (Restart Manager: Setup names it on /status, or run handle.exe `"$Path`" from Sysinternals), stop it, or restart Windows (a restart closes every handle), " +
+                "then run $(Format-DefenseClawSetupAction -Action '/repair'). Taking the account's access away with icacls does not close its handle.")
+        }
+    }
+    finally {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporary -Force
+        }
+    }
+}
+
+function Get-DefenseClawKeptRecordFiles {
+    <#
+        Read only. The copies a Setup run kept aside next to the record Path
+        (<name>.rejected-*), or none. A listing that fails is none.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        return @(Microsoft.PowerShell.Management\Get-ChildItem `
+            -LiteralPath ([IO.Path]::GetDirectoryName($Path)) `
+            -Force `
+            -File `
+            -Filter ([IO.Path]::GetFileName($Path) + '.rejected-*') `
+            -ErrorAction Stop |
+            Microsoft.PowerShell.Core\ForEach-Object { [string]$_.FullName })
+    }
+    catch {
+        return @()
+    }
+}
+
+function Test-DefenseClawDeploymentServicesRegistered {
+    <#
+        Read only. $true when the gateway or the guardian service is registered
+        (or cannot be told to be absent): a deployment may be running.
+    #>
+    param([Parameter(Mandatory)][string]$GatewayServiceName, [Parameter(Mandatory)][string]$GuardianServiceName)
+    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+        try {
+            if (Test-DefenseClawServiceExists -Name $name) { return $true }
+        }
+        catch {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-DefenseClawOrphanedKeptRecordRefusal {
+    <#
+        Read only. '' unless the deployment record is missing while a copy of
+        it that a Setup run kept aside is still next to it AND a DefenseClaw
+        service is registered: the state an earlier build left when it stopped
+        between the move and the rewrite (a hard kill, a Setup timeout), or
+        that a put-back failure left, on a host that may be running. Status,
+        verify and every action but Repair and Uninstall stop with it. With no
+        service registered it is only what an uninstall left behind: no
+        deployment runs from it, nothing reads the copy, and an install removes
+        it (Remove-DefenseClawLeftoverKeptRecords), so it is no refusal.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) { return '' }
+    try {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) { return '' }
+    }
+    catch {
+        return ''
+    }
+    $kept = @(Get-DefenseClawKeptRecordFiles -Path $Layout.MetadataPath)
+    if ($kept.Count -eq 0) { return '' }
+    if (-not (Test-DefenseClawDeploymentServicesRegistered -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) { return '' }
+    return ("untrusted_record: $($Layout.MetadataPath) is missing, and $($kept -join ', ') is the copy of it that Setup kept aside because another account could change it; " +
+        'an earlier run stopped before it wrote the record again, so no deployment record is in place and nothing here says what is installed. ' +
+        "Fix, from an elevated prompt: run $(Format-DefenseClawSetupAction -Action '/repair'). It writes the record again from the machine's services and the signed Setup payload " +
+        '(it never reads the kept copy), and gives the kept copy administrator-only access.')
+}
+
+function Remove-DefenseClawLeftoverKeptRecords {
+    <#
+        Install and Upgrade, under the lifecycle lock: removes the copies a
+        Setup run kept aside (<record>.rejected-*) from a state an uninstall
+        left behind, so they do not block the reinstall or ask for a purge that
+        would delete data. Acts only when there is no deployment record and no
+        DefenseClaw service, and only on regular files in the install folder
+        that carry the name Setup gave them; the copies are DefenseClaw-made
+        backups and nothing reads them. A copy it cannot remove is a warning.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath) -or
+        (Test-DefenseClawDeploymentServicesRegistered -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
+        return
+    }
+    foreach ($record in @([string]$Layout.MetadataPath, [string]$Layout.AgentApplicationControlAttestationPath)) {
+        foreach ($keptFile in @(Get-DefenseClawKeptRecordFiles -Path $record)) {
+            $leaf = [IO.Path]::GetFileName($keptFile)
+            if ($leaf -cnotmatch '^(deployment|agent-application-control-attestation)\.json\.rejected-\d{8}T\d{9}Z-([0-9a-f]{12}|unreadable)$') { continue }
+            try {
+                Assert-DefenseClawNoReparsePath -Path $keptFile
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath $keptFile -Force -ErrorAction Stop
+                Microsoft.PowerShell.Utility\Write-Warning -Message "kept_record_removed: $keptFile was left by an earlier uninstall (a copy of a changed record that Setup kept aside; nothing reads it) and was removed before the install"
+            }
+            catch {
+                Microsoft.PowerShell.Utility\Write-Warning -Message "kept_record_left: could not remove $keptFile ($($_.Exception.Message)); it is evidence only, delete it with Remove-Item -LiteralPath `"$keptFile`" -Force from an elevated prompt"
+            }
+        }
+    }
+}
+
+function Protect-DefenseClawKeptRecord {
+    <#
+        Gives the kept record administrator-only access, after the record was
+        written again. It fails closed and by name: a program that holds the
+        kept file open with write or delete access, or a link, refuses the
+        stamp (GAP-0763), and the file stays readable and writable by the
+        account that changed it, which is evidence only (nothing reads it).
+    #>
+    param([Parameter(Mandatory)][string]$Kept, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Reason)
+    try {
+        Set-DefenseClawPathAcl -Path $Kept -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+    }
+    catch {
+        $held = Get-DefenseClawHeldFileRefusal -ErrorRecord $_
+        if ($null -eq $held) { $held = $_.Exception.Message }
+        throw ("untrusted_record: $Path was written again, but the kept copy $Kept could not be given administrator-only access ($held). " +
+            "Setup went on: the record is written again and only the stamp is left; the kept copy is evidence only and nothing reads it. " +
+            "Run $(Format-DefenseClawSetupAction -Action '/repair') once the program that holds it is stopped (or after a restart): that run finishes the stamp (an /ensure that finds nothing to repair does not look at it); until then every repair warns and goes on. " +
+            "Or, from an elevated prompt: icacls `"$Kept`" /inheritance:r /grant:r `"*S-1-5-18:(F)`" `"*S-1-5-32-544:(F)`" and icacls `"$Kept`" /setowner *S-1-5-32-544, or delete it (Remove-Item -LiteralPath `"$Kept`" -Force)")
+    }
+    Write-DefenseClawResilienceEvent -Marker defenseclaw_recover -Fields @{
+        path   = $Path
+        kept   = $Kept
+        reason = "the record could be changed by another account ($Reason); kept as $Kept and written again"
+    }
+}
+
+function Complete-DefenseClawKeptRecordStamps {
+    <#
+        Gives a kept copy that still carries the other account's access its
+        administrator-only access list. A run that wrote the records but could
+        not stamp the kept copy (a program held it open) leaves the copy
+        unstamped; the next run finishes it here. A stamp that still fails
+        is a warning, never a stop: the copy is evidence only and the run must go on
+        to the repair transaction.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    foreach ($record in @([string]$Layout.MetadataPath, [string]$Layout.AgentApplicationControlAttestationPath)) {
+        foreach ($keptFile in @(Get-DefenseClawKeptRecordFiles -Path $record)) {
+            $reason = Get-DefenseClawStandaloneRecordUntrustedReason -Path $keptFile
+            if ([string]::IsNullOrEmpty($reason)) { continue }
+            try {
+                Protect-DefenseClawKeptRecord -Kept $keptFile -Path $record -Reason $reason
+            }
+            catch {
+                Microsoft.PowerShell.Utility\Write-Warning -Message $_.Exception.Message
+            }
+        }
+    }
+}
+
+function New-DefenseClawNotAttestedRecord {
+    <#
+        The attestation Setup writes in place of one another account could
+        change: nothing attested. The repair transaction writes the real
+        evidence again as it runs; this one only keeps a record in place
+        meanwhile.
+    #>
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return [ordered]@{
+        schema_version = (Get-DefenseClawAgentApplicationControlAttestationSchemaVersion)
+        agent_application_control_enforced = $false
+        prerequisite = $script:AgentApplicationControlPrerequisite
+        approved_agent_clients_enforced = $false
+        minimum_claude_version = (Get-DefenseClawClaudeMinimumClientVersion)
+        claude_effective_policy_verified = $false
+        claude_effective_policy_managed_policy_sha256 = ''
+        claude_effective_policy_hook_sha256 = ''
+        attested_by_sid = [string]$identity.User.Value
+        attested_at = [DateTime]::UtcNow.ToString('o')
+        certification_required = $true
+    }
+}
+
+function Invoke-DefenseClawStandaloneRecordRecovery {
+    <#
+        Standalone Repair, under the lifecycle lock, before the deployment
+        record is read and before any service stops: the deployment record and
+        the application-control attestation that another account owns or can
+        write are replaced and the old object kept
+        (Publish-DefenseClawRecordKeepingOld), never re-trusted in place
+        (GAP-0602, GAP-0603). deployment.json is rebuilt from the machine's own
+        record and the authenticated payload (New-DefenseClawRebuiltDeploymentRecord);
+        the attestation is replaced by a not-attested one, and the repair
+        transaction writes the real evidence again (an administrator attests
+        again with Repair -AttestAgentApplicationControl). The deployment record
+        is rebuilt with it so both agree.
+
+        A record is in place at every moment (review D1): the preconditions are
+        checked first, every new record is built and stamped as a sibling, and
+        each is then swapped in with one atomic step, so a failure or a kill
+        at any point leaves a record at each name. A later run finishes what an
+        earlier one left: it stamps a kept copy that was not stamped, and
+        writes the deployment record again when only a kept copy of it is
+        left. A pending transaction restores its own preimages and is left to
+        the gate. Returns the kept paths.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $kept = [Collections.Generic.List[string]]::new()
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
+        return $kept.ToArray()
+    }
+    $changed = [Collections.Generic.List[object]]::new()
+    foreach ($record in @(
+            @{ Path = [string]$Layout.MetadataPath; Kind = 'deployment' },
+            @{ Path = [string]$Layout.AgentApplicationControlAttestationPath; Kind = 'attestation' })) {
+        $reason = Get-DefenseClawStandaloneRecordUntrustedReason -Path $record.Path
+        if (-not [string]::IsNullOrEmpty($reason)) {
+            $changed.Add([pscustomobject]@{ Kind = $record.Kind; Path = $record.Path; Reason = $reason })
+        }
+    }
+    $orphaned = -not [string]::IsNullOrEmpty((Get-DefenseClawOrphanedKeptRecordRefusal -Layout $Layout -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName))
+    if ($changed.Count -eq 0 -and -not $orphaned) {
+        Complete-DefenseClawKeptRecordStamps -Layout $Layout
+        return $kept.ToArray()
+    }
+    # Everything the rewrite needs is checked before anything is changed: a
+    # payload that lacks an artifact (the installed CLI carries none), a
+    # missing or foreign gateway service. A refusal here leaves every record
+    # where it is (GAP-0602 review M1).
+    if ($changed.Count -gt 0) {
+        $names = (@($changed | Microsoft.PowerShell.Core\ForEach-Object { "the $($_.Kind) record" }) -join ' and ')
+        $readyReason = "untrusted_record: $names could be changed by another account; Setup would replace it and keep the old one aside, but nothing was changed"
+    }
+    else {
+        $readyReason = "untrusted_record: the deployment record is missing and only the copy an earlier run kept aside is left; Setup would write it again, but nothing was changed"
+    }
+    Assert-DefenseClawMetadataRebuildReady `
+        -Layout $Layout `
+        -Sources $Sources `
+        -GatewayServiceName $GatewayServiceName `
+        -Reason $readyReason
+    # A deployment record nobody changed keeps the digests of the approved
+    # config and manifest across the rebuild: an attestation-only change
+    # rewrites the record so the two agree, and it must not lose them.
+    $approvedSources = $null
+    if (@($changed | Microsoft.PowerShell.Core\Where-Object { $_.Kind -ceq 'deployment' }).Count -eq 0 -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf)) {
+        try {
+            $current = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.MetadataPath -Raw -ErrorAction Stop |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+            $property = $current.PSObject.Properties['approved_policy_sources']
+            if ($null -ne $property -and $property.Value -is [Management.Automation.PSCustomObject]) {
+                $approvedSources = [ordered]@{}
+                foreach ($name in @('config', 'manifest')) {
+                    $digest = $property.Value.PSObject.Properties[$name]
+                    if ($null -ne $digest -and ([string]$digest.Value) -cmatch '^[0-9a-f]{64}$') {
+                        $approvedSources[$name] = [string]$digest.Value
+                    }
+                }
+            }
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "approved policy digests not carried over: $($_.Exception.Message)"
+        }
+    }
+    # Names first, records next, both read only or into siblings: nothing at a
+    # live name changes until the swaps below.
+    $plans = [Collections.Generic.List[object]]::new()
+    foreach ($record in $changed) {
+        $plans.Add([pscustomobject]@{
+            Record = $record
+            Kept = (Get-DefenseClawStandaloneKeptRecordPath -Path $record.Path -Reason $record.Reason)
+        })
+    }
+    $deploymentPlan = @($plans | Microsoft.PowerShell.Core\Where-Object { $_.Record.Kind -ceq 'deployment' }) | Microsoft.PowerShell.Utility\Select-Object -First 1
+    $attestationPlan = @($plans | Microsoft.PowerShell.Core\Where-Object { $_.Record.Kind -ceq 'attestation' }) | Microsoft.PowerShell.Utility\Select-Object -First 1
+    $because = if ($plans.Count -gt 0) {
+        (@($plans | Microsoft.PowerShell.Core\ForEach-Object {
+            "the $($_.Record.Kind) record could be changed by another account ($($_.Record.Reason)) and is kept as $($_.Kept)"
+        }) -join '; ')
+    }
+    else {
+        'the deployment record was missing and only the copy an earlier run kept aside was left'
+    }
+    $published = [Collections.Generic.List[object]]::new()
+    try {
+        $deploymentValue = New-DefenseClawRebuiltDeploymentRecord `
+            -Layout $Layout `
+            -Sources $Sources `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -ApprovedPolicySources $approvedSources
+        $attestationValue = $null
+        if ($null -ne $attestationPlan) {
+            $attestationValue = New-DefenseClawNotAttestedRecord
+        }
+        Assert-DefenseClawRebuiltRecordCoversArtifacts -Layout $Layout -Value $deploymentValue
+        Publish-DefenseClawRecordKeepingOld `
+            -Value $deploymentValue `
+            -Path $Layout.MetadataPath `
+            -Kept $(if ($null -ne $deploymentPlan) { [string]$deploymentPlan.Kept } else { '' })
+        if ($null -ne $deploymentPlan) { $published.Add($deploymentPlan) }
+        Microsoft.PowerShell.Utility\Write-Warning -Message (
+            "DefenseClaw enterprise repair: rebuilding the deployment metadata: $because"
+        )
+        if ($null -ne $attestationPlan) {
+            Publish-DefenseClawRecordKeepingOld `
+                -Value $attestationValue `
+                -Path $Layout.AgentApplicationControlAttestationPath `
+                -Kept ([string]$attestationPlan.Kept)
+            $published.Add($attestationPlan)
+        }
+    }
+    catch {
+        $failure = $_.Exception.Message
+        $tail = if ($published.Count -gt 0) {
+            " The record Setup replaced is complete and the old one is kept as $(@($published | Microsoft.PowerShell.Core\ForEach-Object { $_.Kept }) -join ', '); the record it had not replaced yet is still in place, unchanged."
+        }
+        else {
+            ' Nothing was changed: every record is in place as it was found.'
+        }
+        throw "untrusted_record: the records could not be written again ($failure).$tail $(Format-DefenseClawRerunStep) (for example $(Format-DefenseClawSetupAction -Action '/repair')): it finishes the rest."
+    }
+    foreach ($item in $published) {
+        $kept.Add([string]$item.Kept)
+        Microsoft.PowerShell.Utility\Write-Warning -Message "untrusted_record_replaced: $($item.Record.Path) could be changed by another account and was kept as $($item.Kept); Setup wrote it again"
+    }
+    # The kept copies get their administrator-only access now. A copy a program
+    # holds open cannot be stamped: that is a warning, not a stop, because the
+    # records are written and the repair transaction that follows must run
+    # (the rebuilt record has the legacy shape until it has, and any other
+    # action on it fails after stopping the services); the next run stamps it.
+    Complete-DefenseClawKeptRecordStamps -Layout $Layout
+    return $kept.ToArray()
+}
+
+function Assert-DefenseClawMetadataRebuildReady {
+    <#
+        Read only. Everything Repair-DefenseClawUnreadableDeploymentMetadata
+        needs before it writes: every artifact the record names in the
+        authenticated payload, and a registered, DefenseClaw-owned gateway
+        service. It throws with Reason first and the exact next step, and
+        changes nothing.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$Reason
+    )
+    $required = @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.CLIPath -PathType Leaf) {
+        $required += 'cli'
+    }
+    $missing = @($required | Microsoft.PowerShell.Core\Where-Object { -not $Sources.ContainsKey($_) })
+    if ($missing.Count -ne 0) {
+        $carrier = if (Test-DefenseClawStandaloneProfile) { "only the installed release's Setup carries every artifact it must re-record ($($missing -join ', ')); run $(Format-DefenseClawSetupAction -Action '/repair')" } else { "only Setup /repair carries every artifact it must re-record ($($missing -join ', '))" }
+        throw "$Reason; $carrier"
+    }
+    if (-not (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+        if ($Reason.StartsWith('untrusted_record: ', [StringComparison]::Ordinal)) {
+            # No deployment runs: this is the state an uninstall that kept the
+            # state left behind. A new install cannot adopt a record another
+            # account could change; the purge removes it.
+            throw "$Reason; no $GatewayServiceName service is registered, so this is state an uninstall left behind and no deployment runs from it: run $(Format-DefenseClawSetupAction -Action '/uninstall PURGE=1') to remove it (if that refuses, take the account's access away from the named object with the icacls command in its message, or run $(Format-DefenseClawSetupAction -Action '/uninstall FORCE=1 PURGE=1')), then run the same command again"
+        }
+        throw "$Reason; no $GatewayServiceName service is registered, so run $(Format-DefenseClawSetupAction -Action @('/install', '/uninstall PURGE=1'))"
+    }
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $GatewayServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath
+}
+
 function ConvertFrom-DefenseClawDeploymentMetadataText {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -15853,6 +16434,74 @@ function ConvertFrom-DefenseClawDeploymentMetadataText {
         throw "$($script:UnreadableMetadataMessage) $Path ($reason); run $(Format-DefenseClawSetupAction -Action '/repair') to rebuild it"
     }
     return $metadata
+}
+
+function New-DefenseClawRebuiltDeploymentRecord {
+    <#
+        The deployment record rebuilt from the machine's own record: the layout
+        roots, the registered services and the authenticated payload. Builds
+        the value only (hashing every installed artifact takes seconds); the
+        caller publishes it. Assert-DefenseClawMetadataRebuildReady says first
+        whether it can be built.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [AllowNull()][System.Collections.IDictionary]$ApprovedPolicySources = $null
+    )
+    # An installed artifact is recorded only when it has the digest of the
+    # authenticated payload this run carries: nothing the lost record said is
+    # trusted, and the hook's rollback copy needs a recorded digest to be
+    # checked against (GAP-0656 review M3). An artifact that differs is left
+    # unrecorded, and the repair replaces it from the payload.
+    $provenHashes = [ordered]@{}
+    # Every payload key the hash writer emits for a standalone install, the
+    # Claude hook guard included (GAP-0089).
+    $artifactLayoutKey = @{
+        gateway = 'GatewayPath'; acp = 'ACPPath'; hook = 'HookPath'; hook_guard = 'HookGuardPath'
+        sensor_helper = 'SensorHelperPath'; cli = 'CLIPath'; installer = 'InstallerPath'; module = 'ModulePath'
+    }
+    foreach ($artifact in @('gateway', 'acp', 'hook', 'hook_guard', 'sensor_helper', 'cli', 'installer', 'module')) {
+        if (-not $Sources.ContainsKey($artifact) -or -not $Layout.ContainsKey($artifactLayoutKey[$artifact])) { continue }
+        $installedArtifact = $Layout[$artifactLayoutKey[$artifact]]
+        if ([string]::IsNullOrWhiteSpace([string]$installedArtifact) -or
+            -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $installedArtifact -PathType Leaf)) {
+            continue
+        }
+        $payloadDigest = if ($Sources[$artifact] -is [hashtable] -and $Sources[$artifact].ContainsKey('sha256')) {
+            ([string]$Sources[$artifact]['sha256']).ToLowerInvariant()
+        }
+        else {
+            ''
+        }
+        if ([string]::IsNullOrEmpty($payloadDigest)) { continue }
+        $installedDigest = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $installedArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($installedDigest -ceq $payloadDigest) {
+            $provenHashes[$artifact] = $installedDigest
+        }
+    }
+    $rebuilt = [ordered]@{
+        schema_version = $script:SchemaVersion
+        deployment_mode = 'managed_enterprise'
+        installed = $true
+        install_root = $Layout.InstallRoot
+        state_root = $Layout.StateRoot
+        gateway_service = $GatewayServiceName
+        guardian_service = $GuardianServiceName
+        hashes = $provenHashes
+        profile = 'standalone'
+        # rel-1-0-6:GAP-0994: this record has the legacy shape (no activation
+        # evidence, no pinned paths) until the repair transaction that follows
+        # has written the full one. A rollback to it is judged by
+        # Assert-DefenseClawRebuiltRecordArtifacts, not by the full assertion.
+        record_rebuilt_by_setup = $true
+    }
+    if ($null -ne $ApprovedPolicySources -and $ApprovedPolicySources.Count -gt 0) {
+        $rebuilt['approved_policy_sources'] = $ApprovedPolicySources
+    }
+    return $rebuilt
 }
 
 function Repair-DefenseClawUnreadableDeploymentMetadata {
@@ -15887,32 +16536,22 @@ function Repair-DefenseClawUnreadableDeploymentMetadata {
         }
         $unreadable = [string]$_.Exception.Message
     }
-    $required = @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
-    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.CLIPath -PathType Leaf) {
-        $required += 'cli'
-    }
-    $missing = @($required | Microsoft.PowerShell.Core\Where-Object { -not $Sources.ContainsKey($_) })
-    if ($missing.Count -ne 0) {
-        $carrier = if (Test-DefenseClawStandaloneProfile) { "only the installed release's Setup carries every artifact it must re-record ($($missing -join ', ')); run $(Format-DefenseClawSetupAction -Action '/repair')" } else { "only Setup /repair carries every artifact it must re-record ($($missing -join ', '))" }
-        throw "$unreadable; $carrier"
-    }
-    if (-not (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
-        throw "$unreadable; no $GatewayServiceName service is registered, so run $(Format-DefenseClawSetupAction -Action @('/install', '/uninstall PURGE=1'))"
-    }
-    Assert-DefenseClawOwnedServiceOrAbsent `
-        -Name $GatewayServiceName `
-        -ExpectedGatewayPath $Layout.GatewayPath
-    Write-DefenseClawJsonAtomic -Path $Layout.MetadataPath -Kind AdminFile -Value ([ordered]@{
-        schema_version = $script:SchemaVersion
-        deployment_mode = 'managed_enterprise'
-        installed = $true
-        install_root = $Layout.InstallRoot
-        state_root = $Layout.StateRoot
-        gateway_service = $GatewayServiceName
-        guardian_service = $GuardianServiceName
-        hashes = [ordered]@{}
-        profile = 'standalone'
-    })
+    Assert-DefenseClawMetadataRebuildReady `
+        -Layout $Layout `
+        -Sources $Sources `
+        -GatewayServiceName $GatewayServiceName `
+        -Reason $unreadable
+    $rebuilt = New-DefenseClawRebuiltDeploymentRecord `
+        -Layout $Layout `
+        -Sources $Sources `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName
+    # rel-1-0-6:GAP-0994 (delta-5 F4): the same refusal as the changed-record
+    # path, before the record is written: a rebuilt record that cannot name the
+    # gateway, the hook and the sensor helper (an installed file that is stale)
+    # is refused by name with the services as they were.
+    Assert-DefenseClawRebuiltRecordCoversArtifacts -Layout $Layout -Value $rebuilt
+    Write-DefenseClawJsonAtomic -Path $Layout.MetadataPath -Kind AdminFile -Value $rebuilt
     Microsoft.PowerShell.Utility\Write-Warning -Message (
         "DefenseClaw enterprise repair: rebuilding the deployment metadata: $unreadable"
     )
@@ -16126,6 +16765,12 @@ function Get-DefenseClawDeploymentMetadataOnce {
         [void](ConvertFrom-DefenseClawDeploymentMetadataText `
             -Path $Layout.MetadataPath `
             -Text $driftedText)
+        # Another account owns or can write a record that parses: it is
+        # refused by name with the repair that writes it again (GAP-0602).
+        $recordReason = Get-DefenseClawStandaloneRecordUntrustedReason -Path $Layout.MetadataPath
+        if (-not [string]::IsNullOrEmpty($recordReason)) {
+            throw (Format-DefenseClawUntrustedRecordRefusal -Path $Layout.MetadataPath -Reason $recordReason)
+        }
         throw $aclError
     }
     try {
@@ -17713,13 +18358,24 @@ function Assert-DefenseClawStandaloneContentTrusted {
         'another account owns or could change a trusted access list back in place; ' + $refusals[0]
     $shown = [Math]::Min($refusals.Count, 20)
     if ($refusals.Count -gt 1) {
-        $message += " Refused too, for the same reason ($($refusals.Count - 1) more):"
+        # A semicolon ends each path, where the result rewriter that adds the
+        # icacls fix stops reading it; before, " Refused too" and " (2)" were
+        # read as part of the path and cut the fix of the first refusals.
+        $message += "; Refused too, for the same reason ($($refusals.Count - 1) more):"
         for ($index = 1; $index -lt $shown; $index++) {
             $message += " ($index) (" + $refusals[$index]
+            if ($index -lt $shown - 1 -or $refusals.Count -gt $shown) {
+                $message += ';'
+            }
         }
         if ($refusals.Count -gt $shown) {
             $message += " and $($refusals.Count - $shown) more; fix these and $(Format-DefenseClawRerunStep) to see the rest"
         }
+    }
+    if ($Scope -cne 'Lifecycle') {
+        # An uninstall refused for a changed object must not trap the
+        # administrator.
+        $message += '; if you cannot fix it, ' + (Format-DefenseClawSetupAction -Action '/uninstall FORCE=1 PURGE=1') + ' removes the deployment without judging these objects'
     }
     throw $message
 }
@@ -20145,6 +20801,13 @@ function Get-DefenseClawAgentApplicationControlAttestation {
             SelfHealKind              = 'AdminFile'
             SelfHealGatewayServiceSID = $script:AdministratorsSID
         }
+    }
+    $attestationUntrusted = Get-DefenseClawStandaloneRecordUntrustedReason -Path $path
+    if (-not [string]::IsNullOrEmpty($attestationUntrusted)) {
+        # Another account owns or can write it: Repair keeps it aside and
+        # writes it again, nothing re-trusts it here (GAP-0602, GAP-0603).
+        throw (Format-DefenseClawUntrustedRecordRefusal -Path $path -Reason $attestationUntrusted `
+            -Rewrite 'keeps the changed attestation next to it (administrators only), writes a new one as not attested and rebuilds the deployment record with it; attest again afterwards with enterprise windows repair --attest-agent-application-control')
     }
     Assert-DefenseClawPathAcl `
         -Path $path `
@@ -31540,6 +32203,125 @@ function Test-DefenseClawManifestCatchUpTeardownRefusal {
 $script:UninstallDeletedAccountWaitSeconds = 180
 $script:UninstallDeletedAccountPollSeconds = 10
 
+# rel-1-0-6:GAP-0994: how long a repair over a deployment record with no
+# activation evidence waits for a restarted Guardian to publish its three
+# records again, and how often it looks. Tests shorten them.
+$script:GuardianRepublishWaitSeconds = 60
+$script:GuardianRepublishPollSeconds = 1
+$script:GuardianRepublishRecheckSeconds = 2
+
+function Get-DefenseClawGuardianPublicationStamps {
+    <#
+        rel-1-0-6:GAP-0994: the updated_at of the Guardian's activation,
+        authorization and state records, $null for one that is missing or has
+        none. The three are written one after the other, and one publication
+        gives them the same stamp.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $paths = [ordered]@{
+        activation = (Microsoft.PowerShell.Management\Join-Path $Layout.AuthorizationDirectory 'activation.json')
+        authorization = [string]$Layout.AuthorizationLedgerPath
+        state = (Microsoft.PowerShell.Management\Join-Path $Layout.RuntimeDirectory 'hook_guardian_state.json')
+    }
+    $stamps = [ordered]@{}
+    foreach ($name in $paths.Keys) {
+        $stamps[$name] = $null
+        try {
+            $text = [IO.File]::ReadAllText([string]$paths[$name])
+            $match = [regex]::Match($text, '"updated_at"\s*:\s*"([^"]+)"')
+            if ($match.Success) { $stamps[$name] = $match.Groups[1].Value }
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "Guardian $name record not read: $($_.Exception.Message)"
+        }
+    }
+    return $stamps
+}
+
+function Test-DefenseClawGuardianPublicationWhole {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $stamps = Get-DefenseClawGuardianPublicationStamps -Layout $Layout
+    $values = @($stamps.Values)
+    return [bool](
+        @($values | Microsoft.PowerShell.Core\Where-Object { $null -eq $_ }).Count -eq 0 -and
+        @($values | Microsoft.PowerShell.Utility\Select-Object -Unique).Count -eq 1
+    )
+}
+
+function Resolve-DefenseClawGuardianPublicationBeforeTransaction {
+    <#
+        rel-1-0-6:GAP-0994: a deployment record with no activation evidence (a
+        legacy one, or one Setup rebuilt) is classified from the Guardian's
+        activation, authorization and state records. The Guardian publishes the
+        three one after the other and does not publish again until something
+        changes or the generation ages, so a publication that was cut short, or
+        a pass that failed while the deployment record was untrusted, leaves
+        them from different publications for minutes. The classification then
+        refuses, and it runs after the transaction has stopped every service:
+        nothing is left that can publish them again. Here, before the
+        transaction opens, a running Guardian whose records are still from
+        different publications about two seconds after the first look (a look
+        between its three writes is not a fault, delta-4 F2) is restarted (the
+        first pass of every Guardian process publishes all three) and waited
+        for. Nothing is stopped for good: if the start fails after the stop,
+        the start mode is put back and the start is tried once more, and a
+        Guardian that still does not start ends the run naming both failures
+        (delta-4 F1). If the records do not come right the run ends with every
+        service running and nothing changed.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $stamps = Get-DefenseClawGuardianPublicationStamps -Layout $Layout
+    $values = @($stamps.Values)
+    if (@($values | Microsoft.PowerShell.Core\Where-Object { $null -ne $_ }).Count -eq 0) {
+        return
+    }
+    if (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) {
+        return
+    }
+    $guardian = Get-DefenseClawServiceChecked -Name $GuardianServiceName
+    if ($null -eq $guardian -or
+        $guardian.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+        return
+    }
+    Microsoft.PowerShell.Utility\Start-Sleep -Seconds $script:GuardianRepublishRecheckSeconds
+    if (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) {
+        return
+    }
+    $stamps = Get-DefenseClawGuardianPublicationStamps -Layout $Layout
+    Write-DefenseClawLifecyclePhase -Stage 'the Guardian records are from different publications: restarting the Guardian so it publishes them again, before the transaction opens'
+    $startMode = Get-DefenseClawServiceStartMode -Name $GuardianServiceName
+    try {
+        Stop-DefenseClawService -Name $GuardianServiceName
+        Start-DefenseClawService -Name $GuardianServiceName
+    }
+    catch {
+        $first = $_.Exception.Message
+        try {
+            Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode $startMode
+            Start-DefenseClawService -Name $GuardianServiceName
+        }
+        catch {
+            throw ("the hook Guardian was stopped to publish its records again and could not be started ($first; second try: $($_.Exception.Message)). " +
+                "Its start mode was put back. Start it with: sc.exe start $GuardianServiceName , then run the same command again. No transaction was opened and nothing else was changed.")
+        }
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds($script:GuardianRepublishWaitSeconds)
+    while ($true) {
+        if (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) {
+            return
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            $shown = (@($stamps.Keys | Microsoft.PowerShell.Core\ForEach-Object { "$_ $($stamps[$_])" }) -join ', ')
+            throw ("the hook Guardian's activation, authorization and state records are from different publications ($shown) and the restarted Guardian did not publish them again within $($script:GuardianRepublishWaitSeconds) seconds. " +
+                'No transaction was opened and nothing was changed. Look at the Guardian log under the state folder logs\guardian, then run the same command again.')
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Seconds $script:GuardianRepublishPollSeconds
+    }
+}
+
 function Invoke-DefenseClawUninstallPrecommitHookCheck {
     <#
         GAP-0571 read-only check of the hook removal before the uninstall
@@ -37636,6 +38418,113 @@ function Repair-DefenseClawRecoveredCodexRequirements {
     )
 }
 
+function Test-DefenseClawRebuiltDeploymentRecord {
+    <#
+        rel-1-0-6:GAP-0994: whether the deployment record is one Setup rebuilt
+        from the machine and the payload (New-DefenseClawRebuiltDeploymentRecord)
+        and that no transaction has completed over since.
+    #>
+    param([Parameter(Mandatory)]$Metadata)
+    $marker = $Metadata.PSObject.Properties['record_rebuilt_by_setup']
+    return [bool](
+        $null -ne $marker -and
+        $marker.Value -is [bool] -and
+        [bool]$marker.Value -and
+        $null -eq $Metadata.PSObject.Properties['managed_hooks_activation']
+    )
+}
+
+function Get-DefenseClawRebuiltRecordRequiredArtifacts {
+    # The programs the services run: the gateway (also the Guardian's image),
+    # the hook and the sensor helper. A rollback starts them, so the rebuilt
+    # record must name each with the digest it was rebuilt from.
+    return @('gateway', 'hook', 'sensor_helper')
+}
+
+function Format-DefenseClawRebuiltRecordArtifactRefusal {
+    param(
+        [Parameter(Mandatory)][string]$Artifact,
+        [Parameter(Mandatory)][string]$Because,
+        [switch]$BeforeAnyChange
+    )
+    $step = "run the Setup of the release that is installed with $(Format-DefenseClawSetupAction -Action '/repair') (it puts $Artifact back from its own payload), or $(Format-DefenseClawSetupAction -Action @('/uninstall', '/install'))"
+    if ($BeforeAnyChange) {
+        return "the deployment record cannot be rebuilt: $Because. Nothing was changed and every service is as it was; $step."
+    }
+    return "the rebuilt deployment record cannot vouch for $Artifact ($Because), so a rollback to it cannot check it; $step."
+}
+
+function Assert-DefenseClawRebuiltRecordCoversArtifacts {
+    <#
+        rel-1-0-6:GAP-0994 (delta-4 F3): before anything is swapped, the value
+        New-DefenseClawRebuiltDeploymentRecord built must name the gateway, the
+        hook and the sensor helper. It names an installed file only when the
+        file has the digest of the authenticated payload, so a missing digest
+        means the installed file differs from the payload (or is gone). The
+        rollback check below would then pass without checking it.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Value
+    )
+    $layoutKey = @{ gateway = 'GatewayPath'; hook = 'HookPath'; sensor_helper = 'SensorHelperPath' }
+    $hashes = $Value['hashes']
+    foreach ($artifact in (Get-DefenseClawRebuiltRecordRequiredArtifacts)) {
+        if ($null -ne $hashes -and $hashes.Contains($artifact)) { continue }
+        $path = if ($Layout.ContainsKey($layoutKey[$artifact])) { [string]$Layout[$layoutKey[$artifact]] } else { $artifact }
+        throw (Format-DefenseClawRebuiltRecordArtifactRefusal -Artifact $artifact -BeforeAnyChange `
+            -Because "the installed $artifact ($path) is missing or is not the file of this Setup's payload")
+    }
+}
+
+function Assert-DefenseClawRebuiltRecordArtifacts {
+    <#
+        rel-1-0-6:GAP-0994: what a rollback to a rebuilt deployment record can
+        check. The record names no activation evidence and no pinned paths, so
+        the full assertion cannot pass and a rollback that waited for it
+        stopped with the services down and the transaction pending (Repair
+        then failed the same way; only a forced purge ended it). The gateway,
+        the hook and the sensor helper must be named with the digest of the
+        authenticated payload the record was rebuilt from and must still have
+        it; any other artifact the record names must too. A record that names
+        none (or lacks one of the three) is refused by name, never passed.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata
+    )
+    $layoutKey = @{
+        gateway = 'GatewayPath'; acp = 'ACPPath'; hook = 'HookPath'; hook_guard = 'HookGuardPath'
+        sensor_helper = 'SensorHelperPath'; cli = 'CLIPath'; installer = 'InstallerPath'; module = 'ModulePath'
+    }
+    $hashesProperty = $Metadata.PSObject.Properties['hashes']
+    $hashes = if ($null -ne $hashesProperty) { $hashesProperty.Value } else { $null }
+    foreach ($artifact in (Get-DefenseClawRebuiltRecordRequiredArtifacts)) {
+        if ($null -eq $hashes -or $null -eq $hashes.PSObject.Properties[$artifact] -or
+            ([string]$hashes.PSObject.Properties[$artifact].Value) -cnotmatch '^[0-9a-f]{64}$') {
+            throw (Format-DefenseClawRebuiltRecordArtifactRefusal -Artifact $artifact -Because 'the record names no digest for it')
+        }
+    }
+    foreach ($artifact in $layoutKey.Keys) {
+        $recorded = $hashes.PSObject.Properties[$artifact]
+        if ($null -eq $recorded) {
+            continue
+        }
+        if (-not $Layout.ContainsKey($layoutKey[$artifact])) {
+            throw (Format-DefenseClawRebuiltRecordArtifactRefusal -Artifact $artifact -Because 'the layout has no path for it')
+        }
+        $installed = [string]$Layout[$layoutKey[$artifact]]
+        if ([string]::IsNullOrWhiteSpace($installed) -or
+            -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $installed -PathType Leaf)) {
+            throw (Format-DefenseClawRebuiltRecordArtifactRefusal -Artifact $artifact -Because "it is missing at $installed")
+        }
+        $digest = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($digest -cne ([string]$recorded.Value).ToLowerInvariant()) {
+            throw (Format-DefenseClawRebuiltRecordArtifactRefusal -Artifact $artifact -Because "the file at $installed has another digest than the record names")
+        }
+    }
+}
+
 function Assert-DefenseClawEnterpriseDeployment {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -37702,6 +38591,16 @@ function Assert-DefenseClawEnterpriseDeployment {
         -Metadata $metadata `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
+    if ($RollbackRestore -and (Test-DefenseClawStandaloneProfile) -and
+        (Test-DefenseClawRebuiltDeploymentRecord -Metadata $metadata)) {
+        # rel-1-0-6:GAP-0994: the transaction opened over a rebuilt record and
+        # failed. Its rollback puts that record back, and the record cannot
+        # carry what the full assertion below asks for; the next repair writes
+        # the full one. The services start again and the run ends with its error.
+        Assert-DefenseClawRebuiltRecordArtifacts -Layout $Layout -Metadata $metadata
+        Write-DefenseClawLifecyclePhase -Stage 'rollback restored the rebuilt deployment record; the next repair writes the full one'
+        return
+    }
     if (Test-DefenseClawStandaloneProfile) {
         # Verify also serves an installed-host ensure that would otherwise
         # return compliant without opening a transaction. Use the fresh-install
@@ -39475,7 +40374,16 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
             $activeHash = Get-DefenseClawRecordedConfigGenerationHash -Layout $Layout
         }
         else {
-            $activeHash = [string]$Metadata.managed_hooks_activation.manifest_sha256
+            # A record rebuilt from the machine (the unreadable-record
+            # rebuild) has no activation yet, and Repair re-derives it after
+            # this step: the manifest is then judged as it is.
+            $activationProperty = $Metadata.PSObject.Properties['managed_hooks_activation']
+            $activeHash = if ($null -ne $activationProperty) {
+                [string]$activationProperty.Value.manifest_sha256
+            }
+            else {
+                ''
+            }
         }
         if (-not $needsRewrite -and -not [string]::IsNullOrEmpty($activeHash)) {
             $installedHash = (
@@ -48978,6 +49886,16 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -CoworkPackagePath $CoworkPackagePath -CoworkSignaturePath $CoworkSignaturePath `
             -BeforeAclRepair
     }
+    if ($priorDeploymentActive -and $null -eq $priorManagedHooksActivation -and
+        -not $recoverCommittedManagedHooksLifecycle -and
+        (Test-DefenseClawStandaloneProfile)) {
+        # rel-1-0-6:GAP-0994: the activation classification below reads records
+        # that nothing can publish again once the transaction has stopped the
+        # services.
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction `
+            -Layout $Layout `
+            -GuardianServiceName $GuardianServiceName
+    }
     $snapshot = New-DefenseClawTransaction `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
@@ -54433,6 +55351,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -AllowMissingCertificationCodexHome:($Action -in @('Status', 'Verify', 'Recover'))
+    if ((Test-DefenseClawStandaloneProfile) -and
+        $Action -in @('Status', 'Verify', 'Install', 'Upgrade', 'Reconcile') -and
+        -not $recoverProductionUninstallAcl) {
+        # A deployment record that is missing while a copy kept aside is left
+        # next to it: an earlier run stopped between the two (GAP-0602 D1).
+        $orphanedRecord = Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName
+        if (-not [string]::IsNullOrEmpty($orphanedRecord)) { throw $orphanedRecord }
+    }
     if ((Test-DefenseClawDeploymentMetadataPresent -Path $layout.MetadataPath) -and
         ($Action -ne 'Status' -or (Test-DefenseClawAdministrator)) -and
         -not $recoverProductionUninstallAcl) {
@@ -54482,9 +55408,15 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 $installRecoveryReason = "deployment metadata: $($metadataError.Exception.Message)"
             }
             elseif ($Action -ne 'Repair' -or
-                -not ([string]$metadataError.Exception.Message).StartsWith(
-                    $script:UnreadableMetadataMessage,
-                    [StringComparison]::Ordinal)) {
+                -not (([string]$metadataError.Exception.Message).StartsWith(
+                        $script:UnreadableMetadataMessage,
+                        [StringComparison]::Ordinal) -or
+                    ([string]$metadataError.Exception.Message).StartsWith(
+                        'untrusted_record: ',
+                        [StringComparison]::Ordinal))) {
+                # A record another account can change is kept aside and
+                # written again under the lock by Repair, like an unreadable
+                # one (Invoke-DefenseClawStandaloneRecordRecovery, GAP-0602).
                 throw
             }
         }
@@ -54519,10 +55451,18 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             }
         }
         catch {
-            if (-not $installAutoRecoveryEligible -or $installLiveDeployment) {
+            if ($Action -ceq 'Repair' -and (Test-DefenseClawStandaloneProfile) -and
+                ([string]$_.Exception.Message).StartsWith('untrusted_record: ', [StringComparison]::Ordinal)) {
+                # Repair keeps a changed attestation aside under the lock and
+                # writes it again as not attested (GAP-0602).
+                Microsoft.PowerShell.Utility\Write-Verbose "attestation left to the record recovery: $($_.Exception.Message)"
+            }
+            elseif (-not $installAutoRecoveryEligible -or $installLiveDeployment) {
                 throw
             }
-            $installRecoveryReason = "application-control attestation: $($_.Exception.Message)"
+            else {
+                $installRecoveryReason = "application-control attestation: $($_.Exception.Message)"
+            }
         }
     }
     if ($AttestAgentApplicationControl) {
@@ -54735,7 +55675,20 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             $GatewayServiceName -ceq 'DefenseClawGateway') {
             Assert-DefenseClawNoOtherProfileDeployment
         }
+        if ($Action -in @('Install', 'Upgrade') -and (Test-DefenseClawStandaloneProfile)) {
+            # Copies a Setup run kept aside, left by an uninstall that kept the
+            # state, must not block this install (nothing reads them).
+            Remove-DefenseClawLeftoverKeptRecords `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
+        }
         if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
+            [void](Invoke-DefenseClawStandaloneRecordRecovery `
+                -Layout $layout `
+                -Sources $sources `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName)
             Assert-DefenseClawRepairRollbackConfig `
                 -Layout $layout `
                 -Sources $sources `

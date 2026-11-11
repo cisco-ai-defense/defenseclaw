@@ -114,7 +114,7 @@ func WindowsStandaloneTrustScope() bool {
 // reviews 1 to 4). The guardian's layout self-heal and the enumerator leave
 // such a file unrepaired too.
 func StandaloneRefusesContentDrift() bool {
-	return windowsStandaloneTrustScope()
+	return windowsStandaloneTrustScope() || standaloneLifecycleProcess.Load()
 }
 
 // StandaloneFileLeafDrift returns the untrusted owner or write-like entry
