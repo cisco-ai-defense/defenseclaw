@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -3815,12 +3816,13 @@ func classifyRsync(out *parseOutput, command *CommandFact) {
 }
 
 // rsyncRemoteOperand reports host:path, host::module and rsync:// operands.
+// A Windows drive path (C:\dir, C:/dir) is local on a Windows host.
 func rsyncRemoteOperand(operand string) bool {
 	if strings.HasPrefix(operand, "rsync://") {
 		return true
 	}
 	colon := strings.IndexByte(operand, ':')
-	return colon > 0 && !strings.Contains(operand[:colon], "/")
+	return colon > 0 && !strings.Contains(operand[:colon], "/") && filepath.VolumeName(operand) == ""
 }
 
 func dangerousInstallMode(mode string) bool {
