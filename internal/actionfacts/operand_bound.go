@@ -39,6 +39,41 @@ func BoundOperands(command string, droppable func(word string) bool) (reduced st
 	return b.out.String(), true
 }
 
+// maxStatementWords is the most argv words of a statement past the argv bound
+// of the analysis (maxArgvItems) that BoundStatementOperands keeps before it
+// leaves out its later plain operands. It is well below that bound, so that
+// the words that stay past it (the options, every word that is not plain, the
+// last operand) have room and the reading keeps its path facts, and so that
+// the reading costs little next to the full one.
+const maxStatementWords = maxArgvItems / 8
+
+// BoundStatementOperands is the reading of BoundOperands that the gateway
+// judges for a statement of more argv words than the analysis reads
+// (maxArgvItems): such a statement has no path facts, so a credential file it
+// named had no finding (GAP-1069). Past maxStatementWords words of a
+// statement its plain operands are left out as past the call bound, except
+// the last one, which a command may write. It is command when no statement
+// is past the argv bound or nothing is left out.
+func BoundStatementOperands(command string, droppable func(word string) bool) string {
+	if len(command) < 2*maxArgvItems || !statementPastArgvBound(command) {
+		return command
+	}
+	b := operandBounder{command: command, droppable: droppable, first: true, statements: true}
+	b.run()
+	if !b.dropped {
+		return command
+	}
+	return b.out.String()
+}
+
+// statementPastArgvBound reports a statement of command, read as the bounder
+// reads it, with more than maxArgvItems words.
+func statementPastArgvBound(command string) bool {
+	b := operandBounder{command: command, droppable: func(string) bool { return false }, first: true}
+	b.run()
+	return b.past
+}
+
 type operandBounder struct {
 	command   string
 	droppable func(word string) bool
@@ -50,12 +85,21 @@ type operandBounder struct {
 
 	// Past the bound a word that stays is written once per statement: seen
 	// holds what the statement has written (operands apart from redirect
-	// targets), pending an operand left out as a repeat that no operand
-	// written since follows, and afterOption that the word before was an
+	// targets), pending an operand left out as a repeat (or, past the
+	// statement bound only, as plain) that no operand written since
+	// follows, and afterOption that the word before was an
 	// option, whose argument a word may be.
 	seen        map[string]bool
 	pending     string
 	afterOption bool
+
+	// statements bounds each statement too (BoundStatementOperands); words
+	// counts the argv words the statement has written, dropped that a word
+	// was left out, past that a statement wrote more than maxArgvItems.
+	statements bool
+	words      int
+	dropped    bool
+	past       bool
 }
 
 // heredocMark is a here-document whose body starts at the next line.
@@ -94,10 +138,12 @@ func (b *operandBounder) run() {
 			i = end
 		case b.first:
 			b.first = false
+			b.words++
 			b.out.WriteString(word)
 			i = end
 		case len(word) > 1 && word[0] == 0x2d:
 			// An option is no operand, and it may carry a path.
+			b.words++
 			b.out.WriteString(word)
 			b.afterOption = true
 			i = end
@@ -118,7 +164,10 @@ func (b *operandBounder) endStatement() {
 		b.out.WriteByte(0x20)
 		b.out.WriteString(b.pending)
 	}
-	b.first, b.pending, b.afterOption = true, "", false
+	if b.words > maxArgvItems {
+		b.past = true
+	}
+	b.first, b.pending, b.afterOption, b.words = true, "", false, 0
 	clear(b.seen)
 }
 
@@ -127,14 +176,22 @@ func (b *operandBounder) endStatement() {
 func (b *operandBounder) operand(word string) {
 	argument := b.afterOption
 	b.afterOption = false
-	if !b.countedTarget(word) {
+	past := b.statements && b.words >= maxStatementWords
+	if !b.countedTarget(word, past) {
+		// A plain operand left out only for the statement bound is
+		// written when it is the last one: the hook client keeps it below
+		// the call bound, and the last operand may be the one written.
+		if past && !b.over && !argument {
+			b.pending = word
+		}
 		return
 	}
-	if b.over && !argument && b.repeated("o"+word) {
+	if (b.over || past) && !argument && b.repeated("o"+word) {
 		b.pending = word
 		return
 	}
 	b.pending = ""
+	b.words++
 	b.out.WriteString(word)
 }
 
@@ -182,7 +239,7 @@ func (b *operandBounder) redirect(word string, end int) int {
 			end = b.copyNextWord(end)
 		}
 	case target != "":
-		if b.countedTarget(target) && (!b.over || !b.repeated("r"+word)) {
+		if b.countedTarget(target, false) && (!b.over || !b.repeated("r"+word)) {
 			b.out.WriteString(word)
 		}
 	default:
@@ -206,7 +263,7 @@ func (b *operandBounder) redirect(word string, end int) int {
 			b.out.WriteString(command[end:tend])
 			return tend
 		}
-		if b.countedTarget(next) && (!b.over || !b.repeated("r"+word+"\x00"+next)) {
+		if b.countedTarget(next, false) && (!b.over || !b.repeated("r"+word+"\x00"+next)) {
 			b.out.WriteString(word)
 			b.out.WriteString(command[end:j])
 			b.out.WriteString(next)
@@ -238,12 +295,16 @@ func fileDuplicate(op, target string) bool {
 }
 
 // countedTarget counts a file operand or target and reports whether it stays:
-// a plain name past the bound does not.
-func (b *operandBounder) countedTarget(target string) bool {
+// a plain name past the call bound, or past the statement bound (past), does
+// not.
+func (b *operandBounder) countedTarget(target string, past bool) bool {
 	b.n++
 	if b.n > MaxOperandsPerCall {
-		b.over = true
-		return !b.droppable(target)
+		b.over, past = true, true
+	}
+	if past && b.droppable(target) {
+		b.dropped = true
+		return false
 	}
 	return true
 }

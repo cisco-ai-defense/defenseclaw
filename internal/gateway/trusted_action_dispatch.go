@@ -180,8 +180,13 @@ type trustedActionRequest struct {
 	// leave this false even when the argv shape is a static reader.
 	DowngradeReadOnlyDataArgs bool
 	// operandBounded marks the bounded reading of a call over the operand
-	// bound (operandBoundTwinRequest): it is judged once, not bounded again.
+	// bound (operandBoundDispatch): it is judged once, not bounded again.
 	operandBounded bool
+	// statementBounded marks the statement-bounded reading of a call
+	// (operandBoundDispatch). It only adds findings to the reading judged
+	// before it, which has no path facts for the long statement, so an
+	// operand the client map leaves out does not fail it closed.
+	statementBounded bool
 	// A sandbox action may execute in a filesystem the gateway cannot see.
 	SkipLocalFilesystemResolution bool
 	// CopilotSharedLocalFile marks an exact file call decoded from a Local
@@ -394,11 +399,12 @@ func dispatchTrustedAction(
 		// takes the over-limit path (GAP-2537).
 		return trustedActionLimitFindings(request.EnforcementCapable)
 	}
-	if twin, over := operandBoundTwinRequest(request); over {
-		// A statement past actionfacts.MaxOperandsPerCall operands is
-		// unresolved (GAP-0943): the bounded reading is judged
-		// as any call, and the tier adds its verdict (operandBoundFindings).
-		return operandBoundFindings(parent, dispatchTrustedAction(parent, twin), request.EnforcementCapable)
+	if bounded, handled := operandBoundDispatch(parent, request); handled {
+		// A call past actionfacts.MaxOperandsPerCall operands is unresolved
+		// (GAP-0943), and a statement of more argv words than the analysis
+		// reads has no path facts (GAP-1069): operandBoundDispatch judges
+		// the bounded readings.
+		return bounded
 	}
 	var (
 		facts     actionfacts.Facts

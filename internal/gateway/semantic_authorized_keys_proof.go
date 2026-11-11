@@ -1332,8 +1332,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				// which connector scoping removed, keeps the local checks.
 				if _, described := clientTargets[target]; !described {
 					// The strict tier keeps its refusal of every omitted
-					// operand: the plain ones are allowed in the others.
-					if omittedPlain[target] && !request.StrictPolicy {
+					// operand: the plain ones are allowed in the others. The
+					// statement-bounded reading leaves the omitted operands
+					// to the reading judged before it (GAP-1069).
+					if request.statementBounded || omittedPlain[target] && !request.StrictPolicy {
 						return false
 					}
 					omitted := !windowsLocationOrdinaryWriteTarget(target)

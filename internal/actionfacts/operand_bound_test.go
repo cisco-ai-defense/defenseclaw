@@ -213,3 +213,43 @@ func TestBoundOperandsWritesARepeatedWordOncePerStatement(t *testing.T) {
 		}
 	}
 }
+
+// TestBoundStatementOperandsKeepsEveryStatementWithinTheArgvBound is GAP-1069:
+// a statement of more argv words than the analysis reads (maxArgvItems) had no
+// path facts. The gateway reading keeps of each statement the program, the
+// options, the first words, every word that is not plain and the last operand,
+// so the statement is within the argv bound, and it leaves a short statement
+// as it is. Past the call bound the last plain operand is left out, as the hook
+// client leaves it out, and the client reading (BoundOperands) is unchanged.
+func TestBoundStatementOperandsKeepsEveryStatementWithinTheArgvBound(t *testing.T) {
+	t.Parallel()
+	short := "touch " + boundTestWords("f", maxArgvItems-2) + " keep"
+	if reduced := BoundStatementOperands(short, boundTestPlain); reduced != short {
+		t.Fatal("a statement within the argv bound changed")
+	}
+	command := "cp -p " + boundTestWords("f", 300) + " keep1 " + boundTestWords("e", 30) + " flast; touch " + boundTestWords("f", 300)
+	reduced := BoundStatementOperands(command, boundTestPlain)
+	if reduced == command {
+		t.Fatal("a statement past the argv bound was not reduced")
+	}
+	for _, kept := range []string{"cp -p f0 ", " keep1 ", " flast;", "touch f0 ", " f299"} {
+		if !strings.Contains(reduced, kept) {
+			t.Errorf("the reduced reading left out %q", kept)
+		}
+	}
+	if strings.Contains(reduced, " f250 ") {
+		t.Error("a plain operand past the statement bound stayed")
+	}
+	for _, statement := range strings.Split(reduced, ";") {
+		if words := len(strings.Fields(statement)); words > maxArgvItems {
+			t.Errorf("a statement keeps %d argv words, over the bound %d", words, maxArgvItems)
+		}
+	}
+	if client, clientOver := BoundOperands(command, boundTestPlain); clientOver || client != command {
+		t.Error("the client reading of a call within the call bound changed")
+	}
+	reduced = BoundStatementOperands("touch "+boundTestWords("f", MaxOperandsPerCall+100)+" keep", boundTestPlain)
+	if !strings.HasSuffix(reduced, " keep") || strings.Contains(reduced, " f1123") {
+		t.Error("past the call bound: want the word that is not plain kept and the last plain operand left out")
+	}
+}
