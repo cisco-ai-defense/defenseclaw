@@ -1178,7 +1178,7 @@ func (stub *ensureStub) install(t *testing.T) {
 		windowsEnterpriseCoworkEnsureDrift = originalCowork
 		windowsEnterpriseRepairDataDirBeforePlan = originalDataDir
 	})
-	windowsEnterpriseRepairDataDirBeforePlan = func() string { return "" }
+	windowsEnterpriseRepairDataDirBeforePlan = func() (string, string) { return "", "" }
 	originalGuardianRepairs := windowsEnterpriseGuardianRepairsSinceLastRun
 	t.Cleanup(func() { windowsEnterpriseGuardianRepairsSinceLastRun = originalGuardianRepairs })
 	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return nil }
@@ -1286,8 +1286,8 @@ func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
 	// back says so and is not a no-op.
 	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
 	stub.install(t)
-	windowsEnterpriseRepairDataDirBeforePlan = func() string {
-		return `restored the access control of C:\ProgramData\Cisco\DefenseClaw\runtime, which had drifted (untrusted writer S-1-5-32-545)`
+	windowsEnterpriseRepairDataDirBeforePlan = func() (string, string) {
+		return `restored the access control of C:\ProgramData\Cisco\DefenseClaw\runtime, which had drifted (untrusted writer S-1-5-32-545)`, ""
 	}
 	stdout.Reset()
 	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {

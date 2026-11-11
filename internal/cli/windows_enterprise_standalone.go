@@ -239,33 +239,78 @@ const windowsEnterpriseUnreadableMetadataMarker = "could not read the installed 
 
 // windowsEnterpriseRepairDataDirBeforePlan stamps the canonical protection
 // on the runtime folder (data_dir) of an installed standalone deployment
-// when it drifted, as the guardian's data-path repair does, and returns the
-// change it made ("" when none). The strict trust walk refuses a runtime
-// folder another account can write (GAP-0561). A seam for tests.
-var windowsEnterpriseRepairDataDirBeforePlan = func() string {
+// when it drifted, as the guardian's data-path repair does. It returns the
+// change it made ("" when none) and, for a drift it saw but could not put
+// back, why. The strict trust walk refuses a runtime folder another account
+// can write (GAP-0561). A seam for tests.
+var windowsEnterpriseRepairDataDirBeforePlan = func() (change, problem string) {
 	if !windowsEnterpriseIsElevated() {
-		return ""
+		return "", ""
 	}
 	layout, err := windowsManagedLayout.standalone()
 	if err != nil || strings.TrimSpace(layout.DataDir) == "" {
-		return ""
+		return "", ""
 	}
-	// On standalone a runtime folder another account can write or owns is
-	// left for the strict trust walk to refuse and name (g582 round 4). The
-	// refusal and the repair judge by the standalone scope, which Setup's own
-	// process lacks, so both run under the pin (GAP-1048).
+	// The refusal and the repair judge by the standalone scope, which
+	// Setup's own process lacks, so both run under the pin (GAP-1048). The
+	// gateway service account is named: this process carries no service
+	// pins, from which the guardian's repair resolves it.
 	defer pinWindowsStandaloneTrustScope()()
-	if managed.RefuseStandaloneInPlaceRepair(layout.DataDir, managed.ObjectRuntimeDirectory) != nil {
-		return ""
+	return repairWindowsEnterpriseRuntimeFolder(layout.DataDir, managed.CanonicalOptions{GatewayServiceAccount: layout.ServiceUser})
+}
+
+// The canonical checks repairWindowsEnterpriseRuntimeFolder makes; tests
+// replace them.
+var (
+	windowsEnterpriseRuntimeFolderAssess = managed.AssessCanonical
+	windowsEnterpriseRuntimeFolderRefuse = managed.RefuseStandaloneInPlaceRepair
+	windowsEnterpriseRuntimeFolderEnsure = managed.EnsureCanonical
+)
+
+// repairWindowsEnterpriseRuntimeFolder puts a trusted-only drift of the
+// runtime folder back in place. It judges the folder before it repairs it,
+// so a drift this run saw is never reported as compliant: a folder the
+// running guardian put back between that check and the repair is still a
+// change of this run (GAP-0573), and a drift the repair could not put back
+// is named instead of passing as a no-op.
+func repairWindowsEnterpriseRuntimeFolder(dataDir string, opts managed.CanonicalOptions) (change, problem string) {
+	kind := managed.ObjectRuntimeDirectory
+	quiet := opts
+	quiet.Quiet = true
+	seen, err := windowsEnterpriseRuntimeFolderAssess(dataDir, kind, quiet)
+	// Only a trusted-only drift is put back in place. A runtime folder
+	// another account can write or owns is left for the strict trust walk
+	// to refuse and name (g582 round 4); a canonical or missing one has
+	// nothing to repair.
+	if err != nil || seen.Outcome != managed.CanonicalAccepted {
+		return "", ""
 	}
-	// The gateway service account is named: this process carries no
-	// service pins, from which the guardian's repair resolves it.
-	repaired, err := managed.EnsureCanonical(layout.DataDir, managed.ObjectRuntimeDirectory, managed.CanonicalOptions{GatewayServiceAccount: layout.ServiceUser})
-	if err != nil || repaired.Outcome != managed.CanonicalRepaired {
-		return ""
+	if windowsEnterpriseRuntimeFolderRefuse(dataDir, kind) != nil {
+		return "", ""
 	}
-	return "restored the access control of " + layout.DataDir + ", which had drifted (" +
-		windowsEnterpriseBoundedDiagnostic(strings.Join(repaired.Drift, "; ")) + ")"
+	drift := windowsEnterpriseBoundedDiagnostic(strings.Join(seen.Drift, "; "))
+	repaired, err := windowsEnterpriseRuntimeFolderEnsure(dataDir, kind, opts)
+	var reason string
+	switch {
+	case err != nil:
+		reason = err.Error()
+	case repaired.Outcome == managed.CanonicalRepaired:
+		return "restored the access control of " + dataDir + ", which had drifted (" +
+			windowsEnterpriseBoundedDiagnostic(strings.Join(repaired.Drift, "; ")) + ")", ""
+	case repaired.Outcome == managed.CanonicalOK:
+		return "the access control of " + dataDir + " had drifted (" + drift + ") and was put back while ensure repaired it", ""
+	case repaired.Outcome == managed.CanonicalBoundary:
+		// Another account was given write access since the check: the
+		// strict trust walk refuses and names it.
+		return "", ""
+	default:
+		reason = string(repaired.Outcome)
+		if repaired.RepairError != "" {
+			reason += ": " + repaired.RepairError
+		}
+	}
+	return "", "the access control of " + dataDir + " had drifted (" + drift + ") and ensure could not put it back: " +
+		windowsEnterpriseBoundedDiagnostic(reason)
 }
 
 // windowsEnterpriseGuardianRepairsSinceLastRun lists the repairs the hook
@@ -312,9 +357,13 @@ var windowsEnterpriseGuardianRepairsSinceLastRun = func() []string {
 // after a concurrent install, so that pass cannot report a no-op either; it
 // adds no second warning.
 func noteWindowsEnterpriseEnsureDriftRepairs(result *enterprisestatus.Result, repaired *bool) {
-	if change := windowsEnterpriseRepairDataDirBeforePlan(); change != "" {
+	change, problem := windowsEnterpriseRepairDataDirBeforePlan()
+	if change != "" {
 		result.Changes = append(result.Changes, change)
 		*repaired = true
+	}
+	if problem != "" && !windowsEnterpriseResultHasWarning(result, "runtime_acl_not_repaired") {
+		result.AddWarning("runtime_acl_not_repaired", problem)
 	}
 	if healed := windowsEnterpriseGuardianRepairsSinceLastRun(); len(healed) > 0 {
 		if !windowsEnterpriseResultHasWarning(result, "guardian_repaired_drift") {
