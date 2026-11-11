@@ -388,14 +388,7 @@ func (a *APIServer) skillFolderRefsDecision(
 	// the call that names that many is refused (when a skill is held or
 	// denied) without reading them again, so the answer does not wait on the
 	// reading that made the hook run out of time.
-	// Nothing the call reaches can be refused while no skill is denied or
-	// held (the loop below blocks only a denied or held folder), so the call
-	// is not read for skill folders at all: reading an 889 KB patch for them
-	// was most of the gateway's CPU for a benign call.
-	if !a.skillFoldersAreGuarded(cfg) {
-		return config.AssetPolicyDecision{}, false
-	}
-	if facts.SkillLinksTruncated {
+	if facts.SkillLinksTruncated && a.skillFoldersAreGuarded(cfg) {
 		return a.skillLinksCutDecision(ctx, connector, hookEvent, toolName, facts.SkillLinks), true
 	}
 	caller := ""
@@ -409,7 +402,7 @@ func (a *APIServer) skillFolderRefsDecision(
 		caller, uid, gid = peer.Name, peer.UID, peer.GID
 	}
 	refs, cut := assetfacts.SkillFolderRefsAndCut(toolName, toolInput, home, cwd, caller, uid, gid, strict)
-	if cut {
+	if cut && a.skillFoldersAreGuarded(cfg) {
 		return a.skillLinksCutDecision(ctx, connector, hookEvent, toolName, facts.SkillLinks), true
 	}
 	roots := assetfacts.SkillRoots(connector, home, cwd)
