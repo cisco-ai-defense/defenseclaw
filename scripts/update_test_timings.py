@@ -44,6 +44,8 @@ OUT_DIR = ROOT / "scripts" / "test-timings"
 # Packages whose tests the CI splits by test name (go_test_shards.py test
 # mode and the split parts of package mode); only their per-test times are kept.
 PER_TEST_MIN_SECONDS = 60.0
+# A top-level test function, as go_test_shards.py discovers them.
+TEST_FUNCTION_RE = re.compile(r"^func\s+((?:Test|Fuzz|Example)[A-Za-z0-9_]*)\s*\(", re.MULTILINE)
 
 
 def _write(path: Path, data: dict) -> None:
@@ -52,9 +54,8 @@ def _write(path: Path, data: dict) -> None:
     print(f"wrote {path.relative_to(ROOT) if path.is_relative_to(ROOT) else path}")
 
 
-def go_timings(files: list[Path], module: str) -> dict:
-    tests: dict[str, dict[str, float]] = {}
-    packages: dict[str, float] = {}
+def _go_events(files: list[Path]):
+    """The go test -json events of files, in order."""
     for file in files:
         for line in file.read_text(encoding="utf-8", errors="replace").splitlines():
             # A CI log puts a timestamp (and gh run view the job and step
@@ -66,17 +67,28 @@ def go_timings(files: list[Path], module: str) -> dict:
                 event = json.loads(line[start:])
             except json.JSONDecodeError:
                 continue
-            if event.get("Action") not in ("pass", "fail"):
-                continue
-            package = event.get("Package", "")
-            elapsed = float(event.get("Elapsed", 0))
-            name = event.get("Test")
-            if name is None:
-                # Shards of one package each report its elapsed time: sum them.
-                packages[package] = packages.get(package, 0.0) + elapsed
-            elif "/" not in name:
-                rel = package[len(module) + 1 :] if package.startswith(module + "/") else package
-                tests.setdefault(rel, {})[name] = elapsed
+            if isinstance(event, dict):
+                yield event
+
+
+def _rel(package: str, module: str) -> str:
+    return package[len(module) + 1 :] if package.startswith(module + "/") else package
+
+
+def go_timings(files: list[Path], module: str) -> dict:
+    tests: dict[str, dict[str, float]] = {}
+    packages: dict[str, float] = {}
+    for event in _go_events(files):
+        if event.get("Action") not in ("pass", "fail"):
+            continue
+        package = event.get("Package", "")
+        elapsed = float(event.get("Elapsed", 0))
+        name = event.get("Test")
+        if name is None:
+            # Shards of one package each report its elapsed time: sum them.
+            packages[package] = packages.get(package, 0.0) + elapsed
+        elif "/" not in name:
+            tests.setdefault(_rel(package, module), {})[name] = elapsed
     # Per-test times matter only where CI splits a package by test; keep the
     # packages that reach a minute so the file stays reviewable.
     # Tests under two seconds are kept only as their mean ("*"), which is what
@@ -139,6 +151,28 @@ def windows_go_timings(files: list[Path], module: str) -> dict:
     return {"packages": {package: round(value, 1) for package, value in sorted(packages.items())}, "tests": tests}
 
 
+def keep_unreached_go_tests(old: dict, new: dict, files: list[Path], module: str, root: Path = ROOT) -> dict:
+    """new, with the recorded time of each test its package still defines
+    that no input ran to an end. The -timeout that ends a shard leaves the
+    tests it had not reached without an event; without their old time they
+    would weigh as unlisted tests, and the next plan could put them together
+    in one shard."""
+    ended: dict[str, set[str]] = {}
+    for event in _go_events(files):
+        name = event.get("Test")
+        if event.get("Action") in ("pass", "fail", "skip") and name and "/" not in name:
+            ended.setdefault(_rel(event.get("Package", ""), module), set()).add(name)
+    for rel, names in new.get("tests", {}).items():
+        defined = set()
+        for path in (root / rel).glob("*_test.go"):
+            defined.update(TEST_FUNCTION_RE.findall(path.read_text(encoding="utf-8")))
+        for name, seconds in old.get("tests", {}).get(rel, {}).items():
+            if name in defined and name not in names and name not in ended.get(rel, set()):
+                names[name] = seconds
+        new["tests"][rel] = dict(sorted(names.items()))
+    return new
+
+
 def merge_go_timings(old: dict, new: dict, module: str) -> dict:
     """Recorded go timings with the packages new measured replaced: a
     package new has drops its old per-test times too, so a test it no longer
@@ -170,8 +204,11 @@ def main() -> int:
     else:
         data, default = windows_go_timings(args.inputs, module), "go-windows.json"
     out = args.out or OUT_DIR / default
-    if args.update and out.is_file():
-        data = merge_go_timings(json.loads(out.read_text(encoding="utf-8")), data, module)
+    if args.kind != "python" and out.is_file():
+        old = json.loads(out.read_text(encoding="utf-8"))
+        data = keep_unreached_go_tests(old, data, args.inputs, module)
+        if args.update:
+            data = merge_go_timings(old, data, module)
     _write(out, data)
     return 0
 

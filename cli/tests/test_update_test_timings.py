@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from scripts.go_test_shards import partition_packages
-from scripts.update_test_timings import go_timings, merge_go_timings, windows_go_timings
+from scripts.update_test_timings import go_timings, keep_unreached_go_tests, merge_go_timings, windows_go_timings
 
 STAMP = "2026-10-19T12:00:00.1234567Z"
 MODULE = "github.com/example"
@@ -86,6 +86,34 @@ def test_merge_go_timings_replaces_only_the_measured_packages() -> None:
 
     assert data["packages"] == {f"{MODULE}/pkg/a": 120.0, f"{MODULE}/pkg/b": 50.0}
     assert data["tests"] == {"pkg/a": {"TestNew": 30.0, "*": 0.4}, "pkg/b": {"TestKept": 7.0, "*": 0.3}}
+
+
+def test_a_refresh_keeps_the_time_of_a_test_a_timed_out_shard_never_reached(tmp_path: Path) -> None:
+    # The shard ended at its -timeout before TestUnreached ran: it keeps its
+    # recorded time instead of weighing as an unlisted test. A test that ran
+    # takes its new time, and a test the package no longer defines is dropped.
+    package = tmp_path / "pkg" / "a"
+    package.mkdir(parents=True)
+    (package / "a_test.go").write_text(
+        "package a\n\nfunc TestRan(t *testing.T) {}\n\nfunc TestUnreached(t *testing.T) {}\n\nfunc TestFast(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    log = tmp_path / "shard.json"
+    log.write_text(
+        "\n".join(
+            [
+                _event("pass", "pkg/a", 30.0, "TestRan"),
+                _event("pass", "pkg/a", 0.5, "TestFast"),
+                _event("fail", "pkg/a", 660.0),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    old = {"tests": {"pkg/a": {"TestRan": 10.0, "TestUnreached": 90.0, "TestFast": 40.0, "TestGone": 50.0, "*": 0.2}}}
+
+    data = keep_unreached_go_tests(old, go_timings([log], MODULE), [log], MODULE, root=tmp_path)
+
+    assert data["tests"]["pkg/a"] == {"*": 0.5, "TestRan": 30.0, "TestUnreached": 90.0}
 
 
 HEAVY_PART_SECONDS = (180.492, 164.289, 244.576)
