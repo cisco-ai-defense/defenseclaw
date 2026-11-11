@@ -655,6 +655,11 @@
         "scan_hook_surface": {
           "type": "boolean",
           "default": true
+        },
+        "report_agent_class": {
+          "type": "boolean",
+          "default": false,
+          "description": "Managed inspection only: send the authenticated connector class to AI Defense when class-policy resolution is ready."
         }
       }
     },

@@ -1666,11 +1666,12 @@ type GatewayWatcherConfig struct {
 }
 
 type CiscoAIDefenseConfig struct {
-	Endpoint     string   `mapstructure:"endpoint"       yaml:"endpoint"`
-	APIKey       string   `mapstructure:"api_key"        yaml:"api_key"`
-	APIKeyEnv    string   `mapstructure:"api_key_env"    yaml:"api_key_env"`
-	TimeoutMs    int      `mapstructure:"timeout_ms"     yaml:"timeout_ms"`
-	EnabledRules []string `mapstructure:"enabled_rules"  yaml:"enabled_rules"`
+	Endpoint         string   `mapstructure:"endpoint"       yaml:"endpoint"`
+	APIKey           string   `mapstructure:"api_key"        yaml:"api_key"`
+	APIKeyEnv        string   `mapstructure:"api_key_env"    yaml:"api_key_env"`
+	TimeoutMs        int      `mapstructure:"timeout_ms"     yaml:"timeout_ms"`
+	EnabledRules     []string `mapstructure:"enabled_rules"  yaml:"enabled_rules"`
+	ReportAgentClass bool     `mapstructure:"report_agent_class" yaml:"report_agent_class"`
 
 	// ScanHookSurface controls whether the hook lane (PreToolUse +
 	// PostToolUse + UserPromptSubmit on hook-only connectors like
@@ -3919,6 +3920,7 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("cisco_ai_defense.api_key_env", "CISCO_AI_DEFENSE_API_KEY")
 	viper.SetDefault("cisco_ai_defense.timeout_ms", 3000)
 	viper.SetDefault("cisco_ai_defense.enabled_rules", []string{})
+	viper.SetDefault("cisco_ai_defense.report_agent_class", false)
 
 	viper.SetDefault("scanners.skill_scanner.binary", "skill-scanner")
 	viper.SetDefault("scanners.skill_scanner.use_llm", true)
