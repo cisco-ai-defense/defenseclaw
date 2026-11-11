@@ -1246,8 +1246,9 @@ func withActiveStateTargetMention(
 				// link names no state: its reading follows the paths the hook
 				// client placed there (GAP-1023).
 				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
-				if !(spelled && provenCMDSlashCStateWrite(request)) &&
-					!((spelled || request.ProtectedHomeHook) && provenPowerShellStateWrite(request)) {
+				proven := spelled && provenCMDSlashCStateWrite(request) ||
+					(spelled || request.ProtectedHomeHook) && provenPowerShellStateWrite(request)
+				if !proven {
 					return findings
 				}
 			}

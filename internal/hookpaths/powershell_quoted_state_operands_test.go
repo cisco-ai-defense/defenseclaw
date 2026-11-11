@@ -4,6 +4,8 @@
 package hookpaths
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -50,5 +52,34 @@ func TestPowerShellQuotedPathOperandsReadEachQuotedPath(t *testing.T) {
 	}
 	if got, over := paths(many.String()); !over || len(got) != powerShellQuotedPathMax {
 		t.Errorf("past the bound: %d paths over=%t, want %d and over", len(got), over, powerShellQuotedPathMax)
+	}
+}
+
+// A write whose walk ends in the state tree spelled from where that tree
+// really is (the home's .defenseclaw a link to another folder) is listed with
+// the state name; a file next to the state tree is not.
+func TestStateReachNamesTheStateWhereItsWalkSpellsItElsewhere(t *testing.T) {
+	t.Parallel()
+	home, real := t.TempDir(), t.TempDir()
+	for _, name := range []string{"config.yaml", "other.yaml"} {
+		dir := real
+		if name == "other.yaml" {
+			dir = filepath.Dir(real)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(real, filepath.Join(home, ".defenseclaw")); err != nil {
+		t.Skip("no links here:", err)
+	}
+	links := shellLinks{known: true}
+	protected := newProtectedFiles(home)
+	want := filepath.Join(home, ".defenseclaw", "config.yaml")
+	if got, ok := links.stateReach(filepath.Join(real, "config.yaml"), home, protected); !ok || got != want {
+		t.Errorf("state file by its walked spelling: %q %t, want %q", got, ok, want)
+	}
+	if got, ok := links.stateReach(filepath.Join(filepath.Dir(real), "other.yaml"), home, protected); ok {
+		t.Errorf("file next to the state tree placed in it: %q", got)
 	}
 }
