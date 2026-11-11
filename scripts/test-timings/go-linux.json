@@ -722,7 +722,7 @@
    "TestCorrelationReadAPIIsNoStoreAndFailClosed": 2.3,
    "TestCoverage_KnownAttacks": 2.5,
    "TestCoworkCaptureReplaysThroughTheClaudeCodeRoute": 3.7,
-   "TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts": 208.2,
+   "TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts": 401.5,
    "TestCredentialFileExternalUploadPosture": 3.9,
    "TestCredentialFileSecureDeleteNearMissesStayQuiet": 6.0,
    "TestCursorHookOccurrencePreservesNativeTurnAcrossToolLifecycleAndRestart": 2.7,
