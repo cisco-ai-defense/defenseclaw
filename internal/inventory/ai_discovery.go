@@ -265,6 +265,8 @@ type AIEvidence struct {
 	// Kept in sync with Origin at emit time; either both are set or
 	// both are absent.
 	Bundled bool `json:"bundled,omitempty"`
+	// Skill describes the folder of a skill_entry row (ai_skill_facts.go).
+	Skill *AISkillFacts `json:"skill,omitempty"`
 }
 
 // Match-kind constants. Stamped by detectors so the confidence engine
@@ -622,6 +624,11 @@ type ContinuousDiscoveryService struct {
 	// runtime remains the sole owner of signal records.
 	managedInventoryEmitMu sync.RWMutex
 	managedInventoryEmit   func(context.Context)
+	// skillFactsSeen keeps one skill scan's folder facts by path: a shared
+	// folder such as ~/.agents/skills is walked once per agent reading it.
+	skillFactsMu   sync.Mutex
+	skillFactsSeen map[string]AISkillFacts
+	skillBytesRead int64
 	// modelAPIProbeCursor rotates origins and catalogs across bounded passes so
 	// a stalled or over-cap loopback provider cannot starve later providers.
 	modelAPIProbeCursor  atomic.Uint64
@@ -2617,6 +2624,8 @@ func dirHasEntry(path string) bool {
 // constant — trivial to grep, trivial to disable via
 // disabled_signature_ids per surface.
 func (s *ContinuousDiscoveryService) detectSkills() []AISignal {
+	s.resetSkillFacts()
+	defer s.resetSkillFacts()
 	var out []AISignal
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.SkillPaths {
@@ -2787,6 +2796,7 @@ func (s *ContinuousDiscoveryService) directoryChildEvidence(detector, parent, en
 		// apart from "walker didn't stamp an origin"
 		// (latter must fail-safe).
 		ev.Origin = "user"
+		ev.Skill = s.skillFacts(child)
 	}
 	if s.keepEvidencePath() {
 		ev.RawPath = child
@@ -2832,6 +2842,7 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 			PathHash: hashPath(entry.Path),
 			Origin:   origin,
 			Bundled:  entry.Bundled,
+			Skill:    s.skillFacts(entry.Path),
 		}
 		if s.keepEvidencePath() {
 			ev.RawPath = entry.Path
@@ -2918,6 +2929,7 @@ func (s *ContinuousDiscoveryService) appendSystemSkillChildren(evidence *[]AIEvi
 			PathHash: hashPath(child),
 			Origin:   origin,
 			Bundled:  bundled,
+			Skill:    s.skillFacts(child),
 		}
 		if s.keepEvidencePath() {
 			ev.RawPath = child

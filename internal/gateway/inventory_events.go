@@ -114,6 +114,9 @@ type endpointInventoryComponent struct {
 	userIDKind string
 	userName   string
 	userEmail  string
+	// Skill rows only (inventory.AISkillFacts).
+	skillContentHash   string
+	skillContentStatus string
 }
 
 // endpointInventoryCarrier is an atomic, typed snapshot split into parallel
@@ -1613,6 +1616,8 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryProbeStatus:            aiDiscoveryV8OptionalText(component.agentProbeStatus),
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
 			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID, component.userName)),
+			DefenseClawInventorySkillContentHash:            aiDiscoveryV8OptionalText(component.skillContentHash),
+			DefenseClawInventorySkillContentStatus:          aiDiscoveryV8OptionalText(component.skillContentStatus),
 		}
 		inventoryIdentityFor(component.userID, component.userName).applyTo(&input)
 		return builder.BuildLogAIComponentObserved(input)
@@ -1899,7 +1904,9 @@ func discoveredEntriesFromReport(
 ) []endpointInventoryComponent {
 	components := make([]endpointInventoryComponent, 0)
 	for _, signal := range report.Signals {
-		if signal.Category != category {
+		// A gone signal is the folder as the previous scan saw it: its
+		// entries are not on the endpoint any more, or not in that form.
+		if signal.Category != category || signal.State == inventory.AIStateGone {
 			continue
 		}
 		connectorSlug := inventoryStableToken(signal.SupportedConnector, 128)
@@ -1947,6 +1954,10 @@ func discoveredEntriesFromReport(
 				// that pattern, so leave it empty rather than fail record
 				// build.
 			})
+			if facts := evidence.Skill; facts != nil {
+				components[len(components)-1].skillContentHash = facts.ContentHash
+				components[len(components)-1].skillContentStatus = facts.ContentStatus
+			}
 		}
 	}
 	return components

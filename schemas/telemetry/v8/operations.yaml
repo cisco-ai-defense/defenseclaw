@@ -2269,6 +2269,37 @@ attributes:
     id: identity-v1
     notes: Exact configured disabled state
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.skill.content_hash
+  type: string
+  brief: Content hash of one discovered skill folder
+  examples: ['sha256:3f0c1e9a4b7d2c6e8f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 71
+      pattern: '^sha256:[0-9a-f]{64}$'
+    notes: SHA-256 over the sorted lines "relative/path NUL kind NUL sha256(payload) LF", one per entry below the folder. Kind file has the full file bytes as payload, link has the link target as payload (never followed), other has an empty payload. Paths use forward slashes; .git folders and .DS_Store, Thumbs.db and desktop.ini files are excluded. The same skill gives the same hash on every device and platform. Absent when content_status is not ok
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.content_status
+  type: string
+  brief: Whether the skill folder content hash could be computed
+  examples: [ok]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [ok, symlink, too_large, unreadable]
+    notes: ok carries content_hash; symlink is a skill entry that is itself a link (never followed); too_large exceeded the file, byte, or depth limit; unreadable failed to list or read
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.connector.identifiers
   type: array
   brief: Ordered identifier-class section of one complete connector inventory snapshot
@@ -9059,6 +9090,10 @@ groups:
   - body.endpoint.inventory
   attributes: []
   body_fields:
+  - ref: defenseclaw.inventory.skill.content_hash
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.content_status
+    requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.publisher
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.country_code
