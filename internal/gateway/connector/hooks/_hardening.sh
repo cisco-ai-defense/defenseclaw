@@ -3244,6 +3244,39 @@ defenseclaw_read_hook_stdin() {
   defenseclaw_read_stdin_into "${1:-}" "$_dc_rhs_outcome"
 }
 
+# _dc_read_stdin_bounded LIMIT VAR does IFS= read -r -d '' -n LIMIT VAR with
+# the same status and value, in bytes (the caller sets LC_ALL=C). bash reads a
+# pipe one byte per read(2) call, which for a large call (an 889 KB patch) is
+# 889,000 system calls and the largest cost of the hook. The first 16 KiB are
+# read as before; when they are all there and the limit is not reached,
+# head(1) copies the rest, bounded, to the hook's own scratch folder and read
+# takes it from the file in blocks. A short call, a hook without head and an
+# unowned scratch folder read as before. A NUL ends the read (status 0, a
+# shorter value), the end of input gives 1 and a value of LIMIT bytes 0, as
+# before; a failed copy gives 2, the status of a read that could not read.
+_dc_read_stdin_bounded() {
+  local _dc_rb_limit="$1" _dc_rb_first=16384 _dc_rb_file="" _dc_rb_chunk="" _dc_rb_tail="" _dc_rb_status=0
+  if [ "${_DC_SC_RENDER:-0}" = 1 ] || [ "$_dc_rb_limit" -le "$_dc_rb_first" ] ||
+    [ "${_DEFENSECLAW_HOOK_HOME_OWNED:-}" != 1 ] || [ -z "${DEFENSECLAW_HOOK_HOME:-}" ] ||
+    ! command -v head >/dev/null 2>&1; then
+    IFS= read -r -d '' -n "$_dc_rb_limit" "$2"
+    return
+  fi
+  IFS= read -r -d '' -n "$_dc_rb_first" _dc_rb_chunk || _dc_rb_status=$?
+  if [ "$_dc_rb_status" -ne 0 ] || [ "${#_dc_rb_chunk}" -lt "$_dc_rb_first" ]; then
+    printf -v "$2" '%s' "$_dc_rb_chunk"
+    return "$_dc_rb_status"
+  fi
+  _dc_rb_file="${DEFENSECLAW_HOOK_HOME}/stdin.$$"
+  if ! head -c "$((_dc_rb_limit - _dc_rb_first))" >"$_dc_rb_file" 2>/dev/null; then
+    printf -v "$2" '%s' "$_dc_rb_chunk"
+    return 2
+  fi
+  IFS= read -r -d '' -n "$((_dc_rb_limit - _dc_rb_first))" _dc_rb_tail <"$_dc_rb_file" || _dc_rb_status=$?
+  printf -v "$2" '%s%s' "$_dc_rb_chunk" "$_dc_rb_tail"
+  return "$_dc_rb_status"
+}
+
 # defenseclaw_read_stdin_into VAR OUTCOME sets VAR as
 # VAR="$(defenseclaw_read_stdin_capped OUTCOME)" did, and returns its status.
 # A body that is read whole is stored with its trailing newlines removed, as
@@ -3257,7 +3290,7 @@ defenseclaw_read_stdin_into() {
   esac
   _dc_stdin_cap
   _dc_rsi_cap="$_DC_STDIN_CAP"
-  IFS= read -r -d '' -n "$((_dc_rsi_cap + 1))" _dc_rsi_body || _dc_rsi_read=$?
+  _dc_read_stdin_bounded "$((_dc_rsi_cap + 1))" _dc_rsi_body || _dc_rsi_read=$?
   if [ "$_dc_rsi_read" -eq 0 ] && [ "${#_dc_rsi_body}" -le "$_dc_rsi_cap" ]; then
     printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" nul "$_dc_rsi_outcome")"
     return 4
