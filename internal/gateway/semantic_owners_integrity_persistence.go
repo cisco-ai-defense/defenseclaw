@@ -2478,6 +2478,15 @@ func sudoersLiteralOutputReachesDestination(
 	if source.ID == destination.ID {
 		return true
 	}
+	if chain := shellWrapperChain(facts, source); len(chain) != 0 {
+		if slices.ContainsFunc(chain, func(wrapper actionfacts.CommandFact) bool {
+			return wrapper.ID == destination.ID
+		}) {
+			return true
+		}
+		// A pipe from the wrapper is the pipe of the command it runs.
+		source = chain[len(chain)-1]
+	}
 	if source.PipelineID != 0 && source.PipelineID == destination.PipelineID &&
 		hasCommandDataFlow(
 			facts,
@@ -2504,6 +2513,33 @@ func sudoersLiteralOutputReachesDestination(
 			actionfacts.DataStdout,
 			actionfacts.DataStdin,
 		)
+}
+
+// shellWrapperChain returns the command and builtin wrappers around source,
+// innermost first. Both run the word they are given in the caller shell with
+// the caller descriptors, so a redirect or a pipe written on the wrapper is
+// the redirect or the pipe of the command it runs: the wrapper adds no
+// process and no output of its own. A source that redirects its own output
+// has no chain.
+func shellWrapperChain(
+	facts actionfacts.Facts,
+	source actionfacts.CommandFact,
+) []actionfacts.CommandFact {
+	if len(source.Redirects) != 0 {
+		return nil
+	}
+	var chain []actionfacts.CommandFact
+	for current := source; current.ParentCommandID != 0; {
+		parent, ok := integrityCommandByID(facts, current.ParentCommandID)
+		if !ok || parent.Dialect != actionfacts.DialectPOSIX ||
+			(parent.Program != "command" && parent.Program != "builtin") ||
+			!parent.ArgvComplete || parent.ControlFlowUncertain {
+			return chain
+		}
+		chain = append(chain, parent)
+		current = parent
+	}
+	return chain
 }
 
 func sudoersLiteralCommandOutput(command actionfacts.CommandFact) (string, bool) {

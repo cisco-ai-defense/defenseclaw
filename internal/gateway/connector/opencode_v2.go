@@ -4,11 +4,18 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
 
 const openCodeV2ContractID = "opencode-hooks-v2"
+
+// ErrOpenCodeV2Required marks the refusal of an OpenCode that is not V2 (a V1
+// release, or a git build with no release version). Setup refuses it before it
+// writes anything, so the gateway can stop only the OpenCode connector for it
+// and keep every other connector running (GAP-1059).
+var ErrOpenCodeV2Required = errors.New("OpenCode V2 is required")
 
 // RequireOpenCodeV2 rejects a detected unsupported major independently of
 // exploratory contract drift. Unreadable versions retain the existing
@@ -18,11 +25,11 @@ func RequireOpenCodeV2(name, rawVersion string) error {
 		return nil
 	}
 	if gitBuildVersionRE.MatchString(rawVersion) {
-		return fmt.Errorf("OpenCode V2 is required; the detected git build has no release version. Install @opencode/cli@2, rerun defenseclaw setup opencode, and restart OpenCode")
+		return fmt.Errorf("%w; the detected git build has no release version. Install @opencode/cli@2, rerun defenseclaw setup opencode, and restart OpenCode", ErrOpenCodeV2Required)
 	}
 	version := NormalizeAgentVersion("opencode", rawVersion)
 	if version != "" && versionTuple(version)[0] != 2 {
-		return fmt.Errorf("OpenCode V2 is required; detected %s. Install @opencode/cli@2, rerun defenseclaw setup opencode, and restart OpenCode", version)
+		return fmt.Errorf("%w; detected %s. Install @opencode/cli@2, rerun defenseclaw setup opencode, and restart OpenCode", ErrOpenCodeV2Required, version)
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -35,22 +36,32 @@ func reverseDotDotFixture(t *testing.T) (home, project string) {
 	return home, project
 }
 
+// windowsReadsDotDotLexically is true where a dot-dot step after a link has a
+// second reading. Win32 removes the step from the text before it opens the
+// name; Git Bash and the hook follow the link first. A name is ordinary only
+// when both readings are, so in this fixture (the cleaned spelling is a
+// protected link) the name is protected on Windows and ordinary elsewhere.
+var windowsReadsDotDotLexically = runtime.GOOS == "windows"
+
 // GAP-0641 / GAP-0679 review 10: an ordinary file reached through a linked
 // working directory is an ordinary late call even when the cleaned spelling
-// names a protected link. The direct protected name stays closed.
+// names a protected link, where the link is followed before the step (POSIX).
+// On Windows the cleaned spelling is the other reading, so the name is
+// protected. The direct protected name stays closed everywhere.
 func TestGAP0641LinkedParentOrdinaryFileIsAnOrdinaryPayload(t *testing.T) {
 	home, project := reverseDotDotFixture(t)
 	cwd := filepath.Join(project, "jump")
 	t.Chdir(cwd)
+	ordinary := !windowsReadsDotDotLexically
 	for _, row := range []struct {
 		dir, command string
 		ordinary     bool
 	}{
-		{cwd, "cat ../status", true},
-		{cwd, "cat ./../status", true},
-		{cwd, "cat " + cwd + "/../status", true},
-		{cwd, "grep --file=../status x", true},
-		{project, "cat jump/../status", true},
+		{cwd, "cat ../status", ordinary},
+		{cwd, "cat ./../status", ordinary},
+		{cwd, "cat " + cwd + "/../status", ordinary},
+		{cwd, "grep --file=../status x", ordinary},
+		{project, "cat jump/../status", ordinary},
 		{project, "cat status", false},
 	} {
 		if got := ordinaryNoAnswerPayloadInHome(gap0641Payload(row.dir, row.command), home); got != row.ordinary {
@@ -71,7 +82,7 @@ func TestGAP0641LinkedParentOrdinaryFileStaysOpenAtTheOSSDeadline(t *testing.T) 
 		dir, command string
 		blocked      bool
 	}{
-		{cwd, "cat ../status", false},
+		{cwd, "cat ../status", windowsReadsDotDotLexically},
 		{project, "cat status", true},
 	} {
 		t.Run(row.command, func(t *testing.T) {
@@ -97,7 +108,7 @@ func TestGAP0679LinkedParentOrdinaryFileStaysOpenInTheManagedAdminOpenOutage(t *
 		dir, command string
 		blocked      bool
 	}{
-		{cwd, "cat ../status", false},
+		{cwd, "cat ../status", windowsReadsDotDotLexically},
 		{project, "cat status", true},
 	} {
 		t.Run(row.command, func(t *testing.T) {

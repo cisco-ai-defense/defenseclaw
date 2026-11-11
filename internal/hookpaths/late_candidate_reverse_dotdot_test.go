@@ -31,19 +31,31 @@ func TestGAP0641CleanedSpellingProtectedLinkIsNotReachedThroughLinkedParent(t *t
 	}
 	linked := filepath.Join(cwd, "jump")
 	t.Chdir(linked)
-	if data, err := os.ReadFile("../status"); err != nil || string(data) != "ordinary" {
-		t.Fatalf("kernel read %q err=%v", data, err)
+	// The reading that follows jump first opens the ordinary other/status.
+	if got := readParentThroughLink(t, linked, "status"); got != "ordinary" {
+		t.Fatalf("followed-link read %q", got)
+	}
+	// On Windows the cleaned spelling is a second reading (Win32 removes the
+	// step from the text) and it opens the protected link, so a name is
+	// ordinary only when both readings are: the rows that name the step are
+	// protected there and ordinary elsewhere.
+	viaStep := GradeNone
+	if dotDotReadsLexically {
+		if got := readParentOfText(t, linked, "status"); got != "protected-entry" {
+			t.Fatalf("cleaned-spelling read %q", got)
+		}
+		viaStep = GradeNamed
 	}
 	for _, row := range []struct {
 		name, command, dir string
 		want               Grade
 	}{
-		{"leading parent", "cat ../status", linked, GradeNone},
-		{"dot then parent", "cat ./../status", linked, GradeNone},
-		{"absolute spelling", "cat " + linked + "/../status", linked, GradeNone},
-		{"option value", "grep --file=../status x", linked, GradeNone},
-		{"option value separate", "grep -f ../status x", linked, GradeNone},
-		{"step inside the operand", "cat jump/../status", cwd, GradeNone},
+		{"leading parent", "cat ../status", linked, viaStep},
+		{"dot then parent", "cat ./../status", linked, viaStep},
+		{"absolute spelling", "cat " + linked + "/../status", linked, viaStep},
+		{"option value", "grep --file=../status x", linked, viaStep},
+		{"option value separate", "grep -f ../status x", linked, viaStep},
+		{"step inside the operand", "cat jump/../status", cwd, viaStep},
 		{"directly named protected link", "cat status", cwd, GradeNamed},
 		{"directly named from a real parent", "cat plain/../status", cwd, GradeNamed},
 	} {
@@ -51,8 +63,8 @@ func TestGAP0641CleanedSpellingProtectedLinkIsNotReachedThroughLinkedParent(t *t
 			t.Errorf("%s: LateCallGrade(%q)=%s, want %s", row.name, row.command, got, row.want)
 		}
 	}
-	if got := ProtectedReach(cwd+"/jump/../status", home, NewTargetMemo()); got != GradeNone {
-		t.Errorf("ProtectedReach of the ordinary physical file = %s, want None", got)
+	if got := ProtectedReach(cwd+"/jump/../status", home, NewTargetMemo()); got != viaStep {
+		t.Errorf("ProtectedReach of the ordinary physical file = %s, want %s", got, viaStep)
 	}
 	if got := ProtectedReach(cwd+"/status", home, NewTargetMemo()); got != GradeNamed {
 		t.Errorf("ProtectedReach of the named link = %s, want Named", got)

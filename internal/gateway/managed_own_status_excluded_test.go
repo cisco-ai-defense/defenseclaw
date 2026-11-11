@@ -70,7 +70,13 @@ func requireExcludedAnswer(t *testing.T, answer map[string]any, wantCode string)
 		t.Fatalf("excluded roster = %v, want the 3 configured connectors: %s", out.Connectors, encoded)
 	}
 	for name, row := range out.Connectors {
-		requireExcludedRow(t, name, row, wantCode, true)
+		// Only OpenCode V2 runs the machine plugin, so the OpenCode row never
+		// claims plain inspection (GAP-0949).
+		code := wantCode
+		if name == "opencode" && wantCode == "excluded_users_inspected" {
+			code = "excluded_users_opencode_v2_only"
+		}
+		requireExcludedRow(t, name, row, code, true)
 	}
 	// The Cowork row has a reason and no next step.
 	requireExcludedRow(t, "cowork", out.Cowork, wantCode, false)

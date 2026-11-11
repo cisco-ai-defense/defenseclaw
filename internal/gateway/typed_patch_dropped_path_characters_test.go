@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,40 +56,69 @@ func droppedCharSpellings(dir, file string) []string {
 	return out
 }
 
+// droppedCharSampleSpellings is one spelling of each position (inside the
+// last name, before it, after it) with a different dropped character.
+func droppedCharSampleSpellings(dir, file string) []string {
+	cut := len(file) - 3
+	return []string{dir + file[:cut] + "\t" + file[cut:], dir + "\r" + file, dir + file + "\t\r"}
+}
+
 // A typed apply_patch target spelled with a tab or a carriage return opens the
 // file of the plain name, so it gets the verdict of that name, for Add, Update,
 // Delete and Move to, in every profile and input field, on a POSIX and a
-// Windows host; a lookalike or ordinary name stays an ordinary file.
+// Windows host; a lookalike or ordinary name stays an ordinary file. The first
+// credential file takes every spelling, the others and the other input fields
+// one of each position: the name is read by one reader whatever file or field
+// it came from. The file system answers for no short name, as in the other
+// Windows name tests, so the run costs no file system lookup per call.
 func TestTypedPatchOfCredentialFileSpelledWithDroppedCharactersIsJudgedLikeItsName(t *testing.T) {
-	for _, host := range []struct {
+	useShortNames(t, map[string]string{})
+	posixHome := hostFixturePath("/Users/alice")
+	posixFiles := []string{".netrc", ".git-credentials", filepath.FromSlash(".aws/credentials"), filepath.FromSlash(".kube/config")}
+	hosts := []struct {
 		name, home, sep, cwd string
 		windows              bool
 		files                []string
 	}{
-		{"posix", "/Users/alice", "/", "/Users/alice/project", false, []string{".netrc", ".git-credentials", ".aws/credentials", ".kube/config"}},
+		{"posix", posixHome, string(filepath.Separator), filepath.Join(posixHome, "project"), false, posixFiles},
 		{"windows", `C:\Users\r109yws.d-2`, `\`, `C:\Users\r109yws.d-2\project`, true, []string{`.netrc`, `.git-credentials`, `.aws\credentials`, `.kube\config`}},
-	} {
-		for _, profile := range []string{"default", "permissive", "strict"} {
-			connector := "typed-patch-dropped-" + host.name + "-" + profile
-			installToolCallCorpusProfileConnector(t, connector, profile)
+	}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "typed-patch-dropped-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, host := range hosts {
+			verdict := func(field, directive, target string) (string, map[string]bool) {
+				return droppedCharPatchVerdict(t, connector, field, directive, host.home, host.cwd, target, host.windows)
+			}
 			for _, field := range []string{"input", "command", "patch"} {
 				for _, directive := range []string{"Add File", "Update File", "Delete File", "Move to"} {
-					for _, file := range host.files {
-						plainAction, plainRules := droppedCharPatchVerdict(t, connector, field, directive, host.home, host.cwd, host.home+host.sep+file, host.windows)
+					for i, file := range host.files {
+						if field != "input" && i > 0 {
+							break
+						}
+						plainAction, plainRules := verdict(field, directive, host.home+host.sep+file)
 						if len(plainRules) == 0 || plainAction == "allow" {
 							t.Fatalf("%s %s %s: plain %s %s: %s %v, want a finding", host.name, profile, field, directive, file, plainAction, plainRules)
 						}
-						for _, target := range droppedCharSpellings(host.home+host.sep, file) {
-							action, rules := droppedCharPatchVerdict(t, connector, field, directive, host.home, host.cwd, target, host.windows)
+						spellings := droppedCharSampleSpellings(host.home+host.sep, file)
+						if i == 0 && field == "input" {
+							spellings = droppedCharSpellings(host.home+host.sep, file)
+						}
+						for _, target := range spellings {
+							action, rules := verdict(field, directive, target)
 							if action != plainAction || !sameRules(ownerKeys(rules), ownerKeys(plainRules)) {
 								t.Errorf("%s %s %s: %s %q: %s %v, want the verdict of the plain name: %s %v",
 									host.name, profile, field, directive, target, action, rules, plainAction, plainRules)
 							}
 						}
 					}
-					for _, ordinary := range []string{"notes.txt", "main.go", ".netrc.example", strings.Join([]string{".aws", "credentials.example"}, host.sep)} {
-						for _, target := range droppedCharSpellings(host.home+host.sep+"project"+host.sep, ordinary) {
-							if action, rules := droppedCharPatchVerdict(t, connector, field, directive, host.home, host.cwd, target, host.windows); action != "allow" {
+					ordinaries := []string{"notes.txt", ".netrc.example", strings.Join([]string{".aws", "credentials.example"}, host.sep)}
+					if field != "input" {
+						ordinaries = ordinaries[:1]
+					}
+					for _, ordinary := range ordinaries {
+						for _, target := range droppedCharSampleSpellings(host.home+host.sep+"project"+host.sep, ordinary) {
+							if action, rules := verdict(field, directive, target); action != "allow" {
 								t.Errorf("%s %s %s: %s %q: %s %v, want allow", host.name, profile, field, directive, target, action, rules)
 							}
 						}

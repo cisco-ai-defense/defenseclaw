@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -173,7 +174,7 @@ func ownExcludedNextStep() string {
 // ownExcludedCause is the reason of an excluded row: the exclusion, and what
 // the status can prove about the calls. The state stays excluded whatever the
 // inspection is; the reason is in its own field.
-func ownExcludedCause(inspection ownInspection) ownCause {
+func ownExcludedCause(connector string, inspection ownInspection) ownCause {
 	cause := ownCause{"excluded_users", ownExcludedBase, ownExcludedNextStep()}
 	switch inspection {
 	case ownInspectionNone:
@@ -181,6 +182,14 @@ func ownExcludedCause(inspection ownInspection) ownCause {
 	case ownInspectionInspected:
 		cause.code = "excluded_users_inspected"
 		cause.reason += "; the machine policy still inspects your calls"
+		if strings.EqualFold(strings.TrimSpace(connector), enterprisepolicy.ConnectorOpenCode) {
+			// The machine plugin is installed, but only OpenCode V2 registers
+			// its hooks; V1 runs every tool call unchecked, and the status
+			// cannot see which one the account runs (GAP-0949).
+			cause.code = "excluded_users_opencode_v2_only"
+			cause.reason = ownExcludedBase + "; the machine policy inspects OpenCode V2 (@opencode/cli 2.x) calls only: " +
+				"OpenCode V1 (opencode-ai) is not protected, and V2 is required"
+		}
 	default:
 		cause.code = "excluded_users_unverified"
 		cause.reason += "; to see what still inspects calls, an administrator runs " + managed.AdminStatusHint(runtime.GOOS)
@@ -190,8 +199,8 @@ func ownExcludedCause(inspection ownInspection) ownCause {
 
 // ownExcluded is the row of an account that exclude_users names: a state of
 // its own, never protected and never the machine-wide state.
-func ownExcluded(inspection ownInspection) map[string]any {
-	return ownRow(false, "excluded", ownExcludedCause(inspection))
+func ownExcluded(connector string, inspection ownInspection) map[string]any {
+	return ownRow(false, "excluded", ownExcludedCause(connector, inspection))
 }
 
 func ownProtected() map[string]any {

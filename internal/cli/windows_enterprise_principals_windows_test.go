@@ -57,3 +57,18 @@ func TestWindowsStandaloneTrustAdvisoryNamesTheAccountAndTheFix(t *testing.T) {
 		t.Errorf("non-standalone advisory reason was rewritten: %q", got)
 	}
 }
+
+// GAP-1061: the verify message for an untrusted targets.yaml leads with the
+// account and the icacls fix, and never tells the administrator to wait.
+func TestVerifyNamesTheUntrustedManifestAccountFirst(t *testing.T) {
+	previous := windowsPrincipalName
+	t.Cleanup(func() { windowsPrincipalName = previous })
+	windowsPrincipalName = func(sid string) string { return `HOST\dcg` }
+	in := `untrusted principal S-1-5-21-1-2-3-1001 has write-like access to managed path: C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml`
+	got := windowsEnterpriseNamePrincipals(in)
+	if !strings.HasPrefix(got, `HOST\dcg (S-1-5-21-1-2-3-1001) has write access to C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml`) ||
+		!strings.Contains(got, `Fix: icacls "C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml" /remove:g *S-1-5-21-1-2-3-1001`) ||
+		strings.Contains(got, "guardian's next pass") {
+		t.Fatalf("message = %q", got)
+	}
+}

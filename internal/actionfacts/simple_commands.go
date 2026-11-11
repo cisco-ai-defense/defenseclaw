@@ -275,7 +275,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		// A body that names USER or LOGNAME is read with the values its
 		// caller hands over (inherited).
 		inheritsUser := inherited != nil && (strings.Contains(parts[0].text, "USER") || strings.Contains(parts[0].text, "LOGNAME"))
-		if !prefix && !duplication && !nested && !inheritsUser {
+		if !prefix && !duplication && !nested && !inheritsUser && !simpleRedirectDefaultExpansion(stmt) {
 			return nil
 		}
 	}
@@ -1517,6 +1517,34 @@ func simpleJoinForgottenUserVars(merged, body []simpleShellState) []simpleShellS
 	return merged
 }
 
+// simpleRedirectDefaultExpansion reports a ${NAME:-word} or ${NAME-word} word
+// in a redirect target of stmt. A lone statement is read on its own only when
+// a word of it changes with the values the walk holds; a default is read from
+// the static word when the walk holds no value for NAME
+// (simpleStaticWordWithNewline).
+func simpleRedirectDefaultExpansion(stmt *syntax.Stmt) bool {
+	for _, redirect := range stmt.Redirs {
+		if redirect.Word != nil && simpleDefaultExpansion(redirect.Word) {
+			return true
+		}
+	}
+	return false
+}
+
+// simpleDefaultExpansion reports a ${NAME:-word} or ${NAME-word} in node.
+func simpleDefaultExpansion(node syntax.Node) bool {
+	found := false
+	syntax.Walk(node, func(node syntax.Node) bool {
+		if param, ok := node.(*syntax.ParamExp); ok && param.Param != nil && param.Exp != nil &&
+			(param.Exp.Op == syntax.DefaultUnset || param.Exp.Op == syntax.DefaultUnsetOrNull) &&
+			simpleVariableName(param.Param.Value) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
 func simpleVariableName(name string) bool {
 	if name == "" {
 		return false
@@ -1627,8 +1655,13 @@ func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allo
 				return false
 			}
 			_, known := vars[part.Param.Value]
-			if !known || part.Excl || part.Length || part.Width || part.IsSet || part.Index != nil ||
-				part.Slice != nil || part.Repl != nil || part.Names != 0 || part.Exp != nil ||
+			// ${NAME:-word} and ${NAME-word} read NAME, or the static word
+			// when the walk holds no value for NAME (unset in the walk): the
+			// default of an unset name is what the shell expands.
+			defaulted := part.Exp != nil && simpleVariableName(part.Param.Value) &&
+				(part.Exp.Op == syntax.DefaultUnset || part.Exp.Op == syntax.DefaultUnsetOrNull)
+			if !known && !defaulted || part.Excl || part.Length || part.Width || part.IsSet || part.Index != nil ||
+				part.Slice != nil || part.Repl != nil || part.Names != 0 || part.Exp != nil && !defaulted ||
 				part.Flags != nil || part.NestedParam != nil || len(part.Modifiers) != 0 {
 				safe = false
 			}
@@ -1688,14 +1721,25 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 		text       string
 	}
 	var replacements []replacement
+	redirectTargets := map[*syntax.Word]bool{}
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if redirect, ok := node.(*syntax.Redirect); ok &&
-			(redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc) {
-			return false
+		if redirect, ok := node.(*syntax.Redirect); ok {
+			if redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc {
+				return false
+			}
+			redirectTargets[redirect.Word] = true
+			return true
 		}
 		word, ok := node.(*syntax.Word)
 		if !ok {
 			return true
+		}
+		// A default in an operand word stays a runtime-expanded word, as it
+		// was: only the target of a redirect is read through the default,
+		// which is where the hook client lists the file it names. A name the
+		// walk holds a value for through an earlier binding is read as that.
+		if !redirectTargets[word] && simpleDefaultExpansion(word) {
+			return false
 		}
 		hasParam := false
 		hasTilde := false

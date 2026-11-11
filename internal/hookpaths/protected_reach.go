@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -476,8 +477,21 @@ func (m *TargetMemo) dotDotReach(raw, clean, home string, sshOnly bool) Grade {
 	// Every component was read, so the physical path is the one the kernel
 	// opens. A protected link that only the cleaned spelling names is a
 	// different entry that the kernel never reads.
-	return m.protectedReach(physical, home, sshOnly)
+	grade := m.protectedReach(physical, home, sshOnly)
+	if dotDotReadsLexically {
+		// A Windows name has two readings. Win32 removes the step from the
+		// text before it opens the name, so a program that is not a shell
+		// opens the cleaned spelling; Git Bash and this walk follow the link
+		// first. The name is ordinary only when both readings are.
+		grade = grade.Max(m.protectedReach(clean, home, sshOnly))
+	}
+	return grade
 }
+
+// dotDotReadsLexically is true where a dot-dot step after a link also has the
+// reading in which it is removed from the text (Windows). It is a variable so
+// that the tests of the rule run on every host.
+var dotDotReadsLexically = runtime.GOOS == "windows"
 
 // stateTreeHardlinkReach compares a multiply linked file with the active
 // state by file identity (ResolveActiveStateIdentity, which reads the whole

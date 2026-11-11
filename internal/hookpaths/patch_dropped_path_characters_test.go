@@ -5,16 +5,27 @@ package hookpaths
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"slices"
 	"testing"
 )
+
+// droppedCharFixture is a working directory and a home of this host: the
+// directives below name absolute paths, which a Windows host reads only with a
+// drive letter.
+func droppedCharFixture(t *testing.T) (cwd, home string) {
+	t.Helper()
+	home = filepath.Join(t.TempDir(), "work")
+	return filepath.Join(home, "project"), home
+}
 
 // The hook client lists the file the apply_patch tool opens for a directive,
 // which has no tab or carriage return in its name, for a patch tool call and
 // for a shell command that feeds the envelope, so the protected-file checks
 // of the user-side hook and of the gateway read the same name.
 func TestApplyPatchTargetsListTheNameTheToolOpens(t *testing.T) {
-	const cwd, home = "/work/project", "/work"
+	cwd, home := droppedCharFixture(t)
+	want := filepath.Join(home, ".netrc")
 	for _, spelled := range []string{".ne\ttrc", "\t.netrc", ".netrc\t", ".ne\rtrc"} {
 		for _, directive := range []string{"Add File", "Update File", "Delete File"} {
 			envelope := "*** Begin Patch\n*** " + directive + ": " + home + "/" + spelled + "\n*** End Patch"
@@ -23,13 +34,13 @@ func TestApplyPatchTargetsListTheNameTheToolOpens(t *testing.T) {
 				t.Fatal(err)
 			}
 			targets, ok := ApplyPatchLexicalTargets("apply_patch", args, cwd, home)
-			if !ok || !slices.Contains(targets, home+"/.netrc") {
-				t.Errorf("tool %s %q: targets = %v ok = %v, want %s", directive, spelled, targets, ok, home+"/.netrc")
+			if !ok || !slices.Contains(targets, want) {
+				t.Errorf("tool %s %q: targets = %v ok = %v, want %s", directive, spelled, targets, ok, want)
 			}
 			command := "apply_patch <<'EOF'\n" + envelope + "\nEOF"
 			targets, ok = ApplyPatchLexicalCommandTargets("shell", nil, command, cwd, home)
-			if !ok || !slices.Contains(targets, home+"/.netrc") {
-				t.Errorf("shell %s %q: targets = %v ok = %v, want %s", directive, spelled, targets, ok, home+"/.netrc")
+			if !ok || !slices.Contains(targets, want) {
+				t.Errorf("shell %s %q: targets = %v ok = %v, want %s", directive, spelled, targets, ok, want)
 			}
 		}
 	}
@@ -37,7 +48,7 @@ func TestApplyPatchTargetsListTheNameTheToolOpens(t *testing.T) {
 
 // The authorized-keys check reads the opened name too.
 func TestApplyPatchNamesProtectedTargetReadsTheNameTheToolOpens(t *testing.T) {
-	const cwd, home = "/work/project", "/work"
+	cwd, home := droppedCharFixture(t)
 	for _, spelled := range []string{".ssh/authorized_keys", ".ssh/author\tized_keys", ".ssh/authorized_keys\t", "\t.ssh/authorized_keys", ".ssh/author\rized_keys"} {
 		args, err := json.Marshal(map[string]string{"command": "*** Begin Patch\n*** Add File: " + home + "/" + spelled + "\n+x\n*** End Patch"})
 		if err != nil {
