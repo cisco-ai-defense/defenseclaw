@@ -2036,6 +2036,14 @@ func agentHookConfigLiteralHomePath(value string, guard *agentHookConfigGuard) (
 	if strings.HasPrefix(value, "~/") {
 		return filepath.Clean(filepath.Join(guard.home, value[2:])), true
 	}
+	if runtime.GOOS == "windows" {
+		// Git Bash spells a drive as /c/...; any other rooted path is a
+		// folder on the current drive, which is never the agent's home.
+		value = actionfacts.MSYSDrivePath(value)
+		if !filepath.IsAbs(value) && (strings.HasPrefix(value, "/") || strings.HasPrefix(value, `\`)) {
+			return filepath.Clean(value), true
+		}
+	}
 	if filepath.IsAbs(value) {
 		return filepath.Clean(value), true
 	}
