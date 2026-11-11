@@ -4070,14 +4070,25 @@ class TestGatewayOfflineStaging(_BaseSetup):
 
     def test_new_api_port_held_by_another_listener_is_refused_before_saving(self):
         # GAP-1345: --api-port saved a port another account's gateway held.
+        import random
         import socket
 
         self.app.logger = MagicMock()
         before = open(self.cfg_path, encoding="utf-8").read() if os.path.isfile(self.cfg_path) else None
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
-            holder.bind(("127.0.0.1", 0))
+            # An operating-system pick can land at the top of the range (Windows
+            # hands out 49152..65535), where --api-port is refused for lack of
+            # room for the two sandbox ports before the busy-port check runs.
+            for _ in range(100):
+                port = random.randint(20000, 60000)
+                try:
+                    holder.bind(("127.0.0.1", port))
+                except OSError:
+                    continue
+                break
+            else:
+                self.fail("no free port in 20000..60000 to hold")
             holder.listen(1)
-            port = holder.getsockname()[1]
             result = _invoke(["gateway", "--api-port", str(port), "--non-interactive"], self.app)
 
         self.assertEqual(result.exit_code, 1, result.output)
