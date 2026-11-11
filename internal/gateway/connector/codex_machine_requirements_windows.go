@@ -1762,7 +1762,7 @@ func acquireWindowsCodexWriterLock(path string) (windows.Handle, *windows.Overla
 		}
 		if !time.Now().Before(deadline) {
 			return closeOnError(windowsCodexWriterLockBusyError{fmt.Errorf(
-				"timed out waiting %s for Codex machine policy lock",
+				"timed out waiting %s for Codex machine policy lock (another DefenseClaw Setup run or guardian pass holds it; wait for it to finish, then run the same command again)",
 				windowsCodexMachineLockTimeout,
 			)})
 		}

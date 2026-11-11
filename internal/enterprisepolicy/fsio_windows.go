@@ -1212,6 +1212,7 @@ func refuseStandaloneReclaim(dir string, trustErr error) error {
 		return nil
 	}
 	return managed.RefuseStandaloneMachinePolicyDrift(
+		dir,
 		fmt.Errorf("%w (the folder already holds DefenseClaw's %s)", trustErr, marker))
 }
 

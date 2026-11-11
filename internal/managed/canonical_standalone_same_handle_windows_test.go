@@ -118,7 +118,7 @@ func TestStandaloneRepairJudgesTheObjectOnTheHandleItStamps(t *testing.T) {
 			}
 			after := privilegedDescriptorForTest(t, path)
 			if tc.refused {
-				if result.RepairError != standaloneInPlaceRepairRefused {
+				if result.RepairError != standaloneInPlaceRepairRefused(result) {
 					t.Fatalf("repair error = %q, want the standalone refusal", result.RepairError)
 				}
 				if after != stamped {

@@ -268,7 +268,10 @@ func windowsEnterpriseRecoveryGatewayWarnings(
 var (
 	// Internal security-descriptor detail that a failed lifecycle must not
 	// hand the administrator as its error.
-	windowsEnterpriseSecurityDetailPattern = lazyregexp.New(`(?i)\b(DACLs?|ACEs?|ACLs?|SDDL|security descriptors?)\b`)
+	// A word inside a file name or a path (codex-requirements-acl-backup.json)
+	// is not detail: it took the rest of the message, and the icacls fix in
+	// it, away (GAP-0602).
+	windowsEnterpriseSecurityDetailPattern = lazyregexp.New(`(?i)(?:^|[^\w\\/.-])(DACLs?|ACEs?|ACLs?|SDDL|security descriptors?)(?:$|[^\w\\/-])`)
 	windowsEnterpriseSecurityRewrites      = []struct {
 		pattern *regexp.Regexp
 		plain   string

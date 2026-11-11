@@ -2268,6 +2268,11 @@ def test_repair_rebuilds_deployment_metadata_that_is_not_json(tmp_path: Path) ->
             "Get-DefenseClawDeploymentMetadata",
             "Get-DefenseClawDeploymentMetadataOnce",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
+            "New-DefenseClawRebuiltDeploymentRecord",
+            "Assert-DefenseClawMetadataRebuildReady",
+            "Assert-DefenseClawRebuiltRecordCoversArtifacts",
+            "Get-DefenseClawRebuiltRecordRequiredArtifacts",
+            "Format-DefenseClawRebuiltRecordArtifactRefusal",
             "Format-DefenseClawSetupAction",
             "Write-DefenseClawJsonAtomic",
             "Clear-DefenseClawRestrictiveFileAttributes",
@@ -2289,7 +2294,16 @@ $Layout = @{
     MetadataPath = Join-Path $root 'deployment.json'; PendingPath = Join-Path $root 'pending.json'
     InstallRoot = Join-Path $root 'install'; StateRoot = Join-Path $root 'state'
     CLIPath = Join-Path $root 'defenseclaw.exe'; GatewayPath = Join-Path $root 'gateway.exe'
+    HookPath = Join-Path $root 'hook.exe'; SensorHelperPath = Join-Path $root 'sensor.exe'
     CertificationCodexHome = ''; CoreHardeningCertification = $false
+}
+# The rebuilt record names an installed artifact only when it has the payload's
+# digest, and the rebuild refuses a record that cannot name the gateway, hook
+# and sensor helper (GAP-0994 delta-4 F3, delta-5 F4).
+$digests = @{}
+foreach ($pair in @(@('gateway', 'GatewayPath'), @('hook', 'HookPath'), @('sensor_helper', 'SensorHelperPath'))) {
+    [IO.File]::WriteAllText($Layout[$pair[1]], "$($pair[0]) bytes")
+    $digests[$pair[0]] = (Get-FileHash -LiteralPath $Layout[$pair[1]] -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 foreach ($key in @('CodexMachinePolicyPath', 'CodexManagedHooksDirectory', 'CodexManagedHooksStatePath',
         'CodexRequirementsOwnershipPath', 'CodexRequirementsAclBackupPath',
@@ -2310,6 +2324,9 @@ function Move-DefenseClawNonImageFileReplacing {
 }
 function Test-DefenseClawTrustStrictAncestors { return $false }
 function Write-DefenseClawAclSelfHealAdvisory { param($Path, $Reason) }
+# The record is no account's: the drift of this harness is the canonical DACL
+# check above, which a file that parses must still be refused for.
+function Get-DefenseClawStandaloneRecordUntrustedReason { param([string]$Path) return '' }
 # Setup reads the metadata elevated, so the authenticated ACL repair runs
 # first. Like a file another principal could have written, a drifted one is
 # refused there, and the standalone profile keeps the canonical check.
@@ -2325,13 +2342,15 @@ function Test-DefenseClawLayoutBrokerEnabled { param($Layout) return $false }
 function Test-DefenseClawServiceExists { param([string]$Name) return $true }
 function Assert-DefenseClawOwnedServiceOrAbsent { param($Name, $ExpectedGatewayPath) }
 $full = @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
-function Invoke-Case([string]$Name, [string]$Text, [bool]$Drifted, [string[]]$Sources) {
+function Invoke-Case([string]$Name, [string]$Text, [bool]$Drifted, [string[]]$Sources, [string]$Stale = '') {
     [IO.File]::WriteAllText($Layout.MetadataPath, $Text)
     $global:Drifted = $Drifted
     $global:Stamps = 0
     $global:Resets = 0
     $sourceTable = @{}
-    foreach ($source in $Sources) { $sourceTable[$source] = @{} }
+    foreach ($source in $Sources) {
+        $sourceTable[$source] = if ($digests.ContainsKey($source)) { @{ sha256 = $(if ($source -eq $Stale) { 'b' * 64 } else { $digests[$source] }) } } else { @{} }
+    }
     $read = ''
     try { $read = [string]((Get-DefenseClawDeploymentMetadata -Layout $Layout -Required) -ne $null) }
     catch { $read = $_.Exception.Message }
@@ -2351,6 +2370,7 @@ Invoke-Case 'garbage' 'this is not json at all, 30 b' $false $full
 Invoke-Case 'garbage drifted' 'this is not json at all, 30 b' $true $full
 Invoke-Case 'empty' '' $false $full
 Invoke-Case 'garbage without payload' 'this is not json at all, 30 b' $false @('gateway')
+Invoke-Case 'garbage stale hook' 'this is not json at all, 30 b' $false $full 'hook'
 Invoke-Case 'valid drifted' $valid $true $full
 """.replace("__ROOT__", str(tmp_path)),
         encoding="utf-8",
@@ -2374,6 +2394,11 @@ Invoke-Case 'valid drifted' $valid $true $full
         "run & '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair (Setup is not installed on this computer: "
         "use the copy in your MDM package or the release download)"
     ) in cases["garbage without payload"]["repair"], cases["garbage without payload"]
+    # Delta-5 F4: an installed hook that is not the payload's file cannot be named
+    # by the rebuilt record, so the rebuild is refused by name before the write.
+    stale = cases["garbage stale hook"]
+    assert "Nothing was changed and every service is as it was" in stale["repair"] and "hook" in stale["repair"], stale
+    assert "rebuilt=" not in stale["repair"], stale
     assert cases["valid drifted"]["read"].startswith("managed DACL is not protected")
     assert cases["valid drifted"]["repair"].startswith("managed DACL is not protected")
 
@@ -2426,6 +2451,11 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
             "Assert-DefenseClawInstalledConfig",
             "Assert-DefenseClawRepairRollbackConfig",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
+            "New-DefenseClawRebuiltDeploymentRecord",
+            "Assert-DefenseClawMetadataRebuildReady",
+            "Assert-DefenseClawRebuiltRecordCoversArtifacts",
+            "Get-DefenseClawRebuiltRecordRequiredArtifacts",
+            "Format-DefenseClawRebuiltRecordArtifactRefusal",
             "Get-DefenseClawRepairRollbackApprovedConfigSource",
             "Get-DefenseClawRecordedConfigGeneration",
             "Get-DefenseClawRecordedConfigGenerationHash",
@@ -2457,9 +2487,16 @@ $Layout = @{
     RuntimeDirectory = Join-Path $root 'runtime'; CLIPath = Join-Path $root 'defenseclaw.exe'
     InstallRoot = Join-Path $root 'install'; StateRoot = Join-Path $root 'state'
     ConfigDirectory = $root; InstallStateDirectory = Join-Path $root 'install-state'
+    HookPath = Join-Path $root 'installed-hook.exe'; SensorHelperPath = Join-Path $root 'installed-sensor.exe'
 }
 $Sources = @{ gateway = @{ path = 'authenticated-replacement-gateway.exe' } }
 foreach ($name in @('acp', 'hook', 'sensor_helper', 'installer', 'module')) { $Sources[$name] = @{} }
+# The rebuilt record must name the gateway, the hook and the sensor helper
+# (GAP-0994 delta-4 F3): the installed files are the payload's files.
+foreach ($pair in @(@('gateway', 'GatewayPath'), @('hook', 'HookPath'), @('sensor_helper', 'SensorHelperPath'))) {
+    [IO.File]::WriteAllText($Layout[$pair[1]], "$($pair[0]) bytes")
+    $Sources[$pair[0]]['sha256'] = (Get-FileHash -LiteralPath $Layout[$pair[1]] -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 function Get-DefenseClawServiceChecked { param($Name) return [pscustomobject]@{ Status = $global:ServiceStatus } }
 function Assert-DefenseClawSourceDescriptorCurrent { param($Source) $global:SourceChecks++ }
 function Invoke-DefenseClawGatewayCommand {

@@ -199,13 +199,18 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 	refuseUntrusted := StandaloneRefusesContentDrift() && !opts.inPlaceOutOfClass
 	if refuseUntrusted && assessment.boundary() {
 		result.Outcome = CanonicalBoundary
-		result.RepairError = standaloneInPlaceRepairRefused
+		result.RepairError = standaloneInPlaceRepairRefused(result)
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
 	if assessment.Owner == ownerUntrusted && !descriptorUnreadable && !opts.AllowUntrustedOwnerTransfer {
 		result.Outcome = CanonicalBoundary
 		result.RepairError = "owner is not trusted; not adopted"
+		if StandaloneRefusesContentDrift() {
+			// Secure Client keeps the text it has always logged.
+			result.RepairError += ": from an elevated prompt run " + standaloneExactFix(clean, kind.Directory(), nil, []string{"owner is not trusted"}) +
+				" to give it back to Administrators, check it, then run Setup /ensure"
+		}
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
@@ -229,7 +234,7 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 			result.Outcome = CanonicalBoundary
 			result.Drift = refused.drift
 			result.UntrustedWriters = refused.writers
-			result.RepairError = standaloneInPlaceRepairRefused
+			result.RepairError = standaloneInPlaceRepairRefused(result)
 			reportCanonicalResult(result, opts)
 			return result, nil
 		}
@@ -611,10 +616,10 @@ func objectDescriptorFromSD(sd *windows.SECURITY_DESCRIPTOR) (objectDescriptor, 
 
 // standaloneInPlaceRepairRefused is the RepairError of an object the
 // standalone repair refused to re-stamp in place.
-const standaloneInPlaceRepairRefused = "not repaired in place on a standalone install, because an untrusted " +
-	"principal can write or owns it: from an elevated prompt remove that entry (icacls \"<path>\" /remove:g *<SID>; for an inherited entry first run icacls \"<path>\" /inheritance:d, which keeps copies of the inherited entries), " +
-	"or give it back to Administrators (icacls \"<path>\" /setowner *S-1-5-32-544), check it, then run Setup " +
-	"/ensure and Setup /verify (GAP-0561)"
+func standaloneInPlaceRepairRefused(result CanonicalResult) string {
+	return "not repaired in place on a standalone install, because an untrusted principal can write or owns it (GAP-0561): " +
+		standaloneInPlaceRecovery(result.Path, result.Kind.Directory(), result.UntrustedWriters, result.Drift)
+}
 
 // standaloneStampRefusal is the refusal stampCanonicalDescriptor returns when
 // the descriptor read on its own repair handle lets an untrusted principal
@@ -825,10 +830,6 @@ func StampStandaloneTrustedObject(path string, kind ObjectKind, sddl string) err
 	if !kind.valid() {
 		return fmt.Errorf("unknown managed object kind %q", kind)
 	}
-	recovery := standaloneInPlaceFileRecovery
-	if kind.Directory() {
-		recovery = standaloneInPlaceFolderRecovery
-	}
 	clean, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", path, err)
@@ -862,19 +863,19 @@ func StampStandaloneTrustedObject(path string, kind ObjectKind, sddl string) err
 		}
 		defer func() { _ = windows.CloseHandle(handle) }()
 		if err := checkCanonicalStructure(handle, clean, kind); err != nil {
-			return &StandaloneContentDriftError{Err: err, Recovery: recovery}
+			return &StandaloneContentDriftError{Err: err, Recovery: standaloneStructuralRecovery(clean)}
 		}
 		current, err := readObjectDescriptor(handle)
 		if err != nil {
 			return &StandaloneContentDriftError{
 				Err:      fmt.Errorf("cannot judge who can write or owns %s: %w", clean, err),
-				Recovery: recovery,
+				Recovery: standaloneInPlaceRecovery(clean, kind.Directory(), nil, nil),
 			}
 		}
 		if judged := assessCanonicalDescriptor(current, kind, "", windowsLocalAdministratorsMember); judged.boundary() {
 			return &StandaloneContentDriftError{
 				Err:      fmt.Errorf("an untrusted principal can write or owns %s: %s", clean, strings.Join(judged.Drift, "; ")),
-				Recovery: recovery,
+				Recovery: standaloneInPlaceRecovery(clean, kind.Directory(), judged.UntrustedWriters, judged.Drift),
 			}
 		}
 		info := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION |

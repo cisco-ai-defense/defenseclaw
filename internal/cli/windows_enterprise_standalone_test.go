@@ -764,6 +764,31 @@ func TestWindowsEnterpriseConfigRefusalReportsTheInstalledHost(t *testing.T) {
 	}
 }
 
+// GAP-0651: ensure on a host whose token or ACP credential folder another
+// account can write names the folder with the exact commands, exits 1603 and
+// runs nothing after the status probe; before it reported the host healthy.
+func TestWindowsEnterpriseEnsureNamesARuntimeFolderAnotherAccountCanWrite(t *testing.T) {
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
+	stub.install(t)
+	refusal := `an untrusted principal can write or owns C:\ProgramData\Cisco\DefenseClaw\runtime\hooks: from an elevated prompt run icacls "C:\ProgramData\Cisco\DefenseClaw\runtime\hooks" /remove:g *S-1-5-32-545 and icacls "C:\ProgramData\Cisco\DefenseClaw\runtime\hooks" /setowner *S-1-5-32-544`
+	windowsEnterpriseRuntimeFolderRefusal = func() string { return refusal }
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if got := commandExitCode(err); got != 1603 || len(stub.calls) != 1 {
+		t.Fatalf("exit %d after %d installer runs (%v), want 1603 after the status probe only", got, len(stub.calls), err)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Message, "/remove:g *S-1-5-32-545") ||
+		!strings.Contains(result.Errors[0].Message, "nothing was changed") {
+		t.Fatalf("result %+v", result)
+	}
+}
+
 // GAP-0723: Setup /install forwards a supplied config to this preflight.
 // A connector Windows cannot enroll is a bad argument (1639), before the
 // lifecycle can create a root or change hook wiring.
@@ -1179,6 +1204,9 @@ func (stub *ensureStub) install(t *testing.T) {
 		windowsEnterpriseRepairDataDirBeforePlan = originalDataDir
 	})
 	windowsEnterpriseRepairDataDirBeforePlan = func() (string, string) { return "", "" }
+	originalRuntimeFolders := windowsEnterpriseRuntimeFolderRefusal
+	t.Cleanup(func() { windowsEnterpriseRuntimeFolderRefusal = originalRuntimeFolders })
+	windowsEnterpriseRuntimeFolderRefusal = func() string { return "" }
 	originalGuardianRepairs := windowsEnterpriseGuardianRepairsSinceLastRun
 	t.Cleanup(func() { windowsEnterpriseGuardianRepairsSinceLastRun = originalGuardianRepairs })
 	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return nil }
@@ -1947,6 +1975,33 @@ func TestWindowsEnterpriseEnsurePlansInstallOverASquattedRoot(t *testing.T) {
 	other, _ := parseWindowsEnterpriseInstallerReport([]byte(`{"schema_version":1,"ok":false,"action":"status","error":"untrusted ancestor owner S-1-5-21-1-2-3-1001 can replace managed content through: C:\\ProgramData\\Cisco"}`))
 	if _, err := planWindowsEnterpriseEnsure(other, ensureTestOptions(), `C:\stage\install-enterprise.ps1`); err == nil {
 		t.Fatal("planned from a failed probe")
+	}
+}
+
+// A deployment record or attestation another account can change makes the
+// status probe fail with untrusted_record. Setup, which carries the payload,
+// plans a repair that keeps the changed file aside and writes it again; the
+// installed CLI, which carries none, refuses with the same text (GAP-0602).
+func TestWindowsEnterpriseEnsurePlansARepairForAChangedRecord(t *testing.T) {
+	original := windowsEnterpriseEnsureDriftDetector
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }
+	t.Cleanup(func() { windowsEnterpriseEnsureDriftDetector = original })
+	refusal := `untrusted_record: C:\ProgramData\Cisco\DefenseClaw\install\deployment.json can be changed by the account S-1-5-32-545, so Setup does not trust what is in it and changed nothing.`
+	status, err := parseWindowsEnterpriseInstallerReport([]byte(`{"schema_version":1,"ok":false,"action":"status","error":` + strconvQuote(refusal) + `,"errors":[` + strconvQuote(refusal) + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := planWindowsEnterpriseEnsure(status, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if err != nil || plan.Action != "repair" || plan.Reason != "untrusted_record" {
+		t.Fatalf("plan %+v, %v", plan, err)
+	}
+	if code := windowsEnterpriseMessageCode(refusal, ""); code != "untrusted_record" {
+		t.Fatalf("code %q", code)
+	}
+	// The installed CLI carries no payload: it refuses, naming the repair.
+	bare := &windowsEnterpriseLifecycleOptions{}
+	if _, err := planWindowsEnterpriseEnsure(status, bare, `C:\stage\install-enterprise.ps1`); err == nil || !strings.Contains(err.Error(), "untrusted_record: ") {
+		t.Fatalf("a run without a payload planned past a changed record: %v", err)
 	}
 }
 
@@ -3173,7 +3228,7 @@ func TestWindowsEnterpriseRefusedPowerShellReportsRecordedDeployment(t *testing.
 			strings.Contains(warning.Message, "restore") && strings.Contains(warning.Message, "then"))
 	}
 	if !result.Installed || len(result.Services) != 4 || len(result.Errors) != 1 ||
-		result.Errors[0].Code != "powershell7_untrusted" || !notChecked {
+		result.Errors[0].Code != "powershell7_untrusted" || !notChecked || result.Inspection.Local != "unknown" {
 		t.Fatalf("refused verify result = %+v", result)
 	}
 }
@@ -3227,7 +3282,8 @@ func TestWindowsEnterpriseStandardUserStatusReportsRecordedDeployment(t *testing
 			}
 			if !result.Installed || result.InstalledVersion != "" || len(result.Services) != 4 ||
 				result.Errors[0].Code != "elevation_required" || result.ExitCode != 5 ||
-				len(result.Warnings) != 1 || result.Warnings[0].Code != "health_not_checked" {
+				len(result.Warnings) != 1 || result.Warnings[0].Code != "health_not_checked" ||
+				result.Inspection.Local != "unknown" || result.Readiness.Gateway || result.Readiness.Guardian {
 				t.Fatalf("%s --json: result %+v", action, result)
 			}
 		}

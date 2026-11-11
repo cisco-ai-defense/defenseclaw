@@ -7940,6 +7940,11 @@ def test_hardening_harness_removes_the_cisco_folders_it_creates() -> None:
 _SC_SHARED_INSERTS = {
     'Assert-DefenseClawEnterpriseDeployment': [
         (
+            '    Assert-DefenseClawMetadataIdentity `\n        -Metadata $metadata `\n        -GatewayServiceName $GatewayServiceName `\n        -GuardianServiceName $GuardianServiceName\n',
+            "    if ($RollbackRestore -and (Test-DefenseClawStandaloneProfile) -and\n        (Test-DefenseClawRebuiltDeploymentRecord -Metadata $metadata)) {\n        # rel-1-0-6:GAP-0994: the transaction opened over a rebuilt record and\n        # failed. Its rollback puts that record back, and the record cannot\n        # carry what the full assertion below asks for; the next repair writes\n        # the full one. The services start again and the run ends with its error.\n        Assert-DefenseClawRebuiltRecordArtifacts -Layout $Layout -Metadata $metadata\n        Write-DefenseClawLifecyclePhase -Stage 'rollback restored the rebuilt deployment record; the next repair writes the full one'\n        return\n    }\n",
+            '    if (Test-DefenseClawStandaloneProfile) {\n        # Verify also serves an installed-host ensure that would otherwise\n',
+        ),
+        (
             '        [switch]$PendingTransaction,\n        [switch]$ServicingTransaction,\n',
             '        # GAP-0900: set only by the rollback of a transaction (Restore). A link on\n        # the Codex folder is then named and not read through; every forward path\n        # (static validation, the install commit) still fails closed on it.\n        [switch]$RollbackRestore,\n',
             "        [string]$TransitionHookSHA256 = '',\n",

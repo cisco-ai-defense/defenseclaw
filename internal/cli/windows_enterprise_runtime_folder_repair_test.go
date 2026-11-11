@@ -26,7 +26,7 @@ func stubWindowsEnterpriseRuntimeFolder(t *testing.T, seen managed.CanonicalResu
 	windowsEnterpriseRuntimeFolderAssess = func(string, managed.ObjectKind, managed.CanonicalOptions) (managed.CanonicalResult, error) {
 		return seen, nil
 	}
-	windowsEnterpriseRuntimeFolderRefuse = func(string, managed.ObjectKind) error { return refusal }
+	windowsEnterpriseRuntimeFolderRefuse = func(string, managed.ObjectKind, string) error { return refusal }
 	windowsEnterpriseRuntimeFolderEnsure = func(string, managed.ObjectKind, managed.CanonicalOptions) (managed.CanonicalResult, error) {
 		calls++
 		return ensured, ensureErr

@@ -47,6 +47,10 @@ type UntrustedPrincipalError struct {
 
 func (e *UntrustedPrincipalError) Error() string { return e.text }
 
+// untrustedSID is the principal and whether it is the owner, for the recovery
+// text of a refusal (standaloneMachinePolicyDriftRecovery).
+func (e *UntrustedPrincipalError) untrustedSID() (string, bool) { return e.SID, e.Owner }
+
 // UntrustedDACLError is a path element whose access list itself is not
 // trusted: it is null, so any account may change the path, or it holds an
 // allow entry whose layout the walk cannot read, so nobody can say who may.

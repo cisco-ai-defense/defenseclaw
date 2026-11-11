@@ -1474,6 +1474,13 @@ var errWindowsManagedHooksDeletedLocalAccount = errors.New(
 		"the hook enumerator revokes its rows on its next pass",
 )
 
+// errWindowsManagedHooksGuardianNotBound is the refusal when the Guardian's
+// activation, authorization and state records do not bind the deployment
+// manifest exactly. The lifecycle module recognizes its text.
+var errWindowsManagedHooksGuardianNotBound = errors.New(
+	"protected Guardian activation does not exactly bind the legacy deployment manifest and authorization",
+)
+
 // windowsManagedHooksLifecycleDeletedLocalAccount is replaceable in tests.
 var windowsManagedHooksLifecycleDeletedLocalAccount = enterprisehooks.WindowsDeletedLocalAccount
 
@@ -1681,32 +1688,53 @@ func validateWindowsManagedHooksGuardianActivation(
 	healthy := failures == 0
 	maxProtected := len(active) + len(failedTargets)
 	reportedCount := len(reported)
-	if activation.Version != enterpriseHookGuardianActivationVersion ||
-		!validEnterpriseHookHex(activation.ReconcileID, 16) ||
-		authorization.Version != 1 || state.Version != 1 || activationTimeErr != nil ||
-		activation.OK != healthy || activation.FailureCount != failures ||
-		activation.SuccessCount != len(active)-awaitingSignIn ||
-		activation.PendingCount != len(pendingTargets) ||
-		activation.TargetCount != reportedCount ||
-		len(activation.ProtectedTargets) < len(active) || len(activation.ProtectedTargets) > maxProtected ||
-		authorization.OK != healthy || authorization.FailureCount != failures ||
-		authorization.SuccessCount != len(active)-awaitingSignIn ||
-		authorization.PendingCount != len(pendingTargets) ||
-		authorization.TargetCount != reportedCount ||
-		len(authorization.ProtectedTargets) < len(active) || len(authorization.ProtectedTargets) > maxProtected ||
-		state.OK != healthy || state.FailureCount != failures ||
-		state.SuccessCount != len(active)-awaitingSignIn || state.PendingCount != len(pendingTargets) ||
-		state.TargetCount != reportedCount ||
-		len(state.Results) != reportedCount ||
-		activation.UpdatedAt == "" || activation.UpdatedAt != authorization.UpdatedAt ||
-		activation.UpdatedAt != state.UpdatedAt ||
-		!sameEnterpriseHookPath(activation.Manifest, ctx.manifestPath) ||
-		!sameEnterpriseHookPath(state.Manifest, ctx.manifestPath) ||
-		!validEnterpriseHookHex(activation.ManifestSHA256, sha256.Size) ||
-		len(activationIssues) != 0 || len(authorizationIssues) != 0 ||
-		len(stateIssues) != 0 {
-		return nil, nil, errors.New(
-			"protected Guardian activation does not exactly bind the legacy deployment manifest and authorization",
+	// rel-1-0-6:GAP-0994: the refusal says which input disagreed. The three
+	// records are published one after the other, so a reader can meet them
+	// from two generations; the bare refusal gave no way to tell that from a
+	// record that does not match its rows.
+	var mismatch []string
+	note := func(bad bool, reason string) {
+		if bad {
+			mismatch = append(mismatch, reason)
+		}
+	}
+	note(activation.Version != enterpriseHookGuardianActivationVersion, "activation version")
+	note(!validEnterpriseHookHex(activation.ReconcileID, 16), "activation reconcile ID")
+	note(authorization.Version != 1 || state.Version != 1, "authorization or state version")
+	note(activationTimeErr != nil, "activation time")
+	note(activation.OK != healthy, fmt.Sprintf("activation ok=%t, its rows say ok=%t", activation.OK, healthy))
+	note(activation.FailureCount != failures, "activation failure count")
+	note(activation.SuccessCount != len(active)-awaitingSignIn, "activation success count")
+	note(activation.PendingCount != len(pendingTargets), "activation pending count")
+	note(activation.TargetCount != reportedCount, "activation target count")
+	note(len(activation.ProtectedTargets) < len(active) || len(activation.ProtectedTargets) > maxProtected,
+		"activation protected target count")
+	note(authorization.OK != healthy, fmt.Sprintf("authorization ok=%t, the rows say ok=%t", authorization.OK, healthy))
+	note(authorization.FailureCount != failures, "authorization failure count")
+	note(authorization.SuccessCount != len(active)-awaitingSignIn, "authorization success count")
+	note(authorization.PendingCount != len(pendingTargets), "authorization pending count")
+	note(authorization.TargetCount != reportedCount, "authorization target count")
+	note(len(authorization.ProtectedTargets) < len(active) || len(authorization.ProtectedTargets) > maxProtected,
+		"authorization protected target count")
+	note(state.OK != healthy, fmt.Sprintf("state ok=%t, its rows say ok=%t", state.OK, healthy))
+	note(state.FailureCount != failures, "state failure count")
+	note(state.SuccessCount != len(active)-awaitingSignIn, "state success count")
+	note(state.PendingCount != len(pendingTargets), "state pending count")
+	note(state.TargetCount != reportedCount, "state target count")
+	note(len(state.Results) != reportedCount, "state row count")
+	note(activation.UpdatedAt == "" || activation.UpdatedAt != authorization.UpdatedAt ||
+		activation.UpdatedAt != state.UpdatedAt,
+		fmt.Sprintf("the records are from different publications (activation %q, authorization %q, state %q)",
+			activation.UpdatedAt, authorization.UpdatedAt, state.UpdatedAt))
+	note(!sameEnterpriseHookPath(activation.Manifest, ctx.manifestPath) ||
+		!sameEnterpriseHookPath(state.Manifest, ctx.manifestPath), "manifest path")
+	note(!validEnterpriseHookHex(activation.ManifestSHA256, sha256.Size), "activation manifest digest")
+	note(len(activationIssues) != 0, "activation protected targets: "+strings.Join(activationIssues, "; "))
+	note(len(authorizationIssues) != 0, "authorization protected targets: "+strings.Join(authorizationIssues, "; "))
+	note(len(stateIssues) != 0, "state rows: "+strings.Join(stateIssues, "; "))
+	if len(mismatch) != 0 {
+		return nil, nil, fmt.Errorf(
+			"%w (%s)", errWindowsManagedHooksGuardianNotBound, strings.Join(mismatch, "; "),
 		)
 	}
 	// The manifest digest is advisory. The enumerator republishes the

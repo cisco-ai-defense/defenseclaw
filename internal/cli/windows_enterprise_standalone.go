@@ -301,7 +301,7 @@ func windowsEnterpriseRuntimeDriftAtStart() string {
 // replace them.
 var (
 	windowsEnterpriseRuntimeFolderAssess = managed.AssessCanonical
-	windowsEnterpriseRuntimeFolderRefuse = managed.RefuseStandaloneInPlaceRepair
+	windowsEnterpriseRuntimeFolderRefuse = managed.RefuseStandaloneInPlaceRepairAs
 	windowsEnterpriseRuntimeFolderEnsure = managed.EnsureCanonical
 )
 
@@ -323,7 +323,9 @@ func repairWindowsEnterpriseRuntimeFolder(dataDir string, opts managed.Canonical
 	if err != nil || seen.Outcome != managed.CanonicalAccepted {
 		return "", ""
 	}
-	if windowsEnterpriseRuntimeFolderRefuse(dataDir, kind) != nil {
+	// The gateway service account is named: this process carries no
+	// service pin, and the gateway's own write entry is no other account's.
+	if windowsEnterpriseRuntimeFolderRefuse(dataDir, kind, opts.GatewayServiceAccount) != nil {
 		return "", ""
 	}
 	drift := windowsEnterpriseBoundedDiagnostic(strings.Join(seen.Drift, "; "))
@@ -349,6 +351,28 @@ func repairWindowsEnterpriseRuntimeFolder(dataDir string, opts managed.Canonical
 	}
 	return "", "the access control of " + dataDir + " had drifted (" + drift + ") and ensure could not put it back: " +
 		windowsEnterpriseBoundedDiagnostic(reason)
+}
+
+// windowsEnterpriseRuntimeFolderRefusal names the token folder (hooks) and
+// the ACP credential folder (acp) of the runtime folder when an account
+// other than SYSTEM, Administrators and the gateway can write or owns one,
+// with the exact commands; "" otherwise. A seam for tests.
+var windowsEnterpriseRuntimeFolderRefusal = func() string {
+	if !windowsEnterpriseIsElevated() {
+		return ""
+	}
+	layout, err := windowsManagedLayout.standalone()
+	if err != nil || strings.TrimSpace(layout.DataDir) == "" {
+		return ""
+	}
+	for _, name := range []string{"hooks", "acp"} {
+		// The gateway service account is named: this process carries no
+		// service pin, and the gateway's own write entry is no other account's.
+		if refused := managed.RefuseStandaloneInPlaceRepairAs(filepath.Join(layout.DataDir, name), managed.ObjectRuntimeDirectory, layout.ServiceUser); refused != nil {
+			return refused.Error()
+		}
+	}
+	return ""
 }
 
 // windowsEnterpriseGuardianRepairsSinceLastRun lists the repairs the hook
@@ -946,7 +970,13 @@ func runWindowsEnterpriseStandaloneAction(
 	hookRuntimeRepaired := ""
 	claudeDropInRepaired := ""
 	if action == "repair" && windowsEnterpriseIsElevated() {
-		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
+		var hookRuntimeRefusal string
+		hookRuntimeRepaired, hookRuntimeRefusal = repairWindowsEnterpriseHookRuntimeAccessOrRefuse()
+		if hookRuntimeRefusal != "" {
+			result := newWindowsEnterpriseStandaloneResult(action, opts)
+			result.AddError("machine_policy_summary_untrusted", hookRuntimeRefusal)
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
 		claudeDropInRepaired = repairWindowsEnterpriseClaudeDropIn()
 	}
 	var configReplaced []string
@@ -1115,6 +1145,11 @@ func settleWindowsEnterpriseHotConfigClosure(ctx context.Context, result *enterp
 // them too, as the running deployment's (GAP-0103).
 func appendWindowsEnterpriseStatusAdvisories(ctx context.Context, result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	appendWindowsOpenCodePortWarnings(result)
+	// Only an elevated caller can read the descriptor of a kept copy; a
+	// standard account is refused before this runs, and says nothing here.
+	if layout, err := windowsManagedLayout.standalone(); err == nil && strings.TrimSpace(layout.DataDir) != "" && windowsEnterpriseIsElevated() {
+		addWindowsEnterpriseKeptRecordWarnings(result, filepath.Join(filepath.Dir(layout.DataDir), "install"))
+	}
 	if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
 		if raw, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes); err == nil {
 			if installed, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw); err == nil {
@@ -3607,7 +3642,7 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 // codex_state_held: ...", g582 round 11c, L3).
 func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
-	case "codex_state_held", "codex_requirements_held", "privileges_required", "guardian_state_held", "codex_state_unsettled":
+	case "codex_state_held", "codex_requirements_held", "privileges_required", "untrusted_record", "guardian_state_held", "codex_state_unsettled":
 		return strings.TrimPrefix(message, code+": ")
 	case "hook_in_use":
 		// GAP-1042: the committed uninstall's hold on the hook files leads
@@ -3657,6 +3692,9 @@ var windowsEnterpriseKnownCodes = []string{
 	// (GAP-0877, review S2). It exits 1603, like any refusal, unless the
 	// rollback was left pending too: then 1618 (GAP-0999).
 	"codex_state_unsettled",
+	// A Setup-owned record another account owns or can write: a repair that
+	// carries the payload keeps it aside and writes it again (GAP-0602).
+	"untrusted_record",
 }
 
 // windowsEnterpriseBundleRefusalCodes are the bundle refusals a retry of the
@@ -4106,6 +4144,10 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 				result.Readiness.SensorHelper = state == "running"
 			}
 		}
+		// Nothing was checked, so the "active" default is not a finding:
+		// whether verdicts are inspected is not proven (delta-3 standard-
+		// account follow-up; the same word the gateway-not-ready case uses).
+		result.Inspection.Local = "unknown"
 		result.AddWarning(windowsEnterpriseHealthNotChecked, windowsEnterpriseUncheckedHealthMessage(profile, false))
 		return
 	}
@@ -4701,6 +4743,15 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	// guardian logged since the last lifecycle run too.
 	if statusReport.Installed && !statusReport.TransactionPending {
 		noteWindowsEnterpriseEnsureDriftRepairs(result, driftRepaired, driftAtStart)
+		// The folders under the runtime folder that another account can
+		// write or owns are named, not reported ok: the guardian does not
+		// write them back either (GAP-0651).
+		if refusal := windowsEnterpriseRuntimeFolderRefusal(); refusal != "" {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("lifecycle_error", "refusing to report the deployment healthy, and nothing was changed: "+refusal)
+			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+		}
 	}
 	alreadyAppliedNeedsRepair := false
 	alreadyAppliedCoworkDrift := ""
@@ -4983,7 +5034,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		// copy of a payload file an antivirus quarantine removed. Without it
 		// ensure refused "recorded managed artifact is missing" where Setup
 		// /repair healed the same host (GAP-0935).
-		if plan.Reason != "verify_failed" {
+		if plan.Reason != "verify_failed" && plan.Reason != "untrusted_record" {
 			clearWindowsEnterpriseSources(&actionOpts)
 			if opts.codexTargetTransaction {
 				// The repair installs the supplied config on the installed
@@ -4995,7 +5046,14 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			actionOpts.configPath = ""
 		}
 		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)
-		if repaired := repairWindowsEnterpriseHookRuntimeAccess(); repaired != "" {
+		repaired, hookRuntimeRefusal := repairWindowsEnterpriseHookRuntimeAccessOrRefuse()
+		if hookRuntimeRefusal != "" {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("machine_policy_summary_untrusted", hookRuntimeRefusal)
+			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+		}
+		if repaired != "" {
 			result.Changes = append(result.Changes, repaired)
 		}
 		if repaired := repairWindowsEnterpriseClaudeDropIn(); repaired != "" {
@@ -5041,6 +5099,12 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	// install or upgrade whose report replaces this one; keep its record of
 	// the gateway recovery ran.
 	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	if plan.Reason == "untrusted_record" && report != nil && report.OK {
+		if layout, layoutErr := windowsManagedLayout.standalone(); layoutErr == nil && strings.TrimSpace(layout.DataDir) != "" {
+			result.Changes = append(result.Changes,
+				windowsEnterpriseKeptRecordChanges(filepath.Join(filepath.Dir(layout.DataDir), "install"), opts.activationStartedAt)...)
+		}
+	}
 	if allowRetry && plan.Action == "install" && windowsEnterpriseInstallLostRace(report) {
 		result.AddWarning("concurrent_install", "another lifecycle installed this host while ensure waited for the lifecycle lock; ensure re-planned from a fresh status")
 		return true, nil
@@ -5213,6 +5277,14 @@ func planWindowsEnterpriseEnsure(
 	absentReason := "not_installed"
 	if status.probeFailed {
 		failure := windowsEnterpriseEnsureProbeFailure(status)
+		if strings.Contains(failure.Error(), "untrusted_record: ") && len(missingWindowsEnterpriseSources(opts)) == 0 {
+			// The deployment record or the attestation can be changed by
+			// another account. Setup, which carries the payload, keeps the
+			// changed file aside and writes the record again from the
+			// payload instead of trusting it in place (GAP-0602). The
+			// installed CLI carries none and refuses with the same text.
+			return windowsEnterpriseEnsurePlan{Action: "repair", Reason: "untrusted_record", Detail: failure.Error()}, nil
+		}
 		if windowsEnterpriseMessageCode(failure.Error(), "") != "root_squatted" {
 			// Planning from a document that carries no state would read an
 			// installed host as absent and install over it.

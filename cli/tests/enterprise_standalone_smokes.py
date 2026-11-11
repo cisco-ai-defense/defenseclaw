@@ -47,6 +47,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-recorded-trust-smoke.ps1",
     "enterprise-standalone-recovery-activation-deferral-smoke.ps1",
     "enterprise-standalone-recovery-gateway-smoke.ps1",
+    "enterprise-standalone-record-recovery-smoke.ps1",
     "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-runtime-env-acl-smoke.ps1",

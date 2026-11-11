@@ -2492,6 +2492,7 @@ func refuseWindowsManagedPolicyFolderTakeover(path string) error {
 		return nil
 	}
 	return managed.RefuseStandaloneMachinePolicyDrift(
+		path,
 		fmt.Errorf("%w (the folder already holds DefenseClaw's %s)", leaf, marker),
 	)
 }

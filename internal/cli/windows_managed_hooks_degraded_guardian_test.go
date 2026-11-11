@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -256,5 +257,66 @@ func TestWindowsManagedHooksGuardianAcceptsWaitingTargetAsFailed(t *testing.T) {
 	}
 	if _, _, err := f.validate(); err == nil {
 		t.Fatal("non-deferred pending target was accepted")
+	}
+}
+
+// rel-1-0-6:GAP-0994: the Guardian publishes its authorization, state and
+// activation records one after the other, and publishes OK=false with no failed
+// row when the exact enrollment set could not be published. A classification
+// that meets either refuses with the one sentence the lifecycle module
+// recognizes, and now names the input that disagreed.
+func TestWindowsManagedHooksGuardianBindingRefusalNamesTheDisagreement(t *testing.T) {
+	healthy := func() degradedGuardianFixture {
+		f := newDegradedGuardianFixture(true)
+		protected := []enterpriseHookReconcileRow{f.activeRow}
+		f.activation.OK, f.activation.TargetCount, f.activation.SuccessCount = true, 1, 1
+		f.activation.FailureCount, f.activation.PendingCount, f.activation.ProtectedTargets = 0, 0, protected
+		f.authorization.OK, f.authorization.TargetCount, f.authorization.SuccessCount = true, 1, 1
+		f.authorization.FailureCount, f.authorization.PendingCount, f.authorization.ProtectedTargets = 0, 0, protected
+		f.state.OK, f.state.TargetCount, f.state.SuccessCount = true, 1, 1
+		f.state.FailureCount, f.state.PendingCount, f.state.Results = 0, 0, []enterpriseHookReconcileRow{f.activeRow}
+		return f
+	}
+	const older = "2026-10-29T00:00:00Z"
+	const newer = "2026-10-29T00:02:40Z"
+	if _, _, err := healthy().validate(); err != nil {
+		t.Fatalf("one publication was refused: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*degradedGuardianFixture)
+		want   string
+	}{
+		{"stopped after the authorization and the state were published", func(f *degradedGuardianFixture) {
+			f.authorization.UpdatedAt, f.state.UpdatedAt = newer, newer
+			f.activation.UpdatedAt = older
+		}, "different publications (activation \"" + older + "\", authorization \"" + newer + "\", state \"" + newer + "\")"},
+		{"stopped after the authorization was published", func(f *degradedGuardianFixture) {
+			f.authorization.UpdatedAt = newer
+		}, "different publications (activation \"" + older + "\", authorization \"" + newer + "\", state \"" + older + "\")"},
+		{"published as incomplete with no failed row", func(f *degradedGuardianFixture) {
+			f.activation.OK, f.authorization.OK, f.state.OK = false, false, false
+		}, "activation ok=false, its rows say ok=true"},
+		{"another manifest path", func(f *degradedGuardianFixture) {
+			f.state.Manifest = `C:\elsewhere\targets.yaml`
+		}, "manifest path"},
+	} {
+		f := healthy()
+		tc.mutate(&f)
+		for name, call := range map[string]func() error{
+			"classification": func() error {
+				return validateLegacyWindowsManagedHooksGuardianActivation(f.activation, f.authorization, f.state, f.ctx, f.manifestSHA256)
+			},
+			"teardown": func() error { _, _, err := f.validate(); return err },
+		} {
+			err := call()
+			if !errors.Is(err, errWindowsManagedHooksGuardianNotBound) {
+				t.Fatalf("%s (%s): err = %v, want the binding refusal", tc.name, name, err)
+			}
+			if !strings.Contains(err.Error(), "does not exactly bind the legacy deployment manifest and authorization") ||
+				!strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("%s (%s): err = %q, want the recognized sentence and %q", tc.name, name, err, tc.want)
+			}
+		}
 	}
 }
