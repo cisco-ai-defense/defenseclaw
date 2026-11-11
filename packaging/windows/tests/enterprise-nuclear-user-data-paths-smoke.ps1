@@ -223,6 +223,13 @@ targets:
     if ($erinLinked -and (Test-DefenseClawNuclearManagedUserDataFolder -Path $erinData)) {
         throw 'a .defenseclaw reparse point was treated as a managed user data folder'
     }
+    # A GitHub Copilot-only account's runtime generation is managed evidence
+    # too, with no hook contract lock beside it.
+    $frankData = New-SmokeDataDir (New-SmokeHome 'frank')
+    [IO.File]::WriteAllText([IO.Path]::Combine($frankData, 'hooks', ".managed-runtime-copilot-$generation.json"), '{}')
+    if (-not (Test-DefenseClawNuclearManagedUserDataFolder -Path $frankData)) {
+        throw 'a GitHub Copilot runtime generation was not treated as managed user data'
+    }
     if (-not (Test-DefenseClawNuclearManagedUserDataFolder -Path $bobData) -or
         (Test-DefenseClawNuclearManagedUserDataFolder -Path $daveData) -or
         (Test-DefenseClawNuclearManagedUserDataFolder -Path ([IO.Path]::Combine($root, 'absent', '.defenseclaw')))) {

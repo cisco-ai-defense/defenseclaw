@@ -132,7 +132,7 @@ t_install_survives_zero_target_manifest() {
   # different guidance. Without this the warn is a single generic line.
   assert_contains "${body}" 'classify_zero_target_reason "${CONNECTOR}"' \
     "install.sh consults classify_zero_target_reason to distinguish all-unsupported vs none-installed"
-  assert_contains "${body}" 'supported today: amp|codex|claudecode|cursor|opencode' \
+  assert_contains "${body}" 'supported today: amp|codex|claudecode|copilot|cursor|opencode' \
     "zero-target operator report lists every auto-wireable connector"
 
   # Branch-to-bootstrap control-flow guard (CodeRabbit finding 2):

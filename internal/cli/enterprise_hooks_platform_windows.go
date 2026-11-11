@@ -500,11 +500,19 @@ func syncEnterpriseHookManagedMachineEnrollments(
 				}
 			}
 		} else if publishExact {
-			if !currentCodex.Active {
-				return enterpriseHookPolicyError("Codex managed policy is absent after target runtime installation")
-			}
-			if err := enterpriseHookCodexTargetsPublisher(codexOpts, desiredCodex); err != nil {
-				return err
+			// The administrator turned DefenseClaw's managed Codex hooks off
+			// (Secure Client without the strict pin): Codex has no registry to
+			// publish, its rows report the failure, and the other agents'
+			// enrollment is still published.
+			if currentCodex.AdminConflict != "" {
+				connector.ReportWindowsCodexAdminConflict(codexOpts.RequirementsPath, currentCodex.AdminConflict)
+			} else {
+				if !currentCodex.Active {
+					return enterpriseHookPolicyError("Codex managed policy is absent after target runtime installation")
+				}
+				if err := enterpriseHookCodexTargetsPublisher(codexOpts, desiredCodex); err != nil {
+					return err
+				}
 			}
 		} else if currentCodex.Active {
 			desired := make(map[string]string, len(desiredCodex))
@@ -765,7 +773,11 @@ func verifyEnterpriseHookManagedEnrollments(
 	if err != nil {
 		return err
 	}
-	if currentCodex.Active != (expected["codex"] || len(desiredCodex) > 0) ||
+	// An inactive registry left by the administrator's own Codex setting is
+	// not compared: Codex runs no hooks then, and its rows report it.
+	if currentCodex.AdminConflict != "" {
+		desiredCodex = nil
+	} else if currentCodex.Active != (expected["codex"] || len(desiredCodex) > 0) ||
 		len(currentCodex.Targets) != len(desiredCodex) {
 		return fmt.Errorf("Codex protected SID enrollment does not match the enabled manifest")
 	}

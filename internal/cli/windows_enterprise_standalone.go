@@ -141,6 +141,10 @@ type windowsEnterpriseInstallerReport struct {
 	// lifecycle removed because an earlier uninstall that was refused or
 	// rolled back left it (GAP-1041).
 	StaleTeardownJournalRemoved string `json:"stale_teardown_journal_removed"`
+	// RestartDeleteCancelFailed holds why an Install, Upgrade or Repair
+	// could not cancel the restart deletes a purge queued for its files;
+	// the next restart can then delete the reinstalled hook and policies.
+	RestartDeleteCancelFailed string `json:"restart_delete_cancel_failed"`
 	// Forced is set by Setup /uninstall FORCE=1, which removed the
 	// deployment without recovering its transaction; ForcedStateRootKept
 	// names the moved-aside managed state it could not delete.
@@ -2535,6 +2539,16 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 		warnings = append(warnings, enterprisestatus.Message{
 			Code:    "stale_lifecycle_journal_removed",
 			Message: message,
+		})
+	}
+	if failed := strings.TrimSpace(report.RestartDeleteCancelFailed); failed != "" {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "restart_delete_cancel_failed",
+			Message: "Setup could not cancel the deletes a purge queued for DefenseClaw's files at the next restart, " +
+				"so that restart can remove the hook and policy files this run installed; run " + windowsEnterpriseSetupCommand("/ensure") +
+				" again after the restart (" + managed.WindowsSetupSource + "), " +
+				"which repairs the deployment, or installs it again with the same config if the restart also removed its record: " +
+				windowsEnterpriseBoundedDiagnostic(failed),
 		})
 	}
 	if skipped := windowsEnterpriseReportStrings(report.LifecycleRetireSkipped); len(skipped) != 0 {

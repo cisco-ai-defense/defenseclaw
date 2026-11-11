@@ -285,7 +285,12 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 				"enterprise hooks: Codex machine policy belongs to another protected gateway deployment",
 			))
 		}
-		if !registry.Active {
+		// The administrator turned DefenseClaw's managed Codex hooks off
+		// (Secure Client without the strict pin): there is nothing to stage
+		// until the setting is restored, and the Codex rows report it.
+		if registry.AdminConflict != "" {
+			connector.ReportWindowsCodexAdminConflict(machineOpts.RequirementsPath, registry.AdminConflict)
+		} else if !registry.Active {
 			report, err := windowsCodexRequirementsReconciler(machineOpts)
 			if err != nil {
 				return rollback(fmt.Errorf("enterprise hooks: stage Codex machine requirements: %w", err))

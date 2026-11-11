@@ -2664,6 +2664,33 @@ func TestWindowsNativeOTLPCaptureSkipWarning(t *testing.T) {
 	}
 }
 
+// A failed restart-delete cancel reaches the standalone result once, as a
+// warning that names the Repair after the restart.
+func TestWindowsRestartDeleteCancelFailureWarning(t *testing.T) {
+	document, err := json.Marshal(map[string]any{
+		"schema_version":               1,
+		"ok":                           true,
+		"action":                       "install",
+		"restart_delete_cancel_failed": "access to the registry key is denied",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := parseWindowsEnterpriseInstallerReport(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.4")
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	if len(result.Errors) != 0 || len(result.Warnings) != 1 ||
+		result.Warnings[0].Code != "restart_delete_cancel_failed" ||
+		!strings.Contains(result.Warnings[0].Message, "access to the registry key is denied") ||
+		!strings.Contains(result.Warnings[0].Message, windowsEnterpriseSetupCommand("/ensure")+" again after the restart ("+managed.WindowsSetupSource+")") {
+		t.Fatalf("restart-delete cancel failure was not reported once: %+v", result)
+	}
+}
+
 // WIN-R2-03: Setup run from an elevated prompt cannot act as the accounts the
 // guardian registered, so the rollback names that cause and a remedy the
 // administrator can run from that prompt.

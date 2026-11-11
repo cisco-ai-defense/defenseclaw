@@ -1243,3 +1243,79 @@ func TestWindowsGuardianReconcilesAnUnreadableCodexRequirementsBeforePublishingT
 		})
 	}
 }
+
+// A Secure Client host whose administrator turned Codex's managed hooks off
+// has no Codex registry. Exact publication and verify leave Codex out instead
+// of failing the other agents; an inactive registry without that reason
+// still fails both.
+func TestWindowsCodexAdminConflictLeavesCodexOutOfExactEnrollment(t *testing.T) {
+	previousCfg := cfg
+	previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
+	previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+	previousCodexRemover, previousCodexPublisher := enterpriseHookCodexRequirementsRemover, enterpriseHookCodexTargetsPublisher
+	previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+	previousClaudeIdentity, previousCursorIdentity := enterpriseHookClaudePolicyIdentityVerifier, enterpriseHookCursorPolicyIdentityVerifier
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
+		enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+		enterpriseHookCodexRequirementsRemover, enterpriseHookCodexTargetsPublisher = previousCodexRemover, previousCodexPublisher
+		enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+		enterpriseHookClaudePolicyIdentityVerifier, enterpriseHookCursorPolicyIdentityVerifier = previousClaudeIdentity, previousCursorIdentity
+	})
+	cfg = &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileSecureClient},
+		Guardrail:      config.GuardrailConfig{Connector: "codex"},
+	}
+	enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) { return nil, false, nil }
+	enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+		return nil, false, nil
+	}
+	enterpriseHookClaudePolicyTargetsPublisher = func([]string) error { return nil }
+	enterpriseHookCursorPolicyTargetsPublisher = func([]enterprisehooks.WindowsCursorManagedRuntimeTarget) error { return nil }
+	enterpriseHookClaudePolicyIdentityVerifier = func(string, string, string) error { return nil }
+	enterpriseHookCursorPolicyIdentityVerifier = func(string, string, string) error { return nil }
+	enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+		return connector.WindowsCodexMachineRequirementsOptions{HookBinary: `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-hook.exe`, GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway"}, nil
+	}
+	enterpriseHookCodexRequirementsRemover = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+		t.Fatal("an administrator conflict removed Codex machine requirements")
+		return connector.WindowsCodexMachineRequirementsReport{}, nil
+	}
+	var published bool
+	enterpriseHookCodexTargetsPublisher = func(connector.WindowsCodexMachineRequirementsOptions, []connector.WindowsCodexManagedRuntimeTarget) error {
+		published = true
+		return nil
+	}
+	registry := connector.WindowsCodexManagedRuntimeRegistry{
+		AdminConflict: "features.hooks=false conflicts with required DefenseClaw managed hooks",
+	}
+	enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+		return registry, nil
+	}
+	manifest := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{{
+		SID:       "S-1-5-21-1-2-3-1001",
+		UserHome:  `C:\Users\alice`,
+		Connector: "codex",
+	}}}
+
+	if err := syncEnterpriseHookManagedMachineEnrollments(manifest, "127.0.0.1:32109", true); err != nil {
+		t.Fatalf("exact publication with an administrator conflict: %v", err)
+	}
+	if published {
+		t.Fatal("Codex targets were published to a registry the administrator turned off")
+	}
+	if err := verifyEnterpriseHookManagedEnrollments(manifest, "127.0.0.1:32109"); err != nil {
+		t.Fatalf("verify with an administrator conflict: %v", err)
+	}
+
+	registry = connector.WindowsCodexManagedRuntimeRegistry{}
+	err := syncEnterpriseHookManagedMachineEnrollments(manifest, "127.0.0.1:32109", true)
+	if err == nil || !strings.Contains(err.Error(), "Codex managed policy is absent") {
+		t.Fatalf("inactive registry without a conflict = %v, want absent-policy error", err)
+	}
+	if err := verifyEnterpriseHookManagedEnrollments(manifest, "127.0.0.1:32109"); err == nil {
+		t.Fatal("verify accepted an inactive Codex registry without an administrator conflict")
+	}
+}

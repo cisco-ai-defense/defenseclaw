@@ -78,6 +78,7 @@ foreach ($name in @(
         'ConvertTo-DefenseClawResilienceFieldValue',
         'Format-DefenseClawResilienceEvent',
         'Format-DefenseClawRerunStep',
+        'Get-DefenseClawServicePendingDeleteRemedy',
         'Get-DefenseClawServicePendingDeleteMessage',
         'Test-DefenseClawServicePendingDeleteFailure',
         'Invoke-DefenseClawTransientFileRetry',
@@ -104,15 +105,30 @@ function Write-DefenseClawResilienceEvent {
 }
 
 # A pending delete names the exact prerequisite, and auto-recovery sees it.
+# The remedy names open MMC consoles when one is running, a restart otherwise.
+$remedy = Get-DefenseClawServicePendingDeleteRemedy
+if ($remedy -cnotin @(
+        'restart Windows to finish deleting the service, then run Setup again',
+        'close Services, Event Viewer and other MMC consoles that are open, then run Setup again; if it still fails, restart Windows'
+    )) {
+    throw "pending-delete remedy is unexpected: $remedy"
+}
 $message = Get-DefenseClawServicePendingDeleteMessage -Name 'DefenseClawGateway'
-if ($message -cne 'defenseclaw_prereq check="service_pending_delete" remedy="restart Windows to finish deleting the service, then run Setup again" service="DefenseClawGateway"') {
+if ($message -cne ('defenseclaw_prereq check="service_pending_delete" remedy="' + $remedy + '" service="DefenseClawGateway"')) {
     throw "pending-delete prerequisite is not in the shared format: $message"
 }
 $script:SmokeStandaloneProfile = $true
+$standaloneRemedy = Get-DefenseClawServicePendingDeleteRemedy
 $standaloneMessage = Get-DefenseClawServicePendingDeleteMessage -Name 'DefenseClawGateway'
 $script:SmokeStandaloneProfile = $false
-if ($standaloneMessage -cne 'defenseclaw_prereq check="service_pending_delete" remedy="restart Windows to finish deleting the service, then run the same command again" service="DefenseClawGateway"') {
-    throw "standalone pending-delete prerequisite asks for Setup by name: $standaloneMessage"
+if ($standaloneRemedy -cnotin @(
+        'restart Windows to finish deleting the service, then run the same command again',
+        'close Services, Event Viewer and other MMC consoles that are open, then run the same command again; if it still fails, restart Windows'
+    )) {
+    throw "standalone pending-delete remedy asks for Setup by name: $standaloneRemedy"
+}
+if ($standaloneMessage -cne ('defenseclaw_prereq check="service_pending_delete" remedy="' + $standaloneRemedy + '" service="DefenseClawGateway"')) {
+    throw "standalone pending-delete prerequisite is not in the shared format: $standaloneMessage"
 }
 if (-not (Test-DefenseClawServicePendingDeleteFailure -Message "Install failed: $message") -or
     (Test-DefenseClawServicePendingDeleteFailure -Message 'sc.exe exited 5') -or
@@ -233,6 +249,48 @@ if (@($script:DefenseClawBootstrapResilienceEvents | Where-Object {
             $_.StartsWith('defenseclaw_accept connector="codex"')
         }).Count -ne 1) {
     throw "unverifiable Codex enablement was not logged: $($script:DefenseClawBootstrapResilienceEvents -join '; ')"
+}
+
+# No agent installed yet (AVC pushes DefenseClaw first). Secure Client enables
+# the row without a version, so the best-effort contract applies and the
+# enumerator records the real version once the agent appears; it never writes
+# the bootstrap minimum, which is not evidence of an installed agent.
+# Standalone keeps the exact minimum, because its manifest requires one.
+function Get-DefenseClawConnectorMetadataVersion {
+    param([string]$Connector, [string]$UserHome, [string]$OwnerSID, [ref]$NativeCandidateObserved)
+    if ($null -ne $NativeCandidateObserved) { $NativeCandidateObserved.Value = $false }
+    return ''
+}
+$script:DefenseClawWindowsManagedEnterpriseSupportedConnectors = @('codex', 'claudecode', 'cursor', 'copilot')
+$absentProfiles = @([pscustomobject]@{
+        SID = 'S-1-5-21-1000-1000-1000-1002'
+        UserName = 'no-agents-user'
+        UserHome = 'C:\Users\no-agents-user'
+    })
+$absentConnectors = @('codex', 'claudecode', 'cursor', 'copilot')
+$secureClientAbsent = Get-DefenseClawRenderedEnterpriseTargets `
+    -Connectors $absentConnectors `
+    -Profiles $absentProfiles
+$secureClientAbsentBlocks = @(
+    [regex]::Split($secureClientAbsent, '(?m)(?=^  - user: )') |
+        Where-Object { $_.StartsWith('  - user: ') }
+)
+if ($secureClientAbsentBlocks.Count -ne 4) {
+    throw "Secure Client renderer emitted $($secureClientAbsentBlocks.Count) rows for four absent agents: $secureClientAbsent"
+}
+foreach ($block in $secureClientAbsentBlocks) {
+    if ($block -notmatch '(?m)^    enabled: true\r?$' -or
+        $block -match '(?m)^    agent_version:') {
+        throw "Secure Client wrote a bootstrap version for an absent agent instead of an unversioned enabled row: $block"
+    }
+}
+$standaloneAbsent = Get-DefenseClawRenderedEnterpriseTargets `
+    -Connectors @('claudecode') `
+    -Profiles $absentProfiles `
+    -ForProfile Standalone
+if ($standaloneAbsent -notmatch '(?m)^    agent_version: "2\.1\.152"\r?$' -or
+    $standaloneAbsent -notmatch '(?m)^    enabled: true\r?$') {
+    throw "standalone lost the bootstrap minimum for an absent agent: $standaloneAbsent"
 }
 
 'installer resilience smoke passed'

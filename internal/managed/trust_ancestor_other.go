@@ -13,3 +13,7 @@ func osRootAncestor(string) bool { return false }
 // trustedRootAlias is macOS only: other Unix systems have no fixed root
 // aliases a managed path crosses.
 func trustedRootAlias(string) bool { return false }
+
+// administratorWriterGroup is macOS only: on other Unix systems a group write
+// bit on an install marker ancestor stays fatal.
+func administratorWriterGroup(uint32) bool { return false }

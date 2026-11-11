@@ -720,6 +720,23 @@ namespace $nativeNamespace
         [DllImport("wtsapi32.dll")]
         private static extern void WTSFreeMemory(IntPtr memory);
 
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WTSQueryUserToken(int sessionId, out IntPtr token);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTokenInformation(
+            IntPtr token,
+            int tokenInformationClass,
+            IntPtr tokenInformation,
+            int tokenInformationLength,
+            out int returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr handle);
+
         [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
         private static extern int NetLocalGroupGetMembers(
             string serverName,
@@ -887,6 +904,106 @@ namespace $nativeNamespace
             return GetActiveSessionSIDs(false);
         }
 
+        // Session accounts (DOMAIN\user) whose name did not translate on the
+        // last GetActiveSessionSIDs call: those the session token resolved,
+        // and those neither resolved. The caller resolves the second set
+        // locally or leaves those users to the Guardian.
+        public static string[] LastTokenFallbackSessionAccounts = new string[0];
+        public static string[] LastUnresolvedSessionAccounts = new string[0];
+        // What was tried for each account in either set: its session, the
+        // name lookup error and the session token result.
+        public static Dictionary<string, string> LastSessionResolutionDetail =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // The name lookup asks LSA, which forwards a domain account to a
+        // domain controller when its SID is not cached: on a domain laptop
+        // off VPN or with a broken trust it fails. The session's own token
+        // carries the SID with no lookup; reading it needs SeTcbPrivilege,
+        // which Setup has when it runs as LocalSystem (the AVC custom
+        // action). A session neither resolves is reported, never fatal.
+        private static SecurityIdentifier ResolveSessionUserSID(
+            int sessionId,
+            string domain,
+            string user,
+            List<string> tokenFallbacks,
+            List<string> unresolved,
+            Dictionary<string, string> details)
+        {
+            string label = String.IsNullOrEmpty(domain) ? user : domain + "\\" + user;
+            string lookupError;
+            try
+            {
+                NTAccount account = String.IsNullOrEmpty(domain)
+                    ? new NTAccount(user)
+                    : new NTAccount(domain, user);
+                return (SecurityIdentifier)account.Translate(
+                    typeof(SecurityIdentifier));
+            }
+            catch (IdentityNotMappedException ex) { lookupError = ex.GetType().Name + ": " + ex.Message; }
+            catch (SystemException ex) { lookupError = ex.GetType().Name + ": " + ex.Message; }
+            string tokenResult;
+            SecurityIdentifier fromToken = SessionTokenUserSID(sessionId, out tokenResult);
+            details[label] = "session " + sessionId +
+                "; name lookup failed (" + lookupError + ")" +
+                "; session token: " + tokenResult;
+            if (fromToken != null)
+            {
+                tokenFallbacks.Add(label);
+                return fromToken;
+            }
+            unresolved.Add(label);
+            return null;
+        }
+
+        private static string Win32ErrorText(string call)
+        {
+            int code = Marshal.GetLastWin32Error();
+            return call + " failed (Win32 " + code + ": " + new Win32Exception(code).Message + ")";
+        }
+
+        private static SecurityIdentifier SessionTokenUserSID(int sessionId, out string result)
+        {
+            IntPtr token;
+            if (!WTSQueryUserToken(sessionId, out token) || token == IntPtr.Zero)
+            {
+                result = Win32ErrorText("WTSQueryUserToken");
+                return null;
+            }
+            IntPtr buffer = IntPtr.Zero;
+            try
+            {
+                const int tokenUser = 1;
+                int needed;
+                GetTokenInformation(token, tokenUser, IntPtr.Zero, 0, out needed);
+                if (needed <= 0 || needed > 4096)
+                {
+                    result = "GetTokenInformation reported a TokenUser size of " + needed + " bytes";
+                    return null;
+                }
+                buffer = Marshal.AllocHGlobal(needed);
+                if (!GetTokenInformation(token, tokenUser, buffer, needed, out needed))
+                {
+                    result = Win32ErrorText("GetTokenInformation");
+                    return null;
+                }
+                IntPtr sidPointer = Marshal.ReadIntPtr(buffer);
+                if (sidPointer == IntPtr.Zero)
+                {
+                    result = "the token has no user SID";
+                    return null;
+                }
+                SecurityIdentifier sid = new SecurityIdentifier(sidPointer);
+                result = "resolved " + sid.Value;
+                return sid;
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero)
+                    Marshal.FreeHGlobal(buffer);
+                CloseHandle(token);
+            }
+        }
+
         // includeEntra admits Microsoft Entra ID user SIDs (S-1-12-1-...)
         // for the standalone profile; the parameterless Secure Client form
         // keeps the historical S-1-5-21 filter exactly.
@@ -912,6 +1029,10 @@ namespace $nativeNamespace
                 int size = Marshal.SizeOf(typeof(WTSSessionInfo));
                 HashSet<string> active = new HashSet<string>(
                     StringComparer.OrdinalIgnoreCase);
+                List<string> tokenFallbacks = new List<string>();
+                List<string> unresolved = new List<string>();
+                Dictionary<string, string> details = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
                 for (int index = 0; index < count; index++)
                 {
                     IntPtr pointer = new IntPtr(
@@ -934,14 +1055,19 @@ namespace $nativeNamespace
                         row.SessionId,
                         7,
                         "domain name").Trim();
-                    NTAccount account = String.IsNullOrEmpty(domain)
-                        ? new NTAccount(user)
-                        : new NTAccount(domain, user);
-                    SecurityIdentifier sid = (SecurityIdentifier)account.Translate(
-                        typeof(SecurityIdentifier));
-                    if (IsInteractiveUserSID(sid))
+                    SecurityIdentifier sid = ResolveSessionUserSID(
+                        row.SessionId,
+                        domain,
+                        user,
+                        tokenFallbacks,
+                        unresolved,
+                        details);
+                    if (sid != null && IsInteractiveUserSID(sid))
                         active.Add(sid.Value);
                 }
+                LastTokenFallbackSessionAccounts = tokenFallbacks.ToArray();
+                LastSessionResolutionDetail = details;
+                LastUnresolvedSessionAccounts = unresolved.ToArray();
                 List<string> ordered = new List<string>(active);
                 ordered.Sort(StringComparer.OrdinalIgnoreCase);
                 return ordered.ToArray();
@@ -2962,6 +3088,132 @@ function Test-DefenseClawInteractiveUserSID {
         ) -and $componentCount -eq 8)
 }
 
+# The SIDs of the signed-in interactive users. A session whose account name
+# does not translate (a domain account with no LSA answer, as on a domain
+# laptop off VPN) is resolved from its session token when Setup runs as
+# LocalSystem, else from the one ProfileList profile whose folder is named
+# after the user (user, or user.DOMAIN...). A session neither resolves is
+# left out and logged: its rows stay deferred and the Guardian enrolls the
+# user once it reads the session. No lookup failure stops the install.
+function Get-DefenseClawActiveSessionSIDs {
+    param([string]$EnterpriseProfile)
+
+    $native = Initialize-DefenseClawBootstrapNativePath
+    $sids = [Collections.Generic.List[string]]::new()
+    foreach ($sid in @($native::GetActiveSessionSIDs($EnterpriseProfile -ceq 'Standalone'))) {
+        $sids.Add([string]$sid)
+    }
+    $fallbacks = @($native::LastTokenFallbackSessionAccounts)
+    $unresolved = @($native::LastUnresolvedSessionAccounts)
+    $detail = {
+        param([string]$Account)
+        if ($native::LastSessionResolutionDetail.ContainsKey($Account)) {
+            return [string]$native::LastSessionResolutionDetail[$Account]
+        }
+        return 'no detail recorded'
+    }
+    # The standalone profile and strict mode resolve a signed-in account only
+    # through the name lookup, as before; Secure Client falls back to the
+    # session token and then to a single matching ProfileList folder.
+    if (($EnterpriseProfile -ceq 'Standalone') -or (Test-DefenseClawBootstrapStrictAncestors)) {
+        $refused = @($fallbacks) + @($unresolved)
+        if ($refused.Count -gt 0) {
+            $account = [string]$refused[0]
+            throw ("signed-in account $account did not translate to a SID: $(& $detail $account). " +
+                'Expected: the name lookup returns its SID. The standalone profile and strict mode do not ' +
+                'fall back to the session token or the profile folder; restore the domain trust (or connect ' +
+                'to the corporate network) and run Setup again.')
+        }
+        return $sids.ToArray()
+    }
+    foreach ($account in $fallbacks) {
+        Add-DefenseClawBootstrapResilienceEvent `
+            -Marker defenseclaw_accept `
+            -Fields @{
+                account = [string]$account
+                detail  = (& $detail ([string]$account))
+                reason  = 'signed-in account did not translate; using the SID from its session token'
+            }
+    }
+    if ($unresolved.Count -eq 0) {
+        return $sids.ToArray()
+    }
+    $profiles = [Collections.Generic.List[psobject]]::new()
+    $rootKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+    foreach ($sub in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $rootKey -ErrorAction SilentlyContinue)) {
+        try {
+            $profileSID = [Security.Principal.SecurityIdentifier]::new($sub.PSChildName)
+            $image = (Microsoft.PowerShell.Management\Get-ItemProperty -LiteralPath $sub.PSPath `
+                -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+        }
+        catch { continue }
+        if (-not (Test-DefenseClawInteractiveUserSID -SID $profileSID) -or
+            [string]::IsNullOrWhiteSpace($image)) {
+            continue
+        }
+        $leaf = [IO.Path]::GetFileName(
+            [Environment]::ExpandEnvironmentVariables([string]$image).TrimEnd('\')
+        )
+        $profiles.Add([pscustomobject]@{ SID = $profileSID.Value; Leaf = $leaf })
+    }
+    foreach ($account in $unresolved) {
+        $parts = ([string]$account).Split('\')
+        $user = $parts[-1]
+        $domain = if ($parts.Count -gt 1) { $parts[0] } else { '' }
+        # Windows names a profile folder after the user, or user.DOMAIN when
+        # that name is taken, with a .000-style suffix on a further collision.
+        $pattern = '^' + [regex]::Escape($user) + '$'
+        $expected = "a ProfileList folder named $user"
+        if (-not [string]::IsNullOrEmpty($domain)) {
+            $pattern = '^' + [regex]::Escape($user) + '(\.' + [regex]::Escape($domain) + '(\.\d{3})?)?$'
+            $expected = "exactly one ProfileList folder named $user, $user.$domain or $user.$domain.NNN"
+        }
+        $found = @($profiles | Microsoft.PowerShell.Core\Where-Object {
+            [regex]::IsMatch([string]$_.Leaf, $pattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        })
+        # A folder whose SID resolves offline (every local account does) names
+        # a known account; unless that is this account, the folder is not its.
+        $found = @($found | Microsoft.PowerShell.Core\Where-Object {
+            try {
+                $owner = ([Security.Principal.SecurityIdentifier]::new([string]$_.SID)).Translate(
+                    [Security.Principal.NTAccount]).Value
+                return [string]::Equals($owner, [string]$account, [StringComparison]::OrdinalIgnoreCase)
+            }
+            catch {
+                return $true
+            }
+        })
+        if ($found.Count -eq 1) {
+            $sids.Add([string]$found[0].SID)
+            Add-DefenseClawBootstrapResilienceEvent `
+                -Marker defenseclaw_accept `
+                -Fields @{
+                    account = [string]$account
+                    sid     = [string]$found[0].SID
+                    detail  = (& $detail ([string]$account))
+                    reason  = "signed-in account did not translate; matched its ProfileList profile folder $($found[0].Leaf)"
+                }
+            continue
+        }
+        $foundText = if ($found.Count -eq 0) {
+            "none of $($profiles.Count) interactive profile folders matched"
+        }
+        else {
+            ((@($found | Microsoft.PowerShell.Utility\Select-Object -First 5 | Microsoft.PowerShell.Core\ForEach-Object { "$($_.Leaf)=$($_.SID)" })) -join ', ')
+        }
+        Add-DefenseClawBootstrapResilienceEvent `
+            -Marker defenseclaw_degraded `
+            -Fields @{
+                account  = [string]$account
+                detail   = (& $detail ([string]$account))
+                expected = $expected
+                found    = $foundText
+                reason   = "signed-in account did not translate and matched $($found.Count) profile folders; the Guardian enrolls it later"
+            }
+    }
+    return @($sids | Microsoft.PowerShell.Utility\Sort-Object -Unique)
+}
+
 function Select-DefenseClawActiveInteractiveUserProfiles {
     param(
         [AllowEmptyCollection()][object[]]$Profiles = @(),
@@ -3016,10 +3268,7 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
     }
     if ($RequireActiveSession -and
         -not $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
-        $native = Initialize-DefenseClawBootstrapNativePath
-        $ActiveSessionSIDs = @($native::GetActiveSessionSIDs(
-            $EnterpriseProfile -ceq 'Standalone'
-        ))
+        $ActiveSessionSIDs = @(Get-DefenseClawActiveSessionSIDs -EnterpriseProfile $EnterpriseProfile)
     }
 
     # Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList
@@ -4250,10 +4499,7 @@ function Get-DefenseClawRenderedEnterpriseTargets {
     $activeProfiles = @()
     if ($DeferInactiveProfiles) {
         if (-not $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
-            $native = Initialize-DefenseClawBootstrapNativePath
-            $ActiveSessionSIDs = @($native::GetActiveSessionSIDs(
-                $EnterpriseProfile -ceq 'Standalone'
-            ))
+            $ActiveSessionSIDs = @(Get-DefenseClawActiveSessionSIDs -EnterpriseProfile $EnterpriseProfile)
         }
         $activeProfiles = @(
             Select-DefenseClawActiveInteractiveUserProfiles `
@@ -4268,16 +4514,21 @@ function Get-DefenseClawRenderedEnterpriseTargets {
         [void]$activeProfileSIDs.Add(([string]$activeProfile.SID).Trim())
     }
     # When no agent metadata exists yet (the common state on managed
-    # rollouts where AVC pushes DefenseClaw first), use the exact minimum as
-    # a bootstrap placeholder. A detected native package whose
-    # identity/version cannot be authenticated never receives that
-    # fallback. Secure Client enables its row without agent_version, which
-    # the manifest accepts and which selects the best-effort hook contract.
-    # The standalone manifest validator refuses an enabled target without
-    # an agent_version that meets the connector's Windows minimum (see
+    # rollouts where AVC pushes DefenseClaw first), the standalone profile
+    # uses the exact minimum as a bootstrap placeholder: its manifest
+    # validator refuses an enabled target without an agent_version that meets
+    # the connector's Windows minimum (see
     # requireWindowsEnterpriseManagedAgentVersion in
-    # internal/enterprisehooks/install_windows.go), so standalone keeps that
-    # row disabled. A valid below-minimum version remains exact.
+    # internal/enterprisehooks/install_windows.go). Secure Client never
+    # writes the placeholder. It enables its row without agent_version, which
+    # the manifest accepts and which selects the best-effort hook contract,
+    # and the enumerator records the real version once it finds the agent.
+    # A placeholder there is not evidence of any installed agent, and while
+    # the host is not verified as Secure Client the enumerator keeps the
+    # recorded version, so a placeholder below the hook contract floor would
+    # leave the row unhookable. A detected native package whose
+    # identity/version cannot be authenticated never receives the fallback.
+    # A valid below-minimum version remains exact.
     $script:DefenseClawWindowsAgentVersionMinimum = @{
         'codex'      = '0.131.0'
         'claudecode' = '2.1.152'
@@ -4307,6 +4558,7 @@ function Get-DefenseClawRenderedEnterpriseTargets {
                 $metadataDiscoveryFailed = $true
             }
             $minimumVersion = if (
+                $ForProfile -ceq 'Standalone' -and
                 $script:DefenseClawWindowsAgentVersionMinimum.ContainsKey($c)
             ) {
                 $script:DefenseClawWindowsAgentVersionMinimum[$c]

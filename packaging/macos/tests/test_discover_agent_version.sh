@@ -16,7 +16,7 @@ without_host_agent_bins() {
   local fakebin
   fakebin="$(mktest_tmp)"
   local bin
-  for bin in amp claude codex opencode; do
+  for bin in amp claude codex copilot opencode; do
     cat > "${fakebin}/${bin}" <<'SH'
 #!/usr/bin/env bash
 exit 127
@@ -36,6 +36,133 @@ JSON
   local got
   got="$(without_host_agent_bins discover_agent_version amp "${home}")"
   assert_eq "${got}" "0.0.1777777777-gabc123" "amp version from trusted package metadata"
+}
+
+# isolate_copilot_system_prefixes points discovery's system-wide npm and
+# Homebrew prefixes at an empty fixture folder, so a Copilot installed on
+# this host never outranks or replaces the fixtures.
+isolate_copilot_system_prefixes() {
+  _COPILOT_SYSTEM_PREFIXES=("$(mktest_tmp)")
+}
+
+t_copilot_from_user_npm_metadata_without_executing_cli() {
+  isolate_copilot_system_prefixes
+  local home; home="$(mktest_tmp)"
+  local pkg_dir="${home}/.npm-global/lib/node_modules/@github/copilot"
+  mkdir -p "${pkg_dir}"
+  cat > "${pkg_dir}/package.json" <<'JSON'
+{ "name": "@github/copilot", "version": "1.0.105" }
+JSON
+  # A copilot on PATH records every run: discovery must make none, even a
+  # best-effort --version whose failure it would ignore.
+  local fakebin calls
+  fakebin="$(mktest_tmp)"
+  calls="${fakebin}/copilot-calls"
+  cat > "${fakebin}/copilot" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '${calls}'
+printf '9.9.9\n'
+SH
+  chmod 0700 "${fakebin}/copilot"
+  local got
+  got="$(PATH="${fakebin}:${PATH}" discover_agent_version copilot "${home}")"
+  assert_eq "${got}" "1.0.105" "copilot version from its npm package metadata"
+  if [[ -e "${calls}" ]]; then
+    _fail "copilot discovery executed the copilot binary: $(cat "${calls}")"
+  fi
+}
+
+t_copilot_stale_npm_install_does_not_win() {
+  # A stale npm package beside a current one must not select the legacy
+  # contract: the highest version found wins, whichever path comes first.
+  isolate_copilot_system_prefixes
+  local home; home="$(mktest_tmp)"
+  local stale="${home}/.npm-global/lib/node_modules/@github/copilot"
+  local current="${home}/.nvm/versions/node/v22.11.0/lib/node_modules/@github/copilot"
+  mkdir -p "${stale}" "${current}"
+  printf '%s\n' '{ "name": "@github/copilot", "version": "1.0.50" }' > "${stale}/package.json"
+  printf '%s\n' '{ "name": "@github/copilot", "version": "1.0.105" }' > "${current}/package.json"
+  local got
+  got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
+  assert_eq "${got}" "1.0.105" "copilot: the newest install wins over a stale npm package"
+}
+
+t_copilot_release_outranks_its_prerelease() {
+  _copilot_version_newer 1.0.105 1.0.105-rc.1 || _fail "1.0.105 does not outrank 1.0.105-rc.1"
+  ! _copilot_version_newer 1.0.105-rc.1 1.0.105 || _fail "1.0.105-rc.1 outranks 1.0.105"
+  ! _copilot_version_newer 1.0.105 1.0.105 || _fail "a version outranks itself"
+  _copilot_version_newer 1.0.106-rc.1 1.0.105 || _fail "1.0.106-rc.1 does not outrank 1.0.105"
+  _copilot_version_newer 1.0.105-rc.2 1.0.105-rc.1 || _fail "rc.2 does not outrank rc.1"
+  _copilot_version_newer 1.0.105-rc.10 1.0.105-rc.9 || _fail "rc.10 does not outrank rc.9"
+  _copilot_version_newer 1.0.105-rc.1.1 1.0.105-rc.1 || _fail "rc.1.1 does not outrank rc.1"
+  _copilot_version_newer 1.0.105-rc 1.0.105-1 || _fail "an alphanumeric identifier does not outrank a numeric one"
+  ! _copilot_version_newer 1.0.105+build.2 1.0.105+build.1 || _fail "build metadata changed the precedence"
+}
+
+t_copilot_newest_of_a_system_cask_and_a_user_npm_install() {
+  # The system prefixes are fixtures: a cask release beats a user npm
+  # prerelease of the same core.
+  local home prefix
+  home="$(mktest_tmp)"; prefix="$(mktest_tmp)"
+  _COPILOT_SYSTEM_PREFIXES=("${prefix}")
+  local npm="${home}/.npm-global/lib/node_modules/@github/copilot"
+  mkdir -p "${npm}" "${prefix}/Caskroom/copilot-cli/1.0.105"
+  printf '%s\n' '{ "name": "@github/copilot", "version": "1.0.105-rc.2" }' > "${npm}/package.json"
+  : > "${prefix}/Caskroom/copilot-cli/1.0.105/copilot"
+  chmod 0755 "${prefix}/Caskroom/copilot-cli/1.0.105/copilot"
+  local got
+  got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
+  assert_eq "${got}" "1.0.105" "copilot: a system cask release beats a user npm prerelease of it"
+}
+
+t_copilot_from_the_prerelease_cask() {
+  # Homebrew's copilot-cli@prerelease is its own cask folder.
+  local home prefix
+  home="$(mktest_tmp)"; prefix="$(mktest_tmp)"
+  _COPILOT_SYSTEM_PREFIXES=("${prefix}")
+  mkdir -p "${prefix}/Caskroom/copilot-cli@prerelease/1.0.106-1"
+  : > "${prefix}/Caskroom/copilot-cli@prerelease/1.0.106-1/copilot"
+  chmod 0755 "${prefix}/Caskroom/copilot-cli@prerelease/1.0.106-1/copilot"
+  local got
+  got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
+  assert_eq "${got}" "1.0.106-1" "copilot: the prerelease cask is discovered"
+}
+
+t_copilot_npm_invalid_version_is_not_a_version() {
+  isolate_copilot_system_prefixes
+  local home; home="$(mktest_tmp)"
+  local npm="${home}/.npm-global/lib/node_modules/@github/copilot"
+  mkdir -p "${npm}"
+  printf '%s\n' '{ "name": "@github/copilot", "version": "not-a-version" }' > "${npm}/package.json"
+  local got
+  got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
+  assert_eq "${got}" "" "copilot: an invalid npm version is not reported"
+}
+
+t_copilot_from_nvm_global_metadata() {
+  isolate_copilot_system_prefixes
+  local home; home="$(mktest_tmp)"
+  local pkg_dir="${home}/.nvm/versions/node/v22.11.0/lib/node_modules/@github/copilot"
+  mkdir -p "${pkg_dir}"
+  cat > "${pkg_dir}/package.json" <<'JSON'
+{ "name": "@github/copilot", "version": "1.0.97" }
+JSON
+  local got
+  got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
+  assert_eq "${got}" "1.0.97" "copilot version from an nvm global install"
+}
+
+t_copilot_metadata_requires_package_identity() {
+  isolate_copilot_system_prefixes
+  local home; home="$(mktest_tmp)"
+  local pkg_dir="${home}/.npm-global/lib/node_modules/@github/copilot"
+  mkdir -p "${pkg_dir}"
+  cat > "${pkg_dir}/package.json" <<'JSON'
+{ "name": "@attacker/not-copilot", "version": "9.9.9" }
+JSON
+  local got
+  got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
+  [[ "${got}" != "9.9.9" ]] || _fail "a package that is not @github/copilot set the Copilot version"
 }
 
 t_amp_metadata_requires_package_identity() {
@@ -1110,6 +1237,14 @@ t_discover_agent_version_records_error_for_corrupt_codex_npm() {
 run_case "amp from trusted user npm metadata" t_amp_from_user_npm_metadata_without_executing_cli
 run_case "amp package metadata identity"      t_amp_metadata_requires_package_identity
 run_case "amp without metadata is unversioned" t_amp_missing_metadata_may_be_unversioned
+run_case "copilot from trusted user npm metadata" t_copilot_from_user_npm_metadata_without_executing_cli
+run_case "copilot from nvm global metadata"      t_copilot_from_nvm_global_metadata
+run_case "copilot package metadata identity"     t_copilot_metadata_requires_package_identity
+run_case "copilot stale npm install does not win" t_copilot_stale_npm_install_does_not_win
+run_case "copilot release outranks its prerelease" t_copilot_release_outranks_its_prerelease
+run_case "copilot newest of cask and npm installs" t_copilot_newest_of_a_system_cask_and_a_user_npm_install
+run_case "copilot from the prerelease cask"      t_copilot_from_the_prerelease_cask
+run_case "copilot npm invalid version"           t_copilot_npm_invalid_version_is_not_a_version
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "cursor versionless user bundle falls through" t_cursor_versionless_user_bundle_falls_through_to_system_root
 run_case "cursor app plist version probe" t_cursor_app_version_reads_plist_or_nothing
