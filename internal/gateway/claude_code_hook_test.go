@@ -70,6 +70,18 @@ func TestEvaluateClaudeCodeHook_CapturesExactEventContentSentToInspection(t *tes
 			}
 		})
 	}
+
+	resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+		HookEventName: "StopFailure",
+		Error:         "provider failed",
+		ErrorDetails:  "request rejected",
+	})
+	if !resp.InspectedContentPresent {
+		t.Fatal("StopFailure InspectedContentPresent = false, want true")
+	}
+	if want := "provider failed\nrequest rejected"; resp.InspectedContent != want {
+		t.Fatalf("StopFailure InspectedContent = %q, want %q", resp.InspectedContent, want)
+	}
 }
 
 func TestEvaluateClaudeCodeHook_LocalInspectionDoesNotClaimAIDSubmission(t *testing.T) {
@@ -1212,6 +1224,9 @@ func TestEvaluateClaudeCodeHook_StopFailureInspectsErrorAsResult(t *testing.T) {
 	// finding is an alert, not a would-be block.
 	if resp.Action != "alert" || resp.RawAction != "alert" || resp.WouldBlock {
 		t.Fatalf("action=%q raw=%q would_block=%v, want alert/alert/false", resp.Action, resp.RawAction, resp.WouldBlock)
+	}
+	if resp.InspectedContentPresent || resp.InspectedContent != "" {
+		t.Fatalf("local-only StopFailure claimed AI Defense content: %+v", resp)
 	}
 }
 
