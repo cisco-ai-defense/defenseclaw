@@ -3,7 +3,27 @@
 
 package hookpaths
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
+
+// NestedShellBody returns a fixed shell -c body. The shared shell operand
+// readers use the same option grammar for nested calls.
+func NestedShellBody(words []string) string {
+	if len(words) < 3 {
+		return ""
+	}
+	switch filepath.Base(words[0]) {
+	case "bash", "sh", "dash", "zsh", "ash", "ksh":
+	default:
+		return ""
+	}
+	if index, ok := shellCommandBodyIndex(words); ok {
+		return words[index]
+	}
+	return ""
+}
 
 // shellCommandBodyIndex locates a shell's -c program after fixed options.
 // Unrecognized options cannot establish an exact child command.
