@@ -86,6 +86,53 @@ func lateWindowsAlias(word string) bool {
 	return processRelativeLink(strings.ReplaceAll(word, "\\", "/"))
 }
 
+// lateWindowsNumberedLink reports a rooted word that starts with the link of
+// a numbered process (/proc/<pid>/cwd, root, exe, fd/<n> or map_files/<n>,
+// also under task/<tid>). On a Linux host the hook reads that link and
+// proves it; a Windows file system holds no /proc (Git Bash provides it), so
+// the hook has nothing to read and the word stays unproved. A plain entry
+// such as /proc/<pid>/status is an ordinary file.
+func lateWindowsNumberedLink(word string) bool {
+	_, numbered := fixedPIDLink(strings.ReplaceAll(word, "\\", "/"))
+	return numbered
+}
+
+// lateColonListElements splits the value of a shell assignment at its colons,
+// as a path list is read, and reports whether the whole value can name a
+// single path. On a Windows host a colon after one letter that starts an
+// element and before a slash or a backslash is the drive of a Windows path
+// (C:\dir, C:/dir), not a separator. A value with a separator colon is a
+// list: its elements are the candidates, and the whole text is no path the
+// host can open (a colon inside a name is invalid there), so reading it as one
+// would grade an ordinary list as unreadable. Other hosts keep every colon a
+// separator and the whole value a candidate.
+func lateColonListElements(value string, windows bool) (elements []string, whole bool) {
+	elements = strings.Split(value, ":")
+	if !windows {
+		return elements, true
+	}
+	var drive []string
+	start := 0
+	for i := 0; i < len(value); i++ {
+		if value[i] != ':' {
+			continue
+		}
+		if i == start+1 && value[start]|0x20 >= 'a' && value[start]|0x20 <= 'z' &&
+			i+1 < len(value) && (value[i+1] == '/' || value[i+1] == '\\') {
+			continue
+		}
+		drive = append(drive, value[start:i])
+		start = i + 1
+	}
+	drive = append(drive, value[start:])
+	for _, element := range drive {
+		if !slices.Contains(elements, element) {
+			elements = append(elements, element)
+		}
+	}
+	return elements, len(drive) == 1
+}
+
 // lateWindowsDrivePath is the drive path of a Git Bash drive mount, and word
 // unchanged otherwise.
 func lateWindowsDrivePath(word string) string {
