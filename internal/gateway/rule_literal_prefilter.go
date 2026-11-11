@@ -29,6 +29,11 @@ const maxRuleLiteralAlternatives = 32
 // maxRuleLiteralSets bounds how many literal sets a rule checks.
 const maxRuleLiteralSets = 8
 
+// maxAlternateLiteralRanks bounds how many sets of each alternative of an
+// alternation are used: the text must hold a literal of the strongest set of
+// the alternative it matches, and of its next sets too.
+const maxAlternateLiteralRanks = 4
+
 // ruleLiteralPlans caches the plan of each rule pattern, keyed by its source
 // text. Every generation compile copies the rule regexps, so a key per
 // *regexp.Regexp kept every reloaded generation alive (GAP-1933); the source
@@ -89,24 +94,43 @@ func requiredLiteralPlan(re *syntax.Regexp) (ruleLiteralPlan, bool) {
 		}
 		return plan, plan != nil
 	case syntax.OpAlternate:
-		// A match satisfies one alternative, so it holds a literal of that
-		// alternative's strongest set.
-		var union []string
+		// A match is a match of one alternative, and it holds a literal of
+		// every set of that alternative. So for each rank k, a literal of the
+		// k-th strongest set of whichever alternative matched is required:
+		// the clause of rank k is the union of those sets.
+		var branches []ruleLiteralPlan
 		for _, sub := range re.Sub {
 			found, ok := requiredLiteralPlan(sub)
 			if !ok {
 				return nil, false
 			}
-			best := strongestLiteralSets(found, 1)
-			if len(best[0]) == 0 {
+			ranked := distinctLiteralSets(strongestLiteralSets(found, maxRuleLiteralSets))
+			if len(ranked[0]) == 0 {
 				continue // this alternative matches no text
 			}
-			union = append(union, best[0]...)
+			branches = append(branches, ranked[:min(len(ranked), maxAlternateLiteralRanks)])
 		}
-		if len(union) > maxRuleLiteralAlternatives {
-			return nil, false
+		var plan ruleLiteralPlan
+		for rank := 0; rank < maxAlternateLiteralRanks; rank++ {
+			var union []string
+			for _, ranked := range branches {
+				if rank >= len(ranked) {
+					return plan, plan != nil
+				}
+				union = append(union, ranked[rank]...)
+			}
+			if len(union) > maxRuleLiteralAlternatives {
+				if rank == 0 {
+					return nil, false
+				}
+				return plan, true
+			}
+			plan = append(plan, union)
+			if len(branches) == 0 {
+				break
+			}
 		}
-		return ruleLiteralPlan{union}, true
+		return plan, true
 	}
 	return nil, false
 }
@@ -145,6 +169,20 @@ func strongestLiteralSets(plan ruleLiteralPlan, limit int) ruleLiteralPlan {
 		ranked = ranked[:limit]
 	}
 	return ranked
+}
+
+// distinctLiteralSets drops a set equal to an earlier one: it adds no clause.
+func distinctLiteralSets(plan ruleLiteralPlan) ruleLiteralPlan {
+	seen := make(map[string]bool, len(plan))
+	out := make(ruleLiteralPlan, 0, len(plan))
+	for _, set := range plan {
+		key := strings.Join(set, "\x00")
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, set)
+		}
+	}
+	return out
 }
 
 func literalSetStrength(set []string) int {
