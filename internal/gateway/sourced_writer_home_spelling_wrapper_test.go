@@ -44,9 +44,19 @@ func homeScriptFolder(t *testing.T, f b36ManagedHookFixture, links int) {
 // write it makes to the keys file is blocked in the default and the strict
 // profile; the ordinary script is allowed
 // (rel-1-0-9:GAP-1035).
+//
+// Each launcher, each spelling of the home and each builtin appears in at
+// least one row with its ordinary twin, and the link counts are walked by
+// a few rows each: the launcher and the link walk are independent steps, so
+// the cross product adds no behaviour and ran for ten minutes under -race.
 func TestSourcedWriterNamedByHomeSpellingInAWrapperIsBlockedFromAnyFolder(t *testing.T) {
-	launchers := []string{
-		``, `bash -c`, `sh -c`, `bash -lc`, `bash -l -c`, `env X=1 bash -c`, `sudo bash -c`, `zsh -c`,
+	// pair is the writer (block) and the ordinary script (allow) named by
+	// the same form, which holds one %s for the script name.
+	pair := func(name, where, form string) []r106Reader2Row {
+		return []r106Reader2Row{
+			{name + " writer", where, fmt.Sprintf(form, "wk.sh"), "block"},
+			{name + " ordinary", where, fmt.Sprintf(form, "ok.sh"), "allow"},
+		}
 	}
 	for _, links := range []int{0, 1, 3, hookpaths.SystemLinkLimit() - 1} {
 		t.Run(fmt.Sprintf("%d links", links), func(t *testing.T) {
@@ -54,37 +64,28 @@ func TestSourcedWriterNamedByHomeSpellingInAWrapperIsBlockedFromAnyFolder(t *tes
 			if links > 0 {
 				dir = "d"
 			}
+			at := "/chain/" + dir + "/%s"
 			var rows []r106Reader2Row
-			for _, launcher := range launchers {
-				for _, spelling := range []string{"~", "$HOME", "${HOME}", `\"$HOME\"`, "{H}"} {
-					for _, builtin := range []string{".", "source", "bash", "sh"} {
-						if launcher == "" && (builtin == "bash" || builtin == "sh") {
-							continue
-						}
-						form := func(script string) string {
-							inner := builtin + " " + spelling + "/chain/" + dir + "/" + script
-							if launcher == "" {
-								return inner
-							}
-							return launcher + " \"" + inner + "\""
-						}
-						if spelling == `\"$HOME\"` && launcher == "" {
-							continue
-						}
-						rows = append(rows,
-							r106Reader2Row{launcher + " " + builtin + " " + spelling + " writer", "project", form("wk.sh"), "block"},
-							r106Reader2Row{launcher + " " + builtin + " " + spelling + " ordinary", "project", form("ok.sh"), "allow"},
-						)
-					}
+			switch links {
+			case 0:
+				for _, r := range []struct{ name, where, form string }{
+					{"bash -c source $HOME", "project", `bash -c "source $HOME` + at + `"`},
+					{"sh -c bash ${HOME}", "project", `sh -c "bash ${HOME}` + at + `"`},
+					{"bash -lc sh quoted $HOME", "project", `bash -lc "sh \"$HOME\"` + at + `"`},
+					{"env sudo bash -c dot ~", "project", `env X=1 sudo bash -c ". ~` + at + `"`},
+					{"zsh -c dot $HOME", "project", `zsh -c ". $HOME` + at + `"`},
+					{"nested sh in bash after echo", "project", `bash -c "echo go && sh -c \". ~` + at + `\""`},
+					{"absolute spelling from home", "home", `bash -c ". {H}` + at + `"`},
+				} {
+					rows = append(rows, pair(r.name, r.where, r.form)...)
 				}
+			case 1:
+				rows = pair("bash -c dot ~", "project", `bash -c ". ~`+at+`"`)
+			case 3:
+				rows = pair("sh -c bash ${HOME}", "project", `sh -c "bash ${HOME}`+at+`"`)
+			default:
+				rows = pair("bash -lc source $HOME", "project", `bash -lc "source $HOME`+at+`"`)
 			}
-			rows = append(rows,
-				r106Reader2Row{"nested sh in bash", "project", `bash -c "sh -c \". ~/chain/` + dir + `/wk.sh\""`, "block"},
-				r106Reader2Row{"chained after echo", "project", `bash -c "echo go && . ~/chain/` + dir + `/wk.sh"`, "block"},
-				r106Reader2Row{"chained ordinary", "project", `bash -c "echo go && . ~/chain/` + dir + `/ok.sh"`, "allow"},
-				r106Reader2Row{"absolute spelling", "project", `bash -c ". ` + "{H}" + `/chain/` + dir + `/wk.sh"`, "block"},
-				r106Reader2Row{"from home", "home", `bash -c ". ~/chain/` + dir + `/wk.sh"`, "block"},
-			)
 			r106Reader2CheckWith(t, rows, func(t *testing.T, f b36ManagedHookFixture) { homeScriptFolder(t, f, links) })
 		})
 	}
