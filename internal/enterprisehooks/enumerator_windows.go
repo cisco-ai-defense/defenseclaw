@@ -251,7 +251,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			return enrolled
 		}
 	}
-	profiles, err := listWindowsUserProfiles(ctx, opts.Logger, standalone, checkHome)
+	profiles, err := listWindowsUserProfiles(ctx, opts.Logger, checkHome)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -1028,11 +1028,21 @@ func loadPreviousManifestForEnumeration(path string, logf EnumerationLogger) map
 	}
 	m, err := LoadManifest(path)
 	if err != nil {
-		// Not fatal — an operator-hand-edited targets.yaml that
-		// fails validation shouldn't crash the enumerator; we log
-		// and treat every discovered row as new.
-		logfSafely(logf, path, fmt.Sprintf("existing manifest failed to load; treating every row as new: %v", err))
-		return nil
+		// A row this host cannot validate right now (an enabled Secure
+		// Client row with no agent_version while the deployment check
+		// fails) must not drop the recorded state of every row: a
+		// disabled row would come back enabled. Re-read the same file
+		// without the per-row platform check, only to carry that state.
+		lenient, _, lenientErr := loadManifestWithSHA256(path, func(int, ManifestTarget) error { return nil })
+		if lenientErr != nil {
+			// Not fatal — an operator-hand-edited targets.yaml that
+			// does not parse shouldn't crash the enumerator; we log
+			// and treat every discovered row as new.
+			logfSafely(logf, path, fmt.Sprintf("existing manifest failed to load; treating every row as new: %v", err))
+			return nil
+		}
+		logfSafely(logf, path, fmt.Sprintf("existing manifest failed validation; keeping its recorded row state: %v", err))
+		m = lenient
 	}
 	previous := make(map[string]ManifestTarget, len(m.Targets))
 	for _, t := range m.Targets {
@@ -1413,7 +1423,7 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	profiles, err := listWindowsUserProfiles(ctx, nil, true, nil)
+	profiles, err := listWindowsUserProfiles(ctx, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1469,7 +1479,7 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 // checkHome, when not nil, names the canonical SIDs whose home is checked
 // (it exists, is a directory, has no reparse point). Any other profile is
 // listed from the registry alone and its home is never opened.
-func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standalone bool, checkHome func(sid string) bool) ([]windowsUserProfile, error) {
+func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, checkHome func(sid string) bool) ([]windowsUserProfile, error) {
 	subkeyNames, err := windowsProfileListSubkeyReader()
 	if err != nil {
 		return nil, err
@@ -1485,21 +1495,11 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standa
 			logfSafely(logf, name, fmt.Sprintf("not a syntactically-valid SID: %v", err))
 			continue
 		}
+		// Both profiles enroll Microsoft Entra ID users (S-1-12-1-…), as
+		// the 26.8.4 Secure Client release does: an Entra-joined or
+		// Autopilot laptop has no S-1-5-21 interactive user at all.
 		if !sidIsInteractiveUser(sid) {
-			if standalone {
-				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-… or S-1-12-1-…); refusing well-known / machine-scoped principals")
-			} else {
-				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-…); refusing well-known / machine-scoped principals")
-			}
-			continue
-		}
-		// The Secure Client profile keeps its historical filter: Microsoft
-		// Entra ID principals (S-1-12-1-…) are refused with the pre-
-		// standalone reason text so DART forensics stay stable. The
-		// standalone profile admits them (handled in sidIsInteractiveUser
-		// above).
-		if !standalone && sidIsEntraIDUser(sid) {
-			logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-…)")
+			logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-… or S-1-12-1-…); refusing well-known / machine-scoped principals")
 			continue
 		}
 		home, err := windowsProfileImagePathReader(name)
@@ -1693,20 +1693,6 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 	default:
 		return false
 	}
-}
-
-// sidIsEntraIDUser reports whether `sid` carries the Microsoft Entra ID
-// user shape `S-1-12-1-A-B-C-D`. The Secure Client profile refuses this
-// shape; the standalone profile admits it.
-func sidIsEntraIDUser(sid *windows.SID) bool {
-	if sid == nil {
-		return false
-	}
-	if sid.IdentifierAuthority().Value != ([6]byte{0, 0, 0, 0, 0, 12}) {
-		return false
-	}
-	const entraIDUserSubAuthority uint32 = 1
-	return sid.SubAuthorityCount() == 5 && sid.SubAuthority(0) == entraIDUserSubAuthority
 }
 
 // EffectiveWindowsHookConnectors returns the connector names for

@@ -31,6 +31,19 @@ func TestValidateTrustedInstallMarkerDirRejectsUserPathAndSymlink(t *testing.T) 
 	}
 }
 
+// The marker folder itself keeps the strict rule: a group write bit on it is
+// refused for the permissions, before its owner is judged.
+func TestValidateTrustedInstallMarkerDirRefusesGroupWritableMarker(t *testing.T) {
+	marker := t.TempDir()
+	if err := os.Chmod(marker, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker")
+	if err == nil || !strings.Contains(err.Error(), marker+": group/other writable permissions 0775 are not trusted") {
+		t.Fatalf("group-writable marker = %v, want the group/other writable refusal for %s", err, marker)
+	}
+}
+
 func TestValidateTrustedRuntimeDirRejectsStandardUserOwnedPath(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root-owned temp dirs are valid managed runtime dirs")

@@ -59,7 +59,7 @@ func (kind ObjectKind) valid() bool {
 	case ObjectRuntimeDirectory, ObjectRuntimeFile, ObjectRuntimeSecretFile,
 		ObjectConfigFile, ObjectConfigDirectory, ObjectInstallDirectory,
 		ObjectInstallFile, ObjectServiceInstallDirectory, ObjectServiceInstallFile,
-		ObjectStateDirectory, ObjectAdminDirectory, ObjectAdminFile,
+		ObjectSecureClientMarkerDirectory, ObjectStateDirectory, ObjectAdminDirectory, ObjectAdminFile,
 		ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory:
 		return true
 	}
@@ -172,7 +172,7 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
-	if assessment.Owner == ownerUntrusted && !descriptorUnreadable && !opts.AllowUntrustedOwnerTransfer {
+	if assessment.Owner == ownerUntrusted && !descriptorUnreadable && !ownerTransferAllowed(kind, opts) {
 		result.Outcome = CanonicalBoundary
 		result.RepairError = "owner is not trusted; not adopted"
 		reportCanonicalResult(result, opts)

@@ -385,6 +385,9 @@ func ReconcileWindowsCodexMachineRequirements(
 			}
 		}
 	})
+	if err != nil && windowsCodexAdminConflictSkipped(opts, err) {
+		return windowsCodexAdminConflictReport("reconcile", opts, err), nil
+	}
 	if err != nil {
 		report.Error = err.Error()
 		return report, err
@@ -401,6 +404,11 @@ func VerifyWindowsCodexMachineRequirements(
 	opts WindowsCodexMachineRequirementsOptions,
 ) (WindowsCodexMachineRequirementsReport, error) {
 	report := windowsCodexMachineReport("verify", opts)
+	if opts.CodexTargetEnabled && opts.SecureClient && windowsCodexAdminConflictAllowed() {
+		if conflict := windowsCodexRequirementsAdminConflict(opts); conflict != nil {
+			return windowsCodexAdminConflictReport("verify", opts, conflict), nil
+		}
+	}
 	if !opts.CodexTargetEnabled {
 		if err := requireWindowsCodexMachineAdministrator(); err != nil {
 			report.Error = err.Error()
@@ -941,6 +949,20 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 	)
 	if err != nil {
 		return result, err
+	}
+	// Secure Client (not strict): the administrator turned DefenseClaw's
+	// managed Codex hooks off, whether or not DefenseClaw's state was ever
+	// written for them, so this is checked before the state. Codex runs
+	// no hooks then, so there is no active managed Codex runtime to
+	// resolve; Codex is left unauthorized and reported, instead of failing
+	// the Guardian's enrollment publication for every agent on the host.
+	if windowsCodexAdminConflictAllowed() {
+		if cfg, parseErr := parseWindowsCodexRequirements(requirements.data); parseErr == nil {
+			if conflict := codexRequirementsAdminConflict(cfg); conflict != nil {
+				result.AdminConflict = conflict.Error()
+				return result, nil
+			}
+		}
 	}
 	identityOpts := WindowsCodexMachineRequirementsOptions{
 		RequirementsPath:   requirementsPath,
@@ -2250,4 +2272,72 @@ func ensureWindowsCodexMachineDirTrust(path, label string) error {
 	emitManagedResilience(managed.MarkerAccept, path,
 		"accepted directory permission drift: "+strictErr.Error(), map[string]string{"label": label})
 	return nil
+}
+
+// windowsCodexAdminConflictSkipped reports whether err is an administrator
+// setting that turns DefenseClaw's managed Codex hooks off, on a Secure
+// Client host outside strict mode. There Codex is left unhooked and
+// reported instead of failing the whole lifecycle for every agent; the
+// standalone profile and strict mode keep refusing.
+func windowsCodexAdminConflictSkipped(opts WindowsCodexMachineRequirementsOptions, err error) bool {
+	return opts.SecureClient && windowsCodexAdminConflictAllowed() &&
+		errors.Is(err, ErrCodexRequirementsAdminConflict)
+}
+
+// windowsCodexRequirementsAdminConflict reads the live machine requirements
+// and returns the administrator setting that turns DefenseClaw's managed
+// hooks off, or nil. A file it cannot read or parse is not a conflict here;
+// the normal verification reports it.
+func windowsCodexRequirementsAdminConflict(opts WindowsCodexMachineRequirementsOptions) error {
+	requirements, err := readWindowsCodexMachineFile(
+		opts.RequirementsPath,
+		windowsCodexMachineRequirementsLimit,
+		true,
+		"Codex machine requirements",
+	)
+	if err != nil || !requirements.existed {
+		return nil
+	}
+	cfg, err := parseWindowsCodexRequirements(requirements.data)
+	if err != nil {
+		return nil
+	}
+	return codexRequirementsAdminConflict(cfg)
+}
+
+// windowsCodexAdminConflictReport is the ok, not security-complete report of
+// a Secure Client host whose administrator turned DefenseClaw's managed
+// Codex hooks off. Nothing was written. Each per-user Codex install still
+// fails on SecurityComplete=false, so the Guardian reports every Codex row.
+func windowsCodexAdminConflictReport(
+	action string,
+	opts WindowsCodexMachineRequirementsOptions,
+	conflict error,
+) WindowsCodexMachineRequirementsReport {
+	report := windowsCodexMachineReport(action, opts)
+	report.OK = true
+	report.Disposition = "admin_conflict"
+	report.CodexRequirementsConflict = conflict.Error()
+	report.SecurityComplete = false
+	ReportWindowsCodexAdminConflict(opts.RequirementsPath, conflict.Error())
+	return report
+}
+
+// windowsCodexAdminConflictAllowed reports whether this process may leave
+// Codex unhooked on the administrator's own setting: a Secure Client host
+// outside strict mode. The standalone profile and strict mode keep refusing.
+func windowsCodexAdminConflictAllowed() bool {
+	return !managed.StandaloneTrustScope() && !managed.TrustStrictAncestors()
+}
+
+// ReportWindowsCodexAdminConflict logs, once per process, that the
+// administrator's requirements.toml leaves Codex unhooked on this host. Setup,
+// the Guardian's reconcile, its exact enrollment and deferred staging all
+// report the same line.
+func ReportWindowsCodexAdminConflict(requirementsPath, conflict string) {
+	managed.EmitResilienceEventOnce(requirementsPath, managed.MarkerDegraded, map[string]string{
+		"subsystem": "codex_requirements",
+		"path":      requirementsPath,
+		"reason":    "Codex is not hooked on this host: the administrator's requirements.toml turns DefenseClaw managed hooks off (" + conflict + ")",
+	})
 }

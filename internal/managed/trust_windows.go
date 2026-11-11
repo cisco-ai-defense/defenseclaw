@@ -219,10 +219,15 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 }
 
 // ValidateTrustedInstallMarkerDir requires a SYSTEM-owned marker whose only
-// writers are SYSTEM and Administrators. Every verdict is fatal on ancestors;
-// their stock create-child grants keep the narrow replacement mask.
+// writers are SYSTEM and Administrators. Its ancestors take the same scope as
+// the install root and gateway executable checked beside it: drift on the
+// operating system roots and the shared Cisco Secure Client folders is
+// advisory, because Windows and the platform installer own those permissions,
+// while every other ancestor stays fatal. A fatal verdict there would demote
+// a verified Secure Client host to the standalone rules (fixed agent versions,
+// no best-effort hook contract) for as long as the drift lasts.
 func ValidateTrustedInstallMarkerDir(path, label string) error {
-	if err := validateTrustedWindowsRuntimeDirWithAncestors(path, label, nil, windowsStrictAncestorScope); err != nil {
+	if err := validateTrustedWindowsRuntimeDirWithAncestors(path, label, nil, installMarkerAncestorScope); err != nil {
 		return err
 	}
 	return validateTrustedWindowsPathElementWithWriter(path, true, label, nil, windowsTrustSystemOwned)
@@ -587,6 +592,10 @@ func walkWindowsRulePackTree(root string, check func(path string, isDir bool) er
 func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows.SID) error {
 	return validateTrustedWindowsRuntimeDirWithAncestors(path, label, allowedWriter, windowsAncestorScope)
 }
+
+// installMarkerAncestorScope is the ancestor scope of the Secure Client
+// install marker check (ValidateTrustedInstallMarkerDir).
+func installMarkerAncestorScope(path string) windowsTrustScope { return windowsAncestorScope(path) }
 
 // windowsStrictAncestorScope gives every ancestor the narrow mask with fatal
 // verdicts and the exact principal rule, the installer-owned Cisco folders
