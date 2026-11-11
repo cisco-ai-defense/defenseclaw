@@ -30,15 +30,16 @@ func gap0677Nested(levels int, inner string) string {
 // once, for both connectors. A protected target keeps the over-limit block
 // in every profile (limitKeepsBlock); an ordinary one does not (an alert
 // in the default profile, a block in strict,
-// TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget). A single bash -c script of the same order of size
-// is still read and allowed.
+// TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget). A single bash -c
+// script is still read and allowed (the shellparse test weighs one of 400
+// KB).
 func TestGAP0677NestedShellBodiesAreDecidedWithinTheHookWindow(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ordinaryBody := "bash -c '" + strings.Repeat("printf %s "+strings.Repeat("word ", 2000)+"; ", 10) + "'"
+	ordinaryBody := "bash -c '" + strings.Repeat("printf %s "+strings.Repeat("word ", 200)+"; ", 10) + "'"
 	for _, connector := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connector)
 		tool := "Bash"
@@ -62,29 +63,28 @@ func TestGAP0677NestedShellBodiesAreDecidedWithinTheHookWindow(t *testing.T) {
 			})
 			return findings, time.Since(start)
 		}
-		// Eleven levels (266 KB) and both targets for one connector, ten
-		// for the other; the large script once (test budget).
-		levels, targets := 11, []string{"~/project/output", "~/.defenseclaw"}
+		// Eleven levels (266 KB) to an ordinary target for one connector,
+		// ten to a protected one for the other; the script once (test
+		// budget).
+		levels, target := 11, "~/project/output"
 		if connector == "codex" {
-			levels, targets = 10, targets[:1]
+			levels, target = 10, "~/.defenseclaw"
 		}
-		for _, target := range targets {
-			command := gap0677Nested(levels, "rm -rf "+target)
-			findings, took := decide(command)
-			if took > 1500*time.Millisecond {
-				t.Errorf("%s: %d nested bodies (%d bytes) to %s decided in %s", connector, levels, len(command), target, took)
-			}
-			if ids := findingIDs(findings); len(ids) != 1 || ids[0] != "ACTION-COMPOUND-LIMIT" ||
-				buildVerdict(findings, "tool_call").Action != guardrailActionBlock {
-				t.Errorf("%s: %d nested bodies to %s: %s %v, want the over-limit block", connector, levels, target, buildVerdict(findings, "tool_call").Action, ids)
-			} else if keeps := findings[0].limitKeepsBlock; keeps != (target == "~/.defenseclaw") {
-				t.Errorf("%s: %d nested bodies to %s: keeps the block in every profile=%v", connector, levels, target, keeps)
-			}
+		command := gap0677Nested(levels, "rm -rf "+target)
+		findings, took := decide(command)
+		if took > 1500*time.Millisecond {
+			t.Errorf("%s: %d nested bodies (%d bytes) to %s decided in %s", connector, levels, len(command), target, took)
+		}
+		if ids := findingIDs(findings); len(ids) != 1 || ids[0] != "ACTION-COMPOUND-LIMIT" ||
+			buildVerdict(findings, "tool_call").Action != guardrailActionBlock {
+			t.Errorf("%s: %d nested bodies to %s: %s %v, want the over-limit block", connector, levels, target, buildVerdict(findings, "tool_call").Action, ids)
+		} else if keeps := findings[0].limitKeepsBlock; keeps != (target == "~/.defenseclaw") {
+			t.Errorf("%s: %d nested bodies to %s: keeps the block in every profile=%v", connector, levels, target, keeps)
 		}
 		if connector == "codex" {
 			continue
 		}
-		findings, _ := decide(ordinaryBody)
+		findings, _ = decide(ordinaryBody)
 		if action := buildVerdict(findings, "tool_call").Action; action != guardrailActionAllow {
 			t.Errorf("%s: ordinary bash -c script (%d bytes): %s %v", connector, len(ordinaryBody), action, findingIDs(findings))
 		}

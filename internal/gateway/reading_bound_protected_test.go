@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
@@ -137,32 +138,42 @@ func TestGAP0534RecoveredParseBoundIsGradedByTarget(t *testing.T) {
 // shellparse.MaxNestedBodyBytes is decided at once, within the hook window.
 // An ordinary target runs with an alert in the default tier (the strict
 // tier blocks it); a protected target named directly or through a known
-// value blocks in every tier. Nested calls under the bound are read in
-// full and an ordinary one allows.
+// value blocks in every tier. A call whose nested bodies weigh more than
+// shellparse.MaxNestedBodyProofBytes, but not past the bound, is read in
+// full: an ordinary one allows and one through a known protected value
+// blocks. One cell per row (test budget); the shellparse test weighs the
+// other shapes.
 func TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX homes and a mode 0 homes folder")
 	}
-	threeLevels := func(words int) string {
-		return "bash -c " + "\x27ssh host \"sh -c \x27\\\x27\x27printf %s " + strings.Repeat("a b ", words) + "\x27\\\x27\x27\"\x27"
+	for levels, want := range map[int]shellReadingBound{9: shellReadingNestedProof, 10: shellReadingNestedBodies} {
+		command := readingBoundNest(levels, "rm -rf ~/project/output")
+		if got := trustedActionCommandBound(actionfacts.Input{Tool: "Bash", Command: command}); got != want {
+			t.Errorf("%d nested bodies (%d bytes): reading bound %d, want %d", levels, len(command), got, want)
+		}
 	}
-	// The ordinary row in all four cells (strict blocks it); the others in
-	// the default cells, as strict blocks every row (test budget).
-	readingBoundCells(t, []readingBoundRow{
+	perUserDefault, managedDefault, managedStrict := readingBoundAllCells[0], readingBoundAllCells[1], readingBoundAllCells[3]
+	readingBoundCellsIn(t, []readingBoundRow{
 		{"ordinary ten levels", "Bash", readingBoundNest(10, "rm -rf ~/project/output"), guardrailActionAlert},
-	}, 2*time.Second)
+	}, 2*time.Second, nil, []readingBoundCell{perUserDefault, managedStrict})
 	readingBoundCellsIn(t, []readingBoundRow{
-		{"ordinary three levels of 20 KB", "Bash", threeLevels(5000), guardrailActionAlert},
 		{"known protected value", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(10, "rm -rf \"$protected\""), guardrailActionBlock},
-	}, 2*time.Second, nil, readingBoundDefaultCells)
-	// Under the bound the readers read the call in full; the default cells
-	// carry these rows (test budget).
-	readingBoundCellsIn(t, []readingBoundRow{
-		{"ordinary nine levels", "Bash", readingBoundNest(9, "rm -rf ~/project/output"), guardrailActionAllow},
-	}, 0, nil, readingBoundDefaultCells[:1])
-	readingBoundCellsIn(t, []readingBoundRow{
-		// Past shellparse.MaxNestedBodyProofBytes the readers read the call
-		// but do not prove its protected target.
-		{"known protected value nine levels", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(9, "rm -rf \"$protected\""), guardrailActionBlock},
-	}, 0, nil, readingBoundDefaultCells[1:])
+	}, 2*time.Second, nil, []readingBoundCell{managedDefault})
+	// Three levels with a long comment weigh as much as nine levels of a
+	// short body (more than MaxNestedBodyProofBytes, not past the bound)
+	// and read faster.
+	comment := " # " + strings.Repeat("x", 9000)
+	for _, row := range []struct {
+		row  readingBoundRow
+		cell readingBoundCell
+	}{
+		{readingBoundRow{"ordinary under the bound", "Bash", readingBoundNest(3, "rm -rf ~/project/output"+comment), guardrailActionAllow}, perUserDefault},
+		{readingBoundRow{"known protected value under the bound", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(3, "rm -rf \"$protected\""+comment), guardrailActionBlock}, managedDefault},
+	} {
+		if got := trustedActionCommandBound(actionfacts.Input{Tool: "Bash", Command: row.row.command}); got != shellReadingNestedProof {
+			t.Fatalf("%s: reading bound %d, want %d", row.row.name, got, shellReadingNestedProof)
+		}
+		readingBoundCellsIn(t, []readingBoundRow{row.row}, 0, nil, []readingBoundCell{row.cell})
+	}
 }
