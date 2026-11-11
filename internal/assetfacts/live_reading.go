@@ -12,7 +12,7 @@ import (
 )
 
 // A command line is read for the name of a link to a skill folder only where
-// the call can read through it. Six parts of a line run nothing that opens a
+// the call can read through it. Seven parts of a line run nothing that opens a
 // file, and a name inside them is not a read in the balanced tiers:
 //
 //   - the body of a function the line defines and never calls (a name held in
@@ -26,6 +26,11 @@ import (
 //     folder through a link is not a read, the folder named by its own path
 //     is still named, and a line that also reads or runs something still
 //     reads a name they hold, as before;
+//   - the body of a heredoc or the string of a here-string that cat or a
+//     like filter prints, when nothing takes its output as input (the same
+//     rule as echo): the body is text. Any command substitution inside an
+//     unquoted body still runs and stays live. A body given to a shell, an
+//     interpreter, xargs or any command not named here is read as before;
 //   - a comment, which the shell skips;
 //   - the pattern operand of grep and rg, which is text to match (rg --files
 //     has none: all its operands are places to list).
@@ -107,6 +112,7 @@ func readLiveLine(line string, argv []string) liveReading {
 			dead = append(dead, textSpan{int(n.Hash.Offset()), int(n.Hash.Offset()) + 1 + len(n.Text)})
 		case *syntax.Redirect:
 			reads = reads || !inertRedirect(n)
+			dead = append(dead, textBodySpans(n, stack)...)
 		case *syntax.CallExpr:
 			if len(n.Args) == 0 {
 				return true
@@ -147,6 +153,59 @@ func readLiveLine(line string, argv []string) liveReading {
 	})
 	kept := blankSpans(line, dead)
 	return liveReading{live: blankSpans(kept, printed), names: blankSpans(kept, lookups), reads: reads, printed: printedText}
+}
+
+// stdinPrinters are the programs that take their standard input as text and
+// print or count it, and open nothing the input names. A program that writes
+// a file it is given (tee, sort -o), runs its input (a shell, an interpreter,
+// the e command of sed) or reads names from it (xargs) is not listed.
+var stdinPrinters = wordSet("cat tac head tail wc nl rev tr cut")
+
+// textBodySpans gives the parts of the body of a heredoc or here-string that
+// are text: the whole body less the command substitutions in it. It returns
+// nil where the redirection is not a heredoc or here-string, where the
+// command it feeds is not a stdin printer, or where the output is taken as
+// input (outputGoesNowhere). stack holds the nodes above the redirection,
+// the statement last.
+func textBodySpans(r *syntax.Redirect, stack []syntax.Node) []textSpan {
+	var body *syntax.Word
+	switch r.Op {
+	case syntax.Hdoc, syntax.DashHdoc:
+		body = r.Hdoc
+	case syntax.WordHdoc:
+		body = r.Word
+	}
+	if body == nil || len(stack) == 0 {
+		return nil
+	}
+	stmt, ok := stack[len(stack)-1].(*syntax.Stmt)
+	if !ok {
+		return nil
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return nil
+	}
+	if first := readCommandWord(call.Args[0]); first.dynamic || !first.isOneOf(stdinPrinters) {
+		return nil
+	}
+	if !outputGoesNowhere(stack) {
+		return nil
+	}
+	var spans []textSpan
+	at, end := int(body.Pos().Offset()), int(body.End().Offset())
+	syntax.Walk(body, func(node syntax.Node) bool {
+		switch sub := node.(type) {
+		case *syntax.CmdSubst, *syntax.ProcSubst:
+			if start := int(sub.Pos().Offset()); start >= at {
+				spans = append(spans, textSpan{at, start})
+				at = int(sub.End().Offset())
+			}
+			return false
+		}
+		return true
+	})
+	return append(spans, textSpan{at, end})
 }
 
 // definedFunctions are the names of the functions a command line defines.
@@ -195,7 +254,7 @@ func outputGoesNowhere(stack []syntax.Node) bool {
 			return false
 		case *syntax.Stmt:
 			for _, redirect := range n.Redirs {
-				if !inertRedirect(redirect) {
+				if !inertRedirect(redirect) && !feedsInput(redirect) {
 					return false
 				}
 			}
@@ -206,6 +265,12 @@ func outputGoesNowhere(stack []syntax.Node) bool {
 		}
 	}
 	return true
+}
+
+// feedsInput reports whether a redirection only gives the command text to
+// read: a heredoc or here-string. It takes no output anywhere.
+func feedsInput(r *syntax.Redirect) bool {
+	return r.Op == syntax.Hdoc || r.Op == syntax.DashHdoc || r.Op == syntax.WordHdoc
 }
 
 // blankSpans replaces the spans of text with blanks. A span outside the text

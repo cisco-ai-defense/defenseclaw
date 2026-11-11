@@ -16,7 +16,8 @@ import (
 // each; the strict tier keeps refusing every word that names the link. A call
 // that reads through the link stays refused in both, whatever it spells: a
 // search that lists its operands (rg --files), a function a variable calls,
-// text a pipe hands to a command. The assetfacts tests hold the spellings.
+// text a pipe hands to a command, a heredoc given to a shell. The assetfacts
+// tests hold the spellings.
 func TestShellCallThatOnlyMentionsALinkToADeniedSkillIsAllowedInTheDefaultTier(t *testing.T) {
 	mentions := []string{
 		"command -v lnk-held",
@@ -29,6 +30,7 @@ func TestShellCallThatOnlyMentionsALinkToADeniedSkillIsAllowedInTheDefaultTier(t
 		"echo ok # cat lnk-held/SKILL.md",
 		"grep lnk-held/SKILL.md notes.txt",
 		"echo cat lnk-held",
+		"cat <<EOF2\nls lnk-held\nEOF2",
 	}
 	if runtime.GOOS != "windows" {
 		mentions = append(mentions, "type lnk-held")
@@ -46,6 +48,9 @@ func TestShellCallThatOnlyMentionsALinkToADeniedSkillIsAllowedInTheDefaultTier(t
 		"grep lnk-held notes.txt; cat lnk-held",
 		"rg --files lnk-held",
 		`f() { cat lnk-held/SKILL.md; }; reader=f; "$reader"`,
+		"bash <<EOF2\ncat lnk-held/SKILL.md\nEOF2",
+		"sh <<EOF2\nls lnk-held\nEOF2",
+		"cat <<EOF | sh\nls lnk-held\nEOF",
 	}
 	vectors := [][]interface{}{{"command", "-v", "lnk-held"}, {"grep", "lnk-held/SKILL.md", "notes.txt"}}
 	// One fixture serves both tiers: the store behind it costs more than the

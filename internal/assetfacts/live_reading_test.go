@@ -56,6 +56,9 @@ func TestMentioningALinkNameWithoutReadingItIsNotARead(t *testing.T) {
 		"vector path pattern":    bash([]any{"grep", "needle/SKILL.md", "notes.txt"}),
 		"vector reader printed":  bash([]any{"echo", "cat", "needle"}),
 		"rg --files, ordinary":   bash("rg --files notes.txt"),
+		"heredoc text to cat":    bash("cat <<EOF2\nls needle\nEOF2"),
+		"quoted heredoc to cat":  bash("cat <<\x27EOF2\x27\ncd needle && cat needle/SKILL.md\nEOF2"),
+		"here-string to cat":     bash("cat <<< \"ls needle\""),
 	}
 	if runtime.GOOS != "windows" {
 		mentions["type"] = bash("type needle")
@@ -79,6 +82,7 @@ func TestMentioningALinkNameWithoutReadingItIsNotARead(t *testing.T) {
 		"printed reader":  bash("echo cat needle"),
 		"readers printed": bash("echo needle grep ls"),
 		"comment":         bash("echo ok # cat needle/SKILL.md"),
+		"heredoc text":    bash("cat <<EOF2\nls needle\nEOF2"),
 	} {
 		t.Run("strict reads "+name, func(t *testing.T) {
 			if refs := SkillFolderRefsStrict("Bash", input, home, proj); !reaches(refs, held) {
@@ -131,6 +135,14 @@ func TestMentioningALinkNameWithoutReadingItIsNotARead(t *testing.T) {
 		"printed by a function":    bash("f() { echo needle/SKILL.md; }; cat $(f)"),
 		"echo redefined":           bash(`echo() { cat "$@"; }; echo needle/SKILL.md`),
 		"program named echo":       bash("./echo needle/SKILL.md"),
+		"heredoc to a shell":       bash("bash <<EOF2\ncat needle/SKILL.md\nEOF2"),
+		"heredoc to sh, bare name": bash("sh <<EOF2\nls needle\nEOF2"),
+		"heredoc to a pipe":        bash("cat <<EOF | sh\nls needle\nEOF"),
+		"heredoc to a script":      bash("cat <<EOF > run.sh\nls needle\nEOF\nsh run.sh"),
+		"heredoc substitution":     bash("cat <<EOF2\n$(cat needle/SKILL.md)\nEOF2"),
+		"heredoc names to xargs":   bash("xargs cat <<EOF2\nneedle/SKILL.md\nEOF2"),
+		"heredoc then a read":      bash("cat <<EOF2\nhello\nEOF2\ncat needle"),
+		"here-string to a shell":   bash("sh <<< \"ls needle\""),
 	}
 	if runtime.GOOS == "windows" {
 		reads["type reads a file"] = bash("type needle")
