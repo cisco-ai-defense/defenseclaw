@@ -2295,13 +2295,16 @@ $Layout = @{
     InstallRoot = Join-Path $root 'install'; StateRoot = Join-Path $root 'state'
     CLIPath = Join-Path $root 'defenseclaw.exe'; GatewayPath = Join-Path $root 'gateway.exe'
     HookPath = Join-Path $root 'hook.exe'; SensorHelperPath = Join-Path $root 'sensor.exe'
+    HookGuardPath = Join-Path $root 'hook-guard.exe'
     CertificationCodexHome = ''; CoreHardeningCertification = $false
 }
 # The rebuilt record names an installed artifact only when it has the payload's
 # digest, and the rebuild refuses a record that cannot name the gateway, hook
-# and sensor helper (GAP-0994 delta-4 F3, delta-5 F4).
+# and sensor helper (GAP-0994 delta-4 F3, delta-5 F4). The Claude hook guard of
+# the standalone payload (GAP-0089) is named the same way, never required.
 $digests = @{}
-foreach ($pair in @(@('gateway', 'GatewayPath'), @('hook', 'HookPath'), @('sensor_helper', 'SensorHelperPath'))) {
+foreach ($pair in @(@('gateway', 'GatewayPath'), @('hook', 'HookPath'), @('sensor_helper', 'SensorHelperPath'),
+        @('hook_guard', 'HookGuardPath'))) {
     [IO.File]::WriteAllText($Layout[$pair[1]], "$($pair[0]) bytes")
     $digests[$pair[0]] = (Get-FileHash -LiteralPath $Layout[$pair[1]] -Algorithm SHA256).Hash.ToLowerInvariant()
 }
@@ -2341,7 +2344,7 @@ function Resolve-DefenseClawCertificationCodexHome { param($Path, $GatewayServic
 function Test-DefenseClawLayoutBrokerEnabled { param($Layout) return $false }
 function Test-DefenseClawServiceExists { param([string]$Name) return $true }
 function Assert-DefenseClawOwnedServiceOrAbsent { param($Name, $ExpectedGatewayPath) }
-$full = @('gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')
+$full = @('gateway', 'acp', 'hook', 'hook_guard', 'sensor_helper', 'installer', 'module')
 function Invoke-Case([string]$Name, [string]$Text, [bool]$Drifted, [string[]]$Sources, [string]$Stale = '') {
     [IO.File]::WriteAllText($Layout.MetadataPath, $Text)
     $global:Drifted = $Drifted
@@ -2355,14 +2358,16 @@ function Invoke-Case([string]$Name, [string]$Text, [bool]$Drifted, [string[]]$So
     try { $read = [string]((Get-DefenseClawDeploymentMetadata -Layout $Layout -Required) -ne $null) }
     catch { $read = $_.Exception.Message }
     $repair = ''
+    $hashNames = ''
     try {
         $rebuilt = Repair-DefenseClawUnreadableDeploymentMetadata -Layout $Layout -Sources $sourceTable `
             -GatewayServiceName 'DefenseClawGateway' -GuardianServiceName 'DefenseClawHookGuardian' -WarningAction SilentlyContinue
         $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
         $repair = "rebuilt=$rebuilt installed=$($metadata.installed) stamps=$($global:Stamps) drifted=$($global:Drifted)"
+        $hashNames = (@($metadata.hashes.PSObject.Properties.Name) | Sort-Object) -join ','
     }
     catch { $repair = $_.Exception.Message }
-    [pscustomobject]@{ name = $Name; read = $read; repair = $repair; resets = $global:Resets } | ConvertTo-Json -Compress
+    [pscustomobject]@{ name = $Name; read = $read; repair = $repair; resets = $global:Resets; hashes = $hashNames } | ConvertTo-Json -Compress
 }
 $valid = '{"schema_version":1,"installed":true,"install_root":"' + $Layout.InstallRoot.Replace('\', '\\') +
     '","state_root":"' + $Layout.StateRoot.Replace('\', '\\') + '","profile":"standalone","hashes":{}}'
@@ -2371,6 +2376,7 @@ Invoke-Case 'garbage drifted' 'this is not json at all, 30 b' $true $full
 Invoke-Case 'empty' '' $false $full
 Invoke-Case 'garbage without payload' 'this is not json at all, 30 b' $false @('gateway')
 Invoke-Case 'garbage stale hook' 'this is not json at all, 30 b' $false $full 'hook'
+Invoke-Case 'garbage stale hook guard' 'this is not json at all, 30 b' $false $full 'hook_guard'
 Invoke-Case 'valid drifted' $valid $true $full
 """.replace("__ROOT__", str(tmp_path)),
         encoding="utf-8",
@@ -2399,6 +2405,13 @@ Invoke-Case 'valid drifted' $valid $true $full
     stale = cases["garbage stale hook"]
     assert "Nothing was changed and every service is as it was" in stale["repair"] and "hook" in stale["repair"], stale
     assert "rebuilt=" not in stale["repair"], stale
+    # GAP-0089: the rebuilt record names the installed hook guard when it is the
+    # payload's file, and leaves a different one unrecorded (the repair replaces
+    # it from the payload) without refusing the rebuild.
+    assert cases["garbage"]["hashes"] == "gateway,hook,hook_guard,sensor_helper", cases["garbage"]
+    guard = cases["garbage stale hook guard"]
+    assert guard["repair"] == "rebuilt=True installed=True stamps=1 drifted=False", guard
+    assert guard["hashes"] == "gateway,hook,sensor_helper", guard
     assert cases["valid drifted"]["read"].startswith("managed DACL is not protected")
     assert cases["valid drifted"]["repair"].startswith("managed DACL is not protected")
 

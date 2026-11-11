@@ -16457,11 +16457,13 @@ function New-DefenseClawRebuiltDeploymentRecord {
     # checked against (GAP-0656 review M3). An artifact that differs is left
     # unrecorded, and the repair replaces it from the payload.
     $provenHashes = [ordered]@{}
+    # Every payload key the hash writer emits for a standalone install, the
+    # Claude hook guard included (GAP-0089).
     $artifactLayoutKey = @{
-        gateway = 'GatewayPath'; acp = 'ACPPath'; hook = 'HookPath'; sensor_helper = 'SensorHelperPath'
-        cli = 'CLIPath'; installer = 'InstallerPath'; module = 'ModulePath'
+        gateway = 'GatewayPath'; acp = 'ACPPath'; hook = 'HookPath'; hook_guard = 'HookGuardPath'
+        sensor_helper = 'SensorHelperPath'; cli = 'CLIPath'; installer = 'InstallerPath'; module = 'ModulePath'
     }
-    foreach ($artifact in @('gateway', 'acp', 'hook', 'sensor_helper', 'cli', 'installer', 'module')) {
+    foreach ($artifact in @('gateway', 'acp', 'hook', 'hook_guard', 'sensor_helper', 'cli', 'installer', 'module')) {
         if (-not $Sources.ContainsKey($artifact) -or -not $Layout.ContainsKey($artifactLayoutKey[$artifact])) { continue }
         $installedArtifact = $Layout[$artifactLayoutKey[$artifact]]
         if ([string]::IsNullOrWhiteSpace([string]$installedArtifact) -or
@@ -38492,8 +38494,8 @@ function Assert-DefenseClawRebuiltRecordArtifacts {
         [Parameter(Mandatory)]$Metadata
     )
     $layoutKey = @{
-        gateway = 'GatewayPath'; acp = 'ACPPath'; hook = 'HookPath'; sensor_helper = 'SensorHelperPath'
-        cli = 'CLIPath'; installer = 'InstallerPath'; module = 'ModulePath'
+        gateway = 'GatewayPath'; acp = 'ACPPath'; hook = 'HookPath'; hook_guard = 'HookGuardPath'
+        sensor_helper = 'SensorHelperPath'; cli = 'CLIPath'; installer = 'InstallerPath'; module = 'ModulePath'
     }
     $hashesProperty = $Metadata.PSObject.Properties['hashes']
     $hashes = if ($null -ne $hashesProperty) { $hashesProperty.Value } else { $null }
