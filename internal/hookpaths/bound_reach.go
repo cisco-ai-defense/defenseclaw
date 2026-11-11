@@ -55,7 +55,7 @@ func boundNameMayBeProtected(component string) bool {
 var boundUnquoteKeepEscapes = strings.NewReplacer("\x27", "", "\"", "", "`", "")
 
 func boundNameSeparator(r rune) bool {
-	return !(unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("-_.", r))
+	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune("-_.", r)
 }
 
 // boundTextNamesProtected reports whether a path component of text (in

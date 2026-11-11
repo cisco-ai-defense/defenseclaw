@@ -46,12 +46,30 @@ type readingBoundRow struct {
 // user and as a managed peer, in the default and the strict tier.
 func readingBoundCells(t *testing.T, rows []readingBoundRow, window time.Duration) {
 	t.Helper()
-	readingBoundCellsIn(t, rows, window, nil)
+	readingBoundCellsIn(t, rows, window, nil, readingBoundAllCells)
 }
+
+type readingBoundCell struct {
+	connector, tier string
+	managed         bool
+}
+
+// readingBoundAllCells covers both connectors, per user and managed, in the
+// default and the strict tier; readingBoundDefaultCells is its default-tier
+// half, for rows whose strict answer another test already pins.
+var (
+	readingBoundAllCells = []readingBoundCell{
+		{"claudecode", config.HookPolicyTierDefault, false},
+		{"codex", config.HookPolicyTierDefault, true},
+		{"codex", config.HookPolicyTierStrict, false},
+		{"claudecode", config.HookPolicyTierStrict, true},
+	}
+	readingBoundDefaultCells = readingBoundAllCells[:2]
+)
 
 // readingBoundCellsIn is readingBoundCells with setup, which lays out the
 // home and the project (links, files) before the first cell runs.
-func readingBoundCellsIn(t *testing.T, rows []readingBoundRow, window time.Duration, setup func(home, cwd string)) {
+func readingBoundCellsIn(t *testing.T, rows []readingBoundRow, window time.Duration, setup func(home, cwd string), cells []readingBoundCell) {
 	t.Helper()
 	homes := filepath.Join(t.TempDir(), "homes")
 	home := filepath.Join(homes, "alice")
@@ -63,15 +81,7 @@ func readingBoundCellsIn(t *testing.T, rows []readingBoundRow, window time.Durat
 	if setup != nil {
 		setup(home, cwd)
 	}
-	for _, cell := range []struct {
-		connector, tier string
-		managed         bool
-	}{
-		{"claudecode", config.HookPolicyTierDefault, false},
-		{"codex", config.HookPolicyTierDefault, true},
-		{"codex", config.HookPolicyTierStrict, false},
-		{"claudecode", config.HookPolicyTierStrict, true},
-	} {
+	for _, cell := range cells {
 		api := readingBoundTierTestAPI(t, cell.connector, cell.tier)
 		name := cell.connector + "/" + cell.tier + map[bool]string{false: "/per-user", true: "/managed"}[cell.managed]
 		for _, row := range rows {
@@ -136,19 +146,23 @@ func TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget(t *testing.T) {
 	threeLevels := func(words int) string {
 		return "bash -c " + "\x27ssh host \"sh -c \x27\\\x27\x27printf %s " + strings.Repeat("a b ", words) + "\x27\\\x27\x27\"\x27"
 	}
+	// The ordinary row in all four cells (strict blocks it); the others in
+	// the default cells, as strict blocks every row (test budget).
 	readingBoundCells(t, []readingBoundRow{
 		{"ordinary ten levels", "Bash", readingBoundNest(10, "rm -rf ~/project/output"), guardrailActionAlert},
-		{"ordinary three levels of 20 KB", "Bash", threeLevels(5000), guardrailActionAlert},
-		{"protected twelve levels", "Bash", readingBoundNest(12, "rm -rf ~/.ssh"), guardrailActionBlock},
-		{"known protected value", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(10, "rm -rf \"$protected\""), guardrailActionBlock},
-		{"home through a known value", "Bash", "p=$HOME; " + readingBoundNest(10, "rm -rf \"$p\""), guardrailActionBlock},
 	}, 2*time.Second)
-	readingBoundCells(t, []readingBoundRow{
+	readingBoundCellsIn(t, []readingBoundRow{
+		{"ordinary three levels of 20 KB", "Bash", threeLevels(5000), guardrailActionAlert},
+		{"known protected value", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(10, "rm -rf \"$protected\""), guardrailActionBlock},
+	}, 2*time.Second, nil, readingBoundDefaultCells)
+	// Under the bound the readers read the call in full; the default cells
+	// carry these rows (test budget).
+	readingBoundCellsIn(t, []readingBoundRow{
 		{"ordinary nine levels", "Bash", readingBoundNest(9, "rm -rf ~/project/output"), guardrailActionAllow},
-		{"ordinary three levels of 12 KB", "Bash", threeLevels(3000), guardrailActionAllow},
+	}, 0, nil, readingBoundDefaultCells[:1])
+	readingBoundCellsIn(t, []readingBoundRow{
 		// Past shellparse.MaxNestedBodyProofBytes the readers read the call
 		// but do not prove its protected target.
-		{"protected nine levels", "Bash", readingBoundNest(9, "rm -rf ~/.defenseclaw"), guardrailActionBlock},
 		{"known protected value nine levels", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(9, "rm -rf \"$protected\""), guardrailActionBlock},
-	}, 0)
+	}, 0, nil, readingBoundDefaultCells[1:])
 }

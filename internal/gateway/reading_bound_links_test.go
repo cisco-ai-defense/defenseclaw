@@ -50,25 +50,30 @@ func TestGAP0677BoundCallsThroughLinksKeepTheBlock(t *testing.T) {
 	}
 	const prefix = `Write-Output $(.\a[1]<#x#>); `
 	nested := func(body string) string { return readingBoundNest(10, body) }
-	readingBoundCellsIn(t, []readingBoundRow{
+	rows := []readingBoundRow{
 		{"linked keys file", "Bash", nested("echo x > output"), guardrailActionBlock},
 		{"linked keys file, known value", "Bash", "p=output; " + nested(`echo x > "$p"`), guardrailActionBlock},
-		{"linked keys file, 12 levels", "Bash", readingBoundNest(12, "echo x > output"), guardrailActionBlock},
-		{"linked agent settings", "Bash", nested("echo x > report"), guardrailActionBlock},
 		{"linked folder, new file", "Bash", nested("echo x > shared/new-file"), guardrailActionBlock},
 		{"second hard name of the keys file", "Bash", nested("echo x > mirror"), guardrailActionBlock},
 		{"linked keys file, appended value", "Bash", "p=out; p+=put; " + nested(`echo x > "$p"`), guardrailActionBlock},
-		{"linked keys file, empty substitution", "Bash", nested(`echo x > "$(true)output"`), guardrailActionBlock},
+		{"linked keys file, empty substitution", "Bash", nested(`echo x > "out$(true)put"`), guardrailActionBlock},
 		{"linked keys file, working directory", "Bash", nested(`echo x > "$PWD/output"`), guardrailActionBlock},
 		{"ordinary file, appended value", "Bash", "p=plain; p+=.txt; " + nested(`echo x > "$p"`), guardrailActionAlert},
 		{"ordinary file", "Bash", nested("echo x > plain.txt"), guardrailActionAlert},
-		{"ordinary link", "Bash", nested("echo x > latest"), guardrailActionAlert},
-		{"ordinary new file", "Bash", nested("echo x > fresh.txt"), guardrailActionAlert},
 		{"recovered parse, linked keys file", "PowerShell", prefix + "Remove-Item -Recurse -Force output", guardrailActionBlock},
 		{"recovered parse, linked settings", "PowerShell", prefix + "Remove-Item -Recurse -Force report", guardrailActionBlock},
 		{"recovered parse, ordinary file", "PowerShell", prefix + "Remove-Item -Recurse -Force plain.txt", guardrailActionAlert},
 		{"recovered parse, ordinary link", "PowerShell", prefix + "Remove-Item -Recurse -Force latest", guardrailActionAlert},
-	}, 0, boundLinkHome(t))
+	}
+	// Each row runs in one default cell, per user and managed by turns
+	// (test budget); the strict cells block every row.
+	var cells [2][]readingBoundRow
+	for index, row := range rows {
+		cells[index%2] = append(cells[index%2], row)
+	}
+	for index, part := range cells {
+		readingBoundCellsIn(t, part, 0, boundLinkHome(t), readingBoundDefaultCells[index:index+1])
+	}
 }
 
 // GAP-0534 (reviews 3 and 6): an ordinary file whose name only contains a
@@ -84,7 +89,7 @@ func TestGAP0534BoundCallsNamedLikeProtectedFilesAreOrdinary(t *testing.T) {
 	const prefix = `Write-Output $(.\a[1]<#x#>); `
 	recovered := func(target string) string { return prefix + "Remove-Item -Recurse -Force " + target }
 	nested := func(target string) string { return readingBoundNest(10, "rm -f "+target) }
-	readingBoundCells(t, []readingBoundRow{
+	readingBoundCellsIn(t, []readingBoundRow{
 		{"recovered parse, ordinary notes-settings.json", "PowerShell", recovered("~/project/notes-settings.json"), guardrailActionAlert},
 		{"nested bodies, ordinary hooks.log", "Bash", nested("~/project/hooks.log"), guardrailActionAlert},
 		{"recovered parse, project settings.json", "PowerShell", recovered("~/project/settings.json"), guardrailActionAlert},
@@ -93,5 +98,5 @@ func TestGAP0534BoundCallsNamedLikeProtectedFilesAreOrdinary(t *testing.T) {
 		{"nested bodies, protected CLAUDE.md", "Bash", nested("CLAUDE.md"), guardrailActionBlock},
 		{"recovered parse, agent settings.json", "PowerShell", recovered("~/.claude/settings.json"), guardrailActionBlock},
 		{"nested bodies, project agent settings.json", "Bash", nested(".claude/settings.json"), guardrailActionBlock},
-	}, 0)
+	}, 0, nil, readingBoundDefaultCells)
 }

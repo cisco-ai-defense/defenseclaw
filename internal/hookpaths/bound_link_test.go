@@ -49,7 +49,7 @@ func TestBoundCallReachesProtectedLink(t *testing.T) {
 		{`echo "$unknown" > $other`, false},
 		// A word built from values the text shows (GAP-0677 review 6).
 		{`p=out; p+=put; echo x > "$p"`, true},
-		{`echo x > "$(true)output"`, true},
+		{`echo x > "out$(true)put"`, true},
 		{`echo x > "$PWD/output"`, true},
 		{`$p = "out"; $p += "put"; Set-Content -Path $p -Value x`, true},
 		{`p=plain; p+=.txt; echo x > "$p"`, false},

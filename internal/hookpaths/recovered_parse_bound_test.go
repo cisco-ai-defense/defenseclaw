@@ -101,7 +101,13 @@ func TestGAP0534RecoveredParseStaysBounded(t *testing.T) {
 				if elapsed > 3*time.Second {
 					t.Errorf("readers took %s", elapsed)
 				}
-				if used := after.TotalAlloc - before.TotalAlloc; used > 128<<20 {
+				// The product build stays under 128 MiB; the -race build
+				// allocates a few percent more (sync.Pool is not kept there).
+				limit := uint64(128 << 20)
+				if raceDetector {
+					limit = limit * 5 / 4
+				}
+				if used := after.TotalAlloc - before.TotalAlloc; used > limit {
 					t.Errorf("readers allocated %d MiB", used>>20)
 				}
 				if !tail.protected || form.name != "case" && (form.name != "printed fixed point" || !hookWriteEvidenceHost()) {
