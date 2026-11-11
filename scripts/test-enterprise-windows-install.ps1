@@ -620,10 +620,36 @@ try {
         }
     }
 
+    # Bounded evidence for the Setup/guardian race on this drift (GAP-0573):
+    # the folder's access list, when the last lifecycle result was written and
+    # the guardian's repair lines after it.
+    function Write-RuntimeRepairEvidence([string]$When) {
+        try {
+            Write-Host "  runtime folder evidence ($When, $([DateTime]::UtcNow.ToString('o'))):"
+            & icacls.exe $runtimeDirectory 2>&1 | Select-Object -First 16 | ForEach-Object { Write-Host "    $_" }
+            $lastResult = Join-Path $env:SystemRoot 'Logs\DefenseClaw\last-result.json'
+            if (Test-Path -LiteralPath $lastResult) {
+                Write-Host "    last-result written $((Get-Item -LiteralPath $lastResult).LastWriteTimeUtc.ToString('o'))"
+            }
+            $environment = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\DefenseClawHookGuardian' -Name Environment -ErrorAction SilentlyContinue).Environment
+            foreach ($entry in @($environment)) { if ($entry -like 'DEFENSECLAW_WINDOWS_SERVICE_LOG=*') { Write-Host "    guardian $entry" } }
+            $guardianLog = Join-Path $stateRoot 'logs\guardian\hook-guardian.log'
+            if (Test-Path -LiteralPath $guardianLog) {
+                Write-Host "    $guardianLog $((Get-Item -LiteralPath $guardianLog).Length) bytes, last repair or runtime lines:"
+                Get-Content -LiteralPath $guardianLog -Tail 600 | Where-Object { $_ -match 'defenseclaw_repair|\\runtime' } |
+                    Select-Object -Last 12 | ForEach-Object { Write-Host "      $($_.Substring(0, [Math]::Min(400, $_.Length)))" }
+            }
+            else { Write-Host "    $guardianLog is missing" }
+        }
+        catch { Write-Host "    evidence unavailable: $($_.Exception.Message)" }
+    }
+
     Step 'Setup /ensure repairs a trusted-only drift of the runtime ACL with CONFIG='
     & icacls.exe $runtimeDirectory /grant "*${usersSid}:(OI)(CI)RX" | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
+    Write-RuntimeRepairEvidence 'after the drift'
     $run = Invoke-Lifecycle -Name '02-ensure-runtime-acl-repair' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+    Write-RuntimeRepairEvidence 'after ensure'
     # The running hook guardian races Setup for this drift. Setup either puts
     # the ACL back itself (ensure_repair or a change) or finds that the
     # guardian already did and names that repair (guardian_repaired_drift,
