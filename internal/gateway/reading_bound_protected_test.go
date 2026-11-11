@@ -107,12 +107,13 @@ func readingBoundCellsIn(t *testing.T, rows []readingBoundRow, window time.Durat
 }
 
 // GAP-0534: the recovered-parse form the hook client stops at
-// (shell-parse-bound) blocked every target in the default tier. A target
-// the text may name as protected (directly, split or through a known
-// value, the home itself) still blocks in every tier; an ordinary target
-// is read by the gateway readers and runs with an alert in the default
-// tier, and the strict tier blocks it.
-func TestGAP0534RecoveredParseBoundIsGradedByTarget(t *testing.T) {
+// (shell-parse-bound) gets the evaluation-limit finding: it runs with an
+// alert in the default tier and the strict tier blocks it, whatever target
+// its text names (owner rule: an evaluation-limit-only call alerts outside
+// strict, rel-1-0-6:GAP-0675). A call that assigns its protected target
+// before the form is read by the readers, which prove the target: it blocks
+// in every tier. A benign call allows.
+func TestGAP0534RecoveredParseBoundAlertsOutsideStrict(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows hookexec sends no client write evidence; POSIX homes and a mode 0 homes folder")
 	}
@@ -126,7 +127,7 @@ func TestGAP0534RecoveredParseBoundIsGradedByTarget(t *testing.T) {
 		"~/.defenseclaw/config.yaml", "~/.ssh/authorized_keys", "~/.claude/settings.json", "~/.codex/hooks.json",
 		"CLAUDE.md", "~/.bashrc", "/etc/sudoers", "$HOME",
 	} {
-		rows = append(rows, readingBoundRow{"protected " + target, "PowerShell", prefixes[index%2] + "Remove-Item -Recurse -Force " + target, guardrailActionBlock})
+		rows = append(rows, readingBoundRow{"protected " + target, "PowerShell", prefixes[index%2] + "Remove-Item -Recurse -Force " + target, guardrailActionAlert})
 	}
 	rows = append(rows, readingBoundRow{"known protected value", "PowerShell",
 		`$p = "~/.ssh"; ` + prefixes[1] + "Remove-Item -Recurse -Force $p", guardrailActionBlock})
@@ -135,13 +136,13 @@ func TestGAP0534RecoveredParseBoundIsGradedByTarget(t *testing.T) {
 }
 
 // GAP-0677: a call whose nested shell bodies are past
-// shellparse.MaxNestedBodyBytes is decided at once, within the hook window.
-// An ordinary target runs with an alert in the default tier (the strict
-// tier blocks it); a protected target named directly or through a known
-// value blocks in every tier. A call whose nested bodies weigh more than
-// shellparse.MaxNestedBodyProofBytes, but not past the bound, is read in
-// full: an ordinary one allows and one through a known protected value
-// blocks. One cell per row (test budget); the shellparse test weighs the
+// shellparse.MaxNestedBodyBytes is decided at once, within the hook window:
+// it runs with an alert in the default tier and the strict tier blocks it,
+// whatever target its text names. A call whose nested bodies weigh more
+// than shellparse.MaxNestedBodyProofBytes, but not past the bound, is read
+// in full: an ordinary one allows, and one through a known protected value
+// gets the evaluation-limit finding (an alert in default, a block in
+// strict). One cell per row (test budget); the shellparse test weighs the
 // other shapes.
 func TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -158,7 +159,7 @@ func TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget(t *testing.T) {
 		{"ordinary ten levels", "Bash", readingBoundNest(10, "rm -rf ~/project/output"), guardrailActionAlert},
 	}, 2*time.Second, nil, []readingBoundCell{perUserDefault, managedStrict})
 	readingBoundCellsIn(t, []readingBoundRow{
-		{"known protected value", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(10, "rm -rf \"$protected\""), guardrailActionBlock},
+		{"known protected value", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(10, "rm -rf \"$protected\""), guardrailActionAlert},
 	}, 2*time.Second, nil, []readingBoundCell{managedDefault})
 	// Three levels with a long comment weigh as much as nine levels of a
 	// short body (more than MaxNestedBodyProofBytes, not past the bound)
@@ -169,7 +170,7 @@ func TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget(t *testing.T) {
 		cell readingBoundCell
 	}{
 		{readingBoundRow{"ordinary under the bound", "Bash", readingBoundNest(3, "rm -rf ~/project/output"+comment), guardrailActionAllow}, perUserDefault},
-		{readingBoundRow{"known protected value under the bound", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(3, "rm -rf \"$protected\""+comment), guardrailActionBlock}, managedDefault},
+		{readingBoundRow{"known protected value under the bound", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(3, "rm -rf \"$protected\""+comment), guardrailActionAlert}, managedDefault},
 	} {
 		if got := trustedActionCommandBound(actionfacts.Input{Tool: "Bash", Command: row.row.command}); got != shellReadingNestedProof {
 			t.Fatalf("%s: reading bound %d, want %d", row.row.name, got, shellReadingNestedProof)

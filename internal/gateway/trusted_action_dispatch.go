@@ -391,39 +391,21 @@ func dispatchTrustedAction(
 	// binding; the other tiers follow the top-level statements before it.
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
-	// The unproven-write reader of the hook client stopped at a recovered
-	// parse (shell-parse-bound, GAP-0534). A call whose text may name a
-	// protected target keeps the over-limit block in every profile; any
-	// other is read by the readers below, and the bound adds the
-	// evaluation-limit finding, which the profile decides
-	// (guardrailActionForProfile).
-	clientBound := request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound"
-	if clientBound && trustedReadingBoundMayNameProtected(request) {
-		return readingBoundProtectedFindings(true)
-	}
-	if clientBound {
-		defer func() { findings = withTrustedActionLimitFinding(findings, true) }()
+	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
+		return trustedActionLimitFindings(true)
 	}
 	switch trustedActionCommandBound(request.Input) {
-	case shellReadingTooDeep:
+	case shellReadingTooDeep, shellReadingNestedBodies:
 		// Past the reading bounds: no reader below parses it, and the call
-		// takes the over-limit path (GAP-2537).
-		return trustedActionLimitFindings(request.EnforcementCapable)
-	case shellReadingNestedBodies:
-		// No reader below reads it either (GAP-0677). A call whose text may
-		// name a protected target keeps the over-limit block in every
-		// profile; any other gets the evaluation-limit finding the profile
-		// decides.
-		if trustedReadingBoundMayNameProtected(request) {
-			return readingBoundProtectedFindings(request.EnforcementCapable)
-		}
+		// takes the over-limit path, which the profile decides (GAP-2537,
+		// GAP-0677).
 		return trustedActionLimitFindings(request.EnforcementCapable)
 	case shellReadingNestedProof:
 		// The readers below read it, but past this weight they do not prove
-		// its protected targets: a call whose text may name one keeps the
-		// over-limit block in every profile.
+		// its protected targets: a call whose text may name one also gets
+		// the evaluation-limit finding the profile decides.
 		if trustedReadingBoundMayNameProtected(request) {
-			return readingBoundProtectedFindings(request.EnforcementCapable)
+			defer func() { findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable) }()
 		}
 	}
 	if bounded, handled := operandBoundDispatch(parent, request); handled {
@@ -9581,7 +9563,7 @@ func withOmittedOperandLimitFinding(findings []RuleFinding, enforcementCapable b
 	if !had {
 		for index := range findings {
 			if findings[index].RuleID == "ACTION-COMPOUND-LIMIT" {
-				findings[index].limitKeepsBlock = true
+				findings[index].omittedOperand = true
 			}
 		}
 	}

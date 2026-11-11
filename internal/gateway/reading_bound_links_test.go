@@ -37,31 +37,30 @@ func boundLinkHome(t *testing.T) func(home, cwd string) {
 	}
 }
 
-// GAP-0677 and GAP-0534 (review 3): a call the readers did not finish is
-// graded by what its words reach, not only by what its text names. A word
-// that is a link to the keys file or the agent settings, a link to the
-// .ssh folder, or a second hard name of the keys file keeps the block in
-// every tier, named directly or through a value the call assigns, however
-// the call is nested. An ordinary file or link looks the same in the text and
-// runs with an alert in the default tier.
-func TestGAP0677BoundCallsThroughLinksKeepTheBlock(t *testing.T) {
+// GAP-0677 and GAP-0534: a call the readers did not finish gets the
+// evaluation-limit finding, which runs with an alert in the default tier and
+// blocks in strict, also where a word of it is a link to the keys file or
+// the agent settings, a link to the .ssh folder, or a second hard name of
+// the keys file (owner rule: an evaluation-limit-only call alerts outside
+// strict, rel-1-0-6:GAP-0675).
+func TestBoundCallsThroughLinksAlertOutsideStrict(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX homes, links and a mode 0 homes folder")
 	}
 	const prefix = `Write-Output $(.\a[1]<#x#>); `
 	nested := func(body string) string { return readingBoundNest(10, body) }
 	rows := []readingBoundRow{
-		{"linked keys file", "Bash", nested("echo x > output"), guardrailActionBlock},
-		{"linked keys file, known value", "Bash", "p=output; " + nested(`echo x > "$p"`), guardrailActionBlock},
-		{"linked folder, new file", "Bash", nested("echo x > shared/new-file"), guardrailActionBlock},
-		{"second hard name of the keys file", "Bash", nested("echo x > mirror"), guardrailActionBlock},
-		{"linked keys file, appended value", "Bash", "p=out; p+=put; " + nested(`echo x > "$p"`), guardrailActionBlock},
-		{"linked keys file, empty substitution", "Bash", nested(`echo x > "out$(true)put"`), guardrailActionBlock},
-		{"linked keys file, working directory", "Bash", nested(`echo x > "$PWD/output"`), guardrailActionBlock},
+		{"linked keys file", "Bash", nested("echo x > output"), guardrailActionAlert},
+		{"linked keys file, known value", "Bash", "p=output; " + nested(`echo x > "$p"`), guardrailActionAlert},
+		{"linked folder, new file", "Bash", nested("echo x > shared/new-file"), guardrailActionAlert},
+		{"second hard name of the keys file", "Bash", nested("echo x > mirror"), guardrailActionAlert},
+		{"linked keys file, appended value", "Bash", "p=out; p+=put; " + nested(`echo x > "$p"`), guardrailActionAlert},
+		{"linked keys file, empty substitution", "Bash", nested(`echo x > "out$(true)put"`), guardrailActionAlert},
+		{"linked keys file, working directory", "Bash", nested(`echo x > "$PWD/output"`), guardrailActionAlert},
 		{"ordinary file, appended value", "Bash", "p=plain; p+=.txt; " + nested(`echo x > "$p"`), guardrailActionAlert},
 		{"ordinary file", "Bash", nested("echo x > plain.txt"), guardrailActionAlert},
-		{"recovered parse, linked keys file", "PowerShell", prefix + "Remove-Item -Recurse -Force output", guardrailActionBlock},
-		{"recovered parse, linked settings", "PowerShell", prefix + "Remove-Item -Recurse -Force report", guardrailActionBlock},
+		{"recovered parse, linked keys file", "PowerShell", prefix + "Remove-Item -Recurse -Force output", guardrailActionAlert},
+		{"recovered parse, linked settings", "PowerShell", prefix + "Remove-Item -Recurse -Force report", guardrailActionAlert},
 		{"recovered parse, ordinary file", "PowerShell", prefix + "Remove-Item -Recurse -Force plain.txt", guardrailActionAlert},
 		{"recovered parse, ordinary link", "PowerShell", prefix + "Remove-Item -Recurse -Force latest", guardrailActionAlert},
 	}
@@ -76,12 +75,11 @@ func TestGAP0677BoundCallsThroughLinksKeepTheBlock(t *testing.T) {
 	}
 }
 
-// GAP-0534 (reviews 3 and 6): an ordinary file whose name only contains a
-// protected name (a settings, hooks or config name with more in it), or a
-// project document named like agent hook settings (settings.json,
-// hooks.json outside an agent folder), is an ordinary target of a call the
-// readers did not finish. The protected names stay protected as whole names,
-// and the settings names in an agent folder.
+// GAP-0534 (reviews 3 and 6): a call the readers did not finish runs with
+// an alert in the default tier whatever it names: an ordinary file whose
+// name only contains a protected name, a project document named like agent
+// hook settings, and a protected name the readers do not prove (strict
+// blocks every row).
 func TestGAP0534BoundCallsNamedLikeProtectedFilesAreOrdinary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX homes and a mode 0 homes folder")
@@ -94,9 +92,9 @@ func TestGAP0534BoundCallsNamedLikeProtectedFilesAreOrdinary(t *testing.T) {
 		{"nested bodies, ordinary hooks.log", "Bash", nested("~/project/hooks.log"), guardrailActionAlert},
 		{"recovered parse, project settings.json", "PowerShell", recovered("~/project/settings.json"), guardrailActionAlert},
 		{"nested bodies, project hooks.json", "Bash", nested("hooks.json"), guardrailActionAlert},
-		{"recovered parse, protected .bashrc", "PowerShell", recovered(".bashrc"), guardrailActionBlock},
-		{"nested bodies, protected CLAUDE.md", "Bash", nested("CLAUDE.md"), guardrailActionBlock},
-		{"recovered parse, agent settings.json", "PowerShell", recovered("~/.claude/settings.json"), guardrailActionBlock},
-		{"nested bodies, project agent settings.json", "Bash", nested(".claude/settings.json"), guardrailActionBlock},
+		{"recovered parse, protected .bashrc", "PowerShell", recovered(".bashrc"), guardrailActionAlert},
+		{"nested bodies, protected CLAUDE.md", "Bash", nested("CLAUDE.md"), guardrailActionAlert},
+		{"recovered parse, agent settings.json", "PowerShell", recovered("~/.claude/settings.json"), guardrailActionAlert},
+		{"nested bodies, project agent settings.json", "Bash", nested(".claude/settings.json"), guardrailActionAlert},
 	}, 0, nil, readingBoundDefaultCells)
 }

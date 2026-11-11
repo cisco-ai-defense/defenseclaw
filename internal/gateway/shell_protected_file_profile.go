@@ -116,14 +116,13 @@ const evaluationLimitRuleID = "ACTION-COMPOUND-LIMIT"
 // and no word of the command text is read as one. Every other finding (a
 // named or known protected path, a resolved link, a write the reader
 // resolves into the DefenseClaw state folder, which is self-protection) is
-// kept and decides on its own (rel-1-0-6:GAP-0675 round 12). A limit
-// finding whose target may be protected (limitKeepsBlock: a named operand
-// the client map left out, which may be a link to a protected file, or a
-// call past a reading bound whose text may name a protected target) is not
-// returned here, so it keeps its block.
+// kept and decides on its own (rel-1-0-6:GAP-0675 round 12). The limit
+// finding that stands for a named operand the client map left out
+// (omittedOperand) is not returned here: that operand may be a link to a
+// protected file, so it keeps its block.
 func withoutEnforcingEvaluationLimit(findings []RuleFinding) ([]RuleFinding, bool) {
 	isLimit := func(finding RuleFinding) bool {
-		return finding.contributesToEnforcement() && !finding.limitKeepsBlock &&
+		return finding.contributesToEnforcement() && !finding.omittedOperand &&
 			canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
 	}
 	if !slices.ContainsFunc(findings, isLimit) {

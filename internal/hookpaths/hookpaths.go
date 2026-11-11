@@ -1912,12 +1912,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// (RV-p4-1).
 				if shellparse.PastReadingBounds(command) {
 					if !isApplyPatchToolName(tool) {
-						// No reader describes it, but the user can see the
-						// links of the project: a word that reaches a
-						// protected file through one is sent as the
-						// protected-target decision, because the gateway
-						// cannot follow them behind ProtectHome (GAP-0677).
-						return incompleteEvidenceKeeping(cwd, BoundCallReachesProtectedLink(command, cwd, home))
+						return incompleteEvidence(cwd)
 					}
 					// An apply_patch command is a patch envelope whose
 					// targets are read from the envelope below; deep text
@@ -1975,13 +1970,6 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
-				}
-				// A recovered parse the unproven-write reader stopped at is not
-				// read in full: a word of it that reaches a protected file
-				// through a link is the protected-target decision, as for a
-				// call past the reading bounds (GAP-0534).
-				if unprovenReason == "shell-parse-bound" && !protectedDecision && BoundCallReachesProtectedLink(command, cwd, home) {
-					protectedDecision = true
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
 					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands)
