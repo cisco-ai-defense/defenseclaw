@@ -33,7 +33,7 @@ func TestFindActionVariants(t *testing.T) {
 	if err := os.Symlink(hook, link); err != nil {
 		t.Fatal(err)
 	}
-	rows := []struct{ name, command, want string }{
+	rows := []hookConfigShellRow{
 		{"fprint onto the hook", "find . -fprint " + hook, "block"},
 		{"fprint0 onto the hook", "find . -fprint0 " + hook, "block"},
 		{"fprintf onto the hook", "find . -fprintf " + hook + " %p", "block"},
@@ -89,22 +89,5 @@ func TestFindActionVariants(t *testing.T) {
 		{"exec read of the hook root", "find " + hook + " -exec cat {} \\;", "allow"},
 		{"execdir wrapped read of the hook by name", "find . -execdir env cat " + hook + " \\;", "allow"},
 	}
-	for _, row := range rows {
-		for _, profile := range []string{"permissive", "default", "strict"} {
-			for _, managed := range []bool{false, true} {
-				name := row.name + "/" + profile
-				if managed {
-					name += "/managed"
-				} else {
-					name += "/user"
-				}
-				t.Run(name, func(t *testing.T) {
-					got := rv2Action(rv3Judge(t, "claudecode", profile, h.project, managed, "Bash", map[string]any{"command": row.command}))
-					if got != row.want {
-						t.Errorf("got %s, want %s for %q", got, row.want, row.command)
-					}
-				})
-			}
-		}
-	}
+	checkHookConfigShellRows(t, h, rows)
 }

@@ -115,11 +115,6 @@ type gap0048Row struct {
 	needsLinks       bool
 }
 
-func gap0048Judge(t *testing.T, connectorName, profile string, h gap0048Home, row gap0048Row) string {
-	t.Helper()
-	return newHookConfigJudge(t, connectorName, profile)(h.project, false, row.tool, row.input)
-}
-
 func gap0048Check(t *testing.T, connectorName string, h gap0048Home, rows []gap0048Row) {
 	t.Helper()
 	linked := h.links(t)

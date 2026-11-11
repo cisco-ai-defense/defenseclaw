@@ -34,7 +34,7 @@ func TestAgentHookConfigRuleLeavesTheStateTree(t *testing.T) {
 				continue
 			}
 			t.Run(r.name, func(t *testing.T) {
-				got := rv3Judge(t, "claudecode", "default", h.project, managed, "Bash", map[string]any{"command": r.command})
+				got := newHookConfigJudge(t, "claudecode", "default")(h.project, managed, "Bash", map[string]any{"command": r.command})
 				has := strings.Contains(got, agentHookConfigDisableRuleID) || strings.Contains(got, agentHookConfigWriteRuleID)
 				// A managed install keeps its own file policy: only the
 				// installed hook executables stay under the rule there.

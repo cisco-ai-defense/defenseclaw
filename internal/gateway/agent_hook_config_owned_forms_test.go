@@ -82,29 +82,24 @@ func TestAgentHookConfigOwnedTargetSpellings(t *testing.T) {
 		{"perl in place edit with a backup suffix", `perl -pi.bak -e 's/a/b/' ~/.local/bin/defenseclaw-hook-user`, true},
 		{"perl in place option before the code option", `perl -i -pe 's/a/b/' ~/.local/bin/defenseclaw-hook-user`, true},
 	}
-	for _, r := range rows {
-		for _, managed := range []bool{false, true} {
-			for _, profile := range []string{"default", "strict"} {
-				name := r.name + "/" + profile
-				if managed {
-					name += "/managed"
-				}
-				t.Run(name, func(t *testing.T) {
-					got := rv3Judge(t, "claudecode", profile, h.project, managed, "Bash", map[string]any{"command": r.command})
-					want := "allow"
-					// The state tree is outside the agent hook config rule: a
-					// managed install keeps it with its file permissions, a
-					// per-user one with the state rules.
-					if r.block && (!managed || r.name != "install over hook script" && r.name != "folder holding hook scripts moved") {
-						want = "block"
-					}
-					if action := rv2Action(got); action != want {
-						t.Errorf("%s: got %s, want %s: %s", r.command, action, want, strings.TrimSpace(got))
-					}
-				})
-			}
-		}
+	names := make([]string, len(rows))
+	for i, r := range rows {
+		names[i] = r.name
 	}
+	forEachHookConfigCell(t, "claudecode", hookConfigBalancedAndStrictManaged, names, func(t *testing.T, judge hookConfigJudge, cell hookConfigCell, i int) {
+		r := rows[i]
+		want := "allow"
+		// The state tree is outside the agent hook config rule: a managed
+		// install keeps it with its file permissions, a per-user one with the
+		// state rules.
+		if r.block && (!cell.managed || r.name != "install over hook script" && r.name != "folder holding hook scripts moved") {
+			want = "block"
+		}
+		got := judge(h.project, cell.managed, "Bash", map[string]any{"command": r.command})
+		if action := hookConfigAction(got); action != want {
+			t.Errorf("%s: got %s, want %s: %s", r.command, action, want, strings.TrimSpace(got))
+		}
+	})
 }
 
 // TestAgentHookConfigGitWorktreeFromEnvironment pins that GIT_WORK_TREE and

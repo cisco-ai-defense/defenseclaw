@@ -3,7 +3,6 @@
 package gateway
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -178,28 +177,32 @@ func TestGAP0048Round2Variants(t *testing.T) {
 		{"B27 git apply unrelated patch", "claudecode", "Bash", "benign", b("git apply safe.patch")},
 		{"B28 nested OpenCode model override", "claudecode", "Bash", "benign", b(`opencode --config '{"model":"fast"}'`)},
 	}
-	for _, r := range rows {
-		for _, profile := range []string{"default", "strict"} {
-			got := gap0048Judge(t, r.conn, profile, h, gap0048Row{name: r.id, tool: r.tool, input: r.in})
-			var answer struct {
-				Action string `json:"action"`
+	for _, profile := range []string{"default", "strict"} {
+		t.Run(profile, func(t *testing.T) {
+			judges := map[string]hookConfigJudge{}
+			for _, r := range rows {
+				if judges[r.conn] == nil {
+					judges[r.conn] = newHookConfigJudge(t, r.conn, profile)
+				}
 			}
-			_ = json.Unmarshal([]byte(got), &answer)
-			want := "allow"
-			switch {
-			case r.want == "native":
-				want = "block"
-			case r.want == "shell" && profile == "default":
-				want = "alert"
-			case r.want == "shell":
-				want = "block"
+			for _, r := range rows {
+				t.Run(r.id, func(t *testing.T) {
+					t.Parallel()
+					got := hookConfigAction(judges[r.conn](h.project, false, r.tool, r.in))
+					want := "allow"
+					switch {
+					case r.want == "native":
+						want = "block"
+					case r.want == "shell" && profile == "default":
+						want = "alert"
+					case r.want == "shell":
+						want = "block"
+					}
+					if got != want {
+						t.Errorf("got %s, want %s", got, want)
+					}
+				})
 			}
-			status := "ok"
-			if answer.Action != want {
-				status = "MISS"
-				t.Errorf("%s %s: got %s, want %s", profile, r.id, answer.Action, want)
-			}
-			t.Logf("RV048 %s %s | %s | got=%s want=%s", status, profile, r.id, answer.Action, want)
-		}
+		})
 	}
 }

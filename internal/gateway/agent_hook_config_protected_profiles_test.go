@@ -28,7 +28,7 @@ func TestAgentHookConfigProtectedTargetsBlockInEveryProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Dir(hook)
-	for _, tc := range []struct {
+	cases := []struct {
 		name  string
 		tool  string
 		input map[string]any
@@ -50,28 +50,29 @@ func TestAgentHookConfigProtectedTargetsBlockInEveryProfile(t *testing.T) {
 		{"ordinary link through a short cluster", "Bash", map[string]any{"command": "ln -sft" + bin + " " + source + "/other-tool"}, false, false},
 		{"ordinary link into the folder", "Bash", map[string]any{"command": "ln -sf " + source + "/other-tool " + bin + "/"}, false, false},
 		{"ordinary settings edit", "Edit", map[string]any{"file_path": h.userSettings, "old_string": `"env": {"FOO": "1"}`, "new_string": `"env": {"FOO": "1", "BAR": "2"}`}, false, false},
-	} {
-		for _, profile := range []string{"permissive", "default", "strict"} {
-			for _, managed := range []bool{false, true} {
-				if managed && tc.managedLocked {
+	}
+	for _, cell := range []hookConfigCell{{"permissive", false}, {"permissive", true}, {"default", false}, {"default", true}, {"strict", false}, {"strict", true}} {
+		t.Run(cell.profile+"/"+cell.mode(), func(t *testing.T) {
+			judge := newHookConfigJudge(t, "claudecode", cell.profile)
+			for _, tc := range cases {
+				if cell.managed && tc.managedLocked {
 					continue
 				}
-				name := tc.name + "/" + profile
-				if managed {
-					name += "/managed"
-				}
-				t.Run(name, func(t *testing.T) {
-					got := rv3Judge(t, "claudecode", profile, h.project, managed, tc.tool, tc.input)
+				t.Run(tc.name, func(t *testing.T) {
+					if !cell.managed {
+						t.Parallel()
+					}
+					got := judge(h.project, cell.managed, tc.tool, tc.input)
 					want := "allow"
 					if tc.block {
 						want = "block"
 					}
-					if action := rv2Action(got); action != want {
+					if action := hookConfigAction(got); action != want {
 						t.Errorf("got %s, want %s: %s", action, want, strings.TrimSpace(got))
 					}
 				})
 			}
-		}
+		})
 	}
 }
 
@@ -91,7 +92,7 @@ func TestAgentHookConfigGitWorktreeFromCommandAssignments(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(other, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
+	cases := []struct {
 		name, command string
 		graded        bool
 	}{
@@ -139,21 +140,26 @@ func TestAgentHookConfigGitWorktreeFromCommandAssignments(t *testing.T) {
 		{"env in a repository without a registration file", "env -C " + other + " git reset --hard", false},
 		{"unrelated assignment", "LC_ALL=C git status", false},
 		{"read-only command with a work tree", "GIT_WORK_TREE=" + h.project + " git status", false},
-	} {
-		for _, profile := range []string{"default", "strict"} {
-			t.Run(tc.name+"/"+profile, func(t *testing.T) {
-				got := rv2Action(rv3Judge(t, "claudecode", profile, h.ext, false, "Bash", map[string]any{"command": tc.command}))
-				want := "allow"
-				if tc.graded {
-					want = "alert"
-					if profile == "strict" {
-						want = "block"
+	}
+	for _, profile := range []string{"default", "strict"} {
+		t.Run(profile, func(t *testing.T) {
+			judge := newHookConfigJudge(t, "claudecode", profile)
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Parallel()
+					got := hookConfigAction(judge(h.ext, false, "Bash", map[string]any{"command": tc.command}))
+					want := "allow"
+					if tc.graded {
+						want = "alert"
+						if profile == "strict" {
+							want = "block"
+						}
 					}
-				}
-				if got != want {
-					t.Errorf("got %s, want %s", got, want)
-				}
-			})
-		}
+					if got != want {
+						t.Errorf("got %s, want %s", got, want)
+					}
+				})
+			}
+		})
 	}
 }

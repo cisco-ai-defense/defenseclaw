@@ -3,6 +3,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -41,8 +42,11 @@ func newHookConfigJudge(t *testing.T, conn, profile string) hookConfigJudge {
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth(), store: store, logger: logger}
 	handler := api.handleAgentHook(conn)
 	return func(cwd string, managed bool, tool string, input map[string]any) string {
-		payload := mustJSON(t, map[string]any{"session_id": "rv3gx048", "hook_event_name": event,
+		payload, err := json.Marshal(map[string]any{"session_id": "hook-config", "hook_event_name": event,
 			"tool_name": tool, "cwd": cwd, "tool_input": input})
+		if err != nil {
+			return "payload not built: " + err.Error()
+		}
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/"+conn+"/hook", strings.NewReader(string(payload)))
 		req.Header.Set("Content-Type", "application/json")
 		if header := hookpaths.ResolveConnector(conn, "", event, payload); header != "" {
@@ -61,45 +65,95 @@ func newHookConfigJudge(t *testing.T, conn, profile string) hookConfigJudge {
 	}
 }
 
-// rv3Judge is a one-call newHookConfigJudge.
-func rv3Judge(t *testing.T, conn, profile, cwd string, managed bool, tool string, input map[string]any) string {
-	t.Helper()
-	return newHookConfigJudge(t, conn, profile)(cwd, managed, tool, input)
+// hookConfigAction reads the verdict (block, alert or allow) out of a hook answer.
+func hookConfigAction(got string) string {
+	var answer struct {
+		Action   string `json:"action"`
+		Decision string `json:"decision"`
+	}
+	_ = json.Unmarshal([]byte(got), &answer)
+	if answer.Action != "" {
+		return answer.Action
+	}
+	for _, a := range []string{"block", "deny", "alert", "allow"} {
+		if strings.Contains(got, `"`+a+`"`) {
+			return a
+		}
+	}
+	return "?"
 }
 
-// hookConfigShellRow is one Bash command and the verdict it gets in every
-// cell of checkHookConfigShellRows.
-type hookConfigShellRow struct{ name, command, want string }
+// hookConfigCell is one profile and install mode a row is judged in.
+type hookConfigCell struct {
+	profile string
+	managed bool
+}
 
-// checkHookConfigShellRows judges each row in two cells: the default pack for
-// a per-user install and the strict pack for a managed install. The rows
-// state behaviours that do not depend on the profile, so these two cells
-// cover both ends (the balanced default, and the strictest pack under the
-// managed flag) with one handler per cell. Per-user rows run in parallel; the
-// managed flag is process wide, so managed rows run one at a time.
-func checkHookConfigShellRows(t *testing.T, h gap0048Home, rows []hookConfigShellRow) {
+func (c hookConfigCell) mode() string {
+	if c.managed {
+		return "managed"
+	}
+	return "user"
+}
+
+// hookConfigBalancedAndStrictManaged are the two ends: the balanced default
+// on a per-user install, and the strictest pack under the managed flag.
+var hookConfigBalancedAndStrictManaged = []hookConfigCell{{"default", false}, {"strict", true}}
+
+// forEachHookConfigCell runs check for each named row in each cell, with one
+// judge and one audit store per cell. Per-user rows run in parallel; the
+// managed flag is process wide, so managed rows run one at a time. The
+// parallel children finish before the cell subtest returns, so the strict
+// pack installed for the cell is restored after them.
+func forEachHookConfigCell(t *testing.T, conn string, cells []hookConfigCell, names []string, check func(t *testing.T, judge hookConfigJudge, cell hookConfigCell, row int)) {
 	t.Helper()
-	for _, cell := range []struct {
-		profile string
-		managed bool
-	}{{"default", false}, {"strict", true}} {
-		mode := "user"
-		if cell.managed {
-			mode = "managed"
-		}
-		t.Run(cell.profile+"/"+mode, func(t *testing.T) {
-			judge := newHookConfigJudge(t, "claudecode", cell.profile)
-			for _, row := range rows {
-				t.Run(row.name, func(t *testing.T) {
+	for _, cell := range cells {
+		t.Run(cell.profile+"/"+cell.mode(), func(t *testing.T) {
+			judge := newHookConfigJudge(t, conn, cell.profile)
+			for i, name := range names {
+				t.Run(name, func(t *testing.T) {
 					if !cell.managed {
 						t.Parallel()
 					}
-					got := rv2Action(judge(h.project, cell.managed, "Bash", map[string]any{"command": row.command}))
-					if got != row.want {
-						t.Errorf("got %s, want %s for %q", got, row.want, row.command)
-					}
+					check(t, judge, cell, i)
 				})
 			}
 		})
 	}
+}
+
+// hookConfigShellRow is one Bash command and the verdict it gets in every
+// cell of checkHookConfigShellRows: allow, block, or possible (an alert in
+// the balanced default and a block under strict; a managed install leaves the
+// agent config files to the vendor lock, so possible rows run per-user only).
+type hookConfigShellRow struct{ name, command, want string }
+
+// checkHookConfigShellRows judges each row in the two cells of
+// hookConfigBalancedAndStrictManaged. The rows state behaviours that do not
+// depend on the profile, so these two cells cover both ends.
+func checkHookConfigShellRows(t *testing.T, h gap0048Home, rows []hookConfigShellRow) {
+	t.Helper()
+	checkHookConfigShellRowsIn(t, h, hookConfigBalancedAndStrictManaged, rows)
+}
+
+// checkHookConfigShellRowsIn is checkHookConfigShellRows for the given cells.
+func checkHookConfigShellRowsIn(t *testing.T, h gap0048Home, cells []hookConfigCell, rows []hookConfigShellRow) {
+	t.Helper()
+	names := make([]string, len(rows))
+	for i, row := range rows {
+		names[i] = row.name
+	}
+	forEachHookConfigCell(t, "claudecode", cells, names, func(t *testing.T, judge hookConfigJudge, cell hookConfigCell, i int) {
+		row := rows[i]
+		want := row.want
+		if want == "possible" {
+			want = "alert"
+			if cell.profile == "strict" {
+				want = "block"
+			}
+		}
+		if got := hookConfigAction(judge(h.project, cell.managed, "Bash", map[string]any{"command": row.command})); got != want {
+			t.Errorf("got %s, want %s for %q", got, want, row.command)
+		}
+	})
 }

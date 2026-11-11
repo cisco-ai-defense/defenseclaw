@@ -28,7 +28,7 @@ func TestAgentHookConfigKnownLinkPlacement(t *testing.T) {
 	if err := os.MkdirAll(otherBin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rows := []struct{ name, command, want string }{
+	rows := []hookConfigShellRow{
 		{"literal protected", "ln -sf " + named + " " + bin + "/", "block"},
 		{"bound source", "src=" + named + "; ln -sf \"$src\" " + bin + "/", "block"},
 		{"bound destination", "dest=" + bin + "; ln -sf " + named + " \"$dest\"/", "block"},
@@ -67,22 +67,5 @@ func TestAgentHookConfigKnownLinkPlacement(t *testing.T) {
 		{"copy onto the hook after echo", "echo a; cp " + ordinary + " " + hook, "block"},
 		{"copy onto the hook through a wrapper after echo", "echo a; nice -n 5 cp " + ordinary + " " + hook, "block"},
 	}
-	for _, row := range rows {
-		for _, profile := range []string{"permissive", "default", "strict"} {
-			for _, managed := range []bool{false, true} {
-				name := row.name + "/" + profile
-				if managed {
-					name += "/managed"
-				} else {
-					name += "/user"
-				}
-				t.Run(name, func(t *testing.T) {
-					got := rv2Action(rv3Judge(t, "claudecode", profile, h.project, managed, "Bash", map[string]any{"command": row.command}))
-					if got != row.want {
-						t.Errorf("got %s, want %s for %q", got, row.want, row.command)
-					}
-				})
-			}
-		}
-	}
+	checkHookConfigShellRows(t, h, rows)
 }
