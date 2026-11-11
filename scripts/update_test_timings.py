@@ -37,6 +37,7 @@ import argparse
 import json
 import re
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,19 @@ def _go_events(files: list[Path]):
                 yield event
 
 
+GO_EVENT_TIME_RE = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)$")
+
+
+def _event_time(event: dict) -> datetime | None:
+    # The Time of a go test -json event (RFC 3339 with nanoseconds), or None.
+    match = GO_EVENT_TIME_RE.match(str(event.get("Time", "")))
+    if not match:
+        return None
+    fraction = (match.group(2) or "")[:6].ljust(6, "0")
+    zone = "+00:00" if match.group(3) == "Z" else match.group(3)
+    return datetime.fromisoformat(f"{match.group(1)}.{fraction}{zone}")
+
+
 def _rel(package: str, module: str) -> str:
     return package[len(module) + 1 :] if package.startswith(module + "/") else package
 
@@ -78,16 +92,31 @@ def _rel(package: str, module: str) -> str:
 def go_timings(files: list[Path], module: str) -> dict:
     tests: dict[str, dict[str, float]] = {}
     packages: dict[str, float] = {}
+    started: dict[tuple[str, str], datetime] = {}
     for event in _go_events(files):
+        package = event.get("Package", "")
+        name = event.get("Test")
+        when = _event_time(event)
+        if name is not None and when is not None:
+            top = (package, name.split("/", 1)[0])
+            if event.get("Action") == "run" and "/" not in name:
+                started[top] = when
+            else:
+                started.setdefault(top, when)
         if event.get("Action") not in ("pass", "fail"):
             continue
-        package = event.get("Package", "")
         elapsed = float(event.get("Elapsed", 0))
-        name = event.get("Test")
         if name is None:
             # Shards of one package each report its elapsed time: sum them.
             packages[package] = packages.get(package, 0.0) + elapsed
         elif "/" not in name:
+            # A test whose subtests call t.Parallel reports the Elapsed of
+            # its own body only (0.01 s for the internal/hookpaths archive
+            # table parts, which take 33 to 41 s on a Windows runner); its
+            # time is from its run event to its end, whichever is longer.
+            first = started.pop((package, name), None)
+            if first is not None and when is not None:
+                elapsed = max(elapsed, (when - first).total_seconds())
             tests.setdefault(_rel(package, module), {})[name] = elapsed
     # Per-test times matter only where CI splits a package by test; keep the
     # packages that reach a minute so the file stays reviewable.

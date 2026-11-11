@@ -79,6 +79,36 @@ def test_go_timings_reads_events_after_a_log_prefix(tmp_path: Path) -> None:
     }
 
 
+def test_go_timings_time_a_test_from_its_run_to_its_end(tmp_path: Path) -> None:
+    # Windows Native CI dispatch 43024510603: the internal/hookpaths archive
+    # table parts, whose subtests call t.Parallel, report an Elapsed of 0.01 s
+    # but run 33 to 41 s each. Weighed as fast tests, all sixteen landed in one
+    # part, which took 571 s. A test now weighs the time from its run event to
+    # its end; a test whose Elapsed covers its run (the benign twin) keeps it.
+    def at(seconds: float, action: str, test: str, elapsed: float = 0.0) -> str:
+        event = json.loads(_event(action, "pkg/a", elapsed, test))
+        event["Time"] = f"2026-11-11T13:05:{seconds:09.6f}1-05:00"
+        return json.dumps(event)
+
+    log = tmp_path / "pk6.log"
+    log.write_text(
+        "\n".join(
+            [
+                at(0.0, "run", "TestTable"),
+                at(0.2, "run", "TestTable/ditto"),
+                at(34.2, "pass", "TestTable/ditto", 34.0),
+                at(35.0, "pass", "TestTable", 0.01),
+                at(36.0, "run", "TestSerial"),
+                at(46.0, "pass", "TestSerial", 10.0),
+                _event("pass", "pkg/a", 70.0),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert go_timings([log], MODULE)["tests"] == {"pkg/a": {"TestSerial": 10.0, "TestTable": 35.0, "*": 0.1}}
+
+
 def test_merge_go_timings_replaces_only_the_measured_packages() -> None:
     # go-darwin.json: the darwin connector parts refresh the connector
     # package; the enterpriseunix times recorded earlier stay.
