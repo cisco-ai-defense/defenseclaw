@@ -1251,6 +1251,32 @@ func TestCheckpointWALIfLargeRepeatedOverLimitPassesNeverSettleBeforeTheWriter(t
 	}
 }
 
+// manualDeadlineContext is a pass context whose deadline passes when a test
+// says so, so that a test of a pass that ran out of time does not depend on how
+// long the copies before the point it targets take.
+type manualDeadlineContext struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func newManualDeadlineContext() *manualDeadlineContext {
+	return &manualDeadlineContext{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *manualDeadlineContext) Done() <-chan struct{} { return c.done }
+
+func (c *manualDeadlineContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (c *manualDeadlineContext) expire() { c.once.Do(func() { close(c.done) }) }
+
 // Review of G-flood-wal round 3 (P1): a pass that ran out of time while the
 // log was over the limit cleared the store's over-the-limit mark and left the
 // bounded catch-up's misses as they were, so background writers went on and
@@ -1263,11 +1289,16 @@ func TestCheckpointWALIfLargePassThatRunsOutOfTimeKeepsThePressureAndEscalates(t
 	logWALGuardEvents(t, store, 200)
 	writeDuringEveryCopy(t, store)
 	overrideWALDuration(t, &walCatchUpCap, 40*time.Millisecond)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	// The pass's deadline passes only once the copy under the writer has
+	// outrun its cap, never during the copies before it: a wall-clock deadline
+	// raced the first copy on a slow runner.
+	ctx := newManualDeadlineContext()
 	original := walWriterPhaseHook
-	// The copy under the writer outruns its cap and the pass's deadline.
-	walWriterPhaseHook = func(context.Context) { <-ctx.Done() }
+	walWriterPhaseHook = func(hold context.Context) {
+		<-hold.Done()
+		ctx.expire()
+		<-ctx.Done()
+	}
 	t.Cleanup(func() { walWriterPhaseHook = original })
 	pass, err := store.CheckpointWALIfLarge(ctx, 0, testWALWriterBudget)
 	if !errors.Is(err, context.DeadlineExceeded) || !pass.Bounded || pass.Restarted {
