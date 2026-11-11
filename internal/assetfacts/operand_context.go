@@ -693,6 +693,8 @@ type entryScan struct {
 	home, account string
 	listed        map[string]listing
 	resolved      map[string][]FolderRef
+	// cut is set when folders stopped at its room.
+	cut bool
 }
 
 type listing struct {
@@ -725,8 +727,14 @@ func (s *entryScan) entries(dir string) listing {
 // the command line holds anywhere in its text, whatever the words around them
 // are. The name of an entry is what the shell is given, however the line is
 // split, quoted or run, so no reading of the line can hide it. A folder too
-// large to list is read word by word.
-func (s *entryScan) folders(line, cwd string) []FolderRef {
+// large to list is read word by word. It stops reading entries once it has
+// room folders (and sets cut): a call that names more is judged as one that
+// was cut.
+func (s *entryScan) folders(line, cwd string, room int) []FolderRef {
+	if room <= 0 {
+		s.cut = true
+		return nil
+	}
 	forms := textForms(line)
 	dirs := []string{cwd}
 	named := slashWords(line)
@@ -766,6 +774,10 @@ func (s *entryScan) folders(line, cwd string) []FolderRef {
 			lower := strings.ToLower(name)
 			if lower == "" || !slices.ContainsFunc(forms, func(form string) bool { return strings.Contains(form, lower) }) {
 				continue
+			}
+			if len(refs) >= room {
+				s.cut = true
+				return refs
 			}
 			refs = append(refs, s.reached(filepath.Join(dir, name))...)
 		}

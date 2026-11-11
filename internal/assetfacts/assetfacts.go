@@ -934,47 +934,44 @@ type FolderRef struct {
 	BareOperand bool
 }
 
-// SkillFolderRefs lists the skill folders the strings of a tool input reach
-// into: every distinct path with a "skills/<name>" pair of components, in a command
-// line, a file path or a working folder. "~" and $HOME expand to home and
-// a relative path resolves against cwd. tool is the name of the tool the call
-// is for (it may be empty): a search tool that names no place searches cwd. A
-// slash-free word is a path only as the name of an existing entry that leads
-// into a skill folder: a command line that holds such a name anywhere in its
-// text, and a word that reads, copies, writes or runs, reads that folder in
-// every tier; the strict tier needs no such word (see operand_context.go).
-func SkillFolderRefs(tool string, input any, home, cwd string, caller ...string) []FolderRef {
-	return skillFolderRefsForCaller(tool, input, home, cwd, callerName(caller), os.Geteuid(), os.Getegid(), false)
+// maxSkillFolderHits bounds the paths of one call that are read for the skill
+// folder they lead into: the work grows with each, on a host with few cores
+// a call that names thousands of links outlasts the hook call. It is the
+// operand bound of a shell call (actionfacts.MaxOperandsPerCall). Only a path
+// that leads into a skill folder counts; any number of other paths is read.
+const maxSkillFolderHits = 1024
+
+// SkillFolderRefsAndCut lists the skill folders the strings of a tool input
+// reach into: every distinct path with a "skills/<name>" pair of components,
+// in a command line, a file path or a working folder. "~" and $HOME expand to
+// home and a relative path resolves against cwd. tool is the name of the tool
+// the call is for (it may be empty): a search tool that names no place
+// searches cwd. A slash-free word is a path only as the name of an existing
+// entry that leads into a skill folder: a command line that holds such a name
+// anywhere in its text, and a word that reads, copies, writes or runs, reads
+// that folder in every tier; the strict policy tier needs no such word (see
+// operand_context.go): a command line that holds the name of an entry that
+// leads into a skill folder reads that folder. caller, uid and gid are the
+// credentials the links are followed with (a managed hook request uses the
+// kernel credentials of its caller, not the gateway service account).
+//
+// cut says it stopped reading paths at maxSkillFolderHits. The caller then
+// cannot show the paths it left out not to lead into a held or denied skill,
+// and judges the call as it does a claim that was cut
+// (Facts.SkillLinksTruncated).
+func SkillFolderRefsAndCut(tool string, input any, home, cwd, caller string, uid, gid int, strict bool) (refs []FolderRef, cut bool) {
+	return skillFolderRefsAndCut(tool, input, home, cwd, caller, uid, gid, strict)
 }
 
-// SkillFolderRefsStrict is SkillFolderRefs for the strict policy tier: a
-// command line that holds the name of an entry that leads into a skill folder
-// reads that folder, with or without a word that reads or runs.
-func SkillFolderRefsStrict(tool string, input any, home, cwd string, caller ...string) []FolderRef {
-	return skillFolderRefsForCaller(tool, input, home, cwd, callerName(caller), os.Geteuid(), os.Getegid(), true)
-}
-
-func callerName(caller []string) string {
-	if len(caller) > 0 {
-		return caller[0]
-	}
-	return ""
-}
-
-// SkillFolderRefsForPeer resolves a managed hook request using the kernel
-// credentials of the caller, rather than the gateway service account. strict
-// is as for SkillFolderRefsStrict.
-func SkillFolderRefsForPeer(tool string, input any, home, cwd, caller string, uid, gid int, strict bool) []FolderRef {
-	return skillFolderRefsForCaller(tool, input, home, cwd, caller, uid, gid, strict)
-}
-
-func skillFolderRefsForCaller(tool string, input any, home, cwd, account string, uid, gid int, strict bool) []FolderRef {
+func skillFolderRefsAndCut(tool string, input any, home, cwd, account string, uid, gid int, strict bool) ([]FolderRef, bool) {
 	var fields []inputField
 	collectFields(tool, input, "", 0, &fields)
 	seen := map[string]int{}
 	var refs []FolderRef
+	hits, cut := 0, false
 	scan := newEntryScan(home, account)
 	addRefs := func(found []FolderRef, explicit bool) {
+		hits += len(found)
 		for _, ref := range found {
 			ref.ExplicitDirectory = explicit
 			if index, ok := seen[ref.Dir]; ok {
@@ -988,11 +985,19 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 		}
 	}
 	addToken := func(token, dir string, explicit bool) {
+		if hits >= maxSkillFolderHits {
+			cut = true
+			return
+		}
 		addRefs(skillFolderRefs(token, home, dir, account), explicit)
 	}
 	// A path that echo or printf prints names the folder only as spelled: the
 	// folder a link on the path leads to is not read by printing it.
 	addPrinted := func(token, dir string, explicit bool) {
+		if hits >= maxSkillFolderHits {
+			cut = true
+			return
+		}
 		var direct []FolderRef
 		for _, ref := range skillFolderRefs(token, home, dir, account) {
 			if !ref.Linked {
@@ -1055,7 +1060,7 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 				}
 			}
 			if strict || kind == kindOther || reading.reads {
-				addRefs(scan.folders(reading.names, dir), explicit)
+				addRefs(scan.folders(reading.names, dir, maxSkillFolderHits-hits), explicit)
 			}
 			if runsFolderReader(line, f.argv, kind == kindCommand) {
 				addToken(dir, dir, explicit)
@@ -1111,7 +1116,7 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 			add(field, current.value, current.dir, current.explicit)
 		}
 	}
-	return refs
+	return refs, cut || scan.cut
 }
 
 // leadingSkillDirectoryChange follows a literal cd before another command.
