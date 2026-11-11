@@ -903,14 +903,16 @@ def test_recovery_watcher_removes_the_folder_after_exit_code_0_and_keeps_it_afte
         installer = subprocess.Popen(  # noqa: S603 - fixed interpreter, fixed script
             [powershell, "-NoProfile", "-Command", f"Start-Sleep -Seconds 2; exit {code}"]
         )
-        watcher = _REAL_WATCH_RECOVERY_COPY(powershell, installer.pid, recovery, dict(os.environ))
+        env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+        watcher = _REAL_WATCH_RECOVERY_COPY(powershell, installer.pid, recovery, env)
         assert watcher is not None
         runs.append((code, installer, watcher, os.path.dirname(recovery[0])))
 
     for code, installer, watcher, folder in runs:
         assert installer.wait(timeout=60) == code
-        assert watcher.wait(timeout=60) == 0
-        assert os.path.isdir(folder) == (code != 0), f"exit code {code}"
+        # 0: the copy was removed; 4: the installer failed and the copy was kept.
+        assert watcher.wait(timeout=60) == (0 if code == 0 else 4), f"installer exit code {code}"
+        assert os.path.isdir(folder) == (code != 0), f"installer exit code {code}"
         shutil.rmtree(folder, ignore_errors=True)
 
 

@@ -788,16 +788,21 @@ def _drop_recovery_copy(recovery: tuple[str, str] | None) -> None:
 
 # Runs hidden after the shim has exited and removes the recovery copy once the
 # installer it started has ended with exit code 0. A failed or unreadable run
-# keeps the copy, which the failed run's message names (GAP-1011).
+# keeps the copy, which the failed run's message names (GAP-1011). It uses
+# language operators and .NET calls only, so no PowerShell module has to load.
+# Its own exit code says what it did: 0 removed the copy, 3 could not watch
+# the installer, 4 the installer failed (copy kept), 5 the folder is not a
+# recovery copy, 6 the removal failed.
 _RECOVERY_WATCHER = (
     "$ErrorActionPreference = 'Stop'; "
     "try { $p = [System.Diagnostics.Process]::GetProcessById([int]$env:DC_WATCH_PID) } catch { exit 3 }; "
     "if (@('powershell', 'pwsh') -notcontains $p.ProcessName) { exit 3 }; "
     "$p.WaitForExit(); "
-    "if ($p.ExitCode -ne 0) { exit 0 }; "
+    "if ($p.ExitCode -ne 0) { exit 4 }; "
     "$d = $env:DC_WATCH_DIR; "
-    "if ((Split-Path -Leaf $d) -like 'defenseclaw-recovery-*') "
-    "{ Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }"
+    "if (-not [System.IO.Path]::GetFileName($d).StartsWith('defenseclaw-recovery-')) { exit 5 }; "
+    "try { [System.IO.Directory]::Delete($d, $true) } catch { exit 6 }; "
+    "exit 0"
 )
 
 
