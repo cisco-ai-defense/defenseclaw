@@ -63,7 +63,7 @@ jobs:
     # Each part has its own runner: gwN runs shard N of 16 of the gateway
     # package and shard N of 16 of the connector package, both balanced on
     # recorded Windows test times (scripts/test-timings/go-windows.json);
-    # pkN one of nine timing-balanced parts of the remaining packages and hxN
+    # pkN one of fourteen timing-balanced parts of the remaining packages and hxN
     # one of six test-level parts of hookexec (still -p=1 within each part).
     # The checks part runs DACL, redaction, isolated connector tests, vet, and
     # builds; stress runs the single-flight and executable
@@ -100,6 +100,11 @@ jobs:
           - { shard: pk6, kind: packages, index: 6 }
           - { shard: pk7, kind: packages, index: 7 }
           - { shard: pk8, kind: packages, index: 8 }
+          - { shard: pk9, kind: packages, index: 9 }
+          - { shard: pk10, kind: packages, index: 10 }
+          - { shard: pk11, kind: packages, index: 11 }
+          - { shard: pk12, kind: packages, index: 12 }
+          - { shard: pk13, kind: packages, index: 13 }
           - { shard: hx0, kind: hookexec, index: 0 }
           - { shard: hx1, kind: hookexec, index: 1 }
           - { shard: hx2, kind: hookexec, index: 2 }
@@ -260,7 +265,7 @@ jobs:
           $suiteKind = [string]$env:GO_SUITE_KIND
           $matrixShard = [int]$env:GO_SUITE_INDEX
           $nativeTestShardCount = 16
-          $remainingPackageShardCount = 9
+          $remainingPackageShardCount = 14
           $hookexecTestShardCount = 6
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
           $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
