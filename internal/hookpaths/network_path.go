@@ -562,6 +562,9 @@ func Lstat(name string) (os.FileInfo, error) { return pathLstat(name) }
 // Stat is os.Stat for a path a hook call names, read as pathStat reads it.
 func Stat(name string) (os.FileInfo, error) { return pathStat(name) }
 
+// ReadDir is os.ReadDir for a directory a hook call names, read as pathReadDir reads it.
+func ReadDir(name string) ([]os.DirEntry, error) { return pathReadDir(name) }
+
 // NotExist reports a read error that a proof which tells a missing path
 // from an unreadable one takes as missing: an os not-exist error, or a
 // share that did not answer in time. A read that waits for such a share

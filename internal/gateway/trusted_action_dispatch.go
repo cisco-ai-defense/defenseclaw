@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/netip"
 	"os"
 	osuser "os/user"
@@ -3830,6 +3831,9 @@ func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedAct
 		if changed && globbedStateCommandMutates(command, rewritten, home, facts.CWD) {
 			return true
 		}
+		if copyThroughLinkedChild(request, command, words, home, facts.CWD, root, resolve, inState) {
+			return true
+		}
 		// `cd dclink && git clean -fdx`: a directory the command runs in
 		// after a cd, physically in the state but spelled outside it, is
 		// judged by its ~/.defenseclaw spelling (GAP-2047 L11).
@@ -3890,6 +3894,71 @@ func copyDestinationThroughLink(
 	moved := slices.Clone(words)
 	moved[index] = prefix + strings.TrimRight(spelled, "/")
 	return moved, true
+}
+
+// copyThroughLinkedChild reports a cp whose destination directory has a child
+// that is a link to protected state and whose source words can name it:
+// `cp /tmp/x/conf*.yaml dir/` with dir/config.yaml a link to
+// ~/.defenseclaw/config.yaml. cp writes through the link; a move or a link
+// replaces it. The children are the destination directory read locally, and,
+// for a gateway that may not read it, the links the hook client walked
+// (hookpaths.WalkFactChildren). GAP-1053.
+func copyThroughLinkedChild(
+	request trustedActionRequest, command actionfacts.CommandFact, words []string, home, cwd, root string,
+	resolve func(string) (string, bool),
+	inState func(string) bool,
+) bool {
+	if path.Base(command.Program) != "cp" {
+		return false
+	}
+	index, directory, option := actionfacts.CopyOperandRoles(words)
+	if index >= 0 {
+		directory = words[index]
+	}
+	if directory == "" || stateWordExpands(directory) {
+		return false
+	}
+	placed, ok := stateHomePath(directory, home, cwd)
+	if !ok {
+		return false
+	}
+	placed = path.Clean(placed)
+	var patterns []string
+	for position, word := range words {
+		if position != index && !option[position] && word != "" {
+			patterns = append(patterns, expandStateBraces(path.Base(word))...)
+		}
+	}
+	if len(patterns) == 0 {
+		return false
+	}
+	children := hookpaths.WalkFactChildren(request.ResolvedWriteTargets, placed)
+	if !request.ProtectedHomeHook && !request.SkipLocalFilesystemResolution {
+		if entries, err := hookpaths.ReadDir(placed); err == nil && len(entries) <= 4096 {
+			for _, entry := range entries {
+				if entry.Type()&fs.ModeSymlink == 0 {
+					continue
+				}
+				if physical, linked := resolve(placed + "/" + entry.Name()); linked {
+					if children == nil {
+						children = map[string]string{}
+					}
+					children[entry.Name()] = physical
+				}
+			}
+		}
+	}
+	for name, physical := range children {
+		if !inState(physical) || !statePatternReaches(home+"/.defenseclaw"+strings.TrimPrefix(physical, root), home, cwd) {
+			continue
+		}
+		for _, pattern := range patterns {
+			if shellComponentMatches(pattern, name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // gitDirectoryWordThroughLink spells the value of a git -C or --work-tree

@@ -74,6 +74,14 @@ func TestCopyWithGlobSourceKeepsItsStateDestination(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, "a.cfg"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A project directory that holds a link to the state file: cp writes
+	// through it, a move or a link replaces it.
+	if err := os.MkdirAll(filepath.Join(project, "linked"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(state, filepath.Join(project, "linked", "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
 	var protected []stateWriterRow
 	for _, dest := range []struct{ name, word string }{
 		{"absolute", state}, {"home", "$HOME/.defenseclaw/config.yaml"}, {"tilde", "~/.defenseclaw/config.yaml"},
@@ -118,6 +126,14 @@ func TestCopyWithGlobSourceKeepsItsStateDestination(t *testing.T) {
 	for _, dir := range []string{"$HOME/aliasdir", "$HOME/aliasdir/"} {
 		protected = append(protected, stateWriterRow{"plain-directory-link", "cp " + src + "/config*.yaml " + dir})
 	}
+	for _, source := range []string{src + "/config*.yaml", src + "/conf*", "./conf*.yaml", src + "/{other,config}.yaml", "c*"} {
+		for _, form := range []string{"cp " + source + " linked/", "cp -t linked " + source, "cp --target-directory=linked " + source, "cp " + source + " ./linked/"} {
+			protected = append(protected,
+				stateWriterRow{"directory-with-linked-child", form},
+				stateWriterRow{"loop-directory-with-linked-child", "for u in $USER; do " + form + "; done"},
+			)
+		}
+	}
 	// A pattern is not the destination wherever else it stands: the value of
 	// another option, or a word after the end of the options.
 	for _, dest := range []string{state, "$HOME/.defenseclaw/config.yaml", "~/.defenseclaw/config.yaml", parent + "$USER/.defenseclaw/config.yaml", "$HOME/statealias"} {
@@ -135,6 +151,9 @@ func TestCopyWithGlobSourceKeepsItsStateDestination(t *testing.T) {
 		}
 	}
 	ordinary := []stateWriterRow{
+		{"directory-with-linked-child-other-names", "cp " + src + "/a*.cfg linked/"},
+		{"directory-with-linked-child-other-names-target", "cp -t linked " + src + "/*.cfg"},
+		{"move-into-directory-with-linked-child", "mv " + src + "/config*.yaml linked/"},
 		{"glob-to-state-dir-no-protected-name", "cp -t $HOME/.defenseclaw " + src + "/*.cfg"},
 		{"glob-to-state-dir-link-no-protected-name", "cp -t $HOME/aliasdir " + src + "/*.cfg"},
 		{"glob-to-state-dir-plain-no-protected-name", "cp " + src + "/*.cfg $HOME/.defenseclaw/"},
