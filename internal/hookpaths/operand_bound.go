@@ -41,9 +41,15 @@ func BoundCommandOperands(command, cwd, home string) (reduced string, over bool)
 // judges too (actionfacts.BoundStatementOperands, GAP-1069). It leaves out
 // the same plain names as BoundCommandOperands, and also those past the
 // statement bound, so a statement it keeps has path facts; it is command
-// when it leaves out none.
+// when it leaves out none. It also leaves out a plain name it cannot read:
+// this reading only adds findings to the reading judged before it, which
+// keeps every word, so keeping a name it cannot read would only keep the
+// statement past the argv bound, with no path facts for any word. A managed
+// gateway cannot read the home of the user, so for a call whose folder it
+// knows (a Codex workdir) it left out no name and a credential file the
+// statement named had no finding (GAP-1072).
 func BoundStatementCommandOperands(command, cwd, home string) string {
-	probe := &operandLinkProbe{cwd: cwd, home: home, dirs: map[string]bool{}}
+	probe := &operandLinkProbe{cwd: cwd, home: home, dirs: map[string]bool{}, unreadDroppable: true}
 	return actionfacts.BoundStatementOperands(command, probe.droppable)
 }
 
@@ -53,10 +59,13 @@ func BoundStatementCommandOperands(command, cwd, home string) string {
 // for the one call only.
 type operandLinkProbe struct {
 	cwd, home string
-	cwdLink   *bool           // the cwd itself is a link
-	dirs      map[string]bool // stop + folder -> the folder or one above it is a link
-	keys      protectedFiles
-	keysRead  bool
+	// unreadDroppable leaves out a plain name that a read of the file
+	// system could not tell about (BoundStatementCommandOperands).
+	unreadDroppable bool
+	cwdLink         *bool           // the cwd itself is a link
+	dirs            map[string]bool // stop + folder -> the folder or one above it is a link
+	keys            protectedFiles
+	keysRead        bool
 }
 
 // droppable reports a word that may be left out past the bound: a plain name
@@ -84,7 +93,7 @@ func (p *operandLinkProbe) droppable(word string) bool {
 		}
 	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
 		// Nothing there to be a link; the folders are still read.
-	default:
+	case !p.unreadDroppable:
 		return false
 	}
 	return !p.linkAbove(filepath.Dir(path), stop)
