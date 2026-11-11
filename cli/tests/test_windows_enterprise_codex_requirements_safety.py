@@ -49,6 +49,7 @@ foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseCl
     if ($null -eq $definition) { throw "missing $name" }
     . ([ScriptBlock]::Create($definition.Extent.Text))
 }
+$script:DefenseClawRollbackDeferBusyWriter = $false
 function Format-DefenseClawSetupAction { param([string]$Action) "Setup $Action" }
 function Get-DefenseClawCodexWriterHolderText { param([string]$Path) 'the writer is writer.exe (pid 4242, account NT AUTHORITY\SYSTEM)' }
 $layout = @{ CodexManagedHooksStatePath = (Join-Path $Scratch '.defenseclaw-managed-hooks.state') }
@@ -145,9 +146,13 @@ def test_a_writer_lock_failure_is_classified_by_its_error_code_not_only_by_text(
     assert "$reportedCode -ceq 'writer_lock_busy'" in command
     go = (ROOT / "internal" / "gateway" / "connector" / "codex_machine_requirements_windows.go").read_text(encoding="utf-8")
     assert go.count("windowsCodexWriterLockBusyError{") >= 3
-    assert go.count("windows.ERROR_IO_PENDING") == 2
+    # GAP-1001 review D3: named classifiers by Win32 code, behavior-tested in the connector package.
+    assert go.count("windowsCodexLockRangeBusy(err)") == 2 and go.count("windowsCodexLockOpenBusy(err)") == 2
+    assert "errors.Is(err, windows.ERROR_IO_PENDING)" in go
     cli = (ROOT / "internal" / "cli" / "windows_codex_requirements.go").read_text(encoding="utf-8")
-    assert "report.ErrorCode = windowsCodexRequirementsWriterLockBusyCode" in cli
+    assert "annotateWindowsCodexRequirementsFailure(&report, err)" in cli
+    neutral = (ROOT / "internal" / "cli" / "windows_codex_requirements_basefile.go").read_text(encoding="utf-8")
+    assert "report.ErrorCode = windowsCodexRequirementsWriterLockBusyCode" in neutral
     assert '"--base-file"' not in cli and 'StringVar(&baseFile, "base-file"' in cli
 
 

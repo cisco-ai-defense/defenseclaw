@@ -985,10 +985,12 @@ func resolveWindowsCodexManagedRuntimeRegistryStable(
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return WindowsCodexManagedRuntimeRegistry{}, fmt.Errorf(
+			// GAP-0999: an open Codex transaction is a writer that has not
+			// settled, the same class as a held writer lock.
+			return WindowsCodexManagedRuntimeRegistry{}, windowsCodexWriterLockBusyError{fmt.Errorf(
 				"timed out waiting %s for a Codex machine policy transaction to finish",
 				windowsCodexReaderWait,
-			)
+			)}
 		}
 		delay := 25 * time.Millisecond
 		if remaining < delay {
@@ -1726,7 +1728,7 @@ func acquireWindowsCodexWriterLock(path string) (windows.Handle, *windows.Overla
 		0,
 	)
 	if err != nil {
-		if errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		if windowsCodexLockOpenBusy(err) {
 			err = windowsCodexWriterLockBusyError{err}
 		}
 		return 0, nil, fmt.Errorf("open Codex machine policy lock: %w", err)
@@ -1755,7 +1757,7 @@ func acquireWindowsCodexWriterLock(path string) (windows.Handle, *windows.Overla
 		if err == nil {
 			return handle, overlapped, nil
 		}
-		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) && !errors.Is(err, windows.ERROR_IO_PENDING) {
+		if !windowsCodexLockRangeBusy(err) {
 			return closeOnError(fmt.Errorf("acquire Codex machine policy lock: %w", err))
 		}
 		if !time.Now().Before(deadline) {
@@ -1921,7 +1923,7 @@ func acquireWindowsCodexMachineFileLockMode(
 		0,
 	)
 	if err != nil {
-		if errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		if windowsCodexLockOpenBusy(err) {
 			err = windowsCodexWriterLockBusyError{err}
 		}
 		return 0, nil, fmt.Errorf("open Codex machine policy lock: %w", err)
@@ -1964,7 +1966,7 @@ func acquireWindowsCodexMachineFileLockMode(
 		if err == nil {
 			return handle, overlapped, nil
 		}
-		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) && !errors.Is(err, windows.ERROR_IO_PENDING) {
+		if !windowsCodexLockRangeBusy(err) {
 			return closeOnError(fmt.Errorf("acquire Codex machine policy lock: %w", err))
 		}
 		if !time.Now().Before(deadline) {
@@ -1981,6 +1983,18 @@ func acquireWindowsCodexMachineFileLockMode(
 			time.Sleep(delay)
 		}
 	}
+}
+
+// windowsCodexLockOpenBusy reports an open of the writer lock that another
+// program's handle refuses (GAP-1001).
+func windowsCodexLockOpenBusy(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION)
+}
+
+// windowsCodexLockRangeBusy reports a byte-range lock request that a writer
+// holds, or that is still pending: the wait goes on until its bound (GAP-1001).
+func windowsCodexLockRangeBusy(err error) bool {
+	return errors.Is(err, windows.ERROR_LOCK_VIOLATION) || errors.Is(err, windows.ERROR_IO_PENDING)
 }
 
 func requireWindowsCodexMachineAdministrator() error {

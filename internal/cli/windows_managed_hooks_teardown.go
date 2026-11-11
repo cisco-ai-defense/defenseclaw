@@ -123,6 +123,53 @@ type windowsManagedHooksTeardownReport struct {
 	MachineStateRemaining        []string                            `json:"machine_state_remaining,omitempty"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
+	// ErrorCode is the stable class of a failure the caller acts on without
+	// reading text: writer_lock_busy when a Codex writer holds the writer lock
+	// or keeps a transaction open (GAP-0999).
+	ErrorCode string `json:"error_code,omitempty"`
+}
+
+// windowsManagedHooksTeardownErrorCode is the stable code of a teardown
+// failure, or "" when it has none.
+func windowsManagedHooksTeardownErrorCode(err error) string {
+	if windowsManagedHooksTeardownOnlyBusyWriter(err) {
+		return windowsCodexRequirementsWriterLockBusyCode
+	}
+	return ""
+}
+
+// windowsManagedHooksTeardownOnlyBusyWriter reports a failure whose every
+// cause is a busy Codex writer. A joined failure (a Claude or Cursor
+// compensation that failed next to the Codex busy answer) is not one: the
+// caller defers a writer-only failure and throws the rest.
+func windowsManagedHooksTeardownOnlyBusyWriter(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == connector.ErrWindowsCodexWriterLockBusy {
+		return true
+	}
+	// A busy-writer error marks itself; asking errors.Is of a wrapper would also
+	// find a busy cause hidden beside another failure.
+	if marked, ok := err.(interface{ Is(error) bool }); ok && marked.Is(connector.ErrWindowsCodexWriterLockBusy) {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !windowsManagedHooksTeardownOnlyBusyWriter(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return windowsManagedHooksTeardownOnlyBusyWriter(wrapped.Unwrap())
+	}
+	return false
 }
 
 // windowsManagedHooksKeptUntrustedPolicyFiles lists the vendor policy files
@@ -913,6 +960,7 @@ func runWindowsManagedHooksTeardown(
 	fail := func(err error) (windowsManagedHooksTeardownReport, error) {
 		report.OK = false
 		report.Error = err.Error()
+		report.ErrorCode = windowsManagedHooksTeardownErrorCode(err)
 		report.SucceededCount = 0
 		report.VerifiedCleanCount = 0
 		if !report.RollbackCompleted {

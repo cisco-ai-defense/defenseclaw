@@ -529,6 +529,24 @@ func TestWindowsEnterpriseHeldRollbackNextStepNamesOnlyThePendingTransaction(t *
 	}
 }
 
+// GAP-0999: the next step of a rollback a Codex writer left pending never says the
+// services keep enforcing, and still names a stopped service.
+func TestWindowsEnterprisePendingUnsettledLeadNeverSaysEnforcing(t *testing.T) {
+	var services []enterprisestatus.Service
+	for _, name := range []string{"DefenseClawGateway", "DefenseClawHookGuardian", "DefenseClawHookEnumerator", "DefenseClawSensorHelper"} {
+		services = append(services, enterprisestatus.Service{Name: name, State: "running", Required: true})
+	}
+	got := windowsEnterprisePendingUnsettledLead(services)
+	if strings.Contains(got, "enforcing") || !strings.Contains(got, "protection may be incomplete") || !strings.Contains(got, "verify says what is not covered") {
+		t.Fatalf("unsettled lead with running services = %q", got)
+	}
+	services[0].State = "stopped"
+	got = windowsEnterprisePendingUnsettledLead(services)
+	if !strings.Contains(got, "DefenseClawGateway service stays stopped") || strings.Contains(got, "enforcing") {
+		t.Fatalf("unsettled lead with a stopped service = %q", got)
+	}
+}
+
 // GAP-0947: a rollback a late holder stopped starts the restored services and
 // ends with the held code; the next step says they keep enforcing and never
 // offers the forced uninstall.

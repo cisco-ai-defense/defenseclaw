@@ -269,7 +269,7 @@ try {
         $recRequirements = [IO.Path]::Combine($recDir, 'requirements.toml')
         $recOwnership = [IO.Path]::Combine($recDir, 'ownership.json')
         $recInstallState = [IO.Path]::Combine($recDir, 'install-state'); [void][IO.Directory]::CreateDirectory($recInstallState)
-        $recLayout = @{ CodexMachinePolicyPath = $recRequirements; CodexRequirementsOwnershipPath = $recOwnership; InstallStateDirectory = $recInstallState; InstallRoot = $Scratch }
+        $recLayout = @{ CodexMachinePolicyPath = $recRequirements; CodexRequirementsOwnershipPath = $recOwnership; InstallStateDirectory = $recInstallState; InstallRoot = $Scratch; CodexManagedHooksStatePath = [IO.Path]::Combine($recDir, '.defenseclaw-managed-hooks.state') }
         $preimage = [Text.Encoding]::UTF8.GetBytes("[features]`nfoo = true`n")
         $sha = [Security.Cryptography.SHA256]::Create(); $preimageHash = ([BitConverter]::ToString($sha.ComputeHash($preimage)) -replace '-', '').ToLowerInvariant(); $sha.Dispose()
         function Write-Record([string]$RequirementsPath, [string]$Hash, [bool]$Existed) {

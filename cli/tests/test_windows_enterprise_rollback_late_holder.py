@@ -48,7 +48,10 @@ def test_every_deferral_is_standalone_only() -> None:
     # The definition is a function, not a call.
     sites = [s for s in sites if not text[max(0, s - 40) : s].rstrip().endswith("function")]
     # GAP-0977 added the eighth: a guardian state file a holder keeps the guardian from publishing.
-    assert len(sites) == 8, len(sites)
+    # GAP-0999 added the ninth to the eleventh: a stuck Codex writer (the state check of the readiness
+    # check, the Codex verify of it, the guardian proof that cannot publish); the twelfth is the
+    # managed-hook teardown rollback that meets the same writer first.
+    assert len(sites) == 12, len(sites)
     for site in sites:
         window = text[max(0, site - 1700) : site]
         assert "Test-DefenseClawStandaloneProfile" in window, text[site - 200 : site + 100]
@@ -103,7 +106,7 @@ def test_the_previous_hook_that_a_holder_blocks_is_deferred_after_the_services_r
 def test_a_failed_run_whose_rollback_met_a_holder_ends_with_the_held_code_and_the_original_failure() -> None:
     text = _text()
     start = text.index("# GAP-0947: a program that arrived during the rollback holds a")
-    block = text[start : start + 900]
+    block = text[start : start + 1700]
     assert "(Test-DefenseClawStandaloneProfile)" in text[start - 250 : start]
     assert "Test-DefenseClawRollbackHeldMessage" in text[start - 250 : start]
     assert ". This $Action had failed first: " in block
@@ -119,9 +122,10 @@ def test_the_second_holder_does_not_cost_another_full_wait() -> None:
 
 def test_the_guardian_coverage_proof_is_deferred_only_for_a_republish_a_holder_blocked() -> None:
     text = _text()
-    # Set in three places, all in the rollback: the held republish of the Codex requirements, the held state check, and (GAP-0977) a held
-    # guardian state file, which the guardian cannot publish over.
-    assert text.count("$script:DefenseClawRollbackCoverageDeferred = $true") == 3
+    # Set in five places, all in the rollback: the held republish of the Codex requirements, the held state check, and (GAP-0977) a held
+    # guardian state file, which the guardian cannot publish over; and (GAP-0999) the Codex verify and the guardian proof that a
+    # Codex writer holding the lock keeps from passing.
+    assert text.count("$script:DefenseClawRollbackCoverageDeferred = $true") == 5
     deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
     assert "$script:DefenseClawRollbackCoverageDeferred = $true" in deployment
     check = _function_body(text, "Test-DefenseClawRollbackCoverageDeferred")
@@ -229,7 +233,7 @@ def test_the_result_says_the_guardian_was_not_proven_and_names_each_file_once() 
     assert "The guardian's coverage was not proven by this rollback" in done
     add = _function_body(text, "Add-DefenseClawRollbackDeferredHold")
     assert "Get-DefenseClawHeldMessagePath" in add
-    block = text[text.index("$rollbackHeld = [string]$_.Exception.Message") :][:900]
+    block = text[text.index("$rollbackHeld = [string]$_.Exception.Message") :][:1700]
     assert "throw $rollbackHeld" in block and "This $Action had failed first: " in block
 
 

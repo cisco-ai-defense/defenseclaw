@@ -4,11 +4,38 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+// GAP-1001: a failure that matches the busy-writer sentinel reaches the JSON
+// report as error_code writer_lock_busy; no other failure does.
+func TestAnnotateWindowsCodexRequirementsFailureSetsTheWriterLockBusyCode(t *testing.T) {
+	var busy connector.WindowsCodexMachineRequirementsReport
+	annotateWindowsCodexRequirementsFailure(&busy, fmt.Errorf("Codex requirements reconcile failed: %w", connector.ErrWindowsCodexWriterLockBusy))
+	if busy.ErrorCode != "writer_lock_busy" {
+		t.Fatalf("error code = %q", busy.ErrorCode)
+	}
+	raw, err := json.Marshal(busy)
+	if err != nil || !strings.Contains(string(raw), `"error_code":"writer_lock_busy"`) {
+		t.Fatalf("the report does not carry the code: %s %v", raw, err)
+	}
+	for name, cause := range map[string]error{"nil": nil, "other": errors.New("open Codex machine policy lock: access denied")} {
+		var other connector.WindowsCodexMachineRequirementsReport
+		annotateWindowsCodexRequirementsFailure(&other, cause)
+		raw, _ := json.Marshal(other)
+		if other.ErrorCode != "" || strings.Contains(string(raw), "error_code") {
+			t.Fatalf("%s: a code was set: %s", name, raw)
+		}
+	}
+}
 
 // GAP-1001: the document a reconcile renders into is read only from the
 // recovered-policy folder beside the ownership record, as text.

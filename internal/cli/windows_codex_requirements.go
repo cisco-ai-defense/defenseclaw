@@ -126,9 +126,7 @@ func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOu
 	default:
 		err = fmt.Errorf("unsupported Codex requirements action %q", action)
 	}
-	if err != nil && errors.Is(err, connector.ErrWindowsCodexWriterLockBusy) {
-		report.ErrorCode = windowsCodexRequirementsWriterLockBusyCode
-	}
+	annotateWindowsCodexRequirementsFailure(&report, err)
 	if jsonOutput {
 		if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(report); encodeErr != nil && err == nil {
 			err = encodeErr
@@ -152,10 +150,6 @@ func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOu
 	}
 	return nil
 }
-
-// windowsCodexRequirementsWriterLockBusyCode is the error_code of a report
-// whose failure is a Codex writer holding the writer lock (GAP-1001).
-const windowsCodexRequirementsWriterLockBusyCode = "writer_lock_busy"
 
 func writeWindowsCodexRequirementsFailure(
 	cmd *cobra.Command,

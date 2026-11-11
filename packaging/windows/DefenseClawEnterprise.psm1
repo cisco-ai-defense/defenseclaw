@@ -18942,7 +18942,9 @@ function New-DefenseClawTransaction {
                 -GuardianServiceName $GuardianServiceName
             if ((Test-DefenseClawStandaloneProfile) -and
                 -not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+                $codexWriterKept = Get-DefenseClawRollbackCodexWriterHolds
                 Clear-DefenseClawRollbackDeferredHolds
+                Restore-DefenseClawRollbackCodexWriterHolds -Kept $codexWriterKept
                 Restore-DefenseClawEarlyHook `
                     -Layout $Layout `
                     -Intent $quiescingIntent `
@@ -19849,6 +19851,20 @@ function Wait-DefenseClawCodexManagedHooksStateSettled {
         }
     }
     $why = if (($last % 2) -ne 0) { 'odd: a transaction is open' } else { 'still changing' }
+    if (Test-DefenseClawStandaloneProfile) {
+        # GAP-0999: the same refusal with the writer by name. The throw below is
+        # the text Secure Client keeps.
+        $writerText = ''
+        try { $writerText = [string](Get-DefenseClawCodexWriterHolderText -Path $Path) } catch { $writerText = '' }
+        if ($writerText -ne '') {
+            throw (New-DefenseClawCodexStateUnsettledRefusal `
+                -Path $Path `
+                -Counter $last `
+                -Why $why `
+                -WaitedSeconds $waitedSeconds `
+                -WriterText $writerText)
+        }
+    }
     throw (
         'codex_state_unsettled: the Codex writer transaction counter next to ' + $Path +
         ' stayed at ' + $last + ' (' + $why + ') for ' + $waitedSeconds +
@@ -19898,6 +19914,23 @@ function Resolve-DefenseClawCodexManagedHooksStateCopySettled {
 function Assert-DefenseClawCodexManagedHooksStateFile {
     param([Parameter(Mandatory)][hashtable]$Layout)
     Assert-DefenseClawCodexManagedHooksStateFilePreflight -Layout $Layout
+    if ($script:DefenseClawRollbackDeferBusyWriter) {
+        # GAP-0999: inside a standalone rollback's readiness assertion a Codex
+        # writer that keeps its transaction open leaves the state unjudged. The
+        # rollback goes on (the restored services start; the guardian proof
+        # defers itself if the writer keeps it from publishing) and ends with the
+        # retryable code. Every forward run, and Secure Client, meet the wait below.
+        try {
+            [void](Wait-DefenseClawCodexManagedHooksStateSettled -Path $Layout.CodexManagedHooksStatePath)
+        }
+        catch {
+            if (([string]$_.Exception.Message).StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+                Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout)
+                return
+            }
+            throw
+        }
+    }
     $settled = Wait-DefenseClawCodexManagedHooksStateSettled `
         -Path $Layout.CodexManagedHooksStatePath
     $stateCopy = [string]$settled.Path
@@ -23096,6 +23129,7 @@ function Restore-DefenseClawTransaction {
         [switch]$DeferServiceRestart
     )
     Clear-DefenseClawRollbackDeferredHolds
+    $script:DefenseClawRollbackKeptGuardedNote = ''
     Assert-DefenseClawDescendant -Path $SnapshotPath -Root $Layout.StateRoot -Label 'transaction snapshot' | Microsoft.PowerShell.Core\Out-Null
     Assert-DefenseClawNoReparsePath -Path $SnapshotPath
     $snapshot = Microsoft.PowerShell.Management\Get-Content -LiteralPath $SnapshotPath -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
@@ -23521,6 +23555,7 @@ function Restore-DefenseClawTransaction {
                         path      = $destination
                         reason    = "the Codex requirements recorded by the transaction would leave Codex unguarded ($backupProblem); the file in place carries the DefenseClaw hook and was not replaced"
                     }
+                    $script:DefenseClawRollbackKeptGuardedNote = "The Codex requirements.toml was not put back to the file this run recorded ($backupProblem): the file in place carries the DefenseClaw hook and stays, so Codex stays guarded ($destination)"
                     continue
                 }
             }
@@ -24017,6 +24052,15 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         (Test-DefenseClawServiceExists -Name $enumeratorServiceName)) {
         throw 'restored deployment retained an Enumerator absent from its authenticated transaction preimage'
     }
+    # GAP-0999: every rollback that reaches this assertion (the restore of a
+    # transaction and the restore that ends a managed-hook teardown) defers the
+    # Codex checks that meet a Codex writer holding the writer lock, whatever
+    # the counter says, instead of failing the rollback with the services
+    # stopped (standalone only; Invoke-DefenseClawCodexRequirementsCommand reads
+    # the flag). The try and finally lines stay at the left edge so the call
+    # below keeps its text.
+    $script:DefenseClawRollbackDeferBusyWriter = [bool](Test-DefenseClawStandaloneProfile)
+    try {
     Assert-DefenseClawEnterpriseDeployment `
         -Layout $Layout `
         -GatewayServiceName ([string]$Snapshot.gateway_service) `
@@ -24030,6 +24074,10 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         -ExpectedGatewayAccount @(
             Get-DefenseClawTransactionGatewayAccount -Snapshot $Snapshot
         )
+    }
+    finally {
+        $script:DefenseClawRollbackDeferBusyWriter = $false
+    }
     return $true
 }
 
@@ -24639,11 +24687,27 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
         -Layout $Layout `
         -DeferServiceRestart:$rollbackRequired
     if ($rollbackRequired) {
+        # GAP-0999: this rollback (the one call that sets the flag) defers a Codex
+        # writer that holds the lock instead of failing with the services stopped.
+        # The try and finally lines stay at the left edge so the call keeps its text.
+        $script:DefenseClawTeardownRollbackDeferred = $false
+        $script:DefenseClawTeardownRollbackDeferBusy = [bool](Test-DefenseClawStandaloneProfile)
+        try {
         [void](Invoke-DefenseClawManagedHooksTeardownCommand `
             -Layout $Layout `
             -GatewayServiceName ([string]$snapshot.gateway_service) `
             -GuardianServiceName ([string]$snapshot.guardian_service) `
             -Action rollback)
+        }
+        finally {
+            $script:DefenseClawTeardownRollbackDeferBusy = $false
+        }
+        if ($script:DefenseClawTeardownRollbackDeferred) {
+            # The connector hooks are not put back yet: the prepared receipt and the
+            # journal stay for the /repair that runs this rollback again.
+            $journalPreserved = $false
+            $script:DefenseClawTeardownRollbackDeferred = $false
+        }
     }
     # Prepare publishes this receipt before the first per-user teardown
     # mutation. Generic restore is sufficient when prepare failed before its
@@ -28331,7 +28395,9 @@ function Recover-DefenseClawQuiescingIntent {
         -GuardianServiceName $GuardianServiceName
     if ((Test-DefenseClawStandaloneProfile) -and
         -not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+        $codexWriterKept = Get-DefenseClawRollbackCodexWriterHolds
         Clear-DefenseClawRollbackDeferredHolds
+        Restore-DefenseClawRollbackCodexWriterHolds -Kept $codexWriterKept
         Restore-DefenseClawEarlyHook `
             -Layout $Layout `
             -Intent $Intent `
@@ -30427,8 +30493,43 @@ function Test-DefenseClawCodexWriterLockBusyMessage {
         (codex_machine_requirements_windows.go).
     #>
     param([AllowEmptyString()][string]$Message)
+    if ($Message -match 'timed out waiting \S+ for a Codex machine policy transaction to finish') {
+        return $true
+    }
+    if ($Message -match 'open Codex machine policy lock: .*locked a portion of the file') {
+        # ERROR_LOCK_VIOLATION on the open of the writer lock: a Codex writer's byte-range lock.
+        return $true
+    }
     return ($Message -match 'timed out waiting \S+ for Codex machine policy lock' -or
         $Message -match 'open Codex machine policy lock: .*(being used by another process|sharing violation)')
+}
+
+function Test-DefenseClawBusyWriterIsTheOnlyFailure {
+    <#
+        GAP-0999: a teardown rollback report whose error text (one line per joined error) is
+        nothing but busy-writer answers. A joined failure (a Claude or Cursor compensation
+        that failed too, next to the Codex busy answer) has a line that is not one, so it is
+        not deferred as a writer-only hold.
+    #>
+    param([AllowEmptyString()][string]$Message)
+    $lines = @(($Message -split '\r?\n') | Microsoft.PowerShell.Core\Where-Object { $_.Trim() -ne '' })
+    if ($lines.Count -eq 0) {
+        return $false
+    }
+    # Each line is one busy-writer answer and nothing else: the phrase ends the line and
+    # follows the start of the line or a ': ' of the wrapper text in front of it.
+    foreach ($line in $lines) {
+        $text = $line.Trim()
+        $busy = (
+            $text -match '(^|: )timed out waiting \S+ for Codex machine policy lock\.?$' -or
+            $text -match '(^|: )timed out waiting \S+ for a Codex machine policy transaction to finish\.?$' -or
+            $text -match '(^|: )open Codex machine policy lock: [^:]*(being used by another process|sharing violation|locked a portion of the file)\.?$'
+        )
+        if (-not $busy) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function New-DefenseClawCodexWriterBusyRefusal {
@@ -30445,6 +30546,11 @@ function New-DefenseClawCodexWriterBusyRefusal {
         [Parameter(Mandatory)][string]$Action,
         [Parameter(Mandatory)][string]$Detail
     )
+    if ($script:DefenseClawRollbackDeferBusyWriter) {
+        # GAP-0999: inside a rollback's readiness check the refusal is the
+        # rollback's own held form, which the recovery defers.
+        return (New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout)
+    }
     $path = [string]$Layout.CodexManagedHooksStatePath
     $writerText = ''
     try { $writerText = [string](Get-DefenseClawCodexWriterHolderText -Path $path) } catch { $writerText = '' }
@@ -30569,6 +30675,15 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         $reportedCode = if ($null -ne $report.PSObject.Properties['error_code']) { [string]$report.error_code } else { '' }
         if ((Test-DefenseClawStandaloneProfile) -and
             ($reportedCode -ceq 'writer_lock_busy' -or (Test-DefenseClawCodexWriterLockBusyMessage -Message $detail))) {
+            if ($script:DefenseClawRollbackDeferBusyWriter -and $Action -in @('verify', 'inspect')) {
+                # GAP-0999: the Codex check of a rollback's readiness met a Codex
+                # writer that holds the lock. The check is deferred like a held
+                # file (the rollback goes on, starts the restored services and
+                # ends 1618 with the transaction pending); nothing is judged.
+                Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout)
+                $script:DefenseClawRollbackCoverageDeferred = $true
+                return $null
+            }
             # GAP-0999: not a defect of the policy file.
             throw (New-DefenseClawCodexWriterBusyRefusal -Layout $Layout -Action $Action -Detail "Codex requirements $Action failed: $detail")
         }
@@ -31450,6 +31565,29 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
             $probe.output
         }
         $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $detail
+        $teardownErrorCode = ''
+        $teardownErrorProperty = $report.PSObject.Properties['error_code']
+        if ($null -ne $teardownErrorProperty) {
+            $teardownErrorCode = [string]$teardownErrorProperty.Value
+        }
+        if ($Action -ceq 'rollback' -and $script:DefenseClawTeardownRollbackDeferBusy -and
+            (Test-DefenseClawStandaloneProfile) -and
+            ($teardownErrorCode -ceq 'writer_lock_busy' -or
+                (Test-DefenseClawBusyWriterIsTheOnlyFailure -Message ([string]$report.error)))) {
+            # GAP-0999: the Codex step of the teardown rollback met a Codex writer
+            # that holds the lock (the installed gateway of an older release says it
+            # in text only, a current one by error_code). Only the call of the
+            # rollback of a transaction sets the flag. The rollback is deferred like
+            # a held file: the caller starts the restored services and the run ends
+            # 1618 with the transaction pending; /repair runs this rollback again.
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'rollback'
+                reason    = "the managed-hook teardown rollback met a Codex writer that holds the lock (error_code [$teardownErrorCode]): $detail"
+            }
+            Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout -TeardownRollback)
+            $script:DefenseClawTeardownRollbackDeferred = $true
+            return $null
+        }
         throw "managed-hook teardown $Action failed: $detail"
     }
     foreach ($pair in @(
@@ -36468,6 +36606,29 @@ function Resolve-DefenseClawRollbackLateGuardianHold {
         [Parameter(Mandatory)]$Failure,
         [Parameter(Mandatory)][string]$GuardianServiceName
     )
+    if ((Test-DefenseClawStandaloneProfile) -and
+        [string]$Failure.Exception.Message -notmatch '^guardian_state_held: ' -and
+        (Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $Layout)) {
+        # GAP-0999: the wait ended without the guardian's coverage while a Codex
+        # writer keeps its transaction open or a program holds the writer lock
+        # (the writer arrived after the check that precedes the wait). The proof
+        # is deferred, the guardian is started as it was, and the run ends with
+        # the retryable codex_state_unsettled and the pending transaction.
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'guardian'
+            reason    = "the guardian coverage proof of the rollback is deferred: a Codex writer keeps its transaction open or holds the writer lock ($([string]$Failure.Exception.Message))"
+        }
+        try {
+            Start-DefenseClawService -Name $GuardianServiceName
+        }
+        catch {
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'guardian'
+                reason    = "the guardian did not stay up while a Codex writer keeps its transaction open: $($_.Exception.Message)"
+            }
+        }
+        return $true
+    }
     if (-not (Test-DefenseClawStandaloneProfile) -or
         [string]$Failure.Exception.Message -notmatch '^guardian_state_held: ') {
         return $false
@@ -36505,6 +36666,12 @@ function Set-DefenseClawRollbackGuardianStateDeferral {
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return
     }
+    if (Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $Layout) {
+        # GAP-0999: a Codex writer that keeps its transaction open, or a program
+        # that holds the writer lock, keeps the guardian from publishing; the
+        # proof is deferred (the hold is listed by that test).
+        return
+    }
     $held = Get-DefenseClawGuardianStateHold -Layout $Layout -Probes 3
     if ($null -eq $held) {
         return
@@ -36523,10 +36690,181 @@ $script:DefenseClawRollbackDeferredHolds = [Collections.Generic.List[string]]::n
 # guardian cannot reconcile until the holder lets go, so the restored services
 # start without the guardian's coverage proof (Test-DefenseClawRollbackCoverageDeferred).
 $script:DefenseClawRollbackCoverageDeferred = $false
+# GAP-1001: set when a rollback kept a requirements.toml that carries the hook
+# instead of putting back a recorded one that would leave Codex unguarded; the
+# failed run says so (Invoke-DefenseClawInstallLikeLifecycle).
+$script:DefenseClawRollbackKeptGuardedNote = ''
+# GAP-0999: set around the readiness assertion of a standalone rollback so a
+# Codex writer that holds the lock defers the Codex checks
+# (Invoke-DefenseClawCodexRequirementsCommand).
+$script:DefenseClawRollbackDeferBusyWriter = $false
+# GAP-0999: set around the call of the managed-hook teardown rollback of a transaction so
+# a busy Codex writer defers that rollback; the second says it did.
+$script:DefenseClawTeardownRollbackDeferBusy = $false
+$script:DefenseClawTeardownRollbackDeferred = $false
 
 function Test-DefenseClawRollbackHeldMessage {
     param([AllowEmptyString()][string]$Message)
+    # GAP-0999: a Codex writer that never settles is the same kind of deferral,
+    # told apart from the refusal of a forward run by the words only the
+    # rollback's own message carries.
+    if ($Message -match '^codex_state_unsettled: .*the rollback left that state as it is') {
+        return $true
+    }
     return ($Message -match '^(codex_requirements_held|codex_state_held|hook_in_use|guardian_state_held): ')
+}
+
+function New-DefenseClawCodexStateUnsettledRefusal {
+    <#
+        GAP-0999: the refusal of the settle wait (Wait-DefenseClawCodexManagedHooksStateSettled)
+        with the writer by name. Standalone only; the wait's own text, which
+        Secure Client keeps, has no writer in it.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int64]$Counter,
+        [Parameter(Mandatory)][string]$Why,
+        [Parameter(Mandatory)]$WaitedSeconds,
+        [Parameter(Mandatory)][string]$WriterText
+    )
+    return (
+        'codex_state_unsettled: the Codex writer transaction counter next to ' + $Path +
+        ' stayed at ' + $Counter + ' (' + $Why + ') for ' + $WaitedSeconds +
+        ' seconds (' + $WriterText +
+        '), so the Codex managed-hooks state could not be judged and this run stopped (an install, repair, ensure or upgrade that had started is rolled back, an upgrade to the release it came from; a verify changes nothing). Next step: run ' +
+        (Format-DefenseClawSetupAction -Action '/repair') +
+        ' again once no Codex writer is running (the next Codex writer pass ends a stopped transaction)'
+    )
+}
+
+function Test-DefenseClawCodexWriterLockNamed {
+    <#
+        GAP-0999: a program Windows can name has the Codex writer lock open,
+        whatever the counter says (an antivirus scanner, a backup program, a
+        writer that does not follow the counter protocol). The holder text
+        starts with 'the writer is' only when a holder was named.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        return ([string](Get-DefenseClawCodexWriterHolderText -Path $Path)).StartsWith('the writer is ', [StringComparison]::Ordinal)
+    }
+    catch {
+        return $false
+    }
+}
+
+function New-DefenseClawCodexWriterUnsettledHeldMessage {
+    <#
+        GAP-0999 (r109): the retryable end of a rollback that cannot judge the
+        Codex managed-hooks state, or prove the guardian that depends on it,
+        because a Codex writer keeps its transaction open or holds the writer
+        lock. The stable code first (codex_state_unsettled, as the refusal of
+        the forward run), the writer by name, what was left as it is, and the
+        next step: /repair finishes the rollback once the writer is gone. When
+        the requirements.toml in place carries no DefenseClaw hook it says so
+        plainly. The restored services run, the transaction stays pending, and
+        the Setup exit code is 1618.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout, [switch]$TeardownRollback)
+    $path = [string]$Layout.CodexManagedHooksStatePath
+    $counter = [int64](Get-DefenseClawCodexManagedHooksWriterCounter -Path $path)
+    $why = if (($counter % 2) -ne 0) { 'odd: a transaction is open' } else { 'even, but a writer holds the lock or keeps changing it' }
+    $writerText = ''
+    try { $writerText = [string](Get-DefenseClawCodexWriterHolderText -Path $path) } catch { $writerText = '' }
+    if ($writerText -eq '') {
+        $writerText = 'the writer is a program that Windows did not name'
+    }
+    $repair = Format-DefenseClawSetupAction -Action '/repair'
+    $message = ('codex_state_unsettled: the Codex writer transaction counter next to {0} stayed at {1} ({2}; {3}), so the rollback could not judge the Codex managed-hooks state; the rollback left that state as it is and has not proven the rest of what it puts back, so the transaction is still pending and /verify says what is not covered. Next step: once no Codex writer is running (the next Codex writer pass ends a stopped transaction), run {4}; it finishes the rollback (an MDM retries exit 1618 on its own)' -f $path, $counter, $why, $writerText, $repair)
+    $what = ''
+    $policyPath = [string]$Layout.CodexMachinePolicyPath
+    # Only a deployment that guards Codex can leave it unguarded.
+    $codexOn = ((Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexTargetEnabled) -ieq 'True')
+    try {
+        if (-not $codexOn) {
+            $what = ''
+        }
+        elseif (-not [IO.File]::Exists($policyPath)) {
+            $what = 'does not exist'
+        }
+        else {
+            $policyBytes = [IO.File]::ReadAllBytes($policyPath)
+            if ($policyBytes.Length -eq 0 -or
+                [string]::IsNullOrWhiteSpace([Text.Encoding]::UTF8.GetString($policyBytes).TrimStart([char]0xFEFF))) {
+                $what = 'is empty'
+            }
+            else {
+                $guardProblem = [string](Get-DefenseClawCodexRequirementsGuardProblem -Bytes $policyBytes)
+                if ($guardProblem -ne '') {
+                    $what = 'does not carry the DefenseClaw managed hook (' + $guardProblem + ')'
+                }
+            }
+        }
+    }
+    catch {
+        $what = ''
+    }
+    if ($TeardownRollback) {
+        $message += (". The managed-hook teardown of the uninstall was not fully rolled back: the runtime selectors and the per-user enrollments it removed are back, but the Claude Code, Cursor and Codex machine-policy hooks stay as the uninstall left them, so those agents may be unguarded until {0} runs" -f $repair)
+    }
+    if ($what -ne '') {
+        $message += ('. Codex is not guarded right now: {0} {1}, so nothing guards Codex until the policy is published again: run {2} as an administrator' -f $policyPath, $what, $repair)
+    }
+    return $message
+}
+
+function Test-DefenseClawGuardianProofDeferredByCodexWriter {
+    <#
+        GAP-0999: the guardian cannot publish the coverage a rollback waits
+        for while a Codex writer keeps its transaction open (it ends a stopped
+        transaction and the writer starts it again), or while a program holds
+        the writer lock with the counter even (an antivirus scanner, a backup
+        program, a writer that does not follow the protocol). Either is a
+        named holder of the lock, so the proof is deferred as a held file
+        defers it (GAP-0947): the restored services start, the run ends with
+        the retryable codex_state_unsettled and the pending transaction. The
+        hold is listed here. Standalone only.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    $statePath = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexManagedHooksStatePath)
+    if ([string]::IsNullOrWhiteSpace($statePath)) {
+        return $false
+    }
+    $open = ((([int64](Get-DefenseClawCodexManagedHooksWriterCounter -Path $statePath)) % 2) -ne 0) -or
+        (Test-DefenseClawCodexWriterLockNamed -Path $statePath)
+    if (-not $open) {
+        return $false
+    }
+    Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout)
+    $script:DefenseClawRollbackCoverageDeferred = $true
+    return $true
+}
+
+function Get-DefenseClawRollbackCodexWriterHolds {
+    <#
+        GAP-0999: the recovery that started the services clears the holds of the
+        steps before the hook put-back (Clear-DefenseClawRollbackDeferredHolds)
+        but not the deferral the service start itself made for a Codex writer.
+        This takes them; Restore-DefenseClawRollbackCodexWriterHolds puts them back.
+    #>
+    return [pscustomobject]@{
+        Holds    = @($script:DefenseClawRollbackDeferredHolds |
+            Microsoft.PowerShell.Core\Where-Object { $_.StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal) })
+        Coverage = [bool]$script:DefenseClawRollbackCoverageDeferred
+    }
+}
+
+function Restore-DefenseClawRollbackCodexWriterHolds {
+    param([Parameter(Mandatory)]$Kept)
+    foreach ($entry in @($Kept.Holds)) {
+        $script:DefenseClawRollbackDeferredHolds.Add([string]$entry)
+    }
+    if (@($Kept.Holds).Count -gt 0) {
+        $script:DefenseClawRollbackCoverageDeferred = [bool]$Kept.Coverage
+    }
 }
 
 function Clear-DefenseClawRollbackDeferredHolds {
@@ -36560,6 +36898,14 @@ function Add-DefenseClawRollbackDeferredHold {
             $known = $true
         }
     }
+    if (-not $known -and $Message.StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+        # GAP-0999: one entry for the Codex writer, however many steps meet it.
+        foreach ($entry in $script:DefenseClawRollbackDeferredHolds) {
+            if ($entry.StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+                $known = $true
+            }
+        }
+    }
     if (-not $known) {
         $script:DefenseClawRollbackDeferredHolds.Add($Message)
     }
@@ -36582,6 +36928,12 @@ function Assert-DefenseClawRollbackHoldsResolved {
     $message = $script:DefenseClawRollbackDeferredHolds -join ' | '
     $guardianNotProven = Test-DefenseClawRollbackCoverageDeferred
     Clear-DefenseClawRollbackDeferredHolds
+    if ($guardianNotProven -and $message.Contains('codex_state_unsettled: ')) {
+        # GAP-0999: the services run, but the guardian cannot publish its
+        # coverage while a Codex writer keeps its transaction open.
+        $message += ". The guardian's coverage was not proven by this rollback: it cannot publish coverage while a Codex writer keeps its transaction open or holds the writer lock and may keep retrying, so run /verify after /repair"
+        $guardianNotProven = $false
+    }
     if ($guardianNotProven) {
         # GAP-0947 review S2: the services run, but this rollback did not prove
         # the guardian's coverage.
@@ -49041,6 +49393,12 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 $rollbackHeld = [string]$_.Exception.Message
                 $firstFailure = [string]$operationError.Exception.Message
                 $firstPath = Get-DefenseClawHeldMessagePath -Message $firstFailure
+                if ($firstFailure.StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal) -and
+                    $rollbackHeld.StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+                    # The run was refused for the stuck Codex writer and the
+                    # rollback met it again (GAP-0999): it is named once.
+                    throw $rollbackHeld
+                }
                 if ($firstPath -ne '' -and $rollbackHeld.IndexOf($firstPath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
                     # The run failed on the same held file: it is named once.
                     throw $rollbackHeld
@@ -49081,6 +49439,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 path      = [string]$Layout.ManagedHooksLifecycleJournalPath
                 reason    = "prior enrollment restored; the completed lifecycle journal is kept for recovery: $($_.Exception.Message)"
             }
+        }
+        if ($script:DefenseClawRollbackKeptGuardedNote -ne '') {
+            throw ([string]$operationError.Exception.Message + '. ' + $script:DefenseClawRollbackKeptGuardedNote)
         }
         throw $operationError
     }

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1931,5 +1932,37 @@ func TestWindowsManagedHooksTeardownRollbackDoesNotRestoreBehindAKeptPerUserLink
 	}
 	if !slices.Equal(*restores, []string{"copilot"}) {
 		t.Fatalf("restores = %q, want copilot once", *restores)
+	}
+}
+
+// GAP-0999: a managed-hook teardown whose Codex step meets a Codex writer that
+// holds the lock reports the stable busy-writer code, so the rollback that
+// called it defers instead of failing with the services stopped.
+func TestWindowsManagedHooksTeardownReportsABusyCodexWriterByCode(t *testing.T) {
+	busy := fmt.Errorf("restore Codex managed hooks: timed out waiting 10s for Codex machine policy lock: %w", connector.ErrWindowsCodexWriterLockBusy)
+	for name, err := range map[string]error{
+		"direct":      busy,
+		"joined busy": errors.Join(busy, fmt.Errorf("again: %w", connector.ErrWindowsCodexWriterLockBusy)),
+	} {
+		if got := windowsManagedHooksTeardownErrorCode(err); got != "writer_lock_busy" {
+			t.Fatalf("%s: code = %q, want writer_lock_busy", name, got)
+		}
+	}
+	// A busy Codex writer next to another failure (a compensation that failed too) is not a
+	// writer-only failure: no code, so the caller throws as before.
+	for name, err := range map[string]error{
+		"busy plus compensation":                          errors.Join(busy, errors.New("restore pre-rollback Claude policy after Codex failure: access denied")),
+		"compensation first":                              errors.Join(errors.New("restore pre-rollback Cursor policy after Codex failure: access denied"), busy),
+		"single wrapper around a join with a plain cause": fmt.Errorf("teardown rollback: %w", errors.Join(busy, errors.New("restore pre-rollback Claude policy after Codex failure: access denied"))),
+	} {
+		if got := windowsManagedHooksTeardownErrorCode(err); got != "" {
+			t.Fatalf("%s: code = %q, want none", name, got)
+		}
+	}
+	if got := windowsManagedHooksTeardownErrorCode(errors.New("Codex machine policy is not clean after teardown rollback")); got != "" {
+		t.Fatalf("a plain failure got code %q", got)
+	}
+	if got := windowsManagedHooksTeardownErrorCode(nil); got != "" {
+		t.Fatalf("nil error got code %q", got)
 	}
 }

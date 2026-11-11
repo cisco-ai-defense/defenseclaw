@@ -1958,8 +1958,14 @@ func applyWindowsEnterpriseInstallerReport(
 		if windowsBundleHasCode(result.Errors[firstError:], "codex_requirements_held") ||
 			windowsBundleHasCode(result.Errors[firstError:], "codex_state_held") ||
 			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) ||
+			(report.TransactionPending && windowsEnterpriseUnsettledRollbackDeferred(result.Errors[firstError:])) ||
 			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "guardian_state_held")) {
 			next = windowsEnterpriseHeldRollbackNextStep(report.TransactionPending, windowsEnterpriseLiveStandaloneServices())
+		}
+		if report.TransactionPending && windowsEnterpriseUnsettledRollbackDeferred(result.Errors[firstError:]) {
+			// GAP-0999: this rollback is not finished, so the text does not say the
+			// services keep enforcing; verify says what is covered.
+			next = windowsEnterprisePendingUnsettledLead(windowsEnterpriseLiveStandaloneServices())
 		}
 		if next != "" {
 			result.Errors[firstError].Message += " " + next
@@ -3468,10 +3474,27 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 // codex_state_held: ...", g582 round 11c, L3).
 func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
-	case "codex_state_held", "codex_requirements_held", "privileges_required", "guardian_state_held":
+	case "codex_state_held", "codex_requirements_held", "privileges_required", "guardian_state_held", "codex_state_unsettled":
 		return strings.TrimPrefix(message, code+": ")
 	}
 	return message
+}
+
+// windowsEnterpriseUnsettledRollbackDeferredText is the wording only the
+// rollback's own deferral for a Codex writer that never settles carries
+// (DefenseClawEnterprise.psm1 New-DefenseClawCodexWriterUnsettledHeldMessage,
+// GAP-0999). The refusal of a forward run does not have it.
+const windowsEnterpriseUnsettledRollbackDeferredText = "the rollback left that state as it is"
+
+// windowsEnterpriseUnsettledRollbackDeferred reports whether one of the
+// messages is the rollback's deferral for a Codex writer that never settled.
+func windowsEnterpriseUnsettledRollbackDeferred(messages []enterprisestatus.Message) bool {
+	for _, m := range messages {
+		if m.Code == "codex_state_unsettled" && strings.Contains(m.Message, windowsEnterpriseUnsettledRollbackDeferredText) {
+			return true
+		}
+	}
+	return false
 }
 
 // windowsEnterpriseKnownCodes are the stable refusal codes the standalone
@@ -3494,7 +3517,8 @@ var windowsEnterpriseKnownCodes = []string{
 	// the whole wait, so the Codex managed-hooks state could not be judged.
 	// Inside an install, repair, ensure or upgrade the throw is followed by
 	// the rollback text, so the code is not at the start of the message
-	// (GAP-0877, review S2). It exits 1603, like any refusal.
+	// (GAP-0877, review S2). It exits 1603, like any refusal, unless the
+	// rollback was left pending too: then 1618 (GAP-0999).
 	"codex_state_unsettled",
 }
 
@@ -3533,6 +3557,18 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			// changed nothing, or kept the previous config with the services
 			// running, and a retry after the release gets past it (GAP-0967).
 			return enterprisestatus.WindowsExitBusy
+		case "codex_state_unsettled":
+			// GAP-0999: a Codex writer that never settles refuses the run
+			// (1603). When the rollback could not judge the Codex state either
+			// and left the transaction pending, the restored services run and
+			// /repair finishes the rollback once the writer is gone: the
+			// held-rollback convention, so an MDM retries (1618).
+			// Only the rollback's own deferral counts: a refusal whose rollback
+			// then failed for another reason stays 1603 (the services may be
+			// stopped; a retry of the same delivery does not help).
+			if result.TransactionPending && strings.Contains(message.Message, windowsEnterpriseUnsettledRollbackDeferredText) {
+				return enterprisestatus.WindowsExitBusy
+			}
 		case "scanner_runtime_unavailable":
 			if strings.HasSuffix(message.Message, windowsScannerPrepareRetryNotice) {
 				// A prepare that hit its bound is finished by a retry of the
