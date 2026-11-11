@@ -2851,6 +2851,10 @@ func sameAliasValue(a, b json.RawMessage) bool {
 // complete patch, and a nil watch never reports a change.
 type PatchTargetWatch struct {
 	targets map[string]string
+	// entries are the targets the evidence attests as an entry (a delete
+	// removes the final name, so only its directory is followed): they are
+	// read again as an entry, never as the file a link there reaches.
+	entries map[string]bool
 	home    string
 	// protected is read at the first Changed, which is after the gateway
 	// answered, so it is never older than that answer.
@@ -2869,6 +2873,12 @@ func patchTargetWatchOf(targets map[string]string, home string) *PatchTargetWatc
 	for path, attested := range targets {
 		if filepath.IsAbs(path) {
 			watch.targets[path] = attested
+			if targets[ReplacedLinkFactPrefix+path] == "1" {
+				if watch.entries == nil {
+					watch.entries = map[string]bool{}
+				}
+				watch.entries[path] = true
+			}
 		}
 	}
 	return watch
@@ -2898,9 +2908,22 @@ func (w *PatchTargetWatch) Changed() bool {
 			// link it cannot read) stays changed.
 			continue
 		}
-		resolved, ok := links.resolve(path, w.protected)
+		var resolved string
+		var ok bool
+		if w.entries[path] {
+			resolved, ok = entryTarget(path)
+		} else {
+			resolved, ok = links.resolve(path, w.protected)
+		}
 		if !ok || resolved != attested || w.protected.has(resolved) {
 			return true
+		}
+		if w.entries[path] && isSymlinkEntry(resolved) {
+			// Removing a link names the link, not the file it reaches: what
+			// the link leads to is judged by the name the gateway read, and
+			// a link there that leads to a protected key file is removed
+			// like any other link.
+			continue
 		}
 		// Read fresh and complete: a state file made since the proof, or one
 		// the walk could not see, must refuse the patch.
@@ -2909,6 +2932,22 @@ func (w *PatchTargetWatch) Changed() bool {
 		}
 	}
 	return false
+}
+
+// entryTarget is the entry a delete of path removes, as the hook attested it:
+// the directory of path followed to where it leads, the final name kept.
+func entryTarget(path string) (string, bool) {
+	parent, ok := ResolveWriteTarget(filepath.Dir(path))
+	if !ok {
+		return "", false
+	}
+	return filepath.Join(parent, filepath.Base(path)), true
+}
+
+// isSymlinkEntry reports an entry that is a link itself.
+func isSymlinkEntry(entry string) bool {
+	info, err := pathLstat(entry)
+	return err == nil && info.Mode()&os.ModeSymlink != 0
 }
 
 // stepsUpFromMissingDirectory reports an absolute path that steps up (..) out
