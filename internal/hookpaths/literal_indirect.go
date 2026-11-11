@@ -139,8 +139,12 @@ func readIndirectSourceThroughLinks(cwd, relative string) (string, bool) {
 	return readIndirectSourceIn(root, below, before, err)
 }
 
+// literalSourceFileOperands reads the script a . or source command names:
+// the first word after the builtin. The words after it are the positional
+// parameters of the sourced body, not other scripts, so the same body is read
+// with or without them.
 func literalSourceFileOperands(words []string, cwd, home string, depth int) []string {
-	if depth >= 4 || len(words) != 2 {
+	if depth >= 4 || len(words) < 2 || words[1] == "" {
 		return nil
 	}
 	content, ok := readActionScript(words[1], cwd)
