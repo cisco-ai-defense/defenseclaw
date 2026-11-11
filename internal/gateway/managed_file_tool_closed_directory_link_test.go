@@ -250,7 +250,7 @@ const (
 )
 
 // boundedClosedLinkCall builds a project with a shell command of count
-// ordinary redirects, then a command that reopens a closed folder and appends
+// redirects through ordinary links, then a command that reopens a closed folder and appends
 // through a project link into the key file. pad lengthens the redirect names,
 // boundedPadPerName bytes at a time from the first, so the client map grows
 // byte by byte towards its bound: the operand answer and its link text are the
@@ -304,6 +304,16 @@ func boundedClosedLinkCall(t *testing.T, count, pad int) func(home, project stri
 			extra := min(remaining, boundedPadPerName)
 			name += strings.Repeat("r", extra)
 			remaining -= extra
+			// Each redirect names a link, so its entry is not a plain
+			// operand: the client lists plain operands past the map bound
+			// in a short list instead of the map (hookpaths.OmittedPlainKey)
+			// and the map would never reach the bound this test must cross.
+			link := filepath.Join(filler, name)
+			if _, err := os.Lstat(link); err != nil {
+				if err := os.Symlink(link+"t", link); err != nil {
+					t.Fatal(err)
+				}
+			}
 			statements = append(statements, fmt.Sprintf("printf x > %s/%s", relative, name))
 		}
 		if remaining > 0 {
