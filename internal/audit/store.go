@@ -3845,7 +3845,14 @@ func (s *Store) ListByActionAndType(field, value, targetType string) ([]ActionEn
 // ListActionsByType returns all action entries for a given target type, across
 // all connectors. Each entry carries its own Connector (SK-4).
 func (s *Store) ListActionsByType(targetType string) ([]ActionEntry, error) {
-	return s.queryActions(
+	return s.ListActionsByTypeContext(context.Background(), targetType)
+}
+
+// ListActionsByTypeContext is ListActionsByType that stops waiting for the
+// store when ctx ends, so a caller on a bounded path (a hook call) is not held
+// by a connection that something else keeps.
+func (s *Store) ListActionsByTypeContext(ctx context.Context, targetType string) ([]ActionEntry, error) {
+	return s.queryActionsContext(ctx,
 		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
 		 FROM actions WHERE target_type = ? ORDER BY updated_at DESC`, targetType)
 }
@@ -3868,7 +3875,11 @@ func (s *Store) ListAllActions() ([]ActionEntry, error) {
 }
 
 func (s *Store) queryActions(query string, args ...any) ([]ActionEntry, error) {
-	rows, err := s.queryDB(context.Background(), "audit", query, args...)
+	return s.queryActionsContext(context.Background(), query, args...)
+}
+
+func (s *Store) queryActionsContext(ctx context.Context, query string, args ...any) ([]ActionEntry, error) {
+	rows, err := s.queryDB(ctx, "audit", query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("audit: query actions: %w", err)
 	}

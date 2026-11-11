@@ -359,7 +359,7 @@ func (a *APIServer) skillLinksUnprovenDecision(
 	if !claimedAssetFactsFromContext(ctx).SkillLinksUnproven && !hookpaths.SkillLinksUnproven() {
 		return config.AssetPolicyDecision{}, false
 	}
-	if !a.skillFoldersAreGuarded(cfg) {
+	if !a.skillFoldersAreGuarded(ctx, cfg) {
 		return config.AssetPolicyDecision{}, false
 	}
 	const reason = "a path of the call could not be placed (a network share did not answer in time, or a drive-relative path names a drive other than the one of the working folder), so a skill folder a link there leads to cannot be shown not to be held or denied"
@@ -392,7 +392,7 @@ func (a *APIServer) skillFolderRefsDecision(
 	// held (the loop below blocks only a denied or held folder), so the call
 	// is not read for skill folders at all: reading an 889 KB patch for them
 	// was most of the gateway's CPU for a benign call.
-	if !a.skillFoldersAreGuarded(cfg) {
+	if !a.skillFoldersAreGuarded(ctx, cfg) {
 		return config.AssetPolicyDecision{}, false
 	}
 	if facts.SkillLinksTruncated {
@@ -535,17 +535,26 @@ func (a *APIServer) skillLinksCutDecision(
 	return decision
 }
 
+// skillGuardReadWait bounds how long a hook call waits for the audit store to
+// say whether any skill is denied or held.
+const skillGuardReadWait = 250 * time.Millisecond
+
 // skillFoldersAreGuarded reports whether any skill is denied or held
 // (runtime-disabled) for any connector, so a skill folder a call reaches can
-// be one to refuse. A store that cannot be read counts as guarded.
-func (a *APIServer) skillFoldersAreGuarded(cfg *config.Config) bool {
+// be one to refuse. A store that cannot be read, or that does not answer within
+// skillGuardReadWait (something else keeps its only connection), counts as
+// guarded: the call is then read for skill folders as it was before this check,
+// and a hook call never waits on the audit store for longer than that.
+func (a *APIServer) skillFoldersAreGuarded(ctx context.Context, cfg *config.Config) bool {
 	if len(cfg.AssetPolicy.Skill.Denied) > 0 {
 		return true
 	}
 	if a == nil || a.store == nil {
 		return false
 	}
-	entries, err := a.store.ListActionsByType("skill")
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), skillGuardReadWait)
+	defer cancel()
+	entries, err := a.store.ListActionsByTypeContext(readCtx, "skill")
 	if err != nil {
 		return true
 	}
