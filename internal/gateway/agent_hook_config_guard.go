@@ -257,7 +257,8 @@ func agentHookConfigRegistrationPaths(g *agentHookConfigGuard) []string {
 	}
 	for _, file := range g.files {
 		for path := filepath.Clean(file.Path); filepath.IsAbs(path); path = filepath.Dir(path) {
-			if path == g.home || path == g.cwd || path == string(filepath.Separator) ||
+			// A volume root (/, C:\) is its own parent: the walk ends there.
+			if path == g.home || path == g.cwd || filepath.Dir(path) == path ||
 				strings.HasPrefix(g.home, path+string(filepath.Separator)) ||
 				strings.HasPrefix(g.cwd, path+string(filepath.Separator)) {
 				break
