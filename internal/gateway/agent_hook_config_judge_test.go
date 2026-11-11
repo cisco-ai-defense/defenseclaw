@@ -27,6 +27,15 @@ type hookConfigJudge func(cwd string, managed bool, tool string, input map[strin
 // parallel calls that mix modes.
 func newHookConfigJudge(t *testing.T, conn, profile string) hookConfigJudge {
 	t.Helper()
+	return newHookConfigJudgeWith(t, conn, profile, true)
+}
+
+// newHookConfigJudgeWith is newHookConfigJudge; clientEvidence false sends a
+// call without the hook client resolved-target header, as a hook command
+// that does not resolve its targets does, so the gateway reads the shell
+// call alone.
+func newHookConfigJudgeWith(t *testing.T, conn, profile string, clientEvidence bool) hookConfigJudge {
+	t.Helper()
 	event := "PreToolUse"
 	if conn == "opencode" {
 		event = "tool.execute.before"
@@ -49,7 +58,7 @@ func newHookConfigJudge(t *testing.T, conn, profile string) hookConfigJudge {
 		}
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/"+conn+"/hook", strings.NewReader(string(payload)))
 		req.Header.Set("Content-Type", "application/json")
-		if header := hookpaths.ResolveConnector(conn, "", event, payload); header != "" {
+		if header := hookpaths.ResolveConnector(conn, "", event, payload); header != "" && clientEvidence {
 			req.Header.Set(hookpaths.Header, header)
 		}
 		if conn == "codex" {
