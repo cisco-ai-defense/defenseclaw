@@ -37,8 +37,47 @@ func serveHookCall(t *testing.T, f b36ManagedHookFixture, call *hookCall) {
 // null OTHER takes the word of :-. An ordinary copy through such a name stays
 // allowed in every profile, mode and connector, and a copy whose name was
 // fixed to the protected file before the rebinding stays blocked, with the
-// command as it is and padded over the command bound.
-func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopy(t *testing.T) {
+// command as it is and padded over the command bound. The rows are shared
+// among nine tests, so no test holds a CI shard for minutes.
+func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopyPart1(t *testing.T) {
+	copyThroughAVariableSetFromAnother(t, 0, 9)
+}
+
+func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopyPart2(t *testing.T) {
+	copyThroughAVariableSetFromAnother(t, 1, 9)
+}
+
+func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopyPart3(t *testing.T) {
+	copyThroughAVariableSetFromAnother(t, 2, 9)
+}
+
+func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopyPart4(t *testing.T) {
+	copyThroughAVariableSetFromAnother(t, 3, 9)
+}
+
+func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopyPart5(t *testing.T) {
+	copyThroughAVariableSetFromAnother(t, 4, 9)
+}
+
+func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopyPart6(t *testing.T) {
+	copyThroughAVariableSetFromAnother(t, 5, 9)
+}
+
+func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopyPart7(t *testing.T) {
+	copyThroughAVariableSetFromAnother(t, 6, 9)
+}
+
+func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopyPart8(t *testing.T) {
+	copyThroughAVariableSetFromAnother(t, 7, 9)
+}
+
+func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopyPart9(t *testing.T) {
+	copyThroughAVariableSetFromAnother(t, 8, 9)
+}
+
+// copyThroughAVariableSetFromAnother judges the rows whose index is part
+// modulo parts.
+func copyThroughAVariableSetFromAnother(t *testing.T, part, parts int) {
 	f := newB36ManagedHookFixture(t)
 	if err := os.Symlink("../.ssh", filepath.Join(f.project, "sshlink")); err != nil {
 		t.Fatal(err)
@@ -46,7 +85,7 @@ func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopy(t *t
 	if err := os.WriteFile(filepath.Join(f.project, "a.txt"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, row := range []struct {
+	for index, row := range []struct {
 		command, want string
 		// managedOnly: the per-user gateway reads the variable operand of
 		// a command that binds a protected name anywhere as a candidate
@@ -73,6 +112,9 @@ func TestCopyThroughAVariableSetFromAnotherReadsTheBindingInEffectAtTheCopy(t *t
 		{`p=out.txt; f=${p:-../.ssh/authorized_keys}; p=other.txt; cp a.txt "$f"`, "allow", false},
 		{`p=out.txt; f=${p-../.ssh/authorized_keys}; p=other.txt; cp a.txt "$f"`, "allow", false},
 	} {
+		if index%parts != part {
+			continue
+		}
 		for _, pad := range []int{0, 70000} {
 			command := row.command + strings.Repeat(" ", pad)
 			t.Run(fmt.Sprintf("%s/pad%d", row.command, pad), func(t *testing.T) {

@@ -117,8 +117,35 @@ func shellProtectedFileRoute(t *testing.T, home, cwd, connectorName, posture str
 // in every profile on every hook route, per-user and managed; the shell
 // startup file write is at least an alert in every profile and blocks in
 // strict; DefenseClaw self-protection blocks in every profile and an ordinary
-// write is allowed in every profile.
-func TestGAP0675ShellProtectedFileKeepsItsBlockOnEveryRoute(t *testing.T) {
+// write is allowed in every profile. One test per connector, so no test
+// holds a CI shard for minutes.
+func TestGAP0675ShellProtectedFileKeepsItsBlockOnEveryRouteClaudeCode(t *testing.T) {
+	shellProtectedFileEveryRoute(t, "claudecode")
+}
+
+func TestGAP0675ShellProtectedFileKeepsItsBlockOnEveryRouteCodex(t *testing.T) {
+	shellProtectedFileEveryRoute(t, "codex")
+}
+
+func TestGAP0675ShellProtectedFileKeepsItsBlockOnEveryRouteCopilot(t *testing.T) {
+	shellProtectedFileEveryRoute(t, "copilot")
+}
+
+func TestGAP0675ShellProtectedFileKeepsItsBlockOnEveryRouteOpenCode(t *testing.T) {
+	shellProtectedFileEveryRoute(t, "opencode")
+}
+
+func TestGAP0675ShellProtectedFileKeepsItsBlockOnEveryRouteHermes(t *testing.T) {
+	shellProtectedFileEveryRoute(t, "hermes")
+}
+
+func TestGAP0675ShellProtectedFileKeepsItsBlockOnEveryRouteOpenClaw(t *testing.T) {
+	shellProtectedFileEveryRoute(t, "openclaw")
+}
+
+// shellProtectedFileEveryRoute judges every row on the per-user and the
+// managed route of one connector.
+func shellProtectedFileEveryRoute(t *testing.T, connectorName string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell rows")
 	}
@@ -150,24 +177,22 @@ func TestGAP0675ShellProtectedFileKeepsItsBlockOnEveryRoute(t *testing.T) {
 		{"ordinary write, harmless word", "printf defenseclaw >> notes.txt",
 			map[string]string{"default": "allow", "permissive": "allow", "strict": "allow"}, ""},
 	}
-	for _, connectorName := range []string{"claudecode", "codex", "copilot", "opencode", "hermes", "openclaw"} {
-		for _, managed := range []bool{false, true} {
-			cell := connectorName + map[bool]string{false: " per-user", true: " managed"}[managed]
-			t.Run(cell, func(t *testing.T) {
-				for _, row := range rows {
-					for _, posture := range []string{"default", "permissive", "strict"} {
-						action, rules := shellProtectedFileRoute(t, home, cwd, connectorName, posture, managed, row.command)
-						if want := row.want[posture]; action != want {
-							t.Errorf("%s %s %s: action=%q want %q rules=%v", cell, posture, row.name, action, want, rules)
-							continue
-						}
-						if row.rule != "" && !slices.Contains(rules, row.rule) {
-							t.Errorf("%s %s %s: rules=%v want %s", cell, posture, row.name, rules, row.rule)
-						}
+	for _, managed := range []bool{false, true} {
+		cell := connectorName + map[bool]string{false: " per-user", true: " managed"}[managed]
+		t.Run(cell, func(t *testing.T) {
+			for _, row := range rows {
+				for _, posture := range []string{"default", "permissive", "strict"} {
+					action, rules := shellProtectedFileRoute(t, home, cwd, connectorName, posture, managed, row.command)
+					if want := row.want[posture]; action != want {
+						t.Errorf("%s %s %s: action=%q want %q rules=%v", cell, posture, row.name, action, want, rules)
+						continue
+					}
+					if row.rule != "" && !slices.Contains(rules, row.rule) {
+						t.Errorf("%s %s %s: rules=%v want %s", cell, posture, row.name, rules, row.rule)
 					}
 				}
-			})
-		}
+			}
+		})
 	}
 }
 

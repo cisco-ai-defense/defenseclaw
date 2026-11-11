@@ -19,8 +19,31 @@ import (
 // source shape (literal, empty, dynamic, from the loop variable) lets a
 // protected link through, in any profile. A destination that is an ordinary
 // file, and a loop whose word list is empty, stay allowed
-// (rel-1-0-6:GAP-0880, GAP-0885).
-func TestLoopWriterNameSpellingsAndSourceShapesAreJudgedByDestination(t *testing.T) {
+// (rel-1-0-6:GAP-0880, GAP-0885). One test per writer program, so no test
+// holds a CI shard for minutes.
+func TestLoopWriterNameSpellingsAndSourceShapesAreJudgedByDestinationCp(t *testing.T) {
+	loopWriterNameSpellings(t, "cp")
+}
+
+func TestLoopWriterNameSpellingsAndSourceShapesAreJudgedByDestinationMv(t *testing.T) {
+	loopWriterNameSpellings(t, "mv")
+}
+
+func TestLoopWriterNameSpellingsAndSourceShapesAreJudgedByDestinationInstall(t *testing.T) {
+	loopWriterNameSpellings(t, "install")
+}
+
+func TestLoopWriterNameSpellingsAndSourceShapesAreJudgedByDestinationLn(t *testing.T) {
+	loopWriterNameSpellings(t, "ln")
+}
+
+func TestLoopWriterNameSpellingsAndSourceShapesAreJudgedByDestinationTee(t *testing.T) {
+	loopWriterNameSpellings(t, "tee")
+}
+
+// loopWriterNameSpellings judges every spelling, source shape and target of
+// one writer program in a loop body.
+func loopWriterNameSpellings(t *testing.T, program string) {
 	f := newB36ManagedHookFixture(t)
 	t.Setenv("BASH_ENV", "")
 	t.Setenv("ENV", "")
@@ -51,24 +74,22 @@ func TestLoopWriterNameSpellingsAndSourceShapesAreJudgedByDestination(t *testing
 	options := map[string]string{"install": " -m 600", "ln": " -sf"}
 	type row struct{ name, command, want string }
 	var rows []row
-	for _, program := range []string{"cp", "mv", "install", "ln", "tee"} {
-		for _, spelling := range []string{"plain", "backslash", "quoted", "command", "builtin"} {
-			for _, source := range sources {
-				name := program + "/" + spelling + "/" + source.name
-				for _, target := range []struct{ name, loop, want string }{
-					{"link", "keylink", "block"},
-					{"ordinary", "out2.txt", "allow"},
-					{"empty-list", "", "allow"},
-				} {
-					var body string
-					if program == "tee" {
-						body = fmt.Sprintf(`printf %%s %s | %s "$f"`, source.word, spell(spelling, program))
-					} else {
-						body = spell(spelling, program) + options[program] + " " + source.word + ` "$f"`
-					}
-					command := fmt.Sprintf("%sfor f in %s; do %s; done", source.prefix, target.loop, body)
-					rows = append(rows, row{name + "/" + target.name, command, target.want})
+	for _, spelling := range []string{"plain", "backslash", "quoted", "command", "builtin"} {
+		for _, source := range sources {
+			name := program + "/" + spelling + "/" + source.name
+			for _, target := range []struct{ name, loop, want string }{
+				{"link", "keylink", "block"},
+				{"ordinary", "out2.txt", "allow"},
+				{"empty-list", "", "allow"},
+			} {
+				var body string
+				if program == "tee" {
+					body = fmt.Sprintf(`printf %%s %s | %s "$f"`, source.word, spell(spelling, program))
+				} else {
+					body = spell(spelling, program) + options[program] + " " + source.word + ` "$f"`
 				}
+				command := fmt.Sprintf("%sfor f in %s; do %s; done", source.prefix, target.loop, body)
+				rows = append(rows, row{name + "/" + target.name, command, target.want})
 			}
 		}
 	}

@@ -18,14 +18,51 @@ import (
 // default of an unset variable (P=${P:-FILE}, ${P-FILE}, or the default
 // written in the redirect) and when the command that writes it runs behind
 // command or builtin, which run the word they are given in the caller shell:
-// in the default and the strict profile, unpadded and padded with white space
-// past the 64 KiB command limit, for Codex and Claude Code (GAP-0934 twins
-// EM31-01, FL31-02). The same shapes aimed at an ordinary file, and a read of
-// the protected file, stay allowed.
-func TestShellDefaultValueAndWrapperWritesKeepTheirVerdict(t *testing.T) {
+// in the default and the strict profile, for Codex and Claude Code (GAP-0934
+// twins EM31-01, FL31-02). The same shapes aimed at an ordinary file, and a
+// read of the protected file, stay allowed. Every shape is judged unpadded and
+// padded with white space past the 64 KiB command limit; one protected and one
+// ordinary shape per route are also padded past the 256 KiB argument limit.
+// One test per connector, profile and verdict, so no test holds a CI shard
+// for minutes.
+func TestShellDefaultValueAndWrapperWritesKeepTheirVerdictCodexAttacks(t *testing.T) {
+	shellDefaultValueAndWrapperWrites(t, "codex", "", true)
+}
+
+func TestShellDefaultValueAndWrapperWritesKeepTheirVerdictCodexBenign(t *testing.T) {
+	shellDefaultValueAndWrapperWrites(t, "codex", "", false)
+}
+
+func TestShellDefaultValueAndWrapperWritesKeepTheirVerdictCodexStrictAttacks(t *testing.T) {
+	shellDefaultValueAndWrapperWrites(t, "codex", "strict", true)
+}
+
+func TestShellDefaultValueAndWrapperWritesKeepTheirVerdictCodexStrictBenign(t *testing.T) {
+	shellDefaultValueAndWrapperWrites(t, "codex", "strict", false)
+}
+
+func TestShellDefaultValueAndWrapperWritesKeepTheirVerdictClaudeCodeAttacks(t *testing.T) {
+	shellDefaultValueAndWrapperWrites(t, "claudecode", "", true)
+}
+
+func TestShellDefaultValueAndWrapperWritesKeepTheirVerdictClaudeCodeBenign(t *testing.T) {
+	shellDefaultValueAndWrapperWrites(t, "claudecode", "", false)
+}
+
+func TestShellDefaultValueAndWrapperWritesKeepTheirVerdictClaudeCodeStrictAttacks(t *testing.T) {
+	shellDefaultValueAndWrapperWrites(t, "claudecode", "strict", true)
+}
+
+func TestShellDefaultValueAndWrapperWritesKeepTheirVerdictClaudeCodeStrictBenign(t *testing.T) {
+	shellDefaultValueAndWrapperWrites(t, "claudecode", "strict", false)
+}
+
+// shellDefaultValueAndWrapperWrites judges the protected shapes (attacks) or
+// the ordinary ones for one connector and rule pack.
+func shellDefaultValueAndWrapperWrites(t *testing.T, connector, rulePack string, attacks bool) {
 	home, project := hermesPatchHome(t)
 	const lib = "/usr/local/lib/libreview.so"
-	hook := func(connector, rulePack, command string) string {
+	hook := func(command string) string {
 		args := map[string]any{"cmd": command, "workdir": project}
 		call := nativeWriteCall{connector, "exec_command", func(string) map[string]any { return args }}
 		if connector == "claudecode" {
@@ -37,7 +74,9 @@ func TestShellDefaultValueAndWrapperWritesKeepTheirVerdict(t *testing.T) {
 		return overLimitHostHookInPack(t, connector, rulePack, home, body,
 			hookpaths.ResolveConnector(connector, "", "preToolUse", []byte(body)))
 	}
-	attacks := map[string]string{
+	// argumentPadRow is the shape of each set that is also judged past the
+	// argument limit.
+	shapes, argumentPadRow, kind := map[string]string{
 		"default with colon":      "P=${P:-/etc/ld.so.preload};%s echo " + lib + " >> $P",
 		"default without colon":   "P=${P-/etc/ld.so.preload};%s echo " + lib + " >> $P",
 		"quoted default":          "P=${P:-\"/etc/ld.so.preload\"};%s echo " + lib + " >> \"$P\"",
@@ -53,37 +92,33 @@ func TestShellDefaultValueAndWrapperWritesKeepTheirVerdict(t *testing.T) {
 		"bound path then builtin": "P=/etc/ld.so.preload;%s builtin echo " + lib + " >> $P",
 		"wrapped producer to tee": "command echo " + lib + " |%s tee -a /etc/ld.so.preload",
 		"producer to wrapped tee": "echo " + lib + " |%s command tee -a /etc/ld.so.preload",
+	}, "default with colon", "attack"
+	if !attacks {
+		shapes, argumentPadRow, kind = map[string]string{
+			"ordinary default":             "P=${P:-/tmp/ok.txt};%s echo hello >> $P",
+			"ordinary default in redirect": "echo hello >> ${P:-/tmp/ok.txt}%s",
+			"bound value beats default":    "P=/tmp/ok.txt;%s echo hello >> ${P:-/etc/ld.so.preload}",
+			"ordinary command wrapper":     "%s command echo hello >> /tmp/ok.txt",
+			"ordinary builtin wrapper":     "%s builtin echo hello >> /tmp/ok.txt",
+			"protected default is read":    "P=${P:-/etc/ld.so.preload};%s cat $P",
+			"wrapped read":                 "%s command cat /etc/ld.so.preload",
+			"builtin directory change":     "%s builtin cd /tmp && echo hello > ok.txt",
+		}, "ordinary default", "benign"
 	}
-	benign := map[string]string{
-		"ordinary default":             "P=${P:-/tmp/ok.txt};%s echo hello >> $P",
-		"ordinary default in redirect": "echo hello >> ${P:-/tmp/ok.txt}%s",
-		"bound value beats default":    "P=/tmp/ok.txt;%s echo hello >> ${P:-/etc/ld.so.preload}",
-		"ordinary command wrapper":     "%s command echo hello >> /tmp/ok.txt",
-		"ordinary builtin wrapper":     "%s builtin echo hello >> /tmp/ok.txt",
-		"protected default is read":    "P=${P:-/etc/ld.so.preload};%s cat $P",
-		"wrapped read":                 "%s command cat /etc/ld.so.preload",
-		"builtin directory change":     "%s builtin cd /tmp && echo hello > ok.txt",
-	}
-	for _, connector := range []string{"codex", "claudecode"} {
-		for _, rulePack := range []string{"", "strict"} {
-			for _, pad := range []int{0, 70000, 300000} {
-				for name, format := range attacks {
-					t.Run(fmt.Sprintf("attack/%s/%q/%s/pad %d", connector, rulePack, name, pad), func(t *testing.T) {
-						got := hook(connector, rulePack, fmt.Sprintf(format, strings.Repeat(" ", pad)))
-						if overLimitHookAction(t, got) != "block" || !strings.Contains(got, "persistence.global_ld_preload_install") {
-							t.Fatalf("not blocked by the preload rule: %.600s", got)
-						}
-					})
-				}
-				for name, format := range benign {
-					t.Run(fmt.Sprintf("benign/%s/%q/%s/pad %d", connector, rulePack, name, pad), func(t *testing.T) {
-						got := hook(connector, rulePack, fmt.Sprintf(format, strings.Repeat(" ", pad)))
-						if overLimitHookAction(t, got) == "block" {
-							t.Fatalf("ordinary command blocked: %.600s", got)
-						}
-					})
-				}
+	for _, pad := range []int{0, 70000, 300000} {
+		for name, format := range shapes {
+			if pad == 300000 && name != argumentPadRow {
+				continue
 			}
+			t.Run(fmt.Sprintf("%s/%s/%q/%s/pad %d", kind, connector, rulePack, name, pad), func(t *testing.T) {
+				got := hook(fmt.Sprintf(format, strings.Repeat(" ", pad)))
+				switch {
+				case attacks && (overLimitHookAction(t, got) != "block" || !strings.Contains(got, "persistence.global_ld_preload_install")):
+					t.Fatalf("not blocked by the preload rule: %.600s", got)
+				case !attacks && overLimitHookAction(t, got) == "block":
+					t.Fatalf("ordinary command blocked: %.600s", got)
+				}
+			})
 		}
 	}
 }

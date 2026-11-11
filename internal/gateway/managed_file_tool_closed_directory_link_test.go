@@ -9,10 +9,12 @@ package gateway
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -362,25 +364,59 @@ func TestManagedShellWriteThroughAClosedFolderLinkStaysBlockedWhenTheClientMapIs
 	if count == 0 || count == redirectCap {
 		t.Fatalf("the map bound was not found: %d redirects held whole (cap %d)", count, redirectCap)
 	}
-	var incomplete []int
-	withText := 0
 	// With the pad on the first names, the room left after the last whole
 	// entry shrinks two bytes a step: it passes the size of the operand answer
 	// and its link text once, then the last redirect no longer fits and the
-	// answer is whole again. The sweep ends there.
-	for pad, last := 0, count*boundedPadPerName; pad <= last; pad++ {
+	// answer is whole again. The bound can fall inside that entry only where
+	// the answer changes, so the sweep steps one name pad at a time and judges
+	// every pad between the two steps around each change; it ends when the
+	// answer is whole again.
+	const (
+		otherMap = iota
+		mapWithText
+		incompleteMap
+	)
+	judged := map[int]int{}
+	judge := func(pad int) int {
+		if state, ok := judged[pad]; ok {
+			return state
+		}
 		targets := resolve(count, pad)
 		resolved, present := targets[alias]
 		_, text := targets[hookpaths.LinkTextFactPrefix+alias]
+		state := otherMap
 		switch {
 		case present && resolved == "" && text:
-			withText++
-			if len(incomplete) > 0 {
-				pad = last
-			}
+			state = mapWithText
 		case present && resolved == "":
 			t.Fatalf("%d redirects, pad %d: an empty answer for the linked operand without its link text and without a bound marker", count, pad)
 		case !present && targets[hookpaths.TruncatedKey] != "":
+			state = incompleteMap
+		}
+		judged[pad] = state
+		return state
+	}
+	last := count * boundedPadPerName
+	sawIncomplete := false
+	for previous, pad := 0, 0; ; previous, pad = pad, min(pad+boundedPadPerName, last) {
+		state := judge(pad)
+		if state != judge(previous) {
+			for between := previous + 1; between < pad; between++ {
+				judge(between)
+			}
+		}
+		sawIncomplete = sawIncomplete || state == incompleteMap
+		if pad == last || sawIncomplete && state == mapWithText {
+			break
+		}
+	}
+	var incomplete []int
+	withText := 0
+	for _, pad := range slices.Sorted(maps.Keys(judged)) {
+		switch judged[pad] {
+		case mapWithText:
+			withText++
+		case incompleteMap:
 			incomplete = append(incomplete, pad)
 		}
 	}
