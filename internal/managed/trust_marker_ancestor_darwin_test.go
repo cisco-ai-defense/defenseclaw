@@ -28,7 +28,8 @@ func TestAdministratorWriterGroupNamesWheelAndAdminOnly(t *testing.T) {
 // passes the mode check and is reported. The same bit for another group, any
 // other-write bit, and the admin bit on the marker folder itself stay fatal.
 // The temp folder is the test user's, so the owner check still stops it after
-// the mode check; the error says which check did.
+// the mode check; the error says which check did. Run as root, the folder is
+// root-owned and the accepted bit leaves no error at all.
 func TestInstallMarkerAncestorAcceptsOnlyAnAdministratorGroupWriteBit(t *testing.T) {
 	if StandaloneTrustScope() {
 		t.Skip("a standalone trust scope accepts no administrator group")
@@ -56,7 +57,11 @@ func TestInstallMarkerAncestorAcceptsOnlyAnAdministratorGroupWriteBit(t *testing
 
 	chmod(0o775)
 	err := ancestor()
-	if err == nil || strings.Contains(err.Error(), "writable permissions") || !strings.Contains(err.Error(), "owner uid") {
+	if os.Geteuid() == 0 {
+		if err != nil {
+			t.Fatalf("admin group write on a root-owned ancestor: got %v, want it accepted", err)
+		}
+	} else if err == nil || strings.Contains(err.Error(), "writable permissions") || !strings.Contains(err.Error(), "owner uid") {
 		t.Fatalf("admin group write on an ancestor: got %v, want only the owner check to fail", err)
 	}
 	if len(reported) != 1 || !strings.Contains(reported[0], "0775") {

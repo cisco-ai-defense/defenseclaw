@@ -1179,7 +1179,7 @@ discover_agent_version() {
       local -a system_pkgs=() casks=()
       for prefix in "${_COPILOT_SYSTEM_PREFIXES[@]}"; do
         system_pkgs+=("${prefix}/lib/node_modules/@github/copilot/package.json")
-        casks+=("${prefix}/Caskroom/copilot-cli")
+        casks+=("${prefix}/Caskroom/copilot-cli" "${prefix}/Caskroom/copilot-cli@prerelease")
       done
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@github/copilot/package.json \
@@ -1189,6 +1189,10 @@ discover_agent_version() {
         [[ -f "${pkg}" ]] || continue
         v="$(_probe_json_version "${pkg}" copilot "@github/copilot")"
         [[ -n "${v}" ]] || continue
+        if ! _is_valid_opencode_version "${v}"; then
+          _record_discovery_error copilot "${pkg}" "invalid-version"
+          continue
+        fi
         if [[ -z "${best}" ]] || _copilot_version_newer "${v}" "${best}"; then
           best="${v}"
         fi

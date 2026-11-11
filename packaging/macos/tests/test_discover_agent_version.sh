@@ -115,6 +115,30 @@ t_copilot_newest_of_a_system_cask_and_a_user_npm_install() {
   assert_eq "${got}" "1.0.105" "copilot: a system cask release beats a user npm prerelease of it"
 }
 
+t_copilot_from_the_prerelease_cask() {
+  # Homebrew's copilot-cli@prerelease is its own cask folder.
+  local home prefix
+  home="$(mktest_tmp)"; prefix="$(mktest_tmp)"
+  _COPILOT_SYSTEM_PREFIXES=("${prefix}")
+  mkdir -p "${prefix}/Caskroom/copilot-cli@prerelease/1.0.106-1"
+  : > "${prefix}/Caskroom/copilot-cli@prerelease/1.0.106-1/copilot"
+  chmod 0755 "${prefix}/Caskroom/copilot-cli@prerelease/1.0.106-1/copilot"
+  local got
+  got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
+  assert_eq "${got}" "1.0.106-1" "copilot: the prerelease cask is discovered"
+}
+
+t_copilot_npm_invalid_version_is_not_a_version() {
+  isolate_copilot_system_prefixes
+  local home; home="$(mktest_tmp)"
+  local npm="${home}/.npm-global/lib/node_modules/@github/copilot"
+  mkdir -p "${npm}"
+  printf '%s\n' '{ "name": "@github/copilot", "version": "not-a-version" }' > "${npm}/package.json"
+  local got
+  got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
+  assert_eq "${got}" "" "copilot: an invalid npm version is not reported"
+}
+
 t_copilot_from_nvm_global_metadata() {
   isolate_copilot_system_prefixes
   local home; home="$(mktest_tmp)"
@@ -1219,6 +1243,8 @@ run_case "copilot package metadata identity"     t_copilot_metadata_requires_pac
 run_case "copilot stale npm install does not win" t_copilot_stale_npm_install_does_not_win
 run_case "copilot release outranks its prerelease" t_copilot_release_outranks_its_prerelease
 run_case "copilot newest of cask and npm installs" t_copilot_newest_of_a_system_cask_and_a_user_npm_install
+run_case "copilot from the prerelease cask"      t_copilot_from_the_prerelease_cask
+run_case "copilot npm invalid version"           t_copilot_npm_invalid_version_is_not_a_version
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "cursor versionless user bundle falls through" t_cursor_versionless_user_bundle_falls_through_to_system_root
 run_case "cursor app plist version probe" t_cursor_app_version_reads_plist_or_nothing

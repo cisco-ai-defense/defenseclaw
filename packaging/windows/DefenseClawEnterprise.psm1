@@ -43062,12 +43062,18 @@ function Get-DefenseClawNuclearRegisteredProfiles {
                 -Name ProfileImagePath `
                 -ErrorAction SilentlyContinue).ProfileImagePath
             if (-not [string]::IsNullOrWhiteSpace($image)) {
-                $registered.Add([pscustomobject]@{
-                    sid  = [string]$entry.PSChildName
-                    home = [IO.Path]::GetFullPath(
-                        [Environment]::ExpandEnvironmentVariables($image)
-                    ).TrimEnd('\')
-                })
+                # One malformed profile path must not drop every later profile.
+                try {
+                    $registered.Add([pscustomobject]@{
+                        sid  = [string]$entry.PSChildName
+                        home = [IO.Path]::GetFullPath(
+                            [Environment]::ExpandEnvironmentVariables($image)
+                        ).TrimEnd('\')
+                    })
+                }
+                catch {
+                    Microsoft.PowerShell.Utility\Write-Verbose "profile $($entry.PSChildName) has an unreadable path: $($_.Exception.Message)"
+                }
             }
         }
     }

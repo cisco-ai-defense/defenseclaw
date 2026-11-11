@@ -404,7 +404,7 @@ func VerifyWindowsCodexMachineRequirements(
 	opts WindowsCodexMachineRequirementsOptions,
 ) (WindowsCodexMachineRequirementsReport, error) {
 	report := windowsCodexMachineReport("verify", opts)
-	if opts.CodexTargetEnabled && opts.SecureClient && !managed.TrustStrictAncestors() {
+	if opts.CodexTargetEnabled && opts.SecureClient && windowsCodexAdminConflictAllowed() {
 		if conflict := windowsCodexRequirementsAdminConflict(opts); conflict != nil {
 			return windowsCodexAdminConflictReport("verify", opts, conflict), nil
 		}
@@ -2280,7 +2280,7 @@ func ensureWindowsCodexMachineDirTrust(path, label string) error {
 // reported instead of failing the whole lifecycle for every agent; the
 // standalone profile and strict mode keep refusing.
 func windowsCodexAdminConflictSkipped(opts WindowsCodexMachineRequirementsOptions, err error) bool {
-	return opts.SecureClient && !managed.TrustStrictAncestors() &&
+	return opts.SecureClient && windowsCodexAdminConflictAllowed() &&
 		errors.Is(err, ErrCodexRequirementsAdminConflict)
 }
 
