@@ -132,9 +132,9 @@ var boundHomeSpellings = []string{
 // with ..). An assignment counts like its
 // value, so a target reached through a known value is named too. It never
 // parses and reads no file, so it costs one pass over the text whatever its
-// size. Over-matching only keeps the over-limit block; an ordinary command
-// that names none of these gets the evaluation-limit finding the profile
-// decides (GAP-0534 and GAP-0677).
+// size. The gateway adds the evaluation-limit finding, which the profile
+// decides, to a call of the nested-body proof band whose text may name one
+// of these; over-matching only adds that finding (GAP-0677).
 func BoundCallMayNameProtected(command, cwd, home string) bool {
 	if MayNameState(command) {
 		return true

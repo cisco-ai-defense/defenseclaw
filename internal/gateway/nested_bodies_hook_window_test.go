@@ -27,10 +27,9 @@ func gap0677Nested(levels int, inner string) string {
 // MB) took 3 to 8.5 s through the hook client and the gateway, past the
 // hook answer window. It is past the reading bounds now: the hook client
 // sends incomplete evidence and the gateway takes the over-limit path at
-// once, for both connectors. A protected target keeps the over-limit block
-// in every profile (limitKeepsBlock); an ordinary one does not (an alert
-// in the default profile, a block in strict,
-// TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget). A single bash -c
+// once, for both connectors, with the evaluation-limit finding the profile
+// decides, whatever the target (an alert in the default profile, a block
+// in strict, TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget). A single bash -c
 // script is still read and allowed (the shellparse test weighs one of 400
 // KB).
 func TestGAP0677NestedShellBodiesAreDecidedWithinTheHookWindow(t *testing.T) {
@@ -78,8 +77,8 @@ func TestGAP0677NestedShellBodiesAreDecidedWithinTheHookWindow(t *testing.T) {
 		if ids := findingIDs(findings); len(ids) != 1 || ids[0] != "ACTION-COMPOUND-LIMIT" ||
 			buildVerdict(findings, "tool_call").Action != guardrailActionBlock {
 			t.Errorf("%s: %d nested bodies to %s: %s %v, want the over-limit block", connector, levels, target, buildVerdict(findings, "tool_call").Action, ids)
-		} else if keeps := findings[0].limitKeepsBlock; keeps != (target == "~/.defenseclaw") {
-			t.Errorf("%s: %d nested bodies to %s: keeps the block in every profile=%v", connector, levels, target, keeps)
+		} else if findings[0].omittedOperand {
+			t.Errorf("%s: %d nested bodies to %s: keeps the block in every profile", connector, levels, target)
 		}
 		if connector == "codex" {
 			continue

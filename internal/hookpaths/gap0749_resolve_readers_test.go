@@ -27,7 +27,6 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	dialect := hookShellDialect("", "Bash")
 	_ = actionfacts.CommandTextOverLimit(command)
 	shellparse.PastReadingBounds(command)
-	BoundCallReachesProtectedLink(command, cwd, home)
 	BoundCommandOperands(command, cwd, home)
 	ActionCommandAuditReasonWithDialect(command, cwd, home, dialect)
 	MayNameState(command)
@@ -120,7 +119,7 @@ var gap0749ResolveReaderCalls = []string{
 	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
 	"actionConcreteProtectedWriteOnWithOperands", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
-	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin", "BoundCallReachesProtectedLink",
+	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
 	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
 }
