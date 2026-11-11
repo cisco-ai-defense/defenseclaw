@@ -57,6 +57,10 @@ func TestGAP0677BoundCallsThroughLinksKeepTheBlock(t *testing.T) {
 		{"linked agent settings", "Bash", nested("echo x > report"), guardrailActionBlock},
 		{"linked folder, new file", "Bash", nested("echo x > shared/new-file"), guardrailActionBlock},
 		{"second hard name of the keys file", "Bash", nested("echo x > mirror"), guardrailActionBlock},
+		{"linked keys file, appended value", "Bash", "p=out; p+=put; " + nested(`echo x > "$p"`), guardrailActionBlock},
+		{"linked keys file, empty substitution", "Bash", nested(`echo x > "$(true)output"`), guardrailActionBlock},
+		{"linked keys file, working directory", "Bash", nested(`echo x > "$PWD/output"`), guardrailActionBlock},
+		{"ordinary file, appended value", "Bash", "p=plain; p+=.txt; " + nested(`echo x > "$p"`), guardrailActionAlert},
 		{"ordinary file", "Bash", nested("echo x > plain.txt"), guardrailActionAlert},
 		{"ordinary link", "Bash", nested("echo x > latest"), guardrailActionAlert},
 		{"ordinary new file", "Bash", nested("echo x > fresh.txt"), guardrailActionAlert},
@@ -67,25 +71,27 @@ func TestGAP0677BoundCallsThroughLinksKeepTheBlock(t *testing.T) {
 	}, 0, boundLinkHome(t))
 }
 
-// GAP-0534 (review 3): an ordinary file whose name only contains a protected
-// name (a settings, hooks or config name with more in it) is an ordinary
-// target of a call the readers did not finish. The protected names stay
-// protected as whole names.
+// GAP-0534 (reviews 3 and 6): an ordinary file whose name only contains a
+// protected name (a settings, hooks or config name with more in it), or a
+// project document named like agent hook settings (settings.json,
+// hooks.json outside an agent folder), is an ordinary target of a call the
+// readers did not finish. The protected names stay protected as whole names,
+// and the settings names in an agent folder.
 func TestGAP0534BoundCallsNamedLikeProtectedFilesAreOrdinary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX homes and a mode 0 homes folder")
 	}
 	const prefix = `Write-Output $(.\a[1]<#x#>); `
-	var rows []readingBoundRow
-	for _, name := range []string{"notes-settings.json", "hooks.log", ".config-cache", "my_profile.txt", "settings.json.bak"} {
-		rows = append(rows,
-			readingBoundRow{"recovered parse, ordinary " + name, "PowerShell", prefix + "Remove-Item -Recurse -Force ~/project/" + name, guardrailActionAlert},
-			readingBoundRow{"nested bodies, ordinary " + name, "Bash", readingBoundNest(10, "rm -f ~/project/"+name), guardrailActionAlert})
-	}
-	for _, name := range []string{"settings.json", "hooks.json", ".bashrc", "CLAUDE.md"} {
-		rows = append(rows,
-			readingBoundRow{"recovered parse, protected " + name, "PowerShell", prefix + "Remove-Item -Recurse -Force " + name, guardrailActionBlock},
-			readingBoundRow{"nested bodies, protected " + name, "Bash", readingBoundNest(10, "rm -f "+name), guardrailActionBlock})
-	}
-	readingBoundCells(t, rows, 0)
+	recovered := func(target string) string { return prefix + "Remove-Item -Recurse -Force " + target }
+	nested := func(target string) string { return readingBoundNest(10, "rm -f "+target) }
+	readingBoundCells(t, []readingBoundRow{
+		{"recovered parse, ordinary notes-settings.json", "PowerShell", recovered("~/project/notes-settings.json"), guardrailActionAlert},
+		{"nested bodies, ordinary hooks.log", "Bash", nested("~/project/hooks.log"), guardrailActionAlert},
+		{"recovered parse, project settings.json", "PowerShell", recovered("~/project/settings.json"), guardrailActionAlert},
+		{"nested bodies, project hooks.json", "Bash", nested("hooks.json"), guardrailActionAlert},
+		{"recovered parse, protected .bashrc", "PowerShell", recovered(".bashrc"), guardrailActionBlock},
+		{"nested bodies, protected CLAUDE.md", "Bash", nested("CLAUDE.md"), guardrailActionBlock},
+		{"recovered parse, agent settings.json", "PowerShell", recovered("~/.claude/settings.json"), guardrailActionBlock},
+		{"nested bodies, project agent settings.json", "Bash", nested(".claude/settings.json"), guardrailActionBlock},
+	}, 0)
 }

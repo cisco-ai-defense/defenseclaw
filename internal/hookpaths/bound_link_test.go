@@ -47,6 +47,13 @@ func TestBoundCallReachesProtectedLink(t *testing.T) {
 		{`echo x > plain.txt`, false},
 		{`echo x > missing.txt`, false},
 		{`echo "$unknown" > $other`, false},
+		// A word built from values the text shows (GAP-0677 review 6).
+		{`p=out; p+=put; echo x > "$p"`, true},
+		{`echo x > "$(true)output"`, true},
+		{`echo x > "$PWD/output"`, true},
+		{`$p = "out"; $p += "put"; Set-Content -Path $p -Value x`, true},
+		{`p=plain; p+=.txt; echo x > "$p"`, false},
+		{`echo x > "$PWD/plain.txt"`, false},
 	} {
 		if got := BoundCallReachesProtectedLink(row.command, cwd, home); got != row.want {
 			t.Errorf("BoundCallReachesProtectedLink(%q) = %v, want %v", row.command, got, row.want)

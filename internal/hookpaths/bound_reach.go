@@ -14,19 +14,34 @@ import (
 // folder and keys, the hook settings and configuration folders of the
 // supported agents, agent instruction files, shell startup profiles,
 // sudoers and Git hooks. A component is a run of letters, digits, "-", "_"
-// and "." between any other characters, so settings.json is named by
-// ~/.claude/settings.json and by settings.json alone, and is not named by
-// notes-settings.json, hooks.log or .config-cache (GAP-0534 review 3). The
-// DefenseClaw state is looked for by MayNameState.
+// and "." between any other characters, so .bashrc is named by ~/.bashrc
+// and by .bashrc alone, and is not named by my_profile.txt or .config-cache
+// (GAP-0534 review 3). The hook settings names (boundFolderNames) count
+// only in an agent folder. The DefenseClaw state is looked for by
+// MayNameState.
 var boundProtectedNames = map[string]bool{
 	".ssh": true, "authorized_keys": true,
 	".claude": true, ".codex": true, ".copilot": true, ".cursor": true, ".config": true, ".gemini": true,
 	".hermes": true, ".kiro": true, ".devin": true, "appdata": true,
-	"claude.md": true, "agents.md": true, "hooks": true, "hooks.json": true, "core.hookspath": true,
-	"settings.json": true, "settings.local.json": true,
+	"claude.md": true, "agents.md": true, "core.hookspath": true,
 	".bashrc": true, "bash.bashrc": true, ".zshrc": true, ".zshenv": true, ".bash_login": true, ".profile": true,
 	".bash_profile": true, "zprofile": true, ".zprofile": true, "profile.ps1": true,
 	"sudoers": true, "sudoers.d": true,
+}
+
+// boundFolderNames are the protected names, in lower case, that are agent
+// hook settings or Git hooks only inside a folder of boundAgentFolders: a
+// project document called settings.json or hooks.json, or a project folder
+// called hooks, is an ordinary target (GAP-0534 review 6).
+var boundFolderNames = map[string]bool{
+	"hooks": true, "hooks.json": true, "settings.json": true, "settings.local.json": true,
+}
+
+// boundAgentFolders are the folders, in lower case, whose boundFolderNames
+// are protected: the agent configuration folders and the Git folder.
+var boundAgentFolders = map[string]bool{
+	".claude": true, ".codex": true, ".copilot": true, ".cursor": true, ".config": true, ".gemini": true,
+	".hermes": true, ".kiro": true, ".devin": true, "appdata": true, ".git": true,
 }
 
 // boundNameMayBeProtected reports a path component that is a protected
@@ -46,17 +61,56 @@ func boundNameSeparator(r rune) bool {
 // boundTextNamesProtected reports whether a path component of text (in
 // lower case, quotes removed) is a protected name, with its backslashes
 // removed (a POSIX escape) and again with them as separators (a Windows
-// path).
-func boundTextNamesProtected(text string) bool {
+// path). A name of boundFolderNames counts when its folder may be an agent
+// folder: the folder the word gives is built at run time, matched by a
+// pattern or reached through .., or the word gives none and the working
+// directory cwd (lower case, / separators) is in an agent folder or unknown,
+// or the folder the word gives, or cwd, is in an agent folder, or the text
+// names a variable that moves an agent folder (CLAUDE_CONFIG_DIR,
+// CODEX_HOME).
+func boundTextNamesProtected(text, cwd string) bool {
+	anyFolder := cwd == "" || strings.Contains(text, "config_dir") || strings.Contains(text, "codex_home") ||
+		boundInAgentFolder(cwd)
 	for _, variant := range []string{
 		strings.NewReplacer("\\", "").Replace(text),
 		strings.NewReplacer("\\", "/").Replace(text),
 	} {
-		if slices.ContainsFunc(strings.FieldsFunc(variant, boundNameSeparator), boundNameMayBeProtected) {
-			return true
+		for _, word := range strings.FieldsFunc(variant, boundWordSeparator) {
+			// The folder the word gives so far: whether it has an agent
+			// folder, and whether it is built at run time.
+			agentFolder, unknownFolder := false, false
+			for _, segment := range strings.Split(word, "/") {
+				for _, component := range strings.FieldsFunc(segment, boundNameSeparator) {
+					if boundNameMayBeProtected(component) {
+						return true
+					}
+					if !boundFolderNames[component] {
+						continue
+					}
+					before, _, _ := strings.Cut(segment, component)
+					if anyFolder || agentFolder || unknownFolder || boundFolderUnknown(before) {
+						return true
+					}
+				}
+				agentFolder = agentFolder || boundAgentFolders[segment]
+				unknownFolder = unknownFolder || boundFolderUnknown(segment)
+			}
 		}
 	}
 	return false
+}
+
+// boundInAgentFolder reports a folder (lower case, / separators) with a
+// component of boundAgentFolders.
+func boundInAgentFolder(folder string) bool {
+	return slices.ContainsFunc(strings.Split(folder, "/"), func(component string) bool { return boundAgentFolders[component] })
+}
+
+// boundFolderUnknown reports a folder part of a word that is built at run
+// time, matched by a pattern or reached through .., so it may be an agent
+// folder.
+func boundFolderUnknown(folder string) bool {
+	return strings.ContainsAny(folder, "$%*?[{`") || strings.Contains(folder, "..")
 }
 
 // boundHomeSpellings are the spellings of the home folder, in lower case,
@@ -87,7 +141,11 @@ func BoundCallMayNameProtected(command, cwd, home string) bool {
 	}
 	unquote := strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "")
 	text := strings.ToLower(unquote.Replace(command))
-	if boundTextNamesProtected(strings.ToLower(boundUnquoteKeepEscapes.Replace(command))) {
+	folderCWD := ""
+	if cwd != "" {
+		folderCWD = strings.ToLower(strings.ReplaceAll(cwd, "\\", "/"))
+	}
+	if boundTextNamesProtected(strings.ToLower(boundUnquoteKeepEscapes.Replace(command)), folderCWD) {
 		return true
 	}
 	homeText := strings.TrimRight(strings.ToLower(unquote.Replace(home)), "/")

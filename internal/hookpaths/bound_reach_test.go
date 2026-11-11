@@ -48,9 +48,16 @@ func TestBoundCallMayNameProtected(t *testing.T) {
 
 		// Whole components: the protected names are named however they are
 		// spelled, and an ordinary name that only contains one is not.
-		{`echo x > settings.json`, project, true},
-		{`echo x > "set"tings.json`, project, true},
+		{`echo x > settings.json`, home + "/.claude", true},
+		{`echo x > "set"tings.json`, home + "/.claude", true},
+		{`echo x > hooks.json`, home + "/.codex", true},
+		{`echo x > settings.json`, "", true},
 		{`cat > .git/hooks/pre-commit`, project, true},
+		{`cat > sub/.git/hooks/pre-commit`, project, true},
+		{`d=.cl; rm ~/${d}aude/settings.json`, project, true},
+		{`rm $dir/settings.json`, project, true},
+		{`rm sub/../../.claude/settings.json`, project, true},
+		{`CLAUDE_CONFIG_DIR=~/project claude; echo x > settings.json`, project, true},
 		{`git -c core.hooksPath=/tmp/h commit`, project, true},
 		{`rm /etc/sudoers.d/x`, project, true},
 		{`echo x >> .bashrc`, project, true},
@@ -65,6 +72,13 @@ func TestBoundCallMayNameProtected(t *testing.T) {
 		{`rm sudoers-review.txt`, project, false},
 		{`Remove-Item C:\Users\alice\project\hooks.log`, project, false},
 		{`echo x > ~/project/notes.txt`, project, false},
+		// Agent settings names count only in an agent folder: a project
+		// document of the same name is ordinary (GAP-0534 review 6).
+		{`rm settings.json`, project, false},
+		{`Remove-Item -Recurse -Force ~/project/hooks.json`, project, false},
+		{`echo x > docs/settings.local.json`, project, false},
+		{`rm -rf hooks`, project, false},
+		{`Remove-Item C:\Users\alice\project\settings.json`, project, false},
 
 		{`rm -rf ~/project/output`, project, false},
 		{`Write-Output $(.\a[1]<#x#>); Remove-Item -Recurse -Force ~/project/output`, project, false},

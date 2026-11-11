@@ -15,13 +15,15 @@ import (
 // folder. Where the reader resolves the removal to the state folder, which is
 // the Windows PowerShell reading of a drive-letter home, the call is a proven
 // mutation of DefenseClaw state: self-protection blocks it in every profile.
-// Where it does not (POSIX homes), the call proves no target, so it alerts
-// outside the strict profile and blocks in strict (lead ruling,
-// rel-1-0-6:GAP-0675 round 12). The ordinary-file twin follows the same
-// reading: on POSIX the unparsed statement leaves the call unanalysed, so it
-// alerts outside strict; on Windows the reader parses the whole call, finds an
-// ordinary file and allows it in every profile. The hook answers within its
-// time budget.
+// Where it does not (POSIX homes), the hook client stops at the recovered
+// parse (shell-parse-bound) and the call names the state folder directly, so
+// its over-limit finding keeps the block in every profile (GAP-0534,
+// readingBoundProtectedFindings). The ordinary-file twin, a project document
+// called settings.json, names no protected target: on POSIX the unparsed
+// statement leaves the call unanalysed, so it alerts outside strict (lead
+// ruling, rel-1-0-6:GAP-0675 round 12); on Windows the reader parses the whole
+// call, finds an ordinary file and allows it in every profile. The hook
+// answers within its time budget.
 func TestGAP0534PowerShellHookFixedPointBlocks(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -40,10 +42,7 @@ func TestGAP0534PowerShellHookFixedPointBlocks(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	const unparsed = `Write-Output $(.\a[1]<#x#>); `
-	stateWant := map[string]string{"default": guardrailActionAlert, "strict": guardrailActionBlock}
-	if runtime.GOOS == "windows" {
-		stateWant = map[string]string{"default": guardrailActionBlock, "strict": guardrailActionBlock}
-	}
+	stateWant := map[string]string{"default": guardrailActionBlock, "strict": guardrailActionBlock}
 	ordinaryWant := map[string]string{"default": guardrailActionAlert, "strict": guardrailActionBlock}
 	if runtime.GOOS == "windows" {
 		ordinaryWant = map[string]string{"default": guardrailActionAllow, "strict": guardrailActionAllow}

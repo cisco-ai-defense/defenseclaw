@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"unicode"
@@ -42,9 +43,13 @@ func BoundCallReachesProtectedLink(command, cwd, home string) bool {
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
 	seen := map[string]bool{}
-	for _, word := range strings.FieldsFunc(text, func(r rune) bool {
-		return unicode.IsSpace(r) || strings.ContainsRune(";|&()<>=,{}", r) || r == 0x3a && runtime.GOOS != "windows"
-	}) {
+	words := strings.FieldsFunc(text, boundLinkWordSeparator)
+	if strings.Contains(text, "$") {
+		// A word the call builds from values is looked up as the text
+		// shows it built too (GAP-0677 review 6).
+		words = append(words, strings.FieldsFunc(boundKnownValuesText(text, cwd, home), boundLinkWordSeparator)...)
+	}
+	for _, word := range words {
 		if seen[word] || len(word) > MaxWriteTargetPathBytes ||
 			strings.ContainsAny(word, "*?[]$\x00") || strings.HasPrefix(word, "-") && !strings.Contains(word, "/") {
 			continue
@@ -77,4 +82,41 @@ func BoundCallReachesProtectedLink(command, cwd, home string) bool {
 		}
 	}
 	return false
+}
+
+func boundLinkWordSeparator(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune(";|&()<>=,{}", r) || r == 0x3a && runtime.GOOS != "windows"
+}
+
+// boundValueReference is a value the shell or PowerShell expands: ${name},
+// $(command), $name.
+var boundValueReference = regexp.MustCompile(`\$\{[^{}]*\}|\$\([^()]*\)|\$[A-Za-z_][A-Za-z0-9_:]*`)
+
+// boundAssignment is an assignment the text makes: name=value or
+// name+=value, and the PowerShell $name = value (quotes already removed).
+var boundAssignment = regexp.MustCompile(`(?:^|[\s;&|(])\$?([A-Za-z_][A-Za-z0-9_]*)\s*(\+?)=\s*([^\s;&|()<>]*)`)
+
+// boundKnownValuesText is text with each value reference replaced by what the
+// text shows of it: the value the assignments give it (an appended value
+// joined), the working directory for PWD and the home folder for HOME. Any
+// other reference (a command substitution, a value the text does not set)
+// is left out, as an empty value would be. Names are read in lower case, so
+// a PowerShell and a shell spelling meet. It is one pass over the text for
+// the assignments and one for the references.
+func boundKnownValuesText(text, cwd, home string) string {
+	values := map[string]string{"pwd": cwd, "home": home}
+	expand := func(value string) string {
+		return boundValueReference.ReplaceAllStringFunc(value, func(reference string) string {
+			name := strings.ToLower(strings.Trim(reference, "${}"))
+			return values[strings.TrimPrefix(name, "env:")]
+		})
+	}
+	for _, assignment := range boundAssignment.FindAllStringSubmatch(text, -1) {
+		name, value := strings.ToLower(assignment[1]), expand(assignment[3])
+		if assignment[2] == "+" {
+			value = values[name] + value
+		}
+		values[name] = value
+	}
+	return expand(text)
 }
