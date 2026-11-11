@@ -314,20 +314,20 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 		}
 		program, known := staticProgramWord(call.Args[0], home)
 		base := programBase(program)
-		if known && (base == "rm" || base == "rmdir" || base == "unlink" || base == "mv" ||
+		if known && (base == "rm" || base == "rmdir" || base == "unlink" || base == "mv" || base == "gmv" ||
 			base == "chmod" || base == "chown" || base == "chgrp" || base == "setfacl" || base == "chattr") {
-			lastOperand := len(call.Args) - 1
-			targetDir := false
-			for _, word := range call.Args[1:] {
-				value, fixed := StaticWord(word, home)
-				if fixed && (value == "-t" || value == "--target-directory" || strings.HasPrefix(value, "--target-directory=")) {
-					targetDir = true
+			receiver := -1
+			if base == "mv" || base == "gmv" {
+				words := make([]string, len(call.Args))
+				for index, word := range call.Args {
+					words[index], _ = StaticWord(word, home)
 				}
+				receiver = registrationMoveReceiver(words)
 			}
 			for index, word := range call.Args[1:] {
-				receives := base == "mv" && !targetDir && index+1 == lastOperand
+				receives := index+1 == receiver
 				if receives && !actionWordHasBraceText(word) {
-					continue // the last operand receives the source
+					continue // the destination receives the sources (read where it is placed, below)
 				}
 				if actionWordHasBraceText(word) {
 					fields := actionMentionBraceFields(word, home)
@@ -366,16 +366,18 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 				}
 			}
 		}
-		if known && inert == 0 && (base == "ln" || base == "gln") {
-			// A link is judged by where it is placed: its operands go through
-			// the values the command has bound so far (a name, a folder or a
-			// source set by an earlier assignment), and only a destination
-			// that resolves to a registered file counts. A link that cannot
-			// run (an uncalled function, a branch a fixed condition rules out)
-			// is untouched, and a called function is read at its calls.
-			words := []string{program}
+		if args, placer := registrationPlacingCall(call.Args, home); placer != "" && inert == 0 {
+			// A link or a rename is judged by where it is placed: its operands
+			// go through the values the command has bound so far (a name, a
+			// folder or a source set by an earlier assignment), and only a
+			// destination that resolves to a registered file counts. mv onto a
+			// registered file replaces it as cp and install do. A call that
+			// cannot run (an uncalled function, a branch a fixed condition
+			// rules out) is untouched, and a called function is read at its
+			// calls.
+			words := []string{placer}
 			fixedWords := []bool{true}
-			for _, word := range call.Args[1:] {
+			for _, word := range args[1:] {
 				value, fixed := actionWordValue(word, values, currentCWD, home)
 				words, fixedWords = append(words, value), append(fixedWords, fixed)
 			}
@@ -729,19 +731,22 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 		for _, word := range operands {
 			add(word)
 		}
-	case "mv":
-		sources := operands
-		toDirectory := false
+	case "mv", "gmv":
+		// The sources are renamed away; the destination is replaced (or, as
+		// a folder, receives each source under its own name).
+		words := []string{program}
+		known := []bool{true}
 		for _, word := range operands {
-			value, fixed := StaticWord(word, home)
-			toDirectory = toDirectory || fixed && (value == "-t" || strings.HasPrefix(value, "--target-directory"))
+			value, fixed := actionWordValue(word, values, cwd, home)
+			words, known = append(words, value), append(known, fixed)
 		}
-		if !toDirectory && len(sources) > 1 {
-			sources = sources[:len(sources)-1]
+		receiver := registrationMoveReceiver(words)
+		for index, word := range operands {
+			if index+1 != receiver {
+				add(word)
+			}
 		}
-		for _, word := range sources {
-			add(word)
-		}
+		targets = append(targets, registrationPlacedPaths(words, known, cwd)...)
 	case "cp", "gcp", "install", "ln":
 		words := []string{program}
 		known := []bool{true}
@@ -1122,7 +1127,7 @@ func registrationInstallReach(words []string, cwd string, protected protectedFil
 	return false
 }
 
-// registrationPlacedPaths lists the paths a cp, install or ln call writes
+// registrationPlacedPaths lists the paths a cp, install, ln or mv call writes
 // (words[0] is the program): the last operand when it is a plain file name,
 // and, when it is a folder (or is written with a trailing separator, or
 // -t names it), the file each source name takes in that folder. A folder
@@ -1238,8 +1243,8 @@ func registrationPlacedPaths(words []string, known []bool, cwd string) []string 
 	return placed
 }
 
-// registrationValueLetters lists the short options of a cp, install or ln
-// call that take a value (the target folder -t, the backup suffix -S, and
+// registrationValueLetters lists the short options of a cp, install, ln or
+// mv call that take a value (the target folder -t, the backup suffix -S, and
 // install's mode, owner and group).
 func registrationValueLetters(program string) string {
 	if program == "install" || program == "ginstall" {
@@ -1248,8 +1253,8 @@ func registrationValueLetters(program string) string {
 	return "tS"
 }
 
-// registrationLongWord spells an abbreviated long option of a cp, install or
-// ln call in full (GNU accepts any unambiguous prefix: --target-d is
+// registrationLongWord spells an abbreviated long option of a cp, install,
+// ln or mv call in full (GNU accepts any unambiguous prefix: --target-d is
 // --target-directory). A word that is not an option of the program, or is
 // ambiguous, is returned as it is.
 func registrationLongWord(program, word string) string {
@@ -1264,6 +1269,8 @@ func registrationLongWord(program, word string) string {
 		options = lnLongOptions
 	case "install", "ginstall":
 		options = installLongOptions
+	case "mv", "gmv":
+		options = mvLongOptions
 	default:
 		return word
 	}
@@ -1278,25 +1285,143 @@ func registrationLongWord(program, word string) string {
 	return "--" + option
 }
 
+// mvLongOptions are the GNU mv long options; GNU accepts any unambiguous
+// abbreviation.
+var mvLongOptions = []string{"backup", "force", "interactive", "no-clobber", "no-copy",
+	"strip-trailing-slashes", "suffix", "target-directory", "no-target-directory", "update", "verbose",
+	"context", "exchange", "debug", "help", "version"}
+
+// registrationMoveReceiver is the index in words (words[0] is the mv
+// program, "" a word whose value is not fixed) of the word that receives the
+// sources: the folder -t or --target-directory names (the last one given),
+// else the last operand; -1 when there is none. That word is written, not
+// renamed away.
+func registrationMoveReceiver(words []string) int {
+	receiver, last := -1, -1
+	optionsEnded := false
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		if !optionsEnded {
+			word = registrationLongWord(programBase(words[0]), word)
+		}
+		switch {
+		case optionsEnded || word == "-" || !strings.HasPrefix(word, "-"):
+			last = i
+		case word == "--":
+			optionsEnded = true
+		case word == "--target-directory" || word == "--suffix":
+			if i+1 < len(words) {
+				i++
+				if word == "--target-directory" {
+					receiver = i
+				}
+			}
+		case strings.HasPrefix(word, "--target-directory="):
+			receiver = i
+		case strings.HasPrefix(word, "--"):
+		default:
+			// A short cluster: the first of t and S takes the rest of the
+			// word or the next word.
+			if position := strings.IndexAny(word, "tS"); position > 0 {
+				value := i
+				if position == len(word)-1 && i+1 < len(words) {
+					i++
+					value = i
+				}
+				if strings.HasPrefix(word[position:], "t") {
+					receiver = value
+				}
+			}
+		}
+	}
+	if receiver >= 0 {
+		return receiver
+	}
+	return last
+}
+
+// registrationPlacingCall returns the words of a call from its program on
+// (the runner grammar the loop reader strips, env, command, sudo, nice,
+// timeout and the like, and a multicall busybox or toybox, removed) and the
+// base name of that program when it places its operands: ln or mv. The name
+// is "" for any other call.
+func registrationPlacingCall(args []*syntax.Word, home string) ([]*syntax.Word, string) {
+	words, literal := actionLiteralCommandWords(args, home)
+	for depth := 0; literal && len(words) > 1 && depth < 4; depth++ {
+		program, fixed := staticProgramWord(words[0], home)
+		if !fixed {
+			return nil, ""
+		}
+		switch base := programBase(program); {
+		case slices.Contains(multicallPrograms, base):
+			words = words[1:]
+		case base == "ln" || base == "gln" || base == "mv" || base == "gmv":
+			return words, base
+		default:
+			return nil, ""
+		}
+	}
+	return nil, ""
+}
+
+// registrationRsyncReach reads an rsync call: --delete empties the
+// destination folder, the destination file (or, as a folder, the file each
+// source takes in it) is replaced as cp replaces it, and
+// --remove-source-files removes the local sources.
 func registrationRsyncReach(words []string, cwd string, protected protectedFiles) bool {
-	deletes := false
-	destination := ""
+	deletes, movesSources := false, false
+	var operands []string
 	for _, word := range words[1:] {
 		if strings.HasPrefix(word, "--delete") {
 			deletes = true
 		}
+		movesSources = movesSources || word == "--remove-source-files"
 		if !strings.HasPrefix(word, "-") {
-			destination = word
+			operands = append(operands, word)
 		}
 	}
-	// host:path names a remote folder; a Windows drive path (C:/dir) is a
-	// local one on a Windows host.
-	if !deletes || destination == "" || strings.Contains(destination, ":") && filepath.VolumeName(destination) == "" {
+	if len(operands) == 0 {
 		return false
 	}
-	destination = OperandPath(destination, cwd)
-	for _, target := range protected {
-		if target.path == destination || strings.HasPrefix(target.path, destination+string(filepath.Separator)) {
+	// host:path names a remote file or folder; a Windows drive path (C:/dir)
+	// is a local one on a Windows host.
+	remote := func(path string) bool { return strings.Contains(path, ":") && filepath.VolumeName(path) == "" }
+	last := operands[len(operands)-1]
+	sources := operands[:len(operands)-1]
+	if movesSources {
+		for _, source := range sources {
+			if !remote(source) && protectedReachPath(OperandPath(source, cwd), protected, "") {
+				return true
+			}
+		}
+	}
+	if remote(last) {
+		return false
+	}
+	destination := OperandPath(last, cwd)
+	if deletes {
+		for _, target := range protected {
+			if target.path == destination || strings.HasPrefix(target.path, destination+string(filepath.Separator)) {
+				return true
+			}
+		}
+	}
+	folder := strings.HasSuffix(last, "/")
+	if info, err := pathStat(destination); err == nil && info.IsDir() {
+		folder = true
+	}
+	for _, source := range sources {
+		placed := destination
+		if folder {
+			if strings.HasSuffix(source, "/") {
+				continue // the contents of a folder: their names are not in the call
+			}
+			if remote(source) {
+				source = source[strings.LastIndex(source, ":")+1:]
+			}
+			placed = filepath.Join(destination, filepath.Base(source))
+		}
+		if protectedReachPath(placed, protected, "") {
 			return true
 		}
 	}
