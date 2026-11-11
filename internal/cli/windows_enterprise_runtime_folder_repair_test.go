@@ -105,8 +105,8 @@ func TestWindowsEnterpriseEnsureNamesARuntimeDriftItCouldNotPutBack(t *testing.T
 	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return nil }
 	result := newWindowsEnterpriseStandaloneResult("ensure", &windowsEnterpriseLifecycleOptions{})
 	repaired := false
-	noteWindowsEnterpriseEnsureDriftRepairs(result, &repaired)
-	noteWindowsEnterpriseEnsureDriftRepairs(result, &repaired)
+	noteWindowsEnterpriseEnsureDriftRepairs(result, &repaired, "")
+	noteWindowsEnterpriseEnsureDriftRepairs(result, &repaired, "")
 	count := 0
 	for _, warning := range result.Warnings {
 		if warning.Code == "runtime_acl_not_repaired" {
@@ -115,5 +115,55 @@ func TestWindowsEnterpriseEnsureNamesARuntimeDriftItCouldNotPutBack(t *testing.T
 	}
 	if repaired || count != 1 || len(result.Changes) != 0 {
 		t.Fatalf("repaired=%t warnings=%d changes=%v", repaired, count, result.Changes)
+	}
+}
+
+// A drift seen when ensure started counts as a change only when the folder
+// is canonical now. A drift ensure could not put back keeps its warning, and
+// a folder another account can now write is left to the strict trust walk.
+func TestWindowsEnterpriseDriftSeenAtStartIsAChangeOnlyOnceCanonical(t *testing.T) {
+	const dir = `C:\ProgramData\Cisco\DefenseClaw\runtime`
+	original := windowsEnterpriseRepairDataDirBeforePlan
+	originalGuardian := windowsEnterpriseGuardianRepairsSinceLastRun
+	originalState := windowsEnterpriseRuntimeFolderState
+	t.Cleanup(func() {
+		windowsEnterpriseRepairDataDirBeforePlan = original
+		windowsEnterpriseGuardianRepairsSinceLastRun = originalGuardian
+		windowsEnterpriseRuntimeFolderState = originalState
+	})
+	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return nil }
+	start := "the access control of " + dir + " had drifted (extra entry S-1-5-32-545)"
+	for _, tc := range []struct {
+		name         string
+		atStart      string
+		problem      string
+		canonical    bool
+		wantRepaired bool
+		wantChange   string
+	}{
+		{name: "put back during the run", atStart: start, canonical: true, wantRepaired: true, wantChange: start + " when ensure started and was put back while it ran"},
+		{name: "no drift at start", canonical: true},
+		{name: "not canonical now", atStart: start},
+		{name: "could not put it back", atStart: start, problem: "could not put it back", canonical: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			windowsEnterpriseRepairDataDirBeforePlan = func() (string, string) { return "", tc.problem }
+			windowsEnterpriseRuntimeFolderState = func() (string, string, bool) { return dir, "", tc.canonical }
+			result := newWindowsEnterpriseStandaloneResult("ensure", &windowsEnterpriseLifecycleOptions{})
+			repaired := false
+			noteWindowsEnterpriseEnsureDriftRepairs(result, &repaired, tc.atStart)
+			if repaired != tc.wantRepaired || strings.Join(result.Changes, "\n") != tc.wantChange {
+				t.Fatalf("repaired=%t changes=%q, want %t %q", repaired, result.Changes, tc.wantRepaired, tc.wantChange)
+			}
+		})
+	}
+	// The drift at the start is named from the folder state before the probe.
+	windowsEnterpriseRuntimeFolderState = func() (string, string, bool) { return dir, "extra entry S-1-5-32-545", false }
+	if got := windowsEnterpriseRuntimeDriftAtStart(); got != start {
+		t.Fatalf("drift at start %q, want %q", got, start)
+	}
+	windowsEnterpriseRuntimeFolderState = func() (string, string, bool) { return dir, "", true }
+	if got := windowsEnterpriseRuntimeDriftAtStart(); got != "" {
+		t.Fatalf("canonical folder at start %q, want none", got)
 	}
 }

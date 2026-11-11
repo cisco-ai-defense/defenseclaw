@@ -231,6 +231,7 @@ func isolateTestMachineWriters(logDir string) func() {
 	sandboxSeam("removeEmptyWindowsEnterpriseInstallParent", &removeEmptyWindowsEnterpriseInstallParent, func() {})
 	sandboxSeam("windowsEnterpriseRestoreStartModes", &windowsEnterpriseRestoreStartModes, func(*windowsEnterpriseInstallerReport) error { return nil })
 	sandboxSeam("windowsEnterpriseRepairDataDirBeforePlan", &windowsEnterpriseRepairDataDirBeforePlan, func() (string, string) { return "", "" })
+	sandboxSeam("windowsEnterpriseRuntimeFolderState", &windowsEnterpriseRuntimeFolderState, func() (string, string, bool) { return "", "", false })
 	sandboxSeam("windowsEnterpriseRemoveReplacementCopies", &windowsEnterpriseRemoveReplacementCopies, func() []string { return nil })
 	// The guardian's self-heal (repairEnterpriseHookManagedInstallPlatform,
 	// reached from the hook watch's reconcile under a managed cfg) heals the
