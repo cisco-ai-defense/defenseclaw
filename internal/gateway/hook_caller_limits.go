@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -453,17 +454,24 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 
 // writeHookRateLimited answers 429 with the stable reason and a readable
 // message. retry_after_seconds mirrors Retry-After for the shell hooks, whose
-// curl call keeps only the body and the status.
+// curl call keeps only the body and the status. The response carries its
+// length: a hook reads the whole refusal before it sends the call again, and
+// without a length the response only ends when the handler returns, so the
+// audit row a shed call is given after this answer (recordHookCallerGone)
+// would hold the retry of the hook for as long as that write takes (GAP-1065).
 func writeHookRateLimited(w http.ResponseWriter, reason, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Retry-After", "1")
-	w.WriteHeader(http.StatusTooManyRequests)
-	_ = json.NewEncoder(w).Encode(map[string]string{
+	body, _ := json.Marshal(map[string]string{
 		"error":               "rate_limited",
 		"reason":              reason,
 		"message":             message,
 		"retry_after_seconds": "1",
 	})
+	body = append(body, "\n"...)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", "1")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = w.Write(body)
 }
 
 // hookRunSlot is the caller's run slot one admitted request holds.
