@@ -72,14 +72,16 @@ func TestWindowsLexTrailingBlankLinesEndNoStatement(t *testing.T) {
 
 // Reading a command that ends in n blank lines costs n steps, not n times
 // the length of the tail (GAP-1014: a 35 KB tail of blank lines took 5 s
-// outside -race, 50 s under it). The double size may take at most 2.5x the
-// single size (best of 3 tries, 50 ms for timer noise); a quadratic reading
-// takes 4x.
+// outside -race, 50 s under it). Four times the size may take at most ten
+// times as long (best of 5 tries, 50 ms for timer noise): a linear reading
+// takes 4x, a quadratic one 16x. The ratio of two sizes four times apart
+// leaves room for the timer and the garbage collector on a loaded runner,
+// where a ratio of two sizes only twice apart (2.5x allowed) failed at 3.1x.
 func TestWindowsLexTrailingBlankLinesCostGrowsLinearly(t *testing.T) {
 	read := func(units int) time.Duration {
 		source := "echo ok > out.txt" + strings.Repeat("  \n", units)
 		best := time.Duration(-1)
-		for try := 0; try < 3; try++ {
+		for try := 0; try < 5; try++ {
 			start := time.Now()
 			lexWindowsForTest(t, source, windowsPowerShell, DialectPowerShell)
 			if elapsed := time.Since(start); best < 0 || elapsed < best {
@@ -88,10 +90,10 @@ func TestWindowsLexTrailingBlankLinesCostGrowsLinearly(t *testing.T) {
 		}
 		return best
 	}
-	const units = 10000
-	half, full := read(units), read(2*units)
-	t.Logf("%d blank lines %s, %d blank lines %s", units, half, 2*units, full)
-	if full > half*5/2+50*time.Millisecond {
-		t.Errorf("%d blank lines took %s and %d took %s: not linear (over 2.5x)", units, half, 2*units, full)
+	const units = 5000
+	small, large := read(units), read(4*units)
+	t.Logf("%d blank lines %s, %d blank lines %s", units, small, 4*units, large)
+	if large > small*10+50*time.Millisecond {
+		t.Errorf("%d blank lines took %s and %d took %s: not linear (over 10x for 4x the size)", units, small, 4*units, large)
 	}
 }
