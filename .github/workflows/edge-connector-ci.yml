@@ -13,6 +13,7 @@ on:
       - 'scripts/build-release-assets.sh'
       - 'scripts/install.sh'
       - 'scripts/install.ps1'
+      - 'scripts/runner-apt-install.sh'
       - '.github/workflows/edge-connector-ci.yml'
   pull_request:
     paths:
@@ -25,6 +26,7 @@ on:
       - 'scripts/build-release-assets.sh'
       - 'scripts/install.sh'
       - 'scripts/install.ps1'
+      - 'scripts/runner-apt-install.sh'
       - '.github/workflows/edge-connector-ci.yml'
 
 permissions:
@@ -44,7 +46,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+        run: bash scripts/runner-apt-install.sh "cmake gcc g++ make" cmake build-essential
       - name: Configure (STANDARD profile, dev mode for tests)
         run: cmake -B build -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=ON
         working-directory: edge-connector
@@ -71,7 +73,7 @@ jobs:
           submodules: recursive
           persist-credentials: false
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+        run: bash scripts/runner-apt-install.sh "cmake gcc g++ make" cmake build-essential
       - name: Build mbedTLS 3.6.5
         run: |
           cmake -S .deps/mbedtls -B .deps/mbedtls-build \

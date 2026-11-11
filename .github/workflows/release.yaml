@@ -448,7 +448,7 @@ jobs:
           set -euo pipefail
           args=(--version "$VERSION" --out-dir enterprise-windows)
           if [[ -n "${WINDOWS_AUTHENTICODE_PFX_BASE64:-}" ]]; then
-            sudo apt-get update -q && sudo apt-get install -y -q osslsigncode
+            bash scripts/runner-apt-install.sh osslsigncode osslsigncode
             AUTHENTICODE_PFX="$RUNNER_TEMP/codesign.pfx"; export AUTHENTICODE_PFX
             ( umask 077; printf '%s' "$WINDOWS_AUTHENTICODE_PFX_BASE64" | base64 --decode > "$AUTHENTICODE_PFX" )
             trap 'rm -f "$AUTHENTICODE_PFX"' EXIT
@@ -498,7 +498,7 @@ jobs:
       - name: Build and sign with a throwaway self-signed certificate
         run: |
           set -euo pipefail
-          sudo apt-get update -q && sudo apt-get install -y -q osslsigncode
+          bash scripts/runner-apt-install.sh osslsigncode osslsigncode
           packaging/windows/standalone/prove-signing-path.sh --version "$VERSION" --out-dir "$RUNNER_TEMP/signing-proof"
 
   # Standalone managed-enterprise pkg for MDMs. Developer ID signing and
