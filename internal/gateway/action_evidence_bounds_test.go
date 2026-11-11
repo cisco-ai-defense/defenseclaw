@@ -126,31 +126,47 @@ func (f b36ManagedHookFixture) post(t *testing.T, connector string, payload []by
 // as described and was allowed. Both connectors must deny it, relative or
 // absolute, a direct name or a link only the client can see.
 func TestR103B36RealBoundedHeaderKeepsTruncation(t *testing.T) {
-	f := newB36ManagedHookFixture(t)
-	for name, last := range map[string]string{
-		"relative_protected": "../.ssh/authorized_keys",
-		"relative_link":      "keylink",
-		"absolute_link":      filepath.Join(f.project, "keylink"),
+	// A working folder of 3 KB makes every entry of the map (two absolute
+	// paths) large, so a few operands fill it; under -race the cost of a call
+	// follows the bytes of its operands. Plain operands past the map budget
+	// are named in a short list (hookpaths.OmittedPlainKey) that has a budget
+	// of its own: twelve operands in the folder above the working folder fill
+	// the list and then the map, and operands in the folders above that, which
+	// shrink step by step, close the gap, so the last operand is the one the
+	// map leaves out. The checks below fail if not.
+	f := deepFolderFixtureOf(t, 13, 250)
+	var fill strings.Builder
+	for i := 0; i < 12; i++ {
+		fmt.Fprintf(&fill, " > ../z%02d", i)
+	}
+	for k := 2; k <= 8; k++ {
+		fmt.Fprintf(&fill, " > %szz", strings.Repeat("../", k))
+	}
+	// One representative per reading: a protected name the map omits is
+	// denied on both connectors; a link only the client can see is denied on
+	// the connector that scopes the header (Claude Code) and on the other one.
+	for _, c := range []struct {
+		name, last string
+		connectors []string
+	}{
+		{"relative_protected", "../.ssh/authorized_keys", []string{"claudecode", "codex"}},
+		{"relative_link", "keylink", []string{"claudecode"}},
+		{"absolute_link", filepath.Join(f.project, "keylink"), []string{"codex"}},
 	} {
-		var command strings.Builder
-		command.WriteString("echo hi")
-		for i := 0; i < 530; i++ {
-			fmt.Fprintf(&command, " > ordinary/filler%03d", i)
-		}
-		command.WriteString(" > " + last)
-		payload := f.payload(t, command.String())
+		payload := f.payload(t, "echo hi"+fill.String()+" > "+c.last)
 		header := f.clientHeader(t, payload)
 		targets, ok := hookpaths.Decode(header)
 		if !ok || targets[hookpaths.TruncatedKey] != "1" {
 			t.Fatalf("%s: real client header is not a bounded map: decoded=%t targets=%d truncated=%q reason=%q header_bytes=%d",
-				name, ok, len(targets), targets[hookpaths.TruncatedKey], targets[hookpaths.UnprovenReasonKey], len(header))
+				c.name, ok, len(targets), targets[hookpaths.TruncatedKey], targets[hookpaths.UnprovenReasonKey], len(header))
 		}
-		if _, listed := targets[hookpaths.OperandPath(last, f.project)]; listed {
-			t.Fatalf("%s: the bounded map lists the last operand; the proof needs it omitted", name)
+		if _, listed := targets[hookpaths.OperandPath(c.last, f.project)]; listed {
+			t.Fatalf("%s: the bounded map lists the last operand; the proof needs it omitted (targets=%d budget=%q plain_list_bytes=%d header_bytes=%d)",
+				c.name, len(targets), targets[hookpaths.BudgetKey], len(targets[hookpaths.OmittedPlainKey]), len(header))
 		}
-		for _, connector := range []string{"claudecode", "codex"} {
+		for _, connector := range c.connectors {
 			if got := f.post(t, connector, payload, header); got != "block" {
-				t.Errorf("%s/%s: bounded header verdict = %s, want block", connector, name, got)
+				t.Errorf("%s/%s: bounded header verdict = %s, want block", connector, c.name, got)
 			}
 		}
 	}
@@ -274,8 +290,10 @@ func TestCommandHookResolvedWritesScope(t *testing.T) {
 // and link forms of a protected write after a full map, a Unicode HOME
 // alias of the account home, and a real bounded header reused on another
 // call. A large benign command whose write operands do not fit the map is
-// also denied, as over the evaluation budget (ACTION-COMPOUND-LIMIT,
-// GAP-0146): the documented managed known limit (rel-1-0-3 GAP-0291).
+// also denied in the strict tier, as over the evaluation budget
+// (ACTION-COMPOUND-LIMIT, GAP-0146): the documented managed known limit
+// (rel-1-0-3 GAP-0291). The other tiers allow it, since the client names the
+// plain operands its map leaves out (GAP-1058).
 func TestR103B36BoundedHeaderOmittedOperandsStayUnknown(t *testing.T) {
 	f := newB36ManagedHookFixture(t).strict(t)
 	if err := os.Symlink("../.ssh", filepath.Join(f.project, "dirlink")); err != nil {

@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -31,7 +32,9 @@ func TestResolveConnectorOversizePatchTextIsNotReadAsShell(t *testing.T) {
 	} {
 		var body strings.Builder
 		body.WriteString("*** Begin Patch\n*** Add File: " + target + "\n")
-		body.WriteString("+echo done > " + content + "\n")
+		// The shell line spells its path with forward slashes, which every
+		// shell reads as the path (a backslash is an escape in a shell word).
+		body.WriteString("+echo done > " + filepath.ToSlash(content) + "\n")
 		for i := 0; i < row.lines; i++ {
 			fmt.Fprintf(&body, "+line %d padding padding padding padding\n", i)
 		}

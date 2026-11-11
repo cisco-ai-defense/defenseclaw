@@ -1057,6 +1057,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// the client did describe, and does not make them omitted.
 	clientTargets := request.ResolvedWriteTargets
 	truncated := clientTargets[hookpaths.TruncatedKey] == "1"
+	// The operands the budget-bounded map left out that the client had
+	// resolved as plain (hookpaths.OmittedPlainKey): ordinary, as if listed.
+	omittedPlain := hookpaths.OmittedPlainOperands(clientTargets)
 	// A managed Claude Code or Codex hook reports its evidence the same way,
 	// so the gateway scopes both alike: an operand the client could not place
 	// (a target the call assigns inside a group) is judged by the shell
@@ -1328,6 +1331,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				// is unknown, so fail closed. An operand the client did list,
 				// which connector scoping removed, keeps the local checks.
 				if _, described := clientTargets[target]; !described {
+					// The strict tier keeps its refusal of every omitted
+					// operand: the plain ones are allowed in the others.
+					if omittedPlain[target] && !request.StrictPolicy {
+						return false
+					}
 					omitted := !windowsLocationOrdinaryWriteTarget(target)
 					if omitted && request.overBudgetOmission != nil && clientTargets[hookpaths.BudgetKey] == "1" {
 						*request.overBudgetOmission = true
