@@ -13,6 +13,36 @@ import (
 	"testing"
 )
 
+// sourcedWriterReachesKeys reports whether the reading of line by the hook,
+// run in project, finds the keys file of home written by the script the line
+// names. On a POSIX home that is the client decision a managed gateway blocks
+// on (ActionDecisionKey). A Windows home carries no client decision, the
+// gateway reads the Windows file system itself, so there the write operands
+// of the line are asked: the reading the Windows gateway judges, through the
+// same script reader.
+func sourcedWriterReachesKeys(t *testing.T, project, home, line string) bool {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		keys := filepath.Join(home, ".ssh", "authorized_keys")
+		for _, operand := range LiteralWriteOperands(line, project, home) {
+			if samePathName(operand, keys) {
+				return true
+			}
+		}
+		return false
+	}
+	payload, err := json.Marshal(map[string]any{"session_id": "c1013", "hook_event_name": "PreToolUse",
+		"cwd": project, "tool_name": "Bash", "tool_input": map[string]any{"command": line}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, ok := Decode(Resolve(payload))
+	if !ok {
+		t.Fatalf("%q: client header does not decode", line)
+	}
+	return targets[ActionDecisionKey] == ProtectedTargetDecision
+}
+
 // TestClientDecisionReadsASourcedScriptOutsideTheWorkingFolder: the hook
 // client, the one reader that opens the user home for a managed gateway, reads
 // a script that a source, dot, bash or sh command names wherever it lies:
@@ -56,19 +86,17 @@ func TestClientDecisionReadsASourcedScriptOutsideTheWorkingFolder(t *testing.T) 
 	}
 	for _, spelling := range spellings {
 		for _, command := range []string{". %s", "source %s", "bash %s", "sh %s", `bash -c ". %s"`, `sh -c "bash %s"`} {
+			if runtime.GOOS == "windows" && strings.HasPrefix(spelling, "$") {
+				// Inside double quotes the outer shell would expand $HOME
+				// to the backslash path of the Windows home, which the inner
+				// shell reads as escapes; Git Bash exports the /c/ form. The
+				// inner shell expands it instead.
+				command = strings.ReplaceAll(command, `"`, `'`)
+			}
 			for script, want := range map[string]bool{"wk.sh": true, "ok.sh": false} {
 				line := fmt.Sprintf(command, fmt.Sprintf(spelling, script))
-				payload, err := json.Marshal(map[string]any{"session_id": "c1013", "hook_event_name": "PreToolUse",
-					"cwd": project, "tool_name": "Bash", "tool_input": map[string]any{"command": line}})
-				if err != nil {
-					t.Fatal(err)
-				}
-				targets, ok := Decode(Resolve(payload))
-				if !ok {
-					t.Fatalf("%q: client header does not decode", line)
-				}
-				if got := targets[ActionDecisionKey] == ProtectedTargetDecision; got != want {
-					t.Errorf("%q: client decision = %t, want %t", line, got, want)
+				if got := sourcedWriterReachesKeys(t, project, home, line); got != want {
+					t.Errorf("%q: reaches the keys file = %t, want %t", line, got, want)
 				}
 			}
 		}

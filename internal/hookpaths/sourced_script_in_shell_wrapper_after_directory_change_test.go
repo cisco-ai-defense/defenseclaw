@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -58,19 +59,26 @@ func TestClientDecisionReadsTheScriptOfAShellWrapperWhereTheDirectoryChangeLeave
 		row{`cd a && cd .. && bash -c "source ok.sh"`, true},
 		row{`bash -c "source ok.sh"`, true},
 		row{`bash -c "source wk.sh"`, false},
+		row{`bash -c "cd a && source wk.sh"`, true},
+		row{`bash -c "cd a && source ok.sh"`, false},
 	)
 	for _, r := range rows {
-		payload, err := json.Marshal(map[string]any{"session_id": "wrapper-after-cd", "hook_event_name": "PreToolUse",
-			"cwd": project, "tool_name": "Bash", "tool_input": map[string]any{"command": r.line}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		targets, ok := Decode(Resolve(payload))
-		if !ok {
-			t.Fatal("client header does not decode")
-		}
-		if got := targets[ActionDecisionKey] == ProtectedTargetDecision; got != r.block {
-			t.Errorf("%q: client decision protected = %t, want %t", r.line, got, r.block)
+		// A Windows home carries no client decision (the gateway reads the
+		// Windows file system itself); the write operands below are the
+		// reading it judges there.
+		if runtime.GOOS != "windows" {
+			payload, err := json.Marshal(map[string]any{"session_id": "wrapper-after-cd", "hook_event_name": "PreToolUse",
+				"cwd": project, "tool_name": "Bash", "tool_input": map[string]any{"command": r.line}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := Decode(Resolve(payload))
+			if !ok {
+				t.Fatal("client header does not decode")
+			}
+			if got := targets[ActionDecisionKey] == ProtectedTargetDecision; got != r.block {
+				t.Errorf("%q: client decision protected = %t, want %t", r.line, got, r.block)
+			}
 		}
 		writes := false
 		for _, operand := range LiteralWriteOperands(r.line, project, home) {
