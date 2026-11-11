@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"encoding/json"
+	pathpkg "path"
 	"slices"
 	"strings"
 )
@@ -25,8 +26,12 @@ import (
 type nativeFileWrite struct {
 	target, added, replaced string
 	whole, edit             bool
-	after, before           []string
-	all                     []bool
+	// combined marks the write withRepeatedTargetResults makes of the blocks
+	// of one file taken together: a text for the content proofs only, no
+	// block the tool applies.
+	combined      bool
+	after, before []string
+	all           []bool
 }
 
 // NativeEditContentLimit is the largest file text a proof reads for an Edit
@@ -186,7 +191,7 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 		for _, change := range envelope.changes {
 			patchFiles[command.ID][change.path] = true
 		}
-		for _, write := range nativePatchEnvelopeWrites(text) {
+		for _, write := range nativePatchEnvelopeWrites(envelope.canonical) {
 			write.added = boundedNativeText(write.added)
 			write.replaced = boundedNativeText(write.replaced)
 			writes = append(writes, write)
@@ -352,20 +357,20 @@ func nativePatchWrites(object map[string]any) []nativeFileWrite {
 		return nil
 	}
 	text, ok := nativeStringField(object, nativePatchTextKeys)
-	if !ok || parsePatchEnvelope(text).status != StatusComplete {
+	envelope := parsePatchEnvelope(text)
+	if !ok || envelope.status != StatusComplete {
 		return nil
 	}
-	return nativePatchEnvelopeWrites(text)
+	return nativePatchEnvelopeWrites(envelope.canonical)
 }
 
 // nativePatchEnvelopeWrites reads the files and the added and removed lines of
-// an apply_patch envelope that parsePatchEnvelope read complete.
+// an apply_patch envelope that parsePatchEnvelope read complete (its
+// canonical form).
 func nativePatchEnvelopeWrites(text string) []nativeFileWrite {
 	var writes []nativeFileWrite
 	var current []int
-	for _, line := range strings.Split(
-		strings.TrimSuffix(strings.ReplaceAll(text, "\r\n", "\n"), "\n"), "\n",
-	) {
+	for _, line := range strings.Split(text, "\n") {
 		switch {
 		case strings.HasPrefix(line, "*** Add File: "), strings.HasPrefix(line, "*** Update File: "):
 			writes = append(writes, nativeFileWrite{
@@ -398,6 +403,40 @@ func nativePatchEnvelopeWrites(text string) []nativeFileWrite {
 				*writes[index].lastHunk() += strings.TrimPrefix(line, " ") + "\n"
 			}
 		}
+	}
+	return withRepeatedTargetResults(writes)
+}
+
+// withRepeatedTargetResults adds, for a file the envelope changes in more than
+// one block, the write of its blocks taken together: the tool applies the
+// blocks in order, so the file ends with the text of all of them, and a
+// document that one block opens and a later one finishes is judged as the
+// text it makes, as the hunks of one block are. Each block stays a write of its
+// own, because each block is applied and the file holds its text.
+func withRepeatedTargetResults(writes []nativeFileWrite) []nativeFileWrite {
+	key := func(write nativeFileWrite) string {
+		return pathpkg.Clean(strings.ReplaceAll(write.target, `\`, "/"))
+	}
+	blocks := map[string][]int{}
+	var order []string
+	for index, write := range writes {
+		name := key(write)
+		if len(blocks[name]) == 0 {
+			order = append(order, name)
+		}
+		blocks[name] = append(blocks[name], index)
+	}
+	for _, name := range order {
+		if len(blocks[name]) < 2 {
+			continue
+		}
+		merged := nativeFileWrite{target: writes[blocks[name][0]].target, combined: true}
+		for _, index := range blocks[name] {
+			merged.added += writes[index].added
+			merged.replaced += writes[index].replaced
+			merged.after = append(merged.after, writes[index].after...)
+		}
+		writes = append(writes, merged)
 	}
 	return writes
 }

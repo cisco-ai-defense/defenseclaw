@@ -18,7 +18,6 @@ package actionfacts
 
 import (
 	"os"
-	pathpkg "path"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -32,10 +31,15 @@ type patchPathChange struct {
 }
 
 type patchEnvelopeResult struct {
-	changes []patchPathChange
-	hasMove bool
-	status  ParseStatus
-	issue   IssueCode
+	// canonical is the envelope as the patch tool reads it: without the white
+	// space around the patch and around a file header, and with LF line ends.
+	// The content proofs read the files text from it, so they judge what the
+	// tool applies.
+	canonical string
+	changes   []patchPathChange
+	hasMove   bool
+	status    ParseStatus
+	issue     IssueCode
 }
 
 func isApplyPatchTool(tool string) bool {
@@ -66,7 +70,24 @@ func isPatchInputField(field string) bool {
 // value keeps the nested reading.
 func isPatchEnvelopeField(field string, value any) bool {
 	text, ok := value.(string)
-	return ok && field == "input" && strings.HasPrefix(text, "*** Begin Patch")
+	return ok && field == "input" && strings.HasPrefix(strings.TrimSpace(text), patchBeginLine)
+}
+
+const (
+	patchBeginLine = "*** Begin Patch"
+	patchEndLine   = "*** End Patch"
+)
+
+// patchFileHeaderPrefixes start the header line of a file of a patch.
+var patchFileHeaderPrefixes = []string{"*** Add File: ", "*** Update File: ", "*** Delete File: "}
+
+func isPatchFileHeader(line string) bool {
+	for _, prefix := range patchFileHeaderPrefixes {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // isAcceptedPatchPath reports a patch target with one stable meaning: a path
@@ -198,16 +219,29 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		return fail(StatusLimitExceeded, IssueInputLimit)
 	}
 
-	normalized := strings.ReplaceAll(text, "\r\n", "\n")
-	normalized = strings.TrimSuffix(normalized, "\n")
+	// The patch tool trims the white space around the patch text, and around
+	// its first and last line, before it checks the Begin and End markers, and
+	// reads CRLF as LF. The white space it trims is every Unicode space (the
+	// ASCII ones, a lone carriage return, U+0085, U+00A0, U+1680, U+2000 to
+	// U+200A, U+2028, U+2029, U+202F, U+205F and U+3000), the set that
+	// strings.TrimSpace takes, so the envelope is judged in that form: the same
+	// text with any padding or line end style is the same patch. A carriage
+	// return that does not end a line and lies between the markers is not
+	// padding: one beside a directive keeps the envelope unread.
+	normalized := strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
 	lines := strings.Split(normalized, "\n")
-	if len(lines) < 3 || lines[0] != "*** Begin Patch" ||
-		lines[len(lines)-1] != "*** End Patch" {
+	if len(lines) < 3 {
 		return fail(StatusInvalid, IssueInvalidSyntax)
 	}
+	lines[0] = strings.TrimSpace(lines[0])
+	lines[len(lines)-1] = strings.TrimSpace(lines[len(lines)-1])
+	if lines[0] != patchBeginLine || lines[len(lines)-1] != patchEndLine {
+		return fail(StatusInvalid, IssueInvalidSyntax)
+	}
+	canonical := make([]string, 0, len(lines))
+	canonical = append(canonical, lines[0])
 
 	changes := make([]patchPathChange, 0, 8)
-	seenPaths := make(map[string]struct{})
 	directives := 0
 	pendingUpdate := -1
 	activeDirective := ""
@@ -221,6 +255,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		if strings.ContainsRune(line, '\r') && !isPatchDirectiveLine(line) {
 			return fail(StatusInvalid, IssueInvalidSyntax)
 		}
+		canonical = append(canonical, line)
 		if line == "*** End of File" {
 			if activeDirective != "update" || !updateHunk || !updateContent {
 				return fail(StatusInvalid, IssueInvalidSyntax)
@@ -244,6 +279,12 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 				contentAfterDirective = true
 				continue
 			}
+			// The tool reads an empty line of an update as an empty line of
+			// its text.
+			if updateHunk && line == "" {
+				contentAfterDirective = true
+				continue
+			}
 			if updateHunk && (strings.HasPrefix(line, "+") ||
 				strings.HasPrefix(line, "-") || strings.HasPrefix(line, " ")) {
 				contentAfterDirective = true
@@ -251,12 +292,20 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 				continue
 			}
 		}
+		// The tool reads the header of a file without the white space around
+		// it. A line that starts with a space inside an update is a line of
+		// its text, not a header.
+		if header := strings.TrimSpace(line); header != line &&
+			isPatchFileHeader(header) && (activeDirective != "update" || line[0] != ' ') {
+			line = header
+			canonical[len(canonical)-1] = header
+		}
 		if line == "" || strings.HasPrefix(line, "+") ||
 			strings.HasPrefix(line, "-") || strings.HasPrefix(line, " ") ||
 			strings.HasPrefix(line, "@@") {
 			return fail(StatusInvalid, IssueInvalidSyntax)
 		}
-		if line == "*** Begin Patch" || line == "*** End Patch" {
+		if line == patchBeginLine || line == patchEndLine {
 			return fail(StatusInvalid, IssueInvalidSyntax)
 		}
 
@@ -289,18 +338,11 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		if directives > maxPatchDirectives {
 			return fail(StatusLimitExceeded, IssueFactLimit)
 		}
-		// The envelope can spell the same effective target through dot
-		// segments or either separator style. Key duplicate detection by that
-		// conservative lexical identity so conflicting access facts cannot regain
-		// authority after path normalization.
-		pathKey := pathpkg.Clean(strings.ReplaceAll(pathValue, `\`, "/"))
-		if _, duplicate := seenPaths[pathKey]; duplicate {
-			return fail(StatusAmbiguous, IssueConflictingSources)
-		}
-
+		// A file the envelope names in more than one block is changed by each
+		// block in order, so every block is a change of its own: each is judged
+		// by the path rules, and nativePatchEnvelopeWrites by the content rules.
 		switch kind {
 		case "add", "update":
-			seenPaths[pathKey] = struct{}{}
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessWrite,
 			})
@@ -313,7 +355,6 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 			updateHunk = false
 			updateContent = false
 		case "delete":
-			seenPaths[pathKey] = struct{}{}
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessDelete,
 			})
@@ -327,7 +368,6 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 				contentAfterDirective {
 				return fail(StatusInvalid, IssueInvalidSyntax)
 			}
-			seenPaths[pathKey] = struct{}{}
 			changes[pendingUpdate].access = PathAccessDelete
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessWrite,
@@ -347,9 +387,10 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		return fail(StatusInvalid, IssueInvalidSyntax)
 	}
 	return patchEnvelopeResult{
-		changes: changes,
-		hasMove: hasMove,
-		status:  StatusComplete,
+		canonical: strings.Join(append(canonical, patchEndLine), "\n"),
+		changes:   changes,
+		hasMove:   hasMove,
+		status:    StatusComplete,
 	}
 }
 

@@ -3721,6 +3721,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
 			EnforcementCapable:      enforcementCapable,
 			StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
+			ManagedInstall:          a.managedInstallForHook(ctx),
 			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
 			ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
 			patchTarget:             hermesV4APatch,

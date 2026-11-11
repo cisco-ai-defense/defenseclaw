@@ -153,7 +153,7 @@ func overLimitWriteReduction(input Input, bounded bool) (Facts, overLimitReducti
 // reaches through links (nil when unknown).
 func OverLimitWriteElidedContentTarget(input Input, facts Facts, resolved map[string]string) (string, bool) {
 	if !LimitExceededWriteTool(input, facts) {
-		return unreadPatchContentTarget(input, facts, resolved)
+		return unreadPatchContentTarget(input, facts, resolved, false)
 	}
 	if len(input.Args) > maxOverLimitWriteArgsBytes || !utf8.Valid(input.Args) {
 		return "", false
@@ -215,14 +215,16 @@ func pathContentRuleClass(path PathFact, viewCWD, inputCWD string, resolved map[
 // an envelope past maxArgsJSONBytes is (OverLimitWriteElidedContentTarget):
 // the callers take the same conservative finding, and no size leaves a band in
 // which neither reading applies. An ordinary file is never such a target.
-func unreadPatchContentTarget(input Input, facts Facts, resolved map[string]string) (string, bool) {
+// With combined it reads the write the blocks of one file make together
+// (OverLimitCombinedPatchContentTarget) instead of the blocks themselves.
+func unreadPatchContentTarget(input Input, facts Facts, resolved map[string]string, combined bool) (string, bool) {
 	if !isApplyPatchTool(input.Tool) || !facts.Authoritative() ||
 		input.Command != "" || len(input.Argv) != 0 {
 		return "", false
 	}
 	unread := map[string]struct{}{}
 	for _, write := range nativeFileWrites(input.Tool, input.Args) {
-		if write.target != "" && write.textOverProofBound() {
+		if write.target != "" && write.combined == combined && write.textOverProofBound() {
 			unread[write.target] = struct{}{}
 		}
 	}
@@ -241,6 +243,17 @@ func unreadPatchContentTarget(input Input, facts Facts, resolved map[string]stri
 		}
 	}
 	return "", false
+}
+
+// OverLimitCombinedPatchContentTarget is unreadPatchContentTarget for the
+// blocks of one file taken together: every block alone is within the proof
+// bound (and so read), but the text they make together is not, so no rule has
+// judged a document that one block opens and a later block finishes. Only the
+// strict tier and a managed install act on it: in the default and permissive
+// tiers of a per-user install such blocks stay allowed, as a file written by
+// separate calls does.
+func OverLimitCombinedPatchContentTarget(input Input, facts Facts, resolved map[string]string) (string, bool) {
+	return unreadPatchContentTarget(input, facts, resolved, true)
 }
 
 // textOverProofBound reports a text of the write, or a piece of it, that is
@@ -651,11 +664,18 @@ func compactPatchSectionLines(lines []string) (kept []string, dropped bool) {
 // elided; unscoped is set when a hunk line outside any file was dropped.
 // Files that were not compacted lose nothing.
 func reducePatchEnvelope(text string, bounded bool, budget *int) (reduced string, elided []string, unscoped, ok bool) {
-	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	// The padding around the patch is dropped, as the tool drops it; the line
+	// end that closes the patch is kept.
+	closingLineEnd := ""
+	if strings.HasSuffix(strings.TrimRight(text, " \t\r"), "\n") {
+		closingLineEnd = "\n"
+	}
+	normalized := strings.ReplaceAll(strings.TrimSpace(text), "\r\n", "\n")
 	if strings.ContainsRune(normalized, '\r') {
 		return "", nil, false, false
 	}
 	var out []string
+	inUpdate := false
 	section := &patchEnvelopeSection{}
 	flush := func() {
 		lines, dropped := section.lines, false
@@ -674,6 +694,15 @@ func reducePatchEnvelope(text string, bounded bool, budget *int) (reduced string
 	}
 	previous := ""
 	for _, line := range strings.Split(normalized, "\n") {
+		// The tool reads a file header without the white space around it
+		// (parsePatchEnvelope), so the header is kept in that form.
+		if header := strings.TrimSpace(line); header != line &&
+			isPatchFileHeader(header) && (!inUpdate || line[0] != ' ') {
+			line = header
+		}
+		if isPatchFileHeader(line) {
+			inUpdate = strings.HasPrefix(line, "*** Update File: ")
+		}
 		switch {
 		case strings.HasPrefix(line, "*** Add File: "), strings.HasPrefix(line, "*** Update File: "),
 			strings.HasPrefix(line, "*** Delete File: "):
@@ -700,5 +729,5 @@ func reducePatchEnvelope(text string, bounded bool, budget *int) (reduced string
 		section.hunkBytes += len(line) + 1
 	}
 	flush()
-	return strings.Join(out, "\n"), elided, unscoped, true
+	return strings.Join(out, "\n") + closingLineEnd, elided, unscoped, true
 }

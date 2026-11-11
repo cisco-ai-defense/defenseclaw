@@ -1078,18 +1078,12 @@ func scanRuleCategoriesWithOptions(
 	// literals (rxprefilter, GAP-2279); both checks never skip a match.
 	raw := &ruleScanText{text: text}
 	rawScan := rxprefilter.NewText(text)
+	rawMatches := scanRuleMatchesInParallel(generation, options, seen, raw, rawScan)
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
-		categoryAllowed := options.allowsCategory(cat.Name)
-		if !categoryAllowed && !options.allowsMigratedLiteralRule(cat.Name) {
-			continue
-		}
 		for ruleIndex := range cat.Rules {
 			rule := &cat.Rules[ruleIndex]
-			if !categoryAllowed && !rule.migratedLiteral {
-				continue
-			}
-			if !options.allows(rule.ID, rule.ToolCallOnly) {
+			if !ruleScanEligible(options, cat, rule) {
 				continue
 			}
 			// An effective profile can contain the same canonical rule through
@@ -1098,10 +1092,7 @@ func scanRuleCategoriesWithOptions(
 			if seen[rule.ID] {
 				continue
 			}
-			if !raw.mayMatch(rule.Pattern) {
-				continue
-			}
-			loc := firstAcceptedRuleMatchIn(*rule, rawScan)
+			loc := rawMatches.match(rule, raw, rawScan)
 			if loc == nil {
 				continue
 			}
@@ -1130,27 +1121,18 @@ func scanRuleCategoriesWithOptions(
 	if normalized != text {
 		normalizedText := &ruleScanText{text: normalized}
 		normalizedScan := rxprefilter.NewText(normalized)
+		normalizedMatches := scanRuleMatchesInParallel(generation, options, seen, normalizedText, normalizedScan)
 		for categoryIndex := range generation.categories {
 			cat := &generation.categories[categoryIndex]
-			categoryAllowed := options.allowsCategory(cat.Name)
-			if !categoryAllowed && !options.allowsMigratedLiteralRule(cat.Name) {
-				continue
-			}
 			for ruleIndex := range cat.Rules {
 				rule := &cat.Rules[ruleIndex]
-				if !categoryAllowed && !rule.migratedLiteral {
-					continue
-				}
-				if !options.allows(rule.ID, rule.ToolCallOnly) {
+				if !ruleScanEligible(options, cat, rule) {
 					continue
 				}
 				if seen[rule.ID] {
 					continue // already found on raw pass
 				}
-				if !normalizedText.mayMatch(rule.Pattern) {
-					continue
-				}
-				loc := firstAcceptedRuleMatchIn(*rule, normalizedScan)
+				loc := normalizedMatches.match(rule, normalizedText, normalizedScan)
 				if loc == nil {
 					continue
 				}

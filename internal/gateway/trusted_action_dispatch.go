@@ -158,7 +158,11 @@ type trustedActionRequest struct {
 	Connector          string
 	EnforcementCapable bool
 	// StrictPolicy grades an unverifiable extra argument as a block.
-	StrictPolicy               bool
+	StrictPolicy bool
+	// ManagedInstall is set for a call judged by a managed enterprise install:
+	// content the rules could not prove is judged as the strict tier judges it,
+	// because a managed device fails closed.
+	ManagedInstall             bool
 	UnknownKeyPossibleOverflow bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
@@ -9517,7 +9521,7 @@ func trustedPowerShellExecutionTool(tool string) bool {
 	}
 }
 
-func trustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool) {
+func decodeTrustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	opening, err := decoder.Token()
 	if err != nil || opening != json.Delim('{') {
