@@ -2782,15 +2782,14 @@ func TestVerifyClaudeCodeHookMatrixRejectsMalformedUnexpectedEvent(t *testing.T)
 		t.Fatal(err)
 	}
 	hooks := settings["hooks"].(map[string]interface{})
-	// The base invocation is that of an event Setup writes unchanged; on
-	// Windows PreToolUse may differ from it (claudeCodeHandlerInvocation).
-	baseHandler := hooks["Stop"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
-	expectedCommand := baseHandler["command"].(string)
-	var expectedArgs []string
-	if rawArgs, exists := baseHandler["args"].([]interface{}); exists {
-		for _, rawArg := range rawArgs {
-			expectedArgs = append(expectedArgs, rawArg.(string))
-		}
+	// The base invocation is the one Setup renders each event from; on
+	// Windows every event's registered handler wraps it differently, so no
+	// registered handler is the base.
+	expectedCommand, expectedArgs := claudeCodeHookInvocation(setupOpts, filepath.Join(dir, "hooks", "claude-code-hook.sh"))
+	// The unchanged registration verifies, so each rejection below is the
+	// malformed UnexpectedEvent's own.
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"), setupOpts); err != nil {
+		t.Fatalf("the registration Setup wrote does not verify: %v", err)
 	}
 	baseline, err := json.Marshal(hooks)
 	if err != nil {
