@@ -37,6 +37,46 @@ const hookAnswerQueueBudget = 3500 * time.Millisecond
 // explains (GAP-0889).
 const hookAnswerQueueCeiling = 3 * hookAnswerQueueBudget
 
+// A late answer is told from a starved host by the answers around it. A host
+// that keeps the process off the CPU slows every call in flight, so the calls
+// beside a late one are slow too. A call that stalls alone is late while the
+// process keeps answering quickly: at least hookAnswerStallPeers answers of at
+// most hookAnswerQueueBudget/3 finish after the late one has been pending for a
+// whole budget, and hookAnswerStallMargin or more before it finishes. The
+// margin keeps the answers a paused process finishes together with the late one
+// from counting as proof that the process was running (GAP-0889).
+const (
+	hookAnswerStallPeers  = 3
+	hookAnswerStallMargin = 250 * time.Millisecond
+	hookAnswerStallFast   = hookAnswerQueueBudget / 3
+)
+
+// hookAnswer is one answered hook call: when it ran, how long it took, and
+// whether the host kept a busy thread of the process from the CPU for a
+// quarter of exactly that call (testenv.Window). The calls are in flight
+// together and a call's work moves between goroutines and threads, so no
+// thread is the call's own: the window is never taken off a time, it only says
+// whether the host let the measurement run (GAP-0889).
+type hookAnswer struct {
+	started, ended time.Time
+	took           time.Duration
+	starved        bool
+}
+
+// stalledAlone reports whether the late answer waited while the process was
+// answering other calls quickly, which no host effect on the whole process
+// explains.
+func (late hookAnswer) stalledAlone(all []hookAnswer) bool {
+	from, to := late.started.Add(hookAnswerQueueBudget), late.ended.Add(-hookAnswerStallMargin)
+	peers := 0
+	for _, other := range all {
+		if other.took <= hookAnswerStallFast && !other.ended.Before(from) && !other.ended.After(to) {
+			peers++
+		}
+	}
+	return peers >= hookAnswerStallPeers
+}
+
 // TestHookAnswersStayInsideTheBudgetUnderCPULoad drives the real hook
 // handler, audit store and v8 runtime at 10 benign Claude Code PreToolUse
 // calls a second from ten sessions on two CPUs with six busy goroutines (the
@@ -65,17 +105,7 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
 	bindHookLifecycleV8(t, api, fixture.runtime)
 	cwd := t.TempDir()
-	// answer is one call: how long it took, and whether the host kept a busy
-	// thread of this process from the CPU for a quarter of exactly that call
-	// (testenv.Window). The calls are in flight together and a call's work
-	// moves between goroutines and threads, so no thread is the call's own:
-	// the window is never taken off a time, it only says whether the host let
-	// the measurement run (GAP-0889).
-	type answer struct {
-		took    time.Duration
-		starved bool
-	}
-	call := func(session string, index int) (answer, int) {
+	call := func(session string, index int) (hookAnswer, int) {
 		body, err := json.Marshal(map[string]any{
 			"session_id": session, "transcript_path": filepath.Join(cwd, "transcript.jsonl"),
 			"cwd": cwd, "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -84,15 +114,16 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 		})
 		if err != nil {
 			t.Error(err)
-			return answer{}, 0
+			return hookAnswer{}, 0
 		}
 		window := testenv.StartWindow()
 		started := time.Now()
 		rec := httptest.NewRecorder()
 		api.handleAgentHook("claudecode").ServeHTTP(rec,
 			httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)))
-		took := time.Since(started)
-		return answer{took: took, starved: took > hookAnswerQueueBudget && window.Starved()}, rec.Code
+		ended := time.Now()
+		took := ended.Sub(started)
+		return hookAnswer{started: started, ended: ended, took: took, starved: took > hookAnswerQueueBudget && window.Starved()}, rec.Code
 	}
 	for index := range 20 {
 		call("warm", index)
@@ -115,7 +146,7 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	const sessions = 10
 	const duration = 20 * time.Second
 	var mu sync.Mutex
-	var answers []answer
+	var answers []hookAnswer
 	var calls sync.WaitGroup
 	deadline := time.Now().Add(duration)
 	for session := range sessions {
@@ -149,7 +180,7 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	if len(answers) < sessions*int(duration/time.Second)/2 {
 		t.Fatalf("only %d calls ran", len(answers))
 	}
-	over, overOnAFreeHost, beyondCeiling := 0, 0, 0
+	over, overOnAFreeHost, beyondCeiling, stalls := 0, 0, 0, 0
 	for _, a := range answers {
 		if a.took > hookAnswerQueueCeiling {
 			beyondCeiling++
@@ -158,6 +189,8 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 			over++
 			if !a.starved {
 				overOnAFreeHost++
+			} else if a.stalledAlone(answers) {
+				stalls++
 			}
 		}
 	}
@@ -177,9 +210,15 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	// and the run says so and is not judged. A call that missed it on a host
 	// that left the process three quarters of its CPU is never in that case:
 	// the answers take under 1 s there. No answer is excused beyond the
-	// ceiling (three budgets): that fails whatever the host did.
+	// ceiling (three budgets): that fails whatever the host did. A starved
+	// host does not excuse a late answer that stalled alone either (see
+	// stalledAlone): the flag only says some busy thread waited, not that the
+	// late call lost that CPU time.
 	if beyondCeiling > 0 {
 		t.Fatalf("%d of %d answers over the %v answer ceiling, starved host or not (max %v, p95 %v)", beyondCeiling, len(answers), hookAnswerQueueCeiling, answers[len(answers)-1].took, p95)
+	}
+	if stalls > 0 {
+		t.Fatalf("%d of %d answers over the %v answer budget while the process kept answering other calls quickly (max %v, p95 %v)", stalls, len(answers), hookAnswerQueueBudget, answers[len(answers)-1].took, p95)
 	}
 	if overOnAFreeHost > 0 {
 		t.Fatalf("%d of %d answers over the %v answer budget (%d on a free host; max %v, p95 %v)", over, len(answers), hookAnswerQueueBudget, overOnAFreeHost, answers[len(answers)-1].took, p95)
@@ -187,5 +226,45 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	if over > 0 {
 		t.Skipf("host starved the process: %d of %d answers over the %v answer budget, each while a busy thread of the process was off the CPU for %.0f%% or more of the call; max %v, p95 %v. The budget was not judged",
 			over, len(answers), hookAnswerQueueBudget, testenv.StarvedShare*100, answers[len(answers)-1].took, p95)
+	}
+}
+
+// TestLateHookAnswerStalledAloneIsToldFromAStarvedHost: a late answer that
+// waited while the process answered other calls quickly is a stall of its own
+// and is never excused by a starved host; a late answer beside slow calls, or
+// beside the calls a paused process finishes together with it, still is
+// (GAP-0889).
+func TestLateHookAnswerStalledAloneIsToldFromAStarvedHost(t *testing.T) {
+	t.Parallel()
+	origin := time.Unix(1000, 0)
+	at := func(started, took time.Duration) hookAnswer {
+		return hookAnswer{started: origin.Add(started), ended: origin.Add(started + took), took: took, starved: true}
+	}
+	peersEvery := func(from, to, took time.Duration) []hookAnswer {
+		var out []hookAnswer
+		for start := from; start < to; start += 100 * time.Millisecond {
+			out = append(out, at(start, took))
+		}
+		return out
+	}
+	cases := []struct {
+		name    string
+		late    hookAnswer
+		peers   []hookAnswer
+		stalled bool
+	}{
+		{"blocked for 8 s while calls answer in half a second", at(0, 8*time.Second), peersEvery(0, 8*time.Second, 500*time.Millisecond), true},
+		{"late beside calls that are slow too", at(0, 6*time.Second), peersEvery(0, 6*time.Second, 2500*time.Millisecond), false},
+		{"late across a pause the process resumed from", at(0, 5200*time.Millisecond), peersEvery(5*time.Second, 5200*time.Millisecond, 100*time.Millisecond), false},
+		{"late with no call to compare to", at(0, 4*time.Second), nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			all := append([]hookAnswer{c.late}, c.peers...)
+			if got := c.late.stalledAlone(all); got != c.stalled {
+				t.Fatalf("stalledAlone = %v, want %v", got, c.stalled)
+			}
+		})
 	}
 }
