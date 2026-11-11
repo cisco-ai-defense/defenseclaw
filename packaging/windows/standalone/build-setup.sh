@@ -14,7 +14,7 @@
 # Two payload channels:
 #
 #   default (hash-pinned, unsigned)
-#       Builds the eight inner files from this checkout and embeds them
+#       Builds the nine inner files from this checkout and embeds them
 #       with distribution_flavor "standalone-unsigned". At install time the
 #       Setup stages the digests it verified against its own manifest as the
 #       lifecycle's hash_pinned trust anchor, so the trust root is the Setup
@@ -29,7 +29,7 @@
 #       Sign the outer Setup with the same certificate afterward.
 #
 #   --sign-command <cmd> (Authenticode-signed executables/scripts, built here)
-#       Builds the eight inner files like the default channel, runs
+#       Builds the nine inner files like the default channel, runs
 #       "<cmd> <file>" on each of them (the command signs the file in place,
 #       for example packaging/mdm/signing/authenticode-sign.sh), embeds them
 #       with distribution_flavor "standalone", then signs the outer Setup
@@ -118,6 +118,7 @@ PAYLOAD_FILES=(
     DefenseClawEnterprise.psm1
     defenseclaw-acp.exe
     defenseclaw-gateway.exe
+    defenseclaw-hook-guard.exe
     defenseclaw-hook.exe
     defenseclaw-scanners.exe
     defenseclaw-sensor-helper.exe
@@ -180,6 +181,7 @@ else
     build "${STAGE_DIR}/defenseclaw-gateway.exe" ./cmd/defenseclaw gateway console
     build "${STAGE_DIR}/defenseclaw-acp.exe" ./cmd/defenseclaw-acp acp-guard console
     build "${STAGE_DIR}/defenseclaw-hook.exe" ./cmd/defenseclaw-hook hook gui
+    build "${STAGE_DIR}/defenseclaw-hook-guard.exe" ./cmd/defenseclaw-hook-guard hook-guard gui
     build "${STAGE_DIR}/defenseclaw-sensor-helper.exe" ./cmd/defenseclaw-sensor-helper sensor-helper gui
     echo "==> building the scanner runtime"
     "${REPO_ROOT}/packaging/windows/standalone/build-scanner-runtime.sh" --out-dir "${STAGE_DIR}/scanner-runtime"

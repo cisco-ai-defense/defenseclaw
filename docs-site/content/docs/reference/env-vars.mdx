@@ -348,7 +348,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 151 test-only variables">
+<Accordion title="Show the 152 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -452,6 +452,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_TEST_CODEX_MANAGED_SUBPROCESS`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marker the Windows connector-reconcile subprocess test sets in a re-execed child so it takes the Codex-managed code path instead of the parent's test-harness path.<br/>**Read by:** `internal/cli/connector_reconcile_subprocess_windows_test.go` |
 | `DEFENSECLAW_TEST_COMMAND`<br/>Default: `unset`<br/>Values: `start`, `status`, `restart`, `unset`<br/>Managed host: `ignore` | Gateway subcommand selected by the native Windows daemon executable test harness.<br/>**Read by:** `internal/cli/daemon_executable_windows_test.go` |
 | `DEFENSECLAW_TEST_EXE`<br/>Default: `unset`<br/>Values: `absolute temporary executable path`, `unset`<br/>Managed host: `ignore` | Absolute path to the temporary gateway executable invoked by the native Windows daemon executable tests.<br/>**Read by:** `internal/cli/daemon_executable_windows_test.go` |
+| `DEFENSECLAW_TEST_FAKE_GUARD_STATUS`<br/>Default: `unset`<br/>Values: `integer exit status`, `unset`<br/>Managed host: `ignore` | Makes a copy of the connector test binary answer as the Claude Code hook guard with the given exit status, so the Windows tests can run the registered cmd.exe hook command line under the real command processor.<br/>**Read by:** `internal/gateway/connector/claudecode_chain_cmd_helper_test.go` |
 | `DEFENSECLAW_TEST_GRACEFUL_STOP_MARKER`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries the marker used by the authenticated graceful-stop daemon fixture.<br/>**Read by:** `internal/daemon/daemon_test.go` |
 | `DEFENSECLAW_TEST_GRACEFUL_STOP_OBSERVED`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries the observation marker used to prove the daemon graceful-stop fixture received its shutdown request.<br/>**Read by:** `internal/daemon/daemon_test.go` |
 | `DEFENSECLAW_TEST_GRACEFUL_STOP_RELEASE`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries the release marker used to let the daemon graceful-stop fixture finish after observing shutdown.<br/>**Read by:** `internal/daemon/daemon_test.go` |

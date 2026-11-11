@@ -34,6 +34,7 @@ func TestWindowsConfiguredMachinePolicySurvivesEmptyEnrollment(t *testing.T) {
 			previousCodexRemover, previousCodexPublisher := enterpriseHookCodexRequirementsRemover, enterpriseHookCodexTargetsPublisher
 			previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
 			previousClaudeDeactivator, previousCursorDeactivator := enterpriseHookClaudePolicyDeactivator, enterpriseHookCursorPolicyDeactivator
+			previousClaudeEnsurer := enterpriseHookClaudePolicyEnsurer
 			previousClaudeIdentity, previousCursorIdentity := enterpriseHookClaudePolicyIdentityVerifier, enterpriseHookCursorPolicyIdentityVerifier
 			t.Cleanup(func() {
 				cfg = previousCfg
@@ -42,6 +43,7 @@ func TestWindowsConfiguredMachinePolicySurvivesEmptyEnrollment(t *testing.T) {
 				enterpriseHookCodexRequirementsRemover, enterpriseHookCodexTargetsPublisher = previousCodexRemover, previousCodexPublisher
 				enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
 				enterpriseHookClaudePolicyDeactivator, enterpriseHookCursorPolicyDeactivator = previousClaudeDeactivator, previousCursorDeactivator
+				enterpriseHookClaudePolicyEnsurer = previousClaudeEnsurer
 				enterpriseHookClaudePolicyIdentityVerifier, enterpriseHookCursorPolicyIdentityVerifier = previousClaudeIdentity, previousCursorIdentity
 			})
 			cfg = &config.Config{
@@ -62,6 +64,8 @@ func TestWindowsConfiguredMachinePolicySurvivesEmptyEnrollment(t *testing.T) {
 			}
 			var removedCodex bool
 			var removedOther bool
+			ensuredClaude := false
+			enterpriseHookClaudePolicyEnsurer = func(connector.SetupOpts) error { ensuredClaude = true; return nil }
 			enterpriseHookClaudePolicyDeactivator = func() error { removedOther, active = true, false; return nil }
 			enterpriseHookCursorPolicyDeactivator = func() error { removedOther, active = true, false; return nil }
 			enterpriseHookCodexRequirementsRemover = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
@@ -83,6 +87,9 @@ func TestWindowsConfiguredMachinePolicySurvivesEmptyEnrollment(t *testing.T) {
 			}
 			if removedCodex {
 				t.Fatal("empty Codex enrollment removed configured machine requirements")
+			}
+			if name == "claudecode" && !ensuredClaude {
+				t.Fatal("active Claude policy was not checked for an earlier registered command")
 			}
 			if err := verifyEnterpriseHookManagedEnrollments(manifest, "127.0.0.1:32109"); err != nil {
 				t.Fatalf("configured %s policy with zero targets failed verify: %v", name, err)
@@ -238,6 +245,11 @@ func TestWindowsMachineGuardRepairStateTable(t *testing.T) {
 						wantEnsures = 1
 					case damaged:
 						wantRestores = 1
+					}
+					if connectorName == "claudecode" {
+						// Every reconcile checks an authenticated active policy for
+						// an earlier command form, including a signed-out enrollment.
+						wantEnsures = 2
 					}
 					active := guard == "present"
 					// The machine-owned record keeps Alice through damage. An
@@ -561,7 +573,8 @@ func TestWindowsClaudeDeletedPolicyReconcileRetainsEnrolledTargets(t *testing.T)
 			t.Fatalf("reconcile publication (exact=%t): %v", publishExact, err)
 		}
 	}
-	if ensures != 1 || published != 2 {
+	// Every reconcile pass checks an active policy for an earlier command form.
+	if ensures != 2 || published != 2 {
 		t.Fatalf("reconcile ensured policy %d times and published targets %d times", ensures, published)
 	}
 }

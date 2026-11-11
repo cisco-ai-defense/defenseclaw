@@ -29,6 +29,18 @@ func (c *Config) BindRulePackPostures(postures map[string]string) {
 	}
 }
 
+// BindRulePackPosturesFrom pins on c the postures a generation bound to src,
+// for a copy of that configuration that is published in its place. A src with
+// none bound leaves c to resolve its packs as before.
+func (c *Config) BindRulePackPosturesFrom(src *Config) {
+	if c == nil || src == nil {
+		return
+	}
+	if snapshot, ok := pinnedRulePackPostures.Load(weak.Make(src)); ok {
+		c.BindRulePackPostures(snapshot.(map[string]string))
+	}
+}
+
 // PinnedRulePackPosture returns the loaded posture for dir when a generation
 // bound it to this configuration. A missing entry leaves older config-only
 // callers to resolve their pack as before.

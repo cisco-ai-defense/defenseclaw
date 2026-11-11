@@ -30,7 +30,9 @@ TestClaudeCodeWindowsHandlersMatchTheSharedGolden checks it against Setup
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -320,6 +322,125 @@ def test_status_and_doctor_read_the_claude_launcher_guard_the_same_way(monkeypat
     ):
         other = {**pretool, "command": command}
         assert hook_integrity.claude_launcher_guard_view(other) is other, command
+
+
+def test_claude_chain_view_and_guard_drift(tmp_path, monkeypatch):
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    chain = tmp_path / "chain"
+    chain.mkdir()
+    generation = "chain-abc123"
+    pair = chain / generation
+    pair.mkdir()
+    guard = pair / "defenseclaw-hook-guard.exe"
+    approved = pair / "defenseclaw-hook-guard.approved"
+    body = b"approved guard image"
+    guard.write_bytes(body)
+    approved.write_bytes(body)
+    (chain / "chain.json").write_text(json.dumps({"guard_sha256": hashlib.sha256(body).hexdigest(), "generation": generation}))
+    launcher = str(tmp_path / "defenseclaw-hook.exe")
+    # A Windows host checks that the launcher the handler names is installed.
+    (tmp_path / "defenseclaw-hook.exe").write_bytes(b"MZ launcher")
+    command = "C:\\Windows\\System32\\cmd.exe"
+    compare = "C:\\Windows\\System32\\fc.exe"
+    words = hook_integrity._claude_chain_wrapper_words(
+        compare, str(guard), str(approved), launcher, "UserPromptSubmit"
+    )
+    handler = {"type": "command", "command": command, "args": words}
+    assert hook_integrity.claude_launcher_guard_view(handler) == {
+        **handler, "command": launcher, "args": ["hook", "--connector", "claudecode"]
+    }
+    cfg, _ = _install(tmp_path, "claudecode", json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [handler]}]}}))
+    assert hook_integrity.hook_launcher_problems(cfg, "claudecode") == []
+    guard.write_bytes(b"changed guard")
+    problems = hook_integrity.hook_launcher_problems(cfg, "claudecode")
+    assert len(problems) == 1 and "missing or changed" in problems[0]
+    assert "defenseclaw setup claude-code" in problems[0].repair
+    edited = {**handler, "args": [*words[:-2], "0", ")"]}
+    assert hook_integrity.claude_launcher_guard_view(edited) is edited
+    neutral = hook_integrity._claude_chain_wrapper_words(compare, str(guard), str(approved), launcher, "Stop")
+    assert neutral[-2] == "1"
+    direct = {"command": str(guard),
+              "args": ["launcher-guard", launcher, "hook", "--connector", "claudecode", "--event", "PreToolUse"]}
+    assert hook_integrity.claude_launcher_guard_view(direct)["command"] == launcher
+
+
+def test_claude_chain_profile_bound_open_answer_is_owned(tmp_path):
+    launcher = str(tmp_path / "defenseclaw-hook.exe")
+    guard = str(tmp_path / "chain-abc123" / "defenseclaw-hook-guard.exe")
+    approved = str(tmp_path / "chain-abc123" / "defenseclaw-hook-guard.approved")
+    compare = "C:\\Windows\\System32\\fc.exe"
+    command = "C:\\Windows\\System32\\cmd.exe"
+    words = hook_integrity._claude_chain_wrapper_words(
+        compare, guard, approved, launcher, "UserPromptSubmit", unavailable_open=True
+    )
+    handler = {"command": command, "args": words}
+    assert words[-2] == "1"
+    assert hook_integrity.claude_launcher_guard_view(handler)["command"] == launcher
+    changed = {**handler, "args": [*words[:-2], "2", ")"]}
+    assert hook_integrity.claude_launcher_guard_view(changed) is changed
+    direct = {"command": guard, "args": [
+        "launcher-guard", launcher, "hook", "--connector", "claudecode",
+        "--event", "PreToolUse", "--unavailable-mode", "open",
+    ]}
+    assert hook_integrity.claude_launcher_guard_view(direct)["args"] == ["hook", "--connector", "claudecode"]
+
+
+@pytest.mark.parametrize(
+    "system_directory",
+    ("C:\\WINDOWS\\system32", "C:\\Windows\\system32", "c:\\windows\\SYSTEM32", "C:\\Windows\\System32"),
+)
+@pytest.mark.parametrize("event", ("UserPromptSubmit", "SessionStart", "Stop"))
+def test_claude_chain_view_reads_the_system_directory_as_windows_spells_it(monkeypatch, system_directory, event):
+    # Setup writes the system directory GetSystemDirectory reports, which
+    # Windows spells C:\WINDOWS\system32 or C:\Windows\system32. Doctor, status
+    # and the launcher check read the registered handler with the same spelling
+    # (the packaged install's first doctor run saw no handler for any event).
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
+    launcher = "C:\\Users\\Owner\\AppData\\Local\\DefenseClaw\\HookRuntime\\defenseclaw-hook.exe"
+    guard = "C:\\Users\\Owner\\AppData\\Local\\DefenseClaw\\claude-code-chain\\chain-abc123\\defenseclaw-hook-guard.exe"
+    approved = guard.replace(".exe", ".approved")
+    command = system_directory + "\\cmd.exe"
+    words = hook_integrity._claude_chain_wrapper_words(system_directory + "\\fc.exe", guard, approved, launcher, event)
+    handler = {"type": "command", "command": command, "args": words}
+    expected = {**handler, "command": launcher, "args": ["hook", "--connector", "claudecode"]}
+    assert hook_integrity.claude_launcher_guard_view(handler) == expected
+    assert hook_integrity.hook_handler_command_lines(handler, "claudecode") == [
+        subprocess.list2cmdline([launcher, "hook", "--connector", "claudecode"])
+    ]
+    # The benign twin stays protected: an edited answer, a compare program
+    # that is not the system directory's, and a changed word stay unowned.
+    edited = {**handler, "args": [*words[:-2], "0", ")"]}
+    assert hook_integrity.claude_launcher_guard_view(edited) is edited
+    elsewhere = {**handler, "args": hook_integrity._claude_chain_wrapper_words(
+        "C:\\Temp\\fc.exe", guard, approved, launcher, event)}
+    assert hook_integrity.claude_launcher_guard_view(elsewhere) is elsewhere
+    other_program = {**handler, "command": "C:\\Temp\\system32\\cmd.exe"}
+    assert hook_integrity.claude_launcher_guard_view(other_program) is other_program
+
+
+def test_managed_claude_guard_view_carries_closed_and_neutral_answers(monkeypatch):
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
+    launcher = "C:\\Program Files\\DefenseClaw\\bin\\defenseclaw-hook.exe"
+    guard = "C:\\Program Files\\DefenseClaw\\bin\\defenseclaw-hook-guard.exe"
+    for event, unavailable_exit in (("UserPromptSubmit", "2"), ("PreToolUse", "2"),
+                                    ("Stop", "1"), ("SubagentStop", "1")):
+        words = hook_integrity._claude_managed_wrapper_words(guard, launcher, event)
+        handler = {"command": "C:\\Windows\\System32\\cmd.exe", "args": words}
+        assert words[-2] == unavailable_exit and words[-1] == ")"
+        # A missing guard gives the reason that names it and the repair command.
+        missing = " ".join(words[words.index("(") + 1:words.index(")")])
+        assert "defenseclaw-hook-guard.exe" in missing
+        assert "DefenseClawSetup-Enterprise-Standalone-x64.exe /repair" in missing
+        assert "enterprise windows repair" not in missing
+        assert missing.endswith(f"exit /b {unavailable_exit}")
+        assert hook_integrity.claude_launcher_guard_view(handler) == {
+            **handler,
+            "command": launcher,
+            "args": ["hook", "--connector", "claudecode", "--enterprise-managed"],
+        }
+        edited = {**handler, "args": [*words[:-2], "0", ")"]}
+        assert hook_integrity.claude_launcher_guard_view(edited) is edited
 
 
 def test_windows_copilot_adapter_in_a_data_dir_not_named_defenseclaw_is_registered(tmp_path, monkeypatch):

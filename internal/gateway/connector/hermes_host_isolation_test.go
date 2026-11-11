@@ -18,6 +18,7 @@ import (
 // (hermespath.IsolateHostForTests): a HERMES_HOME a Hermes developer
 // exported failed the Hermes Setup and Verify tests.
 func TestMain(m *testing.M) {
+	answerAsFakeGuard()
 	// A copy of this test binary stands in for the packaged Windows hook
 	// launcher in Hermes' execution-probe tests (testHermesProbeLauncherEnv).
 	// "1" answers as the active hook runtime does; any other value is a
@@ -43,7 +44,9 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the real per-user folders:", err)
 		os.Exit(1)
 	}
+	restoreChain := UseClaudeCodeChainFixtureForTests()
 	code := m.Run()
+	restoreChain()
 	cleanup()
 	if err := finishUserRoots(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

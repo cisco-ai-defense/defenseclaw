@@ -301,8 +301,24 @@ def test_windows_packaged_handler_runs_after_binary_removal(
             assert "additionalContext" in result.stdout
 
 
-def test_build_bumps_and_a_rebuild_clears_the_confirmation(app) -> None:
-    first, calls = _setup(app, "--yes")
+def _built_hooks_gateway(tmp_path: Path):
+    """The gateway that builds the plugin: a Windows host builds the native guard
+    form, which is the one its status reader accepts as current, from a guard
+    and launcher that are installed."""
+    if os.name != "nt":
+        return None
+    install = tmp_path / "installed"
+    install.mkdir(exist_ok=True)
+    for name in ("defenseclaw-hook-guard.exe", "defenseclaw-hook.exe"):
+        (install / name).write_bytes(b"MZ installed fixture")
+    doc = _windows_hooks_doc(
+        install / "defenseclaw-hook-guard.exe", tmp_path / "account", install / "defenseclaw-hook.exe",
+    )
+    return _gateway(stdout=json.dumps(doc))
+
+
+def test_build_bumps_and_a_rebuild_clears_the_confirmation(app, tmp_path: Path) -> None:
+    first, calls = _setup(app, "--yes", gateway=_built_hooks_gateway(tmp_path))
     assert first.exit_code == 0, first.output
     assert calls[0][:3] == [GATEWAY, "connector", "cowork-plugin"]
     assert "observe mode: records only" in first.output and "--mode action" in first.output
@@ -313,7 +329,7 @@ def test_build_bumps_and_a_rebuild_clears_the_confirmation(app) -> None:
         return _health(last_activity_at=stamp, last_session_start_at=stamp), ""
 
     with patch("defenseclaw.commands.cmd_setup_cowork._gateway_health", side_effect=health):
-        waited, _ = _setup(app, "--yes", "--wait", "--timeout", "10")
+        waited, _ = _setup(app, "--yes", "--wait", "--timeout", "10", gateway=_built_hooks_gateway(tmp_path))
     assert waited.exit_code == 0, waited.output
     assert "Cowork is protected: a Cowork session reached" in waited.output
     assert "observe mode: records only" in waited.output
@@ -321,7 +337,7 @@ def test_build_bumps_and_a_rebuild_clears_the_confirmation(app) -> None:
     assert state["version"] > v1 and state["last_event_at"] and state["confirmed_at"]
     assert cowork.cowork_status(app.cfg, None, gateway_running=True).protected
 
-    rebuilt, _ = _setup(app, "--yes")
+    rebuilt, _ = _setup(app, "--yes", gateway=_built_hooks_gateway(tmp_path))
     assert rebuilt.exit_code == 0, rebuilt.output
     state = cowork.load_state(_data_dir(app))
     assert "last_event_at" not in state and "confirmed_at" not in state and state["previous_event_at"]
@@ -662,6 +678,58 @@ def test_protection_survives_a_gateway_restart(app) -> None:
     with patch.object(cmd_doctor, "_authenticated_gateway_health", return_value=(restarted, "", True)):
         cmd_doctor._check_cowork(app.cfg, {"gateway": {}}, r)
     assert next(c for c in r.checks if c.get("check_id") == "doctor.cowork")["status"] == "pass"
+
+
+def _with_windows_drive_paths(data: bytes) -> bytes:
+    """Give the hook arguments of a built plugin the drive-letter paths a Windows
+    host writes. The builder runs here on the host path rules, but the status
+    reader judges the archive by Windows rules, and Python 3.13 no longer reads
+    a path with one leading slash as absolute there."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            body = src.read(info.filename)
+            if info.filename == "hooks/hooks.json":
+                doc = json.loads(body)
+                for groups in doc["hooks"].values():
+                    for group in groups:
+                        for handler in group["hooks"]:
+                            handler["args"][1] = "C:\\ProgramData\\DefenseClaw"
+                            handler["args"][2] = "C:\\Program Files\\DefenseClaw\\defenseclaw-hook.exe"
+                body = (json.dumps(doc, indent=2) + "\n").encode()
+            dst.writestr(info, body)
+    return out.getvalue()
+
+
+def test_released_windows_cowork_plugin_requires_rebuild(app, monkeypatch, tmp_path: Path) -> None:
+    released = Path(__file__).resolve().parents[2] / (
+        "internal/gateway/connector/testdata/released-carriers/1.0.8/cowork-plugin-hooks-windows.json"
+    )
+    archive = Path(cowork.zip_path(_data_dir(app)))
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.write(released, "hooks/hooks.json")
+    cowork.save_state(_data_dir(app), {"build": 8, "version": "1.0.8", "built_at": _now(-600)})
+    _write_gateway_activity(app, _now(-300))
+    monkeypatch.setattr(cowork.sys, "platform", "win32")
+    health = {"connectors": [{"name": "claudecode"}]}
+
+    row = cowork.cowork_status(app.cfg, health, gateway_running=True)
+    assert row is not None and not row.protected
+    assert row.reason_code == "cowork_plugin_stale"
+    assert row.step == "defenseclaw setup cowork"
+    check = cmd_doctor._DoctorResult()
+    with patch.object(cmd_doctor, "_authenticated_gateway_health", return_value=(health, "", True)):
+        cmd_doctor._check_cowork(app.cfg, {"gateway": {}}, check)
+    doctor_row = next(c for c in check.checks if c.get("check_id") == "doctor.cowork")
+    assert doctor_row["status"] == "warn" and doctor_row["reason_code"] == "cowork_plugin_stale"
+
+    source = tmp_path / "bin" / "defenseclaw-hook-guard.exe"
+    source.parent.mkdir()
+    source.write_bytes(b"MZ current guard")
+    current = _windows_hooks_doc(source, tmp_path / "account", tmp_path / "bin" / "defenseclaw-hook.exe")
+    archive.write_bytes(_with_windows_drive_paths(cowork.plugin_zip_bytes(current, "1.0.9-test", "1.0.9")))
+    assert cowork.cowork_status(app.cfg, health, gateway_running=True).protected
 
 
 def test_gateway_activity_before_the_build_is_not_protection(app) -> None:

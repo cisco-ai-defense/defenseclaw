@@ -1637,11 +1637,46 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 	if opts.ClaudeAllowManagedHooksOnly {
 		policy["allowManagedHooksOnly"] = true
 	}
-	body, err := json.MarshalIndent(policy, "", "  ")
+	body, err := marshalClaudeCodeManagedPolicy(policy, claudeCodeManagedPolicyIsCompact(opts))
 	if err != nil {
 		return nil, fmt.Errorf("marshal Claude Code managed hook policy: %w", err)
 	}
-	return append(body, '\n'), nil
+	return body, nil
+}
+
+// claudeCodeManagedPolicyIsCompact reports whether the policy carries the
+// Windows guard wrapper, which holds about 130 arguments for each of the 29
+// hook events. One argument to a line, indented nine levels deep, made that
+// document 105 KB, over the 64 KiB bound the managed state record is read
+// under, so the guardian refused the file and /ensure ended 1603 (GAP-1050).
+// Without whitespace and without HTML escapes (every & and > became a six
+// byte \u0026 or \u003e) it is a little over a third of that. Every other
+// managed policy, including the Secure Client exec form, keeps the indented
+// form byte for byte.
+func claudeCodeManagedPolicyIsCompact(opts SetupOpts) bool {
+	return claudeCodeWindowsHost() && opts.ManagedEnterprise && !opts.SecureClientHookDelivery
+}
+
+// claudeCodeWindowsHost reports whether the managed Claude Code hooks are
+// rendered for a Windows host. A test replaces it to render the Windows form
+// on any OS.
+var claudeCodeWindowsHost = func() bool { return runtime.GOOS == "windows" }
+
+func marshalClaudeCodeManagedPolicy(policy map[string]interface{}, compact bool) ([]byte, error) {
+	if !compact {
+		body, err := json.MarshalIndent(policy, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return append(body, '\n'), nil
+	}
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(policy); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 // VerifyManagedHookPolicy verifies the exact persisted managed-policy shape.
@@ -1710,17 +1745,23 @@ func appendClaudeCodeHookMatrix(hooks map[string]interface{}, hookCommand string
 func appendClaudeCodeHookMatrixForSetup(
 	hooks map[string]interface{}, hookCommand string, hookArgs []string, opts SetupOpts,
 ) error {
+	if err := claudeCodeChainAdmission(opts, hookCommand, hookArgs, runtime.GOOS); err != nil {
+		return err
+	}
 	groups, err := claudeCodeHookGroupsForSetup(opts)
 	if err != nil {
 		return err
 	}
-	appendClaudeCodeHookGroups(hooks, hookCommand, hookArgs, groups)
+	appendClaudeCodeHookGroups(hooks, hookCommand, hookArgs, groups, claudeCodeUnavailableOpen(opts),
+		opts.ManagedEnterprise && !opts.SecureClientHookDelivery)
 	return nil
 }
 
 func appendClaudeCodeHookGroups(
-	hooks map[string]interface{}, hookCommand string, hookArgs []string, groups []claudeCodeHookGroup,
+	hooks map[string]interface{}, hookCommand string, hookArgs []string, groups []claudeCodeHookGroup, unavailableOpen ...bool,
 ) {
+	open := len(unavailableOpen) > 0 && unavailableOpen[0]
+	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && claudeCodeWindowsHost()
 	fallback := false
 	if len(hookArgs) == 7 || len(hookArgs) == 9 {
 		fallback = claudeCodePerUserGuardTarget(
@@ -1729,7 +1770,10 @@ func appendClaudeCodeHookGroups(
 		)
 	}
 	for _, group := range groups {
-		command, args := claudeCodeHandlerInvocation(group.eventType, hookCommand, hookArgs)
+		command, args := claudeCodeHandlerInvocation(group.eventType, hookCommand, hookArgs, open)
+		if managedWindows {
+			command, args = claudeManagedGuardWrapperInvocation(group.eventType, hookCommand, hookArgs)
+		}
 		handler := map[string]interface{}{
 			"type":    "command",
 			"command": command,
@@ -1765,6 +1809,9 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 	// On Windows Claude Code's exec form invokes the native launcher directly,
 	// without Git Bash or PowerShell parsing an absolute path that may contain
 	// spaces. Older shell-form commands are still recognized during migration.
+	if err := EnsureClaudeCodeChain(opts); err != nil {
+		return err
+	}
 	hookCommand, hookArgs := claudeCodeHookInvocation(opts, hookScript)
 	settingsPath := claudeCodeSettingsPath()
 	return withFileLock(settingsPath, func() error {
@@ -3191,7 +3238,8 @@ func verifyClaudeCodeHookMatrixForSetup(
 	if err != nil {
 		return err
 	}
-	return verifyClaudeCodeHookGroups(hooks, expectedCommand, expectedArgs, hooksDir, groups)
+	return verifyClaudeCodeHookGroups(hooks, expectedCommand, expectedArgs, hooksDir, groups,
+		claudeCodeUnavailableOpen(opts), opts.ManagedEnterprise && !opts.SecureClientHookDelivery)
 }
 
 // verifyClaudeCodeHookGroups validates the exact DefenseClaw-owned effective
@@ -3205,11 +3253,17 @@ func verifyClaudeCodeHookGroups(
 	expectedArgs []string,
 	hooksDir string,
 	groups []claudeCodeHookGroup,
+	unavailableOpen ...bool,
 ) error {
+	open := len(unavailableOpen) > 0 && unavailableOpen[0]
+	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && claudeCodeWindowsHost()
 	expectedEvents := make(map[string]struct{}, len(groups))
 	for _, expected := range groups {
 		expectedEvents[expected.eventType] = struct{}{}
-		expectedCommand, expectedArgs := claudeCodeHandlerInvocation(expected.eventType, expectedCommand, expectedArgs)
+		expectedCommand, expectedArgs := claudeCodeHandlerInvocation(expected.eventType, expectedCommand, expectedArgs, open)
+		if managedWindows {
+			expectedCommand, expectedArgs = claudeManagedGuardWrapperInvocation(expected.eventType, expectedCommand, expectedArgs)
+		}
 		locations, err := ownedClaudeCodeHookLocations(
 			hooks[expected.eventType], hooksDir, expectedCommand, expectedArgs,
 		)

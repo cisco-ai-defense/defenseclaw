@@ -300,11 +300,11 @@ func readWindowsClaudeManagedPolicyTargetsForHook(expectedHook string) ([]string
 	var targets []string
 	active := false
 	err = withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
-		policy, err := snapshotWindowsManagedFile(path)
+		policy, err := snapshotWindowsManagedPolicy(path)
 		if err != nil {
 			return err
 		}
-		state, err := snapshotWindowsManagedFile(
+		state, err := snapshotWindowsManagedState(
 			statePath,
 		)
 		if err != nil {
@@ -358,11 +358,11 @@ func PublishWindowsClaudeManagedPolicyTargets(rawTargets []string) error {
 			return err
 		}
 		statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
-		policySnapshot, err := snapshotWindowsManagedFile(path)
+		policySnapshot, err := snapshotWindowsManagedPolicy(path)
 		if err != nil {
 			return err
 		}
-		stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+		stateSnapshot, err := snapshotWindowsManagedState(statePath)
 		if err != nil {
 			return err
 		}
@@ -475,11 +475,11 @@ func DeactivateWindowsClaudeManagedPolicy() error {
 			return err
 		}
 		statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
-		policy, err := snapshotWindowsManagedFile(path)
+		policy, err := snapshotWindowsManagedPolicy(path)
 		if err != nil {
 			return err
 		}
-		state, err := snapshotWindowsManagedFile(statePath)
+		state, err := snapshotWindowsManagedState(statePath)
 		if err != nil {
 			return err
 		}
@@ -1270,11 +1270,11 @@ func resolveWindowsClaudeManagedPolicyTarget() (windowsClaudeManagedPolicyTarget
 		return target, policyErr
 	}
 	statePath := filepath.Join(filepath.Dir(policyPath), windowsClaudeManagedStateFile)
-	policySnapshot, policyErr := snapshotWindowsManagedFile(policyPath)
+	policySnapshot, policyErr := snapshotWindowsManagedPolicy(policyPath)
 	if policyErr != nil {
 		return target, policyErr
 	}
-	stateSnapshot, stateErr := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, stateErr := snapshotWindowsManagedState(statePath)
 	if stateErr != nil {
 		return target, stateErr
 	}
@@ -1694,11 +1694,11 @@ func installWindowsClaudeManagedPolicyUnlocked(
 	if err := reclaimOrphanClaudeManagedPolicy(path, statePath); err != nil {
 		return "", nil, err
 	}
-	policySnapshot, err := snapshotWindowsManagedFile(path)
+	policySnapshot, err := snapshotWindowsManagedPolicy(path)
 	if err != nil {
 		return "", nil, err
 	}
-	stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, err := snapshotWindowsManagedState(statePath)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1728,8 +1728,8 @@ func installWindowsClaudeManagedPolicyUnlocked(
 		*bodyRef = body
 	}
 	// A configured connector needs a guard before any account enrolls. An
-	// ensure pass must not replace a newer contract another reconcile already
-	// published while it waited for this transaction lock.
+	// ensure pass keeps the published contract, but upgrades an authenticated
+	// direct command even when every enrolled account is signed out.
 	if targetSID == nil && policySnapshot.existed {
 		if existingState.SchemaVersion != 2 ||
 			!sameWindowsEnterprisePath(existingState.HookExecutable, opts.HookExecutable) ||
@@ -1737,7 +1737,32 @@ func installWindowsClaudeManagedPolicyUnlocked(
 			existingState.GatewayServiceName != os.Getenv(connector.WindowsGatewayServiceNameEnv) {
 			return "", nil, errors.New("enterprise hooks: existing Claude machine policy belongs to another protected deployment")
 		}
-		return path, nil, nil
+		upgrade := false
+	searchPolicy:
+		for _, contract := range windowsClaudeRecordedPolicyContracts() {
+			for _, lock := range []bool{true, false} {
+				current, renderErr := renderWindowsClaudeRecordedPolicy(existingState, contract, lock)
+				if renderErr != nil {
+					return "", nil, renderErr
+				}
+				if bytes.Equal(policySnapshot.data, current) {
+					return path, nil, nil
+				}
+				previous, renderErr := renderWindowsClaudeRecordedPolicy(existingState, contract, lock, true)
+				if renderErr != nil {
+					return "", nil, renderErr
+				}
+				if bytes.Equal(policySnapshot.data, previous) {
+					body = current
+					*bodyRef = body
+					upgrade = true
+					break searchPolicy
+				}
+			}
+		}
+		if !upgrade {
+			return "", nil, errors.New("enterprise hooks: existing Claude machine policy has an unrecognized registered command")
+		}
 	}
 	// The transaction (withWindowsClaudeManagedPolicyTransaction) has
 	// already created managed-settings.d and ClaudeCode, and recorded the
@@ -1831,11 +1856,11 @@ func removeWindowsClaudeManagedPolicyTargetUnlocked(targetSID *windows.SID) erro
 		return err
 	}
 	statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
-	policySnapshot, err := snapshotWindowsManagedFile(path)
+	policySnapshot, err := snapshotWindowsManagedPolicy(path)
 	if err != nil {
 		return err
 	}
-	stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, err := snapshotWindowsManagedState(statePath)
 	if err != nil {
 		return err
 	}
@@ -2963,7 +2988,13 @@ func reclaimOrphanClaudeManagedPolicy(policyPath, statePath string) error {
 	return nil
 }
 
-func snapshotWindowsManagedFile(path string) (windowsManagedFileSnapshot, error) {
+// The policy and its state record are bounded apart: the policy carries the
+// 29 hook handlers of the guarded Windows form, far over the state limit.
+func snapshotWindowsManagedPolicy(path string) (windowsManagedFileSnapshot, error) {
+	return snapshotWindowsManagedFileWithLimit(path, windowsClaudeManagedPolicyLimit)
+}
+
+func snapshotWindowsManagedState(path string) (windowsManagedFileSnapshot, error) {
 	return snapshotWindowsManagedFileWithLimit(path, windowsClaudeManagedStateLimit)
 }
 
