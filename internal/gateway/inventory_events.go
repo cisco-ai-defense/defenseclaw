@@ -83,14 +83,6 @@ type endpointInventoryComponent struct {
 	connectorSubprocessPolicy   string
 	mcpTransport                string
 	mcpCommandBasename          string
-	mcpCommandFingerprint       string
-	mcpArgumentsFingerprint     string
-	mcpSourceScope              string
-	mcpServerURL                string
-	mcpIsRemote                 bool
-	mcpToolParentID             string
-	mcpToolSource               string
-	mcpToolObservedAt           string
 	mcpURLHost                  string
 	mcpAuthProviderType         string
 	mcpDisabled                 *bool
@@ -117,6 +109,9 @@ type endpointInventoryComponent struct {
 	// Skill rows only (inventory.AISkillFacts).
 	skillContentHash   string
 	skillContentStatus string
+	skillState         string
+	skillFirstSeen     string
+	skillLastSeen      string
 }
 
 // endpointInventoryCarrier is an atomic, typed snapshot split into parallel
@@ -198,7 +193,6 @@ func emitEndpointInventory(
 	connectorDiscoveryPartial bool,
 	discoveryReport *inventory.AIDiscoveryReport,
 	gate *managedInventoryPublishState,
-	toolStates ...*mcpToolInventory,
 ) error {
 	if !ManagedEnterpriseActive() || ctx == nil || emitter == nil {
 		return nil
@@ -243,30 +237,6 @@ func emitEndpointInventory(
 		firstErr = err
 	}
 
-	// Collect the connector-native MCP inventory before processing the
-	// discovery report. A discovery signal can describe the same component as
-	// the native reader, but it cannot carry transport, URL, or local command
-	// fingerprints. When the native collection is complete it is authoritative
-	// for an exact component-id match, so the thinner discovery row must not be
-	// published later and overwrite those fields downstream. On a partial read
-	// keep the discovery row as a fail-open fallback; partial native snapshots
-	// are local diagnostics and do not reach the managed AI Defense route.
-	var toolState *mcpToolInventory
-	if len(toolStates) > 0 {
-		toolState = toolStates[0]
-	}
-	readMCP := func() ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
-		return perConnectorMCPEntriesWithReadStatus(cfg, reg)
-	}
-	var perConnectorMCP []endpointInventoryComponent
-	var perConnectorStatus perConnectorMCPReadStatus
-	if toolState != nil {
-		perConnectorMCP, perConnectorStatus = toolState.readAndReconcileParents(ctx, readMCP)
-	} else {
-		perConnectorMCP, perConnectorStatus = readMCP()
-	}
-	perConnectorPartial := perConnectorStatus.partial
-
 	// Per-entry inventories derived from the latest AI-Discovery scan. Each
 	// enumerated skill / plugin / MCP server ships as its own
 	// ai_component.observed record with defenseclaw.agent.discovery.connector
@@ -275,25 +245,26 @@ func emitEndpointInventory(
 	// managed_enterprise gates the whole function above, so this whole block
 	// is inert in unmanaged mode.
 	if discoveryReport != nil {
-		discoveryPartial := !aiDiscoveryReportComplete(discoveryReport)
 		mcpEntries := discoveredMCPEntriesFromReport(*discoveryReport)
-		mcpEntries = preferNativeMCPInventory(mcpEntries, perConnectorMCP, perConnectorPartial)
 		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, "endpoint_discovered_mcp_inventory", mcpEntries, discoveryPartial,
+			ctx, emitter, "endpoint_discovered_mcp_inventory", mcpEntries, false,
 			config.ObservabilityV8ManagedMCPInventoryAction, publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		skillEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill")
+		skillEntries := publish.cycle.trackSkills(
+			discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill"),
+			skillScanComplete(discoveryReport),
+		)
 		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, "endpoint_skill_inventory", skillEntries, discoveryPartial,
+			ctx, emitter, endpointSkillInventorySource, skillEntries, false,
 			config.ObservabilityV8ManagedSkillInventoryAction, publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		pluginEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalPlugin, "plugin")
 		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, "endpoint_plugin_inventory", pluginEntries, discoveryPartial,
+			ctx, emitter, "endpoint_plugin_inventory", pluginEntries, false,
 			config.ObservabilityV8ManagedPluginInventoryAction, publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
@@ -315,182 +286,14 @@ func emitEndpointInventory(
 	// Skipping it would leave the cloud holding removed MCP servers forever — the
 	// stored digest would never advance past the last non-empty publish — and
 	// would silently drop the collection from the daily complete bundle.
-	const perConnectorMCPSource = "endpoint_per_connector_mcp_inventory"
-	var completeRows []endpointInventoryComponent
-	acceptedParentIDs := make(map[string]struct{})
-	if perConnectorPartial {
-		// A partial aggregate is not an authoritative snapshot, but connectors
-		// whose native reads completed still carry independently validated server
-		// records. Publish those records as additive observations so their tools
-		// do not reference a parent that only exists locally. The partial snapshot
-		// below remains diagnostic-only and keeps the collection digest and daily
-		// bundle clock unchanged; an incomplete connector can therefore neither
-		// suppress a complete sibling nor cause its retained cloud rows to be
-		// removed.
-		completeRows = completeConnectorMCPEntriesFromPartial(perConnectorMCP, perConnectorStatus.incompleteConnectors)
-		var err error
-		acceptedParentIDs, err = emitEndpointInventoryComponents(
-			ctx, emitter, perConnectorMCPSource, completeRows,
-			config.ObservabilityV8ManagedMCPInventoryAction, publish,
-		)
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	parentSnapshotErr := emitEndpointInventorySnapshot(
-		ctx, emitter, perConnectorMCPSource, perConnectorMCP, perConnectorPartial,
+	perConnectorMCP := perConnectorMCPEntries(cfg, reg)
+	if err := emitEndpointInventorySnapshot(
+		ctx, emitter, "endpoint_per_connector_mcp_inventory", perConnectorMCP, false,
 		config.ObservabilityV8ManagedMCPInventoryAction, publish,
-	)
-	if parentSnapshotErr != nil && firstErr == nil {
-		firstErr = parentSnapshotErr
-	}
-	fullParentSnapshotCovered := false
-	if !perConnectorPartial && len(perConnectorMCP) <= maxManagedMCPInventory {
-		if publish.cycle == nil {
-			fullParentSnapshotCovered = parentSnapshotErr == nil
-		} else {
-			digest := managedInventoryComponentsDigest(perConnectorMCPSource, perConnectorMCP)
-			fullParentSnapshotCovered = publish.cycle.covers(perConnectorMCPSource, digest)
-		}
-	}
-	managedParentIDs := managedMCPParentIDs(perConnectorMCP, acceptedParentIDs, fullParentSnapshotCovered)
-	if toolState != nil {
-		incompleteConnectors := perConnectorStatus.incompleteConnectors
-		if err := toolState.flushPendingAdvertised(ctx); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		if err := toolState.flushPendingObserved(ctx); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		observedReadPartial := toolState.observedIncomplete(incompleteConnectors)
-		if perConnectorPartial && len(perConnectorStatus.incompleteConnectors) == 0 {
-			// A partial result without connector attribution is not safe to scope.
-			observedReadPartial = true
-		}
-		for _, collection := range []struct {
-			source     string
-			remote     bool
-			toolSource string
-		}{
-			{"endpoint_local_mcp_tool_inventory", false, "advertised"},
-			{"endpoint_remote_mcp_tool_inventory", true, "advertised"},
-			{"endpoint_local_mcp_observed_tool_inventory", false, "observed"},
-			{"endpoint_remote_mcp_observed_tool_inventory", true, "observed"},
-		} {
-			rows, toolPartial := toolState.components(perConnectorMCP, collection.remote, collection.toolSource)
-			parentsEligible := mcpToolParentsManaged(rows, managedParentIDs)
-			readPartial := perConnectorPartial
-			if collection.toolSource == "observed" {
-				readPartial = observedReadPartial
-			}
-			// A child can use the managed route only when its parent did too. In
-			// particular, an over-limit parent collection is diagnostic-only even
-			// when a small child collection would pass its independent limit.
-			snapshotPartial := readPartial || toolPartial || !parentsEligible
-			err := emitEndpointInventorySnapshot(ctx, emitter, collection.source, rows, snapshotPartial,
-				config.ObservabilityV8ManagedMCPInventoryAction, publish)
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-			outcome, reason := "submitted", "none"
-			switch {
-			case err != nil:
-				outcome, reason = "error", "publish_error"
-			case snapshotPartial:
-				outcome, reason = "partial", "incomplete"
-			case len(rows) == 0:
-				outcome = "empty"
-			}
-			toolState.recordMetric(ctx, "export", outcome, reason)
-		}
+	); err != nil && firstErr == nil {
+		firstErr = err
 	}
 	return firstErr
-}
-
-func managedMCPParentIDs(
-	all []endpointInventoryComponent,
-	accepted map[string]struct{},
-	fullSnapshotCovered bool,
-) map[string]struct{} {
-	eligible := make(map[string]struct{}, len(all))
-	if len(all) > maxManagedMCPInventory {
-		return eligible
-	}
-	for _, parent := range all {
-		if fullSnapshotCovered {
-			eligible[parent.id] = struct{}{}
-			continue
-		}
-		if _, ok := accepted[parent.id]; ok {
-			eligible[parent.id] = struct{}{}
-		}
-	}
-	return eligible
-}
-
-func mcpToolParentsManaged(rows []endpointInventoryComponent, eligible map[string]struct{}) bool {
-	for _, row := range rows {
-		if _, ok := eligible[row.mcpToolParentID]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-func completeConnectorMCPEntriesFromPartial(
-	components []endpointInventoryComponent,
-	incompleteConnectors map[string]struct{},
-) []endpointInventoryComponent {
-	// A partial result without connector attribution cannot be scoped safely.
-	if len(components) == 0 || len(incompleteConnectors) == 0 {
-		return nil
-	}
-	complete := make([]endpointInventoryComponent, 0, len(components))
-	for _, component := range components {
-		connectorName := canonicalConnectorRulePackKey(component.agentConnector)
-		if connectorName == "" {
-			continue
-		}
-		if _, incomplete := incompleteConnectors[connectorName]; incomplete {
-			continue
-		}
-		complete = append(complete, component)
-	}
-	return complete
-}
-
-// preferNativeMCPInventory removes discovery-derived MCP entries that would
-// shadow a richer connector-native component with the same stable id. Native
-// inventory only takes precedence when its scan is complete and eligible for
-// the managed route; a partial, over-limit, or invalid native snapshot is
-// diagnostic-only, so discovery entries remain available as a managed fallback.
-func preferNativeMCPInventory(
-	discovered, native []endpointInventoryComponent,
-	nativePartial bool,
-) []endpointInventoryComponent {
-	if nativePartial || len(discovered) == 0 || len(native) == 0 {
-		return discovered
-	}
-	if len(native) > managedInventoryLimit(config.ObservabilityV8ManagedMCPInventoryAction) {
-		return discovered
-	}
-	if _, ok := endpointInventoryCarrierFor(config.ObservabilityV8ManagedMCPInventoryAction, native); !ok {
-		return discovered
-	}
-	nativeIDs := make(map[string]struct{}, len(native))
-	for _, component := range native {
-		if component.id != "" {
-			nativeIDs[component.id] = struct{}{}
-		}
-	}
-	filtered := make([]endpointInventoryComponent, 0, len(discovered))
-	for _, component := range discovered {
-		if _, shadowed := nativeIDs[component.id]; shadowed {
-			continue
-		}
-		filtered = append(filtered, component)
-	}
-	return filtered
 }
 
 // perConnectorMCPEntries enumerates one endpointInventoryComponent per
@@ -508,78 +311,13 @@ func preferNativeMCPInventory(
 // exported per-file readers directly with paths constructed under each home in
 // cfg.AIDiscovery.HomeDirs (populated by the installer's eligible-users
 // enumeration).
-func perConnectorMCPEntriesWithStatus(cfg *config.Config, reg *connector.Registry) ([]endpointInventoryComponent, bool) {
-	components, status := perConnectorMCPEntriesWithReadStatus(cfg, reg)
-	return components, status.partial
+func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpointInventoryComponent {
+	return perConnectorMCPEntriesForOS(cfg, reg, runtime.GOOS)
 }
 
-func perConnectorMCPEntriesForOSWithStatus(cfg *config.Config, reg *connector.Registry, goos string) ([]endpointInventoryComponent, bool) {
-	components, status := perConnectorMCPEntriesForOSWithReadStatus(cfg, reg, goos)
-	return components, status.partial
-}
-
-func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector.Registry, goos string, homeGuard func(string) error) ([]endpointInventoryComponent, bool) {
-	components, status := perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg, reg, goos, homeGuard)
-	return components, status.partial
-}
-
-type perConnectorMCPReadStatus struct {
-	partial              bool
-	incompleteConnectors map[string]struct{}
-}
-
-// readAndReconcileParents serializes the native read, parent replacement, and
-// durable retirement as one state transition. A slower older emit therefore
-// cannot resume after a newer read and delete the newer parents' tool rows.
-func (m *mcpToolInventory) readAndReconcileParents(
-	ctx context.Context,
-	read func() ([]endpointInventoryComponent, perConnectorMCPReadStatus),
-) ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
-	if m == nil || read == nil {
-		return nil, perConnectorMCPReadStatus{partial: true}
-	}
-	m.reconcileMu.Lock()
-	defer m.reconcileMu.Unlock()
-	components, status := read()
-	m.retryRestoreFromStore(ctx)
-	unscopedPartial := status.partial && len(status.incompleteConnectors) == 0
-	var removed []string
-	if !unscopedPartial {
-		removed = m.refreshCompleteParents(components, status.incompleteConnectors)
-	}
-	if m.store != nil && len(removed) > 0 {
-		if err := m.store.DeleteMCPObservedToolsForParents(ctx, removed); err == nil {
-			m.acknowledgeRemovedParents(removed)
-		}
-	}
-	return components, status
-}
-
-func (s *perConnectorMCPReadStatus) markIncomplete(connectorName string) {
-	s.partial = true
-	key := canonicalConnectorRulePackKey(connectorName)
-	if key == "" {
-		return
-	}
-	if s.incompleteConnectors == nil {
-		s.incompleteConnectors = make(map[string]struct{})
-	}
-	s.incompleteConnectors[key] = struct{}{}
-}
-
-func perConnectorMCPEntriesWithReadStatus(cfg *config.Config, reg *connector.Registry) ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
-	return perConnectorMCPEntriesForOSWithReadStatus(cfg, reg, runtime.GOOS)
-}
-
-func perConnectorMCPEntriesForOSWithReadStatus(cfg *config.Config, reg *connector.Registry, goos string) ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
-	return perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg, reg, goos, managed.RequireWindowsGatewayPathOutsideUserProfiles)
-}
-
-func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *connector.Registry, goos string, homeGuard func(string) error) ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
-	status := perConnectorMCPReadStatus{}
+func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, goos string) []endpointInventoryComponent {
 	if cfg == nil {
-		status.partial = true
-		return nil, status
+		return nil
 	}
 	// Union of ActiveConnectors() and reg.Available() so every registered
 	// connector is scanned. ActiveConnectors() alone is often narrower than
@@ -613,9 +351,8 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 		}
 	}
 	if len(connectors) == 0 {
-		return nil, status
+		return nil
 	}
-	fingerprintKey := mcpInventoryFingerprintKey(cfg)
 	// homes = daemon's own HOME (via ReadMCPServersForConnector) plus every
 	// configured user home (via direct-path readers). Empty homes list falls
 	// back to the single ReadMCPServersForConnector path.
@@ -643,8 +380,6 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 		owner := ownerFor(connectorName, home)
 		for _, server := range servers {
 			command := inventorySafeBasename(server.Command)
-			commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
-			serverURL := mcpInventoryServerURL(server.URL)
 			host := mcpURLHost(server.URL)
 			name := inventorySafeItemName(server.Name, 256)
 			if name == "" {
@@ -657,12 +392,12 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 			if product == "" {
 				product = host
 			}
-			// Keep the pre-fingerprint component identity stable across upgrades
-			// and configuration changes. Fingerprints are change-detection
-			// attributes, not identity: rotating the gateway token or updating a
-			// command, arguments, or URL must not replace the server and its tool
-			// history. Connector and home scope separate same-named entries owned
-			// by different agents or users.
+			// Identity + dedup key both carry the home scope so two
+			// users' same-named MCP servers (e.g. `codex/webex` in
+			// each user's ~/.codex/config.toml) get distinct
+			// component ids AND both survive the seenComponent
+			// dedup. Empty homeScope (Pass 1 — daemon's own HOME)
+			// keeps the historical shape.
 			identity := connectorName + "/" + homeScope + "/" + server.Name
 			if _, seen := seenComponent[identity]; seen {
 				continue
@@ -673,28 +408,23 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 			// Hyphen (not underscore) in the id kind to satisfy the
 			// defenseclaw.ai.component.id pattern.
 			components = append(components, endpointInventoryComponent{
-				id:                      endpointInventoryComponentID("mcp-entry", identity),
-				componentType:           "mcp_server",
-				signal:                  "configured_mcp_server",
-				product:                 product,
-				active:                  !disabled,
-				itemName:                name,
-				mcpTransport:            inventoryStableToken(server.Transport, 64),
-				mcpCommandBasename:      command,
-				mcpCommandFingerprint:   commandFingerprint,
-				mcpArgumentsFingerprint: argumentsFingerprint,
-				mcpSourceScope:          inventoryStableToken(server.SourceScope, 64),
-				mcpServerURL:            serverURL,
-				mcpIsRemote:             server.URL != "",
-				mcpURLHost:              host,
-				mcpAuthProviderType:     inventoryStableToken(server.AuthProviderType, 64),
-				mcpDisabled:             &disabled,
-				agentConnector:          slug,
-				agentInstalled:          &installed,
-				userID:                  owner.ID,
-				userIDKind:              owner.IDKind,
-				userName:                owner.Name,
-				userEmail:               owner.Email,
+				id:                  endpointInventoryComponentID("mcp-entry", identity),
+				componentType:       "mcp_server",
+				signal:              "configured_mcp_server",
+				product:             product,
+				active:              !disabled,
+				itemName:            name,
+				mcpTransport:        inventoryStableToken(server.Transport, 64),
+				mcpCommandBasename:  command,
+				mcpURLHost:          host,
+				mcpAuthProviderType: inventoryStableToken(server.AuthProviderType, 64),
+				mcpDisabled:         &disabled,
+				agentConnector:      slug,
+				agentInstalled:      &installed,
+				userID:              owner.ID,
+				userIDKind:          owner.IDKind,
+				userName:            owner.Name,
+				userEmail:           owner.Email,
 			})
 		}
 	}
@@ -711,10 +441,8 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 			continue
 		}
 		// Native readers check each file at its open, including links.
-		servers, err := cfg.ReadMCPServersForConnector(connectorName)
-		appendServers(connectorName, "", daemonHomeForInventoryAttribution(), servers)
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			status.markIncomplete(connectorName)
+		if servers, err := cfg.ReadMCPServersForConnector(connectorName); err == nil {
+			appendServers(connectorName, "", daemonHomeForInventoryAttribution(), servers)
 		}
 	}
 	// Pass 2 — every configured user home via direct-path readers.
@@ -725,42 +453,14 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 		if home == "" {
 			continue
 		}
-		// The managed Windows LocalSystem gateway must not read a user's
-		// profile. Treat that configured home as missing evidence for the
-		// entire collection instead of probing each connector or publishing
-		// an apparently complete snapshot that would remove its old rows.
-		if homeGuard(home) != nil {
-			for _, connectorName := range connectors {
-				status.markIncomplete(connectorName)
-			}
-			continue
-		}
 		homeScope := endpointInventoryScopeKey(home)
 		for _, connectorName := range connectors {
-			groups, readPartial := readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos)
-			if readPartial {
-				status.markIncomplete(connectorName)
+			for _, servers := range readMCPServersUnderHomeForOS(connectorName, home, goos) {
+				appendServers(connectorName, homeScope, home, servers)
 			}
-			var servers []config.MCPServerEntry
-			// Native readers return sources in precedence order. A later file
-			// cannot replace a name found in an earlier file. Entries within one
-			// source may represent separate native project scopes.
-			seenPriorNames := make(map[string]struct{})
-			for _, group := range groups {
-				for _, server := range group {
-					if _, seen := seenPriorNames[server.Name]; seen {
-						continue
-					}
-					servers = append(servers, server)
-				}
-				for _, server := range group {
-					seenPriorNames[server.Name] = struct{}{}
-				}
-			}
-			appendServers(connectorName, homeScope, home, servers)
 		}
 	}
-	return components, status
+	return components
 }
 
 // inventoryHomeOwner resolves who owns one profile directory, and which
@@ -825,11 +525,8 @@ func discoveryUserIDKind(userID string) string {
 // owner or a profile directory's owner), never from anything a client sent,
 // so its directory facts are reported as verified.
 func inventoryIdentity(userID string) *llmEventIdentity {
-	if userID == "" {
+	if userID == "" || !identityFactsEnabled.Load() {
 		return nil
-	}
-	if !identityFactsEnabled.Load() {
-		return secureClientInventoryIdentity(userID)
 	}
 	return inventoryIdentityFacts(userID)
 }
@@ -844,11 +541,8 @@ func inventoryIdentity(userID string) *llmEventIdentity {
 // that names no account cannot prove it, so it gets no facts. A Windows SID
 // is never reused, so it is not checked.
 func inventoryIdentityFor(userID, userName string) *llmEventIdentity {
-	if userID == "" {
+	if userID == "" || !identityFactsEnabled.Load() {
 		return nil
-	}
-	if !identityFactsEnabled.Load() {
-		return secureClientInventoryIdentity(userID)
 	}
 	if useridentity.KindForID(userID) == useridentity.KindPOSIXUID {
 		recorded, current := strings.TrimSpace(userName), strings.TrimSpace(userScopedIdentityName(userID))
@@ -921,55 +615,34 @@ func hasNativeMCPReader(connectorName string) bool {
 	return false
 }
 
-// readMCPServersUnderHomeForOS preserves the best-effort reader used by
-// callers that do not publish authoritative inventory snapshots.
-func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.MCPServerEntry {
-	groups, _ := readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos)
-	return groups
+// readMCPServersUnderHome reads all MCP-server entries for a given connector
+// from the standard filesystem paths under `home`. Returns a slice of
+// per-source results so callers can label each individually if desired.
+// Missing/unparseable files yield nil entries (best-effort).
+func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEntry {
+	return readMCPServersUnderHomeForOS(connectorName, home, runtime.GOOS)
 }
 
-// readMCPServersUnderHomeForOSWithStatus reads each native config source under
-// home and reports whether an expected source was unreadable or invalid.
-func readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos string) ([][]config.MCPServerEntry, bool) {
+func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.MCPServerEntry {
 	if home == "" {
-		return nil, false
+		return nil
 	}
 	var results [][]config.MCPServerEntry
-	partial := false
 	tryFile := func(reader func(string) ([]config.MCPServerEntry, error), relPath string) {
 		full := filepath.Join(home, relPath)
 		if managed.RequireWindowsGatewayPathOutsideUserProfiles(full) != nil {
-			partial = true
 			return
 		}
-		// Some native readers wrap a missing file in a generic error, so
-		// distinguish ordinary absence before asking them to parse it. A file
-		// that disappears between these operations remains partial.
-		if _, err := os.Lstat(full); err != nil {
-			if !errors.Is(err, fs.ErrNotExist) {
-				partial = true
-			}
-			return
-		}
-		entries, err := reader(full)
-		if len(entries) > 0 {
+		if entries, err := reader(full); err == nil && len(entries) > 0 {
 			results = append(results, entries)
-		}
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			partial = true
 		}
 	}
 	tryHome := func(reader func(string) ([]config.MCPServerEntry, error)) {
 		if managed.RequireWindowsGatewayPathOutsideUserProfiles(home) != nil {
-			partial = true
 			return
 		}
-		entries, err := reader(home)
-		if len(entries) > 0 {
+		if entries, err := reader(home); err == nil && len(entries) > 0 {
 			results = append(results, entries)
-		}
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			partial = true
 		}
 	}
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
@@ -1031,7 +704,7 @@ func readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos string) ([
 	case "amp":
 		tryHome(config.ReadMCPServersAMPUnderHome)
 	}
-	return results, partial
+	return results
 }
 
 // makeEndpointInventoryEmitter rebuilds the connector registry for each
@@ -1051,7 +724,6 @@ func makeEndpointInventoryEmitter(
 	emitter sidecarRuntimeEmitter,
 	snapshotFn func() inventory.AIDiscoveryReport,
 	gate *managedInventoryPublishState,
-	tools *mcpToolInventory,
 ) func(context.Context) {
 	return func(ctx context.Context) {
 		reg := connector.NewDefaultRegistry()
@@ -1073,7 +745,7 @@ func makeEndpointInventoryEmitter(
 				report = &snap
 			}
 		}
-		_ = emitEndpointInventory(ctx, cfg, reg, emitter, partial, report, gate, tools)
+		_ = emitEndpointInventory(ctx, cfg, reg, emitter, partial, report, gate)
 	}
 }
 
@@ -1132,15 +804,13 @@ func endpointMCPComponents(cfg *config.Config) ([]endpointInventoryComponent, bo
 		// path or parser error.
 		return nil, true
 	}
-	return endpointMCPComponentsFromServers(servers, mcpInventoryFingerprintKey(cfg)), false
+	return endpointMCPComponentsFromServers(servers), false
 }
 
-func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerprintKey []byte) []endpointInventoryComponent {
+func endpointMCPComponentsFromServers(servers []config.MCPServerEntry) []endpointInventoryComponent {
 	components := make([]endpointInventoryComponent, 0, len(servers))
 	for _, server := range servers {
 		command := inventorySafeBasename(server.Command)
-		commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
-		serverURL := mcpInventoryServerURL(server.URL)
 		host := mcpURLHost(server.URL)
 		name := inventorySafeItemName(server.Name, 256)
 		product := inventoryStableIdentifier(name)
@@ -1150,31 +820,23 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 		if product == "" {
 			product = host
 		}
-		// Preserve the historical alias-based component ID. Fingerprints and
-		// sanitized endpoint fields describe configuration changes without
-		// replacing the component or its child-tool history.
 		identity := server.Name
 		if strings.TrimSpace(identity) == "" {
 			identity = strings.Join([]string{command, host}, "\x00")
 		}
 		disabled := server.Disabled
 		components = append(components, endpointInventoryComponent{
-			id:                      endpointInventoryComponentID("mcp", identity),
-			componentType:           "mcp_server",
-			signal:                  "configured_mcp_server",
-			product:                 product,
-			active:                  !disabled,
-			itemName:                name,
-			mcpTransport:            inventoryStableToken(server.Transport, 64),
-			mcpCommandBasename:      command,
-			mcpCommandFingerprint:   commandFingerprint,
-			mcpArgumentsFingerprint: argumentsFingerprint,
-			mcpSourceScope:          inventoryStableToken(server.SourceScope, 64),
-			mcpServerURL:            serverURL,
-			mcpIsRemote:             server.URL != "",
-			mcpURLHost:              host,
-			mcpAuthProviderType:     inventoryStableToken(server.AuthProviderType, 64),
-			mcpDisabled:             &disabled,
+			id:                  endpointInventoryComponentID("mcp", identity),
+			componentType:       "mcp_server",
+			signal:              "configured_mcp_server",
+			product:             product,
+			active:              !disabled,
+			itemName:            name,
+			mcpTransport:        inventoryStableToken(server.Transport, 64),
+			mcpCommandBasename:  command,
+			mcpURLHost:          host,
+			mcpAuthProviderType: inventoryStableToken(server.AuthProviderType, 64),
+			mcpDisabled:         &disabled,
 		})
 	}
 	return components
@@ -1194,53 +856,6 @@ func emitEndpointInventorySnapshot(
 		observability.SourceSystem, action, "endpoint_inventory", endpointInventoryDetector,
 		publish,
 	)
-}
-
-// emitEndpointInventoryComponents publishes independently complete rows from a
-// partial collection without claiming that they form an authoritative
-// snapshot. It deliberately emits no summary and stores no collection digest:
-// callers must also emit the partial diagnostic snapshot so the cycle remains
-// degraded until every connector can be read.
-func emitEndpointInventoryComponents(
-	ctx context.Context,
-	emitter sidecarRuntimeEmitter,
-	source string,
-	components []endpointInventoryComponent,
-	action observability.ProducerKey,
-	publish endpointInventoryCycle,
-) (map[string]struct{}, error) {
-	accepted := make(map[string]struct{}, len(components))
-	if len(components) == 0 || len(components) > managedInventoryLimit(action) {
-		return accepted, nil
-	}
-	scanID := publish.scanID
-	if scanID == "" {
-		scanID = "inventory-" + uuid.NewString()
-	}
-	components = append([]endpointInventoryComponent(nil), components...)
-	sort.SliceStable(components, func(left, right int) bool {
-		if components[left].itemName != components[right].itemName {
-			return components[left].itemName < components[right].itemName
-		}
-		return components[left].id < components[right].id
-	})
-	var firstErr error
-	for _, component := range components {
-		outcome, err := emitEndpointInventoryComponent(
-			ctx, emitter, source, scanID, component,
-			observability.SourceSystem, action, "endpoint_inventory", endpointInventoryDetector,
-		)
-		if managedInventoryPublishRejected(outcome) && publish.cycle != nil {
-			publish.cycle.markDegraded()
-		}
-		if err == nil && !managedInventoryPublishRejected(outcome) {
-			accepted[component.id] = struct{}{}
-		}
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return accepted, firstErr
 }
 
 func emitInventorySnapshot(
@@ -1271,11 +886,8 @@ func emitInventorySnapshot(
 			active++
 		}
 	}
-	limit := managedInventoryComponentLimit(managedAction, components)
+	limit := managedInventoryLimit(managedAction)
 	carrier, carrierOK := endpointInventoryCarrierFor(managedAction, components)
-	if len(components) == 0 && strings.HasSuffix(source, "_mcp_tool_inventory") {
-		carrier, carrierOK = endpointInventoryCarrier{}, true
-	}
 	action := managedAction
 	if partial || limit == 0 || len(components) > limit || !carrierOK {
 		partial = true
@@ -1293,7 +905,7 @@ func emitInventorySnapshot(
 	switch {
 	case gated:
 		digest = managedInventoryComponentsDigest(source, components)
-		if !publish.cycle.shouldPublish(source, digest) {
+		if !publish.cycle.shouldPublish(source, digest) && !hasRemovedSkill(components) {
 			// Unchanged since the last successful publish and no bundle due:
 			// emit neither the summary nor any component record.
 			return nil
@@ -1349,14 +961,6 @@ func managedInventoryLimit(action observability.ProducerKey) int {
 	}
 }
 
-func managedInventoryComponentLimit(action observability.ProducerKey, components []endpointInventoryComponent) int {
-	if action == config.ObservabilityV8ManagedMCPInventoryAction &&
-		(len(components) == 0 || components[0].componentType == "mcp_tool") {
-		return maxMCPToolCollection
-	}
-	return managedInventoryLimit(action)
-}
-
 func endpointInventoryCarrierFor(
 	action observability.ProducerKey,
 	components []endpointInventoryComponent,
@@ -1389,14 +993,6 @@ func endpointInventoryCarrierFor(
 			connectorContent:     observability.Present(observability.TelemetryStructuredDefenseClawInventoryConnectorContent{Items: content}),
 		}, true
 	case config.ObservabilityV8ManagedMCPInventoryAction:
-		if len(components) > 0 && components[0].componentType == "mcp_tool" {
-			for _, component := range components {
-				if component.componentType != "mcp_tool" || component.mcpToolParentID == "" || component.mcpToolSource == "" {
-					return endpointInventoryCarrier{}, false
-				}
-			}
-			return endpointInventoryCarrier{}, true
-		}
 		identifiers := make([]observability.TelemetryStructuredDefenseClawInventoryMcpIdentifier, 0, len(components))
 		metadata := make([]observability.TelemetryStructuredDefenseClawInventoryMcpMetadataItem, 0, len(components))
 		for _, component := range components {
@@ -1405,14 +1001,10 @@ func endpointInventoryCarrierFor(
 			}
 			identifiers = append(identifiers, observability.TelemetryStructuredDefenseClawInventoryMcpIdentifier{
 				Name: component.itemName, URLHost: aiDiscoveryV8OptionalText(component.mcpURLHost),
-				ServerURL:            aiDiscoveryV8OptionalText(component.mcpServerURL),
-				CommandFingerprint:   aiDiscoveryV8OptionalText(component.mcpCommandFingerprint),
-				ArgumentsFingerprint: aiDiscoveryV8OptionalText(component.mcpArgumentsFingerprint),
 			})
 			metadata = append(metadata, observability.TelemetryStructuredDefenseClawInventoryMcpMetadataItem{
 				Transport:        aiDiscoveryV8OptionalText(component.mcpTransport),
 				CommandBasename:  aiDiscoveryV8OptionalText(component.mcpCommandBasename),
-				SourceScope:      aiDiscoveryV8OptionalText(component.mcpSourceScope),
 				AuthProviderType: aiDiscoveryV8OptionalText(component.mcpAuthProviderType),
 				Disabled:         *component.mcpDisabled,
 			})
@@ -1594,13 +1186,6 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryConnectorSubprocessPolicy:   aiDiscoveryV8OptionalText(component.connectorSubprocessPolicy),
 			DefenseClawInventoryMcpTransport:                aiDiscoveryV8OptionalText(component.mcpTransport),
 			DefenseClawInventoryMcpCommandBasename:          aiDiscoveryV8OptionalText(component.mcpCommandBasename),
-			DefenseClawInventoryMcpCommandFingerprint:       aiDiscoveryV8OptionalText(component.mcpCommandFingerprint),
-			DefenseClawInventoryMcpArgumentsFingerprint:     aiDiscoveryV8OptionalText(component.mcpArgumentsFingerprint),
-			DefenseClawInventoryMcpSourceScope:              aiDiscoveryV8OptionalText(component.mcpSourceScope),
-			DefenseClawInventoryMcpServerURL:                aiDiscoveryV8OptionalText(component.mcpServerURL),
-			DefenseClawInventoryMcpToolParentID:             aiDiscoveryV8OptionalText(component.mcpToolParentID),
-			DefenseClawInventoryMcpToolSource:               aiDiscoveryV8OptionalText(component.mcpToolSource),
-			DefenseClawInventoryMcpToolObservedAt:           aiDiscoveryV8OptionalText(component.mcpToolObservedAt),
 			DefenseClawInventoryMcpURLHost:                  aiDiscoveryV8OptionalText(component.mcpURLHost),
 			DefenseClawInventoryMcpAuthProviderType:         aiDiscoveryV8OptionalText(component.mcpAuthProviderType),
 			DefenseClawInventoryMcpDisabled:                 inventoryOptionalBool(component.mcpDisabled),
@@ -1618,6 +1203,9 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID, component.userName)),
 			DefenseClawInventorySkillContentHash:            aiDiscoveryV8OptionalText(component.skillContentHash),
 			DefenseClawInventorySkillContentStatus:          aiDiscoveryV8OptionalText(component.skillContentStatus),
+			DefenseClawInventorySkillState:                  aiDiscoveryV8OptionalText(component.skillState),
+			DefenseClawInventorySkillFirstSeen:              aiDiscoveryV8OptionalText(component.skillFirstSeen),
+			DefenseClawInventorySkillLastSeen:               aiDiscoveryV8OptionalText(component.skillLastSeen),
 		}
 		inventoryIdentityFor(component.userID, component.userName).applyTo(&input)
 		return builder.BuildLogAIComponentObserved(input)
@@ -1854,41 +1442,6 @@ func mcpURLHost(raw string) string {
 		return ""
 	}
 	return host
-}
-
-// mcpInventoryServerURL returns only the configured remote endpoint's origin.
-// Paths, userinfo, query, and fragment are omitted because every one of those
-// positions is used for bearer material in real MCP configurations. It does
-// not contact the endpoint.
-func mcpInventoryServerURL(raw string) string {
-	canonical := mcpInventoryCanonicalRemoteEndpoint(raw)
-	if canonical == "" {
-		return ""
-	}
-	parsed, _ := url.Parse(canonical)
-	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
-}
-
-// mcpInventoryCanonicalRemoteEndpoint is identity-only material. Callers must
-// never export or persist it; use it only as input to a keyed fingerprint.
-func mcpInventoryCanonicalRemoteEndpoint(raw string) string {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Opaque != "" {
-		return ""
-	}
-	scheme := strings.ToLower(parsed.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return ""
-	}
-	host := strings.ToLower(mcpURLHost(raw))
-	if host == "" {
-		return ""
-	}
-	endpoint := scheme + "://" + host + parsed.EscapedPath()
-	if len(endpoint) > 1024 {
-		return ""
-	}
-	return endpoint
 }
 
 // discoveredEntriesFromReport enumerates per-entry inventory components for a
