@@ -1028,11 +1028,21 @@ func loadPreviousManifestForEnumeration(path string, logf EnumerationLogger) map
 	}
 	m, err := LoadManifest(path)
 	if err != nil {
-		// Not fatal — an operator-hand-edited targets.yaml that
-		// fails validation shouldn't crash the enumerator; we log
-		// and treat every discovered row as new.
-		logfSafely(logf, path, fmt.Sprintf("existing manifest failed to load; treating every row as new: %v", err))
-		return nil
+		// A row this host cannot validate right now (an enabled Secure
+		// Client row with no agent_version while the deployment check
+		// fails) must not drop the recorded state of every row: a
+		// disabled row would come back enabled. Re-read the same file
+		// without the per-row platform check, only to carry that state.
+		lenient, _, lenientErr := loadManifestWithSHA256(path, func(int, ManifestTarget) error { return nil })
+		if lenientErr != nil {
+			// Not fatal — an operator-hand-edited targets.yaml that
+			// does not parse shouldn't crash the enumerator; we log
+			// and treat every discovered row as new.
+			logfSafely(logf, path, fmt.Sprintf("existing manifest failed to load; treating every row as new: %v", err))
+			return nil
+		}
+		logfSafely(logf, path, fmt.Sprintf("existing manifest failed validation; keeping its recorded row state: %v", err))
+		m = lenient
 	}
 	previous := make(map[string]ManifestTarget, len(m.Targets))
 	for _, t := range m.Targets {

@@ -233,4 +233,46 @@ if (@($script:DefenseClawBootstrapResilienceEvents | Where-Object {
     throw "unverifiable Codex enablement was not logged: $($script:DefenseClawBootstrapResilienceEvents -join '; ')"
 }
 
+# No agent installed yet (AVC pushes DefenseClaw first). Secure Client enables
+# the row without a version, so the best-effort contract applies and the
+# enumerator records the real version once the agent appears; it never writes
+# the bootstrap minimum, which is not evidence of an installed agent.
+# Standalone keeps the exact minimum, because its manifest requires one.
+function Get-DefenseClawConnectorMetadataVersion {
+    param([string]$Connector, [string]$UserHome, [string]$OwnerSID, [ref]$NativeCandidateObserved)
+    if ($null -ne $NativeCandidateObserved) { $NativeCandidateObserved.Value = $false }
+    return ''
+}
+$script:DefenseClawWindowsManagedEnterpriseSupportedConnectors = @('codex', 'claudecode', 'cursor', 'copilot')
+$absentProfiles = @([pscustomobject]@{
+        SID = 'S-1-5-21-1000-1000-1000-1002'
+        UserName = 'no-agents-user'
+        UserHome = 'C:\Users\no-agents-user'
+    })
+$absentConnectors = @('codex', 'claudecode', 'cursor', 'copilot')
+$secureClientAbsent = Get-DefenseClawRenderedEnterpriseTargets `
+    -Connectors $absentConnectors `
+    -Profiles $absentProfiles
+$secureClientAbsentBlocks = @(
+    [regex]::Split($secureClientAbsent, '(?m)(?=^  - user: )') |
+        Where-Object { $_.StartsWith('  - user: ') }
+)
+if ($secureClientAbsentBlocks.Count -ne 4) {
+    throw "Secure Client renderer emitted $($secureClientAbsentBlocks.Count) rows for four absent agents: $secureClientAbsent"
+}
+foreach ($block in $secureClientAbsentBlocks) {
+    if ($block -notmatch '(?m)^    enabled: true\r?$' -or
+        $block -match '(?m)^    agent_version:') {
+        throw "Secure Client wrote a bootstrap version for an absent agent instead of an unversioned enabled row: $block"
+    }
+}
+$standaloneAbsent = Get-DefenseClawRenderedEnterpriseTargets `
+    -Connectors @('claudecode') `
+    -Profiles $absentProfiles `
+    -ForProfile Standalone
+if ($standaloneAbsent -notmatch '(?m)^    agent_version: "2\.1\.152"\r?$' -or
+    $standaloneAbsent -notmatch '(?m)^    enabled: true\r?$') {
+    throw "standalone lost the bootstrap minimum for an absent agent: $standaloneAbsent"
+}
+
 'installer resilience smoke passed'

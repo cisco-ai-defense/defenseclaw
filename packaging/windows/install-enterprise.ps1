@@ -4377,16 +4377,21 @@ function Get-DefenseClawRenderedEnterpriseTargets {
         [void]$activeProfileSIDs.Add(([string]$activeProfile.SID).Trim())
     }
     # When no agent metadata exists yet (the common state on managed
-    # rollouts where AVC pushes DefenseClaw first), use the exact minimum as
-    # a bootstrap placeholder. A detected native package whose
-    # identity/version cannot be authenticated never receives that
-    # fallback. Secure Client enables its row without agent_version, which
-    # the manifest accepts and which selects the best-effort hook contract.
-    # The standalone manifest validator refuses an enabled target without
-    # an agent_version that meets the connector's Windows minimum (see
+    # rollouts where AVC pushes DefenseClaw first), the standalone profile
+    # uses the exact minimum as a bootstrap placeholder: its manifest
+    # validator refuses an enabled target without an agent_version that meets
+    # the connector's Windows minimum (see
     # requireWindowsEnterpriseManagedAgentVersion in
-    # internal/enterprisehooks/install_windows.go), so standalone keeps that
-    # row disabled. A valid below-minimum version remains exact.
+    # internal/enterprisehooks/install_windows.go). Secure Client never
+    # writes the placeholder. It enables its row without agent_version, which
+    # the manifest accepts and which selects the best-effort hook contract,
+    # and the enumerator records the real version once it finds the agent.
+    # A placeholder there is not evidence of any installed agent, and while
+    # the host is not verified as Secure Client the enumerator keeps the
+    # recorded version, so a placeholder below the hook contract floor would
+    # leave the row unhookable. A detected native package whose
+    # identity/version cannot be authenticated never receives the fallback.
+    # A valid below-minimum version remains exact.
     $script:DefenseClawWindowsAgentVersionMinimum = @{
         'codex'      = '0.131.0'
         'claudecode' = '2.1.152'
@@ -4416,6 +4421,7 @@ function Get-DefenseClawRenderedEnterpriseTargets {
                 $metadataDiscoveryFailed = $true
             }
             $minimumVersion = if (
+                $ForProfile -ceq 'Standalone' -and
                 $script:DefenseClawWindowsAgentVersionMinimum.ContainsKey($c)
             ) {
                 $script:DefenseClawWindowsAgentVersionMinimum[$c]
