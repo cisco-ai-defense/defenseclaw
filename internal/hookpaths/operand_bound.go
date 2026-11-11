@@ -36,6 +36,17 @@ func BoundCommandOperands(command, cwd, home string) (reduced string, over bool)
 	return actionfacts.BoundOperands(command, probe.droppable)
 }
 
+// BoundStatementCommandOperands is the reading of a shell command with a
+// statement of more argv words than the analysis reads that the gateway
+// judges too (actionfacts.BoundStatementOperands, GAP-1069). It leaves out
+// the same plain names as BoundCommandOperands, and also those past the
+// statement bound, so a statement it keeps has path facts; it is command
+// when it leaves out none.
+func BoundStatementCommandOperands(command, cwd, home string) string {
+	probe := &operandLinkProbe{cwd: cwd, home: home, dirs: map[string]bool{}}
+	return actionfacts.BoundStatementOperands(command, probe.droppable)
+}
+
 // operandLinkProbe tells, for one call, whether a plain name is read from
 // the file system as itself: no link in the name or in the folders below the
 // cwd, and no second name of a protected key file. It keeps what it learned
