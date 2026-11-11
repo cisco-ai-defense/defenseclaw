@@ -16,8 +16,8 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// RegistrationWriteReached runs the shared concrete shell mutation reader
-// against a caller-supplied registration set and returns the members of that
+// registrationWriteReachedAs is RegistrationWriteReached in one reading of
+// the command: it runs the shared concrete shell mutation reader against a caller-supplied registration set and returns the members of that
 // set the command provably writes, in the order given. It uses the same
 // value, directory and link resolution as the protected state decision,
 // including ordered shell assignments and cd-relative operands. The command
@@ -25,7 +25,7 @@ import (
 // halves, so a command that reaches k members costs about k*log(n) reads of
 // the command rather than one per member. A write proof concerns one member,
 // so a half reaches exactly when one of its members does.
-func RegistrationWriteReached(command, cwd, home string, names []string) []string {
+func registrationWriteReachedAs(command, cwd, home string, names []string) []string {
 	if command == "" || !filepath.IsAbs(cwd) || len(names) == 0 {
 		return nil
 	}
@@ -1355,10 +1355,9 @@ func registrationCopyReach(file *syntax.File, cwd, home string, protected protec
 	return found
 }
 
-// RegistrationArchivePossibleReach reports an extraction into a directory
-// containing a registration when the archive's entries are not named in the
-// command. This is a possible write; callers choose its profile grade.
-func RegistrationArchivePossibleReach(command, cwd, home string, names []string) string {
+// registrationArchivePossibleReachAs is RegistrationArchivePossibleReach in
+// one reading of the command.
+func registrationArchivePossibleReachAs(command, cwd, home string, names []string) string {
 	if !strings.Contains(command, "tar") && !strings.Contains(command, "unzip") {
 		return ""
 	}
