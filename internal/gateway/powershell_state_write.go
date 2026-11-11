@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // provenPowerShellStateWrite judges the PowerShell reading of a Windows-home
@@ -25,7 +26,10 @@ import (
 // link (a junction onto the state directory) does not spell DefenseClaw: it
 // is read when the mention scan, which walks the link on the file system as
 // the cmdlet route does, places it in the state, and the reading then follows
-// the text and values that scan places there (GAP-1023 IB34).
+// the text and values that scan places there (GAP-1023 IB34). A managed
+// gateway cannot walk the user's links: there the text and values are those
+// that spell a path the hook client lists in the state tree, as the user's
+// walk placed it (clientStateSpellings).
 func provenPowerShellStateWrite(request trustedActionRequest) bool {
 	home := request.Input.ActiveHome
 	if len(home) < 2 || home[1] != ':' {
@@ -44,6 +48,10 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 	if !strings.Contains(strings.ToLower(command), "defenseclaw") {
 		cwd := request.Input.CWD
 		mentions = func(text string) bool { return request.targetMemo.ActionStateTargetMention(text, cwd, home) }
+		if request.ProtectedHomeHook {
+			spellings := clientStateSpellings(request.ResolvedWriteTargets, home)
+			mentions = func(text string) bool { return psSpellsAny(text, spellings) }
+		}
 		if !mentions(command) {
 			return false
 		}
@@ -88,6 +96,46 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 			if proven(variant) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// clientStateSpellings returns the spellings (psLinkKey) of the paths the
+// hook client's map places in the active state tree of home, also relative to
+// the folder the client ran the call in. The client walks a quoted path of a
+// PowerShell call as the user and lists it when it reaches the state
+// (hookpaths stateOperand), where a gateway that cannot read the home sees
+// neither the link nor where it leads.
+func clientStateSpellings(targets map[string]string, home string) []string {
+	state := psLinkKey(home + `\.defenseclaw`)
+	cwd := psLinkKey(targets[hookpaths.CWDKey])
+	var spellings []string
+	for key, value := range targets {
+		if key == "" || strings.HasPrefix(key, "\x00") {
+			continue
+		}
+		if physical := psLinkKey(value); physical != state && !strings.HasPrefix(physical, state+`\`) {
+			continue
+		}
+		spelling := psLinkKey(key)
+		spellings = append(spellings, spelling)
+		if rest, ok := strings.CutPrefix(spelling, cwd+`\`); ok && cwd != "" {
+			spellings = append(spellings, rest)
+		}
+	}
+	return spellings
+}
+
+// psSpellsAny reports text that spells one of spellings (psLinkKey).
+func psSpellsAny(text string, spellings []string) bool {
+	if len(spellings) == 0 {
+		return false
+	}
+	text = strings.ToLower(strings.ReplaceAll(text, "/", `\`))
+	for _, spelling := range spellings {
+		if spelling != "" && strings.Contains(text, spelling) {
+			return true
 		}
 	}
 	return false

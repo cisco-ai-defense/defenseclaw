@@ -2016,6 +2016,11 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					operands, _, parsed, _ = shellWriteOperands(command, cwd, home, KnownUser{})
 				}
 				stateOperands = append(stateOperands, knownStateOperands(command, cwd, home)...)
+				if actionWindowsHome(home) && clientPowerShellReading(connector, tool, facts) {
+					quoted, over := powerShellQuotedPathOperands(command, cwd)
+					stateOperands = append(stateOperands, quoted...)
+					truncated = truncated || over
+				}
 				if concreteOperands.ready {
 					literalOperands = concreteOperands.literal
 				} else {

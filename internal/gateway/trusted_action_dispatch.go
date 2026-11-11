@@ -1242,8 +1242,12 @@ func withActiveStateTargetMention(
 				// /c rd /s /q %USERPROFILE%\.defenseclaw) names none, while the
 				// cmd twin (or the PowerShell reading, GAP-2414) proves the mutation of
 				// the state root (classifier-ps checker it9 RV9-2 X02, X07).
-				if !strings.Contains(strings.ToLower(command), ".defenseclaw") ||
-					!provenCMDSlashCStateWrite(request) && !provenPowerShellStateWrite(request) {
+				// A managed PowerShell call that reaches the state through a
+				// link names no state: its reading follows the paths the hook
+				// client placed there (GAP-1023).
+				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
+				if !(spelled && provenCMDSlashCStateWrite(request)) &&
+					!((spelled || request.ProtectedHomeHook) && provenPowerShellStateWrite(request)) {
 					return findings
 				}
 			}

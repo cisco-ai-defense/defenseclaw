@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // A .NET write through a variable bound to a path under a junction onto the
@@ -60,13 +61,27 @@ func TestPowerShellBoundWriteThroughAJunctionToStateIsProven(t *testing.T) {
 				args, _ := json.Marshal(map[string]string{"command": tc.command})
 				input := actionfacts.Input{Tool: "shell_command", Args: args, CWD: project, ActiveHome: home}
 				input.DialectHint = agentHookWindowsShellDialect(input)
-				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				request := trustedActionRequest{
 					Input: input, LegacyText: string(args), Connector: connectorName,
 					EnforcementCapable: true, ProtectedHomeHook: managed,
-				})
+				}
+				if managed {
+					// A managed gateway places the call's targets from the
+					// map the hook client resolves as the user and sends.
+					payload, _ := json.Marshal(map[string]any{"session_id": "s", "turn_id": "t1",
+						"hook_event_name": "PreToolUse", "cwd": project, "tool_name": "shell_command",
+						"tool_input": map[string]string{"command": tc.command}})
+					targets, ok := hookpaths.Decode(hookpaths.ResolveConnector("codex", "", "PreToolUse", payload))
+					if !ok {
+						t.Fatal("client map did not decode")
+					}
+					request.ResolvedWriteTargets = targets
+				}
+				findings := dispatchTrustedAction(t.Context(), request)
 				verdict := buildVerdict(findings, "tool_call")
 				if got := verdict.Action == "block" && api.provenActiveStateMutation(t.Context(), verdict); got != tc.block {
-					t.Fatalf("observe-mode hard block=%t, want %t (action %q, findings %v)", got, tc.block, verdict.Action, findingIDs(findings))
+					t.Fatalf("observe-mode hard block=%t, want %t (action %q, findings %v, client map %q)",
+						got, tc.block, verdict.Action, findingIDs(findings), request.ResolvedWriteTargets)
 				}
 			})
 		}
