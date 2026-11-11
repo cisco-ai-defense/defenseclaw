@@ -65,6 +65,24 @@ func (b psBindings) size() int {
 type psMerger struct {
 	home, cwd string
 	links     map[string]bool
+	// mentions, when set, reports text whose paths the mention scan places
+	// in the active state although they do not spell DefenseClaw (a link
+	// onto the state directory, which only the file system shows). The
+	// reading then follows that text as well (psMerger.namesState).
+	mentions func(text string) bool
+}
+
+// namesState reports text the reading follows: text that spells DefenseClaw,
+// or text the mention scan places in the active state.
+func (m psMerger) namesState(text string) bool {
+	return strings.Contains(strings.ToLower(text), "defenseclaw") || m.mentions != nil && m.mentions(text)
+}
+
+// namesStateValue is namesState for a value a variable is bound to, judged as
+// the path a write of it opens.
+func (m psMerger) namesStateValue(value string) bool {
+	return strings.Contains(strings.ToLower(value), "defenseclaw") ||
+		m.mentions != nil && m.mentions("Set-Content -LiteralPath "+managed.PowerShellLiteral(value)+" -Value x")
 }
 
 func newPSMerger(home, cwd string, targets map[string]string) psMerger {
@@ -305,13 +323,13 @@ func psUnionBindings(a, b psBindings, m psMerger, overflow *bool) psBindings {
 // spelling was proven, the bound one was only a rule match that observe mode
 // downgrades).
 //
-// Only values that name DefenseClaw are tracked, so ordinary scripts are
-// read unchanged. A value is a single- or double-quoted string whose
-// expansions are bound variables or the user home ($HOME, $env:USERPROFILE),
-// or a bound variable; any other right-hand side, compound assignment or
-// unresolvable expansion makes the variable unknown from there on. Strings
-// that PowerShell does not expand (single-quoted, here-strings) and comments
-// are copied unchanged.
+// Only values that name DefenseClaw state are tracked (psMerger.namesState),
+// so ordinary scripts are read unchanged. A value is a single- or
+// double-quoted string or here-string whose expansions are bound variables or
+// the user home ($HOME, $env:USERPROFILE), or a bound variable; any other
+// right-hand side, compound assignment or unresolvable expansion makes the
+// variable unknown from there on. Strings that PowerShell does not expand
+// (single-quoted, here-strings) and comments are copied unchanged.
 //
 // Control flow keeps every executable alternative. A block that may run (an
 // if, a loop, a script block) leaves the variable holding what it held before
@@ -322,7 +340,7 @@ func psUnionBindings(a, b psBindings, m psMerger, overflow *bool) psBindings {
 // earlier use in the next round. A block proven on one reading counts;
 // nothing else does. A value past a bound sets budget.over.
 func psBindStaticValues(command string, merge psMerger, budget *psBudget) (readings []string) {
-	if !strings.Contains(strings.ToLower(command), "defenseclaw") || !strings.ContainsRune(command, '$') {
+	if !strings.ContainsRune(command, '$') || !merge.namesState(command) {
 		return nil
 	}
 	r := []rune(command)
@@ -484,7 +502,7 @@ func (b *psBinder) run(i int, st psBindings, inBlock bool) (int, psBindings) {
 				copyTo(valueEnd)
 				var kept []string
 				for _, value := range values {
-					if strings.Contains(strings.ToLower(value), "defenseclaw") && len([]rune(value)) <= psBoundValueMaxRunes {
+					if len([]rune(value)) <= psBoundValueMaxRunes && b.merge.namesStateValue(value) {
 						kept = psAddValue(kept, value, b.merge, &b.overflow)
 					}
 				}
@@ -713,8 +731,8 @@ func psVariableName(r []rune, i int) (name string, end int, braced bool) {
 }
 
 // assignedValues reads the right-hand side of an assignment whose = is at
-// r[eq]: one quoted string, or one bound variable, that ends the statement.
-// It returns every value the right-hand side can have.
+// r[eq]: one quoted string or here-string, or one bound variable, that ends
+// the statement. It returns every value the right-hand side can have.
 func (b *psBinder) assignedValues(eq int, st psBindings) (values []string, end int, ok bool) {
 	r := b.r
 	if eq >= len(r) || r[eq] != '=' {
@@ -729,6 +747,21 @@ func (b *psBinder) assignedValues(eq int, st psBindings) (values []string, end i
 	}
 	var literalEnd int
 	switch {
+	case r[start] == '@' && start+1 < len(r) && (psSingleQuote(r[start+1]) || psDoubleQuote(r[start+1])) && b.scan.hereStringOpen(start+2):
+		var body string
+		literalEnd, body, ok = b.hereStringBody(start)
+		if !ok {
+			return nil, 0, false
+		}
+		if psSingleQuote(r[start+1]) {
+			values = []string{body}
+			break
+		}
+		var expanded bool
+		values, expanded = psDoubleQuotedValues(`"`+body+`"`, st, b.merge.home, true, &b.overflow)
+		if !expanded {
+			return nil, 0, false
+		}
 	case psSingleQuote(r[start]):
 		literalEnd = b.scan.singleQuoted(start)
 		inner := string(r[start+1 : max(literalEnd-1, start+1)])
@@ -736,7 +769,7 @@ func (b *psBinder) assignedValues(eq int, st psBindings) (values []string, end i
 	case psDoubleQuote(r[start]):
 		literalEnd = b.scan.doubleQuoted(start)
 		var expanded bool
-		values, expanded = psDoubleQuotedValues(string(r[start:literalEnd]), st, b.merge.home, &b.overflow)
+		values, expanded = psDoubleQuotedValues(string(r[start:literalEnd]), st, b.merge.home, false, &b.overflow)
 		if !expanded {
 			return nil, 0, false
 		}
@@ -761,12 +794,34 @@ func (b *psBinder) assignedValues(eq int, st psBindings) (values []string, end i
 	return values, literalEnd, true
 }
 
+// hereStringBody returns the end of the here-string at r[start] (@' or @")
+// and its text: the lines between the header line and the closing line,
+// without the line break before the closing quote, as PowerShell reads it.
+// ok is false when the here-string is not closed.
+func (b *psBinder) hereStringBody(start int) (end int, body string, ok bool) {
+	r := b.r
+	end = b.scan.hereString(start)
+	open := start + 2
+	for open < len(r) && r[open] != '\n' {
+		open++
+	}
+	// The closing quote starts a line of its own and is of the opening kind.
+	if end < open+3 || r[end-1] != '@' || psSingleQuote(r[end-2]) != psSingleQuote(r[start+1]) ||
+		end-2 > open+1 && r[end-3] != '\n' {
+		return 0, "", false
+	}
+	text := string(r[open+1 : end-2])
+	text = strings.TrimSuffix(text, "\n")
+	return end, strings.TrimSuffix(text, "\r"), true
+}
+
 // psDoubleQuotedValues returns the strings a double-quoted PowerShell literal
 // can hold: escapes decoded, $name and ${name} of bound variables and the
 // user home expanded, one string per combination of the values the variables
 // hold; combinations past the bound set *overflow. expanded is false for any other expansion ($(...), an unbound
-// variable), whose value is not known.
-func psDoubleQuotedValues(literal string, st psBindings, home string, overflow *bool) (values []string, expanded bool) {
+// variable), whose value is not known. here reads the text of an expandable
+// here-string, in which a doubled quote is two quotes.
+func psDoubleQuotedValues(literal string, st psBindings, home string, here bool, overflow *bool) (values []string, expanded bool) {
 	r := []rune(literal)
 	if len(r) < 2 {
 		return nil, false
@@ -798,7 +853,7 @@ func psDoubleQuotedValues(literal string, st psBindings, home string, overflow *
 			default:
 				text = string(r[i])
 			}
-		case psDoubleQuote(r[i]) && i+1 < len(r)-1 && psDoubleQuote(r[i+1]):
+		case !here && psDoubleQuote(r[i]) && i+1 < len(r)-1 && psDoubleQuote(r[i+1]):
 			text = string(r[i])
 			i++
 		case r[i] == '$':
@@ -905,11 +960,11 @@ var psPatchDirectives = []string{"*** add file:", "*** update file:", "*** delet
 // read as a line break; a statement that only mentions an envelope or the
 // flag (Write-Output, echo) runs nothing and lists none. Each target is
 // judged as the Set-Content write it is.
-func psPatchRunTargets(statement, cwd string, budget *psBudget) []string {
-	lower := strings.ToLower(statement)
-	if !strings.Contains(lower, "*** ") || !strings.Contains(lower, "defenseclaw") {
+func psPatchRunTargets(statement string, merge psMerger, budget *psBudget) []string {
+	if !strings.Contains(statement, "*** ") || !merge.namesState(statement) {
 		return nil
 	}
+	cwd := merge.cwd
 	if !psRunsPatch(psWords(statement, budget), budget) || budget.over {
 		return nil
 	}

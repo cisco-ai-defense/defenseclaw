@@ -21,7 +21,11 @@ import (
 // ${C:\...} = x, the path of a .NET file write) is read as the write
 // Set-Content -LiteralPath <target> it is. Only a twin whose own reading
 // proves the mutation of active state counts. The caller has already seen a
-// DefenseClaw state mention.
+// DefenseClaw state mention. A command that reaches the state only through a
+// link (a junction onto the state directory) does not spell DefenseClaw: it
+// is read when the mention scan, which walks the link on the file system as
+// the cmdlet route does, places it in the state, and the reading then follows
+// the text and values that scan places there (GAP-1023 IB34).
 func provenPowerShellStateWrite(request trustedActionRequest) bool {
 	home := request.Input.ActiveHome
 	if len(home) < 2 || home[1] != ':' {
@@ -33,10 +37,18 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 		return false
 	}
 	command, known := trustedBashCommandInput(request.Input)
-	if !known || !strings.Contains(strings.ToLower(command), "defenseclaw") {
+	if !known {
 		return false
 	}
-	forms, bounded, ok := powerShellStateWriteForms(command, home, request.Input.CWD, request.ResolvedWriteTargets)
+	var mentions func(string) bool
+	if !strings.Contains(strings.ToLower(command), "defenseclaw") {
+		cwd := request.Input.CWD
+		mentions = func(text string) bool { return request.targetMemo.ActionStateTargetMention(text, cwd, home) }
+		if !mentions(command) {
+			return false
+		}
+	}
+	forms, bounded, ok := powerShellStateWriteForms(command, home, request.Input.CWD, request.ResolvedWriteTargets, mentions)
 	if !ok {
 		return false
 	}
@@ -250,11 +262,13 @@ func newPSScan(runes []rune, budget *psBudget) *psStateScan {
 // reports a command past the reading bounds. ok is false when PowerShell
 // cannot parse the command: a < that starts a token is a parse error there
 // (a Git Bash here-document or input redirect), so nothing runs in that
-// reading.
-func powerShellStateWriteForms(command, home, cwd string, targets map[string]string) (forms []string, bounded, ok bool) {
+// reading. mentions, when not nil, also places text in the state (psMerger).
+func powerShellStateWriteForms(command, home, cwd string, targets map[string]string, mentions func(string) bool) (forms []string, bounded, ok bool) {
 	seen := map[string]bool{}
 	budget := &psBudget{}
-	reading := psReading{newPSMerger(home, cwd, targets)}
+	merge := newPSMerger(home, cwd, targets)
+	merge.mentions = mentions
+	reading := psReading{merge}
 	bounded, ok = reading.collect(command, 0, true, seen, &forms, budget)
 	return forms, bounded, ok
 }
@@ -278,8 +292,7 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 	}
 	add := func(form string) {
 		form = strings.TrimSpace(form)
-		if form == "" || seen[form] || !strings.Contains(strings.ToLower(form), "defenseclaw") ||
-			psOutputOnly(form) {
+		if form == "" || seen[form] || psOutputOnly(form) || !reading.merge.namesState(form) {
 			return
 		}
 		seen[form] = true
@@ -298,14 +311,14 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 	}
 	for _, piece := range scan.pieces {
 		add(piece)
-		for _, target := range psPatchRunTargets(piece, reading.merge.cwd, budget) {
+		for _, target := range psPatchRunTargets(piece, reading.merge, budget) {
 			add("Set-Content -LiteralPath " + target + " -Value x")
 		}
 		body, nested := psNestedShellBody(piece, budget)
 		if budget.over {
 			return true, true
 		}
-		if !nested || !strings.Contains(strings.ToLower(body), "defenseclaw") {
+		if !nested || !reading.merge.namesState(body) {
 			continue
 		}
 		if depth >= psNestedShellDepth {
@@ -317,7 +330,7 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 		}
 	}
 	for _, body := range scan.bodies {
-		if !strings.Contains(strings.ToLower(body), "defenseclaw") {
+		if !reading.merge.namesState(body) {
 			continue
 		}
 		if depth >= psNestedShellDepth {
@@ -762,6 +775,14 @@ func (s *psStateScan) code(i int, nested bool) int {
 			if pipedFrom != "" {
 				if body, ok := psPipedInvokeBody(pipedFrom, text, s.budget); ok {
 					s.bodies = append(s.bodies, body)
+				}
+				// A program reads what is piped into it: an envelope piped
+				// into apply_patch is the patch it applies, as when it is
+				// the argument (GAP-1023 IB34). The run is read as a piece
+				// with the piped text as its argument.
+				if strings.Contains(pipedFrom, "*** ") && psRunsPatch(psWords(text, s.budget), s.budget) &&
+					s.account(len(cur)+len(pipedFrom)+1) {
+					s.pieces = append(s.pieces, strings.TrimSpace(text)+" "+strings.TrimSpace(pipedFrom))
 				}
 			}
 		}
