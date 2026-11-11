@@ -92,12 +92,14 @@ type RuleFinding struct {
 	// class on a shell command (markShellProtectedFileFindings). It is
 	// private and value-free; profileClassFloor reads it.
 	shellProtectedFile bool
-	// omittedOperand marks the evaluation-limit finding that stands for a
-	// named write operand the hook client left out of its bounded map: a
-	// target the gateway cannot place, which may be a link to a protected
-	// file. It is private and value-free; guardrailActionForProfile keeps its
-	// block in every profile.
-	omittedOperand bool
+	// limitKeepsBlock marks an evaluation-limit finding whose target may be
+	// protected: a named write operand the hook client left out of its
+	// bounded map (a target the gateway cannot place, which may be a link to
+	// a protected file), or a call past a reading bound whose text may name
+	// a protected target (readingBoundProtectedFindings). It is private and
+	// value-free; guardrailActionForProfile keeps its block in every
+	// profile.
+	limitKeepsBlock bool
 }
 
 type findingEnforcement uint8

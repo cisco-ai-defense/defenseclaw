@@ -391,13 +391,40 @@ func dispatchTrustedAction(
 	// binding; the other tiers follow the top-level statements before it.
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
-	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
-		return trustedActionLimitFindings(true)
+	// The unproven-write reader of the hook client stopped at a recovered
+	// parse (shell-parse-bound, GAP-0534). A call whose text may name a
+	// protected target keeps the over-limit block in every profile; any
+	// other is read by the readers below, and the bound adds the
+	// evaluation-limit finding, which the profile decides
+	// (guardrailActionForProfile).
+	clientBound := request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound"
+	if clientBound && trustedReadingBoundMayNameProtected(request) {
+		return readingBoundProtectedFindings(true)
 	}
-	if trustedActionCommandTooDeep(request.Input) {
+	if clientBound {
+		defer func() { findings = withTrustedActionLimitFinding(findings, true) }()
+	}
+	switch trustedActionCommandBound(request.Input) {
+	case shellReadingTooDeep:
 		// Past the reading bounds: no reader below parses it, and the call
 		// takes the over-limit path (GAP-2537).
 		return trustedActionLimitFindings(request.EnforcementCapable)
+	case shellReadingNestedBodies:
+		// No reader below reads it either (GAP-0677). A call whose text may
+		// name a protected target keeps the over-limit block in every
+		// profile; any other gets the evaluation-limit finding the profile
+		// decides.
+		if trustedReadingBoundMayNameProtected(request) {
+			return readingBoundProtectedFindings(request.EnforcementCapable)
+		}
+		return trustedActionLimitFindings(request.EnforcementCapable)
+	case shellReadingNestedProof:
+		// The readers below read it, but past this weight they do not prove
+		// its protected targets: a call whose text may name one keeps the
+		// over-limit block in every profile.
+		if trustedReadingBoundMayNameProtected(request) {
+			return readingBoundProtectedFindings(request.EnforcementCapable)
+		}
 	}
 	if bounded, handled := operandBoundDispatch(parent, request); handled {
 		// A call past actionfacts.MaxOperandsPerCall operands is unresolved
@@ -9554,7 +9581,7 @@ func withOmittedOperandLimitFinding(findings []RuleFinding, enforcementCapable b
 	if !had {
 		for index := range findings {
 			if findings[index].RuleID == "ACTION-COMPOUND-LIMIT" {
-				findings[index].omittedOperand = true
+				findings[index].limitKeepsBlock = true
 			}
 		}
 	}
@@ -9573,29 +9600,55 @@ func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
 
-// trustedActionCommandTooDeep reports whether the call's command (the
-// command input, or the top-level command argument of any tool but
-// apply_patch) nests past
-// shellparse.MaxNestingDepth. Every shell reader of the gateway, the hook
-// proofs and actionfacts recurse per nesting level; such a command
-// overflowed the Windows gateway's stack (GAP-2537).
-func trustedActionCommandTooDeep(input actionfacts.Input) bool {
+// shellReadingBound is the reading bound a command is past
+// (trustedActionCommandBound).
+type shellReadingBound uint8
+
+const (
+	shellReadingWithinBounds shellReadingBound = iota
+	// shellReadingTooDeep: it nests past shellparse.MaxNestingDepth. Every
+	// shell reader of the gateway, the hook proofs and actionfacts recurse
+	// per nesting level; such a command overflowed the Windows gateway
+	// stack (GAP-2537).
+	shellReadingTooDeep
+	// shellReadingNestedBodies: its nested shell bodies weigh more than
+	// shellparse.MaxNestedBodyBytes; the readers took seconds to read them
+	// (GAP-0677).
+	shellReadingNestedBodies
+	// shellReadingNestedProof: its nested shell bodies weigh more than
+	// shellparse.MaxNestedBodyProofBytes; the readers read it but do not
+	// prove its protected targets.
+	shellReadingNestedProof
+)
+
+// trustedActionCommandBound reports the reading bound the command of the
+// call (the command input, or the top-level command argument of any tool
+// but apply_patch) is past, as shellparse.PastReadingBounds measures it.
+func trustedActionCommandBound(input actionfacts.Input) shellReadingBound {
 	// The command of an apply_patch call is a patch envelope: file text,
 	// not shell. Its targets are read from the envelope, and every shell
 	// reader parses through shellparse.Reader, so a patch of ordinary text
 	// with many unclosed (, { or [ (ANSI colour escapes) is judged by its
 	// targets, not by the shell bound (GAP-2561).
 	if actionfacts.ApplyPatchTool(input.Tool) {
-		return false
+		return shellReadingWithinBounds
 	}
-	if shellparse.TooDeep(input.Command) {
-		return true
+	command := input.Command
+	if command == "" && len(bytes.TrimSpace(input.Args)) > 0 {
+		if field, present, valid := trustedTopLevelCommandField(input.Args); valid && present {
+			command = field
+		}
 	}
-	if input.Command != "" || len(bytes.TrimSpace(input.Args)) == 0 {
-		return false
+	if shellparse.TooDeep(command) {
+		return shellReadingTooDeep
 	}
-	command, present, valid := trustedTopLevelCommandField(input.Args)
-	return valid && present && shellparse.TooDeep(command)
+	switch weight := shellparse.NestedBodyWeight(command); {
+	case weight > shellparse.MaxNestedBodyBytes:
+		return shellReadingNestedBodies
+	case weight > shellparse.MaxNestedBodyProofBytes:
+		return shellReadingNestedProof
+	}
+	return shellReadingWithinBounds
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {

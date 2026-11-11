@@ -1419,6 +1419,10 @@ func trimExtendedPrefix(path string) string {
 	return path
 }
 
+// maxResolvablePathBytes is past the longest path a system call accepts
+// (PATH_MAX of Linux and macOS, 32,767 UTF-16 units on Windows).
+const maxResolvablePathBytes = 3 * 32767
+
 // ResolveLinks follows every link (symlink, junction or reparse point) in
 // path, one component at a time in the order the filesystem takes them: a
 // parent segment removes the last component of the path as resolved so far,
@@ -1438,6 +1442,11 @@ func trimExtendedPrefix(path string) string {
 // relative path, or one with more than maxLinkHops links (a loop), comes back
 // cleaned and unresolved.
 func ResolveLinks(path string) string {
+	if len(path) > maxResolvablePathBytes {
+		// No system call opens a path this long, so no link on it is
+		// followed (GAP-0677).
+		return filepath.Clean(path)
+	}
 	if runtime.GOOS == "windows" {
 		path = filepath.FromSlash(trimExtendedPrefix(filepath.ToSlash(path)))
 	}
@@ -1464,6 +1473,14 @@ func ResolveLinks(path string) string {
 			return filepath.Join(append([]string{next}, pending...)...)
 		}
 		info, err := os.Lstat(next)
+		if err != nil && !slices.Contains(pending, "..") {
+			// Under a part that cannot be examined there is no link the
+			// walk could follow, and no .. leads back out of it: the rest
+			// follows lexically in one join. Joining it part by part cost
+			// time in the square of its length, seconds for the long words
+			// of deeply nested shell bodies (GAP-0677).
+			return filepath.Join(append([]string{next}, pending...)...)
+		}
 		if err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 			resolved = next
 			continue
