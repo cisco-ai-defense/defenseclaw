@@ -152,8 +152,11 @@ def partition_packages(
     root: Path = ROOT,
 ) -> list[list[tuple[str, str]]]:
     """Return each shard's (package, -run regex) items; an empty regex tests
-    the whole package. A package heavier than 60% of a shard whose tests have
-    recorded times is split into parts of at most half a shard."""
+    the whole package. A package heavier than 60% of a shard is split into
+    parts of at most half a shard: by its recorded test times, or, when its
+    tests have none, by the source size of its test files, each part weighing
+    its share of the package time. A package that outgrows its recorded time
+    then still leaves room in the step of its shard."""
     timings = timings or {}
     package_seconds = timings.get("packages", {})
     test_seconds = timings.get("tests", {})
@@ -166,13 +169,22 @@ def partition_packages(
     for package in unique:
         rel = package[len(prefix) :] if package.startswith(prefix) else ""
         recorded = test_seconds.get(rel)
-        if recorded and weights[package] > 0.6 * target:
+        if rel and weights[package] > 0.6 * target:
             files = discover_test_files(root / rel)
             parts = min(len(files), max(2, math.ceil(weights[package] / (0.5 * target))))
             if parts >= 2:
-                for index, names in enumerate(partition_test_files(files, parts, recorded)):
+                if recorded:
                     fallback = float(recorded.get("*", _median(v for k, v in recorded.items() if k != "*")))
-                    piece = sum(float(recorded.get(name, fallback)) for name in names)
+                    seconds = {name: float(recorded.get(name, fallback)) for _, names in files for name in names}
+                else:
+                    size = sum(path.stat().st_size for path, _ in files)
+                    seconds = {
+                        name: weights[package] * path.stat().st_size / size / len(names)
+                        for path, names in files
+                        for name in names
+                    }
+                for index, names in enumerate(partition_test_files(files, parts, recorded)):
+                    piece = sum(seconds[name] for name in names)
                     items[f"{package}#{index:03d}"] = (package, shard_regex(names), piece)
                 continue
         items[package] = (package, "", weights[package])

@@ -63,7 +63,7 @@ jobs:
     # Each part has its own runner: gwN runs shard N of 16 of the gateway
     # package and shard N of 16 of the connector package, both balanced on
     # recorded Windows test times (scripts/test-timings/go-windows.json);
-    # pkN one of eight timing-balanced parts of the remaining packages and hxN
+    # pkN one of nine timing-balanced parts of the remaining packages and hxN
     # one of six test-level parts of hookexec (still -p=1 within each part).
     # The checks part runs DACL, redaction, isolated connector tests, vet, and
     # builds; stress runs the single-flight and executable
@@ -99,6 +99,7 @@ jobs:
           - { shard: pk5, kind: packages, index: 5 }
           - { shard: pk6, kind: packages, index: 6 }
           - { shard: pk7, kind: packages, index: 7 }
+          - { shard: pk8, kind: packages, index: 8 }
           - { shard: hx0, kind: hookexec, index: 0 }
           - { shard: hx1, kind: hookexec, index: 1 }
           - { shard: hx2, kind: hookexec, index: 2 }
@@ -259,7 +260,7 @@ jobs:
           $suiteKind = [string]$env:GO_SUITE_KIND
           $matrixShard = [int]$env:GO_SUITE_INDEX
           $nativeTestShardCount = 16
-          $remainingPackageShardCount = 8
+          $remainingPackageShardCount = 9
           $hookexecTestShardCount = 6
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
           $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
@@ -319,8 +320,10 @@ jobs:
             ) -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-package-shard.log')
             # A line is a package to test whole, or "<package><TAB><-run regex>"
             # for one part of a package too slow for one shard (internal/hookpaths,
-            # GAP-0749); the script fails unless every package, and every test
-            # of a split package, is in exactly one shard.
+            # GAP-0749; internal/cli and internal/enterprisehooks, which have no
+            # recorded test times, split by test-file size, GAP-1066); the script
+            # fails unless every package, and every test of a split package, is
+            # in exactly one shard.
             $selectedLines = @(
               [regex]::Split([string]$selection.StdOut, '\r?\n') |
                 ForEach-Object { $_.Trim() } |

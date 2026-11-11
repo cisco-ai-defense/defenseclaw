@@ -159,6 +159,27 @@ def test_package_mode_splits_a_slow_package_and_covers_every_package_once(tmp_pa
     ]
 
 
+def test_package_mode_splits_a_slow_package_without_test_times_by_file_size(tmp_path: Path) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/m\n", encoding="utf-8")
+    _write_package(tmp_path)
+    packages = ["example.com/m/pkg"] + [f"example.com/m/p{index}" for index in range(4)]
+    # A package with no recorded test times that outweighs 60% of a shard
+    # (internal/cli on Windows, GAP-1066) runs in parts by test-file size.
+    heavy = {"packages": {"example.com/m/pkg": 200.0, **{f"example.com/m/p{index}": 10.0 for index in range(4)}}}
+
+    shards = partition_packages(packages, 3, heavy, root=tmp_path)
+
+    whole = sorted(package for shard in shards for package, regex in shard if not regex)
+    parts = [regex_names(regex) for shard in shards for package, regex in shard if regex]
+    assert whole == [f"example.com/m/p{index}" for index in range(4)]
+    assert len(parts) >= 2
+    tests = sorted(name for _, names in discover_test_files(tmp_path / "pkg") for name in names)
+    assert check_exact_cover(parts, tests) == []
+    # The benign twin: inside 60% of a shard the package still runs whole.
+    light = {"packages": {"example.com/m/pkg": 5.0, **{f"example.com/m/p{index}": 10.0 for index in range(4)}}}
+    assert all(not regex for shard in partition_packages(packages, 3, light, root=tmp_path) for _, regex in shard)
+
+
 def test_linux_connector_parts_separate_the_ci_timeout_cluster() -> None:
     root = Path(__file__).resolve().parents[2]
     timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))
@@ -427,6 +448,43 @@ def test_windows_remaining_package_control_stays_covered() -> None:
     for regex in parts:
         estimated = sum(float(seconds.get(name, seconds["*"])) for name in regex_names(regex))
         assert estimated <= 0.5 * 14 * 60, (regex, estimated)
+
+
+def test_windows_remaining_package_shards_leave_room_in_their_step() -> None:
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))
+    prefix = "github.com/defenseclaw/defenseclaw/"
+    excluded = {
+        prefix + path
+        for path in ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")
+    }
+    packages = sorted(set(timings["packages"]) - excluded)
+    workflow = (root / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
+    shard_count = int(re.search(r"\$remainingPackageShardCount = (\d+)", workflow).group(1))
+    shards = partition_packages(packages, shard_count, timings, root=root)
+
+    def planned(package: str, regex: str) -> float:
+        if not regex:
+            return float(timings["packages"][package])
+        seconds = timings["tests"].get(package.removeprefix(prefix))
+        if seconds:
+            return sum(float(seconds.get(name, seconds["*"])) for name in regex_names(regex))
+        files = discover_test_files(root / package.removeprefix(prefix))
+        names = set(regex_names(regex))
+        size = sum(path.stat().st_size for path, _ in files)
+        part = sum(path.stat().st_size * len(names & set(found)) / len(found) for path, found in files)
+        return float(timings["packages"][package]) * part / size
+
+    # Windows Native CI run 42961488619 (rel/1.0.9 6f0e44c10d): pk0 was planned
+    # at 726 s with internal/cli at its recorded 391 s; the package took 681 s
+    # and the go test run of the part met its 1020 s step limit. internal/cli
+    # runs in parts now, no package or part plans past half the step, and no
+    # shard past 640 s.
+    cli = [regex for shard in shards for package, regex in shard if package == prefix + "internal/cli"]
+    assert len(cli) >= 2 and all(cli), cli
+    loads = [[planned(package, regex) for package, regex in shard] for shard in shards]
+    assert max(max(load) for load in loads) <= 0.5 * 1020, loads
+    assert max(sum(load) for load in loads) <= 640, [round(sum(load)) for load in loads]
 
 
 def test_linux_remaining_package_hookpaths_runs_in_parts_under_the_race_timeout() -> None:
