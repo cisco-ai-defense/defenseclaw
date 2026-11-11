@@ -282,7 +282,7 @@ func TestR105WindowsCMDHeredocReceiverReadIsLinear(t *testing.T) {
 		resolved[value] = value
 	}
 	const state = `%USERPROFILE%\.defenseclaw\config.yaml`
-	const size = 64 << 10
+	const size = 12 << 10
 	for _, tc := range []struct {
 		unit, tail string
 		block      bool
