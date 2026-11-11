@@ -32205,8 +32205,11 @@ $script:UninstallDeletedAccountPollSeconds = 10
 
 # rel-1-0-6:GAP-0994: how long a repair over a deployment record with no
 # activation evidence waits for a restarted Guardian to publish its three
-# records again, and how often it looks. Tests shorten them.
-$script:GuardianRepublishWaitSeconds = 60
+# records again, and how often it looks. Tests shorten them. The wait is the
+# budget of a Guardian's first pass over every enrolled account
+# ($script:GuardianFirstReconcileTimeoutSeconds), since a repaired deployment
+# record now always takes this restart (fc36 EW-02).
+$script:GuardianRepublishWaitSeconds = 600
 $script:GuardianRepublishPollSeconds = 1
 $script:GuardianRepublishRecheckSeconds = 2
 
@@ -32248,6 +32251,47 @@ function Test-DefenseClawGuardianPublicationWhole {
     )
 }
 
+function Test-DefenseClawGuardianPublicationIncomplete {
+    <#
+        rel-1-0-6:GAP-0602, GAP-0974, GAP-0994 (fc36 EW-02): whether the
+        Guardian's activation record is a pass that failed as a whole with no
+        failed target: ok is false and failure_count is 0. The Guardian
+        publishes that when it cannot publish the protected enrollment set, as
+        while it cannot read the deployment record (another owner, or not
+        JSON). No target row explains such an ok=false, so the activation
+        classification refuses it, and once Setup has repaired the record only
+        a new Guardian pass publishes ok=true. A record that cannot be read
+        here is left to the classification.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $path = Microsoft.PowerShell.Management\Join-Path $Layout.AuthorizationDirectory 'activation.json'
+    try {
+        $record = [IO.File]::ReadAllText($path) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    }
+    catch {
+        return $false
+    }
+    if ($record -isnot [Management.Automation.PSCustomObject]) {
+        return $false
+    }
+    $ok = $record.PSObject.Properties['ok']
+    $failures = $record.PSObject.Properties['failure_count']
+    return [bool](
+        $null -ne $ok -and $ok.Value -is [bool] -and -not $ok.Value -and
+        $null -ne $failures -and $failures.Value -is [ValueType] -and [int64]$failures.Value -eq 0
+    )
+}
+
+function Test-DefenseClawGuardianPublicationCurrent {
+    # One whole publication that is not a whole-pass failure with no failed
+    # target (Test-DefenseClawGuardianPublicationIncomplete).
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    return [bool](
+        (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) -and
+        -not (Test-DefenseClawGuardianPublicationIncomplete -Layout $Layout)
+    )
+}
+
 function Resolve-DefenseClawGuardianPublicationBeforeTransaction {
     <#
         rel-1-0-6:GAP-0994: a deployment record with no activation evidence (a
@@ -32268,6 +32312,13 @@ function Resolve-DefenseClawGuardianPublicationBeforeTransaction {
         Guardian that still does not start ends the run naming both failures
         (delta-4 F1). If the records do not come right the run ends with every
         service running and nothing changed.
+        fc36 EW-02: one whole publication of a pass that failed with no failed
+        target (Test-DefenseClawGuardianPublicationIncomplete) gets the same
+        restart. It is what the Guardian published while it could not read
+        the deployment record that Setup has rebuilt or put back since; the
+        restarted Guardian reads the repaired record. A new publication that
+        is still such a pass ends the run the same way, before the
+        transaction.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -32278,7 +32329,7 @@ function Resolve-DefenseClawGuardianPublicationBeforeTransaction {
     if (@($values | Microsoft.PowerShell.Core\Where-Object { $null -ne $_ }).Count -eq 0) {
         return
     }
-    if (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) {
+    if (Test-DefenseClawGuardianPublicationCurrent -Layout $Layout) {
         return
     }
     $guardian = Get-DefenseClawServiceChecked -Name $GuardianServiceName
@@ -32287,11 +32338,16 @@ function Resolve-DefenseClawGuardianPublicationBeforeTransaction {
         return
     }
     Microsoft.PowerShell.Utility\Start-Sleep -Seconds $script:GuardianRepublishRecheckSeconds
-    if (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) {
+    if (Test-DefenseClawGuardianPublicationCurrent -Layout $Layout) {
         return
     }
     $stamps = Get-DefenseClawGuardianPublicationStamps -Layout $Layout
-    Write-DefenseClawLifecyclePhase -Stage 'the Guardian records are from different publications: restarting the Guardian so it publishes them again, before the transaction opens'
+    if (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) {
+        Write-DefenseClawLifecyclePhase -Stage 'the Guardian records say its last pass did not publish the protected enrollment set and name no failed target: restarting the Guardian so it publishes them again from the repaired deployment record, before the transaction opens'
+    }
+    else {
+        Write-DefenseClawLifecyclePhase -Stage 'the Guardian records are from different publications: restarting the Guardian so it publishes them again, before the transaction opens'
+    }
     $startMode = Get-DefenseClawServiceStartMode -Name $GuardianServiceName
     try {
         Stop-DefenseClawService -Name $GuardianServiceName
@@ -32310,8 +32366,13 @@ function Resolve-DefenseClawGuardianPublicationBeforeTransaction {
     }
     $deadline = [DateTime]::UtcNow.AddSeconds($script:GuardianRepublishWaitSeconds)
     while ($true) {
-        if (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) {
-            return
+        if ((Test-DefenseClawGuardianPublicationWhole -Layout $Layout) -and
+            [string](Get-DefenseClawGuardianPublicationStamps -Layout $Layout)['activation'] -cne [string]$stamps['activation']) {
+            if (-not (Test-DefenseClawGuardianPublicationIncomplete -Layout $Layout)) {
+                return
+            }
+            throw ('the restarted hook Guardian published its records again and its pass still did not publish the protected enrollment set, with no failed target named. ' +
+                'No transaction was opened and nothing was changed. Look at the Guardian log under the state folder logs\guardian, then run the same command again.')
         }
         if ([DateTime]::UtcNow -ge $deadline) {
             $shown = (@($stamps.Keys | Microsoft.PowerShell.Core\ForEach-Object { "$_ $($stamps[$_])" }) -join ', ')
@@ -49951,6 +50012,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         }
         if ($Action -eq 'Upgrade' -and $priorDeploymentActive -and
             (Test-DefenseClawStandaloneProfile) -and
+            # A record Setup rebuilt names no release (GAP-0974, fc36): it is
+            # not the 1.0.6 shape this restore is for.
+            $null -ne $metadata.PSObject.Properties['product_version'] -and
             ([string]$metadata.product_version) -match '^1\.0\.6(?:$|[+-])' -and
             (Test-DefenseClawUpgradeOwnerRightsRestoreNeeded `
                 -Layout $Layout `

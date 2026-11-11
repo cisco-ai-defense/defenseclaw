@@ -486,6 +486,11 @@ try {
             $script:startCalls++
             if ($script:startFailures -gt 0) { $script:startFailures--; throw 'SCM start request exited 1056 (fixture)' }
             if ($script:republishes) { Write-Publication '2026-11-09T22:00:00.5Z' '2026-11-09T22:00:00.5Z' '2026-11-09T22:00:00.5Z' }
+            if ($script:republishIncomplete) { Write-ActivationOutcome '2026-11-09T22:00:00.5Z' 'false' 0 }
+        }
+        $script:republishIncomplete = $false
+        function Write-ActivationOutcome([string]$Stamp, [string]$Ok, [int]$Failures) {
+            [IO.File]::WriteAllText([IO.Path]::Combine($auth, 'activation.json'), ('{"version": 2, "updated_at": "' + $Stamp + '", "ok": ' + $Ok + ', "failure_count": ' + $Failures + '}'))
         }
         Write-Publication '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z'
         Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
@@ -542,6 +547,31 @@ try {
         [void][IO.Directory]::CreateDirectory($auth); [void][IO.Directory]::CreateDirectory($run)
         Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
         if ($script:restarts -ne 0) { throw 'a deployment with no Guardian record at all was restarted' }
+
+        # fc36 EW-02 (GAP-0602, GAP-0974, GAP-0994): one whole publication of a
+        # pass that failed with no failed target, which the Guardian publishes
+        # while it cannot read the deployment record, gets one restart and the
+        # new publication is used. A pass with a failed target and a healthy
+        # pass are left alone. A new publication that is still such a pass
+        # ends the run before the transaction.
+        $script:republishes = $true; $script:restarts = 0
+        Write-Publication '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z'
+        Write-ActivationOutcome '2026-11-09T21:00:00.1Z' 'false' 0
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
+        if ($script:restarts -ne 1 -or -not (Test-DefenseClawGuardianPublicationCurrent -Layout $glayout)) { throw 'a whole pass that failed with no failed target was not published again by one restart' }
+        $script:restarts = 0
+        Write-Publication '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z'
+        Write-ActivationOutcome '2026-11-09T21:00:00.1Z' 'false' 1
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
+        Write-ActivationOutcome '2026-11-09T21:00:00.1Z' 'true' 0
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
+        if ($script:restarts -ne 0) { throw 'a pass with a failed target, or a healthy pass, was restarted' }
+        $script:republishIncomplete = $true
+        Write-ActivationOutcome '2026-11-09T21:00:00.1Z' 'false' 0
+        $threw = ''
+        try { Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H' } catch { $threw = $_.Exception.Message }
+        $script:republishIncomplete = $false
+        if ($script:restarts -ne 1 -or $threw -notmatch 'still did not publish the protected enrollment set' -or $threw -notmatch 'No transaction was opened') { throw "a restarted Guardian whose pass still failed with no failed target did not end the run before the transaction: $threw" }
 
         # Delta-5 F4: the non-JSON rebuild (Repair-DefenseClawUnreadableDeploymentMetadata)
         # refuses a rebuilt record that cannot name the gateway, hook and sensor

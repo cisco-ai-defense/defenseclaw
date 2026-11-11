@@ -253,3 +253,20 @@ def test_the_rebuilt_record_must_name_the_programs_the_services_run() -> None:
     )
     refusal = _function(text, "Format-DefenseClawRebuiltRecordArtifactRefusal")
     assert "Nothing was changed and every service is as it was" in refusal and "/repair" in refusal
+
+
+def test_a_whole_guardian_pass_that_failed_with_no_failed_target_is_published_again() -> None:
+    """fc36 EW-02 (GAP-0602, GAP-0974, GAP-0994): the Guardian publishes ok=false with no
+    failed target while it cannot read the deployment record; Setup restarts it after the
+    record is repaired, and the next lifecycle reads no release from a rebuilt record."""
+    text = _text()
+    incomplete = _function(text, "Test-DefenseClawGuardianPublicationIncomplete")
+    assert "PSObject.Properties['ok']" in incomplete and "PSObject.Properties['failure_count']" in incomplete
+    body = _function(text, "Resolve-DefenseClawGuardianPublicationBeforeTransaction")
+    stop = body.index("Stop-DefenseClawService -Name $GuardianServiceName")
+    assert body.count("Test-DefenseClawGuardianPublicationCurrent -Layout $Layout", 0, stop) == 2
+    wait = body[body.index("$deadline = "):]
+    assert "Test-DefenseClawGuardianPublicationIncomplete" in wait and "No transaction was opened and nothing was changed" in wait
+    lifecycle = _function(text, "Invoke-DefenseClawInstallLikeLifecycle")
+    read = lifecycle.index("([string]$metadata.product_version) -match")
+    assert lifecycle.rindex("$null -ne $metadata.PSObject.Properties['product_version'] -and", 0, read) > read - 120
