@@ -86,6 +86,13 @@ func TestClientDecisionReadsASourcedScriptOutsideTheWorkingFolder(t *testing.T) 
 	}
 	for _, spelling := range spellings {
 		for _, command := range []string{". %s", "source %s", "bash %s", "sh %s", `bash -c ". %s"`, `sh -c "bash %s"`} {
+			if runtime.GOOS == "windows" && strings.HasPrefix(spelling, "$") {
+				// Inside double quotes the outer shell would expand $HOME
+				// to the backslash path of the Windows home, which the inner
+				// shell reads as escapes; Git Bash exports the /c/ form. The
+				// inner shell expands it instead.
+				command = strings.ReplaceAll(command, `"`, `'`)
+			}
 			for script, want := range map[string]bool{"wk.sh": true, "ok.sh": false} {
 				line := fmt.Sprintf(command, fmt.Sprintf(spelling, script))
 				if got := sourcedWriterReachesKeys(t, project, home, line); got != want {
