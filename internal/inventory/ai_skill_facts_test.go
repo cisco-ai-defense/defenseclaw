@@ -172,7 +172,10 @@ func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 	if len(facts) != 2 || facts[0] == nil || facts[1] == nil || facts[0] == facts[1] {
 		t.Fatalf("want two separate fact rows, got %+v", facts)
 	}
-	want := AISkillFacts{ContentHash: mustHashSkill(t, filepath.Join(home, ".agents", "skills", "pdf")), ContentStatus: SkillContentOK}
+	want := AISkillFacts{
+		ContentHash: mustHashSkill(t, filepath.Join(home, ".agents", "skills", "pdf")), ContentStatus: SkillContentOK,
+		Scope: SkillScopeUser, Location: "~/.agents/skills/pdf",
+	}
 	if *facts[0] != want || *facts[1] != want {
 		t.Fatalf("facts = %+v / %+v, want %+v", *facts[0], *facts[1], want)
 	}
@@ -182,21 +185,67 @@ func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 
 	// A spent scan budget stops reading instead of hashing more user files.
 	svc.skillBytesRead = maxSkillScanBytes
-	if got := svc.skillFacts(filepath.Join(home, ".agents", "skills", "pdf")); got.ContentStatus != SkillContentTooLarge {
+	if got := svc.skillFacts(filepath.Join(home, ".agents", "skills", "pdf"), false); got.ContentStatus != SkillContentTooLarge {
 		t.Fatalf("over the scan budget: %+v", got)
 	}
 }
 
+func TestDetectSkillsSyncedAndManagedFolders(t *testing.T) {
+	home, managed := t.TempDir(), t.TempDir()
+	skills := filepath.Join(home, ".claude", "skills")
+	writeSkillFiles(t, skills, map[string]string{
+		"pdf/SKILL.md":                     "---\nname: pdf\n---\n",
+		"synced/account-1/review/SKILL.md": "---\nname: review\n---\n",
+	})
+	writeSkillFiles(t, managed, map[string]string{"policy/SKILL.md": "---\nname: policy\n---\n"})
+	writeSkillFiles(t, filepath.Join(home, "work", "app"), map[string]string{".cursor/skills/lint/SKILL.md": "x"})
+	catalog := []AISignature{
+		// The same folder named twice is scanned once.
+		{ID: "claudecode", Category: SignalSupportedConnector, SupportedConnector: "claudecode", SkillPaths: []string{"~/.claude/skills", skills, managed}},
+		{ID: "cursor", Category: SignalSupportedConnector, SupportedConnector: "cursor", SkillPaths: []string{"~/.claude/skills", ".cursor/skills"}},
+	}
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
+		ScanRoots: []string{filepath.Join(home, "work", "app")},
+	}, catalog)
+	cleanupPreparedDiscoveryService(t, svc)
+
+	got := map[string][]string{}
+	for _, signal := range svc.detectSkills() {
+		for _, ev := range signal.Evidence {
+			if strings.Contains(fmt.Sprint(signal.Basenames, ev.Basename), "account-1") {
+				t.Fatalf("the synced account id left the endpoint: %v %+v", signal.Basenames, ev)
+			}
+		}
+		for _, ev := range signal.Evidence {
+			if ev.Type == "skill_entry" {
+				got[signal.SignatureID] = append(got[signal.SignatureID], ev.Basename+"="+ev.Skill.Scope+":"+ev.Skill.Location)
+			}
+		}
+	}
+	want := map[string][]string{
+		// The account id and a repository's path stay on the endpoint.
+		"claudecode": {"pdf=user:~/.claude/skills/pdf", "review=user:~/.claude/skills/synced/review", "policy=managed:"},
+		"cursor":     {"pdf=user:~/.claude/skills/pdf", "lint=project:"},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("skills = %v, want %v", got, want)
+	}
+}
+
 func TestValidateSkillFactsRejectsForgedFields(t *testing.T) {
-	good := AISkillFacts{ContentHash: "sha256:" + strings.Repeat("a", 64), ContentStatus: SkillContentOK}
+	good := AISkillFacts{ContentHash: "sha256:" + strings.Repeat("a", 64), ContentStatus: SkillContentOK, Scope: SkillScopeUser, Location: "~/.claude/skills/x"}
 	if err := validateSkillFacts(good); err != nil {
 		t.Fatalf("valid facts: %v", err)
 	}
 	for name, mutate := range map[string]func(*AISkillFacts){
-		"keyed hash":   func(f *AISkillFacts) { f.ContentHash = "hmac-sha256:" + strings.Repeat("a", 64) },
-		"short hash":   func(f *AISkillFacts) { f.ContentHash = "sha256:abc" },
-		"hash, not ok": func(f *AISkillFacts) { f.ContentStatus = SkillContentTooLarge },
-		"status":       func(f *AISkillFacts) { f.ContentStatus = "fine" },
+		"keyed hash":    func(f *AISkillFacts) { f.ContentHash = "hmac-sha256:" + strings.Repeat("a", 64) },
+		"short hash":    func(f *AISkillFacts) { f.ContentHash = "sha256:abc" },
+		"hash, not ok":  func(f *AISkillFacts) { f.ContentStatus = SkillContentTooLarge },
+		"status":        func(f *AISkillFacts) { f.ContentStatus = "fine" },
+		"scope":         func(f *AISkillFacts) { f.Scope = "system" },
+		"absolute path": func(f *AISkillFacts) { f.Location = "/Users/alice/.claude/skills/x" },
+		"control char":  func(f *AISkillFacts) { f.Location = "~/x\n" },
 	} {
 		facts := good
 		mutate(&facts)

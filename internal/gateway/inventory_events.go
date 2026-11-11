@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -120,6 +121,9 @@ type endpointInventoryComponent struct {
 	skillState         string
 	skillFirstSeen     string
 	skillLastSeen      string
+	skillScope         string
+	skillLocation      string
+	skillAgents        []string
 }
 
 // endpointInventoryCarrier is an atomic, typed snapshot split into parallel
@@ -1631,6 +1635,11 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventorySkillState:                  aiDiscoveryV8OptionalText(component.skillState),
 			DefenseClawInventorySkillFirstSeen:              aiDiscoveryV8OptionalText(component.skillFirstSeen),
 			DefenseClawInventorySkillLastSeen:               aiDiscoveryV8OptionalText(component.skillLastSeen),
+			DefenseClawInventorySkillScope:                  aiDiscoveryV8OptionalText(component.skillScope),
+			DefenseClawInventorySkillLocation:               aiDiscoveryV8OptionalText(component.skillLocation),
+		}
+		if len(component.skillAgents) > 0 {
+			input.DefenseClawInventorySkillAgents = observability.Present(component.skillAgents)
 		}
 		inventoryIdentityFor(component.userID, component.userName).applyTo(&input)
 		return builder.BuildLogAIComponentObserved(input)
@@ -1916,6 +1925,7 @@ func discoveredEntriesFromReport(
 	kind string,
 ) []endpointInventoryComponent {
 	components := make([]endpointInventoryComponent, 0)
+	shared := map[string][]int{}
 	for _, signal := range report.Signals {
 		// A gone signal is the folder as the previous scan saw it: its
 		// entries are not on the endpoint any more, or not in that form.
@@ -1948,6 +1958,7 @@ func discoveredEntriesFromReport(
 			// across scans (PathHash of the parent surface is
 			// deterministic within a single walker configuration).
 			scope := endpointInventoryScopeFromEvidence(signal.Evidence)
+			shared[scope+"/"+name] = append(shared[scope+"/"+name], len(components))
 			components = append(components, endpointInventoryComponent{
 				id:              endpointInventoryComponentID(kind+"-entry", signal.SignatureID+"/"+scope+"/"+name),
 				componentType:   kind,
@@ -1968,8 +1979,24 @@ func discoveredEntriesFromReport(
 				// build.
 			})
 			if facts := evidence.Skill; facts != nil {
-				components[len(components)-1].skillContentHash = facts.ContentHash
-				components[len(components)-1].skillContentStatus = facts.ContentStatus
+				row := &components[len(components)-1]
+				row.skillContentHash, row.skillContentStatus = facts.ContentHash, facts.ContentStatus
+				row.skillScope, row.skillLocation = facts.Scope, facts.Location
+			}
+		}
+	}
+	if kind == "skill" {
+		// One folder several agents read (~/.agents/skills) lists them all.
+		for _, rows := range shared {
+			var agents []string
+			for _, row := range rows {
+				if agent := components[row].agentConnector; agent != "" && !slices.Contains(agents, agent) {
+					agents = append(agents, agent)
+				}
+			}
+			sort.Strings(agents)
+			for _, row := range rows {
+				components[row].skillAgents = agents[:min(len(agents), 16)]
 			}
 		}
 	}

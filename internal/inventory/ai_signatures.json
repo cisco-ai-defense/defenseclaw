@@ -63,7 +63,9 @@
         "$CODEX_HOME/skills",
         "~/.agents/skills",
         ".codex/skills",
-        ".agents/skills"
+        ".agents/skills",
+        "/etc/codex/skills",
+        "$ProgramData/OpenAI/Codex/skills"
       ],
       "rule_paths": [
         "~/.codex/rules",
@@ -138,7 +140,10 @@
       "local_endpoints": [],
       "skill_paths": [
         "~/.claude/skills",
-        ".claude/skills"
+        ".claude/skills",
+        "/Library/Application Support/ClaudeCode/.claude/skills",
+        "$ProgramFiles/ClaudeCode/.claude/skills",
+        "/etc/claude-code/.claude/skills"
       ],
       "rule_paths": [
         "~/.claude/rules",
@@ -319,7 +324,11 @@
         ".cursor/skills-cursor",
         ".cursor/skills",
         ".agents/skills",
-        "~/.agents/skills"
+        "~/.agents/skills",
+        "~/.claude/skills",
+        "~/.codex/skills",
+        ".claude/skills",
+        ".codex/skills"
       ],
       "rule_paths": [
         "~/.cursor/rules",
@@ -466,7 +475,10 @@
       "skill_paths": [
         ".github/skills",
         "~/.copilot/skills",
-        ".agents/skills"
+        ".agents/skills",
+        "~/.agents/skills",
+        "~/.claude/skills",
+        ".claude/skills"
       ]
     },
     {

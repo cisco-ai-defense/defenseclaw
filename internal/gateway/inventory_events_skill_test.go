@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -85,5 +86,39 @@ func TestSkillInventoryRecordsCarryTheContentHash(t *testing.T) {
 		if body[hashKey] != want[0] || body[statusKey] != want[1] {
 			t.Errorf("%s: hash %v status %v, want %v", key, body[hashKey], body[statusKey], want)
 		}
+	}
+}
+
+func TestSkillInventoryRecordsListEveryAgentOfASharedFolder(t *testing.T) {
+	parent := "sha256:" + strings.Repeat("1", 64)
+	shared := inventory.AIEvidence{Type: "skill_entry", Basename: "pdf", Skill: &inventory.AISkillFacts{
+		ContentStatus: inventory.SkillContentTooLarge, Scope: inventory.SkillScopeUser, Location: "~/.agents/skills/pdf",
+	}}
+	bundled := inventory.AIEvidence{Type: "skill_entry", Basename: "imagegen", Skill: &inventory.AISkillFacts{
+		ContentStatus: inventory.SkillContentTooLarge, Scope: inventory.SkillScopeBundled,
+	}}
+	bodies := skillRecordBodies(t, discoveredEntriesFromReport(inventory.AIDiscoveryReport{Signals: []inventory.AISignal{
+		skillReportSignal("codex", "codex", parent, shared),
+		skillReportSignal("cursor", "cursor", parent, shared),
+		skillReportSignal("codex", "codex", "sha256:"+strings.Repeat("2", 64), bundled),
+	}}, inventory.SignalSkill, "skill"))
+	agents := observability.TelemetryAttributeDefenseClawInventorySkillAgents
+	for key, want := range map[string][3]any{
+		"pdf/codex":      {"user", "~/.agents/skills/pdf", []any{"codex", "cursor"}},
+		"pdf/cursor":     {"user", "~/.agents/skills/pdf", []any{"codex", "cursor"}},
+		"imagegen/codex": {"bundled", nil, []any{"codex"}},
+	} {
+		body := bodies[key]
+		got := [3]any{
+			body[observability.TelemetryAttributeDefenseClawInventorySkillScope],
+			body[observability.TelemetryAttributeDefenseClawInventorySkillLocation], body[agents],
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s = %v, want %v", key, got, want)
+		}
+	}
+	if bodies["pdf/codex"][observability.TelemetryAttributeDefenseClawAIComponentID] ==
+		bodies["pdf/cursor"][observability.TelemetryAttributeDefenseClawAIComponentID] {
+		t.Fatal("each agent keeps its own component id")
 	}
 }
