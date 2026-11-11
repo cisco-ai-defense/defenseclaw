@@ -301,6 +301,13 @@ func agentNotInstalledRefusal(name, why string) string {
 	return fmt.Sprintf("the agent is not installed for this account (%s); reinstall it and run: defenseclaw-gateway restart, or remove the connector: defenseclaw setup remove %s", why, name)
 }
 
+// openCodeV2RequiredRefusal is the health reason of an OpenCode connector
+// skipped because the OpenCode the gateway found is not V2. The version is in
+// the gateway log.
+func openCodeV2RequiredRefusal(name string) string {
+	return fmt.Sprintf("the OpenCode the gateway found for this account is not V2, and V2 is required; put OpenCode V2 first on the PATH of the shell that starts the gateway and run: defenseclaw-gateway restart, or remove the connector: defenseclaw setup remove %s", name)
+}
+
 // claudeDesktopEngineMayExist reports a Claude Desktop engine folder
 // (<data>/claude-code, for every deployment and install of this account:
 // internal/claudedesktop) that holds at least one entry. An unreadable

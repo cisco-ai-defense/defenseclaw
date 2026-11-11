@@ -6903,22 +6903,39 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		if err != nil {
 			if wasActive && !registration.opts.ManagedEnterprise {
 				unchanged := setupRefusedBeforeAnyChange(err)
-				if why := agentNotInstalledReason(registration.opts, registration.conn.Name()); unchanged && why != "" {
-					// The agent was removed outside DefenseClaw (its package
-					// deleted, its binary gone from PATH). Setup refused before
-					// it changed anything, and neither a rollback nor an
-					// upgrade can guard an agent that is not there: failing the
-					// start left every other connector unchecked (GAP-0492).
-					// Skip only this connector, keep its registration and lock
-					// entry for when the agent comes back, and name the fix.
-					reason := agentNotInstalledRefusal(registration.conn.Name(), why)
+				// Two refusals leave nothing to roll back and no upgrade can
+				// cure them, so they stop only this connector: its agent is
+				// gone (GAP-0492), or the OpenCode the gateway found is not V2
+				// (GAP-1059).
+				reason, skipWhy := "", ""
+				if unchanged {
+					if why := agentNotInstalledReason(registration.opts, registration.conn.Name()); why != "" {
+						// The agent was removed outside DefenseClaw (its package
+						// deleted, its binary gone from PATH). Setup refused before
+						// it changed anything, and neither a rollback nor an
+						// upgrade can guard an agent that is not there: failing the
+						// start left every other connector unchecked (GAP-0492).
+						// Skip only this connector, keep its registration and lock
+						// entry for when the agent comes back, and name the fix.
+						reason, skipWhy = agentNotInstalledRefusal(registration.conn.Name(), why), "its agent is not installed"
+					} else if errors.Is(err, connector.ErrOpenCodeV2Required) {
+						// The gateway looks OpenCode up on its own PATH, which can
+						// put a V1 ahead of the V2 the account runs. V1 has no
+						// plugin hooks, so there is nothing to refresh: failing the
+						// start rolled back an unrelated connector setup until
+						// OpenCode was removed (GAP-1059). Same skip, same kept
+						// registration.
+						reason, skipWhy = openCodeV2RequiredRefusal(registration.conn.Name()), "the OpenCode it found is not V2"
+					}
+				}
+				if reason != "" {
 					// A retained native hook can call this gateway before the next
 					// restart. Refuse it until setup publishes this connector's own
 					// rule pack and runtime policy on a fresh start.
 					if s.health != nil {
 						s.health.markConnectorSkippedAtStart(registration.conn.Name(), reason)
 					}
-					fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s not started, its agent is not installed (other connectors unaffected): %v\n", registration.conn.Name(), err)
+					fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s not started, %s (other connectors unaffected): %v\n", registration.conn.Name(), skipWhy, err)
 					if transaction.agentSettingsRefused == nil {
 						transaction.agentSettingsRefused = map[string]string{}
 					}
