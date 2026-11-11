@@ -53,8 +53,6 @@ var shippedToolCallRegexIDs = map[string]bool{
 	"credential.kubernetes_batch_secret_collection":   true,
 	"tamper.pam_permit_authentication_bypass":         true,
 	"tamper.docker_insecure_http_registry":            true,
-	"tamper.agent_hook_config_disable":                true,
-	"tamper.agent_hook_config_write":                  true,
 	"exfil.credential_archive_external_upload":        true,
 	"persistence.global_ld_preload_install":           true,
 	"privilege.host_namespace_entry":                  true,

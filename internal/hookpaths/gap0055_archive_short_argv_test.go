@@ -158,7 +158,7 @@ var gap0055Argvs = []string{"", " -v", " -", " --", " a", " a b", " ''", " $X"}
 // the package with each option, last and after one operand. A bounded sweep
 // reads through Resolve: every GAP-0055 command, every bare argv form of every
 // word, every argv and wrapper form of an archive program (where the GAP-0055 panic was), each
-// wrapper behind every fourth word, and one tenth of the program-option pairs,
+// wrapper behind every fourth word, and one eighth of the program-option pairs,
 // spread so that each program meets a spread of options and each option a
 // spread of programs.
 func gap0055SweepForms(words, options []string, bounded bool) (forms []gap0055Form, programs []string) {
@@ -196,8 +196,8 @@ func gap0055SweepForms(words, options []string, bounded bool) (forms []gap0055Fo
 	}
 	for programIndex, program := range programs {
 		for optionIndex, option := range options {
-			add(program+" "+option, (programIndex+optionIndex)%20 == 0)
-			add(program+" a "+option, (programIndex+optionIndex)%20 == 10)
+			add(program+" "+option, (programIndex+optionIndex)%16 == 0)
+			add(program+" a "+option, (programIndex+optionIndex)%16 == 8)
 		}
 	}
 	return forms, programs

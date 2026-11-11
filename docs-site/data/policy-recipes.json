@@ -737,58 +737,6 @@
       "data_axis": []
     },
     {
-      "id": "RECIPE-tamper.agent_hook_config_disable",
-      "title": "Turn off the agent's DefenseClaw hooks",
-      "kind": "rule:cognitive-file",
-      "body": {
-        "id": "tamper.agent_hook_config_disable",
-        "tool_call_only": true,
-        "pattern": "a^",
-        "title": "Turn off the agent's DefenseClaw hooks",
-        "severity": "CRITICAL",
-        "confidence": 0.98,
-        "tags": [
-          "cognitive-tampering",
-          "tampering",
-          "security-state"
-        ]
-      },
-      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity CRITICAL.",
-      "examples": [],
-      "counterexamples": [],
-      "source": "policies/guardrail/strict/rules/cognitive.yaml",
-      "tags": [
-        "cognitive-tampering",
-        "tampering",
-        "security-state"
-      ]
-    },
-    {
-      "id": "RECIPE-tamper.agent_hook_config_write",
-      "title": "Shell write to an agent hook config",
-      "kind": "rule:cognitive-file",
-      "body": {
-        "id": "tamper.agent_hook_config_write",
-        "tool_call_only": true,
-        "pattern": "a^",
-        "title": "Shell write to an agent hook config",
-        "severity": "HIGH",
-        "confidence": 0.8,
-        "tags": [
-          "cognitive-tampering",
-          "tampering"
-        ]
-      },
-      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity HIGH.",
-      "examples": [],
-      "counterexamples": [],
-      "source": "policies/guardrail/strict/rules/cognitive.yaml",
-      "tags": [
-        "cognitive-tampering",
-        "tampering"
-      ]
-    },
-    {
       "id": "RECIPE-CMD-REVSHELL-POWERSHELL-TCP",
       "title": "PowerShell TCP command-execution loop",
       "kind": "rule:command",

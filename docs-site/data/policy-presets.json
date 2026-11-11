@@ -507,31 +507,6 @@
                     "tampering",
                     "security-state"
                   ]
-                },
-                {
-                  "id": "tamper.agent_hook_config_disable",
-                  "tool_call_only": true,
-                  "pattern": "a^",
-                  "title": "Turn off the agent's DefenseClaw hooks",
-                  "severity": "CRITICAL",
-                  "confidence": 0.98,
-                  "tags": [
-                    "cognitive-tampering",
-                    "tampering",
-                    "security-state"
-                  ]
-                },
-                {
-                  "id": "tamper.agent_hook_config_write",
-                  "tool_call_only": true,
-                  "pattern": "a^",
-                  "title": "Shell write to an agent hook config",
-                  "severity": "HIGH",
-                  "confidence": 0.8,
-                  "tags": [
-                    "cognitive-tampering",
-                    "tampering"
-                  ]
                 }
               ]
             },
@@ -4305,31 +4280,6 @@
                     "cognitive-tampering",
                     "tampering",
                     "security-state"
-                  ]
-                },
-                {
-                  "id": "tamper.agent_hook_config_disable",
-                  "tool_call_only": true,
-                  "pattern": "a^",
-                  "title": "Turn off the agent's DefenseClaw hooks",
-                  "severity": "CRITICAL",
-                  "confidence": 0.98,
-                  "tags": [
-                    "cognitive-tampering",
-                    "tampering",
-                    "security-state"
-                  ]
-                },
-                {
-                  "id": "tamper.agent_hook_config_write",
-                  "tool_call_only": true,
-                  "pattern": "a^",
-                  "title": "Shell write to an agent hook config",
-                  "severity": "HIGH",
-                  "confidence": 0.8,
-                  "tags": [
-                    "cognitive-tampering",
-                    "tampering"
                   ]
                 }
               ]
@@ -8200,31 +8150,6 @@
                     "cognitive-tampering",
                     "tampering",
                     "security-state"
-                  ]
-                },
-                {
-                  "id": "tamper.agent_hook_config_disable",
-                  "tool_call_only": true,
-                  "pattern": "a^",
-                  "title": "Turn off the agent's DefenseClaw hooks",
-                  "severity": "CRITICAL",
-                  "confidence": 0.98,
-                  "tags": [
-                    "cognitive-tampering",
-                    "tampering",
-                    "security-state"
-                  ]
-                },
-                {
-                  "id": "tamper.agent_hook_config_write",
-                  "tool_call_only": true,
-                  "pattern": "a^",
-                  "title": "Shell write to an agent hook config",
-                  "severity": "HIGH",
-                  "confidence": 0.8,
-                  "tags": [
-                    "cognitive-tampering",
-                    "tampering"
                   ]
                 }
               ]
