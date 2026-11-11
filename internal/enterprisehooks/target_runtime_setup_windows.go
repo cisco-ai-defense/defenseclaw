@@ -416,8 +416,12 @@ func planWindowsManagedRuntimeRoots(
 				inspectErr = probeWindowsManagedRuntimeProfileMutable(target)
 			}
 			if inspectErr != nil {
-				if !resilient || errors.Is(inspectErr, errWindowsManagedRuntimePlanHost) ||
-					windowsPerUserInstallFolderRefused(inspectErr) {
+				// A per-user install folder skips only its own user here,
+				// like any other profile the plan cannot use: the folder is
+				// left untouched and the account is not enrolled, so one
+				// user's old per-user install no longer fails the install
+				// for every user. A standalone or strict plan refuses it.
+				if !resilient || errors.Is(inspectErr, errWindowsManagedRuntimePlanHost) {
 					return inspectErr
 				}
 				skipped = append(skipped, WindowsManagedRuntimeSkippedProfile{
@@ -1156,8 +1160,9 @@ func refuseWindowsPerUserInstallFolder(target windowsManagedRuntimeTarget) error
 }
 
 // windowsPerUserInstallFolderError is refuseWindowsPerUserInstallFolder's
-// refusal. No plan skips it, on either profile: the per-user install has to
-// be removed before the account can be enrolled.
+// refusal. The per-user install has to be removed before the account can be
+// enrolled: a Secure Client plan skips that user and reports the folder, a
+// standalone or strict plan refuses.
 type windowsPerUserInstallFolderError struct {
 	dataDir, leftover string
 }
@@ -1167,11 +1172,6 @@ func (e *windowsPerUserInstallFolderError) Error() string {
 		"enterprise hooks: reject noncanonical managed runtime baseline: %s holds %s, which a per-user DefenseClaw install leaves",
 		e.dataDir, e.leftover,
 	)
-}
-
-func windowsPerUserInstallFolderRefused(err error) bool {
-	var refused *windowsPerUserInstallFolderError
-	return errors.As(err, &refused)
 }
 
 // windowsManagedRuntimePurgeKeptAdoptable reports the folder shape

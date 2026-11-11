@@ -6361,7 +6361,7 @@ def test_vendor_folder_link_refusal_runs_first_for_standalone_install_like_actio
         "$pendingRecovery = Recover-DefenseClawPendingTransaction",
         "Initialize-DefenseClawTransactionManagedRoot",
         "New-DefenseClawLayoutDirectories",
-        "return Invoke-DefenseClawInstallLikeLifecycle",
+        "$installResult = Invoke-DefenseClawInstallLikeLifecycle",
     ):
         assert at < dispatcher.index(later), later
     assert dispatcher[:at].rstrip().endswith("if ($Action -in @('Install', 'Upgrade', 'Repair')) {")
@@ -6422,14 +6422,17 @@ def test_rollback_skips_codex_files_behind_a_link_and_reads_the_user_sid_label()
     assert module.count("-RollbackRestore `\n") == 1
     ready = _psm1_function(module, "Assert-DefenseClawRestoredTransactionReadyForActivation")
     assert "        -ServicingTransaction `\n        -RollbackRestore `\n" in ready
-    # The lines Secure Client runs are the ones it always ran, byte for byte; the
-    # new code only brackets them.
+    # The lines Secure Client runs are the ones it always ran, byte for byte, with
+    # the administrator-conflict skips of #1446 around the state check and the
+    # ACL backup read; the new code only brackets them.
     for kept in (
         "    if ($codexTargetEnabled) {\n        Assert-DefenseClawCodexMachinePolicyDirectory `\n            -Path $Layout.CodexVendorDirectory\n"
         "        Assert-DefenseClawCodexMachinePolicyDirectory `\n            -Path $Layout.CodexMachinePolicyDirectory\n"
         "        Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout\n"
-        "        try {\n            Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout\n",
-        "        [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)\n    }\n    else {\n",
+        "        if (-not (Test-DefenseClawCodexStateAbsentByAdminConflict `\n            -Layout $Layout `\n"
+        "            -GatewayServiceName $GatewayServiceName)) {\n"
+        "            try {\n                Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout\n",
+        "            [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)\n        }\n    }\n    else {\n",
         "    if (-not $codexRequirementsDeferred) {\n"
         "        [void](Invoke-DefenseClawCodexRequirementsCommand `\n            -Layout $Layout `\n"
         "            -GatewayServiceName $GatewayServiceName `\n"
@@ -6445,9 +6448,11 @@ def test_rollback_skips_codex_files_behind_a_link_and_reads_the_user_sid_label()
     assert "if ($codexFolderLink -eq '') {\n    if ($codexTargetEnabled) {" in deployment
 
     attributable = _psm1_function(module, "Test-DefenseClawGuardianReportErrorsAttributable")
-    assert "(?<connector>[^@\\s]+)@(?<account>.+?)(?: \\((?<sid>S-1-[0-9-]+)\\))?: " in attributable
-    standalone = attributable.index("if (Test-DefenseClawStandaloneProfile) {")
-    assert standalone < attributable.index("(?<account>.+?)") < attributable.index("'^last guardian reconcile failed for (\\S+): '")
+    # One label parser for every profile (#1446): "connector@user (SID)" and
+    # "connector@SID" both key on connector@SID.
+    assert attributable.count("'^last guardian reconcile failed for (.+?)(?: \\((S-1-[0-9-]+)\\))?: '") == 1
+    assert "Test-DefenseClawStandaloneProfile" not in attributable
+    assert "(\\S+): '" not in attributable
 
     # The error of a failed action names the link the rollback met.
     lifecycle = _psm1_function(module, "Invoke-DefenseClawInstallLikeLifecycle")

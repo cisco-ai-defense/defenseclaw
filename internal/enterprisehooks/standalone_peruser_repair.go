@@ -124,6 +124,26 @@ var standaloneOwnedHookConfigConnectors = map[string]bool{"kiro": true, "copilot
 // standaloneOwnedHookConfigName is the file name of those hook configs.
 const standaloneOwnedHookConfigName = "defenseclaw.json"
 
+// secureClientOwnedHookConfigConnectors are the connectors whose
+// DefenseClaw-owned hook config the macOS Secure Client guardian also writes
+// in a folder it creates as the user: Copilot's
+// ~/.copilot/hooks/defenseclaw.json. Copilot reads that folder but does not
+// create it, so without this an account that never added hooks of its own
+// stayed unenrolled ("hook config parent missing").
+var secureClientOwnedHookConfigConnectors = map[string]bool{"copilot": true}
+
+// secureClientOwnedHookConfigGOOS is the OS secureClientOwnedHookConfigConnector
+// checks: a seam for tests of the macOS rule on Linux CI.
+var secureClientOwnedHookConfigGOOS = runtime.GOOS
+
+// secureClientOwnedHookConfigConnector reports whether this process is the
+// macOS Secure Client guardian and prepares connectorName's hook config
+// folder itself.
+func secureClientOwnedHookConfigConnector(connectorName string) bool {
+	return secureClientOwnedHookConfigGOOS == "darwin" && secureClientHookDelivery() &&
+		secureClientOwnedHookConfigConnectors[strings.ToLower(strings.TrimSpace(connectorName))]
+}
+
 // prepareOwnedHookConfigParents creates, for an installed agent whose hook
 // config is a DefenseClaw-owned file, the missing directories above that
 // file inside the home, as the user and owner-only. Without them a first
@@ -134,8 +154,22 @@ const standaloneOwnedHookConfigName = "defenseclaw.json"
 // existing element that is a link, not a directory, owned by someone else
 // or writable by group or others is refused, and nothing is created below
 // it.
-func prepareOwnedHookConfigParents(home, connectorName string, paths []string, uid int) ([]string, []string, error) {
-	if !standalonePerUserRepair(uid) || !standaloneOwnedHookConfigConnectors[strings.ToLower(strings.TrimSpace(connectorName))] {
+//
+// The standalone per-user worker calls it with the user's own credentials.
+// The macOS Secure Client guardian runs as root and calls it inside
+// withOwnerCredentials, so the folders are made by and owned by the user.
+// It passes secureClientGuardian, the secureClientOwnedHookConfigConnector
+// decision it made as root: the user may not be able to search the Secure
+// Client install marker's folder.
+func prepareOwnedHookConfigParents(home, connectorName string, paths []string, uid int, secureClientGuardian bool) ([]string, []string, error) {
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	switch {
+	case standalonePerUserRepair(uid):
+		if !standaloneOwnedHookConfigConnectors[name] {
+			return nil, nil, nil
+		}
+	case secureClientGuardian && secureClientOwnedHookConfigConnectors[name] && uid > 0 && os.Geteuid() == uid:
+	default:
 		return nil, nil, nil
 	}
 	home = filepath.Clean(home)

@@ -152,11 +152,16 @@ Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'codex@EC2AMAZ
 Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@evil (S-1-5-21-9-9-9-9) (S-1-5-21-1-2-3-1003)') -Allow) $true 'a name that holds another SID, with the real SID last'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@evil (S-1-5-21-1-2-3-1003) (S-1-5-21-9-9-9-9)') -Allow) $false 'a name that holds the failed SID, with another SID last'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@evil: x (S-1-5-21-1-2-3-1003)') -Allow) $false 'a name that holds a colon before the SID'
-# Secure Client keeps its text and behaviour: only the old connector@SID label is read.
+# Secure Client reads the same labels (#1446): its Guardian names a failed
+# account "user (SID)" too, and a user name may carry spaces. Only the failed
+# row's own SID is accepted.
 $script:SmokeStandalone = $false
 try {
     Assert-Result (Test-Coverage (New-Report -Failures 1) -Allow) $true 'Secure Client: the connector@SID label'
-    Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel) -Allow) $false 'Secure Client: the user (SID) label is not read'
+    Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@dana (S-1-5-21-1-2-3-1003)') -Allow) $true 'Secure Client: degraded reconcile with a Windows account label'
+    Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@Dana Smith (S-1-5-21-1-2-3-1003)') -Allow) $true 'Secure Client: degraded reconcile with a spaced Windows account label'
+    Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@dana (S-1-5-21-1-2-3-1001)') -Allow) $false 'Secure Client: degraded reconcile naming another SID'
+    Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel)) $false 'Secure Client: user (SID) row without -AllowFailedTargets'
 }
 finally {
     $script:SmokeStandalone = $true

@@ -180,7 +180,7 @@ def test_a_held_codex_state_copy_defers_the_state_check_of_a_rollback() -> None:
     window = body[check:catch]
     assert "$RepairRecoveredCodexRequirements -and $ServicingTransaction" in window
     assert "Test-DefenseClawStandaloneProfile" in window
-    assert "if ($blockedState -eq '') {\n                throw" in body[catch : catch + 300]
+    assert "if ($blockedState -eq '') {\n                    throw" in body[catch : catch + 300]
     # The republish and the Codex verify are skipped once the state check deferred.
     gate = body.index("if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and", catch)
     assert "-not $codexRequirementsDeferred) {" in body[gate : gate + 300]
