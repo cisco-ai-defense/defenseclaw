@@ -6,11 +6,14 @@ package hookpaths
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 )
 
 // InstructionFileNames are the agent instruction and identity files that the
@@ -411,6 +414,10 @@ func (f *InstructionFiles) identify() {
 	}
 }
 
+// instructionLinkReads counts the targets Identities reads the links of, so
+// a test can prove a long command pays that walk only when it can matter.
+var instructionLinkReads atomic.Int64
+
 // Identities reports the existing instruction files a write target names,
 // by file identity, whether through its own name or an alias: every one of
 // them, so a write to one file with two instruction names (CLAUDE.md and
@@ -421,6 +428,17 @@ func (f *InstructionFiles) Identities(path string) []string {
 		return nil
 	}
 	path = filepath.Clean(path)
+	// A missing target has no identity, and a call with no instruction file
+	// has nothing to compare it with: neither reads the links of the path,
+	// which costs a read a folder (on Windows several) for every operand of
+	// a long command (GAP-1075).
+	if _, err := pathLstat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if f.identify(); len(f.files) == 0 {
+		return nil
+	}
+	instructionLinkReads.Add(1)
 	real := path
 	if resolved, err := pathEvalSymlinks(path); err == nil {
 		real = resolved
@@ -429,7 +447,6 @@ func (f *InstructionFiles) Identities(path string) []string {
 	if err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
-	f.identify()
 	var files []string
 	for _, file := range f.files {
 		if os.SameFile(info, file.info) {

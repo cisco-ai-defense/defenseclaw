@@ -1948,7 +1948,8 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	// Its directory is followed and its name kept, so mv a.txt /ext/y/
 	// config.yaml with y -> ~/.defenseclaw names the entry when config.yaml
 	// links out of the tree, as it does when config.yaml is a file (GAP-2560).
-	if actionStateEntryMayDiffer(value) {
+	differ, missing := actionStateEntryMayDiffer(value)
+	if differ {
 		if name := filepath.Base(value); name != "." && name != ".." && name != string(filepath.Separator) {
 			if parent, ok := home.memo.resolveWriteTarget(filepath.Dir(value)); ok {
 				relative, err := filepath.Rel(activeHome, filepath.Join(parent, name))
@@ -1959,7 +1960,11 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 		}
 	}
 	// Only an existing regular file with a second link can alias the state.
-	// A missing or ordinary target costs one stat here, not a second walk.
+	// A missing entry costs no further read (its Lstat above told), an
+	// ordinary target one stat here, not a second walk (GAP-1075).
+	if missing {
+		return false
+	}
 	info, err := pathStat(resolved)
 	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return false
@@ -5056,16 +5061,17 @@ func actionSpelledWindowsTarget(value string, tilde bool, base, home string, sta
 // directory followed, its name kept) can name another file than its full
 // walk: only when the last name is itself a link. An absolute value whose
 // last name is missing or not a link costs one Lstat, not a second walk
-// (GAP-2279 answer budget); a relative value is always read.
-func actionStateEntryMayDiffer(value string) bool {
+// (GAP-2279 answer budget); a relative value is always read. missing reports
+// an absolute value that Lstat found not to exist.
+func actionStateEntryMayDiffer(value string) (differ, missing bool) {
 	if !filepath.IsAbs(value) {
-		return true
+		return true, false
 	}
 	info, err := pathLstat(value)
 	if err != nil {
-		return !os.IsNotExist(err)
+		return !os.IsNotExist(err), os.IsNotExist(err)
 	}
-	return info.Mode()&os.ModeSymlink != 0
+	return info.Mode()&os.ModeSymlink != 0, false
 }
 
 // actionSSHSetupMode reports a mode that only tightens the .ssh folder to
