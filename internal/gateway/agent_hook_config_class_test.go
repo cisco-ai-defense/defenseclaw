@@ -5,17 +5,13 @@ package gateway
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // gap0048Home lays out a per-user home with the hook files the per-user
@@ -121,69 +117,48 @@ type gap0048Row struct {
 
 func gap0048Judge(t *testing.T, connectorName, profile string, h gap0048Home, row gap0048Row) string {
 	t.Helper()
-	event := "PreToolUse"
-	if connectorName == "opencode" {
-		event = "tool.execute.before"
-	}
-	payload := mustJSON(t, map[string]any{"session_id": "gap0048", "hook_event_name": event,
-		"tool_name": row.tool, "cwd": h.project, "tool_input": row.input})
-	cfg := &config.Config{}
-	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Connector = connectorName
-	if profile == "strict" {
-		installToolCallCorpusProfileConnector(t, connectorName, "strict")
-		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
-	}
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth(), store: store, logger: logger}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/"+connectorName+"/hook", strings.NewReader(string(payload)))
-	req.Header.Set("Content-Type", "application/json")
-	if header := hookpaths.ResolveConnector(connectorName, "", event, payload); header != "" {
-		req.Header.Set(hookpaths.Header, header)
-	}
-	if connectorName == "codex" {
-		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
-	}
-	recorder := httptest.NewRecorder()
-	api.handleAgentHook(connectorName).ServeHTTP(recorder, req)
-	return recorder.Body.String()
+	return newHookConfigJudge(t, connectorName, profile)(h.project, false, row.tool, row.input)
 }
 
 func gap0048Check(t *testing.T, connectorName string, h gap0048Home, rows []gap0048Row) {
 	t.Helper()
 	linked := h.links(t)
-	for _, row := range rows {
-		for _, profile := range []string{"default", "strict"} {
-			want := row.defaults
-			if profile == "strict" {
-				want = row.strict
+	for _, profile := range []string{"default", "strict"} {
+		t.Run(profile, func(t *testing.T) {
+			judge := newHookConfigJudge(t, connectorName, profile)
+			for _, row := range rows {
+				want := row.defaults
+				if profile == "strict" {
+					want = row.strict
+				}
+				t.Run(row.name, func(t *testing.T) {
+					t.Parallel()
+					if row.needsLinks && !linked {
+						t.Skip("no symlink privilege")
+					}
+					before := gap0048Snapshot(t, h)
+					got := judge(h.project, false, row.tool, row.input)
+					var answer struct {
+						Action string `json:"action"`
+					}
+					if err := json.Unmarshal([]byte(got), &answer); err != nil {
+						t.Fatalf("answer %q: %v", got, err)
+					}
+					if answer.Action != want {
+						t.Fatalf("%s %s: action %q, want %q: %.700s", profile, row.name, answer.Action, want, got)
+					}
+					if want != "allow" && row.rule != "" && !strings.Contains(got, row.rule) {
+						t.Fatalf("%s %s: want rule %s: %.700s", profile, row.name, row.rule, got)
+					}
+					if want == "allow" && (strings.Contains(got, agentHookConfigDisableRuleID) || strings.Contains(got, agentHookConfigWriteRuleID)) {
+						t.Fatalf("%s %s: allowed call names a hook config rule: %.700s", profile, row.name, got)
+					}
+					if after := gap0048Snapshot(t, h); after != before {
+						t.Fatal("the hook check changed a hook file")
+					}
+				})
 			}
-			t.Run(row.name+"/"+profile, func(t *testing.T) {
-				if row.needsLinks && !linked {
-					t.Skip("no symlink privilege")
-				}
-				before := gap0048Snapshot(t, h)
-				got := gap0048Judge(t, connectorName, profile, h, row)
-				var answer struct {
-					Action string `json:"action"`
-				}
-				if err := json.Unmarshal([]byte(got), &answer); err != nil {
-					t.Fatalf("answer %q: %v", got, err)
-				}
-				if answer.Action != want {
-					t.Fatalf("%s %s: action %q, want %q: %.700s", profile, row.name, answer.Action, want, got)
-				}
-				if want != "allow" && row.rule != "" && !strings.Contains(got, row.rule) {
-					t.Fatalf("%s %s: want rule %s: %.700s", profile, row.name, row.rule, got)
-				}
-				if want == "allow" && (strings.Contains(got, agentHookConfigDisableRuleID) || strings.Contains(got, agentHookConfigWriteRuleID)) {
-					t.Fatalf("%s %s: allowed call names a hook config rule: %.700s", profile, row.name, got)
-				}
-				if after := gap0048Snapshot(t, h); after != before {
-					t.Fatal("the hook check changed a hook file")
-				}
-			})
-		}
+		})
 	}
 }
 

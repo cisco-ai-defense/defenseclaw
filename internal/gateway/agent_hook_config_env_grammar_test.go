@@ -12,7 +12,7 @@ import (
 func TestAgentHookConfigEnvGrammar(t *testing.T) {
 	h := newGAP0048Home(t)
 	off := `--settings '{"disableAllHooks":true}'`
-	rows := []struct{ name, command, want string }{
+	rows := []hookConfigShellRow{
 		{"debug then unset home", "env --debug --unset HOME claude -p hi", "block"},
 		{"list signals then unset home", "env --list-signal-handling --unset HOME claude -p hi", "block"},
 		{"block signal then unset home", "env --block-signal=PIPE --unset HOME claude -p hi", "block"},
@@ -39,24 +39,7 @@ func TestAgentHookConfigEnvGrammar(t *testing.T) {
 		{"argv0 then ordinary", "env -a other claude -p hi", "allow"},
 		{"cluster change directory ordinary", "env -0C " + h.project + " claude -p hi", "allow"},
 	}
-	for _, row := range rows {
-		for _, profile := range []string{"permissive", "default", "strict"} {
-			for _, managed := range []bool{false, true} {
-				name := row.name + "/" + profile
-				if managed {
-					name += "/managed"
-				} else {
-					name += "/user"
-				}
-				t.Run(name, func(t *testing.T) {
-					got := rv2Action(rv3Judge(t, "claudecode", profile, h.project, managed, "Bash", map[string]any{"command": row.command}))
-					if got != row.want {
-						t.Errorf("got %s, want %s for %q", got, row.want, row.command)
-					}
-				})
-			}
-		}
-	}
+	checkHookConfigShellRows(t, h, rows)
 }
 
 func TestAgentHookConfigEnvChildWords(t *testing.T) {

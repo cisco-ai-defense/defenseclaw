@@ -11,30 +11,13 @@ import (
 // when it is run directly, and keeps an ordinary quoted split string allowed.
 func TestAgentHookConfigSplitStringEscapes(t *testing.T) {
 	h := newGAP0048Home(t)
-	rows := []struct{ name, command, want string }{
+	rows := []hookConfigShellRow{
 		{"quoted escaped blank disables hooks", `env -S 'claude --settings "{\"disableAllHooks\":\_true}" -p hi'`, "block"},
 		{"quoted escaped blank changes config home", `env -S 'CLAUDE_CONFIG_DIR="/tmp/other\_path" claude -p hi'`, "block"},
 		{"quoted escaped blank ordinary settings", `env -S 'claude --settings "{\"model\":\_\"sonnet\"}" -p hi'`, "allow"},
 		{"quoted escaped blank ordinary env", `env -S 'FOO="bar\_baz" claude -p hi'`, "allow"},
 	}
-	for _, row := range rows {
-		for _, profile := range []string{"permissive", "default", "strict"} {
-			for _, managed := range []bool{false, true} {
-				name := row.name + "/" + profile
-				if managed {
-					name += "/managed"
-				} else {
-					name += "/user"
-				}
-				t.Run(name, func(t *testing.T) {
-					got := rv2Action(rv3Judge(t, "claudecode", profile, h.project, managed, "Bash", map[string]any{"command": row.command}))
-					if got != row.want {
-						t.Errorf("got %s, want %s for %q", got, row.want, row.command)
-					}
-				})
-			}
-		}
-	}
+	checkHookConfigShellRows(t, h, rows)
 }
 
 // TestAgentHookConfigExecutedLinkPlacement judges a link by whether it runs:
@@ -54,7 +37,7 @@ func TestAgentHookConfigExecutedLinkPlacement(t *testing.T) {
 	// (the test tree under /tmp when TMPDIR is /tmp) is a different, existing
 	// rule and not the ordinary folder this test means.
 	ordinary := t.TempDir()
-	rows := []struct{ name, command, want string }{
+	rows := []hookConfigShellRow{
 		{"called function with late known values", "link_hook() { ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; link_hook", "block"},
 		{"called function with early known values", "src=" + named + "; dest=" + bin + "; link_hook() { ln -sf \"$src\" \"$dest\"/; }; link_hook", "block"},
 		{"called function with arguments", "link_hook() { ln -sf \"$1\" \"$2\"/; }; link_hook " + named + " " + bin, "block"},
@@ -93,22 +76,5 @@ func TestAgentHookConfigExecutedLinkPlacement(t *testing.T) {
 		{"printf -v with an ordinary link", "shopt -s lastpipe; src=" + named + "; dest=" + ordinary + "; echo x | printf -v dest %s " + ordinary + "; ln -sf \"$src\" \"$dest\"/", "allow"},
 		{"function shadowing unset with an ordinary link", "unset() { :; }; link_hook() { ln -sf \"$1\" \"$2\"/; }; unset -f link_hook; link_hook " + ordinary + "/note " + ordinary, "allow"},
 	}
-	for _, row := range rows {
-		for _, profile := range []string{"permissive", "default", "strict"} {
-			for _, managed := range []bool{false, true} {
-				name := row.name + "/" + profile
-				if managed {
-					name += "/managed"
-				} else {
-					name += "/user"
-				}
-				t.Run(name, func(t *testing.T) {
-					got := rv2Action(rv3Judge(t, "claudecode", profile, h.project, managed, "Bash", map[string]any{"command": row.command}))
-					if got != row.want {
-						t.Errorf("got %s, want %s for %q", got, row.want, row.command)
-					}
-				})
-			}
-		}
-	}
+	checkHookConfigShellRows(t, h, rows)
 }
