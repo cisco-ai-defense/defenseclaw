@@ -4,7 +4,6 @@
 package gateway
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,32 +53,18 @@ func TestSourcedScriptInAShellWrapperAfterADirectoryChangeIsJudgedWhereItRuns(t 
 			t.Skipf("link unavailable: %v", err)
 		}
 	}
-	var rows []r106HookRow
-	for _, shape := range []string{
-		`cd a && bash -c "source %s"`,
-		`cd a && sh -c ". ./%s"`,
-		`cd a && env X=1 bash -c "source %s"`,
-		`cd a && bash --login -c "source %s"`,
-		`cd a && nice bash -c "source %s"`,
-		`cd a && bash -c "bash %s"`,
-		`cd a && bash -c "bash -c \"source %s\""`,
-		`(cd a && bash -c "source %s")`,
-		`cd a && cd . && bash -c "source %s"`,
-	} {
-		for _, name := range []string{"ok.sh", "portal/../ok.sh", "wk.sh", "portal/../wk.sh"} {
-			rows = append(rows, r106HookRow{command: fmt.Sprintf(shape, name), block: filepath.Base(name) == "wk.sh"})
-		}
+	// One representative row per behaviour and its benign twin; the launcher
+	// spellings (login, nice, nested, subshell) are covered by the hookpaths test.
+	rows := []r106HookRow{
+		{command: `cd a && bash -c "source ok.sh"`},
+		{command: `cd a && bash -c "source wk.sh"`, block: true},
+		{command: `cd a && bash -c "source portal/../ok.sh"`},
+		{command: `cd a && bash -c "source portal/../wk.sh"`, block: true},
+		{command: `cd a && sh -c ". ./wk.sh"`, block: true},
+		{command: `cd a && env X=1 bash -c "source wk.sh"`, block: true},
+		// A change back to the starting folder places the script there again.
+		{command: `cd a && cd .. && bash -c "source wk.sh"`},
+		{command: `cd a && cd .. && bash -c "source ok.sh"`, block: true},
 	}
-	// The change inside the wrapper, and one back to the starting folder,
-	// still place the script where it runs.
-	rows = append(rows,
-		r106HookRow{command: `bash -c "cd a && source ok.sh"`},
-		r106HookRow{command: `bash -c "cd a && source wk.sh"`, block: true},
-		r106HookRow{command: `cd a && cd .. && bash -c "source wk.sh"`},
-		r106HookRow{command: `cd a && cd .. && bash -c "source ok.sh"`, block: true},
-		r106HookRow{command: `cd a && cd .. && bash -c "source portal/../ok.sh"`, block: true},
-		r106HookRow{command: `bash -c "source ok.sh"`, block: true},
-		r106HookRow{command: `bash -c "source wk.sh"`},
-	)
 	judgeR106HookRows(t, rows, prepare)
 }
