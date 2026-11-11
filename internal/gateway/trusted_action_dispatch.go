@@ -3930,7 +3930,9 @@ func stateWordThroughLink(
 // trailing separator makes the kernel follow it (`rm -rf dclink/`). Such a
 // call names no state path, so the mention check alone let it through
 // (GAP-2047); provenStateMutationPath then judges it on the physical
-// target, as it does every other operand.
+// target, as it does every other operand. The managed agent settings
+// DefenseClaw publishes are protected like the state, so an operand whose
+// place is one of them is reported the same way (GAP-1064).
 func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionRequest) bool {
 	home := facts.ActiveHome
 	if !filepath.IsAbs(home) && (!request.gitBashDrive || !path.IsAbs(home)) {
@@ -3962,13 +3964,54 @@ func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionReque
 		}
 		// `rm -rf dclink/../.defenseclaw/hooks`: the parent as the kernel
 		// walks it (GAP-2047 L5).
-		if walked, ok := stateWalkSpelling(candidate, request.Input.CWD, home); ok {
+		walked, isWalked := stateWalkSpelling(candidate, request.Input.CWD, home)
+		if isWalked {
 			if physical, ok := resolve(walkParent(walked)); ok && inState(physical) {
 				return true
 			}
 		}
+		if drive {
+			continue
+		}
+		if managedSettingsReachedThroughLink(facts, candidate, value, resolve) ||
+			isWalked && managedSettingsReachedThroughLink(facts, candidate, walked, resolve) {
+			return true
+		}
 	}
 	return false
+}
+
+// managedSettingsReachedThroughLink reports a changing operand that is no
+// managed agent settings file by its spelling but is one by the file the
+// kernel opens for it: a project link to the vendor folder, to a published
+// file or to another link (GAP-1064). The operand is followed whole, so a
+// link as its last name counts; a delete removes the final name and never
+// the file a link there reaches, so only the directory of its name is
+// followed. The spelling is walked, not cleaned, so a `..` after a link
+// ascends from the target of the link.
+func managedSettingsReachedThroughLink(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+	spelling string,
+	resolve func(string) (string, bool),
+) bool {
+	walk, entry := spelling, ""
+	if candidate.Access == actionfacts.PathAccessDelete {
+		walk, entry = walkParent(spelling), filepath.Base(spelling)
+	}
+	physical, ok := resolve(walk)
+	if !ok || !filepath.IsAbs(physical) {
+		return false
+	}
+	if entry != "" {
+		physical = filepath.Join(physical, entry)
+	}
+	if filepath.Clean(physical) == filepath.Clean(spelling) {
+		return false
+	}
+	linked := candidate
+	linked.Value, linked.Normalized, linked.Resolved = physical, physical, physical
+	return managedAgentSettingsCandidate(facts, linked)
 }
 
 // fileToolWriteThroughLinkToState reports a file tool write (write_file,
@@ -4192,6 +4235,10 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 				if physical, ok := hookpaths.ResolveWriteTarget(operand); ok {
 					targets = append(targets, physical)
 				}
+			} else if physical, ok := hookpaths.WalkFactTarget(request.ResolvedWriteTargets, operand); ok {
+				// The link walk of the hook client places a managed call
+				// the gateway cannot read (GAP-1064).
+				targets = append(targets, physical)
 			}
 			for _, target := range targets {
 				if active, same := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same {
@@ -4219,6 +4266,10 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 				// The hook client followed the directory (rel-1-0-6:GAP-0681
 				// review 2).
 				targets = append(targets, state)
+			} else if parent, ok := hookpaths.WalkFactTarget(request.ResolvedWriteTargets, filepath.Dir(entry)); ok {
+				// The link walk of the hook client reaches the directory of
+				// an entry outside the state (GAP-1064).
+				targets = append(targets, filepath.Join(parent, filepath.Base(entry)))
 			}
 			for _, target := range targets {
 				written := actionfacts.PathFact{

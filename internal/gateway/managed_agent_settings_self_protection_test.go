@@ -4,11 +4,14 @@
 package gateway
 
 import (
+	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -159,7 +162,10 @@ func TestWindowsManagedAgentSettingsAreSelfProtection(t *testing.T) {
 	}
 	// Another machine: this host name with one letter changed.
 	if host, err := os.Hostname(); err == nil && host != "" {
-		allowed = append(allowed, `\\`+otherMachineName(host, 0)+`\C$\Program Files\ClaudeCode\managed-settings.json`)
+		other := `\\` + otherMachineName(host, 0) + `\C$\Program Files\ClaudeCode\managed-settings.json`
+		if otherMachineShareAnswersAbsent(t, other) {
+			allowed = append(allowed, other)
+		}
 	}
 	for _, managed := range []bool{false, true} {
 		for _, pack := range []string{"", "strict", "permissive"} {
@@ -271,6 +277,52 @@ func otherMachineName(name string, i int) string {
 	return name[:i] + letter + name[i+1:]
 }
 
+// otherMachineShareAnswersAbsent reports whether this host answers a read of
+// a file on the administrative share of a server that does not exist with
+// "does not exist", for the system and for the hook reader alike, within a
+// bound. A host that cannot say so (a network that answers a missing name
+// late, with another error, or not at all) holds a read of that share
+// unanswered, and a managed gateway fails closed on an unanswered share
+// (GAP-0127); that is the share rules, not the name rules these tests pin,
+// so such a row is not asked of the host. The read is repeated until the
+// answer is settled, which also leaves the share known to the hook reader as
+// answered for the cells that follow.
+func otherMachineShareAnswersAbsent(t *testing.T, file string) bool {
+	t.Helper()
+	type answer struct {
+		statErr, lstatErr error
+		took              time.Duration
+	}
+	absent := func(a answer) bool {
+		return errors.Is(a.statErr, fs.ErrNotExist) && errors.Is(a.lstatErr, fs.ErrNotExist)
+	}
+	done := make(chan answer, 1)
+	go func() {
+		start := time.Now()
+		var a answer
+		for {
+			_, a.statErr = os.Stat(file)
+			_, a.lstatErr = hookpaths.Lstat(file)
+			a.took = time.Since(start)
+			if absent(a) || a.took > 8*time.Second {
+				done <- a
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
+	select {
+	case a := <-done:
+		if absent(a) {
+			return true
+		}
+		t.Logf("host gives no plain not-exist for %s after %s (stat: %v; hook reader: %v): row not asked", file, a.took.Round(time.Millisecond), a.statErr, a.lstatErr)
+	case <-time.After(30 * time.Second):
+		t.Logf("host gives no answer for %s within 30 s: row not asked", file)
+	}
+	return false
+}
+
 // rel-1-0-6:GAP-0734 review 11 M1: an administrative share is this machine
 // only when the whole server name is one of its names. A server that shares
 // the first label of the host name with another DNS domain is another
@@ -304,6 +356,14 @@ func TestWindowsAdminShareNeedsWholeHostName(t *testing.T) {
 			`\\`+otherMachineName(host, len(host)-1)+tail,
 		)
 	}
+	// Which absent servers a host can say are absent is for the host to say.
+	answered := remote[:0]
+	for _, file := range remote {
+		if otherMachineShareAnswersAbsent(t, file) {
+			answered = append(answered, file)
+		}
+	}
+	remote = answered
 	for _, managed := range []bool{false, true} {
 		for _, pack := range []string{"", "permissive", "strict"} {
 			for _, file := range local {
