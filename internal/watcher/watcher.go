@@ -1266,6 +1266,11 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 						w.queuePending(copyRoot)
 						continue
 					}
+					// .git/objects and friends look like
+					// <marketplace>/<plugin>/<version> at depth 3.
+					if depth == 3 && w.inClaudeCacheGitDir(event.Name) {
+						continue
+					}
 					if depth != 3 {
 						continue
 					}
@@ -1406,6 +1411,12 @@ func (w *InstallWatcher) queueDueIssues() {
 	for _, issue := range w.state.dueIssues(AdmissionUnscanned, AdmissionNotQuarantined) {
 		roots := w.sourceRootsFor(InstallType(issue.Type))
 		if !slices.ContainsFunc(roots, func(root string) bool { return watcherPathAtOrBelow(issue.Path, root) }) {
+			continue
+		}
+		// Staging clones and .git internals are never plugins; do not retry them (#1428).
+		// Clear stale saved issues so they do not linger in admission reports.
+		if w.inClaudePluginStaging(issue.Path, 0) || w.inClaudeCacheGitDir(issue.Path) {
+			w.state.clearIssue(issue.Path)
 			continue
 		}
 		w.queuePending(issue.Path)
@@ -1988,6 +1999,9 @@ func (w *InstallWatcher) claudePluginIdentity(path string) (string, bool) {
 		})
 		switch {
 		case strings.EqualFold(filepath.Base(rootAbs), "cache") && len(parts) == 3:
+			if pathHasGitDirSegment(relative) {
+				return "", false
+			}
 			return parts[1] + "@" + parts[0], true
 		case strings.EqualFold(filepath.Base(rootAbs), "cache") && len(parts) == 1 &&
 			isCachePluginCopy(pathAbs):
@@ -3622,6 +3636,15 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 	if w.secureClientActive() {
 		return
 	}
+	if w.inClaudePluginStaging(dir, 0) {
+		return
+	}
+	// If Run handed us a .git directory (or any path under .git) in the cache,
+	// do not walk its children — objects/hooks look like plugins and can be
+	// queued as skills.
+	if w.inClaudeCacheGitDir(dir) {
+		return
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -3631,6 +3654,9 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 			continue
 		}
 		child := filepath.Join(dir, entry.Name())
+		if w.inClaudePluginStaging(child, 0) {
+			continue
+		}
 		if root, copied := w.cachePluginCopyRoot(child); copied {
 			if !sameWatcherPath(root, child) {
 				continue
@@ -3654,11 +3680,13 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 const claudeStagingGrace = 15 * time.Minute
 
 // inClaudePluginStaging reports a path below a Claude Code plugin staging
-// folder (cache/temp_local_<id>), younger than grace when grace is set.
-// Claude Code builds a plugin there and then moves it to
-// <marketplace>/<plugin>/<version>: the watcher scanned the staging copy as
-// a plugin, blocked it for its missing manifest and held its files while the
-// move ran, so even a clean plugin failed to install with EPERM (GAP-0629).
+// folder (cache/temp_local_<id>, cache/temp_git_<id> or
+// cache/temp_subdir_<id>.clone), younger
+// than grace when grace is set. Claude Code builds or updates a plugin
+// there and then moves it to <marketplace>/<plugin>/<version>: the watcher
+// scanned the staging copy (and its .git internals) as plugins, blocked
+// them for a missing manifest and held their files while the move or clone
+// ran, so even a clean plugin failed to install or update (GAP-0629, #1428).
 // The final folder is admitted as before. The Secure Client profile keeps
 // the earlier behaviour.
 func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration) bool {
@@ -3683,6 +3711,11 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 		if !isPluginStagingFolder(first) {
 			return false
 		}
+		// Update clones are never installed plugins; skip them on rescan
+		// regardless of age so a leftover clone is not quarantined (#1428).
+		if isClaudePluginUpdateClone(first) {
+			return true
+		}
 		if grace <= 0 {
 			return true
 		}
@@ -3693,13 +3726,95 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 }
 
 // isPluginStagingFolder names a staging folder in a plugin cache: Claude
-// Code's temp_local_<id>, and the .dclaw-stage-<name>-<random> folder that
+// Code's temp_local_<id> (install), temp_git_<id> (install from a Git URL)
+// and temp_subdir_<id>.clone (plugin update), and the
+// .dclaw-stage-<name>-<random> folder that
 // "defenseclaw plugin install" copies a plugin into, scans and decides
-// itself before it moves the copy to cache/<name> (GAP-0017).
+// itself before it moves the copy to cache/<name> (GAP-0017, #1428).
+// Marketplace folders such as temp_subdir_tools or temp_subdir_tools.clone
+// are not staging: see isClaudePluginUpdateClone for the exact clone shape.
 func isPluginStagingFolder(name string) bool {
 	lower := strings.ToLower(name)
-	for _, prefix := range []string{"temp_local_", ".dclaw-stage-"} {
-		if strings.HasPrefix(lower, prefix) && len(lower) > len(prefix) {
+	if strings.HasPrefix(lower, "temp_local_") && len(lower) > len("temp_local_") {
+		return true
+	}
+	if isClaudePluginUpdateClone(lower) || isClaudePluginGitClone(lower) {
+		return true
+	}
+	if strings.HasPrefix(lower, ".dclaw-stage-") && len(lower) > len(".dclaw-stage-") {
+		return true
+	}
+	return false
+}
+
+// isClaudePluginUpdateClone names Claude Code's plugin-update staging
+// directory: cache/temp_subdir_<n>_<rand>.clone, where <n> is a decimal
+// timestamp and <rand> a short alphanumeric suffix (#1428). Marketplace
+// names may use letters, digits, ".", "_" and "-", so a marketplace such as
+// temp_subdir_tools.clone must not match; only the exact clone shape does.
+func isClaudePluginUpdateClone(name string) bool {
+	lower := strings.ToLower(name)
+	const prefix, suffix = "temp_subdir_", ".clone"
+	if !strings.HasPrefix(lower, prefix) || !strings.HasSuffix(lower, suffix) ||
+		len(lower) <= len(prefix)+len(suffix) {
+		return false
+	}
+	stamp, random, ok := strings.Cut(lower[len(prefix):len(lower)-len(suffix)], "_")
+	return ok && isASCIIDigits(stamp) && isASCIIAlnum(random)
+}
+
+// isClaudePluginGitClone names the folder Claude Code clones a Git URL
+// plugin source into before it copies the plugin to its versioned folder:
+// cache/temp_git_<n>_<rand>, with the same <n> and <rand> as the update
+// clone and no suffix. Unlike update clones these are left alone only for
+// the staging grace: Claude Code does not always remove them, and leftover
+// ones are read as skills (anthropics/claude-code#46566), so the rescan
+// scans them once they are older. A marketplace named temp_git_tools is not
+// staging.
+func isClaudePluginGitClone(name string) bool {
+	lower := strings.ToLower(name)
+	const prefix = "temp_git_"
+	if !strings.HasPrefix(lower, prefix) {
+		return false
+	}
+	stamp, random, ok := strings.Cut(lower[len(prefix):], "_")
+	return ok && isASCIIDigits(stamp) && isASCIIAlnum(random)
+}
+
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIAlnum(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'z') {
+			return false
+		}
+	}
+	return true
+}
+
+// pathHasGitDirSegment reports whether any path component is named ".git"
+// (case-insensitive so Windows aliases such as .GIT are excluded too).
+// Claude Code's plugin-update staging clone exposes .git/objects, .git/hooks
+// and similar as <marketplace>/<plugin>/<version> folders; those are git
+// internals, not plugins (#1428).
+func pathHasGitDirSegment(path string) bool {
+	for _, part := range strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if strings.EqualFold(part, ".git") {
 			return true
 		}
 	}
@@ -3818,9 +3933,21 @@ func (w *InstallWatcher) cacheLayoutPlugins(path string) bool {
 }
 
 func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {
+	relative, inside := w.claudeCacheRelative(path)
+	if !inside {
+		return 0, false
+	}
+	return len(strings.FieldsFunc(relative, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})), true
+}
+
+// claudeCacheRelative returns path relative to the Claude Code plugin cache
+// root it is below, and whether it is below one.
+func (w *InstallWatcher) claudeCacheRelative(path string) (string, bool) {
 	pathAbs, err := filepath.Abs(path)
 	if err != nil {
-		return 0, false
+		return "", false
 	}
 	for _, root := range w.pluginDirs {
 		rootAbs, absErr := filepath.Abs(root)
@@ -3832,11 +3959,17 @@ func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {
 			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			continue
 		}
-		return len(strings.FieldsFunc(relative, func(r rune) bool {
-			return r == '/' || r == '\\'
-		})), true
+		return relative, true
 	}
-	return 0, false
+	return "", false
+}
+
+// inClaudeCacheGitDir reports a path at or below a .git folder inside the
+// Claude Code plugin cache. Only the part below the cache root counts, so a
+// cache that itself sits below a folder named .git is not excluded whole.
+func (w *InstallWatcher) inClaudeCacheGitDir(path string) bool {
+	relative, inside := w.claudeCacheRelative(path)
+	return inside && pathHasGitDirSegment(relative)
 }
 
 func sameWatcherPath(left, right string) bool {
