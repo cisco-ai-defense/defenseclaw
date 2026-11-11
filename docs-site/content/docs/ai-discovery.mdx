@@ -1056,6 +1056,9 @@ In `managed_enterprise`, the managed inventory carries every skill the agents lo
 | `content_hash` | SHA-256 over every file of the skill folder, scripts and binaries included. The same skill has the same hash on every endpoint |
 | `content_status` | `ok`, or why the record has no hash: `symlink` (links are recorded by target and never followed), `too_large` or `unreadable` |
 | `state`, `first_seen`, `last_seen` | `new`, `changed`, `unchanged` or `removed` since the last publish, from state the endpoint keeps, and when the skill was first and last seen |
+| `scope` | `user`, `project`, `bundled` (shipped by the agent vendor) or `managed` (an admin folder outside every home) |
+| `location` | The skill folder below the user's home, as `~/.claude/skills/pdf`. The account name and the absolute path stay on the endpoint; a project or managed skill sends none |
+| `agents` | Every agent that reads the folder. Each agent still gets its own record and component id, with the same hash |
 
 A scan reads at most 32 MiB and 1,000 files and folders per skill, and 256 MiB in all; a bigger skill is sent as `too_large`. `.git` and Finder or Explorer metadata files (`.DS_Store`, `Thumbs.db`, `desktop.ini`) are left out, so they do not change the hash.
 

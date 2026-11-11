@@ -448,6 +448,9 @@ func managedInventoryComponentsDigest(key string, components []endpointInventory
 			component.skillContentHash,
 			component.skillContentStatus,
 			component.skillFirstSeen,
+			component.skillScope,
+			component.skillLocation,
+			strings.Join(component.skillAgents, ","),
 		}, managedInventoryFieldSeparator))
 	}
 	return managedInventoryDigest(key, rows)

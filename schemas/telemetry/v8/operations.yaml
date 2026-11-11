@@ -2182,6 +2182,52 @@ attributes:
     overrides: {max_utf8_bytes: 64}
     notes: UTC RFC3339. Publishes are change-gated with a daily complete bundle, so this advances at least daily; on a removed record it is the last publish that still found the skill
   introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.scope
+  type: string
+  brief: Where the skill is installed
+  examples: [user]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [user, project, bundled, managed]
+    notes: user is a skill in a user skill folder, project a skill in a repository skill folder, bundled a skill the agent vendor ships, managed a skill in an admin folder outside every home such as /etc/codex/skills
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.location
+  type: string
+  brief: Home-relative location of one discovered skill folder
+  examples: [~/.agents/skills/pdf]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 512
+      pattern: '^~/[^\x00-\x1f\x7f]*$'
+    notes: The agent's skill folder relative to the user's home followed by the skill folder name, always with forward slashes. It never contains the account name, and raw local paths never leave the endpoint. Present for user and bundled skills inside a user home only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.agents
+  type: string[]
+  brief: Every coding agent that loads skills from this skill's folder
+  examples:
+  - [codex, cursor]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 1040, max_item_utf8_bytes: 64, max_items: 16}
+    notes: Sorted connector slugs, at most 16; a shared folder such as ~/.agents/skills lists every agent that reads it, and each agent still gets its own record keyed by its own component id
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.connector.identifiers
   type: array
   brief: Ordered identifier-class section of one complete connector inventory snapshot
@@ -8816,6 +8862,12 @@ groups:
   - ref: defenseclaw.inventory.skill.first_seen
     requirement_level: recommended
   - ref: defenseclaw.inventory.skill.last_seen
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.scope
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.location
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.agents
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.publisher
     requirement_level: recommended
