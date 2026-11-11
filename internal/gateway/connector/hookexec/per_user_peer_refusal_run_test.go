@@ -27,12 +27,23 @@ type peerListener struct {
 
 func newPeerListener(t *testing.T, addr string, closeAtOnce bool) *peerListener {
 	t.Helper()
-	ln, err := net.Listen("tcp4", addr)
+	p, err := startPeerListener(addr, closeAtOnce)
 	if err != nil {
 		t.Fatalf("listen %s: %v", addr, err)
 	}
+	t.Cleanup(func() { _ = p.ln.Close() })
+	return p
+}
+
+// startPeerListener is newPeerListener without a test: for a goroutine that
+// can outlive the call (the per-user gateway start), which must not register
+// a cleanup. The caller closes p.ln.
+func startPeerListener(addr string, closeAtOnce bool) (*peerListener, error) {
+	ln, err := net.Listen("tcp4", addr)
+	if err != nil {
+		return nil, err
+	}
 	p := &peerListener{ln: ln}
-	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -51,7 +62,7 @@ func newPeerListener(t *testing.T, addr string, closeAtOnce bool) *peerListener 
 			}()
 		}
 	}()
-	return p
+	return p, nil
 }
 
 func (p *peerListener) addr() string { return p.ln.Addr().String() }
@@ -148,14 +159,28 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 			var peer atomic.Pointer[peerListener]
 			opts.APIAddr = addr
 			opts.HTTPClient = verifiedTestClient(addr, func(net.Conn) error { return io.EOF })
+			// The per-user hook runs the start in a goroutine that can
+			// outlive the call, so it registers no cleanup; this subtest's
+			// cleanup waits for it before it checks and closes the listener.
+			recoveryDone := make(chan struct{})
 			opts.GatewayRecovery = func(context.Context, error) error {
-				peer.Store(newPeerListener(t, addr, false))
+				defer close(recoveryDone)
+				if p, err := startPeerListener(addr, false); err == nil {
+					peer.Store(p)
+				}
 				time.Sleep(200 * time.Millisecond)
 				return errors.New("gateway start failed")
 			}
 			t.Cleanup(func() {
-				if p := peer.Load(); p != nil && p.received.Load() != 0 {
-					t.Errorf("the listener that bound during the start received %d bytes", p.received.Load())
+				select {
+				case <-recoveryDone:
+				case <-time.After(5 * time.Second):
+				}
+				if p := peer.Load(); p != nil {
+					if n := p.received.Load(); n != 0 {
+						t.Errorf("the listener that bound during the start received %d bytes", n)
+					}
+					_ = p.ln.Close()
 				}
 			})
 			return free
