@@ -132,6 +132,7 @@ func nativeOutageBlocked(r runResult) bool {
 // status, an authentication refusal) and a gateway that took the call and did
 // not answer block in every tier.
 func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
+	shortRestartBudget(t)
 	fastRestartRetries(t)
 	type scenario struct {
 		name   string
@@ -211,6 +212,7 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 // The config on disk (OutageFailModeNow) alone decides a classified outage.
 // A prior render's outage mode cannot override it.
 func TestPerUserNativeHookOutageFollowsTheConfigNow(t *testing.T) {
+	shortRestartBudget(t)
 	fastRestartRetries(t)
 	constant := func(mode string) func() string { return func() string { return mode } }
 	for _, connector := range []string{"claudecode", "codex", "copilot", "cursor"} {
@@ -247,6 +249,7 @@ func TestPerUserNativeHookOutageFollowsTheConfigNow(t *testing.T) {
 
 // A managed hook ignores the per-user outage callback.
 func TestManagedNativeHookIgnoresThePerUserOutageMode(t *testing.T) {
+	shortRestartBudget(t)
 	fastRestartRetries(t)
 	result := run(t, "codex", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		managedCodex(opts)

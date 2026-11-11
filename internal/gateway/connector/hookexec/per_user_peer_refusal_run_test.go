@@ -27,12 +27,23 @@ type peerListener struct {
 
 func newPeerListener(t *testing.T, addr string, closeAtOnce bool) *peerListener {
 	t.Helper()
-	ln, err := net.Listen("tcp4", addr)
+	p, err := startPeerListener(addr, closeAtOnce)
 	if err != nil {
 		t.Fatalf("listen %s: %v", addr, err)
 	}
+	t.Cleanup(func() { _ = p.ln.Close() })
+	return p
+}
+
+// startPeerListener is newPeerListener without a test: for a goroutine that
+// can outlive the call (the per-user gateway start), which must not register
+// a cleanup. The caller closes p.ln.
+func startPeerListener(addr string, closeAtOnce bool) (*peerListener, error) {
+	ln, err := net.Listen("tcp4", addr)
+	if err != nil {
+		return nil, err
+	}
 	p := &peerListener{ln: ln}
-	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -51,7 +62,7 @@ func newPeerListener(t *testing.T, addr string, closeAtOnce bool) *peerListener 
 			}()
 		}
 	}()
-	return p
+	return p, nil
 }
 
 func (p *peerListener) addr() string { return p.ln.Addr().String() }
@@ -75,9 +86,13 @@ func verifiedTestClient(addr string, verify func(net.Conn) error) *http.Client {
 // accepted and closed at once while the Windows owner check waited past the
 // connect deadline, and one that vanished after the refusal.
 func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing.T) {
+	shortRestartBudget(t)
 	fastRestartRetries(t)
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
+	// Read once here: a dial that outlives its request must not read the
+	// variable while shortRestartBudget's cleanup restores it.
+	ownerCheckWait := max(gatewayRestartBudget, firstTryConnectWindow) + 300*time.Millisecond
 	type scenario struct {
 		name string
 		// setup returns the client and the listener whose bytes must stay 0.
@@ -100,12 +115,14 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 		{"check error at the restart deadline", refusing(fmt.Errorf("%w: owner check", errGatewayNotConnected))},
 		{"accepts and closes at once, owner check past the connect deadline", func(t *testing.T, opts *Options) *peerListener {
 			// The Windows tuple wait: the accepted row left the table, so
-			// the check waits its own 3 s, past the try's connect deadline.
+			// the check waits its own 3 s, past the try's connect deadline
+			// (the restart budget, and at least the first try's connect
+			// window).
 			peer := newPeerListener(t, "127.0.0.1:0", true)
 			opts.APIAddr = peer.addr()
 			opts.HTTPClient = verifiedTestClient(peer.addr(), func(net.Conn) error {
 				select {
-				case <-time.After(gatewayRestartBudget + 300*time.Millisecond):
+				case <-time.After(ownerCheckWait):
 				case <-stop:
 				}
 				return errors.New("connected gateway server socket was not found")
@@ -142,14 +159,35 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 			var peer atomic.Pointer[peerListener]
 			opts.APIAddr = addr
 			opts.HTTPClient = verifiedTestClient(addr, func(net.Conn) error { return io.EOF })
+			// The per-user hook runs the start in a goroutine that can
+			// outlive the call, so it registers no cleanup; this subtest's
+			// cleanup waits for it before it checks and closes the listener.
+			recoveryDone := make(chan struct{})
+			var listenErr atomic.Pointer[error]
 			opts.GatewayRecovery = func(context.Context, error) error {
-				peer.Store(newPeerListener(t, addr, false))
+				defer close(recoveryDone)
+				p, err := startPeerListener(addr, false)
+				if err != nil {
+					listenErr.Store(&err)
+				} else {
+					peer.Store(p)
+				}
 				time.Sleep(200 * time.Millisecond)
 				return errors.New("gateway start failed")
 			}
 			t.Cleanup(func() {
-				if p := peer.Load(); p != nil && p.received.Load() != 0 {
-					t.Errorf("the listener that bound during the start received %d bytes", p.received.Load())
+				select {
+				case <-recoveryDone:
+				case <-time.After(5 * time.Second):
+				}
+				if err := listenErr.Load(); err != nil {
+					t.Errorf("the start could not bind %s, so the scenario checked no listener: %v", addr, *err)
+				}
+				if p := peer.Load(); p != nil {
+					if n := p.received.Load(); n != 0 {
+						t.Errorf("the listener that bound during the start received %d bytes", n)
+					}
+					_ = p.ln.Close()
 				}
 			})
 			return free
@@ -195,6 +233,7 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 // The controls: this account's gateway still answers through the same
 // transport, and a port nobody listens on is still an outage.
 func TestPerUserNativeHookOutageStillOpensForThisAccountsGateway(t *testing.T) {
+	shortRestartBudget(t)
 	fastRestartRetries(t)
 	gateway := newPeerListener(t, "127.0.0.1:0", false)
 	addr := gateway.addr()

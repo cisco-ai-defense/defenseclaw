@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // writeUnusedSharedHookRuntime lays out the shared hook runtime of an account
@@ -309,10 +311,7 @@ func TestAccountAgentProcessMayRunSeesTheAgentsProcess(t *testing.T) {
 	if accountAgentProcessMayRun(dataDir, agent) {
 		t.Fatal("a process was found for an agent nothing runs")
 	}
-	sleep, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Skip("no sleep")
-	}
+	sleep := testenv.NativeSleep(t)
 	link := filepath.Join(t.TempDir(), agent)
 	if err := os.Symlink(sleep, link); err != nil {
 		t.Fatal(err)

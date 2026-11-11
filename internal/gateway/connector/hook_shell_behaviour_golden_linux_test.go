@@ -935,6 +935,11 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 				if k == "X-Defenseclaw-Hook-Answer-Within-Ms" {
 					value = "<MS>"
 				}
+				// curl names its own version in the header it sends, and the
+				// computer the test runs on decides which curl that is.
+				if k == "User-Agent" {
+					value = hookGoldenCurlAgent(value)
+				}
 				// The body carries this case's folder, whose name varies in
 				// length: pin that the length is the body's.
 				if k == "Content-Length" {
@@ -956,6 +961,25 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		return obs, err
 	}
 	return obs, nil
+}
+
+// hookGoldenRecordedCurlAgent is the User-Agent of the curl the golden was
+// recorded with (curl 8.5.0).
+const hookGoldenRecordedCurlAgent = "curl/8.5.0"
+
+var hookGoldenCurlAgentPattern = regexp.MustCompile(`^curl/[0-9]+(\.[0-9]+)*$`)
+
+// hookGoldenCurlAgent maps the User-Agent of any curl release to the one the
+// golden was recorded with, so that the digest of a case does not depend on
+// the curl of the computer that runs it (a hosted runner image changes it:
+// every case of the golden differed on curl 8.18.0). A User-Agent that is not
+// a bare curl release stays as it is, so a hook that sends another program
+// name or a changed User-Agent still fails its case.
+func hookGoldenCurlAgent(value string) string {
+	if hookGoldenCurlAgentPattern.MatchString(value) {
+		return hookGoldenRecordedCurlAgent
+	}
+	return value
 }
 
 // hookGoldenOwnRejected returns an error when the gateway refused a request

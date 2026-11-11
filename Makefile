@@ -1140,12 +1140,16 @@ go-test-cov: sync-openclaw-extension
 	@rm -f coverage-go-*.out
 
 CONNECTOR_MATRIX_RUN := Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix
-# The connector package alone runs about 16 minutes of the matrix, so CI
-# splits it to stay inside the 20-minute job budget: CONNECTOR_MATRIX_PART=
-# packages runs the other packages and the Python matrix, and 0 .. N-1 run
-# that part of the connector package's matrix tests (N =
-# CONNECTOR_MATRIX_CONNECTOR_PARTS, balanced on go-linux.json). The default,
-# all, runs everything in one go test.
+# The connector package alone runs about 24 minutes of the matrix on a hosted
+# runner, so CI splits it to stay inside the 20-minute job budget:
+# CONNECTOR_MATRIX_PART= packages runs the other packages and the Python
+# matrix, and 0 .. N-1 run that part of the matrix tests of the connector
+# package (N = CONNECTOR_MATRIX_CONNECTOR_PARTS). The parts are balanced on
+# go-linux-connector-matrix.json, the times of this run (no -race). go-linux.json
+# holds the -race times of the remaining-package shards; the shell-hook tests
+# wait on the scripts they spawn, so without -race they are most of the run,
+# and balanced on those times one part ran more than twice as long as the
+# others (GAP-0834). The default, all, runs everything in one go test.
 CONNECTOR_MATRIX_PART ?= all
 CONNECTOR_MATRIX_CONNECTOR_PARTS ?= 4
 
@@ -1169,7 +1173,7 @@ else ifeq ($(CONNECTOR_MATRIX_PART),packages)
 		-run '$(CONNECTOR_MATRIX_RUN)'
 else
 	run="$$($(HOST_PYTHON) scripts/go_test_shards.py --package-dir internal/gateway/connector \
-		--match '$(CONNECTOR_MATRIX_RUN)' --timings scripts/test-timings/go-linux.json \
+		--match '$(CONNECTOR_MATRIX_RUN)' --timings scripts/test-timings/go-linux-connector-matrix.json \
 		--shard-count $(CONNECTOR_MATRIX_CONNECTOR_PARTS) --shard-index $(CONNECTOR_MATRIX_PART))" && \
 		go test -count=1 -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/connector -run "$$run"
 endif

@@ -183,6 +183,56 @@ def test_linux_connector_parts_separate_the_ci_timeout_cluster() -> None:
     assert all(sum(observed_seconds.get(name, 0) for name in part) < 300 for part in parts)
 
 
+def test_linux_remaining_package_shards_plan_inside_the_shared_deadline() -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    shard_count = len(workflow["jobs"]["go-test-other"]["strategy"]["matrix"]["shard"])
+    timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))
+    prefix = "github.com/defenseclaw/defenseclaw/"
+    packages = sorted(set(timings["packages"]) - {prefix + "internal/audit", prefix + "internal/gateway"})
+    shards = partition_packages(packages, shard_count, timings, root=root)
+
+    def planned(package: str, regex: str) -> float:
+        if not regex:
+            return float(timings["packages"][package])
+        seconds = timings["tests"][package.removeprefix(prefix)]
+        return sum(float(seconds.get(name, seconds["*"])) for name in regex_names(regex))
+
+    # Run 42452817096: shard 9 held internal/cli (315 s) and a connector part
+    # that its recorded times put at 308 s but that took 422 s and more, so the
+    # part was stopped by the 16-minute shard deadline. The recorded times are
+    # now the package wall times of that run. A shard step also spends time
+    # building its race test binaries, which the recorded times leave out (402
+    # s of package time took 540 s), so a shard plans at most 600 of the 960
+    # seconds of the shared deadline.
+    loads = [sum(planned(package, regex) for package, regex in shard) for shard in shards]
+    assert max(loads) <= 600, loads
+
+
+def test_connector_matrix_parts_balance_on_the_times_of_the_matrix_run() -> None:
+    # The Connector Matrix job runs the connector package without -race, 4 parts
+    # in a 20-minute job. Balanced on the -race times of go-linux.json, part 0
+    # held most of the shell-hook tests and ran past the job limit while the other
+    # parts ran 4 to 8 minutes (GAP-0834). The matrix has its own times, from a run of
+    # the matrix tests in a 4-CPU Ubuntu 26.04 container.
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-linux-connector-matrix.json").read_text(encoding="utf-8"))
+    seconds = timings["tests"]["internal/gateway/connector"]
+    pattern = "Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix"
+    files = match_test_files(discover_test_files(root / "internal/gateway/connector"), pattern)
+    parts = partition_test_files(files, 4, seconds)
+
+    expected = sorted({name for _, names in files for name in names})
+    assert check_exact_cover(parts, expected) == []
+    default = seconds["*"]
+    weights = [sum(seconds.get(name, default) for name in part) for part in parts]
+    # The recorded run of the whole package is 1,413 s: each part is a quarter of
+    # it (353 s) plus whatever the one test of 330 s forces; none may be near the
+    # 840 s a part can use of the 14-minute go test limit.
+    assert max(weights) < 1.25 * (sum(weights) / len(weights))
+    assert max(weights) < 480
+
+
 def test_linux_gateway_shards_separate_the_ci_timeout_cluster() -> None:
     root = Path(__file__).resolve().parents[2]
     timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))
@@ -318,7 +368,9 @@ def test_windows_hookexec_matrix_covers_each_test_once_with_time_headroom() -> N
 
     uv_step = next(step for step in job["steps"] if step.get("uses", "").startswith("astral-sh/setup-uv@"))
     assert "matrix.kind == 'hookexec'" in uv_step["if"]
-    run = next(step["run"] for step in job["steps"] if step.get("name") == "Full native Windows Go test, vet, and build")
+    run = next(
+        step["run"] for step in job["steps"] if step.get("name") == "Full native Windows Go test, vet, and build"
+    )
     hookexec = run.split("if ($suiteKind -eq 'hookexec') {", 1)[1].split("if ($suiteKind -eq 'packages') {", 1)[0]
     packages = run.split("if ($suiteKind -eq 'packages') {", 1)[1].split("if ($suiteKind -eq 'gateway'", 1)[0]
     assert "$hookexecTestShardCount = 5" in run
@@ -348,7 +400,10 @@ def test_windows_remaining_package_control_stays_covered() -> None:
     root = Path(__file__).resolve().parents[2]
     timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))
     prefix = "github.com/defenseclaw/defenseclaw/"
-    excluded = {prefix + path for path in ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")}
+    excluded = {
+        prefix + path
+        for path in ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")
+    }
     packages = sorted(set(timings["packages"]) - excluded)
     shards = partition_packages(packages, 6, timings, root=root)
     control = prefix + "internal/hookpaths"
