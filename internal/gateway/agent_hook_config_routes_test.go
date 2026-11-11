@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 )
 
 func TestGAP0048Round2RegistryAndDocuments(t *testing.T) {
@@ -19,7 +20,7 @@ func TestGAP0048Round2RegistryAndDocuments(t *testing.T) {
 		{"Kiro hooks", filepath.Join(h.home, ".kiro", "hooks", "defenseclaw.json"), gatewayconnector.AgentHookConfigJSONHooks},
 		{"Kiro agent", filepath.Join(h.home, ".kiro", "agents", "kiro_default.json"), gatewayconnector.AgentHookConfigJSONHooks},
 		{"Kiro settings", filepath.Join(h.home, ".kiro", "settings", "cli.json"), gatewayconnector.AgentHookConfigKiroSettings},
-		{"Hermes", filepath.Join(h.home, ".hermes", "config.yaml"), gatewayconnector.AgentHookConfigHermesYAML},
+		{"Hermes", hermespath.ConfigPathForUserHome(h.home), gatewayconnector.AgentHookConfigHermesYAML},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if got := guard.format(row.path); got != row.format {
@@ -59,7 +60,7 @@ func TestGAP0048Round2Variants(t *testing.T) {
 	kiroHooks := filepath.Join(h.home, ".kiro", "hooks", "defenseclaw.json")
 	kiroAgent := filepath.Join(h.home, ".kiro", "agents", "kiro_default.json")
 	kiroSettings := filepath.Join(h.home, ".kiro", "settings", "cli.json")
-	hermesConfig := filepath.Join(h.home, ".hermes", "config.yaml")
+	hermesConfig := hermespath.ConfigPathForUserHome(h.home)
 	for path, body := range map[string]string{
 		ampPlugin:                              "// DefenseClaw Amp plugin\n",
 		antigravityHooks:                       `{"hooks":{"pre":[{"command":"defenseclaw-hook"}]}}`,

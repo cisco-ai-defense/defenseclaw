@@ -15,10 +15,10 @@ import (
 // command is read twice, as the protected decision reads it
 // (actionWindowsTargetMention): with the POSIX grammar Git Bash uses, and with
 // a backslash inside a word read as a path separator
-// (registrationWindowsReading). A member either reading reaches is reached.
+// (WindowsShellReading). A member either reading reaches is reached.
 func RegistrationWriteReached(command, cwd, home string, names []string) []string {
 	reached := registrationWriteReachedAs(command, cwd, home, names)
-	reading, windows := registrationWindowsReading(command)
+	reading, windows := WindowsShellReading(command)
 	if !windows || len(reached) == len(names) {
 		return reached
 	}
@@ -43,17 +43,18 @@ func RegistrationArchivePossibleReach(command, cwd, home string, names []string)
 	if found := registrationArchivePossibleReachAs(command, cwd, home, names); found != "" {
 		return found
 	}
-	if reading, windows := registrationWindowsReading(command); windows {
+	if reading, windows := WindowsShellReading(command); windows {
 		return registrationArchivePossibleReachAs(reading, cwd, home, names)
 	}
 	return ""
 }
 
-// registrationWindowsReading returns, on a Windows host, the command with a
+// WindowsShellReading returns, on a Windows host, the command with a
 // backslash inside a word read as a path separator, so a native path such as
 // C:\Users\me\.claude names that folder whichever shell runs the call. It
-// reports false off Windows and when that reading is the same text.
-func registrationWindowsReading(command string) (string, bool) {
+// reports false off Windows and when that reading is the same text. A reader
+// that judges a call in this reading too keeps the verdict of either.
+func WindowsShellReading(command string) (string, bool) {
 	if runtime.GOOS != "windows" || !strings.Contains(command, `\`) {
 		return "", false
 	}

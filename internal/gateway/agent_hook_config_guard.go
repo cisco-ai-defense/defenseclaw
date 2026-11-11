@@ -998,7 +998,7 @@ func agentHookConfigTextMayDisable(text string) bool {
 // (GAP-0048): the disable rule for a native file tool call whose document
 // turns DefenseClaw off, the write rule for a shell write to a hook file.
 // A rule the active pack does not hold adds nothing.
-func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	if !request.EnforcementCapable ||
 		request.SkipLocalFilesystemResolution || isSandboxHookRequest(ctx) {
 		return findings
