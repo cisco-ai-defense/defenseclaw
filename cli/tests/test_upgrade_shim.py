@@ -56,6 +56,22 @@ def shim_os(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     return view
 
 
+_REAL_WATCH_RECOVERY_COPY = upgrade_shim._watch_recovery_copy
+
+
+@pytest.fixture(autouse=True)
+def recovery_watchers(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, str]]:
+    """Record the recovery watchers the shim starts instead of starting a PowerShell for each."""
+    started: list[tuple[int, str]] = []
+
+    def record(powershell: str, pid: int, recovery: tuple[str, str] | None, env: dict[str, str]) -> None:
+        if recovery:
+            started.append((pid, os.path.dirname(recovery[0])))
+
+    monkeypatch.setattr(upgrade_shim, "_watch_recovery_copy", record)
+    return started
+
+
 def test_platform_pretence_stays_in_the_shim(monkeypatch: pytest.MonkeyPatch) -> None:
     # GAP-0273: a pretend platform reaches only the shim, never the config
     # writer and file helpers it calls; the environment stays shared.
@@ -805,6 +821,107 @@ def test_windows_recovery_copy_is_kept_when_the_installer_still_runs_without_a_l
 
     assert upgrade_shim.run(["rollback", "--yes"]) == 1
     assert len(_recovery_dirs(home)) == 1
+
+
+def test_windows_recovery_copy_is_removed_when_the_installer_opened_its_log_and_ended_with_exit_code_0(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _windows_rollback_with_desktop(home, monkeypatch)
+
+    def poll() -> int:
+        _write_transcript(home)
+        return 0
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+    assert _recovery_dirs(home) == []
+
+
+def test_windows_rollback_that_returns_while_the_installer_runs_hands_its_recovery_copy_to_a_watcher(
+    home: Path, monkeypatch: pytest.MonkeyPatch, recovery_watchers: list[tuple[int, str]]
+) -> None:
+    # The shim exits while the installer still runs, so it cannot see the exit
+    # code: the copy stays for the watcher, which removes it after exit code 0.
+    _windows_rollback_with_desktop(home, monkeypatch)
+
+    def poll() -> None:
+        _write_transcript(home)
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: _child(poll))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+    kept = _recovery_dirs(home)
+    assert len(kept) == 1
+    assert recovery_watchers == [(_INSTALLER_PID, str(kept[0]))]
+
+
+def test_recovery_watcher_takes_the_pid_and_folder_from_the_environment_and_never_stands_in_the_folder(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launches: list[tuple[list[str], dict[str, object]]] = []
+
+    def popen(argv: list[str], **kwargs: object) -> object:
+        launches.append((argv, kwargs))
+        return object()
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", popen)
+    monkeypatch.setenv("SystemRoot", str(home.parent))
+    staged = home.parent / "install.ps1"
+    staged.write_text("x", encoding="utf-8")
+    recovery = upgrade_shim._stage_recovery_copy(str(staged))
+    assert recovery is not None
+
+    assert _REAL_WATCH_RECOVERY_COPY("powershell.exe", 4242, None, {}) is None
+    _REAL_WATCH_RECOVERY_COPY("powershell.exe", 4242, recovery, {"KEEP": "1"})
+
+    assert len(launches) == 1
+    argv, kwargs = launches[0]
+    folder = os.path.dirname(recovery[0])
+    assert argv[0] == "powershell.exe" and argv[-2] == "-Command"
+    assert folder not in " ".join(argv)
+    env = kwargs["env"]
+    assert env["DC_WATCH_PID"] == "4242" and env["DC_WATCH_DIR"] == folder and env["KEEP"] == "1"
+    assert kwargs["cwd"] == str(home.parent)
+    assert not str(kwargs["cwd"]).startswith(folder)
+    upgrade_shim._drop_recovery_copy(recovery)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="runs the Windows PowerShell watcher")
+def test_recovery_watcher_removes_the_folder_after_exit_code_0_and_keeps_it_after_a_failure(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    powershell = os.path.join(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    staged = home.parent / "install.ps1"
+    staged.write_text("x", encoding="utf-8")
+    env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+
+    def watch(script: str, *, ended_first: bool) -> tuple[int, subprocess.Popen[bytes], subprocess.Popen[bytes], str]:
+        recovery = upgrade_shim._stage_recovery_copy(str(staged))
+        assert recovery is not None
+        installer = subprocess.Popen([powershell, "-NoProfile", "-Command", script])  # noqa: S603
+        if ended_first:
+            # The installer ended before the watcher attached, while the shim
+            # still holds its process handle.
+            installer.wait(timeout=60)
+        watcher = _REAL_WATCH_RECOVERY_COPY(powershell, installer.pid, recovery, env)
+        assert watcher is not None
+        return installer.pid, installer, watcher, os.path.dirname(recovery[0])
+
+    running_ok = watch("Start-Sleep -Seconds 5; exit 0", ended_first=False)
+    running_failed = watch("Start-Sleep -Seconds 5; exit 7", ended_first=False)
+    ended_failed = watch("exit 7", ended_first=True)
+
+    # The installer ended with exit code 0 while the watcher waited: removed.
+    assert running_ok[2].wait(timeout=60) == 0
+    assert not os.path.isdir(running_ok[3])
+    # A failed installer, whether the watcher saw it end or found it ended: kept.
+    assert running_failed[2].wait(timeout=60) == 4
+    assert os.path.isdir(running_failed[3])
+    ended_failed[2].wait(timeout=60)
+    assert os.path.isdir(ended_failed[3])
+    for run in (running_ok, running_failed, ended_failed):
+        shutil.rmtree(run[3], ignore_errors=True)
 
 
 def test_windows_installer_that_appends_beyond_the_first_chunk_of_a_same_second_log_has_opened_its_log(
