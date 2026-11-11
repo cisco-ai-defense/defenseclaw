@@ -1633,6 +1633,9 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		// may match where the bundled regex pack didn't.
 		if aid, submitted := a.hookAIDInspectWithSubmission(ctx, "message", content); submitted {
 			verdict.aiDefenseSubmitted = true
+			if aid != nil && aid.RedactionEnabled != nil {
+				verdict.RedactionEnabled = aid.RedactionEnabled
+			}
 			if aid != nil && aid.Action != "allow" && aid.Action != "" {
 				verdict = mergeWithAIDVerdict(verdict, aid)
 				verdict.aiDefenseSubmitted = true
