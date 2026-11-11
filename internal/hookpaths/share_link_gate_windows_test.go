@@ -23,17 +23,23 @@ import (
 func TestLinkWalkOfAUNCPathOnASilentShareIsBoundedByTheShareWait(t *testing.T) {
 	host := 10 + rand.IntN(200)
 	defer HookCall()()
-	for i, path := range []string{
-		fmt.Sprintf(`//192.0.2.%d/share/skills/a/../b/SKILL.md`, host),
-		fmt.Sprintf(`\\?\UNC\192.0.2.%d\share\skills\b\SKILL.md`, host+1),
-		fmt.Sprintf(`\\192.0.2.%d\share\skills\b\SKILL.md`, host+2),
+	for i, row := range []struct{ path, want string }{
+		{fmt.Sprintf(`//192.0.2.%d/share/skills/a/../b/SKILL.md`, host), ""},
+		// The extended-length spelling comes back in the usual one
+		// (assetfacts.trimExtendedPrefix).
+		{fmt.Sprintf(`\\?\UNC\192.0.2.%d\share\skills\b\SKILL.md`, host+1), fmt.Sprintf(`\\192.0.2.%d\share\skills\b\SKILL.md`, host+1)},
+		{fmt.Sprintf(`\\192.0.2.%d\share\skills\b\SKILL.md`, host+2), ""},
 	} {
+		path, want := row.path, row.want
+		if want == "" {
+			want = filepath.Clean(path)
+		}
 		start := time.Now()
 		got := assetfacts.ResolveLinks(path)
 		if took := time.Since(start); took > 1500*time.Millisecond {
 			t.Errorf("spelling %d: ResolveLinks took %v, want the share wait and no more", i, took)
 		}
-		if want := filepath.Clean(path); got != want {
+		if got != want {
 			t.Errorf("spelling %d: ResolveLinks = %q, want %q", i, got, want)
 		}
 	}

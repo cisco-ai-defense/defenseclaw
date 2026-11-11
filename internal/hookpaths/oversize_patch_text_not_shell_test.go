@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -17,7 +18,9 @@ import (
 // seconds on an ordinary 889 KB patch (GAP-1008). The same lines in a patch
 // under the limit keep the reading they had.
 func TestResolveConnectorOversizePatchTextIsNotReadAsShell(t *testing.T) {
-	home := t.TempDir()
+	// The directive and the redirect are shell text: a Windows host spells the
+	// folder with slashes there, because a backslash is a shell escape.
+	home := filepath.ToSlash(t.TempDir())
 	cwd := home + "/project"
 	target := cwd + "/notes.txt"
 	content := cwd + "/redirect-in-file-content.txt"
