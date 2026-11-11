@@ -306,6 +306,9 @@ jobs:
           GO_PACKAGE_SHARDS: 16
         run: |
           set -euo pipefail
+          # One deadline for the whole shard, package discovery included: 16 of
+          # the step 18 minutes (see run_timeout below).
+          deadline=$((SECONDS + 960))
           go list ./... > "$RUNNER_TEMP/go-packages.txt"
           # Time-balanced (scripts/test-timings/go-linux.json): a whole package
           # per line, or "<package><TAB><-run regex>" for one part of a package
@@ -333,7 +336,6 @@ jobs:
           # left, so the run that overruns the shard is stopped by go test with
           # the goroutine dump that names its test; a run that cannot start
           # inside the deadline fails and says so.
-          deadline=$((SECONDS + 960))
           run_timeout() { # run_timeout <part>: the -timeout of the next go test run
             local left=$((deadline - SECONDS))
             if (( left < 30 )); then
