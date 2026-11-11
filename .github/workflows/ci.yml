@@ -286,7 +286,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -306,7 +306,7 @@ jobs:
         timeout-minutes: 18
         env:
           GO_PACKAGE_SHARD: ${{ matrix.shard }}
-          GO_PACKAGE_SHARDS: 16
+          GO_PACKAGE_SHARDS: 19
         run: |
           set -euo pipefail
           go list ./... > "$RUNNER_TEMP/go-packages.txt"
@@ -588,9 +588,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 40 gateway + 4 audit + 16 remaining-package shards, plus the
+          # 40 gateway + 4 audit + 19 remaining-package shards, plus the
           # frozen-gateway job.
-          test "${#coverage_parts[@]}" -eq 61
+          test "${#coverage_parts[@]}" -eq 64
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"

@@ -284,8 +284,30 @@ def test_linux_remaining_package_shards_plan_inside_the_shared_deadline() -> Non
     # building its race test binaries, which the recorded times leave out (402
     # s of package time took 540 s), so a shard plans at most 600 of the 960
     # seconds of the shared deadline.
+    # Run 43080425819 (rel/1.0.9 b3638ee613): shard 5, planned at 574 s,
+    # held six internal/cli runs and a hookexec part that took about 760 s of tests
+    # and 300 s of builds, so hookexec met the deadline at 3m44s. Its slowest
+    # new tests weighed as fast tests. The recorded times are now the larger
+    # of the times of three rel/1.0.9 runs, in 19 shards.
     loads = [sum(planned(package, regex) for package, regex in shard) for shard in shards]
     assert max(loads) <= 600, loads
+
+
+def test_linux_remaining_package_times_count_the_tests_of_the_shard_that_met_the_deadline() -> None:
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))["tests"]
+    # Seconds measured in shard 5 of run 43080425819. With no recorded time
+    # each weighed the fast-test mean ("*", under 0.2 s) of its package.
+    observed_seconds = {
+        ("internal/cli", "TestWorkerRestoresTheScriptAndTheEntryDamagedInOneChange"): 40.7,
+        ("internal/cli", "TestWorkerRechecksARepairedTargetAndKeepsBothRestores"): 17.6,
+        ("internal/cli", "TestWorkerNamesNoChangeForAnElementFileTooLargeToRead"): 13.2,
+        ("internal/cli", "TestEnterpriseHookWorkerTimedOutInsideInstallKeepsTheRestore"): 11.2,
+        ("internal/gateway/connector/hookexec", "TestSlowOwnerReadOfTheOwnFrozenGatewayStaysAnOutage"): 14.7,
+    }
+    for (package, name), seconds in observed_seconds.items():
+        recorded = timings[package]
+        assert float(recorded.get(name, recorded["*"])) >= seconds, (package, name)
 
 
 def test_connector_matrix_parts_balance_on_the_times_of_the_matrix_run() -> None:
@@ -555,7 +577,9 @@ def test_linux_remaining_package_hookpaths_runs_in_parts_under_the_race_timeout(
     prefix = "github.com/defenseclaw/defenseclaw/"
     excluded = {prefix + path for path in ("internal/audit", "internal/gateway")}
     packages = sorted(set(timings["packages"]) - excluded)
-    shards = partition_packages(packages, 12, timings, root=root)
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    shard_count = len(workflow["jobs"]["go-test-other"]["strategy"]["matrix"]["shard"])
+    shards = partition_packages(packages, shard_count, timings, root=root)
     control = prefix + "internal/hookpaths"
     # The hookpaths program sweep and archive table take 7 to 8 minutes in the
     # race run of a hosted runner and hit the 11 minute go test timeout of the
