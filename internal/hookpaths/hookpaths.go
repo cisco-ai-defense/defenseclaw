@@ -2251,6 +2251,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		if !ok && aliasKnown && !entryOnly {
 			if text, reached := linkTextWritePath(resolutionPath); reached && text != filepath.Clean(path) {
 				linkText = text
+			} else if nativePatch || actionfacts.PathTool(tool) {
+				// A file tool or an apply_patch header creates the directories
+				// on the way of its file, so a step up out of one that does not
+				// exist is the cleaned name. The answer stays empty (the spelling
+				// cannot be opened, and the patch watch reads it as unchanged
+				// only while it still cannot), and the file it leads to is its
+				// text, which a managed gateway judges as it judges the text of
+				// a directory closed to the user.
+				if past, found, changed := ResolveWriteTargetPastMissingStepUps(resolutionPath); changed && found {
+					linkText, _ = protected.target(past)
+				}
 			}
 		}
 		if !ok {

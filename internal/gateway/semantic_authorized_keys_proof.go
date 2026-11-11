@@ -1406,6 +1406,15 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				resolved, ok = text, true
 			}
 		}
+		if !ok && nativeFileToolWriteOperand(request.Input, facts, clientCWD, target) {
+			// A name that steps up out of a directory that does not exist
+			// (sub/../notes.txt) is the cleaned file: the tool creates the
+			// directory, a plain one. The cleaned name is judged like any
+			// other, so a protected file reached this way stays protected.
+			if past, found, changed := hookpaths.ResolveWriteTargetPastMissingStepUps(walked); changed {
+				resolved, ok = windowsWalkResult(past), found
+			}
+		}
 		// An existing link whose target cannot be resolved is still a
 		// possible write into the protected home. The client and gateway
 		// must both fail closed on a linked component before "..".
