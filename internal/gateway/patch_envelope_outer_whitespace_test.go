@@ -32,7 +32,6 @@ var patchEdgeSpaces = []struct{ name, text string }{
 
 type patchEdgeSpelling struct {
 	name        string
-	prefix      string
 	beginMarker string
 	suffix      string
 }
@@ -47,7 +46,7 @@ func patchEdgeSpellings(space string) []patchEdgeSpelling {
 }
 
 func (s patchEdgeSpelling) patch(target, text string) string {
-	return s.prefix + "*** Begin Patch" + s.beginMarker + "\n*** Add File: " + target + "\n+" + text +
+	return "*** Begin Patch" + s.beginMarker + "\n*** Add File: " + target + "\n+" + text +
 		"\n*** End Patch" + s.suffix
 }
 
