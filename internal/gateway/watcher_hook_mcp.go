@@ -71,6 +71,9 @@ type hookReportedMCPServers struct {
 	// overflow holds, per connector and account, the sessions the session
 	// store was full for (holdOverflow).
 	overflow map[string]map[string]*overflowHold
+	// sessionStarts holds, per connector, account and session, when the
+	// session started (noteSession).
+	sessionStarts map[string]*mcpSessionStart
 }
 
 func (h *hookReportedMCPServers) list() ([]config.MCPServerEntry, error) {

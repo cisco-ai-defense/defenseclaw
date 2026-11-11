@@ -55,6 +55,19 @@ type MCPAdmissionStatus struct {
 	// definition the agent config lists now does not answer it: the hook
 	// names the server, not the connection (GAP-0920).
 	Revoked bool
+	// Departed is, for a Revoked status, when the latest of the earlier
+	// definitions it speaks for left the agent config. Only an agent process
+	// that was running before then can still hold a connection to one: a
+	// session that started after it connects to what the config lists. Zero
+	// when that cannot be told (the listing could not be read, a definition
+	// that did not fit), so the status then stands for every session.
+	Departed time.Time
+	// Listed is, for a Revoked status with a Departed time, the status of the
+	// definition the agent config lists now: what a session that started after
+	// Departed is judged on. An allow written for that definition answers it,
+	// while the revoked status keeps standing for the sessions that may hold
+	// the earlier connection.
+	Listed *MCPAdmissionStatus
 	// Admitted is the listed definition serving the query that an allow
 	// admitted before any scan, when there is one: a definition the agent
 	// runs on the administrator's word, not on a verdict. The agent keeps its
@@ -262,6 +275,9 @@ type mcpKnownDefinition struct {
 	path string
 	// issue is mcpScanIssue of the definition.
 	issue string
+	// departed is when the definition was noticed to have left the agent
+	// config (rememberDepartedMCP); zero while it is listed.
+	departed time.Time
 }
 
 // mcpDepartedMax bounds mcpAdmissionDeparted.
@@ -350,6 +366,11 @@ func (w *InstallWatcher) rememberDepartedMCP(prev, now []mcpKnownDefinition, set
 		}
 		if w.mcpAdmissionDeparted == nil {
 			w.mcpAdmissionDeparted = map[string]mcpKnownDefinition{}
+		}
+		if held, ok := w.mcpAdmissionDeparted[key]; ok {
+			definition.departed = held.departed
+		} else {
+			definition.departed = time.Now()
 		}
 		w.mcpAdmissionDeparted[key] = definition
 	}
@@ -462,6 +483,9 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 	var admitted *config.MCPServerEntry
 	status := w.mcpAdmissionStatus(q, &admitted)
 	status.Admitted = admitted
+	if status.Listed != nil {
+		status.Listed.Admitted = admitted
+	}
 	return status
 }
 
@@ -508,7 +532,7 @@ func (w *InstallWatcher) mcpAdmissionStatus(q MCPAdmissionQuery, admitted **conf
 			// still run: a revoked earlier one beats the listed one, whose
 			// allow cannot speak for it.
 			if revoked := w.mcpDepartedRevoked(q, servers, true); revoked.Failed {
-				return revoked
+				return revoked.withListed(FailedMCPStatus(server))
 			}
 			return FailedMCPStatus(server)
 		}
@@ -542,7 +566,7 @@ func (w *InstallWatcher) mcpAdmissionStatus(q MCPAdmissionQuery, admitted **conf
 		}
 	}
 	if len(pending) == 0 {
-		return w.mcpDepartedRevoked(q, servers, true)
+		return w.mcpDepartedRevoked(q, servers, true).withListed(MCPAdmissionStatus{})
 	}
 	w.AdmitAddedMCPServers(pending)
 	if refused != nil {
@@ -554,7 +578,7 @@ func (w *InstallWatcher) mcpAdmissionStatus(q MCPAdmissionQuery, admitted **conf
 		// its own admission. A revoked earlier definition the agent may still
 		// run is the more restrictive verdict and comes first (GAP-0920).
 		if revoked := w.mcpDepartedRevoked(q, servers, true); revoked.Failed {
-			return revoked
+			return revoked.withListed(FailedMCPStatus(*refused))
 		}
 		return FailedMCPStatus(*refused)
 	}
@@ -628,6 +652,8 @@ func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, servers []confi
 		hash, _ := mcpDefinitionHash(server)
 		listed[mcpDepartedKey(mcpKnownDefinition{path: MCPEventPath(server), hash: hash})] = true
 	}
+	var revoked MCPAdmissionStatus
+	var departed time.Time
 	for _, definition := range gone {
 		server := definition.server
 		// Only a server admitted before any scan is held; the allow or the
@@ -636,15 +662,35 @@ func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, servers []confi
 			Type: InstallMCP, Name: server.Name, Path: definition.path, Connector: server.Connector, remembered: &server}) {
 			continue
 		}
-		status := FailedMCPStatus(server)
-		status.ScanIssue = definition.issue
-		status.Revoked = true
-		return status
+		if !revoked.Failed {
+			revoked = FailedMCPStatus(server)
+			revoked.ScanIssue = definition.issue
+			revoked.Revoked = true
+		}
+		if definition.departed.After(departed) {
+			departed = definition.departed
+		}
+	}
+	if revoked.Failed {
+		if listingRead {
+			revoked.Departed = departed
+		}
+		return revoked
 	}
 	if listingRead && lost && len(listed) == 0 && len(gone) == 0 {
 		return MCPAdmissionStatus{Name: q.Server, Failed: true, Revoked: true}
 	}
 	return MCPAdmissionStatus{}
+}
+
+// withListed names, on a revoked status that says when its definitions left
+// the agent config, the status of the definition the config lists now, which
+// a session that started later is judged on (MCPAdmissionStatus.Listed).
+func (s MCPAdmissionStatus) withListed(listed MCPAdmissionStatus) MCPAdmissionStatus {
+	if s.Revoked && !s.Departed.IsZero() {
+		s.Listed = &listed
+	}
+	return s
 }
 
 // mcpUnscannedAdmissionLapsed reports an MCP server admitted before any scan
