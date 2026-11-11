@@ -109,6 +109,9 @@ type endpointInventoryComponent struct {
 	// Skill rows only (inventory.AISkillFacts).
 	skillContentHash   string
 	skillContentStatus string
+	skillState         string
+	skillFirstSeen     string
+	skillLastSeen      string
 }
 
 // endpointInventoryCarrier is an atomic, typed snapshot split into parallel
@@ -249,9 +252,12 @@ func emitEndpointInventory(
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		skillEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill")
+		skillEntries := publish.cycle.trackSkills(
+			discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill"),
+			skillScanComplete(discoveryReport),
+		)
 		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, "endpoint_skill_inventory", skillEntries, false,
+			ctx, emitter, endpointSkillInventorySource, skillEntries, false,
 			config.ObservabilityV8ManagedSkillInventoryAction, publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
@@ -899,7 +905,7 @@ func emitInventorySnapshot(
 	switch {
 	case gated:
 		digest = managedInventoryComponentsDigest(source, components)
-		if !publish.cycle.shouldPublish(source, digest) {
+		if !publish.cycle.shouldPublish(source, digest) && !hasRemovedSkill(components) {
 			// Unchanged since the last successful publish and no bundle due:
 			// emit neither the summary nor any component record.
 			return nil
@@ -1197,6 +1203,9 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID, component.userName)),
 			DefenseClawInventorySkillContentHash:            aiDiscoveryV8OptionalText(component.skillContentHash),
 			DefenseClawInventorySkillContentStatus:          aiDiscoveryV8OptionalText(component.skillContentStatus),
+			DefenseClawInventorySkillState:                  aiDiscoveryV8OptionalText(component.skillState),
+			DefenseClawInventorySkillFirstSeen:              aiDiscoveryV8OptionalText(component.skillFirstSeen),
+			DefenseClawInventorySkillLastSeen:               aiDiscoveryV8OptionalText(component.skillLastSeen),
 		}
 		inventoryIdentityFor(component.userID, component.userName).applyTo(&input)
 		return builder.BuildLogAIComponentObserved(input)
