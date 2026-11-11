@@ -60,6 +60,7 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "gateway.pid"), record, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	const settleCap = 2 * time.Minute
 	connect := func() (net.Conn, *PerUserPeerRecord) {
 		t.Helper()
 		conn, err := net.Dial("tcp", address)
@@ -68,7 +69,13 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 		}
 		client, server := conn.LocalAddr().(*net.TCPAddr), conn.RemoteAddr().(*net.TCPAddr)
 		owner, unique := 0, false
-		for end := time.Now().Add(2 * time.Second); time.Now().Before(end) && !unique; time.Sleep(10 * time.Millisecond) {
+		// Both reads are setup: they state which process owns the accepted
+		// socket, and nothing is timed against them. They wait for that state
+		// to exist, not for a wall-clock time (GAP-0889), so a host that is
+		// slow to schedule the helper process or this one cannot fail them;
+		// the cap only keeps a socket that never gets an owner from holding
+		// the test for ever.
+		for hung := time.Now().Add(settleCap); !unique && time.Now().Before(hung); time.Sleep(10 * time.Millisecond) {
 			owner, unique = perUserConnectedPeerPID(client, server)
 		}
 		if !unique || owner != pid {
@@ -76,7 +83,8 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 		}
 		peer := NewPerUserPeerRecord()
 		peer.capture(conn.LocalAddr(), conn.RemoteAddr())
-		if got, known := peer.wait(2 * time.Second); !known || got.pid != pid {
+		got, known := peer.wait(settleCap)
+		if !known || got.pid != pid {
 			t.Fatalf("recorded peer = %+v %v", got, known)
 		}
 		return conn, peer
