@@ -384,20 +384,26 @@ func (a *APIServer) skillFolderRefsDecision(
 ) (config.AssetPolicyDecision, bool) {
 	facts := claimedAssetFactsFromContext(ctx)
 	home := hookActiveHome(ctx)
+	// A hook that cut the links it reports says so before any link is read:
+	// the call that names that many is refused (when a skill is held or
+	// denied) without reading them again, so the answer does not wait on the
+	// reading that made the hook run out of time.
+	if facts.SkillLinksTruncated && a.skillFoldersAreGuarded(cfg) {
+		return a.skillLinksCutDecision(ctx, connector, hookEvent, toolName, facts.SkillLinks), true
+	}
 	caller := ""
-	var refs []assetfacts.FolderRef
 	// The strict tier reads a command line that holds the name of an entry
 	// leading into a skill folder as a read of it; the others, only when the
 	// line also holds a word that reads or runs (the hook's claim is made on
 	// the second reading).
 	strict := a.shareBodyStrictTier(ctx, connector)
+	uid, gid := os.Geteuid(), os.Getegid()
 	if peer, ok := managedHookPeerFromContext(ctx); ok {
-		caller = peer.Name
-		refs = assetfacts.SkillFolderRefsForPeer(toolName, toolInput, home, cwd, caller, peer.UID, peer.GID, strict)
-	} else if strict {
-		refs = assetfacts.SkillFolderRefsStrict(toolName, toolInput, home, cwd, caller)
-	} else {
-		refs = assetfacts.SkillFolderRefs(toolName, toolInput, home, cwd, caller)
+		caller, uid, gid = peer.Name, peer.UID, peer.GID
+	}
+	refs, cut := assetfacts.SkillFolderRefsAndCut(toolName, toolInput, home, cwd, caller, uid, gid, strict)
+	if cut && a.skillFoldersAreGuarded(cfg) {
+		return a.skillLinksCutDecision(ctx, connector, hookEvent, toolName, facts.SkillLinks), true
 	}
 	roots := assetfacts.SkillRoots(connector, home, cwd)
 	// A folder a link leads to is spelled as the link resolves, which a root
@@ -424,25 +430,6 @@ func (a *APIServer) skillFolderRefsDecision(
 		}
 	}
 	refs = appendReportedSkillLinks(refs, facts.SkillLinks, linkRoots)
-	if facts.SkillLinksTruncated && a.skillFoldersAreGuarded(cfg) {
-		// The hook names the skill folders a link of the call leads into, up
-		// to a bound. Past it a protected folder cannot be ruled out (fail
-		// closed), when there is a protected folder: with no denied or held
-		// skill nothing the call reaches can be one, and an ordinary call
-		// runs.
-		name := "skill-links"
-		if len(facts.SkillLinks) > 0 {
-			name = filepath.Base(facts.SkillLinks[0])
-		}
-		decision := runtimeAssetDisableBlockDecision("skill", name, connector, "skill_folder",
-			"the call reaches more skill folders through links than the hook reports, so none of them can be shown not to be held or denied; "+
-				"name fewer skill folders in one call", "skill-links-truncated")
-		decision.RegistryStatus = "unknown"
-		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
-			TargetType: "skill", SkillName: name, ToolName: toolName, Surface: "skill_folder", Matched: true,
-		})
-		return decision, true
-	}
 	if len(refs) == 0 {
 		return config.AssetPolicyDecision{}, false
 	}
@@ -516,6 +503,29 @@ func (a *APIServer) skillFolderRefsDecision(
 		}
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+// skillLinksCutDecision refuses a call that reaches more skill folders through
+// links than are read (the hook's claim is cut, or this gateway stopped at the
+// bound, assetfacts.SkillFolderRefsAndCut). A protected folder among them
+// cannot be ruled out (fail closed); the callers ask only when there is a
+// protected folder: with no denied or held skill nothing the call reaches can
+// be one, and an ordinary call runs.
+func (a *APIServer) skillLinksCutDecision(
+	ctx context.Context, connector, hookEvent, toolName string, reported []string,
+) config.AssetPolicyDecision {
+	name := "skill-links"
+	if len(reported) > 0 {
+		name = filepath.Base(reported[0])
+	}
+	decision := runtimeAssetDisableBlockDecision("skill", name, connector, "skill_folder",
+		"the call reaches more skill folders through links than are read, so none of them can be shown not to be held or denied; "+
+			"name fewer skill folders in one call", "skill-links-truncated")
+	decision.RegistryStatus = "unknown"
+	a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
+		TargetType: "skill", SkillName: name, ToolName: toolName, Surface: "skill_folder", Matched: true,
+	})
+	return decision
 }
 
 // skillFoldersAreGuarded reports whether any skill is denied or held

@@ -78,6 +78,9 @@ func TestNameOfALinkIsAPathWhereTheLineReadsOrRuns(t *testing.T) {
 		"query":                 {"Search", map[string]any{"query": "needle"}},
 		"edit text":             {"Edit", map[string]any{"file_path": "notes.txt", "old_string": "needle", "new_string": "echo"}},
 		"Grep include pattern":  {"Grep", map[string]any{"path": "notes.txt", "pattern": "needle", "glob": "*.txt"}},
+		"grep pattern":          bash("grep needle notes.txt"),
+		"rg pattern":            bash("rg needle notes.txt"),
+		"piped grep pattern":    bash("cat notes.txt | grep needle"),
 	} {
 		t.Run("word "+name, func(t *testing.T) {
 			if refs := SkillFolderRefs(c.tool, c.input, home, proj); len(refs) != 0 {
@@ -89,9 +92,6 @@ func TestNameOfALinkIsAPathWhereTheLineReadsOrRuns(t *testing.T) {
 		"cat operand":               bash("cat needle"),
 		"upper case":                bash("cat NEEDLE"),
 		"link of another case":      bash("cat mixed"),
-		"grep pattern":              bash("grep needle notes.txt"),
-		"rg pattern":                bash("rg needle notes.txt"),
-		"piped grep pattern":        bash("cat notes.txt | grep needle"),
 		"find name value":           bash("find notes.txt -name needle"),
 		"sudo option operand":       bash("sudo -u root cat needle"),
 		"sudo attached user":        bash("sudo -uroot cat needle"),
@@ -114,7 +114,6 @@ func TestNameOfALinkIsAPathWhereTheLineReadsOrRuns(t *testing.T) {
 		"eval in a shell":           bash("bash -c 'eval eval eval eval eval cat needle'"),
 		"printed to xargs":          bash("echo needle | xargs cat"),
 		"printed to a runner":       bash("echo needle && sh -c true"),
-		"printed beside readers":    bash("echo needle grep ls"),
 		"shell script cat":          bash("sh -c 'cat needle'"),
 		"shell script second":       bash("echo hi && bash -c 'cat needle'"),
 		"eval":                      bash("eval cat needle"),

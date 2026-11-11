@@ -77,9 +77,14 @@ func hookAssetFacts(connector string, payload []byte) string {
 			}
 		}
 	}
-	for _, ref := range assetfacts.SkillFolderRefs(event.ToolName, event.ToolInput, home, event.CWD) {
+	refs, cut := assetfacts.SkillFolderRefsAndCut(event.ToolName, event.ToolInput, home, event.CWD, "", os.Geteuid(), os.Getegid(), false)
+	// A call that names more paths into skill folders than are read is said to
+	// be cut: the gateway refuses it when a skill is held or denied.
+	facts.SkillLinksTruncated = cut
+	inSkillRoot := hookLinkedSkillFolders(connector, home, event.CWD)
+	for _, ref := range refs {
 		addSkill(ref.Name, ref.Dir)
-		if (ref.Linked || ref.BareOperand) && hookLinkedSkillFolder(connector, home, event.CWD, ref.Dir) && !slices.Contains(facts.SkillLinks, ref.Dir) {
+		if (ref.Linked || ref.BareOperand) && inSkillRoot(ref.Dir) && !slices.Contains(facts.SkillLinks, ref.Dir) {
 			// The gateway may not follow the link in this home, nor tell a
 			// bare word from a name there; say which folder the call reaches.
 			facts.SkillLinks = append(facts.SkillLinks, ref.Dir)
@@ -144,26 +149,38 @@ func hookPathMissing(path string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-// hookLinkedSkillFolder reports whether dir, where a link of the call ends, is
-// a folder directly in a skill root of the connector or of any connector that
-// loads skills from folders, spelled as the root or as the root resolves: the
-// only place the gateway takes a reported link, so the claim carries nothing
-// else. The folder a link ends in is protected whichever connector's call
-// follows the link.
-func hookLinkedSkillFolder(connector, home, cwd, dir string) bool {
-	parent := filepath.Dir(dir)
-	roots := hookSkillRoots(connector, home, cwd)
-	for _, root := range assetfacts.KnownSkillRoots(home, cwd) {
-		if !slices.Contains(roots, root) {
-			roots = append(roots, root)
+// hookLinkedSkillFolders gives the test of whether dir, where a link of the
+// call ends, is a folder directly in a skill root of the connector or of any
+// connector that loads skills from folders, spelled as the root or as the root
+// resolves: the only place the gateway takes a reported link, so the claim
+// carries nothing else. The folder a link ends in is protected whichever
+// connector's call follows the link. The roots are looked up once, at the
+// first test, not once per link: a call may name a thousand.
+func hookLinkedSkillFolders(connector, home, cwd string) func(dir string) bool {
+	var spelled, resolved []string
+	loaded := false
+	return func(dir string) bool {
+		if !loaded {
+			loaded = true
+			roots := hookSkillRoots(connector, home, cwd)
+			for _, root := range assetfacts.KnownSkillRoots(home, cwd) {
+				if !slices.Contains(roots, root) {
+					roots = append(roots, root)
+				}
+			}
+			for _, root := range roots {
+				spelled = append(spelled, filepath.Clean(root))
+				resolved = append(resolved, assetfacts.ResolveLinks(root))
+			}
 		}
-	}
-	for _, root := range roots {
-		if parent == filepath.Clean(root) || parent == assetfacts.ResolveLinks(root) {
-			return true
+		parent := filepath.Dir(dir)
+		for i := range spelled {
+			if parent == spelled[i] || parent == resolved[i] {
+				return true
+			}
 		}
+		return false
 	}
-	return false
 }
 
 // hookSkillRoots are the skill folders the agent loads from for this user:

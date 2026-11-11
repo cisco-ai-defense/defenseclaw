@@ -28,7 +28,10 @@ import (
 //     With a word that reads, copies, writes or runs (readerWords) it is a
 //     path in every tier; without one only in the strict tier. A name is
 //     matched as a substring of the text as typed and with quotes and
-//     backslashes taken out, without regard to case.
+//     backslashes taken out, without regard to case. In the balanced tiers
+//     the word that reads must be a word of a command that runs, and a
+//     lookup, the body of a function nothing names and the pattern of a
+//     grep or rg are left out of the scan (live_reading.go).
 //
 // The entries read are those of the working folder and of each folder the
 // line names with a path (entryScan).
@@ -395,7 +398,9 @@ func textRunsReader(text string, depth int, cannotTell bool) bool {
 // word of a command that runs (a call, an argument of eval, trap, time, ...).
 // A function nothing names never runs, so the commands of its body are not
 // commands of the line. A name found only inside the body of a function that
-// is itself not named does not count, so the answer is a fixed point.
+// is itself not named does not count, so the answer is a fixed point. A
+// command that runs a program named by an expansion (reader=f; "$reader") or
+// hands one to eval may call any function: then every function is called.
 func calledFunctions(file *syntax.File) map[string]bool {
 	defined := map[string]bool{}
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -412,6 +417,14 @@ func calledFunctions(file *syntax.File) map[string]bool {
 			case *syntax.FuncDecl:
 				return called[n.Name.Value]
 			case *syntax.CallExpr:
+				if runsByValue(n.Args) {
+					for name := range defined {
+						if !called[name] {
+							called[name] = true
+							changed = true
+						}
+					}
+				}
 				for _, arg := range n.Args {
 					text := readCommandWord(arg).text
 					for _, token := range append(strings.FieldsFunc(text, func(r rune) bool { return strings.ContainsRune(" \t\r\n;|&()<>", r) }), text) {
@@ -428,6 +441,26 @@ func calledFunctions(file *syntax.File) map[string]bool {
 	return called
 }
 
+// runsByValue reports whether a simple command runs a program, or a command
+// line, that its words do not spell: its program is an expansion, or it is a
+// wrapper, shell or eval with an expansion among its words.
+func runsByValue(args []*syntax.Word) bool {
+	words := make([]commandWord, len(args))
+	for i, arg := range args {
+		words[i] = readCommandWord(arg)
+	}
+	if len(words) == 0 {
+		return false
+	}
+	if words[0].dynamic {
+		return true
+	}
+	if words[0].isOneOf(runnerWrappers) || words[0].isOneOf(runnerShells) || words[0].isOneOf(evalWord) || words[0].isOneOf(wordSet("trap")) {
+		return slices.ContainsFunc(words[1:], func(word commandWord) bool { return word.dynamic })
+	}
+	return false
+}
+
 // commandWord is one word of a simple command as the parser read it.
 type commandWord struct {
 	// text is the word with its quotes and escapes taken out.
@@ -438,6 +471,8 @@ type commandWord struct {
 	// dynamic is set for a word that holds an expansion or a pattern: its
 	// value is not in the text.
 	dynamic bool
+	// start and end are the byte offsets of the word in the parsed text.
+	start, end int
 }
 
 func (w commandWord) isOneOf(set map[string]bool) bool {
@@ -448,7 +483,7 @@ func (w commandWord) isOption() bool { return strings.HasPrefix(w.text, "-") }
 
 func readCommandWord(word *syntax.Word) commandWord {
 	var raw, text strings.Builder
-	var out commandWord
+	out := commandWord{start: int(word.Pos().Offset()), end: int(word.End().Offset())}
 	for _, part := range word.Parts {
 		switch p := part.(type) {
 		case *syntax.Lit:
@@ -658,6 +693,8 @@ type entryScan struct {
 	home, account string
 	listed        map[string]listing
 	resolved      map[string][]FolderRef
+	// cut is set when folders stopped at its room.
+	cut bool
 }
 
 type listing struct {
@@ -690,8 +727,14 @@ func (s *entryScan) entries(dir string) listing {
 // the command line holds anywhere in its text, whatever the words around them
 // are. The name of an entry is what the shell is given, however the line is
 // split, quoted or run, so no reading of the line can hide it. A folder too
-// large to list is read word by word.
-func (s *entryScan) folders(line, cwd string) []FolderRef {
+// large to list is read word by word. It stops reading entries once it has
+// room folders (and sets cut): a call that names more is judged as one that
+// was cut.
+func (s *entryScan) folders(line, cwd string, room int) []FolderRef {
+	if room <= 0 {
+		s.cut = true
+		return nil
+	}
 	forms := textForms(line)
 	dirs := []string{cwd}
 	named := slashWords(line)
@@ -731,6 +774,10 @@ func (s *entryScan) folders(line, cwd string) []FolderRef {
 			lower := strings.ToLower(name)
 			if lower == "" || !slices.ContainsFunc(forms, func(form string) bool { return strings.Contains(form, lower) }) {
 				continue
+			}
+			if len(refs) >= room {
+				s.cut = true
+				return refs
 			}
 			refs = append(refs, s.reached(filepath.Join(dir, name))...)
 		}
