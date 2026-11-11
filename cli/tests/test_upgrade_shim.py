@@ -891,29 +891,37 @@ def test_recovery_watcher_takes_the_pid_and_folder_from_the_environment_and_neve
 def test_recovery_watcher_removes_the_folder_after_exit_code_0_and_keeps_it_after_a_failure(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    powershell = os.path.join(
-        os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
-    )
+    powershell = os.path.join(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
     staged = home.parent / "install.ps1"
     staged.write_text("x", encoding="utf-8")
-    runs = []
-    for code in (0, 7):
+    env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+
+    def watch(script: str, *, ended_first: bool) -> tuple[int, subprocess.Popen[bytes], subprocess.Popen[bytes], str]:
         recovery = upgrade_shim._stage_recovery_copy(str(staged))
         assert recovery is not None
-        installer = subprocess.Popen(  # noqa: S603 - fixed interpreter, fixed script
-            [powershell, "-NoProfile", "-Command", f"Start-Sleep -Seconds 2; exit {code}"]
-        )
-        env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+        installer = subprocess.Popen([powershell, "-NoProfile", "-Command", script])  # noqa: S603
+        if ended_first:
+            # The installer ended before the watcher attached, while the shim
+            # still holds its process handle.
+            installer.wait(timeout=60)
         watcher = _REAL_WATCH_RECOVERY_COPY(powershell, installer.pid, recovery, env)
         assert watcher is not None
-        runs.append((code, installer, watcher, os.path.dirname(recovery[0])))
+        return installer.pid, installer, watcher, os.path.dirname(recovery[0])
 
-    for code, installer, watcher, folder in runs:
-        assert installer.wait(timeout=60) == code
-        # 0: the copy was removed; 4: the installer failed and the copy was kept.
-        assert watcher.wait(timeout=60) == (0 if code == 0 else 4), f"installer exit code {code}"
-        assert os.path.isdir(folder) == (code != 0), f"installer exit code {code}"
-        shutil.rmtree(folder, ignore_errors=True)
+    running_ok = watch("Start-Sleep -Seconds 5; exit 0", ended_first=False)
+    running_failed = watch("Start-Sleep -Seconds 5; exit 7", ended_first=False)
+    ended_failed = watch("exit 7", ended_first=True)
+
+    # The installer ended with exit code 0 while the watcher waited: removed.
+    assert running_ok[2].wait(timeout=60) == 0
+    assert not os.path.isdir(running_ok[3])
+    # A failed installer, whether the watcher saw it end or found it ended: kept.
+    assert running_failed[2].wait(timeout=60) == 4
+    assert os.path.isdir(running_failed[3])
+    ended_failed[2].wait(timeout=60)
+    assert os.path.isdir(ended_failed[3])
+    for run in (running_ok, running_failed, ended_failed):
+        shutil.rmtree(run[3], ignore_errors=True)
 
 
 def test_windows_installer_that_appends_beyond_the_first_chunk_of_a_same_second_log_has_opened_its_log(
