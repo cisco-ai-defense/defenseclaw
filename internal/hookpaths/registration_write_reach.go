@@ -1289,7 +1289,9 @@ func registrationRsyncReach(words []string, cwd string, protected protectedFiles
 			destination = word
 		}
 	}
-	if !deletes || destination == "" || strings.Contains(destination, ":") {
+	// host:path names a remote folder; a Windows drive path (C:/dir) is a
+	// local one on a Windows host.
+	if !deletes || destination == "" || strings.Contains(destination, ":") && filepath.VolumeName(destination) == "" {
 		return false
 	}
 	destination = OperandPath(destination, cwd)
