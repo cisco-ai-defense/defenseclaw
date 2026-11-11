@@ -786,6 +786,52 @@ def _drop_recovery_copy(recovery: tuple[str, str] | None) -> None:
         shutil.rmtree(os.path.dirname(recovery[0]), ignore_errors=True)
 
 
+# Runs hidden after the shim has exited and removes the recovery copy once the
+# installer it started has ended with exit code 0. A failed or unreadable run
+# keeps the copy, which the failed run's message names (GAP-1011).
+_RECOVERY_WATCHER = (
+    "$ErrorActionPreference = 'Stop'; "
+    "try { $p = [System.Diagnostics.Process]::GetProcessById([int]$env:DC_WATCH_PID) } catch { exit 3 }; "
+    "if (@('powershell', 'pwsh') -notcontains $p.ProcessName) { exit 3 }; "
+    "$p.WaitForExit(); "
+    "if ($p.ExitCode -ne 0) { exit 0 }; "
+    "$d = $env:DC_WATCH_DIR; "
+    "if ((Split-Path -Leaf $d) -like 'defenseclaw-recovery-*') "
+    "{ Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }"
+)
+
+
+def _watch_recovery_copy(
+    powershell: str, pid: int, recovery: tuple[str, str] | None, env: dict[str, str]
+) -> subprocess.Popen[bytes] | None:
+    """Start the hidden process that removes *recovery* when the installer *pid* ends with exit code 0.
+
+    The shim returns while the installer still runs (it must free the files of
+    the running CLI), so only a process that outlives it can see the result.
+    It is not started from the CLI's own interpreter, which would hold files
+    the installer replaces, and its working directory is the system folder, so
+    it never holds the folder it removes. ``None`` when it could not start: the
+    copy then stays, as it does after a failed run.
+    """
+    if not recovery:
+        return None
+    watch_env = dict(env)
+    watch_env["DC_WATCH_PID"] = str(pid)
+    watch_env["DC_WATCH_DIR"] = os.path.dirname(recovery[0])
+    try:
+        return subprocess.Popen(  # noqa: S603 - fixed interpreter and fixed script
+            [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", _RECOVERY_WATCHER],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            cwd=os.environ.get("SystemRoot", r"C:\Windows"),
+            env=watch_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+
+
 def _recovery_copy_verifies(recovery: tuple[str, str] | None) -> bool:
     if not recovery:
         return False
@@ -928,6 +974,9 @@ def _run_installer(path: str, args: list[str], workdir: str, *, rerun: str, newe
             shutil.rmtree(workdir, ignore_errors=True)
             _drop_recovery_copy(recovery)
             raise ShimError(f"could not start {powershell}: {exc}") from None
+        # The shim ends while the installer runs, so a process that outlives it
+        # removes the copy once the installer has ended with exit code 0.
+        _watch_recovery_copy(powershell, proc.pid, recovery, env)
         # A started process is not a running install (GAP-1011): the installer
         # opens its log only after it has the install lock, and an installer
         # that ends before then leaves nothing but a window that closes.
@@ -936,7 +985,11 @@ def _run_installer(path: str, args: list[str], workdir: str, *, rerun: str, newe
         if opened:
             # An open log is a start, not a result: the installer may still
             # fail and delete the folder it runs from, so the verified copy
-            # stays. Only an exit code 0 the shim has seen removes it.
+            # stays until the installer ends with exit code 0. The watcher
+            # started above removes it then; an installer that already ended
+            # with 0 is handled here.
+            if rc == 0:
+                _drop_recovery_copy(recovery)
             print("  → The installer continues in a new window, which shows the result when it ends.")
             print(f"    Its log is saved in {logs} (install-<time>.log).")
         elif rc == 0:
