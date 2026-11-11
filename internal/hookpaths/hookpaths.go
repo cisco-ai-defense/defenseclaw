@@ -2016,6 +2016,14 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					operands, _, parsed, _ = shellWriteOperands(command, cwd, home, KnownUser{})
 				}
 				stateOperands = append(stateOperands, knownStateOperands(command, cwd, home)...)
+				// The gateway reads every shell call under a Windows home in
+				// PowerShell too (provenPowerShellStateWrite), whatever else
+				// parses it, so its quoted paths are listed for every such call.
+				if actionWindowsHome(home) {
+					quoted, over := powerShellQuotedPathOperands(command, cwd)
+					stateOperands = append(stateOperands, quoted...)
+					truncated = truncated || over
+				}
 				if concreteOperands.ready {
 					literalOperands = concreteOperands.literal
 				} else {
@@ -7437,8 +7445,22 @@ func (l shellLinks) stateReach(path, home string, protected protectedFiles) (str
 	if !ok || home == "" {
 		return "", false
 	}
-	_, under := cutPathPrefix(resolved, filepath.Join(home, ".defenseclaw"))
-	return resolved, under
+	state := filepath.Join(home, ".defenseclaw")
+	if _, under := cutPathPrefix(resolved, state); under {
+		return resolved, true
+	}
+	// The walk spells the target from the volume it is on; the state tree is
+	// that spelling too when its own walk differs from the home spelling (a
+	// home on a substituted or mounted drive). The state name is returned.
+	root, ok := resolveWritePath(state, 0)
+	if !ok || root == state {
+		return "", false
+	}
+	rest, under := cutPathPrefix(resolved, root)
+	if !under {
+		return "", false
+	}
+	return filepath.Join(state, rest), true
 }
 
 // stateEntry is the name in the DefenseClaw state tree of home that a
