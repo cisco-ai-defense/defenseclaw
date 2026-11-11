@@ -9,11 +9,13 @@ import "testing"
 // protected target was found, in the incomplete header and in the unproven
 // header alike, and carries it for no call that found none (GAP-0943).
 func TestOverflowHeadersKeepTheProtectedTargetReadingOnlyWhenFound(t *testing.T) {
-	cwd := "/work/proj"
+	// The identity fact is decoded only when it is an absolute path of this
+	// host, so the folder is a real one: "/work/proj" has no drive on Windows.
+	cwd := t.TempDir()
 	for _, found := range []bool{true, false} {
 		for name, evidence := range map[string]string{
 			"incomplete": incompleteEvidenceKeeping(cwd, found),
-			"unproven":   unprovenEvidence(cwd, "trap", "/work/proj", found),
+			"unproven":   unprovenEvidence(cwd, "trap", cwd, found),
 		} {
 			targets, ok := Decode(evidence)
 			if !ok {
