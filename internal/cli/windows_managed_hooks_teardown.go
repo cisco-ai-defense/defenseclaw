@@ -1206,6 +1206,9 @@ func runWindowsManagedHooksTeardown(
 		if err == nil {
 			err = windowsManagedHooksTeardownJournalNamed(
 				validateWindowsManagedHooksTeardownJournal(journal, identity), report.JournalPath)
+			if committedStandalone {
+				err = windowsManagedHooksTeardownForeignJournalNextStep(err, report.JournalPath)
+			}
 		}
 		if err == nil {
 			report.EnrollmentTargetCount =
@@ -1234,6 +1237,9 @@ func runWindowsManagedHooksTeardown(
 		if err == nil {
 			err = windowsManagedHooksTeardownJournalNamed(
 				validateWindowsManagedHooksTeardownJournal(journal, identity), report.JournalPath)
+			if committedStandalone {
+				err = windowsManagedHooksTeardownForeignJournalNextStep(err, report.JournalPath)
+			}
 		}
 		if err == nil {
 			report.EnrollmentTargetCount =
@@ -1266,6 +1272,9 @@ func runWindowsManagedHooksTeardown(
 		if err == nil {
 			err = windowsManagedHooksTeardownJournalNamed(
 				validateWindowsManagedHooksTeardownJournal(journal, identity), report.JournalPath)
+			if committedStandalone {
+				err = windowsManagedHooksTeardownForeignJournalNextStep(err, report.JournalPath)
+			}
 		}
 		if err == nil && journal.Phase != "prepared" && journal.Phase != "finalized" {
 			err = fmt.Errorf(
@@ -1507,6 +1516,12 @@ func prepareWindowsManagedHooksTeardown(
 	if existing, err := readWindowsManagedHooksTeardownJournal(journalPath); err == nil {
 		if validateErr := validateWindowsManagedHooksTeardownJournal(existing, identity); validateErr != nil {
 			// Name the file: the refusal named no path (GAP-1041).
+			if committedStandalone {
+				return false, 0, windowsManagedHooksTeardownForeignJournalNextStep(
+					fmt.Errorf("%w: %s (phase %s)", validateErr, journalPath, existing.Phase),
+					journalPath,
+				)
+			}
 			return false, 0, fmt.Errorf("%w: %s (phase %s)", validateErr, journalPath, existing.Phase)
 		}
 		switch existing.Phase {
@@ -1542,6 +1557,12 @@ func prepareWindowsManagedHooksTeardown(
 			); err != nil {
 				return false, 0, fmt.Errorf("restore interrupted committed hook teardown: %w", err)
 			}
+			// GAP-1062: the preimage is back, so the machine is as this journal
+			// recorded it. The zero-target Codex bit was read from the machine
+			// before the restore (captureWindowsManagedHooksTeardownCodexPolicy),
+			// and a failed earlier attempt had already taken the Codex policy
+			// off: the journal's bit is the authenticated one.
+			identity = windowsManagedHooksTeardownRestoredIdentity(identity, existing)
 		case "rolled_back", "finalized":
 			// A subsequent lifecycle attempt may safely replace a completed
 			// journal after the active set is verified below.
@@ -2853,6 +2874,39 @@ func windowsManagedHooksTeardownJournalNamed(err error, path string) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", err, path)
+}
+
+// windowsManagedHooksTeardownRestoredIdentity is the identity of a prepare
+// that put an interrupted attempt's preimage back first (GAP-1062): its
+// zero-target Codex bit is the journal's, not the one read from the machine
+// while the failed attempt had left it half removed. Enrolled Codex targets
+// come from the manifest and keep the identity's value.
+func windowsManagedHooksTeardownRestoredIdentity(
+	identity, restored windowsManagedHooksTeardownJournal,
+) windowsManagedHooksTeardownJournal {
+	if len(identity.CodexTargets) == 0 && len(restored.CodexTargets) == 0 {
+		identity.CodexPolicyActive = restored.CodexPolicyActive
+	}
+	return identity
+}
+
+// windowsManagedHooksTeardownForeignJournalNextStep adds the next step to the
+// refusal of a committed uninstall whose teardown journal belongs to another
+// deployment or manifest (GAP-1062). Setup never deletes that record and
+// changed nothing; it names the file and what to send. Any other error is
+// returned as it was.
+func windowsManagedHooksTeardownForeignJournalNextStep(err error, journalPath string) error {
+	if err == nil || !strings.Contains(err.Error(), "managed-hook teardown journal") {
+		return err
+	}
+	return fmt.Errorf(
+		"%w. Setup deleted nothing and changed no teardown record: the file cannot be trusted for this uninstall (the record of another deployment or manifest, or a damaged one). "+
+			"Next step: leave %s as it is, run %s from an elevated PowerShell prompt to see what is left, and send both results with the lifecycle log to DefenseClaw support.%s",
+		err,
+		journalPath,
+		windowsEnterpriseSetupCommand("/verify"),
+		windowsEnterpriseSetupSourceNote,
+	)
 }
 
 func validateWindowsManagedHooksTeardownJournal(

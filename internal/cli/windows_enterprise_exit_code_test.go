@@ -13,6 +13,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -204,5 +205,80 @@ func TestWindowsEnterpriseUnsettledDeferralDoesNotRepeatItsCode(t *testing.T) {
 	}
 	if windowsEnterpriseUnsettledRollbackDeferred([]enterprisestatus.Message{{Code: "codex_state_unsettled", Message: "this run stopped"}}) {
 		t.Fatal("a plain refusal was read as the rollback's deferral")
+	}
+}
+
+// GAP-1042: an uninstall that already committed and then met a file a program
+// holds open (the Codex writer lock, requirements.toml, the hook, a guardian
+// state file) ends with the module's held code at the front, exit 1618 (the
+// MDM retries and the same uninstall finishes the clean-up), with no pending
+// transaction and no FORCE in the next step.
+func TestWindowsEnterpriseCommittedUninstallHeldFileIsRetryable(t *testing.T) {
+	tail := ". The uninstall is already committed (the services are removed and nothing is rolled back); this step of its clean-up did not finish. Next step: close that program, then run & '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall again; it finishes the clean-up (an MDM retries exit 1618 on its own)"
+	for code, message := range map[string]string{
+		"codex_state_held":        "codex_state_held: pwsh.exe (process id 4242, NT AUTHORITY\\SYSTEM) has C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.writer.lock, the Codex managed-hooks writer lock, open without delete sharing, so Setup could not remove it" + tail,
+		"codex_requirements_held": "codex_requirements_held: notepad.exe (process id 7) has C:\\ProgramData\\OpenAI\\Codex\\requirements.toml, the Codex machine requirements, open without delete sharing, so Setup could not remove or change it" + tail,
+		"hook_in_use":             "hook_in_use: a program that Windows did not name (it may run as SYSTEM, so no process id is available) has C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe, the installed hook, open without delete sharing, so Setup could not remove it" + tail,
+		"guardian_state_held":     "guardian_state_held: backup.exe (process id 9) has C:\\ProgramData\\Cisco\\DefenseClaw\\runtime\\hook_guardian_state.json, the hook guardian state file, open without delete sharing, so Setup could not remove it" + tail,
+	} {
+		if got := windowsEnterpriseMessageCode(message, "lifecycle_error"); got != code {
+			t.Fatalf("%s: code = %q", code, got)
+		}
+		result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "9.9.9")
+		result.AddError(code, windowsEnterpriseTrimHeldCodePrefix(code, message))
+		if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitBusy {
+			t.Fatalf("%s: exit = %d, want %d", code, got, enterprisestatus.WindowsExitBusy)
+		}
+		if strings.HasPrefix(result.Errors[0].Message, code+":") || strings.Contains(result.Errors[0].Message, "FORCE") {
+			t.Fatalf("%s: message = %q", code, result.Errors[0].Message)
+		}
+		if next := windowsEnterpriseHeldRollbackNextStep(false, nil); next != "" {
+			t.Fatalf("%s: a committed uninstall with no pending transaction got a next step %q", code, next)
+		}
+	}
+}
+
+// GAP-1063: an uninstall that ran next to the recovery Setup arms behind the
+// run before it finds no deployment record, and the module names each
+// account folder it cannot attribute. With nothing of the deployment left that
+// is the end state of an uninstall that found nothing to remove: a warning that
+// names the folders, exit 0. While some deployment state remains it is still
+// an error.
+func TestWindowsEnterpriseUnattributedUserStateIsAWarningWhenNothingIsLeft(t *testing.T) {
+	previous := windowsEnterpriseStandaloneFootprint
+	t.Cleanup(func() { windowsEnterpriseStandaloneFootprint = previous })
+	entry := `EC2AMAZ-X\Administrator (S-1-5-21-1-2-3-500): C:\Users\Administrator\.defenseclaw: ` + windowsEnterpriseUnattributedUserStateReason
+	raw, err := json.Marshal([]string{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := &windowsEnterpriseInstallerReport{UserStateRemaining: raw}
+	for name, test := range map[string]struct {
+		present bool
+		err     error
+		code    string
+		warning bool
+	}{
+		"nothing left":             {false, nil, "", true},
+		"deployment state remains": {true, nil, "per_user_state_remaining", false},
+		"footprint cannot be read": {false, errors.New("scm"), "per_user_state_remaining", false},
+	} {
+		windowsEnterpriseStandaloneFootprint = func() (bool, error) { return test.present, test.err }
+		result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "9.9.9")
+		addWindowsEnterpriseUserStateWarning(result, report)
+		if test.warning {
+			if len(result.Errors) != 0 || len(result.Warnings) != 1 || result.Warnings[0].Code != "per_user_state_remaining" ||
+				!strings.Contains(result.Warnings[0].Message, `C:\Users\Administrator\.defenseclaw`) ||
+				strings.Contains(result.Warnings[0].Message, windowsEnterpriseUnattributedUserStateReason) {
+				t.Fatalf("%s: errors=%v warnings=%v, want one warning naming the folder", name, result.Errors, result.Warnings)
+			}
+			if exit := result.Finish("windows", enterprisestatus.WindowsExitFailure); exit != 0 {
+				t.Fatalf("%s: exit = %d, want 0", name, exit)
+			}
+			continue
+		}
+		if len(result.Errors) != 1 || result.Errors[0].Code != test.code {
+			t.Fatalf("%s: errors=%v, want the per_user_state_remaining error", name, result.Errors)
+		}
 	}
 }

@@ -20620,15 +20620,313 @@ function Remove-DefenseClawCommittedManagedHooksSerializationLocks {
                 (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512))
             continue
         }
+        if (Test-DefenseClawStandaloneProfile) {
+            # GAP-1042: wait for a program that holds the lock, else end 1618 naming it.
+            Wait-DefenseClawCommittedUninstallFileReleased -Layout $Layout -Path $path
+        }
         Remove-DefenseClawManagedHooksSerializationLock `
             -Path $path `
             -Label $lock.Label
         if ($lock.Key -ceq 'CodexManagedHooksLockPath') {
+            if (Test-DefenseClawStandaloneProfile) {
+                Wait-DefenseClawCommittedUninstallFileReleased -Layout $Layout -Path ([IO.Path]::Combine([IO.Path]::GetDirectoryName($path), '.defenseclaw-managed-hooks.lock'))
+            }
             # The lock of 1.0.8 and earlier beside it (GAP-0650).
             Remove-DefenseClawManagedHooksSerializationLock `
                 -Path ([IO.Path]::Combine([IO.Path]::GetDirectoryName($path), '.defenseclaw-managed-hooks.lock')) `
                 -Label 'Codex policy serialization lock of an earlier release'
         }
+    }
+}
+
+# GAP-1042 (r109): the clean-up a standalone uninstall runs after its tombstone
+# is committed (the Codex requirements removal, the hook finalize, the lock
+# files, the retained-state stamps) can meet a file a program holds open. The
+# committed uninstall cannot be rolled back (its services are gone), and the
+# failure ended as a raw IOException ("The process cannot access the file ...
+# writer.lock because it is being used by another process") or the gateway's
+# own timeout text, with exit 1603 and no holder named. Now the delete of a
+# lock file waits the settle bound for its holder (the wait the Codex state
+# uses), and a failure that still names a held file ends as the retryable held
+# code (exit 1618) that names the file and the holder and says to run the same
+# uninstall again. Nothing is rolled back and no FORCE is needed: the committed
+# state stays as it is and the same uninstall finishes the clean-up.
+# Standalone only; Secure Client keeps its text.
+function Get-DefenseClawCommittedUninstallHeldTargets {
+    <#
+        GAP-1042: the files a committed standalone uninstall deletes or
+        rewrites after its commit that a program can hold open, with the held
+        code each one gets (the codes of the other held-file refusals): the
+        Codex writer lock and managed-hooks state, the Codex requirements,
+        the hook files and the hook guardian's state files.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $targets = [Collections.Generic.List[object]]::new()
+    $codexLock = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexManagedHooksLockPath)
+    if (-not [string]::IsNullOrWhiteSpace($codexLock)) {
+        $targets.Add([pscustomobject]@{ Path = $codexLock; Code = 'codex_state_held'; What = 'the Codex managed-hooks writer lock' })
+        $targets.Add([pscustomobject]@{
+                Path = [IO.Path]::Combine([IO.Path]::GetDirectoryName($codexLock), '.defenseclaw-managed-hooks.lock')
+                Code = 'codex_state_held'
+                What = 'the Codex policy serialization lock of an earlier release'
+            })
+    }
+    $codexState = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexManagedHooksStatePath)
+    if (-not [string]::IsNullOrWhiteSpace($codexState)) {
+        $targets.Add([pscustomobject]@{ Path = $codexState; Code = 'codex_state_held'; What = 'the Codex managed-hooks state' })
+        try {
+            $directory = [IO.Path]::GetDirectoryName($codexState)
+            $stateName = [IO.Path]::GetFileName($codexState)
+            if ([IO.Directory]::Exists($directory)) {
+                foreach ($copy in [IO.Directory]::GetFiles($directory, ($stateName + '.*'))) {
+                    $targets.Add([pscustomobject]@{ Path = $copy; Code = 'codex_state_held'; What = 'a copy of the Codex managed-hooks state' })
+                }
+            }
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "Codex state copies not listed: $($_.Exception.Message)"
+        }
+    }
+    $requirements = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexMachinePolicyPath)
+    if (-not [string]::IsNullOrWhiteSpace($requirements)) {
+        $targets.Add([pscustomobject]@{ Path = $requirements; Code = 'codex_requirements_held'; What = 'the Codex machine requirements' })
+    }
+    $claudeLock = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ClaudeManagedHooksLockPath)
+    if (-not [string]::IsNullOrWhiteSpace($claudeLock)) {
+        $targets.Add([pscustomobject]@{ Path = $claudeLock; Code = 'hook_in_use'; What = 'the Claude Code policy serialization lock' })
+    }
+    $hook = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookPath)
+    if (-not [string]::IsNullOrWhiteSpace($hook)) {
+        $targets.Add([pscustomobject]@{ Path = $hook; Code = 'hook_in_use'; What = 'the installed hook' })
+    }
+    foreach ($guardianFile in @(Get-DefenseClawGuardianStateFiles -Layout $Layout)) {
+        $targets.Add([pscustomobject]@{ Path = [string]$guardianFile; Code = 'guardian_state_held'; What = 'the hook guardian state file' })
+    }
+    return @($targets)
+}
+
+function Get-DefenseClawCommittedUninstallHeldFile {
+    <#
+        GAP-1042: the first file of Get-DefenseClawCommittedUninstallHeldTargets
+        that a program holds open in a way that keeps it from being deleted or
+        replaced (an open for DELETE that allows every sharing mode fails), or
+        $null. -Path narrows the answer to that file. -Hint is an error text:
+        a file it names is looked at first.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [string]$Path = '',
+        [string]$Hint = ''
+    )
+    $only = ''
+    if ($Path -ne '') {
+        $only = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    }
+    $named = [Collections.Generic.List[object]]::new()
+    $others = [Collections.Generic.List[object]]::new()
+    foreach ($target in @(Get-DefenseClawCommittedUninstallHeldTargets -Layout $Layout)) {
+        $full = [IO.Path]::GetFullPath([string]$target.Path).TrimEnd('\')
+        if ($only -ne '' -and -not [string]::Equals($full, $only, [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        $entry = [pscustomobject]@{ Path = $full; Code = [string]$target.Code; What = [string]$target.What }
+        if ($Hint -ne '' -and $Hint.IndexOf($full, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $named.Add($entry)
+        }
+        else {
+            $others.Add($entry)
+        }
+    }
+    foreach ($entry in @($named) + @($others)) {
+        if (-not [IO.File]::Exists([string]$entry.Path)) {
+            continue
+        }
+        if (Test-DefenseClawFileDeleteBlocked -Path ([string]$entry.Path)) {
+            return $entry
+        }
+    }
+    return $null
+}
+
+function New-DefenseClawCommittedUninstallHeldMessage {
+    <#
+        GAP-1042: the retryable end (exit 1618) of a committed uninstall whose
+        clean-up met a file a program holds open: the stable held code first,
+        the holder by name, the file, what was refused, that the uninstall is
+        already committed and nothing is rolled back, and the next step (the
+        same uninstall, with PURGE=1 when it asked for it). No FORCE.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$What,
+        [Parameter(Mandatory)][string]$Why
+    )
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $holders = Get-DefenseClawGuardianStateHolderNames -Layout $Layout -Path $full
+    $rerun = Format-DefenseClawSetupAction -Action $(if ($script:DefenseClawUninstallPurgeUserState) { '/uninstall PURGE=1' } else { '/uninstall' })
+    return ('{0}: {1} has {2}, {3}, {4}. The uninstall is already committed (the services are removed and nothing is rolled back); this step of its clean-up did not finish. Next step: close that program, then run {5} again; it finishes the clean-up (an MDM retries exit 1618 on its own)' -f $Code, $holders, $full, $What, $Why, $rerun)
+}
+
+# GAP-1042: whether the committed uninstall's lock-file delete waits for the
+# holder. Only the foreground Uninstall does (Invoke-DefenseClawEnterpriseLifecycle
+# sets it from its Action): the detached recovery Setup arms behind every uninstall
+# (Recover) goes straight to the delete as it always did, so its outcome and
+# its timing are those of every earlier release.
+$script:DefenseClawCommittedUninstallHeldWaits = $false
+
+function Wait-DefenseClawCommittedUninstallFileReleased {
+    <#
+        GAP-1042: before the committed uninstall deletes Path (a lock file),
+        waits the settle bound the Codex state wait uses for the program that
+        holds it to let go. A holder still there at the end ends the run with
+        the retryable held code (exit 1618) that names the file and the
+        holder, instead of the raw IOException the delete would throw. A file
+        nobody holds, or that is not there, returns at once. Standalone only.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Path
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    if (-not $script:DefenseClawCommittedUninstallHeldWaits) {
+        # A recovery (the watchdog Setup arms behind every uninstall) goes on to the delete as it did.
+        return
+    }
+    $bound = [int]$script:CodexStateSettleSeconds
+    $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(0, $bound))
+    while ($true) {
+        # A probe that fails is not a held file: the delete that follows reports it.
+        $held = $null
+        try {
+            $held = Get-DefenseClawCommittedUninstallHeldFile -Layout $Layout -Path $Path
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "held-file probe failed: $($_.Exception.Message)"
+        }
+        if ($null -eq $held) {
+            return
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            break
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+    }
+    throw (New-DefenseClawCommittedUninstallHeldMessage `
+        -Layout $Layout `
+        -Path $held.Path `
+        -Code $held.Code `
+        -What $held.What `
+        -Why 'open without delete sharing, so Setup could not remove it')
+}
+
+function ConvertTo-DefenseClawCommittedUninstallHeldMessage {
+    <#
+        GAP-1042: the failure of a standalone uninstall that already
+        committed, read for a held file. When the failure says a program
+        holds a file (a sharing or lock violation, or the gateway's timeout
+        for the Codex writer lock) and the deployment is a tombstone, returns
+        the retryable held message (New-DefenseClawCommittedUninstallHeldMessage)
+        for the file that is held now, else $null and the failure stays as it
+        was. A failure of an uninstall that did not commit is never read here:
+        its own rollback and refusals apply.
+    #>
+    param(
+        [AllowNull()]$Layout,
+        [AllowEmptyString()][string]$Message
+    )
+    if ($null -eq $Layout -or -not (Test-DefenseClawStandaloneProfile)) {
+        return $null
+    }
+    if ($Message.Contains('The uninstall is already committed (the services are removed')) {
+        return $null
+    }
+    $sharing = ($Message -match 'being used by another process|sharing violation|another process has locked a portion of the file')
+    $writerBusy = ($Message.Contains('codex_state_unsettled: ') -or (Test-DefenseClawCodexWriterLockBusyMessage -Message $Message))
+    if (-not $sharing -and -not $writerBusy) {
+        return $null
+    }
+    try {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
+            return $null
+        }
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+        if ($null -eq $metadata -or (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
+            return $null
+        }
+        $held = Get-DefenseClawCommittedUninstallHeldFile -Layout $Layout -Hint $Message
+        $why = 'open without delete sharing, so Setup could not remove or change it'
+        if ($null -ne $held -and -not $writerBusy -and
+            $Message -match "'[A-Za-z]:\\[^']+'" -and
+            $Message.IndexOf([string]$held.Path, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            # The failure quotes another file than the one held now: not this one.
+            return $null
+        }
+        if ($null -eq $held) {
+            $codexLock = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexManagedHooksLockPath)
+            if (-not $writerBusy -or [string]::IsNullOrWhiteSpace($codexLock)) {
+                return $null
+            }
+            $held = [pscustomobject]@{ Path = $codexLock; Code = 'codex_state_held'; What = 'the Codex managed-hooks writer lock' }
+            $why = ('held by a Codex writer (or left in the middle of its transaction by one that stopped; the next Codex writer pass ends that) while the uninstall removed the Codex policy, so that removal could not finish. The failure was: ' +
+                (ConvertTo-DefenseClawBoundedDiagnostic -Value $Message -MaxLength 400))
+        }
+        return (New-DefenseClawCommittedUninstallHeldMessage `
+            -Layout $Layout `
+            -Path $held.Path `
+            -Code $held.Code `
+            -What $held.What `
+            -Why $why)
+    }
+    catch {
+        # Reading the failure never replaces it.
+        return $null
+    }
+}
+
+function ConvertTo-DefenseClawCommittedUninstallJournalMessage {
+    <#
+        GAP-1062: the refusal of a standalone uninstall that already committed
+        because its managed-hook teardown journal cannot be trusted for this
+        deployment (the journal is not this uninstall's: another deployment,
+        another manifest, a record that fails its binding). Nothing was
+        changed; Setup never deletes the record. The message names the file and
+        the next step. A missing journal is not a refusal (a fresh teardown
+        starts). Not committed, not standalone, or any other failure: $null.
+    #>
+    param(
+        [AllowNull()]$Layout,
+        [AllowEmptyString()][string]$Message
+    )
+    if ($null -eq $Layout -or -not (Test-DefenseClawStandaloneProfile)) {
+        return $null
+    }
+    if ($Message -notmatch 'managed-hook teardown journal' -or
+        $Message -match 'journal is missing or is not a regular file|journal disappeared|Next step: leave |refusing to retire|while it was read|changed during publication|identity changed') {
+        return $null
+    }
+    try {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
+            return $null
+        }
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+        if ($null -eq $metadata -or (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
+            return $null
+        }
+        $journal = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ManagedHooksTeardownJournalPath)
+        if ([string]::IsNullOrWhiteSpace($journal)) {
+            return $null
+        }
+        return ('{0}. Setup deleted nothing and changed no teardown record: the file is the teardown record of the uninstall and it cannot be trusted for this deployment (another deployment or manifest, or a damaged record). Next step: leave {1} as it is, run {2} to see what is left, and send both results with the lifecycle log to DefenseClaw support' -f
+            $Message.TrimEnd('.', ' '),
+            $journal,
+            (Format-DefenseClawSetupAction -Action '/verify'))
+    }
+    catch {
+        return $null
     }
 }
 
@@ -53812,6 +54110,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     $script:DefenseClawLauncherTemp = [string]$LauncherTemp
     $script:DefenseClawRemoveLifecycleLockOnExit = $false
+    $script:DefenseClawCommittedUninstallHeldWaits = [bool]($Action -ceq 'Uninstall')
     $script:DefenseClawPurgeBundleLock = $null
     $script:DefenseClawUninstallPurgeUserState = (
         $Action -eq 'Uninstall' -and [bool]$Purge -and (Test-DefenseClawStandaloneProfile)
@@ -54854,6 +55153,17 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     catch {
         Add-DefenseClawRecoveryEvidenceToError -ErrorRecord $_ -Layout $layout
+        if ($Action -ceq 'Uninstall') {
+            # GAP-1042: a committed uninstall whose clean-up met a held file ends 1618, naming it.
+            $committedHeld = ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message ([string]$_.Exception.Message)
+            if ($null -ne $committedHeld) {
+                throw $committedHeld
+            }
+            $committedJournal = ConvertTo-DefenseClawCommittedUninstallJournalMessage -Layout $layout -Message ([string]$_.Exception.Message)
+            if ($null -ne $committedJournal) {
+                throw $committedJournal
+            }
+        }
         throw
     }
     finally {

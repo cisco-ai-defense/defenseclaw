@@ -2165,6 +2165,7 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 		}
 	}
 	var notLocalSystem, pathEntryKept, keptForRegistrations, accountLinksKept, remaining []string
+	var unattributed []string
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStateRemaining) {
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksNotLocalSystemReason); found {
 			notLocalSystem = append(notLocalSystem, account)
@@ -2182,7 +2183,24 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 			pathEntryKept = append(pathEntryKept, account)
 			continue
 		}
+		if account, found := strings.CutSuffix(entry, ": "+windowsEnterpriseUnattributedUserStateReason); found &&
+			windowsEnterpriseNoDeploymentLeft() {
+			// GAP-1063: no deployment record is left to attribute the folder,
+			// and nothing of the deployment remains: the same end state as an
+			// uninstall that found nothing to remove, which names the folder
+			// in a warning (addWindowsEnterpriseLeftoverUserStateWarning).
+			unattributed = append(unattributed, account)
+			continue
+		}
 		remaining = append(remaining, entry)
+	}
+	if len(unattributed) > 0 {
+		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
+			"--purge removed the machine deployment, but %d account(s) still have a DefenseClaw per-user folder %%USERPROFILE%%\\.defenseclaw. "+
+				"With no deployment record left, Setup cannot tell DefenseClaw's files there from the account's own, so it removes nothing. "+
+				"Delete each folder as an administrator once its account has no DefenseClaw registration left and runs no per-user DefenseClaw of its own; "+
+				"a folder kept for the account's agent registrations (its connector_backups restore them) needs %s and then %s while that account has an active session. Accounts: %s",
+			len(unattributed), windowsEnterpriseSetupCommand("/ensure"), windowsEnterpriseSetupCommand("/uninstall", "PURGE=1"), windowsEnterpriseBoundedLabels(unattributed)))
 	}
 	if len(notLocalSystem) > 0 {
 		// A purge that did not run as LocalSystem removed the machine
@@ -2715,6 +2733,20 @@ func windowsEnterpriseReportStrings(raw json.RawMessage) []string {
 		}
 	}
 	return out
+}
+
+// windowsEnterpriseUnattributedUserStateReason is the reason the module gives
+// a per-account folder it could not attribute because the deployment record
+// was already gone (DefenseClawEnterprise.psm1
+// Get-DefenseClawUnattributedUserStateFolders, GAP-0533).
+const windowsEnterpriseUnattributedUserStateReason = "the recorded deployment state was missing, so the uninstall could not tell DefenseClaw's files there from the account's own"
+
+// windowsEnterpriseNoDeploymentLeft reports that no standalone deployment
+// state or service remains (GAP-1063); a footprint that cannot be read counts
+// as present.
+func windowsEnterpriseNoDeploymentLeft() bool {
+	present, err := windowsEnterpriseStandaloneFootprint()
+	return err == nil && !present
 }
 
 func windowsEnterpriseBoundedLabels(items []string) string {
@@ -3475,6 +3507,10 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
 	case "codex_state_held", "codex_requirements_held", "privileges_required", "guardian_state_held", "codex_state_unsettled":
+		return strings.TrimPrefix(message, code+": ")
+	case "hook_in_use":
+		// GAP-1042: the committed uninstall's hold on the hook files leads
+		// with the code too, like the other held codes.
 		return strings.TrimPrefix(message, code+": ")
 	}
 	return message
