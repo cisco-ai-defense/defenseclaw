@@ -1438,7 +1438,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				return
 			}
 			child = parseCommandAs(nested, dialect, out.nextID, wrapperDepth+1)
-		case "sudo", "exec", "env", "command", "nsenter", "chroot":
+		case "sudo", "exec", "env", "command", "builtin", "nsenter", "chroot":
 			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(command.Argv, program)
 			if uncertain {
 				out.markPartial(IssueUnsupportedConstruct)
@@ -1672,6 +1672,20 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				return nil, false, false
 			}
 			if strings.HasPrefix(argv[i], "-") {
+				return nil, false, true
+			}
+			return cloneSlice(argv[i:]), true, false
+		}
+
+	case "builtin":
+		// builtin NAME runs the shell builtin NAME in the caller shell with the
+		// caller descriptors, so a redirect on it is a redirect of the NAME it
+		// runs, as for command. The shell accepts a leading --.
+		for i := 1; i < len(argv); i++ {
+			switch {
+			case argv[i] == "--":
+				continue
+			case strings.HasPrefix(argv[i], "-"):
 				return nil, false, true
 			}
 			return cloneSlice(argv[i:]), true, false

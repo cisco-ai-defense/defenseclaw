@@ -162,7 +162,7 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	switch {
 	case excluded:
 		// Cowork runs the Claude Code hooks, so it follows that connector.
-		cause := ownExcludedCause(a.ownExcludedInspection(cfg, idKey, self, name, enterprisepolicy.ConnectorClaudeCode))
+		cause := ownExcludedCause(enterprisepolicy.ConnectorClaudeCode, a.ownExcludedInspection(cfg, idKey, self, name, enterprisepolicy.ConnectorClaudeCode))
 		cowork = ownCoworkRow(false, "excluded", cause.code, cause.reason)
 	case !claudeCode && claudeConfigured:
 		cowork = ownCoworkRow(false, "not confirmed", "claude_code_unverified", "Claude Code policy or enrollment is not verified for this account")
@@ -277,7 +277,7 @@ func ownUnresolvedConnectorStates(cfg *config.Config) map[string]any {
 func (a *APIServer) ownExcludedConnectorStates(cfg *config.Config, idKey, uid, name string) map[string]any {
 	states := make(map[string]any)
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
-		states[connector] = ownExcluded(a.ownExcludedInspection(cfg, idKey, uid, name, connector))
+		states[connector] = ownExcluded(connector, a.ownExcludedInspection(cfg, idKey, uid, name, connector))
 	}
 	return states
 }

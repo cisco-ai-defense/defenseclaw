@@ -62,10 +62,18 @@ func TestClientDescribesACallOverTheOperandBoundOnce(t *testing.T) {
 	}
 	// Quoted names and path forms are plain names too: they are no cover for
 	// a protected file named after them.
-	padding := strings.Repeat("\"f1\" ./f2 /tmp/f3 ", 2000)
-	reduced, over = BoundCommandOperands("touch "+padding+"../.ssh/authorized_keys", "", "")
-	if !over || !strings.HasSuffix(reduced, " ../.ssh/authorized_keys") || len(reduced) > bound*20 {
-		t.Errorf("padding kept: over %v, %d bytes of %d", over, len(reduced), len(padding))
+	// A name that stays (here one below a link in a folder of the test, so
+	// that no system path decides it) is written once after the bound however
+	// often it is repeated; the first operands stay as they are.
+	dir := t.TempDir()
+	if err := os.Symlink(dir, filepath.Join(dir, "lnk")); err != nil {
+		t.Skipf("no links here: %v", err)
+	}
+	padding := strings.Repeat("\"f1\" ./f2 lnk/f3 ", 2000)
+	reduced, over = BoundCommandOperands("touch "+padding+"../.ssh/authorized_keys", dir, "")
+	if copies := strings.Count(reduced, "lnk/f3"); !over || !strings.HasSuffix(reduced, " ../.ssh/authorized_keys") ||
+		len(reduced) > bound*20 || copies != bound/3+1 {
+		t.Errorf("padding kept: over %v, %d bytes of %d, %d copies, want %d", over, len(reduced), len(padding), copies, bound/3+1)
 	}
 }
 

@@ -79,6 +79,13 @@ func standaloneClaudeMachineHookContract(layout managed.StandaloneLayout) string
 	if _, err := os.Lstat(path); err != nil {
 		return ""
 	}
+	// This is a read, and it runs in Setup's own process on every ensure,
+	// status and verify. That process carries no standalone trust scope, so the
+	// manifest gate took its Secure Client branch: it re-stamped targets.yaml's
+	// owner and access list in place and went on to read the bytes an untrusted
+	// account had written. The guardian's own scope makes the gate refuse
+	// instead (GAP-1048).
+	defer pinWindowsStandaloneTrustScope()()
 	if err := enterpriseHookManifestFileTrustCheck(path); err != nil {
 		return ""
 	}

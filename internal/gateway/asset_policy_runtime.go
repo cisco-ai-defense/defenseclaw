@@ -298,7 +298,7 @@ func (a *APIServer) mcpAdmissionPendingDecision(ctx context.Context, connectorNa
 		status.Name, status.Pending = a.mcpAdmissionPending(connectorName, probe.ServerName, home, probe.WorkspaceDir)
 		status.RetryAfter = time.Minute
 	}
-	status, opened := a.failedMCPSessionHold(ctx, cfg, connectorName, probe, status)
+	status, opened := a.failedMCPSessionHold(ctx, cfg, connectorName, probe, a.statusForSession(ctx, connectorName, probe, status))
 	decision, refused := a.mcpAdmissionStatusDecision(ctx, cfg, connectorName, hookEvent, probe, status)
 	return decision, refused, opened
 }
@@ -748,18 +748,25 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 // agent starts again (a new process or a resume): it connects to the servers
 // its config lists now, so what it held before no longer says where a call
 // goes. A cleared or compacted conversation keeps its connections and its
-// memory (GAP-0861).
+// memory (GAP-0861). Every hook also places its session in time (noteSession),
+// which statusForSession reads.
 func (a *APIServer) mcpSessionStarted(ctx context.Context, connector, sessionID, hookEvent, source string) {
-	if canonicalEvent(hookEvent) != "sessionstart" || strings.TrimSpace(sessionID) == "" {
-		return
-	}
-	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "startup", "resume":
-	default:
+	if strings.TrimSpace(sessionID) == "" {
 		return
 	}
 	home, serviceAccount := callerHomeForAssets(ctx)
 	if serviceAccount && home == "" {
+		return
+	}
+	restart := false
+	if canonicalEvent(hookEvent) == "sessionstart" {
+		switch strings.ToLower(strings.TrimSpace(source)) {
+		case "startup", "resume":
+			restart = true
+		}
+	}
+	a.hookMCP.noteSession(connector, home, sessionID, restart, time.Now())
+	if !restart {
 		return
 	}
 	a.mcpResolved.forgetSession(connector, home, sessionID)

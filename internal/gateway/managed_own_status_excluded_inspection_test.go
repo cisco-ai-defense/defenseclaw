@@ -28,8 +28,13 @@ const (
 	nothingReason   = "excluded from enrollment; DefenseClaw does not inspect your calls"
 
 	inspectedCode = "excluded_users_inspected"
-	nothingCode   = "excluded_users"
-	unknownCode   = "excluded_users_unverified"
+	// openCodeV2Code and openCodeV2Reason are the inspected state of the OpenCode
+	// row: the machine plugin only runs under OpenCode V2, V1 has no hook
+	// (GAP-0949).
+	openCodeV2Code   = "excluded_users_opencode_v2_only"
+	openCodeV2Reason = "excluded from enrollment; the machine policy inspects OpenCode V2 (@opencode/cli 2.x) calls only: OpenCode V1 (opencode-ai) is not protected, and V2 is required"
+	nothingCode      = "excluded_users"
+	unknownCode      = "excluded_users_unverified"
 )
 
 // unknownReason names the administrator status command of the platform the
@@ -211,6 +216,9 @@ func TestOwnStatusExcludedReasonFollowsTheMachinePolicyHook(t *testing.T) {
 				t.Fatalf("roster = %v, want the 3 configured connectors", rows)
 			}
 			for connector, want := range tc.want {
+				if connector == "opencode" && want[0] == inspectedCode {
+					want = [2]string{openCodeV2Code, openCodeV2Reason}
+				}
 				requireExcludedReason(t, connector, rows[connector], want[0], want[1])
 			}
 			requireExcludedReason(t, "cowork", cowork, tc.cowork[0], tc.cowork[1])
@@ -363,7 +371,7 @@ func TestOwnExcludedUnverifiedReasonNamesAnExistingAdministratorCommand(t *testi
 			t.Fatalf("%s hint %q", goos, hint)
 		}
 	}
-	reason := ownExcludedCause(ownInspectionUnknown).reason
+	reason := ownExcludedCause("claudecode", ownInspectionUnknown).reason
 	if strings.Contains(reason, "defenseclaw-managed") || !strings.Contains(reason, managed.AdminStatusHint(runtime.GOOS)) {
 		t.Fatalf("unverified excluded reason %q does not name the administrator status command of %s", reason, runtime.GOOS)
 	}
@@ -395,4 +403,53 @@ func TestOwnExcludedNextStepNamesTheInstalledGatewayPath(t *testing.T) {
 	if got, _ := row["next_step"].(string); got != next {
 		t.Fatalf("reported next_step %q, want %q", got, next)
 	}
+}
+
+// OpenCode V1 (opencode-ai) loads the machine plugin but never registers its
+// hooks, so a pinned machine-policy plugin proves nothing about a V1 turn. The
+// excluded OpenCode row never says the machine policy still inspects the calls:
+// it says V1 is not protected and V2 is required, in every state that would
+// otherwise claim inspection, while the other connectors keep their claim and
+// the states that claim nothing are unchanged (GAP-0949).
+func TestOwnStatusExcludedOpenCodeRowNeverClaimsInspectionForV1(t *testing.T) {
+	for _, name := range []string{"inspect", "deny"} {
+		t.Run(name, func(t *testing.T) {
+			var configure []func(*config.Config)
+			if name == "deny" {
+				configure = append(configure, func(cfg *config.Config) { cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledDeny })
+			}
+			api := ownStatusExcludedFixture(t, []string{"carol"}, nil, configure...)
+			rows, _ := ownExcludedRowsOf(t, api, "uid", "5003", "carol")
+			row := rows["opencode"]
+			reason, _ := row["reason"].(string)
+			if row["state"] != "excluded" || row["protected"] != false || row["reason_code"] != openCodeV2Code {
+				t.Fatalf("opencode row = %#v, want state excluded, not protected, code %s", row, openCodeV2Code)
+			}
+			for _, want := range []string{"OpenCode V1", "not protected", "V2 is required", "enterprise.enrollment.exclude_users"} {
+				if !strings.Contains(reason, want) {
+					t.Fatalf("opencode reason %q does not say %q", reason, want)
+				}
+			}
+			if strings.Contains(reason, "still inspects your calls") {
+				t.Fatalf("opencode reason %q claims inspection for a route with no V1 hook", reason)
+			}
+			if next, _ := row["next_step"].(string); next == "" {
+				t.Fatalf("opencode row = %#v, want the administrator next step", row)
+			}
+			for _, connector := range []string{"claudecode", "copilot"} {
+				requireExcludedReason(t, connector, rows[connector], inspectedCode, inspectedReason)
+			}
+		})
+	}
+	t.Run("states that claim nothing are unchanged", func(t *testing.T) {
+		api := ownStatusExcludedFixture(t, []string{"carol"}, nil)
+		api.managedPolicyView.Store(nil)
+		saved := machineHookAbsent
+		machineHookAbsent = func(string, *config.Config, string) bool { return true }
+		t.Cleanup(func() { machineHookAbsent = saved })
+		api.managedHookAuthz.Store(newManagedHookAuthorizer(api.runtimeConfigSnapshot().Enterprise.Enrollment, nil,
+			func() (managedHookLedger, error) { return managedHookLedger{}, nil }))
+		rows, _ := ownExcludedRowsOf(t, api, "uid", "5003", "carol")
+		requireExcludedReason(t, "opencode", rows["opencode"], nothingCode, nothingReason)
+	})
 }

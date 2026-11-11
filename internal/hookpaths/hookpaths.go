@@ -2887,6 +2887,17 @@ func (w *PatchTargetWatch) Changed() bool {
 	w.protectedOnce.Do(func() { w.protected = newProtectedFiles(w.home) })
 	links := shellLinks{known: true}
 	for path, attested := range w.targets {
+		if attested == "" && stepsUpFromMissingDirectory(path) {
+			// A spelling the hook could not place when it read the patch (a
+			// step up from a directory that does not exist, listed beside
+			// the clean spelling the gateway judged) and that still steps
+			// up from a missing directory leads nowhere: the operating
+			// system cannot open it either. It reads as changed once a
+			// link or a directory stands there, and any other spelling the
+			// walk cannot place (a protected file it cannot identify, a
+			// link it cannot read) stays changed.
+			continue
+		}
 		resolved, ok := links.resolve(path, w.protected)
 		if !ok || resolved != attested || w.protected.has(resolved) {
 			return true
@@ -2895,6 +2906,63 @@ func (w *PatchTargetWatch) Changed() bool {
 		// the walk could not see, must refuse the patch.
 		if _, state, complete := ResolveActiveStateIdentity(resolved, w.home); state || !complete {
 			return true
+		}
+	}
+	return false
+}
+
+// stepsUpFromMissingDirectory reports an absolute path that steps up (..) out
+// of a directory that does not exist, with no unreadable name on the way to
+// it. A link on the way (a working directory reached through a link) is
+// followed to where it leads, as the operating system does; the walk of a
+// write path cannot cross such a step, because the missing directory may
+// become a link before the command runs, and that is the only reason it fails
+// for this path. It fails for it still while the directory is missing, and a
+// link, a directory or a non-directory made there since ends the walk first.
+func stepsUpFromMissingDirectory(path string) bool {
+	volume := filepath.VolumeName(path)
+	root := volume + string(filepath.Separator)
+	current := root
+	parts := strings.Split(filepath.ToSlash(strings.TrimPrefix(path, volume)), "/")
+	var missing []bool
+	for hops := 0; len(parts) > 0; {
+		part := parts[0]
+		parts = parts[1:]
+		switch part {
+		case "", ".":
+		case "..":
+			if n := len(missing); n > 0 {
+				if missing[n-1] {
+					return true
+				}
+				missing = missing[:n-1]
+			}
+			current = filepath.Dir(current)
+		default:
+			current = filepath.Join(current, part)
+			info, err := pathLstat(current)
+			switch {
+			case os.IsNotExist(err):
+				missing = append(missing, true)
+			case err != nil || windowsMountPointLink(current, info):
+				return false
+			case info.Mode()&os.ModeSymlink != 0:
+				text, err := pathReadlink(current)
+				if hops++; err != nil || text == "" || hops > SystemLinkLimit() {
+					return false
+				}
+				current = filepath.Dir(current)
+				if filepath.IsAbs(text) || filepath.VolumeName(text) != "" {
+					if filepath.VolumeName(text) != volume {
+						return false
+					}
+					current, missing = root, nil
+					text = strings.TrimPrefix(text, volume)
+				}
+				parts = append(strings.Split(filepath.ToSlash(text), "/"), parts...)
+			default:
+				missing = append(missing, false)
+			}
 		}
 	}
 	return false

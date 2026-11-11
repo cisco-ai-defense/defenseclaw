@@ -150,17 +150,16 @@ func TestWindowsManagedAgentSettingsAreSelfProtection(t *testing.T) {
 		`C:\ProgramData\Cursor2\hooks.json`,
 		`C:\Program Files\Other\managed-settings.json`,
 		`\\localhost\C$\Users\vn\proj\ClaudeCode\managed-settings.json`,
-		`\\otherhost\C$\Program Files\ClaudeCode\managed-settings.json`,
 		`\\localhost\C$\Program Files\Other\managed-settings.json`,
-		`C:\PROGRA~1\Other\managed-settings.json`,
-		// Short-name shapes that NTFS does not generate, and names that are
-		// already 8.3 and have no other name.
-		`C:\PROGRA~0\ClaudeCode\managed-settings.json`,
-		`C:\PROGRA~5\ClaudeCode\managed-settings.json`,
-		`C:\PROGRA~1\ClaudeCode\MANAGE~0.JSO`,
-		`C:\PROGRA~1\ClaudeCode\MANAGE~5.JSO`,
-		`C:\ProgramData\OpenAI\CODEX~1\requirements.toml`,
-		`C:\ProgramData\CURSOR~1\hooks.json`,
+		// No 8.3 row is written here: which short names exist is for the
+		// volume to say. The names the volume gives come from
+		// TestWindowsShortNamesOfManagedAgentSettingsStayBlocked and
+		// TestWindowsShortNameOfAnotherVendorFolderFileStaysAllowed, the
+		// shapes it does not generate from the vendor-folder test.
+	}
+	// Another machine: this host name with one letter changed.
+	if host, err := os.Hostname(); err == nil && host != "" {
+		allowed = append(allowed, `\\`+otherMachineName(host, 0)+`\C$\Program Files\ClaudeCode\managed-settings.json`)
 	}
 	for _, managed := range []bool{false, true} {
 		for _, pack := range []string{"", "strict", "permissive"} {
@@ -288,14 +287,22 @@ func TestWindowsAdminShareNeedsWholeHostName(t *testing.T) {
 	}
 	const tail = `\C$\Program Files\ClaudeCode\managed-settings.json`
 	local := []string{`\\` + host + tail, `\\` + strings.ToUpper(short) + tail}
+	// Another machine differs from this one in a letter. It never has an
+	// added one: NetBIOS cuts a computer name to 15 characters, so a
+	// 15-character host name with a letter added is this machine. The same
+	// first label in another DNS domain is a changed letter in the domain
+	// part of a name that has one (the stand-in host names of
+	// TestWindowsLocalHostIsAWholeName cover the single-label host).
 	remote := []string{
-		`\\` + short + `.unrelated.invalid` + tail,
-		`\\` + host + `.unrelated.invalid` + tail,
-		// Another machine differs from this one in a letter. It never has an
-		// added one: NetBIOS cuts a computer name to 15 characters, so a
-		// 15-character host name with a letter added is this machine.
 		`\\` + otherMachineName(short, len(short)-1) + tail,
 		`\\` + otherMachineName(short, 0) + tail,
+		`\\` + otherMachineName(short, len(short)/2) + tail,
+	}
+	if dot := strings.IndexByte(host, '.'); dot >= 0 && dot+1 < len(host)-1 {
+		remote = append(remote,
+			`\\`+otherMachineName(host, dot+1)+tail,
+			`\\`+otherMachineName(host, len(host)-1)+tail,
+		)
 	}
 	for _, managed := range []bool{false, true} {
 		for _, pack := range []string{"", "permissive", "strict"} {

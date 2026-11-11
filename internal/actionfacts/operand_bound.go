@@ -47,6 +47,15 @@ type operandBounder struct {
 	over      bool // n passed MaxOperandsPerCall
 	first     bool // the next word starts a statement
 	heredocs  []heredocMark
+
+	// Past the bound a word that stays is written once per statement: seen
+	// holds what the statement has written (operands apart from redirect
+	// targets), pending an operand left out as a repeat that no operand
+	// written since follows, and afterOption that the word before was an
+	// option, whose argument a word may be.
+	seen        map[string]bool
+	pending     string
+	afterOption bool
 }
 
 // heredocMark is a here-document whose body starts at the next line.
@@ -65,7 +74,7 @@ func (b *operandBounder) run() {
 			i++
 			continue
 		case statementSeparator(command, i):
-			b.first = true
+			b.endStatement()
 			b.out.WriteByte(c)
 			i++
 			if c == 0x0a && len(b.heredocs) > 0 {
@@ -90,19 +99,62 @@ func (b *operandBounder) run() {
 		case len(word) > 1 && word[0] == 0x2d:
 			// An option is no operand, and it may carry a path.
 			b.out.WriteString(word)
+			b.afterOption = true
 			i = end
 		default:
 			b.operand(word)
 			i = end
 		}
 	}
+	b.endStatement()
 }
 
-// operand counts word and writes it unless it is past the bound and plain.
-func (b *operandBounder) operand(word string) {
-	if b.countedTarget(word) {
-		b.out.WriteString(word)
+// endStatement ends the statement: an operand left out as a repeat that
+// would have been the last of the statement is written (the last operand of
+// a command can be the one it writes), and the next statement starts with
+// nothing written (it may run in another folder).
+func (b *operandBounder) endStatement() {
+	if b.pending != "" {
+		b.out.WriteByte(0x20)
+		b.out.WriteString(b.pending)
 	}
+	b.first, b.pending, b.afterOption = true, "", false
+	clear(b.seen)
+}
+
+// operand counts word and writes it unless it is past the bound and plain,
+// or a repeat (see repeated).
+func (b *operandBounder) operand(word string) {
+	argument := b.afterOption
+	b.afterOption = false
+	if !b.countedTarget(word) {
+		return
+	}
+	if b.over && !argument && b.repeated("o"+word) {
+		b.pending = word
+		return
+	}
+	b.pending = ""
+	b.out.WriteString(word)
+}
+
+// repeated reports that the statement has already written key, a word that
+// stays past the bound, and notes it when not. A word spelled alike in the
+// same statement is read the same way, in the same folder, by the same
+// program, whatever the file system holds, so a second copy adds nothing to
+// the judgment of the reduced command: it only makes it long (GAP-0943). The
+// role of the copy is kept apart by the callers: the last operand of the
+// statement (endStatement), the word after an option, and a redirect
+// target, which a key of its own tells from an operand.
+func (b *operandBounder) repeated(key string) bool {
+	if b.seen[key] {
+		return true
+	}
+	if b.seen == nil {
+		b.seen = map[string]bool{}
+	}
+	b.seen[key] = true
+	return false
 }
 
 // redirect handles the redirection word at command[i:end] (wordAt cuts a
@@ -130,7 +182,7 @@ func (b *operandBounder) redirect(word string, end int) int {
 			end = b.copyNextWord(end)
 		}
 	case target != "":
-		if b.countedTarget(target) {
+		if b.countedTarget(target) && (!b.over || !b.repeated("r"+word)) {
 			b.out.WriteString(word)
 		}
 	default:
@@ -154,7 +206,7 @@ func (b *operandBounder) redirect(word string, end int) int {
 			b.out.WriteString(command[end:tend])
 			return tend
 		}
-		if b.countedTarget(next) {
+		if b.countedTarget(next) && (!b.over || !b.repeated("r"+word+"\x00"+next)) {
 			b.out.WriteString(word)
 			b.out.WriteString(command[end:j])
 			b.out.WriteString(next)

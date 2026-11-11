@@ -19,3 +19,8 @@ func windowsManagedSettingsShortNames(*testing.T) []string {
 		`C:\PROGRA~3\OpenAI\Codex\requirements.toml`,
 	}
 }
+
+// windowsOrdinaryVendorFileShortName: off Windows no volume can say which
+// names exist, and the shape of a short name names a managed settings file,
+// so there is no 8.3 name of another file to test.
+func windowsOrdinaryVendorFileShortName(*testing.T) string { return "" }
