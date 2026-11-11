@@ -44,7 +44,7 @@ func lateCallGradeReading(command, cwd, home string, spelled bool) Grade {
 		}
 		grade := ProtectedReach(OperandPath(word, cwd), home, memo)
 		if runtime.GOOS == "windows" {
-			if lateWindowsAlias(word) {
+			if lateWindowsAlias(word) || lateWindowsNumberedLink(word) {
 				return GradePossible
 			}
 			if drive := lateWindowsDrivePath(word); drive != word {
@@ -297,11 +297,15 @@ func lateAssignValues(assigns []*syntax.Assign, cwd, home string, spelled bool) 
 		if !known {
 			return nil, false
 		}
-		calls = append(calls, []string{"", value})
 		if !strings.Contains(value, ":") {
+			calls = append(calls, []string{"", value})
 			continue
 		}
-		for _, element := range strings.Split(value, ":") {
+		elements, whole := lateColonListElements(value, runtime.GOOS == "windows")
+		if whole {
+			calls = append(calls, []string{"", value})
+		}
+		for _, element := range elements {
 			if element == "~" || strings.HasPrefix(element, "~/") {
 				element = home + element[1:]
 			}
