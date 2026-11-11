@@ -3642,11 +3642,15 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 // codex_state_held: ...", g582 round 11c, L3).
 func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
-	case "codex_state_held", "codex_requirements_held", "privileges_required", "untrusted_record", "guardian_state_held", "codex_state_unsettled":
+	case "codex_state_held", "codex_requirements_held", "privileges_required", "guardian_state_held", "codex_state_unsettled":
 		return strings.TrimPrefix(message, code+": ")
 	case "hook_in_use":
 		// GAP-1042: the committed uninstall's hold on the hook files leads
 		// with the code too, like the other held codes.
+		return strings.TrimPrefix(message, code+": ")
+	case "untrusted_record":
+		// GAP-0602: the refusal of a Setup-owned record another account owns
+		// or can write leads with the code too.
 		return strings.TrimPrefix(message, code+": ")
 	}
 	return message

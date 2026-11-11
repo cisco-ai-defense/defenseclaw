@@ -162,7 +162,7 @@ def test_ensure_names_a_runtime_folder_another_account_can_write_before_it_plans
     seam = seam[: seam.index("\n}\n")]
     assert '[]string{"hooks", "acp"}' in seam and "managed.RefuseStandaloneInPlaceRepairAs(" in seam
     call = go.index("windowsEnterpriseRuntimeFolderRefusal(); refusal != \"\"")
-    assert go.rindex("noteWindowsEnterpriseEnsureDriftRepairs(result, driftRepaired)", 0, call) > go.rindex("func runWindowsEnterpriseStandaloneEnsureOnce(", 0, call)
+    assert go.rindex("noteWindowsEnterpriseEnsureDriftRepairs(result, driftRepaired, driftAtStart)", 0, call) > go.rindex("func runWindowsEnterpriseStandaloneEnsureOnce(", 0, call)
     assert "alreadyAppliedNeedsRepair := false" in go[call : call + 700], "the refusal must come before the plan"
     hook = (ROOT / "internal" / "cli" / "windows_enterprise_hookruntime_windows.go").read_text(encoding="utf-8")
     assert "errors.As(err, &refused)" in hook and "machine_policy_summary_untrusted" in go
