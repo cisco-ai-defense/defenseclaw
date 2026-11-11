@@ -55,6 +55,17 @@ Set these in every standalone config. On Linux and macOS the lifecycle fills in 
 
 Always set `enterprise.profile`. When it is unset, Windows and macOS resolve to the Secure Client profile and the `enterprise policy` commands refuse to run. The profile cannot change without a reinstall. For `policy_dir` and the rule-pack lookup rules, see [Custom rule packs](#custom-rule-packs).
 
+## AI Defense class policies
+
+Managed inspection can report the authenticated connector class for Codex, Cursor, and Claude Code to AI Defense. Leave `cisco_ai_defense.report_agent_class` at its default `false` until the AI Defense connection schema and class resolver are deployed and the resolver is in enforce mode. Then set it to `true` in the administrator-owned config and apply the config through the normal lifecycle. The managed gateway sends only the canonical class, never a client-selected connection ID. Unsupported or conflicting connector context remains on the global policy path.
+
+```yaml title="config.yaml (excerpt)"
+cisco_ai_defense:
+  report_agent_class: true
+```
+
+Set the key back to `false` to make new managed inspection requests omit the class. AI Defense then selects the existing global connection. This does not delete class connections or policy associations. OSS and API-key inspection do not send this field.
+
 ## Choose the agents to protect
 
 List each agent under `guardrail.connectors`. The key is the connector name; an empty value (`{}`) enables it with the defaults, and only `enabled: false` turns a listed agent off. A config without this map protects nothing, and `verify` fails on it (`no_connectors_enabled`).
