@@ -155,7 +155,10 @@ jobs:
         # 2026-10-31: on 710e2cc0d8 the 28 shards ran 8 to 12.5 minutes and
         # shard 4 hit the 11m -timeout twice (the gateway race time grew to
         # about 4.5 hours), so 36 shards bring each back to about 7.5 minutes.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
+        # 2026-11-10: the times recorded on the red runs of rel/1.0.9 (U12,
+        # U16, U17) total about 4.6 hours, 7.7 minutes in 36 shards; 40 keep
+        # each under 7 minutes.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -171,7 +174,7 @@ jobs:
       - name: Run gateway race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 36
+          GO_TEST_SHARDS: 40
         run: |
           set -euo pipefail
           test_regex="$(python3 scripts/go_test_shards.py \
@@ -585,9 +588,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 36 gateway + 4 audit + 16 remaining-package shards, plus the
+          # 40 gateway + 4 audit + 16 remaining-package shards, plus the
           # frozen-gateway job.
-          test "${#coverage_parts[@]}" -eq 57
+          test "${#coverage_parts[@]}" -eq 61
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
