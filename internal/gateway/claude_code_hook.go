@@ -274,7 +274,12 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		// only and can never retract text already being displayed.
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Delta, Direction: "response", Connector: "claudecode"})
 	case "StopFailure":
-		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
+		// StopFailure's inspected error/error_details are distinct from the
+		// optional last_assistant_message emitted as a model.response companion.
+		// Retain the exact submitted error content on hook_decision so a failure
+		// without an assistant message does not lose its inspection input.
+		inspectedContent = claudeCodeToolOutput(req)
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: inspectedContent, Direction: "tool_result", Connector: "claudecode"})
 	case "Stop", "SubagentStop", "SessionEnd":
 		if !req.StopHookActive && cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
