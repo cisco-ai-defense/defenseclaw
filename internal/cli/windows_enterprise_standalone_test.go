@@ -1182,6 +1182,9 @@ func (stub *ensureStub) install(t *testing.T) {
 	originalGuardianRepairs := windowsEnterpriseGuardianRepairsSinceLastRun
 	t.Cleanup(func() { windowsEnterpriseGuardianRepairsSinceLastRun = originalGuardianRepairs })
 	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return nil }
+	originalRuntimeState := windowsEnterpriseRuntimeFolderState
+	t.Cleanup(func() { windowsEnterpriseRuntimeFolderState = originalRuntimeState })
+	windowsEnterpriseRuntimeFolderState = func() (string, string, bool) { return "", "", false }
 	// The host's real Cowork check stays out of scripted ensures; the
 	// Cowork drift tests replace this after install.
 	windowsEnterpriseCoworkEnsureDrift = func() (string, string) { return "", "" }
@@ -1322,11 +1325,11 @@ func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
 	// run a no-op or name the guardian repair twice.
 	repaired := false
 	passResult := newWindowsEnterpriseStandaloneResult("ensure", opts)
-	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired)
+	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired, "")
 	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return nil }
-	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired)
+	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired, "")
 	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return []string{"again"} }
-	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired)
+	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired, "")
 	count := 0
 	for _, warning := range passResult.Warnings {
 		if warning.Code == "guardian_repaired_drift" {
@@ -1335,6 +1338,51 @@ func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
 	}
 	if !repaired || count != 1 {
 		t.Fatalf("drift flag across passes: repaired=%t guardian warnings=%d", repaired, count)
+	}
+
+	// The Enterprise Upgrade Lane race: the guardian put the drift back
+	// during the status probe, just before it logged the repair, so the
+	// repair before the plan found a canonical folder and the guardian log
+	// had no line yet. The drift ensure saw at its start makes the run a
+	// change, not a compliant no-op.
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+	stub.install(t)
+	const runtimeDir = `C:\ProgramData\Cisco\DefenseClaw\runtime`
+	stateCalls := 0
+	windowsEnterpriseRuntimeFolderState = func() (string, string, bool) {
+		stateCalls++
+		if stateCalls == 1 {
+			return runtimeDir, "extra entry S-1-5-32-545", false
+		}
+		return runtimeDir, "", true
+	}
+	stdout.Reset()
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("ensure after a silent guardian repair: %v\n%s", err, stdout.String())
+	}
+	result = enterprisestatus.Result{}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Noop || result.NoopReason != "" || !strings.Contains(strings.Join(result.Changes, "\n"),
+		`the access control of `+runtimeDir+` had drifted (extra entry S-1-5-32-545) when ensure started and was put back while it ran`) {
+		t.Fatalf("silent guardian repair: result %+v", result)
+	}
+	// Benign twin: a folder canonical at the start leaves a compliant
+	// ensure a no-op.
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+	stub.install(t)
+	windowsEnterpriseRuntimeFolderState = func() (string, string, bool) { return runtimeDir, "", true }
+	stdout.Reset()
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("compliant ensure: %v\n%s", err, stdout.String())
+	}
+	result = enterprisestatus.Result{}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || !result.Noop || result.NoopReason != "compliant" || len(result.Changes) != 0 {
+		t.Fatalf("compliant ensure with a canonical runtime folder: result %+v", result)
 	}
 }
 

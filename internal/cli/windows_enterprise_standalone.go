@@ -259,6 +259,44 @@ var windowsEnterpriseRepairDataDirBeforePlan = func() (change, problem string) {
 	return repairWindowsEnterpriseRuntimeFolder(layout.DataDir, managed.CanonicalOptions{GatewayServiceAccount: layout.ServiceUser})
 }
 
+// windowsEnterpriseRuntimeFolderState judges the runtime folder (data_dir) of
+// an installed standalone deployment without changing it: the trusted-only
+// drift it carries ("" when none) and whether it is canonical. The folder is
+// "" when the run is not elevated or there is no standalone layout. A seam
+// for tests.
+var windowsEnterpriseRuntimeFolderState = func() (dataDir, drift string, canonical bool) {
+	if !windowsEnterpriseIsElevated() {
+		return "", "", false
+	}
+	layout, err := windowsManagedLayout.standalone()
+	if err != nil || strings.TrimSpace(layout.DataDir) == "" {
+		return "", "", false
+	}
+	defer pinWindowsStandaloneTrustScope()()
+	seen, err := windowsEnterpriseRuntimeFolderAssess(layout.DataDir, managed.ObjectRuntimeDirectory,
+		managed.CanonicalOptions{GatewayServiceAccount: layout.ServiceUser, Quiet: true})
+	if err != nil {
+		return "", "", false
+	}
+	switch seen.Outcome {
+	case managed.CanonicalOK:
+		return layout.DataDir, "", true
+	case managed.CanonicalAccepted:
+		return layout.DataDir, windowsEnterpriseBoundedDiagnostic(strings.Join(seen.Drift, "; ")), false
+	}
+	return layout.DataDir, "", false
+}
+
+// windowsEnterpriseRuntimeDriftAtStart names the trusted-only drift of the
+// runtime folder when ensure starts, before the status probe ("" when none).
+func windowsEnterpriseRuntimeDriftAtStart() string {
+	dataDir, drift, _ := windowsEnterpriseRuntimeFolderState()
+	if dataDir == "" || drift == "" {
+		return ""
+	}
+	return "the access control of " + dataDir + " had drifted (" + drift + ")"
+}
+
 // The canonical checks repairWindowsEnterpriseRuntimeFolder makes; tests
 // replace them.
 var (
@@ -355,8 +393,9 @@ var windowsEnterpriseGuardianRepairsSinceLastRun = func() []string {
 // back and names the repairs the guardian made since the last lifecycle run
 // (GAP-0573). repaired is the run's flag, kept across the re-planned pass
 // after a concurrent install, so that pass cannot report a no-op either; it
-// adds no second warning.
-func noteWindowsEnterpriseEnsureDriftRepairs(result *enterprisestatus.Result, repaired *bool) {
+// adds no second warning. driftAtStart is the drift ensure saw before its
+// status probe (windowsEnterpriseRuntimeDriftAtStart).
+func noteWindowsEnterpriseEnsureDriftRepairs(result *enterprisestatus.Result, repaired *bool, driftAtStart string) {
 	change, problem := windowsEnterpriseRepairDataDirBeforePlan()
 	if change != "" {
 		result.Changes = append(result.Changes, change)
@@ -371,6 +410,16 @@ func noteWindowsEnterpriseEnsureDriftRepairs(result *enterprisestatus.Result, re
 				windowsEnterpriseBoundedDiagnostic(strings.Join(healed, "; ")))
 		}
 		*repaired = true
+	}
+	// The guardian can put the drift back during the status probe, in the
+	// instant before it logs the repair, so neither check above sees it. A
+	// drift seen at the start of the run that is canonical now was put back
+	// during the run: a change, not a no-op.
+	if !*repaired && problem == "" && driftAtStart != "" {
+		if _, _, canonical := windowsEnterpriseRuntimeFolderState(); canonical {
+			result.Changes = append(result.Changes, driftAtStart+" when ensure started and was put back while it ran")
+			*repaired = true
+		}
 	}
 }
 
@@ -4353,13 +4402,16 @@ func runWindowsEnterpriseStandaloneEnsure(
 	// A drift repair recorded by the first pass keeps the re-planned pass
 	// from reporting a no-op (GAP-0573).
 	driftRepaired := false
-	retry, err := runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, true, &driftRepaired)
+	// Judged before the status probe, which takes seconds: the running
+	// guardian often puts the drift back meanwhile (GAP-0573).
+	driftAtStart := windowsEnterpriseRuntimeDriftAtStart()
+	retry, err := runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, true, &driftRepaired, driftAtStart)
 	if !retry {
 		return err
 	}
 	// The plan went stale while ensure waited for the lifecycle lock: a
 	// concurrent run installed the host. Re-plan once from a fresh status.
-	_, err = runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, false, &driftRepaired)
+	_, err = runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, false, &driftRepaired, driftAtStart)
 	return err
 }
 
@@ -4587,6 +4639,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	result *enterprisestatus.Result,
 	allowRetry bool,
 	driftRepaired *bool,
+	driftAtStart string,
 ) (bool, error) {
 	statusReport, statusRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 	if err != nil {
@@ -4647,7 +4700,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	// and puts the ACL back within seconds, so ensure names each repair the
 	// guardian logged since the last lifecycle run too.
 	if statusReport.Installed && !statusReport.TransactionPending {
-		noteWindowsEnterpriseEnsureDriftRepairs(result, driftRepaired)
+		noteWindowsEnterpriseEnsureDriftRepairs(result, driftRepaired, driftAtStart)
 	}
 	alreadyAppliedNeedsRepair := false
 	alreadyAppliedCoworkDrift := ""
