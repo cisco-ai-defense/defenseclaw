@@ -173,6 +173,20 @@ def keep_unreached_go_tests(old: dict, new: dict, files: list[Path], module: str
     return new
 
 
+def keep_unreached_windows_packages(old: dict, new: dict, module: str, root: Path = ROOT) -> dict:
+    """new, with the recorded time of each package that still exists and
+    that no input log gave a time. The step timeout that ends a Windows
+    remaining-package part leaves the packages after it without a
+    [go-package-time] line; without their old time they would weigh the
+    median, and the next plan could put several of them in one part."""
+    packages = dict(new.get("packages", {}))
+    for package, seconds in old.get("packages", {}).items():
+        if package not in packages and any((root / _rel(package, module)).glob("*.go")):
+            packages[package] = seconds
+    new["packages"] = dict(sorted(packages.items()))
+    return new
+
+
 def merge_go_timings(old: dict, new: dict, module: str) -> dict:
     """Recorded go timings with the packages new measured replaced: a
     package new has drops its old per-test times too, so a test it no longer
@@ -207,6 +221,8 @@ def main() -> int:
     if args.kind != "python" and out.is_file():
         old = json.loads(out.read_text(encoding="utf-8"))
         data = keep_unreached_go_tests(old, data, args.inputs, module)
+        if args.kind == "windows-go":
+            data = keep_unreached_windows_packages(old, data, module)
         if args.update:
             data = merge_go_timings(old, data, module)
     _write(out, data)

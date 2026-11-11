@@ -316,12 +316,11 @@ func boundedClosedLinkCall(t *testing.T, count, pad int) func(home, project stri
 
 // The client map is bounded. The answer for an operand behind a closed folder
 // and the link text that says so are one entry: for no map size does the
-// client send the empty answer without its link text and without saying the
-// map is incomplete, and the managed hook blocks the key append at the size
-// where the bound first falls on that entry. The test finds the bound on the
-// system it runs on (the most redirects the map holds whole, then the first
-// pad that moves the last entry across it) and must cross it, or it would not
-// hold the case it names.
+// client send the empty answer without its link text, and the managed hook
+// blocks the key append at the size where the map first meets its bound. The
+// test finds the bound on the system it runs on (the most redirects the map
+// holds whole, then the first pad that makes that map incomplete) and must
+// cross it, or it would not hold the case it names.
 func TestManagedShellWriteThroughAClosedFolderLinkStaysBlockedWhenTheClientMapIsAtItsBound(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX link walk")
@@ -383,66 +382,33 @@ func TestManagedShellWriteThroughAClosedFolderLinkStaysBlockedWhenTheClientMapIs
 	if count == 0 || count >= redirectCap {
 		t.Fatalf("the map bound was not found: %d redirects held whole (cap %d)", count, redirectCap)
 	}
-	// With the pad on the first names, the room left after the last whole
-	// entry shrinks two bytes a step: while it holds the operand answer and
-	// its link text the map is whole with the text, and once it does not the
-	// map says it is incomplete. Because the room only shrinks, any pad whose
-	// map has the empty answer without its text would sit right after the
-	// last map with the text, which is the pad the search below converges on.
-	const (
-		otherMap = iota
-		mapWithText
-		incompleteMap
-	)
-	judge := func(pad int) int {
+	// At its bound the client gives up plain operands first, keeps the answer
+	// for the linked operand with its link text, and says the map is
+	// incomplete (GAP-0943). For no map size does it send the empty answer
+	// without its link text. The pad on the first names grows the map byte by
+	// byte, so the first incomplete map is the size where the bound falls.
+	incomplete := func(pad int) bool {
 		targets := resolve(count, pad)
-		resolved, present := targets[alias]
-		_, text := targets[hookpaths.LinkTextFactPrefix+alias]
-		switch {
-		case present && resolved == "" && text:
-			return mapWithText
-		case present && resolved == "":
-			t.Fatalf("%d redirects, pad %d: an empty answer for the linked operand without its link text and without a bound marker", count, pad)
-		case !present && targets[hookpaths.TruncatedKey] != "":
-			return incompleteMap
+		if answer, present := targets[alias]; present && answer == "" {
+			if _, text := targets[hookpaths.LinkTextFactPrefix+alias]; !text {
+				t.Fatalf("%d redirects, pad %d: an empty answer for the linked operand without its link text", count, pad)
+			}
 		}
-		return otherMap
+		return targets[hookpaths.TruncatedKey] != ""
 	}
 	last := count * boundedPadPerName
-	// The client adds its optional facts only while they fit, and drops them
-	// before the operand entries, so the search starts from the size of the
-	// path entries and the link text alone.
-	entries := map[string]string{}
-	for key, value := range resolve(count, 0) {
-		if filepath.IsAbs(key) || strings.HasPrefix(key, hookpaths.LinkTextFactPrefix) {
-			entries[key] = value
-		}
+	if incomplete(0) || !incomplete(last) {
+		t.Fatalf("%d redirects: the pad did not cross the bound between pad 0 and pad %d", count, last)
 	}
-	estimate := min(max((mapBound-len(mustJSON(t, entries)))/2, 0), last)
-	withText, past := max(estimate-4, 0), min(estimate+4, last)
-	for judge(withText) != mapWithText {
-		if withText == 0 {
-			t.Fatalf("%d redirects: no pad gives a map with the link text", count)
-		}
-		withText = max(withText-boundedPadPerName, 0)
-	}
-	for judge(past) == mapWithText {
-		if past == last {
-			t.Fatalf("%d redirects: the sweep did not cross the bound up to pad %d", count, last)
-		}
-		past = min(past+boundedPadPerName, last)
-	}
-	for past-withText > 1 {
-		if middle := (withText + past) / 2; judge(middle) == mapWithText {
-			withText = middle
-		} else {
+	held, past := 0, last
+	for past-held > 1 {
+		if middle := (held + past) / 2; incomplete(middle) {
 			past = middle
+		} else {
+			held = middle
 		}
 	}
-	if state := judge(past); state != incompleteMap {
-		t.Fatalf("%d redirects: pad %d gives a map with the link text and pad %d neither the text nor a bound marker (%d)", count, withText, past, state)
-	}
-	t.Logf("the map holds %d redirects; pad %d keeps the link text, pad %d is the first incomplete map (search started at %d)", count, withText, past, estimate)
+	t.Logf("the map holds %d redirects; pad %d is the last whole map, pad %d the first incomplete one", count, held, past)
 	blocked, body := postManagedHookBehindProtectHome(t, "default", func(home, project string) map[string]any {
 		call := boundedClosedLinkCall(t, count, past)(home, project)
 		if err := os.Chmod(filepath.Join(project, "closed"), 0); err != nil {

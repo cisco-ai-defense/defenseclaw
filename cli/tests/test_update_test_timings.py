@@ -5,7 +5,13 @@ import json
 from pathlib import Path
 
 from scripts.go_test_shards import partition_packages
-from scripts.update_test_timings import go_timings, keep_unreached_go_tests, merge_go_timings, windows_go_timings
+from scripts.update_test_timings import (
+    go_timings,
+    keep_unreached_go_tests,
+    keep_unreached_windows_packages,
+    merge_go_timings,
+    windows_go_timings,
+)
 
 STAMP = "2026-10-19T12:00:00.1234567Z"
 MODULE = "github.com/example"
@@ -162,3 +168,26 @@ def test_a_timing_refresh_keeps_a_split_package_split(tmp_path: Path) -> None:
     heavy_items = [(package, regex) for shard in shards for package, regex in shard if package.endswith("/heavy")]
     assert len(heavy_items) >= 2
     assert all(regex for _, regex in heavy_items)
+
+
+def test_a_windows_refresh_keeps_the_time_of_a_package_its_timed_out_part_never_reached(tmp_path: Path) -> None:
+    for rel in ("internal/reached", "internal/unreached"):
+        (tmp_path / rel).mkdir(parents=True)
+        (tmp_path / rel / "code.go").write_text("package p\n", encoding="utf-8")
+    old = {
+        "packages": {
+            f"{MODULE}/internal/reached": 10.0,
+            f"{MODULE}/internal/unreached": 300.0,
+            f"{MODULE}/internal/removed": 5.0,
+        },
+        "tests": {},
+    }
+    log = tmp_path / "pk0.log"
+    log.write_text(f"{STAMP} [go-package-time] {MODULE}/internal/reached pass 12.0\n", encoding="utf-8")
+
+    data = keep_unreached_windows_packages(old, windows_go_timings([log], MODULE), MODULE, root=tmp_path)
+
+    # The measured package takes its new time (with the link), the package
+    # the step timeout never reached keeps its old one, and a package that
+    # no longer exists is dropped.
+    assert data["packages"] == {f"{MODULE}/internal/reached": 18.0, f"{MODULE}/internal/unreached": 300.0}
