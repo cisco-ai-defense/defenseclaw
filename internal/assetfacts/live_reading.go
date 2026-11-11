@@ -112,7 +112,7 @@ func readLiveLine(line string, argv []string) liveReading {
 			dead = append(dead, textSpan{int(n.Hash.Offset()), int(n.Hash.Offset()) + 1 + len(n.Text)})
 		case *syntax.Redirect:
 			reads = reads || !inertRedirect(n)
-			dead = append(dead, textBodySpans(n, stack)...)
+			dead = append(dead, textBodySpans(n, stack, redefined)...)
 		case *syntax.CallExpr:
 			if len(n.Args) == 0 {
 				return true
@@ -161,13 +161,26 @@ func readLiveLine(line string, argv []string) liveReading {
 // the e command of sed) or reads names from it (xargs) is not listed.
 var stdinPrinters = wordSet("cat tac head tail wc nl rev tr cut")
 
+// isStdinPrinter reports whether text names one of the stdinPrinters as the
+// program itself: the bare name or its path in /bin or /usr/bin, as printsOnly
+// matches echo. A path to another program of that name (./cat) is not the
+// printer, and a name the line defines as a function is not either.
+func isStdinPrinter(text string, redefined map[string]bool) bool {
+	if redefined[text] {
+		return false
+	}
+	name := strings.TrimPrefix(strings.TrimPrefix(text, "/usr/bin/"), "/bin/")
+	return stdinPrinters[name] && (name == text || text == "/bin/"+name || text == "/usr/bin/"+name)
+}
+
 // textBodySpans gives the parts of the body of a heredoc or here-string that
 // are text: the whole body less the command substitutions in it. It returns
 // nil where the redirection is not a heredoc or here-string, where the
-// command it feeds is not a stdin printer, or where the output is taken as
-// input (outputGoesNowhere). stack holds the nodes above the redirection,
-// the statement last.
-func textBodySpans(r *syntax.Redirect, stack []syntax.Node) []textSpan {
+// command it feeds is not a stdin printer (see isStdinPrinter; redefined holds
+// the functions the line defines), or where the output is taken as input
+// (outputGoesNowhere). stack holds the nodes above the redirection, the
+// statement last.
+func textBodySpans(r *syntax.Redirect, stack []syntax.Node, redefined map[string]bool) []textSpan {
 	var body *syntax.Word
 	switch r.Op {
 	case syntax.Hdoc, syntax.DashHdoc:
@@ -186,7 +199,7 @@ func textBodySpans(r *syntax.Redirect, stack []syntax.Node) []textSpan {
 	if !ok || len(call.Args) == 0 {
 		return nil
 	}
-	if first := readCommandWord(call.Args[0]); first.dynamic || !first.isOneOf(stdinPrinters) {
+	if first := readCommandWord(call.Args[0]); first.dynamic || !isStdinPrinter(first.text, redefined) {
 		return nil
 	}
 	if !outputGoesNowhere(stack) {
