@@ -163,9 +163,13 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 			// outlive the call, so it registers no cleanup; this subtest's
 			// cleanup waits for it before it checks and closes the listener.
 			recoveryDone := make(chan struct{})
+			var listenErr atomic.Pointer[error]
 			opts.GatewayRecovery = func(context.Context, error) error {
 				defer close(recoveryDone)
-				if p, err := startPeerListener(addr, false); err == nil {
+				p, err := startPeerListener(addr, false)
+				if err != nil {
+					listenErr.Store(&err)
+				} else {
 					peer.Store(p)
 				}
 				time.Sleep(200 * time.Millisecond)
@@ -175,6 +179,9 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 				select {
 				case <-recoveryDone:
 				case <-time.After(5 * time.Second):
+				}
+				if err := listenErr.Load(); err != nil {
+					t.Errorf("the start could not bind %s, so the scenario checked no listener: %v", addr, *err)
 				}
 				if p := peer.Load(); p != nil {
 					if n := p.received.Load(); n != 0 {
