@@ -11,8 +11,11 @@
 # "a|b" is met by either program. Then:
 #   1. When every COMMAND is already on PATH (the runner image ships cmake,
 #      gcc, g++, make and rpm), apt is not used at all.
-#   2. Otherwise apt-get update and apt-get install PACKAGE... run up to three
-#      times, 45 s and 90 s apart, each with Acquire::Retries.
+#   2. Otherwise apt-get update and the download of PACKAGE... run up to
+#      three times, 15 s and 30 s apart, each with Acquire::Retries and each
+#      network phase cut at 30 s (a resolver that times out makes one apt
+#      attempt take about 9 minutes otherwise); the packages then install from
+#      the local cache with --no-download, which needs no network.
 #   3. When apt stays unreachable, each PACKAGE pinned in runner-apt-pins.txt
 #      for this Ubuntu release is downloaded from an Ubuntu mirror, checked
 #      against its pinned SHA-256 and installed with dpkg.
@@ -51,13 +54,15 @@ if [ -z "$(missing)" ]; then
 fi
 
 apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-delays=(45 90)
+delays=(15 30)
+network_seconds=30
 installed=0
 for attempt in 1 2 3; do
-    if ! sudo apt-get "${apt_opts[@]}" update -q; then
+    if ! timeout "$network_seconds" sudo apt-get "${apt_opts[@]}" update -q; then
         echo "::warning title=apt-get update failed::attempt $attempt of 3"
     fi
-    if sudo apt-get "${apt_opts[@]}" install -y -q "${packages[@]}"; then
+    if timeout "$network_seconds" sudo apt-get "${apt_opts[@]}" install -y -q --download-only "${packages[@]}"; then
+        sudo apt-get install -y -q --no-download "${packages[@]}"
         installed=1
         break
     fi
@@ -85,7 +90,7 @@ if [ "$installed" -eq 0 ]; then
         deb="${RUNNER_TEMP:-/tmp}/$(basename "$pool_path")"
         fetched=0
         for mirror in https://mirrors.edge.kernel.org/ubuntu https://archive.ubuntu.com/ubuntu; do
-            if curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 -o "$deb" "$mirror/$pool_path"; then
+            if curl -fsSL --retry 2 --retry-all-errors --connect-timeout 20 --max-time 60 -o "$deb" "$mirror/$pool_path"; then
                 fetched=1
                 break
             fi

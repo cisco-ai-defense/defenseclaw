@@ -5,7 +5,7 @@
 The script skips apt when the tools are already on the runner, retries apt
 with backoff, and falls back to a SHA-256 pinned .deb only for this Ubuntu
 release; any other outcome still fails the step (rel-1-0-6 GAP-1070).
-apt-get, sudo, sleep, curl and dpkg are stubs on PATH, so nothing installs.
+apt-get, sudo, sleep, timeout, curl and dpkg are stubs on PATH, so nothing installs.
 """
 
 from __future__ import annotations
@@ -68,6 +68,7 @@ def _run(
     make_tool = f'printf "#!/bin/sh\\n" > {bin_dir / TOOL}; chmod +x {bin_dir / TOOL}\n' if installs else ""
     _stub(bin_dir, "sudo", 'exec "$@"\n')
     _stub(bin_dir, "sleep", f'echo "sleep $*" >> {log}\n')
+    _stub(bin_dir, "timeout", f'echo "timeout $1" >> {log}\nshift\nexec "$@"\n')
     _stub(
         bin_dir,
         "apt-get",
@@ -111,9 +112,15 @@ def test_tools_already_on_the_runner_skip_apt(tmp_path: Path) -> None:
 def test_apt_is_retried_after_a_failed_try(tmp_path: Path) -> None:
     result, calls, _ = _run(tmp_path, apt_fails=1, pin_sha=None)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert sum(c.startswith("apt-get") and " install " in c for c in calls) == 2
-    assert all("Acquire::Retries=3" in c for c in calls if c.startswith("apt-get"))
-    assert "sleep 45" in calls
+    downloads = [c for c in calls if c.startswith("apt-get") and "--download-only" in c]
+    assert len(downloads) == 2
+    assert [c for c in calls if "--no-download" in c] == ["apt-get install -y -q --no-download dc-apt-fixture"]
+    assert all("Acquire::Retries=3" in c for c in calls if c.startswith("apt-get") and "--no-download" not in c)
+    # Every apt network phase runs under a 30 s cut; the cache install needs none.
+    network = [i for i, c in enumerate(calls) if c.startswith("apt-get") and "--no-download" not in c]
+    assert all(calls[i - 1] == "timeout 30" for i in network)
+    assert calls[calls.index("apt-get install -y -q --no-download dc-apt-fixture") - 1] != "timeout 30"
+    assert "sleep 15" in calls
     assert not any(c.startswith(("curl", "dpkg")) for c in calls)
 
 
@@ -121,7 +128,7 @@ def test_unreachable_apt_installs_the_pinned_deb(tmp_path: Path) -> None:
     deb = b"fixture deb"
     result, calls, temp = _run(tmp_path, apt_fails=3, pin_sha=hashlib.sha256(deb).hexdigest(), deb=deb)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert [c for c in calls if c.startswith("sleep")] == ["sleep 45", "sleep 90"]
+    assert [c for c in calls if c.startswith("sleep")] == ["sleep 15", "sleep 30"]
     assert any(c.startswith("curl") and f"https://mirrors.edge.kernel.org/ubuntu/{POOL_PATH}" in c for c in calls)
     assert any(c.startswith("dpkg -i") for c in calls)
     assert list(temp.iterdir()) == []
