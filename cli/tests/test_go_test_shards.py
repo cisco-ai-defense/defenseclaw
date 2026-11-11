@@ -535,13 +535,18 @@ def test_windows_remaining_package_shards_leave_room_in_their_step() -> None:
     # Windows Native CI run 42961488619 (rel/1.0.9 6f0e44c10d): pk0 was planned
     # at 726 s with internal/cli at its recorded 391 s; the package took 681 s
     # and the go test run of the part met its 1020 s step limit. internal/cli
-    # runs in parts now, no package or part plans past half the step, and no
-    # shard past 640 s.
+    # runs in parts now, no package or part plans past half the step.
+    # Windows Native CI run 43019588811 (rel/1.0.9 3b4c39b0a5): pk7, planned
+    # at 621 s in nine shards, was cancelled at the 20 minute job timeout. A
+    # job spends about 150 s before its go test step, and the step builds the
+    # whole packages (about 95 s) and, for a shard with an internal/cli part,
+    # that test binary (about 130 s), none of which the plan counts. No shard
+    # plans past 465 s, so the job ends in about 14 minutes.
     cli = [regex for shard in shards for package, regex in shard if package == prefix + "internal/cli"]
     assert len(cli) >= 2 and all(cli), cli
     loads = [[planned(package, regex) for package, regex in shard] for shard in shards]
     assert max(max(load) for load in loads) <= 0.5 * 1020, loads
-    assert max(sum(load) for load in loads) <= 640, [round(sum(load)) for load in loads]
+    assert max(sum(load) for load in loads) <= 465, [round(sum(load)) for load in loads]
 
 
 def test_linux_remaining_package_hookpaths_runs_in_parts_under_the_race_timeout() -> None:
