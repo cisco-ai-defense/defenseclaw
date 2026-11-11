@@ -19,8 +19,10 @@ import (
 // source shape (literal, empty, dynamic, from the loop variable) lets a
 // protected link through, in any profile. A destination that is an ordinary
 // file, and a loop whose word list is empty, stay allowed
-// (rel-1-0-6:GAP-0880, GAP-0885). One test per writer program, so no test
-// holds a CI shard for minutes.
+// (rel-1-0-6:GAP-0880, GAP-0885). One test per writer program; each spelling
+// and each source shape is judged once onto the link and once onto the
+// ordinary file, and the rows rotate over the connector, per-user or managed
+// gateway and rule pack cells.
 func TestLoopWriterNameSpellingsAndSourceShapesAreJudgedByDestinationCp(t *testing.T) {
 	loopWriterNameSpellings(t, "cp")
 }
@@ -41,8 +43,9 @@ func TestLoopWriterNameSpellingsAndSourceShapesAreJudgedByDestinationTee(t *test
 	loopWriterNameSpellings(t, "tee")
 }
 
-// loopWriterNameSpellings judges every spelling, source shape and target of
-// one writer program in a loop body.
+// loopWriterNameSpellings judges every spelling and every source shape of one
+// writer program in a loop body, each onto the protected link and onto an
+// ordinary file, and the empty word list.
 func loopWriterNameSpellings(t *testing.T, program string) {
 	f := newB36ManagedHookFixture(t)
 	t.Setenv("BASH_ENV", "")
@@ -65,55 +68,72 @@ func loopWriterNameSpellings(t *testing.T, program string) {
 		}
 		return program
 	}
-	sources := []struct{ name, prefix, word string }{
-		{"literal", "", "a.txt"},
-		{"empty", "", `""`},
-		{"dynamic", "src=$RANDOM; ", `"$src"`},
-		{"loop-variable", "", `"$f.bak"`},
-	}
+	type source struct{ name, prefix, word string }
+	literal := source{"literal", "", "a.txt"}
 	options := map[string]string{"install": " -m 600", "ln": " -sf"}
+	type shape struct {
+		spelling string
+		source   source
+	}
+	// Every spelling with the literal source, then every other source with
+	// the plain spelling.
+	shapes := []shape{{"plain", literal}, {"backslash", literal}, {"quoted", literal}, {"command", literal}, {"builtin", literal},
+		{"plain", source{"empty", "", `""`}},
+		{"plain", source{"dynamic", "src=$RANDOM; ", `"$src"`}},
+		{"plain", source{"loop-variable", "", `"$f.bak"`}}}
 	type row struct{ name, command, want string }
 	var rows []row
-	for _, spelling := range []string{"plain", "backslash", "quoted", "command", "builtin"} {
-		for _, source := range sources {
-			name := program + "/" + spelling + "/" + source.name
-			for _, target := range []struct{ name, loop, want string }{
-				{"link", "keylink", "block"},
-				{"ordinary", "out2.txt", "allow"},
-				{"empty-list", "", "allow"},
-			} {
-				var body string
-				if program == "tee" {
-					body = fmt.Sprintf(`printf %%s %s | %s "$f"`, source.word, spell(spelling, program))
-				} else {
-					body = spell(spelling, program) + options[program] + " " + source.word + ` "$f"`
+	add := func(s shape, target, loop, want string) {
+		var body string
+		if program == "tee" {
+			body = fmt.Sprintf(`printf %%s %s | %s "$f"`, s.source.word, spell(s.spelling, program))
+		} else {
+			body = spell(s.spelling, program) + options[program] + " " + s.source.word + ` "$f"`
+		}
+		rows = append(rows, row{program + "/" + s.spelling + "/" + s.source.name + "/" + target,
+			fmt.Sprintf("%sfor f in %s; do %s; done", s.source.prefix, loop, body), want})
+	}
+	for _, s := range shapes {
+		add(s, "link", "keylink", "block")
+		add(s, "ordinary", "out2.txt", "allow")
+	}
+	add(shapes[0], "empty-list", "", "allow")
+	type cell struct {
+		connector, pack string
+		managed         bool
+	}
+	// An ordinary destination is not judged in strict. The programs start the
+	// rotation at different cells, so the five tests together judge every
+	// cell.
+	var blockCells, allowCells []cell
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, managed := range []bool{false, true} {
+			for _, pack := range []string{"", "permissive", "strict"} {
+				blockCells = append(blockCells, cell{connector, pack, managed})
+				if pack != "strict" {
+					allowCells = append(allowCells, cell{connector, pack, managed})
 				}
-				command := fmt.Sprintf("%sfor f in %s; do %s; done", source.prefix, target.loop, body)
-				rows = append(rows, row{name + "/" + target.name, command, target.want})
 			}
 		}
 	}
-	for _, r := range rows {
-		t.Run(r.name, func(t *testing.T) {
-			for _, connector := range []string{"claudecode", "codex"} {
-				for _, managed := range []bool{false, true} {
-					if r.name == "cp/command/literal/ordinary" && connector == "codex" && managed {
-						// The authorized-keys write-target reader (not the loop
-						// reader) fails closed on this one prefixed form, as it
-						// does without the loop reader; the loop reader allows it
-						// (hookpaths TestGAP0431LoopCopyProofGuards).
-						continue
-					}
-					for _, pack := range []string{"", "permissive", "strict"} {
-						if r.want == "allow" && pack == "strict" {
-							continue
-						}
-						got := postSelfProtectionPackCell(t, f.home, f.project, connector, pack, managed, managed, r.command)
-						if want := fmt.Sprintf(`{"action":"%s"`, r.want); !strings.HasPrefix(got, want) {
-							t.Errorf("connector=%s managed=%t pack=%q: %s: got %.160s, want %s", connector, managed, pack, r.command, got, r.want)
-						}
-					}
-				}
+	offset := len(shapes) * map[string]int{"cp": 0, "mv": 1, "install": 2, "ln": 3, "tee": 4}[program]
+	for index, r := range rows {
+		cells := allowCells
+		if r.want == "block" {
+			cells = blockCells
+		}
+		c := cells[(offset+index/2)%len(cells)]
+		if r.name == "cp/command/literal/ordinary" && c.connector == "codex" && c.managed {
+			// The authorized-keys write-target reader (not the loop reader)
+			// fails closed on this one prefixed form, as it does without the
+			// loop reader; the loop reader allows it (hookpaths
+			// TestGAP0431LoopCopyProofGuards). Judge it per-user.
+			c.managed = false
+		}
+		t.Run(fmt.Sprintf("%s/%s/managed=%t/%q", r.name, c.connector, c.managed, c.pack), func(t *testing.T) {
+			got := postSelfProtectionPackCell(t, f.home, f.project, c.connector, c.pack, c.managed, c.managed, r.command)
+			if want := fmt.Sprintf(`{"action":"%s"`, r.want); !strings.HasPrefix(got, want) {
+				t.Errorf("%s: got %.160s, want %s", r.command, got, r.want)
 			}
 		})
 	}

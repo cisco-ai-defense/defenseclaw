@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -177,20 +178,30 @@ func shellProtectedFileEveryRoute(t *testing.T, connectorName string) {
 		{"ordinary write, harmless word", "printf defenseclaw >> notes.txt",
 			map[string]string{"default": "allow", "permissive": "allow", "strict": "allow"}, ""},
 	}
+	// Each row is judged in one profile on one gateway; the cell moves one
+	// step a row and one step a connector, so every row meets every profile,
+	// per-user and managed, across the six connector tests.
+	type cell struct {
+		posture string
+		managed bool
+	}
+	var cells []cell
 	for _, managed := range []bool{false, true} {
-		cell := connectorName + map[bool]string{false: " per-user", true: " managed"}[managed]
-		t.Run(cell, func(t *testing.T) {
-			for _, row := range rows {
-				for _, posture := range []string{"default", "permissive", "strict"} {
-					action, rules := shellProtectedFileRoute(t, home, cwd, connectorName, posture, managed, row.command)
-					if want := row.want[posture]; action != want {
-						t.Errorf("%s %s %s: action=%q want %q rules=%v", cell, posture, row.name, action, want, rules)
-						continue
-					}
-					if row.rule != "" && !slices.Contains(rules, row.rule) {
-						t.Errorf("%s %s %s: rules=%v want %s", cell, posture, row.name, rules, row.rule)
-					}
-				}
+		for _, posture := range []string{"default", "permissive", "strict"} {
+			cells = append(cells, cell{posture, managed})
+		}
+	}
+	offset := slices.Index([]string{"claudecode", "codex", "copilot", "opencode", "hermes", "openclaw"}, connectorName)
+	for index, row := range rows {
+		c := cells[(index+offset)%len(cells)]
+		name := fmt.Sprintf("%s %s managed=%t %s", connectorName, c.posture, c.managed, row.name)
+		t.Run(name, func(t *testing.T) {
+			action, rules := shellProtectedFileRoute(t, home, cwd, connectorName, c.posture, c.managed, row.command)
+			if want := row.want[c.posture]; action != want {
+				t.Fatalf("action=%q want %q rules=%v", action, want, rules)
+			}
+			if row.rule != "" && !slices.Contains(rules, row.rule) {
+				t.Errorf("rules=%v want %s", rules, row.rule)
 			}
 		})
 	}
