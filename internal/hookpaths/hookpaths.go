@@ -4624,6 +4624,19 @@ func hiddenDirectoryChange(file *syntax.File, home string, depth int) bool {
 	if depth > maxHiddenDirectoryDepth {
 		return true
 	}
+	functions := definedFunctionNames(file)
+	hidden := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if call, ok := node.(*syntax.CallExpr); ok && !hidden {
+			hidden = callHidesDirectoryChange(call, functions, home, depth)
+		}
+		return !hidden
+	})
+	return hidden
+}
+
+// definedFunctionNames is the names of the functions file defines.
+func definedFunctionNames(file *syntax.File) map[string]bool {
 	functions := make(map[string]bool)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil {
@@ -4631,39 +4644,54 @@ func hiddenDirectoryChange(file *syntax.File, home string, depth int) bool {
 		}
 		return true
 	})
-	hidden := false
-	body := func(text string) {
-		inner, parsed := parseShell(text)
-		hidden = hidden || !parsed || hiddenDirectoryChange(inner, home, depth+1)
+	return functions
+}
+
+// callHidesDirectoryChange reports one call of the kind hiddenDirectoryChange
+// counts.
+func callHidesDirectoryChange(call *syntax.CallExpr, functions map[string]bool, home string, depth int) bool {
+	if len(call.Args) == 0 {
+		return false
 	}
-	syntax.Walk(file, func(node syntax.Node) bool {
-		call, ok := node.(*syntax.CallExpr)
-		if hidden || !ok || len(call.Args) == 0 {
-			return !hidden
-		}
-		words := make([]string, len(call.Args))
-		static := make([]bool, len(call.Args))
-		for i, arg := range call.Args {
-			words[i], static[i] = StaticWord(arg, home)
-		}
-		if !static[0] {
-			// A dynamic program word is read elsewhere (known is false).
+	words := make([]string, len(call.Args))
+	static := make([]bool, len(call.Args))
+	for i, arg := range call.Args {
+		words[i], static[i] = StaticWord(arg, home)
+	}
+	if !static[0] {
+		// A dynamic program word is read elsewhere (known is false).
+		return false
+	}
+	body := func(text string) bool {
+		inner, parsed := parseShell(text)
+		return !parsed || hiddenDirectoryChange(inner, home, depth+1)
+	}
+	program := programBase(words[0])
+	switch {
+	case slices.Contains(hiddenDirectoryPrograms, program) || functions[words[0]]:
+		return true
+	case program == "eval":
+		if slices.Contains(static[1:], false) {
 			return true
 		}
-		program := programBase(words[0])
-		switch {
-		case slices.Contains(hiddenDirectoryPrograms, program) || functions[words[0]]:
-			hidden = true
-		case program == "eval":
-			if slices.Contains(static[1:], false) {
-				hidden = true
-			} else {
-				body(strings.Join(words[1:], " "))
-			}
-		default:
-			if text := literalShellBody(program, words, static); text != "" {
-				body(text)
-			}
+		return body(strings.Join(words[1:], " "))
+	default:
+		if text := literalShellBody(program, words, static); text != "" {
+			return body(text)
+		}
+	}
+	return false
+}
+
+// hiddenDirectoryChangeBefore reports a call that hiddenDirectoryChange
+// counts and that ends before offset: only the calls after it can stand in a
+// directory it changed.
+func hiddenDirectoryChangeBefore(file *syntax.File, home string, offset uint) bool {
+	functions := definedFunctionNames(file)
+	hidden := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if call, ok := node.(*syntax.CallExpr); ok && !hidden && call.End().Offset() <= offset {
+			hidden = callHidesDirectoryChange(call, functions, home, 0)
 		}
 		return !hidden
 	})
@@ -4737,6 +4765,14 @@ func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs, nestedC
 // pushd to return to, a top-level program word is not static, or the
 // command has more possible directories than are read.
 func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statements []*syntax.Stmt, dirs []string, known bool) {
+	return topLevelStatementPlaces(file, cwd, home, false)
+}
+
+// topLevelStatementPlaces is topLevelStatementDirectories; hiddenAllowed
+// leaves out the check for a hidden directory change (hiddenDirectoryChange),
+// for a caller that reads only the statements before the first one
+// (hiddenDirectoryChangeBefore).
+func topLevelStatementPlaces(file *syntax.File, cwd, home string, hiddenAllowed bool) (statements []*syntax.Stmt, dirs []string, known bool) {
 	// The calls the statement walk below places; a cd anywhere else keeps
 	// the conservative reading.
 	topLevel := make(map[*syntax.CallExpr]bool)
@@ -4773,7 +4809,7 @@ func topLevelStatementDirectories(file *syntax.File, cwd, home string) (statemen
 		}
 		return true
 	})
-	if !known || hiddenDirectoryChange(file, home, 0) {
+	if !known || !hiddenAllowed && hiddenDirectoryChange(file, home, 0) {
 		return nil, nil, false
 	}
 	// A place is one directory the shell may stand in, with its pushd

@@ -1475,14 +1475,10 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			}
 		}
 		if script, ok := shellScriptOperand(words); ok {
-			if !actionScriptInsideCWD(script, cwd) || len(words) > 2 {
+			if len(words) > 2 {
 				return "nested-shell"
 			}
-			content, read := readIndirectSource(script, cwd)
-			if !read {
-				return "nested-shell"
-			}
-			return actionPosixCommandDecision(content, cwd, home, depth+1)
+			return actionScriptBodyDecision(script, cwd, home, depth, "nested-shell")
 		}
 		return "nested-shell" // stdin, -s or an unrecognized option.
 	}
@@ -1541,14 +1537,10 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 	}
 	switch program {
 	case "source", ".":
-		if len(words) != 2 || words[1] == "" || !actionScriptInsideCWD(words[1], cwd) {
+		if len(words) != 2 || words[1] == "" {
 			return "eval-source"
 		}
-		content, read := readIndirectSource(words[1], cwd)
-		if !read {
-			return "eval-source"
-		}
-		return actionPosixCommandDecision(content, cwd, home, depth+1)
+		return actionScriptBodyDecision(words[1], cwd, home, depth, "eval-source")
 	case "git":
 		return actionGitDecision(words, cwd, home, depth+1, true)
 	case "command", "exec", "busybox", "time", "nohup":
@@ -1776,6 +1768,39 @@ func actionScriptInsideCWD(script, cwd string) bool {
 	path := OperandPath(script, cwd)
 	resolved, ok := ResolveWriteTarget(path)
 	return ok && (resolved == cwd || strings.HasPrefix(resolved, cwd+string(filepath.Separator)))
+}
+
+// readActionScript reads the script operand of a source, dot or shell
+// command: the file the system opens for the name, whatever folder it lies
+// in and however the name spells it (relative, ~ or $HOME expanded, a full
+// path, folder links on the way). A name that reaches into the working
+// folder is read from it first; any other name is read from the root of its
+// volume. The hook client runs as the user, so it is the one reader that
+// opens a script in the user home or beside the project for a managed
+// gateway that cannot (rel-1-0-9:GAP-1035, GAP-1038, GAP-1039).
+func readActionScript(script, cwd string) (string, bool) {
+	if actionScriptInsideCWD(script, cwd) {
+		if content, read := readIndirectSource(script, cwd); read {
+			return content, true
+		}
+	}
+	return readIndirectSourceAnywhere(script, cwd)
+}
+
+// actionScriptBodyDecision is the decision on the body of the script a source,
+// dot or shell command names. A body that writes a protected file is judged
+// wherever the script lies. A body that is not read, and an ordinary body of
+// a script outside the working folder, stay the unproven class the audit
+// records for it (unproven).
+func actionScriptBodyDecision(script, cwd, home string, depth int, unproven string) string {
+	content, read := readActionScript(script, cwd)
+	if !read {
+		return unproven
+	}
+	if class := actionPosixCommandDecision(content, cwd, home, depth+1); class != "" || actionScriptInsideCWD(script, cwd) {
+		return class
+	}
+	return unproven
 }
 
 func actionWrappedDecision(program string, words []string, cwd, home string, depth int) string {

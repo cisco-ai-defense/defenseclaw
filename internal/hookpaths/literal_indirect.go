@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -16,7 +17,8 @@ import (
 
 const maxIndirectSourceBytes = 16 << 10
 
-// readIndirectSource reads only one regular file under the caller's cwd.
+// readIndirectSource reads only one regular file under cwd (the volume root,
+// for readIndirectSourceAnywhere).
 // These reads occur only for an explicit source, make, or AWK -f command.
 func readIndirectSource(name, cwd string) (string, bool) {
 	if !filepath.IsAbs(cwd) || name == "" || strings.ContainsAny(name, "\x00\r\n") {
@@ -24,7 +26,15 @@ func readIndirectSource(name, cwd string) (string, bool) {
 	}
 	relative := name
 	if filepath.IsAbs(name) {
-		prefix := filepath.Clean(cwd) + string(filepath.Separator)
+		// A drive path spelled with forward slashes (C:/Users/..., or /c/...
+		// mapped to c:/...) is the same file as its backslash spelling; the
+		// prefix test below is on the text. Separators change, no component
+		// is cleaned, so link/.. keeps its meaning.
+		name = filepath.FromSlash(name)
+		prefix := filepath.Clean(cwd)
+		if !os.IsPathSeparator(prefix[len(prefix)-1]) {
+			prefix += string(filepath.Separator)
+		}
 		if !strings.HasPrefix(name, prefix) {
 			return "", false
 		}
@@ -44,6 +54,28 @@ func readIndirectSource(name, cwd string) (string, bool) {
 	}
 	noteBodyLinkLimit(err)
 	return readIndirectSourceIn(root, relative, before, err)
+}
+
+// readIndirectSourceAnywhere reads the regular file a script operand names as
+// the system opens it, wherever it lies: a name relative to cwd is joined to
+// it unchanged (a .. climbs the physical parent, as the shell does), and the
+// read starts at the root of the volume the path is on, so a script beside
+// the project or in the user home is read as one in the project is. It is
+// the same bounded read (a regular file of at most maxIndirectSourceBytes; a
+// link past the system bound or a share that does not answer is an unread
+// body).
+func readIndirectSourceAnywhere(name, cwd string) (string, bool) {
+	if !filepath.IsAbs(cwd) || name == "" || strings.ContainsAny(name, "\x00\r\n") {
+		return "", false
+	}
+	if runtime.GOOS == "windows" {
+		name = actionMSYSDrivePath(name)
+	}
+	path := name
+	if !filepath.IsAbs(path) {
+		path = joinPathElement(cwd, name)
+	}
+	return readIndirectSource(path, filepath.VolumeName(path)+string(filepath.Separator))
 }
 
 // readIndirectSourceIn reads relative below root once its Lstat answered.
@@ -111,7 +143,7 @@ func literalSourceFileOperands(words []string, cwd, home string, depth int) []st
 	if depth >= 4 || len(words) != 2 {
 		return nil
 	}
-	content, ok := readIndirectSource(words[1], cwd)
+	content, ok := readActionScript(words[1], cwd)
 	if !ok {
 		return nil
 	}

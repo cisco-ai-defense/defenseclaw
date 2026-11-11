@@ -328,6 +328,14 @@ func promotedArtifactCandidates(facts actionfacts.Facts) []promotedArtifactCandi
 			continue
 		}
 		resolved = filepath.Clean(resolved)
+		if opened, stepsUp := promotedArtifactOpenedPath(
+			path.Value, facts.CWD, facts.ActiveHome, promotedArtifactAfterDirectoryChange(facts, command),
+		); stepsUp {
+			if opened == "" {
+				continue
+			}
+			resolved = opened
+		}
 		if !promotedArtifactPathIsLocal(resolved) {
 			continue
 		}
@@ -522,6 +530,58 @@ func promotedArtifactCandidateKey(candidate promotedArtifactCandidate) string {
 		key = strings.ToLower(key)
 	}
 	return key
+}
+
+// promotedArtifactOpenedPath is the file the system opens for a script
+// operand whose spelling steps up (..) after a name. The path fact cleans such
+// a spelling as text, but a folder link on the way is followed before the
+// step (link/../x.sh is the parent of the folder the link leads to), so the
+// cleaned spelling can name another file than the one that runs. stepsUp is
+// false for every other operand, which keeps the fact path; opened is empty
+// when the system opens no file for the spelling (or the spelling needs an
+// expansion that is not known here). Windows resolves .. as text before it
+// follows a link, so its fact is already the file opened.
+func promotedArtifactOpenedPath(value, cwd, home string, moved bool) (opened string, stepsUp bool) {
+	if runtime.GOOS == "windows" || !slices.Contains(strings.Split(value, "/"), "..") {
+		return "", false
+	}
+	if value == "~" || strings.HasPrefix(value, "~/") {
+		if !filepath.IsAbs(home) {
+			return "", true
+		}
+		value = strings.TrimRight(home, "/") + value[1:]
+	}
+	if strings.Contains(value, "$") {
+		return "", true
+	}
+	if !filepath.IsAbs(value) {
+		if !filepath.IsAbs(cwd) || moved {
+			return "", true
+		}
+		value = strings.TrimRight(cwd, "/") + "/" + value
+	}
+	// The system answers first: a pathname it refuses (more links than it
+	// follows in one name, a folder it cannot search) opens no script,
+	// while EvalSymlinks follows many more links than the system does.
+	if _, err := os.Stat(value); err != nil {
+		return "", true
+	}
+	physical, err := filepath.EvalSymlinks(value)
+	if err != nil {
+		return "", true
+	}
+	return physical, true
+}
+
+// promotedArtifactAfterDirectoryChange reports that command runs after a
+// command of the action that may have changed the directory a relative name
+// resolves against. The facts keep the folder the hook started in, so the
+// file such a name opens is not known here; the hook client and the gateway
+// reader of the placed statements judge it in the folder it runs in.
+func promotedArtifactAfterDirectoryChange(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	return slices.ContainsFunc(facts.Commands, func(earlier actionfacts.CommandFact) bool {
+		return earlier.ID < command.ID && actionfacts.ChangesShellDirectory(earlier)
+	})
 }
 
 func promotedArtifactPathIsLocal(path string) bool {

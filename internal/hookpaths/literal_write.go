@@ -150,6 +150,24 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 			}
 		}
 	}
+	// A call is read where it runs: the effective directory goes into the
+	// launcher descent (a shell -c body, eval), so a script the body names is
+	// the file of that name where the call stands, not in the folder the hook
+	// started in. Where the call runs in no other folder, the starting folder
+	// is the only reading (rel-1-0-9:GAP-1038).
+	placed := newPlacedCalls(file, command, cwd, home)
+	programOperands := func(words []string, stmt *syntax.Stmt, call *syntax.CallExpr, environment actionValues) []string {
+		readFiles := len(file.Stmts) == 1
+		dirs := placed.of(call)
+		if len(dirs) == 1 && dirs[0] == cwd {
+			return literalProgramOperandsKnown(words, stmt, cwd, home, depth, readFiles, environment, include)
+		}
+		var names []string
+		for _, dir := range dirs {
+			names = append(names, literalProgramOperandsKnown(words, stmt, dir, home, depth, readFiles, environment, include)...)
+		}
+		return names
+	}
 	var knownValues map[*syntax.Word]string
 	knownValuesRead := false
 	var shadow *knownShadow
@@ -280,7 +298,7 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 					}
 				}
 				if unknown {
-					for _, name := range literalProgramOperandsKnown(words, stmt, cwd, home, depth, len(file.Stmts) == 1, initial, include) {
+					for _, name := range programOperands(words, stmt, call, initial) {
 						if samePathName(OperandPath(name, cwd), probe) {
 							addCall(probe)
 							break
@@ -361,7 +379,7 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 						// Interpreter arguments after fixed code do not change that
 						// code. Keep its write operands even though argv is dynamic.
 						if i > 0 && fixedInterpreterCodePrefix(words[:i]) {
-							for _, name := range literalProgramOperandsKnown(words[:i], stmt, cwd, home, depth, len(file.Stmts) == 1, callEnvironment, include) {
+							for _, name := range programOperands(words[:i], stmt, call, callEnvironment) {
 								addCall(name)
 							}
 						} else if i > 0 && awkProgramName(words[0]) {
@@ -369,13 +387,13 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 							// literal print targets stay targets (GAP-2197).
 							if text, rendered := awkRenderedProgram(arg); rendered {
 								prefix := append(append([]string(nil), words[:i]...), text)
-								for _, name := range literalProgramOperandsKnown(prefix, stmt, cwd, home, depth, len(file.Stmts) == 1, callEnvironment, include) {
+								for _, name := range programOperands(prefix, stmt, call, callEnvironment) {
 									addCall(name)
 								}
 							}
 						} else if include != nil && i > 0 {
 							if _, shell := shellCommandBodyIndex(words[:i]); shell {
-								for _, name := range literalProgramOperandsKnown(words[:i], stmt, cwd, home, depth, len(file.Stmts) == 1, callEnvironment, include) {
+								for _, name := range programOperands(words[:i], stmt, call, callEnvironment) {
 									addCall(name)
 								}
 							}
@@ -425,7 +443,7 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 						}
 					}
 				}
-				names := literalProgramOperandsKnown(words, stmt, cwd, home, depth, len(file.Stmts) == 1, callEnvironment, include)
+				names := programOperands(words, stmt, call, callEnvironment)
 				// A plain cp call lists only its own destination; a literal shell
 				// body (sh -c BODY) lists the own destinations of its cp calls.
 				var own []string
