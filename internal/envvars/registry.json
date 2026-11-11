@@ -5671,6 +5671,26 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_FAKE_GUARD_STATUS",
+      "category": "test_fixture",
+      "purpose": "Makes a copy of the connector test binary answer as the Claude Code hook guard with the given exit status, so the Windows tests can run the registered cmd.exe hook command line under the real command processor.",
+      "default": "unset",
+      "accepted_values": [
+        "integer exit status",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/claudecode_chain_cmd_helper_test.go",
+          "description": "answerAsFakeGuard (called first by TestMain) exits with the status when the binary is started with the wrapped guard subcommand; the cmd.exe wrapper tests set it on the child"
+        }
+      ],
+      "since": "1.0.9"
+    },
+    {
       "name": "DEFENSECLAW_TEST_GRACEFUL_STOP_MARKER",
       "category": "test_fixture",
       "purpose": "Carries the marker used by the authenticated graceful-stop daemon fixture.",
