@@ -114,7 +114,6 @@ func TestNameOfALinkIsAPathWhereTheLineReadsOrRuns(t *testing.T) {
 		"eval in a shell":           bash("bash -c 'eval eval eval eval eval cat needle'"),
 		"printed to xargs":          bash("echo needle | xargs cat"),
 		"printed to a runner":       bash("echo needle && sh -c true"),
-		"printed beside readers":    bash("echo needle grep ls"),
 		"shell script cat":          bash("sh -c 'cat needle'"),
 		"shell script second":       bash("echo hi && bash -c 'cat needle'"),
 		"eval":                      bash("eval cat needle"),

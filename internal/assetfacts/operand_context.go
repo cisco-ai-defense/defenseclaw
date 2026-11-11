@@ -398,7 +398,9 @@ func textRunsReader(text string, depth int, cannotTell bool) bool {
 // word of a command that runs (a call, an argument of eval, trap, time, ...).
 // A function nothing names never runs, so the commands of its body are not
 // commands of the line. A name found only inside the body of a function that
-// is itself not named does not count, so the answer is a fixed point.
+// is itself not named does not count, so the answer is a fixed point. A
+// command that runs a program named by an expansion (reader=f; "$reader") or
+// hands one to eval may call any function: then every function is called.
 func calledFunctions(file *syntax.File) map[string]bool {
 	defined := map[string]bool{}
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -415,6 +417,14 @@ func calledFunctions(file *syntax.File) map[string]bool {
 			case *syntax.FuncDecl:
 				return called[n.Name.Value]
 			case *syntax.CallExpr:
+				if runsByValue(n.Args) {
+					for name := range defined {
+						if !called[name] {
+							called[name] = true
+							changed = true
+						}
+					}
+				}
 				for _, arg := range n.Args {
 					text := readCommandWord(arg).text
 					for _, token := range append(strings.FieldsFunc(text, func(r rune) bool { return strings.ContainsRune(" \t\r\n;|&()<>", r) }), text) {
@@ -429,6 +439,26 @@ func calledFunctions(file *syntax.File) map[string]bool {
 		})
 	}
 	return called
+}
+
+// runsByValue reports whether a simple command runs a program, or a command
+// line, that its words do not spell: its program is an expansion, or it is a
+// wrapper, shell or eval with an expansion among its words.
+func runsByValue(args []*syntax.Word) bool {
+	words := make([]commandWord, len(args))
+	for i, arg := range args {
+		words[i] = readCommandWord(arg)
+	}
+	if len(words) == 0 {
+		return false
+	}
+	if words[0].dynamic {
+		return true
+	}
+	if words[0].isOneOf(runnerWrappers) || words[0].isOneOf(runnerShells) || words[0].isOneOf(evalWord) || words[0].isOneOf(wordSet("trap")) {
+		return slices.ContainsFunc(words[1:], func(word commandWord) bool { return word.dynamic })
+	}
+	return false
 }
 
 // commandWord is one word of a simple command as the parser read it.

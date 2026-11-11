@@ -48,6 +48,14 @@ func TestMentioningALinkNameWithoutReadingItIsNotARead(t *testing.T) {
 		"vector lookup":          bash([]any{"command", "-v", "needle"}),
 		"vector quoted text":     bash([]any{"echo", "cd needle && ls"}),
 		"vector grep pattern":    bash([]any{"grep", "needle", "notes.txt"}),
+		"quoted path":            bash(`echo "needle/SKILL.md"`),
+		"comment":                bash("echo ok # cat needle/SKILL.md"),
+		"grep path pattern":      bash("grep needle/SKILL.md notes.txt"),
+		"reader word printed":    bash("echo cat needle"),
+		"readers printed":        bash("echo needle grep ls"),
+		"vector path pattern":    bash([]any{"grep", "needle/SKILL.md", "notes.txt"}),
+		"vector reader printed":  bash([]any{"echo", "cat", "needle"}),
+		"rg --files, ordinary":   bash("rg --files notes.txt"),
 	}
 	if runtime.GOOS != "windows" {
 		mentions["type"] = bash("type needle")
@@ -63,11 +71,14 @@ func TestMentioningALinkNameWithoutReadingItIsNotARead(t *testing.T) {
 	// The strict tier keeps every word and the body of a function nothing
 	// calls, with and without a reader.
 	for name, input := range map[string]any{
-		"quoted text":    bash(`echo "cd needle && ls"`),
-		"lookup":         bash("command -v needle"),
-		"uncalled body":  bash("f() { cat needle; }"),
-		"uncalled slash": bash("f() { cat needle/SKILL.md; }; echo ok"),
-		"grep pattern":   bash("grep needle notes.txt"),
+		"quoted text":     bash(`echo "cd needle && ls"`),
+		"lookup":          bash("command -v needle"),
+		"uncalled body":   bash("f() { cat needle; }"),
+		"uncalled slash":  bash("f() { cat needle/SKILL.md; }; echo ok"),
+		"grep pattern":    bash("grep needle notes.txt"),
+		"printed reader":  bash("echo cat needle"),
+		"readers printed": bash("echo needle grep ls"),
+		"comment":         bash("echo ok # cat needle/SKILL.md"),
 	} {
 		t.Run("strict reads "+name, func(t *testing.T) {
 			if refs := SkillFolderRefsStrict("Bash", input, home, proj); !reaches(refs, held) {
@@ -107,6 +118,19 @@ func TestMentioningALinkNameWithoutReadingItIsNotARead(t *testing.T) {
 		"write redirect":           bash("echo hi > needle"),
 		"read redirect":            bash("wc -l < needle"),
 		"dynamic program":          bash("$tool needle"),
+		"rg --files":               bash("rg --files needle"),
+		"rg --files after --":      bash("rg --files -- needle"),
+		"rg --files with glob":     bash("rg --files -g SKILL.md needle"),
+		"vector rg --files":        bash([]any{"rg", "--files", "needle"}),
+		"function by variable":     bash(`f() { cat needle/SKILL.md; }; reader=f; "$reader"`),
+		"function by eval":         bash(`f() { cat needle/SKILL.md; }; reader=f; eval "$reader"`),
+		"function by substitution": bash("f() { cat needle/SKILL.md; }; $(echo f)"),
+		"printed path to xargs":    bash("echo needle/SKILL.md | xargs cat"),
+		"printed path substituted": bash("cat $(echo needle/SKILL.md)"),
+		"printed path to a script": bash(`echo "cat needle/SKILL.md" > run.sh; sh run.sh`),
+		"printed by a function":    bash("f() { echo needle/SKILL.md; }; cat $(f)"),
+		"echo redefined":           bash(`echo() { cat "$@"; }; echo needle/SKILL.md`),
+		"program named echo":       bash("./echo needle/SKILL.md"),
 	}
 	if runtime.GOOS == "windows" {
 		reads["type reads a file"] = bash("type needle")
@@ -149,7 +173,7 @@ func TestSearchPatternOperandIsFoundFromTheOptions(t *testing.T) {
 	}
 	for _, text := range []string{
 		"grep -f rules notes.txt", "grep -R needle .", "rg --follow needle .", "grep --fil needle x", "grep $p needle",
-		"echo needle", "cat needle", "grep", "grep -e",
+		"echo needle", "cat needle", "grep", "grep -e", "rg --files needle .", "rg --files -g x needle",
 	} {
 		if got := line(text); len(got) != 0 {
 			t.Errorf("%q: pattern words = %v, want none", text, got)

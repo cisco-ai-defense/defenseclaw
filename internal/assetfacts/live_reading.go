@@ -12,26 +12,42 @@ import (
 )
 
 // A command line is read for the name of a link to a skill folder only where
-// the call can read through it. Four parts of a line run nothing that opens a
+// the call can read through it. Six parts of a line run nothing that opens a
 // file, and a name inside them is not a read in the balanced tiers:
 //
-//   - the body of a function the line defines and never names;
+//   - the body of a function the line defines and never calls (a name held in
+//     a variable can call any function, so then every body counts);
 //   - a lookup (command -v, type), which prints where a program is;
 //   - quoted text that is the argument of a program, because a word that
 //     holds blanks is one word and never a program of its own (echo "cd x");
-//   - the pattern operand of grep and rg, which is text to match.
+//   - the arguments of echo and printf, which print them, when nothing takes
+//     the output as input (a pipe, a command substitution, a redirection to a
+//     file, a function body); a path they spell that leads into a skill
+//     folder through a link is not a read, the folder named by its own path
+//     is still named, and a line that also reads or runs something still
+//     reads a name they hold, as before;
+//   - a comment, which the shell skips;
+//   - the pattern operand of grep and rg, which is text to match (rg --files
+//     has none: all its operands are places to list).
 //
 // Everything else keeps the whole-text name check of operand_context.go. The
 // strict tier reads none of this: it keeps every word.
 
 // liveReading is a command line less the parts above.
 type liveReading struct {
-	// live is the line without the bodies of functions nothing names. Words
-	// with a slash are read from it.
+	// live is the line without the bodies of functions nothing calls, the
+	// comments, the search patterns and the arguments of echo and printf.
+	// Words with a slash are read from it.
 	live string
-	// names is live without the lookups and the search patterns. The name
-	// check reads it.
+	// names is the line without the bodies, the comments, the search patterns
+	// and the lookups. The name check reads it.
 	names string
+	// argv is the argument vector with the elements that are text to match or
+	// to print left empty; nil for a command line.
+	argv []string
+	// printed holds the text echo and printf print, left out of live and argv:
+	// the words of a command line, the elements of a vector.
+	printed []string
 	// reads is set where a live word reads, copies, writes or runs, or a
 	// redirection opens a file.
 	reads bool
@@ -48,7 +64,7 @@ func readLiveLine(line string, argv []string) liveReading {
 		for i, element := range argv {
 			words[i] = commandWord{text: element, names: []string{programName(element)}}
 		}
-		reading := liveReading{live: line, names: line}
+		reading := liveReading{live: line, names: line, argv: argv}
 		if isLookup(words) {
 			reading.names = ""
 			return reading
@@ -59,24 +75,36 @@ func readLiveLine(line string, argv []string) liveReading {
 			masked[i] = ""
 		}
 		reading.names = strings.Join(masked, " ")
+		if printsOnly(words) {
+			for i := 1; i < len(masked); i++ {
+				reading.printed = append(reading.printed, masked[i])
+				masked[i] = ""
+			}
+		}
+		reading.argv = masked
 		return reading
 	}
-	file, ok := shellparse.Parse(line)
+	file, ok := shellparse.ParseWithComments(line)
 	if !ok {
 		whole.reads = holdsReaderWord(textForms(line))
 		return whole
 	}
 	called := calledFunctions(file)
-	var bodies, inert []textSpan
+	redefined := definedFunctions(file)
+	var dead, printed, lookups []textSpan
+	var printedText []string
+	var stack []syntax.Node
 	reads := false
-	syntax.Walk(file, func(node syntax.Node) bool {
+	visit := func(node syntax.Node) bool {
 		switch n := node.(type) {
 		case *syntax.FuncDecl:
 			if called[n.Name.Value] {
 				return true
 			}
-			bodies = append(bodies, textSpan{int(n.Pos().Offset()), int(n.End().Offset())})
+			dead = append(dead, textSpan{int(n.Pos().Offset()), int(n.End().Offset())})
 			return false
+		case *syntax.Comment:
+			dead = append(dead, textSpan{int(n.Hash.Offset()), int(n.Hash.Offset()) + 1 + len(n.Text)})
 		case *syntax.Redirect:
 			reads = reads || !inertRedirect(n)
 		case *syntax.CallExpr:
@@ -88,18 +116,96 @@ func readLiveLine(line string, argv []string) liveReading {
 				words[i] = readCommandWord(arg)
 			}
 			if isLookup(words) {
-				inert = append(inert, textSpan{int(n.Pos().Offset()), int(n.End().Offset())})
+				lookups = append(lookups, textSpan{int(n.Pos().Offset()), int(n.End().Offset())})
 				return false
 			}
 			reads = reads || callReads(words)
 			for _, i := range searchPatterns(words) {
-				inert = append(inert, textSpan{words[i].start, words[i].end})
+				dead = append(dead, textSpan{words[i].start, words[i].end})
+			}
+			if printsOnly(words) && !redefined[words[0].text] && outputGoesNowhere(stack) {
+				for _, word := range words[1:] {
+					printed = append(printed, textSpan{word.start, word.end})
+					if word.start >= 0 && word.end <= len(line) && word.start < word.end {
+						printedText = append(printedText, line[word.start:word.end])
+					}
+				}
 			}
 		}
 		return true
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		keep := visit(node)
+		if keep {
+			stack = append(stack, node)
+		}
+		return keep
 	})
-	live := blankSpans(line, bodies)
-	return liveReading{live: live, names: blankSpans(live, inert), reads: reads}
+	kept := blankSpans(line, dead)
+	return liveReading{live: blankSpans(kept, printed), names: blankSpans(kept, lookups), reads: reads, printed: printedText}
+}
+
+// definedFunctions are the names of the functions a command line defines.
+func definedFunctions(file *syntax.File) map[string]bool {
+	defined := map[string]bool{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.FuncDecl); ok {
+			defined[decl.Name.Value] = true
+		}
+		return true
+	})
+	return defined
+}
+
+// printsOnly reports whether a simple command is echo or printf with words
+// whose value is in the text: it prints them and opens nothing. A path to
+// another program of that name (./echo) is not the builtin.
+func printsOnly(words []commandWord) bool {
+	if len(words) == 0 {
+		return false
+	}
+	switch words[0].text {
+	case "echo", "printf", "/bin/echo", "/usr/bin/echo", "/bin/printf", "/usr/bin/printf":
+	default:
+		return false
+	}
+	for _, word := range words {
+		if word.dynamic {
+			return false
+		}
+	}
+	return true
+}
+
+// outputGoesNowhere reports whether what a command prints is not taken as
+// input to anything that could read through a link. stack holds the nodes
+// above the command, outermost first. The output is taken where it is
+// substituted into another command (a command or process substitution), where
+// it is printed by the body of a function (called where it is not known),
+// where it is redirected to a file that may be read or run later, and where
+// it is piped to another command.
+func outputGoesNowhere(stack []syntax.Node) bool {
+	for i, node := range stack {
+		switch n := node.(type) {
+		case *syntax.CmdSubst, *syntax.ProcSubst, *syntax.FuncDecl:
+			return false
+		case *syntax.Stmt:
+			for _, redirect := range n.Redirs {
+				if !inertRedirect(redirect) {
+					return false
+				}
+			}
+		case *syntax.BinaryCmd:
+			if (n.Op == syntax.Pipe || n.Op == syntax.PipeAll) && i+1 < len(stack) && stack[i+1] == syntax.Node(n.X) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // blankSpans replaces the spans of text with blanks. A span outside the text
@@ -122,6 +228,9 @@ func blankSpans(text string, spans []textSpan) string {
 // is not a program; a program named by an expansion cannot be told and
 // counts.
 func callReads(words []commandWord) bool {
+	if printsOnly(words) {
+		return false
+	}
 	for i, word := range words {
 		switch {
 		case word.dynamic:
@@ -196,6 +305,9 @@ type searchSpec struct {
 	// followShort and followLong make the search follow the links it meets.
 	followShort string
 	followLong  string
+	// noPatternLong make the command search for nothing: every operand is a
+	// place (rg --files lists them).
+	noPatternLong []string
 }
 
 var searchSpecs = map[string]searchSpec{
@@ -212,7 +324,7 @@ var searchSpecs = map[string]searchSpec{
 		otherLong: []string{"after-context", "before-context", "context", "max-count", "glob", "iglob", "type", "type-not",
 			"type-add", "type-clear", "threads", "max-depth", "max-filesize", "max-columns", "replace", "encoding",
 			"ignore-file", "pre", "pre-glob", "sort", "sortr", "path-separator", "context-separator", "colors", "engine"},
-		followShort: "L", followLong: "follow",
+		followShort: "L", followLong: "follow", noPatternLong: []string{"files"},
 	},
 }
 
@@ -298,7 +410,7 @@ func searchPatterns(words []commandWord) []int {
 		case strings.HasPrefix(text, "--"):
 			name, _, attached := strings.Cut(text[2:], "=")
 			switch {
-			case name == spec.followLong:
+			case name == spec.followLong, exact(name, spec.noPatternLong):
 				return nil
 			case exact(name, spec.patternLong):
 				patternGiven = true

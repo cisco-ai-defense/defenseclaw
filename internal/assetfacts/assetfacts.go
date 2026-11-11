@@ -990,6 +990,17 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 	addToken := func(token, dir string, explicit bool) {
 		addRefs(skillFolderRefs(token, home, dir, account), explicit)
 	}
+	// A path that echo or printf prints names the folder only as spelled: the
+	// folder a link on the path leads to is not read by printing it.
+	addPrinted := func(token, dir string, explicit bool) {
+		var direct []FolderRef
+		for _, ref := range skillFolderRefs(token, home, dir, account) {
+			if !ref.Linked {
+				direct = append(direct, ref)
+			}
+		}
+		addRefs(direct, explicit)
+	}
 	add := func(f inputField, text, dir string, explicit bool) {
 		kind := kindOfField(tool, f.key)
 		switch kind {
@@ -1016,13 +1027,18 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 			reading := liveReading{live: line, names: line}
 			if f.argv != nil {
 				line = strings.Join(f.argv, " ")
-				reading = liveReading{live: line, names: line}
+				reading = liveReading{live: line, names: line, argv: f.argv}
 				if !strict && kind == kindCommand {
 					reading = readLiveLine(line, f.argv)
 				}
-				for _, element := range f.argv {
+				for _, element := range reading.argv {
 					if strings.ContainsAny(element, "/\\") {
 						addToken(element, dir, explicit)
+					}
+				}
+				for _, element := range reading.printed {
+					if strings.ContainsAny(element, "/\\") {
+						addPrinted(element, dir, explicit)
 					}
 				}
 			} else {
@@ -1031,6 +1047,11 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 				}
 				for _, word := range slashWords(reading.live) {
 					addToken(word, dir, explicit)
+				}
+				for _, text := range reading.printed {
+					for _, word := range slashWords(text) {
+						addPrinted(word, dir, explicit)
+					}
 				}
 			}
 			if strict || kind == kindOther || reading.reads {
