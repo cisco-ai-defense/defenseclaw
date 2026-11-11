@@ -321,9 +321,10 @@ jobs:
             # A line is a package to test whole, or "<package><TAB><-run regex>"
             # for one part of a package too slow for one shard (internal/hookpaths,
             # GAP-0749; internal/cli and internal/enterprisehooks, which have no
-            # recorded test times, split by test-file size, GAP-1066); the script
-            # fails unless every package, and every test of a split package, is
-            # in exactly one shard.
+            # recorded test times, split by test-file size, GAP-1066). A part
+            # whose regex would not fit one command line comes as several
+            # lines of this shard. The script fails unless every package, and
+            # every test of a split package, is in exactly one shard.
             $selectedLines = @(
               [regex]::Split([string]$selection.StdOut, '\r?\n') |
                 ForEach-Object { $_.Trim() } |

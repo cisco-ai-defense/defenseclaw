@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+import scripts.go_test_shards as go_test_shards
 from scripts.go_test_shards import (
+    bounded_regexes,
     check_exact_cover,
     discover_test_files,
     match_test_files,
@@ -17,6 +19,7 @@ from scripts.go_test_shards import (
     partition_test_files,
     regex_names,
     run_shards,
+    shard_regex,
 )
 
 
@@ -178,6 +181,60 @@ def test_package_mode_splits_a_slow_package_without_test_times_by_file_size(tmp_
     # The benign twin: inside 60% of a shard the package still runs whole.
     light = {"packages": {"example.com/m/pkg": 5.0, **{f"example.com/m/p{index}": 10.0 for index in range(4)}}}
     assert all(not regex for shard in partition_packages(packages, 3, light, root=tmp_path) for _, regex in shard)
+
+
+def test_package_parts_run_in_patterns_that_fit_one_command_line(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/m\n", encoding="utf-8")
+    _write_package(tmp_path)
+    packages = ["example.com/m/pkg"] + [f"example.com/m/p{index}" for index in range(4)]
+    heavy = {"packages": {"example.com/m/pkg": 200.0, **{f"example.com/m/p{index}": 10.0 for index in range(4)}}}
+    tests = sorted(name for _, names in discover_test_files(tmp_path / "pkg") for name in names)
+    whole_plan = partition_packages(packages, 3, heavy, root=tmp_path)
+    # A part longer than the bound runs as several patterns, each inside it,
+    # on the shard of its part, and every test still runs exactly once.
+    monkeypatch.setattr(go_test_shards, "MAX_RUN_PATTERN_CHARS", max(len(shard_regex([name])) for name in tests))
+    shards = partition_packages(packages, 3, heavy, root=tmp_path)
+    patterns = [regex for shard in shards for _, regex in shard if regex]
+    assert len(patterns) > sum(1 for shard in whole_plan for _, regex in shard if regex)
+    assert all(len(regex) <= go_test_shards.MAX_RUN_PATTERN_CHARS for regex in patterns), patterns
+    assert check_exact_cover([regex_names(regex) for regex in patterns], tests) == []
+    for planned, bounded in zip(whole_plan, shards):
+        assert {name for _, regex in planned for name in regex_names(regex)} == {
+            name for _, regex in bounded for name in regex_names(regex)
+        }
+    # The benign twin: parts inside the real bound stay one pattern each.
+    monkeypatch.undo()
+    assert bounded_regexes(tests) == [shard_regex(tests)]
+    assert partition_packages(packages, 3, heavy, root=tmp_path) == whole_plan
+
+
+def test_windows_remaining_package_parts_fit_one_command_line() -> None:
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))
+    prefix = "github.com/defenseclaw/defenseclaw/"
+    excluded = {
+        prefix + path
+        for path in ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")
+    }
+    packages = sorted(set(timings["packages"]) - excluded)
+    workflow = (root / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
+    shard_count = int(re.search(r"\$remainingPackageShardCount = (\d+)", workflow).group(1))
+    shards = partition_packages(packages, shard_count, timings, root=root)
+    # Windows Native CI run 42974860632 (rel/1.0.9 a2ac2452a2): pk5, pk6 and
+    # pk7 could not start their internal/cli part, a -run regex of about
+    # 57,000 characters, past the 32,767 a Windows command line holds. Each
+    # pattern keeps under half of that, which leaves room for go.exe, its
+    # other flags and the test binary it starts.
+    patterns = {package: [] for shard in shards for package, regex in shard if regex}
+    for shard in shards:
+        for package, regex in shard:
+            if regex:
+                assert len(regex) <= 32_767 // 2, (package, len(regex))
+                patterns[package].append(regex_names(regex))
+    assert prefix + "internal/cli" in patterns
+    for package, parts in patterns.items():
+        tests = sorted(name for _, names in discover_test_files(root / package.removeprefix(prefix)) for name in names)
+        assert check_exact_cover(parts, tests) == [], package
 
 
 def test_linux_connector_parts_separate_the_ci_timeout_cluster() -> None:
