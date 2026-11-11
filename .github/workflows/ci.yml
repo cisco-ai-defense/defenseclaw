@@ -1172,7 +1172,7 @@ jobs:
           name: install-smoke-assets
           path: ${{ runner.temp }}/assets
       - name: strace for the processes-per-hook count
-        run: command -v strace || { sudo apt-get update -q && sudo apt-get install -y -q strace; }
+        run: bash scripts/runner-apt-install.sh strace strace
       - name: Install into a throwaway HOME
         run: python3 scripts/perf/dcperf.py provision --assets "$RUNNER_TEMP/assets" --home "$RUNNER_TEMP/perf-home"
       - name: Measure and check the budgets
@@ -1741,7 +1741,8 @@ jobs:
           path: ${{ runner.temp }}/enterprise-install
       - name: Install RPM archive reader on the disposable runner
         shell: bash
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libarchive-tools
+        # The runner image ships rpm, which the check prefers over bsdtar.
+        run: bash scripts/runner-apt-install.sh "rpm|bsdtar" libarchive-tools
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: enterprise-install-windows
