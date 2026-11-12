@@ -23,7 +23,7 @@ func TestGAP0690OpenClawPluginConfigMigration(t *testing.T) {
 		"config": map[string]interface{}{
 			"level":        float64(3),
 			"operatorNote": "note",
-			"mode":         "action",
+			"sidecarPort":  float64(18970),
 			"agent":        map[string]interface{}{"id": "alice", "extra": true},
 			"awsHttp1Shim": "invalid",
 		},
@@ -44,8 +44,8 @@ func TestGAP0690OpenClawPluginConfigMigration(t *testing.T) {
 		"enabled": true,
 		"hooks":   map[string]interface{}{"allowConversationAccess": true},
 		"config": map[string]interface{}{
-			"mode":  "action",
-			"agent": map[string]interface{}{"id": "alice"},
+			"sidecarPort": float64(18970),
+			"agent":       map[string]interface{}{"id": "alice"},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -88,7 +88,7 @@ func TestGAP0690OpenClawPluginConfigAcceptedTwin(t *testing.T) {
 	configPath := filepath.Join(home, "openclaw.json")
 	writeOpenClawJSON(t, configPath, map[string]interface{}{
 		"plugins": map[string]interface{}{"entries": map[string]interface{}{"defenseclaw": map[string]interface{}{
-			"config": map[string]interface{}{"mode": "observe", "agent": map[string]interface{}{"id": "alice"}},
+			"config": map[string]interface{}{"awsHttp1Shim": "off", "agent": map[string]interface{}{"id": "alice"}},
 		}}},
 	})
 	if err := patchOpenClawConfig(configPath, filepath.Join(home, "extensions", "defenseclaw"), false, false, false); err != nil {
@@ -96,7 +96,7 @@ func TestGAP0690OpenClawPluginConfigAcceptedTwin(t *testing.T) {
 	}
 	entry := readOpenClawEntries(t, configPath)["defenseclaw"].(map[string]interface{})
 	if entry["enabled"] != true || !reflect.DeepEqual(entry["config"], map[string]interface{}{
-		"mode": "observe", "agent": map[string]interface{}{"id": "alice"},
+		"awsHttp1Shim": "off", "agent": map[string]interface{}{"id": "alice"},
 	}) {
 		t.Fatalf("accepted plugin config changed: %v", entry)
 	}

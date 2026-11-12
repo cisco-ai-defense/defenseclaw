@@ -69,7 +69,6 @@ func TestOpenClawPluginCredentialRouteTable(t *testing.T) {
 		{http.MethodPost, "/enforce/block"},
 		{http.MethodDelete, "/enforce/block"},
 		{http.MethodDelete, "/enforce/blocked"},
-		{http.MethodGet, "/status"},
 		{http.MethodGet, "/alerts"},
 		{http.MethodPost, "/v1/shutdown"},
 		{http.MethodPost, "/api/v1/connector/enable"},

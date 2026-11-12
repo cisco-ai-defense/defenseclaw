@@ -307,6 +307,9 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 func (c *OpenClawConnector) registerPlugin(opts SetupOpts) error {
 	paths := c.pathsFor(opts)
 	configPath := paths.config
+	if openClawSeparateUser(opts) {
+		return c.registerSeparateUser(opts, paths)
+	}
 	externalDir := paths.external
 	// Check every file setup is about to change before changing any.
 	if err := openClawPreflight(paths, externalDir); err != nil {
@@ -459,9 +462,15 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	paths := c.pathsFor(opts)
 	configPath := paths.config
 	dropRejectedApprovals := OpenClawLacksPluginApprovals(openClawObservedVersion(opts))
-	// One hold covers the restore-or-cleanup decision and its write, so a setup
-	// that starts meanwhile (a gateway start) cannot interleave with it.
-	if err := openClawConfigLocked(configPath, func() error {
+	// In the separate-user layout DefenseClaw never wrote openclaw.json.
+	// Otherwise one hold covers the restore-or-cleanup decision and its
+	// write, so a setup that starts meanwhile (a gateway start) cannot
+	// interleave with it.
+	if openClawSeparateUser(opts) {
+		if err := c.teardownSeparateUser(opts, paths); err != nil {
+			errs = append(errs, err.Error())
+		}
+	} else if err := openClawConfigLocked(configPath, func() error {
 		if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
 			errs = append(errs, fmt.Sprintf("restore openclaw.json backup: %v", err))
 		} else if restored {
@@ -905,6 +914,16 @@ func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 	var residual []string
 
 	paths := c.pathsFor(opts)
+	if openClawSeparateUser(opts) {
+		// openclaw.json belongs to the OpenClaw account; only the published
+		// credential is DefenseClaw state.
+		if tokenFile := strings.TrimSpace(opts.OpenClawPluginTokenFile); tokenFile != "" {
+			if _, err := os.Lstat(tokenFile); err == nil {
+				residual = append(residual, tokenFile+" still exists")
+			}
+		}
+		paths.config = ""
+	}
 	// Check extension directory
 	if _, err := os.Stat(paths.managedPluginDir()); err == nil {
 		residual = append(residual, "extensions/defenseclaw still exists")
@@ -912,7 +931,7 @@ func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 
 	// Check openclaw.json for defenseclaw entries
 	configPath := paths.config
-	if data, err := readConnectorStateFile(configPath); err == nil {
+	if data, err := readConnectorStateFile(configPath); configPath != "" && err == nil {
 		if cfg, err := parseOpenClawConfig(configPath, data); err == nil {
 			if plugins, ok := cfg["plugins"].(map[string]interface{}); ok {
 				if entries, ok := plugins["entries"].(map[string]interface{}); ok {

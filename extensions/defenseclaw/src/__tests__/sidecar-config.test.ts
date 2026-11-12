@@ -33,7 +33,14 @@ vi.mock("node:fs", () => ({
 
 import { readFileSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { loadSidecarConfig, loadOpenClawOutageMode, _resetSidecarConfigCache } from "../sidecar-config.js";
+import {
+  configureSidecarConnection,
+  loadSidecarConfig,
+  loadOpenClawOutageMode,
+  separateUserLayout,
+  setRuntimeSettings,
+  _resetSidecarConfigCache,
+} from "../sidecar-config.js";
 
 const mockReadFileSync = vi.mocked(readFileSync);
 const mockStatSync = vi.mocked(statSync);
@@ -389,5 +396,47 @@ describe("loadSidecarConfig", () => {
       mtime = 2000;
       expect(loadSidecarConfig().token).toBe("1".repeat(64));
     });
+  });
+});
+
+describe("separate-user layout", () => {
+  afterEach(() => {
+    configureSidecarConnection(undefined);
+    setRuntimeSettings(undefined);
+    mockReadFileSync.mockReset();
+  });
+
+  it("takes the address and credential from the plugin config, never config.yaml", () => {
+    mockReadFileSync.mockImplementation((path) => {
+      const p = String(path);
+      if (p === "/etc/defenseclaw/openclaw-plugin.token") return "c".repeat(64) + "\n";
+      throw new Error("must not read " + p);
+    });
+    configureSidecarConnection({
+      tokenFile: "/etc/defenseclaw/openclaw-plugin.token",
+      sidecarHost: "127.0.0.1",
+      sidecarPort: 18990,
+      guardrailPort: 4010,
+    });
+    expect(separateUserLayout()).toBe(true);
+    const cfg = loadSidecarConfig();
+    expect(cfg.baseUrl).toBe("http://127.0.0.1:18990");
+    expect(cfg.guardrailPort).toBe(4010);
+    expect(cfg.token).toBe("c".repeat(64));
+    expect(cfg.hiltEnabled).toBe(false);
+  });
+
+  it("applies the approval settings the gateway reports", () => {
+    mockReadFileSync.mockImplementation(() => "c".repeat(64));
+    configureSidecarConnection({ tokenFile: "/etc/defenseclaw/openclaw-plugin.token" });
+    setRuntimeSettings({ hilt_enabled: true, approval_timeout_s: 90 });
+    const cfg = loadSidecarConfig();
+    expect(cfg.hiltEnabled).toBe(true);
+    expect(cfg.approvalTimeoutS).toBe(90);
+  });
+
+  it("ignores a relative tokenFile", () => {
+    configureSidecarConnection({ tokenFile: "relative/token" });
+    expect(separateUserLayout()).toBe(false);
   });
 });

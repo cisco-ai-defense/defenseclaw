@@ -37,9 +37,14 @@ func TestValidateOpenClawConnector(t *testing.T) {
 		{"external wrong name", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: "/opt/dc/plugin"}, "named defenseclaw"},
 		{"dir without external", OpenClawConnectorConfig{PluginDir: "/opt/dc/defenseclaw"}, "only with plugin_install"},
 		{"token file without account", OpenClawConnectorConfig{PluginTokenFile: "/etc/dc/oc.token"}, "need plugin_account"},
-		{"separate user", OpenClawConnectorConfig{PluginAccount: "openclaw", PluginTokenFile: "/etc/dc/oc.token", PluginTokenGroup: "openclaw"}, ""},
+		{"separate user", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: "/opt/dc/defenseclaw", PluginAccount: "openclaw", PluginTokenFile: "/etc/dc/oc.token", PluginTokenGroup: "openclaw"}, ""},
+		{"separate user managed", OpenClawConnectorConfig{PluginAccount: "openclaw", PluginTokenFile: "/etc/dc/oc.token"}, "needs plugin_install: external"},
+		{"separate user no token file", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: "/opt/dc/defenseclaw", PluginAccount: "openclaw"}, "needs plugin_token_file"},
 		{"bad account", OpenClawConnectorConfig{PluginAccount: "a b"}, "not an account"},
 	}
+	prev := openClawGOOS
+	openClawGOOS = "linux"
+	defer func() { openClawGOOS = prev }()
 	for _, tc := range cases {
 		cfg := &Config{}
 		cfg.Connectors.OpenClaw = tc.oc

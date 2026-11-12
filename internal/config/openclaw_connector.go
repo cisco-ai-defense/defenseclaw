@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -81,6 +82,11 @@ func (c *Config) OpenClawExternalPluginDir() string {
 	return filepath.Clean(strings.TrimSpace(c.Connectors.OpenClaw.PluginDir))
 }
 
+// OpenClawSeparateUser reports the separate-user layout: plugin_account set.
+func (c *Config) OpenClawSeparateUser() bool {
+	return c != nil && strings.TrimSpace(c.Connectors.OpenClaw.PluginAccount) != ""
+}
+
 // OpenClawOperatorAdmin reports whether the OpenClaw client requests
 // operator.admin.
 func (c *Config) OpenClawOperatorAdmin() bool {
@@ -89,6 +95,9 @@ func (c *Config) OpenClawOperatorAdmin() bool {
 	}
 	return *c.Connectors.OpenClaw.OperatorAdmin
 }
+
+// openClawGOOS is runtime.GOOS; tests replace it.
+var openClawGOOS = runtime.GOOS
 
 var openClawAccountPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.\\-]{0,63}$`)
 
@@ -117,8 +126,21 @@ func (c *Config) ValidateOpenClawConnector() error {
 	} else if dir != "" {
 		return fmt.Errorf("config: connectors.openclaw.plugin_dir is used only with plugin_install: external")
 	}
-	if a := strings.TrimSpace(oc.PluginAccount); a != "" && !openClawAccountPattern.MatchString(a) {
-		return fmt.Errorf("config: connectors.openclaw.plugin_account %q is not an account name", oc.PluginAccount)
+	if a := strings.TrimSpace(oc.PluginAccount); a != "" {
+		if !openClawAccountPattern.MatchString(a) {
+			return fmt.Errorf("config: connectors.openclaw.plugin_account %q is not an account name", oc.PluginAccount)
+		}
+		if openClawGOOS == "windows" {
+			return fmt.Errorf("config: connectors.openclaw.plugin_account (the separate-user layout) is supported on Linux and macOS; on Windows run OpenClaw and DefenseClaw as one account")
+		}
+		// The OpenClaw account must not be able to change the plugin code,
+		// so the separate-user layout needs the administrator-installed plugin.
+		if mode != OpenClawPluginExternal {
+			return fmt.Errorf("config: connectors.openclaw.plugin_account needs plugin_install: external (an administrator-installed plugin)")
+		}
+		if strings.TrimSpace(oc.PluginTokenFile) == "" {
+			return fmt.Errorf("config: connectors.openclaw.plugin_account needs plugin_token_file, where the plugin account reads its credential")
+		}
 	}
 	tokenFile := strings.TrimSpace(oc.PluginTokenFile)
 	if tokenFile != "" && (!filepath.IsAbs(tokenFile) || filepath.Clean(tokenFile) != tokenFile) {

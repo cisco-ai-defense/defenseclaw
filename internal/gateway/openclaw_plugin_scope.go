@@ -37,6 +37,7 @@ const openClawPluginScope = "openclaw"
 // and ask for scans and policy decisions, but never block, allow, unblock
 // (those write config.yaml), switch connectors, change config or shut down.
 var openClawPluginRoutes = map[string]string{
+	"/status":           http.MethodGet,
 	"/enforce/blocked":  http.MethodGet,
 	"/enforce/allowed":  http.MethodGet,
 	"/audit/event":      http.MethodPost,
@@ -44,11 +45,45 @@ var openClawPluginRoutes = map[string]string{
 	"/scan/result":      http.MethodPost,
 	"/v1/plugin/scan":   http.MethodPost,
 	"/api/v1/scan/code": http.MethodPost,
+	openClawRuntimePath: http.MethodGet,
 }
+
+// openClawRuntimePath answers the plugin the settings it used to read from
+// config.yaml, which the plugin account cannot read in the separate-user
+// layout.
+const openClawRuntimePath = "/api/v1/openclaw/runtime"
 
 // openClawPluginRoute reports whether method and path are a route the
 // OpenClaw plugin credential may call.
 func openClawPluginRoute(method, path string) bool {
 	want, ok := openClawPluginRoutes[path]
 	return ok && strings.EqualFold(method, want)
+}
+
+// handleOpenClawRuntime returns the guardrail settings of the openclaw
+// connector from the live config.yaml: mode, human approval and its
+// timeout. It holds no secret.
+func (a *APIServer) handleOpenClawRuntime(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config not loaded"})
+		return
+	}
+	mode := "observe"
+	if m := strings.ToLower(cfg.EffectiveGuardrailModeForConnector(openClawPluginScope)); m == "action" || m == "enforce" {
+		mode = "action"
+	}
+	timeout := cfg.Gateway.ApprovalTimeout
+	if timeout <= 0 {
+		timeout = 30
+	}
+	a.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"mode":               mode,
+		"hilt_enabled":       cfg.EffectiveHILTForConnector(openClawPluginScope).Enabled,
+		"approval_timeout_s": timeout,
+	})
 }

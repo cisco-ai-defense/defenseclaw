@@ -4604,7 +4604,9 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 				artifacts = append(artifacts, artifact)
 			}
 		}
-		if oc, ok := conn.(interface{ SetOpenClawPaths(home, config, external string) }); ok {
+		if oc, ok := conn.(interface {
+			SetOpenClawPaths(home, config, external string)
+		}); ok {
 			cfg := s.currentConfig()
 			oc.SetOpenClawPaths(cfg.OpenClawHome(), cfg.OpenClawConfigPath(), cfg.OpenClawExternalPluginDir())
 		}
@@ -7445,19 +7447,22 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		return connector.SetupOpts{}, err
 	}
 	return connector.SetupOpts{
-		DataDir:              cfg.DataDir,
-		CodexOtelEnvironment: cfg.Environment,
-		ConfigHome:           configHome,
-		OpenClawHome:         cfg.OpenClawHome(),
-		OpenClawConfigPath:   cfg.OpenClawConfigPath(),
-		OpenClawPluginDir:    cfg.OpenClawExternalPluginDir(),
-		ProxyAddr:            proxyAddr,
-		APIAddr:              apiAddr,
-		APIToken:             setupTokens.connectorToken,
-		HookAPIToken:         setupTokens.hookToken,
-		HookAPITokenScoped:   setupTokens.hookTokenScoped,
-		GatewayToken:         strings.TrimSpace(apiToken),
-		WorkspaceDir:         cfg.ConnectorWorkspaceDir(),
+		DataDir:                  cfg.DataDir,
+		CodexOtelEnvironment:     cfg.Environment,
+		ConfigHome:               configHome,
+		OpenClawHome:             cfg.OpenClawHome(),
+		OpenClawConfigPath:       cfg.OpenClawConfigPath(),
+		OpenClawPluginDir:        cfg.OpenClawExternalPluginDir(),
+		OpenClawPluginAccount:    strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount),
+		OpenClawPluginTokenFile:  strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenFile),
+		OpenClawPluginTokenGroup: strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenGroup),
+		ProxyAddr:                proxyAddr,
+		APIAddr:                  apiAddr,
+		APIToken:                 setupTokens.connectorToken,
+		HookAPIToken:             setupTokens.hookToken,
+		HookAPITokenScoped:       setupTokens.hookTokenScoped,
+		GatewayToken:             strings.TrimSpace(apiToken),
+		WorkspaceDir:             cfg.ConnectorWorkspaceDir(),
 		// The hooks' outage mode (config.HookOutageFailMode); Secure Client
 		// renders the resolved mode as is (#1163).
 		HookFailMode:             cfg.EffectiveHookOutageFailModeForConnectorAtTier(conn.Name(), policyTier),

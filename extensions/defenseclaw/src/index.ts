@@ -77,7 +77,13 @@ import type {
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
-import { loadOpenClawOutageMode, loadSidecarConfig } from "./sidecar-config.js";
+import {
+  configureSidecarConnection,
+  loadOpenClawOutageMode,
+  loadSidecarConfig,
+  separateUserLayout,
+  setRuntimeSettings,
+} from "./sidecar-config.js";
 import { isLoopbackHost } from "./listener-proof.js";
 import { createFetchInterceptor, MODEL_OUTAGE_WARNING } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
@@ -332,6 +338,7 @@ export default function (api: DefenseClawPluginHost) {
 
   // ─── Runtime: tool call interception ───
 
+  configureSidecarConnection(api.pluginConfig);
   const sidecarConfig = loadSidecarConfig();
   const SIDECAR_API = sidecarConfig.baseUrl;
   if (!isLoopbackHost(sidecarConfig.host)) {
@@ -341,9 +348,12 @@ export default function (api: DefenseClawPluginHost) {
       `[defenseclaw] gateway.host ${sidecarConfig.host} is not a loopback address: the plugin sends nothing to it, so tool checks are blocked`,
     );
   }
-  const INSPECT_TIMEOUT_MS = sidecarConfig.hiltEnabled
-    ? Math.max(2_000, (sidecarConfig.approvalTimeoutS + 5) * 1_000)
-    : 2_000;
+  // Read per call: in the separate-user layout the approval settings arrive
+  // from the gateway after registration (setRuntimeSettings).
+  const inspectTimeoutMs = (): number => {
+    const live = loadSidecarConfig();
+    return live.hiltEnabled ? Math.max(2_000, (live.approvalTimeoutS + 5) * 1_000) : 2_000;
+  };
 
   let identityCache: BootstrapPluginIdentityResult | undefined;
   let pluginAgentExtras: { name?: string; policyId?: string } = {};
@@ -387,6 +397,18 @@ export default function (api: DefenseClawPluginHost) {
     { daemonUrl: sidecarConfig.baseUrl },
     daemonClient,
   );
+
+  // Separate-user layout: config.yaml is not readable from this account, so
+  // the approval settings come from the gateway, refreshed every minute.
+  if (separateUserLayout()) {
+    const refreshRuntime = () =>
+      daemonClient.runtime().then((res) => {
+        if (res.ok && res.data) setRuntimeSettings(res.data);
+      }).catch(() => {});
+    void refreshRuntime();
+    const timer = setInterval(refreshRuntime, 60_000);
+    timer.unref?.();
+  }
 
   // ─── Health monitor ───
   // Polls the sidecar /status endpoint and warns when protection is down.
@@ -543,7 +565,7 @@ export default function (api: DefenseClawPluginHost) {
     // gateway, and its verdict comes back on that connection (GAP-0594). The
     // budget counts from the proven connection, so the proof does not use it.
     const res = await daemonClient.postRaw("/api/v1/inspect/tool", bodyPayload, {
-      timeoutMs: INSPECT_TIMEOUT_MS,
+      timeoutMs: inspectTimeoutMs(),
       correlation: { runId: toolCtx?.runId, sessionId },
     });
     if (res.status === 0) {

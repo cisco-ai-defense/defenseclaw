@@ -40,20 +40,6 @@ interface SidecarConfig {
   guardrailPort: number;
   approvalTimeoutS: number;
   hiltEnabled: boolean;
-  /**
-   * Mirror of guardrail.mode from ~/.defenseclaw/config.yaml. Values
-   * recognised by the host enforcement code are:
-   *   - "observe" (default): inspection failures fall open (legacy
-   *     behaviour, used in development).
-   *   - "action" / "enforce": inspection failures fail CLOSED. The
-   *     extension MUST NOT silently allow tool calls when the sidecar
-   *     is unreachable, returns 401/403/413, times out, or returns
-   *     malformed JSON (finding "Tool inspection fails open
-   *     on sidecar errors").
-   * Anything else is treated as observe to preserve the existing
-   * conservative default for unknown values.
-   */
-  enforcementMode: "observe" | "action";
 }
 
 let cached: SidecarConfig | undefined;
@@ -79,7 +65,91 @@ function resolveDefenseClawHome(): string {
  * rotation rewrite the credential while OpenClaw keeps running, and a
  * stale one fails every sidecar call (GAP-2286).
  */
+/**
+ * The separate-user layout: the OpenClaw account cannot read the DefenseClaw
+ * data folder, so plugins.entries.defenseclaw.config names the gateway
+ * address and the published credential (tokenFile), and the guardrail
+ * settings come from GET /api/v1/openclaw/runtime (setRuntimeSettings).
+ */
+interface SidecarConnection {
+  tokenFile: string;
+  host: string;
+  apiPort: number;
+  guardrailPort: number;
+}
+
+let connection: SidecarConnection | undefined;
+let runtimeSettings = { hiltEnabled: false, approvalTimeoutS: 30 };
+
+/** Configure the separate-user layout from api.pluginConfig (no tokenFile: off). */
+export function configureSidecarConnection(pluginConfig: unknown): void {
+  const pc = (pluginConfig ?? {}) as Record<string, unknown>;
+  const tokenFile = typeof pc["tokenFile"] === "string" ? pc["tokenFile"] : "";
+  if (!tokenFile || !isAbsolute(tokenFile)) {
+    connection = undefined;
+  } else {
+    const num = (v: unknown, d: number) => (typeof v === "number" && v > 0 ? v : d);
+    connection = {
+      tokenFile: normalize(tokenFile),
+      host: typeof pc["sidecarHost"] === "string" && pc["sidecarHost"] ? pc["sidecarHost"] : DEFAULT_HOST,
+      apiPort: num(pc["sidecarPort"], DEFAULT_API_PORT),
+      guardrailPort: num(pc["guardrailPort"], 4000),
+    };
+  }
+  _resetSidecarConfigCache();
+}
+
+/** Whether the plugin runs in the separate-user layout. */
+export function separateUserLayout(): boolean {
+  return connection !== undefined;
+}
+
+/** Apply the answer of GET /api/v1/openclaw/runtime (separate-user layout). */
+export function setRuntimeSettings(answer: unknown): void {
+  const a = (answer ?? {}) as Record<string, unknown>;
+  runtimeSettings = {
+    hiltEnabled: a["hilt_enabled"] === true,
+    approvalTimeoutS:
+      typeof a["approval_timeout_s"] === "number" && a["approval_timeout_s"] > 0 ? a["approval_timeout_s"] : 30,
+  };
+  _resetSidecarConfigCache();
+}
+
+function readTokenFile(path: string): string {
+  try {
+    const value = readFileSync(path, "utf8").trim();
+    return PLUGIN_TOKEN_RE.test(value) ? value : "";
+  } catch {
+    return "";
+  }
+}
+
+function tokenFileKey(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${path}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return `${path}:missing`;
+  }
+}
+
 export function loadSidecarConfig(): SidecarConfig {
+  if (connection) {
+    const key = `separate|${tokenFileKey(connection.tokenFile)}|${runtimeSettings.hiltEnabled}|${runtimeSettings.approvalTimeoutS}`;
+    if (cached && key === cachedKey) return cached;
+    const host = connection.host.trim().toLowerCase() === "localhost" ? DEFAULT_HOST : connection.host;
+    cached = {
+      host,
+      apiPort: connection.apiPort,
+      baseUrl: `http://${host}:${connection.apiPort}`,
+      token: readTokenFile(connection.tokenFile),
+      guardrailPort: connection.guardrailPort,
+      approvalTimeoutS: runtimeSettings.approvalTimeoutS,
+      hiltEnabled: runtimeSettings.hiltEnabled,
+    };
+    cachedKey = key;
+    return cached;
+  }
   // Resolve outside the permissive config-file fallback below. An invalid
   // explicit data-root override must fail closed instead of silently reading
   // an unrelated account-level installation.
@@ -93,9 +163,6 @@ export function loadSidecarConfig(): SidecarConfig {
   let approvalTimeoutS = 30;
   let hiltEnabled = false;
   let token = "";
-  // Default to observe to keep current dev behaviour. Production
-  // installs flip this via `guardrail.mode = action` (or `enforce`).
-  let enforcementMode: "observe" | "action" = "observe";
 
   try {
     const cfgPath = join(defenseClawHome, "config.yaml");
@@ -112,13 +179,6 @@ export function loadSidecarConfig(): SidecarConfig {
       const gr = raw["guardrail"] as Record<string, unknown> | undefined;
       if (gr && typeof gr === "object") {
         if (typeof gr["port"] === "number") guardrailPort = gr["port"];
-        if (typeof gr["mode"] === "string") {
-          const m = gr["mode"].toLowerCase();
-          // "action" and "enforce" are accepted aliases for the
-          // fail-closed behaviour. Anything else (including the legacy
-          // empty string) stays in observe.
-          enforcementMode = m === "action" || m === "enforce" ? "action" : "observe";
-        }
         const hilt =
           (gr["hilt"] as Record<string, unknown> | undefined) ??
           (gr["hitl"] as Record<string, unknown> | undefined);
@@ -145,7 +205,6 @@ export function loadSidecarConfig(): SidecarConfig {
     guardrailPort,
     approvalTimeoutS,
     hiltEnabled,
-    enforcementMode,
   };
   cachedKey = key;
   return cached;
@@ -171,12 +230,7 @@ function configFilesKey(defenseClawHome: string): string {
  * "" when it is missing or not a 64-character hex token.
  */
 function readPluginToken(defenseClawHome: string): string {
-  try {
-    const value = readFileSync(join(defenseClawHome, PLUGIN_TOKEN_FILE), "utf8").trim();
-    return PLUGIN_TOKEN_RE.test(value) ? value : "";
-  } catch {
-    return "";
-  }
+  return readTokenFile(join(defenseClawHome, PLUGIN_TOKEN_FILE));
 }
 
 /** Clear cached config (for testing). */

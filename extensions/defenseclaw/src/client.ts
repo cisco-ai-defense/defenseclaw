@@ -185,6 +185,11 @@ export class DaemonClient {
     return this.post<void>("/scan/result", result);
   }
 
+  /** Guardrail settings for the separate-user layout (GET /api/v1/openclaw/runtime). */
+  async runtime(): Promise<ApiResponse<Record<string, unknown>>> {
+    return this.get<Record<string, unknown>>("/api/v1/openclaw/runtime");
+  }
+
   async listBlocked(): Promise<ApiResponse<BlockEntry[]>> {
     return this.get<BlockEntry[]>("/enforce/blocked");
   }

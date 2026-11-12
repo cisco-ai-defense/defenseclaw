@@ -93,6 +93,14 @@ type SetupOpts struct {
 	// and registers but never writes or deletes. Empty means the managed
 	// plugin under <OpenClawHome>/extensions/defenseclaw.
 	OpenClawPluginDir string
+	// OpenClawPluginAccount, OpenClawPluginTokenFile and
+	// OpenClawPluginTokenGroup are the separate-user layout
+	// (connectors.openclaw.plugin_account, plugin_token_file,
+	// plugin_token_group): OpenClaw runs as another account, owns
+	// openclaw.json, and reads the plugin credential from the token file.
+	OpenClawPluginAccount    string
+	OpenClawPluginTokenFile  string
+	OpenClawPluginTokenGroup string
 	// HookAPIToken is the least-privilege credential written beside generated
 	// hook artifacts. Proxy connectors keep APIToken as the master credential
 	// for their in-process/plugin integration while their generic shell hooks
