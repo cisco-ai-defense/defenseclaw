@@ -112,7 +112,7 @@ Gateway replicas hold no state, so a finding that spans several calls needs one 
 
 - **The agent.** Substrate issues each agent its own certificate and, on request, signed tokens. DefenseClaw trusts only the token Substrate's egress gateway adds. Events carry Substrate's actor UID (`ate.actor.uid`), so DefenseClaw and Substrate records line up. The agent identity (`agt-...`) is derived from the cluster, the person (or the atespace for an unattended workload) and the connector, so a fork is a new sandbox under the same agent.
 - **The person.** When the DefenseClaw launcher starts the agent, the cluster gateway verifies the person's OIDC token and registers the actor with that person **before** it answers. In enterprise, team atespaces only let DefenseClaw create actors, so the registration can't be forged. Actors started some other way are attributed to their atespace and template only.
-- **The relay.** To attach to an actor, the launcher asks the admin listener for a short-lived session token for one person and one actor, then reaches the relay through Substrate's router with a client certificate. The gateway verifies the token for the calling actor only.
+- **The relay.** To attach to an actor, the launcher opens a WebSocket (or a long-poll fallback) to the gateway's admin listener. The gateway authenticates the person with OIDC or the Kubernetes identity, checks they own the actor (or are an administrator, audited as themselves), and proxies to the actor's relay through Substrate's router with its own in-cluster identity. The relay accepts only a short-lived session token for that person and actor. The launcher never dials the router and holds no router certificate.
 
 ## Suspend, resume, undo, fork
 

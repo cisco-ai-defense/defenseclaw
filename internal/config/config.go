@@ -3356,11 +3356,15 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: openshell: %w", settingErrorAt("openshell", err))
 	}
-	if err := cfg.Substrate.Validate(); err != nil {
+	subErr := cfg.Substrate.Validate()
+	if subErr == nil {
+		subErr = cfg.Substrate.ValidateManaged(managed.IsManagedEnterprise(cfg.DeploymentMode))
+	}
+	if subErr != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "substrate_invalid")
 		}
-		return nil, fmt.Errorf("config: substrate: %w", settingErrorAt("substrate", err))
+		return nil, fmt.Errorf("config: substrate: %w", settingErrorAt("substrate", subErr))
 	}
 	if err := cfg.validateSubstrateProfiles(); err != nil {
 		if ReportConfigLoadError != nil {

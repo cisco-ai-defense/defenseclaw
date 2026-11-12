@@ -54,7 +54,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/hook":
             if not HOOK_URL:
                 return self._send(500, "STUB_HOOK_URL is not set\n")
-            req = urllib.request.Request(HOOK_URL, data=body, method="POST", headers={"Content-Type": "application/json"})
+            # What the actor hook helper of the kit sends: the hook event wrapped in the envelope, with the
+            # placeholder header that egress replaces with the actor's JWT.
+            envelope = json.dumps({
+                "v": "1", "connector": "claudecode", "event": "PreToolUse", "mode": "interactive",
+                "kit_version": "0.0.0-e2e", "payload": json.loads(body or b"{}"),
+            }).encode()
+            req = urllib.request.Request(HOOK_URL, data=envelope, method="POST", headers={
+                "Content-Type": "application/json",
+                "x-defenseclaw-actor": "placeholder",
+                "X-DefenseClaw-Client": "actor-hook/0.0.0-e2e",
+                "X-DefenseClaw-Kit-Version": "0.0.0-e2e",
+                "X-DefenseClaw-Hook-Event": "PreToolUse",
+            })
             try:
                 with urllib.request.urlopen(req, timeout=25) as resp:
                     return self._send(resp.status, resp.read(), "application/json")
