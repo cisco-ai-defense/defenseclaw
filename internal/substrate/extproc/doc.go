@@ -48,6 +48,12 @@
 //     or model traffic. MCP JSON-RPC tools/call bodies go through the same
 //     tool rules the hooks use (ToolJudge).
 //
+// Known limit (GAP-0067): upstream #3817 allows a single override mode, which
+// buffers the response body too, so an MCP server answering an inspected
+// tools/call with an event stream reaches the actor only when the stream
+// ends. The upstream ask for a second allowed mode (response body NONE) is
+// drafted by lane U; overrideMode changes to it once a release has it.
+//
 // A refusal is an ImmediateResponse 403 with the DefenseClaw JSON body
 // (egress.BlockResponse); an allowed request gets x-defenseclaw-decision.
 // Every allowed or refused request becomes an observed_egress step

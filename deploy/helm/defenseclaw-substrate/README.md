@@ -75,5 +75,14 @@ Every value is checked by `values.schema.json`. The main ones:
   (for example WireGuard) where that matters.
 - **Use the full Service names.** An actor resolves only the names in its egress policy, so policies and agent
   settings use `defenseclaw-actor.<namespace>.svc.cluster.local`, never the short `.svc` name.
+- **MCP body inspection needs an egress filter with mode override, and buffers the answer too.** Body mode needs
+  Agent Substrate's egress filter rendered with `--experimental-additional-egress-extproc-allow-mode-override`
+  (upstream #3817). Stock v1.0.0 ignores it: set `config.substrate.extproc.body_inspection: off` there (MCP calls are
+  then checked on their headers only, and each one is recorded `body_not_inspected`). With `auto` on stock, every MCP
+  request with a body is recorded `body_not_received` as an alert. #3817 allows one override mode, which buffers the
+  response body as well, so a Streamable HTTP MCP server that answers a `tools/call` with an event stream reaches the
+  agent only when the stream ends, and an answer over Envoy's buffer limit fails. Long-running tools that stream
+  progress should answer with JSON or use the server's GET stream (never buffered). Requests the callout can't
+  inspect (a body over 1 MiB, an event-stream, gRPC or multipart body) are refused when `failure_mode` is `closed`.
 - **NetworkPolicy is a second layer.** Some CNIs apply a policy to a new pod a moment after it starts (kind's kindnet:
   about a second). Every listener authenticates its callers on its own.
