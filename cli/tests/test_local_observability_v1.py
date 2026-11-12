@@ -153,7 +153,7 @@ def test_managed_sandbox_counters_reach_prometheus_without_host_or_account_label
     collector = yaml.safe_load(compat.COLLECTOR.read_text(encoding="utf-8"))
     pipelines = collector["service"]["pipelines"]
     processors = collector["processors"]
-    condition = 'IsMatch(metric.name, "^defenseclaw[.]sandbox[.]managed[.]")'
+    condition = 'IsMatch(metric.name, "^defenseclaw[.](sandbox[.]managed|substrate)[.]")'
 
     assert processors["filter/managed-sandbox-out"]["metric_conditions"] == [condition]
     assert processors["filter/managed-sandbox-only"]["metric_conditions"] == ["not " + condition]

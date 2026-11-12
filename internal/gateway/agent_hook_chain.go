@@ -198,12 +198,12 @@ func hasUnplacedRelativePath(facts actionfacts.Facts) bool {
 }
 
 type toolChainHookFinalization struct {
-	repository   *audit.ToolChainRepository
+	repository   toolChainStore
 	receiptIDs   []string
 	evaluationID string
 	// rootRepository and rootReceiptIDs are the root scope's receipts
-	// (issue #1391), kept in the root-scope tables.
-	rootRepository *audit.ToolChainRepository
+	// (issue #1391, or a Substrate actor's window), kept in the root tables.
+	rootRepository toolChainStore
 	rootReceiptIDs []string
 }
 
@@ -333,15 +333,16 @@ func (a *APIServer) applyAgentHookToolChains(
 		req.ConnectorInstanceID == "" {
 		return resp, finalization
 	}
-	repository, err := a.store.ToolChainRepository()
-	if err != nil {
-		return resp, finalization
-	}
 	// Root scope (issue #1391): nil unless guardrail.chains.root_scope is on
 	// and a trusted connector's root_session_id was honoured. Session ends and
 	// turn boundaries reset only the session scope: the root scope follows
-	// the work across them, bounded by the same event and time windows.
-	rootRepository := a.toolChainRootRepository(ctx, req)
+	// the work across them, bounded by the same event and time windows. A
+	// verified Substrate actor's session and actor windows are on the leader
+	// (toolChainStores).
+	repository, rootRepository, ok := a.toolChainStores(ctx, req)
+	if !ok {
+		return resp, finalization
+	}
 	rawFingerprint := sha256.Sum256(rawBody)
 	inputFingerprint := hex.EncodeToString(rawFingerprint[:])
 	if !lifecycleEligible {

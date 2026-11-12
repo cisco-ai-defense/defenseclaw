@@ -238,5 +238,9 @@ containerSecurityContext:
   capabilities:
     drop: [ALL]
 
+# The memory emptyDir that holds DEFENSECLAW_HOME (the audit database and
+# local state) in every DefenseClaw pod; it counts against the pod's memory.
+homeSizeLimit: 256Mi
+
 podAnnotations: {}
 podLabels: {}

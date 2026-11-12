@@ -1,0 +1,126 @@
+---
+title: How it works
+description: Where DefenseClaw runs in an Agent Substrate cluster, how a tool call, a model call and a web request are checked, and how agent identity, network policy, state and suspend and resume fit together.
+keywords:
+  - Agent Substrate architecture
+  - DefenseClaw egress callout
+  - actor JWT
+  - leader
+---
+
+{/* TODO(substrate): re-check ports, Service names and header names against the merged chart (lanes/a8) and gateway (lanes/a2) before the PR is marked ready. */}
+
+## Where DefenseClaw runs
+
+DefenseClaw doesn't run inside the agent's sandbox. It runs next to Substrate in the cluster, in its own namespace. The agent reaches it the only way an actor can reach anything: through Substrate's egress gateway. This mirrors OpenShell, where DefenseClaw stays on the host and the sandbox calls out to it.
+
+<Flow
+  direction="TB"
+  caption="An Agent Substrate cluster with DefenseClaw. The agent's sandbox has no network of its own: everything leaves through Substrate's egress gateway, which adds a signed agent identity to calls to DefenseClaw and asks the DefenseClaw callout about every other request."
+>
+  <Zone id="actor" label="Actor sandbox (gVisor or microVM)" tone="untrusted">
+    <Node id="agent" kind="agent">{`Coding agent\nClaude Code, Codex, ...`}</Node>
+    <Node id="kit" kind="connector">{`DefenseClaw kit\nhook binary and terminal relay`}</Node>
+  </Zone>
+  <Zone id="ate" label="Agent Substrate (ate-system)" tone="privileged">
+    <Node id="egress" kind="gateway">{`Egress gateway\ndefault deny, adds identity and secrets`}</Node>
+  </Zone>
+  <Zone id="dc" label="DefenseClaw (defenseclaw-system)" tone="restricted">
+    <Node id="gw" kind="gateway">{`Gateway, actor listener\nhooks and guardrail proxy`}</Node>
+    <Node id="cb" kind="policy">{`Egress callout\nchecks each request`}</Node>
+    <Node id="ld" kind="datastore">{`Gateway leader\nchains, intent, asks`}</Node>
+  </Zone>
+  <Node id="net" kind="generic">{`Model providers and the web`}</Node>
+  <Edge from="agent" to="kit" label="runs hooks" />
+  <Edge from="kit" to="egress" label="all traffic" />
+  <Edge from="egress" to="gw" label="hooks, model calls" />
+  <Edge from="egress" to="cb" label="asks about the rest" />
+  <Edge from="gw" to="ld" label="stateful steps" />
+  <Edge from="gw" to="net" label="checked model calls" />
+  <Edge from="egress" to="net" label="if allowed" />
+</Flow>
+
+Separately, the controller decides what each agent may reach at all:
+
+<Flow direction="LR" caption="The controller turns each agent's DefenseClaw profile into Substrate's own network allow list. Substrate enforces it; an agent without one has no network.">
+  <Node id="prof" kind="policy">{`DefenseClaw profile\npack, team, template`}</Node>
+  <Node id="ctl" kind="operator">{`Controller\nrenders the allow list`}</Node>
+  <Node id="api" kind="datastore">{`Substrate control plane\nEgressPolicy per agent`}</Node>
+  <Node id="eg" kind="gateway">{`Egress gateway\nenforces it`}</Node>
+  <Edge from="prof" to="ctl" />
+  <Edge from="ctl" to="api" label="writes" />
+  <Edge from="api" to="eg" label="applies" />
+</Flow>
+
+| Part | What it does |
+|---|---|
+| **Gateway, actor listener** | The same checks as on a laptop: tool-call hooks, model request and reply guardrails, MCP and skill checks, asks. A Deployment with an autoscaler (at least two replicas). Its Service `defenseclaw-actor` is the only DefenseClaw host in an actor's allow list |
+| **Gateway, admin listener** | The launcher, fleet view and policy bundles. A separate Service `defenseclaw-admin` that is never in an allow list, so an actor cannot reach it |
+| **Gateway leader** | One replica holds a lease and the store volume. It keeps the state that has to survive across stateless calls |
+| **Controller** | Watches agents through Substrate's API. For each agent it writes Substrate's network allow list (`EgressPolicy`) from the agent's DefenseClaw profile, **before the agent first runs**. It also checks templates and handles suspend, resume, fork, idle suspend and drift |
+| **Egress callout** | Plugged into Substrate's egress gateway. It sees each web request the agent makes (method, address, headers, and for MCP calls the body) and can refuse it: block lists, data in URLs and headers, sites that need an ask |
+| **Kit in the image** | A small hook binary and a terminal relay, plus the agent's hook settings. It holds no keys and no policy |
+
+## A tool call
+
+<Sequence
+  caption="Claude Code asks DefenseClaw before running a command. The hook sends a placeholder header; Substrate's egress gateway replaces it with a short-lived token that names the agent, so the agent can't pretend to be another one and holds nothing worth stealing."
+  participants={[
+    { id: 'a', label: 'Agent and hook', kind: 'agent' },
+    { id: 'e', label: 'Egress gateway', kind: 'gateway' },
+    { id: 'g', label: 'DefenseClaw', kind: 'gateway' },
+  ]}
+>
+  <Message from="a" to="e" label="hook call, placeholder identity" />
+  <Message from="e" to="g" label="same call, signed agent identity" />
+  <Message from="g" to="g" label="verify identity and live actor, find profile, check" note />
+  <Message from="g" to="e" kind="return" label="allow, block or ask" />
+  <Message from="e" to="a" kind="return" label="verdict" />
+</Sequence>
+
+The gateway believes only the token Substrate adds. Everything else in the request, including the body, session IDs, timestamps and file paths, is a claim from the agent. The token must be unexpired, have the right audience, come from a key the cluster published, and name an actor that is running or resuming with that UID. A worker token, a stale UID or no token gets a `401` with a closed reason and nothing else. The gateway never echoes request headers.
+
+The verdict uses the same code path as a hook on a laptop, so messages, rules and audit records match. If DefenseClaw can't be reached, the hook retries once and then follows the [fail mode](/docs/reference/fail-modes): closed on managed deployments and for unattended runs, open with a warning for interactive agents on default open-source settings.
+
+## A model call
+
+The agent's model address (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and the like) points at the DefenseClaw guardrail proxy through the same Service, on a path per provider. The provider's own address is never in the agent's allow list, so there's no way around the proxy. The proxy works out who is calling from the signed token, applies routing and the guardrails, adds the real key, which lives only in the cluster, forwards the request, and checks the reply. It records usage and cost against the verified actor and person.
+
+## A web request
+
+- **No allow list, no network.** Substrate refuses DNS and connections for an agent without an `EgressPolicy`. An agent DefenseClaw hasn't approved, from an unattested template for example, can't reach anything. Nothing is ever left open while DefenseClaw catches up.
+- **DefenseClaw writes the list.** It is built from the policy pack and the profile. It always includes DefenseClaw itself, and never the model providers. Allowed sites use Substrate's inspected HTTPS rule, so the callout sees each request. Sites an admin explicitly marks as pass-through are not inspected, never carry a secret, and their events say so.
+- **The callout checks each request.** Block-list feeds, secrets in URLs or headers, and hosts that need an ask. For POSTs to MCP servers and other listed hosts it can read the body, up to 1 MiB, to apply tool rules; a larger body is not read and the event says so. Credential headers are redacted in its logs.
+- **Chains.** Each request adds an `observed_egress` step to the actor's tool chain window. The callout may refuse a request whose earlier step in the window was a secret read.
+- **Asks.** A refused site raises an ask in your session. An approval updates the agent's list, and Substrate applies it within seconds; the held request is retried for about ten seconds.
+- **What Substrate blocks anyway.** WebSockets from the actor, proxy tunnels, raw TCP, and UDP other than DNS.
+- **If the callout is down.** Closed in managed mode. Open source can choose; `doctor` is red either way.
+
+## State across stateless calls
+
+Gateway replicas hold no state, so a finding that spans several calls needs one place to live. The leader keeps tool-chain windows, user intent, asks and registrations, and the other replicas forward to it over mutually authenticated calls that are safe to repeat.
+
+- A chain window is the current call plus up to eight earlier ones, for 30 minutes, **counted in running time**: the clock stops while the actor is suspended.
+- Every call lands in two windows, one per session and one per actor, so rotating session IDs can't empty the window.
+- A fork inherits its parent's windows but not its asks. A revert marks a barrier in the window and keeps earlier findings.
+- When the leader moves, the volume reattaches in about 30 seconds. Stateless checks continue meanwhile; stateful steps follow the fail mode, and unattended runs wait and retry.
+- Findings from different actors are correlated in telemetry and detections only, never used as a blocking proof.
+
+## Identity
+
+- **The agent.** Substrate issues each agent its own certificate and, on request, signed tokens. DefenseClaw trusts only the token Substrate's egress gateway adds. Events carry Substrate's actor UID (`ate.actor.uid`), so DefenseClaw and Substrate records line up. The agent identity (`agt-...`) is derived from the cluster, the person (or the atespace for an unattended workload) and the connector, so a fork is a new sandbox under the same agent.
+- **The person.** When the DefenseClaw launcher starts the agent, the cluster gateway verifies the person's OIDC token and registers the actor with that person **before** it answers. In enterprise, team atespaces only let DefenseClaw create actors, so the registration can't be forged. Actors started some other way are attributed to their atespace and template only.
+- **The relay.** To attach to an actor, the launcher asks the admin listener for a short-lived session token for one person and one actor, then reaches the relay through Substrate's router with a client certificate. The gateway verifies the token for the calling actor only.
+
+## Suspend, resume, undo, fork
+
+| What happens | What DefenseClaw does |
+|---|---|
+| The agent suspends, then resumes on another machine | Nothing changes. Its approvals, sessions and audit trail carry on. Before it resumes, the controller checks its profile hasn't changed, and the first hook after resume uses a connection the relay opened in advance |
+| You undo to a checkpoint | Same agent, same approvals. The chain window gets a barrier |
+| Someone starts a new agent from a saved snapshot | A new agent with a new UID and fresh approvals. An approval given to one agent can't be copied by cloning it. Actors made from one golden snapshot share the memory the snapshot captured, including the state of any random number generator in a program that started before it. Kernel randomness and IDs differ per actor. The kit starts nothing before the first resume, and partitions its state on the actor UID |
+| The agent is deleted | Its allow list and registration are removed and a tombstone stays in the audit. The snapshots are removed from the bucket |
+
+## What we rely on Substrate for, and what we don't
+
+We rely on Substrate's sandbox, its egress gateway and its identity certificates. We don't defend against a cluster administrator, a node root user or a sandbox escape. See the [threat model](/docs/substrate/threat-model). The integration is tested against one pinned Substrate version at a time, inside the supported range.

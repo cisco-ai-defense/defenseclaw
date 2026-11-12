@@ -153,9 +153,19 @@ func (c *Client) CheckEgress(ctx context.Context, in EgressRequest) (EgressVerdi
 // calls of anything else use Fallback (the process-local store).
 type IntentStore struct {
 	Client *Client
+	// Namespace separates the contexts of judges with different roles.
+	Namespace string
 	// ActorOf returns the verified actor of a call.
 	ActorOf  func(ctx context.Context) (Actor, bool)
 	Fallback intentstore.Store
+}
+
+// key is the leader's key of a judge's session key.
+func (s *IntentStore) key(key string) string {
+	if s.Namespace == "" {
+		return key
+	}
+	return s.Namespace + "\x00" + key
 }
 
 var _ intentstore.Store = (*IntentStore)(nil)
@@ -184,7 +194,7 @@ func (s *IntentStore) ObservePrompt(ctx context.Context, key, intent string) err
 		}
 		return f.ObservePrompt(ctx, key, intent)
 	}
-	return s.Client.call(ctx, leader.MethodIntentPut, IntentRequest{Actor: a, Op: IntentPrompt, Key: key, Text: intent}, nil)
+	return s.Client.call(ctx, leader.MethodIntentPut, IntentRequest{Actor: a, Op: IntentPrompt, Key: s.key(key), Text: intent}, nil)
 }
 
 // AppendToolCall implements intentstore.Store.
@@ -198,7 +208,7 @@ func (s *IntentStore) AppendToolCall(ctx context.Context, key string, call inten
 		return f.AppendToolCall(ctx, key, call)
 	}
 	var out IntentResponse
-	if err := s.Client.call(ctx, leader.MethodIntentPut, IntentRequest{Actor: a, Op: IntentAppend, Key: key,
+	if err := s.Client.call(ctx, leader.MethodIntentPut, IntentRequest{Actor: a, Op: IntentAppend, Key: s.key(key),
 		Tool: call.Tool, Args: call.Args}, &out); err != nil {
 		return intentstore.Snapshot{}, err
 	}
@@ -221,5 +231,5 @@ func (s *IntentStore) Reset(ctx context.Context, key string) error {
 		}
 		return f.Reset(ctx, key)
 	}
-	return s.Client.call(ctx, leader.MethodIntentPut, IntentRequest{Actor: a, Op: IntentReset, Key: key}, nil)
+	return s.Client.call(ctx, leader.MethodIntentPut, IntentRequest{Actor: a, Op: IntentReset, Key: s.key(key)}, nil)
 }

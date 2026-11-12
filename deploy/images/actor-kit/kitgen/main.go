@@ -106,7 +106,11 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 			keyFiles[p] = b
 		}
 	}
-	ov, err := kit.ActorOverlay(ctx.Artifacts, kit.OverlayOptions{Config: cfg, Home: home, Workdir: workdir, Provider: provider, Model: model})
+	art, err := kit.SubstrateArtifacts(h.Provider, ctx.HarnessVersion, cfg)
+	if err != nil {
+		return err
+	}
+	ov, err := kit.ActorOverlay(art, kit.OverlayOptions{Config: cfg, Home: home, Workdir: workdir, Provider: provider, Model: model})
 	if err != nil {
 		return err
 	}

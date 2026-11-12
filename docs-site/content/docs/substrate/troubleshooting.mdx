@@ -1,0 +1,91 @@
+---
+title: Troubleshooting Agent Substrate
+description: Symptoms, causes and fixes for DefenseClaw on Agent Substrate - 503 and parking, the ask delay, unattended templates, drift and policy conflicts, another callout, version, issuer, bucket and kit skew - and a section written for the agents themselves.
+keywords:
+  - Agent Substrate troubleshooting
+  - defenseclaw substrate doctor
+  - policy_conflict
+  - 503 parking
+---
+
+{/* TODO(substrate): confirm each message, reason code and event name below against the merged code. Messages are quoted from design notes and may differ in wording. */}
+
+Start with `defenseclaw substrate doctor`. It checks the cluster side and says how to fix each failure. Exit codes are in the [reference](/docs/substrate/reference#exit-codes).
+
+## Symptoms
+
+### "cluster full", a 503, or the launcher waits
+
+Substrate parks a request when no worker has room for the actor. The launcher waits, retries with backoff, and then says the cluster is full. Suspend idle actors (`defenseclaw substrate list`, then `delete` the ones you don't need), or add workers to the pool. A golden-snapshot build also takes a worker. Lowering a worker pool's replica count while it hosts a running actor crashes that actor. Revert it with `kubectl ate revert`.
+
+### A request to a new site hangs for several seconds after I approved it
+
+After an approval, DefenseClaw updates the agent's allow list and Substrate applies it. The held request is retried for about ten seconds, so a delay of that order is expected. If it never goes through, run `defenseclaw substrate policy explain` and check that your profile lets you approve (`allow_unblock`).
+
+### My agent can't reach anything
+
+An actor with no allow list has no network. The usual causes:
+
+- **The template isn't attested.** The template was made with plain `kubectl ate`, or its attestation doesn't match. `doctor` lists it with the reason. Rebuild it with `defenseclaw substrate template build`, or `template verify`.
+- **The controller is down.** Existing actors keep their policy; new ones have none. Check `kubectl -n defenseclaw-system get deploy defenseclaw-controller`.
+- **The profile has no matching assignment.** You get `default_profile`. `policy explain` shows which one.
+
+### An unattended run stopped on an ask
+
+Unattended runs deny asks by default. Either allow the site in the profile, or set `unattended_asks` to allow a wait of up to `ask_timeout`, and answer with `defenseclaw substrate approvals`.
+
+### An actor is marked `policy_conflict`
+
+Another writer reverted DefenseClaw's egress policy three times in ten minutes, usually a GitOps tool or a script that owns `EgressPolicy` objects. The controller stopped reverting (it never adds access while doing so) and raised an alert. Find the other writer in the actor's audit records (`drift` and `policy_conflict` lifecycle records name the change), stop it, then delete and recreate the actor.
+
+{/* TODO(substrate): confirm the recovery step with A3. Is there a way to clear policy_conflict without recreating the actor? */}
+
+### `setup` says another callout is registered
+
+Substrate has one slot for an egress callout. DefenseClaw refuses to replace another, because that would turn off someone's checks. Chain them on the other callout's side, or remove it deliberately. `setup` shows what is registered.
+
+### `doctor` says the Substrate version is outside the tested range
+
+DefenseClaw 1.0.10 is tested with Substrate `>=1.0.0 <1.1.0`. Other versions may work but aren't supported. Upgrade or downgrade Substrate with the upstream runbook, then run `setup` and `doctor`.
+
+### `doctor` says two clusters share an issuer
+
+The default actor-token issuer is the same on every cluster. Give each cluster its own with `substrate.identity.issuer`, and redeploy Substrate's API server with the matching `--actor-jwt-issuer`.
+
+### `doctor` warns about the snapshot bucket
+
+Snapshots hold everything an actor held, so the bucket should be encrypted, private, region-correct and have a retention rule. Fix the bucket, or accept the warning knowingly. `delete` removes an agent's snapshots.
+
+### A kit version refusal with a `migrate` hint
+
+The gateway accepts the kit from its own release and the one before. Rebuild the template with `template build`, then `defenseclaw substrate migrate <name>`.
+
+### Hooks fail with "gateway unreachable"
+
+The hook retries once, then follows the fail mode. Check that the `defenseclaw-actor` Service has ready endpoints, that the NetworkPolicy admits Substrate's egress gateway, and that the agent's settings use the full Service name (`defenseclaw-actor.defenseclaw-system.svc.cluster.local`): an actor resolves only the names in its allow list. Some CNIs apply a NetworkPolicy a moment after a pod starts.
+
+### HTTPS calls from tools inside the actor fail certificate checks
+
+Egress inspects HTTPS, so tools must trust Substrate's bundle. Python needs `SSL_CERT_FILE=/run/ate/egress-trust-bundle/trust-bundle.pem`; the directory form wasn't enough. Set it in the actor's environment (the template) if your tools need it.
+
+### A secret placeholder shows up in a tool's output
+
+The placeholder was sent to a host the secret isn't bound to, so nothing was swapped. That is working as intended. Bind the secret to the right host, or stop the tool from echoing it. Hosts that echo tokens back are a known case.
+
+### Credential injection returns 403 "atespace not permitted"
+
+The Kubernetes credential provider hadn't picked up its namespace policy. The chart's bootstrap grants the launcher atespaces; restart the provider (`kubectl -n ate-system rollout restart deploy/k8s-credential-provider`) after any manual change.
+
+## For agents
+
+This section is for a coding agent, or an LLM working for one, that hits a DefenseClaw refusal inside an actor. A person usually reads the same messages.
+
+- **A hook answer says blocked.** Don't retry the same call. The reason names the rule. Choose a different approach, or ask the user.
+- **An egress request returns `403` from the callout.** The body names the rule or feed. Don't try another host to reach the same service, or send the data through a model call or an MCP server. Ask the user to approve the host.
+- **A tool call is waiting on an ask.** Wait. Don't poll in a loop, and don't switch to another tool to get around it. If this is an unattended run, asks are denied by default, so finish what you can without the call and say what you needed.
+- **A `429`.** Back off for `Retry-After` seconds. Don't open parallel connections.
+- **A secret is a placeholder.** `DC_SECRET_...` values are not real. Don't print, store or transform them. The network layer swaps them on the right host.
+- **You have no network at all.** The template wasn't attested, or the policy isn't written yet. Stop and tell the user.
+- **Your terminal is detached.** That is normal. The run continues. Write results to the repository or the task's output, not to your terminal.
+- **You were suspended and resumed.** Your clock may have jumped and your connections may have been reset. Check the time, reopen connections, and don't assume a long-running command is still running.
+- **Never** try to read or change the hook settings, the root-owned managed settings or the kit. They are outside your user, and changes are reported.
