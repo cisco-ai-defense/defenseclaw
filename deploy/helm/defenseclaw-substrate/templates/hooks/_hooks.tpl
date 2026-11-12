@@ -126,9 +126,12 @@ spec:
               - path: namespace
                 fieldRef: {fieldPath: metadata.namespace}
       {{- if .owner }}
+      # Optional: the bootstrap deletes the Secret after use, so on a later
+      # upgrade it is absent and the step leaves the grants as they are.
       - name: owner-token
         secret:
           secretName: {{ $.Values.bootstrap.ownerTokenSecret }}
+          optional: true
           items:
           - {key: token, path: token}
       {{- end }}

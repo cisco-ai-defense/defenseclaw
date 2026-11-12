@@ -9,6 +9,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -108,6 +109,12 @@ func init() {
 			func(ctx context.Context, plan setup.ChartPlan) (setup.StepReport, error) {
 				if substrateChartOwnerToken == "" {
 					return setup.StepReport{Step: "bootstrap"}, fmt.Errorf("--owner-token is required")
+				}
+				if _, err := os.Stat(substrateChartOwnerToken); errors.Is(err, os.ErrNotExist) {
+					// The first bootstrap deleted the owner token Secret; an
+					// upgrade without a new one keeps the grants as they are.
+					return setup.StepReport{Step: "bootstrap", Notes: []string{"no owner token Secret: the access policies " +
+						"were not touched. Doctor checks them; create the Secret again to rewrite them."}}, nil
 				}
 				kube, err := substrateChartKube()
 				if err != nil {
