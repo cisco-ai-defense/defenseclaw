@@ -364,7 +364,10 @@ func emitEndpointHealthV8(
 	if err != nil {
 		return endpointHealthEmitResult{}, err
 	}
-	result := endpointHealthEmitResult{routedToManaged: outcome.ManagedOnly()}
+	// Only projected managed-destination work counts. A managed-only outcome
+	// can carry just an optional failure (for example an unresolved profile)
+	// with no work and no error, and that report was not delivered.
+	var result endpointHealthEmitResult
 	for _, work := range outcome.OptionalWork() {
 		if work.Delivery().DestinationName == config.ObservabilityV8ManagedAIDDestinationName {
 			result.routedToManaged = true

@@ -392,3 +392,52 @@ func TestEndpointHealthReloadClearingEndpointMidReportReachesNoOperatorDestinati
 		}
 	}
 }
+
+// fixedOutcomeEmitter returns outcome for every record after building it.
+type fixedOutcomeEmitter struct{ outcome pipeline.LocalLogOutcome }
+
+func (e fixedOutcomeEmitter) Emit(
+	_ context.Context,
+	_ router.Metadata,
+	build observabilityruntime.EmitBuilder,
+) (pipeline.LocalLogOutcome, error) {
+	if _, err := build(observabilityruntime.EmitContext{}, router.AdmissionOrdinary); err != nil {
+		return pipeline.LocalLogOutcome{}, err
+	}
+	return e.outcome, nil
+}
+
+// A managed-only outcome whose managed projection failed has no work and no
+// error. The report is not delivered: it is recorded as not_routed and the
+// "since last report" cursor is kept for the next delivered report.
+func TestEndpointHealthManagedProjectionFailureIsNotDelivered(t *testing.T) {
+	emitter := fixedOutcomeEmitter{outcome: pipeline.NewManagedOptionalFailureOutcomeForTest(pipeline.OptionalFailureProfile)}
+	report := buildEndpointHealthReport(healthyEndpointHealthSources(), endpointHealthTestMeta)
+	result, err := emitEndpointHealthV8(context.Background(), emitter, report)
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if result.routedToManaged {
+		t.Fatal("a failed managed projection counted as delivered")
+	}
+
+	s := &Sidecar{cfg: endpointHealthManagedConfig(t), health: NewSidecarHealth()}
+	r := newEndpointHealthReporter(s)
+	var written []diagnostics.HealthReportFileContent
+	r.write = func(_ string, content diagnostics.HealthReportFileContent) error {
+		written = append(written, content)
+		return nil
+	}
+	r.emit = func(ctx context.Context, report endpointHealthReport) (endpointHealthEmitResult, error) {
+		return emitEndpointHealthV8(ctx, emitter, report)
+	}
+	before := endpointHealthCursor{previousReportAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), failOpenTotal: 3, failOpenRead: true}
+	r.cursor = before
+	r.report(context.Background(), endpointHealthTriggerScheduled)
+	if r.cursor != before {
+		t.Fatalf("cursor advanced by an undelivered report: %+v", r.cursor)
+	}
+	if len(written) != 1 || written[0].Delivery.Result != "not_routed" {
+		t.Fatalf("delivery = %+v", written)
+	}
+}
