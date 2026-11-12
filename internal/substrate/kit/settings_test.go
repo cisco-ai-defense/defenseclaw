@@ -15,7 +15,7 @@ import (
 
 func overlayFor(t *testing.T, h *harness.Spec, provider string) Overlay {
 	t.Helper()
-	art, err := h.Provider.SandboxArtifacts(connector.SandboxRenderTarget{IngressPort: 18970, FailMode: "closed", AgentVersion: h.DefaultVersion})
+	art, err := SubstrateArtifacts(h.Provider, h.DefaultVersion, DefaultConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,8 @@ func TestClaudeCodeOverlay(t *testing.T) {
 	if doc.Env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != DefaultGatewayURL+"/v1/logs" {
 		t.Fatalf("otel %q", doc.Env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"])
 	}
-	if h := string(file(ov, "/usr/local/lib/defenseclaw/otel-headers.sh")); !strings.Contains(h, `"x-defenseclaw-actor":"placeholder"`) {
+	if h := string(file(ov, "/usr/local/lib/defenseclaw/otel-headers.sh")); !strings.Contains(h, `"x-defenseclaw-actor":"defenseclaw-actor-placeholder"`) ||
+		strings.Contains(h, "Authorization") {
 		t.Fatalf("otel helper %q", h)
 	}
 	var cfg Config
@@ -89,7 +90,7 @@ func TestClaudeCodeOverlay(t *testing.T) {
 		"NODE_EXTRA_CA_CERTS": TrustBundle, "SSL_CERT_FILE": TrustBundle, "TMPDIR": "/sandbox/.cache/tmp",
 		"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_BEDROCK_BASE_URL": DefaultGatewayURL + "/llm/bedrock",
 		"AWS_BEARER_TOKEN_BEDROCK": "placeholder-not-a-secret", "NO_UPDATE_NOTIFIER": "1",
-		"ANTHROPIC_CUSTOM_HEADERS": "x-defenseclaw-actor: placeholder",
+		"ANTHROPIC_CUSTOM_HEADERS": "x-defenseclaw-actor: defenseclaw-actor-placeholder\nX-DefenseClaw-Client: claudecode-llm/1.0",
 	} {
 		if ov.Env[k] != want {
 			t.Errorf("env %s=%q, want %q", k, ov.Env[k], want)
@@ -119,10 +120,10 @@ func TestCodexOverlay(t *testing.T) {
 	mc := string(file(ov, connector.CodexSandboxManagedConfigPath))
 	for _, want := range []string{
 		"notify = ['" + HookBinary + "', '--connector', 'codex', '--notify']",
-		"endpoint = '" + DefaultGatewayURL + "/v1/logs'", "x-defenseclaw-actor = 'placeholder'", "environment = 'substrate'",
+		"endpoint = '" + DefaultGatewayURL + "/v1/logs'", "x-defenseclaw-actor = 'defenseclaw-actor-placeholder'", "environment = 'substrate'",
 		"check_for_update_on_startup = false", "[feedback]\nenabled = false", "model_provider = 'defenseclaw'",
 		"base_url = '" + DefaultGatewayURL + "/llm/openai/v1'", "web_search = 'disabled'", "multi_agent = false",
-		"http_headers = { x-defenseclaw-actor = 'placeholder' }",
+		"http_headers = { x-defenseclaw-actor = 'defenseclaw-actor-placeholder', X-DefenseClaw-Client = 'codex-llm/1.0' }",
 	} {
 		if !strings.Contains(mc, want) {
 			t.Errorf("managed config lacks %q:\n%s", want, mc)
