@@ -26,18 +26,19 @@ func TestGeneratedProducerGroupsAreExactPublicClassificationAuthority(t *testing
 	t.Parallel()
 	ensureGeneratedProducerClassifications()
 
-	if got, want := len(generatedProducerGroups), 256; got != want {
+	if got, want := len(generatedProducerGroups), 257; got != want {
 		t.Fatalf("generated producer groups = %d, want %d", got, want)
 	}
 	if got, want := len(gatewayEventClassifications), 17; got != want {
 		t.Fatalf("gateway classifications = %d, want %d", got, want)
 	}
-	if got, want := len(auditActionClassifications), 239; got != want {
+	if got, want := len(auditActionClassifications), 240; got != want {
 		t.Fatalf("audit classifications = %d, want %d", got, want)
 	}
 	for _, action := range []ProducerKey{
 		"fleet.device.credential_provision_authorized",
 		"fleet.device.decommission_authorized",
+		"connector-hook-account-removed",
 	} {
 		if _, found := AuditActionClassification(action); !found {
 			t.Errorf("missing fleet audit classification for %s", action)

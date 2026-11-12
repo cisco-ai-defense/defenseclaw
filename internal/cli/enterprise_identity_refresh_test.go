@@ -73,7 +73,9 @@ func runIdentityRefreshCommand(t *testing.T, args ...string) (map[string]any, []
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs(args)
+	// An empty list, not nil: nil makes cobra read the test binary's own
+	// command line (GAP-0079).
+	cmd.SetArgs(append([]string{}, args...))
 	err := cmd.Execute()
 	var doc map[string]any
 	if strings.Contains(strings.Join(args, " "), "--json") {

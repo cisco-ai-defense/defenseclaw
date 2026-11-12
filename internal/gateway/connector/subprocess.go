@@ -591,6 +591,11 @@ func writePerUserGatewayHelperRecord(hookDir string) error {
 // under, beside the per-user hooks it renders (cli hookConfigRecordName).
 const perUserConfigRecordName = ".config-record"
 
+// perUserInstallHomeRecordName is the record of the folder that holds the
+// gateway.pid of this account, beside the hooks. It is separate from the config
+// record because DEFENSECLAW_CONFIG can name a file outside the install home.
+const perUserInstallHomeRecordName = ".install-home-record"
+
 // writePerUserConfigRecord records, beside the hooks, the absolute config
 // file this gateway runs under, as config.ConfigPath names it
 // (DEFENSECLAW_CONFIG, else DEFENSECLAW_HOME/config.yaml, else
@@ -621,6 +626,19 @@ func writePerUserConfigRecord(hookDir string) error {
 	}
 	if err := hookRuntimeFileWriter(false)(filepath.Join(hookDir, perUserConfigRecordName), []byte(path+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write hook config record: %w", err)
+	}
+	// Written under the same cold-start guard as the config record.
+	home := os.Getenv("DEFENSECLAW_HOME")
+	if home == "" {
+		if account := userHomeDir(); account != "" {
+			home = filepath.Join(account, ".defenseclaw")
+		}
+	}
+	if !filepath.IsAbs(home) {
+		return nil
+	}
+	if err := hookRuntimeFileWriter(false)(filepath.Join(hookDir, perUserInstallHomeRecordName), []byte(filepath.Clean(home)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write hook install home record: %w", err)
 	}
 	return nil
 }
@@ -822,7 +840,7 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 		HookHomeSH:           homeSH,
 		ScopedToken:          scopedToken,
 		ConnectorName:        strings.ToLower(strings.TrimSpace(connectorName)),
-		HookBinaryPS:         strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
+		HookBinaryPS:         powershellLiteralBody(defenseclawHookBinary()),
 		HookTimeoutMS:        windowsHookAdapterTimeoutMS,
 		CursorHookTimeoutMS:  cursorWindowsHookAdapterTimeoutMS,
 		CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,
@@ -863,6 +881,7 @@ const hookRuntimeRenderMaxBytes = 4 << 20
 type renderedHookRuntimeFile struct {
 	path string
 	body []byte
+	mode os.FileMode
 }
 
 // HookScriptRenderDrift compares the hook runtime files conn's managed Setup
@@ -879,23 +898,84 @@ type renderedHookRuntimeFile struct {
 // recorded digest. Files are read with the caller's credentials, bounded and
 // without following a link.
 func HookScriptRenderDrift(conn Connector, opts SetupOpts) (string, error) {
-	files, err := renderedHookRuntimeFiles(conn, opts)
-	if err != nil {
-		return filepath.Join(opts.DataDir, "hooks"), err
-	}
-	for _, file := range files {
-		installed, err := safefile.ReadRegularFileBounded(file.path, hookRuntimeRenderMaxBytes)
-		if errors.Is(err, os.ErrNotExist) {
-			return file.path, nil
-		}
-		if err != nil {
-			return file.path, err
-		}
-		if !bytes.Equal(installed, file.body) {
-			return file.path, nil
-		}
+	return hookScriptRenderDrift(conn, opts, nil)
+}
+
+// HookScriptRenderDriftWithMetadata also checks the file protection expected
+// by a caller that owns the installed runtime. The standalone Unix guardian
+// supplies this check; other profiles retain HookScriptRenderDrift's byte
+// comparison.
+func HookScriptRenderDriftWithMetadata(
+	conn Connector, opts SetupOpts,
+	check func(string, os.FileMode) (bool, error),
+) (string, error) {
+	return hookScriptRenderDrift(conn, opts, check)
+}
+
+func hookScriptRenderDrift(
+	conn Connector, opts SetupOpts,
+	check func(string, os.FileMode) (bool, error),
+) (string, error) {
+	if drifts := hookScriptRenderDrifts(conn, opts, check, true); len(drifts) > 0 {
+		return drifts[0].Path, drifts[0].Err
 	}
 	return "", nil
+}
+
+// HookRuntimeFileDrift is one hook runtime file that is missing, differs or
+// carries the wrong protection. Err is set when the file could not be read or
+// checked.
+type HookRuntimeFileDrift struct {
+	Path string
+	Err  error
+}
+
+// HookScriptRenderDrifts is HookScriptRenderDriftWithMetadata for a caller
+// that must know every file that drifted, not the first: the guardian counts a
+// restore per file, and a pass that puts one script back while another stays
+// broken has restored the one (GAP-0754). The first entry is the file
+// HookScriptRenderDriftWithMetadata returns.
+func HookScriptRenderDrifts(
+	conn Connector, opts SetupOpts,
+	check func(string, os.FileMode) (bool, error),
+) []HookRuntimeFileDrift {
+	return hookScriptRenderDrifts(conn, opts, check, false)
+}
+
+func hookScriptRenderDrifts(
+	conn Connector, opts SetupOpts,
+	check func(string, os.FileMode) (bool, error),
+	firstOnly bool,
+) []HookRuntimeFileDrift {
+	files, err := renderedHookRuntimeFiles(conn, opts)
+	if err != nil {
+		return []HookRuntimeFileDrift{{Path: filepath.Join(opts.DataDir, "hooks"), Err: err}}
+	}
+	var drifts []HookRuntimeFileDrift
+	for _, file := range files {
+		drift := HookRuntimeFileDrift{Path: file.path}
+		installed, err := safefile.ReadRegularFileBounded(file.path, hookRuntimeRenderMaxBytes)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			drift.Err = err
+		case !bytes.Equal(installed, file.body):
+		default:
+			if check == nil {
+				continue
+			}
+			matches, checkErr := check(file.path, file.mode)
+			if checkErr == nil && matches {
+				continue
+			}
+			drift.Err = checkErr
+		}
+		drifts = append(drifts, drift)
+		if firstOnly {
+			break
+		}
+	}
+	return drifts
 }
 
 // HookRuntimeTokenFile returns the connector-scoped token file the hook
@@ -953,10 +1033,10 @@ func renderedHookRuntimeFiles(conn Connector, opts SetupOpts) ([]renderedHookRun
 		if err != nil {
 			return nil, fmt.Errorf("read hook helper %s: %w", name, err)
 		}
-		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, name), body: content})
+		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, name), body: content, mode: 0o600})
 	}
 	for _, script := range scripts {
-		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, script.name), body: script.body})
+		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, script.name), body: script.body, mode: 0o700})
 	}
 	return files, nil
 }
@@ -2429,13 +2509,31 @@ func readStableManagedRuntimeFileForOwner(
 	maxBytes int64,
 	expectedOwnerSID string,
 ) ([]byte, bool, error) {
+	var data []byte
+	var exists bool
+	err := safefile.RetryTransientRead(func() error {
+		var readErr error
+		data, exists, readErr = readStableManagedRuntimeFileForOwnerOnce(
+			path, label, maxBytes, expectedOwnerSID,
+		)
+		return readErr
+	})
+	if allowMissing && errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	return data, exists, err
+}
+
+// Each attempt binds pathname, opened handle, protection and body together.
+func readStableManagedRuntimeFileForOwnerOnce(
+	path, label string,
+	maxBytes int64,
+	expectedOwnerSID string,
+) ([]byte, bool, error) {
 	if maxBytes <= 0 {
 		return nil, false, fmt.Errorf("%s has an invalid read limit", label)
 	}
 	expected, err := pathidentity.LstatPinned(path)
-	if errors.Is(err, os.ErrNotExist) && allowMissing {
-		return nil, false, nil
-	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -2461,7 +2559,7 @@ func readStableManagedRuntimeFileForOwner(
 	}
 	if opened.Mode()&os.ModeSymlink != 0 || !opened.Mode().IsRegular() ||
 		!os.SameFile(expected, opened) {
-		return nil, false, fmt.Errorf("%s changed identity before open", label)
+		return nil, false, fmt.Errorf("%s changed identity before open: %w", label, safefile.ErrReadIdentityChanged)
 	}
 	if err := validateHookRuntimeOpenedFile(file, label); err != nil {
 		return nil, false, err
@@ -2515,7 +2613,7 @@ func readStableManagedRuntimeFileForOwner(
 		!between.ModTime().Equal(opened.ModTime()) ||
 		!after.ModTime().Equal(opened.ModTime()) ||
 		!bytes.Equal(first, second) {
-		return nil, false, fmt.Errorf("%s changed during bounded read", label)
+		return nil, false, fmt.Errorf("%s changed during bounded read: %w", label, safefile.ErrReadIdentityChanged)
 	}
 	return first, true, nil
 }

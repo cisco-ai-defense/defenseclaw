@@ -288,10 +288,9 @@ def kept_backups_root(data_dir: str) -> str:
 
     The gateway teardown removes the setup receipts there; anything else (a
     copy 1.0.4 saved of an edited OmniGent module) is the user's. So
-    ``uninstall --all`` and Windows Setup (DELETEUSERDATA=1) move it beside
-    the data folder before they remove it: ``<data folder>-removed-connector-
-    backups/<connector>``. Windows Setup uses the same name
-    (removedConnectorBackupsKeptRoot).
+    ``uninstall --all`` moves it beside the data folder before it removes it:
+    ``<data folder>-removed-connector-backups/<connector>``. The enterprise
+    purge uses the same name (removedConnectorBackupsKeptRoot).
     """
     return os.path.normpath(data_dir) + "-removed-connector-backups"
 

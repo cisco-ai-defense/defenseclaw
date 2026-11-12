@@ -114,7 +114,13 @@ func watchedPrefixes(homeDirs []string) []string {
 }
 
 func (s *darwinSource) Events() <-chan Event { return s.buffer.Events() }
-func (s *darwinSource) Coverage() Coverage   { return s.coverage }
+
+// Coverage is what Start found, plus the events the buffer dropped under
+// back-pressure after eslogger delivered them: counted, and never reported
+// before (cowork-1-0-8 GAP-0072).
+func (s *darwinSource) Coverage() Coverage {
+	return WithBufferDrops(s.coverage, s.buffer.Dropped(), SensorEventBuffer)
+}
 
 func (s *darwinSource) Start(ctx context.Context) error {
 	if _, err := os.Stat(esloggerPath); err != nil {
@@ -295,6 +301,7 @@ func (s *darwinSource) translate(message esMessage) (Event, bool) {
 		var payload esEvent
 		if json.Unmarshal(message.Event, &payload) == nil && payload.Exec != nil {
 			event.ImageSHA256, event.ImageVersion = darwinClientImage(payload.Exec.Target.Executable, eventAccount(event))
+			event.ImageDigestState = digestStateOf(event.ImageSHA256, event.ImageVersion)
 		}
 	}
 	return event, ok

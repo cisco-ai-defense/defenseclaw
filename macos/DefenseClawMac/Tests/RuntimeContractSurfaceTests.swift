@@ -26,6 +26,7 @@ enum RuntimeContractSurfaceTests {
         precondition(Set(titles).count == titles.count, "command titles must be unique")
         precondition(titles.contains("setup amp"), "Amp setup command is missing")
         precondition(titles.contains("setup kiro"), "Kiro setup command is missing")
+        precondition(titles.contains("setup cowork"), "Cowork setup command is missing")
         precondition(titles.contains("setup galileo"), "Galileo setup command is missing")
         // `keys set` secret transport (runtime 1.0.0+ documents --value-stdin).
         let keysSetArgv = ["keys", "set", "OPENAI_API_KEY"]
@@ -49,6 +50,7 @@ enum RuntimeContractSurfaceTests {
         let bundledTitles = CommandRegistry.paletteCommands(supportedSetupCommands: []).map(\.title)
         precondition(!bundledTitles.contains("setup amp"), "runtime 0.8.10 must not expose setup amp")
         precondition(!bundledTitles.contains("setup kiro"), "runtimes without Kiro must not expose setup kiro")
+        precondition(!bundledTitles.contains("setup cowork"), "runtimes without Cowork must not expose setup cowork")
         let unknownTitles = CommandRegistry.paletteCommands(supportedSetupCommands: nil).map(\.title)
         precondition(!unknownTitles.contains("setup kiro"), "unknown setup capability must fail closed")
         let futureTitles = CommandRegistry.paletteCommands(supportedSetupCommands: ["amp"]).map(\.title)

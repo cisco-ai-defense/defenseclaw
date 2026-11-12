@@ -319,6 +319,11 @@ func (e *Env) readAttestation() (enterprisehooks.CredentialAttestation, error) {
 	return enterprisehooks.ParseCredentialAttestation(data)
 }
 
+// guardianLedgerNotAttested is the attestation problem of a guardian that has
+// published its authorization ledger and not yet the attestation bound to it
+// (the interval between the two writes of one reconcile).
+const guardianLedgerNotAttested = "the hook guardian's authorization ledger does not match its last credential attestation; the next guardian reconcile publishes both"
+
 // guardianManifestNotReconciled is the attestation problem of a guardian
 // whose last reconcile was of an earlier targets.yaml.
 const guardianManifestNotReconciled = "the hook guardian has not reconciled the current targets.yaml yet; its next reconcile does"
@@ -346,7 +351,7 @@ func (e *Env) attestationProblem(ledger []byte) (problem string, torn bool) {
 		return fmt.Sprintf("the hook guardian's credential attestation is in the older format %d, which does not bind each target; the next guardian reconcile rewrites it", attestation.Version), false
 	}
 	if !attestation.BoundTo(ledger) {
-		return "the hook guardian's authorization ledger does not match its last credential attestation; the next guardian reconcile publishes both", true
+		return guardianLedgerNotAttested, true
 	}
 	manifest, manifestSHA256, err := enterprisehooks.LoadStandaloneManifestWithSHA256(e.P(e.Layout.ManifestPath))
 	if err != nil {

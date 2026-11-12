@@ -208,6 +208,12 @@ func (a ActionState) Summary() string {
 	return strings.Join(parts, ", ")
 }
 
+// AccountMCPActionType is the target type of the actions rows that hold the
+// admission decision of an enrolled account MCP server. A server name is free
+// text, so these rows live under their own type rather than beside the rows
+// of account-less servers, which could otherwise share a row with them.
+const AccountMCPActionType = "mcp-account"
+
 // ActionEntry is the unified record for all enforcement actions on a target.
 type ActionEntry struct {
 	ID         string      `json:"id"`
@@ -224,6 +230,11 @@ type ActionEntry struct {
 	// entry plus one entry per connector. Mirrors ActionEntry.connector in
 	// cli/defenseclaw/models.py.
 	Connector string `json:"connector,omitempty"`
+	// RuntimeSource is the event path whose admission recorded the runtime
+	// disable, written in the same statement (SetRuntimeDisableForConnector).
+	// Any other runtime write or clear drops it, and releases before 1.0.9
+	// never wrote it, so it is the provenance of the current runtime value.
+	RuntimeSource string `json:"-"`
 }
 
 type Store struct {
@@ -304,6 +315,16 @@ type Store struct {
 	// callGroup groups the flushes of concurrent hook calls' write batches
 	// into one transaction (CallWriteBatch).
 	callGroup writeGroup
+	// durableGroup groups the commits of concurrent writes to the synchronous=FULL
+	// connection into one transaction and one flush (durableGrouped).
+	durableGroup writeGroup
+	// writeBaton orders the transactions of the pool connection and the
+	// durable connection (writeBaton).
+	writeBaton writeBaton
+	// dirSyncedWAL is the write-ahead log file whose directory entry the last
+	// folder flush of the durable connection covered (syncDurableDir).
+	dirSyncMu    sync.Mutex
+	dirSyncedWAL os.FileInfo
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
@@ -2410,6 +2431,30 @@ func (s *Store) StoredHookVerdict(ctx context.Context, id string) (verdict Store
 	return decision, true, nil
 }
 
+// LatestHookVerdictOfEvent returns the verdict of the newest hook record
+// (connector-hook or connector-hook-synthetic row, or its decision record)
+// observed for the semantic event id, so a repeat of that delivery can tell
+// what the audit last recorded for it. found is false when no hook record is
+// linked to the event (GAP-1060).
+func (s *Store) LatestHookVerdictOfEvent(ctx context.Context, semanticEventID string) (verdict StoredHookVerdict, found bool, err error) {
+	if s == nil || !s.Ready() || semanticEventID == "" {
+		return StoredHookVerdict{}, false, errors.New("audit: hook verdict lookup requires a ready store and a semantic event id")
+	}
+	var id string
+	err = s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx, `SELECT event.id
+		FROM correlation_observations AS observation JOIN audit_events AS event ON event.id = observation.record_id
+		WHERE observation.semantic_event_id = ? AND event.action IN (?, ?)
+		ORDER BY observation.observed_time_unix_nano DESC, event.timestamp DESC, event.rowid DESC LIMIT 1`,
+		semanticEventID, string(ActionConnectorHook), string(ActionConnectorHookSynthetic)), &id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StoredHookVerdict{}, false, nil
+	}
+	if err != nil {
+		return StoredHookVerdict{}, false, err
+	}
+	return s.StoredHookVerdict(ctx, id)
+}
+
 // DatabaseFileReplaced reports whether the database path no longer names
 // the file this store opened: it was deleted or replaced while the gateway
 // ran. SQLite keeps writing to the open, unlinked file, so every new audit
@@ -3596,16 +3641,50 @@ func (s *Store) SetActionFieldForConnector(targetType, targetName, connector, fi
 	case "runtime":
 		initJSON = fmt.Sprintf(`{"runtime":"%s"}`, value)
 	}
+	update := "json_set(actions_json, ?, ?)"
+	if field == "runtime" {
+		// A runtime value written here has no deciding path recorded with
+		// it (SetRuntimeDisableForConnector), so it carries none.
+		update = "json_remove(" + update + ", '$.runtime_source')"
+	}
 	query :=
 		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
 		 VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
 		 ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
-		   actions_json = json_set(actions_json, ?, ?),
+		   actions_json = ` + update + `,
 		   reason = excluded.reason,
 		   updated_at = excluded.updated_at`
 	_, err := s.execDB(context.Background(), "audit", query, id, targetType, targetName, initJSON, reason, now, connector, path, value)
 	if err != nil {
 		return fmt.Errorf("audit: set action field %s: %w", field, err)
+	}
+	return nil
+}
+
+// SetRuntimeDisableForConnector records runtime=disable on the row scoped to
+// connector together with the path whose admission decided it, in one
+// statement: the row's source_path and its runtime_source
+// (ActionEntry.RuntimeSource). A reader that must know the runtime disable
+// is this admission's own decision, not an older row under the same name,
+// checks RuntimeSource.
+func (s *Store) SetRuntimeDisableForConnector(targetType, targetName, connector, sourcePath, reason string) error {
+	initJSON, err := json.Marshal(map[string]string{"runtime": "disable", "runtime_source": sourcePath})
+	if err != nil {
+		return fmt.Errorf("audit: marshal runtime disable: %w", err)
+	}
+	_, err = s.execDB(context.Background(), "audit",
+		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
+		   actions_json = json_set(actions_json, '$.runtime', 'disable', '$.runtime_source', ?),
+		   source_path = COALESCE(excluded.source_path, source_path),
+		   reason = excluded.reason,
+		   updated_at = excluded.updated_at`,
+		observability.NewTimeOrderedID(), targetType, targetName, nullStr(sourcePath), string(initJSON), reason,
+		time.Now().UTC(), connector, sourcePath,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: set runtime disable: %w", err)
 	}
 	return nil
 }
@@ -3642,11 +3721,14 @@ func (s *Store) ClearActionFieldForConnector(targetType, targetName, connector, 
 	if err := validateActionFieldAndValue(field, ""); err != nil {
 		return err
 	}
-	path := "$." + field
+	remove := "json_remove(actions_json, ?)"
+	if field == "runtime" {
+		remove = "json_remove(actions_json, ?, '$.runtime_source')" // its provenance goes with it
+	}
 	_, err := s.execDB(context.Background(), "audit",
-		`UPDATE actions SET actions_json = json_remove(actions_json, ?), updated_at = ?
+		`UPDATE actions SET actions_json = `+remove+`, updated_at = ?
 		 WHERE target_type = ? AND target_name = ? AND connector = ?`,
-		path, time.Now().UTC(), targetType, targetName, connector,
+		"$."+field, time.Now().UTC(), targetType, targetName, connector,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: clear action field %s: %w", field, err)
@@ -3704,9 +3786,7 @@ func (s *Store) GetActionForConnector(targetType, targetName, connector string) 
 	}
 	e.SourcePath = sourcePath.String
 	e.Reason = reason.String
-	if actionsJSON.String != "" {
-		_ = json.Unmarshal([]byte(actionsJSON.String), &e.Actions)
-	}
+	e.parseActions(actionsJSON.String)
 	return &e, nil
 }
 
@@ -3765,7 +3845,14 @@ func (s *Store) ListByActionAndType(field, value, targetType string) ([]ActionEn
 // ListActionsByType returns all action entries for a given target type, across
 // all connectors. Each entry carries its own Connector (SK-4).
 func (s *Store) ListActionsByType(targetType string) ([]ActionEntry, error) {
-	return s.queryActions(
+	return s.ListActionsByTypeContext(context.Background(), targetType)
+}
+
+// ListActionsByTypeContext is ListActionsByType that stops waiting for the
+// store when ctx ends, so a caller on a bounded path (a hook call) is not held
+// by a connection that something else keeps.
+func (s *Store) ListActionsByTypeContext(ctx context.Context, targetType string) ([]ActionEntry, error) {
+	return s.queryActionsContext(ctx,
 		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
 		 FROM actions WHERE target_type = ? ORDER BY updated_at DESC`, targetType)
 }
@@ -3788,7 +3875,11 @@ func (s *Store) ListAllActions() ([]ActionEntry, error) {
 }
 
 func (s *Store) queryActions(query string, args ...any) ([]ActionEntry, error) {
-	rows, err := s.queryDB(context.Background(), "audit", query, args...)
+	return s.queryActionsContext(context.Background(), query, args...)
+}
+
+func (s *Store) queryActionsContext(ctx context.Context, query string, args ...any) ([]ActionEntry, error) {
+	rows, err := s.queryDB(ctx, "audit", query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("audit: query actions: %w", err)
 	}
@@ -3803,12 +3894,22 @@ func (s *Store) queryActions(query string, args ...any) ([]ActionEntry, error) {
 		}
 		e.SourcePath = sourcePath.String
 		e.Reason = reason.String
-		if actionsJSON.String != "" {
-			_ = json.Unmarshal([]byte(actionsJSON.String), &e.Actions)
-		}
+		e.parseActions(actionsJSON.String)
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
+}
+
+func (e *ActionEntry) parseActions(actionsJSON string) {
+	if actionsJSON == "" {
+		return
+	}
+	var stored struct {
+		ActionState
+		RuntimeSource string `json:"runtime_source"`
+	}
+	_ = json.Unmarshal([]byte(actionsJSON), &stored)
+	e.Actions, e.RuntimeSource = stored.ActionState, stored.RuntimeSource
 }
 
 func nullStr(s string) sql.NullString {
@@ -4451,7 +4552,7 @@ func (s *Store) GetCounts() (Counts, error) {
 	}{
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedSkills},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedSkills},
-		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
+		{`SELECT COUNT(*) FROM actions WHERE target_type IN ('mcp', '` + AccountMCPActionType + `') AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedMCPs},
 		// ActiveAlerts is the unacknowledged actionable queue, not a count
 		// of every non-INFO audit row. Keep this IPC surface aligned with

@@ -1,0 +1,105 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package scanner
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+)
+
+// A local server of an enrolled account that a managed Linux or macOS
+// gateway lists (the hook reported it) is refused from its launcher before
+// anything starts, in the words of the Python scanner, so the refusal is a
+// verdict about the definition (GAP-0925). A launcher a scan starts is not
+// decided here.
+func TestEnrolledAccountLocalServerWithRefusedLauncherIsRefusedWithoutStarting(t *testing.T) {
+	for _, tc := range []struct {
+		name, command string
+		args          []string
+		refused       bool
+	}{
+		{"interpreter", "python3", []string{"/home/eng1/server.py"}, true},
+		{"node", "node", []string{"/home/eng1/server.py"}, true},
+		{"command path", "/usr/bin/python3", []string{"/home/eng1/server.py"}, true},
+		{"allowlisted npx", "npx", []string{"-y", "pkg"}, false},
+		{"allowlisted uvx", "uvx", []string{"mcp-server-time"}, false},
+		{"npx execution flag", "npx", []string{"-c", "echo hi"}, true},
+		{"uvx execution flag with a value", "uvx", []string{"--eval=1", "pkg"}, true},
+		{"npx without a package", "npx", nil, true},
+		{"npx with options only", "npx", []string{"-y"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The binary does not exist: a scan that got past the refusal
+			// would fail in the preflight with a different message.
+			scan := &MCPScanner{
+				Config: config.MCPScannerConfig{Binary: "/nonexistent/defenseclaw-scanner"},
+				ServerEntry: &config.MCPServerEntry{Name: "localpy", Command: tc.command, Args: tc.args,
+					Connector: "claudecode", Home: "/home/eng1"},
+			}
+			_, err := scan.Scan(context.Background(), "localpy")
+			if err == nil {
+				t.Fatal("scan of a server with a missing scanner binary succeeded")
+			}
+			if got := MCPScanRefused(err) && MCPLauncherRefusal(err.Error()); got != tc.refused {
+				t.Fatalf("command %q: launcher refusal=%v (%v), want %v", tc.command, got, err, tc.refused)
+			}
+			if tc.refused && !strings.Contains(err.Error(), "allowlisted stdio launcher") &&
+				!strings.Contains(err.Error(), "forbidden execution flag") &&
+				!strings.Contains(err.Error(), "requires a package/server argument") {
+				t.Fatalf("refusal %q does not carry the scanner's wording", err)
+			}
+		})
+	}
+}
+
+// The same definition without an account home is a per-user gateway's own
+// server, scanned as before.
+func TestLocalServerWithoutAccountHomeIsNotRefusedByTheEnrolledAccountCheck(t *testing.T) {
+	scan := &MCPScanner{
+		Config:      config.MCPScannerConfig{Binary: "/nonexistent/defenseclaw-scanner"},
+		ServerEntry: &config.MCPServerEntry{Name: "localpy", Command: "python3", Args: []string{"server.py"}},
+	}
+	_, err := scan.Scan(context.Background(), "localpy")
+	if err == nil || MCPLauncherRefusal(err.Error()) {
+		t.Fatalf("a per-user gateway's server was refused by the enrolled-account check: %v", err)
+	}
+}
+
+// The entry a managed gateway lists from a hook claim holds at most the first
+// arguments; the verdict the hook took from the complete definition decides,
+// so the refusal does not depend on arguments the claim does not carry.
+func TestEnrolledAccountLocalServerIsRefusedByTheStatedVerdictOfTheCompleteDefinition(t *testing.T) {
+	for _, tc := range []struct {
+		name, stated string
+		args         []string
+		refused      bool
+	}{
+		{"flag past the claim", "arguments", []string{"-y", "pkg"}, true},
+		{"launcher", "launcher", nil, true},
+		{"nothing refused", "none", []string{"-y", "pkg"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := "npx"
+			if tc.stated == "launcher" {
+				command = "python3"
+			}
+			scan := &MCPScanner{
+				Config: config.MCPScannerConfig{Binary: "/nonexistent/defenseclaw-scanner"},
+				ServerEntry: &config.MCPServerEntry{Name: "longargs", Command: command, Args: tc.args,
+					Connector: "claudecode", Home: "/home/eng1", LocalRefusal: tc.stated},
+			}
+			_, err := scan.Scan(context.Background(), "longargs")
+			if err == nil {
+				t.Fatal("scan with a missing scanner binary succeeded")
+			}
+			if got := MCPScanRefused(err) && MCPLauncherRefusal(err.Error()); got != tc.refused {
+				t.Fatalf("stated %q: refused=%v (%v), want %v", tc.stated, got, err, tc.refused)
+			}
+		})
+	}
+}

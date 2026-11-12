@@ -42,10 +42,13 @@ const DynamicOperandPlaceholder = "/dev/null"
 // the call, so "cp a.txt ~/.defenseclaw/config.yaml $(true)" and
 // "cp $SRC ~/.defenseclaw/config.yaml" named no write at all.
 //
-// Only words that the shell expands from a parameter, a command or
-// arithmetic count; a call with a filename pattern, brace or tilde word that
-// is not home-anchored keeps the readings the glob resolver already gives it,
-// and has no twin. The first reading has each expanded word as one plain
+// Words that the shell expands from a parameter, a command or arithmetic
+// count, and a filename pattern, brace or tilde word of a cp, mv, install or
+// ln call that is not the destination (copyPatternWords): what such a word
+// expands to never changes which operand is the destination, so it is read as
+// one plain name too (GAP-1053). A call with a pattern word in the
+// destination position keeps the readings the glob resolver already gives
+// it, and has no twin. The first reading has each expanded word as one plain
 // name. The second,
 // returned only when some call ends in unquoted words that are a lone
 // command substitution or plain parameter expansion (which expand to no
@@ -61,12 +64,15 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 			twins = nil
 		}
 	}()
-	source := command
+	source, userHome := command, ""
 	if home, _ := normalizeActiveHome(activeHome); home != "" {
 		home = strings.TrimRight(home, "/")
 		if posixShellHome(home) && !strings.ContainsAny(home, "\x00\r\n") {
 			if resolved, ok := homeResolvedSource(source, home); ok {
 				source = resolved
+			}
+			if strings.HasPrefix(home, "/") {
+				userHome = home
 			}
 		}
 	}
@@ -74,6 +80,10 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 	if !parsed {
 		return nil
 	}
+	// A command that binds USER or LOGNAME leaves the login to the reader of
+	// the reading, which follows the assignment: a word spelled through it
+	// is kept as it is, not respelled as the home of the active login.
+	loginBound := bindsLoginName(file)
 	type edit struct {
 		start, end int
 		text       string
@@ -93,14 +103,29 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 		if !known {
 			return true
 		}
-		last := -1
+		last, respelled, replaced := -1, map[int]string{}, false
+		patternWord := copyPatternWords(call.Args, first, source)
 		for index := first; index < len(call.Args); index++ {
 			word := call.Args[index]
 			if !projectPOSIXWord(word).Expands {
 				last = index
-			} else if !runtimeExpansionWord(word) {
+			} else if below, user := userHomeRewriteWord(word, userHome); userHome != "" && user {
+				// A path below the home spelled through USER or LOGNAME
+				// (/home/$USER/f) is the home path: it keeps its role as a
+				// destination in the reading (GAP-1053). Where the command
+				// binds the login, the word stays as written.
+				last = index
+				if !loginBound {
+					respelled[index] = userHome + below
+				}
+			} else if !runtimeExpansionWord(word) && !patternWord(index) {
 				return false
+			} else {
+				replaced = true
 			}
+		}
+		if !replaced {
+			return false
 		}
 		trailing := last >= first && last < len(call.Args)-1
 		var callPlain, callVanished []edit
@@ -109,20 +134,27 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 			if !projectPOSIXWord(word).Expands {
 				continue
 			}
+			if _, user := userHomeRewriteWord(word, userHome); user && loginBound {
+				continue
+			}
 			start, end := int(word.Pos().Offset()), int(word.End().Offset())
 			if start < 0 || end <= start || end > len(source) {
 				invalid = true
 				return false
 			}
-			replaced := edit{start: start, end: end, text: operandKeyPrefix(word) + DynamicOperandPlaceholder}
-			callPlain = append(callPlain, replaced)
+			text := operandKeyPrefix(word) + DynamicOperandPlaceholder
+			if path, user := respelled[index]; user {
+				text = path
+			}
+			rewrite := edit{start: start, end: end, text: text}
+			callPlain = append(callPlain, rewrite)
 			if index > last {
 				if !vanishingWord(word) {
 					trailing = false
 				}
-				replaced.text = ""
+				rewrite.text = ""
 			}
-			callVanished = append(callVanished, replaced)
+			callVanished = append(callVanished, rewrite)
 		}
 		plain = append(plain, callPlain...)
 		if trailing {
@@ -162,6 +194,70 @@ func DynamicOperandTwins(command, activeHome string) (twins []string) {
 		}
 	}
 	return twins
+}
+
+// copyPatternWords returns the test for a filename pattern, brace or tilde
+// word of a cp, mv, install or ln call (operands from first) that is not the
+// destination, whatever it expands to: a source, the value of an option other
+// than the target directory, or a word after "--". The destination is the
+// last operand, or the value of the target-directory option (CopyOperandRoles),
+// and the shell may expand any other word to any number of names without
+// changing which operand that is. The test is false for every word of any
+// other program.
+func copyPatternWords(args []*syntax.Word, first int, source string) func(index int) bool {
+	if first < 1 || first > len(args) {
+		return func(int) bool { return false }
+	}
+	name := projectPOSIXWord(args[first-1]).Value
+	if slash := strings.LastIndexByte(name, '/'); slash >= 0 {
+		name = name[slash+1:]
+	}
+	switch name {
+	case "cp", "mv", "install", "ln":
+	default:
+		return func(int) bool { return false }
+	}
+	words := make([]string, 0, len(args)-first)
+	for _, word := range args[first:] {
+		text := projectPOSIXWord(word)
+		value := text.Value
+		if start, end := int(word.Pos().Offset()), int(word.End().Offset()); text.Expands &&
+			start >= 0 && start < end && end <= len(source) {
+			value = source[start:end]
+		}
+		words = append(words, value)
+	}
+	destination, _, option := CopyOperandRoles(words)
+	return func(index int) bool {
+		index -= first
+		return index >= 0 && index < len(words) && index != destination && !option[index]
+	}
+}
+
+// bindsLoginName reports a command that can change USER or LOGNAME: an
+// assignment or declaration, a for loop over either, or a builtin or
+// printf -v given the bare name.
+func bindsLoginName(file *syntax.File) bool {
+	login := func(name string) bool { return name == "USER" || name == "LOGNAME" }
+	bound := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.Assign:
+			bound = bound || typed.Name != nil && login(typed.Name.Value)
+		case *syntax.ForClause:
+			if iter, ok := typed.Loop.(*syntax.WordIter); ok && iter.Name != nil {
+				bound = bound || login(iter.Name.Value)
+			}
+		case *syntax.CallExpr:
+			for _, word := range typed.Args {
+				if text := projectPOSIXWord(word); !text.Expands && login(text.Value) {
+					bound = true
+				}
+			}
+		}
+		return !bound
+	})
+	return bound
 }
 
 // runtimeExpansionWord reports a word whose expansion comes from a

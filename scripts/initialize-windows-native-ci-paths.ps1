@@ -9,8 +9,6 @@ param(
     [Parameter(Mandatory)]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')]
     [string]$DiagnosticsLeaf,
-    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')]
-    [string]$ArtifactLeaf = '',
     # Put the state root (and so TEMP/TMP, which
     # Initialize-WindowsNativeTestEnvironment points below it) on the runner
     # work drive (the drive of RUNNER_TEMP, D: on hosted runners) instead of
@@ -30,7 +28,7 @@ if ([string]::IsNullOrWhiteSpace($env:GITHUB_ENV)) {
     throw 'GITHUB_ENV is required to publish Windows-native CI paths.'
 }
 if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
-    throw 'RUNNER_TEMP is required to isolate Windows-native diagnostics and artifacts.'
+    throw 'RUNNER_TEMP is required to isolate Windows-native diagnostics.'
 }
 
 if ($StateOnRunnerDrive -and $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
@@ -95,7 +93,4 @@ $lines = [Collections.Generic.List[string]]::new()
 $lines.Add("DC_WINDOWS_NATIVE_BASE_ROOT=$stateBase")
 $lines.Add("DC_STATE_ROOT=$stateRoot")
 $lines.Add("DC_DIAGNOSTICS=$([IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP $DiagnosticsLeaf)))")
-if (-not [string]::IsNullOrWhiteSpace($ArtifactLeaf)) {
-    $lines.Add("DC_ARTIFACT_ROOT=$([IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP $ArtifactLeaf)))")
-}
 [IO.File]::AppendAllLines([IO.Path]::GetFullPath($env:GITHUB_ENV), $lines)

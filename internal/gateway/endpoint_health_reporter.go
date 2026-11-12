@@ -70,7 +70,7 @@ func endpointHealthReporterEnabled(cfg *config.Config) bool {
 // cadence (which a managed deployment floors at 30 minutes and an operator
 // can only lengthen), or the managed floor while discovery is not running.
 func (s *Sidecar) endpointHealthInterval() time.Duration {
-	interval := inventory.ManagedEnterpriseScanInterval
+	interval := inventory.SecureClientScanInterval
 	if discovery := s.aiDiscoverySnapshot(); discovery != nil {
 		if scan := discovery.FullScanInterval(); scan > interval {
 			interval = scan
@@ -152,7 +152,7 @@ func (s *Sidecar) runEndpointHealthReporter(ctx context.Context) {
 // fleet that restarts together does not report together.
 func endpointHealthNextDelay(interval time.Duration) time.Duration {
 	if interval <= 0 {
-		interval = inventory.ManagedEnterpriseScanInterval
+		interval = inventory.SecureClientScanInterval
 	}
 	jitter := interval / endpointHealthJitterDivisor
 	if jitter <= 0 {

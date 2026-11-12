@@ -79,6 +79,7 @@ func stageEnsureManifestForEnrollmentTest(t *testing.T, enrollment config.Enterp
 // Setup runs the lifecycle with a scratch profile whose default data_dir does
 // not exist; the first-install config load must not depend on it.
 func TestWindowsEnterpriseEnsureLoadsTheConfigWithAProtectedDataDir(t *testing.T) {
+	requireAdministratorTestToken(t, "the staging folder ensure creates is protected with an Administrators owner (createProtectedWindowsEnterpriseDirectory), which only an administrator token can set")
 	t.Setenv(windowsEnterpriseEnsureDataDirEnv, "")
 	if _, err := stageEnsureManifestForEnrollmentTest(t, config.EnterpriseEnrollmentConfig{
 		Mode: config.EnterpriseEnrollmentAuto,
@@ -94,6 +95,14 @@ func TestWindowsEnterpriseEnsureLoadsTheConfigWithAProtectedDataDir(t *testing.T
 // so ensure must not stage a first manifest from discovery that nothing would
 // ever update or prune: it needs the administrator's --manifest.
 func TestWindowsEnterpriseEnsureRefusesToEnumerateInManifestMode(t *testing.T) {
+	// The refusal codes need no fixture (g079 review F4).
+	if code := windowsEnterpriseEnsureStagingErrorCode(errWindowsEnterpriseEnsureManifestRequired); code != "invalid_arguments" {
+		t.Fatalf("manifest-mode refusal code = %q, want invalid_arguments", code)
+	}
+	if code := windowsEnterpriseEnsureStagingErrorCode(errors.New("disk full")); code != "manifest_staging_failed" {
+		t.Fatalf("ordinary staging failure code = %q, want manifest_staging_failed", code)
+	}
+	requireAdministratorTestToken(t, "the staging folder ensure creates is protected with an Administrators owner (createProtectedWindowsEnterpriseDirectory), which only an administrator token can set")
 	calls, err := stageEnsureManifestForEnrollmentTest(t, config.EnterpriseEnrollmentConfig{
 		Mode: config.EnterpriseEnrollmentManifest,
 	})
@@ -105,9 +114,6 @@ func TestWindowsEnterpriseEnsureRefusesToEnumerateInManifestMode(t *testing.T) {
 	}
 	if code := windowsEnterpriseEnsureStagingErrorCode(err); code != "invalid_arguments" {
 		t.Fatalf("manifest-mode refusal code = %q, want invalid_arguments", code)
-	}
-	if code := windowsEnterpriseEnsureStagingErrorCode(errors.New("disk full")); code != "manifest_staging_failed" {
-		t.Fatalf("ordinary staging failure code = %q, want manifest_staging_failed", code)
 	}
 
 	calls, err = stageEnsureManifestForEnrollmentTest(t, config.EnterpriseEnrollmentConfig{

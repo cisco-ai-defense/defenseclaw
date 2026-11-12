@@ -240,9 +240,11 @@ FACTS = [
     ]),
     ('gap_1356_windows_project_skill_roots_skipped', [
         (('enterprise/windows.mdx',),
-         'project skill folders inside profiles are skipped before verification or registration'),
+         'Ordinary project skill folders inside profiles are not watched or admission-scanned'),
         (('enterprise/windows.mdx',),
-         'no install scan, no "is not scanned yet" refusal and no `project_skill_root_unverified` warning'),
+         '`project_skill_roots_unverified`, and enterprise status shows a'),
+        (('enterprise/windows.mdx',),
+         'root is refused in every asset policy mode until a fresh caller inspection'),
     ]),
     ('gap_0289_invalid_machine_policy_is_config_invalid', [
         (('enterprise/troubleshooting.mdx',),
@@ -605,6 +607,19 @@ FACTS = [
         (('get-started/windows/install-lifecycle.mdx',),
          "Windows Home, per-user Docker Desktop, WSL2 engines and Windows containers are not supported"),
     ]),
+    # GAP-0650, owner decision for 1.0.9: a held requirements.toml is a
+    # documented Windows platform limit.
+    ("gap_0650_held_codex_requirements_is_a_platform_limit", [
+        (('enterprise/windows.mdx',),
+         "A user who can read it can also hold it open, and while it is held Windows does not let DefenseClaw replace it, so Codex policy updates wait."),
+        (('enterprise/windows.mdx',),
+         "The enforced policy already in place stays in effect. Status names the process that holds the file (the warning `codex_requirements_held`). On a standalone deployment, if the holder lets go within 30 seconds of the failed attempt, the running command applies the update. Otherwise the guardian applies it at its next pass, about a minute later, and a failed Setup run needs the administrator to run it again. Secure Client keeps the earlier behavior and does not wait."),
+    ]),
+    # g582 review 7 M1: the vendor-folder fix also removes inherited entries.
+    ("g582_vendor_folder_fix_removes_inherited_entries", [
+        (('enterprise/machine-policy.mdx',),
+         '`icacls "<folder>" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"`'),
+    ]),
 ]
 
 
@@ -625,6 +640,19 @@ def test_docs_keep_the_fact(fact: str) -> None:
     checks = dict(FACTS)[fact]
     for pages, phrase in checks:
         assert any(phrase in _flat(page) for page in pages), (fact, pages, phrase)
+
+
+@pytest.mark.parametrize("name", ["WINDOWS-ENTERPRISE-CERTIFICATION.md", "WINDOWS-ENTERPRISE-THREAT-MODEL.md"])
+def test_windows_codex_held_file_rows_say_standalone_and_when_it_changes(name: str) -> None:
+    # g582 round 10: the certification and threat-model rows carry the round 9
+    # wording: the retry and the per-change state file are standalone only.
+    text = " ".join((ROOT / "docs" / name).read_text(encoding="utf-8").split())
+    assert "in each transaction" not in text
+    assert "as soon as the file is released" not in text
+    assert "state file is written under a new name when it changes" in text
+    assert "On a standalone deployment" in text
+    assert "if the holder lets go within 30 seconds of the failed attempt" in text or "retried for up to 30 seconds from the failed attempt" in text
+    assert "Secure Client" in text
 
 
 def test_sandbox_docs_name_the_openshell_release_setup_installs() -> None:

@@ -31,7 +31,7 @@ const (
 	// SupportedMin is the oldest OpenShell release DefenseClaw supports. It
 	// creates and starts sandboxes only on it and later, and its install
 	// step upgrades an older OpenShell in place (Installer.Install), as
-	// ensure moves a managed account off one (ManagedSetupPin). OpenShell
+	// ensure moves a managed account off one (ManagedVersionPin). OpenShell
 	// 0.1.6 initializes a missing or empty MicroVM hosts file. It preserves
 	// nonempty image-authored files, so retain the current MicroVM image
 	// verdict and admission gate. Its prereleases come before it
@@ -98,7 +98,7 @@ const TarballBaseURL = "https://github.com/NVIDIA/OpenShell/releases/download/"
 // InstallerVersion; a release without an entry cannot be installed. The
 // managed hosts DefenseClaw 1.0.3 set up with enterprise.openshell.version
 // "0.1.3" need no entry for it:
-// setup mode raises an older pin to InstallerVersion (ManagedSetupPin), so a
+// setup mode raises an older pin to InstallerVersion (ManagedVersionPin), so a
 // release older than SupportedMin is never listed.
 var TarballPins = map[string]map[string]string{
 	"0.1.6": {
@@ -303,13 +303,16 @@ func (e *ErrUnsupportedVersion) Error() string {
 	return fmt.Sprintf("OpenShell %s is not supported; DefenseClaw drives >=%s <%s", e.Found, SupportedMin, SupportedBelow)
 }
 
-// ErrSandboxRelease reports a supported OpenShell release older than
-// SupportedMin, which DefenseClaw creates and starts no sandbox on.
+// ErrSandboxRelease reports a release older than SupportedMin, which
+// DefenseClaw creates and starts no sandbox on.
 type ErrSandboxRelease struct {
 	Found Version
 }
 
 func (e *ErrSandboxRelease) Error() string {
+	if err := CheckConnects(e.Found); err != nil {
+		return err.Error()
+	}
 	return fmt.Sprintf("OpenShell %s runs no DefenseClaw sandbox: OpenShell %s or later is required; upgrade OpenShell to %s in place",
 		e.Found, SupportedMin, InstallerVersion)
 }
@@ -344,20 +347,49 @@ func ProvisioningTimedOut(said string) bool {
 		strings.Contains(said, "provisioning timed out") || strings.Contains(said, "provisioning timeout cleanup")
 }
 
-// ManagedSetupPin is the release the managed "setup" install mode installs
-// for the exact pin enterprise.openshell.version: the pin, or
-// InstallerVersion for one older than SupportedMin (raised reports it). That
-// is the in-place migration of the hosts DefenseClaw 1.0.3 set up on
-// "0.1.3", whose sandboxes would otherwise never start again: ensure and
-// each user's daemon move them to InstallerVersion. Any other pin (a
-// range, a newer or unreadable release, prerequisite mode) is kept, and
-// judged as it is. Remove it with the 1.0.3 upgrade path.
-func ManagedSetupPin(setup bool, pin string) (release string, raised bool) {
-	v, err := ParseVersion(pin)
-	if !setup || err != nil || strings.TrimSpace(pin) != v.String() || CheckSandboxRelease(v) == nil {
-		return pin, false
+// ManagedVersionPin is the effective managed version requirement. Exact pins
+// below SupportedMin move to InstallerVersion; ranges start no lower than the
+// floor. An upper bound at or below the floor has no usable release and is
+// reported by floorPossible. The lifecycle and daemon use the same result.
+func ManagedVersionPin(pin string) (effective string, raised, floorPossible bool) {
+	pin = strings.TrimSpace(pin)
+	floor := mustParse(SupportedMin)
+	if len(strings.Fields(pin)) == 1 {
+		if v, err := ParseVersion(pin); err == nil {
+			if v.Compare(floor) < 0 {
+				return InstallerVersion, true, true
+			}
+			return pin, false, true
+		}
 	}
-	return InstallerVersion, true
+	fields := strings.Fields(pin)
+	if len(fields) == 0 || len(fields) > 2 || !strings.HasPrefix(fields[0], ">=") {
+		return pin, false, true
+	}
+	low, err := ParseVersion(strings.TrimPrefix(fields[0], ">="))
+	if err != nil {
+		return pin, false, true
+	}
+	if len(fields) == 2 {
+		if !strings.HasPrefix(fields[1], "<") {
+			return pin, false, true
+		}
+		high, err := ParseVersion(strings.TrimPrefix(fields[1], "<"))
+		if err != nil {
+			return pin, false, true
+		}
+		if high.Compare(floor) <= 0 {
+			return pin, false, false
+		}
+	}
+	if low.Compare(floor) < 0 {
+		upper := ""
+		if len(fields) == 2 {
+			upper = " " + fields[1]
+		}
+		return ">=" + SupportedMin + upper, true, true
+	}
+	return pin, false, true
 }
 
 // CheckSupported returns an *ErrUnsupportedVersion when v is outside the

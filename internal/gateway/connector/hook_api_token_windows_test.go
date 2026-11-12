@@ -667,6 +667,64 @@ func TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor(t *testing.T) {
 	}
 }
 
+func TestHookAPITokenWindowsRefusesPerUserInheritedCreateChildOnSecureClientHost(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	previousHost, previousPath := managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified
+	t.Cleanup(func() {
+		managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified = previousHost, previousPath
+	})
+	managed.SecureClientHostVerified = func() bool { return true }
+	base := t.TempDir()
+	state := filepath.Join(base, "Cisco", "Cisco Secure Client", "DefenseClaw")
+	managedDir := filepath.Join(state, "hook-token")
+	ossDir := filepath.Join(base, "Cisco", "oss", "hook-token")
+	for _, dir := range []string{managedDir, ossDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	managed.SecureClientProcessPathVerified = func(path string) bool {
+		return strings.HasPrefix(strings.ToLower(filepath.Clean(path)), strings.ToLower(state)+string(filepath.Separator))
+	}
+	for _, tc := range []struct {
+		name string
+		sid  func() (*windows.SID, error)
+	}{
+		{"Users", func() (*windows.SID, error) { return windows.CreateWellKnownSid(windows.WinBuiltinUsersSid) }},
+		{"Authenticated Users", func() (*windows.SID, error) { return windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			principal, err := tc.sid()
+			if err != nil {
+				t.Fatal(err)
+			}
+			acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+				AccessPermissions: 0x1201bf,
+				AccessMode:        windows.GRANT_ACCESS,
+				Trustee: windows.TRUSTEE{
+					TrusteeForm:  windows.TRUSTEE_IS_SID,
+					TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+					TrusteeValue: windows.TrusteeValueFromSID(principal),
+				},
+			}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ace *windows.ACCESS_ALLOWED_ACE
+			if err := windows.GetAce(acl, 0, &ace); err != nil {
+				t.Fatal(err)
+			}
+			ace.Header.AceFlags = windows.INHERITED_ACE | windows.CONTAINER_INHERIT_ACE
+			if err := hookAPIRejectUntrustedWindowsWriteACEs(ossDir, acl, true, true, false); err == nil {
+				t.Fatal("a per-user hook-token folder accepted an inherited create-child entry")
+			}
+			if err := hookAPIRejectUntrustedWindowsWriteACEs(managedDir, acl, true, true, false); err != nil {
+				t.Fatalf("the managed hook-token folder refused the inherited entry: %v", err)
+			}
+		})
+	}
+}
+
 func TestHookAPITokenWindowsRejectsOrdinaryWriteOnSharedAncestor(t *testing.T) {
 	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {

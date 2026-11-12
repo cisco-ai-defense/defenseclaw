@@ -13,6 +13,10 @@ package enterprisepolicy
 import (
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // connectorAmp has no machine policy target; on Windows the guardian holds
@@ -32,6 +36,20 @@ var windowsGoOwnedTargets = map[string]bool{
 
 // windowsGoOwnedNames are windowsGoOwnedTargets in retire and remove order.
 var windowsGoOwnedNames = []string{ConnectorCopilot, ConnectorDevinCascade, ConnectorOpenCode}
+
+// windowsGoOwnedFolderUse is how the vendor of a Go-owned Windows target
+// uses the folder that holds its policy file: Copilot loads every *.json
+// file in it and OpenCode two config names, so another account that can add
+// a file there changes the policy; Devin reads only hooks.json, in both of its folders.
+func windowsGoOwnedFolderUse(name string) policyFolderUse {
+	switch name {
+	case ConnectorCopilot:
+		return copilotFolderUse
+	case ConnectorOpenCode:
+		return opencodeFolderUse
+	}
+	return policyFolderUse{}
+}
 
 // IsWindowsGoOwned reports whether the Go guardian owns connector's Windows
 // machine policy.
@@ -143,10 +161,11 @@ func RemoveWindowsSecureClientCopilot(opts Options) (State, error) {
 		return State{Connector: copilotConnector, Route: RouteMachinePolicy}, err
 	}
 	target := copilotTarget{}
-	if err := takeBackWindowsGoOwnedForRemoval(opts, target); err != nil {
+	unprotected, err := takeBackWindowsGoOwnedForRemoval(opts, target)
+	if err != nil {
 		return State{}, fmt.Errorf("%s: %w", copilotConnector, err)
 	}
-	return removeTargetOwned(target, opts)
+	return removeTargetOwned(target, opts.removingFrom(unprotected))
 }
 
 // takeBackWindowsGoOwnedForRemoval takes back a target's vendor folders that
@@ -156,19 +175,124 @@ func RemoveWindowsSecureClientCopilot(opts Options) (State, error) {
 // Copilot was never configured, while the install had gone through
 // (GAP-0898); install and uninstall now treat the folder the same way. A
 // file a standard user left in Copilot's policy.d is moved aside too.
-func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) error {
+//
+// On a standalone install a vendor folder DefenseClaw did not create that
+// holds a file DefenseClaw recorded (case c) is never taken over, and the
+// removal does not fail closed on one that does not protect that file
+// either: protecting nothing is all a refusal would buy once DefenseClaw no
+// longer claims the connector. Such folders are returned, and the removal
+// then strips DefenseClaw's entry only from a recorded file it can still
+// trust (restoreOrStripUnprotected). Every target walks each folder it
+// removes a recorded file from, so Devin (both folders), OpenCode and Copilot
+// behave the same (g582 review 7 S1).
+func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) ([]unprotectedVendorFolder, error) {
 	paths, err := target.Paths(opts)
 	if err != nil || len(paths) == 0 {
-		return nil
+		return nil, nil
+	}
+	walk := paths[:1]
+	use := windowsGoOwnedFolderUse(target.Name())
+	use.removal = true
+	switch target.Name() {
+	case ConnectorDevinCascade:
+		// The pre-rename Devin file is removed as well when DefenseClaw
+		// recorded writing it. Kept for the supported 1.0.5-1.0.8 to 1.0.9
+		// upgrade only, until the Cascade withdrawal goes in 1.1 (the reason
+		// is at weakVendorFolders, g877b review S6).
+		if len(paths) > 1 {
+			if record, err := loadRecord(opts, devinCascadeLegacyRecord); err == nil && record != nil {
+				walk = paths[:2]
+			}
+		}
 	}
 	var state State
-	if _, err := takeBackPolicyPath(opts, paths[0], &state); err != nil {
-		return err
+	var unprotected []unprotectedVendorFolder
+	for index, path := range walk {
+		// A link kept at this path is not read, taken back or created
+		// behind (GAP-0758); Devin's other folder is still walked.
+		if opts.linkKept(path) {
+			continue
+		}
+		_, found, err := takeBackPolicyPathFor(opts, path, use, &state)
+		if err != nil {
+			return unprotected, err
+		}
+		unprotected = append(unprotected, found...)
+		if index == 0 && len(found) == 0 && target.Name() == ConnectorCopilot {
+			displaceUntrustedPolicyFiles(opts, platformPath(opts, dirFor(opts, path)), DefenseClawDropInName, &state)
+		}
 	}
-	if target.Name() == ConnectorCopilot {
-		displaceUntrustedPolicyFiles(opts, platformPath(opts, dirFor(opts, paths[0])), DefenseClawDropInName, &state)
+	return unprotected, nil
+}
+
+// keepLinkedGoOwnedForRemoval looks at every policy path of target. It clears
+// a link a standard user planted (the link only; what it points at is
+// untouched), and returns the paths on which a link an administrator owns, or
+// one it could not remove, stays, with the reason in the state's details:
+// the removal then reads nothing through those paths, and they are named
+// (WindowsGoOwnedLinkedFolders). Each path is decided on its own, so a link
+// at one of Devin's two folders keeps that folder alone. cleared reports that
+// a planted link was removed.
+func keepLinkedGoOwnedForRemoval(opts Options, target Target) (kept map[string]bool, cleared bool, state State) {
+	state = State{Connector: target.Name(), Route: RouteMachinePolicy}
+	paths, err := target.Paths(opts)
+	if err != nil {
+		return nil, false, state
 	}
-	return nil
+	for _, path := range paths {
+		before := len(state.Details)
+		link, why := clearOrKeepLinkedPolicyPath(opts, platformPath(opts, path), &state)
+		if link == "" {
+			cleared = cleared || len(state.Details) > before
+			continue
+		}
+		state.detail("kept %s: %s", link, why)
+		managed.EmitResilienceEvent(managed.MarkerBoundary, map[string]string{
+			"path":   link,
+			"reason": why,
+		})
+		if kept == nil {
+			kept = map[string]bool{}
+		}
+		kept[keptLinkKey(opts, path)] = true
+	}
+	return kept, cleared, state
+}
+
+func keptLinkKey(opts Options, path string) string {
+	return strings.ToLower(platformPath(opts, path))
+}
+
+// linkKept reports whether RemoveWindowsGoOwned kept a link on path.
+func (o Options) linkKept(path string) bool {
+	return o.keptLinks[keptLinkKey(o, path)]
+}
+
+// WindowsGoOwnedLinkedFolders lists, sorted, the paths on the Go-owned
+// policy paths (Copilot, OpenCode, Devin) that are links now. It is
+// read-only. A teardown that kept one names it in machine_state_remaining
+// (path: kept: reason).
+func WindowsGoOwnedLinkedFolders(opts Options) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, name := range windowsGoOwnedNames {
+		target, ok := TargetFor(name)
+		if !ok {
+			continue
+		}
+		paths, err := target.Paths(opts)
+		if err != nil {
+			continue
+		}
+		for _, path := range paths {
+			if link := linkedPolicyComponent(opts, platformPath(opts, path)); link != "" && !seen[link] {
+				seen[link] = true
+				out = append(out, link)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // RemoveWindowsGoOwned removes the DefenseClaw entries of the Go-owned
@@ -186,11 +310,27 @@ func RemoveWindowsGoOwned(opts Options) (Result, error) {
 		if !ok {
 			continue
 		}
-		if err := takeBackWindowsGoOwnedForRemoval(opts, target); err != nil {
+		// A link on the target path is cleared or kept before anything is
+		// taken back, created or read (GAP-0758): the removal never fails on
+		// it and never creates a folder in its place.
+		// Each path is decided on its own: a link at one path keeps that path
+		// only, and the target's entry at its other paths is still removed.
+		kept, cleared, linkState := keepLinkedGoOwnedForRemoval(opts, target)
+		if len(linkState.Details) > 0 {
+			result.States = append(result.States, linkState)
+			result.Changed = result.Changed || linkState.Changed || cleared
+		}
+		if paths, err := target.Paths(opts); err == nil && len(kept) != 0 && len(kept) == len(paths) {
+			continue
+		}
+		targetOpts := opts
+		targetOpts.keptLinks = kept
+		unprotected, err := takeBackWindowsGoOwnedForRemoval(targetOpts, target)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		state, err := removeTargetOwned(target, opts)
+		state, err := removeTargetOwned(target, targetOpts.removingFrom(unprotected))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		} else if name == ConnectorOpenCode {

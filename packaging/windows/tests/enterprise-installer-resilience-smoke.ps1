@@ -77,6 +77,7 @@ function Get-DefenseClawSmokeFunctionText {
 foreach ($name in @(
         'ConvertTo-DefenseClawResilienceFieldValue',
         'Format-DefenseClawResilienceEvent',
+        'Format-DefenseClawRerunStep',
         'Get-DefenseClawServicePendingDeleteRemedy',
         'Get-DefenseClawServicePendingDeleteMessage',
         'Test-DefenseClawServicePendingDeleteFailure',
@@ -86,6 +87,10 @@ foreach ($name in @(
     )) {
     . ([scriptblock]::Create((Get-DefenseClawSmokeFunctionText -Path $modulePath -Name $name)))
 }
+# The retry step of a hint depends on the deployment profile (cowork-1-0-8
+# GAP-0095); the smoke pins it per profile through this stand-in.
+$script:SmokeStandaloneProfile = $false
+function Test-DefenseClawStandaloneProfile { return $script:SmokeStandaloneProfile }
 $script:ResilienceMarkers = @(
     'defenseclaw_repair', 'defenseclaw_accept', 'defenseclaw_skip',
     'defenseclaw_boundary', 'defenseclaw_prereq', 'defenseclaw_recover',
@@ -111,6 +116,19 @@ if ($remedy -cnotin @(
 $message = Get-DefenseClawServicePendingDeleteMessage -Name 'DefenseClawGateway'
 if ($message -cne ('defenseclaw_prereq check="service_pending_delete" remedy="' + $remedy + '" service="DefenseClawGateway"')) {
     throw "pending-delete prerequisite is not in the shared format: $message"
+}
+$script:SmokeStandaloneProfile = $true
+$standaloneRemedy = Get-DefenseClawServicePendingDeleteRemedy
+$standaloneMessage = Get-DefenseClawServicePendingDeleteMessage -Name 'DefenseClawGateway'
+$script:SmokeStandaloneProfile = $false
+if ($standaloneRemedy -cnotin @(
+        'restart Windows to finish deleting the service, then run the same command again',
+        'close Services, Event Viewer and other MMC consoles that are open, then run the same command again; if it still fails, restart Windows'
+    )) {
+    throw "standalone pending-delete remedy asks for Setup by name: $standaloneRemedy"
+}
+if ($standaloneMessage -cne ('defenseclaw_prereq check="service_pending_delete" remedy="' + $standaloneRemedy + '" service="DefenseClawGateway"')) {
+    throw "standalone pending-delete prerequisite is not in the shared format: $standaloneMessage"
 }
 if (-not (Test-DefenseClawServicePendingDeleteFailure -Message "Install failed: $message") -or
     (Test-DefenseClawServicePendingDeleteFailure -Message 'sc.exe exited 5') -or

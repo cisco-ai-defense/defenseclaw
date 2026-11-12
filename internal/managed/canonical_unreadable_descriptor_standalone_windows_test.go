@@ -1,0 +1,68 @@
+//go:build windows
+
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package managed
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"golang.org/x/sys/windows"
+)
+
+// g582 review 4 F1: when not even the repair privileges can read an object's
+// descriptor, standalone judges it a boundary (never Accepted), so no
+// standalone refusal lets it be re-stamped; Secure Client keeps the accepted
+// verdict and, as on the base, never takes the privileges to assess (g582
+// review 5 M1).
+func TestStandaloneUnreadableDescriptorIsABoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		standalone bool
+		want       CanonicalOutcome
+	}{
+		{name: "standalone", standalone: true, want: CanonicalBoundary},
+		{name: "twin: Secure Client", want: CanonicalAccepted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(TrustStrictAncestorsEnv, "")
+			path := filepath.Join(t.TempDir(), "object")
+			if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			requireHiddenDescriptorElevated(t)
+			stampHiddenDescriptorForTest(t, path, hiddenWriterFileSDDL)
+			previous := canonicalRunWithRepairPrivileges
+			calls := 0
+			canonicalRunWithRepairPrivileges = func(func() error) error {
+				calls++
+				return windows.ERROR_ACCESS_DENIED
+			}
+			t.Cleanup(func() { canonicalRunWithRepairPrivileges = previous })
+			pinTrustProfileForTest(t, tc.standalone)
+
+			assessed, err := AssessCanonical(path, ObjectAdminFile, CanonicalOptions{Quiet: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.standalone && calls == 0 {
+				t.Fatal("the assessment never tried the privileged read")
+			}
+			if !tc.standalone && calls != 0 {
+				t.Fatalf("the Secure Client assessment took the repair privileges %d time(s); the base never did (g582 review 5 M1)", calls)
+			}
+			if assessed.Outcome != tc.want {
+				t.Fatalf("outcome = %s, want %s (%+v)", assessed.Outcome, tc.want, assessed)
+			}
+			refusal := RefuseStandaloneInPlaceRepair(path, ObjectAdminFile)
+			var refused *StandaloneContentDriftError
+			if tc.standalone != errors.As(refusal, &refused) {
+				t.Fatalf("RefuseStandaloneInPlaceRepair = %v, standalone %v", refusal, tc.standalone)
+			}
+		})
+	}
+}

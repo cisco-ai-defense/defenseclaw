@@ -736,7 +736,7 @@ func validateAuditDBDirectory(path string, info os.FileInfo, allowStickyWritable
 		return err
 	}
 	if !allowStickyWritableAncestor && !auditDBImmediateDirectoryModeTrusted(info) {
-		return errors.New("audit: immediate database directory is group- or other-writable")
+		return fmt.Errorf("audit: immediate database directory %s is group- or other-writable", path)
 	}
 	return nil
 }

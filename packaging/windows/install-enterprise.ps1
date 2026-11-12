@@ -23,6 +23,7 @@ param(
     [string]$GatewayBinary,
     [string]$ACPBinary,
     [string]$HookBinary,
+    [string]$HookGuardBinary,
     [string]$SensorHelperBinary,
     [string]$PolicyCompiler,
     [string]$CLIBinary,
@@ -2733,6 +2734,90 @@ function Assert-DefenseClawBootstrapModuleTrust {
     return $full
 }
 
+function Get-DefenseClawBootstrapTransactionModulePin {
+    <#
+        Standalone only (rel-1-0-6 GAP-0649). While a lifecycle transaction is
+        pending, returns the module SHA-256 the transaction recorded for the
+        installer and module it installs (lifecycle-pins.json in its protected
+        transaction directory), when the running installer is byte-identical
+        to the recorded one; otherwise ''. An upgrade cut off after it copied
+        the new installer and module leaves the pair of the release that wrote
+        the transaction, the only one that can recover it, which the
+        deployment record (still the old release) does not pin. The pending
+        record and the pin file pass the same local-NTFS, no-reparse,
+        administrator-owned chain as the deployment record.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$StateRoot,
+        [Parameter(Mandatory)][string]$InstallerPath
+    )
+    try {
+        $installState = [IO.Path]::Combine($StateRoot, 'install')
+        $pendingPath = [IO.Path]::Combine($installState, 'pending.json')
+        if (-not [IO.File]::Exists($pendingPath)) {
+            return ''
+        }
+        $pendingFull = Assert-DefenseClawBootstrapModuleTrust `
+            -Path $pendingPath `
+            -AllowUnsignedModule
+        $pendingItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $pendingFull -Force
+        if ([int64]$pendingItem.Length -gt 1048576) {
+            return ''
+        }
+        $pending = Microsoft.PowerShell.Management\Get-Content -LiteralPath $pendingFull -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        if ($pending -isnot [Management.Automation.PSCustomObject]) {
+            return ''
+        }
+        $snapshot = $pending.PSObject.Properties['snapshot']
+        if ($null -eq $snapshot -or [string]::IsNullOrWhiteSpace([string]$snapshot.Value)) {
+            return ''
+        }
+        $transactions = [IO.Path]::GetFullPath([IO.Path]::Combine($installState, 'transactions')).TrimEnd('\') + '\'
+        $directory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$snapshot.Value))
+        if (-not $directory.StartsWith($transactions, [StringComparison]::OrdinalIgnoreCase) -or
+            $directory.Length -le $transactions.Length -or
+            $directory.Substring($transactions.Length).Contains('\')) {
+            return ''
+        }
+        $pinsPath = [IO.Path]::Combine($directory, 'lifecycle-pins.json')
+        if (-not [IO.File]::Exists($pinsPath)) {
+            return ''
+        }
+        $pinsFull = Assert-DefenseClawBootstrapModuleTrust `
+            -Path $pinsPath `
+            -AllowUnsignedModule
+        $pinsItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $pinsFull -Force
+        if ([int64]$pinsItem.Length -gt 65536) {
+            return ''
+        }
+        $pins = Microsoft.PowerShell.Management\Get-Content -LiteralPath $pinsFull -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        if ($pins -isnot [Management.Automation.PSCustomObject]) {
+            return ''
+        }
+        $schema = $pins.PSObject.Properties['schema_version']
+        $installer = $pins.PSObject.Properties['installer']
+        $module = $pins.PSObject.Properties['module']
+        if ($null -eq $schema -or [string]$schema.Value -cne '1' -or
+            $null -eq $installer -or [string]$installer.Value -cnotmatch '^[0-9a-f]{64}$' -or
+            $null -eq $module -or [string]$module.Value -cnotmatch '^[0-9a-f]{64}$') {
+            return ''
+        }
+        $running = (Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $InstallerPath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($running -cne [string]$installer.Value) {
+            return ''
+        }
+        return [string]$module.Value
+    }
+    catch {
+        # An unreadable or untrusted record admits nothing.
+        return ''
+    }
+}
+
 function Get-DefenseClawBootstrapRecordedModulePin {
     <#
         Standalone only. Returns the module SHA-256 a hash-pinned standalone
@@ -2745,12 +2830,16 @@ function Get-DefenseClawBootstrapRecordedModulePin {
         leaves its path and reason in
         $script:DefenseClawBootstrapUnreadableRecord, so the caller names
         the damaged record instead of the module signature (GAP-0164).
+        $script:DefenseClawBootstrapRecordedHashPinned says whether a trusted
+        record of a hash-pinned standalone deployment was found, whatever
+        installer it pins (g649 review F1).
     #>
     param(
         [Parameter(Mandatory)][string]$MetadataPath,
         [Parameter(Mandatory)][string]$InstallerPath
     )
     $script:DefenseClawBootstrapUnreadableRecord = ''
+    $script:DefenseClawBootstrapRecordedHashPinned = $false
     try {
         if (-not [IO.File]::Exists($MetadataPath)) {
             return ''
@@ -2788,6 +2877,7 @@ function Get-DefenseClawBootstrapRecordedModulePin {
             $null -eq $hashes -or $null -eq $hashes.Value) {
             return ''
         }
+        $script:DefenseClawBootstrapRecordedHashPinned = $true
         $module = $hashes.Value.PSObject.Properties['module']
         $installer = $hashes.Value.PSObject.Properties['installer']
         if ($null -eq $module -or [string]$module.Value -cnotmatch '^[0-9a-f]{64}$' -or
@@ -2807,6 +2897,53 @@ function Get-DefenseClawBootstrapRecordedModulePin {
         # requirement then applies unchanged.
         return ''
     }
+}
+
+function Get-DefenseClawBootstrapInstalledModulePin {
+    <#
+        Standalone only: the module SHA-256 the installed CLI's bootstrap
+        admits, or '' (a valid signature is then required). It is the pin the
+        trusted hash-pinned deployment record names
+        (Get-DefenseClawBootstrapRecordedModulePin). While a lifecycle
+        transaction is pending, an interrupted transaction may already have
+        installed its own installer and module (rel-1-0-6 GAP-0649): its pins
+        are chosen when the recorded pair does not apply to the running
+        installer, or when the module on disk is the transaction's. Those
+        pins count only for a deployment whose trusted record is hash-pinned
+        standalone, as on the module side: an Authenticode deployment never
+        admits a module by a transaction's hash (g649 review F1). The module
+        must still match the chosen digest.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$StateRoot,
+        [Parameter(Mandatory)][string]$InstallerPath,
+        [Parameter(Mandatory)][string]$ModulePath
+    )
+    $recorded = Get-DefenseClawBootstrapRecordedModulePin `
+        -MetadataPath ([IO.Path]::Combine($StateRoot, 'install', 'deployment.json')) `
+        -InstallerPath $InstallerPath
+    if (-not [bool]$script:DefenseClawBootstrapRecordedHashPinned) {
+        return $recorded
+    }
+    $transactionPin = Get-DefenseClawBootstrapTransactionModulePin `
+        -StateRoot $StateRoot `
+        -InstallerPath $InstallerPath
+    if ([string]::IsNullOrEmpty($transactionPin)) {
+        return $recorded
+    }
+    $moduleOnDisk = ''
+    try {
+        $moduleOnDisk = (Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $ModulePath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    catch {
+        $moduleOnDisk = ''
+    }
+    if ([string]::IsNullOrEmpty($recorded) -or $moduleOnDisk -ceq $transactionPin) {
+        return $transactionPin
+    }
+    return $recorded
 }
 
 # ---------------------------------------------------------------------------
@@ -4496,7 +4633,8 @@ function Add-DefenseClawLifecycleFailureEvidence {
         @('DefenseClaw.TransactionPending', 'transaction_pending'),
         @('DefenseClaw.RecoveryGatewayRuns', 'recovery_gateway_runs'),
         @('DefenseClaw.RecoveryGatewayRefusal', 'recovery_gateway_refusal'),
-        @('DefenseClaw.RollbackLeftovers', 'rollback_leftovers')
+        @('DefenseClaw.RollbackLeftovers', 'rollback_leftovers'),
+        @('DefenseClaw.GuardianRestartFailure', 'guardian_restart_failure')
     )) {
         if ($Evidence.Contains([string]$field[0])) {
             Microsoft.PowerShell.Utility\Add-Member `
@@ -4684,11 +4822,13 @@ try {
         # Nothing keeps a payload manifest after a hash-pinned install, so the
         # installed CLI (Add/Remove Programs, MDM detect and uninstall
         # scripts) arrives here with no pin. Admit the installed module by the
-        # digest the deployment's protected metadata recorded; the module then
+        # digest the deployment's protected metadata recorded, or by the pins
+        # of its pending transaction (rel-1-0-6 GAP-0649); the module then
         # re-admits the rest of its installed payload the same way.
-        $bootstrapPinnedModuleSHA256 = Get-DefenseClawBootstrapRecordedModulePin `
-            -MetadataPath ([IO.Path]::Combine($StateRoot, 'install', 'deployment.json')) `
-            -InstallerPath $PSCommandPath
+        $bootstrapPinnedModuleSHA256 = Get-DefenseClawBootstrapInstalledModulePin `
+            -StateRoot $StateRoot `
+            -InstallerPath $PSCommandPath `
+            -ModulePath $modulePath
     }
     $bootstrapAllowedSigners = @()
     if ($EnterpriseProfile -ceq 'Standalone') {
@@ -4720,8 +4860,8 @@ try {
             throw ("DefenseClaw enterprise installer rejected its module before import: " +
                 "could not read the installed deployment metadata $($script:DefenseClawBootstrapUnreadableRecord), " +
                 'which holds the digest this deployment admits its installed module by; nothing was changed. ' +
-                'Run Setup /repair to rebuild it: the installed release''s DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1, ' +
-                'as LocalSystem or from an elevated prompt')
+                'Run Setup /repair to rebuild it: the installed release''s Setup, & ''.\DefenseClawSetup-Enterprise-Standalone-x64.exe'' /repair JSON=1, ' +
+                'as LocalSystem or from an elevated PowerShell prompt (Setup is not installed on this computer: use the copy in your MDM package or the release download)')
         }
         throw "DefenseClaw enterprise installer rejected its module before import: $rejection"
     }
@@ -4762,6 +4902,7 @@ try {
         GatewayBinary = $GatewayBinary
         ACPBinary = $ACPBinary
         HookBinary = $HookBinary
+        HookGuardBinary = $HookGuardBinary
         SensorHelperBinary = $SensorHelperBinary
         PolicyCompiler = $PolicyCompiler
         CLIBinary = $CLIBinary
@@ -4831,6 +4972,20 @@ try {
                     -MemberType NoteProperty `
                     -Name mdm_rotation_journal_kept `
                     -Value $journalKept `
+                    -Force
+        }
+    }
+    # The folders DefenseClaw created that a purge kept, with why, so the
+    # Setup and CLI JSON name them, not only the lifecycle log (GAP-0091).
+    if ($Action -eq 'Uninstall' -and $null -ne $result -and
+        $null -ne (Microsoft.PowerShell.Core\Get-Command -Name 'DefenseClawEnterprise\Get-DefenseClawCreatedFoldersKept' -ErrorAction SilentlyContinue)) {
+        $foldersKept = [string[]]@(DefenseClawEnterprise\Get-DefenseClawCreatedFoldersKept)
+        if ($foldersKept.Count -gt 0) {
+            $result |
+                Microsoft.PowerShell.Utility\Add-Member `
+                    -MemberType NoteProperty `
+                    -Name created_folders_kept `
+                    -Value $foldersKept `
                     -Force
         }
     }

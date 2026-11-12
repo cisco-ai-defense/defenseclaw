@@ -27,6 +27,27 @@ func claudeLockTestSetup() connector.SetupOpts {
 	}
 }
 
+func TestWindowsClaudeRecordedPolicyRecognizesPreviousCommandForm(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	record := windowsClaudeManagedPolicyState{HookExecutable: claudeLockTestSetup().HookExecutable}
+	previous, err := renderWindowsClaudeRecordedPolicy(record, "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := renderWindowsClaudeRecordedPolicy(record, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(previous, current) {
+		t.Fatal("current and previous managed commands have the same form")
+	}
+	record.PolicySHA256 = windowsManagedPolicyDigest(previous)
+	got, err := renderRecordedWindowsClaudeManagedPolicy(record)
+	if err != nil || !bytes.Equal(got, previous) {
+		t.Fatalf("previous policy was not recognized: %v", err)
+	}
+}
+
 // A standalone process renders and verifies the machine-wide Claude
 // Code drop-in with allowManagedHooksOnly: true unless the administrator
 // chose managed_hooks_only: preserve; a Secure Client process never does.

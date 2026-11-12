@@ -88,6 +88,23 @@
               }
             }
           }
+        },
+        "removed_connectors": {
+          "type": "array",
+          "description": "Windows standalone: per account, the connectors an administrator took off the roster that the account had been enrolled for. Not protected and not pending: DefenseClaw no longer governs them for the account.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["account", "connectors"],
+            "properties": {
+              "account": { "type": "string" },
+              "sid": { "type": "string" },
+              "connectors": {
+                "type": "object",
+                "additionalProperties": { "enum": ["not managed (removed from roster)"] }
+              }
+            }
+          }
         }
       }
     },

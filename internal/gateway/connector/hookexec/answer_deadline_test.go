@@ -427,7 +427,7 @@ func TestProcessStartTimeIsTheCreationOfTheProcess(t *testing.T) {
 	if started.After(hookProcessInit.Add(20 * time.Millisecond)) {
 		t.Fatalf("process start %s is after the package init %s", started, hookProcessInit)
 	}
-	if hookProcessInit.Sub(started) > maxProcessStartAge {
+	if hookProcessInit.Sub(started) > 30*time.Second {
 		t.Fatalf("process start %s is %s before the package init", started, hookProcessInit.Sub(started))
 	}
 	if got := ProcessStartTime(); got.After(time.Now()) {

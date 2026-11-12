@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -43,14 +44,24 @@ func TestLinuxSourceHashesTheRunningClientImage(t *testing.T) {
 	pid := startImage(t, image, sleep)
 
 	source := &linuxSource{buffer: NewBuffer()}
-	source.pushProcess(KindExec, pid, time.Now(), false)
-	if event := <-source.buffer.Events(); event.ImageSHA256 != "" || event.ImageVersion != "2.1.317" {
-		t.Fatalf("first exec image identity = %q %q, want the version and no digest yet", event.ImageSHA256, event.ImageVersion)
+	first := time.Now()
+	source.pushProcess(KindExec, pid, first, false)
+	if event := <-source.buffer.Events(); event.ImageSHA256 != "" || event.ImageVersion != "2.1.317" ||
+		event.ImageDigestState != DigestPending {
+		t.Fatalf("first exec image identity = %q %q %q, want the version and the digest pending",
+			event.ImageSHA256, event.ImageVersion, event.ImageDigestState)
 	}
 	clientImages.idle()
+	// cowork-1-0-8 GAP-0067: the digest of that exec follows once it is read.
+	if event := <-source.buffer.Events(); event.Kind != KindImageDigest || event.PID != pid || !event.At.Equal(first) ||
+		event.ImageVersion != "2.1.317" || event.ImageSHA256 != hex.EncodeToString(want[:]) ||
+		event.ImageDigestState != DigestRead {
+		t.Fatalf("digest of the first exec = %+v", event)
+	}
 	source.pushProcess(KindExec, pid, time.Now(), false)
-	if event := <-source.buffer.Events(); event.ImageSHA256 != hex.EncodeToString(want[:]) || event.ImageVersion != "2.1.317" {
-		t.Fatalf("exec image identity = %q %q", event.ImageSHA256, event.ImageVersion)
+	if event := <-source.buffer.Events(); event.ImageSHA256 != hex.EncodeToString(want[:]) || event.ImageVersion != "2.1.317" ||
+		event.ImageDigestState != DigestRead {
+		t.Fatalf("exec image identity = %q %q %q", event.ImageSHA256, event.ImageVersion, event.ImageDigestState)
 	}
 
 	if err := os.Remove(image); err != nil {
@@ -64,6 +75,9 @@ func TestLinuxSourceHashesTheRunningClientImage(t *testing.T) {
 	source.pushProcess(KindExec, pid, time.Now(), false)
 	<-source.buffer.Events()
 	clientImages.idle()
+	if event := <-source.buffer.Events(); event.Kind != KindImageDigest || event.ImageSHA256 != hex.EncodeToString(want[:]) {
+		t.Fatalf("digest of the unlinked image = %+v", event)
+	}
 	source.pushProcess(KindExec, pid, time.Now(), false)
 	if event := <-source.buffer.Events(); event.ImageSHA256 != hex.EncodeToString(want[:]) {
 		t.Fatalf("replaced path read as the running image: %q", event.ImageSHA256)
@@ -71,8 +85,8 @@ func TestLinuxSourceHashesTheRunningClientImage(t *testing.T) {
 
 	// An image outside a release layout is not read.
 	source.pushProcess(KindExec, startImage(t, filepath.Join(t.TempDir(), "claude"), sleep), time.Now(), false)
-	if event := <-source.buffer.Events(); event.ImageSHA256 != "" || event.ImageVersion != "" {
-		t.Fatalf("image outside a release layout = %q %q", event.ImageSHA256, event.ImageVersion)
+	if event := <-source.buffer.Events(); event.ImageSHA256 != "" || event.ImageVersion != "" || event.ImageDigestState != "" {
+		t.Fatalf("image outside a release layout = %q %q %q", event.ImageSHA256, event.ImageVersion, event.ImageDigestState)
 	}
 }
 
@@ -115,6 +129,9 @@ func TestForkThatExecsMidReadIsNotPairedWithItsParentImage(t *testing.T) {
 			source.pushProcess(KindExec, pid, time.Now(), false)
 			<-source.buffer.Events()
 			clientImages.idle()
+			if event := <-source.buffer.Events(); event.Kind != KindImageDigest {
+				t.Fatalf("after the parent image's read = %+v, want its digest", event)
+			}
 
 			fired := false
 			procSnapshotHook = func(at string) {
@@ -274,9 +291,147 @@ func TestSlowClientImageReadDoesNotStopExecDelivery(t *testing.T) {
 	}
 	close(release)
 	hasher.idle()
+	if event := <-source.buffer.Events(); event.Kind != KindImageDigest || event.PID != client || event.ImageSHA256 != "slow" {
+		t.Fatalf("digest of the delivered exec = %+v", event)
+	}
 	source.pushProcess(KindExec, client, time.Now(), false)
 	if event := <-source.buffer.Events(); event.ImageSHA256 != "slow" {
 		t.Fatalf("digest after the read = %q", event.ImageSHA256)
+	}
+}
+
+// cowork-1-0-8 GAP-0067: an exec event says whether its image digest is in
+// it, follows it, or is not coming, so the host plane waits only for one
+// that is coming. Every waiter of a queued image hears once how its read
+// ended.
+func TestImageDigestStates(t *testing.T) {
+	hasher := newImageHasher()
+	started, release := make(chan struct{}, 8), make(chan struct{})
+	hasher.hash = func(*os.File, int64, time.Time) (string, error) {
+		started <- struct{}{}
+		<-release
+		return "sum", nil
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+		hasher.idle()
+	}()
+	dir := t.TempDir()
+	var mu sync.Mutex
+	var heard []string
+	follow := func(tag string) func(string, bool) {
+		return func(sum string, read bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			heard = append(heard, fmt.Sprintf("%s:%s:%t", tag, sum, read))
+		}
+	}
+	state := func(name, account string, then func(string, bool)) DigestState {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err != nil {
+			if err := os.WriteFile(path, []byte(name), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, ok := statImageKey(file)
+		if !ok {
+			t.Skip("no image key on this volume")
+		}
+		_, got := hasher.digestOf(file, key, account, then)
+		return got
+	}
+	for _, step := range []struct {
+		what, image, account string
+		then                 func(string, bool)
+		want                 DigestState
+	}{
+		{"queued now", "a", "uid:1", follow("a1"), DigestPending},
+		{"already queued: waits for the same read", "a", "uid:1", follow("a2"), DigestPending},
+		{"nobody to deliver a later digest to", "a", "uid:1", nil, DigestFailed},
+		{"the account's slot holds another image", "b", "uid:1", follow("b"), DigestFailed},
+	} {
+		if got := state(step.image, step.account, step.then); got != step.want {
+			t.Fatalf("%s: %q, want %q", step.what, got, step.want)
+		}
+	}
+	<-started // the worker reads a; the queue has room for maxClientImageJobs more
+	for i := range maxClientImageJobs {
+		if got := state(fmt.Sprintf("q%d", i), fmt.Sprintf("uid:%d", 10+i), follow("q")); got != DigestPending {
+			t.Fatalf("queue slot %d: %q", i, got)
+		}
+	}
+	if got := state("full", "uid:99", follow("full")); got != DigestFailed {
+		t.Fatalf("queue full: %q, want failed", got)
+	}
+	hasher.mu.Lock()
+	waiting := hasher.waiting
+	hasher.waiting = maxDigestWaiters
+	hasher.mu.Unlock()
+	if got := state("a", "uid:1", follow("a3")); got != DigestFailed {
+		t.Fatalf("waiters full: %q, want failed", got)
+	}
+	hasher.mu.Lock()
+	hasher.waiting = waiting
+	hasher.mu.Unlock()
+	close(release)
+	released = true
+	hasher.idle()
+	mu.Lock()
+	got := strings.Join(heard, " ")
+	mu.Unlock()
+	if !strings.HasPrefix(got, "a1:sum:true a2:sum:true ") || strings.Count(got, "q:sum:true") != maxClientImageJobs ||
+		strings.Contains(got, "a3") || strings.Contains(got, "full") || strings.Contains(got, "b:") {
+		t.Fatalf("waiters heard %q", got)
+	}
+	if got := state("a", "uid:1", follow("a4")); got != DigestRead {
+		t.Fatalf("cached: %q, want read", got)
+	}
+	hasher.off.Store(true)
+	if got := state("c", "uid:2", follow("c")); got != DigestFailed {
+		t.Fatalf("hashing off: %q, want failed", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Contains(strings.Join(heard, " "), "a4") || strings.Contains(strings.Join(heard, " "), "c:") {
+		t.Fatalf("a digest that is in or not coming was followed up: %q", heard)
+	}
+}
+
+// The digest of an exec never goes out before the exec's own event, however
+// fast its read ends, and nothing goes out of a closed source.
+func TestImageDigestFollowsItsExec(t *testing.T) {
+	at := time.Unix(1_760_000_000, 7)
+	var pushed []Event
+	early := newDigestDelivery(func(event Event) { pushed = append(pushed, event) }, 42, at)
+	early.version = "2.1.317"
+	early.follow("sum", true)
+	if len(pushed) != 0 {
+		t.Fatalf("digest pushed before its exec: %+v", pushed)
+	}
+	early.execSent()
+	late := newDigestDelivery(func(event Event) { pushed = append(pushed, event) }, 43, at)
+	late.version = "2.1.317"
+	late.execSent()
+	late.follow("ignored", false)
+	if len(pushed) != 2 || pushed[0].Kind != KindImageDigest || pushed[0].PID != 42 || !pushed[0].At.Equal(at) ||
+		pushed[0].ImageVersion != "2.1.317" || pushed[0].ImageSHA256 != "sum" || pushed[0].ImageDigestState != DigestRead ||
+		pushed[1].PID != 43 || pushed[1].ImageSHA256 != "" || pushed[1].ImageDigestState != DigestFailed {
+		t.Fatalf("pushed %+v", pushed)
+	}
+	closed := &linuxSource{buffer: NewBuffer(), closed: true}
+	closed.pushUnlessClosed(Event{Kind: KindImageDigest, PID: 44})
+	select {
+	case event := <-closed.buffer.Events():
+		t.Fatalf("closed source delivered %+v", event)
+	default:
 	}
 }
 
@@ -298,10 +453,71 @@ func TestClientImageDigestIsDroppedWhenTheFileChangesDuringTheRead(t *testing.T)
 		t.Fatal(err)
 	}
 	key, _ := statImageKey(file)
-	hasher.digestOf(file, key, "")
+	var heard []string
+	if _, state := hasher.digestOf(file, key, "", func(sum string, read bool) {
+		heard = append(heard, fmt.Sprintf("%q %t", sum, read))
+	}); state != DigestPending {
+		t.Fatalf("state %q, want pending", state)
+	}
 	hasher.idle()
 	if len(hasher.digest) != 0 {
 		t.Fatal("a digest of a file written during the read was cached")
+	}
+	if len(heard) != 1 || heard[0] != `"" false` {
+		t.Fatalf("the waiter heard %v, want one failed read", heard)
+	}
+}
+
+// cowork-1-0-8 GAP-0067: a fork event is flagged, and its digest is never
+// followed up (the exec has an event of its own), so it takes no waiter.
+func TestForkEventIsFlaggedAndNotFollowedUp(t *testing.T) {
+	useHasher(t, newImageHasher())
+	sleep, err := os.ReadFile(testenv.NativeSleep(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := startImage(t, filepath.Join(t.TempDir(), ".local/share/claude/versions/2.1.317"), sleep)
+	source := &linuxSource{buffer: NewBuffer()}
+	source.pushProcess(KindExec, pid, time.Now(), true)
+	if event := <-source.buffer.Events(); !event.Fork || event.ImageVersion != "2.1.317" ||
+		event.ImageDigestState != DigestFailed {
+		t.Fatalf("fork event = %+v, want flagged, the version, no digest coming", event)
+	}
+	clientImages.idle()
+	select {
+	case event := <-source.buffer.Events():
+		t.Fatalf("a fork was followed up: %+v", event)
+	default:
+	}
+	source.pushProcess(KindExec, pid, time.Now(), false)
+	if event := <-source.buffer.Events(); event.Fork || event.ImageDigestState != DigestRead {
+		t.Fatalf("exec event = %+v, want unflagged with the digest the fork's read cached", event)
+	}
+}
+
+// A read that fails tells its waiters so: the host plane records the held
+// client at once instead of at the end of its hold.
+func TestFailedClientImageReadIsFollowedUp(t *testing.T) {
+	hasher := newImageHasher()
+	hasher.hash = func(*os.File, int64, time.Time) (string, error) { return "", errImageDeadline }
+	path := filepath.Join(t.TempDir(), "image")
+	if err := os.WriteFile(path, []byte("release image fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := statImageKey(file)
+	var heard []string
+	if _, state := hasher.digestOf(file, key, "", func(sum string, read bool) {
+		heard = append(heard, fmt.Sprintf("%q %t", sum, read))
+	}); state != DigestPending {
+		t.Fatalf("state %q, want pending", state)
+	}
+	hasher.idle()
+	if len(heard) != 1 || heard[0] != `"" false` || len(hasher.digest) != 0 || hasher.waiting != 0 {
+		t.Fatalf("heard %v, cached %d, waiting %d; want one failed read and nothing left", heard, len(hasher.digest), hasher.waiting)
 	}
 }
 
@@ -339,6 +555,40 @@ func TestProcessConnectorOverflowIsReportedNotTheEnd(t *testing.T) {
 	if limits := strings.Join(source.Coverage().Limitations, "; "); !strings.Contains(limits, "ENOBUFS") {
 		t.Fatalf("coverage limitations = %q, want the overflow", limits)
 	}
+}
+
+// cowork-1-0-8 GAP-0071: an event the source's own buffer drops after the
+// kernel delivered it is named in the coverage, as an ENOBUFS loss is, for
+// the native source and for the Tetragon stream (its buffer and its native
+// process half's).
+func TestBufferDropsAreReportedInCoverage(t *testing.T) {
+	fill := func(buffer *Buffer) {
+		for index := 0; index <= eventBuffer; index++ {
+			buffer.Push(Event{Kind: KindFileRead, PID: index})
+		}
+	}
+	native := &linuxSource{buffer: NewBuffer()}
+	if limits := strings.Join(native.Coverage().Limitations, "; "); strings.Contains(limits, "dropped") {
+		t.Fatalf("limitations before any drop = %q", limits)
+	}
+	fill(native.buffer)
+	if limits := strings.Join(native.Coverage().Limitations, "; "); !strings.Contains(limits, "1 events were dropped from the sensor's event buffer") {
+		t.Fatalf("native limitations = %q, want the buffer drop", limits)
+	}
+	stream := NewTetragonSource(nil, TetragonOptions{Mode: "consume"}).(*tetragonSource)
+	half := &linuxSource{buffer: NewBuffer()}
+	files := &linuxSource{buffer: NewBuffer()}
+	stream.proc = halfSource{linuxSource: half, cancel: func() {}}
+	stream.files = halfSource{linuxSource: files, cancel: func() {}}
+	fill(stream.buffer)
+	fill(half.buffer)
+	fill(files.buffer)
+	if limits := strings.Join(stream.Coverage().Limitations, "; "); !strings.Contains(limits, "3 events were dropped from the sensor's event buffer") {
+		t.Fatalf("Tetragon limitations = %q, want the stream's, the process half's and the file half's drops", limits)
+	}
+	// A half that stops keeps its drops: TestTetragonSourceFallsBackInStreamAndRecovers
+	// (cn_proc at a Tetragon reconnect) and
+	// TestTetragonSourceHandsTheFileHalfOverAndTakesItBack (fanotify at the hand-off).
 }
 
 func TestClaudeImageVersionFromInstallLayout(t *testing.T) {

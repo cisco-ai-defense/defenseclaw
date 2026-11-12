@@ -39,10 +39,13 @@ foreach ($name in @(
         'Test-DefenseClawGuardianCoverageReport',
         'Test-DefenseClawGuardianReportCompletedWithFailedTargets',
         'Test-DefenseClawGuardianReportErrorsAttributable',
+        'ConvertTo-DefenseClawGuardianTimestamp',
         'Get-DefenseClawGuardianGeneration',
         'Get-DefenseClawGuardianReadinessProbe',
         'Invoke-DefenseClawGuardianReadinessCommand',
         'Get-DefenseClawGuardianFailedTargets',
+        'Test-DefenseClawGuardianFailedTargetsWithinSIDs',
+        'Get-DefenseClawAllowedFailedTargetSIDs',
         'Get-DefenseClawGuardianPendingTargets',
         'Write-DefenseClawGuardianDegradedTargets',
         'Get-DefenseClawVerifyFailedTargetKeys'
@@ -67,6 +70,9 @@ function Write-DefenseClawResilienceEvent {
     $script:Events.Add("$Marker connector=$($Fields['connector']) sid=$($Fields['sid'])")
 }
 function ConvertTo-DefenseClawBoundedDiagnostic { param($Value) [string]$Value }
+# The module is not imported here: the profile is a flag. Standalone reads both label forms, Secure Client the old one only.
+$script:SmokeStandalone = $true
+function Test-DefenseClawStandaloneProfile { return [bool]$script:SmokeStandalone }
 
 $startedAfter = [DateTime]::Parse('2026-10-29T00:00:00Z').ToUniversalTime()
 $digest = 'a' * 64
@@ -105,7 +111,7 @@ function New-Report([int]$Failures, [int]$Rows = 3, [bool]$WithState = $true, [s
     }
     return ($report | ConvertTo-Json -Depth 6 | ConvertFrom-Json)
 }
-function Test-Coverage($Report, [string]$Digest = '', [switch]$Allow) {
+function Test-Coverage($Report, [string]$Digest = '', [switch]$Allow, [string[]]$AllowedSIDs) {
     return Test-DefenseClawGuardianCoverageReport `
         -Report $Report `
         -PriorReconcileID '' `
@@ -114,7 +120,8 @@ function Test-Coverage($Report, [string]$Digest = '', [switch]$Allow) {
         -CurrentStateIdentity 'new' `
         -ExpectedManifestSHA256 $Digest `
         -StartedAfter $startedAfter `
-        -AllowFailedTargets:$Allow
+        -AllowFailedTargets:$Allow `
+        -AllowedFailedTargetSIDs $AllowedSIDs
 }
 function Assert-Result($Result, [bool]$Ok, [string]$Label) {
     if ([bool]$Result.ok -ne $Ok) {
@@ -131,11 +138,69 @@ Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest ('c' * 64
 Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest) $false 'degraded activation without -AllowFailedTargets'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -Rows 2) -Allow) $false 'incomplete degraded reconcile'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -WithState $false) -Allow) $false 'not-ok report without state'
-# The Windows Guardian names a failed account "user (SID)"; a user name may
-# carry spaces. Only the failed row's own SID is accepted.
-Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@dana (S-1-5-21-1-2-3-1003)') -Allow) $true 'degraded reconcile with a Windows account label'
-Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@Dana Smith (S-1-5-21-1-2-3-1003)') -Allow) $true 'degraded reconcile with a spaced Windows account label'
-Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@dana (S-1-5-21-1-2-3-1001)') -Allow) $false 'degraded reconcile naming another SID'
+# GAP-0900: Windows names the account of a row as "user (SID)" (GAP-2290), and the
+# acceptance of a degraded reconcile read only the old "connector@SID" label, so a
+# rollback or a recovery that met any failed row stayed pending with the services stopped.
+$accountLabel = 'claudecode@EC2AMAZ-X\alice (S-1-5-21-1-2-3-1003)'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel) -Allow) $true 'degraded reconcile, row named as user (SID), rollback lane'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel -ActivationDigest $digest) -Digest $digest -Allow) $true 'degraded reconcile, row named as user (SID), activation lane'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@Bob Smith (S-1-5-21-1-2-3-1003)') -Allow) $true 'degraded reconcile, user name with a space'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel)) $false 'user (SID) row without -AllowFailedTargets'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@EC2AMAZ-X\alice (S-1-5-21-9-9-9-9)') -Allow) $false 'row named with a SID that is not a failed row'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'codex@EC2AMAZ-X\alice (S-1-5-21-1-2-3-1003)') -Allow) $false 'row named with another connector'
+# A crafted account name: the SID of the row is the last "(S-1-...)" before the first ": ".
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@evil (S-1-5-21-9-9-9-9) (S-1-5-21-1-2-3-1003)') -Allow) $true 'a name that holds another SID, with the real SID last'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@evil (S-1-5-21-1-2-3-1003) (S-1-5-21-9-9-9-9)') -Allow) $false 'a name that holds the failed SID, with another SID last'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@evil: x (S-1-5-21-1-2-3-1003)') -Allow) $false 'a name that holds a colon before the SID'
+# Secure Client reads the same labels (#1446): its Guardian names a failed
+# account "user (SID)" too, and a user name may carry spaces. Only the failed
+# row's own SID is accepted.
+$script:SmokeStandalone = $false
+try {
+    Assert-Result (Test-Coverage (New-Report -Failures 1) -Allow) $true 'Secure Client: the connector@SID label'
+    Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@dana (S-1-5-21-1-2-3-1003)') -Allow) $true 'Secure Client: degraded reconcile with a Windows account label'
+    Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@Dana Smith (S-1-5-21-1-2-3-1003)') -Allow) $true 'Secure Client: degraded reconcile with a spaced Windows account label'
+    Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@dana (S-1-5-21-1-2-3-1001)') -Allow) $false 'Secure Client: degraded reconcile naming another SID'
+    Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel)) $false 'Secure Client: user (SID) row without -AllowFailedTargets'
+}
+finally {
+    $script:SmokeStandalone = $true
+}
+$skippedSID = 'S-1-5-21-1-2-3-1003'
+$otherSID = 'S-1-5-21-1-2-3-1001'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest -Allow -AllowedSIDs @($skippedSID)) $true 'failed skipped account'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest -Allow -AllowedSIDs @($otherSID)) $false 'failed unlisted account'
+
+# A restarted guardian's first publication inside the same UTC second as the
+# one before it (GAP-0931). The no-digest recovery and Reconcile callers prove
+# a restart by a generation and a state identity they had not seen. The status
+# JSON goes through ConvertFrom-Json as in production, which turns a timestamp
+# of up to seven fractional digits into a DateTime.
+function New-TimedReport([string]$UpdatedAt) {
+    return ('{"ok":true,"errors":[],"state":{"updated_at":"' + $UpdatedAt + '","target_count":1}}' |
+        ConvertFrom-Json)
+}
+function Test-NoDigestRestart($Prior, $Current, [string]$PriorIdentity, [string]$CurrentIdentity) {
+    return Test-DefenseClawGuardianCoverageReport `
+        -Report $Current `
+        -PriorReconcileID ('1' * 32) `
+        -PriorGeneration ([string](Get-DefenseClawGuardianGeneration -Report $Prior)) `
+        -PriorStateIdentity $PriorIdentity `
+        -CurrentStateIdentity $CurrentIdentity `
+        -ExpectedManifestSHA256 '' `
+        -StartedAfter $startedAfter
+}
+foreach ($pair in @(
+        @{ prior = '2026-10-29T00:00:05.1000000Z'; current = '2026-10-29T00:00:05.9000000Z'; label = 'seven digits in one second' },
+        @{ prior = '2026-10-29T00:00:05.1Z'; current = '2026-10-29T00:00:05.9Z'; label = 'one digit in one second' },
+        @{ prior = '2026-10-29T00:00:05.100000001Z'; current = '2026-10-29T00:00:05.900000001Z'; label = 'nine digits in one second' }
+    )) {
+    $prior = New-TimedReport $pair.prior
+    $current = New-TimedReport $pair.current
+    Assert-Result (Test-NoDigestRestart $prior $current 'old' 'new') $true "restart republished in one second ($($pair.label))"
+    Assert-Result (Test-NoDigestRestart $prior $current 'same' 'same') $false "same state file kept ($($pair.label))"
+    Assert-Result (Test-NoDigestRestart $prior $prior 'old' 'new') $false "same generation with a new state file ($($pair.label))"
+}
 
 # The readiness wait that follows uses `enterprise hooks status`, which exits
 # non-zero for a degraded Guardian. The same rollback-only allowance applies.
@@ -146,7 +211,29 @@ function Invoke-DefenseClawGatewayCommand { param($Layout, $GatewayServiceName, 
 function Get-DefenseClawGuardianStatusReport { param($Layout, $GatewayServiceName) $script:StatusReport }
 function Get-DefenseClawGuardianVerificationFailureDiagnostic { param($Probe) 'guardian not ready' }
 # The live-verify probe picks its verb by profile; this lane is Secure Client.
-function Test-DefenseClawStandaloneProfile { $false }
+$script:StandaloneProfile = $false
+function Test-DefenseClawStandaloneProfile { $script:StandaloneProfile }
+function Get-DefenseClawTargetRuntimeSkippedProfiles {
+    param($Plan)
+    return @($Plan.skipped_profiles)
+}
+$plan = [pscustomobject]@{
+    skipped_profiles = @([pscustomobject]@{ sid = $otherSID })
+}
+$secureClientSIDs = [string[]](Get-DefenseClawAllowedFailedTargetSIDs -Plan $plan)
+if ($secureClientSIDs.Count -ne 0 -or
+    -not [bool](Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) `
+        -Digest $digest -Allow -AllowedSIDs $secureClientSIDs).ok) {
+    throw 'Secure Client rejected an unrelated failed target after one skipped profile'
+}
+$script:StandaloneProfile = $true
+$standaloneSIDs = [string[]](Get-DefenseClawAllowedFailedTargetSIDs -Plan $plan)
+if ($standaloneSIDs.Count -ne 1 -or $standaloneSIDs[0] -cne $otherSID -or
+    [bool](Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) `
+        -Digest $digest -Allow -AllowedSIDs $standaloneSIDs).ok) {
+    throw 'standalone accepted a failure outside its skipped account'
+}
+$script:StandaloneProfile = $false
 $probeArgs = @{ Layout = @{ ManifestPath = 'C:\targets.yaml' }; GatewayServiceName = 'gw'; GuardianServiceName = 'guardian' }
 if (-not [bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets).ready) {
     throw 'rollback readiness rejected a complete degraded reconcile'
@@ -158,6 +245,13 @@ if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets 
     throw 'live verification accepted a degraded Guardian without a per-target verify report'
 }
 $script:VerifyOutput = @('{"ok":false,"results":[{"connector":"claudecode","sid":"S-1-5-21-1-2-3-1003","ok":false,"error":"hook missing"},{"connector":"codex","sid":"S-1-5-21-1-2-3-1001","ok":true}]}')
+$script:Events.Clear()
+if (-not [bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify -AllowedFailedTargetSIDs @($skippedSID)).ready) {
+    throw 'live verification rejected the failed skipped account'
+}
+if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify -AllowedFailedTargetSIDs @($otherSID)).ready) {
+    throw 'live verification accepted a failure outside the skipped account'
+}
 $script:Events.Clear()
 if (-not [bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
     throw 'live verification rejected a failure confined to the Guardian-failed target'

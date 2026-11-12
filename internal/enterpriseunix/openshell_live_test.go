@@ -129,6 +129,8 @@ func TestPrerequisiteVersionRefusesPrereleases(t *testing.T) {
 		spec, have string
 		ok         bool
 	}{
+		{"0.0.40", "0.0.40", false},
+		{"0.2.0", "0.2.0", false},
 		{"", "0.1.6~pre.3", false},
 		{"", "0.1.6~pre.3-1", false},
 		{"", "openshell 0.1.6-pre.3", false},

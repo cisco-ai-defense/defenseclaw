@@ -11,6 +11,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -244,8 +246,8 @@ const standaloneHookRuntimeRecordMaxBytes = 4 << 20
 // shared inspect scripts and _hardening.sh, a managed plugin) is still there
 // with the recorded bytes (a deleted hermes-hook.sh stayed missing
 // and every check stayed green); the hooks were rendered for the fail mode
-// and guardrail mode the configuration selects now (an
-// observe-to-action change never reached ~/.defenseclaw/hooks); and the
+// mode the configuration selects now (an observe-to-action change that
+// changes the rendered hook must reach ~/.defenseclaw/hooks); and the
 // runtime records the hook scripts read (.hookcfg and .hookcfg.<connector>)
 // carry that fail mode. Every hook runtime file DefenseClaw renders for the
 // user (a managed in-agent plugin for Amp and OpenCode, the hook scripts
@@ -256,27 +258,62 @@ const standaloneHookRuntimeRecordMaxBytes = 4 << 20
 // runs as the user and reads only the user's own files. Standalone per-user
 // worker only.
 func verifyStandaloneHookRuntime(conn connector.Connector, setupOpts connector.SetupOpts, guardrailMode string, lock connector.HookContractLockEntry, uid int) error {
+	if faults := standaloneHookRuntimeFaults(conn, setupOpts, guardrailMode, lock, uid, false); len(faults) > 0 {
+		return faults[0].err
+	}
+	return nil
+}
+
+// hookRuntimeFault is one way the hook runtime of a target does not match what
+// DefenseClaw renders, and the protected element it belongs to: one runtime
+// file (hookRuntimeFileElement), or HookElementRuntime when the fault is
+// about the runtime as a whole (the lock, the fail mode, the render itself).
+type hookRuntimeFault struct {
+	element string
+	err     error
+}
+
+// standaloneHookRuntimeFaults is the check verifyStandaloneHookRuntime makes,
+// kept as a list: with all set it reports every fault, each against the file
+// it belongs to, so the guardian can tell which protected file a repair put
+// back while another stayed broken (GAP-0754); without it, it stops at the
+// first fault, which is the error verifyStandaloneHookRuntime returns.
+func standaloneHookRuntimeFaults(conn connector.Connector, setupOpts connector.SetupOpts, guardrailMode string, lock connector.HookContractLockEntry, uid int, all bool) []hookRuntimeFault {
 	if !standalonePerUserRepair(uid) || conn == nil {
 		return nil
 	}
 	name := conn.Name()
 	opts := setupOpts
 	opts.GuardrailMode = strings.TrimSpace(guardrailMode)
+	var faults []hookRuntimeFault
+	// add records a fault and says whether the check goes on.
+	add := func(element string, err error) bool {
+		faults = append(faults, hookRuntimeFault{element: element, err: err})
+		return all
+	}
 	expected, err := connector.NewHookContractLockEntryForMode(opts, conn, version.Current().BinaryVersion, false)
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: connector %s: inspect the hook runtime: %w", name, err)
+		add(HookElementRuntime, fmt.Errorf("enterprise hooks: connector %s: inspect the hook runtime: %w", name, err))
+		return faults
 	}
 	if recorded := strings.TrimSpace(lock.HookFailMode); recorded != "" && recorded != expected.HookFailMode {
-		return fmt.Errorf("enterprise hooks: connector %s hooks were rendered for fail mode %q; the configuration now selects %q", name, recorded, expected.HookFailMode)
+		if !add(HookElementRuntime, fmt.Errorf("enterprise hooks: connector %s hooks were rendered for fail mode %q; the configuration now selects %q", name, recorded, expected.HookFailMode)) {
+			return faults
+		}
 	}
-	if lock.RegistrationPosture != nil && expected.RegistrationPosture != nil &&
-		lock.RegistrationPosture.GuardrailMode != expected.RegistrationPosture.GuardrailMode {
-		return fmt.Errorf("enterprise hooks: connector %s hooks were rendered for guardrail mode %q; the configuration now selects %q", name, lock.RegistrationPosture.GuardrailMode, expected.RegistrationPosture.GuardrailMode)
-	}
+	// The guardrail mode in the lock records policy at the last install. A
+	// mode change alone does not mean the target changed: the template,
+	// sidecar, token and registration checks below establish whether the
+	// current mode actually requires a new render.
 
 	shared, err := readSharedHookScriptDigests(opts.DataDir)
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: connector %s: %w", name, err)
+		// An unreadable lock is a fault of the runtime as a whole; the files
+		// are still read against the render, which does not need the lock.
+		if !add(HookElementRuntime, fmt.Errorf("enterprise hooks: connector %s: %w", name, err)) {
+			return faults
+		}
+		shared = nil
 	}
 	hookDir := filepath.Join(filepath.Clean(opts.DataDir), "hooks")
 	rendersScript := false
@@ -295,29 +332,230 @@ func verifyStandaloneHookRuntime(conn connector.Connector, setupOpts connector.S
 		}
 		got, present := expected.HookScriptDigests[base]
 		if !present {
-			return fmt.Errorf("enterprise hooks: connector %s hook runtime file is missing or unreadable: %s", name, path)
+			if !add(hookRuntimeFileElement(path), fmt.Errorf("enterprise hooks: connector %s hook runtime file is missing or unreadable: %s", name, path)) {
+				return faults
+			}
+			continue
 		}
 		if got != want {
-			return fmt.Errorf("enterprise hooks: connector %s hook runtime file changed since it was installed: %s", name, path)
+			if !add(hookRuntimeFileElement(path), fmt.Errorf("enterprise hooks: connector %s hook runtime file changed since it was installed: %s", name, path)) {
+				return faults
+			}
 		}
 	}
 	if path, err := connector.ManagedPluginArtifactDrift(conn, opts); err != nil {
-		return fmt.Errorf("enterprise hooks: inspect connector %s managed plugin %s: %w", name, path, err)
+		if !add(hookRuntimeFileElement(path), fmt.Errorf("enterprise hooks: inspect connector %s managed plugin %s: %w", name, path, err)) {
+			return faults
+		}
 	} else if path != "" {
-		return fmt.Errorf("enterprise hooks: connector %s managed plugin differs from the rendered template: %s", name, path)
+		if !add(hookRuntimeFileElement(path), fmt.Errorf("enterprise hooks: connector %s managed plugin differs from the rendered template: %s", name, path)) {
+			return faults
+		}
 	}
-	if path, err := connector.HookScriptRenderDrift(conn, opts); err != nil {
-		return fmt.Errorf("enterprise hooks: inspect connector %s hook runtime file %s: %w", name, path, err)
-	} else if path != "" {
-		return fmt.Errorf("enterprise hooks: connector %s hook runtime file differs from the rendered template: %s", name, path)
+	for _, path := range connector.ManagedPluginArtifacts(conn, opts) {
+		matches, err := standaloneRuntimeFileMetadataMatches(path, 0o600, uid)
+		if err != nil {
+			if !add(hookRuntimeFileElement(path), fmt.Errorf("enterprise hooks: inspect connector %s managed plugin %s: %w", name, path, err)) {
+				return faults
+			}
+		} else if !matches {
+			if !add(hookRuntimeFileElement(path), fmt.Errorf("enterprise hooks: connector %s managed plugin protection differs from the installed mode or owner: %s", name, path)) {
+				return faults
+			}
+		}
+	}
+	for _, drift := range connector.HookScriptRenderDrifts(conn, opts, func(path string, mode os.FileMode) (bool, error) {
+		return standaloneRuntimeFileMetadataMatches(path, mode, uid)
+	}) {
+		element := hookRuntimeFileElement(drift.Path)
+		if drift.Path == hookDir {
+			element = HookElementRuntime // the render itself failed, no file is named
+		}
+		err := fmt.Errorf("enterprise hooks: connector %s hook runtime file differs from the rendered template: %s", name, drift.Path)
+		if drift.Err != nil {
+			err = fmt.Errorf("enterprise hooks: inspect connector %s hook runtime file %s: %w", name, drift.Path, drift.Err)
+		}
+		if !add(element, err) {
+			return faults
+		}
 	}
 	if !rendersScript {
-		return nil // plugin-only connectors keep no per-connector runtime record
+		return faults // plugin-only connectors keep no per-connector runtime record
 	}
 	if err := verifyHookRuntimeToken(conn, opts); err != nil {
-		return err
+		path, _, _ := connector.HookRuntimeTokenFile(opts, conn)
+		if !add(hookRuntimeFileElement(path), err) {
+			return faults
+		}
 	}
-	return verifyHookRuntimeRecords(hookDir, name, connector.CapableHookFailMode(opts, conn, expected.HookFailMode))
+	for _, fault := range hookRuntimeRecordFaults(hookDir, name, connector.CapableHookFailMode(opts, conn, expected.HookFailMode)) {
+		if !add(fault.element, fault.err) {
+			break
+		}
+	}
+	return faults
+}
+
+func standaloneRuntimeFileMetadataMatches(path string, mode os.FileMode, uid int) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	owned, _ := fileOwnerMatches(path, uid)
+	return info.Mode().IsRegular() && info.Mode().Perm() == mode && owned, nil
+}
+
+// HookCredentials are one target's per-user hook API and OTLP credentials.
+type HookCredentials struct {
+	APIToken      string `json:"api_token"`
+	OTLPPathToken string `json:"otlp_path_token,omitempty"`
+}
+
+// PreviousHookRuntimeIntactForConfigurationChange distinguishes a configuration
+// rerender from repair of a changed target. It verifies the installed runtime
+// against the prior recorded configuration; independent drift keeps the
+// ordinary repair classification. prior, when the guardian holds a credential
+// rotation, is the target's credential pair from the other key of that
+// rotation; nil otherwise.
+func PreviousHookRuntimeIntactForConfigurationChange(ctx context.Context, opts InstallOptions, prior *HookCredentials) bool {
+	if runtime.GOOS == "windows" || !standaloneProfileProcess() || os.Geteuid() == 0 {
+		return false
+	}
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+	}
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	lock, err := connector.LoadHookContractLockEntryForMode(dataDir, name, false)
+	if err != nil || lock.Connector != name || lock.RegistrationPosture == nil || strings.TrimSpace(lock.HookFailMode) == "" {
+		return false
+	}
+	previous := opts
+	previous.AgentVersion = lock.RawAgentVersion
+	previous.HookContractID = lock.ContractID
+	previous.HookFailMode = lock.HookFailMode
+	previous.GuardrailMode = lock.RegistrationPosture.GuardrailMode
+	previous.HILTEnabled = lock.RegistrationPosture.HILTEnabled
+	previous.WorkspaceDir = lock.RegistrationPosture.WorkspaceDir
+	previous.ManagedHookSocket = lock.RegistrationPosture.HookSocket
+	previous.ManagedServiceUID = lock.RegistrationPosture.HookSocketServiceUID
+	previous.ForeignHookGuardBinary = lock.RegistrationPosture.ForeignHookGuard
+	// The lock deliberately omits endpoints. The installed runtime record
+	// retains the prior one, so use it to reproduce the previous rendering
+	// when an administrator changes the endpoint and policy together.
+	if endpoint, ok := previousHookRuntimeEndpoint(opts, dataDir); ok {
+		previous.APIAddr = endpoint
+	}
+	// The scoped credential is installed alongside the runtime. Its custody
+	// check and the lock's credential binding distinguish a legitimate token
+	// rotation from a changed or unreadable installed token.
+	if token, tokenErr := connector.LoadHookAPIToken(dataDir, name); tokenErr != nil {
+		return false
+	} else if token != "" {
+		if token != opts.APIToken && lock.RegistrationPosture.HookCredentialBinding == "" {
+			return false
+		}
+		previous.APIToken = token
+	}
+	// The binding covers the API and OTLP credentials together, and a
+	// rotation replaces both. The OTLP credential need not be rendered
+	// anywhere the account can read, so the prior pair comes from the
+	// guardian, which derives it from the other key of the rotation it
+	// holds. It is used only when it explains both the installed API token
+	// and the recorded binding; any other installed credential fails below.
+	if prior != nil && previous.APIToken == prior.APIToken &&
+		!connector.HookCredentialDrifted(lock, connector.SetupOpts{
+			HookCredentialIdentity: previous.HookCredentialIdentity,
+			APIToken:               prior.APIToken,
+			OTLPPathToken:          prior.OTLPPathToken,
+		}) {
+		previous.OTLPPathToken = prior.OTLPPathToken
+	}
+	if strings.TrimSpace(previous.HookFailMode) == strings.TrimSpace(opts.HookFailMode) &&
+		strings.TrimSpace(previous.GuardrailMode) == strings.TrimSpace(opts.GuardrailMode) &&
+		previous.APIAddr == opts.APIAddr && previous.APIToken == opts.APIToken &&
+		previous.OTLPPathToken == opts.OTLPPathToken &&
+		previous.AgentVersion == opts.AgentVersion && previous.HookContractID == opts.HookContractID &&
+		previous.HILTEnabled == opts.HILTEnabled &&
+		previous.WorkspaceDir == opts.WorkspaceDir && previous.ManagedHookSocket == opts.ManagedHookSocket &&
+		previous.ManagedServiceUID == opts.ManagedServiceUID && previous.ForeignHookGuardBinary == opts.ForeignHookGuardBinary {
+		return false
+	}
+	_, err = Verify(ctx, previous)
+	return err == nil
+}
+
+func previousHookRuntimeEndpoint(opts InstallOptions, dataDir string) (string, bool) {
+	path := filepath.Join(dataDir, "hooks", ".hookcfg")
+	body, exists, err := readUserRuntimeRecord(path, "hook runtime record")
+	if err != nil {
+		return "", false
+	}
+	if exists {
+		var record struct {
+			Version     int    `json:"version"`
+			GatewayAddr string `json:"gateway_addr"`
+			Managed     bool   `json:"managed_enterprise"`
+		}
+		if err := json.Unmarshal(body, &record); err != nil || record.Version != 2 ||
+			strings.TrimSpace(record.GatewayAddr) == "" || !record.Managed ||
+			connector.HookSidecarJSONAmbiguous(body) {
+			return "", false
+		}
+		return record.GatewayAddr, true
+	}
+	reg := opts.Registry
+	if reg == nil {
+		reg = connector.NewDefaultRegistry()
+	}
+	conn, ok := reg.Get(strings.ToLower(strings.TrimSpace(opts.ConnectorName)))
+	if !ok {
+		return "", false
+	}
+	var paths []string
+	if err := connector.WithUserHomeDir(opts.UserHome, func() error {
+		paths = connector.ManagedPluginArtifacts(conn, connector.SetupOpts{DataDir: dataDir, WorkspaceDir: opts.WorkspaceDir})
+		return nil
+	}); err != nil || len(paths) == 0 {
+		return "", false
+	}
+	endpoint := ""
+	for _, path := range paths {
+		body, exists, err := readUserRuntimeRecord(path, "managed plugin")
+		if err != nil || !exists {
+			return "", false
+		}
+		value, ok := renderedPluginEndpoint(body)
+		if !ok || (endpoint != "" && endpoint != value) {
+			return "", false
+		}
+		endpoint = value
+	}
+	return endpoint, endpoint != ""
+}
+
+func renderedPluginEndpoint(body []byte) (string, bool) {
+	endpoint := ""
+	for _, line := range strings.Split(string(body), "\n") {
+		left, right, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		left = strings.TrimSpace(left)
+		if left != "const DC_API_ADDR" && left != "const DC_API_ADDR: string" {
+			continue
+		}
+		if endpoint != "" {
+			return "", false
+		}
+		raw := strings.TrimSuffix(strings.TrimSpace(right), ";")
+		value, err := strconv.Unquote(raw)
+		if err != nil || value == "" || len(value) > 256 {
+			return "", false
+		}
+		endpoint = value
+	}
+	return endpoint, endpoint != ""
 }
 
 // verifyHookRuntimeToken requires the connector-scoped token file the hook
@@ -363,11 +601,23 @@ func readSharedHookScriptDigests(dataDir string) (map[string]string, error) {
 	return lock.Shared, nil
 }
 
-// verifyHookRuntimeRecords requires the shared JSON record and the
-// connector's flat record, which the hook scripts read, to name the fail
-// mode the hooks are rendered with.
-func verifyHookRuntimeRecords(hookDir, name, failMode string) error {
+// hookRuntimeRecordFaults requires the shared JSON record and the
+// connector flat record, which the hook scripts read, to name the fail
+// mode the hooks are rendered with. Each record is its own element.
+func hookRuntimeRecordFaults(hookDir, name, failMode string) []hookRuntimeFault {
+	var faults []hookRuntimeFault
 	flatPath := filepath.Join(hookDir, ".hookcfg."+name)
+	if err := verifyHookRuntimeFlatRecord(flatPath, name, failMode); err != nil {
+		faults = append(faults, hookRuntimeFault{element: hookRuntimeFileElement(flatPath), err: err})
+	}
+	sharedPath := filepath.Join(hookDir, ".hookcfg")
+	if err := verifyHookRuntimeSharedRecord(sharedPath, name, failMode); err != nil {
+		faults = append(faults, hookRuntimeFault{element: hookRuntimeFileElement(sharedPath), err: err})
+	}
+	return faults
+}
+
+func verifyHookRuntimeFlatRecord(flatPath, name, failMode string) error {
 	flat, exists, err := readUserRuntimeRecord(flatPath, "hook runtime record")
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: connector %s: %w", name, err)
@@ -386,7 +636,10 @@ func verifyHookRuntimeRecords(hookDir, name, failMode string) error {
 		return fmt.Errorf("enterprise hooks: connector %s hook runtime record %s names connector %q fail mode %q, want %q %q",
 			name, flatPath, values["DEFENSECLAW_CONNECTOR"], values["DEFENSECLAW_FAIL_MODE"], name, failMode)
 	}
-	sharedPath := filepath.Join(hookDir, ".hookcfg")
+	return nil
+}
+
+func verifyHookRuntimeSharedRecord(sharedPath, name, failMode string) error {
 	body, exists, err := readUserRuntimeRecord(sharedPath, "hook runtime record")
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: connector %s: %w", name, err)

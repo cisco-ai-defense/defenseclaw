@@ -6,6 +6,7 @@
 package managed
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +96,12 @@ var windowsStandaloneTrustScope = func() bool {
 	return StandaloneTrustScope() || WindowsStandaloneInstallExecutable()
 }
 
+// WindowsStandaloneTrustScope is the shared standalone rule for managed
+// lock validation in the connector.
+func WindowsStandaloneTrustScope() bool {
+	return windowsStandaloneTrustScope()
+}
+
 // StandaloneRefusesContentDrift reports whether a drifted policy or data
 // file (config.yaml, the guardian manifest, the managed-hook journals, the
 // Codex machine requirements) must be refused without an in-place ACL
@@ -107,7 +114,91 @@ var windowsStandaloneTrustScope = func() bool {
 // reviews 1 to 4). The guardian's layout self-heal and the enumerator leave
 // such a file unrepaired too.
 func StandaloneRefusesContentDrift() bool {
-	return windowsStandaloneTrustScope()
+	return windowsStandaloneTrustScope() || standaloneLifecycleProcess.Load()
+}
+
+// StandaloneFileLeafDrift returns the untrusted owner or write-like entry
+// of path itself, or a stand-in for its untrusted access list (a null DACL,
+// an allow entry the walk cannot read), when that is the standalone walk's
+// only objection to it: path fails the standalone check on its own
+// descriptor, and every folder above it passes. A trusted rewrite recovers
+// exactly this drift: a fresh file from the administrator's approved source,
+// under the admin-only descriptor, takes the name, and the old object moves
+// aside (GAP-0561, GAP-0590). It returns nil for a trusted path, a
+// structural failure, and drift on a folder above path, which a new file in
+// that folder does not recover.
+func StandaloneFileLeafDrift(path, label string) *UntrustedPrincipalError {
+	if label == "" {
+		label = "managed file"
+	}
+	refused := standaloneLeafVerdict(ValidateTrustedFilePathStandalone(path, label))
+	if refused == nil {
+		return nil
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil || !strings.EqualFold(filepath.Clean(refused.Path), clean) {
+		return nil
+	}
+	for dir := filepath.Dir(clean); ; dir = filepath.Dir(dir) {
+		if validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsStandaloneAncestorScope(dir)) != nil {
+			return nil
+		}
+		if dir == filepath.Dir(dir) {
+			return refused
+		}
+	}
+}
+
+// standaloneLeafVerdict is the principal of a standalone verdict that a
+// trusted rewrite recovers from: an untrusted owner or writer, or an access
+// list that is itself untrusted, which stands in as Everyone (a null DACL)
+// or as no account it can name (an entry the walk cannot read). Before, only
+// the first counted, so a null DACL or such an entry on config.yaml was
+// refused with a CONFIG= recovery that wrote nothing (GAP-0590 review S1).
+// It is nil for no verdict and for a structural failure.
+func standaloneLeafVerdict(err error) *UntrustedPrincipalError {
+	var principal *UntrustedPrincipalError
+	if errors.As(err, &principal) {
+		return principal
+	}
+	var dacl *UntrustedDACLError
+	if !errors.As(err, &dacl) {
+		return nil
+	}
+	if dacl.Null {
+		return &UntrustedPrincipalError{Path: dacl.Path, SID: "S-1-1-0", ACL: "null", text: dacl.text}
+	}
+	return &UntrustedPrincipalError{Path: dacl.Path, ACL: "unsupported", text: dacl.text}
+}
+
+// The targets.yaml and record recovery texts are only chosen on Windows
+// (standaloneContentDriftRecovery below), through the renderer.
+func standaloneManifestDriftRecovery() string {
+	return "from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure", "CONFIG=<the approved config>") +
+		"` so Setup writes a new targets.yaml enumerated from it (in manifest enrollment mode add MANIFEST=<the approved targets.yaml>), then `" +
+		WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
+}
+
+func standaloneRecordDriftRecovery() string {
+	return "Setup does not write this file from an administrator source and refuses it too, before it stops anything: remove that " +
+		"entry, or give the file back to Administrators, and check the file, then from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure") + "` and `" +
+		WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
+}
+
+// standaloneContentDriftRecovery is the recovery that works for the file
+// err refuses: Setup writes config.yaml and the guardian manifest new from
+// the approved source; every other content file is the administrator's to
+// check (GAP-0590).
+func standaloneContentDriftRecovery(err error) string {
+	if refused := standaloneLeafVerdict(err); refused != nil {
+		switch strings.ToLower(filepath.Base(refused.Path)) {
+		case "config.yaml":
+			return standaloneConfigDriftRecovery()
+		case "targets.yaml":
+			return standaloneManifestDriftRecovery()
+		}
+	}
+	return standaloneRecordDriftRecovery()
 }
 
 // WindowsStandaloneInstallExecutable reports whether the running binary sits
@@ -118,18 +209,40 @@ func WindowsStandaloneInstallExecutable() bool {
 	return windowsStandaloneInstallExecutable()
 }
 
-var windowsStandaloneInstallExecutable = sync.OnceValue(func() bool {
+var windowsStandaloneInstallExecutable = func() bool {
+	return windowsStandaloneInstallService() != ""
+}
+
+// windowsStandaloneInstallService is the gateway service the installer
+// registers for the install root the running binary sits in, or "" when it
+// sits in none: DefenseClawGateway for the production root,
+// DefenseClawCertGateway_<run id> for a run-scoped certification root. It is
+// the trusted deployment scope of an unpinned console. Tests replace it.
+var windowsStandaloneInstallService = sync.OnceValue(func() string {
 	executable, err := os.Executable()
-	if err != nil || !filepath.IsAbs(executable) {
-		return false
-	}
-	bin := filepath.Dir(filepath.Clean(executable))
-	if !strings.EqualFold(filepath.Base(bin), "bin") {
-		return false
+	if err != nil {
+		return ""
 	}
 	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
-		return false
+		return ""
 	}
-	return winpath.ValidateEnterpriseInstallRoot(roots, filepath.Dir(bin)) == nil
+	return gatewayServiceForExecutable(executable, roots)
 })
+
+// gatewayServiceForExecutable is the gateway service of the standalone
+// install root that holds executable in its bin folder, or "".
+func gatewayServiceForExecutable(executable string, roots winpath.EnterpriseRoots) string {
+	if !filepath.IsAbs(executable) {
+		return ""
+	}
+	bin := filepath.Dir(filepath.Clean(executable))
+	if !strings.EqualFold(filepath.Base(bin), "bin") {
+		return ""
+	}
+	service, err := winpath.EnterpriseGatewayServiceForRoot(roots, filepath.Dir(bin))
+	if err != nil {
+		return ""
+	}
+	return service
+}

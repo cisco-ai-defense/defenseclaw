@@ -64,7 +64,8 @@ from defenseclaw import ux
     default=None,
     help=(
         "Saves your choice for a gateway outage as guardrail.hook_fail_mode; it wins "
-        "over the policy tier. Omitted, nothing is saved and outages follow the policy tier "
+        "over the policy tier, except OpenClaw under the strict policy and ZeptoClaw model "
+        "requests, which stay closed. Omitted, nothing is saved and outages follow the policy tier "
         "(default and permissive let calls run with a warning, strict blocks them: "
         "`defenseclaw guardrail use-pack strict`). Every other hook failure blocks. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and "

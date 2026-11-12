@@ -110,7 +110,7 @@ The guardrail checks what your agent is about to do (a prompt, a shell command, 
   ]}
 />
 
-The picker's "never block" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`; the permissive pack only reports it). See [Two modes](#two-modes-you-have-to-choose-between).
+The picker's "never block" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`, with every rule pack). See [Two modes](#two-modes-you-have-to-choose-between).
 
 ## Same setup, no prompts
 
@@ -170,7 +170,7 @@ Telemetry redaction is configured per destination with `defenseclaw setup redact
 
 You choose how strict it is per agent with a mode:
 
-- **Observe** records policy findings without enforcing them. Start here. One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it).
+- **Observe** records policy findings without enforcing them. Start here. One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`, with every rule pack).
 - **Action** applies the block and alert levels below.
 - **Human approval (HITL)** is an option in action mode. A risky call below the block level pauses and asks you first, on agents that can ask.
 
@@ -238,7 +238,7 @@ Codex, Cursor, Hermes, OpenCode, Devin, Kiro and ZeptoClaw cannot ask. GitHub Co
 ### What it does not do
 
 - It cannot see what a child program writes after a command starts. For protected files, add a sandbox or file permissions.
-- Observe mode does not enforce policy findings, whatever the levels say. Hook fail mode and proxy availability still apply. One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`; the permissive pack only reports it).
+- Observe mode does not enforce policy findings, whatever the levels say. Hook fail mode and proxy availability still apply. One exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw`, is blocked in every mode (rule `tamper.detector_state_write`, with every rule pack).
 - The TUI does not hold or resume a paused call. Approval happens in the agent.
 
 ## Connector resolution
@@ -411,9 +411,10 @@ What you get and what you give up:
 
 ### Let tool calls go first
 
-To keep the prompt judges and still not make tool calls wait, tell DefenseClaw
-how many requests your model server runs at once (for Ollama, its
-`OLLAMA_NUM_PARALLEL`; 1 when you are not sure):
+DefenseClaw defaults to one model request at a time when the judge endpoint is
+loopback, private, or link local. Public endpoints keep the unlimited default.
+You can set the number your model server runs at once (for Ollama, its
+`OLLAMA_NUM_PARALLEL`):
 
 ```bash
 defenseclaw config set guardrail.judge.max_parallel 1
@@ -427,10 +428,13 @@ the one judge call already running. Prompt and tool-output judges wait their
 turn within their own timeout. A tool call cannot wait long in any case: the
 Claude Code and Codex hooks give DefenseClaw about 4 seconds, so a tool-call
 judge that has not answered after 3.4 seconds is reported as `late` and the
-rule verdict stands; the judge verdict is still recorded when it comes.
+rule verdict stands. DefenseClaw cancels its pending model request and records
+that cancellation in the judge response. A response received before cancellation
+is still recorded.
 
-A judge that answers in time gives the same verdict as before. The default,
-0, sends every call at once, as before.
+A judge that answers in time gives the same verdict as before. Set
+`guardrail.judge.max_parallel` to `0` explicitly for no limit, or unset it to
+restore the endpoint-based default.
 
 Releases before 1.0.6 refuse this key. Remove it before you go back to one:
 `defenseclaw config unset guardrail.judge.max_parallel`.
@@ -439,8 +443,8 @@ Releases before 1.0.6 refuse this key. Remove it before you go back to one:
 
 When the rules decide a hook check because the judge gave no verdict in
 time, DefenseClaw reports it. The verdict stays the rule verdict. The reason is
-one of `timeout`, `error`, `late` (the hook answer could not wait longer; the
-judge verdict is still recorded when it comes), `busy` (too many hook judge
+one of `timeout`, `error`, `late` (the hook answer could not wait longer),
+`busy` (too many hook judge
 calls at once) or `budget` (earlier judge calls of the same hook used its
 time). You see it in these places:
 
@@ -656,8 +660,8 @@ The table follows `defenseclaw setup guardrail --help`.
 ## What setup writes
 
 The tree below shows Claude Code on Linux and macOS. On Windows the registered
-command runs `defenseclaw-hook.exe` through `cmd.exe`; shell scripts are
-compatibility assets. See the [Claude Code paths](/docs/connectors/claudecode#files-defenseclaw-will-modify).
+command runs `defenseclaw-hook.exe` through a small guarded launcher; the system `cmd.exe` checks that guard on
+events other than `PreToolUse`. Shell scripts are compatibility assets. See the [Claude Code paths](/docs/connectors/claudecode#files-defenseclaw-will-modify).
 
 <Files>
   <Folder name="~/.defenseclaw" defaultOpen>

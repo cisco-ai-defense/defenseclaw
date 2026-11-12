@@ -73,7 +73,7 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		prerequisite: pathOwnerPrerequisite(
 			matchesContextualEnvironmentFile,
 		),
-		suppressFallback: sensitivePathSafeNegativePreservingWrites(
+		suppressFallback: pathOwnerSafeNegative(
 			matchesEnvironmentFile,
 			matchesContextualEnvironmentFile,
 		),
@@ -625,7 +625,7 @@ func sshPrivateKeyContentReadSafeNegative(facts actionfacts.Facts) bool {
 			return true
 		}
 	}
-	return sensitivePathSafeNegativePreservingWrites(
+	return pathOwnerSafeNegative(
 		matchesSSHPrivateKey,
 		matchesActiveSSHPrivateKey,
 	)(facts)
@@ -760,42 +760,18 @@ func pathValueMatcher(matches semanticPathCandidate) semanticPathMatcher {
 	}
 }
 
+// pathOwnerSafeNegative is the safe negative of an owner whose expression
+// covers reads. It distinguishes a proven live mutation of the sensitive file
+// from a read or an inert filename reference: reads keep their semantic owner
+// and fixture or reference-only inputs are safe negatives, but a live write
+// to the active user home deliberately retains the regex compatibility lane
+// until a dedicated write expression owns it. Without that, the owner of a
+// read-only expression would drop the path rule for the own file of the user
+// and leave a write to it with no rule, where the same name elsewhere is judged.
 func pathOwnerSafeNegative(
 	isCandidate semanticPathCandidate,
 	isActive semanticPathMatcher,
 ) semanticOwnerPrerequisite {
-	return func(facts actionfacts.Facts) bool {
-		if !facts.Authoritative() {
-			return false
-		}
-		sawCandidate := false
-		for _, candidate := range semanticPathCandidates(facts) {
-			if !isCandidate(semanticPathValue(candidate)) {
-				continue
-			}
-			sawCandidate = true
-			if isActive(facts, candidate) ||
-				isDefiniteFixturePath(facts, candidate) {
-				continue
-			}
-			// An unresolved path or a different user's live-home target must
-			// retain the regex fallback.
-			return false
-		}
-		return sawCandidate
-	}
-}
-
-// sensitivePathSafeNegativePreservingWrites distinguishes a proven sensitive
-// file mutation from a read or inert filename reference. Read expressions keep
-// their semantic owner, fixture/reference-only inputs are safe negatives, and
-// a live write deliberately retains the compatibility lane until a dedicated
-// write expression owns it.
-func sensitivePathSafeNegativePreservingWrites(
-	isCandidate semanticPathCandidate,
-	isActive semanticPathMatcher,
-) semanticOwnerPrerequisite {
-	baseSafeNegative := pathOwnerSafeNegative(isCandidate, isActive)
 	return func(facts actionfacts.Facts) bool {
 		if !facts.Authoritative() {
 			return false
@@ -811,7 +787,21 @@ func sensitivePathSafeNegativePreservingWrites(
 				return false
 			}
 		}
-		return baseSafeNegative(facts)
+		sawCandidate := false
+		for _, candidate := range semanticPathCandidates(facts) {
+			if !isCandidate(semanticPathValue(candidate)) {
+				continue
+			}
+			sawCandidate = true
+			if isActive(facts, candidate) ||
+				isDefiniteFixturePath(facts, candidate) {
+				continue
+			}
+			// An unresolved path or the live-home target of another user
+			// must retain the regex fallback.
+			return false
+		}
+		return sawCandidate
 	}
 }
 
@@ -853,15 +843,42 @@ func isDefiniteFixturePath(
 	resolved := canonicalSemanticPath(candidate.Resolved)
 	cwd := canonicalSemanticPath(facts.CWD)
 	if resolved == "" || cwd == "" ||
-		isRecognizedHomeRoot(cwd) ||
+		isRecognizedHomeRoot(cwd) || isHomeContainerDirectory(cwd) ||
 		!pathWithin(resolved, cwd) {
 		return false
 	}
-	return true
+	// A call that runs in a profile found by its entries, or above it, is
+	// at the home of an account like one that runs in its Users folder.
+	// A home folder of the active account below the working directory is
+	// that account home reached under another parent, not a fixture of the
+	// project (nestedActiveHomeBelow).
+	return !profileHomeAtOrAbove(resolved, cwd) && !nestedActiveHomeBelow(resolved, cwd, facts.ActiveHome)
+}
+
+// nestedActiveHomeBelow reports, in the part of resolved below cwd, a Users or
+// home folder followed by the account folder of the active home and a name
+// below it, in any letter case: the home of the user under another parent (a
+// project folder, a mount, a copy), so the directory a call starts in decides
+// nothing for it. The home folders of other accounts below the working
+// directory stay fixtures (a project that keeps the homes of test accounts).
+// Both paths are in the folded spelling canonicalSemanticPath gives.
+func nestedActiveHomeBelow(resolved, cwd, activeHome string) bool {
+	account := path.Base(canonicalSemanticPath(activeHome))
+	if account == "." || account == "/" || account == "" {
+		return false
+	}
+	below := strings.TrimPrefix(strings.TrimRight(resolved, "/"), strings.TrimRight(cwd, "/"))
+	parts := strings.Split(strings.Trim(below, "/"), "/")
+	for index := 0; index+2 < len(parts); index++ {
+		if (parts[index] == "users" || parts[index] == "home") && parts[index+1] == account {
+			return true
+		}
+	}
+	return false
 }
 
 func canonicalSemanticPath(value string) string {
-	value = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+	value = semanticFoldPath(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
 	if value == "" {
 		return ""
 	}
@@ -890,7 +907,7 @@ func isRecognizedHomeRoot(value string) bool {
 	}
 	return len(value) >= 4 &&
 		value[1] == ':' &&
-		isSingleUserHomeRoot(value[2:], "/users/")
+		(isSingleUserHomeRoot(value[2:], "/users/") || isSingleUserHomeRoot(value[2:], "/home/"))
 }
 
 func isSingleUserHomeRoot(value, prefix string) bool {
@@ -906,13 +923,7 @@ func activeHomeRelative(
 	candidate actionfacts.PathFact,
 ) (string, bool) {
 	home := canonicalSemanticPath(facts.ActiveHome)
-	resolved := canonicalSemanticPath(candidate.Resolved)
-	if resolved == "" {
-		resolved = canonicalSemanticPath(candidate.Normalized)
-	}
-	if resolved == "" {
-		resolved = canonicalSemanticPath(candidate.Value)
-	}
+	resolved := canonicalSemanticPath(semanticPathValue(candidate))
 	if home == "" || resolved == "" || !pathWithin(resolved, home) {
 		return "", false
 	}
@@ -1451,14 +1462,26 @@ func hasDataFlowTo(
 }
 
 func semanticPathValue(path actionfacts.PathFact) string {
-	value := path.Resolved
-	if value == "" {
-		value = path.Normalized
+	value := pathFactSpelling(path)
+	// Trailing spaces are read by windowsOpenedPath, which keeps them in an
+	// extended-length path, where they are part of the name: the matchers trim
+	// whitespace, so they are spelled as a visible character that no
+	// protected name contains.
+	if opened, ok, _ := windowsOpenedPathOfFact(path); ok {
+		return windowsNameFold(markTrailingSpaces(opened))
 	}
-	if value == "" {
-		value = path.Value
+	return semanticFoldPath(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+}
+
+// semanticFoldPath is the lower-case spelling the semantic path matchers
+// read. A drive-letter path is a Windows path, whose names compare through
+// upper case, so it is also folded the way Windows folds (see windowsNameFold);
+// any other path is lower-cased only.
+func semanticFoldPath(value string) string {
+	if actionfacts.DriveLetterPath(value) {
+		return windowsNameFold(value)
 	}
-	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+	return strings.ToLower(value)
 }
 
 func matchesActiveSensitivePath(
@@ -1516,11 +1539,27 @@ func matchesActiveSSHPrivateKey(
 }
 
 func matchesAWSCredentials(value string) bool {
+	name, ok := awsDirectoryEntry(value)
+	return ok && matchesAWSCredentialsName(name)
+}
+
+// matchesExactAWSCredentials is the credentials file itself: unlike
+// matchesAWSCredentials it does not take a copy named credentials.<suffix>.
+func matchesExactAWSCredentials(value string) bool {
+	name, ok := awsDirectoryEntry(value)
+	return ok && name == "credentials"
+}
+
+// awsDirectoryEntry is the part of value below an .aws folder.
+func awsDirectoryEntry(value string) (string, bool) {
 	if strings.HasPrefix(value, ".aws/") {
-		return matchesAWSCredentialsName(strings.TrimPrefix(value, ".aws/"))
+		return strings.TrimPrefix(value, ".aws/"), true
 	}
 	index := strings.LastIndex(value, "/.aws/")
-	return index >= 0 && matchesAWSCredentialsName(value[index+len("/.aws/"):])
+	if index < 0 {
+		return "", false
+	}
+	return value[index+len("/.aws/"):], true
 }
 
 func matchesAWSCredentialsName(name string) bool {
@@ -1941,4 +1980,18 @@ func hardcodedToolCallOnlyRule(ruleID string) bool {
 	default:
 		return false
 	}
+}
+
+// isHomeContainerDirectory reports a directory that holds the homes of
+// accounts, as isRecognizedHomeRoot reads a home: a file system or drive root,
+// /home or /users, or a Users or home folder on a drive. A credential file below it is
+// the file of an account, not a fixture of a project that happens to run
+// there. A folder that merely has such a name deeper in a project (repo/home)
+// is a project folder. The value is canonical (canonicalSemanticPath).
+func isHomeContainerDirectory(value string) bool {
+	value = strings.TrimRight(value, "/")
+	if len(value) >= 2 && value[1] == ':' {
+		return value[2:] == "" || value[2:] == "/users" || value[2:] == "/home"
+	}
+	return value == "" || value == "/home" || value == "/users"
 }

@@ -29,8 +29,10 @@
 
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createEgressReporter, type EgressReporter } from "./egress-telemetry.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
+import { ListenerProofError, proveListener, provenCreateConnection } from "./listener-proof.js";
 import {
   HEADER_DEFENSECLAW_AGENT_ID,
   HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
@@ -52,6 +54,8 @@ const _require = createRequire(import.meta.url);
 const https = _require("https") as typeof import("https");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const http = _require("http") as typeof import("http");
+type NodeClientRequest = ReturnType<typeof http.request>;
+const directModelRequest = new AsyncLocalStorage<boolean>();
 
 // undici — Node 18+ backs globalThis.fetch with undici's internal dispatcher.
 // SDKs that capture the pre-patch fetch reference or call undici.request()
@@ -87,7 +91,33 @@ interface InterceptorSharedState {
   ollamaPorts: string[];
   installed: boolean;
   guardrailPort: number | null;
+  /**
+   * Set by the copy that patched the transport (builds that predate GAP-0745
+   * never set it). A later copy of the plugin, loaded again by a hot reload in
+   * the same process, hands its config to this controller instead of patching
+   * again or leaving the patch pointing at a copy that was replaced.
+   */
+  controller?: InterceptorController | null;
 }
+
+interface InterceptorController {
+  adopt(owner: object, config: AdoptedConfig): void;
+  release(owner: object): void;
+  describeLayers(): InterceptorLayers;
+  verifyInterception(): Promise<InterceptionSelfTest>;
+  runSelfTest(): Promise<InterceptionSelfTest>;
+}
+
+interface AdoptedConfig {
+  guardrailPort: number;
+  getCorrelationHeaders: CorrelationHeadersGetter;
+  getOutageMode?: OutageModeGetter;
+  onOutageWarning?: (message: string) => void;
+}
+
+/** The installed account's saved outage mode, read only after a classified proxy outage. */
+type OutageModeGetter = () => "open" | "closed" | "protected";
+const closedOutageMode: OutageModeGetter = () => "closed";
 
 function getOrCreateSharedState(): InterceptorSharedState {
   const existing = (globalThis as Record<symbol, unknown>)[
@@ -102,6 +132,7 @@ function getOrCreateSharedState(): InterceptorSharedState {
     ollamaPorts: providersConfig.ollama_ports.map(String),
     installed: false,
     guardrailPort: null,
+    controller: null,
   };
   (globalThis as Record<symbol, unknown>)[INTERCEPTOR_STATE_KEY] = state;
   return state;
@@ -129,6 +160,92 @@ type UndiciDispatchOptions = {
   [key: string]: unknown;
 };
 type UndiciDispatchFn = (opts: UndiciDispatchOptions, handler: unknown) => boolean;
+
+// A dispatcher consumes stream bodies as it writes to the proxy. Keep the
+// bytes it consumed and retain the source iterator so an outage continuation
+// can send the complete body, including any unread suffix, to the provider.
+function replayUndiciStreamBody(body: unknown): {
+  proxyBody: AsyncIterable<unknown>;
+  directBody: AsyncIterable<unknown>;
+  canRetry: () => boolean;
+  abandon: () => void;
+} | null {
+  if (!body || typeof body !== "object" || !(Symbol.asyncIterator in body)) return null;
+  const iterator = (body as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+  const chunks: unknown[] = [];
+  const maxReplayBytes = 32 << 20;
+  let bytes = 0;
+  let complete = false;
+  let replayable = true;
+  let abandoned = false;
+  let pending: Promise<IteratorResult<unknown>> | undefined;
+  const abandon = (): void => {
+    if (abandoned) return;
+    abandoned = true;
+    replayable = false;
+    chunks.length = 0;
+    if (!complete && iterator.return) {
+      try { void iterator.return().catch(() => undefined); } catch { /* source already closed */ }
+    }
+  };
+  const proxyBody: AsyncIterable<unknown> = {
+    [Symbol.asyncIterator]() {
+      return {
+        async next() {
+          const read = iterator.next();
+          pending = read;
+          try {
+            const result = await read;
+            if (result.done) {
+              complete = true;
+            } else if (replayable) {
+              const chunk = result.value;
+              const size = typeof chunk === "string" ? Buffer.byteLength(chunk) :
+                chunk instanceof Uint8Array ? chunk.byteLength : maxReplayBytes + 1;
+              bytes += size;
+              if (bytes > maxReplayBytes) {
+                replayable = false;
+                chunks.length = 0;
+              } else {
+                chunks.push(chunk instanceof Uint8Array ? Buffer.from(chunk) : chunk);
+              }
+            }
+            return result;
+          } catch (error) {
+            replayable = false;
+            throw error;
+          } finally {
+            if (pending === read) pending = undefined;
+          }
+        },
+        // Do not close the source on a proxy transport error. The provider
+        // continuation may still need the portion the proxy did not read.
+        async return() { return { done: true, value: undefined }; },
+      };
+    },
+  };
+  const directBody: AsyncIterable<unknown> = {
+    async *[Symbol.asyncIterator]() {
+      try {
+        if (pending) await pending;
+        for (const chunk of chunks) yield chunk;
+        if (!complete) {
+          for (;;) {
+            const result = await iterator.next();
+            if (result.done) {
+              complete = true;
+              break;
+            }
+            yield result.value;
+          }
+        }
+      } finally {
+        if (!complete && iterator.return) await iterator.return();
+      }
+    },
+  };
+  return { proxyBody, directBody, canRetry: () => replayable, abandon };
+}
 
 /**
  * Apply a merged provider registry from the Go sidecar. Additive
@@ -222,6 +339,11 @@ export async function bootstrapProviderOverlay(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
+    if (options?.token) {
+      // The token goes only to a listener that proves it is this account's
+      // gateway (GAP-0594).
+      await proveListener("127.0.0.1", guardrailPort, options.token);
+    }
     const res = await doFetch(
       `http://127.0.0.1:${guardrailPort}/v1/config/providers`,
       {
@@ -313,8 +435,8 @@ export const DC_AUTH_HEADER = "X-DC-Auth";
  * gets intercepted.
  */
 /**
- * GAP-2428: what a model call shows when the DefenseClaw gateway is down.
- * The proxy hop is refused, so the call fails closed; without this the
+ * GAP-2428: what a strict model call shows when the DefenseClaw gateway is down.
+ * The proxy hop is refused, so the saved closed mode blocks; without this the
  * agent only reported "connection refused by the provider endpoint". The
  * wording avoids "refused", "timeout" and "unavailable" so OpenClaw shows
  * it as is instead of mapping it to its generic transport copy.
@@ -323,10 +445,22 @@ export const GATEWAY_DOWN_MESSAGE =
   "[DefenseClaw] The DefenseClaw gateway is not running, so this request was blocked (fail-closed). " +
   "Run: defenseclaw-gateway start";
 
-function isConnectionRefused(err: unknown): boolean {
-  const e = err as { code?: unknown; cause?: { code?: unknown } } | null;
-  return e?.code === "ECONNREFUSED" || e?.cause?.code === "ECONNREFUSED";
+function isProxyOutage(err: unknown): boolean {
+  const codes = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_SOCKET"]);
+  let current: unknown = err;
+  for (let depth = 0; depth < 3 && current && typeof current === "object"; depth++) {
+    // A failed listener proof is an outage only when nothing answered: a
+    // listener that answered without the proof is not one (GAP-0594).
+    if (current instanceof ListenerProofError) return current.unreachable;
+    const candidate = current as { code?: unknown; cause?: unknown };
+    if (typeof candidate.code === "string" && codes.has(candidate.code)) return true;
+    current = candidate.cause;
+  }
+  return false;
 }
+
+export const MODEL_OUTAGE_WARNING =
+  "[DEFENSECLAW WARNING] The DefenseClaw gateway is offline. This model request is continuing without inspection under the saved outage mode.";
 
 /** A provider-shaped 503 for a refused fetch hop; OpenAI and Anthropic SDKs both surface its message. */
 export function gatewayDownResponse(): Response {
@@ -337,24 +471,6 @@ export function gatewayDownResponse(): Response {
     }),
     { status: 503, headers: { "Content-Type": "application/json", "x-should-retry": "false" } },
   );
-}
-
-/**
- * Name the DefenseClaw gateway in a refused node:http proxy hop's error,
- * keeping its code so SDK retry logic is unchanged.
- */
-export function explainRefusedProxyHop<T extends { emit: (event: string | symbol, ...args: unknown[]) => boolean }>(
-  req: T,
-): T {
-  const emit = req.emit;
-  if (typeof emit !== "function") return req;
-  req.emit = function (this: T, event: string | symbol, ...args: unknown[]): boolean {
-    if (event === "error" && isConnectionRefused(args[0]) && args[0] instanceof Error) {
-      args[0].message = GATEWAY_DOWN_MESSAGE;
-    }
-    return emit.call(this, event, ...args);
-  } as T["emit"];
-  return req;
 }
 
 function extractHost(urlStr: string): string {
@@ -1204,6 +1320,67 @@ function completeUndiciProbe(handler: unknown): boolean {
   }
 }
 
+/**
+ * Answer an undici handler with the provider-shaped 503 of a gateway outage
+ * (gatewayDownResponse), for a proxy hop whose listener did not prove it is
+ * this account's gateway: nothing was sent (GAP-0594).
+ */
+function completeUndiciGatewayDown(handler: unknown): void {
+  const sink = handler as {
+    onRequestStart?: (controller: unknown, context?: unknown) => void;
+    onResponseStart?: (controller: unknown, status: number, headers: Record<string, string>, statusText?: string) => void;
+    onResponseData?: (controller: unknown, chunk: Buffer) => void;
+    onResponseEnd?: (controller: unknown, trailers: Record<string, string>) => void;
+    onConnect?: (abort: () => void) => void;
+    onHeaders?: (status: number, headers: Buffer[], resume: () => void, statusText?: string) => boolean | void;
+    onData?: (chunk: Buffer) => boolean | void;
+    onComplete?: (trailers: Buffer[]) => void;
+    onError?: (err: Error) => void;
+  };
+  const body = Buffer.from(
+    JSON.stringify({ type: "error", error: { type: "defenseclaw_gateway_down", message: GATEWAY_DOWN_MESSAGE } }),
+  );
+  try {
+    if (typeof sink.onResponseStart === "function") {
+      const controller = {
+        abort: () => undefined, pause: () => undefined, resume: () => undefined,
+        paused: false, aborted: false, reason: null, rawHeaders: [],
+      };
+      sink.onRequestStart?.(controller, {});
+      sink.onResponseStart(controller, 503, { "content-type": "application/json", "x-should-retry": "false" }, "Service Unavailable");
+      sink.onResponseData?.(controller, body);
+      sink.onResponseEnd?.(controller, {});
+      return;
+    }
+    sink.onConnect?.(() => undefined);
+    sink.onHeaders?.(
+      503,
+      [Buffer.from("content-type"), Buffer.from("application/json"), Buffer.from("x-should-retry"), Buffer.from("false")],
+      () => undefined,
+      "Service Unavailable",
+    );
+    sink.onData?.(body);
+    sink.onComplete?.([]);
+  } catch (err) {
+    sink.onError?.(err instanceof Error ? err : new Error(String(err)));
+  }
+}
+
+/** Report err to an undici handler whose deferred dispatch threw (GAP-0594). */
+function failUndiciHandler(handler: unknown, err: unknown): void {
+  const sink = handler as { onResponseError?: (controller: unknown, err: Error) => void; onError?: (err: Error) => void };
+  const error = err instanceof Error ? err : new Error(String(err));
+  try {
+    if (typeof sink.onResponseError === "function") {
+      sink.onResponseError({ abort: () => undefined }, error);
+    } else {
+      sink.onError?.(error);
+    }
+  } catch {
+    // The handler cannot be told; never let it escape as an unhandled rejection.
+  }
+}
+
 /** The undici copy the host application ships, as far as the interceptor needs it. */
 type HostUndici = {
   Agent: (new () => { close?: () => Promise<void> }) & { prototype: object };
@@ -1254,6 +1431,9 @@ function undiciHeadersToRecord(headers: unknown): Record<string, string> {
 
 export interface CreateFetchInterceptorOptions {
   guardrailPort: number;
+  /** The installed account's saved outage mode, read only after a classified proxy failure. */
+  getOutageMode?: OutageModeGetter;
+  onOutageWarning?: (message: string) => void;
   /**
    * Synchronous snapshot of DefenseClaw X-DefenseClaw-* correlation
    * headers to stamp on every intercepted LLM request. Called once per
@@ -1279,10 +1459,22 @@ export function createFetchInterceptor(
     typeof portOrOpts === "number"
       ? { guardrailPort: portOrOpts }
       : portOrOpts;
-  const guardrailPort = interceptorOpts.guardrailPort;
-  const getCorrelationHeaders =
+  // Config of the copy of the plugin that currently owns the patch. The
+  // wrappers read these at call time, so a reload swaps them in place.
+  let guardrailPort = interceptorOpts.guardrailPort;
+  let getCorrelationHeaders =
     interceptorOpts.getCorrelationHeaders ?? emptyCorrelationHeaders;
-  const proxyBase = `http://127.0.0.1:${guardrailPort}`;
+  let proxyBase = `http://127.0.0.1:${guardrailPort}`;
+  // The saved outage mode and the warning hook come with the same config:
+  // the copy that owns the patch supplies them (GAP-0745).
+  let getOutageMode: OutageModeGetter = interceptorOpts.getOutageMode ?? closedOutageMode;
+  let onOutageWarning = interceptorOpts.onOutageWarning;
+  // Identifies this copy to the controller. The copies served by the patch
+  // are kept in load order; the last one supplies the config.
+  const self = {};
+  let holders: Array<{ copy: object; config: AdoptedConfig }> = [];
+  let started = false;
+  let olderHolderWarned = false;
   let originalFetch: typeof globalThis.fetch | null = null;
   let originalHttpsRequest: typeof https.request | null = null;
   let originalHttpRequest: typeof http.request | null = null;
@@ -1298,7 +1490,123 @@ export function createFetchInterceptor(
   let originalHostDispatch: UndiciDispatchFn | null = null;
   let lastHostProbeDestination = "";
 
-  function describeLayers(): InterceptorLayers {
+  function openModelOutage(): boolean {
+    try {
+      if (getOutageMode() !== "open") return false;
+    } catch {
+      return false;
+    }
+    console.warn(MODEL_OUTAGE_WARNING);
+    onOutageWarning?.(MODEL_OUTAGE_WARNING);
+    return true;
+  }
+
+  type NodeRequestOptions = Record<string, unknown>;
+  type CanonicalNodeRequest = {
+    url: string;
+    options: NodeRequestOptions;
+    headers: Record<string, string>;
+    body: Buffer[];
+    optionsOnly: boolean;
+  };
+
+  function nodeRequestWithOutageFallback(
+    req: NodeClientRequest,
+    original: CanonicalNodeRequest,
+    directFactory: () => NodeClientRequest,
+  ): NodeClientRequest {
+    const emit = req.emit;
+    const write = req.write;
+    const end = req.end;
+    const chunks = original.body;
+    const maxReplayBytes = 16 << 20;
+    let replayBytes = 0;
+    let replayable = true;
+    let ended = false;
+    let retried = false;
+    let direct: NodeClientRequest | null = null;
+    let proxyAnswered = false;
+
+    const remember = (chunk: unknown, encoding?: unknown): void => {
+      if (chunk === undefined || chunk === null || !replayable || proxyAnswered) return;
+      if (typeof chunk !== "string" && !Buffer.isBuffer(chunk) && !(chunk instanceof Uint8Array)) {
+        replayable = false;
+        chunks.length = 0;
+        return;
+      }
+      const bytes = typeof chunk === "string"
+        ? Buffer.from(chunk, typeof encoding === "string" ? encoding as BufferEncoding : "utf8")
+        : Buffer.from(chunk);
+      replayBytes += bytes.length;
+      if (replayBytes > maxReplayBytes) {
+        replayable = false;
+        chunks.length = 0;
+        return;
+      }
+      chunks.push(bytes);
+    };
+
+    // Headers set after request() are still part of the caller's request.
+    // Keep the provider snapshot current without reading proxy-only headers.
+    if (typeof req.setHeader === "function") {
+      const setHeader = req.setHeader;
+      req.setHeader = function (this: NodeClientRequest, name: string, value: number | string | readonly string[]): NodeClientRequest {
+        original.headers[name.toLowerCase()] = value as unknown as string;
+        return setHeader.call(this, name, value);
+      } as NodeClientRequest["setHeader"];
+    }
+    if (typeof req.removeHeader === "function") {
+      const removeHeader = req.removeHeader;
+      req.removeHeader = function (this: NodeClientRequest, name: string): void {
+        delete original.headers[name.toLowerCase()];
+        removeHeader.call(this, name);
+      } as NodeClientRequest["removeHeader"];
+    }
+
+    req.write = function (this: NodeClientRequest, ...args: Parameters<NodeClientRequest["write"]>): boolean {
+      if (direct) return direct.write(...args);
+      remember(args[0], args[1]);
+      return write.apply(this, args);
+    } as NodeClientRequest["write"];
+    req.end = function (this: NodeClientRequest, ...args: Parameters<NodeClientRequest["end"]>): NodeClientRequest {
+      if (direct) {
+        direct.end(...args);
+        return this;
+      }
+      remember(args[0], args[1]);
+      ended = true;
+      return end.apply(this, args);
+    } as NodeClientRequest["end"];
+    req.emit = function (this: NodeClientRequest, event: string | symbol, ...args: unknown[]): boolean {
+      if (retried && (event === "error" || event === "response" || event === "close")) return true;
+      if (event === "response") {
+        proxyAnswered = true;
+        chunks.length = 0;
+      }
+      if (event === "error" && !retried && !proxyAnswered && isProxyOutage(args[0])) {
+        if (replayable && openModelOutage()) {
+          retried = true;
+          try {
+            direct = directFactory();
+            direct.on("response", (response) => emit.call(req, "response", response));
+            direct.on("error", (error) => emit.call(req, "error", error));
+            direct.on("close", () => emit.call(req, "close"));
+            for (const chunk of chunks) direct.write(chunk);
+            chunks.length = 0;
+            if (ended) direct.end();
+            return true;
+          } catch (directErr) {
+            return emit.call(req, "error", directErr);
+          }
+        }
+        if (args[0] instanceof Error) args[0].message = GATEWAY_DOWN_MESSAGE;
+      }
+      return emit.call(this, event, ...args);
+    } as NodeClientRequest["emit"];
+    return req;
+  }
+
+  function describeOwnLayers(): InterceptorLayers {
     return {
       fetch: originalFetch !== null && globalThis.fetch !== originalFetch,
       httpRequest: originalHttpRequest !== null && http.request !== originalHttpRequest,
@@ -1382,6 +1690,7 @@ export function createFetchInterceptor(
     layer: "global" | "host",
     next: (opts: UndiciDispatchOptions, handler: unknown) => boolean,
   ): boolean {
+    if (directModelRequest.getStore()) return next(opts, handler);
     const origin = opts.origin?.toString() ?? "";
     const pathStr = opts.path ?? "";
     const urlStr = origin + pathStr;
@@ -1392,6 +1701,12 @@ export function createFetchInterceptor(
       !isKnownSafeDomain(urlStr) &&
       (isLLMUrl(urlStr, guardrailPort) || hasLLMPathSuffix(urlStr))
     ) {
+      const directOpts: UndiciDispatchOptions = { ...opts, origin: opts.origin, headers: opts.headers };
+      const bodyReplay = replayUndiciStreamBody(opts.body);
+      if (bodyReplay) {
+        opts.body = bodyReplay.proxyBody;
+        directOpts.body = bodyReplay.directBody;
+      }
       opts.origin = proxyBase;
       const existingHeaders = undiciHeadersToRecord(opts.headers);
       const providerKey = extractProviderKeyFromRecord(existingHeaders);
@@ -1399,6 +1714,7 @@ export function createFetchInterceptor(
       // carries the origin only, as on the fetch and https layers (GAP-0242).
       const proxyHdrs = buildProxyHeaders(new URL(origin).origin, providerKey, getCorrelationHeaders);
       opts.headers = { ...existingHeaders, ...proxyHdrs };
+      const isProbe = readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1";
 
       noteInterceptLayer(layer === "host" ? "undici-host" : "undici", urlStr);
       egressReporter?.report({
@@ -1410,7 +1726,7 @@ export function createFetchInterceptor(
         decision: "intercept",
         reason: layer === "host" ? "undici-host-dispatcher" : "undici-dispatcher",
       });
-      if (readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1") {
+      if (isProbe) {
         // Either layer proves a probe was rewritten: OpenClaw swaps the global
         // dispatcher for its own after the first agent run, and the host layer
         // keeps intercepting.
@@ -1419,19 +1735,100 @@ export function createFetchInterceptor(
         if (layer === "host") lastHostProbeDestination = destination;
         return completeUndiciProbe(handler);
       }
+      // The provider key and token go only to a guardrail listener that
+      // proves it is this account's gateway right before this request
+      // (GAP-0594). Dispatch once the proof is in. A proof that found nothing
+      // listening, or timed out, is a gateway outage and follows the saved
+      // outage mode. A listener that answered without the proof, or no token
+      // to prove with, answers as a gateway outage in every tier; nothing is
+      // sent to the guardrail port either way.
+      let proxyHandler = handler;
+      if (handler && typeof handler === "object") {
+        let retried = false;
+        let proxyResponseStarted = false;
+        proxyHandler = new Proxy(handler, {
+          get(target, property) {
+            const method = Reflect.get(target, property) as unknown;
+            if ((property === "onHeaders" || property === "onResponseStart") && typeof method === "function") {
+              return (...args: unknown[]) => {
+                proxyResponseStarted = true;
+                bodyReplay?.abandon();
+                return method.apply(target, args);
+              };
+            }
+            if (property === "onError") {
+              return (err: Error) => {
+                if (!retried && !proxyResponseStarted && isProxyOutage(err) &&
+                    (!bodyReplay || bodyReplay.canRetry()) && openModelOutage()) {
+                  retried = true;
+                  try {
+                    next(directOpts, target);
+                    return;
+                  } catch (directErr) {
+                    if (typeof method === "function") return method.call(target, directErr);
+                    throw directErr;
+                  }
+                }
+                bodyReplay?.abandon();
+                if (typeof method === "function") return method.call(target, err);
+              };
+            }
+            return typeof method === "function" ? method.bind(target) : method;
+          },
+        });
+      }
+      proveListener("127.0.0.1", guardrailPort, loadSidecarConfig().token).then(
+        () => {
+          try {
+            next(opts, proxyHandler);
+          } catch (err) {
+            failUndiciHandler(handler, err);
+          }
+        },
+        (err) => {
+          if (isProxyOutage(err) && openModelOutage()) {
+            try {
+              next(directOpts, handler);
+            } catch (directErr) {
+              failUndiciHandler(handler, directErr);
+            }
+            return;
+          }
+          bodyReplay?.abandon();
+          completeUndiciGatewayDown(handler);
+        },
+      );
+      return true;
     }
 
     return next(opts, handler);
   }
 
   function start(): void {
-    if (originalFetch) return; // this instance already started
+    if (started) return; // this instance already started
 
-    // Idempotent cross-instance guard: if another module evaluation
-    // already patched the transport, we only bootstrap the overlay
-    // (so our operator-added domains merge into the shared list) and
-    // return without re-wrapping fetch/https/http/undici.
+    // A copy of this build already patched the transport (a hot reload loaded
+    // the plugin again): serve that patch with the config of this copy.
+    // Nothing is wrapped a second time, and no wrapper is left behind a
+    // stopped copy.
+    const controller = _shared.controller;
+    if (controller) {
+      started = true;
+      controller.adopt(self, { guardrailPort, getCorrelationHeaders, getOutageMode, onOutageWarning });
+      return;
+    }
+
+    // An older build (no controller) patched the transport: it cannot hand
+    // over, so we only bootstrap the overlay (so our operator-added domains
+    // merge into the shared list) and leave its patch alone.
     if (_shared.installed) {
+      started = true;
+      if (!olderHolderWarned) {
+        olderHolderWarned = true;
+        console.warn(
+          "[defenseclaw] an older DefenseClaw plugin copy guards model calls in this process; restart the OpenClaw gateway to load this one",
+        );
+      }
       // Pass the sidecar token like the first instance does: the
       // endpoint is authenticated, and an unauthenticated call is
       // logged as an api-auth-failure security event.
@@ -1441,10 +1838,17 @@ export function createFetchInterceptor(
       });
       return;
     }
+    started = true;
     _shared.installed = true;
     _shared.guardrailPort = guardrailPort;
+    _shared.controller = controllerImpl;
+    holders = [{ copy: self, config: { guardrailPort, getCorrelationHeaders, getOutageMode, onOutageWarning } }];
 
-    originalFetch = globalThis.fetch;
+    // Natives are bound here: a call that is still in flight when the patch is
+    // taken out must finish through the same transport, not through fields
+    // that the stop cleared (GAP-0745).
+    const nativeFetch: typeof globalThis.fetch = globalThis.fetch;
+    originalFetch = nativeFetch;
     egressReporter = createEgressReporter({ guardrailPort });
 
     // Layer 4 (governance): pull the sidecar's merged provider
@@ -1455,7 +1859,7 @@ export function createFetchInterceptor(
     // out below so the bootstrap call is not intercepted by the
     // wrapper we're about to install.
     void bootstrapProviderOverlay(guardrailPort, {
-      fetchImpl: originalFetch,
+      fetchImpl: nativeFetch,
       token: loadSidecarConfig().token,
     });
 
@@ -1463,17 +1867,18 @@ export function createFetchInterceptor(
       input: RequestInfo | URL,
       init?: RequestInit,
     ): Promise<Response> => {
+      if (directModelRequest.getStore()) return nativeFetch(input, init);
       const urlStr = String(input instanceof Request ? input.url : input);
 
       // Never self-loop: a request already aimed at the guardrail proxy
       // short-circuits before any shape inspection so we don't peek its body.
       if (isAlreadyProxied(urlStr, guardrailPort)) {
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       if (shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
         reportChatGPTCodexResponsePassthrough(urlStr);
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       // Layer 0: the known-provider allowlist is cheap and path-free.
@@ -1507,14 +1912,14 @@ export function createFetchInterceptor(
           decision: "allow",
           reason: "no-match",
         });
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       let original: URL;
       try {
         original = new URL(urlStr);
       } catch {
-        return originalFetch!(input, init);
+        return nativeFetch(input, init);
       }
 
       // Rewrite: keep path + query, replace scheme://host with proxy.
@@ -1545,6 +1950,10 @@ export function createFetchInterceptor(
       let rewriteBody = effective.body;
       if (!hasOwnBody(init) && input instanceof Request && !input.bodyUsed) {
         rewriteBody = input.body ?? effective.body;
+      }
+      let directBody = rewriteBody;
+      if (rewriteBody instanceof ReadableStream) {
+        [rewriteBody, directBody] = rewriteBody.tee();
       }
 
       // Preserve Request metadata and caller init extras (duplex, etc.),
@@ -1586,6 +1995,26 @@ export function createFetchInterceptor(
         referrerPolicy: effective.referrerPolicy,
         ...(duplex ? { duplex } : {}),
       };
+      const directInit: RequestInit = {
+        ...newInit,
+        headers: new Headers(effective.headers),
+        body: directBody,
+      };
+
+      // The provider key and token go only to a guardrail listener that
+      // proved it is this account's gateway (GAP-0594); a failed proof
+      // sends nothing to it, and no token to prove with sends nothing
+      // either. A proof that found nothing listening, or timed out, is a
+      // gateway outage and follows the saved outage mode; any other failed
+      // proof answers as a gateway outage in every tier.
+      try {
+        await proveListener("127.0.0.1", guardrailPort, loadSidecarConfig().token);
+      } catch (err) {
+        if (isProxyOutage(err) && openModelOutage()) {
+          return directModelRequest.run(true, () => nativeFetch(urlStr, directInit));
+        }
+        return gatewayDownResponse();
+      }
 
       if (shapeBranch === "shape") {
         logInfo(
@@ -1599,9 +2028,12 @@ export function createFetchInterceptor(
 
       let response: Response;
       try {
-        response = await originalFetch!(proxied, newInit);
+        response = await nativeFetch(proxied, newInit);
       } catch (err) {
-        if (!isConnectionRefused(err)) throw err;
+        if (!isProxyOutage(err)) throw err;
+        if (openModelOutage()) {
+          return directModelRequest.run(true, () => nativeFetch(urlStr, directInit));
+        }
         return gatewayDownResponse();
       }
 
@@ -1633,13 +2065,13 @@ export function createFetchInterceptor(
     // delegate to node:https are intercepted. Note: undici-based clients
     // (including Node 18+ globalThis.fetch) are covered by the undici
     // dispatcher patch above, not this https.request patch.
-    originalHttpsRequest = https.request.bind(https);
-    originalHttpRequest = http.request.bind(http);
+    const nativeHttpsRequest = https.request.bind(https);
+    const nativeHttpRequest = http.request.bind(http);
+    originalHttpsRequest = nativeHttpsRequest;
+    originalHttpRequest = nativeHttpRequest;
     originalHttpGet = http.get.bind(http);
 
-    type NodeRequestOptions = Record<string, unknown>;
     type NodeIncomingMessage = unknown;
-    type NodeClientRequest = ReturnType<typeof http.request>;
 
     /**
      * Normalize the varied `https.request` call shapes into a single URL string
@@ -1754,16 +2186,48 @@ export function createFetchInterceptor(
       return `${proto}//${hostPart}${path}`;
     }
 
+    // Capture every supported Node overload before constructing the proxy hop.
+    // The continuation uses only this provider request, including headers and
+    // option overlays, so proxy headers cannot become provider headers.
+    function canonicalNodeRequest(
+      urlOrOptions: string | URL | NodeRequestOptions,
+      secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
+    ): CanonicalNodeRequest {
+      const optionsOnly = typeof urlOrOptions === "object" && !(urlOrOptions instanceof URL);
+      const firstOptions = optionsOnly ? urlOrOptions as NodeRequestOptions : {};
+      const secondOptions = typeof secondArg === "object" && secondArg !== null
+        ? secondArg as NodeRequestOptions : {};
+      const options: NodeRequestOptions = { ...firstOptions, ...secondOptions };
+      const headers: Record<string, string> = {};
+      if (options.headers && typeof options.headers === "object") {
+        for (const [name, value] of Object.entries(options.headers as Record<string, string>)) {
+          headers[name.toLowerCase()] = value;
+        }
+      }
+      options.headers = headers;
+      return {
+        url: buildUrlStringFromArgs(urlOrOptions, secondArg),
+        options,
+        headers,
+        body: [],
+        optionsOnly,
+      };
+    }
+
     function patchedHttpsRequest(
       urlOrOptions: string | URL | NodeRequestOptions,
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
-      const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+      if (directModelRequest.getStore()) {
+        return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      }
+      const original = canonicalNodeRequest(urlOrOptions, optionsOrCallback);
+      const urlStr = original.url;
 
       if (urlStr && shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
         reportChatGPTCodexResponsePassthrough(urlStr);
-        return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+        return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
       }
 
       // Path-only shape detection for https.request — the body is
@@ -1783,25 +2247,17 @@ export function createFetchInterceptor(
 
       if (urlStr && (knownForHTTPS || shapedForHTTPS)) {
         noteInterceptLayer("https.request", urlStr);
-        let opts: NodeRequestOptions = {};
-        let cb = callback;
-
-        if (typeof optionsOrCallback === "function") {
-          cb = optionsOrCallback;
-          opts = typeof urlOrOptions === "string" || urlOrOptions instanceof URL
-            ? {} : urlOrOptions as NodeRequestOptions;
-        } else if (optionsOrCallback && typeof optionsOrCallback === "object") {
-          opts = optionsOrCallback as NodeRequestOptions;
-        }
+        const opts = original.options;
+        const cb = typeof optionsOrCallback === "function" ? optionsOrCallback : callback;
 
         let originalUrl: URL;
         try {
           originalUrl = new URL(urlStr);
         } catch {
-          return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+          return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
         }
 
-        const hdrs = opts.headers as Record<string, string> ?? {};
+        const hdrs = original.headers;
         const providerKey = extractProviderKeyFromRecord(hdrs);
         const proxyHdrs = buildProxyHeaders(
           originalUrl.origin,
@@ -1871,9 +2327,17 @@ export function createFetchInterceptor(
           protocol: "http:",
           path: `${originalUrl.pathname}${originalUrl.search}`,
           headers: { ...hdrs, ...proxyHdrs },
-          // Force Node to pick a default http.Agent for this request. Leaving
-          // the caller's https.Agent in place would throw at socket allocation.
-          agent: false,
+          // The caller's https.Agent is dropped: left in place it would throw
+          // at socket allocation. The hop's own connection proves it reaches this account's gateway
+          // before the provider key and token are written on it (GAP-0594);
+          // with no token the connection fails and nothing is written.
+          // node:http uses createConnection only without an agent.
+          agent: undefined,
+          createConnection: provenCreateConnection(
+            "127.0.0.1",
+            guardrailPort,
+            loadSidecarConfig().token,
+          ) as unknown as NodeRequestOptions["createConnection"],
         };
 
         if (!knownForHTTPS && shapedForHTTPS) {
@@ -1899,9 +2363,19 @@ export function createFetchInterceptor(
         // F-1586: now that http.request is also patched, the proxy
         // hop must use the captured original to avoid recursing
         // back into this branch.
-        return explainRefusedProxyHop(
-          originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]),
+        const proxyRequest = nativeHttpRequest(
+          newOpts as unknown as Parameters<typeof http.request>[0],
+          cb as Parameters<typeof http.request>[1],
         );
+        const directFactory = (): NodeClientRequest => {
+          const request = originalUrl.protocol === "http:"
+            ? nativeHttpRequest : nativeHttpsRequest;
+          if (original.optionsOnly) {
+            return request({ ...original.options, headers: { ...original.headers } });
+          }
+          return request(original.url, { ...original.options, headers: { ...original.headers } });
+        };
+        return nodeRequestWithOutageFallback(proxyRequest, original, directFactory);
       }
 
       // Non-intercepted https.request — report silent passthrough so
@@ -1920,7 +2394,7 @@ export function createFetchInterceptor(
           reason: "no-match",
         });
       }
-      return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      return nativeHttpsRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
     }
 
     https.request = patchedHttpsRequest as typeof https.request;
@@ -1938,6 +2412,9 @@ export function createFetchInterceptor(
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
+      if (directModelRequest.getStore()) {
+        return nativeHttpRequest(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+      }
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
       // Layer 0: known provider domain or registered local LLM port
       // with a recognizable LLM path (original Ollama-only gate).
@@ -1960,15 +2437,19 @@ export function createFetchInterceptor(
           hasLLMPathSuffix(urlStr),
       );
       if (!knownCandidate && !shapedCandidate) {
-        return originalHttpRequest!(
+        return nativeHttpRequest(
           urlOrOptions as string,
           optionsOrCallback as NodeRequestOptions,
           callback,
         );
       }
       // Re-use the https.request patched path. The proxy hop is
-      // plain http already, so the protocol downgrade is a no-op.
-      return patchedHttpsRequest(urlOrOptions, optionsOrCallback, callback);
+      // plain http already. Keep the caller's protocol when it used an
+      // options bag without an explicit URL, including outage continuation.
+      const originalTarget = typeof urlOrOptions === "object" && !(urlOrOptions instanceof URL)
+        ? { ...urlOrOptions, protocol: "http:" }
+        : urlOrOptions;
+      return patchedHttpsRequest(originalTarget, optionsOrCallback, callback);
     }
 
     http.request = patchedHttpRequest as typeof http.request;
@@ -2043,13 +2524,13 @@ export function createFetchInterceptor(
     logInfo(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
-    const layers = describeLayers();
+    const layers = describeOwnLayers();
     logStartupBanner(layers);
     scheduleSelfTest();
   }
 
-  async function verifyInterception(): Promise<InterceptionSelfTest> {
-    const layers = describeLayers();
+  async function verifyOwnInterception(): Promise<InterceptionSelfTest> {
+    const layers = describeOwnLayers();
     const expectedDest = `${proxyBase}/v1/chat/completions`;
     if (!originalFetch) {
       return {
@@ -2063,7 +2544,7 @@ export function createFetchInterceptor(
     // only short-circuits inside our own wrapper. If globalThis.fetch is not
     // ours -- never installed, or replaced by another module after start() --
     // the probe would become genuine unguarded egress from the guardrail
-    // itself, repeated on every verify tick. describeLayers() already reports
+    // itself, repeated on every verify tick. describeOwnLayers() already reports
     // that condition with no network call, so answer from it instead.
     if (!layers.fetch) {
       return {
@@ -2157,6 +2638,7 @@ export function createFetchInterceptor(
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (token) headers[DC_AUTH_HEADER] = `Bearer ${token}`;
     try {
+      if (token) await proveListener("127.0.0.1", guardrailPort, token);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 2_000);
       await originalFetch(`http://127.0.0.1:${guardrailPort}/v1/events/egress`, {
@@ -2179,8 +2661,8 @@ export function createFetchInterceptor(
     }
   }
 
-  async function runSelfTest(): Promise<InterceptionSelfTest> {
-    const result = await verifyInterception();
+  async function runOwnSelfTest(): Promise<InterceptionSelfTest> {
+    const result = await verifyOwnInterception();
     const line =
       `[defenseclaw] interception self-test ok=${result.ok} dest=${result.destination || "none"} ` +
       `reason=${result.reason}`;
@@ -2197,14 +2679,17 @@ export function createFetchInterceptor(
   function scheduleSelfTest(): void {
     if (selfTestTimer) return;
     selfTestTimer = setInterval(() => {
-      void runSelfTest();
+      void runOwnSelfTest();
     }, INTERCEPTION_SELF_TEST_INTERVAL_MS);
     if (typeof selfTestTimer === "object" && selfTestTimer && "unref" in selfTestTimer) {
       (selfTestTimer as { unref?: () => void }).unref?.();
     }
   }
 
-  function stop(): void {
+  // Takes the patch out. Only the controller runs it, once the last copy it
+  // serves has stopped, so the stop of a copy that a reload replaced leaves
+  // the patch of its successor alone.
+  function uninstall(): void {
     if (originalFetch) {
       globalThis.fetch = originalFetch;
       originalFetch = null;
@@ -2246,8 +2731,65 @@ export function createFetchInterceptor(
     }
     _shared.installed = false;
     _shared.guardrailPort = null;
+    _shared.controller = null;
+    holders = [];
     logInfo("[defenseclaw] LLM fetch interceptor stopped");
   }
 
-  return { start, stop, describeLayers, verifyInterception, runSelfTest };
+  // Points the wrappers at the config of the copy that was loaded last.
+  function serve(config: AdoptedConfig): void {
+    guardrailPort = config.guardrailPort;
+    getCorrelationHeaders = config.getCorrelationHeaders;
+    getOutageMode = config.getOutageMode ?? closedOutageMode;
+    onOutageWarning = config.onOutageWarning;
+    proxyBase = `http://127.0.0.1:${guardrailPort}`;
+    _shared.guardrailPort = guardrailPort;
+    egressReporter?.stop();
+    egressReporter = createEgressReporter({ guardrailPort });
+    void bootstrapProviderOverlay(guardrailPort, {
+      fetchImpl: originalFetch ?? globalThis.fetch,
+      token: loadSidecarConfig().token,
+    });
+    logInfo(`[defenseclaw] LLM fetch interceptor serving proxy ${proxyBase}`);
+  }
+
+  const controllerImpl: InterceptorController = {
+    adopt(copy, config) {
+      holders = holders.filter((h) => h.copy !== copy);
+      holders.push({ copy, config });
+      serve(config);
+    },
+    release(copy) {
+      const wasLast = holders[holders.length - 1]?.copy === copy;
+      holders = holders.filter((h) => h.copy !== copy);
+      if (holders.length === 0) {
+        uninstall();
+      } else if (wasLast) {
+        serve(holders[holders.length - 1].config);
+      }
+    },
+    describeLayers: describeOwnLayers,
+    verifyInterception: verifyOwnInterception,
+    runSelfTest: runOwnSelfTest,
+  };
+
+  // A copy that adopted the patch of an earlier copy reports on that patch.
+  function served(): InterceptorController | null {
+    const controller = _shared.controller;
+    return started && controller && controller !== controllerImpl ? controller : null;
+  }
+
+  function stop(): void {
+    if (!started) return;
+    started = false;
+    _shared.controller?.release(self);
+  }
+
+  return {
+    start,
+    stop,
+    describeLayers: () => (served() ?? controllerImpl).describeLayers(),
+    verifyInterception: () => (served() ?? controllerImpl).verifyInterception(),
+    runSelfTest: () => (served() ?? controllerImpl).runSelfTest(),
+  };
 }

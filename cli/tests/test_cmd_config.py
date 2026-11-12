@@ -555,6 +555,17 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
             "line 2: gateway2: unknown field. All fields: defenseclaw config reference --format json-schema",
         )
 
+    def test_retired_v7_key_uses_gateway_retirement_message(self):
+        raw = b"config_version: 9\naudit_sinks: []\n"
+        reason = (
+            "[config_schema_invalid] audit_sinks was retired in config_version 8; "
+            "use observability.destinations"
+        )
+        self.assertEqual(
+            cmd_config._plain_v8_issue(raw, "$.audit_sinks", reason),
+            "line 2: audit_sinks was retired in config_version 8; use observability.destinations",
+        )
+
     def test_retired_key_names_its_replacement(self):
         v8 = b"config_version: 8\nskill_actions:\n  medium: {install: block}\n"
         self.assertEqual(

@@ -46,7 +46,7 @@ func runWindowsNamespacePurge(opts *windowsNamespacePurgeOptions) error {
 	if opts == nil {
 		return errors.New("namespace-root-cleanup options are required")
 	}
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return err
 	}
 	requestPath, err := requireWindowsTargetRuntimeProtectedPath(

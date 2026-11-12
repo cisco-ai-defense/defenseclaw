@@ -56,6 +56,10 @@ func newForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
 func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
 	t.Helper()
 	fixture := &foreignGuardFixture{home: t.TempDir()}
+	// The guard scan reads the agent environment: on Windows Devin keeps its
+	// user config under %APPDATA%, which must be the fixture home, not the
+	// account that runs the tests (GAP-0887).
+	t.Setenv("APPDATA", filepath.Join(fixture.home, "AppData", "Roaming"))
 	fixture.project = filepath.Join(fixture.home, "work", "repo")
 	if err := os.MkdirAll(filepath.Join(fixture.project, ".git"), 0o755); err != nil {
 		t.Fatal(err)

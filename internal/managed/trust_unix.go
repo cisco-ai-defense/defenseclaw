@@ -35,6 +35,24 @@ import (
 // its ACL with this, as the trust checks here do.
 func ValidatePathACL(path string) error { return validateStrictPathACL(path) }
 
+// ValidatePathACLForAccount is ValidatePathACL for a path owned by the account
+// with the given uid and name (its own configuration folders): an entry for
+// root or for the account itself adds no authority and is not judged, and an
+// entry for any other principal is judged as ValidatePathACL does.
+func ValidatePathACLForAccount(path string, uid int, account string) error {
+	return validateAccountPathACL(path, uid, account)
+}
+
+// ModeWithoutACLMask is mode with its group bits corrected for a Linux POSIX
+// access ACL on path: there the kernel reports the ACL mask as the group
+// bits, so a named entry for root or the owner makes a private path look
+// group writable. Callers that judge group write from the mode bits and judge
+// named ACL entries with ValidatePathACLForAccount use this for the group
+// bits. Unchanged on a path without an ACL and off Linux.
+func ModeWithoutACLMask(path string, mode fs.FileMode) fs.FileMode {
+	return modeWithoutACLMask(path, mode)
+}
+
 // ValidateTrustedInstallMarkerDir accepts a Secure Client install marker
 // only when root owns it, with no group, other or ACL writer and no symlink
 // in the path. An ancestor may also be written by the administrators the

@@ -23,12 +23,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -451,128 +449,6 @@ func (d *DeviceIdentity) ConnectDevice(p ConnectDeviceParams) map[string]interfa
 		"signedAt":  signedAt,
 		"nonce":     p.Nonce,
 	}
-}
-
-// RepairPairing writes (or overwrites) the sidecar's device entry into
-// OpenClaw's devices/paired.json so the gateway can authenticate on the
-// next connect attempt.  This is called automatically when a connect
-// handshake fails with "token_missing" or "unauthorized", which happens
-// when openclaw regenerates its pairing state (e.g. after a restart).
-//
-// S3.HIGH_BUG ("RepairPairing can erase unrelated paired
-// devices"): the previous implementation silently swallowed JSON parse
-// errors on paired.json. A truncated or partially-written file would
-// be treated as an empty map and the subsequent rewrite would erase
-// every other paired device. The hardened version:
-//
-//  1. Fails closed on parse errors -- the caller MUST surface the
-//     failure rather than silently corrupting OpenClaw's pairing
-//     database. A snapshot of the unparseable file is kept beside the
-//     original as paired.json.corrupt.<unix-nanos> for forensics so
-//     the operator can recover the original byte stream.
-//  2. Writes via a same-directory temp file, fsync, chmod 0600, then
-//     os.Rename for atomicity. A crash between truncate and write can
-//     no longer leave OpenClaw's pairing database half-empty.
-//  3. Tightens the on-disk perms from 0o644 to 0o600 so the device
-//     identity / token references are not world-readable.
-func (d *DeviceIdentity) RepairPairing(sandboxHome string) error {
-	devicesDir := filepath.Join(sandboxHome, ".openclaw", "devices")
-	pairedPath := filepath.Join(devicesDir, "paired.json")
-
-	paired := make(map[string]interface{})
-	existingData, readErr := os.ReadFile(pairedPath)
-	if readErr == nil && len(existingData) > 0 {
-		if unmarshalErr := json.Unmarshal(existingData, &paired); unmarshalErr != nil {
-			// Snapshot the corrupt file so the operator can recover
-			// or post-mortem the bytes; never overwrite blindly.
-			backup := fmt.Sprintf("%s.corrupt.%d", pairedPath, time.Now().UnixNano())
-			if backupErr := safefile.WritePrivate(backup, existingData); backupErr != nil {
-				fmt.Fprintf(os.Stderr,
-					"[gateway] repair pairing: failed to back up corrupt paired.json (%v); refusing to overwrite\n",
-					backupErr)
-			} else {
-				fmt.Fprintf(os.Stderr,
-					"[gateway] repair pairing: corrupt paired.json snapshotted to %s; refusing to overwrite\n",
-					backup)
-			}
-			return fmt.Errorf("gateway: repair pairing: paired.json is unparseable: %w", unmarshalErr)
-		}
-	} else if readErr != nil && !os.IsNotExist(readErr) {
-		// Read errors other than file-not-found are fatal -- a
-		// permission or I/O failure must not be silently ignored.
-		return fmt.Errorf("gateway: repair pairing: read existing paired.json: %w", readErr)
-	}
-
-	nowMs := time.Now().UnixMilli()
-	scopes := []string{
-		"operator.read", "operator.write",
-		"operator.admin", "operator.approvals",
-	}
-
-	existing, _ := paired[d.DeviceID].(map[string]interface{})
-	if existing == nil {
-		existing = map[string]interface{}{}
-	}
-
-	tokens := existing["tokens"]
-	if tokens == nil {
-		tokens = map[string]interface{}{}
-	}
-	createdAt := existing["createdAtMs"]
-	if createdAt == nil {
-		createdAt = nowMs
-	}
-
-	// Platform must match what the connect handshake reports
-	// (client.go uses runtime.GOOS); otherwise OpenClaw flags this as
-	// `metadata-upgrade` ("device identity changed and must be re-approved")
-	// on every reconnect and the gateway link gets stuck in NOT_PAIRED.
-	// See gateway-rooted regression: hardcoding "linux" here while
-	// connecting from darwin produced an infinite RECONNECTING loop
-	// even with a valid paired.json entry.
-	paired[d.DeviceID] = map[string]interface{}{
-		"deviceId":       d.DeviceID,
-		"publicKey":      d.PublicKeyBase64URL(),
-		"displayName":    "defenseclaw-sidecar",
-		"platform":       runtime.GOOS,
-		"deviceFamily":   existing["deviceFamily"],
-		"clientId":       "gateway-client",
-		"clientMode":     "backend",
-		"role":           "operator",
-		"roles":          []string{"operator"},
-		"scopes":         scopes,
-		"approvedScopes": scopes,
-		"tokens":         tokens,
-		"createdAtMs":    createdAt,
-		"approvedAtMs":   nowMs,
-	}
-
-	if err := os.MkdirAll(devicesDir, 0o755); err != nil {
-		return fmt.Errorf("gateway: repair pairing: mkdir: %w", err)
-	}
-
-	data, err := json.MarshalIndent(paired, "", "  ")
-	if err != nil {
-		return fmt.Errorf("gateway: repair pairing: marshal: %w", err)
-	}
-	data = append(data, '\n')
-
-	if err := atomicWritePairedJSON(pairedPath, data); err != nil {
-		return fmt.Errorf("gateway: repair pairing: write: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "[gateway] repaired device pairing in %s\n", pairedPath)
-	return nil
-}
-
-// atomicWritePairedJSON writes data to path through a same-directory
-// temp file, fsyncs the contents, chmods to 0600, and renames over the
-// destination. A crash anywhere before os.Rename leaves the original
-// file intact; a crash after rename leaves the new content intact.
-// The temp file is created with O_EXCL so a stale tmp from a prior
-// crash does not silently get reused.
-func atomicWritePairedJSON(path string, data []byte) error {
-	return safefile.WritePrivate(path, data)
 }
 
 func normalizeMetadata(s string) string {

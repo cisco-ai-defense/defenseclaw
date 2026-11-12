@@ -314,7 +314,7 @@ func TestClassifiedDefaultEventNamesMatchReviewedSnapshot(t *testing.T) {
 		}
 	}
 
-	const wantSHA256 = "347b71619cf8417959c55031051fbec955d7e4996f15c06df149a7643dc92ca6"
+	const wantSHA256 = "2f3dc1837d352e514a8ca9fea730725f114a49eaa10c716dfdbc4d5cf9b62c64"
 	sum := sha256.Sum256([]byte(strings.Join(eventNamesToStrings(names), "\n")))
 	if got := hex.EncodeToString(sum[:]); got != wantSHA256 {
 		t.Fatalf("classified default event-name snapshot changed: sha256=%s names=%v", got, names)

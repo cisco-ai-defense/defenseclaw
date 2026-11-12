@@ -68,7 +68,7 @@ The API host is the console host with a leading `console.` changed to `api.` (or
 
 ## Standalone enterprise deployments
 
-The managed service has no administrator shell environment. Store the key with `defenseclaw-gateway enterprise secret set --name galileo-api-key --from-stdin` and reference it as `Galileo-API-Key: {credential: galileo-api-key}` in the administrator config. `setup galileo` is not shipped in enterprise packages.
+The managed service has no administrator shell environment. Store the key with `/opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name galileo-api-key --from-stdin` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS) and reference it as `Galileo-API-Key: {credential: galileo-api-key}` in the administrator config. `setup galileo` is not shipped in enterprise packages.
 
 ## Keep local observability and Galileo together
 

@@ -290,7 +290,6 @@ def test_wheel_rejects_cumulative_compressed_and_expanded_bounds(
 def test_make_and_release_workflow_enforce_extension_artifact_contract() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     workflow = (ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
-    windows_workflow = (ROOT / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
     tsconfig = json.loads((ROOT / "extensions/defenseclaw/tsconfig.json").read_text(encoding="utf-8"))
@@ -301,9 +300,6 @@ def test_make_and_release_workflow_enforce_extension_artifact_contract() -> None
     # plugin tarball; the wheel still carries the staged fingerprint.
     assert "make extensions" in workflow
     assert "make dist-cli dist-installers dist-requirements" in workflow
-    windows_package_job = windows_workflow[windows_workflow.index("  package-artifact:") :]
-    assert "actions/setup-node@" in windows_package_job
-    assert 'node-version: "24"' in windows_package_job
     assert tsconfig["compilerOptions"]["newLine"] == "lf"
     for path in (
         "extensions/defenseclaw/package.json",

@@ -40,7 +40,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 from defenseclaw import bootstrap, fail_mode, hook_integrity
 from defenseclaw.commands import cmd_doctor, cmd_status
 from defenseclaw.config import default_config
@@ -220,6 +219,7 @@ def test_the_windows_render_is_registered_until_its_entries_are_removed(tmp_path
     # The launcher the Windows commands name is on the Windows host, not here.
     real_isfile = os.path.isfile
     monkeypatch.setattr(os.path, "isfile", lambda path: path == _WINDOWS_LAUNCHER or real_isfile(path))
+    monkeypatch.setattr(hook_integrity, "_launcher_health", lambda launcher, data_dir="": hook_integrity.LauncherHealth())
     connector = case["connector"]
     cfg, paths = _install(tmp_path, monkeypatch, case)
     assert "defenseclaw-hook.exe" not in Path(paths[0]).read_text(encoding="utf-8")
@@ -240,6 +240,7 @@ def test_windows_hook_files_are_reflected_in_status_quickstart_and_doctor(tmp_pa
     # The launcher the Windows commands name is on the Windows host, not here.
     real_isfile = os.path.isfile
     monkeypatch.setattr(os.path, "isfile", lambda path: path == _WINDOWS_LAUNCHER or real_isfile(path))
+    monkeypatch.setattr(hook_integrity, "_launcher_health", lambda launcher, data_dir="": hook_integrity.LauncherHealth())
     connector = case["connector"]
     cfg, paths = _install(tmp_path, monkeypatch, case)
     cfg.deployment_mode = "" if mode == "per_user" else mode

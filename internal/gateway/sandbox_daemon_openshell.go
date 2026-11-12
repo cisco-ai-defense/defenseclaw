@@ -73,12 +73,15 @@ import (
 // (sandboxapi.SettingsDrift) and is reported to the managed gateway (event
 // settings_drift).
 
+// openShellGatewayRepairCommand is the administrator's repair of a managed
+// Mac, with the gateway by its absolute path: it is not on the PATH.
+var openShellGatewayRepairCommand = "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos repair"
+
 const (
-	openShellGatewayUnit          = "defenseclaw-openshell-gateway.service"
-	openShellGatewayRepairCommand = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair"
-	daemonSystemctl               = "/usr/bin/systemctl"
-	daemonLaunchctl               = "/bin/launchctl"
-	renderedGatewayDriftField     = "gateway configuration"
+	openShellGatewayUnit      = "defenseclaw-openshell-gateway.service"
+	daemonSystemctl           = "/usr/bin/systemctl"
+	daemonLaunchctl           = "/bin/launchctl"
+	renderedGatewayDriftField = "gateway configuration"
 
 	// openShellPrerequisiteReason is the refusal detail of a missing
 	// OpenShell prerequisite.

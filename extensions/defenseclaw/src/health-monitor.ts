@@ -20,11 +20,11 @@
  * Health monitor that periodically checks the DefenseClaw sidecar and
  * exposes an `isUnprotected` flag for the fetch interceptor to query.
  *
- * The monitor does NOT block LLM calls — it only warns. Model calls go
- * through the gateway's proxy, so while the gateway is down they fail
- * closed (GAP-2428): the warning says so instead of "not being scanned".
+ * The monitor supplies the agent's outage warning. The saved policy tier
+ * decides whether a model request continues when the proxy is unreachable.
  */
 
+import { ListenerProofError } from "./listener-proof.js";
 import type { OutboundSidecarRequestLog } from "./types.js";
 
 const POLL_INTERVAL_MS = 60_000;
@@ -40,6 +40,7 @@ export interface HealthMonitorOptions {
   /** Structured outbound request logging (optional). */
   logOutboundRequest?: (entry: OutboundSidecarRequestLog) => void;
   getLogAgentId?: () => string;
+  getOutageMode?: () => "open" | "closed" | "protected";
 }
 
 export class HealthMonitor {
@@ -50,11 +51,13 @@ export class HealthMonitor {
   private readonly onFetchResponse?: (res: Response) => void;
   private readonly logOutboundRequest?: (entry: OutboundSidecarRequestLog) => void;
   private readonly getLogAgentId?: () => string;
+  private readonly getOutageMode?: () => "open" | "closed" | "protected";
   private timer: ReturnType<typeof setInterval> | null = null;
   private _unprotected = false;
   private _wasUnprotected = false;
   private _connecting = false;
   private _down = false;
+  private _unproven = false;
 
   constructor(opts: HealthMonitorOptions) {
     this.statusUrl = opts.statusUrl;
@@ -64,10 +67,20 @@ export class HealthMonitor {
     this.onFetchResponse = opts.onFetchResponse;
     this.logOutboundRequest = opts.logOutboundRequest;
     this.getLogAgentId = opts.getLogAgentId;
+    this.getOutageMode = opts.getOutageMode;
   }
 
   get isUnprotected(): boolean {
     return this._unprotected;
+  }
+
+  /**
+   * The gateway did not answer: an outage the saved outage mode applies to.
+   * A listener that answered without proving it is this account's gateway
+   * is not one; model calls stay blocked then (GAP-0594).
+   */
+  get isGatewayDown(): boolean {
+    return this._down && !this._unproven;
   }
 
   start(): void {
@@ -77,6 +90,12 @@ export class HealthMonitor {
     void this.check();
 
     this.timer = setInterval(() => void this.check(), this.pollIntervalMs);
+    // A poll timer must never keep the gateway process from exiting.
+    this.timer.unref?.();
+  }
+
+  refresh(): Promise<void> {
+    return this.check();
   }
 
   stop(): void {
@@ -121,9 +140,11 @@ export class HealthMonitor {
             console.log("[defenseclaw] Gateway is back online. Protection restored.");
           }
           this._unprotected = false;
+          this._down = false;
           this._wasUnprotected = false;
           this._connecting = false;
         } else if (gwState === "starting" || gwState === "reconnecting") {
+          this._down = false;
           // The DefenseClaw gateway answered; only its link to this freshly
           // started OpenClaw gateway is still coming up. That is not "not
           // running", and starting it again would not help (GAP-1799).
@@ -137,21 +158,26 @@ export class HealthMonitor {
       } else {
         this.markUnprotected(false);
       }
-    } catch {
+    } catch (err) {
       const duration_ms = Math.round(performance.now() - started);
       this.logOutboundRequest?.({
         agentId: this.getLogAgentId?.() ?? "unknown",
         status_code: 0,
         duration_ms,
       });
-      this.markUnprotected(true);
+      this.markUnprotected(true, err instanceof ListenerProofError && !err.unreachable);
     }
   }
 
-  /** `down`: the gateway did not answer at all, so model calls through its proxy are refused. */
-  private markUnprotected(down: boolean): void {
+  /**
+   * `down`: the gateway did not answer at all, so model calls through its
+   * proxy are refused. `unproven`: the listener answered without proving it
+   * is this account's gateway, so no saved outage mode lets a call continue.
+   */
+  private markUnprotected(down: boolean, unproven = false): void {
     this._unprotected = true;
     this._down = down;
+    this._unproven = unproven;
     if (!this._wasUnprotected) {
       this._wasUnprotected = true;
       console.warn(`[defenseclaw] WARNING: ${this.describe()}`);
@@ -159,11 +185,18 @@ export class HealthMonitor {
   }
 
   private describe(): string {
-    return this._down
-      ? "The DefenseClaw gateway is not running, so model calls are blocked (fail-closed) until it is back. " +
-          "Run 'defenseclaw-gateway start' to restore protection."
-      : "The DefenseClaw gateway is not healthy, so protection may be incomplete. " +
-          "Check it with 'defenseclaw-gateway status'.";
+    if (this._down) {
+      let open = false;
+      try {
+        open = !this._unproven && this.getOutageMode?.() === "open";
+      } catch {
+        // An unknown saved mode remains closed.
+      }
+      return open
+        ? "The DefenseClaw gateway is not running, so model calls continue without inspection under the saved outage mode. Run 'defenseclaw-gateway start' to restore protection."
+        : "The DefenseClaw gateway is not running, so model calls are blocked (fail-closed) until it is back. Run 'defenseclaw-gateway start' to restore protection.";
+    }
+    return "The DefenseClaw gateway is not healthy, so protection may be incomplete. Check it with 'defenseclaw-gateway status'.";
   }
 
   /**

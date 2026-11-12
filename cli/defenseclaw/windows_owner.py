@@ -28,6 +28,7 @@ gateway and ACP guard make the same change with the same exclusions
 
 from __future__ import annotations
 
+import ntpath
 import os
 
 _TOKEN_QUERY = 0x0008
@@ -93,17 +94,39 @@ def _enterprise_install_root_present() -> bool:
 
 
 def _program_files_dir() -> str:
-    """Program Files from the machine registration, not the environment; "" if unreadable."""
+    """Program Files from the machine registration, not the environment; "" if unreadable.
+
+    Like the Go resolver (winpath.TrustedProgramFiles, ValidateTrustedMachineRoot)
+    it takes only a REG_SZ that is a canonical local drive-letter path, with no
+    padding, environment reference, control character or forward slash
+    (g072 review 3 N4); anything else is unreadable.
+    """
     import winreg
 
     try:
         with winreg.OpenKey(
             winreg.HKEY_LOCAL_MACHINE, _CURRENT_VERSION_KEY, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY
         ) as key:
-            value, _ = winreg.QueryValueEx(key, "ProgramFilesDir")
+            value, kind = winreg.QueryValueEx(key, "ProgramFilesDir")
     except OSError:
         return ""
-    return value.strip() if isinstance(value, str) else ""
+    if kind != winreg.REG_SZ or not isinstance(value, str) or not _canonical_machine_root(value):
+        return ""
+    return value
+
+
+def _canonical_machine_root(value: str) -> bool:
+    if not value or value != value.strip() or "%" in value or "/" in value:
+        return False
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        return False
+    return (
+        len(value) >= 3
+        and value[0].isascii()
+        and value[0].isalpha()
+        and value[1:3] == ":\\"
+        and ntpath.normpath(value) == value
+    )
 
 
 def _managed_marker_present() -> bool:

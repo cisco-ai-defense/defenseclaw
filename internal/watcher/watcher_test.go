@@ -553,7 +553,21 @@ func TestQuarantineSkillUnderLinkedClaudeHome(t *testing.T) {
 	if res.Verdict != VerdictRejected {
 		t.Fatalf("verdict = %+v, want rejected", res)
 	}
-	if _, err := os.Lstat(filepath.Join(realSkills, "ucc-flagged-skill")); !os.IsNotExist(err) {
+	_, err := os.Lstat(filepath.Join(realSkills, "ucc-flagged-skill"))
+	if runtime.GOOS == "windows" {
+		// Windows refuses a linked skill root by design (ownership of a
+		// reparse point is not proven), so the files are never moved through
+		// the link. The refusal is reported, not silent.
+		if err != nil {
+			t.Fatalf("a skill under a linked ~/.claude was moved on Windows: %v", err)
+		}
+		issues, readErr := ReadAdmissionIssues(cfg.DataDir)
+		if readErr != nil || len(issues) != 1 || issues[0].Kind != AdmissionNotQuarantined {
+			t.Fatalf("issues %+v (err %v), want one not-quarantined issue for the refused linked root", issues, readErr)
+		}
+		return
+	}
+	if !os.IsNotExist(err) {
 		t.Fatalf("CRITICAL skill under the linked ~/.claude stayed in place: %v", err)
 	}
 }

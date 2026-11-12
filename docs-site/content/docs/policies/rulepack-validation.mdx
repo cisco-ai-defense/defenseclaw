@@ -11,7 +11,7 @@ keywords:
 `validate-pack` runs the same loader the gateway uses. It works offline: the gateway does not need to be running and no network request is made.
 
 <Callout type="info" title="Enterprise deployments">
-On a managed computer, `defenseclaw` runs only `sandbox` commands. Use `defenseclaw-gateway rulepack validate --dir PACK`; it prints the digest to pin. See [custom rule packs](/docs/enterprise/configuration).
+On a managed computer, `defenseclaw` runs only the commands in [Managed command availability](/docs/enterprise/managed-commands). Use `/opt/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir PACK` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS); it prints the digest to pin. See [custom rule packs](/docs/enterprise/configuration).
 </Callout>
 
 1. Validate the pack.
@@ -22,10 +22,10 @@ On a managed computer, `defenseclaw` runs only `sandbox` commands. Use `defensec
 
    ```text
    Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/default"
-     rules: 242/246 enabled across 7 files
+     rules: 244/248 enabled across 7 files
      components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
-     digest: c2b3f254cd30a35872dcac7db4e16d3ce171f416f4fd043bbb7ea2037aaa388d
-     files digest: e3854bc72a462ff0a06e104838625373d0799b4c835ced52bd864ef9301d4af6 (the guardrail.custom_packs pin)
+     digest: 115b4e9167b1aad16c44d6d8192d86b7a53823e8d10c3ce4c1e781b2d284d261
+     files digest: 90f2b4d24947c1e6af723f5ba629677e664bbe367822d2f13134fc55d1644d08 (the guardrail.custom_packs pin)
    ```
 
    `judges=4` counts the compiled-in exfil judge and the three judge files. The full digest includes compiled defaults and can change between builds even when the files digest stays the same. Use your own run's `files digest` to pin a custom pack. You can pass a pack name instead of a path.
@@ -37,7 +37,7 @@ On a managed computer, `defenseclaw` runs only `sandbox` commands. Use `defensec
    ```
 
    ```json
-   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"c2b3f254…","enabled_rule_count":242,"files_digest":"e3854bc7…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":246,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
+   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"115b4e91…","enabled_rule_count":244,"files_digest":"90f2b4d2…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":248,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
    ```
 
 3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`. The reason names the file, or the folder when a whole copy of another pack sits inside this one (for example `default/judge/injection.yaml` names `default`), and says to move it out or remove it:
@@ -86,6 +86,8 @@ Doctor validates the pack every connector uses. It shows `FAIL` for an invalid p
 ## Apply a validated pack
 
 The pinned digest also covers the optional `defenseclaw-pack.json` posture file. Adding or editing that file changes the digest, so validate the pack again and pin the new digest, as for a rule file ([Thresholds](/docs/policies/thresholds#rule-pack-default-posture), [custom rule packs](/docs/enterprise/configuration#custom-rule-packs)).
+
+A `guardrail.custom_packs` entry is checked once, when the configuration is read, and every reader (the gateway, the hooks, `defenseclaw status` and `defenseclaw doctor`) uses that one result. An entry is a config error when its path is empty, is not a readable folder, or loads no valid pack, or when its `digest` is missing or does not match the pack's files digest (a pack with no files has no usable digest). A relative `path` is read against the folder that holds `config.yaml`, not the current directory, and `~` is not expanded. While an entry has a config error, a setting that selects it runs the built-in pack of that name (`default` for any other name), `status` and `doctor` name the error, and the hook's outage behaviour follows the strict tier, so it does not open. Fix the entry, then reload.
 
 DefenseClaw ships three rule packs: `permissive`, `default` and `strict`. A pack changes which rules run and the default block and alert levels.
 

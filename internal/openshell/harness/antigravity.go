@@ -67,7 +67,7 @@ var Antigravity = register(&Spec{
 		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=antigravity, Gemini-API mock through GEMINI_API_KEY): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock; hook-fire probe with a replaced user hooks.json and a hooks path replaced by a directory (refused). Verified with the Gemini-API mock only: the defenseclaw-gemini profile has not carried a real Gemini key (no account), and Google sign-in inside a sandbox is untested"},
 	probe: ProbeSpec{
 		VersionArgv:     []string{"/usr/local/bin/agy", "--version"},
-		VersionRE:       regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+)$`),
+		VersionRE:       regexp.MustCompile(`^v?([0-9]+\.[0-9]+\.[0-9]+)$`),
 		NetworkBinaries: `readlink -f /usr/local/bin/agy`,
 	},
 	install:  antigravityInstallSteps,
@@ -148,7 +148,7 @@ func antigravityInstallSteps(version string) ([]InstallStep, error) {
 			`install -o root -g root -m 0755 "$tmp/antigravity" "$root/bin/agy"; ` +
 			`rm -rf "$tmp"; ln -sfn "$root/bin/agy" /usr/local/bin/agy; ` +
 			`got="$(cd /tmp && HOME=/tmp/defenseclaw-version-home /usr/local/bin/agy --version 2>/dev/null | head -n 1)"; rm -rf /tmp/defenseclaw-version-home; ` +
-			`[ "$got" = ` + shellQuote(version) + ` ] || { echo "Antigravity CLI '$got' is not the pinned ` + version + `" >&2; exit 1; }`,
+			pinVersionCheck("Antigravity CLI", version),
 	}}, nil
 }
 

@@ -17,9 +17,19 @@ func TestJudgeMaxParallelLoadsAndDefaultsOff(t *testing.T) {
 	if cfg.Guardrail.Judge.MaxParallel != 2 {
 		t.Fatalf("max_parallel = %d, want 2", cfg.Guardrail.Judge.MaxParallel)
 	}
+	if !cfg.Guardrail.Judge.MaxParallelExplicit {
+		t.Fatal("explicit max_parallel was not retained")
+	}
 	cfg = loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  judge:\n    enabled: true\n")
 	if cfg.Guardrail.Judge.MaxParallel != 0 {
 		t.Fatalf("max_parallel default = %d, want 0 (no limit)", cfg.Guardrail.Judge.MaxParallel)
+	}
+	if cfg.Guardrail.Judge.MaxParallelExplicit {
+		t.Fatal("omitted max_parallel was marked explicit")
+	}
+	cfg = loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  judge:\n    enabled: true\n    max_parallel: 0\n")
+	if cfg.Guardrail.Judge.MaxParallel != 0 || !cfg.Guardrail.Judge.MaxParallelExplicit {
+		t.Fatalf("explicit zero was lost: %+v", cfg.Guardrail.Judge)
 	}
 }
 

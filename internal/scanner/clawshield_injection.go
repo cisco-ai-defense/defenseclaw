@@ -117,6 +117,13 @@ func (s *ClawShieldInjectionScanner) Scan(ctx context.Context, target string) (*
 	return result, nil
 }
 
+// ScanTextContent runs the in-process prompt-injection detector over one
+// in-memory file: a gateway that may not read a user profile judges the text
+// the hook read as the user (GAP-0699, GAP-0701).
+func ScanTextContent(content []byte, path string) []Finding {
+	return csInjectionScanContent(content, path)
+}
+
 func csInjectionScanContent(content []byte, path string) []Finding {
 	text := string(content)
 	normalized := norm.NFKC.String(text)

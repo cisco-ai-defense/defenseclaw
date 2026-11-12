@@ -23,3 +23,8 @@ package cli
 func keepConfigDACL(string) (func(...string) error, error) {
 	return func(...string) error { return nil }, nil
 }
+
+// keepConfigSecurity is a no-op off Windows, as keepConfigDACL is.
+func keepConfigSecurity(string) (func(...string) error, error) {
+	return func(...string) error { return nil }, nil
+}

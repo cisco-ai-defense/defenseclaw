@@ -1215,7 +1215,7 @@ attributes:
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.events_lost
   type: int64
-  brief: Events the Plane C backend reported losing since it started
+  brief: Events the Plane C backends reported losing since the gateway started
   examples: [0]
   stability: stable
   owner: defenseclaw
@@ -1225,7 +1225,7 @@ attributes:
   normalization:
     id: numeric-range-v1
     overrides: {min: 0, max: 9223372036854775807}
-    notes: Cumulative since the backend's stream opened. It always counts the drops the stream itself reported (rate-limit drops); loss_known says whether the backend's own loss counters were readable as well, so zero with loss_known false means none seen, not none happened
+    notes: Cumulative for the life of the gateway process (a new service.instance.id starts it again) and across backends; the losses of earlier event streams, replaced when the sensor helper restarts or its backend changes, are carried, so it never goes back while the gateway runs and can include the losses of an earlier backend (Tetragon losses still count after a change to the native backend). Tetragon's own loss counters count from their first successful read in each session. It always counts the drops the stream itself reported (rate-limit drops); loss_known says whether the backend's own loss counters were readable as well, so zero with loss_known false means none seen, not none happened
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.loss_known
   type: boolean
@@ -14518,6 +14518,9 @@ producer_identity_sets:
   - event_name: legacy.audit.config.update
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.connector.hook.account.removed
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.connector.hook.repaired
     bucket: compliance.activity
     compatibility_only: true
@@ -17332,6 +17335,26 @@ producer_mappings:
   default_identity:
     event_name: legacy.audit.connector.hook
     bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: connector-hook-account-removed
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.connector.hook.account.removed
+    bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action
   key: connector-hook-repaired

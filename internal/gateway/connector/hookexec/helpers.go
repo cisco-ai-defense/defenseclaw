@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -273,7 +274,8 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 	if w := opts.answerWatch; w != nil {
 		// Before anything below can block: a closed failure keeps the
 		// watchdog's answer closed (claimFailureLog).
-		done, claimed := w.claimFailureLog(opts, sp, blocked, reason, failMode, unreachableAnswer)
+		frame := localFailureFallbackFrame(opts, sp, reason, category, failMode, blocked)
+		done, claimed := w.claimFailureLog(opts, sp, blocked, reason, failMode, unreachableAnswer, frame)
 		if !claimed {
 			return
 		}
@@ -310,14 +312,6 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 	}
 	eventID := managedLocalDenyEventID(opts, outcome)
 	logDir := filepath.Join(home, "logs")
-	// The log the watchdog opened ahead of its deadline: the folder and the
-	// file exist, so the line is one append (rel-1-0-6 GAP-0407).
-	f := opts.failureLog.take(home)
-	if f == nil {
-		if !hookFailureLogFolderReady(opts, home, logDir, eventID) {
-			return
-		}
-	}
 	failMode = loggedFailMode(opts, sp, failMode)
 	sessionID, callID, toolID := hookFailureCorrelation(opts.failurePayload)
 	entry := hookFailureEntry{
@@ -334,24 +328,81 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		Outcome:   outcome,
 		EventID:   eventID,
 	}
+	if reason == perUserGatewayNoAnswerReason && perUserRestartWindowCall(opts, sp) {
+		entry.RestartProof = opts.failureLog.getRestartReason()
+		if entry.RestartProof == "" {
+			entry.RestartProof = "no_verified_connection"
+		}
+		slog.Debug("per-user hook restart proof", "reason", entry.RestartProof)
+	}
 	line, err := json.Marshal(entry)
 	if err != nil {
-		if f != nil {
-			_ = f.Close()
-		}
 		return
 	}
+	line = append(line, '\n')
+	markerEntry := entry
+	if len(markerEntry.Reason) > 1024 {
+		markerEntry.Reason = strings.ToValidUTF8(markerEntry.Reason[:1024], "")
+	}
+	if len(markerEntry.Event) > 128 {
+		markerEntry.Event = strings.ToValidUTF8(markerEntry.Event[:128], "")
+	}
+	markerLine, err := json.Marshal(markerEntry)
+	if err != nil {
+		return
+	}
+	frame := append(append([]byte("DCID"), markerLine...), '\n')
+	opts.failureLog.setFallbackFrame(frame)
+	if opts.failureLog.fallbackRecorded() {
+		return
+	}
+	appendMarker := func() bool {
+		marker := opts.failureLog.takeMarker(home)
+		if marker == nil {
+			if !hookFailureLogFolderReady(opts, home, logDir, eventID) {
+				return false
+			}
+			var openErr error
+			marker, openErr = opts.failureLog.opener()(filepath.Join(logDir, "hook-failures.dropped"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+			if openErr != nil {
+				return false
+			}
+		}
+		defer marker.Close()
+		n, writeErr := marker.Write(frame)
+		return writeErr == nil && n == len(frame)
+	}
+	// The prepared descriptor avoids a second open on the deadline path.
+	f := opts.failureLog.take(home)
 	if f == nil {
-		f, err = openHookFailureLog(filepath.Join(logDir, "hook-failures.jsonl"),
+		if !hookFailureLogFolderReady(opts, home, logDir, eventID) {
+			return
+		}
+		f, err = opts.failureLog.opener()(filepath.Join(logDir, "hook-failures.jsonl"),
 			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
+			if blocked && !opts.ManagedEnterprise && !opts.SecureClient && appendMarker() {
+				return
+			}
+			fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be opened")
 			noteUnrecordedLocalDeny(opts, eventID, "the account's hook-failure log cannot be opened")
 			return
 		}
 	}
 	defer f.Close()
-	if _, err := f.Write(append(line, '\n')); err == nil && entry.EventID != "" && opts.Stderr != nil &&
-		!quietManagedFailureStderr(opts) {
+	if opts.failureLog.fallbackRecorded() {
+		return
+	}
+	n, err := f.Write(line)
+	if (err != nil || n != len(line)) && blocked && !opts.ManagedEnterprise && !opts.SecureClient && appendMarker() {
+		return
+	}
+	if err != nil || n != len(line) {
+		fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be appended")
+		noteUnrecordedLocalDeny(opts, eventID, "the account's hook-failure log cannot be written")
+		return
+	}
+	if entry.EventID != "" && opts.Stderr != nil && !quietManagedFailureStderr(opts) {
 		// The answer names the record, so the refusal can be looked up
 		// although the gateway that writes the audit log did not see it
 		// (mgmt-p1 GAP-0134). A Secure Client block shows only
@@ -401,6 +452,9 @@ type hookFailureEntry struct {
 	Category string `json:"category"`
 	FailMode string `json:"fail_mode"`
 	Outcome  string `json:"outcome"`
+	// RestartProof names why the per-user restart-window proof did not
+	// replace a no-answer refusal with the account's outage answer.
+	RestartProof string `json:"restart_proof,omitempty"`
 	// EventID names a managed call the hook blocked itself (the
 	// gateway, which writes the audit log, did not decide it); the
 	// hook's answer names the same id (managedLocalDenyEventID).

@@ -179,15 +179,17 @@ var windowsManagedClaudeGuardianLeftoverRemover = func() error {
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
+	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return err
 	}
 	return removeWindowsManagedClaudeTransactionFolderOutsideLifecycle(dir, filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
 }
 
-// windowsManagedClaudeLifecycleLock is replaceable in tests.
-var windowsManagedClaudeLifecycleLock = acquireWindowsEnterpriseLifecycleLock
+// windowsManagedClaudeLifecycleLock is replaceable in tests. It never waits:
+// the guardian's pass gives the folder up while a lifecycle run holds the lock
+// (GAP-0646 review 2).
+var windowsManagedClaudeLifecycleLock = tryWindowsEnterpriseLifecycleLock
 
 // removeWindowsManagedClaudeTransactionFolderOutsideLifecycle removes the
 // transaction folder holding the lifecycle lock, and does nothing while a
@@ -273,6 +275,76 @@ var windowsManagedClaudeCurrentUserSID = func() (string, error) {
 // removeWindowsManagedHooksStandalonePerUserRegistrations); Secure Client
 // writes none. Per-user runtime files stay, like every other connector.
 
+// windowsEnterpriseKeptLinkReason is the reason of a machine_state_remaining
+// entry for a link a purge kept. The psm1 purge steps write the same text.
+const windowsEnterpriseKeptLinkReason = "kept: a link sits here; DefenseClaw does not follow, change or remove it"
+
+// windowsEnterpriseCodexKeptLinkReason is the reason for the link at the Codex
+// machine-policy folder: the entry starts with windowsEnterpriseKeptLinkReason
+// and says what a kept link cannot promise. Nothing behind the link is read,
+// so a Codex requirement there may still name the hook binary the uninstall
+// removes (GAP-0773). The psm1 purge steps write only the shorter text for a
+// link they meet, and the first entry for a path wins.
+const windowsEnterpriseCodexKeptLinkReason = windowsEnterpriseKeptLinkReason +
+	"; what is behind it was not checked, so a Codex requirement there may still name the DefenseClaw hook binary that the uninstall removes"
+
+// windowsManagedHooksKeptLinkedFolders names, as machine_state_remaining
+// entries (path: kept: reason), each vendor folder a teardown kept because a
+// link sits there: the ones the Cursor, Claude Code, selector and per-user
+// teardown steps of this process met, and the ones on the Go-owned policy
+// paths (Copilot, OpenCode, Devin), which an earlier step of the uninstall
+// may have kept. It only reads. Replaceable in tests.
+var windowsManagedHooksKeptLinkedFolders = func() []string {
+	var goOwned []string
+	if layout, programFiles, programData, err := standaloneEnterprisePolicyLayout(); err == nil {
+		opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
+		goOwned = enterprisepolicy.WindowsGoOwnedLinkedFolders(opts)
+	}
+	return windowsManagedHooksNameKeptLinksOnce(
+		connector.WindowsCodexMachineFoldersKept(),
+		enterprisehooks.WindowsManagedPolicyFoldersKept(),
+		goOwned,
+	)
+}
+
+// windowsManagedHooksNameKeptLinksOnce builds the kept-link entries from the
+// links the Codex walk, the vendor-folder steps and the Go-owned policy scan
+// met. A link is named once, whichever step met it: the selector step names the
+// Codex folder as well when an enrolled Codex account has a selector entry to
+// look for (GAP-0773), so the Codex entries go first and keep their wording.
+func windowsManagedHooksNameKeptLinksOnce(codex, vendor, goOwned []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(folder, text string) {
+		key := strings.ToLower(filepath.Clean(folder))
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, folder+": "+text)
+	}
+	for _, folder := range codex {
+		add(folder, windowsEnterpriseCodexKeptLinkReason)
+	}
+	for _, folder := range vendor {
+		add(folder, windowsEnterpriseKeptLinkReason)
+	}
+	for _, folder := range goOwned {
+		add(folder, windowsEnterpriseKeptLinkReason)
+	}
+	return out
+}
+
+// The per-user enrollment reads and the rollback republication, replaceable in
+// tests. A teardown makes none of them for a connector whose machine folder a
+// link keeps: the read follows a link on the parent, so an enrollment.json
+// behind an administrator link would fail the check after the uninstall
+// committed.
+var (
+	windowsManagedHooksPerUserEnrollmentReader   = enterprisehooks.ReadWindowsPerUserManagedEnrollmentTargets
+	windowsManagedHooksPerUserEnrollmentRestorer = enterprisehooks.RestoreWindowsPerUserManagedEnrollment
+)
+
 func windowsManagedHooksStandalonePerUserTarget(connectorName string) bool {
 	return enterprisehooks.IsWindowsProfilePerUserConnector(connectorName)
 }
@@ -301,7 +373,14 @@ func windowsManagedHooksStandalonePerUserExpected(
 
 func validateWindowsManagedHooksStandalonePerUserEnrollment(identity windowsManagedHooksTeardownJournal) error {
 	for connectorName, want := range windowsManagedHooksStandalonePerUserExpected(identity) {
-		current, exists, err := enterprisehooks.ReadWindowsPerUserManagedEnrollmentTargets(connectorName)
+		// A link at the connector's machine folder keeps it out of the
+		// comparison: nothing behind the link is read (GAP-0773, GAP-0829).
+		if kept, err := windowsManagedHooksTeardownConnectorKept(connectorName); err != nil {
+			return err
+		} else if kept {
+			continue
+		}
+		current, exists, err := windowsManagedHooksPerUserEnrollmentReader(connectorName)
 		if err != nil {
 			return err
 		}
@@ -346,7 +425,15 @@ func removeWindowsManagedHooksStandalonePerUserWiring(identity windowsManagedHoo
 		return err
 	}
 	opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
-	if _, err := enterprisepolicy.RemoveWindowsGoOwned(opts); err != nil {
+	removed, err := enterprisepolicy.RemoveWindowsGoOwned(opts)
+	// A vendor folder that does not protect DefenseClaw's file is named, and
+	// the uninstall goes on (g582 review 7 S1).
+	for _, state := range removed.States {
+		for _, warning := range state.Warnings {
+			fmt.Fprintf(os.Stderr, "warning: %s: %s\n", state.Connector, warning)
+		}
+	}
+	if err != nil {
 		return err
 	}
 	// The Claude Code version floor drop-in goes with the rest of the
@@ -367,38 +454,24 @@ var windowsManagedHooksStandaloneFloorPurger = purgeWindowsManagedHooksUnrecorde
 // Claude Code version floor drop-in that holds DefenseClaw's floor but whose
 // ownership record is gone (a rolled-back install left it), which the
 // teardown's recorded removal keeps.
+//
+// It removes the drop-in only. The ClaudeCode and managed-settings.d folders
+// it leaves are not removed here: the purge removes a vendor folder only when
+// the created-folder record names it (the lifecycle's record-driven removal,
+// Remove-DefenseClawStandaloneCreatedFolder, and enterprisehooks.
+// RemoveWindowsCreatedFolderIfEmpty), so an empty ClaudeCode folder an
+// administrator made before the install stays and the purge names it
+// (GAP-0758 round 2, the g091 record-only rule). A by-name removal used to
+// run here.
 func purgeWindowsManagedHooksUnrecordedClaudeFloor() error {
 	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
 	if err != nil {
 		return err
 	}
-	if _, err := enterprisepolicy.PurgeWindowsUnrecordedClaudeVersionFloor(
+	_, err = enterprisepolicy.PurgeWindowsUnrecordedClaudeVersionFloor(
 		enterprisepolicy.LayoutOptions(layout, programFiles, programData),
-	); err != nil {
-		return err
-	}
-	removeEmptyWindowsClaudeManagedSettingsFolders(programFiles)
-	return nil
-}
-
-// removeEmptyWindowsClaudeManagedSettingsFolders removes Claude Code's
-// managed-settings.d, and then its ClaudeCode folder, under programFiles when
-// the purge left them empty. Setup creates them for its drop-ins. A folder
-// that holds anything, or is not a plain directory, stays.
-func removeEmptyWindowsClaudeManagedSettingsFolders(programFiles string) {
-	root := filepath.Join(programFiles, "ClaudeCode")
-	for _, dir := range []string{filepath.Join(root, "managed-settings.d"), root} {
-		info, err := os.Lstat(dir)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeType != os.ModeDir {
-			return
-		}
-		if err := os.Remove(dir); err != nil {
-			return
-		}
-	}
+	)
+	return err
 }
 
 func restoreWindowsManagedHooksStandalonePerUserEnrollments(journal windowsManagedHooksTeardownJournal) error {
@@ -407,7 +480,14 @@ func restoreWindowsManagedHooksStandalonePerUserEnrollments(journal windowsManag
 		if len(targets) == 0 {
 			continue
 		}
-		if err := enterprisehooks.RestoreWindowsPerUserManagedEnrollment(connectorName, journal.HookBinary, targets); err != nil {
+		// Nothing was removed behind a kept link, so there is nothing to put back.
+		if kept, err := windowsManagedHooksTeardownConnectorKept(connectorName); err != nil {
+			errs = append(errs, err)
+			continue
+		} else if kept {
+			continue
+		}
+		if err := windowsManagedHooksPerUserEnrollmentRestorer(connectorName, journal.HookBinary, targets); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -418,7 +498,13 @@ func restoreWindowsManagedHooksStandalonePerUserEnrollments(journal windowsManag
 
 func verifyWindowsManagedHooksStandalonePerUserClean() error {
 	for _, connectorName := range enterprisehooks.WindowsProfilePerUserConnectorNames() {
-		_, exists, err := enterprisehooks.ReadWindowsPerUserManagedEnrollmentTargets(connectorName)
+		// A link at the machine folder of the connector is kept and was never read.
+		if kept, err := windowsManagedHooksTeardownConnectorKept(connectorName); err != nil {
+			return err
+		} else if kept {
+			continue
+		}
+		_, exists, err := windowsManagedHooksPerUserEnrollmentReader(connectorName)
 		if err != nil {
 			return err
 		}

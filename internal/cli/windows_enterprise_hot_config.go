@@ -33,6 +33,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc/mgr"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -67,7 +68,7 @@ const windowsEnterpriseHotConfigMaxBytes = 4 << 20
 var (
 	windowsEnterpriseHotConfigTimeout        = 30 * time.Second
 	windowsEnterpriseHotConfigRestartTimeout = 2 * time.Minute
-	windowsEnterpriseHotConfigLayout         = managed.StandaloneWindowsLayout
+	windowsEnterpriseHotConfigLayout         = windowsManagedStandaloneLayout
 	windowsEnterpriseHotConfigLock           = acquireWindowsEnterpriseLifecycleLock
 	windowsEnterpriseHotConfigValidate       = validateWindowsServiceConfig
 	windowsEnterpriseHotConfigPoll           = 2 * time.Second
@@ -91,6 +92,153 @@ var (
 	// windowsEnterpriseHotConfigFailClosed stops the gateway after an undo
 	// that could not be proven, once its hooks are durably closed.
 	windowsEnterpriseHotConfigFailClosed = stopWindowsStandaloneGatewayFailClosed
+	// windowsEnterpriseHotConfigApproveSource makes the config this ensure
+	// applied the approved config source Repair restores (GAP-0779).
+	windowsEnterpriseHotConfigApproveSource = approveWindowsStandaloneConfigSource
+)
+
+// approveWindowsStandaloneConfigSource records the installed config.yaml as
+// the approved config source of the layout, in the protected install state
+// folder (refreshManagedApprovedConfigSource).
+func approveWindowsStandaloneConfigSource(layout managed.StandaloneLayout) error {
+	installed, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return fmt.Errorf("read the installed config: %w", err)
+	}
+	return refreshManagedApprovedConfigSource(layout.LifecycleDir, layout.ConfigPath, installed)
+}
+
+// windowsEnterpriseHealApprovedSource is the check at the end of a lifecycle
+// run that an approved config source an earlier build left stale does not
+// outlive it (GAP-0779); tests replace it.
+var windowsEnterpriseHealApprovedSource = healWindowsStandaloneApprovedConfigSource
+
+// healWindowsStandaloneApprovedConfigSource puts the config a finished
+// lifecycle run accepted into the approved config source when the deployment
+// records one that differs: a binary-only upgrade, a repeat of the installed
+// CONFIG= or a repair publishes none, so an older approved copy would
+// otherwise survive and a Repair after a hand edit would restore it. It
+// publishes only bytes config.generation.json binds to a lifecycle write, and
+// the caller runs it last, after every proof of the run, so a run that fails
+// later never changed the source. A signed-bundle deployment is left alone
+// (Repair refuses it, and Setup approved copy is not proof of the bundle
+// bytes). A source that is stale and cannot be refreshed fails the run: it
+// must not report success while Repair could restore an older config.
+func healWindowsStandaloneApprovedConfigSource(result *enterprisestatus.Result) {
+	if !windowsEnterpriseIsElevated() {
+		return
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil || layout.LifecycleDir == "" {
+		return
+	}
+	// Only a deployment that records an approved config source has one to
+	// heal; check before taking the lock so a host without one is untouched.
+	if _, err := os.Stat(filepath.Join(layout.LifecycleDir, managedDeploymentRecordFile)); err != nil {
+		return
+	}
+	if windowsStandaloneBundleStoreHoldsVersions(layout) {
+		return
+	}
+	changed, err := healManagedApprovedConfigSourceBound(layout.LifecycleDir, layout.ConfigPath, func() (func(), error) {
+		// layout.LifecycleDir is the install state folder (deployment.json and
+		// the approved copy); the lock is in the lifecycle root (GAP-0854).
+		lockPath, err := windowsStandaloneLifecycleLockPath()
+		if err != nil {
+			return nil, err
+		}
+		release, err := windowsEnterpriseHotConfigLock(lockPath)
+		if windowsLifecycleLockBusy(err) {
+			return nil, errManagedApprovedSourceBusy
+		}
+		return release, err
+	})
+	switch {
+	case errors.Is(err, errManagedApprovedSourceBusy):
+		result.AddError("lifecycle_busy", "another DefenseClaw lifecycle run holds lifecycle.lock, so the approved config source, which differs from the installed config, was not refreshed and "+
+			windowsEnterpriseSetupCommand("/repair", "JSON=1")+" after a hand edit could restore an older config; the run can be retried."+windowsEnterpriseSetupSourceNote)
+	case err != nil:
+		result.AddError("approved_config_source_stale", "the approved config source differs from the installed config and could not be refreshed ("+
+			windowsEnterpriseBoundedDiagnostic(err.Error())+"); "+windowsEnterpriseSetupCommand("/repair", "JSON=1")+" after a hand edit could restore an older config. Next step: run "+
+			windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1")+" from an elevated PowerShell prompt."+windowsEnterpriseSetupSourceNote)
+	case changed:
+		result.Changes = append(result.Changes, "refreshed the approved config source to the installed config, which an earlier release had left at an older config")
+	}
+}
+
+// windowsStandaloneLifecycleLockPath is the lifecycle.lock every standalone
+// lifecycle run holds. It lives in the lifecycle root (roots.LifecycleDir,
+// ProgramData\Cisco\DefenseClaw-Lifecycle), not in the install state folder
+// (layout.LifecycleDir, ProgramData\Cisco\DefenseClaw\install) that holds
+// deployment.json and the approved config copy. The approved source check
+// built the lock path from the second folder, where no lock file exists, so
+// the proof of an up-to-date copy was never written after a Repair, a restart
+// ensure or a no-op ensure and the next Repair over a hand edit was refused
+// (GAP-0854).
+func windowsStandaloneLifecycleLockPath() (string, error) {
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	if err != nil {
+		return "", fmt.Errorf("resolve the lifecycle lock folder: %w", err)
+	}
+	return filepath.Join(roots.LifecycleDir, "lifecycle.lock"), nil
+}
+
+// refuseWindowsEnterpriseRepairOverUnprovenApprovedSource stops a Repair that
+// would put the approved config source over a hand-edited config.yaml when
+// nothing proves that source is the config the last lifecycle run applied. The
+// installer restores it before any Go code runs again, and a release that
+// applied configs in place left the copy at an older config with a matching
+// digest, so the check has to come first (GAP-0779). It acts only on a
+// standalone repair of an installed deployment that supplies no config of its
+// own, has stored no signed bundle (the installer refuses those and names the
+// CLI repair) and has no recovery pending; everything else is left to the
+// installer. The first ensure, upgrade, install or repair of this release
+// writes the proof, so the refusal names an ensure.
+func refuseWindowsEnterpriseRepairOverUnprovenApprovedSource(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	if action != "repair" || !windowsEnterpriseStandalone(opts) || strings.TrimSpace(opts.configPath) != "" ||
+		strings.TrimSpace(opts.stateRoot) != "" || opts.bundle != nil {
+		return nil
+	}
+	deployment, err := windowsEnterpriseTargetDeployment(opts)
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled || windowsEnterpriseStandaloneRecoveryPending(opts) {
+		return nil
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil || layout.LifecycleDir == "" || windowsStandaloneBundleStoreHoldsVersions(layout) {
+		return nil
+	}
+	if err := unprovenApprovedConfigSourceForHandEdit(layout.LifecycleDir, layout.ConfigPath); err != nil {
+		return windowsEnterpriseInvalidArguments("%s; the earlier approved config may be older than the one now installed. Next step: run %s "+
+			"from an elevated PowerShell prompt with the approved config (nothing was changed)%s",
+			err.Error(), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1"), windowsEnterpriseSetupSourceNote)
+	}
+	return nil
+}
+
+// windowsStandaloneBundleStoreHoldsVersions is whether the deployment ever
+// stored a signed policy bundle (a non-empty etc\bundles folder, as the
+// installer checks). An unreadable folder counts as holding versions.
+func windowsStandaloneBundleStoreHoldsVersions(layout managed.StandaloneLayout) bool {
+	entries, err := os.ReadDir(filepath.Join(layout.ConfigDir, "bundles"))
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	return len(entries) > 0
+}
+
+// Seams for the approved-source rewrite (GAP-0590). Tests replace them.
+var (
+	// windowsEnterpriseInstalledLeafDrift is the standalone verdict on a
+	// managed content file when only the file itself, not a folder above it,
+	// has an untrusted owner or writer.
+	windowsEnterpriseInstalledLeafDrift = managed.StandaloneFileLeafDrift
+	// windowsEnterpriseManifestSourceCheck admits MANIFEST= only from a file
+	// that only SYSTEM, Administrators and TrustedInstaller can write, as the
+	// transaction does (Assert-DefenseClawTrustedSource).
+	windowsEnterpriseManifestSourceCheck = func(path string) error {
+		return managed.ValidateTrustedFilePath(path, "supplied hook guardian manifest")
+	}
+	windowsEnterpriseApprovedManifestStager = stageWindowsEnterpriseEnsureManifest
 )
 
 // reloadWindowsStandaloneBundlePolicy asks the installed gateway to load the
@@ -209,7 +357,7 @@ func windowsBundleTakeOverPendingCommit(ctx context.Context, opts *windowsEnterp
 	if err != nil {
 		return false
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return false
 	}
@@ -246,9 +394,12 @@ func windowsBundleTakeOverPendingCommit(ctx context.Context, opts *windowsEnterp
 
 // windowsEnterpriseHotConfigApply applies the supplied config to the running
 // gateway and fills result from a verify of the host. For a signed bundle,
-// start-only keys restart only the gateway. It returns false after attempting
-// to restore the old config on failure; ordinary CONFIG= uses the upgrade transaction
-// for start-only keys.
+// start-only keys restart only the gateway. An ordinary CONFIG= change whose
+// start-only keys are all guardian-rendered machine policy
+// (windowsEnterpriseGuardianRestartPaths) restarts only the hook guardian and
+// then the gateway (GAP-0044); any other start-only key uses the upgrade
+// transaction. It returns false after attempting to restore the old config on
+// failure, with the start-only keys the transaction then applies.
 func windowsEnterpriseHotConfigApply(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -256,7 +407,7 @@ func windowsEnterpriseHotConfigApply(
 	script string,
 	status *windowsEnterpriseInstallerReport,
 	result *enterprisestatus.Result,
-) (bool, []string) {
+) (appliedHot bool, transactionKeys []string) {
 	// A signed bundle has no transaction fallback: the caller fails it with
 	// bundle_apply_failed. Each refusal of a bundle says why, so a failed
 	// first apply names its cause and a held lock is retried (GAP-0104).
@@ -305,7 +456,7 @@ func windowsEnterpriseHotConfigApply(
 	if config.NeedsMigrationV9(next) {
 		return unavailable("the staged config needs a config_version migration")
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return unavailable("cannot resolve the trusted enterprise roots: " + err.Error())
 	}
@@ -375,8 +526,21 @@ func windowsEnterpriseHotConfigApply(
 	// A bundle rollback by the installed CLI has no payload for the upgrade
 	// transaction: it restarts only the gateway, as the bundle it undoes did.
 	gatewayOnlyRestart := bundleChange || payloadlessRollback
-	if len(startOnly) > 0 && !gatewayOnlyRestart {
+	// A plain config change whose start-only keys the hook guardian renders
+	// at machine scope restarts the guardian, then the gateway, instead of
+	// every service in the upgrade transaction (GAP-0044).
+	guardianRestart := !gatewayOnlyRestart && windowsEnterpriseGuardianRestartPaths(startOnly)
+	if len(startOnly) > 0 && !gatewayOnlyRestart && !guardianRestart {
 		return false, startOnly
+	}
+	if guardianRestart {
+		// A restart that does not complete leaves the keys to the upgrade
+		// transaction, which names them.
+		defer func() {
+			if !appliedHot && transactionKeys == nil {
+				transactionKeys = startOnly
+			}
+		}()
 	}
 
 	restoreEnvironment := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
@@ -439,6 +603,9 @@ func windowsEnterpriseHotConfigApply(
 	// exactly these back (GAP-0847).
 	var publishedBefore windowsHotConfigPublishedTargets
 	gatewayRestartAttempted := false
+	// The guardian rendered the candidate's machine policy once this is set:
+	// an undo restarts it on the restored config and proves that too.
+	guardianRestartAttempted := false
 	gatewayOnNewConfig := func() bool {
 		return gatewayRestartAttempted || (opts.bundle != nil && opts.bundle.gatewayRestarted)
 	}
@@ -489,7 +656,7 @@ func windowsEnterpriseHotConfigApply(
 				restoreErr = errors.New("the installed config does not hold the previous bytes after the restore")
 			}
 		}
-		var targetsErr, gatewayErr error
+		var targetsErr, gatewayErr, guardianErr error
 		targetsRepublished := false
 		// The previously enrolled targets the candidate's targets no longer
 		// enroll: the guardian may already have removed their hooks, and
@@ -526,6 +693,14 @@ func windowsEnterpriseHotConfigApply(
 					if err := windowsEnterpriseHotConfigTargetHooksProven(restoreCtx, layout, lost, windowsEnterpriseHotConfigRestartTimeout); err != nil {
 						targetsErr = fmt.Errorf("the previous targets were published again, but the hooks of the previously enrolled targets were not proven back: %w", err)
 					}
+				}
+			}
+			// A guardian this attempt restarted rendered the candidate's
+			// machine policy: it reconciles the restored config, and its
+			// targets are proven, before the gateway goes back (GAP-0044).
+			if targetsErr == nil && guardianRestartAttempted {
+				if err := windowsEnterpriseHotConfigGuardianReconcile(restoreCtx, layout, true); err != nil {
+					guardianErr = fmt.Errorf("the hook guardian did not prove the enrolled targets on the restored config: %w", err)
 				}
 			}
 			// The gateway goes back to the restored config: a restart for one
@@ -571,7 +746,7 @@ func windowsEnterpriseHotConfigApply(
 				}
 			}
 		}
-		if restoreErr == nil && targetsErr == nil && gatewayErr == nil {
+		if restoreErr == nil && targetsErr == nil && gatewayErr == nil && guardianErr == nil {
 			if !holding {
 				return
 			}
@@ -616,6 +791,29 @@ func windowsEnterpriseHotConfigApply(
 		}
 		opts.hotConfigRestoreFailed = true
 		installed := windowsEnterpriseHotConfigUndoState(layout.ConfigPath, previous, next, targetsRefreshed, targetsRepublished)
+		// The previous config is back and the gateway enforces it; what could
+		// not be proven is the guardian's own publication, because a program
+		// holds one of its state files open. That is not a verdict on any
+		// policy, so the gateway keeps running and no hook is closed over it:
+		// the error names the holder and the repair to run once it lets go
+		// (GAP-0967). The accounts whose hooks the roster change took away wait
+		// for the repair like an account that is signed out.
+		if restoreErr == nil && gatewayErr == nil && (targetsErr != nil || guardianErr != nil) {
+			if hold := windowsEnterpriseGuardianStateHeldNow(layout); hold != nil {
+				cause := targetsErr
+				if cause == nil {
+					cause = guardianErr
+				}
+				unprotected := ""
+				if len(lost) > 0 {
+					unprotected = "; these previously enrolled targets have no DefenseClaw hook until the repair: " + windowsEnterpriseBoundedDiagnostic(strings.Join(windowsHotConfigTargetLabels(lost), ", "))
+				}
+				result.AddError("guardian_state_held", "the previous config is back and the gateway enforces it, but "+hold.describe()+": "+
+					windowsEnterpriseBoundedDiagnostic(cause.Error())+"; "+installed+unprotected+"; the services were left running and no hook was closed. Next step: close that program, then from an elevated PowerShell prompt run "+
+					windowsEnterpriseAdminCommand("repair"))
+				return
+			}
+		}
 		gateway := "the gateway service was stopped after every standalone hook was durably forced closed; rerun ensure after repair to prove the live policy and release that closure"
 		if err := windowsEnterpriseHotConfigCloseHooks(layout); err != nil {
 			gateway = "the gateway service was left running because its hooks could not be durably forced closed (" +
@@ -638,6 +836,10 @@ func windowsEnterpriseHotConfigApply(
 			result.AddError("targets_restore_failed", "the previous config is back, but the enrolled targets could not be published for it again: "+
 				windowsEnterpriseBoundedDiagnostic(targetsErr.Error())+"; "+installed+unprotected+"; "+gateway+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("repair")+
 				" to enroll them again, then "+windowsEnterpriseAdminCommand("verify")+" before starting the gateway again")
+		case guardianErr != nil:
+			result.AddError("config_restore_failed", "the previous config is back at "+layout.ConfigPath+", but "+
+				windowsEnterpriseBoundedDiagnostic(guardianErr.Error())+"; "+installed+"; "+gateway+
+				". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+"; repair before starting the gateway again")
 		default:
 			result.AddError("config_restore_failed", "the previous config is back at "+layout.ConfigPath+", but "+gatewayErr.Error()+
 				"; "+installed+"; "+gateway+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+"; repair before starting the gateway again")
@@ -674,6 +876,20 @@ func windowsEnterpriseHotConfigApply(
 		// request cannot bypass adoption confirmation.
 		if err := windowsEnterpriseHotBundleReload(ctx, layout); err != nil {
 			result.AddWarning("bundle_reload_request_failed", "the direct gateway reload request failed; waiting for the gateway's file watcher and checking its reported policy: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
+		}
+	}
+	if guardianRestart {
+		// The guardian reads config.yaml before each reconcile; its restart
+		// starts one now, which writes the managed_hooks_only lock into the
+		// Claude Code drop-in at machine scope (GAP-0064) before any row. The
+		// gateway restarts only once every published target is proven with
+		// the new config, as the transaction starts the guardian first.
+		guardianRestartAttempted = true
+		if err := windowsEnterpriseHotConfigGuardianReconcile(ctx, layout, false); err != nil {
+			noteWindowsEnterpriseEnsure(cmd, opts, "[ensure] the hook guardian did not prove the enrolled targets on the new config ("+
+				windowsEnterpriseBoundedDiagnostic(err.Error())+"); the previous config goes back and the upgrade transaction applies the change")
+			undo()
+			return false, nil
 		}
 	}
 	if len(startOnly) > 0 {
@@ -793,15 +1009,32 @@ func windowsEnterpriseHotConfigApply(
 		failBundle("bundle_post_verify_failed", message)
 		return false, nil
 	}
+	if !bundleChange && !payloadlessRollback {
+		// The approved source is what Repair puts back over a hand edit, so
+		// the config this ensure applied has to become it: otherwise a
+		// repair restores the config of an earlier ensure. The config stays
+		// applied only with its approved source; any failure puts the
+		// previous config back and leaves the change to the upgrade
+		// transaction, which publishes both (GAP-0779).
+		if err := windowsEnterpriseHotConfigApproveSource(layout); err != nil {
+			noteWindowsEnterpriseEnsure(cmd, opts, "[ensure] the applied config could not be recorded as the approved config source ("+
+				windowsEnterpriseBoundedDiagnostic(err.Error())+"); the previous config goes back and the upgrade transaction applies the change")
+			undo()
+			return false, nil
+		}
+	}
 	accepted := *verifyReport
 	accepted.OK = true
 	applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
 	if refreshTargets {
 		warnWindowsEnterpriseHotAgentSessions(result, previous, next, connectorChangeStartedAt)
 	}
-	if len(startOnly) > 0 {
+	switch {
+	case guardianRestart:
+		result.Changes = append(result.Changes, "applied the config change after restarting the hook guardian and the gateway; the other services kept running")
+	case len(startOnly) > 0:
 		result.Changes = append(result.Changes, "applied the config change after restarting the gateway")
-	} else {
+	default:
 		result.Changes = append(result.Changes, "applied the config change in the running gateway; it was not restarted")
 	}
 	if kept != "" {
@@ -823,7 +1056,9 @@ func windowsEnterpriseHotConfigApply(
 	case refreshTargets:
 		result.Changes = append(result.Changes, "refreshed the enrolled targets; the hook guardian registers and removes hooks for them without a restart")
 	}
-	if len(startOnly) > 0 {
+	if guardianRestart {
+		result.AddWarning(windowsEnterpriseGuardianRestartWarning(status.InstalledVersion, startOnly))
+	} else if len(startOnly) > 0 {
 		result.AddWarning("ensure_bundle_applied", "ensure applied the policy bundle after restarting the gateway: "+applied)
 	} else if bundleChange {
 		result.AddWarning("ensure_bundle_applied", "ensure applied the policy bundle in the running gateway: "+applied)
@@ -831,6 +1066,66 @@ func windowsEnterpriseHotConfigApply(
 		result.AddWarning("ensure_config_applied", "ensure applied drift:config in the running gateway, without stopping any service: "+applied)
 	}
 	return true, nil
+}
+
+// windowsEnterpriseHotConfigGuardianReconcile restarts the hook guardian on
+// the installed config.yaml through the service manager and waits, bounded by
+// the restart timeout, until the installed gateway's readiness proves every
+// published target verified or pending with complete protected authorization
+// (windowsEnterpriseHotConfigTargetHooksProven). Readiness verifies each
+// target against the config it loads, so it passes once the guardian has
+// rendered that config's machine policy. The apply needs a running guardian
+// and never starts a stopped one. The undo (restore) puts the guardian back
+// as it was: one whose restart failed after its stop is started again, and
+// the proof then decides. A seam for tests.
+var windowsEnterpriseHotConfigGuardianReconcile = func(ctx context.Context, layout managed.StandaloneLayout, restore bool) error {
+	restarted, err := restartWindowsStandaloneGuardian(restore)
+	switch {
+	case err != nil:
+		return fmt.Errorf("restart the hook guardian: %w", err)
+	case !restarted && !restore:
+		return errors.New("the hook guardian service is not running")
+	}
+	targets, err := windowsEnterpriseHotConfigPublishedTargets(layout)
+	if err != nil {
+		return fmt.Errorf("read the published targets: %w", err)
+	}
+	return windowsEnterpriseHotConfigTargetHooksProven(ctx, layout, targets, windowsEnterpriseHotConfigRestartTimeout)
+}
+
+// restartWindowsStandaloneGuardian stops the running hook guardian service
+// and starts it again, as the gateway restart does; false when it was not
+// running. With startStopped a guardian that is stopped after that, or
+// whose restart failed, is started.
+func restartWindowsStandaloneGuardian(startStopped bool) (bool, error) {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return false, err
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(windowsStandaloneGuardianService)
+	if err != nil {
+		return false, err
+	}
+	defer service.Close()
+	control := scmGatewayService{service}
+	restarted, err := restartWindowsGatewayServiceBeforeStop(control, windowsStandaloneGuardianService, 60*time.Second, 250*time.Millisecond, nil)
+	if startStopped && (err != nil || !restarted) {
+		return startWindowsGatewayServiceIfStopped(control, windowsStandaloneGuardianService, 60*time.Second, 250*time.Millisecond)
+	}
+	return restarted, err
+}
+
+// noteWindowsEnterpriseEnsure records a line for the lifecycle log of a JSON
+// run, whose stderr must stay quiet (GAP-1069), and prints it otherwise.
+func noteWindowsEnterpriseEnsure(cmd *cobra.Command, opts *windowsEnterpriseLifecycleOptions, line string) {
+	if !opts.jsonOutput {
+		fmt.Fprintln(cmd.ErrOrStderr(), line)
+		return
+	}
+	if len(opts.diagnostics) < windowsEnterpriseEnsureDiagnosticsLimit {
+		opts.diagnostics = append(opts.diagnostics, line)
+	}
 }
 
 // windowsEnterpriseHotConfigRenderTimeout bounds the wait for the hook
@@ -1132,6 +1427,12 @@ type windowsHotConfigPublishedTargets struct {
 // before the apply refreshes them. With none published no user has a hook
 // to lose, and there is nothing to put back. A seam for tests.
 var windowsEnterpriseHotConfigTargetsRecord = func(layout managed.StandaloneLayout) (windowsHotConfigPublishedTargets, error) {
+	// The roster recorded here is written back under a trusted access list
+	// if the refresh fails, so a roster another account owns or can write is
+	// refused and not recorded (GAP-1048).
+	if drift := managed.StandaloneFileLeafDrift(layout.ManifestPath, "hook guardian manifest"); drift != nil {
+		return windowsHotConfigPublishedTargets{}, managed.RefuseStandaloneContentDrift(drift)
+	}
 	before, err := enterprisehooks.LoadManifest(layout.ManifestPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return windowsHotConfigPublishedTargets{restore: func() error { return nil }, dropped: func() []enterprisehooks.ManifestTarget { return nil }}, nil
@@ -1141,6 +1442,9 @@ var windowsEnterpriseHotConfigTargetsRecord = func(layout managed.StandaloneLayo
 	}
 	return windowsHotConfigPublishedTargets{
 		restore: func() error {
+			// Setup's own process lacks the standalone scope the writer's
+			// refusal of a drifted manifest depends on (GAP-1048).
+			defer pinWindowsStandaloneTrustScope()()
 			_, err := enterprisehooks.WriteTargetsManifestAtomic(layout.ManifestPath, before)
 			return err
 		},
@@ -1395,8 +1699,8 @@ func keepInstalledWindowsEnterpriseEditedConfig() string {
 // outside the lifecycle (its sha256 is not the one config.generation.json
 // records) as rejected-config.yaml beside it, before ensure replaces it with
 // the managed config. It returns the kept path, or "" when the file was not
-// edited or could not be kept. The copy has deployment.json's access
-// control, administrators only.
+// edited or could not be kept. Only administrators can read or change the
+// copy.
 func keepWindowsEnterpriseEditedConfig(layout managed.StandaloneLayout, current []byte) string {
 	state, err := configwrite.ReadGenerationState(layout.ConfigPath)
 	if err != nil || state.ConfigSHA256 == "" {
@@ -1411,17 +1715,20 @@ func keepWindowsEnterpriseEditedConfig(layout managed.StandaloneLayout, current 
 }
 
 // keepWindowsEnterpriseRejectedConfig writes current as rejected-config.yaml
-// beside config.yaml, with deployment.json's access control (administrators
-// only). It returns the kept path, or "" when it could not be kept.
+// beside config.yaml. It returns the kept path, or "" when it could not be
+// kept.
 func keepWindowsEnterpriseRejectedConfig(layout managed.StandaloneLayout, current []byte) string {
-	sibling := layout.ConfigPath
-	if deployment, err := windowsEnterpriseDeploymentInspector(managed.ProfileStandalone); err == nil && deployment.MetadataPath != "" {
-		if _, err := os.Stat(deployment.MetadataPath); err == nil {
-			sibling = deployment.MetadataPath
-		}
-	}
-	kept := filepath.Join(layout.ConfigDir, "rejected-config.yaml")
-	if err := writeFileKeepingDACL(kept, current, sibling); err != nil {
+	return keepWindowsEnterpriseRejectedFile(filepath.Join(layout.ConfigDir, "rejected-config.yaml"), current)
+}
+
+// keepWindowsEnterpriseRejectedFile writes current to kept as a new file
+// that only administrators can read or change, under Setup's own AdminFile
+// descriptor. It used to copy deployment.json's access list, or the
+// rejected file's own when deployment.json was missing or unreadable, so a
+// kept copy could carry the very entry it was rejected for (GAP-0590 review
+// S3). It returns kept, or "" when it could not be kept.
+func keepWindowsEnterpriseRejectedFile(kept string, current []byte) string {
+	if _, err := writeFreshFileWithDACL(kept, current, windowsBundleAdminFileSDDL()); err != nil {
 		return ""
 	}
 	return kept
@@ -1434,56 +1741,153 @@ func windowsEnterpriseConfigParses(body []byte) bool {
 	return yaml.Unmarshal(trimWindowsJSONBOM(body), &document) == nil && document != nil
 }
 
-// installWindowsEnterpriseSuppliedConfigOverUnparseable puts the supplied
-// config in place of an installed config.yaml that does not parse, after it
-// keeps the broken file as rejected-config.yaml (GAP-0948). Ensure CONFIG=
-// and repair CONFIG= loaded the installed file before they used the supplied
-// one: the transaction snapshot refused it, the rollback wrote its bytes
-// back, and the transaction stayed pending with every service stopped. With
-// the supplied config in place the transaction snapshots a config that
-// loads, and a rollback puts that config back. It returns the kept path, or
-// "" when there is nothing to do: no supplied config, an installed config
-// that parses, a pending transaction (its recovery restores its own
-// preimage), a source a standard user can write (the transaction refuses
-// it), or a busy lifecycle lock.
-func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (string, error) {
-	supplied := strings.TrimSpace(configPath)
-	if supplied == "" || !windowsEnterpriseIsElevated() {
-		return "", nil
+// windowsEnterpriseUntrustedProblem says, for a message, what is wrong
+// with a managed file another account owns or can change.
+func windowsEnterpriseUntrustedProblem(untrusted *managed.UntrustedPrincipalError) string {
+	switch untrusted.ACL {
+	case "null":
+		return "has no access list, so any account can change it, which only SYSTEM, Administrators and TrustedInstaller may do"
+	case "unsupported":
+		return "has an access entry of a type DefenseClaw cannot read, so it cannot tell which account can change it"
 	}
-	layout, err := windowsEnterpriseHotConfigLayout()
+	if untrusted.Owner {
+		return "is owned by " + untrusted.SID + ", which only SYSTEM, Administrators or TrustedInstaller may be"
+	}
+	return "can be changed by " + untrusted.SID + ", which only SYSTEM, Administrators and TrustedInstaller may do"
+}
+
+// windowsEnterpriseReplacedFile is a managed content file Setup wrote new
+// before the lifecycle transaction; the zero value means nothing was written.
+type windowsEnterpriseReplacedFile struct {
+	kept      string                           // where the replaced bytes are kept, administrators only
+	untrusted *managed.UntrustedPrincipalError // why it was replaced; nil for a config.yaml that did not parse
+	pending   string                           // the replaced object is held open and is deleted at the next restart
+}
+
+// windowsEnterpriseFreshRewrite is a managed content file that Setup writes
+// again from an approved source when another account could change it.
+type windowsEnterpriseFreshRewrite struct {
+	path, label string
+	kept        string // where the replaced bytes are kept, administrators only
+	sddl        string // Setup's descriptor for the file
+	approved    []byte
+}
+
+// rewriteWindowsEnterpriseDriftedFile is the one rule for a standalone
+// content file that another account owns or can change (GAP-0561, GAP-0590):
+// Setup never puts a trusted descriptor back over it, because those bytes
+// may be that account's. When this run carries an approved source, Setup
+// writes the source as a new file under Setup's descriptor before the
+// lifecycle transaction, keeps the replaced bytes for the administrator,
+// and moves the old object aside first, so a handle opened during the drift
+// points at the replaced object. The snapshot and the rollback then hold
+// approved bytes. It works under the lifecycle lock and checks the drift
+// again there; it returns "" when there is nothing to do: the file is
+// trusted again, a transaction is pending (its recovery restores its own
+// preimage), or the lock is busy (the transaction then refuses the file).
+func rewriteWindowsEnterpriseDriftedFile(layout managed.StandaloneLayout, rewrite windowsEnterpriseFreshRewrite) (windowsEnterpriseReplacedFile, error) {
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
-		return "", nil
-	}
-	current, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
-	if err != nil || windowsEnterpriseConfigParses(current) {
-		return "", nil
-	}
-	if windowsBundleInstallTransactionPending(layout) {
-		return "", nil
-	}
-	if windowsEnterpriseHotConfigSourceCheck(supplied) != nil {
-		return "", nil
-	}
-	next, err := readWindowsEnterpriseBoundedFile(supplied, windowsEnterpriseHotConfigMaxBytes)
-	if err != nil {
-		return "", fmt.Errorf("read the supplied config %s: %w", supplied, err)
-	}
-	if !windowsEnterpriseConfigParses(next) {
-		return "", fmt.Errorf("the installed %s does not parse, and neither does the supplied config %s: its root must be a YAML mapping", layout.ConfigPath, supplied)
-	}
-	// This file becomes the transaction snapshot. Check it with the same
-	// service pins and rule-pack compiler before replacing the broken file.
-	if err := windowsEnterpriseStandaloneConfigPreflight(supplied); err != nil {
-		return "", err
-	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
-	if err != nil {
-		return "", nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	release, err := windowsEnterpriseHotConfigLock(filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
 	if err != nil {
-		return "", nil
+		return windowsEnterpriseReplacedFile{}, nil
+	}
+	defer release()
+	untrusted := windowsEnterpriseInstalledLeafDrift(rewrite.path, rewrite.label)
+	if untrusted == nil || windowsBundleInstallTransactionPending(layout) {
+		return windowsEnterpriseReplacedFile{}, nil
+	}
+	current, err := readWindowsEnterpriseBoundedFile(rewrite.path, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("read the installed %s to keep it: %w", rewrite.path, err)
+	}
+	kept := keepWindowsEnterpriseRejectedFile(rewrite.kept, current)
+	if kept == "" {
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s %s and could not be kept as %s", rewrite.path, windowsEnterpriseUntrustedProblem(untrusted), rewrite.kept)
+	}
+	pending, err := writeFreshFileWithDACL(rewrite.path, rewrite.approved, rewrite.sddl)
+	if err != nil {
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("write a new %s from the approved source: %w", rewrite.path, err)
+	}
+	return windowsEnterpriseReplacedFile{kept: kept, untrusted: untrusted, pending: pending}, nil
+}
+
+// installWindowsEnterpriseSuppliedConfigOverRefused puts the supplied config
+// in place of an installed config.yaml the lifecycle transaction refuses, and
+// keeps the refused file as rejected-config.yaml. Ensure CONFIG= and repair
+// CONFIG= loaded the installed file before they used the supplied one, and
+// stopped every service and left the transaction pending when it was
+// refused:
+//   - a config.yaml another account owns or can change, under trusted
+//     folders: the ACL repair refused it after the stop, and its rollback
+//     refused it again (GAP-0590). The supplied config is the
+//     administrator's approved source: rewriteWindowsEnterpriseDriftedFile
+//     writes it as a new file under Setup's ConfigFile descriptor.
+//   - a config.yaml that does not parse: the snapshot refused it and the
+//     rollback wrote its bytes back (GAP-0948). The supplied config replaces
+//     it with the file's access list.
+//
+// It returns the kept path and, for an untrusted owner or writer, which one;
+// "" when there is nothing to do: no supplied config, an installed config the
+// transaction accepts, a pending transaction, a supplied config that is the
+// installed file (a drifted file is never its own approved source), a source
+// a standard user can write (the transaction refuses it), or a busy lock.
+func installWindowsEnterpriseSuppliedConfigOverRefused(configPath string) (windowsEnterpriseReplacedFile, error) {
+	supplied := strings.TrimSpace(configPath)
+	if supplied == "" || !windowsEnterpriseIsElevated() {
+		return windowsEnterpriseReplacedFile{}, nil
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return windowsEnterpriseReplacedFile{}, nil
+	}
+	current, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return windowsEnterpriseReplacedFile{}, nil
+	}
+	untrusted := windowsEnterpriseInstalledLeafDrift(layout.ConfigPath, "managed config")
+	if (untrusted == nil && windowsEnterpriseConfigParses(current)) || windowsBundleInstallTransactionPending(layout) {
+		return windowsEnterpriseReplacedFile{}, nil
+	}
+	if windowsEnterpriseSamePath(supplied, layout.ConfigPath) || windowsEnterpriseHotConfigSourceCheck(supplied) != nil {
+		return windowsEnterpriseReplacedFile{}, nil
+	}
+	next, err := readWindowsEnterpriseBoundedFile(supplied, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("read the supplied config %s: %w", supplied, err)
+	}
+	if !windowsEnterpriseConfigParses(next) {
+		if untrusted == nil {
+			return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s does not parse, and neither does the supplied config %s: its root must be a YAML mapping", layout.ConfigPath, supplied)
+		}
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s %s, and the supplied config %s does not parse: its root must be a YAML mapping", layout.ConfigPath, windowsEnterpriseUntrustedProblem(untrusted), supplied)
+	}
+	// This file becomes the transaction snapshot. Check it with the same
+	// service pins and rule-pack compiler before replacing the refused file.
+	if err := windowsEnterpriseStandaloneConfigPreflight(supplied); err != nil {
+		return windowsEnterpriseReplacedFile{}, err
+	}
+	if untrusted != nil {
+		service, err := managed.WindowsServiceAccountSID(layout.ServiceUser)
+		if err != nil || service == nil {
+			return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s %s, and the gateway service account %q to write a new one for cannot be resolved: %v",
+				layout.ConfigPath, windowsEnterpriseUntrustedProblem(untrusted), layout.ServiceUser, err)
+		}
+		return rewriteWindowsEnterpriseDriftedFile(layout, windowsEnterpriseFreshRewrite{
+			path: layout.ConfigPath, label: "managed config",
+			kept: filepath.Join(layout.ConfigDir, "rejected-config.yaml"),
+			sddl: windowsConfigFileSDDL(service.String()), approved: next,
+		})
+	}
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	if err != nil {
+		return windowsEnterpriseReplacedFile{}, nil
+	}
+	release, err := windowsEnterpriseHotConfigLock(filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
+	if err != nil {
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	defer release()
 	// Another lifecycle run may have committed a config while the preflight
@@ -1493,30 +1897,198 @@ func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (s
 	// before (GAP-1177).
 	current, err = readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
 	if err != nil || windowsEnterpriseConfigParses(current) || windowsBundleInstallTransactionPending(layout) {
-		return "", nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	kept := keepWindowsEnterpriseRejectedConfig(layout, current)
 	if kept == "" {
-		return "", fmt.Errorf("the installed %s does not parse and could not be kept as rejected-config.yaml", layout.ConfigPath)
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s does not parse and could not be kept as rejected-config.yaml", layout.ConfigPath)
 	}
-	if err := writeFileKeepingDACL(layout.ConfigPath, next, layout.ConfigPath); err != nil {
-		return "", fmt.Errorf("install the supplied config over the unparseable %s: %w", layout.ConfigPath, err)
+	if err := recordWindowsEnterpriseLifecycleConfigWrite(layout.ConfigPath, next, windowsEnterpriseSuppliedConfigRecordReason, func() error {
+		return writeFileKeepingDACL(layout.ConfigPath, next, layout.ConfigPath)
+	}); err != nil {
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("install the supplied config over the unparseable %s: %w", layout.ConfigPath, err)
 	}
-	return kept, nil
+	return windowsEnterpriseReplacedFile{kept: kept}, nil
 }
 
-// windowsEnterpriseUnparseableConfigChange is the result line for a config
-// installWindowsEnterpriseSuppliedConfigOverUnparseable replaced.
-func windowsEnterpriseUnparseableConfigChange(kept, action string) string {
-	return "the installed config.yaml did not parse; kept it as " + kept + " and installed the supplied config before the " + action
+// installWindowsEnterpriseApprovedManifestOverDrift writes the hook guardian
+// manifest again when another account owns or can change the installed one
+// (GAP-0590). Standalone Repair used to put the AdminFile descriptor back
+// over it in place, which trusted a roster that account may have edited. The
+// approved source is MANIFEST= when it is given, otherwise a manifest
+// enumerated from the approved CONFIG=, as a first install stages one; in
+// manifest enrollment mode only MANIFEST= is a source. With neither, nothing
+// is written and the lifecycle refuses the manifest before any service
+// stops, naming MANIFEST=.
+func installWindowsEnterpriseApprovedManifestOverDrift(
+	ctx context.Context,
+	logf enterprisehooks.EnumerationLogger,
+	configPath, manifestPath string,
+) (windowsEnterpriseReplacedFile, error) {
+	if !windowsEnterpriseIsElevated() {
+		return windowsEnterpriseReplacedFile{}, nil
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil || strings.TrimSpace(layout.ManifestPath) == "" {
+		return windowsEnterpriseReplacedFile{}, nil
+	}
+	const label = "hook guardian manifest"
+	if windowsEnterpriseInstalledLeafDrift(layout.ManifestPath, label) == nil || windowsBundleInstallTransactionPending(layout) {
+		return windowsEnterpriseReplacedFile{}, nil
+	}
+	source := strings.TrimSpace(manifestPath)
+	if source != "" {
+		if windowsEnterpriseSamePath(source, layout.ManifestPath) || windowsEnterpriseManifestSourceCheck(source) != nil {
+			return windowsEnterpriseReplacedFile{}, nil
+		}
+	} else {
+		approved := strings.TrimSpace(configPath)
+		if approved == "" || windowsEnterpriseSamePath(approved, layout.ConfigPath) || windowsEnterpriseHotConfigSourceCheck(approved) != nil {
+			return windowsEnterpriseReplacedFile{}, nil
+		}
+		staged, cleanup, err := windowsEnterpriseApprovedManifestStager(ctx, logf, approved)
+		if errors.Is(err, errWindowsEnterpriseEnsureManifestRequired) {
+			return windowsEnterpriseReplacedFile{}, nil
+		}
+		if err != nil {
+			return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s needs a new manifest, and none could be enumerated from the supplied config %s: %w", layout.ManifestPath, approved, err)
+		}
+		defer cleanup()
+		source = staged
+	}
+	if _, err := enterprisehooks.LoadManifest(source); err != nil {
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("the hook guardian manifest %s to write over the installed %s does not load: %w", source, layout.ManifestPath, err)
+	}
+	approved, err := readWindowsEnterpriseBoundedFile(source, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("read the hook guardian manifest %s: %w", source, err)
+	}
+	return rewriteWindowsEnterpriseDriftedFile(layout, windowsEnterpriseFreshRewrite{
+		path: layout.ManifestPath, label: label,
+		kept: filepath.Join(layout.ConfigDir, "rejected-targets.yaml"),
+		sddl: windowsBundleAdminFileSDDL(), approved: approved,
+	})
+}
+
+// windowsEnterpriseGateRefusal starts every refusal of the lifecycle's
+// content gate (Assert-DefenseClawStandaloneContentTrusted), which runs
+// before the lifecycle changes anything.
+const windowsEnterpriseGateRefusal = "refusing to change the deployment, and nothing was changed"
+
+// noteWindowsEnterpriseRewriteBeforeRefusal makes a content-gate refusal say
+// what this run had already done: Setup wrote config.yaml or targets.yaml
+// new from the approved source before the lifecycle ran, and the gate then
+// refused another file, so "nothing was changed" was not true (GAP-0590
+// review S4). The changes list the rewrite and the kept file.
+func noteWindowsEnterpriseRewriteBeforeRefusal(result *enterprisestatus.Result, rewritten []string) {
+	if len(rewritten) == 0 {
+		return
+	}
+	said := "refusing to change the rest of the deployment: Setup first wrote a new " + strings.Join(rewritten, " and ") +
+		" from the approved source (see changes), and then stopped no service and changed nothing else"
+	for i := range result.Errors {
+		result.Errors[i].Message = strings.Replace(result.Errors[i].Message, windowsEnterpriseGateRefusal, said, 1)
+	}
+}
+
+// windowsEnterpriseSamePath reports whether two paths name one file.
+func windowsEnterpriseSamePath(left, right string) bool {
+	a, errA := filepath.Abs(left)
+	b, errB := filepath.Abs(right)
+	return errA == nil && errB == nil && strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+}
+
+// windowsEnterpriseReplacedFileChange is the result line for a managed file
+// Setup replaced before the lifecycle transaction: name is config.yaml or
+// targets.yaml.
+func windowsEnterpriseReplacedFileChange(name string, replaced windowsEnterpriseReplacedFile, action string) string {
+	if replaced.untrusted == nil {
+		return "the installed " + name + " did not parse; kept it as " + replaced.kept + " and installed the supplied config before the " + action
+	}
+	change := "the installed " + name + " " + windowsEnterpriseUntrustedProblem(replaced.untrusted) + "; kept it as " + replaced.kept +
+		" and wrote a new " + name + " from the approved source, with Setup's access list, before the " + action
+	if replaced.pending != "" {
+		change += "; " + replaced.pending
+	}
+	return change
+}
+
+// windowsEnterpriseSuppliedConfigRecordReason is the reason of the config
+// generation Setup records when it writes the supplied config over a
+// config.yaml the transaction refuses.
+const windowsEnterpriseSuppliedConfigRecordReason = "enterprise windows lifecycle (the supplied config replaced a refused config.yaml)"
+
+// recordWindowsEnterpriseLifecycleConfigWrite runs write, which puts approved
+// at the managed config path, and records approved as the lifecycle's config
+// generation in the same config.yaml.lock critical section, while the caller
+// holds lifecycle.lock (GAP-0646). Setup used to write the supplied config
+// here with no record and release lifecycle.lock before the transaction took
+// it again: the hook guardian then found bytes config.generation.json did not
+// record, recorded them as hand-edit:unattributed, and the gateway refused to
+// start on them, so the repair ended 1603. The record carries the options the
+// lifecycle's config step records for the same bytes
+// (managedStandaloneLifecycleRecordOptions) and config.yaml's access list, as
+// that step gives it. A record that is there but does not read is the only
+// proof of the counter (GAP-0236): the bytes are written without one, and the
+// transaction's config step refuses that record as before.
+func recordWindowsEnterpriseLifecycleConfigWrite(path string, approved []byte, reason string, write func() error) error {
+	if _, err := configwrite.ReadGenerationState(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return write()
+	}
+	opt, err := managedStandaloneLifecycleRecordOptions(path, approved, reason)
+	if err != nil {
+		return err
+	}
+	opt.RecordSHA256 = configwrite.SHA256Hex(approved)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := configwrite.Locked(ctx, path, opt, func() (bool, error) { return true, write() }); err != nil {
+		return err
+	}
+	restoreACL, err := keepConfigDACL(path)
+	if err != nil {
+		return fmt.Errorf("read the access control list of %s: %w", path, err)
+	}
+	return restoreACL(configwrite.GenerationPath(path))
 }
 
 // acquireWindowsEnterpriseLifecycleLock opens the lifecycle lock the way the
-// PowerShell lifecycle does for a mutation, exclusively, and does not wait:
-// a busy lock sends the change to the upgrade transaction, which waits for
-// it.
+// PowerShell lifecycle does for a mutation, exclusively. It waits up to
+// windowsEnterpriseLifecycleLockWait, and only on a sharing violation, so the
+// hook guardian's short hold never turns a step into "nothing to do"; a busy
+// lock after that sends the change to the upgrade transaction, which waits
+// for it. Only the windowsEnterpriseHotConfigLock seam uses it (Setup's
+// pre-step, hot apply, bundle restore, generation repair); passes that must
+// not wait take tryWindowsEnterpriseLifecycleLock (GAP-0646 review 2).
 func acquireWindowsEnterpriseLifecycleLock(path string) (func(), error) {
-	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+	deadline := time.Now().Add(windowsEnterpriseLifecycleLockWait)
+	for {
+		release, err := tryWindowsEnterpriseLifecycleLock(path)
+		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) || !time.Now().Before(deadline) {
+			return release, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// windowsEnterpriseLifecycleLockWait bounds how long a Go lifecycle step
+// waits for lifecycle.lock. The hook guardian holds it only while it records
+// an administrator's edit of config.yaml (GAP-0646), at most
+// managedConfigRecordHold; a lifecycle run holds it for minutes, so a take
+// during a run still fails as busy. A seam for tests.
+var windowsEnterpriseLifecycleLockWait = 5 * time.Second
+
+// tryWindowsEnterpriseLifecycleLock opens lifecycle.lock with no sharing,
+// once: the error wraps windows.ERROR_SHARING_VIOLATION when another process
+// holds it, and fs.ErrNotExist when there is no lock file. A lock that is not
+// there says so as the base did ("is not a regular file"), and still wraps
+// the cause (GAP-0646 review L1, the port of 93d99c758d).
+func tryWindowsEnterpriseLifecycleLock(path string) (func(), error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("lifecycle lock %s is not a regular file: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("lifecycle lock %s is not a regular file", path)
 	}
 	name, err := windows.UTF16PtrFromString(path)

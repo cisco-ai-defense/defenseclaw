@@ -84,3 +84,42 @@ def test_entry_sets_the_owner_first_on_windows(monkeypatch) -> None:
     with pytest.raises(SystemExit):
         entry.main()
     assert calls == [["--version"]]
+
+
+@pytest.mark.parametrize(
+    "value, kind, expected",
+    [
+        ("C:\\Program Files", "REG_SZ", "C:\\Program Files"),
+        ("D:\\O\u2019Brien Apps", "REG_SZ", "D:\\O\u2019Brien Apps"),
+        ("%SystemDrive%\\Program Files", "REG_EXPAND_SZ", ""),
+        ("%SystemDrive%\\Program Files", "REG_SZ", ""),
+        ("C:\\Program Files", "REG_EXPAND_SZ", ""),
+        (" C:\\Program Files", "REG_SZ", ""),
+        ("C:/Program Files", "REG_SZ", ""),
+        ("\\\\server\\share", "REG_SZ", ""),
+        ("Program Files", "REG_SZ", ""),
+        ("C:\\Program Files\\..\\Users", "REG_SZ", ""),
+        ("C:\\Program\tFiles", "REG_SZ", ""),
+        (7, "REG_DWORD", ""),
+    ],
+)
+def test_program_files_reads_only_a_canonical_reg_sz(monkeypatch, value, kind, expected) -> None:
+    """g072 review 3 N4: the Python reader takes what the Go resolver takes."""
+
+    class _Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    fake = SimpleNamespace(
+        HKEY_LOCAL_MACHINE=1,
+        KEY_READ=1,
+        KEY_WOW64_64KEY=2,
+        REG_SZ="REG_SZ",
+        OpenKey=lambda *_args: _Key(),
+        QueryValueEx=lambda _key, _name: (value, kind),
+    )
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    assert windows_owner._program_files_dir() == expected

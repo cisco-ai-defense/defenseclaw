@@ -147,6 +147,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
 	ctx = a.withInstructionStartup(ctx, "claudecode", req.SessionID, activeAgentContext)
+	a.mcpSessionStarted(ctx, "claudecode", req.SessionID, req.HookEventName, req.Source)
 	mode := sandboxHookMode(ctx, "claudecode", a.claudeCodeMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "claudecode") && !a.claudeCodeEnabled() {
@@ -233,6 +234,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Args:                                     actionArgs,
 			CWD:                                      req.CWD,
 			ActiveHome:                               hookActiveHome(ctx),
+			CurrentWindowsDrive:                      reportedWindowsDrive(req.reportedCWD),
 			ToolResourceIdentity:                     resourceIdentity,
 			CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
 			ActiveAgentFiles:                         activeAgentContext.files,
@@ -330,7 +332,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	stateMutation := a.provenActiveStateMutation(ctx, verdict) && claudeCodeCanEnforce(req)
+	stateMutation := a.provenHookActionMustEnforce(ctx, verdict) && claudeCodeCanEnforce(req)
 	wouldBlock := rawAction == "block" && mode != "action" && !stateMutation
 	if rawAction == "block" && !claudeCodeCanEnforce(req) {
 		action = "allow"
@@ -720,6 +722,11 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 func claudeCodeAdditionalContext(rawAction, severity, reason string, wouldBlock bool) string {
 	if rawAction == "allow" || rawAction == "" {
 		return ""
+	}
+	if strings.HasPrefix(reason, "DefenseClaw is still scanning MCP server ") ||
+		strings.HasPrefix(reason, "DefenseClaw could not read admission for MCP server ") ||
+		strings.HasPrefix(reason, mcpAdmissionAllowedLead) {
+		return reason
 	}
 	lead := "DefenseClaw observed"
 	finding := fmt.Sprintf("a %s Claude Code hook finding", severity)

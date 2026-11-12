@@ -120,7 +120,7 @@ removed.
 ### Install, upgrade, ensure, uninstall
 
 1. An administrator, package script or MDM runs
-   `defenseclaw-gateway enterprise linux <action>` as root. Paths come from
+   `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux <action>` as root. Paths come from
    `managed.StandaloneLayoutFor("linux")`; the environment is not consulted.
 2. The lifecycle takes the lock in `/var/lib/defenseclaw-enterprise`, rolls
    back any interrupted transaction, records an intent, snapshots every file
@@ -137,7 +137,7 @@ removed.
 
 ### Secrets
 
-`defenseclaw-gateway enterprise secret set --name <name> --from-stdin` stores
+`/opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name <name> --from-stdin` stores
 a value in `/etc/defenseclaw/secrets/<name>`. With systemd 247 or later the
 file is `root:root 0600` and reaches the gateway only through
 `LoadCredential=` under `/run/credentials/`; with older systemd it is
@@ -235,7 +235,7 @@ access. Status shows presence, modification time and a digest prefix only.
 | L-34 | — | A user starts a per-user agent with another config root or a mode that skips user configuration (Amp or Devin with `XDG_CONFIG_HOME` or `HOME`, `devin --config <file>`, Antigravity with `HOME`, Hermes with `--safe-mode` or `HERMES_HOME`), so DefenseClaw's registration is never loaded | Not closable by DefenseClaw: the guardian repairs only the default location and cannot see a process's environment or command line, so the session is not inspected, logged or repaired, and status and verify keep the user's target ready (residual 7, enterprise R1). Application control over how users launch these agents closes it | Alternate config root and launch flag drill per connector |
 | L-35 | — | A user, or an API caller, changes policy through a local config writer (`defenseclaw config set`, `skill`/`mcp`/`plugin`/`tool` `block` or `allow`, `guardrail block-at`, `policy activate`, `setup`, the TUI config editor, `POST /enforce/block`, `POST /enforce/allow`) | One config writer under `config.yaml.lock` refuses every actor except `lifecycle` and `migration` on a managed standalone host, also for root: the per-user CLI exits `3` with "This device is managed" (on packaged Linux and macOS, `defenseclaw` is a launcher that offers only `sandbox` and exits `2` with "This computer is managed; only `defenseclaw sandbox` commands are available here."), the gateway answers `403` `managed_device`, nothing is written and the attempt is audited (`outcome=refused reason=managed_device`). `/etc/defenseclaw/config.yaml` is root-owned in addition, so a standard user cannot write it at all | `internal/config/configwrite/configwrite_test.go`, `cli/tests/test_config_writer.py`, `internal/gateway/enforce_config_test.go`; enterprise B15 |
 | L-36 | — | `config.yaml`, a unit file, a machine-policy entry or a hook script is edited in place | A standard user has no write access. An administrator's edit of `config.yaml` is validated by the apply trigger's `ensure --reason path` and recorded as the next config generation (`config.generation.json`, actor `lifecycle`), or reverted to `/var/lib/defenseclaw-enterprise/committed-config.yaml` with the edit kept as `rejected-config.yaml` (`config_rejected` in `status`, `verify` fails). Derived files are regenerated from the config and never read back; `verify` fails on drift | `internal/enterpriseunix/committed_config_test.go`, `internal/enterpriseunix/lifecycle_test.go`; enterprise B16 |
-| L-37 | — | A user environment variable or `.env` entry weakens a check (`DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS`, `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN`, and the other security opt-outs) | The registry's `managed` setting: `ignore` variables read as unset from the environment and from `.env` on a managed standalone host; `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_HOOK_MAX_BODY` are `tighten_only`. Doctor names the ignored variables, never their values | `internal/envvars/registry_test.go`, `cli/tests/test_envvars.py`; enterprise B17 |
+| L-37 | — | A user environment variable or `.env` entry weakens a check (`DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS`, `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN`, and the other security opt-outs) | The registry's `managed` setting: `ignore` variables read as unset from the environment and from `.env` on a managed standalone host; `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS` are `tighten_only`. Managed hooks ignore `DEFENSECLAW_HOOK_MAX_BODY` and keep 1 MiB. Doctor names the ignored variables, never their values | `internal/envvars/registry_test.go`, `cli/tests/test_envvars.py`; enterprise B17 |
 | L-38 | — | `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE` is forged so the host looks unmanaged | The managed test reads `deployment_mode` and `enterprise.profile` from `config.yaml` as well as the environment, so the environment can only add managed status. Both variables are `ignore` on a managed host, the gateway, guardian, enumerator and sensor-helper units pin the profile, and a `.env` file cannot set it | `internal/config/validate_candidate.go`, `cli/defenseclaw/config_writer.py`; enterprise B18 |
 | L-39 | — | Operator block or allow entries are placed in the `actions` table of `audit.db` | Ignored: the gateway decides from `asset_policy` in the config. A managed `ensure` that migrates a version 8 config counts them and warns `local_enforcement_entries_ignored`; it neither imports nor deletes them | `internal/enforce/policy.go`, `internal/config/migrate_v9.go`; enterprise B19 |
 | L-40 | — | A release is fetched from a redirected source (`update.source`, `DEFENSECLAW_REPO`) and installed | The release identity is compiled into `install.sh` and `defenseclaw upgrade`; the source only changes where bytes come from. A mirror needs cosign 2.0 or later and the unchanged signed `checksums.txt`; only the official source falls back to `checksums.txt` alone. On a managed host `defenseclaw upgrade` and `rollback` refuse and `DEFENSECLAW_REPO` is ignored | `cli/tests/test_upgrade_shim.py`; enterprise B20 |
@@ -405,3 +405,24 @@ access. Status shows presence, modification time and a digest prefix only.
     redaction profile decides whether it leaves the computer, and
     `enterprise.tetragon.customer_events: off` stops the forwarding while
     keeping the counts (L-48).
+18. Claude Cowork is a surface of the Claude Code connector, and its residuals
+    follow the machine policy that covers Claude Code
+    ([R36 to R40](ENTERPRISE-THREAT-MODEL.md#residual-risks)). Claude Desktop
+    for Linux is a beta, and Cowork on Linux is not certified: the managed
+    drop-in `/etc/claude-code/managed-settings.d/90-defenseclaw.json` and the
+    per-user setup were verified, but Cowork itself was not run. The surface
+    marker `CLAUDE_CODE_IS_COWORK=1` is set by the caller, so any process of
+    the user can send it; it is used for attribution, never for identity or a
+    verdict. With `managed_hooks_only: preserve`, hooks in Cowork plugins run
+    next to DefenseClaw's and can change a tool call's input after it was
+    inspected, and the foreign-hook guard does not read Cowork plugins; the
+    default `enforce` writes `allowManagedHooksOnly`. Claude Desktop keeps the
+    engine in the user's own data folder, and Linux builds carry no signature:
+    a build counts only when its version folder holds an executable `claude`,
+    it is reported as unsigned, and as unidentified while it runs, so `verify`
+    fails while Cowork or the Code tab runs. Web fetch (Anthropic's side) and
+    the Cowork VM's outbound traffic (Anthropic's proxy) are outside the
+    host's egress controls. A DefenseClaw plugin a user uploaded to their
+    Claude account stays after DefenseClaw is removed and blocks Cowork tool
+    calls while its hook script is gone (GAP-0051); `setup cowork` refuses a
+    managed computer, so this concerns a plugin uploaded earlier.

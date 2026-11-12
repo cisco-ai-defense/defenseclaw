@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -300,10 +301,10 @@ def test_windows_durable_replace_supports_path_beyond_max_path(tmp_path):
     # The validator itself may not be long-path-aware at the process manifest
     # level. Use the explicit Win32 namespace to create and inspect the
     # fixture; replace_file_durable must provide that same support internally.
-    extended_parent = Path(file_permissions._windows_extended_path(parent))
-    extended_target = Path(file_permissions._windows_extended_path(target))
-    extended_staging = Path(file_permissions._windows_extended_path(staging))
-    extended_root = Path(file_permissions._windows_extended_path(tmp_path / "durable-segment-00"))
+    extended_parent = Path(file_permissions.windows_extended_path(parent))
+    extended_target = Path(file_permissions.windows_extended_path(target))
+    extended_staging = Path(file_permissions.windows_extended_path(staging))
+    extended_root = Path(file_permissions.windows_extended_path(tmp_path / "durable-segment-00"))
     try:
         extended_parent.mkdir(parents=True)
         extended_target.write_bytes(b"old")
@@ -401,23 +402,159 @@ def test_windows_system_controller_parent_policy_is_narrow(monkeypatch):
         lambda _path: pytest.fail("the strict file trustee policy must not validate this parent"),
     )
 
-    file_permissions._validate_unmodified_parent(
-        "synthetic-profile",
-        allow_windows_system_controllers=True,
+    file_permissions._validate_unmodified_parent("synthetic-profile")
+
+    # The one Windows owner trust set: the account or a Windows system owner.
+    assert custody_checks == [("synthetic-profile", True, False)]
+
+
+_CURRENT_SID = "S-1-5-21-1-2-3-1001"
+_TRUSTED_INSTALLER_SID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+
+
+def _fake_windows_parent(monkeypatch, owner_sid, entries):
+    monkeypatch.setattr(file_permissions, "os", SimpleNamespace(name="nt", fspath=os.fspath))
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (owner_sid, False, entries))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: _CURRENT_SID)
+
+
+def _profile_entries(owner_sid):
+    # A profile folder: SYSTEM, Administrators and the account have full control.
+    return [
+        (0x1F01FF, 1, 0x13, "S-1-5-18"),
+        (0x1F01FF, 1, 0x13, "S-1-5-32-544"),
+        (0x1F01FF, 1, 0x13, _CURRENT_SID),
+        (0x1F01FF, 1, 0x13, owner_sid),
+    ]
+
+
+@pytest.mark.parametrize(
+    "owner_sid",
+    [_CURRENT_SID, "S-1-5-32-544", "S-1-5-18", _TRUSTED_INSTALLER_SID],
+    ids=["this account", "BUILTIN Administrators", "SYSTEM", "TrustedInstaller"],
+)
+def test_windows_export_parent_accepts_the_owner_trust_set(monkeypatch, owner_sid):
+    # The built-in Administrator's profile is owned by BUILTIN\Administrators;
+    # the Cowork removal marker goes there (cowork-1-0-8 GAP-0085).
+    _fake_windows_parent(monkeypatch, owner_sid, _profile_entries(owner_sid))
+
+    file_permissions._validate_unmodified_parent("C:\\Users\\Administrator")
+
+
+@pytest.mark.parametrize(
+    "owner_sid",
+    ["S-1-5-32-545", "S-1-5-11", "S-1-1-0", "S-1-5-21-1-2-3-1002", "S-1-5-21-1-2-3-512", ""],
+    ids=["Users", "Authenticated Users", "Everyone", "another account", "domain admins lookalike", "no owner"],
+)
+def test_windows_export_parent_refuses_other_owners_by_name(monkeypatch, owner_sid):
+    _fake_windows_parent(monkeypatch, owner_sid, _profile_entries(_CURRENT_SID))
+
+    with pytest.raises(OSError) as raised:
+        file_permissions._validate_unmodified_parent("C:\\Users\\a")
+
+    assert str(raised.value) == (
+        f"unsafe export parent C:\\Users\\a: owner SID {owner_sid or '<unknown>'} is not this account, "
+        "SYSTEM, BUILTIN Administrators or TrustedInstaller"
     )
 
-    assert custody_checks == [("synthetic-profile", True, True)]
+
+@pytest.mark.parametrize("writer_sid", ["S-1-5-32-545", "S-1-5-11", "S-1-1-0", "S-1-5-21-1-2-3-1002"])
+@pytest.mark.parametrize("owner_sid", [_CURRENT_SID, "S-1-5-32-544"])
+def test_windows_export_parent_refuses_other_writers_under_a_trusted_owner(monkeypatch, owner_sid, writer_sid):
+    _fake_windows_parent(monkeypatch, owner_sid, [*_profile_entries(owner_sid), (0x00000002, 1, 0, writer_sid)])
+
+    with pytest.raises(OSError, match=f"untrusted SID {writer_sid}$"):
+        file_permissions._validate_unmodified_parent("C:\\Users\\a")
 
 
-def test_windows_system_controller_parent_policy_requires_unmanaged_parent_mode(tmp_path):
-    with pytest.raises(ValueError, match="requires protect_parent=False"):
-        file_permissions.atomic_write_private_bytes(
-            tmp_path / "must-not-exist",
-            b"synthetic fixture",
-            allow_windows_system_controllers_in_parent=True,
+def test_windows_owner_problem_is_the_one_owner_rule():
+    for owner in (_CURRENT_SID, "S-1-5-32-544", "S-1-5-18", _TRUSTED_INSTALLER_SID):
+        assert file_permissions.windows_owner_problem(owner, _CURRENT_SID) is None
+    assert file_permissions.windows_owner_problem(_CURRENT_SID, "") == (
+        f"owner SID {_CURRENT_SID} is not SYSTEM, BUILTIN Administrators or TrustedInstaller"
+    )
+    for owner in ("S-1-5-32-545", "S-1-5-11", "S-1-1-0", "S-1-5-21-1-2-3-1002"):
+        assert file_permissions.windows_owner_problem(owner, _CURRENT_SID) == (
+            f"owner SID {owner} is not this account, SYSTEM, BUILTIN Administrators or TrustedInstaller"
         )
 
-    assert not (tmp_path / "must-not-exist").exists()
+
+def test_windows_owner_trust_set_matches_go():
+    # The Go guard and safefile use internal/winowner; the CLI uses this set.
+    source = (Path(__file__).resolve().parents[2] / "internal" / "winowner" / "winowner.go").read_text(encoding="utf-8")
+    block = source.split("var SystemOwnerSIDs = [...]string{", 1)[1].split("}", 1)[0]
+    go_sids = re.findall(r'"(S-1-[0-9-]+)"', block)
+
+    assert len(go_sids) == len(set(go_sids))
+    assert frozenset(go_sids) == file_permissions._WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS
+    go_mask = re.search(r"const CustodyWriteMask uint32 = (0x[0-9A-Fa-f]+)", source)
+    assert go_mask is not None
+    assert int(go_mask.group(1), 16) == file_permissions._WINDOWS_CUSTODY_WRITE_MASK == 0x500D0156
+
+
+def test_windows_admin_trusting_write_check_uses_the_owner_trust_set(monkeypatch):
+    _fake_windows_parent(monkeypatch, "S-1-5-32-544", _profile_entries("S-1-5-32-544"))
+
+    assert file_permissions.windows_acl_write_error("C:\\Users\\a\\.local\\bin", trust_administrators=True) is None
+    assert file_permissions.windows_acl_write_error("C:\\Users\\a\\.local\\bin") == (
+        "owner SID S-1-5-32-544 is not the current user"
+    )
+
+
+class _WindowsOs:
+    """``os`` as cmd_setup sees it on Windows; everything else is the real module."""
+
+    name = "nt"
+
+    def __getattr__(self, attribute):
+        return getattr(os, attribute)
+
+
+@pytest.mark.parametrize(
+    ("owner_sid", "extra_entries", "accepted"),
+    [
+        ("S-1-5-32-544", [], True),
+        ("S-1-5-32-544", [(0x1301BF, 1, 0x10, "S-1-5-32-545")], False),
+        ("S-1-5-21-1-2-3-1002", [], False),
+    ],
+    ids=["owned by Administrators", "Users may write", "owned by another account"],
+)
+def test_setup_capture_trusting_administrators_uses_the_owner_trust_set(
+    monkeypatch, tmp_path, owner_sid, extra_entries, accepted
+):
+    # cmd_setup reads its runtime-evidence fingerprint, Codex managed backups
+    # and plugin backup receipt with trust_windows_administrators=True, which
+    # reaches windows_acl_write_error(trust_administrators=True) (g085 review S2).
+    from defenseclaw.commands import cmd_setup
+
+    source = tmp_path / "backup.json"
+    source.write_bytes(b"{}")
+    entries = _profile_entries(owner_sid) + extra_entries
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (owner_sid, False, entries))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: _CURRENT_SID)
+    real_os = file_permissions.os
+
+    def windows_acl_write_error(path, **kwargs):
+        # Only the ACL check sees Windows; the no-follow open stays native.
+        file_permissions.os = SimpleNamespace(name="nt", fspath=os.fspath)
+        try:
+            return file_permissions.windows_acl_write_error(path, **kwargs)
+        finally:
+            file_permissions.os = real_os
+
+    monkeypatch.setattr(cmd_setup, "windows_acl_write_error", windows_acl_write_error)
+    monkeypatch.setattr(cmd_setup, "os", _WindowsOs())
+
+    def capture():
+        return cmd_setup._capture_protected_setup_file(
+            os.fspath(source), 1 << 20, "plugin backup", trust_windows_administrators=True
+        )
+
+    if accepted:
+        assert capture()[:2] == (True, b"{}")
+    else:
+        with pytest.raises(cmd_setup.RollbackSourceRefusedError, match="not protected"):
+            capture()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows system-controller inheritance")
@@ -444,7 +581,6 @@ def test_private_atomic_write_accepts_system_controller_parent_but_keeps_private
         target,
         b"synthetic fixture",
         protect_parent=False,
-        allow_windows_system_controllers_in_parent=True,
     )
 
     assert file_permissions._windows_acl_snapshot(os.fspath(parent)) == before
@@ -457,7 +593,6 @@ def test_private_atomic_write_accepts_system_controller_parent_but_keeps_private
             parent / "must-not-exist",
             b"synthetic fixture",
             protect_parent=False,
-            allow_windows_system_controllers_in_parent=True,
         )
     assert not (parent / "must-not-exist").exists()
     assert list(parent.iterdir()) == [target]
@@ -1242,7 +1377,7 @@ def test_windows_custody_distinguishes_user_and_system_paths(monkeypatch):
         "synthetic-system-path",
         allow_current_user=False,
     )
-    assert problem == f"owner SID {current_sid} is not a trusted custody principal"
+    assert problem == f"owner SID {current_sid} is not SYSTEM, BUILTIN Administrators or TrustedInstaller"
 
 
 @pytest.mark.parametrize(

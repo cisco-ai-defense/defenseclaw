@@ -149,10 +149,10 @@ func TestOpenCodeManagedPluginMustBeTrusted(t *testing.T) {
 	}
 }
 
-// OpenCode's pure mode and its managed config directory override start a
-// session without the managed plugin, which no machine file can prevent.
-// Reconcile and verify must say so next to a covered state, so status does
-// not read as a route users cannot skip.
+// Reconcile and verify say next to a covered state what an OpenCode launch
+// can do to the managed plugin. OpenCode V1's pure mode and managed config
+// override do not exist in OpenCode 2.2.5 (GAP-0053), so the text must not
+// tell administrators they skip the plugin.
 func TestOpenCodeMachinePolicyStateNamesTheVendorLimit(t *testing.T) {
 	opts := testOptions(t)
 	installTestOpenCodePlugin(t, &opts)
@@ -168,8 +168,16 @@ func TestOpenCodeMachinePolicyStateNamesTheVendorLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 		details := strings.Join(state.Details, " ")
-		if !state.Covered || !strings.Contains(details, "OPENCODE_PURE") {
-			t.Fatalf("%s must name OpenCode's pure mode and managed config override: %+v", step.name, state)
+		if !state.Covered || !strings.Contains(details, "no --pure flag") ||
+			!strings.Contains(details, "does not read OPENCODE_PURE or OPENCODE_TEST_MANAGED_CONFIG_DIR") ||
+			!strings.Contains(details, "another ProgramData") || !strings.Contains(details, "Status and verify report") {
+			t.Fatalf("%s must say OpenCode 2.2.5 has no pure mode and that Windows follows ProgramData: %+v", step.name, state)
+		}
+		if strings.Contains(details, "always loads") {
+			t.Fatalf("%s overclaims: on Windows the managed folder follows ProgramData: %+v", step.name, state)
+		}
+		if strings.Contains(details, "skips the managed plugin in pure mode") {
+			t.Fatalf("%s still describes the OpenCode V1 bypass as current: %+v", step.name, state)
 		}
 	}
 }

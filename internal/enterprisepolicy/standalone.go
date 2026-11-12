@@ -90,6 +90,9 @@ func StandaloneConnectors(cfg *config.Config) []string {
 		return nil
 	}
 	names := append([]string(nil), cfg.ActiveConnectors()...)
+	// The singular connector remains enrolled when a plural connector map
+	// is also present; ActiveConnectors alone selects the plural roster.
+	names = append(names, cfg.Guardrail.Connector)
 	for name := range cfg.Enterprise.MachinePolicy.Connectors {
 		names = append(names, name)
 	}

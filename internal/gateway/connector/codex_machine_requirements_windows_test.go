@@ -47,18 +47,17 @@ func TestResolveWindowsCodexManagedRuntimeRegistryCleanAbsenceIsNoop(t *testing.
 	if registry.Active || len(registry.Targets) != 0 {
 		t.Fatalf("clean absence unexpectedly activated managed runtime: %+v", registry)
 	}
-	lockPath := filepath.Join(
-		programData,
-		"OpenAI",
-		"Codex",
-		windowsCodexManagedLockFile,
-	)
-	if _, err := os.Lstat(lockPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("clean absence created a machine policy lock: %v", err)
+	for _, name := range []string{WindowsCodexManagedWriterLockFile, windowsCodexManagedLegacyLockFile} {
+		lockPath := filepath.Join(programData, "OpenAI", "Codex", name)
+		if _, err := os.Lstat(lockPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("clean absence created a machine policy lock %s: %v", name, err)
+		}
 	}
 }
 
-func TestResolveWindowsCodexManagedRuntimeRegistryWaitsForMachinePolicyLock(t *testing.T) {
+// On a host upgraded from 1.0.8 or earlier that no writer of this release has
+// reached yet, the hook still reads under the old lock (GAP-0650 upgrade path).
+func TestResolveWindowsCodexManagedRuntimeRegistryLegacyFallbackWaitsForTheOldLock(t *testing.T) {
 	programData := t.TempDir()
 	policyDir := filepath.Join(programData, "OpenAI", "Codex")
 	if err := os.MkdirAll(policyDir, 0o755); err != nil {
@@ -66,7 +65,7 @@ func TestResolveWindowsCodexManagedRuntimeRegistryWaitsForMachinePolicyLock(t *t
 	}
 	requirementsPath := filepath.Join(policyDir, "requirements.toml")
 	statePath := filepath.Join(policyDir, windowsCodexManagedStateFile)
-	lockPath := filepath.Join(policyDir, windowsCodexManagedLockFile)
+	lockPath := filepath.Join(policyDir, windowsCodexManagedLegacyLockFile)
 	for path, body := range map[string][]byte{
 		requirementsPath: []byte("invalid = true\n"),
 		statePath:        []byte("{}\n"),
@@ -89,7 +88,7 @@ func TestResolveWindowsCodexManagedRuntimeRegistryWaitsForMachinePolicyLock(t *t
 	windowsCodexMachineTrustedDirCheck = func(string, string) error { return nil }
 	windowsCodexMachineTrustedFileCheck = func(string, string) error { return nil }
 
-	heldLock, heldOverlapped, err := acquireWindowsCodexMachineFileLock(lockPath)
+	heldLock, heldOverlapped, err := holdWindowsCodexLockForTest(lockPath)
 	if err != nil {
 		t.Fatalf("hold machine policy lock: %v", err)
 	}
@@ -332,7 +331,8 @@ func TestWindowsCodexMachineGuardArtifactRepairTable(t *testing.T) {
 			}
 		}},
 		{name: "registry stale", keepsTargets: true, pinOnly: true, apply: func(t *testing.T, opts WindowsCodexMachineRequirementsOptions) {
-			data, err := os.ReadFile(opts.ManagedStatePath)
+			// The writer copy is where every transaction starts (GAP-0650).
+			data, err := os.ReadFile(windowsCodexStateCommittedPathForTest(opts))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -345,14 +345,12 @@ func TestWindowsCodexMachineGuardArtifactRepairTable(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(opts.ManagedStatePath, body, 0o600); err != nil {
+			if err := os.WriteFile(windowsCodexStateCommittedPathForTest(opts), body, 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		{name: "registry missing", apply: func(t *testing.T, opts WindowsCodexMachineRequirementsOptions) {
-			if err := os.Remove(opts.ManagedStatePath); err != nil {
-				t.Fatal(err)
-			}
+			removeWindowsCodexStateForTest(t, opts)
 		}},
 	}
 	for _, enrolled := range []bool{false, true} {

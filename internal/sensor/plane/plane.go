@@ -40,6 +40,8 @@ package plane
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -73,6 +75,27 @@ const (
 	// and bounded in the helper. It never enters the classifier, a score,
 	// Plane B or the fanotify hand-off, which are DefenseClaw's.
 	KindPolicyEvent Kind = "policy_event"
+	// KindImageDigest is the image digest of an earlier exec whose event
+	// went out while the image was still being hashed (ImageDigestState
+	// pending): PID, At and ImageVersion are that exec event's, and
+	// ImageSHA256 and ImageDigestState (read or failed) say how the read
+	// ended. It is no process event of its own (cowork-1-0-8 GAP-0067).
+	KindImageDigest Kind = "image_digest"
+)
+
+// DigestState is how the image digest of an exec stands when its event is
+// delivered (Event.ImageDigestState).
+type DigestState string
+
+const (
+	// DigestRead is an event that carries the digest.
+	DigestRead DigestState = "read"
+	// DigestPending is an image being hashed: a KindImageDigest event for the
+	// same exec follows once the read ends.
+	DigestPending DigestState = "pending"
+	// DigestFailed is an image whose digest is not coming: it could not be
+	// pinned or read, hashing is off, or its hash could not be queued.
+	DigestFailed DigestState = "failed"
 )
 
 // Policy owners of a kprobe or LSM event (Event.PolicyOwner).
@@ -168,6 +191,10 @@ type Event struct {
 	// the image is no such layout or could not be read; the host plane then
 	// grants the image nothing.
 	ImageSHA256, ImageVersion string
+	// ImageDigestState is set with ImageVersion: whether this event carries
+	// the digest, a KindImageDigest event follows with it, or none is
+	// coming. Empty from a source that predates it.
+	ImageDigestState DigestState
 	// UID and AUID are the process's kernel uid and audit login uid. nil is
 	// "not observed": uid 0 is root, which is a value, not an absence.
 	UID  *int
@@ -226,6 +253,12 @@ type Event struct {
 	// Self marks DefenseClaw's own gateway, helper and ACP processes. They
 	// are excluded from scoring, never hidden.
 	Self bool
+	// Fork marks a KindExec event that is the kernel's fork of the process,
+	// not an exec (cn_proc): its snapshot runs the parent's image and argv
+	// or, read after the child exec'd, that exec's, which has an event of
+	// its own (cowork-1-0-8 GAP-0067). False from a source that reports no
+	// forks or predates the flag.
+	Fork bool
 	// Hook is the self-filter's verdict (empty for everything else).
 	Hook HookMark
 	// HookTools, on a verified hook's exit, counts the hook's own tool
@@ -252,6 +285,19 @@ type Coverage struct {
 	// helper: Tetragon, or the native one with the reason Tetragon is not in
 	// use. nil everywhere else.
 	Backend *Backend
+	// BufferDropped is how many events DefenseClaw's own event buffers
+	// dropped under back-pressure, each named in Limitations by
+	// WithBufferDrops. Tetragon's own losses are Backend.EventsLost.
+	BufferDropped int64
+	// KernelOverflows is how many times the kernel dropped process events
+	// before the source read them (cn_proc ENOBUFS), named in Limitations by
+	// WithKernelOverflows.
+	//
+	// BufferDropped, KernelOverflows and Backend.EventsLost are the source's
+	// Losses: the host plane adds those of the sources a restart replaced
+	// (WithRetiredLosses), so they outlive a helper reconnect
+	// (cowork-1-0-8 GAP-0080).
+	KernelOverflows int64
 }
 
 // Backend kinds.
@@ -275,8 +321,12 @@ type Backend struct {
 	// reconciler reports it; it does not travel to the gateway.
 	PID int
 	// EventsLost is how many events the backend reported losing since the
-	// stream opened: rate-limit drops in the stream, plus Tetragon's own
-	// loss counters when LossKnown.
+	// source started: rate-limit drops in the stream, plus Tetragon's own
+	// loss counters when LossKnown. The host plane adds the losses of the
+	// sources a restart replaced, so the gateway reports it for its own
+	// life and across backends: after a change from Tetragon to the native
+	// backend it still includes Tetragon's losses (WithRetiredLosses,
+	// cowork-1-0-8 GAP-0080 and its review L2).
 	EventsLost int64
 	// LossKnown is true when Tetragon's loss counters could be read
 	// (metrics on loopback, served by the Tetragon pid). Display only.
@@ -441,7 +491,17 @@ type Buffer struct {
 	// number reported as reduced coverage. Undercounting the drops is the
 	// silent degradation this package exists to make impossible.
 	dropped atomic.Int64
+	// late are the image digests that found the buffer full, at most
+	// maxLateDigests, delivered by the next Push that finds room (lateCount
+	// lets every other Push skip the lock).
+	lateMu    sync.Mutex
+	late      []Event
+	lateCount atomic.Int32
 }
+
+// maxLateDigests bounds the image digests kept for a full buffer: one per
+// pending client exec, which the image hasher bounds the same way.
+const maxLateDigests = 64
 
 // NewBuffer returns an empty buffer.
 func NewBuffer() *Buffer { return &Buffer{events: make(chan Event, eventBuffer)} }
@@ -466,12 +526,37 @@ func NewBuffer() *Buffer { return &Buffer{events: make(chan Event, eventBuffer)}
 // bias costs nothing when the buffer is keeping up and preserves
 // attribution when it is not.
 func (b *Buffer) Push(event Event) {
+	lineage := event.Kind.lineage()
+	if !lineage && b.lateCount.Load() > 0 {
+		// A kept image digest goes ahead of a file event or a digest.
+		b.deliverLate()
+	}
 	select {
 	case b.events <- event:
+		if lineage && b.lateCount.Load() > 0 {
+			// It never takes the room an exec or exit needs: it follows it.
+			b.deliverLate()
+		}
 		return
 	default:
 	}
-	if !event.Kind.lineage() {
+	if event.Kind == KindImageDigest {
+		// An image digest displaces nothing, the tree least of all, but it
+		// is the one event a held client record waits for, and it comes
+		// when a client's start floods the buffer (cowork-1-0-8 GAP-0067).
+		// It waits for the next Push that finds room; past maxLateDigests
+		// it is dropped, and the hold records the client at its deadline.
+		b.lateMu.Lock()
+		if len(b.late) < maxLateDigests {
+			b.late = append(b.late, event)
+			b.lateCount.Add(1)
+		} else {
+			b.dropped.Add(1)
+		}
+		b.lateMu.Unlock()
+		return
+	}
+	if !lineage {
 		// A file event that arrives at a full buffer is simply late. It does
 		// not get to displace the tree.
 		b.dropped.Add(1)
@@ -489,6 +574,22 @@ func (b *Buffer) Push(event Event) {
 	}
 }
 
+// deliverLate queues the image digests that found the buffer full, oldest
+// first, while there is room.
+func (b *Buffer) deliverLate() {
+	b.lateMu.Lock()
+	defer b.lateMu.Unlock()
+	for len(b.late) > 0 {
+		select {
+		case b.events <- b.late[0]:
+			b.late = b.late[1:]
+			b.lateCount.Add(-1)
+		default:
+			return
+		}
+	}
+}
+
 // lineage reports whether an event kind builds the process tree.
 func (k Kind) lineage() bool { return k == KindExec || k == KindExit }
 
@@ -497,6 +598,122 @@ func (b *Buffer) Events() <-chan Event { return b.events }
 
 // Dropped is how many events were discarded under back-pressure.
 func (b *Buffer) Dropped() int64 { return b.dropped.Load() }
+
+// The buffers a drop line names (WithBufferDrops).
+const (
+	// SensorEventBuffer is a host sensor source's own buffer.
+	SensorEventBuffer = "the sensor's event buffer"
+	// HelperStreamBuffer is the gateway's buffer for the sensor helper's
+	// event stream: a host plane that falls behind drops there, not in the
+	// helper (GAP-0071).
+	HelperStreamBuffer = "the gateway's event buffer for the sensor helper's stream"
+)
+
+// WithBufferDrops ends every source's Coverage: it names the events a
+// DefenseClaw Buffer dropped under back-pressure after the OS delivered
+// them, as the ENOBUFS loss is named, so a loss is reduced coverage and
+// never a silence. The count is cumulative for the life of the buffer's
+// source: a dropped event stays lost after the source catches up. The
+// limitations are copied, so the coverage a source recorded at Start does
+// not grow. Linux native and Tetragon (GAP-0071), macOS and Windows, and the
+// gateway's buffer for the helper stream (cowork-1-0-8 GAP-0072) report it
+// with this one function; TestEveryCoverageNamesItsBufferDrops checks the
+// sources. The count is added to BufferDropped, which the host plane
+// carries across a restart of the source (WithRetiredLosses, cowork-1-0-8
+// GAP-0080).
+func WithBufferDrops(coverage Coverage, dropped int64, buffer string) Coverage {
+	if dropped > 0 {
+		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), bufferDropLimitation(dropped, buffer))
+		coverage.BufferDropped += dropped
+	}
+	return coverage
+}
+
+// WithKernelOverflows names the times the kernel dropped process events
+// before the source read them: the cn_proc socket's receive buffer
+// overflowed (ENOBUFS). Reduced, not absent: the reader carries on after an
+// overflow. The count is added to KernelOverflows, which the host plane
+// carries across a restart of the source (cowork-1-0-8 GAP-0080); the
+// limitations are copied.
+func WithKernelOverflows(coverage Coverage, overflows int64) Coverage {
+	if overflows > 0 {
+		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
+			"process events were lost %d times when the netlink receive buffer overflowed (ENOBUFS)", overflows))
+		coverage.KernelOverflows += overflows
+	}
+	return coverage
+}
+
+// Losses are the loss counts of one Plane C source, each cumulative for the
+// life of that source: the events DefenseClaw's buffers dropped
+// (Coverage.BufferDropped), the kernel's receive-buffer overflows
+// (Coverage.KernelOverflows) and the events the backend reported losing
+// (Backend.EventsLost).
+//
+// A restart of the source starts them at zero: a helper reconnect, a
+// package upgrade and a config push all replace it. The host plane sees
+// every replacement, so it keeps the final Losses of each replaced source
+// and adds them to the coverage of the next (WithRetiredLosses): for the
+// gateway every one counts for its own life, and a gateway restart is told
+// apart by the new service.instance.id on its telemetry (cowork-1-0-8
+// GAP-0080).
+type Losses struct {
+	BufferDropped, KernelOverflows, BackendLost int64
+}
+
+// Losses are the loss counts the coverage reports.
+func (c Coverage) Losses() Losses {
+	losses := Losses{BufferDropped: c.BufferDropped, KernelOverflows: c.KernelOverflows}
+	if c.Backend != nil {
+		losses.BackendLost = c.Backend.EventsLost
+	}
+	return losses
+}
+
+// Add is the sum of both tallies.
+func (l Losses) Add(other Losses) Losses {
+	return Losses{
+		BufferDropped:   l.BufferDropped + other.BufferDropped,
+		KernelOverflows: l.KernelOverflows + other.KernelOverflows,
+		BackendLost:     l.BackendLost + other.BackendLost,
+	}
+}
+
+// WithRetiredLosses adds to coverage the losses of the sources a restart
+// replaced, which otherwise vanished from status and telemetry with them
+// (cowork-1-0-8 GAP-0080). Buffer drops and kernel overflows are one line
+// each of their own and add to BufferDropped and KernelOverflows; the
+// backend's add to Backend.EventsLost, so the telemetry's events_lost never
+// goes back. They are shown on whatever backend the coverage names, of any
+// kind: the count spans backends for the life of the gateway. A coverage
+// without a backend has nowhere to show the backend's losses: the caller
+// keeps its tally, and the next backend shows them. The
+// limitations and the backend are copied, never changed in place.
+func WithRetiredLosses(coverage Coverage, retired Losses) Coverage {
+	if retired.BufferDropped > 0 {
+		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
+			"%d events were dropped under back-pressure in earlier event streams of the sensor", retired.BufferDropped))
+		coverage.BufferDropped += retired.BufferDropped
+	}
+	if retired.KernelOverflows > 0 {
+		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
+			"process events were lost %d times when the netlink receive buffer overflowed (ENOBUFS) "+
+				"in earlier event streams of the sensor", retired.KernelOverflows))
+		coverage.KernelOverflows += retired.KernelOverflows
+	}
+	if retired.BackendLost > 0 && coverage.Backend != nil {
+		backend := *coverage.Backend
+		backend.EventsLost += retired.BackendLost
+		coverage.Backend = &backend
+	}
+	return coverage
+}
+
+// bufferDropLimitation is the limitation WithBufferDrops adds.
+func bufferDropLimitation(dropped int64, buffer string) string {
+	return fmt.Sprintf("%d events were dropped from %s under back-pressure "+
+		"(file events first; process events displaced the oldest)", dropped, buffer)
+}
 
 // Close closes the delivery channel.
 func (b *Buffer) Close() { close(b.events) }

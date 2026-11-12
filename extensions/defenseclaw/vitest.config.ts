@@ -20,6 +20,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    setupFiles: ["./src/__tests__/setup-listener-proof.ts"],
     exclude: [
       "**/node_modules/**",
       "**/dist/**",

@@ -23,6 +23,8 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -183,6 +185,69 @@ func clientStateTreeNames(targets map[string]string) map[string]string {
 		names[key] = value
 	}
 	return names
+}
+
+// clientResolvedPathTargets keeps the plain path answers (absolute spelling ->
+// absolute physical path) of a resolved target map, not its metadata keys, for
+// the checks of the action facts that judge a write through a link
+// (actionfacts.Input.ClientResolvedTargets).
+func clientResolvedPathTargets(targets map[string]string) map[string]string {
+	var paths map[string]string
+	for spelling, physical := range targets {
+		if !strings.HasPrefix(spelling, "/") || !strings.HasPrefix(physical, "/") {
+			continue
+		}
+		if paths == nil {
+			paths = map[string]string{}
+		}
+		paths[spelling] = physical
+	}
+	// A link into a directory the user cannot open has no physical answer;
+	// the client lists the file its link text leads to instead
+	// (hookpaths.LinkTextFactPrefix), which is judged by its name.
+	for key, text := range targets {
+		spelling, ok := strings.CutPrefix(key, hookpaths.LinkTextFactPrefix)
+		if !ok || !strings.HasPrefix(spelling, "/") || !strings.HasPrefix(text, "/") {
+			continue
+		}
+		if _, answered := paths[spelling]; !answered {
+			if paths == nil {
+				paths = map[string]string{}
+			}
+			paths[spelling] = text
+		}
+	}
+	return paths
+}
+
+// clientWorkingDirectories keeps the directory spellings the hook client keyed
+// its path answers in (hookpaths.DirectoryFactPrefix, the physical directory
+// as value) that name the directory the gateway judges in, cwd. The gateway
+// resolves a project reached through a link, the client keys a relative
+// operand by the name it was given, so the lookup asks both
+// (actionfacts.Input.ClientWorkingDirectories). With no absolute cwd the
+// gateway has nothing to compare and keeps every directory the client names.
+func clientWorkingDirectories(targets map[string]string, cwd string) []string {
+	var dirs []string
+	cwd = filepath.Clean(cwd)
+	for key, physical := range targets {
+		logical, ok := strings.CutPrefix(key, hookpaths.DirectoryFactPrefix)
+		if !ok || !filepath.IsAbs(logical) || !filepath.IsAbs(physical) {
+			continue
+		}
+		if filepath.IsAbs(cwd) && filepath.Clean(logical) != cwd && filepath.Clean(physical) != cwd {
+			continue
+		}
+		dirs = append(dirs, filepath.Clean(logical))
+	}
+	// The directory the hook client ran the call in is the one it keyed a
+	// relative operand by, whether or not it listed it as a directory fact.
+	if client := targets[hookpaths.CWDKey]; !filepath.IsAbs(cwd) && filepath.IsAbs(client) &&
+		!slices.Contains(dirs, filepath.Clean(client)) {
+		dirs = append(dirs, filepath.Clean(client))
+	}
+	sort.Strings(dirs)
+	return dirs
 }
 
 // activeStateTreeHasNameFor is activeStateTreeHasName with the hook

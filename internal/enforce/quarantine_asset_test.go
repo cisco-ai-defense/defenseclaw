@@ -7,6 +7,7 @@ package enforce
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -360,5 +361,35 @@ func TestDeferredQuarantineRemovalIsRetriedUntilItSucceeds(t *testing.T) {
 	channel.ServeDeferred(retry)
 	if retries != 3 || len(channel.DeferredRemovals()) != 0 {
 		t.Fatalf("deferred removal ran %d times, want 3 (kept after transient error, dropped once removed)", retries)
+	}
+}
+
+// A link inside an asset is refused with ErrLinkedAssetContent, which callers
+// tell apart from a failed move (GAP-0826); the same tree without the link
+// hashes.
+func TestAssetContentHashNamesLinkedContent(t *testing.T) {
+	root := t.TempDir()
+	plugin := filepath.Join(root, "provider")
+	if err := os.MkdirAll(filepath.Join(plugin, "node_modules"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin, "index.js"), []byte("ok\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AssetContentHash(plugin); err != nil {
+		t.Fatalf("plain tree: %v", err)
+	}
+	if err := os.Symlink(root, filepath.Join(plugin, "node_modules", "openclaw")); err != nil {
+		t.Skipf("cannot create a link: %v", err)
+	}
+	_, err := AssetContentHash(plugin)
+	if !errors.Is(err, ErrLinkedAssetContent) {
+		t.Fatalf("err = %v, want ErrLinkedAssetContent", err)
+	}
+	if !strings.Contains(err.Error(), "refusing linked or reparse-point asset") {
+		t.Fatalf("message changed: %v", err)
+	}
+	if _, err := os.Readlink(filepath.Join(plugin, "node_modules", "openclaw")); err != nil {
+		t.Fatalf("link must be left alone: %v", err)
 	}
 }

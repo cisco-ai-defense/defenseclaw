@@ -88,6 +88,16 @@ type RuleFinding struct {
 	// only the in-process trusted-action boundary may use the proof to decide
 	// whether the finding can participate in a synchronous deny decision.
 	proof findingProof
+	// shellProtectedFile marks a finding of the shell-command protected-file
+	// class on a shell command (markShellProtectedFileFindings). It is
+	// private and value-free; profileClassFloor reads it.
+	shellProtectedFile bool
+	// omittedOperand marks the evaluation-limit finding that stands for a
+	// named write operand the hook client left out of its bounded map: a
+	// target the gateway cannot place, which may be a link to a protected
+	// file. It is private and value-free; guardrailActionForProfile keeps its
+	// block in every profile.
+	omittedOperand bool
 }
 
 type findingEnforcement uint8
@@ -881,8 +891,10 @@ type ruleScanOptions struct {
 	excludeTrustExploit bool
 	excludedRuleIDs     map[string]struct{}
 	onlyRuleIDs         map[string]struct{}
-	contentScope        ruleContentScope
-	onlyCategory        string
+	// onlyRule, when set, admits only the rules it reports true for.
+	onlyRule     func(ruleID string) bool
+	contentScope ruleContentScope
+	onlyCategory string
 }
 
 func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
@@ -893,6 +905,9 @@ func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
 		if _, allowed := o.onlyRuleIDs[ruleID]; !allowed {
 			return false
 		}
+	}
+	if o.onlyRule != nil && !o.onlyRule(ruleID) {
+		return false
 	}
 	_, excluded := o.excludedRuleIDs[ruleID]
 	return !excluded
@@ -1063,18 +1078,12 @@ func scanRuleCategoriesWithOptions(
 	// literals (rxprefilter, GAP-2279); both checks never skip a match.
 	raw := &ruleScanText{text: text}
 	rawScan := rxprefilter.NewText(text)
+	rawMatches := scanRuleMatchesInParallel(generation, options, seen, raw, rawScan)
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
-		categoryAllowed := options.allowsCategory(cat.Name)
-		if !categoryAllowed && !options.allowsMigratedLiteralRule(cat.Name) {
-			continue
-		}
 		for ruleIndex := range cat.Rules {
 			rule := &cat.Rules[ruleIndex]
-			if !categoryAllowed && !rule.migratedLiteral {
-				continue
-			}
-			if !options.allows(rule.ID, rule.ToolCallOnly) {
+			if !ruleScanEligible(options, cat, rule) {
 				continue
 			}
 			// An effective profile can contain the same canonical rule through
@@ -1083,10 +1092,7 @@ func scanRuleCategoriesWithOptions(
 			if seen[rule.ID] {
 				continue
 			}
-			if !raw.mayMatch(rule.Pattern) {
-				continue
-			}
-			loc := firstAcceptedRuleMatchIn(*rule, rawScan)
+			loc := rawMatches.match(rule, raw, rawScan)
 			if loc == nil {
 				continue
 			}
@@ -1115,27 +1121,18 @@ func scanRuleCategoriesWithOptions(
 	if normalized != text {
 		normalizedText := &ruleScanText{text: normalized}
 		normalizedScan := rxprefilter.NewText(normalized)
+		normalizedMatches := scanRuleMatchesInParallel(generation, options, seen, normalizedText, normalizedScan)
 		for categoryIndex := range generation.categories {
 			cat := &generation.categories[categoryIndex]
-			categoryAllowed := options.allowsCategory(cat.Name)
-			if !categoryAllowed && !options.allowsMigratedLiteralRule(cat.Name) {
-				continue
-			}
 			for ruleIndex := range cat.Rules {
 				rule := &cat.Rules[ruleIndex]
-				if !categoryAllowed && !rule.migratedLiteral {
-					continue
-				}
-				if !options.allows(rule.ID, rule.ToolCallOnly) {
+				if !ruleScanEligible(options, cat, rule) {
 					continue
 				}
 				if seen[rule.ID] {
 					continue // already found on raw pass
 				}
-				if !normalizedText.mayMatch(rule.Pattern) {
-					continue
-				}
-				loc := firstAcceptedRuleMatchIn(*rule, normalizedScan)
+				loc := normalizedMatches.match(rule, normalizedText, normalizedScan)
 				if loc == nil {
 					continue
 				}

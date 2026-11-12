@@ -36,6 +36,9 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import type { PluginApi, ToolContext } from "@openclaw/plugin-sdk";
 import {
   bootstrapPluginIdentity,
@@ -51,16 +54,19 @@ import {
   HEADER_DEFENSECLAW_AGENT_NAME,
   HEADER_DEFENSECLAW_POLICY_ID,
   HEADER_DEFENSECLAW_RUN_ID,
+  HEADER_DEFENSECLAW_SESSION_BOUND,
   HEADER_DEFENSECLAW_SESSION_ID,
   HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID,
   HEADER_DEFENSECLAW_TRACE_ID,
-  HEADER_HTTP_CONTENT_TYPE,
 } from "./correlation-headers.js";
 
 /** OpenClaw passes full gateway config and the defenseclaw plugin entry config. */
 type DefenseClawPluginHost = PluginApi & {
   config?: unknown;
-  pluginConfig?: { awsHttp1Shim?: "auto" | "on" | "off" };
+  pluginConfig?: {
+    awsHttp1Shim?: "auto" | "on" | "off";
+    agent?: { id?: unknown; name?: unknown; policyId?: unknown };
+  };
 };
 import { PolicyEnforcer, runSkillScan, runPluginScan, runCodeScan } from "./policy/enforcer.js";
 import { scanMCPServer } from "./scanners/mcp-scanner.js";
@@ -72,43 +78,34 @@ import type {
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
-import { loadSidecarConfig } from "./sidecar-config.js";
-import { createFetchInterceptor } from "./fetch-interceptor.js";
+import { loadOpenClawOutageMode, loadSidecarConfig } from "./sidecar-config.js";
+import { isLoopbackHost } from "./listener-proof.js";
+import { createFetchInterceptor, MODEL_OUTAGE_WARNING } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
 
 const INSPECT_ACTIONS = new Set(["allow", "alert", "confirm", "block"]);
 const INSPECT_MODES = new Set(["action", "observe"]);
-const INSPECT_SEVERITIES = new Set([
-  "NONE",
-  "INFO",
-  "LOW",
-  "MEDIUM",
-  "HIGH",
-  "CRITICAL",
-]);
 
 type InspectVerdict = {
   action: "allow" | "alert" | "confirm" | "block";
-  raw_action?: "allow" | "alert" | "confirm" | "block";
-  severity: "NONE" | "INFO" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  raw_action?: string;
+  severity: string;
   reason: string;
   mode: "action" | "observe";
   approval_timeout_ms?: number;
 };
 
+// toolCallIdOf is the id OpenClaw gave this call. The gateway keys the block
+// notice shown on the next model reply by it (GAP-0644); empty when the host
+// sent none.
+function toolCallIdOf(event: { toolCallId?: unknown }): { tool_call_id?: string } {
+  const id = event.toolCallId;
+  return typeof id === "string" && id !== "" ? { tool_call_id: id } : {};
+}
+
 function hasValidInspectActionContract(verdict: Record<string, unknown>): boolean {
   if (verdict.mode === "observe" && verdict.action !== "allow") return false;
-
-  const rawAction = verdict.raw_action;
-  if (rawAction === undefined) return true;
-  if (typeof rawAction !== "string" || !INSPECT_ACTIONS.has(rawAction)) {
-    return false;
-  }
-  if (verdict.mode === "observe" || rawAction === verdict.action) return true;
-
-  // The gateway may turn an unsupported native confirmation into an effective
-  // block after applyMode(), while retaining "confirm" as the raw decision.
-  return verdict.action === "block" && rawAction === "confirm";
+  return verdict.raw_action === undefined || typeof verdict.raw_action === "string";
 }
 
 function isInspectVerdict(value: unknown): value is InspectVerdict {
@@ -122,7 +119,7 @@ function isInspectVerdict(value: unknown): value is InspectVerdict {
     typeof verdict.mode === "string" &&
     INSPECT_MODES.has(verdict.mode) &&
     typeof verdict.severity === "string" &&
-    INSPECT_SEVERITIES.has(verdict.severity) &&
+    verdict.severity.length > 0 &&
     typeof verdict.reason === "string" &&
     hasValidInspectActionContract(verdict) &&
     (verdict.approval_timeout_ms === undefined ||
@@ -144,18 +141,72 @@ function failClosedVerdict(reason: string): InspectVerdict {
   };
 }
 
-// DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN applies only when no sidecar
-// verdict is available because the request itself failed.
-function unavailableVerdict(reason: string): InspectVerdict {
-  const failOpen =
-    (process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN || "")
-      .trim()
-      .toLowerCase() === "1";
-  if (failOpen) {
+function normalizeWorkspaceAgentId(raw?: string): string {
+  const value = raw?.trim() ?? "";
+  if (!value) return "main";
+  if (/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(value)) return value.toLowerCase();
+  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "").slice(0, 64) || "main";
+}
+
+function openClawWorkspaceHome(): string {
+  const osHome = process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || homedir();
+  const configured = process.env.OPENCLAW_HOME?.trim();
+  if (!configured || configured === "undefined" || configured === "null") return resolve(osHome);
+  if (configured === "~") return resolve(osHome);
+  if (configured.startsWith("~/") || configured.startsWith("~\\")) {
+    return resolve(osHome, configured.slice(2));
+  }
+  return resolve(configured);
+}
+
+// OpenClaw runs file and exec tools from the agent workspace by default.
+// The extension's process directory can differ from that workspace, so use
+// the host's agent config when deciding relative targets during an outage.
+function toolWorkspaceCwd(api: DefenseClawPluginHost, ctx?: ToolContext): string {
+  const runtimeWorkspace = (ctx as ToolContext & { workspaceDir?: string } | undefined)?.workspaceDir;
+  if (runtimeWorkspace && isAbsolute(runtimeWorkspace)) return runtimeWorkspace;
+
+  const config = api.config as {
+    agents?: { defaults?: { workspace?: string }; list?: Array<{ id?: string; default?: boolean; workspace?: string }> };
+  } | undefined;
+  const entries = Array.isArray(config?.agents?.list) ? config.agents.list : [];
+  const defaultId = normalizeWorkspaceAgentId(entries.find((entry) => entry?.default)?.id ?? entries[0]?.id);
+  const sessionId = ctx?.sessionKey?.match(/^agent:([^:]+):/i)?.[1];
+  const agentId = normalizeWorkspaceAgentId(ctx?.agentId ?? sessionId ?? defaultId);
+
+  const home = openClawWorkspaceHome();
+  const userPath = (path: string): string => path === "~" ? home :
+    path.startsWith("~/") || path.startsWith("~\\") ? resolve(home, path.slice(2)) : resolve(path);
+  const configured = entries.find((entry) => normalizeWorkspaceAgentId(entry?.id) === agentId)?.workspace?.trim();
+  if (configured) return userPath(configured);
+  if (agentId === defaultId) {
+    const defaultWorkspace = config?.agents?.defaults?.workspace?.trim();
+    if (defaultWorkspace) return userPath(defaultWorkspace);
+    const profile = process.env.OPENCLAW_PROFILE?.trim();
+    return join(home, ".openclaw", profile && profile.toLowerCase() !== "default" ? `workspace-${profile}` : "workspace");
+  }
+  const stateDir = process.env.OPENCLAW_STATE_DIR?.trim();
+  const newStateDir = join(home, ".openclaw");
+  const legacyStateDir = process.env.OPENCLAW_TEST_FAST === "1" || existsSync(newStateDir)
+    ? undefined : [join(home, ".clawdbot"), join(home, ".moldbot")].find(existsSync);
+  return join(stateDir ? userPath(stateDir) : legacyStateDir ?? newStateDir, `workspace-${agentId}`);
+}
+
+// Only a classified outage or timeout can use the account's saved mode.
+function unavailableVerdict(reason: string, payload: Record<string, unknown>, cwd: string): InspectVerdict {
+  const tool = typeof payload.tool === "string" ? payload.tool : "";
+  const args = payload.args && typeof payload.args === "object" && !Array.isArray(payload.args)
+    ? payload.args as Record<string, unknown> : {};
+  const mode = loadOpenClawOutageMode({ name: tool, args, cwd });
+  if (mode === "protected") return failClosedVerdict("tool targets protected state");
+  if (mode === "open") {
+    const warning = `DefenseClaw warning: ${reason}; tool call is running without inspection.`;
+    console.warn(warning);
     return {
       action: "allow",
       severity: "NONE",
-      reason: `${reason} (fail-open opt-in)`,
+      reason: warning,
       mode: "observe",
     };
   }
@@ -164,6 +215,12 @@ function unavailableVerdict(reason: string): InspectVerdict {
 
 function approvalSeverity(severity: string): "info" | "warning" | "critical" {
   return severity.toUpperCase() === "CRITICAL" ? "critical" : severity.toUpperCase() === "NONE" ? "info" : "warning";
+}
+
+function logInspectWarning(toolName: string, verdict: InspectVerdict): void {
+  if (verdict.action === "allow" && verdict.severity === "WARN") {
+    console.warn(`[defenseclaw] tool:${toolName} warning:${verdict.reason}`);
+  }
 }
 
 function approvalDescription(toolName: string, verdict: InspectVerdict): string {
@@ -178,12 +235,12 @@ function approvalTimeoutMs(verdict: InspectVerdict): number | undefined {
     : undefined;
 }
 
-// OpenClaw shows a plugin approval only in its Control UI and on chat
-// channels that forward /approve. openclaw tui and local openclaw chat do not
-// show it, so the request runs out and OpenClaw denies the call with a bare
-// "Approval timed out" (GAP-1958). Say where it could have been answered.
+// OpenClaw shows a plugin approval in its Control UI, on chat channels that
+// forward /approve, and in openclaw tui from OpenClaw 2026.10.9 (GAP-0597).
+// Where no request is shown, it runs out and OpenClaw denies the call with a
+// bare "Approval timed out" (GAP-1958). Say where it could have been answered.
 export const APPROVAL_SURFACES_HINT =
-  "answer DefenseClaw approvals in the OpenClaw Control UI (openclaw dashboard) or on a chat channel that forwards /approve; openclaw tui and local openclaw chat do not show them";
+  "answer DefenseClaw approvals in the OpenClaw Control UI (openclaw dashboard), on a chat channel that forwards /approve, or in openclaw tui from OpenClaw 2026.10.9";
 
 export function approvalResolutionLines(toolName: string, severity: string, decision: string): string[] {
   const lines = [`[defenseclaw] approval:${decision} tool:${toolName} severity:${severity}`];
@@ -210,18 +267,15 @@ function buildApprovalRequest(toolName: string, verdict: InspectVerdict) {
   };
 }
 
-async function readPluginAgentSection(api: PluginApi): Promise<{
+// OpenClaw hands the plugin its `plugins.entries.defenseclaw.config` object as
+// `api.pluginConfig`. It has no `getPluginConfig()` (GAP-0598).
+async function readPluginAgentSection(api: DefenseClawPluginHost): Promise<{
   id?: string;
   name?: string;
   policyId?: string;
 }> {
-  const ext = api as PluginApi & {
-    getPluginConfig?: () => Promise<Record<string, unknown>>;
-  };
-  if (typeof ext.getPluginConfig !== "function") return {};
   try {
-    const c = await ext.getPluginConfig();
-    const agent = c?.agent as Record<string, unknown> | undefined;
+    const agent = api.pluginConfig?.agent;
     if (!agent || typeof agent !== "object") return {};
     const id = agent.id;
     const name = agent.name;
@@ -281,6 +335,13 @@ export default function (api: DefenseClawPluginHost) {
 
   const sidecarConfig = loadSidecarConfig();
   const SIDECAR_API = sidecarConfig.baseUrl;
+  if (!isLoopbackHost(sidecarConfig.host)) {
+    // The plugin sends its token only to a loopback listener that proves it
+    // is this account's gateway (GAP-0594).
+    console.warn(
+      `[defenseclaw] gateway.host ${sidecarConfig.host} is not a loopback address: the plugin sends nothing to it, so tool checks are blocked`,
+    );
+  }
   const INSPECT_TIMEOUT_MS = sidecarConfig.hiltEnabled
     ? Math.max(2_000, (sidecarConfig.approvalTimeoutS + 5) * 1_000)
     : 2_000;
@@ -337,6 +398,7 @@ export default function (api: DefenseClawPluginHost) {
     onFetchResponse: (res) => daemonClient.applyStickyFromHttpResponse(res),
     logOutboundRequest,
     getLogAgentId: () => identityCache?.agentId ?? "unknown",
+    getOutageMode: () => loadOpenClawOutageMode(),
   });
 
   // Last-seen tool context, captured on every before_tool_call so the
@@ -346,6 +408,11 @@ export default function (api: DefenseClawPluginHost) {
   // that the sidecar's CorrelationMiddleware already validates and
   // length-caps.
   let currentToolContext: { sessionId?: string; runId?: string } = {};
+  // True from a tool call until the next intercepted model request is stamped.
+  // The session header is the last-seen context and can be stale; only the one
+  // request that follows a tool call is marked as having observed it, which is
+  // the only request the gateway lets claim a tool block notice (GAP-0644).
+  let toolContextUnclaimed = false;
 
   const trackToolContext = (ctx?: ToolContext): void => {
     if (!ctx) return;
@@ -353,6 +420,7 @@ export default function (api: DefenseClawPluginHost) {
     const runId = ctx.runId;
     if (sessionId || runId) {
       currentToolContext = { sessionId, runId };
+      toolContextUnclaimed = true;
     }
   };
 
@@ -387,7 +455,9 @@ export default function (api: DefenseClawPluginHost) {
 
     if (currentToolContext.sessionId) {
       h[HEADER_DEFENSECLAW_SESSION_ID] = currentToolContext.sessionId;
+      if (toolContextUnclaimed) h[HEADER_DEFENSECLAW_SESSION_BOUND] = "1";
     }
+    toolContextUnclaimed = false;
     if (currentToolContext.runId) {
       h[HEADER_DEFENSECLAW_RUN_ID] = currentToolContext.runId;
     }
@@ -403,16 +473,39 @@ export default function (api: DefenseClawPluginHost) {
   // ─── LLM fetch interceptor ───
   // Patches globalThis.fetch to redirect all outbound LLM API calls through
   // the guardrail proxy regardless of which provider/model OpenClaw uses.
+  let recentModelOutage = 0;
   const interceptor = createFetchInterceptor({
     guardrailPort: sidecarConfig.guardrailPort,
     getCorrelationHeaders: getFetchCorrelationHeaders,
+    getOutageMode: () => loadOpenClawOutageMode(),
+    onOutageWarning: () => { recentModelOutage = Date.now(); },
+  });
+  // OpenClaw includes this text in the agent's current prompt when the
+  // monitor has confirmed an outage and the saved tier permits continuation.
+  api.on("before_prompt_build", async () => {
+    if (loadOpenClawOutageMode() !== "open") return;
+    await healthMonitor.refresh();
+    if (!healthMonitor.isUnprotected) recentModelOutage = 0;
+    if (healthMonitor.isGatewayDown || Date.now() - recentModelOutage < 30_000) {
+      return { prependContext: healthMonitor.getWarningMessage() ?? MODEL_OUTAGE_WARNING };
+    }
   });
   // Start immediately so gateway model prewarm (before plugin services) also
   // routes through the guardrail when Bedrock is the primary model.
   interceptor.start();
 
+  // Stops the interceptor and the health monitor. OpenClaw calls the service
+  // `stop` when it replaces or removes the plugin; it ignores what start()
+  // returns, so without it every reload left the previous copy patching the
+  // transport and polling the gateway (GAP-0745).
+  const stopService = (): void => {
+    interceptor.stop();
+    healthMonitor.stop();
+  };
+
   api.registerService({
     id: "llm-interceptor",
+    stop: stopService,
     start: async () => {
       interceptor.start();
       const layers = interceptor.describeLayers();
@@ -434,12 +527,8 @@ export default function (api: DefenseClawPluginHost) {
           `[defenseclaw] interception self-test failed to complete: ${String(error)}`,
         );
       });
-      return {
-        stop: () => {
-          interceptor.stop();
-          healthMonitor.stop();
-        },
-      };
+      // Older OpenClaw releases take the stop handle from the return value.
+      return { stop: stopService };
     },
   });
 
@@ -448,69 +537,68 @@ export default function (api: DefenseClawPluginHost) {
     toolCtx?: ToolContext,
   ): Promise<InspectVerdict> {
     const sessionId = toolCtx?.sessionId ?? toolCtx?.sessionKey;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), INSPECT_TIMEOUT_MS);
-    const started = performance.now();
-    try {
-      const base = await daemonClient.buildOutboundHeaders({
-        runId: toolCtx?.runId,
-        sessionId,
-      });
-      const headers: Record<string, string> = {
-        ...base,
-        [HEADER_HTTP_CONTENT_TYPE]: "application/json",
-      };
-      const bodyPayload = sessionId
-        ? { ...payload, session_id: sessionId, approval_surface: "native" }
-        : { ...payload, approval_surface: "native" };
-      const res = await fetch(`${SIDECAR_API}/api/v1/inspect/tool`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(bodyPayload),
-        signal: controller.signal,
-      });
-      daemonClient.applyStickyFromHttpResponse(res);
-      const duration_ms = Math.round(performance.now() - started);
-      logOutboundRequest({
-        runId: toolCtx?.runId,
-        sessionId,
-        agentId: identityCache?.agentId ?? "unknown",
-        status_code: res.status,
-        duration_ms,
-      });
-      if (!res.ok) {
-        return failClosedVerdict(`sidecar returned ${res.status}`);
-      }
-      try {
-        const verdict: unknown = await res.json();
-        return isInspectVerdict(verdict)
-          ? verdict
-          : failClosedVerdict("sidecar returned invalid verdict");
-      } catch (err) {
-        // Structurally unreadable JSON stays fail-closed. Abort/reset
-        // while reading the body is an availability failure and follows
-        // DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN.
-        if (err instanceof SyntaxError) {
-          return failClosedVerdict("sidecar returned malformed verdict");
-        }
-        const msg = err instanceof Error ? err.message : String(err);
-        return unavailableVerdict(`sidecar body unavailable: ${msg}`);
-      }
-    } catch (err) {
-      const duration_ms = Math.round(performance.now() - started);
-      logOutboundRequest({
-        runId: toolCtx?.runId,
-        sessionId,
-        agentId: identityCache?.agentId ?? "unknown",
-        status_code: 0,
-        duration_ms,
-      });
-      const msg = err instanceof Error ? err.message : String(err);
-      return unavailableVerdict(`sidecar unreachable: ${msg}`);
-    } finally {
-      clearTimeout(timer);
+    const bodyPayload = sessionId
+      ? { ...payload, session_id: sessionId, approval_surface: "native" }
+      : { ...payload, approval_surface: "native" };
+    // The check goes over a connection that proved it reaches this account's
+    // gateway, and its verdict comes back on that connection (GAP-0594). The
+    // budget counts from the proven connection, so the proof does not use it.
+    const res = await daemonClient.postRaw("/api/v1/inspect/tool", bodyPayload, {
+      timeoutMs: INSPECT_TIMEOUT_MS,
+      correlation: { runId: toolCtx?.runId, sessionId },
+    });
+    if (res.status === 0) {
+      // No verdict is available. Only a gateway that did not answer (nothing
+      // listening, a timeout, or a proven connection that broke off) follows
+      // the saved outage mode. A listener that did not prove it is this
+      // account's gateway, a non-loopback gateway.host and a missing token
+      // stay closed in every tier; nothing was sent to them.
+      const msg = res.error ?? "no answer";
+      return res.outage
+        ? unavailableVerdict(`sidecar unreachable: ${msg}`, payload, toolWorkspaceCwd(api, toolCtx))
+        : failClosedVerdict(`sidecar request failed: ${msg}`);
     }
+    if (res.status < 200 || res.status >= 300) {
+      return failClosedVerdict(`sidecar returned ${res.status}`);
+    }
+    let verdict: unknown;
+    try {
+      verdict = JSON.parse(res.body);
+    } catch {
+      // Structurally unreadable JSON stays fail-closed.
+      return failClosedVerdict("sidecar returned malformed verdict");
+    }
+    return isInspectVerdict(verdict)
+      ? verdict
+      : failClosedVerdict("sidecar returned invalid verdict");
   }
+
+  const outageWarnings = new Map<string, string>();
+  const outageWarningKey = (toolCallId?: string, sessionKey?: string, toolName?: string): string =>
+    toolCallId ? `call:${toolCallId}` : sessionKey && toolName ? `session:${sessionKey}:${toolName}` : "";
+  const rememberOutageWarning = (
+    event: { toolCallId?: string; toolName: string }, ctx: ToolContext | undefined, verdict: InspectVerdict,
+  ): void => {
+    if (!verdict.reason.startsWith("DefenseClaw warning:")) return;
+    const key = outageWarningKey(event.toolCallId ?? ctx?.toolCallId, ctx?.sessionKey, event.toolName);
+    if (!key) return;
+    if (outageWarnings.size >= 256) outageWarnings.delete(outageWarnings.keys().next().value ?? "");
+    outageWarnings.set(key, verdict.reason);
+  };
+
+  // OpenClaw writes this tool result into the agent transcript. Attach the
+  // outage notice there so the agent and its user can see it with the call.
+  api.on("tool_result_persist", (event, ctx) => {
+    const key = outageWarningKey(event.toolCallId ?? ctx?.toolCallId, ctx?.sessionKey, event.toolName ?? ctx?.toolName);
+    const warning = outageWarnings.get(key);
+    if (!warning) return;
+    outageWarnings.delete(key);
+    const message = event.message;
+    if (!message || typeof message !== "object" || Array.isArray(message)) return;
+    const record = message as Record<string, unknown>;
+    if (record.role !== "toolResult" || !Array.isArray(record.content)) return;
+    return { message: { ...record, content: [...record.content, { type: "text", text: warning }] } };
+  });
 
   api.on("before_tool_call", async (event, ctx) => {
     // Cache the current session/run so subsequent LLM fetch interceptions
@@ -531,13 +619,17 @@ export default function (api: DefenseClawPluginHost) {
           args: event.params,
           content,
           direction: "outbound",
+          ...toolCallIdOf(event),
         },
         ctx,
       );
 
+      rememberOutageWarning(event, ctx, verdict);
+
       console.log(
         `[defenseclaw] message-tool verdict:${verdict.action} severity:${verdict.severity}`,
       );
+      logInspectWarning("message", verdict);
 
       if (verdict.action === "block" && verdict.mode === "action") {
         return { block: true, blockReason: `DefenseClaw: outbound blocked — ${verdict.reason}` };
@@ -552,13 +644,17 @@ export default function (api: DefenseClawPluginHost) {
       {
         tool: event.toolName,
         args: event.params,
+        ...toolCallIdOf(event),
       },
       ctx,
     );
 
+    rememberOutageWarning(event, ctx, verdict);
+
     console.log(
       `[defenseclaw] tool:${event.toolName} verdict:${verdict.action} severity:${verdict.severity}`,
     );
+    logInspectWarning(event.toolName, verdict);
 
     if (verdict.action === "block" && verdict.mode === "action") {
       return { block: true, blockReason: `DefenseClaw: ${verdict.reason}` };

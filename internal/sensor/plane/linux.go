@@ -141,6 +141,12 @@ func credentialRoots(homeDirs []string) []credentialRoot {
 	return append(roots, credentialRoot{path: "/etc/shadow"}, credentialRoot{path: "/etc/sudoers.d"})
 }
 
+// ExpandHomes is homeDirs with each dynamic pattern (/sessions/*) expanded to
+// the home directories it matches now: the homes the Cowork VM helper's
+// discovery read covers (cowork-1-0-8 GAP-0008), the same ones Plane C
+// watches.
+func ExpandHomes(homeDirs []string) []string { return expandHomes(homeDirs) }
+
 // expandHomes is homeDirs with each dynamic pattern (/sessions/*) expanded to
 // the home directories it matches now.
 func expandHomes(homeDirs []string) []string {
@@ -236,13 +242,20 @@ func openHomeCredentialRoot(home, root string) (int, error) {
 
 func (s *linuxSource) Events() <-chan Event { return s.buffer.Events() }
 func (s *linuxSource) Coverage() Coverage {
-	coverage := s.coverage
-	if lost := s.procOverflows.Load(); lost > 0 {
-		// Reduced, not absent: the reader carries on after an overflow.
-		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
-			"process events were lost %d times when the netlink receive buffer overflowed (ENOBUFS)", lost))
+	return WithBufferDrops(WithKernelOverflows(s.coverage, s.kernelOverflows()), s.bufferDropped(), SensorEventBuffer)
+}
+
+// kernelOverflows is how many times the cn_proc receive buffer overflowed
+// (ENOBUFS): the kernel dropped process events this source never saw.
+func (s *linuxSource) kernelOverflows() int64 { return s.procOverflows.Load() }
+
+// bufferDropped is how many events this source's own buffer dropped under
+// back-pressure, after the kernel delivered them (GAP-0071).
+func (s *linuxSource) bufferDropped() int64 {
+	if s.buffer == nil {
+		return 0
 	}
-	return coverage
+	return s.buffer.Dropped()
 }
 
 func (s *linuxSource) Start(ctx context.Context) error {
@@ -346,8 +359,9 @@ func (s *linuxSource) startProcessConnector() error {
 		_ = unix.Close(fd)
 		return fmt.Errorf("bind: %w", err)
 	}
-	// A burst of execs outruns the default receive buffer; the helper is
-	// root, so the forced size is tried first.
+	// A burst of execs outruns the default receive buffer. The forced size
+	// needs CAP_NET_ADMIN, which the sensor helper units keep for this;
+	// without it SO_RCVBUF is capped by net.core.rmem_max.
 	if unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, procReceiveBuffer) != nil {
 		_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, procReceiveBuffer)
 	}
@@ -553,6 +567,7 @@ func (s *linuxSource) pushProcess(kind Kind, pid int, at time.Time, fromFork boo
 	}
 	event.Kind = kind
 	event.At = at
+	event.Fork = fromFork
 	if execed {
 		// The process kept exec-ing while it was read, so its command line
 		// may be another program's. Its new image has an exec event of its
@@ -573,17 +588,39 @@ func (s *linuxSource) pushProcess(kind Kind, pid int, at time.Time, fromFork boo
 		}
 		version = ""
 	}
+	var delivery *digestDelivery
 	if identity {
+		// A fork's digest is never waited for (its exec has an event of its
+		// own), so it takes no waiter: read, or failed while hashing.
+		var follow func(string, bool)
+		if !fromFork {
+			delivery = newDigestDelivery(s.pushUnlessClosed, pid, at)
+			delivery.version, follow = version, delivery.follow
+		}
 		event.ImageVersion = version
-		event.ImageSHA256 = clientImages.digestOf(pinned, image, eventAccount(event))
+		event.ImageSHA256, event.ImageDigestState = clientImages.digestOf(
+			pinned, image, eventAccount(event), follow)
 		pinned = nil
 	} else if version != "" && !execed {
-		event.ImageVersion = version
+		event.ImageVersion, event.ImageDigestState = version, DigestFailed
 	}
 	if pinned != nil {
 		pinned.Close()
 	}
 	s.buffer.Push(event)
+	if delivery != nil {
+		delivery.execSent()
+	}
+}
+
+// pushUnlessClosed delivers an event from outside the readers (an image
+// digest read after its exec went out); nothing once the source is closed.
+func (s *linuxSource) pushUnlessClosed(event Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.buffer.Push(event)
+	}
 }
 
 // procSnapshotHook runs between the steps of pushProcess's snapshot; tests

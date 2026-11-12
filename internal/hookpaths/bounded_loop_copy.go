@@ -4,7 +4,6 @@
 package hookpaths
 
 import (
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -183,7 +182,7 @@ func actionClientBoundedLoopCopyPotentialProtected(command, cwd, home string) bo
 				if protectedReachPath(dir, protected, ssh) {
 					return true
 				}
-				info, err := os.Stat(dir)
+				info, err := pathStat(dir)
 				if err != nil || !info.IsDir() {
 					continue
 				}

@@ -17,6 +17,8 @@
 package harness
 
 import (
+	_ "embed"
+
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
@@ -57,10 +59,16 @@ const (
 	// SandboxEnvPath is the root-owned command wrapper that
 	// `defenseclaw-gateway sandbox exec` starts every command through.
 	SandboxEnvPath = LauncherDir + "/sandbox-env"
+	// SandboxLocalProxyPath routes requests to local services within the
+	// sandbox namespace before other requests reach the host egress proxy.
+	SandboxLocalProxyPath = LauncherDir + "/local_proxy.py"
 	// ShimDir holds the root-owned shim that starts the harness command
 	// through its launcher.
 	ShimDir = connector.SandboxLibDir + "/shims"
 )
+
+//go:embed local_proxy.py
+var localProxyScript []byte
 
 // egressEnvScript exports the egress proxy settings from
 // openshell.EnvEgressURL and openshell.EnvEgressBypass. It is POSIX sh (the
@@ -69,7 +77,7 @@ const (
 // carries, so every process started through it goes through the DefenseClaw
 // proxy; without one (the strict profile), or with a URL carrying anything
 // but URL characters, the caller's environment is left alone. NO_PROXY
-// defaults to the ingress host, which hooks reach directly.
+// defaults to the ingress host and local service addresses.
 //
 // With NODE_USE_ENV_PROXY=1, Node 22 (the base image's node, which runs
 // Codex's wrapper, Copilot's npm launcher and every node or npm command the
@@ -90,8 +98,17 @@ case "${` + openshell.EnvEgressURL + `:-}" in
   http://?*)
     HTTPS_PROXY="$` + openshell.EnvEgressURL + `"; HTTP_PROXY="$` + openshell.EnvEgressURL + `"
     https_proxy="$` + openshell.EnvEgressURL + `"; http_proxy="$` + openshell.EnvEgressURL + `"
+    if [ -r ` + SandboxLocalProxyPath + ` ] && [ -x /usr/bin/python3 ]; then
+      dc_local_proxy="$(/usr/bin/python3 -I ` + SandboxLocalProxyPath + ` --ensure)" || true
+      case "$dc_local_proxy" in
+        http://127.0.0.1:[0-9]*)
+          HTTPS_PROXY="$dc_local_proxy"; HTTP_PROXY="$dc_local_proxy"
+          https_proxy="$dc_local_proxy"; http_proxy="$dc_local_proxy" ;;
+      esac
+      unset dc_local_proxy
+    fi
     NODE_USE_ENV_PROXY=1; NODE_NO_WARNINGS="${NODE_NO_WARNINGS:-1}"
-    NO_PROXY="${` + openshell.EnvEgressBypass + `:-` + connector.SandboxIngressHost + `}"; no_proxy="$NO_PROXY"
+    NO_PROXY="${` + openshell.EnvEgressBypass + `:-` + connector.SandboxIngressHost + `,` + sandboxLoopbackNoProxy + `}"; no_proxy="$NO_PROXY"
     export HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NODE_NO_WARNINGS NO_PROXY no_proxy
     ;;
 esac
@@ -772,6 +789,7 @@ func (s *Spec) ShellFiles() []connector.SandboxFile {
 	return []connector.SandboxFile{
 		{Path: SandboxProfilePath, Mode: 0o644, Owner: connector.SandboxOwnerRoot, Data: []byte(s.profile())},
 		{Path: SandboxEnvPath, Mode: 0o755, Owner: connector.SandboxOwnerRoot, Data: []byte(sandboxEnvLauncher)},
+		{Path: SandboxLocalProxyPath, Mode: 0o644, Owner: connector.SandboxOwnerRoot, Data: localProxyScript},
 		{Path: s.ShimPath(), Mode: 0o755, Owner: connector.SandboxOwnerRoot, Data: []byte(s.shim())},
 		{Path: SupervisorPath, Mode: 0o755, Owner: connector.SandboxOwnerRoot, Data: []byte(supervisorScript)},
 	}

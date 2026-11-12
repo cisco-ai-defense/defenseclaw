@@ -60,6 +60,10 @@ func (s *scriptedMCPScanner) count() int {
 func newScriptedMCPHarness(t *testing.T) (*definitionChangeHarness, *scriptedMCPScanner) {
 	t.Helper()
 	h := newDefinitionChangeHarness(t, enrolledMCPServer(t.TempDir(), "1001", "."))
+	// A refused definition blocks in the strict tier and managed profiles;
+	// the default tier keeps it with a warning (GAP-0775,
+	// TestRefusedMCPServerIsKeptWithAWarningInTheDefaultTier).
+	h.w.cfg.Guardrail.RulePack = "strict"
 	scan := &scriptedMCPScanner{h: h}
 	h.w.scannerFactory = func(InstallEvent) scanner.Scanner { return scan }
 	if got := h.poll(); len(got) != 1 || got[0].Verdict != VerdictClean {

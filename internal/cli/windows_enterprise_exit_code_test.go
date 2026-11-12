@@ -13,8 +13,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -87,6 +89,9 @@ func TestWindowsEnterpriseFailureCodesAreInTheExitCodeTable(t *testing.T) {
 		"lifecycle_busy":                  enterprisestatus.WindowsExitBusy,
 		"hook_calls_running":              enterprisestatus.WindowsExitBusy,
 		"hook_in_use":                     enterprisestatus.WindowsExitBusy,
+		"codex_state_held":                enterprisestatus.WindowsExitBusy,
+		"codex_requirements_held":         enterprisestatus.WindowsExitBusy,
+		"codex_state_unsettled":           enterprisestatus.WindowsExitFailure,
 		"bundle_apply_failed":             enterprisestatus.WindowsExitBusy,
 		"invalid_arguments":               enterprisestatus.WindowsExitInvalidArgs,
 		"bundle_config_validation_failed": enterprisestatus.WindowsExitFailure,
@@ -97,6 +102,183 @@ func TestWindowsEnterpriseFailureCodesAreInTheExitCodeTable(t *testing.T) {
 		got := windowsEnterpriseFailureCodeFor(result)
 		if got != want || !slices.Contains(windowsLifecycleExitCodes, got) {
 			t.Fatalf("%s exits %d, want %d (one of %v)", code, got, want, windowsLifecycleExitCodes)
+		}
+	}
+}
+
+// GAP-0803: a rollback that a program held open without delete sharing stopped
+// ends the run with the held code even when the module wrapped the rollback
+// text inside the failure of the run, so the MDM retries it (exit 1618).
+func TestWindowsEnterpriseRollbackHeldCodeSurvivesTheWrappingFailureText(t *testing.T) {
+	holder := "codex_requirements_held: notepad.exe (process id 4242, EC2AMAZ-X\\Administrator) has C:\\ProgramData\\OpenAI\\Codex\\requirements.toml, the Codex machine requirements, open without delete sharing, so the rollback could not put it back"
+	for name, message := range map[string]string{
+		"leading":                       holder,
+		"upgrade":                       "Upgrade failed (Codex requirements reconcile failed: boom); rollback also failed and protected recovery state was retained: managed lifecycle/hook restore failed: " + holder,
+		"ensure, rollback met a holder": "codex_requirements_held: notepad.exe (process id 4242, EC2AMAZ-X\\Administrator) has C:\\ProgramData\\OpenAI\\Codex\\requirements.toml, the Codex machine requirements, open without delete sharing, so the rollback could not put it back; the rollback left that file as it is and put everything else back, and the transaction is still pending. Next step: close that program, then run & '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair; it finishes the rollback (an MDM retries exit 1618 on its own). This ensure had failed first: Codex requirements reconcile failed: boom",
+		"hook, rollback met a holder":   "hook_in_use: a program that Windows did not name (it may run as SYSTEM, so no process id is available) has C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe, the installed hook, open without delete sharing, so the rollback could not put the previous hook back; the rollback left the replacement hook in place and put everything else back, and the transaction is still pending. Next step: close that program, then run /repair",
+		"state variant":                 "codex_state_held: a program (process id 7) has C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state, the Codex managed-hooks state, open without delete sharing, so the rollback could not put it back",
+	} {
+		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
+		if code != "codex_requirements_held" && code != "codex_state_held" && code != "hook_in_use" {
+			t.Fatalf("%s: code = %q, want a held code", name, code)
+		}
+		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "9.9.9")
+		result.AddError(code, message)
+		if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitBusy {
+			t.Fatalf("%s: exit = %d, want %d", name, got, enterprisestatus.WindowsExitBusy)
+		}
+	}
+}
+
+// GAP-0877 review S2: a Codex writer that never settles ends the run with the
+// named code even when the module wrapped it inside the failure and rollback
+// text of an install, repair, ensure or upgrade, and the run still exits 1603
+// (a retry of the same delivery does not get past a stopped writer).
+func TestWindowsEnterpriseUnsettledCodexStateCodeSurvivesTheWrappingFailureText(t *testing.T) {
+	unsettled := "codex_state_unsettled: the Codex writer transaction counter next to C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state stayed at 3 (odd: a transaction is open) for 30 seconds, so the Codex managed-hooks state could not be judged and this run stopped"
+	for name, message := range map[string]string{
+		"leading": unsettled,
+		"upgrade": "Upgrade failed (" + unsettled + "); rolled back to the installed release",
+		"repair":  "Repair failed: " + unsettled + "; the transaction was rolled back",
+	} {
+		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
+		if code != "codex_state_unsettled" {
+			t.Fatalf("%s: code = %q, want codex_state_unsettled", name, code)
+		}
+		if got := windowsEnterpriseStderrCode([]byte(message)); !strings.Contains(got, "codex_state_unsettled:") {
+			t.Fatalf("%s: stderr code = %q, want the unsettled refusal", name, got)
+		}
+		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "9.9.9")
+		result.AddError(code, message)
+		if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitFailure {
+			t.Fatalf("%s: exit = %d, want %d", name, got, enterprisestatus.WindowsExitFailure)
+		}
+	}
+}
+
+// GAP-0999: a Codex writer that never settles refuses the run (1603). When the
+// rollback met the same writer, left the Codex state as it is and ended with
+// the transaction pending and the restored services running, the run exits
+// with the held-rollback convention (1618, the MDM retries and /repair
+// finishes it); a refusal whose rollback was clean stays 1603.
+func TestWindowsEnterpriseUnsettledCodexStateWithAPendingRollbackIsRetryable(t *testing.T) {
+	deferred := "codex_state_unsettled: the Codex writer transaction counter next to C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state stayed at 19 (odd: a transaction is open; the writer is pwsh.exe (pid 4242, account NT AUTHORITY\\SYSTEM)), so the rollback could not judge the Codex managed-hooks state; the rollback left that state as it is and has not proven the rest of what it puts back, so the transaction is still pending and /verify says what is not covered. Next step: once no Codex writer is running, run /repair; it finishes the rollback (an MDM retries exit 1618 on its own)"
+	for name, test := range map[string]struct {
+		message string
+		pending bool
+		want    int
+	}{
+		"rollback left pending":                 {deferred, true, enterprisestatus.WindowsExitBusy},
+		"wrapped in the failure":                {"Ensure failed: " + deferred, true, enterprisestatus.WindowsExitBusy},
+		"clean rollback":                        {strings.Replace(deferred, "the rollback left that state as it is and has not proven the rest of what it puts back, so the transaction is still pending and /verify says what is not covered", "this run stopped", 1), false, enterprisestatus.WindowsExitFailure},
+		"refusal without a pending transaction": {"codex_state_unsettled: x", false, enterprisestatus.WindowsExitFailure},
+		// The forward run was refused for the writer, then its rollback failed for
+		// another reason and left the transaction pending (services may be
+		// stopped): that is not the rollback's deferral, so it stays 1603.
+		"forward unsettled, rollback failed otherwise": {"codex_state_unsettled: the Codex writer transaction counter next to C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state stayed at 3 (odd: a transaction is open) for 30 seconds (the writer is writer.exe (pid 4242)), so the Codex managed-hooks state could not be judged and this run stopped (an install, repair, ensure or upgrade that had started is rolled back, an upgrade to the release it came from; a verify changes nothing). Next step: run Setup /repair again. The rollback then failed: restored deployment retained an Enumerator absent from its authenticated transaction preimage", true, enterprisestatus.WindowsExitFailure},
+	} {
+		code := windowsEnterpriseMessageCode(test.message, "lifecycle_error")
+		if code != "codex_state_unsettled" {
+			t.Fatalf("%s: code = %q, want codex_state_unsettled", name, code)
+		}
+		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "9.9.9")
+		result.TransactionPending = test.pending
+		result.AddError(code, test.message)
+		got := windowsEnterpriseFailureCodeFor(result)
+		if got != test.want || !slices.Contains(windowsLifecycleExitCodes, got) {
+			t.Fatalf("%s: exit = %d, want %d (one of %v)", name, got, test.want, windowsLifecycleExitCodes)
+		}
+	}
+}
+
+// GAP-0999: the module puts the code in front of the rollback's deferral, like
+// the two Codex holds, so the result does not print it twice.
+func TestWindowsEnterpriseUnsettledDeferralDoesNotRepeatItsCode(t *testing.T) {
+	message := "codex_state_unsettled: the Codex writer transaction counter next to X stayed at 3, so the rollback could not judge the Codex managed-hooks state; the rollback left that state as it is"
+	got := windowsEnterpriseTrimHeldCodePrefix("codex_state_unsettled", message)
+	if strings.HasPrefix(got, "codex_state_unsettled:") || !strings.HasPrefix(got, "the Codex writer transaction counter") {
+		t.Fatalf("trimmed = %q", got)
+	}
+	messages := []enterprisestatus.Message{{Code: "codex_state_unsettled", Message: got}}
+	if !windowsEnterpriseUnsettledRollbackDeferred(messages) {
+		t.Fatal("the trimmed deferral is no longer recognised as the rollback's own")
+	}
+	if windowsEnterpriseUnsettledRollbackDeferred([]enterprisestatus.Message{{Code: "codex_state_unsettled", Message: "this run stopped"}}) {
+		t.Fatal("a plain refusal was read as the rollback's deferral")
+	}
+}
+
+// GAP-1042: an uninstall that already committed and then met a file a program
+// holds open (the Codex writer lock, requirements.toml, the hook, a guardian
+// state file) ends with the module's held code at the front, exit 1618 (the
+// MDM retries and the same uninstall finishes the clean-up), with no pending
+// transaction and no FORCE in the next step.
+func TestWindowsEnterpriseCommittedUninstallHeldFileIsRetryable(t *testing.T) {
+	tail := ". The uninstall is already committed (the services are removed and nothing is rolled back); this step of its clean-up did not finish. Next step: close that program, then run & '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall again; it finishes the clean-up (an MDM retries exit 1618 on its own)"
+	for code, message := range map[string]string{
+		"codex_state_held":        "codex_state_held: pwsh.exe (process id 4242, NT AUTHORITY\\SYSTEM) has C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.writer.lock, the Codex managed-hooks writer lock, open without delete sharing, so Setup could not remove it" + tail,
+		"codex_requirements_held": "codex_requirements_held: notepad.exe (process id 7) has C:\\ProgramData\\OpenAI\\Codex\\requirements.toml, the Codex machine requirements, open without delete sharing, so Setup could not remove or change it" + tail,
+		"hook_in_use":             "hook_in_use: a program that Windows did not name (it may run as SYSTEM, so no process id is available) has C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe, the installed hook, open without delete sharing, so Setup could not remove it" + tail,
+		"guardian_state_held":     "guardian_state_held: backup.exe (process id 9) has C:\\ProgramData\\Cisco\\DefenseClaw\\runtime\\hook_guardian_state.json, the hook guardian state file, open without delete sharing, so Setup could not remove it" + tail,
+	} {
+		if got := windowsEnterpriseMessageCode(message, "lifecycle_error"); got != code {
+			t.Fatalf("%s: code = %q", code, got)
+		}
+		result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "9.9.9")
+		result.AddError(code, windowsEnterpriseTrimHeldCodePrefix(code, message))
+		if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitBusy {
+			t.Fatalf("%s: exit = %d, want %d", code, got, enterprisestatus.WindowsExitBusy)
+		}
+		if strings.HasPrefix(result.Errors[0].Message, code+":") || strings.Contains(result.Errors[0].Message, "FORCE") {
+			t.Fatalf("%s: message = %q", code, result.Errors[0].Message)
+		}
+		if next := windowsEnterpriseHeldRollbackNextStep(false, nil); next != "" {
+			t.Fatalf("%s: a committed uninstall with no pending transaction got a next step %q", code, next)
+		}
+	}
+}
+
+// GAP-1063: an uninstall that ran next to the recovery Setup arms behind the
+// run before it finds no deployment record, and the module names each
+// account folder it cannot attribute. With nothing of the deployment left that
+// is the end state of an uninstall that found nothing to remove: a warning that
+// names the folders, exit 0. While some deployment state remains it is still
+// an error.
+func TestWindowsEnterpriseUnattributedUserStateIsAWarningWhenNothingIsLeft(t *testing.T) {
+	previous := windowsEnterpriseStandaloneFootprint
+	t.Cleanup(func() { windowsEnterpriseStandaloneFootprint = previous })
+	entry := `EC2AMAZ-X\Administrator (S-1-5-21-1-2-3-500): C:\Users\Administrator\.defenseclaw: ` + windowsEnterpriseUnattributedUserStateReason
+	raw, err := json.Marshal([]string{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := &windowsEnterpriseInstallerReport{UserStateRemaining: raw}
+	for name, test := range map[string]struct {
+		present bool
+		err     error
+		code    string
+		warning bool
+	}{
+		"nothing left":             {false, nil, "", true},
+		"deployment state remains": {true, nil, "per_user_state_remaining", false},
+		"footprint cannot be read": {false, errors.New("scm"), "per_user_state_remaining", false},
+	} {
+		windowsEnterpriseStandaloneFootprint = func() (bool, error) { return test.present, test.err }
+		result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "9.9.9")
+		addWindowsEnterpriseUserStateWarning(result, report)
+		if test.warning {
+			if len(result.Errors) != 0 || len(result.Warnings) != 1 || result.Warnings[0].Code != "per_user_state_remaining" ||
+				!strings.Contains(result.Warnings[0].Message, `C:\Users\Administrator\.defenseclaw`) ||
+				strings.Contains(result.Warnings[0].Message, windowsEnterpriseUnattributedUserStateReason) {
+				t.Fatalf("%s: errors=%v warnings=%v, want one warning naming the folder", name, result.Errors, result.Warnings)
+			}
+			if exit := result.Finish("windows", enterprisestatus.WindowsExitFailure); exit != 0 {
+				t.Fatalf("%s: exit = %d, want 0", name, exit)
+			}
+			continue
+		}
+		if len(result.Errors) != 1 || result.Errors[0].Code != test.code {
+			t.Fatalf("%s: errors=%v, want the per_user_state_remaining error", name, result.Errors)
 		}
 	}
 }

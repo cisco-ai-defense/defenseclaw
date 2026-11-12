@@ -49,9 +49,16 @@ func pathForDataDir(dataDir string) string {
 	return statePath
 }
 
-func readStatePathTrusted(path string) bool {
+var readStateReparseCheck = winpath.RejectReparseChain
+
+func readStatePathTrusted(path string) (bool, error) {
 	// The signal is replaced atomically during normal Guardian transitions.
 	// Check again at each poll so a later reparse replacement stays unknown.
-	return os.Getenv(managed.WindowsServiceAccountEnv) == "" ||
-		winpath.RejectReparseChain(path) == nil
+	if os.Getenv(managed.WindowsServiceAccountEnv) == "" {
+		return true, nil
+	}
+	if err := readStateReparseCheck(path); err != nil {
+		return false, err
+	}
+	return true, nil
 }

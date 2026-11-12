@@ -501,11 +501,17 @@ class TrustedPathsCliTests(unittest.TestCase):
 
                 # Model a new Windows process whose HOME/profile-derived
                 # defaults now include the path the operator already saved.
+                # "default" is the list setup itself admits, so both the setup
+                # list and the discovery list carry the path.
                 with (
                     patch.object(ad, "_TRUSTED_BIN_PREFIXES_DEFAULT", (resolved,)),
                     patch.object(
                         ad,
                         "_builtin_trusted_bin_prefixes",
+                        return_value=(resolved,),
+                    ),
+                    patch(
+                        "defenseclaw.agent_selection._builtin_setup_trusted_prefixes",
                         return_value=(resolved,),
                     ),
                 ):
@@ -557,6 +563,40 @@ class TrustedPathsCliTests(unittest.TestCase):
                 resolved,
                 body.get("ai_discovery", {}).get("trusted_binary_prefixes", []),
             )
+
+    def test_discovery_only_default_is_labelled_discovery_default(self):
+        # A folder only passive discovery uses is not one setup admits, so it
+        # is listed as a non-removable "discovery default", not as "default".
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            only_discovery = os.path.realpath(os.path.join(tmp, "discovery-only"))
+            os.makedirs(only_discovery)
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
+                with (
+                    patch.object(
+                        ad,
+                        "_builtin_trusted_bin_prefixes",
+                        return_value=(only_discovery,),
+                    ),
+                    patch(
+                        "defenseclaw.agent_selection._builtin_setup_trusted_prefixes",
+                        return_value=(),
+                    ),
+                ):
+                    listing = self.runner.invoke(
+                        cmd_setup.trusted_paths,
+                        ["list", "--json"],
+                        obj=app,
+                    )
+            self.assertEqual(listing.exit_code, 0, msg=listing.output)
+            rows = [
+                row
+                for row in json.loads(listing.output)
+                if row["resolved"] == only_discovery
+            ]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["source"], "discovery default")
+            self.assertFalse(rows[0]["removable"])
 
     def test_remove_operator_added(self):
         with tempfile.TemporaryDirectory() as tmp:

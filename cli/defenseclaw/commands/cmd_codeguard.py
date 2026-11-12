@@ -24,6 +24,7 @@ import shlex
 import click
 
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.winquote import powershell_command_line
 
 
 @click.group()
@@ -221,7 +222,7 @@ def _format_code_scan_command(executable: str) -> str:
     argv = (executable, "scan", "code", "<path to scan>")
     if os.name != "nt":
         return shlex.join(argv)
-    return "& " + " ".join(_powershell_quote(arg) for arg in argv)
+    return powershell_command_line(*argv)
 
 
 def _path_gateway_is(executable: str) -> bool:
@@ -234,11 +235,6 @@ def _path_gateway_is(executable: str) -> bool:
         return os.path.normcase(os.path.realpath(found)) == os.path.normcase(os.path.realpath(executable))
     except (OSError, ValueError):
         return False
-
-
-def _powershell_quote(value: str) -> str:
-    """Single-quote a fixed PowerShell argument without interpolation."""
-    return "'" + value.replace("'", "''") + "'"
 
 
 def _is_codeguard_install_error(status: str) -> bool:

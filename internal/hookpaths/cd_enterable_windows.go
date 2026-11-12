@@ -6,8 +6,6 @@
 package hookpaths
 
 import (
-	"os"
-
 	"golang.org/x/sys/windows"
 )
 
@@ -19,7 +17,7 @@ const fileTraverse = 0x0020
 // directory for traverse and synchronize with backup semantics, so the
 // same open is the check (rel-1-0-6:GAP-0320 review 5 and 6).
 func directoryEnterable(path string) bool {
-	info, err := os.Stat(path)
+	info, err := pathStat(path)
 	if err != nil || !info.IsDir() {
 		return false
 	}

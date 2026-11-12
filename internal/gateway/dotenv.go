@@ -17,9 +17,25 @@
 package gateway
 
 import (
+	"fmt"
 	"os"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
+
+// checkDotEnvSize refuses a new .env of size bytes that is over the one limit
+// every dotenv reader enforces (safefile.MaxDotEnvBytes). Every writer builds the
+// complete file first and calls this before publishing, so a refusal changes
+// nothing on disk and names the cause.
+func checkDotEnvSize(path string, size int) error {
+	if size > safefile.MaxDotEnvBytes {
+		return fmt.Errorf("%s would be %d bytes, over the %d-byte limit every reader accepts; it was left unchanged",
+			path, size, safefile.MaxDotEnvBytes)
+	}
+	return nil
+}
 
 // loadDotEnv reads a KEY=VALUE file (one per line).  Blank lines and
 // lines starting with # are ignored.  Values may be optionally quoted.
@@ -31,6 +47,8 @@ func loadDotEnv(path string) (map[string]string, error) {
 		return nil, err
 	}
 	out := make(map[string]string)
+	// An adopted gateway token copy never shadows the one the operator saved.
+	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -45,7 +63,7 @@ func loadDotEnv(path string) (map[string]string, error) {
 		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
 			v = v[1 : len(v)-1]
 		}
-		if k != "" {
+		if k != "" && !shadowed.Has(k) {
 			out[k] = v
 		}
 	}

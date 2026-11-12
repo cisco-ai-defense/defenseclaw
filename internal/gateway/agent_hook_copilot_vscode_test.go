@@ -24,11 +24,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // TestCopilotVSCodeLocalHookDialect drives the VS Code Local harness
@@ -132,15 +137,14 @@ func TestCopilotCLIHookFileRunByVSCodeLocalHarness(t *testing.T) {
 	}
 }
 
-// The VS Code Local harness can run a per-user Copilot CLI hook file, but
-// that file remains bound to the CLI route. Its Local-shaped body is denied
-// even when the command text itself would be benign.
+// Strict policy retains the CLI registration's exact-schema refusal.
 func TestCopilotCLIHookFileLocalPayloadFromVSCode(t *testing.T) {
 	installSandboxMarkerRules(t)
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "copilot"
+	cfg.Guardrail.RulePack = "strict"
 	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 	handler := http.HandlerFunc(api.handleAgentHook("copilot"))
 
@@ -177,6 +181,182 @@ func TestCopilotCLIHookFileLocalPayloadFromVSCode(t *testing.T) {
 	}
 }
 
+func TestGAP0691PerUserCopilotCLIRegistrationJudgesLocalToolCalls(t *testing.T) {
+	installSandboxMarkerRules(t)
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "copilot"
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	seq := 0
+	post := func(name string, input map[string]any) string {
+		t.Helper()
+		seq++
+		id := "g691-" + name + "-" + strconv.Itoa(seq)
+		body, err := json.Marshal(map[string]any{
+			"hook_event_name": "PreToolUse", "session_id": id, "tool_use_id": id,
+			"cwd": t.TempDir(), "tool_name": name, "tool_input": input,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
+		w := httptest.NewRecorder()
+		api.handleAgentHook("copilot").ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+	if body := post("run_in_terminal", map[string]any{"command": "echo hello"}); !strings.Contains(body, `"action":"allow"`) || strings.Contains(body, hookToolCallUnparsedRuleID) {
+		t.Fatalf("ordinary terminal call: %s", body)
+	}
+	if body := post("create_file", map[string]any{"filePath": t.TempDir() + "/notes.txt", "content": "hello"}); !strings.Contains(body, `"action":"allow"`) || strings.Contains(body, hookToolCallUnparsedRuleID) {
+		t.Fatalf("ordinary project file: %s", body)
+	}
+	if body := post("run_in_terminal", map[string]any{"command": "echo DCE2E-BLOCK-MARKER"}); !strings.Contains(body, `"action":"block"`) || strings.Contains(body, hookToolCallUnparsedRuleID) ||
+		!strings.Contains(body, `"E2E-SANDBOX-MARKER"`) || strings.Count(body, `"permissionDecision":"deny"`) < 2 {
+		t.Fatalf("protected terminal call: %s", body)
+	}
+	if body := post("create_file", map[string]any{"filePath": "/etc/shadow", "content": "example"}); !strings.Contains(body, `"action":"block"`) || strings.Contains(body, hookToolCallUnparsedRuleID) ||
+		!strings.Contains(body, `"PATH-ETC-SHADOW"`) {
+		t.Fatalf("protected file call: %s", body)
+	}
+}
+
+// sharedLocalProtectedTarget returns a protected file that exists on this OS,
+// outside the project, and the rule that names it once a project link to it is
+// resolved. Where the system /etc/shadow exists under that literal name (Linux)
+// it is the target. macOS has no /etc/shadow, and /etc there is a link to
+// /private/etc, so a link to a name below /etc resolves to a /private/etc
+// spelling the exact system-file rule does not name; the fixture is then a real
+// credential file (a .netrc in a user-home-shaped directory of its own), which
+// the same path rules protect on every OS.
+func sharedLocalProtectedTarget(t *testing.T) (target, rule string) {
+	t.Helper()
+	if physical, err := filepath.EvalSymlinks("/etc/shadow"); err == nil && physical == "/etc/shadow" {
+		return "/etc/shadow", "PATH-ETC-SHADOW"
+	}
+	home := filepath.Join(t.TempDir(), "Users", "fixture")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target = filepath.Join(home, ".netrc")
+	if err := os.WriteFile(target, []byte("machine example.invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return target, "PATH-NETRC"
+}
+
+func TestGAP0691SharedLocalFileTargetsAndEnvelope(t *testing.T) {
+	installSandboxMarkerRules(t)
+	store, logger := testStoreAndLogger(t)
+	project := t.TempDir()
+	ordinary := filepath.Join(project, "notes.txt")
+	if err := os.WriteFile(ordinary, []byte("notes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(project, "linked.txt")
+	protectedTarget, linkedRule := sharedLocalProtectedTarget(t)
+	if err := os.Symlink(protectedTarget, linked); err != nil {
+		t.Fatal(err)
+	}
+	ordinaryLink := filepath.Join(project, "ordinary-link.txt")
+	if err := os.Symlink(ordinary, ordinaryLink); err != nil {
+		t.Fatal(err)
+	}
+	type call struct {
+		name, tool string
+		input      any
+		cliEvent   bool
+		protected  bool
+	}
+	calls := []call{
+		{"ordinary create", "create_file", map[string]any{"filePath": ordinary, "content": "notes"}, false, false},
+		{"ordinary read", "read_file", map[string]any{"filePath": ordinary}, false, false},
+		{"ordinary linked create", "create_file", map[string]any{"filePath": ordinaryLink, "content": "notes"}, false, false},
+		{"ordinary linked read", "read_file", map[string]any{"filePath": ordinaryLink}, false, false},
+		{"direct read", "read_file", map[string]any{"filePath": "/etc/shadow"}, false, true},
+		{"linked create", "create_file", map[string]any{"filePath": linked, "content": "notes"}, false, true},
+		{"linked replace", "replace_string_in_file", map[string]any{"filePath": linked, "oldString": "a", "newString": "b"}, false, true},
+		{"linked insert", "insert_edit_into_file", map[string]any{"filePath": linked, "code": "b"}, false, true},
+		{"linked read", "read_file", map[string]any{"filePath": linked}, false, true},
+		{"linked CLI write", "Write", map[string]any{"path": linked, "file_text": "notes"}, false, true},
+		{"linked apply_patch", "apply_patch", "*** Begin Patch\n*** Update File: " + linked + "\n@@\n-a\n+b\n*** End Patch", false, true},
+		{"ordinary apply_patch", "apply_patch", "*** Begin Patch\n*** Update File: " + ordinary + "\n@@\n-a\n+b\n*** End Patch", false, false},
+		{"ordinary linked apply_patch", "apply_patch", "*** Begin Patch\n*** Update File: " + ordinaryLink + "\n@@\n-a\n+b\n*** End Patch", false, false},
+		{"linked Edit patch text", "Edit", "*** Begin Patch\n*** Update File: " + linked + "\n@@\n-a\n+b\n*** End Patch", false, true},
+		{"ordinary Edit patch text", "Edit", "*** Begin Patch\n*** Update File: " + ordinaryLink + "\n@@\n-a\n+b\n*** End Patch", false, false},
+		{"linked write_file", "write_file", map[string]any{"path": linked, "content": "notes"}, false, true},
+		{"ordinary linked write_file", "write_file", map[string]any{"path": ordinaryLink, "content": "notes"}, false, false},
+		{"linked append_file", "append_file", map[string]any{"path": linked, "content": "notes"}, false, true},
+		{"ordinary linked append_file", "append_file", map[string]any{"path": ordinaryLink, "content": "notes"}, false, false},
+		{"direct write_file", "write_file", map[string]any{"path": "/etc/shadow", "content": "notes"}, false, true},
+		{"mixed event field", "run_in_terminal", map[string]any{"command": "echo hello"}, true, true},
+	}
+	for _, tier := range []string{"implicit", "default", "permissive", "strict"} {
+		t.Run(tier, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "copilot"
+			if tier != "implicit" {
+				cfg.Guardrail.RulePack = tier
+			}
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+			for index, tc := range calls {
+				t.Run(tc.name, func(t *testing.T) {
+					id := tier + "-" + strconv.Itoa(index)
+					body := map[string]any{
+						"hook_event_name": "PreToolUse", "session_id": id,
+						"tool_use_id": id, "cwd": project,
+						"tool_name": tc.tool, "tool_input": tc.input,
+					}
+					if tc.cliEvent {
+						body["hookName"] = "preToolUse"
+					}
+					raw, err := json.Marshal(body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					evidence := hookpaths.ResolveConnector("copilot", "", "preToolUse", raw)
+					req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(string(raw)))
+					req.Header.Set("Content-Type", "application/json")
+					req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
+					req.Header.Set(hookpaths.Header, evidence)
+					w := httptest.NewRecorder()
+					api.handleAgentHook("copilot").ServeHTTP(w, req)
+					var answer struct {
+						Action  string   `json:"action"`
+						RuleIDs []string `json:"rule_ids"`
+					}
+					if err := json.Unmarshal(w.Body.Bytes(), &answer); err != nil || w.Code != http.StatusOK {
+						t.Fatalf("status=%d err=%v body=%s", w.Code, err, w.Body.String())
+					}
+					want := "allow"
+					if tc.protected || tier == "strict" {
+						want = "block"
+					}
+					if answer.Action != want {
+						t.Fatalf("action=%s, want %s; rules=%v", answer.Action, want, answer.RuleIDs)
+					}
+					wantRule := "PATH-ETC-SHADOW"
+					if strings.HasPrefix(tc.name, "linked") {
+						wantRule = linkedRule
+					}
+					if tc.protected && !tc.cliEvent && tier != "strict" && !slices.Contains(answer.RuleIDs, wantRule) {
+						t.Fatalf("protected file rule %s absent: %v", wantRule, answer.RuleIDs)
+					}
+					if tc.cliEvent && !slices.Contains(answer.RuleIDs, hookToolCallUnparsedRuleID) {
+						t.Fatalf("mixed body was not refused: %v", answer.RuleIDs)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestGAP0481MappedLocalEventRejectsCLIFields(t *testing.T) {
 	installSandboxMarkerRules(t)
 	store, logger := testStoreAndLogger(t)
@@ -191,7 +371,8 @@ func TestGAP0481MappedLocalEventRejectsCLIFields(t *testing.T) {
 	req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
 	w := httptest.NewRecorder()
 	api.handleAgentHook("copilot")(w, req)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"permissionDecision":"deny"`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"permissionDecision":"deny"`) ||
+		!strings.Contains(w.Body.String(), hookToolCallUnparsedRuleID) {
 		t.Fatalf("mapped Local call changed route: status=%d body=%s", w.Code, w.Body.String())
 	}
 }

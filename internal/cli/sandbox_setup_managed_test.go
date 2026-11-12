@@ -41,7 +41,9 @@ func TestSandboxSetupAnswersOnAManagedComputer(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	command.SetOut(&stdout)
 	command.SetErr(&stderr)
-	command.SetArgs(nil)
+	// An empty list, not nil: nil makes cobra read the test binary's own
+	// command line (GAP-0079).
+	command.SetArgs([]string{})
 	err := command.Execute()
 	var coded *exitCodeError
 	if !errors.As(err, &coded) || coded.ExitCode() != 3 {

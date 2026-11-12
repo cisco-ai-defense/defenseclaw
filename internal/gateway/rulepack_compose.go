@@ -25,11 +25,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -127,8 +129,7 @@ func loadGlobalRulePack(cache *guardrail.RulePackCache, cfg *config.Config, scop
 // pack, whose absence stays a load error.
 func bundledDefaultRulePack(cfg *config.Config, ref config.RulePackRef) bool {
 	if ref.Name != "" {
-		_, custom := cfg.Guardrail.CustomPacks[ref.Name]
-		return ref.Name == "default" && !custom
+		return cfg.BuiltinRulePackFor(ref.Name) == "default"
 	}
 	dir := filepath.Clean(strings.TrimSpace(ref.Dir))
 	for _, root := range []string{
@@ -147,9 +148,28 @@ func loadConnectorRulePack(cache *guardrail.RulePackCache, cfg *config.Config, c
 	return loadScopedRulePack(cache, cfg, connectorRulePackScope(cfg, connector), scope)
 }
 
+// rulePackValidateCommand is the `rulepack validate` an operator runs to print
+// a pack's pin. On a standalone managed install the gateway is not on the PATH,
+// so it is named by its path (cowork-1-0-8 GAP-0081; Windows by the managed
+// renderer, GAP-0076); a per-user install has it on the PATH. Every other
+// profile, Secure Client included, keeps the text of release 1.0.5 (review
+// round 4, S1).
+func rulePackValidateCommand(cfg *config.Config, goos string) string {
+	if cfg.EnterpriseProfile() != managed.ProfileStandalone {
+		return "defenseclaw-gateway rulepack validate --dir <pack dir>"
+	}
+	if goos == "windows" {
+		return managed.WindowsGatewayCommand("rulepack", "validate", "--dir", "<pack-dir>")
+	}
+	return managed.StandaloneGatewayPath(goos) + " rulepack validate --dir <pack dir>"
+}
+
 func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s rulePackScope, scope string) (*guardrail.RulePack, error) {
 	if s.ref.Name != "" && s.dir == "" && !cfg.EmbeddedRulePack(s.ref) {
 		if config.IsBuiltinRulePack(s.ref.Name) {
+			if advice := cfg.WindowsBuiltinRulePackAdvice(s.ref.Name); advice != "" {
+				return nil, fmt.Errorf("%s rule pack %q: policy_dir is not set; %s", scope, s.ref.Name, advice)
+			}
 			return nil, fmt.Errorf("%s rule pack %q: policy_dir is not set", scope, s.ref.Name)
 		}
 		return nil, fmt.Errorf("%s rule pack %q is neither built in (%s) nor a guardrail.custom_packs entry",
@@ -162,10 +182,19 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 		// Secure Client ignored malformed optional manifests before v9.
 		base, err = guardrail.LoadRulePackForSecureClient(s.dir)
 	}
+	if err != nil && s.ref.Name != "" && errors.As(err, &packErr) && packErr.Code == "directory_not_found" {
+		// A built-in pack folder that is not there: name the property to fix.
+		if advice := cfg.WindowsBuiltinRulePackAdvice(s.ref.Name); advice != "" && strings.TrimSpace(cfg.PolicyDir) != "" {
+			if _, isCustom := cfg.UsableCustomRulePack(s.ref.Name); !isCustom {
+				err = fmt.Errorf("%w; policy_dir is %s and it has no guardrail\\%s folder: %s", err, cfg.PolicyDir, s.ref.Name, advice)
+			}
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
-	if custom, ok := cfg.Guardrail.CustomPacks[s.ref.Name]; ok && s.ref.Name != "" {
+	custom, isCustom := cfg.UsableCustomRulePack(s.ref.Name)
+	if isCustom {
 		// The pin covers the pack's own files (FilesDigest), not the
 		// embedded defaults it inherits for missing components.
 		got := "sha256:" + base.FilesDigest()
@@ -177,37 +206,36 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 				hint = fmt.Sprintf("; on this install: defenseclaw config set guardrail.custom_packs.%s.digest %s", s.ref.Name, got)
 			}
 			return nil, fmt.Errorf("%s rule pack %q: digest %s does not match guardrail.custom_packs.%s.digest; "+
-				"review the pack, then pin the digest above in that key (`defenseclaw-gateway rulepack validate --dir <pack dir>` "+
+				"review the pack, then pin the digest above in that key (`%s` "+
 				"prints it on the \"custom_packs pin\" line; a pin computed by a release before the digest covered only the pack's own files "+
 				"needs this one-time re-pin)%s",
-				scope, s.ref.Name, got, s.ref.Name, hint)
+				scope, s.ref.Name, got, s.ref.Name, rulePackValidateCommand(cfg, runtime.GOOS), hint)
 		}
 	}
 	// A read-only v8 load pins the original custom pack, then runs the same
 	// rebase as a committed migration in this generation. Keep the disk pin
 	// check above: an edited source pack still refuses the load.
-	if cfg.RuntimeV8RulePackRebase && s.ref.Name != "" {
-		if _, custom := cfg.Guardrail.CustomPacks[s.ref.Name]; custom {
-			base, err = guardrail.RebaseLoadedRulePack(s.dir, base)
-			if err != nil {
-				return nil, fmt.Errorf("%s rule pack %q: rebase the 0.8.x pack in memory: %w", scope, s.dir, err)
-			}
+	if cfg.RuntimeV8RulePackRebase && isCustom {
+		base, err = guardrail.RebaseLoadedRulePack(s.dir, base)
+		if err != nil {
+			return nil, fmt.Errorf("%s rule pack %q: rebase the 0.8.x pack in memory: %w", scope, s.dir, err)
 		}
 	}
-	if _, custom := cfg.Guardrail.CustomPacks[s.ref.Name]; custom && s.ref.Name != "" {
+	if isCustom {
 		// A custom pack the 0.8.x upgrade of 1.0.0 to 1.0.3 rebased carries
 		// no migrated_literal marks: its migration record names the rules.
 		base = guardrail.MarkMigratedLiteralRules(base, config.ExpressedRulePackRules(migrationConfigPath(cfg)))
 	}
-	notePackPosture(s.dir, guardrail.ReadPackPosture(s.dir))
-	if len(s.layers) == 0 {
-		return base, nil
+	if len(s.layers) != 0 {
+		base, err = guardrail.Compose(base, protectionPackSource, guardrailCustomizations(s.layers)...)
+		if err != nil {
+			return nil, fmt.Errorf("%s rule pack %q: %w", scope, s.dir, err)
+		}
 	}
-	composed, err := guardrail.Compose(base, protectionPackSource, guardrailCustomizations(s.layers)...)
-	if err != nil {
-		return nil, fmt.Errorf("%s rule pack %q: %w", scope, s.dir, err)
-	}
-	return composed, nil
+	// Resolve levels from the same loaded bytes whose digest was checked above.
+	// Reading the path again could observe a later manifest edit.
+	notePackPosture(s.dir, base.Posture())
+	return base, nil
 }
 
 // reportUnrebasedRulePacks raises an alert for each 0.8.x custom pack the
@@ -223,6 +251,26 @@ func (s *Sidecar) reportUnrebasedRulePacks(ctx context.Context) {
 		fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+failure)
 		_ = s.logger.LogActionCtxSeverity(ctx, string(audit.ActionUpgrade), "rule-pack",
 			"rule_pack_rebase=failed "+failure, "HIGH")
+	}
+}
+
+// reportBrokenCustomRulePacks warns at start of each guardrail.custom_packs
+// entry that fails config.CustomRulePackError, and status names the same
+// error. A selection of it loads its built-in fallback pack; a stale pin is
+// refused instead, until the pin is reviewed and corrected.
+func (s *Sidecar) reportBrokenCustomRulePacks(ctx context.Context) {
+	cfg := s.currentConfig()
+	if cfg == nil || s.logger == nil {
+		return
+	}
+	for _, problem := range cfg.CustomRulePackErrors() {
+		failure := problem.Error() + "; a setting that selects it loads its built-in pack"
+		if config.IsStalePinError(problem) {
+			failure = problem.Error() + "; the gateway refuses it until the pin matches the files"
+		}
+		fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+failure)
+		_ = s.logger.LogActionCtxSeverity(ctx, string(audit.ActionConfigUpdate), "rule-pack",
+			"custom_pack=invalid "+failure, "HIGH")
 	}
 }
 

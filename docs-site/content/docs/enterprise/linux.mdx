@@ -73,7 +73,7 @@ lists each):
 | Authorization ledger | `/var/lib/defenseclaw-hook-guardian`, with each user's latest AI Discovery scan in `ai-discovery/` | `root:defenseclaw`, `0750` |
 | Logs | `/var/log/defenseclaw`: empty unless a `jsonl` destination writes there. Services log to the journal ([Logs and events](/docs/enterprise/operations)) | `defenseclaw`, `0750` |
 | Hook socket | `/run/defenseclaw-hook/hook.sock` | Directory `defenseclaw`, `0755`. Socket `0666`: every user may connect, and the gateway authorizes each caller by uid |
-| Sandbox launcher | `/usr/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the `sandbox` commands | `root`, `0755` |
+| Sandbox launcher | `/usr/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the commands in [Managed command availability](/docs/enterprise/managed-commands) | `root`, `0755` |
 | Sandbox state | `/var/lib/defenseclaw/sandbox/`, and `/etc/defenseclaw/openshell/gateway.toml` when `enterprise.openshell` is set | `defenseclaw`, `0600` files; `root` |
 
 The gateway runs as the `defenseclaw` system account, created with
@@ -577,16 +577,18 @@ Nothing migrates a per-user install. Before you deploy, have each user run
 [Uninstall](/docs/get-started/download)). If a user set up Claude Cowork, they also remove the DefenseClaw plugin in Claude Desktop (**Customize > Plugins**, then the **...** menu on DefenseClaw, **Remove**); until then Cowork tool calls are blocked.
 
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
-device enforces: `defenseclaw config get`, `guardrail`, `status` and other
-per-user commands exit `3` and name it, and `doctor` reports the device as managed.
-That is the per-user CLI, where one is still on the user's `PATH`; the packaged
-`defenseclaw` refuses those commands with exit `2`.
+device enforces. An older per-user CLI on the user's `PATH` refuses per-user
+commands and exits `3`. The packaged managed `defenseclaw` launcher shows the
+account's own connectors with `status`, and offers sandbox and guardrail profile
+views; the full list is in [Managed command availability](/docs/enterprise/managed-commands). It refuses `doctor`, `alerts`, `tui` and per-user configuration commands
+with exit `2`, naming the installed administrator status, verify and audit
+export commands.
 
 A per-user gateway still running holds the managed port `127.0.0.1:18970` unless
 its user moved it. The install then stops before it changes anything with
 `api_port_held`, naming the process and the `kill` command. The package install
 completes, with the error in `last-package-result.json`. Stop that gateway or move
-it, then run `defenseclaw-gateway enterprise linux ensure --from-package`. A
+it, then run `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package`. A
 per-user gateway on another port keeps running; the install, `status` and `verify`
 name each such account with `per_user_gateway_running`.
 
@@ -613,9 +615,9 @@ Run these as root from `/opt/defenseclaw/bin`.
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment, its config, secrets and logs, most of its data and lifecycle state, and the `defenseclaw` account. Each user keeps `~/.defenseclaw`, and your policies in `/etc/defenseclaw/policies` stay. When an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay with the root-only records `/var/lib/defenseclaw-enterprise/openshell-state.kept.json` and `/var/lib/defenseclaw-enterprise/retained-state.json` and the marker `/var/lib/defenseclaw/.defenseclaw-retained`. They are root-owned while the service account is gone; the next `ensure` adopts them | `defenseclaw-gateway enterprise linux uninstall --json` |
-| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise linux uninstall --purge --json` |
-| Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise linux uninstall --keep-state --json` |
+| Stop and remove the deployment, its config, secrets and logs, most of its data and lifecycle state, and the `defenseclaw` account. Each user keeps `~/.defenseclaw`, and your policies in `/etc/defenseclaw/policies` stay. When an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay with the root-only records `/var/lib/defenseclaw-enterprise/openshell-state.kept.json` and `/var/lib/defenseclaw-enterprise/retained-state.json` and the marker `/var/lib/defenseclaw/.defenseclaw-retained`. They are root-owned while the service account is gone; the next `ensure` adopts them | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --json` |
+| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json` |
+| Keep the config, secrets, data and logs (and the account) for a reinstall | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --keep-state --json` |
 | Keep only the `defenseclaw` account | Add `--keep-service-account` |
 
 Uninstall removes each user's DefenseClaw hook registrations and DefenseClaw's own

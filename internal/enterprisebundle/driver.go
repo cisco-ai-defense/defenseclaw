@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // ErrConfirmationPrerequisiteMissing means an applied receipt cannot be
@@ -419,7 +420,7 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 	}
 	if !d.TransactionApplied(rc, installed, &policy) {
 		return State{}, d.failAfterRollback(p, installed, CodeNotConfirmed,
-			"the installed generation and gateway do not prove this bundle's transaction; run `defenseclaw enterprise windows ensure --profile standalone --bundle <bundle file>` to apply it again", rollback)
+			"the installed generation and gateway do not prove this bundle's transaction; run "+windowsEnsureCommand(true)+" to apply it again", rollback)
 	}
 	at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
 	if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
@@ -436,7 +437,7 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 		// against the gateway again. It is never failed or rolled back here
 		// (GAP-0485).
 		code := CodeStateInvalid
-		recovery := "run `defenseclaw enterprise windows ensure --profile standalone` to finish confirming it"
+		recovery := "run " + windowsEnsureCommand(false) + " to finish confirming it"
 		if diskFull(err) {
 			code = CodeDiskFull
 			recovery = "free space on that volume, then " + recovery
@@ -711,7 +712,7 @@ func (d *Driver) settleCommitted(installedConfig []byte, installed string, polic
 			}
 			// The run installed these bytes without a commit record: never
 			// confirmed, and not a last good config.
-			if err := d.Store.Fail(rc, CodeNotConfirmed, "the interrupted run installed this bundle's config without committing its transaction; run `defenseclaw enterprise windows ensure --profile standalone --bundle <bundle file>` to apply it again"); err != nil {
+			if err := d.Store.Fail(rc, CodeNotConfirmed, "the interrupted run installed this bundle's config without committing its transaction; run "+windowsEnsureCommand(true)+" to apply it again"); err != nil {
 				return completed, interrupted, pending, rollback, err
 			}
 			rollback = append(rollback, rc)
@@ -769,7 +770,7 @@ func (d *Driver) settleCommitted(installedConfig []byte, installed string, polic
 		if digestErr != nil {
 			code = CodeDigestMismatch
 		}
-		if err := d.Store.Fail(rc, code, "the interrupted run has no proven bundle apply and gateway confirmation; run `defenseclaw enterprise windows ensure --profile standalone --bundle <bundle file>` to apply it again"); err != nil {
+		if err := d.Store.Fail(rc, code, "the interrupted run has no proven bundle apply and gateway confirmation; run "+windowsEnsureCommand(true)+" to apply it again"); err != nil {
 			return completed, interrupted, pending, rollback, err
 		}
 		rollback = append(rollback, rc)
@@ -1012,6 +1013,19 @@ func joinCodes(codes []string) string {
 		out += c
 	}
 	return out
+}
+
+// windowsEnsureCommand is the ensure an administrator runs to settle a
+// bundle, as typed in an elevated PowerShell prompt, with a <bundle file> to
+// deliver it again when bundle is set. The Windows lifecycle is the only
+// caller of this driver, and Setup puts no DefenseClaw command on PATH
+// (cowork-1-0-8 GAP-0076).
+func windowsEnsureCommand(bundle bool) string {
+	args := []string{"enterprise", "windows", "ensure", "--profile", "standalone"}
+	if bundle {
+		args = append(args, "--bundle", "<bundle file>")
+	}
+	return "`" + managed.WindowsAdminCommand(args...) + "` from an elevated PowerShell prompt"
 }
 
 func sha256Hex(b []byte) string {

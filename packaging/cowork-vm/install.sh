@@ -8,9 +8,10 @@
 # this script as root, with no arguments, at every VM start (at most once per
 # boot). It installs the sensor out of the unpack folder and starts it in
 # detection-only mode:
-#   defenseclaw-sensor-helper  root, no network (AF_UNIX, AF_NETLINK, AF_PACKET
-#                              only): the process table, connections, kernel
-#                              events (cn_proc, fanotify) and DNS answers
+#   defenseclaw-sensor-helper  root bounded to six capabilities (HELPER_CAPS),
+#                              no network (AF_UNIX, AF_NETLINK, AF_PACKET only):
+#                              the process table, connections, kernel events
+#                              (cn_proc, fanotify) and DNS answers
 #   defenseclaw-gateway        the unprivileged system account defenseclaw-cowork,
 #                              brokering its runtime planes through the helper
 #                              and exporting OTLP to the collector
@@ -234,6 +235,11 @@ fi
 
 # What the running sensor was started with; /run is empty after every boot.
 helper_cmd=("$DEST/bin/defenseclaw-sensor-helper" --socket "$SOCKET" --service-account "$ACCOUNT" --home-dirs "$helper_homes")
+# GOMEMLIMIT holds the root helper's Go heap well inside its MemoryMax=300M:
+# near 200 MiB the runtime collects harder instead of letting garbage from a
+# large discovery read reach the cgroup limit (cowork-1-0-8 GAP-0008). Set on
+# the command, so the systemd unit and the start without systemd both get it.
+helper_cmd=(/usr/bin/env GOMEMLIMIT=200MiB "${helper_cmd[@]}")
 gw_env=("DEFENSECLAW_HOME=$CONF" "HOME=$DATA/home" "DEFENSECLAW_SENSOR_HELPER_SOCKET=$SOCKET")
 # install.sh itself is in it: the unit settings live here.
 self_digest="$(sha256sum < "$SRC/install.sh" | cut -d' ' -f1)"
@@ -279,6 +285,44 @@ gateway_pid() {
   if [ "$use_systemd" = 1 ]; then systemctl show -p MainPID --value "$UNIT" 2> /dev/null; else cat "$RUNDIR/gateway.pid" 2> /dev/null; fi
 }
 
+# The helper's whole privilege: root, held to these capabilities by its
+# bounding set (systemd CapabilityBoundingSet=, setpriv --bounding-set without
+# systemd), so it never holds CAP_DAC_OVERRIDE, CAP_SETUID, CAP_SYS_MODULE or
+# the rest. It stays uid 0 rather than a dedicated user with ambient
+# capabilities: the socket it publishes and the peer checks it makes are
+# root's. Each one was taken out in turn on the amd64 and arm64 stand-ins
+# (R109-COWORK-S3), and what is named here stopped working without it:
+#   CAP_NET_ADMIN        the cn_proc socket's 4 MiB receive buffer (SO_RCVBUFFORCE;
+#                        without it net.core.rmem_max caps it near 416 KiB and an
+#                        exec burst overflows it), and joining cn_proc at all on
+#                        kernels before 6.6 (Plane C)
+#   CAP_SYS_ADMIN        fanotify_init for the credential-path watch (Plane C)
+#   CAP_NET_RAW          the AF_PACKET socket of the DNS capture (Plane B)
+#   CAP_SYS_PTRACE       /proc/<pid>/fd and /proc/<pid>/exe of the session users'
+#                        processes: connection owners (Plane B), the image a
+#                        client exec runs and its digest (Plane C)
+#   CAP_DAC_READ_SEARCH  the session homes (0750) and other users' /proc/<pid>/fd
+#                        folders: the credential paths fanotify marks, the
+#                        installed client images it hashes, connection owners
+#   CAP_CHOWN            the socket and its folder go to the gateway's group
+# The bound limits what a faulty helper can do, not what a compromised one can:
+# uid 0 with CAP_SYS_PTRACE and CAP_SYS_ADMIN is still close to root. Under
+# systemd, HELPER_SYSCALLS also refuses the calls it never makes and an
+# attacker would want first: ptrace and the cross-process memory calls (its
+# /proc reads need only the ptrace access check, not the call) and mounts.
+# The no-systemd fallback cannot carry that filter.
+HELPER_CAPS="CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_CHOWN"
+HELPER_SYSCALLS="~ptrace process_vm_readv process_vm_writev @mount"
+helper_bset="-all"; for c in $HELPER_CAPS; do c="${c#CAP_}"; helper_bset="$helper_bset,+${c,,}"; done
+# Unit hardening both processes get. Each directive was checked on the stand-ins
+# with every plane up. Left out: MemoryDenyWriteExecute (bytedance/sonic, which
+# both binaries link, maps executable memory at start on amd64 and the process
+# panics) and ProtectProc/ProcSubset (the helper reads every process's /proc).
+HARDEN=(-p NoNewPrivileges=yes -p PrivateTmp=yes -p ProtectHome=read-only -p ProtectKernelModules=yes
+  -p ProtectKernelTunables=yes -p ProtectKernelLogs=yes -p ProtectControlGroups=yes -p ProtectClock=yes
+  -p ProtectHostname=yes -p LockPersonality=yes -p RestrictRealtime=yes -p RestrictSUIDSGID=yes
+  -p SystemCallArchitectures=native)
+
 # The Cowork sensor budget for both processes, enforced by the kernel.
 slice_unit() {
   printf '%s\n' "[Unit]" "Description=DefenseClaw Cowork VM sensor (1 CPU core, 800 MB)" "" "[Slice]" \
@@ -292,9 +336,11 @@ start_systemd() {
   fi
   systemd-run --quiet --unit="$HELPER_UNIT" --slice="$SLICE" \
     --description="DefenseClaw Cowork VM sensor helper (root, no network)" \
-    -p Restart=always -p RestartSec=2 -p NoNewPrivileges=yes \
-    -p RestrictAddressFamilies="AF_UNIX AF_NETLINK AF_PACKET" -p IPAddressDeny=any \
-    -p ProtectSystem=full -p PrivateTmp=yes -p MemoryMax=300M \
+    -p SyslogIdentifier=defenseclaw-sensor-helper \
+    -p Restart=always -p RestartSec=2 -p CapabilityBoundingSet="$HELPER_CAPS" -p AmbientCapabilities= \
+    -p RestrictAddressFamilies="AF_UNIX AF_NETLINK AF_PACKET" -p IPAddressDeny=any -p RestrictNamespaces=yes \
+    -p SystemCallFilter="$HELPER_SYSCALLS" \
+    -p ProtectSystem=full "${HARDEN[@]}" -p MemoryMax=300M \
     "${helper_cmd[@]}" > "$work/start.log" 2>&1 ||
     { tail -n 3 "$work/start.log"; fail "systemd could not start $HELPER_UNIT" 16; }
   for _ in $(seq 1 40); do [ -S "$SOCKET" ] && break; sleep 0.25; done
@@ -302,8 +348,8 @@ start_systemd() {
   for e in "${gw_env[@]}"; do envs+=(--setenv="$e"); done
   systemd-run --quiet --unit="$UNIT" --slice="$SLICE" \
     --description="DefenseClaw Cowork VM sensor (detection only)" -p User="$ACCOUNT" -p Group="$ACCOUNT" "${envs[@]}" \
-    -p Restart=always -p RestartSec=2 -p NoNewPrivileges=yes -p PrivateTmp=yes \
-    -p ProtectSystem=strict -p ReadWritePaths="$CONF $DATA" \
+    -p Restart=always -p RestartSec=2 -p CapabilityBoundingSet= -p AmbientCapabilities= \
+    -p ProtectSystem=strict -p ReadWritePaths="$CONF $DATA" "${HARDEN[@]}" -p RestrictNamespaces="user pid" \
     "$DEST/bin/defenseclaw-gateway" > "$work/start.log" 2>&1 ||
     { tail -n 3 "$work/start.log"; fail "systemd could not start $UNIT" 16; }
 }
@@ -325,7 +371,8 @@ start_detached() {
   # 0022; that is harmless, because the socket and every folder they create
   # get their modes from an explicit chmod.
   rm -f "$RUNDIR/helper.log" "$RUNDIR/gateway.log"
-  ( umask 077; enter_cg; exec setsid "${helper_cmd[@]}" > "$RUNDIR/helper.log" 2>&1 < /dev/null ) &
+  ( umask 077; enter_cg; exec setsid setpriv --bounding-set="$helper_bset" --inh-caps=-all --no-new-privs \
+      "${helper_cmd[@]}" > "$RUNDIR/helper.log" 2>&1 < /dev/null ) &
   echo $! > "$RUNDIR/helper.pid"
   for _ in $(seq 1 40); do [ -S "$SOCKET" ] && break; sleep 0.25; done
   ( umask 077; enter_cg; cd /; exec setsid env -i PATH="$PATH" "${gw_env[@]}" setpriv --reuid="$acct_uid" --regid="$acct_gid" \
@@ -378,8 +425,10 @@ listener_is() { # listener_is <pid>
 }
 HEALTH_REASON=""
 # wait_healthy <seconds>: 0 when the started gateway answers its status and
-# Plane C runs through the sensor helper; 1 when it answers but Plane C does
-# not (after PLANE_GRACE seconds); 2 when it never answers.
+# Plane C runs the process connector (cn_proc) through the sensor helper; 1
+# when it answers but Plane C does not (after PLANE_GRACE seconds), including a
+# Plane C on fanotify alone, which has no exec, exit or privilege events; 2
+# when it never answers.
 PLANE_GRACE=20
 wait_healthy() {
   local deadline=$((SECONDS + $1)) up_at="" pid
@@ -390,7 +439,7 @@ wait_healthy() {
         [ "$(json_field running < "$work/status.json")" = true ] && listener_is "$pid"; then
       [ -n "$up_at" ] || up_at=$SECONDS
       if [ "$(json_field health.ai_runtime.details.planes.c.running < "$work/status.json")" = true ] &&
-          [[ "$(json_field health.ai_runtime.details.planes.c.mechanism < "$work/status.json")" == *"(via the sensor helper)"* ]]; then
+          [[ "$(json_field health.ai_runtime.details.planes.c.mechanism < "$work/status.json")" == *"cn_proc"*"(via the sensor helper)"* ]]; then
         HEALTH_SECONDS=$((SECONDS - START_SECONDS)); return 0
       fi
       HEALTH_REASON="$(json_field health.ai_runtime.details.planes.c.reason < "$work/status.json")"
@@ -421,7 +470,7 @@ if [ "$rc" != 0 ]; then
   else
     tail -n 6 "$RUNDIR/helper.log" "$RUNDIR/gateway.log" 2> /dev/null
   fi
-  [ "$rc" = 1 ] && fail "the sensor answers but its kernel event plane (Plane C) is not running through the sensor helper${HEALTH_REASON:+: $HEALTH_REASON}" 17
+  [ "$rc" = 1 ] && fail "the sensor answers but its kernel event plane (Plane C) is not running the process connector (cn_proc) through the sensor helper${HEALTH_REASON:+: $HEALTH_REASON}" 17
   fail "the sensor gateway did not report healthy on 127.0.0.1:$API_PORT within $HEALTH_WAIT s" 17
 fi
 fingerprint > "$RUNDIR/fingerprint" || fail "cannot write $RUNDIR/fingerprint" 18

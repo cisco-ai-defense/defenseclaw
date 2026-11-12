@@ -23,7 +23,7 @@ import (
 // say (an elevated shell has no pin; a per-user style data_dir under a
 // profile named another folder).
 func TestWindowsAccountJoinReadsTheGuardianSpoolOfTheLayout(t *testing.T) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		t.Fatal(err)
 	}

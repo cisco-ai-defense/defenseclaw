@@ -28,6 +28,10 @@ type ManagedInstallLayout struct {
 	// IPCDirectory is the gateway's IPC socket folder. Set it only when the
 	// folder belongs to this installation.
 	IPCDirectory string
+	// Standalone lists the lock files the standalone profile creates lazily
+	// inside StateRoot. The Secure Client profile leaves it false and keeps
+	// the objects it listed before (GAP-0766).
+	Standalone bool
 }
 
 // targets expands the layout into the ordered object list, parents before
@@ -78,6 +82,13 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 		add(ObjectAdminDirectory, root, "logs", "guardian")
 		add(ObjectAdminDirectory, root, "logs", "cmid-broker")
 		addContent(ObjectConfigFile, root, "etc", "config.yaml")
+		if layout.Standalone {
+			// The config writer's lock sits beside the config and is created
+			// lazily; an untrusted write entry on it would let any account
+			// hold the lock (GAP-0766). Its bytes are never read, so it is
+			// not content.
+			add(ObjectConfigFile, root, "etc", "config.yaml.lock")
+		}
 		addContent(ObjectAdminFile, root, "hook-guardian", "targets.yaml")
 		for _, name := range []string{
 			"deployment.json",
@@ -111,7 +122,11 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 // fresh file. A repair would restore the descriptor over bytes that account
 // may have changed (GAP-0561). ACL-only drift that gave no untrusted
 // principal write (an extra read entry, inheritance) is still repaired.
-// Secure Client keeps the repair.
+// A managed folder (the state root, etc, hook-guardian, install, the broker,
+// logs, the IPC folder) that an untrusted principal can write or owns is
+// refused the same way: an account that could change it may have put or
+// replaced objects in it, and a repair would erase the evidence before
+// Setup or /verify sees it (g582 review 2 S4). Secure Client keeps the repair.
 func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOptions) []CanonicalResult {
 	targets := layout.targets()
 	if !windowsDescriptorPlatform() {
@@ -126,7 +141,16 @@ func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOpti
 				continue
 			}
 		}
-		result, err := EnsureCanonical(target.path, target.kind, opts)
+		if target.kind.Directory() && refuseContentDrift {
+			if refused, ok := refuseStandaloneFolderRepair(target, opts); ok {
+				results = append(results, refused)
+				continue
+			}
+		}
+		standaloneRepairAfterCheck(target.path)
+		targetOpts := opts
+		targetOpts.inPlaceOutOfClass = !target.content && !target.kind.Directory()
+		result, err := EnsureCanonical(target.path, target.kind, targetOpts)
 		if err == nil && result.Outcome != CanonicalBoundary && !target.kind.Directory() {
 			// ReadOnly, Hidden or System set by a user or a hardening tool
 			// stops the next managed write, so the guardian clears them too.
@@ -143,11 +167,78 @@ func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOpti
 // replace it.
 var managedInstallRefusesContentDrift = StandaloneRefusesContentDrift
 
+// standaloneRepairAfterCheck runs between a standalone read-only check and the
+// repair of the same object; tests replace it to change the object in between
+// (g582 review 6 S1). The repair judges the object again on its own handle.
+var standaloneRepairAfterCheck = func(string) {}
+
 // standaloneContentRepairRefusal is the recovery step logged with a refused
-// content file.
-const standaloneContentRepairRefusal = "not repaired in place on a standalone install, because an account " +
-	"that could write this file may have changed it: from an elevated prompt run Setup /ensure so Setup " +
-	"writes a fresh file, then Setup /verify (GAP-0561)"
+// content file, with the exact commands: the Setup run that writes a fresh
+// file and the icacls fix by hand.
+func standaloneContentRepairRefusal(result CanonicalResult) string {
+	return "not repaired in place on a standalone install, because an account that could write this file may " +
+		"have changed it (GAP-0561): " + standaloneInPlaceRecovery(result.Path, false, result.UntrustedWriters, result.Drift)
+}
+
+// standaloneFolderRepairRefusal is the recovery step logged with a refused
+// managed folder.
+func standaloneFolderRepairRefusal(result CanonicalResult) string {
+	return "not repaired in place on a standalone install, because an account that could change this folder " +
+		"may have put or replaced files in it (GAP-0561): " + standaloneInPlaceRecovery(result.Path, true, result.UntrustedWriters, result.Drift)
+}
+
+// refuseStandaloneFolderRepair reads a managed folder's descriptor without
+// writing. When an untrusted principal can write or owns it, it logs the
+// boundary finding with the way out and returns the result and true; the
+// caller must then not repair it, whatever AllowUntrustedOwnerTransfer says.
+// Trusted-only drift, a missing or a structurally bad folder returns false
+// and takes the normal path.
+func refuseStandaloneFolderRepair(target managedDataTarget, opts CanonicalOptions) (CanonicalResult, bool) {
+	quiet := opts
+	quiet.Quiet = true
+	result, err := AssessCanonical(target.path, target.kind, quiet)
+	if err != nil {
+		// A reparse point, a hard link or an object of the wrong type is
+		// reported as it is and never reaches the repair (g582 review 5 L1).
+		reportCanonicalResult(result, opts)
+		return result, true
+	}
+	if result.Outcome != CanonicalBoundary {
+		return CanonicalResult{}, false
+	}
+	result.RepairError = standaloneFolderRepairRefusal(result)
+	reportCanonicalResult(result, opts)
+	return result, true
+}
+
+// standaloneDataPathRepairRefusal is the recovery step logged with a refused
+// gateway data file (a token, a database, the log).
+func standaloneDataPathRepairRefusal(result CanonicalResult) string {
+	return "not repaired in place on a standalone install, because an account that could write this file may " +
+		"have changed it (GAP-0561): " + standaloneInPlaceRecovery(result.Path, false, result.UntrustedWriters, result.Drift)
+}
+
+// refuseStandaloneDataPathRepair is refuseStandaloneFolderRepair for every
+// managed data object: a folder or file an untrusted principal can write or
+// owns is a boundary finding, logged with the way out, and not repaired.
+func refuseStandaloneDataPathRepair(target managedDataTarget, opts CanonicalOptions) (CanonicalResult, bool) {
+	if target.kind.Directory() {
+		return refuseStandaloneFolderRepair(target, opts)
+	}
+	quiet := opts
+	quiet.Quiet = true
+	result, err := AssessCanonical(target.path, target.kind, quiet)
+	if err != nil {
+		reportCanonicalResult(result, opts)
+		return result, true
+	}
+	if result.Outcome != CanonicalBoundary {
+		return CanonicalResult{}, false
+	}
+	result.RepairError = standaloneDataPathRepairRefusal(result)
+	reportCanonicalResult(result, opts)
+	return result, true
+}
 
 // refuseStandaloneContentRepair reads target's descriptor without writing.
 // When an untrusted principal can write or owns the file, or the strict
@@ -160,18 +251,19 @@ func refuseStandaloneContentRepair(target managedDataTarget, opts CanonicalOptio
 	quiet.Quiet = true
 	result, err := AssessCanonical(target.path, target.kind, quiet)
 	if err != nil {
-		return CanonicalResult{}, false
+		reportCanonicalResult(result, opts)
+		return result, true
 	}
 	switch result.Outcome {
 	case CanonicalBoundary:
-		result.RepairError = standaloneContentRepairRefusal
+		result.RepairError = standaloneContentRepairRefusal(result)
 	case CanonicalAccepted:
 		strictErr := ValidateTrustedFilePath(target.path, string(target.kind))
 		if strictErr == nil {
 			return CanonicalResult{}, false
 		}
 		result.Outcome = CanonicalBoundary
-		result.RepairError = standaloneContentRepairRefusal + ": " + strictErr.Error()
+		result.RepairError = standaloneContentRepairRefusal(result) + ": " + strictErr.Error()
 	default:
 		return CanonicalResult{}, false
 	}

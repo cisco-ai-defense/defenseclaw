@@ -640,6 +640,8 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Guardrail.Mode = mode
 		cfg.Guardrail.Connector = connector
+		// A call over the evaluation limit blocks in the strict profile only.
+		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
 		api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 		body := string(mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
 			"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command, "description": "d"}}))

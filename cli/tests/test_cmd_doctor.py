@@ -19,6 +19,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import sys
 import tempfile
 import time
@@ -890,6 +891,118 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("the gateway is not running", result.checks[0]["detail"])
         self.assertIn("defenseclaw-gateway start", result.checks[0]["detail"])
 
+    @unittest.skipIf(os.name == "nt", "the root-owned start blocker and its sudo chain are POSIX only")
+    def test_sidecar_check_names_root_owned_files_and_chain_for_a_stopped_gateway(self):
+        """GAP-0788: a start cannot work over root-owned files, so the row prints the chain."""
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        refused = (0, "<urlopen error [Errno 111] Connection refused>")
+        with (
+            patch.object(cmd_doctor, "_http_probe", return_value=refused),
+            patch.object(
+                cmd_doctor,
+                "root_owned_start_blockers",
+                return_value=(["hook_contract_lock.json", "active_connector.json"], []),
+            ),
+        ):
+            result = _DoctorResult()
+            _check_sidecar(cfg, result)
+        row = result.checks[0]
+        self.assertEqual(row["status"], "fail")
+        self.assertIn("the gateway is not running", row["detail"])
+        self.assertIn("hook_contract_lock.json, active_connector.json", row["detail"])
+        self.assertIn('sudo chown -R "$(id -un)" ', row["remediation"])
+        self.assertTrue(row["remediation"].rstrip().endswith("defenseclaw-gateway start"))
+        self.assertNotIn("doctor --fix", row["detail"] + row["remediation"])
+
+    @unittest.skipIf(os.name == "nt", "the root-owned start blocker and its sudo chain are POSIX only")
+    def test_stopped_gateway_chain_takes_away_group_and_other_access_before_the_start(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        loose = "/tmp/defenseclaw/active connector.json"
+        with patch.object(
+            cmd_doctor,
+            "root_owned_start_blockers",
+            return_value=(["active connector.json"], [loose]),
+        ):
+            detail, remediation = cmd_doctor._stopped_gateway_start_advice(cfg)
+        self.assertIn("active connector.json", detail)
+        self.assertTrue(
+            remediation.endswith(" && chmod go-rwx " + shlex.quote(loose) + " && defenseclaw-gateway start"),
+            remediation,
+        )
+
+    @unittest.skipIf(os.name == "nt", "the root-owned start blocker and its sudo chain are POSIX only")
+    def test_stopped_gateway_chain_sweeps_a_hidden_store_after_the_owner_return(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        store = "/tmp/moved store" + os.sep
+        with patch.object(
+            cmd_doctor,
+            "root_owned_start_blockers",
+            return_value=(["./"], [store]),
+        ):
+            detail, remediation = cmd_doctor._stopped_gateway_start_advice(cfg)
+        self.assertIn("./", detail)
+        sweep = " && find " + shlex.quote(store) + " -maxdepth 2 -type f \\( -name gateway.pid -o "
+        self.assertIn(sweep, remediation)
+        self.assertTrue(
+            remediation.endswith(
+                " -path '*/hooks/.hook-*.token' \\) -exec chmod go-rwx {} + && defenseclaw-gateway start"
+            ),
+            remediation,
+        )
+        for name in cmd_doctor.SUDO_RUNTIME_LEFTOVER_NAMES:
+            self.assertIn("-name " + name, remediation)
+        self.assertLess(remediation.index("chown -R"), remediation.index("find "))
+
+    @unittest.skipIf(os.name == "nt", "the root-owned start blocker and its sudo chain are POSIX only")
+    def test_stopped_gateway_blocker_asks_about_the_configured_discovery(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        for enabled in (False, True):
+            cfg.ai_discovery.enabled = enabled
+            with patch.object(cmd_doctor, "root_owned_start_blockers", return_value=([], [])) as blockers:
+                cmd_doctor._root_leftover_start_blocker(cfg)
+            self.assertEqual(blockers.call_args.kwargs["ai_discovery_enabled"], enabled)
+
+    @unittest.skipUnless(os.name == "nt", "Windows has no root-owned leftovers to report")
+    def test_stopped_gateway_on_windows_names_no_root_owned_files_and_advises_a_start(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        refused = (0, "<urlopen error [Errno 111] Connection refused>")
+        with (
+            patch.object(cmd_doctor, "_http_probe", return_value=refused),
+            patch.object(cmd_doctor, "root_owned_start_blockers") as blockers,
+        ):
+            self.assertEqual(cmd_doctor._root_leftover_start_blocker(cfg), ([], ""))
+            result = _DoctorResult()
+            _check_sidecar(cfg, result)
+        blockers.assert_not_called()
+        row = result.checks[0]
+        self.assertIn("start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'", row["detail"])
+        self.assertNotIn("chown", row["detail"] + row["remediation"])
+
+    def test_sidecar_check_still_advises_a_start_without_root_owned_files(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        refused = (0, "<urlopen error [Errno 111] Connection refused>")
+        with (
+            patch.object(cmd_doctor, "_http_probe", return_value=refused),
+            patch.object(cmd_doctor, "root_owned_start_blockers", return_value=([], [])),
+        ):
+            result = _DoctorResult()
+            _check_sidecar(cfg, result)
+        row = result.checks[0]
+        self.assertIn("start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'", row["detail"])
+        self.assertNotIn("chown", row["detail"] + row["remediation"])
+
     def test_sidecar_check_names_foreign_holder_without_its_health_rows(self):
         from defenseclaw.commands import cmd_doctor
 
@@ -1001,6 +1114,80 @@ class DoctorGuardrailTests(unittest.TestCase):
                 self.assertEqual(watcher["status"], expected_status)
                 if runtime_state == "running":
                     self.assertIn("sidecar is stale", watcher["detail"])
+
+    def test_gap0613_unavailable_watch_root_is_visible_by_tier(self):
+        from defenseclaw.commands import cmd_doctor
+
+        for tier, expected in (("default", "warn"), ("permissive", "warn"), ("strict", "fail")):
+            with self.subTest(tier=tier):
+                cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+                cfg.guardrail.rule_pack = tier
+                health = self._complete_sidecar_health()
+                health["watcher"] = {
+                    "state": "degraded",
+                    "details": {"watch_roots_unavailable": 1, "admission_scanning_off": ["claudecode"]},
+                }
+                result = self._run_sidecar_health(cfg, health)
+                watcher = self._sidecar_row(result, "watcher")
+                self.assertEqual(watcher["status"], expected)
+                self.assertIn("admission scanning is off for claudecode", watcher["detail"])
+
+        managed_cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+        managed_cfg.deployment_mode = "managed_enterprise"
+        self.assertEqual(cmd_doctor._watch_root_coverage_severity(managed_cfg, ["claudecode"]), "fail")
+
+    def test_gap0905_doctor_names_the_writable_folder_and_the_chmod(self):
+        cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+        health = self._complete_sidecar_health()
+        health["watcher"] = {
+            "state": "degraded",
+            "details": {
+                "watch_roots_unavailable": 1,
+                "admission_scanning_off": ["claudecode"],
+                "admission_root_writable_folders": ["/home/u/dotfiles"],
+            },
+        }
+        watcher = self._sidecar_row(self._run_sidecar_health(cfg, health), "watcher")
+        self.assertIn("/home/u/dotfiles can be written by another account", watcher["detail"])
+        self.assertIn("chmod go-w /home/u/dotfiles", watcher["detail"])
+        self.assertIn("the gateway log names each root", watcher["detail"])
+
+    def test_gap0905_doctor_warns_about_a_root_watched_closely_and_names_the_chmod(self):
+        cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+        health = self._complete_sidecar_health()
+        health["watcher"] = {
+            "state": "running",
+            "details": {"admission_root_rescan_folders": ["/home/u/dotfiles"]},
+        }
+        watcher = self._sidecar_row(self._run_sidecar_health(cfg, health), "watcher")
+        self.assertEqual(watcher["status"], "warn")
+        self.assertIn("/home/u/dotfiles is group-writable and pam_group is loaded", watcher["detail"])
+        self.assertIn("chmod g-w /home/u/dotfiles", watcher["detail"])
+
+    def test_gap0905_doctor_names_both_folders_when_one_root_is_off_and_another_is_watched_closely(self):
+        cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+        health = self._complete_sidecar_health()
+        health["watcher"] = {
+            "state": "degraded",
+            "details": {
+                "watch_roots_unavailable": 1,
+                "admission_scanning_off": ["claudecode"],
+                "admission_root_writable_folders": ["/home/u/shared-dotfiles"],
+                "admission_root_rescan_folders": ["/home/u/dotfiles"],
+            },
+        }
+        watcher = self._sidecar_row(self._run_sidecar_health(cfg, health), "watcher")
+        self.assertIn("/home/u/shared-dotfiles can be written by another account", watcher["detail"])
+        self.assertIn("chmod go-w /home/u/shared-dotfiles", watcher["detail"])
+        self.assertIn("/home/u/dotfiles is group-writable and pam_group is loaded", watcher["detail"])
+        self.assertIn("chmod g-w /home/u/dotfiles", watcher["detail"])
+        self.assertIn("the gateway log names each root", watcher["detail"])
+
+    def test_gap0905_doctor_passes_a_running_watcher_without_the_warning(self):
+        cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+        health = self._complete_sidecar_health()
+        health["watcher"] = {"state": "running", "details": {"skill_dirs": 2}}
+        self.assertEqual(self._sidecar_row(self._run_sidecar_health(cfg, health), "watcher")["status"], "pass")
 
     def test_sidecar_check_reports_malformed_nested_health_without_crashing(self):
         cases = (

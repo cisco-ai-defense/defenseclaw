@@ -93,8 +93,8 @@ type SharedFileWrite struct {
 //   - Write publishes the edit only while the file still is the one the render
 //     read, content and metadata alike (CompareAndSwapFile). The file keeps
 //     its own owner, access list and attributes unless the edit names
-//     metadata, and the name holds the old file or the new one at every
-//     instant.
+//     metadata. A concurrent reader of an externally writable file follows
+//     the documented bounded-retry contract during a replacement.
 //   - When another writer changed the file in between, its file is newer and
 //     is kept: the render runs again on it, up to Attempts times.
 //   - Undo puts back what a write replaced only while the file still holds
@@ -189,6 +189,9 @@ func (w SharedFileWriter) Undo(write SharedFileWrite, rebase SharedRender) error
 
 // SharedPublish is one compare-and-swap publication of a shared file.
 type SharedPublish struct {
+	// Class describes whether a writer outside DefenseClaw can also save
+	// this file. It must be set for every publication.
+	Class PublicationClass
 	// Base is the file the publication may replace: absent, or present with
 	// Base.Data (and Base.Metadata when CompareMetadata is set).
 	Base            SharedFile
@@ -254,7 +257,7 @@ func PublishSharedFile(request SharedPublish) (FileMetadata, bool, error) {
 	if request.BeforeSwap != nil {
 		request.BeforeSwap(path)
 	}
-	result, err := CompareAndSwapFile(tempPath, path, expected, request.Limit, request.Inspect)
+	result, err := CompareAndSwapFile(tempPath, path, expected, request.Limit, request.Inspect, request.Class)
 	if err != nil {
 		return FileMetadata{}, false, err
 	}

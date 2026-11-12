@@ -43,6 +43,38 @@ func LocalAccounts(ctx context.Context) (map[string]int, error) {
 	return platformLocalAccounts(ctx)
 }
 
+// LocalDatabaseUIDs returns every uid the local account databases NSS reads
+// hold (the sources of LocalDatabaseAccounts), duplicates included: a login
+// name that appears twice, or in two sources, keeps each of its uids. Unlike
+// LocalDatabaseAccounts, a source that exists and cannot be read is an
+// error, so an answer without a uid is a fact about every source and not
+// about the ones that happened to be readable.
+func LocalDatabaseUIDs(ctx context.Context) ([]int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformLocalDatabaseUIDs(ctx)
+}
+
+// ErrUIDHeld is the error DirectoryShowsUIDUnused returns when a directory
+// source holds the uid: the account exists.
+var ErrUIDHeld = errors.New("unixidentity: a passwd service holds the uid")
+
+// DirectoryShowsUIDUnused returns nil only when no source beyond the local
+// files can hold uid. Linux asks every nsswitch.conf passwd service but files
+// for the uid by itself (a combined lookup can stop before a source) and also
+// needs each to show it answers (SSSD and winbind online, nslcd completing the
+// search); macOS needs the search policy to list only local nodes, or Open
+// Directory to list no node offline. A source that holds the uid is
+// ErrUIDHeld. Any other directory is an error: getent and dscl say "no such
+// account" the same way when the directory cannot be reached.
+func DirectoryShowsUIDUnused(ctx context.Context, uid int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformDirectoryShowsUIDUnused(ctx, uid)
+}
+
 // UserdbRecordDirs are the systemd-userdb drop-in record directories that
 // nss-systemd reads on Linux (userdb(5)): <name>.user holds a JSON user
 // record and <uid>.user links to it. Tests replace it.

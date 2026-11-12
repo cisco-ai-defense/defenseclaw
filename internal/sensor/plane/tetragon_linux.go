@@ -161,13 +161,30 @@ type tetragonSource struct {
 	files    nativeHalf
 	filesErr error
 	handed   bool // fanotify stopped after the hand-off
+	// retiredDropped are the buffer drops of native halves since stopped,
+	// kept so the coverage still names them (GAP-0071), and
+	// retiredOverflows the ENOBUFS overflows of the process halves since
+	// stopped (cowork-1-0-8 GAP-0080).
+	retiredDropped, retiredOverflows int64
+	// retiring are the halves taken out of the source that are still
+	// closing. The coverage reads their counts live until closeRetired
+	// folds the final counts into the retired tallies, so what a half
+	// counts after it left is named, once (cowork-1-0-8 GAP-0080 review S2).
+	retiring []*retiringHalf
+	// filesStarting is a fanotify half being started outside s.mu
+	// (startFiles, GAP-0073).
+	filesStarting bool
 
 	// Loss: rate-limit drops in the stream, and growth of Tetragon's own
 	// loss counters since each session opened (lastLost is the counter at
-	// the last read).
-	dropped   int64
-	knownLost int64
-	lastLost  int64
+	// the last read). lossBaselined says lastLost is a reading of this
+	// session: when the first metrics read of a session fails, the first
+	// readable count is the baseline and not growth, because it is
+	// Tetragon's lifetime total (cowork-1-0-8 GAP-0080 review S1).
+	dropped       int64
+	knownLost     int64
+	lastLost      int64
+	lossBaselined bool
 
 	// Hand-off evidence.
 	lossAt        time.Time // last throttle, rate-limit drop or known loss
@@ -288,7 +305,7 @@ func (s *tetragonSource) dial(ctx context.Context) error {
 	s.backend.Kind, s.backend.Mode = BackendTetragon, s.options.Mode
 	s.fallback = ""
 	s.switchedAt = s.now()
-	s.lastLost = s.backend.EventsLost
+	s.lastLost, s.lossBaselined = s.backend.EventsLost, s.backend.LossKnown
 	if s.observeSince.IsZero() && s.ownObserveEnabled(s.backend.Policies) {
 		// Every subscription after the first dials a Tetragon whose observe
 		// policy is already loaded: the session's first coverage names it
@@ -296,13 +313,14 @@ func (s *tetragonSource) dial(ctx context.Context) error {
 		// policy-list change (#1240).
 		s.observeSince = s.switchedAt
 	}
-	proc := s.proc
+	// Tetragon is delivering again: the native process half stops, or
+	// every exec would arrive twice.
+	proc := s.retireLocked(s.proc)
 	s.proc, s.procErr = nil, nil
 	s.mu.Unlock()
 	if proc != nil {
-		// Tetragon is delivering again: the native process half stops, or
-		// every exec would arrive twice.
-		go func() { _ = proc.Close() }()
+		s.wg.Add(1)
+		go func() { defer s.wg.Done(); s.closeRetired(proc) }()
 	}
 	s.wg.Add(1)
 	go func() { defer s.wg.Done(); s.readFeed(ctx, feed) }()
@@ -356,9 +374,22 @@ func (s *tetragonSource) startFallback(ctx context.Context, reason string) {
 }
 
 // startFiles starts fanotify (at start, and again after any loss signal).
+// At most one file half runs: a feed end and a take-back can both ask for
+// it at once, and the second start replaced the first half without closing
+// it, which then forwarded every file event twice until the source closed
+// (cowork-1-0-8 GAP-0073). A start while one runs or is starting does
+// nothing; a half started after Close is closed.
 func (s *tetragonSource) startFiles(ctx context.Context) {
+	s.mu.Lock()
+	if s.closed || s.files != nil || s.filesStarting {
+		s.mu.Unlock()
+		return
+	}
+	s.filesStarting = true
+	s.mu.Unlock()
 	files, err := startFileHalf(ctx, s.homes)
 	s.mu.Lock()
+	s.filesStarting = false
 	if s.closed {
 		s.mu.Unlock()
 		if files != nil {
@@ -411,14 +442,85 @@ func (s *tetragonSource) handleBatch(batch KernelBatch) {
 		if event.Kind == KindExec && s.duplicateOfNative(event.PID, now) {
 			continue
 		}
+		var delivery *digestDelivery
 		if event.Kind == KindExec && event.Exe != "" {
 			// The helper reads the image while the event is fresh, only if
 			// the pid still runs the binary the event names.
-			event.ImageSHA256, event.ImageVersion = tetragonClientImage(event.PID, event.Exe, eventAccount(event))
+			delivery = newDigestDelivery(s.pushUnlessClosed, event.PID, event.At)
+			event.ImageSHA256, event.ImageVersion, event.ImageDigestState = tetragonClientImage(
+				event.PID, event.Exe, eventAccount(event), delivery)
 		}
 		if event.Kind == KindFileRead || event.Kind == KindFileWrite {
 			s.noteTetragonFile(event, now)
 		}
+		s.buffer.Push(event)
+		if delivery != nil {
+			delivery.execSent()
+		}
+	}
+}
+
+// halfDropped is the buffer drops of a native half (GAP-0071).
+func halfDropped(half nativeHalf) int64 {
+	if h, ok := half.(interface{ bufferDropped() int64 }); ok {
+		return h.bufferDropped()
+	}
+	return 0
+}
+
+// halfOverflows is the ENOBUFS overflows of a native process half: the
+// Tetragon source's coverage named none of them before (cowork-1-0-8
+// GAP-0080).
+func halfOverflows(half nativeHalf) int64 {
+	if h, ok := half.(interface{ kernelOverflows() int64 }); ok {
+		return h.kernelOverflows()
+	}
+	return 0
+}
+
+// retiringHalf is a native half taken out of the source that is still
+// closing.
+type retiringHalf struct{ half nativeHalf }
+
+// retireLocked takes a native half out of the source (nil: none). Its
+// counts used to be read once here, and what it counted before its reader
+// stopped was lost; now the coverage reads them live until closeRetired
+// folds the final counts (cowork-1-0-8 GAP-0080 review S2). The caller
+// holds s.mu, clears its own reference to the half and then calls
+// closeRetired.
+func (s *tetragonSource) retireLocked(half nativeHalf) *retiringHalf {
+	if half == nil {
+		return nil
+	}
+	retired := &retiringHalf{half: half}
+	s.retiring = append(s.retiring, retired)
+	return retired
+}
+
+// closeRetired closes a half that retireLocked took out. After its Close
+// returns, its reader has stopped and it counts nothing more, so its final
+// counts move from retiring to the retired tallies in one lock section:
+// each is counted exactly once.
+func (s *tetragonSource) closeRetired(retired *retiringHalf) {
+	_ = retired.half.Close()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, r := range s.retiring {
+		if r == retired {
+			s.retiring = append(s.retiring[:i], s.retiring[i+1:]...)
+			s.retiredDropped += halfDropped(retired.half)
+			s.retiredOverflows += halfOverflows(retired.half)
+			return
+		}
+	}
+}
+
+// pushUnlessClosed delivers an event from outside the feed (an image digest
+// read after its exec went out); nothing once the source is closed.
+func (s *tetragonSource) pushUnlessClosed(event Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
 		s.buffer.Push(event)
 	}
 }
@@ -684,12 +786,25 @@ func (s *tetragonSource) evaluateHandoff(ctx context.Context, now time.Time) {
 	previous := s.backend
 	s.backend.Version, s.backend.Socket, s.backend.LossKnown = current.Version, current.Socket, current.LossKnown
 	s.backend.Policies = current.Policies
-	if current.EventsLost > s.lastLost {
-		// Known loss from Tetragon's own counters is a loss signal too.
-		s.knownLost += current.EventsLost - s.lastLost
-		s.lossAt, s.fileSince = now, time.Time{}
+	switch {
+	case !current.LossKnown:
+		// Tetragon's counters could not be read: nothing new is known, and
+		// the baseline stays until they can be read again.
+	case !s.lossBaselined:
+		// The session's first readable count is its baseline. It is
+		// Tetragon's lifetime total, which this session did not see grow;
+		// counted as growth over the 0 of a failed first read, and carried
+		// across every reconnect, it inflated events_lost for the
+		// gateway's life (cowork-1-0-8 GAP-0080 review S1).
+		s.lastLost, s.lossBaselined = current.EventsLost, true
+	default:
+		if current.EventsLost > s.lastLost {
+			// Known loss from Tetragon's own counters is a loss signal too.
+			s.knownLost += current.EventsLost - s.lastLost
+			s.lossAt, s.fileSince = now, time.Time{}
+		}
+		s.lastLost = current.EventsLost
 	}
-	s.lastLost = current.EventsLost
 	enabled := s.ownObserveEnabled(current.Policies)
 	// The observe policy becoming the file half (or leaving it) changes the
 	// coverage even when the listing does not: the reconciler records the
@@ -707,8 +822,9 @@ func (s *tetragonSource) evaluateHandoff(ctx context.Context, now time.Time) {
 		now.Sub(since) >= handoffWindow
 	handOff := healthy && s.files != nil && !s.handed
 	takeBack := s.handed && !healthy && (!enabled || s.throttled || s.lossAt.After(since))
-	files := s.files
+	var files *retiringHalf
 	if handOff {
+		files = s.retireLocked(s.files)
 		s.files, s.handed = nil, true
 	}
 	policiesChanged := !samePolicies(previous.Policies, current.Policies)
@@ -716,7 +832,8 @@ func (s *tetragonSource) evaluateHandoff(ctx context.Context, now time.Time) {
 
 	switch {
 	case handOff:
-		go func() { _ = files.Close() }()
+		s.wg.Add(1)
+		go func() { defer s.wg.Done(); s.closeRetired(files) }()
 		s.changed()
 	case takeBack:
 		s.startFiles(ctx)
@@ -773,13 +890,25 @@ func (s *tetragonSource) changed() {
 }
 
 // Coverage names both halves and the backend.
-func (s *tetragonSource) Coverage() Coverage {
+func (s *tetragonSource) Coverage() (coverage Coverage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	backend := s.backend
 	backend.Policies = append([]BackendPolicy(nil), s.backend.Policies...)
 	backend.EventsLost = s.dropped + s.knownLost
-	coverage := Coverage{Backend: &backend}
+	coverage = Coverage{Backend: &backend}
+	// The stream's own buffer and the native halves' (running or stopped)
+	// are DefenseClaw losses, not Tetragon's: named apart from EventsLost
+	// (GAP-0071).
+	dropped := s.buffer.Dropped() + s.retiredDropped + halfDropped(s.proc) + halfDropped(s.files)
+	overflows := s.retiredOverflows + halfOverflows(s.proc)
+	for _, retiring := range s.retiring {
+		dropped += halfDropped(retiring.half)
+		overflows += halfOverflows(retiring.half)
+	}
+	defer func() {
+		coverage = WithBufferDrops(WithKernelOverflows(coverage, overflows), dropped, SensorEventBuffer)
+	}()
 
 	var process, files string
 	switch {
@@ -860,7 +989,11 @@ func (s *tetragonSource) Close() error {
 	}
 	s.closed = true
 	defer close(s.closeDone)
-	cancel, feed, proc, files := s.cancel, s.feed, s.proc, s.files
+	cancel, feed := s.cancel, s.feed
+	// The halves leave the source the way a retired one does, so the
+	// coverage after Close still names what they counted (cowork-1-0-8
+	// GAP-0080 review S2).
+	proc, files := s.retireLocked(s.proc), s.retireLocked(s.files)
 	s.feed, s.proc, s.files = nil, nil, nil
 	s.mu.Unlock()
 	if cancel != nil {
@@ -872,11 +1005,10 @@ func (s *tetragonSource) Close() error {
 			s.options.Stream(StreamState{})
 		}
 	}
-	if proc != nil {
-		_ = proc.Close()
-	}
-	if files != nil {
-		_ = files.Close()
+	for _, half := range []*retiringHalf{proc, files} {
+		if half != nil {
+			s.closeRetired(half)
+		}
 	}
 	s.wg.Wait()
 	s.flushHeld(s.now(), true)

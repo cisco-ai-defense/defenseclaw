@@ -60,8 +60,8 @@ agent's hook or plugin can block.
 The gateway always writes its audit log to
 `%USERPROFILE%\.defenseclaw\audit.db` (SQLite). On a managed computer the
 audit database is `C:\ProgramData\Cisco\DefenseClaw\runtime\audit.db`, and an
-administrator checks the deployment from an elevated prompt with
-`defenseclaw.exe enterprise windows status --profile standalone` and
+administrator checks the deployment from an elevated PowerShell prompt with
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone` and
 `enterprise windows verify --profile standalone`. It keeps writing when no
 remote destination is configured, and when a remote destination is
 unreachable.

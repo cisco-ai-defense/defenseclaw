@@ -6,10 +6,12 @@
 package unixidentity
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -63,6 +65,63 @@ func LookupAccountSpelling(r Resolver, name string, facts func(uid int) (useride
 	return Account{}, err
 }
 
+// LocalSpellingAccounts lists the local account database that
+// LookupAdminAccountSpelling reads for the dot-backslash spelling. Tests
+// replace it.
+var LocalSpellingAccounts = LocalDatabaseAccounts
+
+// LookupAdminAccountSpelling is LookupAccountSpelling for an account an
+// administrator or a user names to profile-explain or policy show|verify,
+// which also takes .\name, the spelling Windows tools and
+// users entries print for an account of this computer (GAP-0759). It names
+// the local account of that name, never a directory account of the same
+// name, and returns the account its uid resolves to, so the spelling and the
+// uid explain the same principal. A name no local account has is ErrNotFound.
+// The live hook path keeps LookupAccountSpelling.
+func LookupAdminAccountSpelling(r Resolver, name string, facts func(uid int) (useridentity.DirectoryFacts, bool)) (Account, error) {
+	rest, local := strings.CutPrefix(strings.TrimSpace(name), `.\`)
+	if !local {
+		return LookupAccountSpelling(r, name, facts)
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" || strings.ContainsAny(rest, `@\`) {
+		return Account{}, ErrNotFound
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	accounts, err := LocalSpellingAccounts(ctx)
+	if err != nil {
+		return Account{}, err
+	}
+	uid, ok := accounts[rest]
+	if !ok {
+		// A case variant names the account only when exactly one local
+		// account has that name, as the users entry matcher takes .\name on
+		// every platform; an exact name always wins, and two names that
+		// differ only in case name nothing.
+		matches := 0
+		for candidate, id := range accounts {
+			if useridentity.EqualFold(candidate, rest) {
+				uid, matches = id, matches+1
+			}
+		}
+		ok = matches == 1
+	}
+	if !ok {
+		return Account{}, ErrNotFound
+	}
+	account, err := r.LookupUID(uid)
+	if err != nil {
+		return Account{}, err
+	}
+	if !useridentity.EqualFold(account.Name, rest) {
+		// The uid answers for another account (a uid two accounts hold): not
+		// confirmed to be the local account asked for.
+		return Account{}, &NameMismatchError{Key: name, Answered: account}
+	}
+	return account, nil
+}
+
 // AccountLookupError is the sentence an administrator reads when the
 // account named to profile-explain or policy show|verify --user does not
 // resolve: what getent answered, the spelling NSS knows a short name by
@@ -75,6 +134,9 @@ func AccountLookupError(name, qualified string, err error) error {
 		return fmt.Errorf("no account named %q on this host: getent passwd answers it with the account %q, which is not "+
 			"confirmed to be the same account; name that account %q or by its uid if it is the one you mean",
 			name, mismatch.Answered.Name, mismatch.Answered.Name)
+	case IsNotFound(err) && strings.HasPrefix(strings.TrimSpace(name), `.\`):
+		return fmt.Errorf("no local account named %q on this host; .\\name names an account of this computer only, "+
+			"not a directory account: check the account database or use the account uid", name)
 	case err != nil && !IsNotFound(err):
 		return fmt.Errorf("could not look up %q in the account database (%s); try again, or name the account by its uid",
 			name, strings.TrimPrefix(err.Error(), "unixidentity: "))

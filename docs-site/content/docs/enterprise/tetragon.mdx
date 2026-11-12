@@ -255,7 +255,7 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify -
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status
 ```
 
-Each line is a pass (`✓`), a warning (`!`), a failure (`✗`) or information (`i`); a failure prints the command that fixes it. `defenseclaw-gateway status` ends with one line such as `Kernel sensor: Tetragon v1.7.1 (consume)`. The list of checks is in [What tetragon verify checks](#what-tetragon-verify-checks).
+Each line is a pass (`✓`), a warning (`!`), a failure (`✗`) or information (`i`); a failure prints the command that fixes it. `/opt/defenseclaw/bin/defenseclaw-gateway status` ends with one line such as `Kernel sensor: Tetragon v1.7.1 (consume)`. The list of checks is in [What tetragon verify checks](#what-tetragon-verify-checks).
 
 ![tetragon verify --ready-for consume on a RHEL 9 computer that passes: Tetragon installed and running, its API a root-owned unix socket, version 1.7.1 supported, the sensor helper reading events, loopback metrics and health listeners, Plane C on and recorded by the gateway, no policy left without a helper, four of your policies loaded and read only, and the closing line Ready: this host runs consume as its config asks](/images/tetragon/terminal-tetragon-verify-consume.png)
 
@@ -532,7 +532,7 @@ defenseclaw-tetragon-ready:
 
 ### What tetragon verify checks
 
-Each line is a pass (`✓`), a warning (`!`), a failure (`✗`) or information (`i`). A failure prints the exact command that fixes it. The checks, in order: Tetragon is installed and running, its API is a root-owned unix socket, its version is in the window for the mode, the helper's stream is connected (and not on the `cn_proc` fallback), the metrics and health listeners are on loopback, Plane C is on and the gateway records it, and your policies are counted. `defenseclaw-gateway status` ends its Subsystems list with one line, `Kernel sensor: Tetragon v1.7.1 (consume)`, and adds `; kernel controls: ...` once DefenseClaw's controls are loaded. On the fallback it reads `Kernel sensor: cn_proc and fanotify (Tetragon not used: <reason>)`.
+Each line is a pass (`✓`), a warning (`!`), a failure (`✗`) or information (`i`). A failure prints the exact command that fixes it. The checks, in order: Tetragon is installed and running, its API is a root-owned unix socket, its version is in the window for the mode, the helper's stream is connected (and not on the `cn_proc` fallback), the metrics and health listeners are on loopback, Plane C is on and the gateway records it, and your policies are counted. `/opt/defenseclaw/bin/defenseclaw-gateway status` ends its Subsystems list with one line, `Kernel sensor: Tetragon v1.7.1 (consume)`, and adds `; kernel controls: ...` once DefenseClaw's controls are loaded. On the fallback it reads `Kernel sensor: cn_proc and fanotify (Tetragon not used: <reason>)`.
 
 ## Step 2: See your own policies' events
 

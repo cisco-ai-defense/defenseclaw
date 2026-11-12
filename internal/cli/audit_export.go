@@ -163,7 +163,7 @@ func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 			if !auditExportCallerIsAdministrator() {
 				return withExitCode(&managedViewRefusal{
 					code:    "elevation_required",
-					message: windowsManagedStandardUserViewAnswer("the audit log", "audit export -o <file>"),
+					message: windowsManagedStandardUserViewAnswer("the audit log", "audit", "export", "-o", "<file>"),
 				}, enterprisestatus.WindowsExitAccessDenied)
 			}
 			return nil

@@ -39,11 +39,12 @@ import (
 const ScanRecordedByCallerEnv = "DEFENSECLAW_SCAN_RECORDED_BY_CALLER"
 
 type PluginScanner struct {
-	Connector   string
-	BinaryPath  string
-	Policy      string
-	Profile     string
-	IncludeSelf bool
+	Connector             string
+	BinaryPath            string
+	Policy                string
+	Profile               string
+	IncludeSelf           bool
+	DisableVendorIdentity bool
 	// LLM is the resolved scanners.plugin judge (config ResolveLLM). Only
 	// the embedded Windows runtime needs it: the defenseclaw CLI resolves
 	// it from config itself.
@@ -95,6 +96,10 @@ func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
 	}
 	if s.IncludeSelf {
 		args = append(args, "--include-self")
+	}
+	base := filepath.Base(binaryPath)
+	if s.DisableVendorIdentity && (base == "defenseclaw" || base == "defenseclaw.exe" || usesScannerRuntime(binaryPath)) {
+		args = append(args, "--disable-vendor-identity")
 	}
 	return binaryPath, args
 }

@@ -14,7 +14,7 @@ DefenseClaw redacts each record once, at the boundary between the record and a d
 A new install uses profile `none` everywhere, local SQLite included. Grafana and the bundled dashboards are consumers of the exported record, not another redaction boundary: they show every field that arrives.
 
 <Callout type="warn" title="Review the plan before you enable export">
-An enabled destination with no `send` or `routes` receives every signal it supports, from every bucket, with profile `none`. Run `defenseclaw observability plan` and `defenseclaw doctor` to find unredacted legs. On a managed install, run `defenseclaw enterprise <os> status` (`linux`, `macos` or `windows`) as an administrator; it lists each destination with its kind, signals and effective profile (`destinations[]` in `--json`).
+An enabled destination with no `send` or `routes` receives every signal it supports, from every bucket, with profile `none`. Run `defenseclaw observability plan` and `defenseclaw doctor` to find unredacted legs. On a managed install, an administrator runs `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status` on Linux, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status` on macOS, or `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status` from an elevated PowerShell prompt on Windows; it lists each destination with its kind, signals and effective profile (`destinations[]` in `--json`). A standard user's commands are listed in [Managed command availability](/docs/enterprise/managed-commands).
 </Callout>
 
 ## Redact before export

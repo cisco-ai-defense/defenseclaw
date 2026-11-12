@@ -26,15 +26,18 @@ var (
 	gatewayManagedState       = func() (bool, int) { return daemon.New(config.DefaultDataPath()).IsRunning() }
 	gatewayRunsReplacedBinary = func() bool { return daemon.New(config.DefaultDataPath()).RunsReplacedExecutable() }
 	gatewayExecutable         = os.Executable
+	gatewayListenerClass      = daemon.ClassifyPerUserListener
 )
 
 // foreignGatewayListener explains a listener on the configured API port that
 // is not the gateway this account started with `defenseclaw-gateway start`
 // for this DefenseClaw home: a gateway left running by another home or test
 // run, another account's process, or any other program. It returns "" when
-// the port is free or held by the managed gateway.
+// the port is free, the managed gateway owns it, or the connected-peer check
+// must decide ownership of an unlisted process from this account.
 //
-// It never sends the gateway token to the listener. Managed deployments run
+// An unlisted account process reaches the separate connected-peer check;
+// this diagnosis never sends a gateway token. Managed deployments run
 // the gateway as a service, so they keep their own checks. On Windows the
 // holder is named by PID and program (GAP-1344): status showed another
 // account's gateway on this account's port as this account's, rc 0.
@@ -56,12 +59,20 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	holder, holderErr := gatewayPortHolder(host, port)
 	// lsof on macOS does not list another account's sockets, so a missing
-	// holder is confirmed with a connection attempt.
+	// holder is confirmed with a connection attempt. The PID record may then
+	// identify a root-run gateway for this home for diagnosis only.
 	if holderErr != nil && !gatewayPortAnswers(addr) {
 		return ""
 	}
 	if holderErr != nil {
 		holder = daemon.PortHolder{UID: -1}
+	}
+	class := gatewayListenerClass(host, port, config.DefaultDataPath(), holder, holderErr, holderErr != nil)
+	if class == daemon.PerUserListenerOwnGatewayRunAsRoot {
+		return daemon.RootGatewayListenerReason
+	}
+	if class == daemon.PerUserListenerOwnGateway || class == daemon.PerUserListenerUnlistedOwnProcess {
+		return ""
 	}
 	running, managedPID := gatewayManagedState()
 	ownUID := os.Getuid()
@@ -72,8 +83,12 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 	switch {
 	case holderErr == nil && holder.UID >= 0 && holder.UID != ownUID:
 		return fmt.Sprintf("%s is held by %s, not by this account's gateway", addr, who)
+	// Windows names no UID for the holder or this account (both -1); its
+	// platform proof compares the process token's user instead.
 	case holderErr == nil && holder.UID == ownUID && sameHomeGatewayProcess(holder.PID, config.DefaultDataPath()):
 		return ""
+	case holderErr != nil:
+		return fmt.Sprintf("%s is held by %s, not by this account's verified gateway", addr, who)
 	case !running:
 		return fmt.Sprintf(
 			"%s is held by %s, not by this account's gateway: no gateway started for %s is running",
@@ -91,37 +106,75 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 // file, such as a transient service. The listener's account is checked by
 // the caller before this process identity is accepted.
 func sameHomeGatewayProcess(pid int, home string) bool {
-	if runtime.GOOS != "linux" || pid <= 0 || !filepath.IsAbs(home) {
+	if pid <= 0 || !filepath.IsAbs(home) {
 		return false
 	}
 	executable, err := gatewayExecutable()
-	if err != nil || filepath.Base(executable) != "defenseclaw-gateway" {
+	if err != nil || !gatewayExecutableName(executable, runtime.GOOS) {
 		return false
 	}
-	expected, err := os.Stat(executable)
-	if err != nil {
-		return false
+	return sameHomeGatewayProcessPlatform(pid, home, executable)
+}
+
+// gatewayExecutableName reports whether executable is the gateway program:
+// defenseclaw-gateway, or defenseclaw-gateway.exe on Windows (GAP-0694).
+func gatewayExecutableName(executable, goos string) bool {
+	if goos == "windows" {
+		return strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe")
 	}
-	actual, err := os.Stat("/proc/" + strconv.Itoa(pid) + "/exe")
-	if err != nil || !os.SameFile(expected, actual) {
-		return false
-	}
-	environment, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/environ")
-	if err != nil || len(environment) == 0 || len(environment) > 4*1024*1024 {
-		return false
-	}
-	count := 0
-	for _, entry := range strings.Split(string(environment), "\x00") {
-		if !strings.HasPrefix(entry, "DEFENSECLAW_HOME=") {
-			continue
+	return filepath.Base(executable) == "defenseclaw-gateway"
+}
+
+// foregroundLaunchHome is the DefenseClaw home of a gateway launched with
+// environment, by the rule of config.DefaultDataPath: a non-empty
+// DEFENSECLAW_HOME, otherwise HOME's .defenseclaw. Linux and macOS share it,
+// so a foreground gateway on the default home is recognised on both
+// (GAP-0705). A relative or repeated value proves nothing.
+func foregroundLaunchHome(environment []string) (string, bool) {
+	return foregroundLaunchHomeFrom(environment, "HOME")
+}
+
+// foregroundLaunchHomeFrom is foregroundLaunchHome for a platform whose
+// account home variable is userHomeKey (USERPROFILE on Windows, the one
+// os.UserHomeDir reads).
+func foregroundLaunchHomeFrom(environment []string, userHomeKey string) (string, bool) {
+	var override, userHome string
+	seenOverride, seenHome := false, false
+	for _, entry := range environment {
+		switch {
+		case strings.HasPrefix(entry, "DEFENSECLAW_HOME="):
+			if seenOverride {
+				return "", false
+			}
+			seenOverride, override = true, strings.TrimPrefix(entry, "DEFENSECLAW_HOME=")
+		case strings.HasPrefix(entry, userHomeKey+"="):
+			if seenHome {
+				return "", false
+			}
+			seenHome, userHome = true, strings.TrimPrefix(entry, userHomeKey+"=")
 		}
-		value := strings.TrimPrefix(entry, "DEFENSECLAW_HOME=")
-		if !filepath.IsAbs(value) || filepath.Clean(value) != filepath.Clean(home) {
-			return false
-		}
-		count++
 	}
-	return count == 1
+	if override != "" {
+		if !filepath.IsAbs(override) {
+			return "", false
+		}
+		return override, true
+	}
+	if filepath.IsAbs(userHome) {
+		return filepath.Join(userHome, config.DefaultDataDirName), true
+	}
+	return "", false
+}
+
+// sameForegroundFile reports whether two absolute paths name one file, so a
+// link to the gateway counts and a copy of it does not.
+func sameForegroundFile(left, right string) bool {
+	if !filepath.IsAbs(left) || !filepath.IsAbs(right) {
+		return false
+	}
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 // otherAccountListenerAt explains a listener on host:port that belongs to
@@ -147,6 +200,13 @@ func otherAccountListenerAt(host string, port int) string {
 	return fmt.Sprintf("%s is held by %s, not by this account's gateway", addr, who)
 }
 
+// problemClause is a foreignGatewayListener problem inside a longer sentence:
+// the root-gateway reason is a full sentence with its own final period, which
+// the surrounding text must not double (GAP-0706).
+func problemClause(problem string) string {
+	return strings.TrimSuffix(problem, ".")
+}
+
 // explainForeignListenerAtReadiness names the holder when another listener
 // answered readiness on the API port. The start check passed, but another
 // account's gateway took the port before this one bound it, and start
@@ -159,7 +219,7 @@ func explainForeignListenerAtReadiness(cfg *config.Config, err error) error {
 		return err
 	}
 	if problem := foreignGatewayListener(cfg); problem != "" {
-		return fmt.Errorf("%w: %s. %s", err, problem, foreignGatewayListenerFix(cfg))
+		return fmt.Errorf("%w: %s. %s", err, problemClause(problem), foreignGatewayListenerFix(cfg))
 	}
 	return err
 }
@@ -179,6 +239,14 @@ func foreignGatewayListenerFix(cfg *config.Config) string {
 // foreignGatewayListenerFixAt is foreignGatewayListenerFix for the API
 // listener at host:apiPort (the observability-v8 helpers, GAP-1670).
 func foreignGatewayListenerFixAt(host string, apiPort int) string {
+	holder, err := gatewayPortHolder(host, apiPort)
+	if err != nil {
+		holder = daemon.PortHolder{UID: -1}
+	}
+	if gatewayListenerClass(host, apiPort, config.DefaultDataPath(), holder, err,
+		err != nil && gatewayPortAnswers(net.JoinHostPort(host, strconv.Itoa(apiPort)))) == daemon.PerUserListenerOwnGatewayRunAsRoot {
+		return daemon.RootGatewayListenerRemedy(config.DefaultDataPath())
+	}
 	port := "<free port>"
 	if free := freeGatewayAPIPort(host, apiPort); free > 0 {
 		port = strconv.Itoa(free)

@@ -237,7 +237,7 @@ func validateHermesExecutableEvidence(
 	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
 		return errors.New("selected executable is not a regular non-reparse file")
 	}
-	if err := hookAPIValidateDirectory(filepath.Dir(selected)); err != nil {
+	if err := hookAPIValidateAgentDirectory(filepath.Dir(selected)); err != nil {
 		return fmt.Errorf("validate selected executable directory custody: %w", err)
 	}
 	if err := hookAPIValidateOwner(selected, before); err != nil {

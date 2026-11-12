@@ -509,13 +509,11 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
             credential,
             expected,
             protect_parent=False,
-            allow_windows_system_controllers_in_parent=True,
         )
         atomic_write_private_bytes(
             access_mode,
             b"no-password\n",
             protect_parent=False,
-            allow_windows_system_controllers_in_parent=True,
         )
 
         for refresh_config in (False, True):

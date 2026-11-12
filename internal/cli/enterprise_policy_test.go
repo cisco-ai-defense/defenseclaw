@@ -102,7 +102,7 @@ func TestEnterprisePolicyVerifyShowAndExport(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatalf("verify --json: %v\n%s", err, out)
 	}
-	// devin brings its Cascade companion.
+	// devin brings its Cascade companion, which publishes nothing.
 	if !report.Complete || report.Profile != "standalone" || len(report.Result.States) != len(ctx.connectors)+1 {
 		t.Fatalf("report: %+v", report)
 	}
@@ -111,7 +111,7 @@ func TestEnterprisePolicyVerifyShowAndExport(t *testing.T) {
 		routes[state.Connector] = state.Route
 	}
 	if routes["codex"] != enterprisepolicy.RouteMachinePolicy || routes["devin"] != enterprisepolicy.RoutePerUser ||
-		routes[enterprisepolicy.ConnectorDevinCascade] != enterprisepolicy.RouteMachinePolicy {
+		routes[enterprisepolicy.ConnectorDevinCascade] != enterprisepolicy.RouteUnsupported {
 		t.Fatalf("routes: %v", routes)
 	}
 	if !report.Guard["cursor"].Guard || !report.Guard["devin"].Guard || report.Guard["codex"].Guard {
@@ -232,6 +232,7 @@ func TestForeignHookCleanupIsInertOutsideStandalone(t *testing.T) {
 }
 
 func TestEnterprisePolicyShowsTheClaudeVersionFloor(t *testing.T) {
+	requireAdministratorTestToken(t, "the product writer, not the fixture, needs it: enterprisepolicy creates the Claude Code policy folder (etc\\claude-code) with an Administrators owner (createProtectedDir, O:BA), which only an administrator token can set")
 	ctx := withEnterprisePolicyTree(t)
 	// The tree is a Linux host's, which has no Windows enumerator record of
 	// unprotected agent installs; on Windows its absence makes verify

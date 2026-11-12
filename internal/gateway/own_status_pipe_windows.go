@@ -15,12 +15,12 @@ import (
 )
 
 func init() {
-	ownStatusWindowsAccountName = func(sid string) string {
+	ownStatusWindowsAccount = func(sid string) (string, string) {
 		account, err := lsaAccountBySID(sid)
 		if err != nil {
-			return ""
+			return "", ""
 		}
-		return account.Name
+		return account.Name, account.Domain
 	}
 }
 
@@ -37,7 +37,7 @@ func (a *APIServer) serveOwnStatusPipe(ctx context.Context) {
 	for ctx.Err() == nil {
 		err := refusalpipe.ServeOwnStatus(ctx, func(sid string) []byte {
 			return a.ownStatusForWindowsAccount(ctx, sid)
-		})
+		}, a.windowsAccountExcludedNow)
 		if err != nil && !logged {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] own-status pipe unavailable, retrying: %v\n", err)
 			logged = true

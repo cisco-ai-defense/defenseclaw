@@ -58,7 +58,7 @@ type WindowsMCPAsUserStarter struct {
 // Seams for tests.
 var (
 	windowsMCPAsUserReadSpool = func(dir, sid, connector string) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
-		return readMCPSpool(dir, sid, connector, managed.ValidateTrustedFilePath)
+		return ReadMCPSpool(dir, sid, connector, managed.ValidateTrustedFilePath)
 	}
 	windowsMCPAsUserSessionToken = windowsEnterpriseSignedInTargetTokenResolver
 	windowsMCPAsUserStartProcess = startWindowsMCPAsUserProcess
@@ -89,10 +89,7 @@ func (s WindowsMCPAsUserStarter) Start(_ context.Context, request mcpasuser.Requ
 	if err != nil {
 		return nil, err
 	}
-	dir := ClaudeMCPSpoolDir(authorizationDir)
-	if request.Connector == "kiro" {
-		dir = KiroMCPSpoolDir(authorizationDir)
-	}
+	dir := MCPSpoolDir(authorizationDir, request.Connector)
 	servers, unreadable, err := windowsMCPAsUserReadSpool(dir, request.SID, request.Connector)
 	if err != nil {
 		return nil, fmt.Errorf("read the MCP servers published for %s: %w", account, err)

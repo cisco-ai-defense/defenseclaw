@@ -611,7 +611,7 @@ func claudeDesktopGateConditions(reg WSLRegistry, create bool, values []RegValue
 		}
 	}
 	if !present && !create {
-		return wslGap{advisory: true, text: `HKLM\` + ClaudeDesktopPolicyKey + ` holds no machine policy, and any value there makes Claude Desktop ignore every account's HKCU policy and local third-party configuration; to set the gate explicitly, deploy the output of "defenseclaw enterprise policy export --connector wsl" with the organization's Claude Desktop policy, or set enterprise.machine_policy.windows_wsl.claude_desktop_key: create`}, nil
+		return wslGap{advisory: true, text: `HKLM\` + ClaudeDesktopPolicyKey + ` holds no machine policy, and any value there makes Claude Desktop ignore every account's HKCU policy and local third-party configuration; to set the gate explicitly, deploy the output of ` + policyExportCommand("windows", "--connector", "wsl") + ` with the organization's Claude Desktop policy, or set enterprise.machine_policy.windows_wsl.claude_desktop_key: create`}, nil
 	}
 	if !present {
 		users, err := reg.UserValues(ClaudeDesktopPolicyKey)

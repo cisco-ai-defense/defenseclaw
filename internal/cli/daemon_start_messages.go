@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -113,10 +114,32 @@ func gatewayLogExitReason(path string, offset int64) string {
 			reason = destination + " (" + reason + ")"
 		}
 	}
-	if len(reason) > 400 {
+	// A cause that ends with its repair names the folder and the command that
+	// fixes it. The folder appears twice and the second copy is shell quoted (an
+	// apostrophe becomes four bytes), so the length depends on the path. It is
+	// never cut: the log read above already bounds it, and a cut would drop the
+	// folder or the command the operator needs. Other causes keep 400 bytes.
+	if len(reason) > 400 && !gatewayRepairStepEnding.MatchString(reason) {
 		reason = strings.ToValidUTF8(reason[:400], "") + "..."
 	}
 	return reason
+}
+
+// gatewayRepairStepEnding matches a cause that already ends with the step to
+// run after the repair (for example an audit-folder refusal: "...chmod go-w
+// <folder>, then run: defenseclaw-gateway restart").
+var gatewayRepairStepEnding = regexp.MustCompile(`then run: defenseclaw-gateway (start|restart)$`)
+
+// gatewayReadinessFailure is the error of a start or restart that did not reach
+// readiness. A cause that ends with its own repair step stays the last words of
+// the message; every other cause is followed by the gateway-log pointer and, on a
+// full disk, the disk note (GAP-0825).
+func gatewayReadinessFailure(prefix string, err error, logFile string) error {
+	if gatewayRepairStepEnding.MatchString(err.Error()) {
+		return fmt.Errorf("%s: %w", prefix, err)
+	}
+	return fmt.Errorf("%s: %w (check %s for errors)%s", prefix, err, logFile,
+		gatewayStartFailureDiskNote(config.DefaultDataPath()))
 }
 
 // gatewayExitedBeforeReadinessError names the error the gateway exited on
@@ -161,6 +184,9 @@ func configSchemaProblem(err error) (string, bool) {
 	}
 	field := strings.TrimPrefix(schemaErr.Path, "$.")
 	if schemaErr.Keyword == "additionalProperties" && field != "" && field != "$" {
+		if retired, ok := schemaErr.RetiredKeyMessage(); ok {
+			return fmt.Sprintf("%s: %s", where, retired), true
+		}
 		// A typo'd or undeclared key (GAP-2173).
 		hint := ""
 		if schemaErr.Suggestion != "" {

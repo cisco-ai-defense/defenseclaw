@@ -162,9 +162,15 @@ func evaluateWindowsEnterprisePrerequisites(input windowsEnterprisePrereqInput, 
 	mutation := windowsEnterpriseMutationAction(input.Action)
 
 	if ops.elevated != nil && !ops.elevated() {
+		// Secure Client keeps its text. A standalone computer may be running
+		// the installed CLI, not Setup (cowork-1-0-8 GAP-0095).
+		remedy := "run Setup from an elevated administrator or LocalSystem context (the deployment system's machine context)"
+		if input.Standalone {
+			remedy = "run the same command from an elevated administrator or LocalSystem context (the deployment system's machine context)"
+		}
 		add(newWindowsEnterprisePrereq(prereqCheckElevation, map[string]string{
 			"reason": "the lifecycle is not running with an elevated administrator token",
-			"remedy": "run Setup from an elevated administrator or LocalSystem context (the deployment system's machine context)",
+			"remedy": remedy,
 		}))
 	}
 	if ops.volumeFindings != nil {
@@ -459,15 +465,13 @@ func classifyWindowsEnterpriseScriptBlock(stderr []byte) (windowsEnterpriseScrip
 		return windowsEnterpriseScriptBlock{
 			ErrorID: "ScriptContainedMaliciousContent",
 			Reason:  "the antimalware scan interface blocked the installer script before it started",
-			Remedy: "allow the DefenseClaw installer script and module in the antimalware or endpoint protection product " +
-				"(exclusion by signer or path), then run Setup again",
+			Remedy:  "allow the DefenseClaw installer script and module in the antimalware or endpoint protection product (exclusion by signer or path), then run Setup again",
 		}, true
 	case windowsEnterprisePolicyIDPattern.Match(stderr) && windowsEnterprisePolicyCategory.Match(stderr):
 		return windowsEnterpriseScriptBlock{
 			ErrorID: "UnauthorizedAccess",
 			Reason:  "PowerShell refused to run the installer script under the effective execution policy",
-			Remedy: "set Turn on Script Execution (Group Policy, machine and user) to Not Configured or to allow the " +
-				"installer, or use the signed payload where AllSigned is enforced, then run Setup again",
+			Remedy:  "set Turn on Script Execution (Group Policy, machine and user) to Not Configured or to allow the installer, or use the signed payload where AllSigned is enforced, then run Setup again",
 		}, true
 	}
 	return windowsEnterpriseScriptBlock{}, false

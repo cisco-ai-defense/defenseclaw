@@ -64,7 +64,7 @@ var Amp = register(&Spec{
 	versionPattern: ampVersionRE,
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/amp", "--version"},
-		VersionRE:   regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+-g[0-9a-f]+) `),
+		VersionRE:   regexp.MustCompile(`^v?([0-9]+\.[0-9]+\.[0-9]+-g[0-9a-f]+) `),
 		// One Bun-compiled executable makes every request.
 		NetworkBinaries: `readlink -f "$(command -v amp)"`,
 	},
@@ -75,7 +75,7 @@ var Amp = register(&Spec{
 			return nil, err
 		}
 		check := `h="$(mktemp -d)"; got="$(HOME="$h" AMP_SKIP_UPDATE_CHECK=1 /usr/local/bin/amp --version 2>/dev/null | head -n 1 | cut -d' ' -f1)"; rm -rf "$h"; ` +
-			`[ "$got" = ` + shellQuote(version) + ` ] || { echo "Amp '$got' is not the pinned ` + version + `" >&2; exit 1; }`
+			pinVersionCheck("Amp", version)
 		return []InstallStep{{
 			Comment: "Install Amp " + version + " in a root-owned prefix (registry integrity and native sha256 checked)",
 			Run:     run + "; " + check,

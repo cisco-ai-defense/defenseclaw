@@ -8169,7 +8169,7 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         _header(
             "Hook Fail Mode (use Guardrail action)",
             "guardrail.hook_fail_mode",
-            _value(cfg, "guardrail.hook_fail_mode"),
+            _effective_guardrail_value(cfg, "", "effective_hook_fail_mode", "guardrail.hook_fail_mode"),
         ),
         _field(
             cfg,

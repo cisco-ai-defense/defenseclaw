@@ -18,7 +18,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -172,10 +174,16 @@ var (
 // once the standalone gateway service is seen failing a start that began
 // while this hook waited, or with errGatewayRestarting when the service is
 // still not running at deadline (the call sits in the socket systemd holds
-// across the restart). stop ends the watch (call it once the response
-// arrives); release frees ctx. Off Linux, or outside the standalone
-// profile, ctx is returned unchanged.
+// across the restart). A managed Windows call outside Secure Client that
+// names its gateway service gets the service watch instead
+// (watchManagedGatewayService). stop ends the watch (call it once the
+// response arrives); release frees ctx. Any other call gets ctx unchanged.
 func watchManagedGatewayStarts(ctx context.Context, opts Options, deadline time.Time) (watched context.Context, stop, release func()) {
+	if running := managedGatewayServiceRunningNow; running != nil && opts.ManagedEnterprise && !opts.ManagedStandalone &&
+		!opts.SecureClient && !deadline.IsZero() && strings.TrimSpace(opts.ManagedGatewayServiceName) != "" {
+		name := opts.ManagedGatewayServiceName
+		return watchManagedGatewayService(ctx, func() (bool, bool) { return running(name) }, deadline, managedGatewayServiceWatchInterval)
+	}
 	probe := standaloneGatewayServiceProbe
 	if !opts.ManagedEnterprise || !opts.ManagedStandalone || probe == nil {
 		return ctx, func() {}, func() {}
@@ -184,7 +192,9 @@ func watchManagedGatewayStarts(ctx context.Context, opts Options, deadline time.
 	done := make(chan struct{})
 	var once sync.Once
 	stop = func() { once.Do(func() { close(done) }) }
-	go watchGatewayStarts(watched, done, cancel, probe, gatewayStartWatchInterval, deadline)
+	// The intervals are read now: the watch outlives the call by a moment
+	// (GAP-0680).
+	go watchGatewayStarts(watched, done, cancel, probe, gatewayStartWatchInterval, gatewayRunningWatchInterval, deadline)
 	return watched, stop, func() { stop(); cancel(nil) }
 }
 
@@ -200,7 +210,7 @@ func watchGatewayStarts(
 	done <-chan struct{},
 	cancel context.CancelCauseFunc,
 	probe func(context.Context) (gatewayServiceState, error),
-	interval time.Duration,
+	interval, runningInterval time.Duration,
 	deadline time.Time,
 ) {
 	timer := time.NewTimer(interval)
@@ -231,7 +241,7 @@ func watchGatewayStarts(
 			cancel(errGatewayStartFailing)
 			return
 		case state.Active == "active":
-			next = max(interval, gatewayRunningWatchInterval)
+			next = max(interval, runningInterval)
 		case !deadline.IsZero():
 			// Stopping, starting or stopped: the call waits in the socket.
 			left := time.Until(deadline)
@@ -242,6 +252,105 @@ func watchGatewayStarts(
 			next = min(interval, left)
 		}
 		timer.Reset(next)
+	}
+}
+
+// managedGatewayServiceRunningNow reads whether the managed Windows gateway
+// service is running (known false: the state could not be read); nil where
+// the managed gateway is no service-manager service the hook reads.
+// A variable for tests.
+var managedGatewayServiceRunningNow = platformManagedGatewayServiceRunning
+
+// managedGatewayServiceStateWait bounds one read of the gateway service's
+// state by the service watch: a read the service manager holds longer
+// proves nothing, and the call keeps its answer deadline.
+var managedGatewayServiceStateWait = 150 * time.Millisecond
+
+// managedGatewayServiceWatchInterval is how often, after the restart
+// budget, a managed Windows call still waiting for its answer reads the
+// gateway service's state again.
+var managedGatewayServiceWatchInterval = 250 * time.Millisecond
+
+// watchManagedGatewayService returns ctx, ended with errGatewayRestarting
+// once the managed Windows gateway service is read as not running at or
+// after deadline (the restart budget) while the call, connected to the
+// gateway, waits for its answer.
+// The first call into a stop connected to the running gateway before Setup
+// or an administrator stopped it; the stopping gateway took the call and
+// never answered it, so the call waited for the process cap (4 s) on every
+// connector at once, 4.5-7.3 s for the agent with its launch, while the
+// calls after it were blocked at the 3 s restart budget (rel-1-0-6
+// GAP-0648, GAP-0167, GAP-0171). That call is now blocked at the restart
+// budget too; errGatewayRestarting is closed in every fail mode. A running
+// gateway (a busy one, one that waits on a scanner) keeps the call's whole
+// answer budget, and a state that cannot be read in time proves nothing.
+// A call no gateway took (its dials were refused) is not ended: its retries
+// end at the restart budget on their own, and then it may start the
+// installer-owned gateway, which a stopped service reads as not running
+// until it runs (GAP-0648 review F3). stop ends the watch (call it once the
+// response arrives); release frees ctx.
+func watchManagedGatewayService(ctx context.Context, running func() (bool, bool), deadline time.Time, interval time.Duration) (watched context.Context, stop, release func()) {
+	var connected atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }})
+	watched, cancel := context.WithCancelCause(ctx)
+	// Read once: the watch outlives the call by a moment after release.
+	wait := managedGatewayServiceStateWait
+	var mu sync.Mutex
+	stopped := false
+	done := make(chan struct{})
+	stop = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !stopped {
+			stopped = true
+			close(done)
+		}
+	}
+	go func() {
+		timer := time.NewTimer(time.Until(deadline))
+		defer timer.Stop()
+		for {
+			select {
+			case <-watched.Done():
+				return
+			case <-done:
+				return
+			case <-timer.C:
+			}
+			if !connected.Load() {
+				timer.Reset(interval)
+				continue
+			}
+			if up, known := serviceRunningWithin(running, wait); known && !up {
+				mu.Lock()
+				if !stopped {
+					cancel(errGatewayRestarting)
+				}
+				mu.Unlock()
+				return
+			}
+			timer.Reset(interval)
+		}
+	}()
+	return watched, stop, func() { stop(); cancel(nil) }
+}
+
+// serviceRunningWithin is running bounded by wait: a read that takes longer
+// is not known.
+func serviceRunningWithin(running func() (bool, bool), wait time.Duration) (up, known bool) {
+	type state struct{ up, known bool }
+	read := make(chan state, 1)
+	go func() {
+		up, known := running()
+		read <- state{up, known}
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case s := <-read:
+		return s.up, s.known
+	case <-timer.C:
+		return false, false
 	}
 }
 
@@ -373,6 +482,7 @@ func connectBy(ctx context.Context, deadline time.Time, onConnect func()) (tryCt
 		})
 	}}
 	ctx, peerCheck := withPerUserPeerCheck(ctx)
+	peerCheck.by = deadline
 	tryCtx, cancel := context.WithCancelCause(httptrace.WithClientTrace(ctx, trace))
 	go func() {
 		timer := time.NewTimer(time.Until(deadline))
@@ -382,7 +492,14 @@ func connectBy(ctx context.Context, deadline time.Time, onConnect func()) (tryCt
 			select {
 			case <-connected:
 			default:
-				if peerCheck.pending.Load() {
+				if peerCheck.deciding.Load() && ownerScanEnded(connected, tryCtx, peerCheck) {
+					return
+				}
+				if peerCheck.abandoned.Load() {
+					// The owner scan of a queued connection outlasted
+					// ownerScanGrace: the outage of an unanswered listener.
+					cancel(errPerUserOwnerScanUnfinished)
+				} else if peerCheck.pending.Load() {
 					// A listener took the connection and its owner is not
 					// proven yet (the Windows tuple wait of one that
 					// closed at once): never an outage.
@@ -396,6 +513,50 @@ func connectBy(ctx context.Context, deadline time.Time, onConnect func()) (tryCt
 		}
 	}()
 	return tryCtx, func() { cancel(nil) }
+}
+
+// ownerScanGrace is how long past the connect deadline a try waits for the
+// owner scan of its unaccepted connection (verifyConnected). The scan is
+// bounded work: every process of the account, plus a short re-read of a
+// thread that cannot be read for a moment. The grace only keeps the deadline
+// from cutting it. A scan still running after the grace has shown neither
+// the own gateway nor another process, so the try ends as the outage of an
+// unanswered listener (errPerUserOwnerScanUnfinished): nothing was sent, and
+// the outage mode of the account decides.
+const ownerScanGrace = 2 * time.Second
+
+// ownerScanEnded holds the connect deadline of a try while the owner scan of
+// its unaccepted connection runs, for up to ownerScanGrace. It reports true
+// when the try needs no cancel: the connection was proven (connected), the
+// try ended (tryCtx), or the scan found its listener to be the own gateway
+// and the dial returned its answer (the check is no longer pending). A scan
+// that said no ends the wait with false (the deadline cut applies), and so
+// does a scan still running when the grace ends, which also marks the check
+// abandoned: connectBy then ends the try with errPerUserOwnerScanUnfinished,
+// and a proof arriving later is void.
+func ownerScanEnded(connected <-chan struct{}, tryCtx context.Context, check *perUserPeerCheck) bool {
+	grace := time.NewTimer(ownerScanGrace)
+	defer grace.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case <-connected:
+			return true
+		case <-tryCtx.Done():
+			return true
+		case <-grace.C:
+			check.abandoned.Store(true)
+			return false
+		case <-poll.C:
+			if !check.pending.Load() {
+				return true
+			}
+			if !check.deciding.Load() {
+				return false
+			}
+		}
+	}
 }
 
 // firstTryConnectWindow is the least time the first try of a per-user hook

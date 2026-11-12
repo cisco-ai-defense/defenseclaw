@@ -56,14 +56,14 @@ func TestEndpointHealthNextDelayJitter(t *testing.T) {
 			t.Fatalf("delay %v outside [%v, %v)", delay, interval, interval+interval/10)
 		}
 	}
-	if got := endpointHealthNextDelay(0); got < inventory.ManagedEnterpriseScanInterval {
+	if got := endpointHealthNextDelay(0); got < inventory.SecureClientScanInterval {
 		t.Fatalf("zero interval delay %v below the managed floor", got)
 	}
 }
 
 func TestEndpointHealthIntervalFallsBackToManagedFloor(t *testing.T) {
 	s := &Sidecar{cfg: endpointHealthManagedConfig(t)}
-	if got := s.endpointHealthInterval(); got != inventory.ManagedEnterpriseScanInterval {
+	if got := s.endpointHealthInterval(); got != inventory.SecureClientScanInterval {
 		t.Fatalf("interval without discovery = %v", got)
 	}
 }

@@ -6,11 +6,13 @@
 package enterpriseunix
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
@@ -38,7 +40,11 @@ func TestUnprotectedRecordFromAnEarlierInstallIsPending(t *testing.T) {
 				data := []byte(tc.record)
 				if tc.record == "" {
 					var err error
-					if data, err = enterprisehooks.MarshalUnprotectedAgents(nil); err != nil {
+					current, generationErr := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+					if generationErr != nil || current.Generation == 0 {
+						t.Fatalf("read current config generation: %+v, %v", current, generationErr)
+					}
+					if data, err = enterprisehooks.MarshalUnprotectedAgentsForConfig(nil, current.Generation, current.ConfigSHA256); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -70,5 +76,95 @@ func TestUnprotectedRecordFromAnEarlierInstallIsPending(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// GAP-0640: a connector added by a config generation must not inherit the
+// previous enumerator scan's complete result. Until a scan of this generation
+// finishes, status, verify and ensure show pending coverage. A later scan
+// with the same empty agent list restores complete coverage.
+func TestUnprotectedRecordPredatingConfigGenerationIsPending(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			h := newTestHost(t, platform)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			recordPath := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
+			generationPath := h.env.P(configwrite.GenerationPath(h.env.Layout.ConfigPath))
+			current, err := configwrite.ReadGenerationState(generationPath)
+			if err != nil || current.Generation == 0 {
+				t.Fatalf("read installed config generation: %+v, %v", current, err)
+			}
+			writeRecord := func(generation uint64) {
+				t.Helper()
+				data, err := enterprisehooks.MarshalUnprotectedAgents(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var record map[string]any
+				if err := json.Unmarshal(data, &record); err != nil {
+					t.Fatal(err)
+				}
+				record["config_generation"] = generation
+				record["config_sha256"] = current.ConfigSHA256
+				data, err = json.Marshal(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(recordPath, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeRecord(current.Generation)
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				if !result.CoverageComplete || messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete) != "" {
+					t.Fatalf("%s with the current scan: coverage=%t warnings=%+v", action, result.CoverageComplete, result.Warnings)
+				}
+			}
+			current.Generation++
+			data, err := json.Marshal(current)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(generationPath, data, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify, ActionEnsure} {
+				result := h.run(Options{Action: action})
+				warnings := messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				if result.CoverageComplete || result.SecurityComplete || !strings.Contains(warnings, "NOT COVERED (scan pending)") ||
+					!strings.Contains(warnings, "different config generation") {
+					t.Fatalf("%s with an earlier scan: coverage=%t security=%t warnings=%+v", action, result.CoverageComplete, result.SecurityComplete, result.Warnings)
+				}
+			}
+			writeRecord(0)
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				warnings := messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				if result.CoverageComplete || result.SecurityComplete || !strings.Contains(warnings, "different config generation") {
+					t.Fatalf("%s with an unstamped scan: coverage=%t security=%t warnings=%+v", action, result.CoverageComplete, result.SecurityComplete, result.Warnings)
+				}
+			}
+			legacy, err := enterprisehooks.MarshalUnprotectedAgents(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(recordPath, legacy, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				warnings := messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				if result.CoverageComplete || result.SecurityComplete || !strings.Contains(warnings, "different config generation") {
+					t.Fatalf("%s with a missing scan stamp: coverage=%t security=%t warnings=%+v", action, result.CoverageComplete, result.SecurityComplete, result.Warnings)
+				}
+			}
+			writeRecord(current.Generation)
+			result := h.run(Options{Action: ActionStatus})
+			if !result.CoverageComplete || messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete) != "" {
+				t.Fatalf("status after the current scan: coverage=%t warnings=%+v", result.CoverageComplete, result.Warnings)
+			}
+		})
 	}
 }

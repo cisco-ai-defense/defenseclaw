@@ -76,6 +76,7 @@ classes:
       ActionAssetPolicy: "asset-policy"
       ActionConnectorHookTampered: "connector-hook-tampered"
       ActionConnectorHookRepaired: "connector-hook-repaired"
+      ActionConnectorHookAccountRemoved: "connector-hook-account-removed"
       ActionProtectedFileChanged: "protected-file-changed"
       ActionEnterpriseExemptUser: "enterprise-exempt-user"
       ActionIdentityRefreshCompleted: "identity-refresh-completed"

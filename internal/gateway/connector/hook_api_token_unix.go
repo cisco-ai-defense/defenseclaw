@@ -54,11 +54,21 @@ func hookAPIValidateOwner(path string, info os.FileInfo) error {
 }
 
 func hookAPIValidateDirectory(path string) error {
+	return hookAPIValidateDirectoryWith(path, false)
+}
+
+// Agent-created connector directories may use a proven private primary group.
+// Hook token, data and socket directories keep the strict directory check.
+func hookAPIValidateAgentDirectory(path string) error {
+	return hookAPIValidateDirectoryWith(path, true)
+}
+
+func hookAPIValidateDirectoryWith(path string, agentDirectory bool) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("hook API token directory must be absolute: %q", path)
 	}
 	clean := filepath.Clean(path)
-	if err := hookAPIValidateDirectoryChain(clean); err != nil {
+	if err := hookAPIValidateDirectoryChainWith(clean, agentDirectory); err != nil {
 		return err
 	}
 	resolved, err := filepath.EvalSymlinks(clean)
@@ -66,7 +76,7 @@ func hookAPIValidateDirectory(path string) error {
 		return err
 	}
 	if resolved != clean {
-		return hookAPIValidateDirectoryChain(resolved)
+		return hookAPIValidateDirectoryChainWith(resolved, agentDirectory)
 	}
 	return nil
 }
@@ -95,6 +105,10 @@ func hookAPIValidateDirectoryElement(path string) error {
 // binding its hook API. The named directory, every ancestor outside that tree,
 // and every structural failure anywhere stay fatal.
 func hookAPIValidateDirectoryChain(clean string) error {
+	return hookAPIValidateDirectoryChainWith(clean, false)
+}
+
+func hookAPIValidateDirectoryChainWith(clean string, agentDirectory bool) error {
 	for cur := clean; ; cur = filepath.Dir(cur) {
 		advisory := cur != clean && managed.AdvisoryAncestorPath(cur)
 		info, err := os.Lstat(cur)
@@ -102,7 +116,7 @@ func hookAPIValidateDirectoryChain(clean string) error {
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			if cur == clean || (!hookAPITrustedDarwinRootAlias(cur) && !hookAPITrustedSystemSymlink(cur, info)) {
+			if hookAPISymlinkRefused(cur, clean, info) {
 				return fmt.Errorf("symlinks are not allowed: %s", cur)
 			}
 			targetInfo, err := os.Stat(cur)
@@ -120,7 +134,7 @@ func hookAPIValidateDirectoryChain(clean string) error {
 		if !info.IsDir() {
 			return fmt.Errorf("expected directory: %s", cur)
 		}
-		if err := hookAPIValidateDirectoryMetadata(cur, info, cur != clean, advisory); err != nil {
+		if err := hookAPIValidateDirectoryMetadataWith(cur, info, cur != clean, advisory, agentDirectory); err != nil {
 			return err
 		}
 		if cur == filepath.Dir(cur) {
@@ -128,6 +142,15 @@ func hookAPIValidateDirectoryChain(clean string) error {
 		}
 	}
 	return nil
+}
+
+// hookAPISymlinkRefused is the walk's decision on a link in the folder chain
+// of clean: the named folder itself is never a link, and an ancestor may be one
+// only when it is a root-owned system link (a macOS root alias or a link inside
+// a root-owned private parent). The plugin-custody explainer asks this same
+// function so it never offers a permission fix for a link.
+func hookAPISymlinkRefused(cur, clean string, info os.FileInfo) bool {
+	return cur == clean || (!hookAPITrustedDarwinRootAlias(cur) && !hookAPITrustedSystemSymlink(cur, info))
 }
 
 func hookAPITrustedDarwinRootAlias(path string) bool {
@@ -160,12 +183,21 @@ func hookAPITrustedSystemSymlink(path string, info os.FileInfo) bool {
 // inspect the element at all stay fatal, as does an ACL helper that could not
 // read or parse the ACL (only its judgements are tagged as downgradable).
 func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowStickyAncestor, advisory bool) error {
+	return hookAPIValidateDirectoryMetadataWith(path, info, allowStickyAncestor, advisory, false)
+}
+
+func hookAPIValidateDirectoryMetadataWith(path string, info os.FileInfo, allowStickyAncestor, advisory, agentDirectory bool) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return fmt.Errorf("cannot inspect directory owner: %s", path)
 	}
 	const label = "hook API token path"
-	if mode := info.Mode().Perm(); mode&0o022 != 0 &&
+	mode := info.Mode().Perm()
+	otherAccountsWritable := mode&0o022 != 0
+	if agentDirectory && mode&0o022 == 0o020 && ownerPrivateGroup(path, info) {
+		otherAccountsWritable = false
+	}
+	if otherAccountsWritable &&
 		((!(allowStickyAncestor) || info.Mode()&os.ModeSticky == 0) || stat.Uid != 0) {
 		if err := managed.RelaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
 			"%s has group/other writable mode %04o", path, mode,
@@ -224,8 +256,29 @@ func hookAPIValidateOwnerFor(path string, info os.FileInfo, _ string) error {
 	return hookAPIValidateOwner(path, info)
 }
 
+// Plugin files are loaded as policy code. Their own write authority must be
+// checked as well as the directory chain, including an existing file's ACL.
+func hookAPIValidatePluginFilePermissions(path string, info os.FileInfo) error {
+	mode := info.Mode().Perm()
+	if mode&0o002 != 0 || (mode&0o020 != 0 && !ownerPrivateGroup(path, info)) {
+		return fmt.Errorf("plugin target %s has group/other writable mode %04o", path, mode)
+	}
+	return hookAPIValidateDirectoryACL(path)
+}
+
 // hookAPIValidateDirectoryFor matches the Windows signature (see
 // hookAPIValidateOwnerFor).
 func hookAPIValidateDirectoryFor(path, _ string) error {
-	return hookAPIValidateDirectory(path)
+	return hookAPIValidateAgentDirectory(path)
+}
+
+// mkdirHookAPITokenDir creates the hooks directory private to its owner.
+func mkdirHookAPITokenDir(hooksDir string) error {
+	return os.Mkdir(hooksDir, 0o700)
+}
+
+// mkdirHookAPITokenParents makes the missing directories above the hooks
+// directory, private to their owner.
+func mkdirHookAPITokenParents(dir string) error {
+	return os.MkdirAll(dir, 0o700)
 }

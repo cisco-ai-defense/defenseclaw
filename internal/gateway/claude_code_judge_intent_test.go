@@ -17,19 +17,41 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
+// slowToolJudgeProvider answers a judge request after delay. In observe mode
+// the hook returns without waiting for its judge, so a request lands in the
+// mock some time after the hook response: a test that reads the mock right
+// after the hook must wait for it (lastToolJudgeSample).
+type slowToolJudgeProvider struct {
+	*mockLLMProvider
+	delay time.Duration
+}
+
+func (p slowToolJudgeProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
+	time.Sleep(p.delay)
+	return p.mockLLMProvider.ChatCompletion(ctx, req)
+}
+
+// toolJudgeCaptureWait is how long lastToolJudgeSample waits for the judge
+// request of an observe hook: the hook-lane answer window, which also ends
+// the judge run, and a margin.
+const toolJudgeCaptureWait = hookJudgeAnswerWindow + time.Second
+
 // newClaudeCodeToolJudgeServer wires a Claude Code gateway whose tool-call
 // lane runs the judge and whose prompt lane stays regex-only, so every
-// provider call the mock captures is a tool-judge request.
-func newClaudeCodeToolJudgeServer(t *testing.T, mock *mockLLMProvider) *APIServer {
+// provider call the mock captures is a tool-judge request. The judge reaches
+// the mock after judgeDelay, as a model that is not instant does.
+func newClaudeCodeToolJudgeServer(t *testing.T, mock *mockLLMProvider, judgeDelay time.Duration) *APIServer {
 	t.Helper()
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
@@ -42,7 +64,7 @@ func newClaudeCodeToolJudgeServer(t *testing.T, mock *mockLLMProvider) *APIServe
 	a.SetHookJudge(&LLMJudge{
 		cfg:      &cfg.Guardrail.Judge,
 		model:    "test-model",
-		provider: mock,
+		provider: slowToolJudgeProvider{mockLLMProvider: mock, delay: judgeDelay},
 		rp:       &guardrail.RulePack{},
 	})
 	return a
@@ -60,8 +82,20 @@ func postClaudeCodeHook(t *testing.T, a *APIServer, body string) {
 }
 
 // lastToolJudgeSample returns the user message of the newest judge request.
+// An observe hook does not hold its answer for the judge, which runs on after
+// the response, so it waits for the first request to arrive.
 func lastToolJudgeSample(t *testing.T, mock *mockLLMProvider) string {
 	t.Helper()
+	deadline := time.Now().Add(toolJudgeCaptureWait)
+	for {
+		mock.mu.Lock()
+		called := len(mock.captured) > 0
+		mock.mu.Unlock()
+		if called || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
 	if len(mock.captured) == 0 {
@@ -84,7 +118,7 @@ const claudeCodeIntentToolCall = `{"session_id":"cc-intent-1","hook_event_name":
 // request went out without the user's task.
 func TestClaudeCodeUserPromptSubmitSeedsToolJudgeIntent(t *testing.T) {
 	mock := injectionHitProvider()
-	a := newClaudeCodeToolJudgeServer(t, mock)
+	a := newClaudeCodeToolJudgeServer(t, mock, 150*time.Millisecond)
 
 	postClaudeCodeHook(t, a, `{"session_id":"cc-intent-1","hook_event_name":"UserPromptSubmit","cwd":"/tmp",`+
 		`"prompt":"list the quarterly report fixtures"}`)
@@ -101,7 +135,7 @@ func TestClaudeCodeUserPromptSubmitSeedsToolJudgeIntent(t *testing.T) {
 // not seed or replace the task the judge weighs tool calls against.
 func TestClaudeCodeUserPromptExpansionDoesNotReplaceToolJudgeIntent(t *testing.T) {
 	mock := injectionHitProvider()
-	a := newClaudeCodeToolJudgeServer(t, mock)
+	a := newClaudeCodeToolJudgeServer(t, mock, 150*time.Millisecond)
 
 	postClaudeCodeHook(t, a, `{"session_id":"cc-intent-1","hook_event_name":"UserPromptSubmit","cwd":"/tmp",`+
 		`"prompt":"list the quarterly report fixtures"}`)

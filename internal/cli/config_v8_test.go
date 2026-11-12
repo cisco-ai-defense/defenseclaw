@@ -55,6 +55,22 @@ func TestV9ValidationFailureNamesCurrentVersion(t *testing.T) {
 	}
 }
 
+func TestRetiredConfigKeyDiagnosticsNameMigration(t *testing.T) {
+	err := config.ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\naudit_sinks: []\n"))
+	if err == nil {
+		t.Fatal("retired key accepted")
+	}
+	const want = "audit_sinks was retired in config_version 8; use observability.destinations"
+	failure := configV8ValidationFailure(err)
+	if failure.Path != "$.audit_sinks" || !strings.Contains(failure.Reason, want) || strings.Contains(failure.Reason, "suggested field") {
+		t.Fatalf("validate diagnostic = %+v, want %q", failure, want)
+	}
+	problem, ok := configSchemaProblem(err)
+	if !ok || !strings.Contains(problem, want) || strings.Contains(problem, "did you mean") {
+		t.Fatalf("status diagnostic = %q (%t), want %q", problem, ok, want)
+	}
+}
+
 func TestLoadConfigV8FileValidatesTargetRuntimeConnectorRoster(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")

@@ -91,10 +91,19 @@ func TestSignedOutOwnerRewrittenAccountUpgradeNeedsReadableOlderLock(t *testing.
 	stubSecureClientSignInReconcile(t)
 	previousEarlier := enterpriseHookReconcileTargetEarlierMatrix
 	previousClosed := enterpriseHookReconcileClosedMachineRegistration
+	previousRemoved := enterpriseHookRemovedAccountRow
 	t.Cleanup(func() {
 		enterpriseHookReconcileTargetEarlierMatrix = previousEarlier
 		enterpriseHookReconcileClosedMachineRegistration = previousClosed
+		enterpriseHookRemovedAccountRow = previousRemoved
 	})
+	// The account exists and is only signed out. The test says so itself:
+	// the real check reads the package cfg, and on a standalone deployment
+	// this fixture account, which has no profile on the computer, reads as
+	// removed and its row is skipped. A test that left the computer's own
+	// standalone config in cfg made this one fail on a managed host only
+	// (GAP-0093).
+	enterpriseHookRemovedAccountRow = func(enterpriseHookReconcileRow) bool { return false }
 	enterpriseHookReconcileSecureClient = func() bool { return false }
 	ownerRightsRestored := false
 	signedIn := false

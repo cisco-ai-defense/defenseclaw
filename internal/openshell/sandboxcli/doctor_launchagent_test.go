@@ -92,10 +92,10 @@ func TestManagedMacDoctorLaunchAgentVerdict(t *testing.T) {
 			}
 			ta.printDoctor(rep)
 			if tc.wantStatus == "fail" {
-				if rep.OK() || row.Fix == nil || row.Fix.Command != "sudo defenseclaw-gateway enterprise macos repair" || !row.Fix.Sudo {
+				if rep.OK() || row.Fix == nil || row.Fix.Command != "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair" || !row.Fix.Sudo {
 					t.Fatalf("failed job did not make doctor unready with administrator repair: %+v", row)
 				}
-				has(t, ta.output(), "not ready for sandboxes: 1 check failed", "sudo defenseclaw-gateway enterprise macos repair")
+				has(t, ta.output(), "not ready for sandboxes: 1 check failed", "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair")
 				lacks(t, ta.output(), "✓ ready for sandboxes")
 			} else {
 				if !rep.OK() {
@@ -105,7 +105,8 @@ func TestManagedMacDoctorLaunchAgentVerdict(t *testing.T) {
 					t.Fatalf("nonfailed job was sent to administrator repair: %+v", row.Fix)
 				}
 				has(t, ta.output(), "✓ ready for sandboxes")
-				lacks(t, ta.output(), "not ready for sandboxes", "sudo defenseclaw-gateway enterprise macos repair")
+				// A ready report prints no repair command at all, bare or by its full path.
+				lacks(t, ta.output(), "not ready for sandboxes", "enterprise macos repair")
 			}
 			calls := runner.Calls()
 			if len(calls) != 2 || openshelltest.Argv(calls[0]) != "launchctl print "+target || openshelltest.Argv(calls[1]) != "launchctl print user/503/com.cisco.defenseclaw.openshell-gateway" || calls[0].Timeout != 10*time.Second || calls[1].Timeout != 10*time.Second {
@@ -151,7 +152,7 @@ func TestManagedMacDoctorUserDomainLaunchAgent(t *testing.T) {
 			t.Fatalf("doctor missed failed user-domain job: %+v", row)
 		}
 		ta.printDoctor(rep)
-		has(t, ta.output(), "not ready for sandboxes", "sudo defenseclaw-gateway enterprise macos repair")
+		has(t, ta.output(), "not ready for sandboxes", "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair")
 		if calls := runner.Calls(); len(calls) != 2 || openshelltest.Argv(calls[0]) != "launchctl print "+gui || openshelltest.Argv(calls[1]) != "launchctl print "+user {
 			t.Fatalf("domain inspection calls = %+v", calls)
 		}
@@ -180,7 +181,7 @@ func TestManagedMacDoctorLaunchAgentFailureExitsNonzero(t *testing.T) {
 	withManagedHost(t)
 	ta, _ := launchAgentDoctorFixture(t, "gui/503/com.cisco.defenseclaw.openshell-gateway = {\n\tstate = not running\n\truns = 5\n\tlast exit reason = OS_REASON_CODESIGNING\n}\n", nil)
 	wantExit(t, ta.RunDoctor(bg, DoctorOptions{}), 1)
-	has(t, ta.output(), "not ready for sandboxes: 1 check failed", "sudo defenseclaw-gateway enterprise macos repair")
+	has(t, ta.output(), "not ready for sandboxes: 1 check failed", "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair")
 }
 
 func TestManagedMacDoctorIdleExit78RemainsReady(t *testing.T) {
@@ -190,5 +191,5 @@ func TestManagedMacDoctorIdleExit78RemainsReady(t *testing.T) {
 		t.Fatalf("doctor failed for a deliberate idle exit: %v", err)
 	}
 	has(t, ta.output(), "ready for sandboxes", "prerequisite of this account")
-	lacks(t, ta.output(), "sudo defenseclaw-gateway enterprise macos repair")
+	lacks(t, ta.output(), "enterprise macos repair")
 }

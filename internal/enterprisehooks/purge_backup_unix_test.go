@@ -89,7 +89,7 @@ func TestPurgeUserStateRemovesManagedOnlyState(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)
 	dataDir := filepath.Join(home, ".defenseclaw")
-	for _, rel := range []string{"hooks/codex-hook.sh", "session-facts.json", "foreign-hooks-backup/codex/x.json", "logs/hook.log"} {
+	for _, rel := range []string{"hooks/codex-hook.sh", "session-facts.json", "hook_contract_lock.json", "logs/hook.log"} {
 		writePurgeTestFile(t, filepath.Join(dataDir, rel), "managed")
 	}
 	summary, err := PurgeUserState(context.Background(), InstallOptions{

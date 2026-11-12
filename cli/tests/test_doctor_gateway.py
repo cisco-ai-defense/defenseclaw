@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -474,3 +475,88 @@ def test_pid_record_rejects_foreign_non_root_leaf(monkeypatch, tmp_path) -> None
     assert record.status == "denied"
     assert "not owned by a trusted principal" in record.reason
     assert record.pid == 0
+
+
+def _refused(pid: int):
+    raise PermissionError(pid)
+
+
+def test_darwin_process_evidence_reads_another_accounts_process_as_ps_does(monkeypatch):
+    """The macOS app's privileged helper runs this account's gateway as root.
+
+    libproc answers only for this account's processes, so the recorded gateway
+    read as ``denied`` and status called its port another account's. sysctl
+    and ``ps`` describe every process, with the identity the daemon verifies.
+    """
+    pid = 36347
+    executable = "/Library/PrivilegedHelperTools/DefenseClawMacGatewayAdmin/uid-501/defenseclaw-gateway"
+    monkeypatch.setattr(doctor_gateway, "_darwin_native_process_identity", _refused)
+    monkeypatch.setattr(doctor_gateway, "_darwin_kinfo_proc", lambda inspected_pid: ("1793776207.630838", 0))
+    monkeypatch.setattr(doctor_gateway, "_darwin_process_executable", lambda inspected_pid: executable)
+
+    evidence = doctor_gateway._darwin_process_evidence(pid)
+
+    assert evidence.status == "ok"
+    assert evidence.pid == pid
+    assert evidence.executable == executable
+    assert evidence.start_identity == "1793776207.630838"
+    assert evidence.uid == 0
+
+
+def test_darwin_process_evidence_stays_denied_without_the_program_path(monkeypatch):
+    monkeypatch.setattr(doctor_gateway, "_darwin_native_process_identity", _refused)
+    monkeypatch.setattr(doctor_gateway, "_darwin_kinfo_proc", lambda inspected_pid: ("1793776207.630838", 0))
+    monkeypatch.setattr(doctor_gateway, "_darwin_process_executable", lambda inspected_pid: "")
+
+    evidence = doctor_gateway._darwin_process_evidence(36347)
+
+    assert evidence.status == "denied"
+    assert evidence.uid == 0
+
+
+def test_darwin_process_evidence_reports_a_refused_process_that_exited_as_missing(monkeypatch):
+    def gone(pid: int):
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(doctor_gateway, "_darwin_native_process_identity", _refused)
+    monkeypatch.setattr(doctor_gateway, "_darwin_kinfo_proc", gone)
+
+    assert doctor_gateway._darwin_process_evidence(36347).status == "missing"
+
+
+def test_darwin_process_evidence_names_this_accounts_own_processes(monkeypatch):
+    monkeypatch.setattr(
+        doctor_gateway,
+        "_darwin_native_process_identity",
+        lambda inspected_pid: ("/opt/DefenseClaw/defenseclaw-gateway", "1785373323.123456"),
+    )
+    monkeypatch.setattr(doctor_gateway, "_darwin_kinfo_proc", lambda inspected_pid: ("1785373323.123456", 501))
+
+    assert doctor_gateway._darwin_process_evidence(4242).uid == 501
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sysctl kern.proc.pid is a macOS record")
+def test_darwin_kinfo_proc_describes_this_and_other_accounts_processes():
+    own_executable, own_identity = doctor_gateway._darwin_native_process_identity(os.getpid())
+    identity, uid = doctor_gateway._darwin_kinfo_proc(os.getpid())
+    assert identity == own_identity
+    assert uid == os.geteuid()
+    assert own_executable
+
+    # launchd (PID 1) is root's: every account may read its record and name
+    # its program, which libproc refuses to a non-root account.
+    launchd_identity, launchd_uid = doctor_gateway._darwin_kinfo_proc(1)
+    assert launchd_uid == 0
+    seconds, _, microseconds = launchd_identity.partition(".")
+    assert int(seconds) > 0 and len(microseconds) == 6
+    assert doctor_gateway._darwin_process_executable(1) == "/sbin/launchd"
+    if os.geteuid() != 0:
+        evidence = doctor_gateway._darwin_process_evidence(1)
+        assert (evidence.status, evidence.uid, evidence.executable) == ("ok", 0, "/sbin/launchd")
+        assert evidence.start_identity == launchd_identity
+
+    # macOS PIDs stop at 99998: the kernel answers an unknown PID with an
+    # empty record, which must read as a process that does not exist.
+    with pytest.raises(ProcessLookupError):
+        doctor_gateway._darwin_kinfo_proc(99999)
+    assert doctor_gateway._darwin_process_executable(99999) == ""

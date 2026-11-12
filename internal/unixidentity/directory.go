@@ -1324,15 +1324,46 @@ func nssSwitchLine(content, database string) []string {
 		if !ok || strings.TrimSpace(key) != database {
 			continue
 		}
-		var out []string
-		for _, source := range strings.Fields(sources) {
-			if !strings.HasPrefix(source, "[") {
-				out = append(out, strings.ToLower(source))
-			}
-		}
-		return out
+		return nssServiceNames(sources)
 	}
 	return nil
+}
+
+// nssSpace is the C isspace set.
+const nssSpace = " \t\n\v\f\r"
+
+// nssServiceNames lists the service names of the sources part of an NSS line,
+// lower-cased. A bracketed action clause is one unit that may hold several
+// actions and spaces ("[SUCCESS=return NOTFOUND=continue]", "[ !UNAVAIL=return ]"),
+// so it is skipped whole and none of its words is read as a service. An
+// unterminated clause is not skipped: its words stay in the list, where a
+// caller that checks every service refuses them, so a line glibc would reject
+// never makes the list shorter. Services are separated by the C isspace set,
+// as glibc nss_action_parse reads them (space, tab, newline, vertical tab,
+// form feed, carriage return).
+func nssServiceNames(sources string) []string {
+	var out []string
+	rest := sources
+	for {
+		rest = strings.TrimLeft(rest, nssSpace)
+		if rest == "" {
+			return out
+		}
+		if strings.HasPrefix(rest, "[") {
+			if end := strings.Index(rest, "]"); end >= 0 {
+				rest = rest[end+1:]
+			} else {
+				rest = rest[1:]
+			}
+			continue
+		}
+		end := strings.IndexAny(rest, nssSpace+"[")
+		if end < 0 {
+			end = len(rest)
+		}
+		out = append(out, strings.ToLower(rest[:end]))
+		rest = rest[end:]
+	}
 }
 
 // Group lookups by name.

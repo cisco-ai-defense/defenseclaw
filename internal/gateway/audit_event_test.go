@@ -73,3 +73,65 @@ func TestAuditEventEndpointIgnoresBodySandboxAttribution(t *testing.T) {
 		}
 	}
 }
+
+// TestGAP0647AuditEventEndpointIgnoresBodyAssignedIdentity pins that a posted
+// event never supplies the identity the gateway assigns: the agent instance
+// (ais-) that alerts --show joins on, the agent identity and the verified
+// caller facts. A later posted row therefore cannot reuse an earlier finding
+// agent instance and change the Agent shown for it. Correlation claims such
+// as the request, run and session IDs and ordinary structured data persist as
+// before.
+func TestGAP0647AuditEventEndpointIgnoresBodyAssignedIdentity(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
+
+	post := func(body string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		api.handleAuditEvent(w, httptest.NewRequest(http.MethodPost, "/audit/event", strings.NewReader(body)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("audit status = %d: %s", w.Code, w.Body.String())
+		}
+	}
+	post(`{"action":"inspect-tool-block","connector":"openclaw","request_id":"req-forged",` +
+		`"session_id":"session-forged","run_id":"run-forged","agent_instance_id":"ais-aaaaaaaaaaaaaaaa",` +
+		`"agent_id":"agt-forged","severity":"CRITICAL","structured":{"user.id":"alice",` +
+		`"defenseclaw.user.name":"alice","defenseclaw.user.id_kind":"uid",` +
+		`"defenseclaw.agent.identity.id":"agt-2222222222222222","defenseclaw.agent.depth":3,"note":"kept"}}`)
+	// The benign twin: the plugin admission row carries no identity and is stored whole.
+	post(`{"action":"gateway-tool-call","target":"shell","actor":"plugin-test","severity":"INFO",` +
+		`"request_id":"req-plugin","structured":{"note":"kept"}}`)
+
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, event := range events {
+		switch event.Action {
+		case "inspect-tool-block":
+			seen[event.Action] = true
+			if event.AgentInstanceID != "" {
+				t.Errorf("a posted event set the agent instance %q", event.AgentInstanceID)
+			}
+			for _, key := range []string{"user.id", "defenseclaw.user.name", "defenseclaw.user.id_kind",
+				"defenseclaw.agent.identity.id", "defenseclaw.agent.depth"} {
+				if value, ok := event.Structured[key]; ok {
+					t.Errorf("a posted event set the gateway identity fact %s=%v", key, value)
+				}
+			}
+			if event.RequestID != "req-forged" || event.SessionID != "session-forged" || event.RunID != "run-forged" ||
+				event.Structured["note"] != "kept" {
+				t.Errorf("correlation claims and ordinary data must persist: %+v", event)
+			}
+		case "gateway-tool-call":
+			seen[event.Action] = true
+			if event.RequestID != "req-plugin" || event.Structured["note"] != "kept" {
+				t.Errorf("the plugin event changed: %+v", event)
+			}
+		}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("stored events = %+v", events)
+	}
+}

@@ -11,13 +11,18 @@
 package gateway
 
 import (
+	"errors"
+	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -31,21 +36,50 @@ import (
 // gateway-wide in-flight cap stays shared by every key.
 //
 // Sizing: a daemon's per-binding limiter (sandboxauth.DefaultLimiterConfig,
-// 25/s burst 100) is the first limit one sandbox meets; sandbox-hook at
-// 100/s carries four sandboxes at that rate and burst 200 lets two burst
-// at once. The delivery receipt that confirms an allowed answer is a second
-// post on the hook route: sandbox-receipt, the same size, counts those
-// (hookCallerAdmissionKey), so the hook classes carry the documented hook
-// rate and a receipt never waits on or is refused by the evaluations
-// (GAP-0490). The 60 s policy/current poll is one call a minute per live
-// registration.
+// 25/s burst 100) is the first limit one sandbox meets. The account budget
+// is what the managed gateway answers inside the hook's 3.5 s window: every
+// relayed call (a proposal and its delivery receipt) makes about two dozen
+// audit writes under one SQLite write lock, and four sandboxes at 10 calls a
+// second answer in about a second on the shared build box (p95 under 1 s),
+// while 96 calls a second did not answer in time in half the runs
+// (rel-1-0-6 GAP-0490). The budget is therefore 40 calls a second with a
+// burst of 100 (the burst one sandbox may itself send), and a call past it
+// is refused at once with a 429 and a message that names the budget, instead
+// of waiting past the hook's window for an answer that comes too late. The
+// delivery receipt that confirms an allowed answer is a second post on the
+// hook route: sandbox-receipt, the same rate and burst, counts those
+// (hookCallerAdmissionKey), so a receipt never spends the evaluation rate.
+// There is no four-binding limit: one account can use its budget across
+// more bindings, each with its own in-flight limit
+// (sandboxauth.DefaultMaxInFlight). The shared hook and receipt admission
+// therefore holds the most calls the account bucket can admit during each
+// managed request's actual lifetime, including its initial burst. Raising
+// the budget toward 100/s needs less work under the audit write lock
+// (the 1.0.10 performance rows). The 60 s policy/current poll is one call a
+// minute per live registration.
 const (
 	sandboxBudgetHook    = "sandbox-hook"
 	sandboxBudgetReceipt = "sandbox-receipt"
 	sandboxBudgetPending = "sandbox-pending"
 	sandboxBudgetPolicy  = "sandbox-policy"
 	sandboxBudgetEvents  = "sandbox-events"
+	sandboxUserHookRate  = 40
+	sandboxUserHookBurst = 100
 )
+
+var sandboxUserHookInFlight, sandboxUserReceiptInFlight = managedSandboxInFlightLimits()
+
+// managedSandboxInFlightLimits uses one rendered ingress attempt's maximum
+// lifetime for hooks and the gateway's receipt window for acknowledgements.
+// These are separate HTTP requests with separate account rate buckets.
+func managedSandboxInFlightLimits() (hook, receipt int) {
+	first, retry := connector.SandboxHookAttemptBudgets()
+	return sandboxWindowCapacity(max(first, retry)), sandboxWindowCapacity(sandboxHookReceiptWindow)
+}
+
+func sandboxWindowCapacity(window time.Duration) int {
+	return sandboxUserHookBurst + int((time.Duration(sandboxUserHookRate)*window+time.Second-1)/time.Second)
+}
 
 // sandboxBudgetLimit is one class's rate, burst and in-flight bound per
 // uid.
@@ -55,8 +89,8 @@ type sandboxBudgetLimit struct {
 
 // sandboxBudgetLimits is the per-class table; tests replace entries.
 var sandboxBudgetLimits = map[string]sandboxBudgetLimit{
-	sandboxBudgetHook:    {Rate: 100, Burst: 200, InFlight: 32},
-	sandboxBudgetReceipt: {Rate: 100, Burst: 200, InFlight: 32},
+	sandboxBudgetHook:    {Rate: sandboxUserHookRate, Burst: sandboxUserHookBurst, InFlight: sandboxUserHookInFlight},
+	sandboxBudgetReceipt: {Rate: sandboxUserHookRate, Burst: sandboxUserHookBurst, InFlight: sandboxUserReceiptInFlight},
 	sandboxBudgetPolicy:  {Rate: 10, Burst: 20, InFlight: 8},
 	// The daemon posts its lifecycle and egress records every 2 s, one batch
 	// per sandbox (daemonRelayTelemetry), and stops a pass at its first
@@ -197,4 +231,84 @@ func sandboxBudgetForKey(key string) (sandboxBudgetLimit, bool) {
 	}
 	limit, ok := sandboxBudgetLimits[key[at+1:]]
 	return limit, ok
+}
+
+// sandboxHookBudgetMessage is the text of the 429 an account's relayed hook
+// or receipt gets when the account budget is empty: it names the budget, so
+// the user knows the call was refused for its rate, not lost to an outage.
+func sandboxHookBudgetMessage() string {
+	return fmt.Sprintf("DefenseClaw allows the sandboxes of one user %d tool calls a second together (a burst of %d); this call is over that budget and did not run, so retry in a few seconds",
+		sandboxUserHookRate, sandboxUserHookBurst)
+}
+
+// isSandboxHookClassKey reports whether a limiter key is one of the account's
+// relayed hook or receipt classes.
+func isSandboxHookClassKey(key string) bool {
+	at := strings.LastIndexByte(key, '|')
+	if at < 0 {
+		return false
+	}
+	switch key[at+1:] {
+	case sandboxBudgetHook, sandboxBudgetPending, sandboxBudgetReceipt:
+		return true
+	}
+	return false
+}
+
+// Stable reasons of a sandbox request refused 429 by its own binding's
+// limiter (sandboxauth), as distinct from the account budget
+// (managedHookReasonRateLimited) and the gateway-wide bound
+// (managedHookReasonOverloaded).
+const (
+	sandboxReasonBindingRate     = "sandbox_rate_limited"
+	sandboxReasonBindingInFlight = "sandbox_too_many_requests"
+)
+
+// sandboxHookRefusal names the cause of a 429 on a sandbox request: the
+// stable reason and a message that says which limit refused it, so a hook
+// shows the real cause and not the account budget for every refusal. err is
+// what the binding's limiter returned (a *sandboxauth.LimitError carrying the
+// limit in force for that binding and bucket), or the refusal string the
+// account class budget (hookCallerLimiter.chargeClass) or admission produced.
+// A binding refusal that does not carry its limit says which kind of limit
+// refused and states no number.
+func sandboxHookRefusal(err error) (reason, message string) {
+	var limit *sandboxauth.LimitError
+	switch {
+	case errors.As(err, &limit):
+		return sandboxLimitRefusal(limit)
+	case errors.Is(err, sandboxauth.ErrRateLimited):
+		return sandboxReasonBindingRate, "DefenseClaw is limiting how fast this one sandbox may send requests; this request did not run, so retry in a few seconds"
+	case errors.Is(err, sandboxauth.ErrTooManyInFlight):
+		return sandboxReasonBindingInFlight, "this sandbox already has as many requests waiting for DefenseClaw's answer as it may; this request did not run, so retry in a few seconds"
+	case err != nil && err.Error() == managedHookReasonOverloaded:
+		return managedHookReasonOverloaded, managedHookOverloadedMessage
+	case err != nil && err.Error() == managedHookReasonRateLimited:
+		return managedHookReasonRateLimited, sandboxHookBudgetMessage()
+	}
+	return managedHookReasonRateLimited, managedHookRateLimitedMessage
+}
+
+// sandboxLimitRefusal words a binding limiter refusal with the numbers the
+// limiter applied to that binding and bucket.
+func sandboxLimitRefusal(e *sandboxauth.LimitError) (reason, message string) {
+	const retry = "; this request did not run, so retry in a few seconds"
+	if errors.Is(e, sandboxauth.ErrRateLimited) {
+		what := "tool calls"
+		switch e.Limit {
+		case sandboxauth.LimitReceipt:
+			what = "tool-call confirmations"
+		case sandboxauth.LimitTelemetry:
+			what = "telemetry uploads"
+		}
+		return sandboxReasonBindingRate, fmt.Sprintf("DefenseClaw is limiting how fast this one sandbox may send %s (%s a second, a burst of %d)%s",
+			what, strconv.FormatFloat(e.RPS, 'g', -1, 64), e.Burst, retry)
+	}
+	switch e.Limit {
+	case sandboxauth.LimitTelemetry:
+		return sandboxReasonBindingInFlight, fmt.Sprintf("this sandbox already has as many telemetry uploads waiting as it may (%d)%s", e.MaxInFlight, retry)
+	case sandboxauth.LimitTelemetryTotal:
+		return sandboxReasonBindingInFlight, fmt.Sprintf("DefenseClaw is already receiving as many telemetry uploads from all sandboxes together as it may (%d)%s", e.MaxInFlight, retry)
+	}
+	return sandboxReasonBindingInFlight, fmt.Sprintf("this sandbox already has as many requests waiting for DefenseClaw's answer as it may (%d)%s", e.MaxInFlight, retry)
 }

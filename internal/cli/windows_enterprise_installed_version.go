@@ -20,7 +20,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peversion"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // windowsEnterpriseInstalledProductVersion reads the ProductVersion string
@@ -33,7 +32,7 @@ func readWindowsEnterpriseInstalledProductVersion(opts *windowsEnterpriseLifecyc
 		root = strings.TrimSpace(opts.installRoot)
 	}
 	if root == "" {
-		roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+		roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 		if err != nil {
 			return "", err
 		}
@@ -91,7 +90,7 @@ func windowsEnterpriseRepairRecordingOptions(action string, opts *windowsEnterpr
 var windowsEnterprisePendingRestoredVersion = readWindowsEnterprisePendingRestoredVersion
 
 func readWindowsEnterprisePendingRestoredVersion(opts *windowsEnterpriseLifecycleOptions) (string, bool) {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.MetadataPath) == "" {
 		return "", false
 	}

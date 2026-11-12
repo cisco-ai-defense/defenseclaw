@@ -99,7 +99,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
+        packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-test-scripts macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint go-lint-analyzers go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
@@ -1078,7 +1078,7 @@ macos-app-build: macos-app-license-check
 	    CODE_SIGNING_ALLOWED=NO \
 	    build
 
-macos-app-test:
+macos-app-test-scripts:
 	macos/DefenseClawMac/script/test_connector_onboarding.sh
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
 	macos/DefenseClawMac/script/test_ai_discovery_models.sh
@@ -1093,6 +1093,7 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_installation_context.sh
 	macos/DefenseClawMac/script/test_local_model_discovery.sh
 	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
+	macos/DefenseClawMac/script/test_cowork_status.sh
 	macos/DefenseClawMac/script/test_gateway_auto_start.sh
 	macos/DefenseClawMac/script/test_gateway_administrator.sh
 	macos/DefenseClawMac/script/test_gateway_admin_helper.sh
@@ -1100,6 +1101,8 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_connector_inventory_compatibility.sh
 	macos/DefenseClawMac/script/test_inspector_layout_policy.sh
 	macos/DefenseClawMac/script/test_main_window_lifecycle_contract.sh
+
+macos-app-test: macos-app-test-scripts
 	$(MAKE) macos-app-build
 
 macos-app-release: macos-app-license-check

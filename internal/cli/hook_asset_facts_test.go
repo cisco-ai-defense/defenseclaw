@@ -14,9 +14,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // GAP-0570, GAP-0576: the standalone hook reports, read as the user, the
@@ -123,5 +126,149 @@ func TestHookAssetFactsReadTheAgentCommandLine(t *testing.T) {
 	args = []string{"claude", "--mcp-config", filepath.Join(home, "missing.json")}
 	if got := facts("claudecode", "mcp__acme-notes__count_words"); got.MCP != nil || got.MCPUnproven != "acme-notes" {
 		t.Fatalf("unreadable --mcp-config facts = %+v, want the server unproven", got)
+	}
+}
+
+// GAP-0686: the hook says when the definition it read is in the config.toml
+// of a CODEX_HOME other than ~/.codex, so the gateway judges the file the
+// agent runs and a managed Windows gateway admits only a published one.
+func TestHookAssetFactsMarkTheRelocatedCodexConfig(t *testing.T) {
+	home := t.TempDir()
+	for _, name := range []string{"HOME", "USERPROFILE"} {
+		t.Setenv(name, home)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	saved := hookAgentCommandLine
+	t.Cleanup(func() { hookAgentCommandLine = saved })
+	hookAgentCommandLine = func() ([]string, string, error) { return nil, "", agentprocess.ErrNoAgent }
+	stubHookAgentWorkingDirectory(t, "")
+	write := func(dir, url string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte("[mcp_servers.notes]\nurl = \""+url+"\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(home, ".codex"), "http://127.0.0.1:28562/mcp")
+	relocated := filepath.Join(t.TempDir(), "codex-home")
+	write(relocated, "http://127.0.0.1:28561/mcp")
+	project := t.TempDir()
+	facts := func(connector string) *assetfacts.MCPServer {
+		t.Helper()
+		got, _ := assetfacts.Decode(hookAssetFacts(connector, []byte(`{"tool_name":"mcp__notes__count_words","cwd":"`+filepath.ToSlash(project)+`"}`)))
+		return got.MCP
+	}
+	t.Setenv("CODEX_HOME", relocated)
+	if got := facts("codex"); got == nil || got.URL != "http://127.0.0.1:28561/mcp" || !got.Relocated {
+		t.Fatalf("CODEX_HOME facts = %+v, want the relocated definition marked", got)
+	}
+	// Twins that stay unmarked: no CODEX_HOME, CODEX_HOME naming the default
+	// folder, and another connector.
+	t.Setenv("CODEX_HOME", "")
+	if got := facts("codex"); got == nil || got.URL != "http://127.0.0.1:28562/mcp" || got.Relocated {
+		t.Fatalf("default facts = %+v, want the default definition unmarked", got)
+	}
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	if got := facts("codex"); got == nil || got.Relocated {
+		t.Fatalf("CODEX_HOME=~/.codex facts = %+v, want it unmarked", got)
+	}
+	// The digest binds the claim to the complete definition.
+	t.Setenv("CODEX_HOME", relocated)
+	if got := facts("codex"); got == nil || got.Digest != config.MCPLaunchDigest(config.MCPServerEntry{URL: "http://127.0.0.1:28561/mcp"}) || got.Digest == "" {
+		t.Fatalf("CODEX_HOME facts = %+v, want the digest of the definition", got)
+	}
+	// A project .codex/config.toml takes precedence over the user config and
+	// is marked as a source the enumerator does not publish.
+	write(filepath.Join(project, ".codex"), "http://127.0.0.1:28563/mcp")
+	// Codex runs a project definition only for a project its user config
+	// trusts: until then the user definition is the one in effect and nothing
+	// is marked as an unpublished source (GAP-0686 review 4).
+	if got := facts("codex"); got == nil || got.URL != "http://127.0.0.1:28561/mcp" || !got.Relocated || got.ProjectScope {
+		t.Fatalf("untrusted project facts = %+v, want the user definition, not the project one", got)
+	}
+	trust, err := os.OpenFile(filepath.Join(relocated, "config.toml"), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := trust.WriteString("\n[projects." + strconv.Quote(project) + "]\ntrust_level = \"trusted\"\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := trust.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := facts("codex"); got == nil || got.URL != "http://127.0.0.1:28563/mcp" || got.Relocated || !got.ProjectScope || got.Digest == "" {
+		t.Fatalf("project facts = %+v, want the project definition marked", got)
+	}
+	if err := os.RemoveAll(filepath.Join(project, ".codex")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", relocated)
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"notes":{"type":"http","url":"http://127.0.0.1:28562/mcp"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := facts("claudecode"); got == nil || got.Relocated {
+		t.Fatalf("claude facts = %+v, want them unmarked", got)
+	}
+}
+
+// GAP-0699, GAP-0701: the hook reads, as the user, the text of the skill
+// folder a request selects and of the plugin it belongs to, for a gateway
+// that may not read the profile; a request that selects neither reads none.
+func TestHookAssetFactsCarryTheTextOfTheSelectedSkillAndPlugin(t *testing.T) {
+	home := t.TempDir()
+	for _, name := range []string{"HOME", "USERPROFILE"} {
+		t.Setenv(name, home)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	saved := hookAgentCommandLine
+	t.Cleanup(func() { hookAgentCommandLine = saved })
+	hookAgentCommandLine = func() ([]string, string, error) { return nil, "", agentprocess.ErrNoAgent }
+	stubHookAgentWorkingDirectory(t, "")
+	write := func(path, text string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(home, ".claude", "skills", "np10", "SKILL.md"), "# np10\nskill text\n")
+	plugin := filepath.Join(t.TempDir(), "r109kit")
+	write(filepath.Join(plugin, "skills", "notes", "SKILL.md"), "# notes\nplugin skill text\n")
+	registry, err := json.Marshal(map[string]any{"plugins": map[string]any{"r109kit@r109mkt": []map[string]string{{"installPath": plugin}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), string(registry))
+	project := t.TempDir()
+	facts := func(payload string) assetfacts.Facts {
+		t.Helper()
+		got, _ := assetfacts.Decode(hookAssetFacts("claudecode", []byte(payload)))
+		return got
+	}
+	cwd := filepath.ToSlash(project)
+	got := facts(`{"tool_name":"Skill","tool_input":{"skill":"np10"},"cwd":"` + cwd + `"}`)
+	if c := got.ContentsFor(assetfacts.ContentSkill, "np10"); len(c) != 1 || len(c[0].Files) != 1 || c[0].Files[0].Rel != "SKILL.md" || c[0].Files[0].Text != "# np10\nskill text\n" {
+		t.Fatalf("skill facts = %+v, want the SKILL.md text", got)
+	}
+	for _, payload := range []string{
+		`{"hook_event_name":"UserPromptExpansion","prompt":"/r109kit:notes","command_name":"r109kit:notes","cwd":"` + cwd + `"}`,
+		`{"tool_name":"mcp__plugin_r109kit_kit-time__kit_time","tool_input":{},"cwd":"` + cwd + `"}`,
+		`{"tool_name":"Skill","tool_input":{"skill":"r109kit:notes"},"cwd":"` + cwd + `"}`,
+	} {
+		if c := facts(payload).ContentsFor(assetfacts.ContentPlugin, "r109kit"); len(c) != 1 || len(c[0].Files) != 1 || c[0].Files[0].Rel != "skills/notes/SKILL.md" {
+			t.Fatalf("plugin facts for %s = %+v, want the plugin text", payload, c)
+		}
+	}
+	for _, payload := range []string{
+		`{"tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"` + cwd + `"}`,
+		`{"tool_name":"Skill","tool_input":{"skill":"missing"},"cwd":"` + cwd + `"}`,
+	} {
+		if got := facts(payload); len(got.Contents) != 0 {
+			t.Fatalf("facts for %s = %+v, want no text read", payload, got)
+		}
 	}
 }

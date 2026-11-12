@@ -1,0 +1,188 @@
+{
+  "refusal": {
+    "darwin": "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. For administrator views, run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status`, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify`, or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.",
+    "linux": "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. For administrator views, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status`, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify`, or `sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.",
+    "windows": "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy."
+  },
+  "commands": [
+    {
+      "command": "defenseclaw --help, --version, help",
+      "managed_linux": "Offered",
+      "managed_macos": "Offered",
+      "managed_windows": "Offered",
+      "per_user": "Linux, macOS, Windows",
+      "note": "The launcher shows its own help; `help` explains the sandbox and status commands."
+    },
+    {
+      "command": "defenseclaw status",
+      "managed_linux": "Offered",
+      "managed_macos": "Offered",
+      "managed_windows": "Offered",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "status",
+      "note": "Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`; the reason says whether the machine policy still inspects its calls. An administrator's run shows the deployment."
+    },
+    {
+      "command": "defenseclaw sandbox ...",
+      "managed_linux": "Offered",
+      "managed_macos": "Offered",
+      "managed_windows": "Not supported",
+      "per_user": "Linux, macOS",
+      "per_user_path": "sandbox",
+      "note": "OpenShell sandboxes run on Linux and macOS only."
+    },
+    {
+      "command": "defenseclaw guardrail profile explain",
+      "managed_linux": "Offered",
+      "managed_macos": "Offered",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "guardrail profile explain",
+      "note": "Shows the guardrail profile that applies to your agents. On Windows the answer points to the administrator's policy view."
+    },
+    {
+      "command": "defenseclaw guardrail",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "guardrail status",
+      "note": "Every guardrail command except `profile explain`, which the row above offers. The guardrail is set in the administrator's config."
+    },
+    {
+      "command": "defenseclaw doctor",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "doctor",
+      "note": "An administrator reads the deployment with the enterprise status and verify commands."
+    },
+    {
+      "command": "defenseclaw alerts",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "alerts",
+      "note": "The per-user alerts view is not part of a managed install; an administrator reads the deployment with the enterprise status command."
+    },
+    {
+      "command": "defenseclaw tui",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "tui",
+      "note": "The terminal UI is part of the per-user install."
+    },
+    {
+      "command": "defenseclaw upgrade",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "upgrade",
+      "note": "The administrator's lifecycle applies updates."
+    },
+    {
+      "command": "defenseclaw rollback",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "rollback",
+      "note": "The administrator's lifecycle applies rollbacks."
+    },
+    {
+      "command": "defenseclaw setup ...",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "setup",
+      "note": "Setup belongs to the per-user install."
+    },
+    {
+      "command": "defenseclaw config set",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "config set",
+      "note": "The configuration is changed in the administrator's config."
+    },
+    {
+      "command": "defenseclaw config unset",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "config unset",
+      "note": "The configuration is changed in the administrator's config."
+    },
+    {
+      "command": "defenseclaw skill ...",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "skill",
+      "note": "The admission policy is set in the administrator's config; an administrator scans an asset from an elevated prompt."
+    },
+    {
+      "command": "defenseclaw mcp ...",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "mcp",
+      "note": "Same as `skill`."
+    },
+    {
+      "command": "defenseclaw plugin ...",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "plugin",
+      "note": "Same as `skill`."
+    },
+    {
+      "command": "defenseclaw tool ...",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "tool",
+      "note": "Same as `skill`."
+    },
+    {
+      "command": "defenseclaw <other per-user command>",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "agent",
+      "note": "Every other per-user command (acp, agent, aibom, codeguard, edge-connector, init, keys, migrate, observability, quickstart, registry, reset, settings, uninstall, version) belongs to the per-user install; each answers with the managed message and changes nothing."
+    },
+    {
+      "command": "defenseclaw policy show",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Administrators only",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "policy show",
+      "note": "A standard account is told to use an elevated prompt."
+    },
+    {
+      "command": "defenseclaw audit export",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Administrators only",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "audit export",
+      "note": "The managed audit log is administrator-only."
+    }
+  ]
+}

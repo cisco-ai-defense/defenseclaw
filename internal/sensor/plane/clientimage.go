@@ -34,9 +34,11 @@ import (
 // Hashing a release image reads a few hundred MiB, so it never runs on a
 // source's reader. The reader opens the image (cheap, and it pins the file),
 // looks its identity up in the digest cache, and otherwise hands the open file
-// to clientImages' worker and delivers the event without a digest. The first
-// exec of an image the cache has not seen is therefore not identified: the
-// host plane reports it as before, never the other way round.
+// to clientImages' worker and delivers the event without a digest, marked
+// pending. When the read ends the source delivers the digest in an event of
+// its own (KindImageDigest) for that exec, so the host plane can wait for it
+// within its hold bounds (cowork-1-0-8 GAP-0067). An exec whose digest does
+// not come in time is reported as before, never the other way round.
 
 // imageKey identifies the contents of one image file: the file (device and
 // inode, or volume and file index), its size, and its change and write times
@@ -65,6 +67,9 @@ const (
 	// one account from taking the queue.
 	maxClientImageJobs           = 4
 	maxClientImageJobsPerAccount = 1
+	// maxDigestWaiters bounds the execs waiting for a queued hash; past it an
+	// exec's digest is reported as not coming.
+	maxDigestWaiters = 64
 )
 
 type imageJob struct {
@@ -84,6 +89,8 @@ type imageHasher struct {
 	sums       map[imageKey]*list.Element
 	digest     map[imageKey]string
 	pending    map[imageKey]struct{}
+	waiters    map[imageKey][]func(sum string, ok bool)
+	waiting    int
 	perAccount map[string]int
 	jobs       chan imageJob
 	start      sync.Once
@@ -97,6 +104,7 @@ func newImageHasher() *imageHasher {
 		sums:       make(map[imageKey]*list.Element),
 		digest:     make(map[imageKey]string),
 		pending:    make(map[imageKey]struct{}),
+		waiters:    make(map[imageKey][]func(string, bool)),
 		perAccount: make(map[string]int),
 		jobs:       make(chan imageJob, maxClientImageJobs),
 	}
@@ -124,37 +132,56 @@ func eventAccount(event Event) string {
 }
 
 // digestOf returns the cached digest of the open image file whose identity is
-// key, or "" after queueing a hash of it. It always takes ownership of file.
+// key (DigestRead), or queues a hash of it. It always takes ownership of file.
 // account (eventAccount) bounds the exec account's queued hashes.
-func (h *imageHasher) digestOf(file *os.File, key imageKey, account string) string {
+//
+// While the image's hash is queued or running, a non-nil follow is called
+// once it ends, from the hasher's worker, with the digest and true, or with
+// false when the read failed or the file changed during it; the state is
+// then DigestPending. Every other way is DigestFailed: hashing is off, the
+// file is too large or not on a local file system, the queue or the
+// account's slot holds another image, the waiters are full, or follow is
+// nil (the caller cannot deliver a later digest; the hash is still queued,
+// for the next exec of the image).
+func (h *imageHasher) digestOf(
+	file *os.File, key imageKey, account string, follow func(sum string, ok bool),
+) (string, DigestState) {
 	if h.off.Load() || key.size <= 0 || key.size > maxClientImageBytes || !localImageFS(file) {
 		file.Close()
-		return ""
+		return "", DigestFailed
 	}
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	if element, found := h.sums[key]; found {
 		h.order.MoveToFront(element)
-		sum := h.digest[key]
-		h.mu.Unlock()
 		file.Close()
-		return sum
+		return h.digest[key], DigestRead
 	}
-	if _, queued := h.pending[key]; queued || h.perAccount[account] >= maxClientImageJobsPerAccount {
-		h.mu.Unlock()
+	_, queued := h.pending[key]
+	if queued {
 		file.Close()
-		return ""
+	} else {
+		if h.perAccount[account] >= maxClientImageJobsPerAccount {
+			file.Close()
+			return "", DigestFailed
+		}
+		select {
+		case h.jobs <- imageJob{file: file, key: key, account: account}:
+			h.pending[key] = struct{}{}
+			h.perAccount[account]++
+			h.busy.Add(1)
+		default:
+			file.Close()
+			return "", DigestFailed
+		}
+		h.start.Do(func() { go h.work() })
 	}
-	select {
-	case h.jobs <- imageJob{file: file, key: key, account: account}:
-		h.pending[key] = struct{}{}
-		h.perAccount[account]++
-		h.busy.Add(1)
-	default:
-		file.Close()
+	if follow == nil || h.waiting >= maxDigestWaiters {
+		return "", DigestFailed
 	}
-	h.mu.Unlock()
-	h.start.Do(func() { go h.work() })
-	return ""
+	h.waiters[key] = append(h.waiters[key], follow)
+	h.waiting++
+	return "", DigestPending
 }
 
 func (h *imageHasher) work() {
@@ -169,10 +196,19 @@ func (h *imageHasher) work() {
 		if h.perAccount[job.account]--; h.perAccount[job.account] <= 0 {
 			delete(h.perAccount, job.account)
 		}
-		if err == nil && ok && after == job.key {
+		read := err == nil && ok && after == job.key
+		if read {
 			h.remember(job.key, sum)
+		} else {
+			sum = ""
 		}
+		waiters := h.waiters[job.key]
+		delete(h.waiters, job.key)
+		h.waiting -= len(waiters)
 		h.mu.Unlock()
+		for _, follow := range waiters {
+			follow(sum, read)
+		}
 		h.busy.Done()
 	}
 }
@@ -192,6 +228,19 @@ func (h *imageHasher) remember(key imageKey, sum string) {
 		delete(h.sums, oldest.Value.(imageKey))
 		delete(h.digest, oldest.Value.(imageKey))
 	}
+}
+
+// digestStateOf is the state of a source's read of an exec image that has
+// no later delivery of its digest: read with a digest, failed without one,
+// none for an image that is no release layout.
+func digestStateOf(sum, version string) DigestState {
+	switch {
+	case version == "":
+		return ""
+	case sum != "":
+		return DigestRead
+	}
+	return DigestFailed
 }
 
 // idle waits for the queued hashes; for tests.

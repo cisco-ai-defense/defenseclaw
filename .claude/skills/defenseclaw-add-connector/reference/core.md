@@ -33,7 +33,6 @@ Paths are repo-relative. Unless noted, Go files are under `internal/gateway/conn
   - `internal/gateway/application_protection.go`
   - `normalizeConnectorTelemetrySource` (`internal/gateway/otel_ingest.go`). This one is a closed allowlist: it also maps `agy` to `antigravity`, and anything missing becomes `unknown`.
   - `normalizeConnector` (`internal/useridentity/email.go`)
-  - `normalizeConnector` (`cmd/defenseclaw-setup/main.go`)
 - **Python:**
   - `normalize_connector` (`cli/defenseclaw/connector_contracts.py`)
   - `normalize` (`cli/defenseclaw/connector_paths.py`; empty input means `openclaw`)
@@ -206,7 +205,7 @@ For hook-only connectors, add a case to `hookOnlyProfileRespond` (`hook_only_pro
 **PowerShell adapters.**
 - `hooks/cursor-hook.ps1` turns pipeline objects into UTF-8 JSON and uses the hidden `--input-file`.
 - `hooks/copilot-hook.ps1` uses a `ProcessStartInfo` byte stream and fails open.
-- Other code checks literal lines of these adapters: the Cursor runtime check in `hook_only.go`, `cli/defenseclaw/cursor_contract.py`, the Copilot adapter check in `cli/defenseclaw/doctor_hooks.py`, `scripts/windows-native-ci.ps1` and `scripts/live-connector-e2e/run-windows.ps1`. A new adapter needs the same kind of check, and an edit to an existing one must update all of them.
+- Other code checks literal lines of these adapters: the Cursor runtime check in `hook_only.go`, `cli/defenseclaw/cursor_contract.py`, the Copilot adapter check in `cli/defenseclaw/doctor_hooks.py`, and `scripts/live-connector-e2e/run-windows-install.ps1`. A new adapter needs the same kind of check, and an edit to an existing one must update all of them.
 
 ## 5. Native hook runner (`hookexec`)
 
@@ -423,8 +422,7 @@ Helpers are in `internal/gateway/connector/connectortest/connectortest.go`.
   - `hook_only.go` (Cursor runtime: `v8` on Unix, `v9` for the Windows adapter) and `cli/defenseclaw/cursor_contract.py`;
   - `amp.go` and `cli/defenseclaw/fail_mode.py` (`// defenseclaw-managed-plugin v2`);
   - `hook_config_paths.go` (OpenCode, `// defenseclaw-managed-plugin v7`);
-  - `cli/defenseclaw/doctor_hooks.py` (the Copilot adapter, `v7`);
-  - `scripts/windows-native-ci.ps1` and `scripts/live-connector-e2e/run-windows.ps1`.
+  - `cli/defenseclaw/doctor_hooks.py` (the Copilot adapter, `v7`).
 
   Find them all with `git grep -n 'defenseclaw-managed-' -- ':!internal/gateway/connector/hooks'`.
 

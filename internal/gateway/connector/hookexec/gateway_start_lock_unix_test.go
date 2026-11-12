@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
+	"github.com/defenseclaw/defenseclaw/internal/proofclock/proofclocktest"
 )
 
 // TestPerUserGatewayStartInProgressReadsTheStartLock pins the signal hook-post
@@ -209,6 +210,7 @@ func TestPerUserConnectedPeerIsTheProcessBehindTheSocket(t *testing.T) {
 // call's connection is gone, was replaced, or no longer owns the port.
 // gateway.pid is not read at all, and an unknown peer is no proof.
 func TestPerUserGatewayRestartProvenReadsTheConnectedPeer(t *testing.T) {
+	clock := proofclocktest.Install(t)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -267,9 +269,10 @@ func TestPerUserGatewayRestartProvenReadsTheConnectedPeer(t *testing.T) {
 	t.Run("lock held, proof budget spent", func(t *testing.T) {
 		// Deterministic (review r4): the look at the start lock blocks until
 		// the test ends, so only the outer budget can end the proof. The
-		// peer would prove a restart if the proof ever finished.
-		previous, previousOpen := perUserRestartProofBudget, perUserStartLockOpen
-		perUserRestartProofBudget = 50 * time.Millisecond
+		// peer would prove a restart if the proof ever finished. The budget
+		// is the product one, spent when the test moves the proof clock
+		// past it, not when the host has run for that long.
+		previousOpen := perUserStartLockOpen
 		release, entered := make(chan struct{}), make(chan struct{})
 		perUserStartLockOpen = func(string) (*os.File, error) {
 			close(entered)
@@ -280,23 +283,27 @@ func TestPerUserGatewayRestartProvenReadsTheConnectedPeer(t *testing.T) {
 		t.Cleanup(func() {
 			close(release)
 			<-entered // orders the proof goroutine's read of the seam before the restore (-race, review r5)
-			perUserRestartProofBudget, perUserStartLockOpen = previous, previousOpen
+			perUserStartLockOpen = previousOpen
 		})
 		dir := t.TempDir()
 		holdStartLock(t, dir)
 		got := make(chan bool, 1)
-		start := time.Now()
 		go func() { got <- PerUserGatewayRestartProven(dir, knownPeer(1<<22+12345, "1 2", server)) }()
+		<-entered
 		select {
 		case ok := <-got:
-			if ok {
-				t.Fatal("a proof past its budget read as a restart")
-			}
-			if d := time.Since(start); d > time.Second {
-				t.Fatalf("the proof took %v, want about its 50 ms budget", d)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("the proof ran past its budget")
+			t.Fatalf("the proof ended (%v) before its budget was spent", ok)
+		default:
+		}
+		clock.Advance(perUserRestartProofBudget - time.Nanosecond)
+		select {
+		case ok := <-got:
+			t.Fatalf("the proof ended (%v) just inside its budget", ok)
+		default:
+		}
+		clock.Advance(time.Nanosecond)
+		if ok := <-got; ok {
+			t.Fatal("a proof past its budget read as a restart")
 		}
 	})
 	// Another process holds a dup of the live gateway's listener (review r3
@@ -363,6 +370,7 @@ func TestPerUserGatewayRestartProvenReadsTheConnectedPeer(t *testing.T) {
 			t.Fatal("restart not proven with another process on the port")
 		}
 	})
+	requireRestartProofBudgets(t, clock)
 }
 
 // TestPerUserGatewayStartInProgressDoesNotWaitOnAFIFO pins the O_NONBLOCK

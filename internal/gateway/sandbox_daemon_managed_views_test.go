@@ -259,7 +259,7 @@ func TestManagedStatusUsesCurrentEnablementAfterDriverSwitch(t *testing.T) {
 	f.d.settings.Available, f.d.settings.Unavailable = true, ""
 	f.d.settingsMu.Unlock()
 	st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
-	if err != nil || !st.Enabled || st.Managed == nil || st.Managed.Unavailable != "" {
+	if err != nil || !st.Enabled || st.Managed == nil || st.Managed.Unavailable != "" || st.DaemonPID != os.Getpid() {
 		t.Fatalf("driver switch completed but status still says off: %+v, %v", st, err)
 	}
 }

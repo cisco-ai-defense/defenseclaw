@@ -98,14 +98,12 @@ final class CommandActivityStore {
                 output: "A command with this run identifier is already active.\n"
             )
         }
-        let usesAdministrator = GatewayAdministratorClient.selectedAction(
-            binary: binary, arguments: arguments,
-            enabled: UserDefaults.standard.bool(forKey: GatewayAdministratorClient.preferenceKey)
-        ) != nil
+        let gatewayLifecycle = binary == "defenseclaw-gateway" && arguments.count == 1
+            && CLIRunner.gatewayLifecycleActions.contains(arguments[0])
         entries.insert(
             CommandActivityEntry(
                 id: id,
-                title: usesAdministrator && !title.localizedCaseInsensitiveContains("administrator") ? title + " as administrator" : title,
+                title: title,
                 command: Self.displayCommand(
                     binary: binary,
                     arguments: arguments,
@@ -148,8 +146,8 @@ final class CommandActivityStore {
                 ? Self.inferredEffects(binary: binary, arguments: arguments, category: category)
                 : successEffects
         }
-        if usesAdministrator && result.exitCode == 78 {
-            entries[index].suggestedNextAction = "Open Settings → Connection for background-service approval, then retry the action."
+        if gatewayLifecycle && result.exitCode == 78 {
+            entries[index].suggestedNextAction = "Allow DefenseClawMac in System Settings → General → Login Items & Extensions so it can repair the gateway, then retry the action."
         } else {
             entries[index].suggestedNextAction = result.succeeded ? suggestedNextAction : "Review the output, then run DefenseClaw Doctor."
         }

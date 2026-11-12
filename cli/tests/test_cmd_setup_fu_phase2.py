@@ -352,6 +352,188 @@ class _BaseSetup(unittest.TestCase):
 class TestPerConnectorWriteSurface(_BaseSetup):
     # An explicit guardrail target must already be set up. The OpenCode
     # selection fixtures below include it in the configured roster.
+    def test_guardrail_secret_size_refusal_in_the_interactive_wizard(self):
+        from defenseclaw.file_permissions import MAX_DOTENV_BYTES
+
+        self._seed_map("codex")
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "action"
+        gc.judge.enabled = False
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        secret_value = "disposable-value"
+        path = Path(self.tmp_dir, ".env")
+        added_line = f"{env_name}={secret_value}\n".encode()
+        original = b"#" + b"x" * (MAX_DOTENV_BYTES + 1 - len(added_line) - 2) + b"\n"
+        atomic_write_private_bytes(str(path), original)
+        config_path = Path(self.cfg_path)
+        atomic_write_private_bytes(str(config_path), b"prior-config-marker\n")
+        before = (path.stat().st_ino, path.stat().st_mtime_ns, config_path.stat().st_mtime_ns)
+
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            _guardrail_judge_secret_wizard(Path(self.tmp_dir, "hook_contract_lock.json"), env_name, secret_value),
+            patch.object(cmd_setup.platform_support, "host_os", return_value="linux"),
+            patch.object(cmd_setup, "_refuse_guardrail_for_connector_not_set_up"),
+            patch.object(cmd_setup, "_check_guardrail_setup_connector_versions", side_effect=AssertionError("late validation")),
+            patch.object(cmd_setup, "execute_guardrail_setup", side_effect=AssertionError("late setup")),
+            patch.object(cmd_setup, "_restart_services", side_effect=AssertionError("late restart")),
+        ):
+            os.environ.pop(env_name, None)
+            result = _invoke(["guardrail", "--connector", "codex", "--no-restart"], self.app, catch=True)
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn(f"over the {MAX_DOTENV_BYTES}-byte limit", result.output)
+        self.assertNotIn(secret_value, _click_result_exception_diagnostics(result))
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(
+            (path.stat().st_ino, path.stat().st_mtime_ns, config_path.stat().st_mtime_ns),
+            before,
+        )
+
+    def test_windows_opencode_guardrail_checks_complete_dotenv_before_selection(self):
+        from defenseclaw.file_permissions import MAX_DOTENV_BYTES
+
+        pristine = copy.deepcopy(self.app.cfg)
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        secret_value = "disposable-value"
+        added_line = f"{env_name}={secret_value}\n".encode()
+        for extra_byte in (1, 0):
+            with self.subTest(extra_byte=extra_byte):
+                self.app.cfg = copy.deepcopy(pristine)
+                self._seed_map("opencode")
+                gc = self.app.cfg.guardrail
+                gc.enabled = True
+                gc.mode = "action"
+                gc.judge.enabled = False
+                dotenv = Path(self.tmp_dir, ".env")
+                config = Path(self.cfg_path)
+                receipt = Path(self.tmp_dir, "agent_selection.json")
+                lock = Path(self.tmp_dir, "hook_contract_lock.json")
+                unverified = Path(self.tmp_dir, "agent_selection_unverified.json")
+                original = b"#" + b"x" * (MAX_DOTENV_BYTES + extra_byte - len(added_line) - 2) + b"\n"
+                atomic_write_private_bytes(str(dotenv), original)
+                atomic_write_private_bytes(str(config), b"prior-config-marker\n")
+                records, errors = record_test_setup_agent_selections(self.tmp_dir, ("opencode",))
+                self.assertTrue(records)
+                self.assertFalse(errors)
+                atomic_write_private_bytes(str(lock), b'{"version":2,"connectors":{}}\n')
+                atomic_write_private_bytes(
+                    str(unverified),
+                    b'{"unverified":{"opencode":{"detail":"prior probe","at":"2026-01-01T00:00:00Z"}}}\n',
+                )
+                paths = (dotenv, config, receipt, lock, unverified)
+                before = {
+                    path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+                    for path in paths
+                }
+                late = AssertionError("size refusal must precede setup and lifecycle")
+                with (
+                    patch.dict(os.environ, {}, clear=False),
+                    _guardrail_judge_secret_wizard(lock, env_name, secret_value) as selected,
+                    patch.object(cmd_setup, "_refuse_guardrail_for_connector_not_set_up"),
+                    patch.object(
+                        cmd_setup,
+                        "_check_guardrail_setup_connector_versions",
+                        side_effect=late if extra_byte else None,
+                        return_value=True,
+                    ),
+                    patch.object(
+                        cmd_setup,
+                        "execute_guardrail_setup",
+                        side_effect=late if extra_byte else None,
+                        return_value=(True, []),
+                    ),
+                    patch.object(cmd_setup, "_restart_services", side_effect=late),
+                ):
+                    os.environ.pop(env_name, None)
+                    result = _invoke(["guardrail", "--connector", "opencode", "--no-restart"], self.app, catch=True)
+
+                if extra_byte:
+                    self.assertNotEqual(result.exit_code, 0)
+                    self.assertIn(f"over the {MAX_DOTENV_BYTES}-byte limit", result.output)
+                    self.assertNotIn(secret_value, _click_result_exception_diagnostics(result))
+                    selected.assert_not_called()
+                    self.assertEqual(
+                        {
+                            path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+                            for path in paths
+                        },
+                        before,
+                    )
+                else:
+                    self.assertEqual(result.exit_code, 0, msg=result.output)
+                    selected.assert_called_once()
+                    self.assertEqual(len(dotenv.read_bytes()), MAX_DOTENV_BYTES)
+
+    def test_interactive_secret_preflight_holds_dotenv_lock_through_publication(self):
+        from defenseclaw.file_permissions import MAX_DOTENV_BYTES
+
+        self._seed_map("opencode")
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "action"
+        gc.judge.enabled = False
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        secret_value = "disposable-value"
+        dotenv = Path(self.tmp_dir, ".env")
+        added_line = f"{env_name}={secret_value}\n".encode()
+        original = b"#" + b"x" * (MAX_DOTENV_BYTES - len(added_line) - 2) + b"\n"
+        atomic_write_private_bytes(str(dotenv), original)
+        original_preflight = cmd_setup._preflight_pending_guardrail_secret_size
+        writer_attempted = threading.Event()
+        writer_finished = threading.Event()
+        writer_errors: list[BaseException] = []
+
+        def competing_writer():
+            writer_attempted.set()
+            try:
+                # This update fits before the pending secret, but not after it.
+                cmd_setup._save_secret_to_dotenv("A", "b", self.tmp_dir)
+            except BaseException as error:
+                writer_errors.append(error)
+            finally:
+                writer_finished.set()
+
+        writer = threading.Thread(target=competing_writer, daemon=True)
+
+        def preflight_then_start_writer(*args, **kwargs):
+            original_preflight(*args, **kwargs)
+            writer.start()
+            self.assertTrue(writer_attempted.wait(5))
+            # With no held lock, the competing update completes before
+            # selection; with one lock, it waits for secret publication.
+            writer_finished.wait(2)
+
+        late = AssertionError("publication must precede setup and lifecycle")
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            _guardrail_judge_secret_wizard(Path(self.tmp_dir, "hook_contract_lock.json"), env_name, secret_value)
+            as selected,
+            patch.object(
+                cmd_setup,
+                "_preflight_pending_guardrail_secret_size",
+                side_effect=preflight_then_start_writer,
+            ),
+            patch.object(cmd_setup, "_refuse_guardrail_for_connector_not_set_up"),
+            patch.object(cmd_setup, "_check_guardrail_setup_connector_versions", return_value=True),
+            patch.object(cmd_setup, "execute_guardrail_setup", return_value=(True, [])),
+            patch.object(cmd_setup, "_restart_services", side_effect=late),
+        ):
+            os.environ.pop(env_name, None)
+            result = _invoke(["guardrail", "--connector", "opencode", "--no-restart"], self.app, catch=True)
+
+        writer.join(5)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        selected.assert_called_once()
+        self.assertTrue(writer_finished.is_set())
+        self.assertEqual(len(writer_errors), 1)
+        self.assertIsInstance(writer_errors[0], cmd_setup._DotenvSizeError)
+        self.assertEqual(len(dotenv.read_bytes()), MAX_DOTENV_BYTES)
+        self.assertIn(added_line, dotenv.read_bytes())
+        self.assertNotIn(b"A=b\n", dotenv.read_bytes())
+
     def test_forged_name_set_cannot_bypass_exact_opencode_selection(self):
         receipt = os.path.join(self.tmp_dir, "agent_selection.json")
         prior = b'{"prior":"receipt"}\n'
@@ -455,11 +637,25 @@ class TestPerConnectorWriteSurface(_BaseSetup):
 
     def test_additive_setup_selects_complete_roster_before_first_gateway_start(self):
         self._seed_map("amp", "claudecode", "codex", "cursor")
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), b"installed fixture")
+        launcher_identity = json.dumps({
+            "schema_version": 1,
+            "name": "defenseclaw-hook-launcher",
+            "version": "1.0.8",
+            "commit": "fixture",
+        }).encode()
 
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
                 return_value="windows",
+            ),
+            patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=SimpleNamespace(
+                returncode=0, stdout=launcher_identity,
+            )) as launcher_probe,
+            patch(
+                "defenseclaw.gateway.canonical_install_path",
+                return_value=os.path.join(self.tmp_dir, "defenseclaw-gateway.exe"),
             ),
             patch(
                 "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
@@ -483,6 +679,11 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             )
 
         selected.assert_called_once()
+        launcher_probe.assert_called_once()
+        self.assertEqual(
+            launcher_probe.call_args.args[0],
+            [os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), "--version-json"],
+        )
         self.assertEqual(
             selected.call_args.args[1],
             ("amp", "claudecode", "codex", "cursor"),
@@ -790,7 +991,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         )
         self.assertEqual(res.output.count("detected-but-unsupported-version"), 1)
         self.assertIn("installed version Hermes Agent v0.17.0", res.output)
-        self.assertIn("hermes-hooks-v1 requires >=0.19.0", res.output)
+        # GAP-0049: the whole supported range, then the nearest contract.
+        self.assertIn("DefenseClaw supports Hermes >=0.19.0 and <0.22.0; hermes-hooks-v1 covers >=0.19.0", res.output)
         self.assertIn("defenseclaw setup hermes --yes --mode action", res.output)
         self.assertNotIn("connector was not detected locally", res.output)
         self.assertEqual(self.app.cfg.guardrail, before)
@@ -844,6 +1046,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
                 return_value="windows",
             ),
+            patch("defenseclaw.commands.cmd_setup.agent_discovery._publish_agent_signal") as publish,
         ):
             accepted = cmd_setup._check_connector_version_supported_for_setup(
                 "opencode",
@@ -859,6 +1062,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             data_dir=self.app.cfg.data_dir,
             persist_cache=False,
         )
+        # Only this connector entry is published; the scan itself rewrote nothing (GAP-0882).
+        publish.assert_called_once_with(disc, "opencode", data_dir=self.app.cfg.data_dir)
 
     def test_windows_opencode_single_setup_selects_exact_image_before_state_and_generic(self):
         original_save = self.app.cfg.save
@@ -1281,7 +1486,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                         )
 
                     self.assertEqual(result.exit_code, 0 if cancellation == "decline" else 1)
-                    selected.assert_called_once()
+                    selected.assert_not_called()
                     secret_write.assert_not_called()
                     generic.assert_not_called()
                     self.assertEqual(self.app.cfg.guardrail, prior_gc)
@@ -1377,7 +1582,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                             )
 
                         self.assertEqual(result.exit_code, 1)
-                        selected.assert_called_once()
+                        selected.assert_not_called()
                         secret_writer.assert_not_called()
                         save.assert_not_called()
                         log_action.assert_not_called()
@@ -1965,7 +2170,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 def fail_post_snapshots(path):
                     nonlocal snapshot_calls
                     snapshot_calls += 1
-                    if snapshot_calls > 1:
+                    if snapshot_calls > 2:
                         raise RuntimeError(secret_value)
                     return original_snapshot(path)
 
@@ -2027,7 +2232,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     secret_writer.assert_called_once()
                     setup_restore.assert_called_once()
                     log_action.assert_not_called()
-                    self.assertEqual(snapshot_calls, 3)
+                    self.assertEqual(snapshot_calls, 4)
                     self.assertEqual(self.app.cfg.guardrail, prior_gc)
                     for path, body in prior_files.items():
                         self.assertEqual(path.read_bytes(), body)
@@ -2663,7 +2868,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     for path, body in prior_files.items():
                         self.assertEqual(path.read_bytes(), body)
 
-    def test_windows_opencode_interactive_refusal_precedes_judge_secret_path(self):
+    def test_windows_opencode_interactive_refusal_precedes_secret_publication(self):
         gc = self.app.cfg.guardrail
         gc.enabled = False
         gc.connector = "openclaw"
@@ -2684,11 +2889,23 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         }
         for path, body in prior_files.items():
             atomic_write_private_bytes(str(path), body)
-        forbidden = AssertionError("exact selection refusal must precede interactive policy prompts")
+        forbidden = AssertionError("exact selection refusal must precede file and lifecycle changes")
+
+        def choose(label, *_args, **_kwargs):
+            if "Select mode" in label or "Select engine" in label:
+                return "1"
+            raise forbidden
+
+        def confirm_choice(label, *_args, **_kwargs):
+            if "Enable guardrail?" in label:
+                return True
+            if "Configure advanced options?" in label:
+                return False
+            raise forbidden
 
         def refuse(_data_dir, connectors, **_kwargs):
             self.assertEqual(tuple(connectors), ("opencode",))
-            self.assertEqual(gc, prior_gc)
+            self.assertEqual(gc.connector, "opencode")
             self.assertEqual(config_path.read_bytes(), prior_files[config_path])
             self.assertEqual(secret_path.read_bytes(), prior_files[secret_path])
             atomic_write_private_bytes(str(receipt_path), b"partial receipt\n")
@@ -2697,23 +2914,23 @@ class TestPerConnectorWriteSurface(_BaseSetup):
 
         with (
             patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
-            patch(
-                "defenseclaw.commands.cmd_setup._select_connector_interactive",
-                return_value="opencode",
-            ) as connector_choice,
+            patch("defenseclaw.commands.cmd_setup._select_connector_interactive", return_value="opencode") as connector_choice,
+            patch("defenseclaw.commands.cmd_setup._prompt_hook_fail_mode"),
+            patch("defenseclaw.commands.cmd_setup._prompt_guardrail_judge_enablement"),
+            patch("defenseclaw.commands.cmd_setup.click.prompt", side_effect=choose) as prompt,
+            patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=confirm_choice) as confirmed,
             patch(
                 "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
                 side_effect=refuse,
             ) as selected,
-            patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=forbidden) as confirm,
             patch(
-                "defenseclaw.commands.cmd_setup._prompt_judge_model_config",
-                side_effect=forbidden,
-            ) as judge_config,
-            patch(
-                "defenseclaw.commands.cmd_setup._prompt_and_save_secret",
+                "defenseclaw.commands.cmd_setup._publish_pending_guardrail_secrets",
                 side_effect=forbidden,
             ) as secret_write,
+            patch(
+                "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                side_effect=forbidden,
+            ) as execute,
         ):
             result = _invoke(
                 ["guardrail", "--no-restart"],
@@ -2724,10 +2941,11 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("interactive exact SST selection refused", result.output)
         connector_choice.assert_called_once()
+        self.assertEqual(prompt.call_count, 2)
+        self.assertEqual(confirmed.call_count, 2)
         selected.assert_called_once()
-        confirm.assert_not_called()
-        judge_config.assert_not_called()
         secret_write.assert_not_called()
+        execute.assert_not_called()
         self.assertEqual(self.app.cfg.guardrail, prior_gc)
         for path, body in prior_files.items():
             self.assertEqual(path.read_bytes(), body)
@@ -2922,6 +3140,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
                 return_value="windows",
             ),
+            patch("defenseclaw.commands.cmd_setup.agent_discovery._publish_agent_signal") as publish,
         ):
             accepted = cmd_setup._check_connector_version_supported_for_setup(
                 "amp",
@@ -2937,6 +3156,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             data_dir=self.app.cfg.data_dir,
             persist_cache=False,
         )
+        # Only this connector entry is published; the scan itself rewrote nothing (GAP-0882).
+        publish.assert_called_once_with(disc, "amp", data_dir=self.app.cfg.data_dir)
 
     def test_guardrail_action_refusal_preserves_modes_and_judge(self):
         self._seed_map("codex", "hermes")
@@ -3849,14 +4070,25 @@ class TestGatewayOfflineStaging(_BaseSetup):
 
     def test_new_api_port_held_by_another_listener_is_refused_before_saving(self):
         # GAP-1345: --api-port saved a port another account's gateway held.
+        import random
         import socket
 
         self.app.logger = MagicMock()
         before = open(self.cfg_path, encoding="utf-8").read() if os.path.isfile(self.cfg_path) else None
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
-            holder.bind(("127.0.0.1", 0))
+            # An operating-system pick can land at the top of the range (Windows
+            # hands out 49152..65535), where --api-port is refused for lack of
+            # room for the two sandbox ports before the busy-port check runs.
+            for _ in range(100):
+                port = random.randint(20000, 60000)
+                try:
+                    holder.bind(("127.0.0.1", port))
+                except OSError:
+                    continue
+                break
+            else:
+                self.fail("no free port in 20000..60000 to hold")
             holder.listen(1)
-            port = holder.getsockname()[1]
             result = _invoke(["gateway", "--api-port", str(port), "--non-interactive"], self.app)
 
         self.assertEqual(result.exit_code, 1, result.output)

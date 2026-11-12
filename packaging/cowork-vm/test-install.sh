@@ -15,6 +15,11 @@
 #     accepts gives exit 17 "did not report healthy": the health check is
 #     bound to the PID this run started (install.sh listener_is)
 #   - a helper that does not broker gives exit 17 and no root gateway
+#   - a helper whose Plane C has no process connector (cn_proc), only
+#     fanotify, gives exit 17, never "sensor up"
+#   - under systemd and without it, the helper holds exactly its six
+#     capabilities (install.sh HELPER_CAPS) with no_new_privs, and the
+#     gateway none; under systemd the helper's syscall filter is on
 # It changes the host (account defenseclaw-cowork, /opt/defenseclaw-cowork,
 # /etc and /var/lib folders, transient units) and removes it all at the end
 # unless --keep. It refuses a host that already has the sensor unless --force.
@@ -58,11 +63,32 @@ run() {
 copy() { rm -rf "${t:?}/$1"; cp -a "$t/pkg" "$t/$1"; }
 as_acct() { setpriv --reuid="$A" --regid="$A" --init-groups -- "$@"; }
 mode() { stat -c %a "$1"; }
+# install.sh HELPER_CAPS as a /proc/<pid>/status mask: CAP_CHOWN (0),
+# CAP_DAC_READ_SEARCH (2), CAP_NET_ADMIN (12), CAP_NET_RAW (13),
+# CAP_SYS_PTRACE (19), CAP_SYS_ADMIN (21).
+HELPER_CAPMASK=0000000000283005 NO_CAPS=0000000000000000
+cap() { awk -v k="$2:" '$1 == k { print $2 }' "/proc/$1/status" 2> /dev/null; }
+caps_check() { # caps_check <how> <helper pid> <gateway pid>
+  local h=$1 hp=$2 gp=$3
+  if [ "$(cap "$hp" CapBnd)" = "$HELPER_CAPMASK" ] && [ "$(cap "$hp" CapEff)" = "$HELPER_CAPMASK" ] && [ "$(cap "$hp" CapAmb)" = "$NO_CAPS" ] &&
+      [ "$(cap "$hp" NoNewPrivs)" = 1 ]; then
+    ok "$h: the helper holds only its six capabilities (CapBnd = CapEff = $HELPER_CAPMASK), no_new_privs"
+  else bad "$h: helper pid $hp CapBnd $(cap "$hp" CapBnd) CapEff $(cap "$hp" CapEff) CapAmb $(cap "$hp" CapAmb) NoNewPrivs $(cap "$hp" NoNewPrivs), want $HELPER_CAPMASK and 1"; fi
+  if [ "$(cap "$gp" CapBnd)" = "$NO_CAPS" ] && [ "$(cap "$gp" CapEff)" = "$NO_CAPS" ] && [ "$(cap "$gp" CapPrm)" = "$NO_CAPS" ]; then
+    ok "$h: the gateway holds no capability, bounding set empty"
+  else bad "$h: gateway pid $gp CapBnd $(cap "$gp" CapBnd) CapEff $(cap "$gp" CapEff) CapPrm $(cap "$gp" CapPrm)"; fi
+}
 
 run "$t/pkg"
 if [ "$RC" = 0 ] && [[ "$LAST" == *"sensor up"*"via the root helper"* ]]; then ok "install: $LAST"; else bad "install rc=$RC: $OUT"; fi
 [ "$(ps -o uid= -p "$(systemctl show -p MainPID --value defenseclaw-cowork)" | tr -d ' ')" = "$(id -u "$A")" ] &&
   ok "the gateway runs as $A" || bad "the gateway does not run as $A"
+caps_check systemd "$(systemctl show -p MainPID --value defenseclaw-cowork-helper)" "$(systemctl show -p MainPID --value defenseclaw-cowork)"
+filter="$(systemctl show -p SystemCallFilter --value defenseclaw-cowork-helper)"
+if [[ "$filter" == "~"* ]] && [[ " ${filter#\~} " == *" ptrace "* ]] && [[ " $filter " == *" process_vm_readv "* ]] &&
+    [[ " $filter " == *" mount "* ]] && [ "$(cap "$(systemctl show -p MainPID --value defenseclaw-cowork-helper)" Seccomp)" = 2 ]; then
+  ok "systemd: the helper's syscall filter refuses ptrace, process_vm_readv/writev and @mount (seccomp on)"
+else bad "systemd: helper SystemCallFilter '$filter'"; fi
 if ! as_acct grep -qx 'policy_dir: /opt/defenseclaw-cowork/policies' /etc/defenseclaw-cowork/config.yaml; then
   bad "config policy_dir is not /opt/defenseclaw-cowork/policies"
 elif [ -d "$t/pkg/policies" ]; then
@@ -102,6 +128,7 @@ as_acct ln -sfn /etc/dc-ci-canary-file "$D/policies.new"
 install -m 0644 /dev/null "$R/helper.log"; install -m 0644 /dev/null "$R/gateway.log"
 copy changed2; echo "# changed 2" >> "$t/changed2/install.sh"; run "$t/changed2" DEFENSECLAW_COWORK_NO_SYSTEMD=1
 [ "$RC" = 0 ] && [[ "$LAST" == *"sensor up"* ]] && ok "no-systemd start" || bad "no-systemd start rc=$RC: $OUT"
+caps_check no-systemd "$(cat "$R/helper.pid" 2> /dev/null)" "$(cat "$R/gateway.pid" 2> /dev/null)"
 [ ! -e /etc/dc-ci-canary-absent ] && ok "a planted gateway.out link is not followed" || bad "root created the gateway.out link target"
 [ "$(sha256sum < /etc/dc-ci-canary-file)" = "$canary_sum" ] && [ "$(stat -c '%U %a' /etc/dc-ci-canary-file)" = "root 600" ] &&
   ok "a planted policies.new link is not followed" || bad "the policies.new link target changed"
@@ -149,6 +176,15 @@ run "$t/nobroker"
 gw_user="$(ps -o uid= -C defenseclaw-gateway | tr -d ' ' | sort -u | tr '\n' ' ')"
 if [ "$RC" = 17 ] && [[ "$LAST" == *"Plane C"* ]] && [[ " $gw_user" != *" 0 "* ]]; then ok "a non-brokering helper gives exit 17, no root gateway: $LAST"
 else bad "non-brokering helper: rc=$RC gateway user '$gw_user' $LAST"; fi
+
+# A helper whose Plane C runs on fanotify alone (no netlink, so no cn_proc):
+# exit 17 naming the process connector, never "sensor up".
+copy nocnproc; sed -i 's/-p RestrictAddressFamilies="AF_UNIX AF_NETLINK AF_PACKET"/-p RestrictAddressFamilies="AF_UNIX AF_PACKET"/' "$t/nocnproc/install.sh"
+if grep -q 'RestrictAddressFamilies="AF_UNIX AF_PACKET"' "$t/nocnproc/install.sh"; then
+  run "$t/nocnproc"
+  if [ "$RC" = 17 ] && [[ "$LAST" == *"cn_proc"* ]] && [[ "$OUT" != *"sensor up"* ]]; then ok "a Plane C without cn_proc gives exit 17: $LAST"
+  else bad "Plane C without cn_proc: rc=$RC $LAST"; fi
+else bad "could not take AF_NETLINK from the helper unit"; fi
 
 run "$t/pkg"; [ "$RC" = 0 ] && ok "a normal start recovers" || bad "recovery rc=$RC: $LAST"
 if [ "$fails" = 0 ]; then echo "all Cowork install.sh root checks passed"; else echo "$fails Cowork install.sh root checks failed"; exit 1; fi

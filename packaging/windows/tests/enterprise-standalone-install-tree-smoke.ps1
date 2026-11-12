@@ -551,7 +551,7 @@ try {
             try {
                 Test-Refused 'replacement of a file another program holds open' {
                     Install-DefenseClawFileAtomic -Source $heldSource -Destination $heldTarget
-                } ([regex]::Escape("another program holds $heldTarget open") + '.*run Setup again')
+                } ([regex]::Escape("another program holds $heldTarget open") + '.*then run the same command again$')
             }
             finally {
                 $handle.Dispose()

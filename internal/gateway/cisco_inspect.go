@@ -19,6 +19,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,6 +115,13 @@ type inspectCall struct {
 	payload        map[string]interface{}     // mutated on 400 retry (delete "config")
 	setAuth        func(req *http.Request)    // set auth header on each attempt
 	onUnauthorized func(context.Context) bool // nil: 401 is terminal (opensource default)
+	// onValidationError switches an API-key tool-call request to its text
+	// form, or returns an already inspected text verdict. Managed callers
+	// leave it nil.
+	onValidationError func() *ScanVerdict
+	// acceptShapeValidation records a cached structured shape's 400/422 as
+	// a rejected format, leaving the concurrently inspected text verdict.
+	acceptShapeValidation bool
 	// onOutcome receives the call's final outcome: nil for a verdict, the
 	// failure otherwise. nil: nothing is reported (every client but the
 	// standalone AI Defense client, whose outcomes feed /health).
@@ -127,9 +135,8 @@ type inspectCall struct {
 //
 // The 401 branch depends on whether call.onUnauthorized is set:
 //   - nil (opensource / API-key path): 401 is a terminal error, emitted
-//     via EmitCiscoError and returning nil. Retry cap stays at 2 attempts
-//     (initial + at most one 400-drop-config retry) — byte-for-byte
-//     identical to the pre-extraction behavior.
+//     via EmitCiscoError and returning nil. The retry cap is 2 attempts,
+//     or 3 when a tool-call request can retry as text after validation.
 //   - non-nil (managed / CMID path): 401 triggers onUnauthorized. If it
 //     reports shouldRetry, doInspectHTTP loops once more; setAuth is
 //     invoked on the fresh attempt, giving the caller a chance to attach
@@ -159,7 +166,11 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 	if call.onUnauthorized != nil {
 		maxAttempts = 3
 	}
+	if call.onValidationError != nil {
+		maxAttempts = 3
+	}
 	retriedAfter401 := false
+	retriedAsText := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		body, err := json.Marshal(call.payload)
 		if err != nil {
@@ -254,6 +265,23 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 				continue
 			}
 		}
+		if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity) &&
+			call.onValidationError != nil && !retriedAsText && attempt+1 < maxAttempts {
+			fallbackVerdict := call.onValidationError()
+			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeRejected, "")
+			if fallbackVerdict != nil {
+				report(nil)
+				return fallbackVerdict
+			}
+			retriedAsText = true
+			continue
+		}
+		if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity) &&
+			call.acceptShapeValidation {
+			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeRejected, "")
+			report(ciscoInspectStatusError(resp.StatusCode))
+			return nil
+		}
 
 		if resp.StatusCode == http.StatusUnauthorized && call.onUnauthorized != nil && !retriedAfter401 {
 			if call.onUnauthorized(ctx) {
@@ -298,17 +326,25 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 	return nil
 }
 
+// ciscoInspectHTTPStatusError retains the status so a cached format check can
+// distinguish shape validation from an unavailable inspection endpoint.
+type ciscoInspectHTTPStatusError struct{ status int }
+
+func (e *ciscoInspectHTTPStatusError) Error() string {
+	switch e.status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Sprintf("the API key was rejected (HTTP %d)", e.status)
+	case http.StatusProxyAuthRequired:
+		return fmt.Sprintf("the egress proxy requires authentication (HTTP %d)", e.status)
+	}
+	return fmt.Sprintf("inspection failed (HTTP %d)", e.status)
+}
+
 // ciscoInspectStatusError describes a final non-200 inspection reply for
 // /health. A rejected key and a proxy that wants credentials name the
 // setting to fix; any other status is reported as is.
 func ciscoInspectStatusError(status int) error {
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("the API key was rejected (HTTP %d)", status)
-	case http.StatusProxyAuthRequired:
-		return fmt.Errorf("the egress proxy requires authentication (HTTP %d)", status)
-	}
-	return fmt.Errorf("inspection failed (HTTP %d)", status)
+	return &ciscoInspectHTTPStatusError{status: status}
 }
 
 // CiscoInspectClient calls the Cisco AI Defense Chat Inspection API using
@@ -335,6 +371,62 @@ type CiscoInspectClient struct {
 	// one; opensource clients leave it nil and report nothing.
 	availabilityMu       sync.RWMutex
 	availabilityObserver func(error)
+}
+
+// A validation response can apply to one request rather than every tool call
+// at an endpoint. A blocking text retry can be reused briefly for an identical
+// API-key request. Non-blocking results recheck the structured form because
+// endpoint capabilities and policies can change. Secure Client does not use
+// this preference.
+const ciscoAPIKeyTextPreferenceLifetime = 30 * time.Second
+
+type ciscoAPIKeyTextPreference struct {
+	key     [32]byte
+	expires time.Time
+}
+
+var ciscoAPIKeyTextOnlyRequests = struct {
+	sync.Mutex
+	keys  map[[32]byte]*ciscoAPIKeyTextPreference
+	order [1024]*ciscoAPIKeyTextPreference
+	next  int
+	size  int
+}{keys: make(map[[32]byte]*ciscoAPIKeyTextPreference)}
+var ciscoAPIKeyTextOnlyLogOnce sync.Once
+
+func ciscoAPIKeyTextOnlyRequestKnown(key [32]byte, now time.Time) bool {
+	ciscoAPIKeyTextOnlyRequests.Lock()
+	defer ciscoAPIKeyTextOnlyRequests.Unlock()
+	entry := ciscoAPIKeyTextOnlyRequests.keys[key]
+	if entry == nil {
+		return false
+	}
+	if !now.Before(entry.expires) {
+		delete(ciscoAPIKeyTextOnlyRequests.keys, key)
+		return false
+	}
+	return true
+}
+
+func ciscoRememberAPIKeyTextOnlyRequest(key [32]byte, now time.Time) bool {
+	ciscoAPIKeyTextOnlyRequests.Lock()
+	defer ciscoAPIKeyTextOnlyRequests.Unlock()
+	if entry := ciscoAPIKeyTextOnlyRequests.keys[key]; entry != nil && now.Before(entry.expires) {
+		return false
+	}
+	if ciscoAPIKeyTextOnlyRequests.size == len(ciscoAPIKeyTextOnlyRequests.order) {
+		old := ciscoAPIKeyTextOnlyRequests.order[ciscoAPIKeyTextOnlyRequests.next]
+		if ciscoAPIKeyTextOnlyRequests.keys[old.key] == old {
+			delete(ciscoAPIKeyTextOnlyRequests.keys, old.key)
+		}
+	} else {
+		ciscoAPIKeyTextOnlyRequests.size++
+	}
+	entry := &ciscoAPIKeyTextPreference{key: key, expires: now.Add(ciscoAPIKeyTextPreferenceLifetime)}
+	ciscoAPIKeyTextOnlyRequests.order[ciscoAPIKeyTextOnlyRequests.next] = entry
+	ciscoAPIKeyTextOnlyRequests.next = (ciscoAPIKeyTextOnlyRequests.next + 1) % len(ciscoAPIKeyTextOnlyRequests.order)
+	ciscoAPIKeyTextOnlyRequests.keys[key] = entry
+	return true
 }
 
 // bindAvailabilityObserver installs the callback that receives every
@@ -446,6 +538,22 @@ func NewCiscoInspectClient(cfg *config.CiscoAIDefenseConfig, dotenvPath string) 
 	}
 }
 
+// ciscoMessageToolCallHasTextForm recognizes the unlabelled text form used by
+// the message hook. The user message must match the carried arguments so an
+// unrelated message cannot be substituted for the tool call on retry.
+func ciscoMessageToolCallHasTextForm(messages []ChatMessage) bool {
+	var calls []struct {
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	return json.Unmarshal(messages[0].ToolCalls, &calls) == nil && len(calls) == 1 &&
+		calls[0].Type == "function" && calls[0].Function.Name == "message" &&
+		calls[0].Function.Arguments == messages[1].Content
+}
+
 // Inspect sends messages to Cisco AI Defense and returns a normalized verdict.
 // The caller's context is mandatory for cancellation and W3C parentage. The
 // generated guardrail ai_defense CLIENT phase owns the span; this client only
@@ -468,13 +576,71 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 		}
 		chatMsgs[i] = msg
 	}
-
+	// PreToolUse supplies its complete text form after an empty assistant
+	// tool-call message. The message hook omits the usual tool label.
+	// Other message lists keep their original shape on a validation error.
+	canUseText := len(messages) == 2 &&
+		messages[0].Role == "assistant" && messages[0].Content == "" && len(messages[0].ToolCalls) > 0 &&
+		messages[1].Role == "user" && len(messages[1].ToolCalls) == 0 &&
+		(strings.HasPrefix(messages[1].Content, "Tool call: ") || ciscoMessageToolCallHasTextForm(messages))
+	var textMsgs []map[string]interface{}
+	if canUseText {
+		textMsgs = []map[string]interface{}{{"role": "user", "content": messages[1].Content}}
+	}
 	payload := map[string]interface{}{"messages": chatMsgs}
 	if len(c.enabledRules) > 0 {
 		payload["config"] = map[string]interface{}{"enabled_rules": c.enabledRules}
 	}
+	var requestKey [32]byte
+	preferredText := false
+	if canUseText {
+		// Tool-use IDs change on each invocation. Exclude only those IDs
+		// from the preference key; keep the tool, arguments, text, rules,
+		// endpoint, and credential so an unrelated request is still probed.
+		var calls []map[string]json.RawMessage
+		if err := json.Unmarshal(messages[0].ToolCalls, &calls); err == nil && len(calls) > 0 {
+			for _, call := range calls {
+				delete(call, "id")
+			}
+			if normalizedCalls, err := json.Marshal(calls); err == nil {
+				keyMessages := append([]map[string]interface{}(nil), chatMsgs...)
+				keyMessages[0] = map[string]interface{}{
+					"role":       messages[0].Role,
+					"content":    messages[0].Content,
+					"tool_calls": json.RawMessage(normalizedCalls),
+				}
+				keyPayload := make(map[string]interface{}, len(payload))
+				for name, value := range payload {
+					keyPayload[name] = value
+				}
+				keyPayload["messages"] = keyMessages
+				if body, err := json.Marshal(keyPayload); err == nil {
+					hash := sha256.New()
+					_, _ = hash.Write([]byte(c.endpoint))
+					_, _ = hash.Write([]byte{0})
+					_, _ = hash.Write([]byte(c.apiKey))
+					_, _ = hash.Write([]byte{0})
+					_, _ = hash.Write(body)
+					copy(requestKey[:], hash.Sum(nil))
+					if ciscoAPIKeyTextOnlyRequestKnown(requestKey, time.Now()) {
+						payload["messages"] = textMsgs
+						canUseText = false
+						preferredText = true
+					}
+				}
+			}
+		}
+	}
 
-	return doInspectHTTP(ctx, runtime, inspectCall{
+	// A retry shares the original request's configured time budget. The
+	// client's per-attempt timeout alone would otherwise allow two budgets.
+	if (canUseText || preferredText) && c.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+		defer cancel()
+	}
+	retriedAsText := false
+	call := inspectCall{
 		client:   c.client,
 		endpoint: c.endpoint,
 		urlPath:  "/api/v1/inspect/chat",
@@ -483,7 +649,117 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 			req.Header.Set("X-Cisco-AI-Defense-API-Key", c.apiKey)
 		},
 		onOutcome: c.availabilityCallback(),
-	})
+	}
+	if preferredText {
+		// The preference is only a shape hint. Check both forms within the
+		// same deadline: waiting for a slow text allow before starting the
+		// structured request could discard a timely structured block.
+		type shapeResult struct {
+			verdict    *ScanVerdict
+			outcome    error
+			structured bool
+		}
+		results := make(chan shapeResult, 2)
+		checkCtx, stop := context.WithCancel(ctx)
+		defer stop()
+		check := func(messages []map[string]interface{}, structured bool) {
+			shapeCall := call
+			shapeCall.acceptShapeValidation = structured
+			shapeCall.payload = make(map[string]interface{}, len(payload))
+			for name, value := range payload {
+				shapeCall.payload[name] = value
+			}
+			shapeCall.payload["messages"] = messages
+			var outcome error
+			shapeCall.onOutcome = func(err error) { outcome = err }
+			verdict := doInspectHTTP(checkCtx, runtime, shapeCall)
+			results <- shapeResult{verdict: verdict, outcome: outcome, structured: structured}
+		}
+		go check(textMsgs, false)
+		go check(chatMsgs, true)
+
+		var textResult, structuredResult shapeResult
+		for range 2 {
+			result := <-results
+			if result.verdict != nil && result.verdict.Action == "block" {
+				stop()
+				if call.onOutcome != nil {
+					call.onOutcome(nil)
+				}
+				return result.verdict
+			}
+			if result.structured {
+				structuredResult = result
+			} else {
+				textResult = result
+			}
+		}
+		// A 400/422 from one shape is a compatibility signal when the
+		// other shape returned a verdict. Any other failed shape leaves an
+		// inspection incomplete, so the caller applies its outage mode.
+		var incomplete error
+		for _, result := range []shapeResult{textResult, structuredResult} {
+			if result.verdict != nil {
+				continue
+			}
+			if result.outcome == nil {
+				if ctx.Err() != nil {
+					incomplete = ctx.Err()
+					break
+				}
+				continue
+			}
+			var status *ciscoInspectHTTPStatusError
+			if errors.As(result.outcome, &status) &&
+				(status.status == http.StatusBadRequest || status.status == http.StatusUnprocessableEntity) {
+				continue
+			}
+			incomplete = result.outcome
+			break
+		}
+		if incomplete != nil {
+			if call.onOutcome != nil && !errors.Is(ctx.Err(), context.Canceled) {
+				call.onOutcome(incomplete)
+			}
+			return nil
+		}
+		if structuredResult.verdict != nil {
+			if call.onOutcome != nil {
+				call.onOutcome(nil)
+			}
+			return structuredResult.verdict
+		}
+		if textResult.verdict != nil {
+			if call.onOutcome != nil {
+				call.onOutcome(nil)
+			}
+			return textResult.verdict
+		}
+		if call.onOutcome != nil && !errors.Is(ctx.Err(), context.Canceled) {
+			if structuredResult.outcome != nil {
+				call.onOutcome(structuredResult.outcome)
+			} else {
+				call.onOutcome(textResult.outcome)
+			}
+		}
+		return nil
+	}
+	if canUseText {
+		call.onValidationError = func() *ScanVerdict {
+			payload["messages"] = textMsgs
+			retriedAsText = true
+			return nil
+		}
+	}
+	verdict := doInspectHTTP(ctx, runtime, call)
+	if retriedAsText && verdict != nil && verdict.Action == "block" && requestKey != ([32]byte{}) {
+		if ciscoRememberAPIKeyTextOnlyRequest(requestKey, time.Now()) {
+			ciscoAPIKeyTextOnlyLogOnce.Do(func() {
+				fmt.Fprintln(defaultLogWriter, "  [cisco-ai-defense] API-key endpoint accepted a text retry; briefly remembering that format for identical blocked requests")
+			})
+		}
+	}
+	return verdict
 }
 
 func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {

@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import shlex
 import socket
@@ -30,7 +31,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
@@ -53,6 +54,261 @@ UNSAFE_PATH_INSPECTION_FAILED = "unsafe-path-inspection-failed"
 UNSAFE_PATH_NAMESPACE_VIEW = "unsafe-path-namespace-view"
 
 _tracked_host_stat_lock = threading.Lock()
+
+# The local account records are checked alongside NSS before a group is
+# considered private. Tests replace these paths with isolated account data.
+_PASSWD_FILE = "/etc/passwd"
+_GROUP_FILE = "/etc/group"
+
+
+def _account_records(path: str) -> list[list[str]] | None:
+    try:
+        with open(path, encoding="utf-8", errors="strict") as handle:
+            lines = handle.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    records = []
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith(("+", "-")):
+            return None
+        records.append(line.split(":"))
+    return records
+
+
+def _has_access_acl(path: str) -> bool:
+    """Treat an unreadable ACL as present; group mode bits can be its mask."""
+    getxattr = getattr(os, "getxattr", None)
+    if getxattr is None:
+        return True
+    for attribute in ("system.posix_acl_access", "system.nfs4_acl", "system.nfs4acl"):
+        try:
+            getxattr(path, attribute, follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno in (errno.ENODATA, errno.ENOTSUP, getattr(errno, "ENOATTR", errno.ENODATA)):
+                continue
+            return True
+        return True
+    return False
+
+
+def owner_private_group(path: str, info: os.stat_result) -> bool:
+    """Whether a Linux path is owned by this account and its private group."""
+    if not sys.platform.startswith("linux") or os.name == "nt":
+        return False
+    uid, gid = os.geteuid(), info.st_gid
+    try:
+        target = os.path.realpath(path)
+        resolved = os.stat(target)
+    except OSError:
+        return False
+    if (resolved.st_dev, resolved.st_ino) != (info.st_dev, info.st_ino):
+        return False
+    if info.st_uid != uid or _has_access_acl(target):
+        return False
+    passwd = _account_records(_PASSWD_FILE)
+    groups = _account_records(_GROUP_FILE)
+    if passwd is None or groups is None:
+        return False
+    try:
+        owners = [rec for rec in passwd if len(rec) >= 4 and int(rec[2]) == uid]
+        if len(owners) != 1:
+            return False
+        name = owners[0][0]
+        if not name:
+            return False
+        for rec in passwd:
+            if len(rec) < 4:
+                return False
+            record_uid, record_gid = int(rec[2]), int(rec[3])
+            if record_gid == gid and record_uid != uid:
+                return False
+            if rec[0] == name and (record_uid != uid or record_gid != gid):
+                return False
+        matches = [rec for rec in groups if len(rec) >= 4 and int(rec[2]) == gid]
+    except ValueError:
+        return False
+    if not matches:
+        return False
+    for rec in matches:
+        members = {member.strip() for member in rec[3].split(",") if member.strip()}
+        if rec[0] != name or not members <= {name}:
+            return False
+    try:
+        import grp
+        import pwd
+
+        account = pwd.getpwuid(uid)
+        group = grp.getgrgid(gid)
+    except (ImportError, KeyError, OSError):
+        return False
+    return account.pw_name == name and account.pw_gid == gid and group.gr_name == name and set(group.gr_mem) <= {name}
+
+
+_ACL_USER_OBJ, _ACL_USER, _ACL_GROUP_OBJ, _ACL_GROUP, _ACL_MASK, _ACL_OTHER = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20
+_ACL_WRITE = 0x02
+
+
+def _plugin_trusted_owner(uid: int) -> bool:
+    """The gateway's trusted owners for a plugin folder: root, this account, the service account."""
+    if trusted_runtime_owner(uid):
+        return True
+    try:
+        import pwd
+    except ImportError:
+        return False
+    for name in ("defenseclaw", "_defenseclaw") if sys.platform == "darwin" else ("defenseclaw",):
+        try:
+            if pwd.getpwnam(name).pw_uid == uid:
+                return True
+        except (KeyError, OSError):
+            continue
+    return False
+
+
+def plugin_owner_untrusted(info: os.stat_result) -> bool:
+    """True when the owner is not one the gateway accepts for a plugin folder or file."""
+    return not _plugin_trusted_owner(info.st_uid)
+
+
+def _plugin_darwin_acl_refused(path: str) -> bool:
+    """The gateway's macOS ACL rule for a plugin folder or file (hook_api_acl_darwin.go).
+
+    The standalone managed profile refuses any allow entry with a write-class
+    right. Every other scope (a per-user install, Secure Client) refuses only
+    an effective allow entry with a write-class right for a principal other
+    than root, wheel and admin, and leaves read, deny, inherit-only and those
+    trusted entries alone. An ACL that cannot be read, or an entry that cannot
+    be parsed, is a refusal in both: the gateway strict parser refuses the same
+    entry. Asking the stricter rule everywhere would warn about, and make setup
+    refuse, a folder the gateway accepts.
+    """
+    mode_field, acl_text = _darwin_acl_output(
+        path, timeout=_PLUGIN_ACL_INSPECTION_TIMEOUT, attempts=_PLUGIN_ACL_INSPECTION_ATTEMPTS
+    )
+    if not mode_field:
+        return True
+    if not acl_text:
+        return "+" in mode_field
+    standalone = _plugin_standalone_scope()
+    for raw_line in acl_text.splitlines():
+        index, colon, entry = raw_line.strip().lower().partition(":")
+        if not colon or not index.isdigit():
+            continue
+        fields = entry.split()
+        verb = next((i for i, field in enumerate(fields) if field in ("allow", "deny")), -1)
+        if verb < 1 or verb + 1 >= len(fields):
+            return True
+        if fields[verb] != "allow":
+            continue
+        rights = set(fields[verb + 1].split(","))
+        if standalone:
+            if rights & _DARWIN_ACL_WRITE_PERMISSIONS:
+                return True
+        elif (
+            fields[0] not in _DARWIN_ACL_TRUSTED_PRINCIPALS
+            and rights & _DARWIN_ACL_WRITE_PERMISSIONS
+            and "only_inherit" not in rights
+        ):
+            return True
+    return False
+
+
+def _plugin_standalone_scope() -> bool:
+    """Whether the gateway on this host judges by the standalone managed profile."""
+    try:
+        from defenseclaw.envvars import managed_standalone
+
+        return managed_standalone()
+    except (ImportError, OSError, ValueError, RuntimeError):
+        return False
+
+
+def plugin_acl_refused(path: str) -> bool:
+    """True when the gateway's ACL rule would refuse *path* (hook_api_acl_{linux,darwin}.go).
+
+    macOS: the rule of the gateway's trust scope (see
+    :func:`_plugin_darwin_acl_refused`). Linux: an NFSv4 ACL, an
+    unreadable or incomplete POSIX ACL, or a POSIX ACL whose effective write
+    belongs to a group, to other, or to a named user that is not trusted.
+    """
+    if sys.platform == "darwin":
+        return _plugin_darwin_acl_refused(path)
+    getxattr = getattr(os, "getxattr", None)
+    if getxattr is None:
+        return False
+    absent = (errno.ENODATA, errno.ENOTSUP, getattr(errno, "ENOATTR", errno.ENODATA))
+    for attribute in ("system.nfs4_acl", "system.nfs4acl"):
+        try:
+            getxattr(path, attribute)
+        except OSError as exc:
+            if exc.errno in absent:
+                continue
+        return True
+    try:
+        data = getxattr(path, "system.posix_acl_access")
+    except OSError as exc:
+        return exc.errno not in absent
+    if len(data) < 4 or struct.unpack_from("<I", data)[0] != 2 or (len(data) - 4) % 8:
+        return True
+    entries = [struct.unpack_from("<HHI", data, offset) for offset in range(4, len(data), 8)]
+    tags = [tag for tag, _, _ in entries]
+    named = any(tag in (_ACL_USER, _ACL_GROUP) for tag in tags)
+    if (
+        tags.count(_ACL_USER_OBJ) != 1
+        or tags.count(_ACL_GROUP_OBJ) != 1
+        or tags.count(_ACL_OTHER) != 1
+        or tags.count(_ACL_MASK) > 1
+        or (named and tags.count(_ACL_MASK) != 1)
+    ):
+        return True
+    mask = next((perm for tag, perm, _ in entries if tag == _ACL_MASK), 0x7)
+    for tag, perm, uid in entries:
+        if tag in (_ACL_USER, _ACL_GROUP_OBJ, _ACL_GROUP):
+            perm &= mask
+        elif tag not in (_ACL_USER_OBJ, _ACL_OTHER, _ACL_MASK):
+            return True
+        if not perm & _ACL_WRITE:
+            continue
+        if tag == _ACL_USER and not _plugin_trusted_owner(uid):
+            return True
+        if tag in (_ACL_GROUP_OBJ, _ACL_GROUP, _ACL_OTHER):
+            return True
+    return False
+
+
+def plugin_link_refused(path: str, info: os.stat_result, *, leaf: bool) -> bool:
+    """True when the gateway's folder walk refuses the link *path*.
+
+    The plugin folder itself is never a link; an ancestor may be one only when
+    it is a root-owned system link (a macOS root alias, or a link inside a
+    root-owned private parent) that leads to a folder.
+    """
+    if not leaf:
+        alias = sys.platform == "darwin" and os.path.normpath(path) in ("/etc", "/tmp", "/var")
+        if not alias and info.st_uid == 0:
+            try:
+                parent = os.lstat(os.path.dirname(path))
+            except OSError:
+                parent = None
+            alias = (
+                parent is not None
+                and stat.S_ISDIR(parent.st_mode)
+                and not parent.st_mode & 0o022
+                and parent.st_uid == 0
+            )
+        if alias:
+            return not os.path.isdir(path)
+    return True
+
+
+def other_accounts_can_write(path: str, info: os.stat_result) -> bool:
+    """Check other-write and group-write after proving a private group."""
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o002:
+        return True
+    return bool(mode & 0o020) and not owner_private_group(path, info)
 
 
 def tracked_host_owner_uid(path: str | os.PathLike[str], info: os.stat_result) -> int:
@@ -289,44 +545,148 @@ SUDO_RUNTIME_LEFTOVER_NAMES: tuple[str, ...] = (
 )
 
 
-def sudo_runtime_leftover_relpaths(data_dir: str | os.PathLike[str]) -> list[str]:
-    """Return relative paths of private root-owned leftovers under *data_dir*."""
+# The data directory itself, named in the start blockers below when root owns
+# it and this account cannot use it (a moved store left root-owned 0700).
+STORE_DIR_ENTRY = "./"
 
-    if os.name == "nt" or not hasattr(os, "geteuid"):
+
+def _root_owned_runtime_files(
+    data_dir: str | os.PathLike[str],
+    names: tuple[str, ...],
+    *,
+    private_only: bool,
+    hooks: bool = True,
+) -> list[tuple[str, bool]]:
+    """``(relative path, group/other bits set)`` of root-owned files under *data_dir*.
+
+    ``lstat`` needs no read access. With *private_only* a file that grants
+    group or others anything is left out (the Sudo leftovers row of Doctor); without
+    it the file is named and flagged, because the gateway refuses such a file
+    too and a change of owner alone does not repair it. Without *hooks* the
+    hooks folder and its tokens are not scanned.
+    """
+
+    if os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0:
         return []
     root = os.fspath(data_dir)
-    leftovers: list[str] = []
-    for name in SUDO_RUNTIME_LEFTOVER_NAMES:
-        if root_owned_private_regular_file(os.path.join(root, name)):
-            leftovers.append(name)
+    found: list[tuple[str, bool]] = []
 
+    def add(rel: str) -> None:
+        try:
+            info = os.lstat(os.path.join(root, rel))
+        except OSError:
+            return
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0:
+            return
+        loose = bool(stat.S_IMODE(info.st_mode) & 0o077)
+        if loose and private_only:
+            return
+        found.append((rel, loose))
+
+    for name in names:
+        add(name)
+
+    if not hooks:
+        return found
     hooks_dir = os.path.join(root, "hooks")
     try:
         info = os.lstat(hooks_dir)
     except OSError:
-        return leftovers
+        return found
     if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-        return leftovers
-    current_uid = os.geteuid()
-    if (
-        current_uid != 0
-        and info.st_uid == 0
-        and not (stat.S_IMODE(info.st_mode) & 0o022)
-    ):
-        leftovers.append("hooks/")
+        return found
+    if info.st_uid == 0 and not (stat.S_IMODE(info.st_mode) & 0o022):
+        found.append(("hooks/", False))
     try:
-        names = os.listdir(hooks_dir)
+        hook_names = os.listdir(hooks_dir)
     except OSError:
-        return leftovers
-    for name in sorted(names):
-        if not (name.startswith(".hook-") and name.endswith(".token")):
-            continue
-        rel = f"hooks/{name}"
-        if root_owned_private_regular_file(os.path.join(hooks_dir, name)):
-            leftovers.append(rel)
-    return leftovers
+        return found
+    for name in sorted(hook_names):
+        if name.startswith(".hook-") and name.endswith(".token"):
+            add(f"hooks/{name}")
+    return found
 
 
+def sudo_runtime_leftover_relpaths(data_dir: str | os.PathLike[str]) -> list[str]:
+    """Return relative paths of private root-owned leftovers under *data_dir*."""
+
+    return [rel for rel, _ in _root_owned_runtime_files(data_dir, SUDO_RUNTIME_LEFTOVER_NAMES, private_only=True)]
+
+
+# The PID records the gateway start and restart validate before anything else.
+GATEWAY_PID_RECORD_NAMES: tuple[str, ...] = ("gateway.pid", "watchdog.pid")
+
+
+def root_owned_start_blockers(
+    data_dir: str | os.PathLike[str],
+    *,
+    ai_discovery_enabled: bool,
+    pid_dir: str | os.PathLike[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Root-owned state that stops the gateway start of this account (GAP-0788).
+
+    Returns ``(blockers, loose)``: the paths to name, and the ones of those
+    whose group/other bits the gateway also refuses, which the repair must
+    take away after the owner is returned. Unlike the Sudo leftovers row this
+    names a root-owned file of any mode. Each file list is scoped to the
+    folder the start reads it from: *data_dir* is the store, with the runtime
+    files and the hooks folder with its tokens (its PID records only when
+    *pid_dir* is the same folder); *pid_dir* is the install home, where start
+    validates the PID records, and when it is another folder only those are
+    scanned there. The store itself is named (``STORE_DIR_ENTRY``) when root
+    owns it and this account cannot write there, as with a root-owned 0700
+    moved store: its files are invisible, so *loose* then also holds the store
+    with a trailing separator, for the repair to take group and other access
+    away from the runtime files it finds there once the owner is returned. The
+    AI discovery state is named only when discovery is enabled: the gateway
+    reads it then and not otherwise.
+    """
+
+    if os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0:
+        return [], []
+    pids_elsewhere = pid_dir is not None and os.path.abspath(os.fspath(pid_dir)) != os.path.abspath(
+        os.fspath(data_dir)
+    )
+    names = tuple(
+        n
+        for n in SUDO_RUNTIME_LEFTOVER_NAMES
+        if (ai_discovery_enabled or n != "ai_discovery_state.json")
+        and not (pids_elsewhere and n in GATEWAY_PID_RECORD_NAMES)
+    )
+    blockers: list[str] = []
+    loose: list[str] = []
+    try:
+        info = os.lstat(data_dir)
+    except OSError:
+        info = None
+    if (
+        info is not None
+        and stat.S_ISDIR(info.st_mode)
+        and info.st_uid == 0
+        and not os.access(data_dir, os.W_OK | os.X_OK)
+    ):
+        blockers.append(STORE_DIR_ENTRY)
+        loose.append(os.path.join(os.path.normpath(os.fspath(data_dir)), ""))
+    for rel, is_loose in _root_owned_runtime_files(data_dir, names, private_only=False):
+        blockers.append(rel)
+        if is_loose:
+            loose.append(os.path.join(os.fspath(data_dir), rel))
+    if pids_elsewhere:
+        for rel, is_loose in _root_owned_runtime_files(
+            pid_dir, GATEWAY_PID_RECORD_NAMES, private_only=False, hooks=False
+        ):
+            path = os.path.join(os.fspath(pid_dir), rel)
+            blockers.append(path)
+            if is_loose:
+                loose.append(path)
+    return blockers, loose
+
+
+# The one Windows owner trust set, besides the account itself, for folders and
+# files DefenseClaw validates but did not create: a profile folder is owned by
+# BUILTIN\Administrators when a member of that group created it, elevated or
+# not (cowork-1-0-8 GAP-0085). Matched by well-known SID only. Go's
+# internal/winowner.SystemOwnerSIDs holds the same list; a test pins the two.
 _WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS = frozenset(
     {
         "S-1-5-18",  # LocalSystem
@@ -335,6 +695,33 @@ _WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS = frozenset(
         "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
     }
 )
+
+
+# Every right that lets a principal change a folder's entries or a file's
+# content, DACL or owner: GENERIC_ALL, GENERIC_WRITE, DELETE, WRITE_DAC,
+# WRITE_OWNER, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_WRITE_EA,
+# FILE_DELETE_CHILD and FILE_WRITE_ATTRIBUTES. Go's
+# internal/winowner.CustodyWriteMask holds the same value (the Cowork guard
+# applies it to the removal marker's folder); a test pins the two.
+_WINDOWS_CUSTODY_WRITE_MASK = 0x10000000 | 0x40000000 | 0x000D0156
+
+
+def windows_owner_problem(owner_sid: str, current_sid: str) -> str | None:
+    """Return why *owner_sid* is outside the Windows owner trust set, or ``None``.
+
+    The set is *current_sid* (when known) and
+    ``_WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS``. Users, Authenticated Users,
+    Everyone and every other account are refused; the message names the owner.
+    """
+    if owner_sid and (
+        (current_sid and owner_sid == current_sid) or owner_sid in _WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS
+    ):
+        return None
+    trusted = "SYSTEM, BUILTIN Administrators or TrustedInstaller"
+    if current_sid:
+        trusted = "this account, " + trusted
+    return f"owner SID {owner_sid or '<unknown>'} is not {trusted}"
+
 
 _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
     {
@@ -421,6 +808,37 @@ def dotenv_key_is_valid(key: str) -> bool:
     )
 
 
+def dotenv_line_ending(existing: bytes | None) -> bytes:
+    """The line ending DefenseClaw writes into a ``.env`` that now holds *existing*.
+
+    One per file, on every OS: CRLF only when the file is entirely CRLF,
+    otherwise LF (also for a new or empty file). The readers accept both.
+    """
+    body = existing or b""
+    lf = body.count(b"\n")
+    return b"\r\n" if lf and lf == body.count(b"\r\n") else b"\n"
+
+
+def serialize_dotenv(lines: Iterable[bytes], existing: bytes | None) -> bytes:
+    """The one serializer every DefenseClaw ``.env`` writer ends with.
+
+    Each of *lines* is written without whatever line ending it carried and
+    with the single ending :func:`dotenv_line_ending` picks from *existing*, the
+    bytes being replaced. A file an older writer left half CRLF and half LF
+    therefore leaves the first write with one ending. Byte-exact rollback
+    restores do not use it: they put the earlier bytes back as they were.
+    """
+    newline = dotenv_line_ending(existing)
+    out: list[bytes] = []
+    for line in lines:
+        for terminator in (b"\r\n", b"\n", b"\r"):
+            if line.endswith(terminator):
+                line = line[: -len(terminator)]
+                break
+        out.append(line + newline)
+    return b"".join(out)
+
+
 def dotenv_key_is_process_control(key: str) -> bool:
     """Return whether a dotenv key can redirect or inject a child process."""
     normalized = key.strip().upper()
@@ -429,7 +847,7 @@ def dotenv_key_is_process_control(key: str) -> bool:
     )
 
 
-def _windows_extended_path(path: str | os.PathLike[str]) -> str:
+def windows_extended_path(path: str | os.PathLike[str]) -> str:
     """Return an absolute Win32 path that is not limited by ``MAX_PATH``."""
 
     value = os.path.abspath(os.fspath(path))
@@ -486,8 +904,8 @@ def replace_file_durable(source: str | os.PathLike[str], target: str | os.PathLi
     code = _move_retrying_sharing_errors(
         lambda: bool(
             move_file_ex(
-                _windows_extended_path(source_path),
-                _windows_extended_path(target_path),
+                windows_extended_path(source_path),
+                windows_extended_path(target_path),
                 movefile_replace_existing | movefile_write_through,
             )
         ),
@@ -662,7 +1080,7 @@ def _open_windows_stable_read_fd(path: str, *, share_delete: bool = True) -> int
     close_handle.restype = wintypes.BOOL
 
     handle = create_file(
-        _windows_extended_path(path),
+        windows_extended_path(path),
         generic_read,
         file_share_read | (file_share_delete if share_delete else 0),
         None,
@@ -883,22 +1301,38 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
     return resolved
 
 
-def _darwin_acl_output(path: str | os.PathLike[str]) -> tuple[str, str]:
+#: The gateway inspection bound (hookAPIACLInspectionTimeout) and its retry: a
+#: slow ls under a process scanner is inspected once more, and a second timeout
+#: is the verdict. Only the plugin-folder check (_plugin_darwin_acl_refused) asks
+#: for this; every other caller keeps the single 2-second inspection, so a
+#: timeout there stays a refusal on the first try.
+_PLUGIN_ACL_INSPECTION_TIMEOUT = 5.0
+_PLUGIN_ACL_INSPECTION_ATTEMPTS = 2
+
+
+def _darwin_acl_output(path: str | os.PathLike[str], *, timeout: float = 2.0, attempts: int = 1) -> tuple[str, str]:
     """Return ``(mode, ACL text)`` from a fixed-path Darwin inspection."""
     if sys.platform != "darwin":
         return "", ""
-    try:
-        result = subprocess.run(
-            ["/bin/ls", "-lde", os.path.abspath(os.fspath(path))],
-            capture_output=True,
-            text=True,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            env=trusted_system_subprocess_env(),
-            timeout=2.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    result = None
+    for _attempt in range(attempts):
+        try:
+            result = subprocess.run(
+                ["/bin/ls", "-lde", os.path.abspath(os.fspath(path))],
+                capture_output=True,
+                text=True,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                env=trusted_system_subprocess_env(),
+                timeout=timeout,
+                check=False,
+            )
+            break
+        except subprocess.TimeoutExpired:
+            continue
+        except (FileNotFoundError, OSError):
+            return "", ""
+    if result is None:
         return "", ""
     if result.returncode != 0:
         return "", ""
@@ -906,6 +1340,25 @@ def _darwin_acl_output(path: str | os.PathLike[str]) -> tuple[str, str]:
     first_line = lines[0] if lines else ""
     mode_field = first_line.split(maxsplit=1)[0] if first_line else ""
     return mode_field, "\n".join(lines[1:])
+
+
+_DARWIN_ACL_WRITE_PERMISSIONS = frozenset(
+    {
+        "add_file",
+        "add_subdirectory",
+        "append",
+        "chown",
+        "delete",
+        "delete_child",
+        "write",
+        "writeattr",
+        "writeextattr",
+        "writesecurity",
+    }
+)
+#: Principals whose allow entries the gateway ignores outside the standalone
+#: profile: they hold administrator authority on macOS already.
+_DARWIN_ACL_TRUSTED_PRINCIPALS = frozenset({"user:root", "group:wheel", "group:admin"})
 
 
 def _darwin_acl_allows(acl_text: str, permissions: frozenset[str]) -> bool:
@@ -942,21 +1395,9 @@ def darwin_acl_write_error(path: str | os.PathLike[str]) -> str | None:
         return "extended ACL could not be inspected"
     if not acl_text:
         return "extended ACL could not be interpreted" if "+" in mode_field else None
-    write_permissions = frozenset(
-        {
-            "add_file",
-            "add_subdirectory",
-            "append",
-            "chown",
-            "delete",
-            "delete_child",
-            "write",
-            "writeattr",
-            "writeextattr",
-            "writesecurity",
-        }
-    )
-    return "extended ACL grants additional write access" if _darwin_acl_allows(acl_text, write_permissions) else None
+    if _darwin_acl_allows(acl_text, _DARWIN_ACL_WRITE_PERMISSIONS):
+        return "extended ACL grants additional write access"
+    return None
 
 
 def _clear_darwin_extended_acl(fd: int, path: str) -> None:
@@ -1472,7 +1913,6 @@ def atomic_write_private(
     write: Callable[[int], None],
     *,
     protect_parent: bool = True,
-    allow_windows_system_controllers_in_parent: bool = False,
     windows_managed_custody: bool = False,
     windows_managed_security: WindowsFileSecurity | None = None,
 ) -> None:
@@ -1493,18 +1933,12 @@ def atomic_write_private(
     so the exact accepted descriptor, rather than generation B's descriptor,
     is applied to the staged replacement before publication.
 
-    ``allow_windows_system_controllers_in_parent`` applies only when an
-    operator-selected parent is preserved. It admits the Windows system
-    controller SIDs already trusted by the custody policy while still
-    requiring current-user ownership and rejecting every other writer. The
-    staged and published file retains the stricter owner/SYSTEM-only policy.
+    ``protect_parent=False`` preserves an operator-selected or account folder
+    as it is and validates it with :func:`_validate_unmodified_parent`. The
+    staged and published file keeps the stricter owner/SYSTEM-only policy.
     """
     if windows_managed_security is not None and not windows_managed_custody:
         raise ValueError("managed Windows security requires managed-custody mode")
-    if allow_windows_system_controllers_in_parent and protect_parent:
-        raise ValueError("trusted Windows parent custody requires protect_parent=False")
-    if allow_windows_system_controllers_in_parent and windows_managed_custody:
-        raise ValueError("trusted Windows parent custody and managed-custody mode are mutually exclusive")
     target = os.path.abspath(os.fspath(path))
     parent = os.path.dirname(target) or os.curdir
     _reject_reparse_chain(parent)
@@ -1522,10 +1956,7 @@ def atomic_write_private(
         elif protect_parent:
             _protect_private_directory(parent)
         else:
-            _validate_unmodified_parent(
-                parent,
-                allow_windows_system_controllers=allow_windows_system_controllers_in_parent,
-            )
+            _validate_unmodified_parent(parent)
         _reject_reparse_path(target, allow_missing=True)
 
         managed_security = windows_managed_security
@@ -1600,7 +2031,6 @@ def atomic_write_private_bytes(
     data: bytes,
     *,
     protect_parent: bool = True,
-    allow_windows_system_controllers_in_parent: bool = False,
     windows_managed_custody: bool = False,
     windows_managed_security: WindowsFileSecurity | None = None,
 ) -> None:
@@ -1618,13 +2048,27 @@ def atomic_write_private_bytes(
         path,
         _write,
         protect_parent=protect_parent,
-        allow_windows_system_controllers_in_parent=allow_windows_system_controllers_in_parent,
         windows_managed_custody=windows_managed_custody,
         windows_managed_security=windows_managed_security,
     )
 
 
-_WINDOWS_BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
+_WINDOWS_UNTRUSTED_WRITER = "ACL grants write access to untrusted SID "
+
+
+def windows_untrusted_writer_problem(sid: str) -> str:
+    """The custody problem text for an untrusted SID that can write a path."""
+    return f"{_WINDOWS_UNTRUSTED_WRITER}{sid or '<unknown>'}"
+
+
+def windows_untrusted_writer_sid(problem: str | None) -> str | None:
+    """The SID in a :func:`windows_untrusted_writer_problem` text, or ``None`` for any other problem."""
+    if not problem or not problem.startswith(_WINDOWS_UNTRUSTED_WRITER):
+        return None
+    sid = problem[len(_WINDOWS_UNTRUSTED_WRITER) :]
+    if sid.startswith("S-1-") and all(char in "0123456789-" for char in sid[4:]) and len(sid) > 4:
+        return sid
+    return None
 
 
 def windows_acl_write_error(
@@ -1635,11 +2079,14 @@ def windows_acl_write_error(
     """Return why an untrusted SID can write *path*, or ``None`` when safe.
 
     Only the current user (who must own *path*), OWNER RIGHTS and LocalSystem
-    may hold write rights. ``trust_administrators`` also admits the built-in
-    Administrators group, matched by its well-known SID only: a profile folder
-    such as ``~\\.local\\bin`` inherits its full-control entry, and a local
-    administrator can already take over the account's files.
+    may hold write rights. ``trust_administrators`` is for a folder or file
+    DefenseClaw did not create, such as ``~\\.local\\bin``: it applies the
+    one Windows owner trust set of :func:`windows_acl_custody_write_error`,
+    whose owners and writers also include BUILTIN Administrators and
+    TrustedInstaller (cowork-1-0-8 GAP-0085).
     """
+    if trust_administrators:
+        return windows_acl_custody_write_error(path, allow_current_user=True)
     if os.name != "nt":
         return None
     try:
@@ -1659,8 +2106,6 @@ def windows_acl_write_error(
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
 
     trusted = {"S-1-3-4", "S-1-5-18", current_sid}  # OWNER RIGHTS, LocalSystem, current user
-    if trust_administrators:
-        trusted.add(_WINDOWS_BUILTIN_ADMINISTRATORS_SID)
     write_mask = 0x10000000 | 0x40000000 | 0x000D0156
     for permissions, access_mode, inheritance, sid in entries:
         if access_mode not in (1, 2) or not permissions & write_mask:
@@ -1669,7 +2114,7 @@ def windows_acl_write_error(
             continue
         if sid == "S-1-3-0" and inheritance & 0x08:
             continue
-        return f"ACL grants write access to untrusted SID {sid or '<unknown>'}"
+        return windows_untrusted_writer_problem(sid)
     return None
 
 
@@ -1709,13 +2154,10 @@ def windows_acl_custody_write_error(
         if not current_sid:
             return "current user SID could not be resolved"
     system_controllers = set(_WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS)
-    trusted_owners = set(system_controllers)
-    if trust_current_user:
-        trusted_owners.add(current_sid)
     if require_current_user_owner and owner_sid != current_sid:
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
-    if not require_current_user_owner and owner_sid not in trusted_owners:
-        return f"owner SID {owner_sid or '<unknown>'} is not a trusted custody principal"
+    if not require_current_user_owner and (problem := windows_owner_problem(owner_sid, current_sid)):
+        return problem
 
     trusted_writers = system_controllers | {
         "S-1-3-4",  # OWNER RIGHTS, constrained by the owner check above
@@ -1723,7 +2165,7 @@ def windows_acl_custody_write_error(
     }
     if trust_current_user:
         trusted_writers.add(current_sid)
-    write_mask = 0x10000000 | 0x40000000 | 0x000D0156
+    write_mask = _WINDOWS_CUSTODY_WRITE_MASK
     ancestor_replace_mask = 0x10000000 | 0x40000000 | 0x00010000 | 0x00040000 | 0x00080000 | 0x40
     for permissions, access_mode, inheritance, sid in entries:
         if access_mode not in (1, 2):
@@ -1739,7 +2181,7 @@ def windows_acl_custody_write_error(
             continue
         if sid == "S-1-3-0" and inheritance & 0x08:
             continue
-        return f"ACL grants write access to untrusted SID {sid or '<unknown>'}"
+        return windows_untrusted_writer_problem(sid)
     return None
 
 
@@ -1959,26 +2401,25 @@ def _protect_private_directory(path: str) -> None:
         copy_windows_dacl(path, path)
 
 
-def _validate_unmodified_parent(
-    path: str,
-    *,
-    allow_windows_system_controllers: bool = False,
-) -> None:
-    """Fail closed when an operator-selected parent is replaceable by others."""
+def _validate_unmodified_parent(path: str) -> None:
+    """Fail closed when an operator-selected parent is replaceable by others.
+
+    On Windows the parent is a folder DefenseClaw did not create, such as the
+    profile folder that holds the Cowork removal marker, so it gets the one
+    Windows owner trust set: owned by this account, SYSTEM, BUILTIN
+    Administrators or TrustedInstaller, and writable by no one else
+    (cowork-1-0-8 GAP-0085).
+    """
     if os.name == "nt":
-        if allow_windows_system_controllers:
-            problem = windows_acl_custody_write_error(
-                path,
-                allow_current_user=True,
-                require_current_user_owner=True,
-            )
-        else:
-            problem = windows_acl_write_error(path)
+        problem = windows_acl_custody_write_error(path, allow_current_user=True)
         if problem is not None:
             raise OSError(f"unsafe export parent {path}: {problem}")
         return
     info = os.stat(path)
-    writable_by_others = info.st_mode & 0o022
+    # The parent is a folder the operator or an agent made under its umask (an
+    # export target, OpenCode's ~/.config/opencode): group write by the owner's
+    # own private group is the owner's (GAP-0053).
+    writable_by_others = other_accounts_can_write(path, info)
     sticky = info.st_mode & 0o1000
     if writable_by_others and not sticky:
         raise OSError(f"unsafe group/world-writable export parent: {path}")

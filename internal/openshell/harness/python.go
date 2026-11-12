@@ -102,7 +102,7 @@ func (u uvTool) installSteps(displayName, version string) []InstallStep {
 		`py="$(readlink -f ` + shellQuote(u.interpreter()) + `)"; ` +
 		`case "$py" in "$root"/python/*) ;; *) echo "` + displayName + ` interpreter $py is not the private one under $root/python" >&2; exit 1 ;; esac; ` +
 		`got="$(cd /tmp && HOME=/tmp/defenseclaw-version-home ` + u.versionCheck + ` 2>/dev/null)"; rm -rf /tmp/defenseclaw-version-home; ` +
-		`[ "$got" = ` + shellQuote(version) + ` ] || { echo "` + displayName + ` '$got' is not the pinned ` + version + `" >&2; exit 1; }`
+		pinVersionCheck(displayName, version)
 	if u.extra != "" {
 		run += "; " + u.extra
 	}

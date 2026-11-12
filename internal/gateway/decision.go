@@ -129,9 +129,11 @@ func guardrailActionForConnectorFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
-	return guardrailActionForFindings(findings, func(severity string) string {
-		return guardrailActionForConnector(cfg, connector, severity, confirmable)
-	})
+	return guardrailActionForProfile(findings, cfg != nil && cfg.SecureClientIntegration(),
+		func() bool { return strictPackPosture(cfg, connector) },
+		func(severity string) string {
+			return guardrailActionForConnector(cfg, connector, severity, confirmable)
+		})
 }
 
 // profileMeetActionForFindings evaluates each member's own findings under its
@@ -171,10 +173,30 @@ func profileMeetActionForFindings(
 }
 
 func singleProfileActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable, content bool) string {
+	if managedClosesOnUnverifiedPath(cfg, findings) {
+		return guardrailActionBlock
+	}
 	if content {
 		return guardrailContentActionForFindings(cfg, connector, findings, confirmable)
 	}
 	return guardrailActionForConnectorFindings(cfg, connector, findings, confirmable)
+}
+
+// managedClosesOnUnverifiedPath reports a managed deployment (any enterprise
+// profile with local rules) that holds an enforceable TOOL-PATH-UNVERIFIED
+// finding: a check the file system would not answer fails closed there, as in
+// the strict tier, whatever threshold its rule pack gives the finding. The
+// OSS default and permissive tiers keep the finding as a visible alert.
+func managedClosesOnUnverifiedPath(cfg *config.Config, findings []RuleFinding) bool {
+	if cfg == nil || cfg.EnterpriseProfile() == "" {
+		return false
+	}
+	for _, finding := range enforceableRuleFindings(findings) {
+		if finding.RuleID == windowsPathUnverifiedRuleID {
+			return true
+		}
+	}
+	return false
 }
 
 func profileMeetActionForSeverity(ctx context.Context, cfg *config.Config, connector, severity string, confirmable, content bool) string {
@@ -209,7 +231,7 @@ func guardrailContentActionForGuardrail(gc *config.GuardrailConfig, connector, s
 		posture := "default"
 		if gc != nil {
 			ref := gc.EffectiveRulePackRef("")
-			posture = packPosture(ref, guardrailRulePackDir(gc, ref))
+			posture = guardrailPackPosture(gc, ref)
 		}
 		blockThreshold, alertThreshold := guardrailProfileThresholds(posture)
 		return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold, false, 0)
@@ -240,9 +262,14 @@ func guardrailActionForGuardrailFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
-	return guardrailActionForFindings(findings, func(severity string) string {
-		return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
-	})
+	return guardrailActionForProfile(findings, ManagedEnterpriseActive(),
+		func() bool {
+			ref := gc.EffectiveRulePackRef(connector)
+			return guardrailPackPosture(gc, ref) == config.HookPolicyTierStrict
+		},
+		func(severity string) string {
+			return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
+		})
 }
 
 // guardrailActionForFindings maps enforceable findings with actionFor and
@@ -314,8 +341,8 @@ func guardrailProfileThresholds(profile string) (blockThreshold int, alertThresh
 }
 
 // guardrailProfileForDir is the posture of a rule-pack folder without a
-// manifest posture: its base name (strict, permissive), else default. Only
-// the three built-in packs rely on it.
+// manifest posture: its base name (strict, permissive), else default. Shipped
+// packs carry manifests; this preserves the legacy directory fallback.
 func guardrailProfileForDir(dir string) string {
 	if strings.TrimSpace(dir) == "" {
 		return "default"
@@ -431,4 +458,14 @@ func clampPromptDirectionAction(direction, action string) (string, bool) {
 		return guardrailActionAlert, true
 	}
 	return action, false
+}
+
+// strictPackPosture reports whether the rule pack of connector in cfg has the
+// strict posture, read as the thresholds read it (packPostureFor).
+func strictPackPosture(cfg *config.Config, connector string) bool {
+	if cfg == nil {
+		return false
+	}
+	ref := cfg.EffectiveRulePackRefForConnector(connector)
+	return packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)) == config.HookPolicyTierStrict
 }

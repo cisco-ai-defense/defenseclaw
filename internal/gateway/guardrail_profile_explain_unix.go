@@ -31,7 +31,7 @@ var profileExplainAccount = func(name string) (id, userName string, err error) {
 	resolver := profileExplainResolver(ctx)
 	// name@domain and DOMAIN\name resolve as getent resolves them, when the
 	// answer is the same account (GAP-0711).
-	account, err := unixidentity.LookupAccountSpelling(resolver, name, func(uid int) (useridentity.DirectoryFacts, bool) {
+	account, err := unixidentity.LookupAdminAccountSpelling(resolver, name, func(uid int) (useridentity.DirectoryFacts, bool) {
 		facts, err := profileExplainDirectoryFacts(strconv.Itoa(uid))
 		return facts, err == nil
 	})
@@ -53,6 +53,16 @@ var profileExplainAccount = func(name string) (id, userName string, err error) {
 		return "", "", err
 	}
 	return strconv.Itoa(account.UID), sanitizeLLMEventUser(account.Name), nil
+}
+
+// profileExplainLocalKey is the key the OS account database is asked for the
+// explained account: the uid when the account was named by the local
+// spelling .\name, which the database does not take (GAP-0759), else name.
+func profileExplainLocalKey(name, id string) string {
+	if strings.HasPrefix(strings.TrimSpace(name), `.\`) {
+		return id
+	}
+	return name
 }
 
 // profileExplainResolver is the platform resolver explain names accounts

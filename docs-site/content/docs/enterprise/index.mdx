@@ -120,15 +120,18 @@ Under the Secure Client profile none of this applies. The model is in
 [Configuration: one source of truth](/docs/reference/source-of-truth).
 
 On Linux and macOS the enterprise package installs `defenseclaw` as a launcher
-that runs only `defenseclaw sandbox` commands and `defenseclaw status`, which
-shows the person their own Claude Code and Cowork protection state (never
-another account's). Every other command prints this and exits `2`:
+that runs only the commands in
+[Managed command availability](/docs/enterprise/managed-commands). Every other command prints this and exits `2`:
 
 ```text
-This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator.
+This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. For administrator views, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status`, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify`, or `sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.
+
+This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. For administrator views, run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status`, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify`, or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.
 ```
 
-Windows has no launcher: `defenseclaw.exe` there is the administrator command. It refuses the per-user writers itself:
+The first message is the Linux text and the second is the macOS text; the administrator-view commands name the installed gateway of that platform.
+
+Windows has no launcher: `defenseclaw.exe` there is the administrator command. Setup puts no DefenseClaw command on `PATH`, so run it by its full path: `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' ...` in PowerShell, or `"C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe" ...` in `cmd.exe`. It refuses the per-user writers itself:
 
 | Attempt on managed Windows | Result |
 | --- | --- |
@@ -136,7 +139,7 @@ Windows has no launcher: `defenseclaw.exe` there is the administrator command. I
 | `skill`, `mcp`, `plugin` or `tool` with `block`, `allow` or `unblock` | Exit `3`, naming the `asset_policy` key in the admin config and saying the command did not change it |
 | `init`, `quickstart`, `guardrail`, `policy activate` | Exit `2`: not a command of the administrator's `defenseclaw.exe` |
 
-A standard account's `defenseclaw.exe status` (and `status --json`) shows that
+A standard account's `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' status` (and `status --json`) shows that
 account's own Claude Code and Cowork protection state and its own last Cowork
 event, which the gateway service reads for the account that asks, never
 another account's. From an elevated prompt `status` names the administrator's
@@ -189,7 +192,8 @@ enable, approvals (HITL) and discovery are runtime state, not policy.
 Every `DEFENSECLAW_*` variable
 has a `managed` setting in the [registry](/docs/reference/env-vars). `ignore`
 variables read as unset, from the process environment and from `.env` files.
-`tighten_only` variables (`DEFENSECLAW_STRICT_AVAILABILITY`) count only
+`tighten_only` variables (`DEFENSECLAW_STRICT_AVAILABILITY` and
+`DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS`) count only
 when they make the setting stricter. Managed hooks ignore `DEFENSECLAW_HOOK_MAX_BODY`
 and keep their fixed 1 MiB body cap. `allow` variables are read as set. A
 forged `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE`

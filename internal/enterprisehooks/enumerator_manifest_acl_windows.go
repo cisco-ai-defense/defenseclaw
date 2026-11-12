@@ -207,6 +207,14 @@ func validateWindowsTargetsManifestObjectShape(path string, directory bool) erro
 }
 
 func openWindowsTargetsManifestObject(path string, directory bool, access uint32) (windows.Handle, error) {
+	return openWindowsTargetsManifestObjectWithBackup(path, directory, access, false)
+}
+
+// The SYSTEM-only OpenCode record may be inspected by an elevated
+// administrator whose dedicated thread has SeBackupPrivilege enabled. The
+// object shape checks remain the same; backup intent only changes the DACL
+// access check for that privileged thread.
+func openWindowsTargetsManifestObjectWithBackup(path string, directory bool, access uint32, backup bool) (windows.Handle, error) {
 	if err := winpath.RejectReparseChain(path); err != nil {
 		return 0, fmt.Errorf("enterprise hooks: hook guardian manifest path contains a reparse point: %w", err)
 	}
@@ -222,7 +230,7 @@ func openWindowsTargetsManifestObject(path string, directory bool, access uint32
 		return 0, err
 	}
 	flags := uint32(windows.FILE_FLAG_OPEN_REPARSE_POINT)
-	if directory {
+	if directory || backup {
 		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
 	}
 	handle, err := windows.CreateFile(

@@ -88,6 +88,48 @@ func (r *doctorRun) processes(ctx context.Context) []process {
 	return r.procs
 }
 
+// ownSandboxDaemonProcess proves that the occupied port belongs to the
+// process that answered the managed daemon's status request. The uid and
+// executable identity must agree as well as the PID; a same-account
+// process with a similar name cannot make the port ready.
+func (r *doctorRun) ownSandboxDaemonProcess(ctx context.Context, holder daemon.PortHolder) bool {
+	if r.DaemonPID <= 0 || r.ResponderPID != r.DaemonPID || holder.PID != r.ResponderPID || holder.UID != r.Geteuid() ||
+		r.DaemonUID != nil && *r.DaemonUID != holder.UID {
+		return false
+	}
+	return r.ownSandboxDaemonImage(ctx, holder.PID)
+}
+
+func installedSandboxDaemonCopy(launcher, candidate string) bool {
+	// On macOS, os.Executable may name the symlink used to start the CLI.
+	// Check the resolved target before comparing it with the LaunchAgent copy.
+	canonical, err := filepath.EvalSymlinks(launcher)
+	if err != nil {
+		return false
+	}
+	if filepath.Base(canonical) != "defenseclaw-gateway" || filepath.Base(candidate) != filepath.Base(canonical) {
+		return false
+	}
+	canonicalInfo, err := os.Lstat(canonical)
+	if err != nil || !canonicalInfo.Mode().IsRegular() {
+		return false
+	}
+	launcherInfo, err := os.Stat(launcher)
+	if err != nil || !os.SameFile(launcherInfo, canonicalInfo) {
+		return false
+	}
+	digest, err := fileSHA256(canonical)
+	if err != nil || candidate != filepath.Join(filepath.Dir(canonical), "launch-agents", digest, filepath.Base(canonical)) {
+		return false
+	}
+	copyInfo, err := os.Lstat(candidate)
+	if err != nil || !copyInfo.Mode().IsRegular() || copyInfo.Size() != canonicalInfo.Size() {
+		return false
+	}
+	copyDigest, err := fileSHA256(candidate)
+	return err == nil && copyDigest == digest
+}
+
 // findProcess is the first of procs running the executable named name
 // whose parent is parent (any parent when parent is 0), or nil.
 func findProcess(procs []process, name string, parent int) *process {

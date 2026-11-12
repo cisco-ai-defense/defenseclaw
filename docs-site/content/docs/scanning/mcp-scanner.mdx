@@ -61,7 +61,7 @@ Each server is scanned independently and findings are tagged with the connector 
 
 ### Before you start
 
-These `defenseclaw mcp` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands, so users add the server through the connector's MCP configuration, for example `claude mcp add`. An administrator scans a remote server with the managed gateway: `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan mcp URL` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan mcp URL` on macOS (see [Known limits](/docs/support-matrix#managed-linux-and-macos-scans)). On managed Windows, use the administrator's `defenseclaw.exe scan mcp` command for a remote URL.
+These `defenseclaw mcp` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher refuses `mcp` ([Managed command availability](/docs/enterprise/managed-commands)), so users add the server through the connector's MCP configuration, for example `claude mcp add`. An administrator scans a remote server with the managed gateway: `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan mcp URL` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan mcp URL` on macOS (see [Known limits](/docs/support-matrix#managed-linux-and-macos-scans)). On managed Windows, use the administrator's `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' scan mcp URL` command from an elevated PowerShell prompt for a remote URL.
 
 - A judge: `defenseclaw setup llm` and `defenseclaw keys set DEFENSECLAW_LLM_KEY`. Without one the scan runs YARA signatures only. It prints `LLM analyzer skipped` when a model is set but its key is missing, and nothing when no model is set.
 - A configured connector (`defenseclaw setup <connector>`). DefenseClaw reads each connector's MCP config.
@@ -121,7 +121,7 @@ A server on the block list prints nothing and exits 2.
 defenseclaw mcp list
 ```
 
-The Verdict column reads `clean`, `warning`, `rejected` or `scan failed`. A server whose last scan failed shows `scan failed` and a next step under the table. A scanned server without a block or allow entry shows what admission does with its severity: `warning` where the policy only warns (the balanced default warns on HIGH), `rejected` where the policy refuses it. A block the gateway left after a failed admission scan is named as such, with `defenseclaw mcp unblock <name>` as the way to release it.
+The Verdict column reads `clean`, `warning`, `rejected` or `scan failed`. A server whose last scan failed shows `scan failed` and a next step under the table. A scanned server without a block or allow entry shows what admission does with its severity: `warning` where the policy only warns (the balanced default warns on HIGH), `rejected` where the policy refuses it. A block the gateway left after a failed admission scan is named as such, with its cause and the way to allow the call: `defenseclaw mcp allow <name>`, or the `asset_policy.mcp.allowed` policy on a managed device ([Managed command availability](/docs/enterprise/managed-commands) lists the commands a managed computer offers). A new scan does not release it, and neither does `mcp unblock` where the strict tier or a managed policy fails closed on a server it cannot scan.
 
 A remote URL whose hostname has no DNS answer is a scan that did not finish, not a refusal of the server. The `unverified_server` setting below decides what happens then.
 
@@ -322,14 +322,15 @@ apply to its calls.
     an upgrade from 0.8.x: the servers the earlier release already ran are
     scanned once to record their baseline and keep running, so findings raise
     alerts and a server the scanner cannot start shows `scan failed` instead
-    of being blocked. A server on a block list stays blocked. Until a new
-    server's admission has a verdict, the Claude Code and Codex hooks refuse
-    its tool calls ("DefenseClaw is still scanning MCP server ... Try the same
-    call again in about a minute") and the
-    gateway admits it at once; Claude Code may already have started the
-    server's process when it opened the project, but no call reaches it
-    before the verdict. With `gateway.watcher.mcp.take_action: false` nothing
-    is refused.
+    of being blocked. A server on a block list stays blocked. While a new
+    server's admission scan is pending, per-user default and permissive hooks
+    allow its tool calls with a warning that names the server; strict and
+    managed hooks block with retry guidance based on the scan timeout. The
+    gateway starts admission at once. A completed failed or rejected scan
+    blocks tool calls in every tier. Claude Code may already have started the
+    server's process when it opened the project. With
+    `gateway.watcher.mcp.take_action: false`, the pending gate is off;
+    explicit denies and completed scan failures still block.
   </Step>
   <Step>
     **Act on the verdict.** The top severity maps through `admission.mcp` (below):
@@ -393,7 +394,7 @@ error: scan failed: refusing to scan MCP URL 'https://10.20.30.40:8080/mcp': hos
 
 From your shell, add `--allow-private` to scan such a server. The scan the gateway runs when a server is added has no such option, so the server is not scanned and admission blocks it. Its `install-scan-error` audit row says `the MCP scanner does not connect to loopback, private, link-local or multicast addresses ... so the server was not scanned` and names two ways to admit a server you trust:
 
-- Allow it by name and URL with `defenseclaw mcp allow <name>`, or `asset_policy.mcp.allowed` in the admin config on a managed device. An allowed server is not scanned.
+- Allow it by name and URL with `defenseclaw mcp allow <name>`, or `asset_policy.mcp.allowed` in the admin config on a managed device (the managed launcher [refuses `mcp`](/docs/enterprise/managed-commands)). An allowed server is not scanned.
 - Set `admission.mcp.scan_on_install` to `false`, which admits new MCP servers without a scan.
 
 Servers started by a `command` (stdio) are scanned on your computer and are not affected.

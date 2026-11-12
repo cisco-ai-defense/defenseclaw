@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
 func TestSandboxMCPInventoryFiltersDefenseClawBlocks(t *testing.T) {
@@ -36,6 +37,9 @@ func TestSandboxMCPInventoryFiltersDefenseClawBlocks(t *testing.T) {
 	pe := configPolicy(store, cfg)
 	// A scan verdict that runtime-disabled the server (journal) also keeps it out.
 	if err := store.SetActionField("mcp", "globally-blocked", "runtime", "disable", "scan verdict"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSourcePath("mcp", "globally-blocked", watcher.MCPEventPath(config.MCPServerEntry{Name: "globally-blocked"})); err != nil {
 		t.Fatal(err)
 	}
 
@@ -130,6 +134,9 @@ func TestSandboxMCPClaimsFilterTheClaimedInventory(t *testing.T) {
 		{URL: "https://x.example/mcp"},
 	}
 	if err := store.SetActionField("mcp", "runtime-disabled", "runtime", "disable", "scan verdict"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSourcePath("mcp", "runtime-disabled", watcher.MCPEventPath(config.MCPServerEntry{Name: "runtime-disabled"})); err != nil {
 		t.Fatal(err)
 	}
 	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, store, logger, cfg)

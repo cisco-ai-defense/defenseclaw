@@ -38,7 +38,37 @@ var (
 	// windowsConnectorSupportedOnHost is the native Windows certification
 	// table; tests of the generic lifecycle replace it for a fixture name.
 	windowsConnectorSupportedOnHost = connector.ConnectorSupportedOnHostOS
+	// The CLI registers the shared OpenCode service.json writer without an
+	// enterprisehooks -> enterprisepolicy import cycle.
+	windowsOpenCodeServicePortWriter func(string, int) (int, error)
 )
+
+func SetWindowsOpenCodeServicePortWriter(write func(string, int) (int, error)) {
+	windowsOpenCodeServicePortWriter = write
+}
+
+func ensureWindowsManagedOpenCodePort(connectorName, home, sid string, assigned int, required bool) error {
+	if connectorName != "opencode" {
+		return nil
+	}
+	if assigned <= 0 {
+		if required {
+			return fmt.Errorf("enterprise hooks: OpenCode service port for target SID %s is unavailable", sid)
+		}
+		return nil
+	}
+	if windowsOpenCodeServicePortWriter == nil {
+		return fmt.Errorf("enterprise hooks: OpenCode service port writer is unavailable")
+	}
+	port, err := windowsOpenCodeServicePortWriter(home, assigned)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: OpenCode service port for target SID %s: %w", sid, err)
+	}
+	if port != assigned {
+		return fmt.Errorf("enterprise hooks: OpenCode service port for target SID %s differs from the guardian assignment", sid)
+	}
+	return nil
+}
 
 func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
 	if err := requireWindowsEnterpriseManagedAgentVersion(
@@ -323,12 +353,12 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
-	policySnapshot, err := snapshotWindowsManagedFile(policyPath)
+	policySnapshot, err := snapshotWindowsManagedPolicy(policyPath)
 	if err != nil {
 		return InstallResult{}, err
 	}
 	statePath := filepath.Join(filepath.Dir(policyPath), windowsClaudeManagedStateFile)
-	stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, err := snapshotWindowsManagedState(statePath)
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -515,6 +545,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		AgentVersion:             strings.TrimSpace(opts.AgentVersion),
 		HookContractID:           strings.TrimSpace(opts.HookContractID),
 		HookExecutable:           hookExecutable,
+		AcceptPriorReleaseRender: opts.AcceptPriorReleaseRender,
 	}
 	// The standalone Amp and OpenCode plugins run the administrator-owned
 	// hook binary for the foreign-hook guard. Install and verify share this
@@ -730,6 +761,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			// Hash the guardian-selected image as the target user and record
 			// it where the connector's executable admission reads it.
 			if err := recordWindowsManagedSetupSelection(target); err != nil {
+				return err
+			}
+			if err := ensureWindowsManagedOpenCodePort(target.conn.Name(), target.home, target.sid.String(), opts.OpenCodeServicePort, opts.OpenCodeServicePortRequired); err != nil {
 				return err
 			}
 			target.conn.SetCredentials(target.setup.APIToken, opts.MasterKey)
@@ -1208,35 +1242,54 @@ func moveWindowsTargetOwnedDataDirLinksAside(home, dataDir string, target *windo
 // administrator owns, a link anywhere else and a data dir that is not the
 // canonical one report "".
 func windowsTargetOwnedDataDirLink(home, dataDir string, target *windows.SID) string {
-	if target == nil || !sameWindowsEnterprisePath(dataDir, filepath.Join(home, ".defenseclaw")) {
+	if target == nil {
 		return ""
 	}
-	for _, path := range []string{filepath.Clean(dataDir), filepath.Join(filepath.Clean(dataDir), "hooks")} {
-		info, err := os.Lstat(path)
+	path, owner, ok := windowsDataDirLink(home, dataDir)
+	if !ok || owner == nil || !owner.Equals(target) {
+		return ""
+	}
+	return path
+}
+
+// windowsDataDirLink finds the first link or junction at the canonical
+// DefenseClaw folder (<home>\.defenseclaw) or at that folder's hooks folder
+// and returns its path and its owner (nil when the owner cannot be read).
+// ok is false when there is none, or when dataDir is not the canonical
+// folder. It only reads names, attributes and owners, never what a link
+// names. GAP-0193 (the account's own link) and GAP-0585 (a link another
+// principal owns, such as an administrator) share this one finder, so the two
+// cannot disagree about what counts as the account's folder link.
+func windowsDataDirLink(home, dataDir string) (path string, owner *windows.SID, ok bool) {
+	if !sameWindowsEnterprisePath(dataDir, filepath.Join(home, ".defenseclaw")) {
+		return "", nil, false
+	}
+	for _, candidate := range []string{filepath.Clean(dataDir), filepath.Join(filepath.Clean(dataDir), "hooks")} {
+		info, err := os.Lstat(candidate)
 		if err != nil {
-			return ""
+			return "", nil, false
 		}
-		ptr, err := winpath.UTF16Ptr(path)
+		ptr, err := winpath.UTF16Ptr(candidate)
 		if err != nil {
-			return ""
+			return "", nil, false
 		}
 		attributes, err := windows.GetFileAttributes(ptr)
 		if err != nil {
-			return ""
+			return "", nil, false
 		}
 		if info.Mode()&os.ModeSymlink == 0 && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
 			if !info.IsDir() {
-				return ""
+				return "", nil, false
 			}
 			continue
 		}
-		owner, err := windowsPathOwnerNoFollow(path)
-		if err != nil || owner == nil || !owner.Equals(target) {
-			return ""
+		linkOwner, err := windowsPathOwnerNoFollow(candidate)
+		if err != nil {
+			linkOwner = nil
 		}
-		return path
+		return candidate, linkOwner, true
 	}
-	return ""
+	return "", nil, false
 }
 
 func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.SID, recreateDirectory bool, label string) error {
@@ -3003,26 +3056,41 @@ func windowsPathOwnerNoFollow(path string) (*windows.SID, error) {
 }
 
 func rejectWindowsReparseChain(path string) error {
-	current, err := filepath.Abs(path)
+	link, err := windowsReparseChainProbe(path)
 	if err != nil {
 		return err
+	}
+	if link != "" {
+		return fmt.Errorf("enterprise hooks: reparse point in path: %s", link)
+	}
+	return nil
+}
+
+// findWindowsReparsePointInChain walks path and each parent without following
+// anything and returns the first element that is a reparse point (a storage-only
+// tag excepted), or "" when the chain has none. rejectWindowsReparseChain refuses
+// on it; a teardown keeps and names it instead (GAP-0758).
+func findWindowsReparsePointInChain(path string) (string, error) {
+	current, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
 	}
 	for {
 		ptr, err := winpath.UTF16Ptr(current)
 		if err != nil {
-			return err
+			return "", err
 		}
 		attributes, err := windows.GetFileAttributes(ptr)
 		if err == nil && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 &&
 			!windowsPathHasHarmlessReparseTag(current) {
-			return fmt.Errorf("enterprise hooks: reparse point in path: %s", current)
+			return current, nil
 		}
 		if err != nil && err != windows.ERROR_FILE_NOT_FOUND && err != windows.ERROR_PATH_NOT_FOUND {
-			return err
+			return "", err
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return nil
+			return "", nil
 		}
 		current = parent
 	}
@@ -3327,41 +3395,6 @@ func hardenWindowsUserRuntime(home, dataDir string, paths []string, target *wind
 		}
 	}
 	return nil
-}
-
-func setWindowsUserPathProtection(path string, target *windows.SID, directory bool) error {
-	if err := rejectWindowsReparseChain(path); err != nil {
-		return err
-	}
-	owner, err := windowsPathOwnerNoFollow(path)
-	if err != nil {
-		return err
-	}
-	if owner == nil || !owner.Equals(target) {
-		return fmt.Errorf(
-			"enterprise hooks: refusing to canonicalize wrong-owner path %s (owner %s, target %s)",
-			path,
-			windowsSIDString(owner),
-			windowsSIDString(target),
-		)
-	}
-	if !directory {
-		if err := validateWindowsRegularFileSingleLink(path); err != nil {
-			return err
-		}
-	}
-	if err := validateWindowsUserPathElement(path, target, directory, directory, true); err == nil {
-		return nil
-	}
-	acl, err := windowsUserPathProtectionACL(target, directory)
-	if err != nil {
-		return err
-	}
-	extended, err := winpath.Extended(path)
-	if err != nil {
-		return err
-	}
-	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }
 
 func windowsUserPathProtectionACL(target *windows.SID, directory bool) (*windows.ACL, error) {

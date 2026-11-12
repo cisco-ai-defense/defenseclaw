@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -235,6 +236,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	// folder, before the call is judged (GAP-1388).
 	startup := a.applyInstructionStartup(ctx, "codex", req.SessionID, req.HookEventName, req.Source, callCWD)
 	ctx = a.withInstructionStartup(ctx, "codex", req.SessionID, startup)
+	a.mcpSessionStarted(ctx, "codex", req.SessionID, req.HookEventName, req.Source)
 	mode := sandboxHookMode(ctx, "codex", a.codexMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "codex") && !a.codexEnabled() {
@@ -366,7 +368,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	stateMutation := a.provenActiveStateMutation(ctx, verdict)
+	stateMutation := a.provenHookActionMustEnforce(ctx, verdict)
 	effectiveMode := mode
 	if stateMutation {
 		effectiveMode = "action"
@@ -393,13 +395,13 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile(
-				"block",
+			capable, capableWouldBlock := mapAssetBlockForProfile(
 				effectiveMode,
 				req.HookEventName,
 				caps,
 				profile,
 				req.Payload,
+				cfg != nil && cfg.SecureClientIntegration(),
 			)
 			if capable != "block" {
 				mergedAction = capable
@@ -699,6 +701,11 @@ func codexAdditionalContext(rawAction, severity, reason, mode string, wouldBlock
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
+	if strings.HasPrefix(reason, "DefenseClaw is still scanning MCP server ") ||
+		strings.HasPrefix(reason, "DefenseClaw could not read admission for MCP server ") ||
+		strings.HasPrefix(reason, mcpAdmissionAllowedLead) {
+		return reason
+	}
 	if mode != "action" && guardrailSeverityRank(severity) < codexObserveContextMinSeverity {
 		return ""
 	}
@@ -878,9 +885,14 @@ func codexToolCallCWD(ctx context.Context, req codexHookRequest) string {
 		workdir = codexTranscriptCallWorkdir(ctx, req)
 	}
 	if workdir == "" {
+		// A managed gateway cannot read the rollout: its hook client did, as
+		// the user, and sent the workdir of the call (GAP-0991).
+		workdir = resolvedWritesFromContext(ctx)[hookpaths.CallWorkdirKey]
+	}
+	if workdir == "" {
 		return req.CWD
 	}
-	return agentHookTrustedActionCWD(ctx, req.CWD, workdir)
+	return agentHookTrustedActionCWDReported(ctx, "codex", req.CWD, "", workdir)
 }
 
 func codexToolName(req codexHookRequest) string {

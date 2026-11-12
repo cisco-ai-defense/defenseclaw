@@ -74,6 +74,9 @@ const (
 	// enterpriseHookWorkerOpAIDiscovery runs the static AI discovery scan
 	// of the user's own home (standalone profile).
 	enterpriseHookWorkerOpAIDiscovery = "ai_discovery"
+	// enterpriseHookWorkerOpOpenCodePortRead reads, as the user, the port the
+	// user's OpenCode service.json names, changing nothing (GAP-0053).
+	enterpriseHookWorkerOpOpenCodePortRead = "opencode_port_read"
 
 	enterpriseHookWorkerModeInstall        = "install"
 	enterpriseHookWorkerModeVerify         = "verify"
@@ -108,6 +111,11 @@ const (
 	// enrollment changed (enterprisehooks.RestoreOwnInstall, rel-1-0-6
 	// GAP-0178). It runs only when every removal of the job succeeded.
 	enterpriseHookWorkerModeRestoreOwnInstall = "restore_own_install"
+	// enterpriseHookWorkerModeProbeElements reads, as the user, which of the
+	// protected elements of a target named in its Broken list now match what
+	// DefenseClaw renders. The parent asks for it when it ended a worker in
+	// the middle of a repair and needs the result of that repair (GAP-0754).
+	enterpriseHookWorkerModeProbeElements = "probe_elements"
 )
 
 // enterpriseHookWorkerWritingModes are the target modes that write into the
@@ -219,6 +227,14 @@ type enterpriseHookWorkerTarget struct {
 	Mode                string                      `json:"mode"`
 	PreviouslyProtected bool                        `json:"previously_protected,omitempty"`
 	Options             enterpriseHookWorkerOptions `json:"options"`
+	// Broken, on a probe_elements target, names the protected elements that
+	// did not match before the repair whose result is asked for.
+	Broken []string `json:"broken,omitempty"`
+	// PriorCredentials are the target's credentials from the other key of
+	// the credential rotation the guardian holds
+	// (enterpriseHookPriorUserTokens). They only classify a reinstall as
+	// configuration; nothing is rendered from them.
+	PriorCredentials *enterprisehooks.HookCredentials `json:"prior_credentials,omitempty"`
 }
 
 type enterpriseHookWorkerRequest struct {
@@ -258,9 +274,19 @@ type enterpriseHookWorkerRequest struct {
 	// foreign_cleanup worker does either; remove-all's apply worker only
 	// removes).
 	CopilotVSCode *enterpriseHookWorkerCopilotVSCode `json:"copilot_vscode,omitempty"`
+	// OpenCodeServicePort is the account's recorded OpenCode service port:
+	// the foreign_cleanup worker writes it into the account's service.json,
+	// whatever the file named (gas-ux-r1 GAP-0053, the record is the only
+	// authority; enterprisepolicy.SetOpenCodeServicePort).
+	OpenCodeServicePort int `json:"opencode_service_port,omitempty"`
 	// TimeoutSeconds replaces enterpriseHookWorkerTimeout for this worker
 	// (remove-all's retry of a worker that timed out).
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// Progress asks the apply worker to write a line when it begins and when
+	// it ends the repair of a protected target (enterpriseHookWorkerProgress),
+	// so a worker the parent kills before its answer still tells what it put
+	// back (GAP-0754). The parent sets it for a caller that marked its context.
+	Progress bool `json:"progress,omitempty"`
 	// CleanupFence tells a foreign_cleanup worker that the guardian passed
 	// the cleanup fence pipes (enterprise_hooks_worker_fence_unix.go). The
 	// guardian sets it from cleanupFence.
@@ -327,7 +353,17 @@ type enterpriseHookWorkerTargetResult struct {
 	Index    int  `json:"index"`
 	OK       bool `json:"ok"`
 	Repaired bool `json:"repaired,omitempty"`
-	Removed  bool `json:"removed,omitempty"`
+	// RestoredElements names the protected elements (enterprisehooks.HookElement*)
+	// that did not match what DefenseClaw renders when the repair began and
+	// match it now. It is the only evidence of a restore, whatever the
+	// target health: a repair that only wrote other files, or the agent
+	// settings in a shared config, restored nothing (GAP-0754).
+	RestoredElements []string `json:"restored_elements,omitempty"`
+	// RestoredChanges says, for each restored element in the same order, what
+	// happened to it: enterprisehooks.HookChangeDeleted, HookChangeAppended or
+	// HookChangeEdited, or none where the worker could not read it.
+	RestoredChanges []string `json:"restored_changes,omitempty"`
+	Removed         bool     `json:"removed,omitempty"`
 	// Restored: the unblock put the account's own Claude Code hook script
 	// back from the copy the enrollment kept (rel-1-0-6 GAP-0178).
 	Restored bool `json:"restored,omitempty"`
@@ -341,8 +377,7 @@ type enterpriseHookWorkerTargetResult struct {
 	// Hermes or Devin config put back or recreated, GAP-0564). It is kept
 	// out of the result, which the guardian state stores.
 	AgentConfig string `json:"agent_config,omitempty"`
-	// Purged is what a purge target found and removed (booleans only, so
-	// nothing the account controls reaches the administrator's output).
+	// Purged is what a purge target found, removed and kept.
 	Purged *enterpriseHookPurgeDetail `json:"purged,omitempty"`
 	// Remove reports are produced as the account, before and after teardown.
 	// Presence distinguishes an empty path set from an older worker response.
@@ -358,11 +393,12 @@ type enterpriseHookWorkerTargetResult struct {
 // Kept says ~/.defenseclaw holds the account's own per-user install, which
 // the purge left as it is (GAP-0727).
 type enterpriseHookPurgeDetail struct {
-	Data     bool `json:"data,omitempty"`
-	Kept     bool `json:"kept,omitempty"`
-	Binaries bool `json:"binaries,omitempty"`
-	Gateway  bool `json:"gateway,omitempty"`
-	UVCache  bool `json:"uv_cache,omitempty"`
+	Data        bool     `json:"data,omitempty"`
+	Kept        bool     `json:"kept,omitempty"`
+	KeptEntries []string `json:"kept_entries,omitempty"`
+	Binaries    bool     `json:"binaries,omitempty"`
+	Gateway     bool     `json:"gateway,omitempty"`
+	UVCache     bool     `json:"uv_cache,omitempty"`
 	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
 	// backups were moved to, comma separated (GAP-2015).
 	RemovedConnectorBackups string `json:"removed_connector_backups,omitempty"`
@@ -372,10 +408,15 @@ type enterpriseHookPurgeDetail struct {
 }
 
 type enterpriseHookWorkerResponse struct {
-	Version  int                                `json:"version"`
+	Version int `json:"version"`
+	// Progress marks a line written before the answer, not the answer.
+	Progress *enterpriseHookWorkerProgress      `json:"progress,omitempty"`
 	Targets  []enterpriseHookWorkerTargetResult `json:"targets,omitempty"`
 	Versions map[string]string                  `json:"versions,omitempty"`
 	Reasons  map[string]string                  `json:"reasons,omitempty"`
+	// VersionSources is, per connector, the CLI whose live run supplied the
+	// version (user-influenced; the parent validates it).
+	VersionSources map[string]string `json:"version_sources,omitempty"`
 	// Surfaces are the discovered app and extension installs per connector
 	// (user-influenced; the parent validates them).
 	Surfaces        map[string][]connector.AgentSurface          `json:"surfaces,omitempty"`
@@ -394,7 +435,22 @@ type enterpriseHookWorkerResponse struct {
 	AIDiscovery *inventory.AIDiscoveryReport `json:"ai_discovery,omitempty"`
 	// CopilotVSCode reports the VS Code Local hook file and plugin.
 	CopilotVSCode *enterpriseHookWorkerCopilotVSCodeReport `json:"copilot_vscode,omitempty"`
-	Error         string                                   `json:"error,omitempty"`
+	// OpenCodeServicePort reports the account's OpenCode service port.
+	OpenCodeServicePort *enterpriseHookWorkerOpenCodePortReport `json:"opencode_service_port,omitempty"`
+	Error               string                                  `json:"error,omitempty"`
+}
+
+// enterpriseHookWorkerOpenCodePortReport is the worker's account of the
+// OpenCode service port (user-influenced: the parent bounds the port).
+type enterpriseHookWorkerOpenCodePortReport struct {
+	Port    int  `json:"port,omitempty"`
+	Changed bool `json:"changed,omitempty"`
+	// Previous is the port the file named before this write (0: none).
+	Previous int      `json:"previous,omitempty"`
+	Created  []string `json:"created,omitempty"`
+	// Sealed are the group-writable folders the setter made sticky.
+	Sealed []string `json:"sealed,omitempty"`
+	Error  string   `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -518,6 +574,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		if request.CopilotVSCode != nil {
 			vscode = runEnterpriseHookWorkerCopilotVSCode(request)
 		}
+		if request.Progress {
+			ctx = withEnterpriseHookWorkerProgress(ctx, stdout)
+		}
 		response := runEnterpriseHookWorkerApply(ctx, request)
 		response.CopilotVSCode = vscode
 		return respond(response, 0)
@@ -548,6 +607,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		if request.CopilotVSCode != nil {
 			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
 		}
+		if request.OpenCodeServicePort > 0 {
+			response.OpenCodeServicePort = runEnterpriseHookWorkerOpenCodePort(request)
+		}
 		if len(request.Targets) > 0 {
 			response.Targets = runEnterpriseHookWorkerApply(ctx, request).Targets
 		} else {
@@ -561,6 +623,13 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(response, 0)
 	case enterpriseHookWorkerOpNativeOTLPCheck:
 		return respond(runEnterpriseHookWorkerNativeOTLPCheck(request), 0)
+	case enterpriseHookWorkerOpOpenCodePortRead:
+		port, sealed, err := enterprisepolicy.ReadOpenCodeServicePortSealed(filepath.Clean(request.Home))
+		report := &enterpriseHookWorkerOpenCodePortReport{Port: port, Sealed: sealed}
+		if err != nil {
+			report.Error = err.Error()
+		}
+		return respond(enterpriseHookWorkerResponse{OpenCodeServicePort: report}, 0)
 	case enterpriseHookWorkerOpAIDiscovery:
 		if request.AIDiscovery == nil {
 			return respond(enterpriseHookWorkerResponse{Error: "the ai_discovery operation needs its scan settings"}, 3)
@@ -583,8 +652,8 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 // enterpriseHookWorkerDiscoverSurfaces and
 // enterpriseHookWorkerDiscoverKiroIDE are replaceable in tests.
 var (
-	enterpriseHookWorkerDiscoverVersion              = enterprisehooks.DiscoverUnixAgentVersion
-	enterpriseHookWorkerDiscoverVersionInAccountHome = enterprisehooks.DiscoverUnixAgentVersionInAccountHome
+	enterpriseHookWorkerDiscoverVersion              = enterprisehooks.DiscoverUnixAgentVersionFrom
+	enterpriseHookWorkerDiscoverVersionInAccountHome = enterprisehooks.DiscoverUnixAgentVersionInAccountHomeFrom
 	enterpriseHookWorkerDiscoverStaticVersion        = enterprisehooks.DiscoverUnixAgentVersionStatically
 	enterpriseHookWorkerDiscoverSurfaces             = enterprisehooks.DiscoverUnixAgentSurfaces
 	enterpriseHookWorkerDiscoverKiroIDE              = enterprisehooks.DiscoverUnixKiroIDEForms
@@ -658,6 +727,7 @@ func lowerRlimit(resource int, limit uint64) {
 var (
 	enterpriseHookWorkerInstaller = enterprisehooks.Install
 	enterpriseHookWorkerVerifier  = enterprisehooks.Verify
+	enterpriseHookWorkerProber    = enterprisehooks.ProbeHookElements
 	enterpriseHookWorkerRemover   = enterprisehooks.RemoveUserHooks
 	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserState
 	// enterpriseHookWorkerStopPerUser stops the account's per-user gateway
@@ -689,6 +759,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		return target.Mode == enterpriseHookWorkerModeRestoreOwnInstall
 	})
 	removeRetiredConnectorsForAccount(ctx, request)
+	progress := enterpriseHookWorkerProgressOf(ctx)
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
@@ -706,6 +777,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		var result enterprisehooks.InstallResult
 		var err error
 		recheck := false
+		repairing := false
 		switch target.Mode {
 		case enterpriseHookWorkerModeInstall:
 			result, err = enterpriseHookWorkerInstaller(ctx, opts)
@@ -719,8 +791,14 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			result, err = enterpriseHookWorkerVerifier(ctx, opts)
 			recheck = err == nil && recheckWindow > 0
 			if err != nil {
-				result, err = enterpriseHookWorkerInstaller(ctx, opts)
-				outcome.Repaired = err == nil
+				policyOnly := request.Standalone && enterprisehooks.PreviousHookRuntimeIntactForConfigurationChange(ctx, opts, target.PriorCredentials)
+				repairing = true
+				result, outcome.RestoredElements, outcome.RestoredChanges, err = repairEnterpriseHookTarget(ctx, progress, target, opts, !policyOnly)
+				outcome.Repaired = (err == nil && !policyOnly) || len(outcome.RestoredElements) > 0
+				// A repaired target is checked again over the window too: a
+				// second element damaged a moment after the install read its
+				// file is put back in this pass, not at the next interval.
+				recheck = err == nil && recheckWindow > 0
 			}
 		case enterpriseHookWorkerModeRemove:
 			previousHome := strings.TrimSpace(target.Options.PreviousHome)
@@ -828,8 +906,15 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", "), UnrestorableConnectorBackups: strings.Join(summary.KeptUnrestorableConnectorBackups, ", ")}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, KeptEntries: summary.KeptEntries, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", "), UnrestorableConnectorBackups: strings.Join(summary.KeptUnrestorableConnectorBackups, ", ")}
 			}
+		case enterpriseHookWorkerModeProbeElements:
+			var after enterprisehooks.HookElements
+			if after, err = enterpriseHookWorkerProber(ctx, opts); err == nil {
+				outcome.RestoredElements = restoredHookElements(target.Broken, after)
+				outcome.Repaired = len(outcome.RestoredElements) > 0
+			}
+			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
 		case enterpriseHookWorkerModeRestoreOwnInstall:
 			if purgeBlocked != "" {
 				err = errors.New("kept the managed changes to its own per-user install: " + purgeBlocked)
@@ -866,8 +951,11 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		}
 		results = append(results, outcome)
+		if repairing {
+			progress.end(outcome)
+		}
 		if recheck {
-			rechecks = append(rechecks, enterpriseHookWorkerRecheck{result: len(results) - 1, opts: opts})
+			rechecks = append(rechecks, enterpriseHookWorkerRecheck{result: len(results) - 1, target: target, opts: opts})
 			recheckedAt = append(recheckedAt, time.Now())
 		}
 	}
@@ -878,19 +966,23 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		},
 		func(index int, _ error) {
 			outcome := &results[rechecks[index].result]
-			result, err := enterpriseHookWorkerInstaller(ctx, rechecks[index].opts)
+			result, restored, changes, err := repairEnterpriseHookTarget(ctx, progress, rechecks[index].target, rechecks[index].opts, true)
+			outcome.RestoredElements, outcome.RestoredChanges = mergeHookRestores(outcome.RestoredElements, outcome.RestoredChanges, restored, changes)
 			if err != nil {
 				outcome.OK, outcome.Result, outcome.AgentConfig = false, nil, ""
+				outcome.Repaired = outcome.Repaired || len(restored) > 0
 				outcome.Pending = enterprisehooks.PendingTargetError(err) &&
 					enterprisehooks.CheckUnixTargetHome(request.Home, request.UID).State == enterprisehooks.HomePending
 				if !outcome.Pending {
 					outcome.Error = err.Error()
 				}
+				progress.end(*outcome)
 				return
 			}
 			outcome.Repaired = true
 			outcome.Result = &result
 			outcome.AgentConfig = result.AgentConfig
+			progress.end(*outcome)
 		})
 	return enterpriseHookWorkerResponse{Targets: results}
 }
@@ -899,7 +991,25 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 // is checked again over the request's recheck window.
 type enterpriseHookWorkerRecheck struct {
 	result int
+	target enterpriseHookWorkerTarget
 	opts   enterprisehooks.InstallOptions
+}
+
+// reinstallEnterpriseHookTarget puts a protected target back after its check
+// found it broken. An install that returns an error after it published (the
+// installer keeps a verified registration it could not finish) has still put
+// the target back, so a failed install is followed by a check: a target that
+// verifies now was restored, and the repair counts (GAP-0754). A target that
+// still fails keeps the install's error.
+func reinstallEnterpriseHookTarget(ctx context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+	result, err := enterpriseHookWorkerInstaller(ctx, opts)
+	if err == nil {
+		return result, nil
+	}
+	if verified, verifyErr := enterpriseHookWorkerVerifier(ctx, opts); verifyErr == nil {
+		return verified, nil
+	}
+	return result, err
 }
 
 // repairManagedCodexUserFeature runs with the target user's uid. The machine
@@ -1472,13 +1582,89 @@ func defaultEnterpriseHookWorkerExecutable() (string, error) {
 	return exe, nil
 }
 
+// enterpriseHookWorkerInterruptDrain is how long a worker that is running when
+// its caller is interrupted may take to answer before it is killed, for a
+// caller that asked for it (withEnterpriseHookWorkerInterruptDrain). The
+// guardian watch loop interrupts a pass for every new file event, and a pass
+// that waited for a worker busy with another account would not react to the
+// event. A worker in the middle of a repair is not killed at this bound but
+// when the repair ends (or at the worker timeout), and a worker killed at the
+// bound keeps the targets it repaired before (enterpriseHookWorkerProgress).
+// Without both, the restore is counted, audited and recorded nowhere
+// (GAP-0754).
+var enterpriseHookWorkerInterruptDrain = 5 * time.Second
+
+type enterpriseHookWorkerInterruptDrainKey struct{}
+
+// withEnterpriseHookWorkerInterruptDrain marks ctx so that
+// runEnterpriseHookWorker, when ctx is canceled, lets a running worker finish
+// up to enterpriseHookWorkerInterruptDrain (a worker in the middle of a repair
+// until that repair ends), accepts its answer, and keeps what it repaired if
+// it has to kill it. A worker not yet started when ctx is canceled is not
+// started. Without the mark a canceled ctx kills the worker at once, as
+// before.
+func withEnterpriseHookWorkerInterruptDrain(ctx context.Context) context.Context {
+	return context.WithValue(ctx, enterpriseHookWorkerInterruptDrainKey{}, true)
+}
+
+func enterpriseHookWorkerInterruptDrains(ctx context.Context) bool {
+	drains, _ := ctx.Value(enterpriseHookWorkerInterruptDrainKey{}).(bool)
+	return drains
+}
+
+// enterpriseHookWorkerContext derives the context of one worker process from
+// the context of its caller: bounded by timeout and, for a caller that marked
+// its context, by the interrupt drain instead of by the cancellation of the
+// caller. stopDrain releases the drain watcher. A marked context that is
+// already canceled yields its error. output is what the worker has written so
+// far; the drain reads it to tell a repair under way.
+func enterpriseHookWorkerContext(parent context.Context, timeout time.Duration, output *workerOutputBuffer) (ctx context.Context, cancel context.CancelFunc, stopDrain func() bool, err error) {
+	if !enterpriseHookWorkerInterruptDrains(parent) {
+		ctx, cancel = context.WithTimeout(parent, timeout)
+		return ctx, cancel, func() bool { return true }, nil
+	}
+	if err := parent.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	ctx, cancel = context.WithTimeout(context.WithoutCancel(parent), timeout)
+	// The bound is read here, in the caller, not in the callback: the
+	// callback runs on its own goroutine, possibly after the caller returned.
+	drain := enterpriseHookWorkerInterruptDrain
+	stopDrain = context.AfterFunc(parent, func() {
+		timer := time.NewTimer(drain)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return
+		}
+		for {
+			if out := parseEnterpriseHookWorkerOutput(output.snapshot()); out.repairing == 0 || out.answered {
+				cancel()
+				return
+			}
+			poll := time.NewTimer(enterpriseHookWorkerRepairPoll)
+			select {
+			case <-poll.C:
+			case <-ctx.Done():
+				poll.Stop()
+				return
+			}
+		}
+	})
+	return ctx, cancel, stopDrain, nil
+}
+
 type workerOutputBuffer struct {
+	mu       sync.Mutex
 	buf      bytes.Buffer
 	limit    int
 	exceeded bool
 }
 
 func (b *workerOutputBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.buf.Len()+len(p) > b.limit {
 		b.exceeded = true
 		if remaining := b.limit - b.buf.Len(); remaining > 0 {
@@ -1502,10 +1688,14 @@ func runEnterpriseHookWorker(
 	if os.Geteuid() != 0 && (os.Geteuid() != account.UID || os.Getegid() != account.GID) {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("a non-root guardian can only run a worker for itself (uid %d)", os.Geteuid())
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	request.Version = enterpriseHookWorkerProtocolVersion
 	request.UID, request.GID = account.UID, account.GID
 	request.User, request.Home = account.User, account.Home
 	request.CleanupFence = request.cleanupFence != nil
+	request.Progress = enterpriseHookWorkerInterruptDrains(ctx) && request.Operation == enterpriseHookWorkerOpApply
 	if enterpriseHookWorkerReadsLaunchd() {
 		request.LaunchdHermesHome = enterpriseHookWorkerLaunchdHermesHome(account)
 	}
@@ -1517,16 +1707,17 @@ func runEnterpriseHookWorker(
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
 	}
-	if ctx == nil {
-		ctx = context.Background()
+	stdout := &workerOutputBuffer{limit: enterpriseHookWorkerResponseLimit}
+	ctx, cancel, stopDrain, err := enterpriseHookWorkerContext(ctx, workerTimeout(request), stdout)
+	if err != nil {
+		return enterpriseHookWorkerResponse{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, workerTimeout(request))
+	defer stopDrain()
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, enterpriseHookWorkerArgs...)
 	cmd.Dir = "/"
 	cmd.Env = enterpriseHookWorkerEnvironment(account)
 	cmd.Stdin = bytes.NewReader(payload)
-	stdout := &workerOutputBuffer{limit: enterpriseHookWorkerResponseLimit}
 	stderr := &workerOutputBuffer{limit: enterpriseHookWorkerStderrLimit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -1553,25 +1744,37 @@ func runEnterpriseHookWorker(
 	}
 	abandoned, runErr := runEnterpriseHookWorkerProcess(ctx, cmd, account.UID)
 	stopFence()
+	// A worker that ends without its answer still tells what it put back
+	// when the parent asked for progress (GAP-0754): the targets it repaired
+	// come back with the error, and the caller accounts them. A target whose
+	// repair began and did not end is failed, never healthy, and is a restore
+	// only for the protected elements it put back (restoresOfEndedWorker).
+	withoutAnswer := func(err error) (enterpriseHookWorkerResponse, error) {
+		if !request.Progress {
+			return enterpriseHookWorkerResponse{}, err
+		}
+		output := parseEnterpriseHookWorkerOutput(stdout.snapshot())
+		return enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion,
+			Targets: restoresOfEndedWorker(account, request, output, err)}, err
+	}
 	if abandoned {
-		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w: it was killed but did not exit (a file system call in the account's home may be stuck)", account.UID, ctx.Err())
+		return withoutAnswer(fmt.Errorf("worker for uid %d timed out: %w: it was killed but did not exit (a file system call in the account's home may be stuck)", account.UID, ctx.Err()))
 	}
 	forwardEnterpriseHookWorkerStderr(account, stderr)
 	if ctx.Err() != nil {
-		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err())
+		return withoutAnswer(fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err()))
 	}
 	if stdout.exceeded {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d returned an oversized response", account.UID)
 	}
-	var response enterpriseHookWorkerResponse
-	decoder := json.NewDecoder(bytes.NewReader(stdout.buf.Bytes()))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&response); err != nil {
+	output := parseEnterpriseHookWorkerOutput(stdout.snapshot())
+	if !output.answered {
 		if runErr != nil {
-			return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d failed: %w", account.UID, runErr)
+			return withoutAnswer(fmt.Errorf("worker for uid %d failed: %w", account.UID, runErr))
 		}
-		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d returned invalid JSON: %w", account.UID, err)
+		return withoutAnswer(fmt.Errorf("worker for uid %d returned invalid JSON: %w", account.UID, output.err))
 	}
+	response := output.response
 	if response.Version != enterpriseHookWorkerProtocolVersion {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d speaks protocol %d", account.UID, response.Version)
 	}
@@ -1810,13 +2013,36 @@ func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterprise
 	}
 	outcomes := make([]enterpriseHookWorkerOutcome, len(jobs))
 	semaphore := make(chan struct{}, parallelism)
+	active, _ := ctx.Value(enterpriseHookWatchActiveWorkersKey{}).(*enterpriseHookWatchActiveWorkers)
 	var wg sync.WaitGroup
 	for i := range jobs {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			semaphore <- struct{}{}
+			var watchedKeys []string
+			var watchedIndex map[int]string
+			if active != nil {
+				watchedIndex = make(map[int]string, len(jobs[i].Request.Targets))
+				for _, target := range jobs[i].Request.Targets {
+					key := active.targetKey(jobs[i].Account.Home, jobs[i].Account.User, target.Options.ConnectorName)
+					if key != "" {
+						watchedKeys = append(watchedKeys, key)
+						watchedIndex[target.Index] = key
+					}
+				}
+				active.start(watchedKeys)
+			}
 			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
+			if active != nil {
+				var repairedKeys []string
+				for _, target := range response.Targets {
+					if key := watchedIndex[target.Index]; target.Repaired && key != "" {
+						repairedKeys = append(repairedKeys, key)
+					}
+				}
+				active.finish(watchedKeys, repairedKeys)
+			}
 			// The slot is free before done runs: a removal record that waits
 			// for its account's lock never holds off another account's worker.
 			<-semaphore
@@ -1855,6 +2081,7 @@ type enterpriseHookWorkerDiscovery struct {
 	mu          sync.Mutex
 	versions    map[string]string
 	reasons     map[string]string
+	sources     map[string]string
 	surfaces    map[string][]connector.AgentSurface
 	unlisted    []enterprisehooks.PrivateAgentInstall
 	installs    []enterprisehooks.PrivateAgentInstall
@@ -1877,6 +2104,7 @@ func enterpriseHookWorkerDiscoverWithin(ctx context.Context, request enterpriseH
 	found := &enterpriseHookWorkerDiscovery{
 		versions: map[string]string{},
 		reasons:  map[string]string{},
+		sources:  map[string]string{},
 		surfaces: map[string][]connector.AgentSurface{},
 		finished: map[string]bool{},
 	}
@@ -1904,13 +2132,13 @@ func enterpriseHookWorkerDiscover(ctx context.Context, request enterpriseHookWor
 		if name == "" {
 			continue
 		}
-		var version, reason string
+		var version, reason, source string
 		if request.StaticDiscovery {
 			version, reason = enterpriseHookWorkerDiscoverStaticVersion(ctx, request.Home, name)
 		} else if name == "hermes" {
-			version, reason = enterpriseHookWorkerDiscoverVersionInAccountHome(ctx, request.Home, name)
+			version, reason, source = enterpriseHookWorkerDiscoverVersionInAccountHome(ctx, request.Home, name)
 		} else {
-			version, reason = enterpriseHookWorkerDiscoverVersion(ctx, request.Home, name, true)
+			version, reason, source = enterpriseHookWorkerDiscoverVersion(ctx, request.Home, name, true)
 		}
 		// Host apps are never run; an engine CLI bundled in one is run
 		// only outside a static (untrusted-home) discovery.
@@ -1923,6 +2151,9 @@ func enterpriseHookWorkerDiscover(ctx context.Context, request enterpriseHookWor
 		found.mu.Lock()
 		if version != "" {
 			found.versions[name] = version
+			if source != "" {
+				found.sources[name] = source
+			}
 		} else if reason != "" {
 			found.reasons[name] = reason
 		}
@@ -1949,15 +2180,19 @@ func (found *enterpriseHookWorkerDiscovery) response(connectors []string) enterp
 	found.mu.Lock()
 	defer found.mu.Unlock()
 	response := enterpriseHookWorkerResponse{
-		Versions: make(map[string]string, len(found.versions)),
-		Reasons:  make(map[string]string, len(found.reasons)),
-		Surfaces: make(map[string][]connector.AgentSurface, len(found.surfaces)),
+		Versions:       make(map[string]string, len(found.versions)),
+		Reasons:        make(map[string]string, len(found.reasons)),
+		VersionSources: make(map[string]string, len(found.sources)),
+		Surfaces:       make(map[string][]connector.AgentSurface, len(found.surfaces)),
 	}
 	for name, version := range found.versions {
 		response.Versions[name] = version
 	}
 	for name, reason := range found.reasons {
 		response.Reasons[name] = reason
+	}
+	for name, source := range found.sources {
+		response.VersionSources[name] = source
 	}
 	for name, surfaces := range found.surfaces {
 		response.Surfaces[name] = append([]connector.AgentSurface(nil), surfaces...)
@@ -1978,4 +2213,40 @@ func (found *enterpriseHookWorkerDiscovery) response(connectors []string) enterp
 	}
 	response.PrivateInstalls = append(installs, found.unlisted...)
 	return response
+}
+
+func (w *enterpriseHookWatchActiveWorkers) targetKey(home, user, connector string) string {
+	if key := w.targetKeys[enterpriseHookWatchTargetID(home, connector)]; key != "" {
+		return key
+	}
+	return enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: user, UserHome: home, Connector: connector})
+}
+
+func (w *enterpriseHookWatchActiveWorkers) start(keys []string) {
+	w.mu.Lock()
+	if w.active == nil {
+		w.active = make(map[string]int)
+	}
+	for _, key := range keys {
+		w.active[key]++
+	}
+	w.mu.Unlock()
+}
+
+func (w *enterpriseHookWatchActiveWorkers) finish(keys, repairedKeys []string) {
+	w.mu.Lock()
+	if len(repairedKeys) > 0 && w.repaired == nil {
+		w.repaired = make(map[string]bool)
+	}
+	for _, key := range repairedKeys {
+		w.repaired[key] = true
+	}
+	for _, key := range keys {
+		if w.active[key] <= 1 {
+			delete(w.active, key)
+		} else {
+			w.active[key]--
+		}
+	}
+	w.mu.Unlock()
 }

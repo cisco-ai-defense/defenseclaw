@@ -117,42 +117,62 @@ func TestCFRRealClientSourceChangedAfterProofMustBlock(t *testing.T) {
 	}
 }
 
-func TestCFRRealClientHermesLinkChangedAfterProofMustBlock(t *testing.T) {
-	home, project := hermesPatchHome(t)
-	parent := filepath.Dir(home)
-	keys := filepath.Join(home, ".ssh", "authorized_keys")
-	ordinary := filepath.Join(project, "out.txt")
-	if err := os.WriteFile(ordinary, []byte("x"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(project, "keylink")
-	if err := os.Symlink(ordinary, link); err != nil {
-		t.Fatal(err)
-	}
-	patch := hermesV4AUpdate("keylink")
-	body := hermesPatchBody(t, project, "patch", map[string]any{"mode": "patch", "patch": patch})
-	header := hookpaths.ResolveConnector("hermes", "", "pre_tool_call", []byte(body))
-	if err := os.Remove(link); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(keys, link); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(parent, 0); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chmod(parent, 0700)
-	cfg := &config.Config{}
-	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Connector = "hermes"
-	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(hookpaths.Header, header)
-	req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
-	out := httptest.NewRecorder()
-	api.handleAgentHook("hermes").ServeHTTP(out, req)
-	if got := hermesOutcome(t, out.Body.String()).action; got != "block" {
-		t.Fatalf("client header from ordinary link was replayed after protected retarget: %s", got)
+// A header the hook made from an ordinary link, posted straight to the gateway
+// after the link was retargeted to a protected file (a direct gateway replay,
+// not a hook run). The gateway cannot read the link again, so the strict policy
+// tier refuses a link it cannot read again and blocks; balanced and permissive
+// trust the hook header and allow, as the same request for an ordinary link
+// that was not retargeted is allowed (owner steer 2: the protective rule that
+// causes the false block of an ordinary link moves to strict). The allow is
+// not agent-visible: the real hook reads where the target leads again after the
+// answer and once it is written and refuses a retargeted link in every profile
+// (TestRealHookRefusesAHermesLinkRetargetedAfterTheGatewayAnswer here, and
+// TestGAP0488PatchTargetSwappedAfterReadingIsRefused in hookexec).
+func TestCFRDirectGatewayReplayOfHermesLinkHeaderAfterRetarget(t *testing.T) {
+	for _, pack := range []string{"strict", "", "permissive"} {
+		t.Run("pack="+pack, func(t *testing.T) {
+			home, project := hermesPatchHome(t)
+			parent := filepath.Dir(home)
+			keys := filepath.Join(home, ".ssh", "authorized_keys")
+			ordinary := filepath.Join(project, "out.txt")
+			if err := os.WriteFile(ordinary, []byte("x"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(project, "keylink")
+			if err := os.Symlink(ordinary, link); err != nil {
+				t.Fatal(err)
+			}
+			patch := hermesV4AUpdate("keylink")
+			body := hermesPatchBody(t, project, "patch", map[string]any{"mode": "patch", "patch": patch})
+			header := hookpaths.ResolveConnector("hermes", "", "pre_tool_call", []byte(body))
+			if err := os.Remove(link); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(keys, link); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(parent, 0); err != nil {
+				t.Fatal(err)
+			}
+			defer os.Chmod(parent, 0700)
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "hermes"
+			cfg.Guardrail.RulePack = pack
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(hookpaths.Header, header)
+			req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+			out := httptest.NewRecorder()
+			api.handleAgentHook("hermes").ServeHTTP(out, req)
+			want := "allow"
+			if pack == "strict" {
+				want = "block"
+			}
+			if got := hermesOutcome(t, out.Body.String()).action; got != want {
+				t.Fatalf("pack %q: direct gateway replay of a header from an ordinary link after a protected retarget: %s, want %s", pack, got, want)
+			}
+		})
 	}
 }

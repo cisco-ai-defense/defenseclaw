@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -158,7 +159,7 @@ func boundedGlobLoopCopyCalls(file *syntax.File, cwd, home string, facts map[str
 			for variable, value := range bindings {
 				vars = append(vars, variable+"="+value)
 			}
-			fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron(vars...)}, assignWord)
+			fields, err := shellparse.Fields(&expand.Config{Env: expand.ListEnviron(vars...)}, assignWord)
 			if err != nil || len(fields) != 1 || fields[0] == "" || strings.ContainsAny(fields[0], "*?[]\x00\x1f") {
 				destinations = nil
 				break

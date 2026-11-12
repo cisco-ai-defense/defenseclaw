@@ -55,7 +55,7 @@ func TestTwoAccountsSameNameMCPServerVerdictsStayApart(t *testing.T) {
 	}
 	runtime := func(server config.MCPServerEntry) string {
 		t.Helper()
-		entry, err := store.GetActionForConnector("mcp", MCPJournalName(server), "claudecode")
+		entry, err := store.GetActionForConnector(MCPJournalType(server), MCPJournalName(server), "claudecode")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -152,7 +152,7 @@ func TestBareNameMCPJournalRowsMoveToTheirAccount(t *testing.T) {
 	if err != nil || moved != 1 || kept != 1 {
 		t.Fatalf("moved %d kept %d err %v; want 1 moved, 1 kept", moved, kept, err)
 	}
-	account, err := store.GetActionForConnector("mcp", MCPJournalName(u1), "claudecode")
+	account, err := store.GetActionForConnector(MCPJournalType(u1), MCPJournalName(u1), "claudecode")
 	if err != nil || account == nil || account.Actions.Runtime != "disable" || account.Actions.Install != "block" ||
 		account.SourcePath != MCPEventPath(u1) {
 		t.Fatalf("account row %+v (err %v), want the block and disable moved with the source path", account, err)
@@ -168,7 +168,7 @@ func TestBareNameMCPJournalRowsMoveToTheirAccount(t *testing.T) {
 	}
 	// An operator allow of the name also clears the accounts' runtime rows.
 	must(ClearAccountMCPJournal(store, "gb05-benign", "claudecode", "runtime"))
-	if account, _ := store.GetActionForConnector("mcp", MCPJournalName(u1), "claudecode"); account == nil ||
+	if account, _ := store.GetActionForConnector(MCPJournalType(u1), MCPJournalName(u1), "claudecode"); account == nil ||
 		account.Actions.Runtime != "" || account.Actions.Install != "block" {
 		t.Fatalf("after the allow: %+v, want the runtime disable cleared and the install block kept", account)
 	}

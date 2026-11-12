@@ -166,6 +166,11 @@ type CanonicalOptions struct {
 	// UnixMode overrides a kind's macOS canonical permission bits, for
 	// per-user objects whose mode depends on the file (a hook script, a token).
 	UnixMode os.FileMode
+	// inPlaceOutOfClass keeps the plain in-place repair on standalone for an
+	// object outside the g582 class (the installed binaries and the two
+	// service logs of RepairWindowsManagedInstall): nothing reads them as
+	// policy, and the installer replaces the binaries.
+	inPlaceOutOfClass bool
 }
 
 // ownerTransferAllowed reports whether a repair may replace an untrusted
@@ -738,6 +743,10 @@ type ManagedDataPaths struct {
 	// RuntimeDirs are further gateway-writable directories below DataDir,
 	// such as the hooks directory.
 	RuntimeDirs []string
+	// LockFiles are product-owned lock files below DataDir that are created
+	// lazily (the ACP credential and enrollment locks). They are repaired as
+	// runtime files, so an entry an untrusted principal added is removed.
+	LockFiles []string
 }
 
 // sqliteSideFileSuffixes are the SQLite side files repaired with each
@@ -799,6 +808,13 @@ func (paths ManagedDataPaths) targets() []managedDataTarget {
 		addDir(filepath.Dir(logPath))
 		addFile(logPath, ObjectRuntimeFile)
 	}
+	for _, lockPath := range paths.LockFiles {
+		if strings.TrimSpace(lockPath) == "" {
+			continue
+		}
+		addDir(filepath.Dir(lockPath))
+		addFile(lockPath, ObjectRuntimeFile)
+	}
 	// Parents before children.
 	sort.SliceStable(dirs, func(i, j int) bool {
 		return strings.Count(dirs[i].path, string(filepath.Separator)) <
@@ -813,13 +829,28 @@ func (paths ManagedDataPaths) targets() []managedDataTarget {
 // (the hook guardian, the CMID broker, the installer) may call it; inside the
 // gateway service it degrades to AssessWindowsManagedDataPaths. On other
 // platforms every result is CanonicalUnsupported.
+//
+// On standalone an object an untrusted principal can write or owns (data_dir,
+// its hooks folder and tokens, the audit and judge databases, the redaction
+// key, the log) is not repaired: it is reported as a boundary finding with
+// the way out and left as it is, whatever AllowUntrustedOwnerTransfer says,
+// as RepairWindowsManagedInstall does (g582 round 4). The redaction key is
+// rotated by the gateway instead. Trusted-only drift keeps the repair.
 func RepairWindowsManagedDataPaths(paths ManagedDataPaths, opts CanonicalOptions) []CanonicalResult {
 	targets := paths.targets()
 	if !windowsDescriptorPlatform() {
 		return unsupportedCanonicalResults(targets)
 	}
+	refuseDrift := managedInstallRefusesContentDrift()
 	results := make([]CanonicalResult, 0, len(targets))
 	for _, target := range targets {
+		if refuseDrift {
+			if refused, ok := refuseStandaloneDataPathRepair(target, opts); ok {
+				results = append(results, refused)
+				continue
+			}
+		}
+		standaloneRepairAfterCheck(target.path)
 		result, _ := EnsureCanonical(target.path, target.kind, opts)
 		results = append(results, result)
 	}

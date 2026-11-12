@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import SimpleNamespace
 
 import pytest
@@ -20,15 +20,17 @@ from defenseclaw.doctor_hooks import (
     _COPILOT_REQUIRED_HOOKS,
     validate_windows_copilot_hook_registration,
 )
+from defenseclaw.winquote import powershell_literal, powershell_literal_body
 
 
-def _powershell_command(adapter: Path, event: str) -> str:
-    literal = str(adapter).replace("'", "''")
-    return f"& '{literal}' -Event '{event}'"
+# The Go renders, quoted with the one PowerShell rule (managed.PowerShellLiteral):
+# tests/test_powershell_quote_golden.py checks both against the Go golden file.
+def _powershell_command(adapter: PurePath, event: str) -> str:
+    return f"& {powershell_literal(str(adapter))} -Event {powershell_literal(event)}"
 
 
-def _adapter_body(runtime: Path) -> str:
-    literal = str(runtime).replace("'", "''")
+def _adapter_body(runtime: PurePath) -> str:
+    literal = powershell_literal_body(str(runtime))
     return f"""# defenseclaw-managed-hook v7
 $hook = '{literal}'
 {_COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT}
@@ -692,3 +694,28 @@ def test_windows_copilot_fail_mode_runs_the_doctor_validator(
     monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
 
     assert fail_mode.registration_integrity_drift(cfg, "copilot") == ([drift] if drift else [])
+
+
+@pytest.mark.parametrize("quote", ["\u2018", "\u2019", "\u201a", "\u201b"])
+def test_windows_copilot_doctor_owns_a_typographic_quote_profile(tmp_path: Path, quote: str) -> None:
+    """g072 review 3 M3: Go doubles the typographic quote of a profile like O\u2019Brien.
+
+    The current render is healthy; the render of releases before 1.0.9 (the
+    quote not doubled) is DefenseClaw's own and stale, never foreign.
+    """
+    profile = tmp_path / f"O{quote}Brien"
+    profile.mkdir()
+    install, data, config = _fixture(profile)
+    adapter = data / "hooks" / "copilot-hook.ps1"
+    assert quote * 2 in _powershell_command(adapter, "preToolUse")
+
+    check = _validate(install, data, config)
+    assert check.state == "healthy", check.detail
+
+    document = json.loads(config.read_text(encoding="utf-8"))
+    for entries in document["hooks"].values():
+        entries[0]["powershell"] = entries[0]["powershell"].replace(quote * 2, quote)
+    config.write_text(json.dumps(document), encoding="utf-8")
+    check = _validate(install, data, config)
+    assert check.state == "stale", check.detail
+    assert "written before 1.0.9" in check.detail

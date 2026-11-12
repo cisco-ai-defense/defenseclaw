@@ -251,6 +251,7 @@ enum CommandRegistry {
         CommandDefinition(id: 18, title: "setup opencode", binary: "defenseclaw", arguments: ["setup", "opencode", "--yes"], summary: "Configure OpenCode observability hooks", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 19, title: "setup amp", binary: "defenseclaw", arguments: ["setup", "amp", "--yes"], summary: "Configure Amp synchronous policy plugin", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 21, title: "setup kiro", binary: "defenseclaw", arguments: ["setup", "kiro", "--yes"], summary: "Configure the Kiro IDE or CLI connector", category: "setup", requiresInput: false, usage: ""),
+        CommandDefinition(id: 235, title: "setup cowork", binary: "defenseclaw", arguments: ["setup", "cowork", "--yes"], summary: "Build the Claude Cowork plugin (sets up Claude Code hooks if off)", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 22, title: "setup rotate-token", binary: "defenseclaw", arguments: ["setup", "rotate-token", "--yes"], summary: "Rotate gateway and scoped hook tokens", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 23, title: "setup gateway", binary: "defenseclaw", arguments: ["setup", "gateway"], summary: "Configure gateway connection (interactive)", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 24, title: "setup guardrail", binary: "defenseclaw", arguments: ["setup", "guardrail"], summary: "Configure LLM guardrail", category: "setup", requiresInput: false, usage: ""),
@@ -466,7 +467,7 @@ enum CommandRegistry {
             }
             guard command.arguments.count == 3,
                   command.arguments[0] == "setup",
-                  ["amp", "kiro"].contains(command.arguments[1]),
+                  ["amp", "kiro", "cowork"].contains(command.arguments[1]),
                   command.arguments[2] == "--yes" else { return true }
             return supportedSetupCommands?.contains(command.arguments[1]) == true
         }

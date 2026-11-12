@@ -652,7 +652,7 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 		t.Fatalf("measured log = %d bytes; want emergency hold armed before the %d-byte ceiling at %d bytes", pass.LogBytes, WALHardLimitBytes, WALEmergencyArmBytes)
 	}
 	held := pass.WriterHeld
-	// A runner too slow to finish even this copy inside the fixed 1s cap gets
+	// A runner too slow to finish even this copy inside the emergency cap gets
 	// the writer back at the cap, and the next over-limit pass retries
 	// (walEmergencyCatchUpCap). Allow that one retry, and only when the
 	// deferred pass gave the writer back at the cap plus the measured
@@ -672,11 +672,11 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	if err != nil || !pass.Bounded || !pass.Restarted || pass.WriterDeferred {
 		t.Fatalf("log over the limit under a flood: %+v, %v; want a bounded catch-up that restarts the log", pass, err)
 	}
-	if pass.WriterHeld < slowCopy || pass.WriterHeld > time.Second {
-		t.Fatalf("emergency catch-up held the writer for %v; want the %v copy inside a fixed 1s cap", pass.WriterHeld, slowCopy)
+	if pass.WriterHeld < slowCopy || pass.WriterHeld >= 500*time.Millisecond {
+		t.Fatalf("emergency catch-up held the writer for %v; want the %v copy inside the 500 ms writer bound", pass.WriterHeld, slowCopy)
 	}
 	// The contract: a hook write that arrives during the pass waits for the
-	// writer hold the pass reports (inside the fixed 1s cap, checked above)
+	// writer hold the pass reports (inside the emergency cap, checked above)
 	// plus its own commit and at most one commit queued ahead of it. A commit
 	// is the longest ordinary one measured above, never under 100ms
 	// (GAP-2407: a fixed 500ms total failed on a slow Windows runner whose
@@ -704,6 +704,66 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	if count < 201+int(writes.Load()) {
 		t.Fatalf("events after the bounded catch-up = %d; want at least %d", count, 201+int(writes.Load()))
 	}
+}
+
+func TestGAP0245EmergencyCopyYieldsWriterWithinBound(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	withoutDiskFlushes(t, store)
+	logWALGuardEvents(t, store, 200)
+	frames := (walFileSize(t, store) - 32) / (4096 + 24)
+	if frames <= 0 {
+		t.Fatal("no WAL frames to scale")
+	}
+	originalFrameBytes := walFrameBytes
+	walFrameBytes = (WALEmergencyArmBytes + 8<<20) / frames
+	t.Cleanup(func() { walFrameBytes = originalFrameBytes })
+	writeDuringEveryCopy(t, store)
+	originalPhase := walWriterPhaseHook
+	walWriterPhaseHook = func(context.Context) { time.Sleep(700 * time.Millisecond) }
+	t.Cleanup(func() { walWriterPhaseHook = originalPhase })
+
+	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+	if err != nil || !pass.Bounded || !pass.WriterDeferred || pass.WriterHeld <= 0 ||
+		pass.WriterHeld >= 500*time.Millisecond {
+		t.Fatalf("slow emergency copy held the writer: %+v, %v; want a yield inside 500 ms", pass, err)
+	}
+	// A normal append still commits after the guard yields its connection.
+	if err := store.LogEvent(Event{Action: "hook_decision", Target: "after-emergency-yield"}); err != nil {
+		t.Fatalf("ordinary append after guard yield: %v", err)
+	}
+	requireNoDiskFlushes(t, store)
+}
+
+func TestGAP0245IntermediateEmergencyCopyRestartsWAL(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	withoutDiskFlushes(t, store)
+	logWALGuardEvents(t, store, 200)
+	frames := (walFileSize(t, store) - 32) / (4096 + 24)
+	if frames <= 0 {
+		t.Fatal("no WAL frames to scale")
+	}
+	originalFrameBytes := walFrameBytes
+	walFrameBytes = (WALEmergencyArmBytes + 8<<20) / frames
+	t.Cleanup(func() { walFrameBytes = originalFrameBytes })
+	writeDuringEveryCopy(t, store)
+	originalPhase := walWriterPhaseHook
+	walWriterPhaseHook = func(context.Context) { time.Sleep(450 * time.Millisecond) }
+	t.Cleanup(func() { walWriterPhaseHook = originalPhase })
+	for attempt := 0; attempt < 2; attempt++ {
+		pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pass.Restarted {
+			if !pass.Bounded || pass.WriterDeferred || pass.WriterHeld >= 500*time.Millisecond {
+				t.Fatalf("intermediate emergency copy exceeded the writer bound: %+v", pass)
+			}
+			return
+		}
+	}
+	t.Fatal("intermediate emergency copy did not restart the WAL")
 }
 
 // The bounded catch-up still gives the writer back at walCatchUpCap: a
@@ -1191,6 +1251,32 @@ func TestCheckpointWALIfLargeRepeatedOverLimitPassesNeverSettleBeforeTheWriter(t
 	}
 }
 
+// manualDeadlineContext is a pass context whose deadline passes when a test
+// says so, so that a test of a pass that ran out of time does not depend on how
+// long the copies before the point it targets take.
+type manualDeadlineContext struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func newManualDeadlineContext() *manualDeadlineContext {
+	return &manualDeadlineContext{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *manualDeadlineContext) Done() <-chan struct{} { return c.done }
+
+func (c *manualDeadlineContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (c *manualDeadlineContext) expire() { c.once.Do(func() { close(c.done) }) }
+
 // Review of G-flood-wal round 3 (P1): a pass that ran out of time while the
 // log was over the limit cleared the store's over-the-limit mark and left the
 // bounded catch-up's misses as they were, so background writers went on and
@@ -1203,11 +1289,16 @@ func TestCheckpointWALIfLargePassThatRunsOutOfTimeKeepsThePressureAndEscalates(t
 	logWALGuardEvents(t, store, 200)
 	writeDuringEveryCopy(t, store)
 	overrideWALDuration(t, &walCatchUpCap, 40*time.Millisecond)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	// The pass's deadline passes only once the copy under the writer has
+	// outrun its cap, never during the copies before it: a wall-clock deadline
+	// raced the first copy on a slow runner.
+	ctx := newManualDeadlineContext()
 	original := walWriterPhaseHook
-	// The copy under the writer outruns its cap and the pass's deadline.
-	walWriterPhaseHook = func(context.Context) { <-ctx.Done() }
+	walWriterPhaseHook = func(hold context.Context) {
+		<-hold.Done()
+		ctx.expire()
+		<-ctx.Done()
+	}
 	t.Cleanup(func() { walWriterPhaseHook = original })
 	pass, err := store.CheckpointWALIfLarge(ctx, 0, testWALWriterBudget)
 	if !errors.Is(err, context.DeadlineExceeded) || !pass.Bounded || pass.Restarted {

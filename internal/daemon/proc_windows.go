@@ -210,3 +210,8 @@ func (d *Daemon) killStaleProcesses() error {
 	_, _, err := d.protectedDaemonPIDs()
 	return err
 }
+
+// processSignalable is always true on Windows: liveness and control go
+// through process handles, and processExists already reports a handle this
+// account cannot open as not running.
+func processSignalable(int) bool { return true }

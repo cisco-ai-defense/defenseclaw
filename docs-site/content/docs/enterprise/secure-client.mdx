@@ -504,7 +504,7 @@ reloads the `openshell` block without a restart.
 | One user's target fails | No active session, missing native config, or a foreign-owned file in the footprint | Read the error in `enterprise hooks status --json`; fix the file's provenance |
 | HTTP 401 from one connector's hook | Its scoped token is missing or drifted | Run `/repair` or a reconcile |
 | AI Discovery reports `sensor helper (not started)` | `DefenseClawSensorHelper` is stopped or its socket DACL is unhealthy | Run `/verify`, then `/repair` |
-| The per-user installer or `defenseclaw upgrade` refuses | A managed deployment exists | Update through Secure Client |
+| The per-user installer or `defenseclaw upgrade` refuses | A managed deployment exists | Update through Secure Client ([Managed command availability](/docs/enterprise/managed-commands) lists the commands a managed computer refuses) |
 
 Exit codes and error codes shared with the standalone profile are in
 [Troubleshooting](/docs/enterprise/troubleshooting). If an AI agent gained

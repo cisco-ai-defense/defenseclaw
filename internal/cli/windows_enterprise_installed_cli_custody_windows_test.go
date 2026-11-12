@@ -50,6 +50,7 @@ func TestWindowsEnterpriseInstalledCLICustodyIsCheckedBeforeExec(t *testing.T) {
 // fixture sits under ProgramData with an Administrators owner so the native
 // CI runs it (see TestWindowsManagedRecordTrustUsesRealACLs).
 func TestWindowsEnterpriseInstalledCLICustodyRefusesAReplaceableFolder(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture needs a BUILTIN\\Administrators owner on its folders, which only an administrator token can set (a standard user can create the folders under C:\\ProgramData, not give them that owner)")
 	production := windowsEnterpriseInstalledCLICustody
 	newHotConfigHost(t, "config_version: 9\n", "config_version: 9\n")
 	windowsEnterpriseInstalledCLICustody = production

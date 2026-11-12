@@ -158,6 +158,31 @@ func windowsEnterpriseHotTargetsPath(path string) bool {
 		(len(parts) == 3 || parts[3] == "enabled")
 }
 
+// windowsEnterpriseGuardianRestartPaths reports whether every start-only path
+// of a Windows CONFIG= change is one the hot path applies by restarting only
+// the hook guardian and then the gateway (GAP-0044): the Claude Code
+// managed_hooks_only lock. Its whole Windows effect is what the guardian
+// renders on its reconcile (the machine-scope Claude Code drop-in, GAP-0064,
+// and the Copilot VS Code Local files of the default scope) and the gateway's
+// config generation; the Windows Codex requirements pin
+// allow_managed_hooks_only whatever the config says, and no other service
+// reads it. Paths match exactly as the config spells them. Any other
+// start-only path, or none, keeps the lifecycle transaction.
+func windowsEnterpriseGuardianRestartPaths(startOnly []string) bool {
+	if len(startOnly) == 0 {
+		return false
+	}
+	for _, path := range startOnly {
+		switch path {
+		case "enterprise.machine_policy.default.managed_hooks_only",
+			"enterprise.machine_policy.connectors.claudecode.managed_hooks_only":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // bundleVerifyRestartPrediction is the prediction for a verified bundle on
 // this device, classified against the installed config. For a repeat of the
 // confirmed bundle (already_applied) it also returns config_drift: whether

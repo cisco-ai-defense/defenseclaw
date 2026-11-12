@@ -46,7 +46,7 @@ func TestWindowsEnterprisePurgeWithAccountsWithoutASessionFinishesWithWarnings(t
 	state := codes["per_user_state_remaining"]
 	if strings.Contains(state, "holds a file") ||
 		!strings.Contains(state, `kept the DefenseClaw folder %USERPROFILE%\.defenseclaw of 1 enrolled account(s) whose agent registrations stay`) ||
-		!strings.Contains(state, "/uninstall PURGE=1, both as LocalSystem") ||
+		!strings.Contains(state, windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1")) ||
 		!strings.HasSuffix(state, `Accounts: `+sid+`: C:\Users\dan\.defenseclaw`) {
 		t.Fatalf("kept-folder warning = %q", state)
 	}

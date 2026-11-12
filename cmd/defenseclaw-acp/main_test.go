@@ -76,7 +76,7 @@ func TestManagedGuardStartFailureNamesTheGatewaySetup(t *testing.T) {
 	gateway, want := filepath.Join(dir, "defenseclaw-gateway"), ""
 	if runtime.GOOS == "windows" {
 		gateway = filepath.Join(dir, "defenseclaw.exe")
-		want = "& \"" + gateway + "\" enterprise acp setup --client zed --agent hermes --profile ih3acp"
+		want = "in PowerShell, run " + managed.WindowsCommandLine(gateway, "enterprise", "acp", "setup", "--client", "zed", "--agent", "hermes", "--profile", "ih3acp")
 	} else {
 		want = gateway + " enterprise acp setup --client zed --agent hermes --profile ih3acp"
 	}

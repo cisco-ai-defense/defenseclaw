@@ -13,12 +13,18 @@ import (
 )
 
 // useConfigValidateLayout points config validate at a goos standalone
-// layout under dir; managedHost publishes its runtime descriptor.
+// layout under dir; managedHost publishes its runtime descriptor. A Windows
+// layout starts from testAdministratorPinLayout, whose roots are in the
+// test's temp folder on Windows, so no field names the computer's own
+// deployment (cowork-1-0-8 GAP-0093 review L2).
 func useConfigValidateLayout(t *testing.T, dir, goos string, managedHost bool) managed.StandaloneLayout {
 	t.Helper()
-	layout, err := managed.StandaloneLayoutFor(goos)
+	var layout managed.StandaloneLayout
+	var err error
 	if goos == "windows" {
-		layout, err = managed.StandaloneWindowsLayoutForRoots(`C:\Program Files`, `C:\ProgramData`)
+		layout = testAdministratorPinLayout(t)
+	} else {
+		layout, err = managed.StandaloneLayoutFor(goos)
 	}
 	if err != nil {
 		t.Fatal(err)

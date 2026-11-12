@@ -22,7 +22,11 @@ top-level test's Elapsed there is its wall time (from its run event, or its
 cont event once t.Parallel resumed it, to its pass or fail event) when that
 is longer: go test leaves the parallel subtests out of their parent's
 Elapsed, so a test of parallel subtests weighed almost nothing to the shard
-planner while it held its shard for minutes.
+planner while it held its shard for minutes. A top-level test still running
+when the stream ends (the package -timeout killed it) is written as a fail
+with the wall time it had run until the last event: a refresh then weighs
+the slowest test of a timed-out shard by at least that time, not as an
+unlisted test.
 
 --annotate TITLE prints a GitHub error annotation per failed top-level test
 (at most 20). The exit status is always 0; the caller keeps go test's.
@@ -60,6 +64,7 @@ def main() -> int:
     timings = open(args.timings, "w", encoding="utf-8") if args.timings else None
     buffered: dict[tuple[str, str], list[str]] = {}
     started: dict[tuple[str, str], datetime] = {}
+    last: datetime | None = None
     failed: list[str] = []
     package_failed = False
     try:
@@ -87,6 +92,9 @@ def main() -> int:
                 continue
             package = event.get("Package", "")
             test = event.get("Test")
+            at = _time(event)
+            if at is not None:
+                last = at
             if test is None:
                 if action == "output":
                     out.write(event.get("Output", ""))
@@ -98,10 +106,11 @@ def main() -> int:
                     timings.write(json.dumps({"Action": action, "Package": package, "Elapsed": event.get("Elapsed", 0)}) + "\n")
                 continue
             key = (package, test)
-            if action in ("run", "cont") and "/" not in test:
-                at = _time(event)
-                if at is not None:
-                    started[key] = at
+            if action in ("run", "cont") and "/" not in test and at is not None:
+                started[key] = at
+            elif action in ("pause", "skip"):
+                # A parallel test waits for its turn: that wait is not its time.
+                started.pop(key, None)
             if action == "output":
                 buffered.setdefault(key, []).append(event.get("Output", ""))
             elif action in ("pass", "skip"):
@@ -117,6 +126,11 @@ def main() -> int:
                 if start is not None and end is not None:
                     elapsed = max(elapsed, round((end - start).total_seconds(), 3))
                 record = {"Action": action, "Package": package, "Test": test, "Elapsed": elapsed}
+                timings.write(json.dumps(record) + "\n")
+        if timings is not None and last is not None:
+            for (package, test), start in started.items():
+                elapsed = round((last - start).total_seconds(), 3)
+                record = {"Action": "fail", "Package": package, "Test": test, "Elapsed": elapsed}
                 timings.write(json.dumps(record) + "\n")
     finally:
         if timings is not None:

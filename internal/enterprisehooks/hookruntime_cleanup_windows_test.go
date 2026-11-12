@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -224,5 +225,47 @@ func TestRemoveWindowsStandaloneDeletedAccountSelectorTargets(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(base, "codex", leaf)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("codex %s must be gone once its only entry was a deleted account's: %v", leaf, err)
 		}
+	}
+}
+
+// An administrator link at a per-user connector
+// folder of the hook runtime root, with an enrollment.json behind it, is kept
+// and named by the last step of the teardown. Nothing behind it is read or
+// removed, and the step does not fail the uninstall that already committed. A
+// folder that is no link still goes, and a link at another connector excuses
+// nothing.
+func TestRemoveWindowsStandaloneHookRuntimeDirectoriesKeepsALinkedConnectorFolder(t *testing.T) {
+	root := stubWindowsHookRuntimeRoot(t)
+	windowsManagedPolicyKept.Lock()
+	windowsManagedPolicyKept.paths = map[string]string{}
+	windowsManagedPolicyKept.Unlock()
+	t.Cleanup(func() {
+		windowsManagedPolicyKept.Lock()
+		windowsManagedPolicyKept.paths = map[string]string{}
+		windowsManagedPolicyKept.Unlock()
+	})
+	linked := filepath.Join(root, "copilot")
+	decoy := filepath.Join(linked, windowsPerUserManagedEnrollmentFile)
+	plant(t, decoy, "decoy enrollment behind the link")
+	writeHookRuntimeFile(t, filepath.Join(root, "devin", windowsPerUserManagedEnrollmentLockFile))
+	previousProbe := windowsReparseChainProbe
+	windowsReparseChainProbe = linkProbe(linked)
+	t.Cleanup(func() { windowsReparseChainProbe = previousProbe })
+
+	kept, err := RemoveWindowsStandaloneHookRuntimeDirectories()
+	if err != nil {
+		t.Fatalf("a link at a per-user connector folder failed the cleanup: %v", err)
+	}
+	if !slices.Contains(kept, linked) {
+		t.Fatalf("kept = %v, want the linked copilot folder named", kept)
+	}
+	if body, readErr := os.ReadFile(decoy); readErr != nil || string(body) != "decoy enrollment behind the link" {
+		t.Fatalf("the file behind the link changed: %q %v", body, readErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, "devin")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a folder that is no link and holds only a lock file must still go: %v", statErr)
+	}
+	if got := WindowsManagedPolicyFoldersKept(); !slices.Contains(got, linked) {
+		t.Fatalf("the kept link is not named: %v", got)
 	}
 }

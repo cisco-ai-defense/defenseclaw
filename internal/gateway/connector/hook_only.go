@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -108,6 +109,9 @@ type hookOnlyConnector struct {
 	scriptName  string
 	configPath  func(SetupOpts) string
 	capability  func(SetupOpts) HookCapability
+	// Some hosts identify registrations by an owned top-level key, even
+	// when a later release changes the command stored below it.
+	ownedRegistrationKeyPrefixes []string
 
 	// pluginArtifact connectors are governed by a host-agent plugin FILE
 	// that DefenseClaw writes (and the agent auto-loads) rather than a
@@ -400,11 +404,12 @@ func NewCopilotConnector() *hookOnlyConnector {
 // registration is deterministic and is not duplicated per workspace.
 func NewAntigravityConnector() *hookOnlyConnector {
 	return &hookOnlyConnector{
-		name:        "antigravity",
-		description: "Antigravity (agy) lifecycle hooks with synchronous PreToolUse ask/deny decisions",
-		apiPath:     "/api/v1/antigravity/hook",
-		scriptName:  "antigravity-hook.sh",
-		configPath:  antigravityHooksPath,
+		name:                         "antigravity",
+		description:                  "Antigravity (agy) lifecycle hooks with synchronous PreToolUse ask/deny decisions",
+		apiPath:                      "/api/v1/antigravity/hook",
+		scriptName:                   "antigravity-hook.sh",
+		configPath:                   antigravityHooksPath,
+		ownedRegistrationKeyPrefixes: []string{antigravityOwnedHookKeyPrefix},
 		capability: func(opts SetupOpts) HookCapability {
 			return HookCapability{
 				CanBlock:           true,
@@ -417,6 +422,10 @@ func NewAntigravityConnector() *hookOnlyConnector {
 			}
 		},
 	}
+}
+
+func (c *hookOnlyConnector) orphanedRegistrationKeyPrefixes() []string {
+	return c.ownedRegistrationKeyPrefixes
 }
 
 func (c *hookOnlyConnector) Name() string        { return c.name }
@@ -1082,7 +1091,7 @@ func (c *hookOnlyConnector) checkAgentSettings(opts SetupOpts) error {
 }
 
 // hermesSetupWarningOutput receives Setup's warning about a Hermes release
-// whose TUI runs tools without the hooks (the gateway's log).
+// whose TUI runs tools without the hooks (the gateway's log), and teardown's warning about a kept hook entry that mentions DefenseClaw.
 var hermesSetupWarningOutput io.Writer = os.Stderr
 
 func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
@@ -1129,7 +1138,7 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
-		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
+		return withOwnedFileLock(filepath.Join(opts.DataDir, hermesLifecycleLockName), func() error {
 			// The home an earlier Setup bound the receipts to is released
 			// first, or capturing the configured home fails on a target
 			// mismatch (an upgrade from 1.0.3 on Windows, GAP-0499).
@@ -1234,6 +1243,13 @@ func (c *hookOnlyConnector) migrateDevinConfigTarget(opts SetupOpts, target stri
 func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label string) error {
 	backup, err := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config"))
 	if os.IsNotExist(err) {
+		// Older installations can retain a copy or notice after their
+		// receipt is gone. Keep only state bound to this target.
+		if spec, ok := agentConfigSpecFor(c.name); ok {
+			if err := spec.removeOtherTargetState(opts.DataDir, target); err != nil {
+				return fmt.Errorf("retire previous %s restore state: %w", label, err)
+			}
+		}
 		return nil
 	}
 	if err != nil {
@@ -1252,20 +1268,50 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 		equal = strings.EqualFold(oldPath, newPath)
 	}
 	if equal {
+		// An earlier target's notice can outlive the receipt migration.
+		if spec, ok := agentConfigSpecFor(c.name); ok {
+			if err := spec.removeOtherTargetState(opts.DataDir, target); err != nil {
+				return fmt.Errorf("retire previous %s restore state: %w", label, err)
+			}
+		}
 		return nil
 	}
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", oldPath)
 	if err != nil {
 		return fmt.Errorf("restore previous %s config target: %w", label, err)
 	}
-	if restored {
-		return nil
+	if !restored {
+		if err := c.removeConfigEntries(oldPath, c.hookCommand(opts), opts); err != nil {
+			return fmt.Errorf("remove previous %s hook entries: %w", label, err)
+		}
+		discardManagedFileBackup(opts.DataDir, c.name, "config")
 	}
-	if err := c.removeConfigEntries(oldPath, c.hookCommand(opts), opts); err != nil {
-		return fmt.Errorf("remove previous %s hook entries: %w", label, err)
+	// A kept settings copy and restore notice are bound to the old target.
+	// They must not inform a later setup at the new target.
+	if spec, ok := agentConfigSpecFor(c.name); ok {
+		if err := spec.removeOtherTargetState(opts.DataDir, target); err != nil {
+			return fmt.Errorf("retire previous %s restore state: %w", label, err)
+		}
 	}
-	discardManagedFileBackup(opts.DataDir, c.name, "config")
 	return nil
+}
+
+// ownedHookEntriesPresent reads only the hook entries in the agent config of a
+// connector that registers them there (not a plugin artifact): the part of
+// ownedHookContractPresent that does not run or hash the hook runtime.
+func (c *hookOnlyConnector) ownedHookEntriesPresent(opts SetupOpts) (bool, error) {
+	if c.name == "hermes" {
+		// The config the Hermes of the account reads, or not verified: an
+		// unresolved home, another HERMES_HOME or a named profile. More
+		// than one active config proves nothing either.
+		if _, err := hermesVerifiedConfigPath(opts); err != nil {
+			return false, err
+		}
+		if len(HookConfigPathsForConnector(c, opts)) != 1 {
+			return false, nil
+		}
+	}
+	return ownedHooksPresentInConfig(c, opts)
 }
 
 // ownedHookContractPresent verifies the agent-visible plugin identity for
@@ -1275,22 +1321,13 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 // is present in the installed regular file.
 func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	if !c.pluginArtifact {
-		hermesConfig := ""
-		if c.name == "hermes" {
-			// The config the account's Hermes reads, or not verified: an
-			// unresolved home, another HERMES_HOME or a named profile. More
-			// than one active config proves nothing either.
-			var err error
-			if hermesConfig, err = hermesVerifiedConfigPath(opts); err != nil {
-				return false, err
-			}
-			if len(HookConfigPathsForConnector(c, opts)) != 1 {
-				return false, nil
-			}
-		}
-		present, err := ownedHooksPresentInConfig(c, opts)
+		present, err := c.ownedHookEntriesPresent(opts)
 		if err != nil || !present || c.name != "hermes" {
 			return present, err
+		}
+		hermesConfig, err := hermesVerifiedConfigPath(opts)
+		if err != nil {
+			return false, err
 		}
 		if !hermesRegisteredCommandExecutable(opts, c.hookCommand(opts)) {
 			return false, nil
@@ -1714,6 +1751,13 @@ func validatePluginArtifactDestination(path string) error {
 // validatePluginArtifactDestinationFor also trusts trustedOwnerSID, the
 // per-user target a Windows guardian verifies without that user's token.
 func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
+	// A refusal names what to fix: every refused folder and the one command
+	// (GAP-0730, GAP-0731), not just the first element the walk met.
+	return explainPluginArtifactRefusal(path, checkPluginArtifactDestination(path, trustedOwnerSID))
+}
+
+// checkPluginArtifactDestination is the custody check itself.
+func checkPluginArtifactDestination(path, trustedOwnerSID string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("plugin path must be absolute: %q", path)
 	}
@@ -1736,7 +1780,7 @@ func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
 	if err := hookAPIValidateOwnerFor(path, info, trustedOwnerSID); err != nil {
 		return err
 	}
-	return nil
+	return hookAPIValidatePluginFilePermissions(path, info)
 }
 
 // hookCommand returns the command an agent runs for this connector's hook. On
@@ -1795,7 +1839,7 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
-		if err := withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
+		if err := withOwnedFileLock(filepath.Join(opts.DataDir, hermesLifecycleLockName), func() error {
 			return c.teardown(ctx, opts, configPath)
 		}); err != nil {
 			return err
@@ -2104,7 +2148,7 @@ func hermesHomeHoldsOwnedEntries(configPath, hookScript, command string) (hooks,
 	if err != nil {
 		return false, false, err
 	}
-	hooks = containsHookScript(cfg["hooks"], hookScript)
+	hooks = hermesHooksHoldOwnedEntries(cfg["hooks"], hookScript)
 	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
 	document, err := readHermesAllowlist(allowlistPath)
 	if err != nil {
@@ -2340,8 +2384,8 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 	if err != nil {
 		if os.IsNotExist(err) {
 			if c.name == "hermes" {
-				command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
-				return verifyHermesCleanup(opts, configPath, command)
+				hookScript := c.hookCommand(opts)
+				return verifyHermesCleanup(opts, configPath, hookScript, hermesConfiguredHookCommand(hookScript, opts.HookExecutable))
 			}
 			return c.verifyCursorHookArtifactsClean(opts)
 		}
@@ -2421,14 +2465,17 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 			return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
 		}
 	}
+	if c.name == "hermes" {
+		// Hermes ownership is structural (hermesHookEntryOwned): the file is not
+		// searched for the script name, so a comment or a user command that only
+		// names it does not fail verification.
+		return verifyHermesCleanup(opts, configPath, needle, hermesConfiguredHookCommand(needle, opts.HookExecutable))
+	}
 	if bytes.Contains(data, []byte(needle)) || bytes.Contains(data, []byte(c.scriptName)) ||
 		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityWindowsHookCommand()))) ||
 		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityNonWaitingWindowsHookCommand()))) ||
 		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityStartProcessWindowsHookCommand()))) {
 		return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
-	}
-	if c.name == "hermes" {
-		return verifyHermesCleanup(opts, configPath, hermesConfiguredHookCommand(needle, opts.HookExecutable))
 	}
 	return c.verifyCursorHookArtifactsClean(opts)
 }
@@ -2456,9 +2503,16 @@ func verifyOtherHermesHomesClean(opts SetupOpts, configPath, hookScript string) 
 	return nil
 }
 
-func verifyHermesCleanup(opts SetupOpts, configPath, command string) error {
+func verifyHermesCleanup(opts SetupOpts, configPath, hookScript, command string) error {
 	if err := validateHermesWindowsConfigPath(configPath); err != nil {
 		return err
+	}
+	config, err := readYAMLObject(configPath)
+	if err != nil {
+		return fmt.Errorf("hermes teardown not verified: inspect hook config: %w", err)
+	}
+	if hermesHooksHoldOwnedEntries(config["hooks"], hookScript) {
+		return fmt.Errorf("hermes teardown incomplete: DefenseClaw hook entries remain in %s", configPath)
 	}
 	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
 	if _, err := os.Stat(allowlistPath); err == nil {
@@ -2489,7 +2543,7 @@ func verifyHermesCleanup(opts SetupOpts, configPath, command string) error {
 			// therefore has no disabled state to prove. The lifecycle lock is a
 			// persistent marker: once Setup or Teardown has run, a missing state
 			// remains a cleanup failure instead of being mistaken for fresh state.
-			lockPath := filepath.Join(opts.DataDir, ".hermes-lifecycle.lock")
+			lockPath := filepath.Join(opts.DataDir, hermesLifecycleLockName)
 			if _, lockErr := os.Lstat(lockPath); os.IsNotExist(lockErr) {
 				return nil
 			} else if lockErr != nil {
@@ -2838,11 +2892,13 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 			c.effectiveFailClosed(opts),
 		)
 	case "devin":
-		err = patchDevinHooks(path, hookScript, devinOwnedHookCommands(opts, hookScript)...)
+		err = patchDevinHooksForEvents(path, func(event string) string {
+			return devinHookCommandForEvent(runtime.GOOS, opts, hookScript, event)
+		}, devinOwnedHookCommands(opts, hookScript)...)
 	case "copilot":
 		err = patchCopilotHooksForOS(path, hookScript, c.copilotHookEvents(opts), runtime.GOOS)
 	case "antigravity":
-		err = patchAntigravityHooks(path, hookScript)
+		err = patchAntigravityHooksFor(path, hookScript, runtime.GOOS, opts.ManagedEnterprise)
 	default:
 		err = fmt.Errorf("unknown hook connector %q", c.name)
 	}
@@ -3039,29 +3095,45 @@ const hermesHomeSetUpFileName = "hermes-home-setup.json"
 type hermesHomeSetUp struct {
 	Home    string `json:"home"`
 	SetUpAt string `json:"set_up_at"`
+	// Hooks is what Setup remembers of the entry it wrote on each required
+	// event; the kept-entry notice reads it (hermesHookEntryRecord).
+	Hooks map[string]hermesHookEntryRecord `json:"hooks,omitempty"`
 }
 
-func recordHermesHomeSetUp(dataDir, home string, now time.Time) error {
-	data, err := json.Marshal(hermesHomeSetUp{Home: home, SetUpAt: now.UTC().Format(time.RFC3339)})
+// readHermesSetUpRecord is the record in dataDir, or the zero record when
+// there is none, it is not a regular file of a sane size, or it does not parse.
+func readHermesSetUpRecord(dataDir string) hermesHomeSetUp {
+	var record hermesHomeSetUp
+	path := filepath.Join(dataDir, hermesHomeSetUpFileName)
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
+		return record
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(data, &record) != nil {
+		return hermesHomeSetUp{}
+	}
+	return record
+}
+
+func writeHermesSetUpRecord(dataDir string, record hermesHomeSetUp) error {
+	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
 	return atomicWriteFileNoFollow(filepath.Join(dataDir, hermesHomeSetUpFileName), data, 0o600)
 }
 
+func recordHermesHomeSetUp(dataDir, home string, now time.Time) error {
+	record := readHermesSetUpRecord(dataDir)
+	record.Home, record.SetUpAt = home, now.UTC().Format(time.RFC3339)
+	return writeHermesSetUpRecord(dataDir, record)
+}
+
 // hermesHomeSetUpAt is when Setup last registered the hooks in home, or
 // zero when no readable record names home or its time is in the future.
 func hermesHomeSetUpAt(dataDir, home string) time.Time {
-	path := filepath.Join(dataDir, hermesHomeSetUpFileName)
-	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
-		return time.Time{}
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return time.Time{}
-	}
-	var record hermesHomeSetUp
-	if json.Unmarshal(data, &record) != nil || !sameManagedTarget(record.Home, home) {
+	record := readHermesSetUpRecord(dataDir)
+	if !sameManagedTarget(record.Home, home) {
 		return time.Time{}
 	}
 	at, err := time.Parse(time.RFC3339, record.SetUpAt)
@@ -4313,7 +4385,7 @@ func planHermesAllowlistApprovals(path string, approvals []interface{}, command 
 		_, requiredEvent := events[event]
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, recognized := recognizedCommands[entryCommand]
-		if owned && !recognized && hermesMovedHomeCommand(entryCommand, command) {
+		if owned && !recognized && hermesRelocatedHookCommand(entryCommand, command) {
 			// DefenseClaw's approval from before a true move of the home is
 			// replaced like any historical command (rel-1-0-2 GAP-0642).
 			recognized = true
@@ -4420,7 +4492,7 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup,
 	// ours is DefenseClaw's hook command for this home, or the same hook
 	// script of this install at the home the account had before a move.
 	ours := func(entryCommand string) bool {
-		return entryCommand == command || hermesMovedHomeCommand(entryCommand, command)
+		return entryCommand == command || hermesRelocatedHookCommand(entryCommand, command)
 	}
 	approvals := document["approvals"].([]interface{})
 	kept := make([]interface{}, 0, len(approvals))
@@ -4492,22 +4564,9 @@ func hermesMovedHomeCommand(entryCommand, command string) bool {
 	if runtime.GOOS == "windows" || entryCommand == command {
 		return false
 	}
-	unquote := func(word string) (string, bool) {
-		word = strings.TrimSpace(word)
-		if len(word) >= 2 && strings.HasPrefix(word, "'") && strings.HasSuffix(word, "'") {
-			return word[1 : len(word)-1], true
-		}
-		return word, false
-	}
-	script, quoted := unquote(command)
-	moved, movedQuoted := unquote(entryCommand)
-	if quoted != movedQuoted {
+	script, moved, ok := hermesHookScriptPaths(entryCommand, command)
+	if !ok {
 		return false
-	}
-	for _, p := range []string{script, moved} {
-		if !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsAny(p, "'\x00\r\n") {
-			return false
-		}
 	}
 	home := filepath.Clean(userHomeDir())
 	rel, err := filepath.Rel(home, script)
@@ -4519,9 +4578,145 @@ func hermesMovedHomeCommand(entryCommand, command string) bool {
 	if !filepath.IsAbs(previous) || previous == filepath.Dir(previous) || managedPathWithin(previous, home) || managedPathWithin(home, previous) {
 		return false
 	}
-	if _, err := os.Lstat(moved); err == nil && !defenseClawHookFile(moved) {
+	return hermesScriptAbsentOrDefenseClaws(moved)
+}
+
+// hermesMovedStoreCommand is hermesMovedHomeCommand for a move of the data
+// directory (defenseclaw config set data_dir) instead of the home: the marked
+// approval names the same generated hook script, hooks/hermes-hook.sh, below
+// the data directory the account had before. The move copies the connector
+// records and seals and leaves the old folder and the allowlist as they were,
+// so Setup, repair and teardown read their own earlier approval as a tampered
+// command and refused every run, which left the gateway down after the advised
+// restart (GAP-0914). The root must be one DefenseClaw can show was its data
+// directory: the install home (the default data_dir, which the move list
+// never names) or a folder in the list config set data_dir keeps there, which
+// holds every earlier folder, so a second move, a move into or out of an
+// earlier folder and an earlier folder that was deleted afterwards all work.
+// On top of that the script name sits at the same place below the root, with
+// nothing at that path or a DefenseClaw-generated script there. A marked
+// approval that names a folder that is neither, present or absent, keeps the
+// refusal, as does any other command on a marked entry.
+func hermesMovedStoreCommand(entryCommand, command string) bool {
+	if runtime.GOOS == "windows" || entryCommand == command {
 		return false
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	}
+	script, moved, ok := hermesHookScriptPaths(entryCommand, command)
+	if !ok {
+		return false
+	}
+	tail := string(filepath.Separator) + "hooks" + string(filepath.Separator) + hermesHookScriptName
+	if !strings.HasSuffix(script, tail) || !strings.HasSuffix(moved, tail) || len(moved) == len(tail) {
+		return false
+	}
+	return hermesEarlierDataDir(strings.TrimSuffix(moved, tail)) && hermesScriptAbsentOrDefenseClaws(moved)
+}
+
+// hermesEarlierDataDirsFile is the list config set data_dir keeps in the
+// install home of the folders it moved the stores away from (GAP-0874).
+const (
+	hermesEarlierDataDirsFile  = "previous-data-dirs.json"
+	hermesEarlierDataDirsLimit = 16
+	hermesEarlierDataDirsBytes = 64 * 1024
+)
+
+// hermesEarlierDataDir reports whether root is an install home or a folder the
+// list in an install home names. The install home is ~/.defenseclaw and, when
+// the process has it, DEFENSECLAW_HOME: a process started with its data folder
+// as DEFENSECLAW_HOME is not told where the install home is, so both are read.
+// The list is read the way Python reads it: a regular file only this account
+// can change, in a private folder, not a link, bounded; anything else names
+// nothing.
+func hermesEarlierDataDir(root string) bool {
+	if !filepath.IsAbs(root) {
+		return false
+	}
+	root = filepath.Clean(root)
+	for _, home := range installHomeCandidates() {
+		if root == home || hermesDataDirListed(home, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// installHomeCandidates are the install homes this process can name, each an
+// absolute clean path: ~/.defenseclaw and, when the process has it,
+// DEFENSECLAW_HOME. A process started with its data folder as DEFENSECLAW_HOME
+// is not told where the install home is, so both are read.
+func installHomeCandidates() []string {
+	homes := []string{filepath.Join(userHomeDir(), ".defenseclaw")}
+	if env := strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")); env != "" {
+		homes = append(homes, env)
+	}
+	valid := homes[:0]
+	for _, home := range homes {
+		if filepath.IsAbs(home) && filepath.Clean(home) == home {
+			valid = append(valid, home)
+		}
+	}
+	return valid
+}
+
+func hermesDataDirListed(home, root string) bool {
+	body, ok := readStablePrivateStateFile(home, hermesEarlierDataDirsFile, hermesEarlierDataDirsBytes)
+	if !ok {
+		return false
+	}
+	var document struct {
+		Folders []interface{} `json:"folders"`
+	}
+	if json.Unmarshal(body, &document) != nil {
+		return false
+	}
+	if len(document.Folders) > hermesEarlierDataDirsLimit {
+		document.Folders = document.Folders[:hermesEarlierDataDirsLimit]
+	}
+	for _, raw := range document.Folders {
+		if folder, ok := raw.(string); ok && filepath.IsAbs(folder) && filepath.Clean(folder) == root {
+			return true
+		}
+	}
+	return false
+}
+
+// hermesRelocatedHookCommand reports whether a marked approval names
+// DefenseClaw's hook script of this install at the place it had before a move
+// of the home or of the data directory.
+func hermesRelocatedHookCommand(entryCommand, command string) bool {
+	return hermesMovedHomeCommand(entryCommand, command) || hermesMovedStoreCommand(entryCommand, command)
+}
+
+// hermesHookScriptPaths returns the script paths of command and entryCommand
+// when both are one absolute, clean path in the same shell-word form (bare or
+// single-quoted) with no character that could end the word.
+func hermesHookScriptPaths(entryCommand, command string) (script, moved string, ok bool) {
+	unquote := func(word string) (string, bool) {
+		word = strings.TrimSpace(word)
+		if len(word) >= 2 && strings.HasPrefix(word, "'") && strings.HasSuffix(word, "'") {
+			return word[1 : len(word)-1], true
+		}
+		return word, false
+	}
+	script, quoted := unquote(command)
+	moved, movedQuoted := unquote(entryCommand)
+	if quoted != movedQuoted {
+		return "", "", false
+	}
+	for _, p := range []string{script, moved} {
+		if !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsAny(p, "'\x00\r\n") {
+			return "", "", false
+		}
+	}
+	return script, moved, true
+}
+
+// hermesScriptAbsentOrDefenseClaws is false for a file at path that is not a
+// DefenseClaw-generated hook script, or that cannot be examined.
+func hermesScriptAbsentOrDefenseClaws(path string) bool {
+	if _, err := os.Lstat(path); err == nil {
+		return defenseClawHookFile(path)
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return false
 	}
 	return true
@@ -4538,7 +4733,7 @@ func hermesConfigBackupHoldsOwnedHooks(dataDir, logicalName, path, hookScript st
 	if yaml.Unmarshal(backup.PristineBytes, &cfg) != nil {
 		return false
 	}
-	return containsHookScript(cfg["hooks"], hookScript)
+	return hermesHooksHoldOwnedEntries(cfg["hooks"], hookScript)
 }
 
 // hermesAllowlistHoldsOwnedApprovals reports whether an allowlist document
@@ -4758,19 +4953,32 @@ func patchHermesHooks(path, hookScript, hookExecutable string, setup ...SetupOpt
 	// exact DefenseClaw (event, command) approvals in the vendor allowlist.
 	hookCommand := hermesConfiguredHookCommand(hookScript, hookExecutable)
 	recognizedCommands := hermesRecognizedHookCommands(hookCommand)
+	recordDir := hermesRecordDir(hookScript)
+	var prior hermesHomeSetUp
+	if recordDir != "" {
+		prior = readHermesSetUpRecord(recordDir)
+	}
+	written := map[string]hermesHookEntryRecord{}
+	var keptEvents []string
 	for _, spec := range hermesRequiredHooks {
 		entry := hermesHookEntry(hookCommand, spec.event, spec.matcher, opts)
-		reconciled, reconcileErr := reconcileHermesHookEntries(hooks[spec.event], recognizedCommands, entry)
+		kept := hermesKeptCommands(prior, spec.event, hooks[spec.event], hookScript, recognizedCommands)
+		if len(kept) > 0 {
+			keptEvents = append(keptEvents, spec.event)
+		}
+		reconciled, reconcileErr := reconcileHermesHookEntries(hooks[spec.event], hookScript, recognizedCommands, entry)
 		if reconcileErr != nil {
 			return fmt.Errorf("reconcile Hermes event %s: %w", spec.event, reconcileErr)
 		}
+		command, _ := hermesHookEntryCommand(entry)
+		written[spec.event] = hermesHookEntryRecord{Wrote: hermesWroteWith(prior.Hooks[spec.event], command), Kept: kept}
 		hooks[spec.event] = reconciled
 	}
 	for event, raw := range hooks {
 		if _, required := hermesHookEventSet()[event]; required {
 			continue
 		}
-		reconciled, reconcileErr := removeStaleHermesHookEntries(raw, recognizedCommands)
+		reconciled, reconcileErr := removeStaleHermesHookEntries(raw, hookScript, recognizedCommands)
 		if reconcileErr != nil {
 			return fmt.Errorf("reconcile unexpected Hermes event %s: %w", event, reconcileErr)
 		}
@@ -4784,10 +4992,19 @@ func patchHermesHooks(path, hookScript, hookExecutable string, setup ...SetupOpt
 	if err != nil {
 		return err
 	}
-	if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, data) {
-		return nil
+	if current, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(current, data) {
+		if err := atomicWriteFile(path, data, 0o600); err != nil {
+			return err
+		}
 	}
-	return atomicWriteFile(path, data, 0o600)
+	// Best effort: without the record the notice is not printed.
+	if recordDir != "" {
+		prior.Hooks = written
+		_ = writeHermesSetUpRecord(recordDir, prior)
+	}
+	sort.Strings(keptEvents)
+	warnHermesKeptHookEntries("setup", path, keptEvents)
+	return nil
 }
 
 // marshalTopLevelYAMLFieldPreservingOtherBytes replaces one top-level YAML
@@ -4947,16 +5164,97 @@ func hermesHookEntry(hookCommand, event, matcher string, opts SetupOpts) map[str
 // hermesHookScriptName is the Hermes hook script Setup generates on Unix.
 const hermesHookScriptName = "hermes-hook.sh"
 
-// hermesReplaceableHookCommand reports whether Setup replaces a Hermes hook
-// handler with its own: an exact current or historical DefenseClaw command,
-// or the generated script at an edited path. Hermes hook failures are
-// fail-open, so refusing to repair an edited path left the agent unguarded
-// (GAP-0906). Other commands that only name DefenseClaw stay refused.
-func hermesReplaceableHookCommand(command string, recognizedCommands map[string]struct{}) bool {
+// hermesHookEntryOwned is the one ownership predicate Setup, repair, teardown
+// and verification share for a Hermes hook entry. An entry is DefenseClaw owned
+// only by identity: its command is one of the strings DefenseClaw writes (the
+// recognized commands: the current command and the historical and native
+// launcher forms, compared byte for byte), a plain spelling of the current
+// command (hermesCommandSpellsTheHookScript: another quoting, blanks around it,
+// plain arguments after it), or the generated script at an edited path
+// (GAP-0906). Only the first word of a command is ever unquoted, and only to
+// compare it with the script; a command is never cleaned or searched for a
+// directory, so a user command that mentions or reaches a managed file in
+// some other way belongs to the user: Setup, repair and teardown keep it, and
+// warn (warnHermesKeptHookEntries) only when the Setup record says Setup wrote
+// the entry it replaces. A spelling of the current command is the current
+// entry: kept beside the one Setup adds it would run the hook twice and fail
+// the registration check (GAP-0873).
+func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedCommands map[string]struct{}) bool {
+	command, ok := hermesHookEntryCommand(entry)
+	if !ok {
+		return false
+	}
+	if command == hookScript || command == shellWord(hookScript) {
+		return true
+	}
 	if _, recognized := recognizedCommands[command]; recognized {
 		return true
 	}
-	return editedDefenseClawHookCommand(command, hermesHookScriptName)
+	if hermesCommandSpellsTheHookScript(command, hookScript) {
+		return true
+	}
+	// The generated script at an edited path. Its matchers trim blanks, which
+	// would claim a command Setup did not write, so a command with a blank at
+	// either end is the user's.
+	return command == strings.TrimSpace(command) &&
+		editedDefenseClawHookCommand(command, hookScriptBaseName(hookScript))
+}
+
+// hermesCommandSpellsTheHookScript reports whether command runs the generated
+// script hookScript by a plain spelling: its first shell word, quoted with
+// single or double quotes or not at all, with blanks around the command or
+// inside the quotes, names exactly hookScript, and whatever follows is plain
+// words (letters, digits and / . _ - + = : , @ % between blanks). A word
+// outside that set, anywhere, means the command does more than run the script
+// (a second command, a redirection, an expansion), so it is the user's. The
+// Python registration checks apply the same test (hermes_command_written in
+// cli/defenseclaw/hook_integrity.py). Windows registers native launcher
+// commands and has no script to spell.
+func hermesCommandSpellsTheHookScript(command, hookScript string) bool {
+	if runtime.GOOS == "windows" || hookScript == "" || isNativeHookCommand(hookScript) {
+		return false
+	}
+	text := strings.Trim(command, " \t")
+	var word strings.Builder
+	i := 0
+scan:
+	for i < len(text) {
+		switch c := text[i]; {
+		case c == ' ' || c == '\t':
+			break scan
+		case c == '\'':
+			end := strings.IndexByte(text[i+1:], '\'')
+			if end < 0 {
+				return false
+			}
+			word.WriteString(text[i+1 : i+1+end])
+			i += end + 2
+		case c == '"':
+			end := strings.IndexByte(text[i+1:], '"')
+			if end < 0 || strings.ContainsAny(text[i+1:i+1+end], "$`\\!") {
+				return false
+			}
+			word.WriteString(text[i+1 : i+1+end])
+			i += end + 2
+		case strings.HasPrefix(text[i:], `\'`):
+			word.WriteByte('\'')
+			i += 2
+		case !posixShellUnsafeRune(rune(c)):
+			word.WriteByte(c)
+			i++
+		default:
+			return false
+		}
+	}
+	if strings.Trim(word.String(), " \t") != hookScript {
+		return false
+	}
+	for _, r := range text[i:] {
+		if r != ' ' && r != '\t' && posixShellUnsafeRune(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func hermesRecognizedHookCommands(current string) map[string]struct{} {
@@ -4981,11 +5279,6 @@ func hermesHookEntryCommand(raw interface{}) (string, bool) {
 	return command, ok
 }
 
-func hermesCommandClaimsDefenseClaw(command string) bool {
-	command = strings.ToLower(strings.TrimSpace(command))
-	return strings.Contains(command, "--connector hermes") || strings.Contains(command, "hermes-hook.sh")
-}
-
 func hermesHookList(raw interface{}) ([]interface{}, error) {
 	switch value := raw.(type) {
 	case nil:
@@ -5002,6 +5295,7 @@ func hermesHookList(raw interface{}) ([]interface{}, error) {
 
 func reconcileHermesHookEntries(
 	raw interface{},
+	hookScript string,
 	recognizedCommands map[string]struct{},
 	expected map[string]interface{},
 ) ([]interface{}, error) {
@@ -5012,16 +5306,12 @@ func reconcileHermesHookEntries(
 	out := make([]interface{}, 0, len(list)+1)
 	replaced := false
 	for _, item := range list {
-		command, hasCommand := hermesHookEntryCommand(item)
-		if hermesReplaceableHookCommand(command, recognizedCommands) {
+		if hermesHookEntryOwned(item, hookScript, recognizedCommands) {
 			if !replaced {
 				out = append(out, expected)
 				replaced = true
 			}
 			continue
-		}
-		if hasCommand && hermesCommandClaimsDefenseClaw(command) {
-			return nil, fmt.Errorf("handler has a tampered DefenseClaw command; refusing non-exact repair")
 		}
 		out = append(out, item)
 	}
@@ -5033,6 +5323,7 @@ func reconcileHermesHookEntries(
 
 func removeStaleHermesHookEntries(
 	raw interface{},
+	hookScript string,
 	recognizedCommands map[string]struct{},
 ) ([]interface{}, error) {
 	list, err := hermesHookList(raw)
@@ -5041,19 +5332,26 @@ func removeStaleHermesHookEntries(
 	}
 	out := make([]interface{}, 0, len(list))
 	for _, item := range list {
-		command, hasCommand := hermesHookEntryCommand(item)
-		if hermesReplaceableHookCommand(command, recognizedCommands) {
+		if hermesHookEntryOwned(item, hookScript, recognizedCommands) {
 			continue
-		}
-		if hasCommand && hermesCommandClaimsDefenseClaw(command) {
-			return nil, fmt.Errorf("handler has a tampered DefenseClaw command; refusing non-exact repair")
 		}
 		out = append(out, item)
 	}
 	return out, nil
 }
 
-func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error {
+func removeHermesHooks(path, hookScript string, backup *managedFileBackup) (err error) {
+	// The record of the entries Setup wrote goes with them, once the file is done.
+	prior := hermesHomeSetUp{}
+	if recordDir := hermesRecordDir(hookScript); recordDir != "" {
+		prior = readHermesSetUpRecord(recordDir)
+		defer func() {
+			if err == nil && prior.Hooks != nil {
+				prior.Hooks = nil
+				_ = writeHermesSetUpRecord(recordDir, prior)
+			}
+		}()
+	}
 	if backup != nil {
 		if err := validateHermesManagedBackupPristine(backup); err != nil {
 			return err
@@ -5076,6 +5374,7 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 		hooks[event] = removeOwnedFlatHooks(raw, hookScript)
 	}
 	pruneEmptyMapArrays(hooks)
+	warnHermesKeptHookEntries("teardown", path, hermesRecordedKeptEvents(prior, hooks, hookScript, hermesRecognizedHookCommands(hermesConfiguredHookCommand(hookScript, ""))))
 	// DefenseClaw owns entries in the hooks mapping only: every other byte of
 	// config.yaml (Hermes' commented template, the user's settings and their
 	// order and quoting) stays as it is. A hooks field that Setup added to a
@@ -5255,7 +5554,7 @@ func patchCursorHooksLocked(path, stateDir, hookScript, legacyShellScript string
 		return err
 	}
 	return withFileLock(path, func() error {
-		return atomicTransformFileWithStateDir(path, stateDir, 0o600, func(data []byte, _ bool) (atomicTransformResult, error) {
+		return atomicTransformFileWithStateDir(path, stateDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			cfg, err := decodeJSONObject(path, data)
 			if err != nil {
 				return atomicTransformResult{}, err
@@ -5265,7 +5564,9 @@ func patchCursorHooksLocked(path, stateDir, hookScript, legacyShellScript string
 			if err != nil {
 				return atomicTransformResult{}, err
 			}
-			return atomicTransformResult{Data: append(out, '\n')}, nil
+			out = append(out, '\n')
+			noteManagedSetupTransform(path, data, exists, out)
+			return atomicTransformResult{Data: out}, nil
 		})
 	})
 }
@@ -5413,15 +5714,17 @@ func (c *hookOnlyConnector) cursorRuntimePath(opts SetupOpts) string {
 	return filepath.Join(opts.DataDir, "hooks", name)
 }
 
+// cursorManagedHookCommands are the commands setup replaces. The Windows
+// adapter command's pre-1.0.9 render (a profile like C:\Users\O’Brien, whose
+// typographic quote those releases did not double) is DefenseClaw's too, so
+// setup rewrites it instead of adding a second entry (g072 review 4 M1).
 func cursorManagedHookCommands(hookScript, legacyShellScript string) []string {
-	return uniqueNonEmptyStrings(append(
-		[]string{
-			hookScript,
-			legacyShellScript,
-			hookInvocationCommandFor("windows", "cursor", legacyShellScript),
-		},
-		legacyCursorNativeHookCommands()...,
-	))
+	commands := []string{hookScript, legacyShellScript}
+	if runtime.GOOS == "windows" {
+		commands = appendWithPreTypographicQuoteForm(commands, hookScript)
+	}
+	commands = appendWithPreTypographicQuoteForm(commands, hookInvocationCommandFor("windows", "cursor", legacyShellScript))
+	return uniqueNonEmptyStrings(append(commands, legacyCursorNativeHookCommands()...))
 }
 
 // replaceManagedCursorHooks drops DefenseClaw's entries, including one whose
@@ -5440,15 +5743,12 @@ func replaceManagedCursorHooks(
 	return append(out, entry)
 }
 
+// cursorOwnedHookCommands are the commands teardown removes, the Windows
+// adapter command's pre-1.0.9 render included (g072 review 4 M1).
 func cursorOwnedHookCommands(opts SetupOpts) []string {
 	portableScript := filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh")
-	return uniqueNonEmptyStrings(append(
-		[]string{
-			portableScript,
-			hookInvocationCommandFor("windows", "cursor", portableScript),
-		},
-		legacyCursorNativeHookCommands()...,
-	))
+	commands := appendWithPreTypographicQuoteForm([]string{portableScript}, hookInvocationCommandFor("windows", "cursor", portableScript))
+	return uniqueNonEmptyStrings(append(commands, legacyCursorNativeHookCommands()...))
 }
 
 // legacyCursorNativeHookCommands returns only direct-native command strings
@@ -5646,7 +5946,7 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 		// A previous DefenseClaw adapter may have been deleted along with
 		// its data directory. Its event-bound command still identifies it.
 		if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-			adapter := strings.ReplaceAll(binding[1], "''", "'")
+			adapter := powershellLiteralValue(binding[1])
 			if _, err := os.Lstat(adapter); errors.Is(err, os.ErrNotExist) {
 				return true
 			}
@@ -5697,7 +5997,7 @@ func copilotMarkedAdapterCommand(command string) bool {
 	if len(binding) != 3 || !ValidCopilotHookEvent(binding[2]) {
 		return false
 	}
-	adapter := strings.ReplaceAll(binding[1], "''", "'")
+	adapter := powershellLiteralValue(binding[1])
 	body, err := safefile.ReadRegularFileBounded(adapter, 1<<20)
 	if err != nil {
 		return false
@@ -5746,8 +6046,10 @@ func copilotLiveOperatorLookalike(raw interface{}, hookScript string) bool {
 			continue
 		}
 		if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-			adapter := strings.ReplaceAll(binding[1], "''", "'")
-			current := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'")
+			adapter := powershellLiteralValue(binding[1])
+			// Both sides decoded: the registered body doubles every PowerShell
+			// single quote (g072 review 3 N5).
+			current := powershellLiteralValue(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(hookScript), "& '"), "'"))
 			if !strings.EqualFold(adapter, current) && !copilotMarkedAdapterCommand(command) {
 				if info, err := os.Lstat(adapter); err == nil && info.Mode().IsRegular() {
 					return true
@@ -5915,7 +6217,7 @@ func copilotPowerShellCommandClaimsHandler(raw interface{}, adapter string) bool
 					lowered := strings.ToLower(command)
 					missingAdapter := false
 					if binding := copilotPowerShellAdapterBinding.FindStringSubmatch(strings.TrimSpace(command)); len(binding) == 3 {
-						path := strings.ReplaceAll(binding[1], "''", "'")
+						path := powershellLiteralValue(binding[1])
 						_, err := os.Lstat(path)
 						missingAdapter = errors.Is(err, os.ErrNotExist)
 					}
@@ -5992,11 +6294,18 @@ func antigravityOwnedHookCommands(hookScript string) []string {
 func antigravityOwnedHookCommandsForOS(goos, hookScript string) []string {
 	commands := []string{hookScript}
 	for _, event := range antigravityLifecycleEvents {
-		command := antigravityHookInvocationCommandForEvent(goos, event, hookScript)
-		commands = append(commands, command)
-		// The 1.0.x render of the Windows bridge stays owned for teardown.
-		if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
-			commands = append(commands, legacy)
+		forms := []string{antigravityHookInvocationCommandForEvent(goos, event, hookScript)}
+		if goos == "windows" {
+			// The bridge releases before 1.0.9 rendered, without the
+			// launcher-start answer (rel-1-0-6 GAP-0676).
+			forms = append(forms, windowsNativePowerShellHookCommandForEvent("antigravity", event, defenseclawHookBinary()))
+		}
+		for _, command := range forms {
+			commands = append(commands, command)
+			// The 1.0.x render of the Windows bridge stays owned for teardown.
+			if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+				commands = append(commands, legacy)
+			}
 		}
 	}
 	return uniqueNonEmptyStrings(commands)
@@ -6036,6 +6345,12 @@ func patchAntigravityHooks(path, hookScript string) error {
 }
 
 func patchAntigravityHooksForOS(path, hookScript, goos string) error {
+	return patchAntigravityHooksFor(path, hookScript, goos, false)
+}
+
+// patchAntigravityHooksFor is patchAntigravityHooksForOS for a per-user or a
+// managed install (antigravityHookCommandForEvent).
+func patchAntigravityHooksFor(path, hookScript, goos string, managed bool) error {
 	if goos != "windows" && strings.IndexFunc(hookScript, unicode.IsSpace) >= 0 {
 		// Antigravity splits the command on whitespace and runs it directly.
 		// Shell metacharacters and Unicode letters do not need shell quoting.
@@ -6045,20 +6360,21 @@ func patchAntigravityHooksForOS(path, hookScript, goos string) error {
 	if err != nil {
 		return err
 	}
-	for key, value := range antigravityOwnedHookKeys(goos, hookScript) {
+	for key, value := range antigravityOwnedHookKeys(goos, hookScript, managed) {
 		cfg[key] = value
 	}
 	return writeJSONObject(path, cfg)
 }
 
 // antigravityOwnedHookKeys renders the outer keys DefenseClaw owns in
-// Antigravity's hooks.json, one per lifecycle event.
-func antigravityOwnedHookKeys(goos, hookScript string) map[string]interface{} {
+// Antigravity's hooks.json, one per lifecycle event, for a per-user or a
+// managed install.
+func antigravityOwnedHookKeys(goos, hookScript string, managed bool) map[string]interface{} {
 	keys := make(map[string]interface{}, len(antigravityLifecycleEvents))
 	for _, event := range antigravityLifecycleEvents {
 		handler := map[string]interface{}{
 			"type":    "command",
-			"command": antigravityHookInvocationCommandForEvent(goos, event, hookScript),
+			"command": antigravityHookCommandForEvent(goos, event, hookScript, managed),
 			"timeout": 30,
 		}
 		var handlers []interface{}
@@ -6373,14 +6689,30 @@ func removeHookScriptReferences(raw interface{}, hookScripts ...string) interfac
 func removeOwnedFlatHooks(raw interface{}, hookScript string) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list))
-	edited := hookScriptBaseName(hookScript)
+	recognized := hermesRecognizedHookCommands(hermesConfiguredHookCommand(hookScript, ""))
 	for _, item := range list {
-		if containsHookScript(item, hookScript) || editedDefenseClawHookEntry(item, edited) {
+		if hermesHookEntryOwned(item, hookScript, recognized) {
 			continue
 		}
 		out = append(out, item)
 	}
 	return out
+}
+
+// hermesHooksHoldOwnedEntries reports whether a Hermes hooks mapping holds an
+// entry DefenseClaw owns (hermesHookEntryOwned).
+func hermesHooksHoldOwnedEntries(raw interface{}, hookScript string) bool {
+	hooks, _ := raw.(map[string]interface{})
+	recognized := hermesRecognizedHookCommands(hermesConfiguredHookCommand(hookScript, ""))
+	for _, event := range hooks {
+		entries, _ := hermesHookList(event)
+		for _, entry := range entries {
+			if hermesHookEntryOwned(entry, hookScript, recognized) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pruneNewlyEmptyHookEntries removes only containers emptied by removing an

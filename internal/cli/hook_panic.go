@@ -27,11 +27,26 @@ func hookPanicExit(args []string, recovered any) int {
 	if len(args) > 0 && args[0] == "notify" {
 		return 0
 	}
+	managed := hookPanicManagedFlag(args)
 	return hookexec.HookPanicExit(hookexec.Options{
 		Connector:         strings.ToLower(strings.TrimSpace(hookPanicFlagValue(args, "--connector"))),
 		Event:             hookPanicFlagValue(args, "--event"),
-		ManagedEnterprise: hookPanicManagedFlag(args),
+		ManagedEnterprise: managed,
+		SecureClient:      managed && hookPanicSecureClientHost(),
 	}, recovered)
+}
+
+// hookPanicSecureClientHost is the hook's Secure Client host check
+// (secureClientHost, as armHookAnswerWatchdog uses it), for the block
+// sentence of a managed panic (GAP-0074). A check that panics itself counts
+// as a Secure Client host, so that host's sentence never changes.
+func hookPanicSecureClientHost() (secureClient bool) {
+	defer func() {
+		if recover() != nil {
+			secureClient = true
+		}
+	}()
+	return secureClientHost()
 }
 
 func hookPanicFlagValue(args []string, flag string) string {

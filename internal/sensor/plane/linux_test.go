@@ -33,6 +33,27 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// bufferedSources are the host sensor sources Linux builds, each with the
+// buffer its Coverage counts (TestEverySourceNamesItsBufferDropsInCoverage).
+func bufferedSources() map[string]func() (Source, *Buffer) {
+	return map[string]func() (Source, *Buffer){
+		"native": func() (Source, *Buffer) {
+			source := NewSource(nil).(*linuxSource)
+			return source, source.buffer
+		},
+		"tetragon stream": func() (Source, *Buffer) {
+			stream := NewTetragonSource(nil, TetragonOptions{Mode: "consume"}).(*tetragonSource)
+			return stream, stream.buffer
+		},
+		"tetragon native process half": func() (Source, *Buffer) {
+			stream := NewTetragonSource(nil, TetragonOptions{Mode: "consume"}).(*tetragonSource)
+			half := NewSource(nil).(*linuxSource)
+			stream.proc = halfSource{linuxSource: half, cancel: func() {}}
+			return stream, half.buffer
+		},
+	}
+}
+
 // TestLinuxParsesProcNetStatSafely pins the field-offset hazard: a process can
 // name itself "a) 1 2 3 (b", and a naive split on whitespace would then read
 // ppid and the CPU counters from the wrong offsets.

@@ -479,7 +479,7 @@ func (a *APIServer) serveUserScoped(
 	}
 	r, release := a.admitHookCaller(w, r, identity, route)
 	if release == nil {
-		if hookCallerLeft(r) {
+		if hookCallerLeft(r) || hookCallerShed(r) {
 			a.recordUserScopedCallerGone(w, r, identity, mark)
 		}
 		return

@@ -531,7 +531,8 @@ func (m *Manager) stopForAlarm(name, bindingID string, kind audit.SandboxFinding
 	if kind == audit.SandboxFindingHookSilence {
 		what = "silent hooks"
 	}
-	ctx, cancel := context.WithTimeout(WithEmergencyStop(context.Background(), what), defaultOpTimeout)
+	ctx, cancel := context.WithTimeout(context.WithValue(WithEmergencyStop(context.Background(), what),
+		hookAlarmStopKindKey{}, kind), defaultOpTimeout)
 	defer cancel()
 	b, unlock, err := m.lockBox(name)
 	if err != nil {
@@ -552,6 +553,17 @@ func (m *Manager) stopForAlarm(name, bindingID string, kind audit.SandboxFinding
 		return
 	}
 	m.logf("%s: stopped %s", what, name)
+}
+
+// hookAlarmStopKindKey carries the stable cause into the lifecycle record.
+type hookAlarmStopKindKey struct{}
+
+func hookAlarmStopCondition(ctx context.Context) *audit.SandboxCondition {
+	kind, _ := ctx.Value(hookAlarmStopKindKey{}).(audit.SandboxFindingKind)
+	if kind != audit.SandboxFindingHookSilence && kind != audit.SandboxFindingHookTamper {
+		return nil
+	}
+	return &audit.SandboxCondition{Type: "SecurityAlarm", Status: "True", Reason: string(kind)}
 }
 
 // pruneToolCalls drops the tool-call ledgers of bindings no sandbox holds

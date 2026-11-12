@@ -46,7 +46,11 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 	}
 	exact := ownedHookCommandNeedles(opts, conn)
 	scripts := ownedHookScriptPaths(conn, opts)
-	if len(exact) == 0 && len(scripts) == 0 {
+	var registrationPrefixes []string
+	if owner, ok := conn.(interface{ orphanedRegistrationKeyPrefixes() []string }); ok {
+		registrationPrefixes = owner.orphanedRegistrationKeyPrefixes()
+	}
+	if len(exact) == 0 && len(scripts) == 0 && len(registrationPrefixes) == 0 {
 		return found, nil
 	}
 	paths := HookConfigPathsForConnector(conn, opts)
@@ -68,11 +72,30 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 		if decoded == nil {
 			continue
 		}
-		if structuredHookCommandReferences(decoded, exact) || hookCommandRunsScript(decoded, scripts) {
+		if structuredHookCommandReferences(decoded, exact) || hookCommandRunsScript(decoded, scripts) ||
+			ownedRegistrationKeyPresent(decoded, registrationPrefixes) {
 			found = append(found, path)
 		}
 	}
 	return found, nil
+}
+
+// ownedRegistrationKeyPresent checks only the host's registration namespace.
+// Commands below those keys can change across releases without losing the
+// ownership signal used by rollback cleanup.
+func ownedRegistrationKeyPresent(decoded interface{}, prefixes []string) bool {
+	config, ok := decoded.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for key := range config {
+		for _, prefix := range prefixes {
+			if prefix != "" && strings.HasPrefix(key, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // maxOrphanedPluginBytes bounds the read of a managed plugin, as Teardown's.

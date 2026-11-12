@@ -17,7 +17,10 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from defenseclaw import winquote
+from defenseclaw.commands import cmd_acp
 from defenseclaw.commands.cmd_acp import acp_cmd, setup_repair_command
+from defenseclaw.winquote import powershell_command_line, powershell_literal_value, split_windows_words
 
 from tests.helpers import cleanup_app
 from tests.test_acp_verify_guard_parity_r105 import _setup
@@ -92,5 +95,58 @@ def test_managed_standalone_repair_names_the_enterprise_setup_the_user_can_run(t
             "--api-port", "18970", "--guard-binary", guard,
         ]), command
         assert "--managed" not in command
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+class _WindowsOs:
+    """cmd_acp's view of os on Windows: os.name is "nt", the rest is this host's."""
+
+    name = "nt"
+
+    def __getattr__(self, attribute: str):
+        return getattr(os, attribute)
+
+
+@pytest.mark.parametrize("quote", ["'", "\u2018", "\u2019", "\u201a", "\u201b"])
+def test_managed_standalone_repair_on_windows_is_one_powershell_line(tmp_path, monkeypatch, quote):
+    """g072 review 3 M2: the managed Windows ACP setup command parses under a profile like O\u2019Brien.
+
+    It was built by hand: only the apostrophe was doubled, so the
+    ``--data-dir`` literal ended at the typographic quote, and verify said
+    "run & '...'" without naming PowerShell.
+    """
+    base = tmp_path / f"O{quote}Brien"
+    base.mkdir()
+    app, data_dir, db_path, settings, guard, _agent, _lock = _setup(base, monkeypatch)
+    try:
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.gateway.api_port = 18970
+        monkeypatch.setattr(cmd_acp, "os", _WindowsOs())
+        monkeypatch.setattr(winquote, "os", _WindowsOs())
+        command = setup_repair_command(app.cfg, "zed", "kiro", data_dir)
+        gateway = str(Path(guard).with_name("defenseclaw-gateway"))
+        args = [
+            "enterprise", "acp", "setup", "--client", "zed", "--agent", "kiro",
+            "--profile", app.cfg.acp.profile_for_pair("zed", "kiro"), "--data-dir", data_dir,
+            "--api-port", "18970", "--guard-binary", guard,
+        ]
+        assert command == powershell_command_line(gateway, *args), command
+        assert quote * 2 in command
+        words = split_windows_words(command)
+        assert words[0] == "&"
+        assert [powershell_literal_value(word[1:-1]) if word[:1] == "'" else word for word in words[1:]] == [
+            gateway,
+            *args,
+        ]
+
+        document = json.loads(settings.read_text())
+        document["agent_servers"]["DefenseClaw \u00b7 Kiro"]["env"] = {"LD_PRELOAD": "/tmp/x.so"}
+        settings.write_text(json.dumps(document))
+        result = CliRunner().invoke(
+            acp_cmd, ["verify", "--client", "zed", "--agent", "kiro", "--runtime-data-dir", data_dir], obj=app
+        )
+        assert result.exit_code != 0, result.output
+        assert f"in PowerShell, run {command}" in " ".join(result.output.split()), result.output
     finally:
         cleanup_app(app, db_path, data_dir)

@@ -48,8 +48,16 @@ $DefenseClaw = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
 
 Run these as root on Linux and macOS, and from an elevated prompt on Windows, so
 every check can read the protected files. On Windows the lifecycle runs on
-PowerShell 7, which must be installed; you can start `defenseclaw.exe` from any
-shell.
+PowerShell 7, which must be installed; you can start the CLI from any shell by its
+full path.
+
+On managed Linux and macOS, the packaged `defenseclaw` launcher gives each
+account its own connector status and sandbox views. It runs only the commands in
+[Managed command availability](/docs/enterprise/managed-commands), and refuses `doctor`,
+`alerts` and `tui` even when root invokes that launcher. Administrators use
+the installed gateway's `enterprise linux status` or `enterprise macos status`,
+`verify`, and `audit export` commands shown here for deployment health and
+events.
 
 | Result of `verify` | Linux and macOS | Windows |
 | --- | --- | --- |
@@ -57,11 +65,11 @@ shell.
 | A check failed | `1` | `1603` |
 | Invalid arguments | `2` | `1639` |
 
-On Windows, a misspelled flag (such as `--bogus`) on an `enterprise windows` lifecycle command, for example `enterprise windows status` or `verify`, exits `1639`, like an argument the lifecycle rejects (`--profile bogus`). It prints `unknown flag` and the usage, or with `--json` one result whose only error is `invalid_arguments`. 1.0.4 and earlier exit `1` for an unknown flag. Other commands keep their own code: another `enterprise` command (`enterprise policy show --bogus`) exits `1`, and the rest of `defenseclaw.exe` (`defenseclaw.exe --bogus`) exits `2` with the usage line.
+On Windows, a misspelled flag (such as `--bogus`) on an `enterprise windows` lifecycle command, for example `enterprise windows status` or `verify`, exits `1639`, like an argument the lifecycle rejects (`--profile bogus`). It prints `unknown flag` and the usage, or with `--json` one result whose only error is `invalid_arguments`. 1.0.4 and earlier exit `1` for an unknown flag. Other commands keep their own code: another `enterprise` command (`enterprise policy show --bogus`) exits `1`, and the rest of `defenseclaw.exe` (`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' --bogus`) exits `2` with the usage line.
 
 On Linux and macOS, `verify` skips its checks and exits `75` with `lifecycle_busy` while another lifecycle run is in progress; run it again. On Windows it fails (`1603`) while another run's transaction is pending. `verify` also runs on a schedule: daily on Linux (`defenseclaw-enterprise-verify.timer`) and macOS (`com.cisco.defenseclaw.verify`), and from your MDM on Windows (for example `detect.ps1 -RequireHealthy`).
 
-A pending agent install scan is a warning, not a failure: when the enumerator's record of unprotected agents is missing or more than 16 minutes old (for example right after a fresh install or an upgrade), `status` and `verify` show one `agent_install_scan_incomplete` warning that starts `NOT COVERED (scan pending)` and gives the record's age, and set `coverage_complete` and `security_complete` to `false`. The warning alone does not fail `verify`; every other failure, including an agent the old record lists that fails `verify`, still does. `defenseclaw doctor` run as root shows the same warning. The scan runs every five minutes; to run one now, restart the enumerator (`sudo systemctl restart defenseclaw-hook-enumerator.service`, `sudo launchctl kickstart -k system/com.cisco.defenseclaw.hook-enumerator`, or `Restart-Service DefenseClawHookEnumerator`).
+A pending agent install scan is a warning, not a failure: when the enumerator's record of unprotected agents is missing, more than 16 minutes old, or (on Linux and macOS) from a different configuration generation, `status` and `verify` show one `agent_install_scan_incomplete` warning that starts `NOT COVERED (scan pending)` and set `coverage_complete` and `security_complete` to `false`. This can follow a fresh install, upgrade, or connector change. The warning alone does not fail `verify`; every other failure, including an agent the old record lists that fails `verify`, still does. The scan runs every five minutes; to run one now, restart the enumerator (`sudo systemctl restart defenseclaw-hook-enumerator.service`, `sudo launchctl kickstart -k system/com.cisco.defenseclaw.hook-enumerator`, or `Restart-Service DefenseClawHookEnumerator`).
 
 ### Verify waits and schedules
 
@@ -121,12 +129,15 @@ inside `/Users` or `/var/root`. On macOS a folder in `/tmp` is scanned. See
 [Linux](/docs/enterprise/linux#scan-skills-mcp-servers-and-plugins) and
 [macOS](/docs/enterprise/macos#scan-skills-mcp-servers-and-plugins).
 
-On managed Windows, use `defenseclaw enterprise windows status --profile standalone --json`
-from an elevated administrator prompt. The `enrollment.accounts` field lists each
-account's connectors and their enrolled, pending or failed state.
-`enterprise hooks status` is the Linux and macOS guardian view.
+On managed Windows, run this from an elevated PowerShell prompt (Setup puts no
+DefenseClaw command on `PATH`, so it names the installed CLI by its path). The
+`enrollment.accounts` field lists each account's connectors and their enrolled,
+pending or failed state. `enterprise hooks status` is the Linux and macOS guardian
+view.
 
-On managed Windows, read `enrollment.accounts` in `defenseclaw enterprise windows status --profile standalone --json` from an elevated prompt.
+```powershell title="Elevated PowerShell prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone --json
+```
 
 ### Audit fields on a standalone host
 
@@ -554,7 +565,7 @@ A file event starts a guardian pass at once, and the pass watches every protecte
 
 To find the account, read `warnings[]` in `status --json` or `verify --json`: each
 `guardian_target_user_path` and `guardian_target_failed` entry names the user, the
-connector and the reason. As root, `defenseclaw-gateway enterprise hooks status --json`
+connector and the reason. As root, `/opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks status --json` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS)
 lists every user and connector with its state.
 
 ### When a user breaks their own setup (Linux and macOS)
@@ -781,7 +792,7 @@ To forward records to a SIEM, add `observability.destinations` to the managed co
 you deploy. Destination kinds include OTLP, Splunk HEC, HTTP JSONL and JSONL files;
 see [Observability](/docs/observability). `enterprise <os> status` and `verify` warn
 when an optional destination is failing. For the destination name, circuit state, last
-failure code and rejected count, run `defenseclaw-gateway status` on the managed host
+failure code and rejected count, run `/opt/defenseclaw/bin/defenseclaw-gateway status` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway status` on macOS, `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' status` on Windows) on the managed host
 or read its loopback `/health` `telemetry.details.destinations` object. A failed
 optional destination does not stop the local audit store or sibling destinations.
 `no_space` means a JSONL file destination's volume is full; free space there and let
@@ -854,10 +865,10 @@ You are an AI agent working for an administrator, on an admin workstation or a t
 2. Check the candidate file before anything is installed.
 
    ```bash
-   defenseclaw-gateway config validate ./config.yaml
+   "$PAYLOAD/defenseclaw-gateway" config validate ./config.yaml
    ```
 
-   Expected: no error, and the previous config stays in force either way. The CLI is not installed on a managed host; run this where the gateway binary is, or from the unpacked release archive.
+   Expected: no error, and the previous config stays in force either way. `$PAYLOAD` is the folder of the unpacked release archive. On a host that already has the package, run the installed gateway instead: `/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS. It is not on the `PATH`.
    If it prints an error: report the setting it names and the profile; do not guess a value (`config_invalid` in [Enterprise troubleshooting](/docs/enterprise/troubleshooting)).
 
 3. Show the administrator the config and the artifact name and SHA-256 you will use. Ask: "Run ensure on this host?" Continue only on yes.

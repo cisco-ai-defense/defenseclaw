@@ -58,9 +58,12 @@ type aiRuntimeResponse struct {
 	HostPlaneContainerEvents int64 `json:"host_plane_container_events,omitempty"`
 	// HostPlaneHookUnexpected counts processes under a verified DefenseClaw
 	// hook that are not its own tools.
-	HostPlaneHookUnexpected int64    `json:"host_plane_hook_unexpected,omitempty"`
-	Degraded                bool     `json:"degraded"`
-	DegradedReasons         []string `json:"degraded_reasons,omitempty"`
+	HostPlaneHookUnexpected int64 `json:"host_plane_hook_unexpected,omitempty"`
+	// HostPlaneClientExecs counts the attributed Claude client exec events
+	// by image digest state, and the ones recorded (sensor.Snapshot).
+	HostPlaneClientExecs map[string]int64 `json:"host_plane_client_execs,omitempty"`
+	Degraded             bool             `json:"degraded"`
+	DegradedReasons      []string         `json:"degraded_reasons,omitempty"`
 	// CustomerKernelEvents are the latest events of the host's own Tetragon
 	// policies below an AI agent (at most 100, oldest first), attributed to
 	// the agent, its user and the hook decision of the tool call. Absent
@@ -335,6 +338,7 @@ func renderAIRuntimeSnapshot(snapshot sensor.Snapshot) aiRuntimeResponse {
 		HostPlaneGated:           snapshot.HostPlaneGated,
 		HostPlaneContainerEvents: snapshot.HostPlaneContainerEvents,
 		HostPlaneHookUnexpected:  snapshot.HostPlaneHookUnexpected,
+		HostPlaneClientExecs:     snapshot.HostPlaneClientExecs,
 		Degraded:                 snapshot.Degraded,
 	}
 	if !snapshot.ScannedAt.IsZero() {

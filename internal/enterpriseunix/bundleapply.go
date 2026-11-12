@@ -78,9 +78,13 @@ const (
 	bundleFileSuffix     = ".dcbundle"
 	// maxInboxFiles bounds how many inbox files one run looks at.
 	maxInboxFiles = 16
-	// bundleApplyCommand is how an administrator applies a bundle.
-	bundleApplyCommand = "defenseclaw-gateway enterprise bundle apply --bundle <file>"
 )
+
+// bundleApplyCommand is how an administrator applies a bundle, by the
+// gateway's absolute path.
+func (e *Env) bundleApplyCommand() string {
+	return e.gatewayCommand("enterprise bundle apply --bundle <file>")
+}
 
 // bundleRun is the bundle one run applies.
 type bundleRun struct {
@@ -408,7 +412,7 @@ func (l *lifecycle) prepareBundleMode(ctx context.Context, record *Deployment, s
 		if err != nil || current == nil || !bytes.Equal(given, current) {
 			r.AddError(codeBundleRequired, fmt.Sprintf(
 				"this device takes its policy from signed bundles (a trust anchor file is installed at %s), so --config is not applied; deliver a signed bundle with `%s`",
-				filepath.Join(env.Layout.ConfigDir, "trust", enterprisebundle.AnchorsName), bundleApplyCommand))
+				filepath.Join(env.Layout.ConfigDir, "trust", enterprisebundle.AnchorsName), env.bundleApplyCommand()))
 			return stop()
 		}
 	}
@@ -721,7 +725,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 				// This repeated delivery has not earned that result block.
 				r.Bundle = nil
 				r.AddError(codeBundleNotConfirmed, fmt.Sprintf(
-					"the repeated policy bundle is installed, but the gateway has not confirmed its effective policy; check `defenseclaw-gateway enterprise bundle status`, then resubmit the same signed bundle with `%s`", bundleApplyCommand))
+					"the repeated policy bundle is installed, but the gateway has not confirmed its effective policy; check `%s`, then resubmit the same signed bundle with `%s`", env.gatewayCommand("enterprise bundle status"), env.bundleApplyCommand()))
 				return code
 			}
 		}

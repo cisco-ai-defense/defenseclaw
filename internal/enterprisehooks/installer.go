@@ -32,6 +32,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
+// installOwnedHooksPresent is the registration read-back used during Install.
+// Tests supply both execution-probe capabilities without depending on the
+// host's user namespace setting.
+var installOwnedHooksPresent = connector.OwnedHooksPresentForPendingInstall
+
+// A lock writer may report an error after its atomic publication. Tests
+// exercise that outcome without changing the on-disk writer.
+var installSaveHookContractLockEntry = connector.SaveHookContractLockEntryForMode
+
 // InstallOptions describes one explicit enterprise hook install/repair target.
 //
 // The gateway service itself is deliberately sandboxed away from user homes in
@@ -109,6 +118,19 @@ type InstallOptions struct {
 	// WindowsTargetLogon selects the logon a Windows install acts under for
 	// the target's user. The zero value is the user's active session.
 	WindowsTargetLogon WindowsTargetLogon
+	// OpenCodeServicePort is the guardian's SID-keyed port assignment for a
+	// managed Windows OpenCode target. Zero leaves other installs untouched.
+	OpenCodeServicePort int
+	// OpenCodeServicePortRequired refuses a managed Windows OpenCode install
+	// when the guardian could not assign that account a port.
+	OpenCodeServicePortRequired bool
+	// AcceptPriorReleaseRender makes a Windows Verify accept the render an
+	// earlier release wrote of a hook bridge (the Constrained Language
+	// fallback end that exited 0 when the launcher never started) as current,
+	// and change nothing else. The standalone guardian sets it on a second,
+	// read-only verify of a signed-out account's target to prove that the
+	// only difference is the earlier release's render (GAP-0980).
+	AcceptPriorReleaseRender bool
 }
 
 // WindowsTargetLogon is the logon whose token a Windows install impersonates.
@@ -166,30 +188,32 @@ func RemoveManagedPolicy(ctx context.Context, opts InstallOptions) error {
 	return platformRemoveManagedPolicy(ctx, opts)
 }
 
-// Verify validates one explicit enterprise hook target without repairing or
-// otherwise mutating its native configuration, runtime files, or authorization
-// state. Callers can use the returned InstallResult-shaped inventory alongside
-// Install results without maintaining a second artifact schema.
-func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
-	if result, handled, err := platformVerify(ctx, opts); handled {
-		return result, err
-	}
-	if errEnterpriseHooksUnsupportedWindows != nil {
-		return InstallResult{}, errEnterpriseHooksUnsupportedWindows
-	}
-	if err := refuseStandaloneRootInProcess("verify"); err != nil {
-		return InstallResult{}, err
+// verifyTarget is one explicit enterprise hook target resolved the way Verify
+// checks it: its home and owner, its data folder, its connector and the setup
+// options the installed hooks are compared with.
+type verifyTarget struct {
+	home, dataDir string
+	uid, gid      int
+	conn          connector.Connector
+	setupOpts     connector.SetupOpts
+}
+
+// newVerifyTarget resolves opts for operation, which names it in the refusal
+// of a standalone root process. It reads and changes nothing.
+func newVerifyTarget(opts InstallOptions, operation string) (verifyTarget, error) {
+	if err := refuseStandaloneRootInProcess(operation); err != nil {
+		return verifyTarget{}, err
 	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {
-		return InstallResult{}, err
+		return verifyTarget{}, err
 	}
 	uid, gid, err := resolveOwner(home, opts.OwnerUID, opts.OwnerGID)
 	if err != nil {
-		return InstallResult{}, err
+		return verifyTarget{}, err
 	}
 	if err := validateHomeOwner(home, uid); err != nil {
-		return InstallResult{}, err
+		return verifyTarget{}, err
 	}
 	dataDir := strings.TrimSpace(opts.DataDir)
 	if dataDir == "" {
@@ -197,13 +221,13 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	}
 	dataDir, err = filepath.Abs(dataDir)
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
 	}
 	if err := validateUserDataDir(home, dataDir, uid); err != nil {
-		return InstallResult{}, err
+		return verifyTarget{}, err
 	}
 	if err := verifyOwnedDataDirModes(home, dataDir, uid); err != nil {
-		return InstallResult{}, err
+		return verifyTarget{}, err
 	}
 
 	reg := opts.Registry
@@ -212,20 +236,20 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	}
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
 	if name == "" {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: connector is required")
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: connector is required")
 	}
 	conn, ok := reg.Get(name)
 	if !ok {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: unknown connector %q", name)
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: unknown connector %q", name)
 	}
 	if connector.IsProxyConnector(conn.Name()) {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q is proxy/plugin setup-only; per-user hook verification is not supported", conn.Name())
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: connector %q is proxy/plugin setup-only; per-user hook verification is not supported", conn.Name())
 	}
 	if !connector.OwnsManagedHookRuntime(conn) {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q does not own a managed hook runtime", conn.Name())
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: connector %q does not own a managed hook runtime", conn.Name())
 	}
 	if !connector.ConnectorSupportedOnHostOS(conn.Name()) {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q is not supported on this host OS", conn.Name())
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: connector %q is not supported on this host OS", conn.Name())
 	}
 
 	setupOpts := connector.SetupOpts{
@@ -270,6 +294,25 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		setupOpts.HookContractID = defaultHookContractID(resolveHookContract(conn.Name(), setupOpts.AgentVersion))
 	}
 
+	return verifyTarget{home: home, dataDir: dataDir, uid: uid, gid: gid, conn: conn, setupOpts: setupOpts}, nil
+}
+
+// Verify validates one explicit enterprise hook target without repairing or
+// otherwise mutating its native configuration, runtime files, or authorization
+// state. Callers can use the returned InstallResult-shaped inventory alongside
+// Install results without maintaining a second artifact schema.
+func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	if result, handled, err := platformVerify(ctx, opts); handled {
+		return result, err
+	}
+	if errEnterpriseHooksUnsupportedWindows != nil {
+		return InstallResult{}, errEnterpriseHooksUnsupportedWindows
+	}
+	target, err := newVerifyTarget(opts, "verify")
+	if err != nil {
+		return InstallResult{}, err
+	}
+	home, dataDir, uid, gid, conn, setupOpts := target.home, target.dataDir, target.uid, target.gid, target.conn, target.setupOpts
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
 		// As root, before the euid drop: no agent policy child starts inside
@@ -644,22 +687,11 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			defer unlock()
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
-			lockWriteAttempted := false
 			var beforeSetup dataDirSnapshot
 			var beforeHookConfigs hookConfigSnapshot
+			var beforeToken *connector.HookAPITokenInstallSnapshot
 			rollback := func(cause error) error {
 				failures := []error{cause}
-				if lockWriteAttempted {
-					var lockErr error
-					if strings.TrimSpace(previousLockEntry.Connector) == "" {
-						lockErr = connector.ClearHookContractLockEntry(dataDir, conn.Name())
-					} else {
-						lockErr = connector.SaveHookContractLockEntry(dataDir, previousLockEntry)
-					}
-					if lockErr != nil {
-						failures = append(failures, fmt.Errorf("enterprise hooks: restore previous hook contract lock: %w", lockErr))
-					}
-				}
 				// A Secure Client macOS target that was protected keeps its
 				// hooks on a failed repair (keepProtectedHooksOnRepairFailure);
 				// the standalone profile keeps its rollback.
@@ -678,11 +710,19 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				// Setup that failed on an unparseable config, whose
 				// teardown fails the same way).
 				if teardownErr == nil || beforeHookConfigs.unchanged() {
-					if residueErr := beforeSetup.removeAdded(); residueErr != nil {
+					if tokenErr := beforeToken.RestoreIfPublished(); tokenErr != nil {
+						failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback token restore failed: %w", conn.Name(), tokenErr))
+					} else if residueErr := beforeSetup.removeAdded(); residueErr != nil {
 						failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback left files in %s: %w", conn.Name(), dataDir, residueErr))
 					}
 				}
 				return errors.Join(failures...)
+			}
+			if requiresScopedHookToken && !secureClient {
+				beforeToken, err = connector.SnapshotHookAPITokenForInstall(dataDir, conn.Name(), setupOpts.HookAPIToken)
+				if err != nil {
+					return fmt.Errorf("enterprise hooks: snapshot connector-scoped hook token: %w", err)
+				}
 			}
 			// A rollback removes what Setup adds below the data directory
 			// (GAP-0509).
@@ -702,6 +742,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 					// It registered nothing, so no teardown: one would take
 					// back a previous install's registration and the shims
 					// every connector shares. The files it added go.
+					if tokenErr := beforeToken.RestoreIfPublished(); tokenErr != nil {
+						return errors.Join(cause, fmt.Errorf("enterprise hooks: connector %s rollback token restore failed: %w", conn.Name(), tokenErr))
+					}
 					if residueErr := beforeSetup.removeAdded(); residueErr != nil {
 						return errors.Join(cause, fmt.Errorf("enterprise hooks: connector %s rollback left files in %s: %w", conn.Name(), dataDir, residueErr))
 					}
@@ -717,13 +760,6 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			// Setup found the folders made above already there, so it did
 			// not record them for its teardown.
 			connector.RecordHookConfigParentDirs(conn.Name(), dataDir, createdHookConfigParents)
-			present, err := connector.OwnedHooksPresent(conn, setupOpts)
-			if err != nil {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
-			}
-			if !present {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts)))
-			}
 			if path, driftErr := connector.ManagedPluginArtifactDrift(conn, setupOpts); driftErr != nil {
 				return rollback(fmt.Errorf("enterprise hooks: inspect connector %s plugin %s: %w", conn.Name(), path, driftErr))
 			} else if path != "" {
@@ -741,9 +777,15 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if err != nil {
 				return rollback(fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err))
 			}
-			lockWriteAttempted = true
-			if err := connector.SaveHookContractLockEntryForMode(dataDir, lockEntry, strictManagedRuntime); err != nil {
-				return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
+			// Some hosts cannot run a contained Hermes execution probe. Use the
+			// digest rendered in this transaction for read-back, without making
+			// it visible to ordinary readers before registration is verified.
+			present, err := installOwnedHooksPresent(conn, setupOpts, lockEntry)
+			if err != nil {
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
+			}
+			if !present {
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts)))
 			}
 
 			if err := hardenInstallFootprint(
@@ -767,6 +809,24 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				if err := publishEnterpriseHookAPIToken(dataDir, conn.Name(), setupOpts.HookAPIToken); err != nil {
 					return rollback(fmt.Errorf("enterprise hooks: publish connector-scoped hook token: %w", err))
 				}
+			}
+			// Publish the lock after every fallible registration and hardening
+			// check. A rejected install leaves peer lock metadata unchanged.
+			lockPath := filepath.Join(dataDir, "hook_contract_lock.json")
+			beforeLock, beforeLockErr := os.Stat(lockPath)
+			if err := installSaveHookContractLockEntry(dataDir, lockEntry, strictManagedRuntime); err != nil {
+				cause := fmt.Errorf("enterprise hooks: save hook contract lock: %w", err)
+				afterLock, afterLockErr := os.Stat(lockPath)
+				// Both writers replace the lock atomically. If the file identity
+				// did not change, the failed save never published, so ordinary
+				// rollback can restore the previous registration. Otherwise a
+				// writer may have published before reporting a durability error:
+				// retain the verified registration for that visible lock.
+				if (errors.Is(beforeLockErr, os.ErrNotExist) && errors.Is(afterLockErr, os.ErrNotExist)) ||
+					(beforeLockErr == nil && afterLockErr == nil && os.SameFile(beforeLock, afterLock)) {
+					return rollback(cause)
+				}
+				return cause
 			}
 			clearProtectedHookRepairFailure(dataDir, conn.Name())
 			result = InstallResult{

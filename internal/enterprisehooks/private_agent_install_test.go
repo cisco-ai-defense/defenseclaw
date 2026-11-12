@@ -6,6 +6,23 @@ import (
 	"unicode/utf8"
 )
 
+func TestUnprotectedRecordCarriesConfigGeneration(t *testing.T) {
+	legacy, err := MarshalUnprotectedAgents(nil)
+	if err != nil || UnprotectedAgentsRecordConfigGeneration(legacy) != 0 {
+		t.Fatalf("legacy record config generation = %d, %v", UnprotectedAgentsRecordConfigGeneration(legacy), err)
+	}
+	if UnprotectedAgentsRecordConfigSHA256(legacy) != "" {
+		t.Fatalf("legacy record config digest = %q", UnprotectedAgentsRecordConfigSHA256(legacy))
+	}
+	current, err := MarshalUnprotectedAgentsForConfig(nil, 7, "abc123")
+	if err != nil || UnprotectedAgentsRecordConfigGeneration(current) != 7 || UnprotectedAgentsRecordConfigSHA256(current) != "abc123" {
+		t.Fatalf("current record config generation = %d digest = %q, %v", UnprotectedAgentsRecordConfigGeneration(current), UnprotectedAgentsRecordConfigSHA256(current), err)
+	}
+	if _, err := ParseUnprotectedAgents(current); err != nil {
+		t.Fatalf("current record is unreadable: %v", err)
+	}
+}
+
 func TestUnprotectedAgentRecordKeepsDistinctPrivateCopies(t *testing.T) {
 	agents := []UnprotectedAgent{
 		{User: "alice", Connector: "claudecode", Version: "2.0.77", InstallPath: "/home/alice/old-a/node_modules/@anthropic-ai/claude-code", Code: UnprotectedCodeHookContractUnverified, Reason: "old copy"},

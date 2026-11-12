@@ -648,7 +648,7 @@ func TestWindowsBundleRepairChangesNothingWhenTheBundleStoreCannotRestore(t *tes
 		t.Fatalf("the failed restore changed config.yaml (read %v)", err)
 	}
 	// The drift is real: the permission repair on its own fixes it.
-	if repairWindowsEnterpriseHookRuntimeAccess() == "" || len(repaired) != 1 || repaired[0] != runtimeDir {
+	if change, refusal := repairWindowsEnterpriseHookRuntimeAccessOrRefuse(); change == "" || refusal != "" || len(repaired) != 1 || repaired[0] != runtimeDir {
 		t.Fatalf("the drifted hook runtime folder was not repairable: %q", repaired)
 	}
 }
@@ -757,7 +757,7 @@ func TestWindowsBundleRollbackRecordsTheLastGoodBundleAgain(t *testing.T) {
 				return windowsServiceConfigValidation{}, nil
 			}
 			opts := windowsBundleRestoreOptions()
-			opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", ""
+			opts.gatewayBinary, opts.acpBinary, opts.hookBinary, opts.hookGuardBinary, opts.sensorHelperBinary, opts.policyCompiler = "", "", "", "", "", ""
 			opts.noStart, opts.resolvedInstaller = false, `C:\stage\install-enterprise.ps1`
 			cmd, _ := windowsBundleCommand()
 			run := &windowsBundleRun{ctx: ctx, layout: host.layout, driver: newWindowsBundleDriver(host.layout),

@@ -178,7 +178,7 @@ func StateTreeHasName(root, pattern string, fold bool) string {
 			continue
 		}
 		found := false
-		walkErr := filepath.WalkDir(filepath.Join(root, entry.Name()), func(_ string, item fs.DirEntry, err error) error {
+		walkErr := pathWalkDir(filepath.Join(root, entry.Name()), func(_ string, item fs.DirEntry, err error) error {
 			seen++
 			if err != nil || seen > activeStateNameWalkLimit || match(item.Name()) {
 				found = true

@@ -280,16 +280,21 @@ def apply(
     *,
     path: str | os.PathLike[str] | None = None,
     timeout_s: float = DEFAULT_LOCK_TIMEOUT_S,
+    check_candidate: Callable[[str, bytes], None] | None = None,
 ) -> WriteResult:
     """Apply ``changes`` to config.yaml (``path`` defaults to the active
     config) under the writer lock and return the new generation. Comments
-    and key order are kept. When nothing changes, nothing is written."""
+    and key order are kept. When nothing changes, nothing is written.
+    ``check_candidate`` inspects the final candidate under the writer lock."""
 
     def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
         return _patch(current, changes, source_name)
 
     decided = [change.path for change in changes]
-    return write_with(mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s, decided=decided)
+    return write_with(
+        mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s,
+        decided=decided, check_candidate=check_candidate,
+    )
 
 
 def replace_document(
@@ -327,6 +332,7 @@ def write_with(
     verify: Callable[[str], None] | None = None,
     decided: Iterable[str] = (),
     as_is: bool = False,
+    check_candidate: Callable[[str, bytes], None] | None = None,
 ) -> WriteResult:
     """Run one writer transaction: ``mutate(current_bytes, path)`` returns
     the candidate bytes and the changed paths. ``Config.save`` uses it to
@@ -334,14 +340,18 @@ def write_with(
     commit, still under the lock; when it raises, the previous bytes are
     restored (as a new generation) and the error re-raised. *decided* names
     the config keys the caller chose, also with an unchanged value; unless
-    *as_is*, the candidate passes :func:`_keep_chosen_admission`."""
+    *as_is*, the candidate passes :func:`_keep_chosen_admission`.
+    ``check_candidate`` runs after schema validation and before the write."""
 
     if not str(actor or "").strip():
         raise ConfigWriteError("a config writer actor is required")
     target = _resolve(path)
     refuse_when_managed(target, actor)
     with hold_lock(target, timeout_s=timeout_s):
-        return _transact(target, mutate, actor, reason, expect_sha256, verify, None if as_is else list(decided))
+        return _transact(
+            target, mutate, actor, reason, expect_sha256, verify,
+            None if as_is else list(decided), check_candidate,
+        )
 
 
 _held = threading.local()
@@ -391,6 +401,7 @@ def _transact(
     expect_sha256: str | None,
     verify: Callable[[str], None] | None,
     decided: list[str] | None,
+    check_candidate: Callable[[str, bytes], None] | None,
 ) -> WriteResult:
     current, mode, exists = _read_current(target)
     digest = hashlib.sha256(current).hexdigest()
@@ -408,6 +419,16 @@ def _transact(
             verify(target)
         return WriteResult(_current_generation(target), digest, [], [])
     validate_candidate(target, candidate)
+    if check_candidate is not None:
+        check_candidate(target, candidate)
+    if decided is not None:
+        # Every ordinary write that turns protection on is judged here, whatever
+        # check the caller also supplies, so no command can save a roster the
+        # gateway refuses to boot (GAP-0588). A migration or restore (as_is)
+        # writes the bytes it was given.
+        from defenseclaw.guardrail_roster import check_guardrail_activation
+
+        check_guardrail_activation(target, candidate)
     # A hand edit does not take config.yaml.lock. Recheck the exact source
     # bytes after validation before installing the candidate.
     latest, _, latest_exists = _read_current(target)
@@ -885,6 +906,13 @@ def pack_pin_repair(message: str, *, files_digest: str = "<files digest>") -> st
 
 
 def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -> str:
+    """:func:`_plain_error_text` plus the advice the gateway check attached (GAP-0099)."""
+    text = _plain_error_text(exc, value=value, directory=directory)
+    note = getattr(exc.__cause__, "note", "") or getattr(exc, "note", "")
+    return text + note if isinstance(note, str) and note and note not in text else text
+
+
+def _plain_error_text(exc: BaseException, *, value: Any = None, directory: str = "") -> str:
     """A refused change in plain words: the key and what to do about it.
 
     The validators report a JSON path, a bracketed error code and pointers to

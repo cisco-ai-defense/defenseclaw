@@ -341,12 +341,20 @@ type Options struct {
 	// for this call found it held. The answer rendered from it with no home
 	// (the watchdog's prepared answer) still names the install (GAP-2440).
 	installWindowSeen bool
+	// lateOrdinaryOpen is set once lateOrdinaryLook proved this per-user
+	// call ordinary under an open outage tier (noAnswerFailMode).
+	lateOrdinaryOpen bool
 	// managedOutageOpen is set on a standalone hook outside Secure Client
 	// for a failure that ManagedOutageFailsOpen lets through (the gateway is
 	// not running, was still restarting, or gave no answer). Only such a
 	// failure takes the administrator's open; every other failure is closed
 	// (managedNonOutageMode, bounded review P1).
 	managedOutageOpen bool
+	// lateOrdinary, when set, scans the call for a path a protected file
+	// could be reached through (lateOrdinaryCheck). A per-user call that a
+	// verified gateway took and did not answer by the deadline follows the
+	// outage mode when it is ordinary (GAP-0518); it stays closed otherwise.
+	lateOrdinary func() bool
 	// perUserOutage is set on a per-user hook for a failure that is a gateway
 	// outage (withPerUserOutage): this account's gateway refused or dropped
 	// the connection, gave no connection within the restart budget, or could
@@ -462,6 +470,13 @@ type Options struct {
 	// not "gateway unreachable". The Windows standalone hook sets it; Secure
 	// Client keeps its message.
 	ExplainUnenrolledAccount bool
+	// ManagedEnrolledPending marks a Windows standalone refusal of an account
+	// that was enrolled and is pending now (managedEnrollmentPendingReason: its
+	// guardian runtime is revoked, and a disconnected or signed-out session
+	// keeps it so): the refusal then says the agent is blocked until the
+	// account signs in (GAP-1026). A never-enrolled account keeps the
+	// enrollment wait text (GAP-1010). The CLI sets it.
+	ManagedEnrolledPending bool
 	// ManagedGatewayServiceName is the administrator-protected SCM identity
 	// that must own the connected loopback listener before any HTTP bytes are
 	// written. It is ignored outside ManagedEnterprise mode.
@@ -611,6 +626,15 @@ func runHook(ctx context.Context, opts Options) int {
 		resolveManagedStandaloneFailureEvent(&opts, sp)
 		if opts.ExplainUnenrolledAccount && !sp.failOpenOnly &&
 			(reason == managedSIDUnregisteredReason || reason == managedEnrollmentPendingReason) {
+			// While the gateway service is proven stopped nothing enrolls
+			// an account, so the wait text is wrong for a new account and for
+			// an excluded one (its exclusion is read from the gateway). The
+			// call is refused, closed, with the outage text an enrolled
+			// account gets (GAP-1010). Such a failure resolved no gateway
+			// service, so the stopped test reads the standalone one.
+			if stoppedOpts := withStandaloneGatewayService(opts); managedGatewayProvenStopped(stoppedOpts) {
+				return failUnreachable(stoppedOpts, sp, "closed", managedGatewayNotRunningReason)
+			}
 			return failEnrollmentRefusal(opts, sp, reason)
 		}
 		return failUnreachable(
@@ -990,6 +1014,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// take time after Run, leaving a healthy gateway only a fraction of the
 	// configured answer budget. The early watchdog still caps the whole call.
 	opts.requestFacts = &hookRequestFacts{}
+	opts.lateOrdinary = lateOrdinaryCheck(opts, payload)
 	if opts.ManagedEnterprise && !opts.SecureClient {
 		opts.requestFacts.set(make(http.Header), opts, payload)
 	}
@@ -1030,7 +1055,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		retry := retryingAfterOutage
 		var check *perUserPeerCheck
 		onConnect := func() {
-			if retry {
+			if retry || opts.ManagedEnterprise {
 				opts.answerWatch.noDecisionPending()
 			}
 			// A gateway that only just started and has not answered any
@@ -1038,7 +1063,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// the outage mode, as the shell hook does (GAP-0295).
 			opts.answerWatch.restartWindowContact(opts, sp, failMode, check)
 		}
-		tryCtx, release := connectBy(ctx, connectDeadline, onConnect)
+		tryCtx, release := connectBy(withPerUserGatewayHomes(ctx, func() []string { return perUserRecordHomes(opts) }), connectDeadline, onConnect)
 		check, _ = tryCtx.Value(perUserPeerCheckKey{}).(*perUserPeerCheck)
 		releases = append(releases, release)
 		resp, err := sendHookRequest(tryCtx, opts, sp, payload, token)
@@ -1057,6 +1082,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 	}
 	resp, err := send()
+	if opts.ManagedEnterprise {
+		opts.answerWatch.managedOutageSeen(opts, sp, failMode, err)
+	}
 	if !opts.ManagedEnterprise {
 		retryingAfterOutage = perUserOutageError(opts, err)
 		// A first try the gateway refused or dropped met an outage: from now
@@ -1096,6 +1124,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			resp, err = nil, cause
 			break
 		}
+		opts.answerWatch.managedOutageSeen(opts, sp, failMode, err)
 	}
 	if errors.Is(err, errInvalidHookRequest) {
 		return failResponse(opts, sp, nonOutageFailMode(opts, failMode), err.Error())
@@ -1103,6 +1132,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// A managed Windows hook starts the installer-owned gateway after the
 	// restart budget; a per-user hook started its own gateway above.
 	if err != nil && opts.ManagedEnterprise && opts.GatewayRecovery != nil && connectionRefused(err) {
+		// The service watch is for a call a stopping gateway took: this one
+		// reached none, and the start reads the service as stopped until it
+		// runs (GAP-0648 review F3). The answer deadline still bounds it.
+		stopWatch()
 		if recoveryErr := opts.GatewayRecovery(ctx, err); recoveryErr == nil && ctx.Err() == nil {
 			// The initial request proved no listener was present. Recovery verifies
 			// and starts the exact installer-owned gateway, including authenticated
@@ -1194,7 +1227,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return failResponse(opts, sp, nonOutageFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", http.StatusUnauthorized))
+			return failGatewayUnauthorized(opts, sp, nonOutageFailMode(opts, failMode), payload)
 		case <-timer.C:
 		}
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
@@ -1254,6 +1287,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// is a gateway service that is not running (see
 			// managedPeerFailMode).
 			return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
+		}
+		if errors.Is(err, errPerUserListenerUnanswered) && !opts.ManagedEnterprise {
+			return failPerUserListenerUnanswered(opts, sp, failMode)
 		}
 		if errors.Is(err, errPerUserPeerUnverified) {
 			// A deadline on the peer check is a local verification failure,
@@ -1375,19 +1411,54 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			opts.Event = resolveHookEvent("", payload)
 		}
 		return failEnrollmentRefusal(opts, sp, managedRootDeniedReason)
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case resp.StatusCode == http.StatusUnauthorized:
+		// An authentication refusal is integrity, not an outage. A Windows
+		// standalone account meets it in its first minutes (GAP-0722).
+		return failGatewayUnauthorized(opts, sp, answeredFailMode, payload)
+	case resp.StatusCode == http.StatusForbidden:
 		// An authentication refusal is integrity, not an outage.
 		return failResponse(opts, sp, answeredFailMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		return failResponse(opts, sp, answeredFailMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 
+	if delivery == nil {
+		// The answer is complete: release the connection before the targets
+		// are read again, so the reading is the last step before the answer.
+		_ = resp.Body.Close()
+	}
+	patchWatch := opts.requestFacts.watch()
+	if patchWatch != nil && !gatewayBlocked(body) && patchWatch.Changed() {
+		// The gateway judged the patch targets the hook read before the
+		// request; one leads elsewhere now. Behind ProtectHome only this hook
+		// can read it again (GAP-0488, GAP-0073). A block answer is not
+		// replaced: it already stops the call and names the rule, and a
+		// target that is itself a protected file reads as changed here
+		// (GAP-1007).
+		return failResponse(opts, sp, "closed", "a patch target changed after DefenseClaw reviewed it")
+	}
 	code := sp.decide(opts, body)
-	if opts.oversizedReview && validUniqueGatewayResponse(body) {
-		var verdict struct {
-			Action string `json:"action"`
+	if code == 0 && patchWatch != nil && gatewayAllowed(body) {
+		// The allow is written to the agent by the answer watchdog after this
+		// returns, or already is; the agent reads it only when this hook
+		// exits. Read the targets once more after the write and revoke the
+		// allow (a failure exit and a block answer) when one changed.
+		revoke := func(stdout, stderr io.Writer) (int, bool) {
+			if !patchWatch.Changed() {
+				return 0, false
+			}
+			revoked := opts
+			revoked.answerWatch, revoked.Stdout, revoked.Stderr = nil, stdout, stderr
+			return failResponse(revoked, sp, "closed", "a patch target changed while DefenseClaw answered"), true
 		}
-		if json.Unmarshal(body, &verdict) == nil && (verdict.Action == "allow" || verdict.Action == "alert") {
+		if opts.answerWatch != nil {
+			opts.answerWatch.setRevoke(revoke)
+		} else if revoked, ok := revoke(opts.Stdout, opts.Stderr); ok {
+			code = revoked
+		}
+	}
+	if opts.oversizedReview && validUniqueGatewayResponse(body) {
+		if gatewayAllowed(body) {
 			quiet := opts
 			quiet.Stderr = io.Discard
 			logHookFailure(quiet, sp, "stdin body exceeded cap; oversize, command not inspected", "transport", "open", false)
@@ -1398,7 +1469,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
 			// finish calls this only after it writes the answer to the agent.
 			// The receipt shares the managed process deadline with the answer.
-			// A late healthy verdict still reaches the agent before this wait.
+			// On a managed call outside Secure Client a verdict read after
+			// that deadline never reaches the agent: the watchdog's closed
+			// answer does (lateAnswerDue).
 			stopAnswer()
 			if answered {
 				receiptWait := hookDeliveryReceiptTimeout
@@ -1408,7 +1481,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 				if receiptWait < 0 {
 					receiptWait = 0
 				}
-				receiptTimer := time.AfterFunc(receiptWait, requestCancel)
+				// The receipt transport outlives the answer context for a
+				// watchdog token. Bound a normal confirmation with its own
+				// timer as well.
+				receiptTimer := time.AfterFunc(receiptWait, delivery.close)
 				defer receiptTimer.Stop()
 				if delivery.acknowledge(localBlock) == nil {
 					// Keep the request alive until HTTP has carried the receipt
@@ -1428,6 +1504,42 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		*requestHandedOff = true
 	}
 	return code
+}
+
+// gatewayAction reads the action of a gateway answer the way decide does: the
+// exact key "action", trimmed and lower-cased. ambiguous is set when the body
+// is not a unique-key JSON object or carries another key that differs from
+// "action" only in case; such a body is never taken as a block here, so no
+// protected-target check is skipped on a reading the decision does not share.
+func gatewayAction(body []byte) (action string, ambiguous bool) {
+	if !validUniqueGatewayResponse(body) {
+		return "", true
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil {
+		return "", true
+	}
+	for key := range fields {
+		if key != "action" && strings.EqualFold(key, "action") {
+			ambiguous = true
+		}
+	}
+	action, _ = rawString(fields, "action")
+	return action, ambiguous
+}
+
+// gatewayBlocked reports a gateway answer whose one unambiguous action is a
+// block. Any other action (allow, alert, confirm, none) can let the call run.
+func gatewayBlocked(body []byte) bool {
+	action, ambiguous := gatewayAction(body)
+	return !ambiguous && action == "block"
+}
+
+// gatewayAllowed reports a gateway answer whose action, as decide reads it,
+// lets the call run.
+func gatewayAllowed(body []byte) bool {
+	action, _ := gatewayAction(body)
+	return action == "allow" || action == "alert"
 }
 
 // failAfterErrorStatus fails a call the gateway answered with the error
@@ -1660,21 +1772,48 @@ func sendHookRequest(
 		req.Header.Set("tracestate", v)
 	}
 	opts.requestFacts.set(req.Header, opts, payload)
+	requestClient := opts.HTTPClient
 	var delivery *hookDeliveryRequest
 	if wantsHookDeliveryReceipt(opts) {
-		gatewayStarting := hookDeliveryGatewayStarting
-		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), func(ctx context.Context) bool {
-			return gatewayStarting(ctx, opts)
+		if !opts.ManagedEnterprise {
+			var continueSignal bool
+			requestClient, continueSignal = hookDeliveryContinueClient(requestClient)
+			if continueSignal {
+				req.Header.Set("Expect", "100-continue")
+			}
+		}
+		// The answer timer ends the hook's wait, but the request body must
+		// remain writable long enough to carry the watchdog's outcome once
+		// this request's gateway has advertised receipt support. Until then,
+		// the original context still bounds connection and body release.
+		deadlineCtx, cancelDeadline := context.WithDeadline(
+			context.WithoutCancel(req.Context()), opts.answerWatch.ceiling.Add(answerWatchdogLogWait))
+		transportCtx, cancelWithCause := context.WithCancelCause(deadlineCtx)
+		cancelTransport := func() {
+			cancelWithCause(nil)
+			cancelDeadline()
+		}
+		req = req.WithContext(transportCtx)
+		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), hookDeliveryGatewayStarting(opts), !opts.ManagedEnterprise && req.Header.Get("Expect") == "100-continue")
+		delivery.setCancel(cancelTransport)
+		context.AfterFunc(ctx, func() {
+			select {
+			case <-delivery.ready:
+				// The accepted request can carry the committed answer.
+			default:
+				cancelWithCause(context.Cause(ctx))
+			}
 		})
+		opts.answerWatch.setDeadlineDelivery(delivery)
 	}
 
 	var connected atomic.Bool
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) {
+		GotConn: func(info httptrace.GotConnInfo) {
 			connected.Store(true)
 		},
 	}))
-	resp, err := opts.HTTPClient.Do(req)
+	resp, err := requestClient.Do(req)
 	if err != nil {
 		if delivery != nil {
 			delivery.close()
@@ -1686,8 +1825,8 @@ func sendHookRequest(
 	}
 	// Headers are a gateway response even if its body has not arrived yet.
 	if delivery != nil {
-		// A 103 after the capability wait still asks for a receipt; the
-		// gateway reads the released marker instead and takes none.
+		// A transport without the legacy read signal may release at the
+		// compatibility wait. A later 103 on that request has no receipt.
 		if resp.Header.Get(HookDeliveryRequiredHeader) == "1" && !delivery.wasReleased() {
 			resp.Body = &hookDeliveryResponseBody{ReadCloser: resp.Body, delivery: delivery}
 		} else {
@@ -1707,6 +1846,9 @@ func sendHookRequest(
 type hookRequestFacts struct {
 	once   sync.Once
 	header http.Header
+	// patchWatch reads the patch targets the evidence attests again, nil when
+	// it attests none.
+	patchWatch *hookpaths.PatchTargetWatch
 }
 
 // set adds the call's facts to header; a nil hookRequestFacts computes them
@@ -1718,21 +1860,33 @@ func (f *hookRequestFacts) set(header http.Header, opts Options, payload []byte)
 	}
 	f.once.Do(func() {
 		f.header = make(http.Header)
-		setHookRequestFacts(f.header, opts, payload)
+		f.patchWatch = setHookRequestFacts(f.header, opts, payload)
 	})
 	for name, values := range f.header {
 		header[name] = slices.Clone(values)
 	}
 }
 
-func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
+// watch is the watch of the patch targets the write evidence the call sent
+// the gateway attests, nil when it attests none.
+func (f *hookRequestFacts) watch() *hookpaths.PatchTargetWatch {
+	if f == nil {
+		return nil
+	}
+	return f.patchWatch
+}
+
+// setHookRequestFacts sets the facts of the call on header and returns the
+// watch of the patch targets its write evidence attests.
+func setHookRequestFacts(header http.Header, opts Options, payload []byte) (patchWatch *hookpaths.PatchTargetWatch) {
 	startupEvent := hookpaths.IsSessionStartEvent(opts.Event)
 	if opts.ManagedEnterprise && !opts.SecureClient &&
-		(runtime.GOOS != "windows" || startupEvent) {
+		(runtime.GOOS != "windows" || startupEvent || hookpaths.ProjectSkillHookCall(opts.Connector, payload)) {
 		// The surface and bound event are the ones this call sends the
 		// gateway (HookDialectHeader, X-DefenseClaw-Copilot-Event), so the
 		// evidence reads the body in the dialect the gateway judges.
-		if resolved := hookpaths.ResolveConnector(opts.Connector, hookDialect(opts), opts.Event, payload); resolved != "" {
+		var resolved string
+		if resolved, patchWatch = hookpaths.ResolveConnectorWatch(opts.Connector, hookDialect(opts), opts.Event, payload); resolved != "" {
 			header.Set(hookpaths.Header, resolved)
 		}
 	}
@@ -1742,6 +1896,7 @@ func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
 			header.Set(assetfacts.Header, value)
 		}
 	}
+	return patchWatch
 }
 
 // setUserIdentityHeaders reports which end user this hook is running as.
@@ -2899,7 +3054,7 @@ const perUserGatewayStatusHint = " `defenseclaw-gateway status` shows its state.
 // line names the blocked or allowed event instead, a prompt rather than a
 // tool for UserPromptSubmit (GAP-1706).
 func unreachableLead(opts Options, sp spec, reason, verdict string) string {
-	if strings.HasPrefix(reason, foreignListenerReasonPrefix) {
+	if perUserPeerRefusal(reason) {
 		return verdict + " this " + hookEventSubject(opts.Event)
 	}
 	return "gateway unreachable, " + verdict + " " + sp.subject
@@ -2913,7 +3068,7 @@ const perUserNotOutageNote = "not a gateway outage, so it is blocked in every fa
 // outage mode, so a block says "fail mode closed". A listener DefenseClaw
 // cannot verify is not an outage and says so (GAP-1735).
 func unreachableModeNote(opts Options, reason string) string {
-	notOutage := strings.HasPrefix(reason, foreignListenerReasonPrefix)
+	notOutage := perUserPeerRefusal(reason)
 	if notOutage && !opts.perUserOutage && !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" &&
 		!opts.SecureClient && !opts.StrictAvailability && !perUserInstallWindow(opts) {
 		return perUserNotOutageNote
@@ -2958,7 +3113,7 @@ const perUserInstallWindowDetail = "DefenseClaw is being installed or upgraded f
 // gateway's own error answer nor a listener DefenseClaw cannot verify,
 // which keep their cause.
 func perUserInstallWindowNamesTheInstall(opts Options, reason string) bool {
-	return opts.gatewayRefusal == "" && !strings.HasPrefix(reason, foreignListenerReasonPrefix) && perUserInstallWindow(opts)
+	return opts.gatewayRefusal == "" && !perUserPeerRefusal(reason) && perUserInstallWindow(opts)
 }
 
 // perUserGatewayDownText is what a per-user hook that fails closed because
@@ -2972,7 +3127,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 		// The gateway answered with an error of its own (perUserRefusalText).
 		return opts.gatewayRefusal
 	}
-	if strings.HasPrefix(reason, foreignListenerReasonPrefix) && !opts.ManagedEnterprise {
+	if perUserPeerRefusal(reason) && !opts.ManagedEnterprise {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + reason + "."
 	}
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
@@ -3091,6 +3246,20 @@ const unenrolledAccountExplanation = "this account is not enrolled yet; restart 
 	"For Claude Code, the wait starts at its first start if that is later. " +
 	"If this continues, the policy may exclude this account: ask your administrator"
 
+// pendingAccountExplanation is why a Windows standalone account that the
+// machine policy registers but that has no runtime yet is blocked. The guardian
+// publishes the runtime only in the account's own connected session, so a
+// signed-out or disconnected account stays blocked until it signs in or
+// reconnects, also when it was enrolled before (GAP-1026). It leads with the
+// block and the way out within the first 80 characters, and keeps the
+// prerequisites of unenrolledAccountExplanation.
+const pendingAccountExplanation = "this account is not enrolled; blocked until you sign in. " +
+	"A disconnected or signed-out account stays blocked until it signs in or reconnects: " +
+	"DefenseClaw enrolls an account within 5 minutes once you have signed in and the agent is installed " +
+	"(console or Remote Desktop; not SSH, a scheduled task or runas), and only in a connected session. " +
+	"Then restart the agent. For Claude Code, the wait starts at its first start if that is later. " +
+	"If this continues, the policy may exclude this account: ask your administrator"
+
 // failEnrollmentRefusal blocks, like failUnreachable in closed mode, a tool
 // call of an account the administrator has not enrolled (yet) or excludes, or
 // of root under enrollment.root: deny, and says so: the gateway is up, and
@@ -3116,6 +3285,14 @@ func failEnrollmentRefusalOf(opts Options, sp spec, reason string, excluded bool
 	}
 	why := unenrolledAccountExplanation
 	switch reason {
+	case managedEnrollmentPendingReason:
+		// An account that was enrolled and has no runtime now (disconnected or
+		// signed out, its runtime revoked; GAP-1026): the text says the agent
+		// is blocked and what ends that, not only "restart". A never-enrolled
+		// account keeps the enrollment wait text.
+		if opts.ManagedEnrolledPending && !opts.SecureClient {
+			why = pendingAccountExplanation
+		}
 	case managedUIDUnregisteredReason:
 		why = unixUnenrolledAccountExplanation
 		if excluded {
@@ -3128,6 +3305,49 @@ func failEnrollmentRefusalOf(opts Options, sp spec, reason string, excluded bool
 	if managedStandaloneHook(opts) && (reason == managedUIDUnregisteredReason || reason == managedRootDeniedReason) {
 		explanation = "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + why + "."
 	}
+	return emitEnrollmentExplanation(opts, sp, explanation)
+}
+
+// managedCredentialPendingReason is the hook-failure reason of a Windows
+// standalone call the gateway answered 401 after the resends of
+// hookAuthRetries: the gateway has not accepted the account credentials
+// yet. A new account holds its runtime before the gateway names it, and
+// that can outlast the resends, which must stay inside the agent hook
+// timeout (GAP-0722). The refusal report is the audit row that names the
+// account; refusalpipe.ReasonCredentialPending is the same code.
+const managedCredentialPendingReason = "enterprise_managed_credential_pending"
+
+// credentialPendingExplanation is why such a call is blocked. It leads with
+// the cause and the wait, as unenrolledAccountExplanation does.
+const credentialPendingExplanation = "DefenseClaw has not accepted the credentials of this account yet, " +
+	"which is usual in the first minutes after a new account signs in. Try again in a minute or two; " +
+	"if this continues, contact your administrator"
+
+// failGatewayUnauthorized ends a call the gateway answered 401 after the
+// resends. A Windows standalone account (ExplainUnenrolledAccount) is
+// blocked with credentialPendingExplanation and an audit report, in every
+// fail mode, as any authentication refusal is closed; every other hook, and
+// an event that cannot block, keeps the generic response failure.
+func failGatewayUnauthorized(opts Options, sp spec, failMode string, payload []byte) int {
+	reason := fmt.Sprintf("gateway returned HTTP %d", http.StatusUnauthorized)
+	if !opts.ManagedEnterprise || !opts.ExplainUnenrolledAccount || opts.SecureClient || sp.failOpenOnly ||
+		failClosedStopEvent(opts, sp) {
+		return failResponse(opts, sp, failMode, reason)
+	}
+	if strings.TrimSpace(opts.Event) == "" {
+		opts.Event = resolveHookEvent("", payload)
+	}
+	reportUnenrolledRefusal(opts, sp, managedCredentialPendingReason)
+	logHookFailure(opts, sp, reason, "response", "closed", true)
+	if code, handled := copilotFailClosed(opts, sp, "response", managedCredentialPendingReason); handled {
+		return code
+	}
+	return emitEnrollmentExplanation(opts, sp, "DefenseClaw blocked this "+hookEventSubject(opts.Event)+": "+credentialPendingExplanation+".")
+}
+
+// emitEnrollmentExplanation delivers explanation as the block of a call the
+// enrollment policy or a pending account refuses.
+func emitEnrollmentExplanation(opts Options, sp spec, explanation string) int {
 	// Claude Code shows a structured block without its hook-command prefix
 	// (GAP-0554, GAP-0636).
 	if sp.connector == "claudecode" && managedStandaloneHook(opts) {
@@ -3161,7 +3381,8 @@ var sendUnenrolledRefusal = refusalpipe.Send
 // nothing is written on disk. The Unix standalone gateway refuses and audits
 // an unenrolled caller itself (managedUIDUnregisteredReason).
 func reportUnenrolledRefusal(opts Options, sp spec, reason string) {
-	if reason != managedSIDUnregisteredReason && reason != managedEnrollmentPendingReason {
+	if reason != managedSIDUnregisteredReason && reason != managedEnrollmentPendingReason &&
+		reason != managedCredentialPendingReason {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), unenrolledRefusalReportBudget)
@@ -4023,6 +4244,17 @@ func managedFailClosedText(opts Options, layer, reason string) string {
 	return managedStandaloneFailClosedText(opts.Event, layer, reason)
 }
 
+// withStandaloneGatewayService is opts with the standalone gateway service
+// as the managed gateway service when the call resolved none, as every
+// runtime-state or enrollment refusal does (the service name is the compiled-in
+// standalone one, never read from user-controlled state).
+func withStandaloneGatewayService(opts Options) Options {
+	if strings.TrimSpace(opts.ManagedGatewayServiceName) == "" {
+		opts.ManagedGatewayServiceName = managed.StandaloneWindowsGatewaySvc
+	}
+	return opts
+}
+
 // managedInstallWindowText is what a managed hook says when the gateway is
 // stopped, restarting or silent while an enterprise lifecycle run (a package
 // install or upgrade, ensure, repair or rollback: managedLifecycleActive)
@@ -4045,9 +4277,7 @@ func managedInstallWindowText(opts Options, layer, reason string) string {
 		return ""
 	}
 	if managedLifecycleRuntimeStateReason(reason) {
-		if strings.TrimSpace(opts.ManagedGatewayServiceName) == "" {
-			opts.ManagedGatewayServiceName = managed.StandaloneWindowsGatewaySvc
-		}
+		opts = withStandaloneGatewayService(opts)
 	} else if !managedOutageShapedReason(reason) {
 		return ""
 	}
