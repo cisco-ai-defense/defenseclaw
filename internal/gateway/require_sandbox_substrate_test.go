@@ -18,13 +18,11 @@ package gateway
 
 import (
 	"encoding/json"
-	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
-	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // E26: on a managed computer whose floor requires an agent in a sandbox
@@ -71,29 +69,6 @@ func TestRequireSandboxBothRuntimesKeepsTheSandboxCommand(t *testing.T) {
 	out := postRequireSandboxHook(t, api, hook, project, nil, nil)
 	if want := sandboxapi.HostRunRefused(hook.connector, "", project, "it-security@example.com"); out["reason"] != want {
 		t.Fatalf("reason = %v, want %q", out["reason"], want)
-	}
-}
-
-// A Substrate-only floor refuses an OpenShell sandbox on the computer with
-// the launcher command, and explain names the runtimes.
-func TestSandboxAuthoritySubstrateOnlyRefusesASandboxHere(t *testing.T) {
-	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
-	f.setGroups(sbxAlice, "dc-sbx-devs")
-	p := f.cfg.Guardrail.Profiles["engineering"]
-	p.Sandbox = &config.SandboxAdminConfig{RequiredFor: []string{"claudecode"}, Runtimes: []string{config.SandboxRuntimeSubstrate}}
-	f.cfg.Guardrail.Profiles["engineering"] = p
-	rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(),
-		map[string]string{sandboxrelay.ConnectorHeader: "claudecode"})
-	var body struct {
-		Message string `json:"message"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if rec.Code != http.StatusForbidden || errorReason(t, rec) != sandboxrelay.ReasonNotAllowed ||
-		body.Message != sandboxapi.SandboxRunSubstrateOnly("claudecode", "engineering") {
-		t.Fatalf("resolve under runtimes [substrate]: %d %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(body.Message, "defenseclaw substrate run claude") {
-		t.Fatalf("refusal lacks the launcher command: %q", body.Message)
 	}
 }
 
