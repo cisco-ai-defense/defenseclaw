@@ -256,11 +256,14 @@ data:
     defenseclaw_hosts:
     - defenseclaw-actor.defenseclaw-system.svc.cluster.local
     - defenseclaw-actor.defenseclaw-system.svc
-    - defenseclaw-admin.defenseclaw-system.svc.cluster.local
-    - defenseclaw-admin.defenseclaw-system.svc
     egress_peers:
     - spiffe://cluster.local/ns/ate-system/sa/atenet-egress
     failure_mode: closed
+    internal_hosts:
+    - defenseclaw-admin.defenseclaw-system.svc.cluster.local
+    - defenseclaw-admin.defenseclaw-system.svc
+    - defenseclaw-admin.defenseclaw-system
+    - defenseclaw-admin
 ---
 # Source: defenseclaw-substrate/templates/configmap.yaml
 apiVersion: v1
@@ -640,7 +643,7 @@ spec:
         app.kubernetes.io/component: callout
       annotations:
         checksum/config: 9250fc1897492948415eb36b75b72d659a5e677753511083087c46ee7ea8aa2a
-        checksum/callout: e88070e3703ffb6827422f8a74e5190074b5c5ec17d42026165119518f1f61ba
+        checksum/callout: 6b8bf411121353b36ffe83bfdc31f0ea40bfa8e05cfa5986352fa20599132e19
     spec:
       
       serviceAccountName: defenseclaw-callout
