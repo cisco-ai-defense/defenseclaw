@@ -768,6 +768,13 @@ func (w *InstallWatcher) mcpFailureAllowed(evt InstallEvent, baseline *audit.Sna
 	return baseline != nil && mcpSnapshotFailed(baseline) && w.admitsMCPWithoutScan(context.Background(), evt)
 }
 
+// mcpFingerprintMarked reports a scanner fingerprint that records how an MCP
+// admission decided without a completed scan: failed, refused, kept
+// unverified or allowed without a scan.
+func mcpFingerprintMarked(fingerprint string) bool {
+	return mcpFingerprintFailed(fingerprint) || strings.HasSuffix(fingerprint, admittedWithoutScanMark)
+}
+
 // mcpFingerprintFailed reports a scanner fingerprint that marks a failed
 // scan, a refused launcher or a server kept unverified.
 func mcpFingerprintFailed(fingerprint string) bool {
