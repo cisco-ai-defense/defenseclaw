@@ -34,6 +34,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
 )
@@ -97,7 +98,7 @@ func newSubstrateDoctorCmd() *cobra.Command {
 		Use:   "doctor",
 		Short: "Check that this computer can run agents in the cluster",
 		Long: `Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers
-over TLS, you are signed in and the cluster accepts it, the sign-in server matches, the agent entrance answers over TLS and
+over TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and
 you have what it asks for, and your sign-in can be kept safely. Nothing needs to be installed here, and nothing in the
 cluster changes.
 
@@ -162,7 +163,7 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 
 	name := ""
 	if openErr != nil {
-		for _, id := range []string{"admin_address", "sign_in", "sign_in_server", "agent_entrance"} {
+		for _, id := range []string{"admin_address", "sign_in", "sign_in_server", "attach"} {
 			d.add(id, doctorSkip, "needs a configured cluster", "")
 		}
 	} else {
@@ -286,8 +287,8 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession, clust
 	// 5. The sign-in server.
 	d.checks = append(d.checks, doctorSignInServer(ctx, c))
 
-	// 6. The agent entrance.
-	d.checks = append(d.checks, doctorAgentEntrance(ctx, s, mine, signedIn))
+	// 6. Attach through the gateway.
+	d.checks = append(d.checks, doctorAttach(ctx, s, mine, signedIn))
 
 	// 7. The cluster's own checks.
 	if adminOK && signedIn {
@@ -339,51 +340,36 @@ func doctorSignInServer(ctx context.Context, c auth.Context) substrateCheck {
 	return substrateCheck{ID: id, Status: doctorOK, Summary: "the sign-in server answers and its issuer matches"}
 }
 
-func doctorAgentEntrance(ctx context.Context, s *substrateSession, mine []api.Actor, signedIn bool) substrateCheck {
-	const id = "agent_entrance"
-	c := s.Ctx
-	if strings.TrimSpace(c.RouterURL) == "" {
-		return substrateCheck{ID: id, Status: doctorFail, Summary: "no agent entrance is set in your context, so agents cannot be reached",
-			Fix: "defenseclaw substrate login --router-url https://HOST:PORT (your administrator has it)"}
+func doctorAttach(ctx context.Context, s *substrateSession, mine []api.Actor, signedIn bool) substrateCheck {
+	const id = "attach"
+	if !signedIn {
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "not checked: sign in first"}
 	}
-	var cert *tls.Certificate
-	haveCert := c.RouterCertFile != "" || c.RouterKeyFile != ""
-	if haveCert {
-		if c.RouterCertFile == "" || c.RouterKeyFile == "" {
-			return substrateCheck{ID: id, Status: doctorFail, Summary: "set both the client certificate and its key for the agent entrance",
-				Fix: "defenseclaw substrate login --router-cert-file FILE --router-key-file FILE"}
-		}
-		pair, err := tls.LoadX509KeyPair(c.RouterCertFile, c.RouterKeyFile)
-		if err != nil {
-			return substrateCheck{ID: id, Status: doctorFail, Summary: "the client certificate for the agent entrance cannot be read: " + doctorFirstLine(err),
-				Fix: "defenseclaw substrate login --router-cert-file FILE --router-key-file FILE"}
-		}
-		cert = &pair
+	if len(mine) == 0 {
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "can be checked once you have an agent; start one with: defenseclaw substrate run claude"}
 	}
-	info, err := probeTLS(ctx, c.RouterURL, c.RouterCAFile, cert, true)
-	if err != nil {
-		return substrateCheck{ID: id, Status: doctorFail, Summary: probeMessage("the agent entrance", c.RouterURL, err), Fix: probeFix(err, "--router-url", "--router-ca-file")}
+	a := mine[0]
+	o := attach.Options{
+		Target:  attach.Target{Atespace: a.Atespace, Name: a.Name},
+		Gateway: attach.Gateway{BaseURL: s.Ctx.AdminURL, CAFile: s.Ctx.AdminCAFile}, Bearer: s.Bearer,
+		MaxWait: 5 * time.Second, NoBanner: true, NoAsks: true,
 	}
-	if haveCert {
-		if info.Alert != "" {
-			return substrateCheck{ID: id, Status: doctorFail, Summary: "the agent entrance answers but refused your client certificate (" + info.Alert + ")",
-				Fix: "ask your administrator for a new client certificate, then defenseclaw substrate login --router-cert-file FILE --router-key-file FILE"}
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if _, err := attach.Status(cctx, o); err != nil {
+		switch {
+		case errors.Is(err, attach.ErrNotOffered):
+			return substrateCheck{ID: id, Status: doctorWarn, Summary: "this cluster does not offer attach through the gateway yet", Fix: "ask your administrator to upgrade DefenseClaw on the cluster"}
+		case errors.Is(err, attach.ErrNotAllowed), errors.Is(err, attach.ErrNoActor):
+			return substrateCheck{ID: id, Status: doctorWarn, Summary: "the cluster would not let you reach " + a.Atespace + "/" + a.Name + ": " + doctorFirstLine(err), Fix: "run doctor again after defenseclaw substrate list shows an agent of yours"}
+		case errors.Is(err, attach.ErrNotSignedIn):
+			return substrateCheck{ID: id, Status: doctorFail, Summary: "the cluster did not accept your sign-in for attach", Fix: "defenseclaw substrate login"}
+		case errors.Is(err, attach.ErrClusterFull), errors.Is(err, attach.ErrStarting):
+			return substrateCheck{ID: id, Status: doctorWarn, Summary: "attach is offered; the agent is busy starting or the cluster is full right now"}
 		}
-		return substrateCheck{ID: id, Status: doctorOK, Summary: "the agent entrance answers (" + info.Version + ") and a client certificate is set"}
+		return substrateCheck{ID: id, Status: doctorFail, Summary: "attach through the gateway failed: " + doctorFirstLine(err), Fix: "check the admin address and the cluster's gateway, then run doctor again"}
 	}
-	// No certificate in the context: the cluster may mint one at attach.
-	if signedIn && len(mine) > 0 {
-		sc, err := s.Client.SessionCert(ctx, mine[0].Atespace, mine[0].Name, time.Minute)
-		if err == nil && sc.ClientCertificatePEM != "" && sc.ClientKeyPEM != "" {
-			return substrateCheck{ID: id, Status: doctorOK, Summary: "the agent entrance answers (" + info.Version + ") and the cluster issues your client certificate"}
-		}
-		if err == nil {
-			return substrateCheck{ID: id, Status: doctorWarn, Summary: "the agent entrance answers (" + info.Version + ") but you have no client certificate and the cluster does not issue one",
-				Fix: "ask your administrator for one: defenseclaw substrate login --router-cert-file FILE --router-key-file FILE"}
-		}
-	}
-	return substrateCheck{ID: id, Status: doctorWarn, Summary: "the agent entrance answers (" + info.Version + ") but no client certificate is set, and none can be checked before you have an agent",
-		Fix: "if the first run is refused at the entrance, ask your administrator for a client certificate and add it with defenseclaw substrate login --router-cert-file FILE --router-key-file FILE"}
+	return substrateCheck{ID: id, Status: doctorOK, Summary: "attach through the gateway works (reached " + a.Atespace + "/" + a.Name + ")"}
 }
 
 // doctorFleetChecks reads the administrator verify document. explicit says

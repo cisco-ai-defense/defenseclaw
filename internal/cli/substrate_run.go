@@ -35,25 +35,11 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
-
-// substrateSessions adapts the admin client to attach.SessionSource.
-type substrateSessions struct{ cl *api.Client }
-
-func (s substrateSessions) Session(ctx context.Context, t attach.Target) (attach.SessionGrant, error) {
-	c, err := s.cl.SessionCert(ctx, t.Atespace, t.Name, 0)
-	if err != nil {
-		return attach.SessionGrant{}, err
-	}
-	g := attach.SessionGrant{Token: c.Token, Expires: c.Expires}
-	if c.ClientCertificatePEM != "" && c.ClientKeyPEM != "" {
-		g.ClientCertPEM, g.ClientKeyPEM = []byte(c.ClientCertificatePEM), []byte(c.ClientKeyPEM)
-	}
-	return g, nil
-}
 
 // substrateAsks adapts the admin client to attach.AskSource for one person.
 type substrateAsks struct{ cl *api.Client }
@@ -63,12 +49,14 @@ func (a substrateAsks) Pending(ctx context.Context, t attach.Target) ([]attach.A
 	if err != nil {
 		return nil, err
 	}
+	// Only an ask that names this exact agent is shown here: a bare name or
+	// an empty actor could be another of the person's agents (GAP-0112).
 	var out []attach.Ask
 	for _, k := range asks {
-		if k.Actor != "" && k.Actor != t.Name && k.Actor != t.Atespace+"/"+t.Name {
+		if k.Actor != t.Atespace+"/"+t.Name {
 			continue
 		}
-		out = append(out, attach.Ask{ID: k.ID, Tool: k.Tool, Summary: k.Summary, Reason: k.Reason, Severity: k.Severity, Created: k.Created})
+		out = append(out, attach.Ask{ID: k.ID, Actor: k.Actor, Tool: k.Tool, Summary: k.Summary, Reason: k.Reason, Severity: k.Severity, Created: k.Created})
 	}
 	return out, nil
 }
@@ -81,14 +69,6 @@ func (a substrateAsks) Decide(ctx context.Context, id string, d attach.Decision)
 		return a.cl.Decide(ctx, id, "approve", true, "")
 	}
 	return a.cl.Decide(ctx, id, "deny", false, "")
-}
-
-func substrateRouter(s *substrateSession) (attach.Router, error) {
-	c := s.Ctx
-	if c.RouterURL == "" {
-		return attach.Router{}, withExitCode(errors.New("this cluster's agent entrance is not set; sign in again with: defenseclaw substrate login --router-url https://HOST:PORT (your administrator has it)"), substrateExitRefused)
-	}
-	return attach.Router{URL: c.RouterURL, CAFile: c.RouterCAFile, CertFile: c.RouterCertFile, KeyFile: c.RouterKeyFile, RelayPort: c.RelayPort}, nil
 }
 
 func substrateTransport(v string) (string, error) {
@@ -134,17 +114,13 @@ func substrateBanner(ctx context.Context, cl *api.Client, a api.Actor) attach.Ba
 }
 
 func substrateAttachOptions(cmd *cobra.Command, s *substrateSession, a api.Actor, transport string, noAsks bool) (attach.Options, error) {
-	router, err := substrateRouter(s)
-	if err != nil {
-		return attach.Options{}, err
-	}
 	tr, err := substrateTransport(transport)
 	if err != nil {
 		return attach.Options{}, err
 	}
 	o := attach.Options{
-		Target: attach.Target{Atespace: a.Atespace, Name: a.Name}, Router: router,
-		Sessions: substrateSessions{s.Client}, In: os.Stdin, Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
+		Target:  attach.Target{Atespace: a.Atespace, Name: a.Name},
+		Gateway: attach.Gateway{BaseURL: s.Ctx.AdminURL, CAFile: s.Ctx.AdminCAFile}, Bearer: s.Bearer, In: os.Stdin, Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
 		Transport: tr, NoAsks: noAsks,
 	}
 	if !noAsks {
@@ -446,9 +422,9 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 		}
 		switch e.Type {
 		case "stdout":
-			fmt.Fprintln(w, e.Data)
+			fmt.Fprintln(w, safetext.Clean(e.Data))
 		case "stderr", "error":
-			fmt.Fprintln(cmd.ErrOrStderr(), e.Data)
+			fmt.Fprintln(cmd.ErrOrStderr(), safetext.Clean(e.Data))
 		}
 	}
 	code, err = attach.RunTask(tctx, attach.TaskOptions{Options: o, Prompt: task, Args: agentArgs, Emit: emit})

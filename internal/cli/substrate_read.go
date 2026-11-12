@@ -31,6 +31,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 )
 
 // actorRef is how a person names an actor: "name" or "atespace/name".
@@ -263,20 +264,20 @@ func printSubstrateMap(w io.Writer, m map[string]any, indent string) {
 	for _, k := range keys {
 		switch v := m[k].(type) {
 		case map[string]any:
-			fmt.Fprintf(w, "%s%s:\n", indent, k)
+			fmt.Fprintf(w, "%s%s:\n", indent, safetext.Line(k))
 			printSubstrateMap(w, v, indent+"  ")
 		case []any:
-			fmt.Fprintf(w, "%s%s:\n", indent, k)
+			fmt.Fprintf(w, "%s%s:\n", indent, safetext.Line(k))
 			for _, item := range v {
 				if im, ok := item.(map[string]any); ok {
 					fmt.Fprintf(w, "%s  -\n", indent)
 					printSubstrateMap(w, im, indent+"    ")
 					continue
 				}
-				fmt.Fprintf(w, "%s  - %v\n", indent, item)
+				fmt.Fprintf(w, "%s  - %s\n", indent, safetext.Line(fmt.Sprint(item)))
 			}
 		default:
-			fmt.Fprintf(w, "%s%s: %v\n", indent, k, v)
+			fmt.Fprintf(w, "%s%s: %s\n", indent, safetext.Line(k), safetext.Line(fmt.Sprint(v)))
 		}
 	}
 }
@@ -783,7 +784,7 @@ func newSubstratePolicyCmd() *cobra.Command {
 		Short: "See the rules that guard your agents",
 		Long:  `Shows the rules that apply to your own agents: what they may reach, what asks you, what is refused. You see only your own policy.`,
 	}
-	parent.AddCommand(newSubstratePolicyExplainCmd(), newSubstratePolicyShowCmd(), newSubstratePolicyTestCmd())
+	parent.AddCommand(newSubstratePolicyExplainCmd(), newSubstratePolicyShowCmd(), newSubstratePolicyTestCmd(), newSubstratePolicyResetCmd())
 	return parent
 }
 
@@ -880,4 +881,56 @@ func substratePolicyCall(cmd *cobra.Command, out *substrateOutput, com *substrat
 	}
 	printSubstrateMap(cmd.OutOrStdout(), res, "")
 	return nil
+}
+
+func newSubstratePolicyResetCmd() *cobra.Command {
+	var (
+		com    substrateCommon
+		yes    bool
+		reason string
+	)
+	cmd := &cobra.Command{
+		Use:   "reset <actor>",
+		Short: "Clear a policy conflict on an agent (administrators only)",
+		Long: `For administrators. When something outside DefenseClaw keeps rewriting an agent's network policy,
+the controller stops after three reverts in ten minutes and marks the agent policy_conflict. Once the
+other writer is stopped, "reset" clears that state so the controller writes the policy again. Name the
+agent as ATESPACE/NAME. The reset is recorded in the audit log under your own name.`,
+		Example: "defenseclaw substrate policy reset eng-web/fix-tests-7f3a --reason \"removed the GitOps rule\"",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref := strings.TrimSpace(args[0])
+			if at, name, ok := strings.Cut(ref, "/"); !ok || at == "" || name == "" || strings.Contains(name, "/") {
+				return withExitCode(errors.New("name the agent as ATESPACE/NAME (list agents with: defenseclaw substrate list --all)"), 2)
+			}
+			s, err := substrateOpen(cmd, &com)
+			if err != nil {
+				return err
+			}
+			if !yes {
+				ok, err := substrateConfirm(cmd, "Clear the policy conflict on "+ref+"? The controller will write its policy again.")
+				if err != nil {
+					return err
+				}
+				if !ok {
+					fmt.Fprintln(cmd.OutOrStdout(), "Nothing changed.")
+					return nil
+				}
+			}
+			ctx, stop := substrateContext(cmd)
+			defer stop()
+			if _, err := s.Client.PolicyReset(ctx, ref, reason); err != nil {
+				if e, ok := api.AsError(err); ok && e.Status == 403 {
+					return withExitCode(errors.New("only administrators may reset a policy conflict"), substrateExitRefused)
+				}
+				return substrateFail(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Cleared the policy conflict on %s. The controller writes its policy again on its next pass.\n", ref)
+			return nil
+		},
+	}
+	com.add(cmd)
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
+	cmd.Flags().StringVar(&reason, "reason", "", "note recorded with the reset")
+	return cmd
 }

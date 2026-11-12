@@ -192,7 +192,7 @@ func TestSubstrateCommandTreeCoversThePlan(t *testing.T) {
 	for _, want := range []string{
 		"login", "logout", "whoami", "run", "connect", "list", "status", "logs", "pull", "checkpoint", "undo", "delete", "migrate",
 		"approvals", "approve", "reject", "usage", "secrets list", "secrets set", "secrets rm", "secrets test",
-		"policy explain", "policy show", "policy test", "doctor", "setup", "bundle apply", "bundle status",
+		"policy explain", "policy show", "policy test", "policy reset", "doctor", "setup", "bundle apply", "bundle status",
 		"verify", "template build", "template verify", "template scan", "template publish",
 	} {
 		if !slices.Contains(paths, want) {

@@ -213,6 +213,8 @@ def exec_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         ["policy", "explain", "fix-tests-7f3a"],
         ["policy", "show", "--json"],
         ["policy", "test", "fix-tests-7f3a", "--host", "registry.example.test"],
+        ["policy", "reset", "eng-web/fix-tests-7f3a", "--reason", "done", "-y"],
+        ["login", "--kube", "--kubeconfig", "/tmp/kc", "--kube-context", "dev"],
         ["doctor", "--json"],
         ["verify", "--install-file", "install.yaml", "--json"],
         ["status", "--cluster", "--api", "--json"],
