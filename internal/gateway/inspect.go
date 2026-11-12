@@ -613,6 +613,8 @@ func (a *APIServer) hookAIDInspectTool(
 	return verdict
 }
 
+// hookAIDInspectToolWithSubmission reports whether the invocation reached the
+// configured AID client, including transport paths that return no verdict.
 func (a *APIServer) hookAIDInspectToolWithSubmission(
 	ctx context.Context,
 	req *ToolInspectRequest,
@@ -667,6 +669,8 @@ func (a *APIServer) hookAIDInspectToolCall(
 	return verdict
 }
 
+// hookAIDInspectToolCallWithSubmission reports whether the structured tool
+// call reached the configured AID client, including nil-verdict failures.
 func (a *APIServer) hookAIDInspectToolCallWithSubmission(
 	ctx context.Context,
 	call aidToolCall,

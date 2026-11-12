@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -135,6 +136,22 @@ type claudeCodeHookResponse struct {
 	// a response flagged this way, since destination rules alone did
 	// not decide the verdict. Never serialized on the wire.
 	laneVerdict bool
+}
+
+var inspectedBearerCredential = regexp.MustCompile(`(?i)(authorization[ \t]*:[ \t]*bearer[ \t]+)([A-Za-z0-9._~+/=-]+)`)
+
+// redactInspectedBearerCredentials removes bearer values from the telemetry
+// copy of submitted event content when AI Defense supplied no redaction
+// directive. The submitted payload itself is unchanged; an explicit cloud
+// directive remains authoritative at the downstream projection boundary.
+func redactInspectedBearerCredentials(content string) string {
+	return inspectedBearerCredential.ReplaceAllStringFunc(content, func(match string) string {
+		parts := inspectedBearerCredential.FindStringSubmatchIndex(match)
+		if len(parts) < 6 {
+			return match
+		}
+		return match[:parts[4]] + redaction.ForSinkEntity(match[parts[4]:parts[5]]) + match[parts[5]:]
+	})
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
@@ -279,6 +296,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		// Retain the exact submitted error content on hook_decision so a failure
 		// without an assistant message does not lose its inspection input.
 		inspectedContent = claudeCodeToolOutput(req)
+		if !a.managedAIDOnly() {
+			inspectedContent = withoutBlockMessageEcho(cfg, "claudecode", inspectedContent)
+		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: inspectedContent, Direction: "tool_result", Connector: "claudecode"})
 	case "Stop", "SubagentStop", "SessionEnd":
 		if !req.StopHookActive && cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnStop {
@@ -320,6 +340,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		))
 	}
 	if strings.TrimSpace(inspectedContent) != "" && verdict != nil && verdict.aiDefenseSubmitted {
+		if verdict.RedactionEnabled == nil {
+			inspectedContent = redactInspectedBearerCredentials(inspectedContent)
+		}
 		inspectedContentPresent = true
 	} else {
 		// Do not retain or emit content handled only by local rules or the

@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -81,6 +82,93 @@ func TestEvaluateClaudeCodeHook_CapturesExactEventContentSentToInspection(t *tes
 	}
 	if want := "provider failed\nrequest rejected"; resp.InspectedContent != want {
 		t.Fatalf("StopFailure InspectedContent = %q, want %q", resp.InspectedContent, want)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_StopFailureRetainsNormalizedSubmittedContent(t *testing.T) {
+	const blockMessage = "Blocked by ACME SecOps policy. Contact secops@example.test"
+	var requestBody string
+	var requestErr error
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		requestErr = err
+		requestBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"is_safe":true,"action":"Allow"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.BlockMessage = blockMessage
+	api := &APIServer{
+		scannerCfg: cfg,
+		ciscoInspector: &CiscoInspectClient{
+			apiKey: "test-key", endpoint: server.URL, client: server.Client(),
+		},
+	}
+
+	resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+		HookEventName: "StopFailure",
+		Error:         "provider failed: " + blockMessage + " retry exhausted",
+	})
+	if requestErr != nil {
+		t.Fatal(requestErr)
+	}
+	if strings.Contains(requestBody, blockMessage) {
+		t.Fatalf("AI Defense request retained configured block message: %s", requestBody)
+	}
+	if !strings.Contains(requestBody, "provider failed:   retry exhausted") {
+		t.Fatalf("AI Defense request did not contain normalized StopFailure content: %s", requestBody)
+	}
+	if want := "provider failed:   retry exhausted"; !resp.InspectedContentPresent || resp.InspectedContent != want {
+		t.Fatalf("StopFailure submitted content = (%q, %t), want (%q, true)", resp.InspectedContent, resp.InspectedContentPresent, want)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_SubmittedContentRedactsBearerWithoutDirective(t *testing.T) {
+	const token = "abc123"
+	for _, test := range []struct {
+		name             string
+		response         string
+		wantTokenPresent bool
+	}{
+		{name: "missing directive redacts", response: `{"is_safe":true,"action":"Allow"}`},
+		{name: "explicit raw directive preserved", response: `{"is_safe":true,"action":"Allow","is_redaction_enabled":false}`, wantTokenPresent: true},
+		{name: "explicit redact directive preserved", response: `{"is_safe":true,"action":"Allow","is_redaction_enabled":true}`, wantTokenPresent: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.response))
+			}))
+			t.Cleanup(server.Close)
+
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			api := &APIServer{
+				scannerCfg: cfg,
+				ciscoInspector: &CiscoInspectClient{
+					apiKey: "test-key", endpoint: server.URL, client: server.Client(),
+				},
+			}
+			resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+				HookEventName: "Notification",
+				Message:       "request failed: Authorization: Bearer " + token + " after retry",
+			})
+			if !resp.InspectedContentPresent {
+				t.Fatal("submitted content was not retained")
+			}
+			if got := strings.Contains(resp.InspectedContent, token); got != test.wantTokenPresent {
+				t.Fatalf("token present = %t, want %t; content = %q", got, test.wantTokenPresent, resp.InspectedContent)
+			}
+			if !strings.Contains(resp.InspectedContent, "request failed: Authorization: Bearer ") ||
+				!strings.Contains(resp.InspectedContent, " after retry") {
+				t.Fatalf("non-credential content changed: %q", resp.InspectedContent)
+			}
+		})
 	}
 }
 
