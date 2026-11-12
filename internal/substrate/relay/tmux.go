@@ -24,6 +24,10 @@ type Tmux struct {
 	Argv    []string
 	Env     []string
 
+	// Status is the file the pane's run-agent wrapper writes the agent's
+	// exit status to (RunAgentCommand).
+	Status string
+
 	mu        sync.Mutex
 	serverPID int
 }
@@ -93,6 +97,12 @@ func (t *Tmux) Ensure(ctx context.Context, cols, rows uint16) (bool, error) {
 	if t.Workdir != "" {
 		args = append(args, "-c", t.Workdir)
 	}
+	wrapper, err := agentWrapper()
+	if err != nil {
+		return false, fmt.Errorf("relay: %w", err)
+	}
+	_ = os.Remove(t.Status)
+	args = append(args, wrapper, RunAgentCommand, "--status", t.Status, "--")
 	args = append(args, t.Argv...)
 	// The options make tmux invisible: no status line, no escape delay, the
 	// newest client's size, and a dead pane kept so its exit status can be
@@ -115,24 +125,27 @@ func (t *Tmux) Ensure(ctx context.Context, cols, rows uint16) (bool, error) {
 	return true, nil
 }
 
-// PaneExit reports the agent's exit status once its pane is dead.
+// PaneExit reports the agent's exit status once it has exited. The status
+// comes from the run-agent wrapper's file, never from tmux's
+// #{pane_dead_status} (see RunAgentCommand).
 func (t *Tmux) PaneExit(ctx context.Context) (int, bool) {
-	s, err := t.out(ctx, "display-message", "-p", "-t", t.Name, "#{pane_dead} #{pane_dead_status}")
-	if err != nil {
-		// No session: the agent is gone without a status.
-		return -1, true
+	if code, ok := readStatus(t.Status); ok {
+		return code, true
 	}
-	f := strings.Fields(s)
-	if len(f) == 0 || f[0] != "1" {
+	s, err := t.out(ctx, "display-message", "-p", "-t", t.Name, "#{pane_dead}")
+	if err == nil && strings.TrimSpace(s) != "1" {
 		return 0, false
 	}
-	code := -1
-	if len(f) > 1 {
-		if n, err := strconv.Atoi(f[1]); err == nil {
-			code = n
+	// The pane or the whole session is gone. The wrapper writes the status
+	// before it exits, so it is there unless the wrapper itself was killed;
+	// give a slow file system a moment.
+	for i := 0; i < 50; i++ {
+		if code, ok := readStatus(t.Status); ok {
+			return code, true
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return code, true
+	return -1, true
 }
 
 // Kill ends the session.

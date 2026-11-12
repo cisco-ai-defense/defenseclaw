@@ -5,5 +5,9 @@
 
 package relay
 
+import "os"
+
 func processAlive(int) bool    { return false }
 func signalRecreateSocket(int) {}
+
+var terminalSignals = []os.Signal{os.Interrupt}
