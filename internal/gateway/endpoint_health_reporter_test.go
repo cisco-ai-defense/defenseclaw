@@ -18,6 +18,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 )
 
 func endpointHealthManagedConfig(t *testing.T) *config.Config {
@@ -301,5 +304,80 @@ func TestEndpointHealthIntervalCappedAtRegistryMaximum(t *testing.T) {
 	}
 	if endpointHealthMaxInterval.Seconds() != 86400 {
 		t.Fatalf("cap %v is not the report_interval_s maximum", endpointHealthMaxInterval)
+	}
+}
+
+// reloadedPlanEmitter routes every record on a plan compiled after a reload
+// and records the destinations it would reach. Before routing it runs
+// onEmit, which the test uses to publish the reloaded config between the
+// reporter's endpoint check and emission.
+type reloadedPlanEmitter struct {
+	evaluator    *router.Evaluator
+	onEmit       func()
+	destinations []string
+}
+
+func (e *reloadedPlanEmitter) Emit(
+	_ context.Context,
+	metadata router.Metadata,
+	build observabilityruntime.EmitBuilder,
+) (pipeline.LocalLogOutcome, error) {
+	if e.onEmit != nil {
+		e.onEmit()
+	}
+	result, err := e.evaluator.Evaluate(metadata, func(admission router.Admission) (observability.Record, error) {
+		return build(observabilityruntime.EmitContext{}, admission)
+	})
+	if err != nil {
+		return pipeline.LocalLogOutcome{}, err
+	}
+	for _, delivery := range result.Deliveries() {
+		e.destinations = append(e.destinations, delivery.DestinationName)
+	}
+	return pipeline.LocalLogOutcome{}, nil
+}
+
+// A reload that clears the Cisco AI Defense endpoint after the reporter's
+// endpoint check, but before emission, hands the report to a plan with no
+// managed destination. The report must still reach no operator destination.
+func TestEndpointHealthReloadClearingEndpointMidReportReachesNoOperatorDestination(t *testing.T) {
+	base, err := config.CompileObservabilityV8(&config.ObservabilityV8Source{
+		Destinations: []config.ObservabilityV8DestinationSource{{
+			Name: "operator-console", Kind: config.ObservabilityV8DestinationConsole,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := config.WithObservabilityV8ManagedAIDDestination(base, config.ObservabilityV8ManagedAIDOptions{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluator, err := router.New(reloaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := endpointHealthManagedConfig(t)
+	after := *before
+	after.CiscoAIDefense.Endpoint = ""
+	s := &Sidecar{cfg: before, health: NewSidecarHealth()}
+	emitter := &reloadedPlanEmitter{evaluator: evaluator, onEmit: func() { s.cfgCurrent.Store(&after) }}
+	r := newEndpointHealthReporter(s)
+	r.write = func(string, diagnostics.HealthReportFileContent) error { return nil }
+	r.emit = func(ctx context.Context, report endpointHealthReport) (endpointHealthEmitResult, error) {
+		return emitEndpointHealthV8(ctx, emitter, report)
+	}
+
+	r.report(context.Background(), endpointHealthTriggerScheduled)
+	if s.currentConfig().CiscoAIDefense.Endpoint != "" {
+		t.Fatal("the reload did not happen during the report")
+	}
+	for _, destination := range emitter.destinations {
+		if destination == "operator-console" {
+			t.Fatalf("operator destination received the endpoint health report: %v", emitter.destinations)
+		}
 	}
 }
