@@ -1559,6 +1559,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		Severity: passthroughSeverity, InboundOrigin: originOf(targetOrigin), Provider: provider, Signed: signedBody,
 	})
 	if routeOutcome.Result == SemanticRouteDenied {
+		p.recordRouteDeny(r.Context(), r.URL.Path, routeOutcome.Deny)
 		p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, routeDenyMessage(routeOutcome))
 		return
 	}
@@ -3182,7 +3183,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			Connector:         p.connectorName(),
 			Listener:          engine.ListenerGuardrail,
 			Severity:          preCallSeverity,
-			RequestedProvider: promptProviderName,
+			RequestedProvider: routeRequestedProvider(req.TargetURL, r.URL.RequestURI(), requestProviderRegistry(r.Context()), promptProviderName),
 			ConversationID:    routerMeta.SessionID,
 			Caller:            routeCaller,
 			Profiles:          routeProfiles,
@@ -3194,8 +3195,10 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		} else {
 			routeOutcome = outcomeFromDecision(routerInput, p.modelRouter.Route(r.Context(), routerInput), time.Since(startedRoute))
 		}
+		p.applyRouteGate(r.Context(), &routeOutcome, routerInput.RequestedProvider, req.Model)
 		p.recordSemanticRoutingDecisionV8(r.Context(), routeOutcome)
 		if routeOutcome.Result == SemanticRouteDenied {
+			p.recordRouteDeny(r.Context(), r.URL.Path, routeOutcome.Deny)
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
 			if req.Stream {
 				p.writeBlockedStream(w, req.Model, routeDenyMessage(routeOutcome))

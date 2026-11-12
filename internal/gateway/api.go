@@ -56,6 +56,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -71,10 +72,13 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health *SidecarHealth
-	client *Client
-	store  *audit.Store
-	logger *audit.Logger
+	// modelUsage is the local usage store behind GET /usage (nil until the
+	// sidecar binds it; the store itself reports whether it is on).
+	modelUsage atomic.Pointer[modelusage.Store]
+	health     *SidecarHealth
+	client     *Client
+	store      *audit.Store
+	logger     *audit.Logger
 	// protectedFiles is the sidecar's protected-file watch (nil when off or
 	// in a test server); the hook handler records tool calls for it.
 	protectedFiles *protectedFileWatch
@@ -1413,6 +1417,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/enforce/allowed", a.handleEnforceAllowed)
 	mux.HandleFunc("/alerts", a.handleAlerts)
 	mux.HandleFunc("/audit/event", a.handleAuditEvent)
+	mux.HandleFunc("/usage", a.handleUsage)
 	mux.HandleFunc("/policy/evaluate", a.handlePolicyEvaluate)
 	mux.HandleFunc("/policy/reload", a.handlePolicyReload)
 	mux.HandleFunc("/v1/skill/scan", a.handleSkillScan)
@@ -1525,6 +1530,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		mux.Handle("/api/v1/fleet/", http.StripPrefix("/api/v1/fleet", a.fleetAPI.Handler()))
 	}
 	a.registerSandboxRoutes(mux)
+	a.registerRoutingRoutes(mux)
 
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
 	handler = a.apiCSRFProtect(handler)

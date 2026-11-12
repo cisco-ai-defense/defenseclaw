@@ -107,6 +107,10 @@ type Sidecar struct {
 	// gateway report, which its install watcher admits (GAP-2591).
 	hookMCP hookReportedMCPServers
 
+	// modelUsageRT is the model usage engine and its local store (inert until
+	// observability.tokenomics turns them on); see sidecar_modelusage.go.
+	modelUsageRT atomic.Pointer[modelUsageRuntime]
+
 	startedAt  time.Time
 	cfg        *config.Config
 	cfgCurrent atomic.Pointer[config.Config]
@@ -1026,6 +1030,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// The API starts independently of connector setup. Mark every per-user
 	// connector pending before it can answer a retained native hook.
 	s.beginPerUserConnectorHookSetup()
+	s.applyModelUsage(s.cfg)
+	defer s.stopModelUsage()
+	s.startRoutingAdmin(ctx)
 	s.carryObservabilityV8ShutdownDrops()
 	// Report the records an earlier run lost from the local history; the loss
 	// journal kept them across the restart (GAP-1129).
@@ -1160,7 +1167,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			}
 		}
 	}
-	s.modelRouter = newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	router := newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	s.modelRouter = router
+	activeEngineRouter.Store(router)
 
 	s.logSecureClientPolicyEngine()
 
@@ -2538,6 +2547,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		proxy.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
 		proxy.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
 	}
+	s.applyModelUsage(appliedCfg)
 
 	if aiRestart {
 		if nextAIDiscovery != nil {
@@ -2934,6 +2944,7 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 	if api != nil {
 		s.bindAPIServerObservabilityV8Locked(api)
 		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
+		api.SetModelUsage(s.modelUsage().store)
 		api.protectedFiles = s.protectedFiles
 	}
 	s.apiServer = api

@@ -8,6 +8,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
+	"slices"
 )
 
 // Policy is the effective routing policy of one request: routing.* tightened
@@ -18,6 +20,14 @@ type Policy struct {
 	DefaultAlias      string            `json:"default_alias,omitempty"`
 	Categories        map[string]string `json:"categories,omitempty"`
 	AllowUserOverride bool              `json:"allow_user_override,omitempty"`
+}
+
+func (p Policy) clone() Policy {
+	out := p
+	out.AllowedAliases = slices.Clone(p.AllowedAliases)
+	out.DeniedProviders = slices.Clone(p.DeniedProviders)
+	out.Categories = maps.Clone(p.Categories)
+	return out
 }
 
 // Digest is a stable digest of the policy (sticky routing key, records).

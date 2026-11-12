@@ -4,7 +4,6 @@
 package routingadmin
 
 import (
-	"context"
 	"errors"
 	"reflect"
 	"slices"
@@ -131,7 +130,7 @@ func testLedger() *Ledger {
 
 func seededLedger(ids ...string) *Ledger {
 	l := testLedger()
-	l.ApplySeed(ids, nil)
+	l.ApplyRemote(ids, nil, now)
 	return l
 }
 
@@ -281,40 +280,43 @@ func TestDefiniteDenyMessageWins(t *testing.T) {
 	}
 }
 
-func TestLedgerWindowsAndSeed(t *testing.T) {
+func TestLedgerWindowsAndRemote(t *testing.T) {
 	l := testLedger()
 	key := "user:m:*:abc"
 	if _, ok := l.Spend(key, "day", now); ok {
-		t.Fatal("unseeded budget must report not loaded")
+		t.Fatal("unsynced budget must report not loaded")
 	}
-	l.Charge([]string{key}, 1, now) // a live charge before the seed is kept
-	l.ApplySeed([]string{"m"}, []SeedRow{
+	l.Charge([]string{key}, 1, now) // a live charge before the first sync is kept
+	l.ApplyRemote([]string{"m"}, []SeedRow{
 		{Day: day(now), Key: key, USD: 2},
 		{Day: day(now.AddDate(0, 0, -2)), Key: key, USD: 4},   // Monday
 		{Day: day(now.AddDate(0, 0, -3)), Key: key, USD: 8},   // Sunday, last week
 		{Day: day(now.AddDate(0, 0, -18)), Key: key, USD: 16}, // October
-		{Day: day(now), Key: "user:other:*:abc", USD: 100},    // budget not being seeded
 		{Day: "2026/11/18", Key: key, USD: 1000},              // not a UTC date: skipped
-	})
+	}, now)
 	for period, want := range map[string]float64{"day": 3, "week": 7, "month": 15} {
 		if got, ok := l.Spend(key, period, now); !ok || got != want {
 			t.Fatalf("%s spend = %v %v, want %v", period, got, ok, want)
 		}
 	}
-	l.ApplySeed([]string{"m", "other"}, []SeedRow{{Day: day(now), Key: key, USD: 50}, {Day: day(now), Key: "user:other:*:abc", USD: 3}})
-	if got, _ := l.Spend(key, "day", now); got != 3 {
-		t.Fatalf("a budget is seeded once: %v", got)
+	l.ApplyRemote([]string{"m"}, []SeedRow{{Day: day(now), Key: key, USD: 5}}, now)
+	if got, _ := l.Spend(key, "day", now); got != 6 {
+		t.Fatalf("remote is replaced, not added: %v", got)
 	}
-	if got, _ := l.Spend("user:other:*:abc", "day", now); got != 3 {
-		t.Fatalf("budget added later: %v", got)
+	if rows := l.LocalRows(); len(rows) != 1 || rows[0] != (SeedRow{Day: day(now), Key: key, USD: 1}) {
+		t.Fatalf("local rows %+v", rows)
+	}
+	l.SyncFailed(errors.New("store busy"))
+	if got := l.SeedState([]string{"m"}); got != "seeded (stale: store busy)" {
+		t.Fatalf("stale state %q", got)
+	}
+	if got := l.SeedState([]string{"m", "new"}); got != "failed: store busy" {
+		t.Fatalf("new id state %q", got)
 	}
 	l.Charge([]string{key}, -5, now)
 	l.Charge([]string{key}, 0, now)
-	if got, _ := l.Spend(key, "day", now); got != 3 {
-		t.Fatalf("non-positive charges are ignored: %v", got)
-	}
-	l.Charge([]string{key}, 1, now.AddDate(0, 0, 70)) // a clock step: counted today, prunes nothing
-	if got, _ := l.Spend(key, "day", now); got != 4 {
+	l.Charge([]string{key}, 1, now.AddDate(0, 0, 70)) // a clock step: counted today
+	if got, _ := l.Spend(key, "day", now); got != 7 {
 		t.Fatalf("future-dated charge: %v", got)
 	}
 	later := now.AddDate(0, 0, 70)
@@ -322,32 +324,6 @@ func TestLedgerWindowsAndSeed(t *testing.T) {
 	l.Charge([]string{key}, 1, later) // a new wall-clock day prunes days older than 62
 	if got, _ := l.Spend(key, "month", now); got != 0 {
 		t.Fatalf("pruned: %v", got)
-	}
-}
-
-func TestLedgerSeedLoopRetries(t *testing.T) {
-	l := testLedger()
-	calls := 0
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	l.SeedLoop(ctx, []string{"m"}, func() time.Time { return now }, func(_ context.Context, since time.Time) ([]SeedRow, error) {
-		calls++
-		if want := now.AddDate(0, 0, -LedgerDays).Truncate(24 * time.Hour); !since.Equal(want) {
-			t.Errorf("since %v, want %v", since, want)
-		}
-		if calls == 1 {
-			if got := l.SeedState([]string{"m"}); got != "seeding" {
-				t.Errorf("state before the first answer: %q", got)
-			}
-			return nil, errors.New("store busy")
-		}
-		if got := l.SeedState([]string{"m"}); got != "failed: store busy" {
-			t.Errorf("state after a failure: %q", got)
-		}
-		return []SeedRow{{Day: day(now), Key: "user:m:*:x", USD: 1}}, nil
-	})
-	if calls != 2 || !l.Seeded("m") || l.SeedState([]string{"m"}) != "seeded" {
-		t.Fatalf("calls %d seeded %v", calls, l.Seeded("m"))
 	}
 }
 

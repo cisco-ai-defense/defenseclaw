@@ -4,8 +4,8 @@
 package routingadmin
 
 import (
-	"context"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -14,29 +14,31 @@ import (
 )
 
 // LedgerDays is how many UTC days of spend the ledger keeps: enough for
-// the longest window (a month) plus the store seed.
+// the longest window (a month) plus a margin.
 const LedgerDays = 62
 
-// Ledger is the in-memory spend of the budget charge keys, per UTC day.
-// It exists only when budgets are configured and is carried across config
-// reloads. Live charges come from the usage recorder (computed cost of
-// agent calls, synchronously at the end of each call); the history of
-// earlier gateway processes comes from the usage store once (Seed).
+// Ledger is the budget spend the evaluator reads, per charge key and UTC
+// day: local is what this gateway process charged (the usage engine calls
+// Charge with the computed cost of each agent call), remote is every other
+// writer's spend from the counters (earlier processes on this device, other
+// devices or replicas), replaced on each sync. It exists only while budgets
+// are configured and is carried across config reloads.
 type Ledger struct {
-	mu sync.Mutex
-	// spend[key][day] is USD, day = days since 1970-01-01 UTC.
-	spend map[string]map[int32]float64
-	// seeded holds the budget ids whose store history has been added.
+	mu     sync.Mutex
+	local  map[string]map[int32]float64
+	remote map[string]map[int32]float64
+	// seeded holds the budget ids whose remote spend has been read once.
 	seeded    map[string]bool
-	seedErr   string
+	syncErr   string
+	lastSync  time.Time
 	lastPrune int32
-	// now is the wall clock (a test seam).
-	now func() time.Time
+	now       func() time.Time
 }
 
 // NewLedger returns an empty ledger.
 func NewLedger() *Ledger {
-	return &Ledger{spend: map[string]map[int32]float64{}, seeded: map[string]bool{}, now: time.Now}
+	return &Ledger{local: map[string]map[int32]float64{}, remote: map[string]map[int32]float64{},
+		seeded: map[string]bool{}, now: time.Now}
 }
 
 // Charge adds usd to every key on the UTC day of at. Non-positive or
@@ -54,10 +56,10 @@ func (l *Ledger) Charge(keys []string, usd float64, at time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, key := range keys {
-		days := l.spend[key]
+		days := l.local[key]
 		if days == nil {
 			days = map[int32]float64{}
-			l.spend[key] = days
+			l.local[key] = days
 		}
 		days[day] += usd
 	}
@@ -66,41 +68,130 @@ func (l *Ledger) Charge(keys []string, usd float64, at time.Time) {
 	}
 }
 
-// Spend returns the key's spend in the current period window and whether
-// its budget's history is loaded. A key of a budget not yet seeded returns
-// false.
+// Spend returns the key's spend (local and remote) in the current period
+// window and whether its budget's remote spend is loaded.
 func (l *Ledger) Spend(key, period string, now time.Time) (float64, bool) {
 	if l == nil {
 		return 0, false
 	}
-	today := dayNumber(now)
-	from := windowStart(period, now)
+	today, from := dayNumber(now), windowStart(period, now)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.seeded[budgetIDOfKey(key)] {
 		return 0, false
 	}
+	return l.windowLocked(key, from, today), true
+}
+
+// SpendPrefix sums the spend of every key that starts with prefix
+// (<scope>:<id>: gives all subjects of one budget, for administrators).
+func (l *Ledger) SpendPrefix(prefix, period string, now time.Time) (float64, bool) {
+	if l == nil {
+		return 0, false
+	}
+	today, from := dayNumber(now), windowStart(period, now)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.seeded[budgetIDOfKey(prefix)] {
+		return 0, false
+	}
+	keys := map[string]bool{}
+	for _, m := range []map[string]map[int32]float64{l.local, l.remote} {
+		for k := range m {
+			if strings.HasPrefix(k, prefix) {
+				keys[k] = true
+			}
+		}
+	}
+	sorted := make([]string, 0, len(keys))
+	for k := range keys {
+		sorted = append(sorted, k)
+	}
+	sort.Strings(sorted)
 	var total float64
-	days := l.spend[key]
-	for day := from; day <= today; day++ {
-		total += days[day] // in day order: the same total on every call
+	for _, k := range sorted {
+		total += l.windowLocked(k, from, today)
 	}
 	return total, true
 }
 
-// SeedRow is the store's spend of one key on one UTC day, from earlier
-// gateway processes only (the store excludes this process's epoch, so the
-// live charges are never counted twice).
+// windowLocked sums in day order, so the same state gives the same total.
+func (l *Ledger) windowLocked(key string, from, today int32) float64 {
+	var total float64
+	local, remote := l.local[key], l.remote[key]
+	for day := from; day <= today; day++ {
+		total += local[day] + remote[day]
+	}
+	return total
+}
+
+// SeedRow is the spend of one charge key on one UTC day.
 type SeedRow struct {
 	Day string // UTC date, YYYY-MM-DD
 	Key string
 	USD float64
 }
 
-// SeedFunc reads the store history since the given UTC day.
-type SeedFunc func(ctx context.Context, since time.Time) ([]SeedRow, error)
+// LocalRows returns this process's spend for the counters to store.
+func (l *Ledger) LocalRows() []SeedRow {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var rows []SeedRow
+	for key, days := range l.local {
+		for day, usd := range days {
+			rows = append(rows, SeedRow{Day: dayDate(day), Key: key, USD: usd})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Day != rows[j].Day {
+			return rows[i].Day < rows[j].Day
+		}
+		return rows[i].Key < rows[j].Key
+	})
+	return rows
+}
 
-// Seeded reports whether the budget's history is loaded.
+// ApplyRemote replaces the remote spend with rows and marks ids synced.
+func (l *Ledger) ApplyRemote(ids []string, rows []SeedRow, at time.Time) {
+	if l == nil {
+		return
+	}
+	remote := map[string]map[int32]float64{}
+	for _, row := range rows {
+		date, err := time.Parse(time.DateOnly, row.Day)
+		if err != nil || !(row.USD > 0) || math.IsInf(row.USD, 0) {
+			continue
+		}
+		days := remote[row.Key]
+		if days == nil {
+			days = map[int32]float64{}
+			remote[row.Key] = days
+		}
+		days[dayNumber(date)] += row.USD
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.remote = remote
+	for _, id := range ids {
+		l.seeded[id] = true
+	}
+	l.syncErr, l.lastSync = "", at
+}
+
+// SyncFailed records a failed sync; remote spend already read stays.
+func (l *Ledger) SyncFailed(err error) {
+	if l == nil || err == nil {
+		return
+	}
+	l.mu.Lock()
+	l.syncErr = err.Error()
+	l.mu.Unlock()
+}
+
+// Seeded reports whether the budget's remote spend has been read.
 func (l *Ledger) Seeded(id string) bool {
 	if l == nil {
 		return false
@@ -110,41 +201,9 @@ func (l *Ledger) Seeded(id string) bool {
 	return l.seeded[id]
 }
 
-// ApplySeed adds rows for the budget ids not yet seeded and marks them
-// seeded. Rows of other ids are skipped, so a later seed for a budget added
-// by a reload cannot count an earlier budget twice.
-func (l *Ledger) ApplySeed(ids []string, rows []SeedRow) {
-	if l == nil {
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	fresh := map[string]bool{}
-	for _, id := range ids {
-		if !l.seeded[id] {
-			fresh[id] = true
-		}
-	}
-	for _, row := range rows {
-		date, err := time.Parse(time.DateOnly, row.Day)
-		if err != nil || !fresh[budgetIDOfKey(row.Key)] || !(row.USD > 0) || math.IsInf(row.USD, 0) {
-			continue
-		}
-		days := l.spend[row.Key]
-		if days == nil {
-			days = map[int32]float64{}
-			l.spend[row.Key] = days
-		}
-		days[dayNumber(date)] += row.USD
-	}
-	for id := range fresh {
-		l.seeded[id] = true
-	}
-	l.seedErr = ""
-}
-
-// SeedState is seeded, seeding or failed: <error> for doctor and status
-// (seeded when every id is loaded).
+// SeedState is seeded, seeding, failed: <error> (never read) or
+// seeded (stale: <error>) (read once, the last sync failed), for doctor and
+// status.
 func (l *Ledger) SeedState(ids []string) string {
 	if l == nil {
 		return "seeding"
@@ -153,53 +212,30 @@ func (l *Ledger) SeedState(ids []string) string {
 	defer l.mu.Unlock()
 	for _, id := range ids {
 		if !l.seeded[id] {
-			if l.seedErr != "" {
-				return "failed: " + l.seedErr
+			if l.syncErr != "" {
+				return "failed: " + l.syncErr
 			}
 			return "seeding"
 		}
 	}
+	if l.syncErr != "" {
+		return "seeded (stale: " + l.syncErr + ")"
+	}
 	return "seeded"
-}
-
-// SeedLoop seeds ids from fetch, retrying with backoff (1 s doubling to
-// 60 s) until it succeeds or ctx ends. It runs only when budgets exist.
-func (l *Ledger) SeedLoop(ctx context.Context, ids []string, now func() time.Time, fetch SeedFunc) {
-	if l == nil || len(ids) == 0 || fetch == nil {
-		return
-	}
-	delay := time.Second
-	for {
-		since := time.Unix(int64(dayNumber(now())-LedgerDays)*86400, 0).UTC()
-		rows, err := fetch(ctx, since)
-		if err == nil {
-			l.ApplySeed(ids, rows)
-			return
-		}
-		l.mu.Lock()
-		l.seedErr = err.Error()
-		l.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(delay):
-		}
-		if delay *= 2; delay > time.Minute {
-			delay = time.Minute
-		}
-	}
 }
 
 func (l *Ledger) pruneLocked(today int32) {
 	l.lastPrune = today
-	for key, days := range l.spend {
-		for day := range days {
-			if day <= today-LedgerDays {
-				delete(days, day)
+	for _, m := range []map[string]map[int32]float64{l.local, l.remote} {
+		for key, days := range m {
+			for day := range days {
+				if day <= today-LedgerDays {
+					delete(days, day)
+				}
 			}
-		}
-		if len(days) == 0 {
-			delete(l.spend, key)
+			if len(days) == 0 {
+				delete(m, key)
+			}
 		}
 	}
 }
@@ -216,6 +252,10 @@ func budgetIDOfKey(key string) string {
 
 func dayNumber(t time.Time) int32 {
 	return int32(math.Floor(float64(t.UTC().Unix()) / 86400))
+}
+
+func dayDate(day int32) string {
+	return time.Unix(int64(day)*86400, 0).UTC().Format(time.DateOnly)
 }
 
 // windowStart is the first UTC day of the period that contains now.

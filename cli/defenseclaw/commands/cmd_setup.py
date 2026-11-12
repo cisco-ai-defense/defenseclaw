@@ -778,6 +778,11 @@ from defenseclaw.commands.cmd_setup_redaction import redaction  # noqa: E402
 
 setup.add_command(redaction)
 
+# Per-call model usage and cost (observability.tokenomics / observability.pricing).
+from defenseclaw.commands.cmd_setup_tokenomics import tokenomics  # noqa: E402
+
+setup.add_command(tokenomics)
+
 # Register the first-class Galileo cloud/self-hosted setup workflow. It writes
 # a named OTLP destination through the shared observability writer, so Galileo
 # can coexist with local-observability and every other OTLP backend.
