@@ -114,6 +114,14 @@ func substrateEnvelopeFrom(ctx context.Context) (substrateEnvelope, bool) {
 	return e, ok
 }
 
+// substrateEnvelopeVersionOK accepts the envelope version the gateway names
+// (substrateEnvelopeVersion) and "1", which the actor kit and the connector
+// notify bridge send (A5 3d9df709db, A1); the two lanes had settled on
+// different strings and a gateway that took only one refused the other.
+func substrateEnvelopeVersionOK(v string) bool {
+	return v == substrateEnvelopeVersion || v == "1"
+}
+
 // substrateHookContract is the hook contract the binding reads: the
 // registration's (from the template attestation), else the envelope's.
 func substrateHookContract(ctx context.Context, reg registry.Registration) string {
@@ -146,7 +154,7 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 		}
 		var env substrateEnvelope
 		dec := json.NewDecoder(bytes.NewReader(raw))
-		if err := dec.Decode(&env); err != nil || env.V != substrateEnvelopeVersion || len(env.Payload) == 0 {
+		if err := dec.Decode(&env); err != nil || !substrateEnvelopeVersionOK(env.V) || len(env.Payload) == 0 {
 			st.logRefusal("hook envelope refused (version %q, %d payload bytes)", env.V, len(env.Payload))
 			writeSubstrateRefusal(w, http.StatusBadRequest, "envelope_invalid")
 			return
