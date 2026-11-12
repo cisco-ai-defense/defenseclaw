@@ -75,7 +75,7 @@ func discover(ctx context.Context, args []string) int {
 		return 2
 	}
 	reg := attest.NewRegistry(attest.RegistryOptions{PlainHTTP: plain})
-	ver := attest.NewVerifier(reg, func() attest.Policy { return attest.Policy{Anchors: ta, RequireDigest: true} })
+	ver := attest.NewVerifier(reg, func() attest.Policy { return attest.Policy{Anchors: ta} })
 	now := time.Now().UTC()
 	enc := json.NewEncoder(os.Stdout)
 

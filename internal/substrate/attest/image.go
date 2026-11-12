@@ -321,6 +321,7 @@ type ImageFS struct {
 	idx    map[string]*FileEntry
 	limits Limits
 	count  int // tar entries seen
+	sorted []string
 }
 
 // OpenFS downloads the layers (digest-checked) and indexes them.
@@ -438,35 +439,92 @@ func (f *ImageFS) indexLayer(layer int, file string) error {
 		if f.count > f.limits.MaxEntries {
 			return fmt.Errorf("image has more than %d entries", f.limits.MaxEntries)
 		}
+		if hdr.Typeflag == tar.TypeGNUSparse {
+			return fmt.Errorf("layer %d: sparse entries are not read", layer)
+		}
+		for k := range hdr.PAXRecords {
+			if strings.HasPrefix(k, "GNU.sparse") {
+				return fmt.Errorf("layer %d: sparse entries are not read", layer)
+			}
+		}
 		p, ok := cleanImagePath(hdr.Name)
 		if !ok {
 			return fmt.Errorf("layer %d: bad path in tar", layer)
 		}
 		dir, base := path.Split(p)
+		// A whiteout removes what lower layers hold; entries the same layer
+		// adds, in any order, stay (OCI image spec, layer changesets).
 		switch {
 		case base == ".wh..wh..opq":
-			f.removeUnder(path.Clean(dir), false)
+			f.removeBelow(path.Clean(f.canon(dir, true)), false, layer)
 			continue
 		case strings.HasPrefix(base, ".wh."):
-			f.removeUnder(path.Join(dir, strings.TrimPrefix(base, ".wh.")), true)
+			f.removeBelow(path.Join(f.canon(dir, true), strings.TrimPrefix(base, ".wh.")), true, layer)
 			continue
 		}
+		// The parents are the real folders the extractor writes into: a
+		// symlinked parent from a lower layer moves the entry.
+		p = f.canon(p, false)
 		e := &FileEntry{Path: p, Type: hdr.Typeflag, Mode: hdr.Mode, UID: hdr.Uid, GID: hdr.Gid,
 			Size: hdr.Size, Linkname: hdr.Linkname, Layer: layer, off: cr.n}
+		if hdr.Typeflag == tar.TypeLink {
+			// A hard link is the same file as its target as it is now; a
+			// later layer that replaces the target does not change it.
+			t, ok := f.idx[f.canon(hdr.Linkname, true)]
+			if !ok {
+				return fmt.Errorf("layer %d: hard link %s has no target %s", layer, p, hdr.Linkname)
+			}
+			c := *t
+			c.Path = p
+			e = &c
+		}
 		f.idx[p] = e
+		f.sorted = nil
 	}
 }
 
-// removeUnder deletes p (when self) and everything below it. An opaque
-// whiteout keeps the directory itself.
-func (f *ImageFS) removeUnder(p string, self bool) {
+// canon resolves symlinked folders in p against the index, as the file system
+// would: every parent always, the last element only when followLast. Loops
+// and long chains stop where they are.
+func (f *ImageFS) canon(p string, followLast bool) string {
+	comps := strings.Split(strings.Trim(path.Clean("/"+p), "/"), "/")
+	cur := "/"
+	hops := 0
+	for i := 0; i < len(comps); i++ {
+		c := comps[i]
+		if c == "" {
+			continue
+		}
+		next := path.Join(cur, c)
+		last := i == len(comps)-1
+		if e, ok := f.idx[next]; ok && e.IsSymlink() && (!last || followLast) && hops < 16 {
+			hops++
+			base := cur
+			if path.IsAbs(e.Linkname) {
+				base = "/"
+			}
+			resolved := path.Clean(path.Join(base, e.Linkname))
+			rest := append([]string(nil), comps[i+1:]...)
+			comps = append(strings.Split(strings.Trim(resolved, "/"), "/"), rest...)
+			cur, i = "/", -1
+			continue
+		}
+		cur = next
+	}
+	return cur
+}
+
+// removeBelow deletes p (when self) and everything below it that lower
+// layers added. An opaque whiteout keeps the directory itself.
+func (f *ImageFS) removeBelow(p string, self bool, layer int) {
 	prefix := p + "/"
 	if p == "/" {
 		prefix = "/"
 	}
-	for k := range f.idx {
-		if strings.HasPrefix(k, prefix) || (self && k == p) {
+	for k, e := range f.idx {
+		if e.Layer < layer && (strings.HasPrefix(k, prefix) || (self && k == p)) {
 			delete(f.idx, k)
+			f.sorted = nil
 		}
 	}
 }
@@ -474,38 +532,39 @@ func (f *ImageFS) removeUnder(p string, self bool) {
 // Close removes the cached layers.
 func (f *ImageFS) Close() error { return os.RemoveAll(f.dir) }
 
-// Lookup returns the entry at p.
+// Lookup returns the entry at p; symlinked parent folders are followed, a
+// symlink at the end is returned as it is.
 func (f *ImageFS) Lookup(p string) (*FileEntry, bool) {
-	e, ok := f.idx[path.Clean("/"+p)]
+	e, ok := f.idx[f.canon(p, false)]
 	return e, ok
+}
+
+// Resolve is Lookup that also follows a symlink at the end, inside the image
+// root, and returns the real path.
+func (f *ImageFS) Resolve(p string) (*FileEntry, string, bool) {
+	real := f.canon(p, true)
+	e, ok := f.idx[real]
+	return e, real, ok
 }
 
 // Paths lists every path, sorted.
 func (f *ImageFS) Paths() []string {
-	out := make([]string, 0, len(f.idx))
-	for p := range f.idx {
-		out = append(out, p)
+	if f.sorted == nil {
+		f.sorted = make([]string, 0, len(f.idx))
+		for p := range f.idx {
+			f.sorted = append(f.sorted, p)
+		}
+		sort.Strings(f.sorted)
 	}
-	sort.Strings(out)
-	return out
+	return f.sorted
 }
 
-// Read returns a regular file's content (hard links are followed, symlinks
-// are not).
+// Read returns a regular file's content. Symlinks are followed inside the
+// image; a hard link is already its target.
 func (f *ImageFS) Read(p string) ([]byte, error) {
-	e, ok := f.Lookup(p)
+	e, _, ok := f.Resolve(p)
 	if !ok {
 		return nil, fmt.Errorf("%s: %w", p, os.ErrNotExist)
-	}
-	for hops := 0; e.Type == tar.TypeLink; hops++ {
-		if hops > 8 {
-			return nil, fmt.Errorf("%s: too many hard links", p)
-		}
-		t, ok := f.Lookup(e.Linkname)
-		if !ok {
-			return nil, fmt.Errorf("%s: link target missing", p)
-		}
-		e = t
 	}
 	if !e.IsRegular() {
 		return nil, fmt.Errorf("%s: not a regular file", p)
@@ -519,7 +578,7 @@ func (f *ImageFS) Read(p string) ([]byte, error) {
 	}
 	defer fh.Close()
 	buf := make([]byte, e.Size)
-	if _, err := fh.ReadAt(buf, e.off); err != nil && !(errors.Is(err, io.EOF) && e.Size == 0) {
+	if _, err := fh.ReadAt(buf, e.off); err != nil && (!errors.Is(err, io.EOF) || e.Size != 0) {
 		return nil, err
 	}
 	return buf, nil
@@ -539,56 +598,73 @@ func (f *ImageFS) Glob(pattern string) []*FileEntry {
 
 // Under lists entries below dir (not dir itself), sorted by path.
 func (f *ImageFS) Under(dir string) []*FileEntry {
-	prefix := path.Clean("/"+dir) + "/"
+	prefix := f.canon(dir, true) + "/"
 	if prefix == "//" {
 		prefix = "/"
 	}
+	paths := f.Paths()
+	i := sort.SearchStrings(paths, prefix)
 	var out []*FileEntry
-	for _, p := range f.Paths() {
-		if strings.HasPrefix(p, prefix) {
-			out = append(out, f.idx[p])
-		}
+	for ; i < len(paths) && strings.HasPrefix(paths[i], prefix); i++ {
+		out = append(out, f.idx[paths[i]])
 	}
 	return out
 }
 
-// Materialize writes the regular files under dir into a new directory under
-// dest, mode 0600/0700, and returns it. Symlinks, devices and hard links are
-// skipped: a scanner reads content, and never gets a link out of the tree.
-func (f *ImageFS) Materialize(dir, dest string) (string, error) {
-	root := path.Clean("/" + dir)
+// Materialize writes the content of the files below dir into a new folder
+// under dest, mode 0600/0700, and returns it with the entries it could not
+// copy: a scanner reads content and never gets a link out of the tree. A
+// symlink to a file inside the image is copied as that file; a link to a
+// folder, a device or a name that climbs out of the folder is reported.
+func (f *ImageFS) Materialize(dir, dest string) (string, []string, error) {
+	root := f.canon(dir, true)
 	target := filepath.Join(dest, filepath.FromSlash(strings.TrimPrefix(root, "/")))
 	if err := os.MkdirAll(target, 0o700); err != nil {
-		return "", err
+		return "", nil, err
 	}
+	var skipped []string
 	for _, e := range f.Under(root) {
 		rel := strings.TrimPrefix(e.Path, root+"/")
-		if rel == "" || strings.Contains(rel, "..") {
+		out := filepath.Join(target, filepath.FromSlash(rel))
+		if rel == "" || strings.Contains(rel, "..") || !strings.HasPrefix(out, target+string(filepath.Separator)) {
+			skipped = append(skipped, e.Path+" (name)")
 			continue
 		}
-		out := filepath.Join(target, filepath.FromSlash(rel))
-		if !strings.HasPrefix(out, target+string(filepath.Separator)) {
-			continue
+		real := e
+		if e.IsSymlink() {
+			r, realPath, ok := f.Resolve(e.Path)
+			if !ok {
+				if len(f.Under(realPath)) > 0 {
+					// A folder with no entry of its own, reached through a link.
+					skipped = append(skipped, e.Path+" (link to a folder)")
+				}
+				continue // otherwise a dangling link has no content
+			}
+			real = r
 		}
 		switch {
-		case e.IsDir():
+		case real.IsDir() && e.IsDir():
 			if err := os.MkdirAll(out, 0o700); err != nil {
-				return "", err
+				return "", nil, err
 			}
-		case e.IsRegular():
+		case real.IsDir():
+			skipped = append(skipped, e.Path+" (link to a folder)")
+		case real.IsRegular():
 			data, err := f.Read(e.Path)
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
 			if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
-				return "", err
+				return "", nil, err
 			}
 			if err := os.WriteFile(out, data, 0o600); err != nil {
-				return "", err
+				return "", nil, err
 			}
+		default:
+			skipped = append(skipped, e.Path+" (special file)")
 		}
 	}
-	return target, nil
+	return target, skipped, nil
 }
 
 // AddLayerGzip adds one more layer on top (a kit layer that is not pushed

@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -14,25 +16,28 @@ import (
 // Rejection codes. They are stable: they go into template_unverified events
 // and the CLI's --json output.
 const (
-	CodeNoAttestation  = "no_attestation"
-	CodeBadSignature   = "bad_signature"
-	CodeUntrustedKey   = "untrusted_signer"
-	CodeKeyRevoked     = "key_revoked"
-	CodeKeyExpired     = "key_expired"
-	CodeBadStatement   = "bad_statement"
-	CodeSubjectMismach = "subject_mismatch"
-	CodeImageMismatch  = "image_mismatch"
-	CodeStalePolicy    = "stale_policy"
-	CodeTooOld         = "too_old"
-	CodeKitNotAccepted = "kit_not_accepted"
-	CodeKitLayer       = "kit_layer_mismatch"
-	CodeBaseUntrusted  = "base_untrusted"
-	CodeScanBlocked    = "scan_blocked"
-	CodeHooksNotRoot   = "hooks_not_root_owned"
-	CodePhoneHome      = "phone_home_enabled"
-	CodeUnpinned       = "unpinned_reference"
-	CodeRegistry       = "registry_error"
-	CodeBadReference   = "bad_reference"
+	CodeNoAttestation      = "no_attestation"
+	CodeBadSignature       = "bad_signature"
+	CodeUntrustedKey       = "untrusted_signer"
+	CodeKeyRevoked         = "key_revoked"
+	CodeKeyExpired         = "key_expired"
+	CodeBadStatement       = "bad_statement"
+	CodeSubjectMismach     = "subject_mismatch"
+	CodeImageMismatch      = "image_mismatch"
+	CodeStalePolicy        = "stale_policy"
+	CodeTooOld             = "too_old"
+	CodeKitNotAccepted     = "kit_not_accepted"
+	CodeKitLayer           = "kit_layer_mismatch"
+	CodeBaseUntrusted      = "base_untrusted"
+	CodeScanBlocked        = "scan_blocked"
+	CodeHooksNotRoot       = "hooks_not_root_owned"
+	CodePhoneHome          = "phone_home_enabled"
+	CodeEnvUnsafe          = "env_loads_code"
+	CodeDigestRevoked      = "digest_revoked"
+	CodeUnpinned           = "unpinned_reference"
+	CodeRegistry           = "registry_error"
+	CodeBadReference       = "bad_reference"
+	CodeRegistryNotAllowed = "registry_not_allowed"
 )
 
 // Rejection is why a template is not admitted. It is an error.
@@ -70,6 +75,11 @@ type Verified struct {
 	KeyID     string
 	KeyName   string
 	CheckedAt time.Time
+	// ValidUntil is when the controller must verify again: a cached verdict
+	// never outlives it, so a revoked key or a raised policy generation reaches
+	// a template that was admitted earlier. A controller that polls less often
+	// than this re-verifies on every pass.
+	ValidUntil time.Time
 }
 
 // Attestor decides whether a template image is attested. A3's controller
@@ -96,10 +106,17 @@ type Policy struct {
 	// AllowUnverifiedBase admits a template whose base is neither
 	// allowlisted nor attested.
 	AllowUnverifiedBase bool
-	// RequireDigest refuses a tag reference, which could move after the
-	// check.
-	RequireDigest bool
-	Now           func() time.Time
+	// AllowTags accepts a tag reference. A tag can move after the check, so
+	// the default is to require a digest; a controller must run Verified.Digest.
+	AllowTags bool
+	// AllowedRegistries, when not empty, lists the registry hosts a template
+	// image may come from. The image reference is untrusted input and names
+	// the host the verifier connects to.
+	AllowedRegistries []string
+	// RevokedDigests are image digests that are never admitted again, whatever
+	// their attestation says.
+	RevokedDigests map[string]bool
+	Now            func() time.Time
 }
 
 func (p Policy) now() time.Time {
@@ -136,14 +153,15 @@ func NewVerifier(reg *Registry, policy func() Policy) *Verifier {
 }
 
 func policyKey(p Policy) string {
-	key := fmt.Sprintf("%d|%s|%v|%v|%d", p.MinPolicyGeneration, p.MaxAge, p.AllowUnverifiedBase, p.RequireDigest, len(p.KitLayers))
+	key := fmt.Sprintf("%d|%s|%v|%v|%s", p.MinPolicyGeneration, p.MaxAge, p.AllowUnverifiedBase, p.AllowTags, strings.Join(p.AllowedRegistries, ","))
+	pins := make([]string, 0, len(p.KitLayers))
+	for k, v := range p.KitLayers {
+		pins = append(pins, k+"="+v)
+	}
+	sort.Strings(pins)
+	key += "|" + strings.Join(pins, ",")
 	if p.Anchors != nil {
-		for _, id := range p.Anchors.KeyIDs() {
-			key += "|" + id
-			if p.Anchors.IsRevoked(id) {
-				key += "!"
-			}
-		}
+		key += "|" + p.Anchors.fingerprint()
 	}
 	return key
 }
@@ -165,7 +183,10 @@ func (v *Verifier) Verify(ctx context.Context, image string) (*Verified, error) 
 	if pol.Anchors == nil || pol.Anchors.Len() == 0 {
 		return nil, reject(CodeUntrustedKey, "no trust anchors are configured")
 	}
-	if ref.Digest == "" && pol.RequireDigest {
+	if len(pol.AllowedRegistries) > 0 && !registryAllowed(ref.Registry, pol.AllowedRegistries) {
+		return nil, reject(CodeRegistryNotAllowed, "registry %s is not an allowed template registry", ref.Registry)
+	}
+	if ref.Digest == "" && !pol.AllowTags {
 		return nil, reject(CodeUnpinned, "%s names a tag; pin the template image by digest", image)
 	}
 	digest := ref.Digest
@@ -176,6 +197,9 @@ func (v *Verifier) Verify(ctx context.Context, image string) (*Verified, error) 
 		}
 		digest = d
 	}
+	if pol.RevokedDigests[digest] {
+		return nil, reject(CodeDigestRevoked, "the image digest %s is revoked", short(digest))
+	}
 	ck, pk := ref.Name()+"@"+digest, policyKey(pol)
 	v.mu.Lock()
 	if c, ok := v.cache[ck]; ok && c.pkey == pk {
@@ -185,7 +209,19 @@ func (v *Verifier) Verify(ctx context.Context, image string) (*Verified, error) 
 		}
 		if pol.now().Sub(c.at) < ttl {
 			v.mu.Unlock()
-			return c.v, c.err
+			if c.err != nil {
+				return nil, c.err
+			}
+			// The kit judgement is a function, so it is asked again; the copy
+			// names this reference, not the one that filled the cache.
+			if pol.AcceptKit != nil {
+				if err := pol.AcceptKit(c.v.Statement.Predicate.Kit.Version); err != nil {
+					return nil, reject(CodeKitNotAccepted, "%v", err)
+				}
+			}
+			cp := *c.v
+			cp.Image, cp.Pinned = image, ref.Digest != ""
+			return &cp, nil
 		}
 	}
 	v.mu.Unlock()
@@ -197,6 +233,9 @@ func (v *Verifier) Verify(ctx context.Context, image string) (*Verified, error) 
 	// A registry outage is never cached as a failure of the template.
 	if r, ok := AsRejection(err); !ok || !r.Retryable {
 		v.mu.Lock()
+		if len(v.cache) >= maxCacheEntries {
+			v.cache = map[string]cached{}
+		}
 		v.cache[ck] = cached{v: out, err: err, at: pol.now(), pkey: pk}
 		v.mu.Unlock()
 	}
@@ -289,12 +328,15 @@ func (v *Verifier) check(ctx context.Context, pol Policy, ref Ref, digest string
 	if !p.Hooks.PhoneHomeOff {
 		return nil, reject(CodePhoneHome, "phone-home or auto-update switches are not all off")
 	}
+	if !p.Hooks.EnvClean {
+		return nil, reject(CodeEnvUnsafe, "the image environment sets variables that load code into every process: %s", strings.Join(p.Hooks.UnsafeEnv, ", "))
+	}
 	// The statement is about this digest; make sure the image it describes
 	// actually carries the kit layer it names, at the place it names.
 	if err := v.checkImage(ctx, ref, digest, p.Kit); err != nil {
 		return nil, err
 	}
-	return &Verified{Digest: digest, Statement: st, KeyID: anchor.KeyID, KeyName: anchor.Name, CheckedAt: now}, nil
+	return &Verified{Digest: digest, Statement: st, KeyID: anchor.KeyID, KeyName: anchor.Name, CheckedAt: now, ValidUntil: now.Add(v.SuccessTTL)}, nil
 }
 
 func anchorID(a *Anchor) string {
@@ -333,3 +375,15 @@ func short(d string) string {
 	}
 	return d
 }
+
+func registryAllowed(host string, allowed []string) bool {
+	for _, a := range allowed {
+		if strings.EqualFold(a, host) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxCacheEntries bounds the verdict cache.
+const maxCacheEntries = 4096
