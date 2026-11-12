@@ -423,8 +423,23 @@ func TestEndpointHealthManagedRequestGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read golden (regenerate with DEFENSECLAW_UPDATE_GOLDEN=1): %v", err)
 	}
+	// A Windows checkout may convert the golden to CRLF.
+	want = bytes.ReplaceAll(want, []byte("\r\n"), []byte("\n"))
 	if !bytes.Equal(want, got) {
-		t.Fatalf("managed endpoint health request changed:\n%s\nwant:\n%s", got, want)
+		gotLines, wantLines := strings.Split(string(got), "\n"), strings.Split(string(want), "\n")
+		for index := 0; index < len(gotLines) || index < len(wantLines); index++ {
+			var gotLine, wantLine string
+			if index < len(gotLines) {
+				gotLine = gotLines[index]
+			}
+			if index < len(wantLines) {
+				wantLine = wantLines[index]
+			}
+			if gotLine != wantLine {
+				t.Fatalf("managed endpoint health request changed at line %d:\n got: %q\nwant: %q\n(regenerate with DEFENSECLAW_UPDATE_GOLDEN=1 and review)",
+					index+1, gotLine, wantLine)
+			}
+		}
 	}
 }
 
