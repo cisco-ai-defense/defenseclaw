@@ -330,7 +330,6 @@ func TestAnchorFileReload(t *testing.T) {
 	}
 }
 
-
 // GAP-0105: new UIDs are swept and capped, not only on a rate update.
 func TestUsageCPUSweepsOnInsert(t *testing.T) {
 	now := time.Date(2026, 11, 12, 22, 0, 0, 0, time.UTC)
