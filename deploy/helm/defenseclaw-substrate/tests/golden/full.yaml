@@ -350,6 +350,7 @@ data:
         address: api.ate-system.svc:443
         auth: serviceaccount
         ca_file: /var/run/ate/ca.crt
+        server_name: api.ate-system.svc
         token_file: /var/run/ate/token
       default_sandbox_class: gvisor
       enabled: true
@@ -806,7 +807,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: callout
       annotations:
-        checksum/config: 3f36443733397257544d22286b50ac19bf5fc8d2c35f49c12083d9677b9691d7
+        checksum/config: 36eba79f0c203448a100efacec4acbd2ddcc5eef8aab1552728d9bac02b175b0
     spec:
       
       serviceAccountName: defenseclaw-callout
@@ -967,7 +968,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: controller
       annotations:
-        checksum/config: 3f36443733397257544d22286b50ac19bf5fc8d2c35f49c12083d9677b9691d7
+        checksum/config: 36eba79f0c203448a100efacec4acbd2ddcc5eef8aab1552728d9bac02b175b0
     spec:
       
       serviceAccountName: defenseclaw-controller
@@ -1110,7 +1111,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: gateway
       annotations:
-        checksum/config: 3f36443733397257544d22286b50ac19bf5fc8d2c35f49c12083d9677b9691d7
+        checksum/config: 36eba79f0c203448a100efacec4acbd2ddcc5eef8aab1552728d9bac02b175b0
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1271,7 +1272,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: leader
       annotations:
-        checksum/config: 3f36443733397257544d22286b50ac19bf5fc8d2c35f49c12083d9677b9691d7
+        checksum/config: 36eba79f0c203448a100efacec4acbd2ddcc5eef8aab1552728d9bac02b175b0
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1677,6 +1678,7 @@ data:
         address: api.ate-system.svc:443
         auth: serviceaccount
         ca_file: /var/run/ate/ca.crt
+        server_name: api.ate-system.svc
         token_file: /var/run/ate/token
       default_sandbox_class: gvisor
       enabled: true

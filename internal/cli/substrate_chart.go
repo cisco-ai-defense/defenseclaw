@@ -67,9 +67,9 @@ func substrateChartStep(name, short string, run func(ctx context.Context, plan s
 
 func substrateChartKube() (*setup.Kube, error) { return setup.NewInClusterKube(substrateChartKubeDir) }
 
-func substrateChartAPI(plan setup.ChartPlan, token string) (*setup.API, error) {
-	return setup.DialAPI(setup.APIOptions{Address: plan.API.Address, ServerName: plan.API.Audience,
-		CAFile: substrateChartAPICA, TokenFile: token})
+func substrateChartAPI(plan setup.ChartPlan, token string, access bool) (*setup.API, error) {
+	return setup.NewAPI(setup.APIOptions{Address: plan.API.Address, ServerName: plan.API.Audience,
+		CAFile: substrateChartAPICA, TokenFile: token, WithAccess: access})
 }
 
 // substrateChartValidateConfig validates the next release's config.yaml as
@@ -113,7 +113,7 @@ func init() {
 				if err != nil {
 					return setup.StepReport{Step: "bootstrap"}, err
 				}
-				api, err := substrateChartAPI(plan, substrateChartOwnerToken)
+				api, err := substrateChartAPI(plan, substrateChartOwnerToken, true)
 				if err != nil {
 					return setup.StepReport{Step: "bootstrap"}, err
 				}
@@ -146,7 +146,7 @@ func init() {
 				if err != nil {
 					return setup.StepReport{Step: "pre-delete"}, err
 				}
-				api, err := substrateChartAPI(plan, substrateChartAPIToken)
+				api, err := substrateChartAPI(plan, substrateChartAPIToken, false)
 				if err != nil {
 					return setup.StepReport{Step: "pre-delete"}, err
 				}

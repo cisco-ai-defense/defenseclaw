@@ -3,7 +3,7 @@ config:
   substrate:
     launcher_atespaces:
       engineering: [eng-payments, eng-web]
-      data: [eng-web, data-ml]
+      data: [data-ml]
 managedAtespaces: [platform-ci]
 bootstrap:
   ownerTokenSecret: ate-bootstrap-owner

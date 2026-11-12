@@ -276,6 +276,7 @@ data:
         address: api.ate-system.svc:443
         auth: serviceaccount
         ca_file: /var/run/ate/ca.crt
+        server_name: api.ate-system.svc
         token_file: /var/run/ate/token
       default_sandbox_class: gvisor
       enabled: true
@@ -291,7 +292,6 @@ data:
       idle_suspend_after: 30m
       launcher_atespaces:
         data:
-        - eng-web
         - data-ml
         engineering:
         - eng-payments
@@ -687,7 +687,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: callout
       annotations:
-        checksum/config: cc44d943547b27ec74a21318cd31af51f1a10230163b6e66d2eafe29a1279445
+        checksum/config: 3ecbadf87aa5e0df5380ebd2bfa087116b59c27bce0af9e5cd38e333ef40e7bb
     spec:
       
       serviceAccountName: defenseclaw-callout
@@ -848,7 +848,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: controller
       annotations:
-        checksum/config: cc44d943547b27ec74a21318cd31af51f1a10230163b6e66d2eafe29a1279445
+        checksum/config: 3ecbadf87aa5e0df5380ebd2bfa087116b59c27bce0af9e5cd38e333ef40e7bb
     spec:
       
       serviceAccountName: defenseclaw-controller
@@ -991,7 +991,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: gateway
       annotations:
-        checksum/config: cc44d943547b27ec74a21318cd31af51f1a10230163b6e66d2eafe29a1279445
+        checksum/config: 3ecbadf87aa5e0df5380ebd2bfa087116b59c27bce0af9e5cd38e333ef40e7bb
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1152,7 +1152,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: leader
       annotations:
-        checksum/config: cc44d943547b27ec74a21318cd31af51f1a10230163b6e66d2eafe29a1279445
+        checksum/config: 3ecbadf87aa5e0df5380ebd2bfa087116b59c27bce0af9e5cd38e333ef40e7bb
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1406,6 +1406,7 @@ data:
         address: api.ate-system.svc:443
         auth: serviceaccount
         ca_file: /var/run/ate/ca.crt
+        server_name: api.ate-system.svc
         token_file: /var/run/ate/token
       default_sandbox_class: gvisor
       enabled: true
@@ -1421,7 +1422,6 @@ data:
       idle_suspend_after: 30m
       launcher_atespaces:
         data:
-        - eng-web
         - data-ml
         engineering:
         - eng-payments

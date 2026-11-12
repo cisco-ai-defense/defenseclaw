@@ -145,6 +145,7 @@ data:
         address: api.ate-system.svc:443
         auth: serviceaccount
         ca_file: /var/run/ate/ca.crt
+        server_name: api.ate-system.svc
         token_file: /var/run/ate/token
       default_sandbox_class: gvisor
       enabled: true
@@ -500,7 +501,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: callout
       annotations:
-        checksum/config: bbdb70bdc64f2b9b1b139a086d7560691df58401b65751048d0f6643e0fcd672
+        checksum/config: 61e0dbdd2c906907f7adf8d028538a64f70b22b75e5d06c44d3b56cc57a69c9a
     spec:
       
       serviceAccountName: defenseclaw-callout
@@ -629,7 +630,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: controller
       annotations:
-        checksum/config: bbdb70bdc64f2b9b1b139a086d7560691df58401b65751048d0f6643e0fcd672
+        checksum/config: 61e0dbdd2c906907f7adf8d028538a64f70b22b75e5d06c44d3b56cc57a69c9a
     spec:
       
       serviceAccountName: defenseclaw-controller
@@ -741,7 +742,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: gateway
       annotations:
-        checksum/config: bbdb70bdc64f2b9b1b139a086d7560691df58401b65751048d0f6643e0fcd672
+        checksum/config: 61e0dbdd2c906907f7adf8d028538a64f70b22b75e5d06c44d3b56cc57a69c9a
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -870,7 +871,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: leader
       annotations:
-        checksum/config: bbdb70bdc64f2b9b1b139a086d7560691df58401b65751048d0f6643e0fcd672
+        checksum/config: 61e0dbdd2c906907f7adf8d028538a64f70b22b75e5d06c44d3b56cc57a69c9a
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1027,6 +1028,7 @@ data:
         address: api.ate-system.svc:443
         auth: serviceaccount
         ca_file: /var/run/ate/ca.crt
+        server_name: api.ate-system.svc
         token_file: /var/run/ate/token
       default_sandbox_class: gvisor
       enabled: true

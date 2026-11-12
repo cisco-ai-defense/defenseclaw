@@ -78,7 +78,7 @@ name this release's Services and the Substrate API filled in.
 {{- $_ := set $sub "services" (dict "actor" (include "dc.actorHost" .) "admin" (include "dc.adminHost" .)) -}}
 {{- end -}}
 {{- if not (hasKey $sub "api") -}}
-{{- $_ := set $sub "api" (dict "address" .Values.substrate.apiAddress "auth" "serviceaccount" "token_file" "/var/run/ate/token" "ca_file" "/var/run/ate/ca.crt") -}}
+{{- $_ := set $sub "api" (dict "address" .Values.substrate.apiAddress "server_name" .Values.substrate.apiAudience "auth" "serviceaccount" "token_file" "/var/run/ate/token" "ca_file" "/var/run/ate/ca.crt") -}}
 {{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
 {{- toYaml $cfg -}}
