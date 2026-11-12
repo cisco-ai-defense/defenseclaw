@@ -323,6 +323,36 @@ func observabilityV8ManagedEndpointHealthDropRoute(index int) ObservabilityV8Eff
 	}
 }
 
+// ObservabilityV8PlanReservesEndpointHealth reports whether every operator
+// log destination of plan drops the endpoint health report, so emitting it
+// on plan can reach only local SQLite and the managed destination. The
+// reporter checks the plan that routes each report, which closes the window
+// where a reload swaps the plan after the reporter's config check.
+func ObservabilityV8PlanReservesEndpointHealth(plan *ObservabilityV8Plan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, destination := range plan.effective.Destinations {
+		if destination.Kind == ObservabilityV8DestinationLocalSQLite ||
+			destination.Name == ObservabilityV8ManagedAIDDestinationName ||
+			!destination.Capabilities.Supports(observability.SignalLogs) ||
+			!observabilityV8SignalsContain(destination.SelectedSignals, observability.SignalLogs) {
+			continue
+		}
+		reserved := false
+		for _, route := range destination.Routes {
+			if route.Generated && route.Name == observabilityV8ManagedEndpointHealthDropRouteName {
+				reserved = true
+				break
+			}
+		}
+		if !reserved {
+			return false
+		}
+	}
+	return true
+}
+
 // withObservabilityV8ManagedEndpointHealthReserved returns plan with the
 // endpoint health drop route first on every operator log destination that
 // lacks it, for a managed Secure Client plan compiled without the managed

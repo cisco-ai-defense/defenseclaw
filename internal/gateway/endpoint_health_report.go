@@ -350,6 +350,9 @@ type endpointHealthSources struct {
 
 	CMIDTokenOK     bool
 	CMIDLastSuccess time.Time
+	// CMIDProbeSkipped is a probe not made because the provider was being
+	// built; it is not evidence that CMID is unavailable.
+	CMIDProbeSkipped bool
 
 	Guardian endpointHealthGuardianSource
 	// HooksPendingSince is when the reporter first saw pending guardian
@@ -511,7 +514,7 @@ func buildEndpointHealthReport(src endpointHealthSources, meta endpointHealthRep
 		report.InspectionCMIDToken = endpointHealthCMIDOK
 	}
 	report.InspectionCMIDLastSuccessAt = endpointHealthTime(src.CMIDLastSuccess)
-	if !src.CMIDTokenOK && !tokenSinceLast {
+	if !src.CMIDTokenOK && !tokenSinceLast && !src.CMIDProbeSkipped {
 		add(endpointHealthReasonCMIDUnavailable, endpointHealthComponentCMID, endpointHealthStatusUnhealthy, "")
 	}
 	report.InspectionFailOpenSinceLast = src.FailOpenSinceLast
@@ -1010,7 +1013,11 @@ func endpointHealthServiceExecutable(image string) string {
 var errEndpointHealthSourceUnavailable = errors.New("endpoint health source unavailable")
 
 // endpointHealthRead runs read with a timeout. A read that outlives it is
-// abandoned; its result is discarded.
+// abandoned; its result is discarded. The read gets the cancelled context,
+// and every source here is an in-process snapshot, a bounded file read or the
+// CMID provider, which honors its context, so an abandoned read ends shortly
+// after the timeout. A source that ignored its context would keep one
+// goroutine per report (48 a day) until it returned.
 func endpointHealthRead[T any](
 	ctx context.Context,
 	timeout time.Duration,
@@ -1203,7 +1210,7 @@ func (s *Sidecar) collectEndpointHealthSources(ctx context.Context, cursor *endp
 
 	// CMID: a bounded token probe on the cached provider, and when any
 	// consumer last got a token.
-	src.CMIDTokenOK, src.CMIDLastSuccess = s.readEndpointHealthCMID(ctx)
+	src.CMIDTokenOK, src.CMIDLastSuccess, src.CMIDProbeSkipped = s.readEndpointHealthCMID(ctx)
 
 	// Guardian state.
 	if cfg != nil {
@@ -1315,19 +1322,23 @@ func (s *Sidecar) readEndpointHealthCloudDelivery(ctx context.Context) (endpoint
 // timeout, and returns whether it got one and when any consumer last did.
 // It never builds the provider; while a build holds the provider lock the
 // probe is skipped and only the last-token time counts.
-func (s *Sidecar) readEndpointHealthCMID(ctx context.Context) (bool, time.Time) {
+func (s *Sidecar) readEndpointHealthCMID(ctx context.Context) (ok bool, lastSuccess time.Time, skipped bool) {
 	if !s.cmidProviderMu.TryLock() {
-		return false, time.Time{}
+		// The provider is being built: no probe, and no verdict.
+		return false, time.Time{}, true
 	}
 	provider := s.cmidProviderInst
 	s.cmidProviderMu.Unlock()
 	if provider == nil {
-		return false, time.Time{}
+		return false, time.Time{}, false
 	}
+	// Read the last consumer token before probing, so the probe's own token
+	// does not stand in for a consumer's.
+	lastSuccess = cloudreg.LastTokenAt(provider)
 	_, err := endpointHealthRead(ctx, endpointHealthSourceTimeout, func(ctx context.Context) (struct{}, error) {
 		// The token itself is discarded here.
 		_, err := provider.Token(ctx)
 		return struct{}{}, err
 	})
-	return err == nil, cloudreg.LastTokenAt(provider)
+	return err == nil, lastSuccess, false
 }

@@ -205,6 +205,11 @@ func TestEndpointHealthReasonTable(t *testing.T) {
 		{"cmid probe fails but a token was used since last report", func(s *endpointHealthSources) {
 			s.CMIDTokenOK = false
 		}, nil},
+		{"cmid probe skipped while the provider is built", func(s *endpointHealthSources) {
+			s.CMIDTokenOK = false
+			s.CMIDLastSuccess = time.Time{}
+			s.CMIDProbeSkipped = true
+		}, nil},
 		{"fail-open occurred while inspection is ok", func(s *endpointHealthSources) {
 			s.FailOpenSinceLast = 3
 		}, []want{{"FAIL_OPEN_OCCURRED", "inspection", "degraded", ""}}},

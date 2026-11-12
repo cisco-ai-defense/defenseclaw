@@ -313,6 +313,7 @@ func TestEndpointHealthIntervalCappedAtRegistryMaximum(t *testing.T) {
 // onEmit, which the test uses to publish the reloaded config between the
 // reporter's endpoint check and emission.
 type reloadedPlanEmitter struct {
+	plan         *config.ObservabilityV8Plan
 	evaluator    *router.Evaluator
 	onEmit       func()
 	destinations []string
@@ -327,7 +328,7 @@ func (e *reloadedPlanEmitter) Emit(
 		e.onEmit()
 	}
 	result, err := e.evaluator.Evaluate(metadata, func(admission router.Admission) (observability.Record, error) {
-		return build(observabilityruntime.EmitContext{}, admission)
+		return build(observabilityruntime.NewEmitContextForTest(e.plan), admission)
 	})
 	if err != nil {
 		return pipeline.LocalLogOutcome{}, err
@@ -365,7 +366,7 @@ func TestEndpointHealthReloadClearingEndpointMidReportReachesNoOperatorDestinati
 	after := *before
 	after.CiscoAIDefense.Endpoint = ""
 	s := &Sidecar{cfg: before, health: NewSidecarHealth()}
-	emitter := &reloadedPlanEmitter{evaluator: evaluator, onEmit: func() { s.cfgCurrent.Store(&after) }}
+	emitter := &reloadedPlanEmitter{plan: reloaded, evaluator: evaluator, onEmit: func() { s.cfgCurrent.Store(&after) }}
 	r := newEndpointHealthReporter(s)
 	r.write = func(string, diagnostics.HealthReportFileContent) error { return nil }
 	emitted := false
@@ -393,15 +394,19 @@ func TestEndpointHealthReloadClearingEndpointMidReportReachesNoOperatorDestinati
 	}
 }
 
-// fixedOutcomeEmitter returns outcome for every record after building it.
-type fixedOutcomeEmitter struct{ outcome pipeline.LocalLogOutcome }
+// fixedOutcomeEmitter returns outcome for every record after building it on
+// a managed plan with the AI Defense destination.
+type fixedOutcomeEmitter struct {
+	plan    *config.ObservabilityV8Plan
+	outcome pipeline.LocalLogOutcome
+}
 
 func (e fixedOutcomeEmitter) Emit(
 	_ context.Context,
 	_ router.Metadata,
 	build observabilityruntime.EmitBuilder,
 ) (pipeline.LocalLogOutcome, error) {
-	if _, err := build(observabilityruntime.EmitContext{}, router.AdmissionOrdinary); err != nil {
+	if _, err := build(observabilityruntime.NewEmitContextForTest(e.plan), router.AdmissionOrdinary); err != nil {
 		return pipeline.LocalLogOutcome{}, err
 	}
 	return e.outcome, nil
@@ -411,7 +416,10 @@ func (e fixedOutcomeEmitter) Emit(
 // error. The report is not delivered: it is recorded as not_routed and the
 // "since last report" cursor is kept for the next delivered report.
 func TestEndpointHealthManagedProjectionFailureIsNotDelivered(t *testing.T) {
-	emitter := fixedOutcomeEmitter{outcome: pipeline.NewManagedOptionalFailureOutcomeForTest(pipeline.OptionalFailureProfile)}
+	emitter := fixedOutcomeEmitter{
+		plan:    endpointHealthTestPlan(t, "https://aid.example.test"),
+		outcome: pipeline.NewManagedOptionalFailureOutcomeForTest(pipeline.OptionalFailureProfile),
+	}
 	report := buildEndpointHealthReport(healthyEndpointHealthSources(), endpointHealthTestMeta)
 	result, err := emitEndpointHealthV8(context.Background(), emitter, report)
 	if err != nil {
@@ -439,5 +447,68 @@ func TestEndpointHealthManagedProjectionFailureIsNotDelivered(t *testing.T) {
 	}
 	if len(written) != 1 || written[0].Delivery.Result != "not_routed" {
 		t.Fatalf("delivery = %+v", written)
+	}
+}
+
+// endpointHealthTestPlan is a plan with an operator console destination,
+// compiled for a managed Secure Client deployment with endpoint, or for an
+// open-source deployment when managed is false.
+func endpointHealthTestPlanFor(t *testing.T, managedDeployment bool, endpoint string) *config.ObservabilityV8Plan {
+	t.Helper()
+	base, err := config.CompileObservabilityV8(&config.ObservabilityV8Source{
+		Destinations: []config.ObservabilityV8DestinationSource{{
+			Name: "operator-console", Kind: config.ObservabilityV8DestinationConsole,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !managedDeployment {
+		return base
+	}
+	plan, err := config.WithObservabilityV8ManagedAIDDestination(base, config.ObservabilityV8ManagedAIDOptions{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise, Endpoint: endpoint,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
+
+func endpointHealthTestPlan(t *testing.T, endpoint string) *config.ObservabilityV8Plan {
+	return endpointHealthTestPlanFor(t, true, endpoint)
+}
+
+// A report routed on a plan whose operator destinations do not drop it (for
+// example a reload that left managed mode while the report was in flight) is
+// refused where it is built, so it reaches no destination at all.
+func TestEndpointHealthRefusedOnAPlanWithoutTheReservation(t *testing.T) {
+	oss := endpointHealthTestPlanFor(t, false, "")
+	if config.ObservabilityV8PlanReservesEndpointHealth(oss) {
+		t.Fatal("an open-source plan with an operator destination reserves the report")
+	}
+	for _, plan := range []*config.ObservabilityV8Plan{
+		endpointHealthTestPlan(t, "https://aid.example.test"), endpointHealthTestPlan(t, ""),
+	} {
+		if !config.ObservabilityV8PlanReservesEndpointHealth(plan) {
+			t.Fatal("a managed Secure Client plan does not reserve the report")
+		}
+	}
+
+	evaluator, err := router.New(oss)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitter := &reloadedPlanEmitter{plan: oss, evaluator: evaluator}
+	report := buildEndpointHealthReport(healthyEndpointHealthSources(), endpointHealthTestMeta)
+	_, err = emitEndpointHealthV8(context.Background(), emitter, report)
+	if !errors.Is(err, errEndpointHealthNotReserved) {
+		t.Fatalf("emit on an unreserved plan: err = %v", err)
+	}
+	if endpointHealthEmitFailureClass(err) != "NOT_RESERVED" {
+		t.Fatalf("failure class = %q", endpointHealthEmitFailureClass(err))
+	}
+	if len(emitter.destinations) != 0 {
+		t.Fatalf("refused report was routed to %v", emitter.destinations)
 	}
 }

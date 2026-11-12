@@ -281,10 +281,16 @@ func newEndpointHealthReportID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// errEndpointHealthNotReserved refuses a report on a plan whose operator
+// destinations do not drop it.
+var errEndpointHealthNotReserved = errors.New("endpoint health: the routing plan does not reserve the report")
+
 // endpointHealthEmitFailureClass maps an emit error to a bounded code.
 func endpointHealthEmitFailureClass(err error) string {
 	var sidecarErr *sidecarObservabilityError
 	switch {
+	case errors.Is(err, errEndpointHealthNotReserved):
+		return "NOT_RESERVED"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "TIMEOUT"
 	case errors.As(err, &sidecarErr):
@@ -351,6 +357,12 @@ func emitEndpointHealthV8(
 	) (observability.Record, error) {
 		if admission != router.AdmissionOrdinary || snapshot.Generation() > math.MaxInt64 {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		}
+		// The report names users, so it is built only on a plan that keeps
+		// it off every operator destination. This is the plan that routes
+		// it, whatever config the reporter checked before collecting.
+		if !config.ObservabilityV8PlanReservesEndpointHealth(snapshot.Plan()) {
+			return observability.Record{}, errEndpointHealthNotReserved
 		}
 		builder, buildErr := aiDiscoveryV8Builder()
 		if buildErr != nil {
