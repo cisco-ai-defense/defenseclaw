@@ -38,7 +38,7 @@ const (
 )
 
 type helperRequest struct {
-	Op        string  `json:"op"` // post, warm, mode, ping
+	Op        string  `json:"op"` // post, warm, mode, ping, skills
 	Request   Request `json:"request,omitempty"`
 	Connector string  `json:"connector,omitempty"`
 	Mode      string  `json:"mode,omitempty"`
@@ -54,7 +54,10 @@ type helperResponse struct {
 	// FailMode is the outage mode the gateway last named ("" before it
 	// answered once).
 	FailMode string `json:"fail_mode,omitempty"`
-	PID      int    `json:"pid"`
+	// Skills are the skill-folder fingerprints the gateway has seen (op
+	// skills).
+	Skills map[string]string `json:"skills,omitempty"`
+	PID    int               `json:"pid"`
 }
 
 // HelperDir is the private directory of the helper's socket.
@@ -124,6 +127,7 @@ type Helper struct {
 	mode     string
 	failMode string
 	warm     map[string]bool
+	skills   map[string]string
 }
 
 // NewHelper builds a helper; it makes no connection until asked.
@@ -135,7 +139,7 @@ func NewHelper(cfg Config, log *slog.Logger) (*Helper, error) {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Helper{cfg: cfg, transport: t, log: log, mode: ModeInteract, warm: map[string]bool{}}, nil
+	return &Helper{cfg: cfg, transport: t, log: log, mode: ModeInteract, warm: map[string]bool{}, skills: map[string]string{}}, nil
 }
 
 // Serve listens on the helper sockets until ctx ends. It returns
@@ -200,6 +204,13 @@ func (h *Helper) do(ctx context.Context, req helperRequest) helperResponse {
 	out := helperResponse{PID: os.Getpid()}
 	switch req.Op {
 	case "ping":
+	case "skills":
+		h.mu.Lock()
+		out.Skills = make(map[string]string, len(h.skills))
+		for k, v := range h.skills {
+			out.Skills[k] = v
+		}
+		h.mu.Unlock()
 	case "mode":
 		// A helper's mode only ever tightens.
 		if req.Mode == ModeUnattend {
@@ -227,6 +238,13 @@ func (h *Helper) do(ctx context.Context, req helperRequest) helperResponse {
 		resp, err := h.transport.Post(ctx, r)
 		out.Response = resp
 		h.learn(resp)
+		if err == nil && resp.Status >= 200 && resp.Status < 300 && len(r.SkillCommit) > 0 {
+			h.mu.Lock()
+			for k, v := range r.SkillCommit {
+				h.skills[k] = v
+			}
+			h.mu.Unlock()
+		}
 		if err != nil {
 			out.Unreachable = errors.Is(err, ErrUnreachable)
 			out.Error = err.Error()

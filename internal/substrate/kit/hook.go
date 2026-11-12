@@ -40,6 +40,10 @@ type HookOptions struct {
 	Getenv    func(string) string
 	// Send overrides the helper-then-direct transport (tests).
 	Send func(ctx context.Context, r Request) (Response, string, error)
+	// KnownSkills overrides the helper's skill fingerprints (tests).
+	KnownSkills func(ctx context.Context) map[string]string
+	// Home is the agent's HOME for the skill roots (default $HOME).
+	Home string
 }
 
 // RunHook runs one hook call and returns the exit code.
@@ -107,6 +111,10 @@ func RunHook(ctx context.Context, o HookOptions) int {
 		Mode: mode, KitVersion: o.Config.KitVersion, Payload: json.RawMessage(payload),
 		Facts: CollectFacts(o.Connector, call.Event, payload, o.Config.attachCap()),
 	}
+	var skillsSent map[string]string
+	if skillScanEvents[call.Event] {
+		skillsSent = o.attachSkills(ctx, &env, payload)
+	}
 	body, err := json.Marshal(env)
 	if err != nil {
 		return refuse("DefenseClaw could not encode the hook event: " + err.Error())
@@ -122,7 +130,12 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	if send == nil {
 		send = defaultSend(o.Config)
 	}
-	resp, helperMode, err := send(ctx, Request{Path: HookPathPrefix + o.Connector, Header: header, Body: body})
+	resp, helperMode, err := send(ctx, Request{Path: HookPathPrefix + o.Connector, Header: header, Body: body, SkillCommit: skillsSent})
+	if err == nil && resp.Status >= 200 && resp.Status < 300 {
+		if moved := quarantineSkills(resp.Body, skillsSent, time.Now()); len(moved) > 0 {
+			fmt.Fprintf(o.Stderr, "defenseclaw: blocked skill folders moved out of the skill root: %s\n", strings.Join(moved, ", "))
+		}
+	}
 	call.FailMode = outageMode(call.FailMode, resp, helperMode, mode)
 	if err != nil {
 		if errors.Is(err, ErrUnreachable) {
@@ -144,6 +157,39 @@ func RunHook(ctx context.Context, o HookOptions) int {
 		fmt.Fprintln(o.Stderr, "defenseclaw:", rerr)
 	}
 	return code
+}
+
+// attachSkills adds the new or changed skill folders to env's facts and
+// returns their fingerprints, for the helper to record once the gateway
+// answers.
+func (o HookOptions) attachSkills(ctx context.Context, env *HookEnvelope, payload []byte) map[string]string {
+	var v struct {
+		CWD string `json:"cwd"`
+	}
+	_ = json.Unmarshal(payload, &v)
+	home := o.Home
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	known := map[string]string{}
+	if o.KnownSkills != nil {
+		known = o.KnownSkills(ctx)
+	} else if r, err := callHelper(ctx, helperRequest{Op: "skills"}, 500*time.Millisecond); err == nil && r.Skills != nil {
+		known = r.Skills
+	}
+	f := env.Facts
+	if f == nil {
+		f = &Facts{}
+	}
+	var used int64
+	for _, a := range f.Files {
+		used += int64(len(a.Content))
+	}
+	sent, _ := collectSkills(f, skillRoots(home, filepath.Clean(v.CWD)), known, o.Config.attachCap()-used)
+	if len(f.Paths) > 0 || len(f.Files) > 0 || f.Truncated {
+		env.Facts = f
+	}
+	return sent
 }
 
 // outageMode is the fail mode of a call: the gateway's word for this actor

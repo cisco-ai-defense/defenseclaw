@@ -33,6 +33,9 @@ type Request struct {
 	// and ignores any caller value for them.
 	Header map[string]string `json:"header,omitempty"`
 	Body   []byte            `json:"body,omitempty"`
+	// SkillCommit are skill-folder fingerprints the helper records as seen
+	// by the gateway once it answers 2xx (skills.go).
+	SkillCommit map[string]string `json:"skill_commit,omitempty"`
 }
 
 // Response is the gateway's answer.
