@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -367,13 +368,23 @@ func TestEndpointHealthReloadClearingEndpointMidReportReachesNoOperatorDestinati
 	emitter := &reloadedPlanEmitter{evaluator: evaluator, onEmit: func() { s.cfgCurrent.Store(&after) }}
 	r := newEndpointHealthReporter(s)
 	r.write = func(string, diagnostics.HealthReportFileContent) error { return nil }
+	emitted := false
 	r.emit = func(ctx context.Context, report endpointHealthReport) (endpointHealthEmitResult, error) {
-		return emitEndpointHealthV8(ctx, emitter, report)
+		result, err := emitEndpointHealthV8(ctx, emitter, report)
+		if err != nil {
+			t.Fatalf("emit on the reloaded plan: %v", err)
+		}
+		emitted = true
+		return result, nil
 	}
 
 	r.report(context.Background(), endpointHealthTriggerScheduled)
-	if s.currentConfig().CiscoAIDefense.Endpoint != "" {
-		t.Fatal("the reload did not happen during the report")
+	if !emitted || s.currentConfig().CiscoAIDefense.Endpoint != "" {
+		t.Fatal("the report was not emitted after the reload cleared the endpoint")
+	}
+	// Local storage still receives it, so routing really ran.
+	if !slices.Contains(emitter.destinations, config.ObservabilityV8LocalDestinationName) {
+		t.Fatalf("the reloaded plan routed the report nowhere: %v", emitter.destinations)
 	}
 	for _, destination := range emitter.destinations {
 		if destination == "operator-console" {
