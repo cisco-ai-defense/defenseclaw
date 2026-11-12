@@ -1188,7 +1188,7 @@ func mainAPIRoutePaths(t *testing.T) []string {
 		"/v1/guardrail/evaluate", "/v1/guardrail/config", "/api/v1/guardrail/profiles/resolve", identityRefreshPath,
 		"/api/v1/acp/challenge", "/api/v1/acp/evaluate",
 		"/v1/acp/catalog", "/v1/acp/profiles", "/api/v1/inspect/tool", "/api/v1/inspect/request",
-		"/api/v1/inspect/response", "/api/v1/inspect/tool-response", "/api/v1/scan/code",
+		"/api/v1/inspect/response", "/api/v1/inspect/tool-response", "/api/v1/scan/code", openClawRuntimePath,
 		"/api/v1/network-egress", "/api/v1/telemetry/canary", "/api/v1/watchdog/recovery",
 		destinationtest.EndpointPath, cliObservabilityV8Path, alertAcknowledgementV8Path,
 		"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/agents/discovery", "/api/v1/agents/identities", "/api/v1/ai-usage",
@@ -1243,6 +1243,7 @@ func routesRegisteredInRun(t *testing.T) []string {
 		"destinationtest.EndpointPath":                  destinationtest.EndpointPath,
 		"enterprisepolicy.ForeignHookSessionPathPrefix": enterprisepolicy.ForeignHookSessionPathPrefix,
 		"identityRefreshPath":                           identityRefreshPath,
+		"openClawRuntimePath":                           openClawRuntimePath,
 	}
 	var resolve func(ast.Expr) string
 	resolve = func(expr ast.Expr) string {
