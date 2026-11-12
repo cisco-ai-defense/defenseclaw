@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,8 @@ const (
 	stopDeadline  = 2 * time.Second
 	maxLabelBytes = 128
 )
+
+var profileLabelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // snapshot is the immutable view of the config one call is recorded under.
 type snapshot struct {
@@ -336,6 +339,9 @@ func (c *call) labels() []Label {
 			v = string(f.CallRole)
 		case "profile":
 			v = f.ProfileName
+			if v != "" && !profileLabelPattern.MatchString(v) {
+				v = "other"
+			}
 		}
 		out = append(out, Label{Key: name, Value: boundLabel(v)})
 	}
