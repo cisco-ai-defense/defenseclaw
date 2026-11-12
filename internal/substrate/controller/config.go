@@ -151,6 +151,14 @@ func (r *ConfigResolver) Resolve(reg Registration, launcher bool) (Resolution, e
 	}}
 	if eff.Allowed != nil && !*eff.Allowed {
 		res.Refuse = "profile " + strings.Join(names, "+") + " does not allow sandboxes"
+	} else if !eff.AllowsRuntime(config.SandboxRuntimeSubstrate) {
+		res.Refuse = "profile " + strings.Join(names, "+") + " runs agents only on " + strings.Join(eff.Runtimes, ", ") +
+			", not on Agent Substrate (runtimes)"
+	}
+	res.SandboxClass = eff.SandboxClass
+	if eff.IdleSuspendAfter != "" {
+		d := eff.EffectiveIdleSuspendAfter(0)
+		res.IdleSuspendAfter = &d
 	}
 	return res, nil
 }

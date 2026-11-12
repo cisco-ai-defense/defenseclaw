@@ -117,6 +117,13 @@ type Resolution struct {
 	// Refuse, when set, means the profile does not allow the actor
 	// (sandboxes not allowed for the subject); it gets no policy.
 	Refuse string
+	// SandboxClass is the weakest isolation the profile admits (gvisor or
+	// microvm, "" = any): an actor whose template runs weaker gets no
+	// policy (PLAN §7.3 sandbox_class).
+	SandboxClass string
+	// IdleSuspendAfter, when set, replaces Options.IdleSuspendAfter for the
+	// actor (the profile's idle_suspend_after; 0 = off).
+	IdleSuspendAfter *time.Duration
 	// Warnings are shown as events (for example a glob on a foreign
 	// atespace, E3).
 	Warnings []string
