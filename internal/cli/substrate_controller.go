@@ -35,6 +35,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
 )
 
@@ -43,6 +46,10 @@ var (
 	substrateControllerOnce   bool
 	substrateControllerCheck  bool
 	substrateControllerUsage  string
+	// The gateway leader that holds registrations (GAP-0125), reached
+	// over mTLS with this pod's identity.
+	substrateControllerLeader, substrateControllerPeerBundle, substrateControllerPeerTrust string
+	substrateControllerLeaderIDs                                                           []string
 	// mTLS for a non-loopback usage listener (GAP-0105).
 	substrateControllerUsageCert, substrateControllerUsageKey, substrateControllerUsageCA string
 )
@@ -73,6 +80,11 @@ func init() {
 	substrateControllerCmd.Flags().StringVar(&substrateControllerUsage, "usage-listen", "",
 		"address for Substrate's per-actor usage records (OTLP/HTTP POST /v1/logs or ndjson), the CPU source of idle suspend; empty turns idle suspend off. "+
 			"Loopback only, unless --usage-tls-cert, --usage-tls-key and --usage-client-ca make it mutual TLS")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerLeader, "leader-address", "",
+		"gateway leader host:port: the registrations the launcher writes (required)")
+	substrateControllerCmd.Flags().StringSliceVar(&substrateControllerLeaderIDs, "leader-id", nil, "SPIFFE IDs the leader may present")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerPeerBundle, "peer-bundle", "/var/run/ate/credential-bundle.pem", "this pod's identity bundle (leader mTLS)")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerPeerTrust, "peer-trust", "/var/run/ate/podidentity-ca.crt", "pod identity trust bundle")
 	substrateControllerCmd.Flags().StringVar(&substrateControllerUsageCert, "usage-tls-cert", "", "usage listener certificate (PEM)")
 	substrateControllerCmd.Flags().StringVar(&substrateControllerUsageKey, "usage-tls-key", "", "usage listener key (PEM)")
 	substrateControllerCmd.Flags().StringVar(&substrateControllerUsageCA, "usage-client-ca", "", "CA bundle the usage clients' certificates must chain to")
@@ -143,6 +155,10 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	} else {
 		idleAfter = 0 // no CPU source: never suspend on silence alone (E4)
 	}
+	reg, err := substrateControllerRegistry()
+	if err != nil {
+		return err
+	}
 	// Admin policy_conflict resets arrive through a ConfigMap in our own
 	// namespace (the gateway's admin route writes them).
 	var resets controller.ResetStore
@@ -157,7 +173,7 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	ctl, err := controller.New(controller.Options{
 		Resets: resets, Namespace: ns,
 		Client: client, Attestor: attestor, Activity: controller.NoActivity{}, CPU: cpu,
-		Registry: controller.NewMemoryRegistry(), Resolver: &controller.ConfigResolver{Config: cfg},
+		Registry: reg, Resolver: &controller.ConfigResolver{Config: cfg},
 		Sink:     &controller.JSONSink{W: cmd.OutOrStdout()},
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
 		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(), Templates: sub.Templates,
@@ -189,6 +205,28 @@ func substrateControllerReport(ctx context.Context, cmd *cobra.Command, client a
 		names = append(names, s.GetMetadata().GetName())
 	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"atespaces": names, "actors": len(actors)})
+}
+
+// substrateControllerRegistry is the leader's registration store: the
+// launcher writes registrations there, so an in-memory registry would call
+// every launcher-created actor foreign (GAP-0125). Reads retry briefly;
+// while the leader is unreachable the controller holds.
+func substrateControllerRegistry() (controller.Registry, error) {
+	if substrateControllerLeader == "" {
+		return nil, errors.New("substrate-controller: --leader-address is required (the gateway leader holds the actor registrations)")
+	}
+	if len(substrateControllerLeaderIDs) == 0 {
+		return nil, errors.New("substrate-controller: --leader-id names the leader's SPIFFE ID")
+	}
+	files, err := podcert.NewFiles(substrateControllerPeerBundle, substrateControllerPeerTrust)
+	if err != nil {
+		return nil, fmt.Errorf("substrate-controller: pod identity: %w", err)
+	}
+	tr := &http.Transport{TLSClientConfig: files.ClientConfig(substrateControllerLeaderIDs), Proxy: nil,
+		MaxIdleConnsPerHost: 32, IdleConnTimeout: 90 * time.Second}
+	client := &leader.Client{BaseURL: "https://" + substrateControllerLeader, HTTP: &http.Client{Transport: tr, Timeout: 10 * time.Second},
+		Retry: 5 * time.Second}
+	return &controller.LeaderRegistry{Store: &registry.Remote{Client: client}}, nil
 }
 
 // substrateUsageTLS decides how the usage listener is protected: forged

@@ -151,6 +151,7 @@ type actorState struct {
 	reg         Registration
 	regOK       bool
 	regAt       time.Time
+	regState    ateapi.ActorState
 	written     bool
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
@@ -488,6 +489,11 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 // refuse means the actor gets no policy.
 func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actorState, launcher bool, base Event) (Registration, string, error) {
 	now := c.o.Now()
+	if st.regOK && st.regState != a.GetStatus().GetState() {
+		// A lifecycle change (resume, suspend, crash, revert) re-reads the
+		// registration: the launcher may have rebound or revoked it.
+		st.regOK = false
+	}
 	if st.regOK && now.Sub(st.regAt) < registrationTTL {
 		st.reg.Template = ateapi.Key(a.GetActorTemplate())
 		return st.reg, "", nil
@@ -495,7 +501,9 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 	md := a.GetMetadata()
 	reg, ok, err := c.o.Registry.Get(ctx, md.GetAtespace(), md.GetUid())
 	if err != nil {
-		return Registration{}, "", fmt.Errorf("%s: registry: %w", st.key, err)
+		// The leader is unreachable: hold. Never call an unknown actor in a
+		// launcher atespace foreign on a failed read, and change no policy.
+		return Registration{}, "", fmt.Errorf("%s: registry (holding, no policy change): %w", st.key, err)
 	}
 	// A registration that is gone (the launcher revoked it, or an in-memory
 	// registry restarted) is made again below like a new one: in a launcher
@@ -546,7 +554,7 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 		}
 	}
 	reg.Template = ateapi.Key(a.GetActorTemplate())
-	st.reg, st.regOK, st.regAt = reg, true, now
+	st.reg, st.regOK, st.regAt, st.regState = reg, true, now, a.GetStatus().GetState()
 	return reg, "", nil
 }
 

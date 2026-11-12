@@ -995,6 +995,9 @@ spec:
         args:
         - substrate-controller
         - --config=/etc/defenseclaw/config.yaml
+        # Registrations live on the gateway leader (GAP-0125), over mTLS.
+        - --leader-address=defenseclaw-leader.defenseclaw-system.svc.cluster.local:7443
+        - --leader-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
         env:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml

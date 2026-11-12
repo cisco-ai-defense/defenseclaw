@@ -37,3 +37,26 @@ func TestSubstrateUsageListenerAuth(t *testing.T) {
 		t.Error("missing key pair accepted")
 	}
 }
+
+// GAP-0125: the shipped controller never runs on an in-memory registry: it
+// needs the leader (address, identity) and a pod identity bundle.
+func TestSubstrateControllerNeedsTheLeader(t *testing.T) {
+	save := func() func() {
+		a, ids, b := substrateControllerLeader, substrateControllerLeaderIDs, substrateControllerPeerBundle
+		return func() { substrateControllerLeader, substrateControllerLeaderIDs, substrateControllerPeerBundle = a, ids, b }
+	}()
+	defer save()
+	substrateControllerLeader, substrateControllerLeaderIDs = "", nil
+	if _, err := substrateControllerRegistry(); err == nil {
+		t.Fatal("the controller started without --leader-address")
+	}
+	substrateControllerLeader = "defenseclaw-leader.dc.svc.cluster.local:7443"
+	if _, err := substrateControllerRegistry(); err == nil {
+		t.Fatal("the controller started without --leader-id")
+	}
+	substrateControllerLeaderIDs = []string{"spiffe://cluster.local/ns/dc/sa/defenseclaw-gateway"}
+	substrateControllerPeerBundle = "/nonexistent/credential-bundle.pem"
+	if _, err := substrateControllerRegistry(); err == nil {
+		t.Fatal("the controller started without its pod identity")
+	}
+}

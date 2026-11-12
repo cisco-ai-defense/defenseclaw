@@ -37,6 +37,9 @@ spec:
         {{- else }}
         - substrate-controller
         - --config=/etc/defenseclaw/config.yaml
+        # Registrations live on the gateway leader (GAP-0125), over mTLS.
+        - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.leader.port }}
+        - --leader-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
         {{- end }}
         env:
         {{- include "dc.env" . | nindent 8 }}
