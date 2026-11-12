@@ -786,7 +786,7 @@ def routing_budgets_list(app: AppContext, as_json: bool) -> None:
         if not isinstance(b, dict):
             continue
         live = spend.get(b.get("id")) or {}
-        rows.append({**b, **{k: live[k] for k in ("spent_usd", "percent_used", "resets_at", "exceeded") if k in live}})
+        rows.append({**b, **{k: live[k] for k in ("spent_usd", "percent_used", "resets_at", "exceeded", "seed") if k in live}})
     if as_json:
         _emit_json({"budgets": rows, "live": not error, "error": error or None})
         return
@@ -808,6 +808,10 @@ def routing_budgets_list(app: AppContext, as_json: bool) -> None:
         )
     if error:
         ux.warn(f"spend not shown: {error}")
+    for r in rows:
+        seed = str(r.get("seed") or "")
+        if seed and seed != "seeded":
+            ux.warn(f"budget {r.get('id')}: spend {seed}")
 
 
 @routing_budgets.command("add")
