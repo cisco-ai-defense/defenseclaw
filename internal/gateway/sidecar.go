@@ -92,6 +92,9 @@ type modelRouterHealthChecker interface {
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
+	// substrateBuild, set by serve --substrate, makes the API server also
+	// serve the Agent Substrate listeners (substrate_leader.go).
+	substrateBuild SubstrateBuilder
 	// installWatcher is the running install watcher, nil while none runs;
 	// a reload that changes a denied list asks it to rescan (GAP-0627).
 	installWatcher atomic.Pointer[watcher.InstallWatcher]
@@ -9449,6 +9452,10 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		s.health.SetSandbox(StateError, err.Error(), nil)
 	} else if rt != nil {
 		return rt.run(ctx, api.Run)
+	}
+	if s.substrateBuild != nil {
+		// serve --substrate: the actor and admin listeners run with the API.
+		return s.runWithSubstrate(ctx, api, api.Run)
 	}
 	return api.Run(ctx)
 }
