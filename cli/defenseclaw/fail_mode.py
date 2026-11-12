@@ -910,7 +910,16 @@ def failure_outcomes(cfg: Any, connector: str, effective: str) -> dict[str, str]
         return {"gateway_down": "block", "no_answer": "block", "hook_error": "block"}
     if deployment == "managed":
         return {"gateway_down": "allow-if-service-stopped", "no_answer": "block", "hook_error": "block"}
-    no_answer = "allow-ordinary" if name in _LATE_ORDINARY_CONNECTORS else "block"
+    if name in _LATE_ORDINARY_CONNECTORS:
+        no_answer = "allow-ordinary"
+    elif sys.platform == "win32":
+        # The Windows native hook gives the no-answer allow by payload shape
+        # today, so an ordinary shell call of another hook connector can run
+        # too (GAP-0030, the hook answer path). Status says so rather than
+        # overstate the block.
+        no_answer = "block-windows-shell-may-run"
+    else:
+        no_answer = "block"
     return {"gateway_down": "allow", "no_answer": no_answer, "hook_error": "block"}
 
 
@@ -918,6 +927,7 @@ _FAILURE_OUTCOME_TEXT = {
     "allow": "allow with a warning",
     "allow-if-service-stopped": "allow with a warning when the hook proves the gateway service is stopped",
     "allow-ordinary": "allow with a warning unless the call may reach a protected file",
+    "block-windows-shell-may-run": "block, but on Windows an ordinary shell call may run with a warning",
     "block": "block",
 }
 

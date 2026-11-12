@@ -111,7 +111,7 @@ describe('Cursor observe outage mode', () => {
     for (const stale of ['guardrail/index.mdx', 'reference/setup-commands.mdx', 'segmentation.mdx']) {
       assert.ok(!/Per-user Cursor (?:in )?observe (?:mode )?(?:still|also) blocks/i.test(page(stale)), stale);
     }
-    assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}A verified gateway that gives no final decision before the hook deadline blocks in every tier and saved mode, except an ordinary tool call of a connector the \[gateway outage table\]/i);
+    assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}A verified gateway that gives no final decision before the hook deadline blocks in every tier and saved mode, except an ordinary tool call of a connector the \[gateway outage section\]/i);
     assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}Other transport and answer failures block in every tier/i);
     assert.match(perUser, /A verified gateway that accepts the call but gives no final decision before the hook.s fixed deadline blocks in every tier/i);
     assert.match(perUser, /in an open outage mode .{0,80}an ordinary tool call that plainly names nothing a protected file could be reached through runs with the warning/i);

@@ -12,6 +12,7 @@ or local hook error (blocks in every tier).
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -40,7 +41,10 @@ def test_per_user_open_runs_only_an_ordinary_call_a_hung_gateway_did_not_answer(
 
 
 @pytest.mark.parametrize("connector", ["cursor", "copilot", "devin", "kiro", "opencode", "amp", "hermes"])
-def test_per_user_open_blocks_a_no_answer_of_the_other_connectors(connector: str) -> None:
+def test_per_user_open_blocks_a_no_answer_of_the_other_connectors(
+    connector: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")  # Windows: GAP-0030, the test below
     assert fail_mode.failure_outcomes(_cfg(), connector, "open") == {
         "gateway_down": "allow",
         "no_answer": "block",
@@ -88,9 +92,27 @@ def test_report_carries_the_outcomes_of_its_effective_mode(monkeypatch: pytest.M
     assert report["on_failure"]["no_answer"] == "allow-ordinary"
 
 
-def test_status_prints_the_outcomes_after_the_fail_mode() -> None:
+def test_status_prints_the_outcomes_after_the_fail_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
     report = {"effective": "open", "on_failure": fail_mode.failure_outcomes(_cfg(), "cursor", "open")}
     assert cmd_status._status_failure_outcomes_suffix(report) == (
         " on-failure=(gateway down: allow with a warning; no answer: block; hook or answer error: block)"
     )
     assert cmd_status._status_failure_outcomes_suffix({"effective": "unknown"}) == ""
+
+
+def test_windows_names_the_shell_call_another_hook_connector_may_run(monkeypatch):
+    """GAP-0030: on Windows the native hook gives the no-answer allow by payload
+    shape, so status does not claim a plain block for another hook connector."""
+    import sys as _sys
+
+    from defenseclaw import fail_mode
+
+    monkeypatch.setattr(_sys, "platform", "win32")
+    cfg = _cfg()
+    outcomes = fail_mode.failure_outcomes(cfg, "kiro", "open")
+    assert outcomes is not None and outcomes["no_answer"] == "block-windows-shell-may-run"
+    assert "on Windows an ordinary shell call may run" in fail_mode.failure_outcomes_summary(outcomes)
+    assert fail_mode.failure_outcomes(cfg, "codex", "open")["no_answer"] == "allow-ordinary"
+    monkeypatch.setattr(_sys, "platform", "linux")
+    assert fail_mode.failure_outcomes(cfg, "kiro", "open")["no_answer"] == "block"
