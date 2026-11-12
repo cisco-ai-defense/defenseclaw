@@ -51,8 +51,12 @@ type ActivitySource interface {
 	LastActivity(uid string) (time.Time, bool)
 	// PendingAsk reports an ask waiting for an answer.
 	PendingAsk(uid string) bool
-	// CPU is recent CPU use in cores and when it was sampled (worker
-	// usage samples or the Substrate usage event).
+}
+
+// CPUSource reports an actor's recent CPU use in cores and when it was
+// sampled. UsageCPU computes it from Substrate's per-actor usage records
+// (ate.actor.usage_sampled); controllerfake.Activity is the test fake.
+type CPUSource interface {
 	CPU(uid string) (cores float64, sampledAt time.Time, ok bool)
 }
 
@@ -76,6 +80,9 @@ type Registration struct {
 	Atespace string `json:"atespace"`
 	Name     string `json:"name"`
 	UID      string `json:"uid"`
+	// Template is the actor's template, "<atespace>/<name>" (the controller
+	// sets it from the actor on every pass).
+	Template string `json:"template,omitempty"`
 	// Person is the verified OIDC subject; Workload a verified workload
 	// principal. Both empty for atespace attribution.
 	Person   string `json:"person,omitempty"`
@@ -118,6 +125,13 @@ type Resolution struct {
 // ProfileResolver picks an actor's profile.
 type ProfileResolver interface {
 	Resolve(reg Registration, launcher bool) (Resolution, error)
+}
+
+// AtespaceLister is implemented by a resolver that knows the atespaces it
+// manages by name. Without the global viewer role the controller lists only
+// these (and the launcher atespaces).
+type AtespaceLister interface {
+	ManagedAtespaces() []string
 }
 
 // Sink receives controller events (audit, telemetry, discovery).
