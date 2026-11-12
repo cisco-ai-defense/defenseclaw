@@ -51,12 +51,21 @@ func TestGAP0407StalledMarkerOpenKeepsWatchdogBound(t *testing.T) {
 		<-w.failureLog.done
 		openHookFailureLog = previous
 	}()
+	// The stalled open never returns until the test ends, so the bound only
+	// has to tell "the watchdog gave up on the log after its wait" from "the
+	// watchdog hangs on the open". A hosted runner can add well over 200 ms of
+	// scheduling delay (684.95 ms seen on a macOS runner against 650 ms), so it
+	// gets 700 ms more; the watchdog still has to exit while the open is stuck.
+	bound, giveUp := 650*time.Millisecond, 900*time.Millisecond
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		bound, giveUp = bound+700*time.Millisecond, giveUp+700*time.Millisecond
+	}
 	select {
 	case elapsed := <-exited:
-		if elapsed > 650*time.Millisecond {
+		if elapsed > bound {
 			t.Fatalf("watchdog exit exceeded its log wait: %v", elapsed)
 		}
-	case <-time.After(900 * time.Millisecond):
+	case <-time.After(giveUp):
 		t.Fatal("watchdog did not exit within its log wait")
 	}
 }

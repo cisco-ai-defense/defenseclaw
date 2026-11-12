@@ -64,7 +64,12 @@ func TestR104CalledFunctionLiteralWriter(t *testing.T) {
 	if _, unknown := ShellDirectoryWriteOperands("cd /tmp && "+fanOut, cwd, home, nil, false, false); !unknown {
 		t.Fatal("a writing body past the expansion bound must be unknown")
 	}
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
+	// This guards against an exponential blow-up in the expansion, not against
+	// a slow runner: the work is linear and takes 0.2 s on Linux, 2.9 s on a
+	// normal hosted Windows runner and 10.2-10.5 s on a slow pool. An
+	// exponential expansion would run for minutes, so 30 s keeps the check
+	// meaningful without flaking on a slow pool.
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
 		t.Fatalf("function fan-out took %v", elapsed)
 	}
 	for _, command := range []string{
