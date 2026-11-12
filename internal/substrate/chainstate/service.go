@@ -16,6 +16,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,16 +34,25 @@ const (
 	EgressAlert = "alert"
 )
 
-// Intent bounds per atespace: the tool judge's own (llm_judge.go), with room
-// for every live session of an atespace.
 const (
-	intentMaxSessions = 4096
+	// Intent bounds per actor: the tool judge's own (llm_judge.go). Each
+	// actor has its own store, so one actor rotating session keys evicts
+	// only its own sessions (GAP-0093).
+	intentMaxSessions = 64
 	intentMaxPrior    = 7
 	intentTTL         = 30 * time.Minute
 	taskMaxBytes      = 4096
 	// DefaultRetention is how long a suspended actor's windows stay ahead of
-	// finished actors' in the partition LRU.
+	// finished actors' when the atespace cap evicts.
 	DefaultRetention = 24 * time.Hour
+	// DefaultPurgeAfter is how long the state of an actor suspended (or
+	// silent) that long is kept before it is purged.
+	DefaultPurgeAfter = 7 * 24 * time.Hour
+	// DefaultMaxActors bounds the actors with chain state per atespace
+	// (the 4,096-partition cap of a host store, per atespace).
+	DefaultMaxActors = guardrail.ToolChainMaxPartitions
+	// DefaultMaxOpenStores bounds the open SQLite handles; idle ones close.
+	DefaultMaxOpenStores = 128
 )
 
 // egressChains are the chains whose terminal step is external egress, and
@@ -65,8 +76,22 @@ type Options struct {
 	// EgressAction is what a detected secret-read-then-egress chain does at
 	// the callout: block (default, PLAN §5.3) or alert.
 	EgressAction string
-	// Retention is how long a suspended actor counts as live (default 24 h).
+	// Retention is how long a suspended actor counts as live for the
+	// atespace cap (default 24 h).
 	Retention time.Duration
+	// PurgeAfter purges the state of an actor suspended, or silent, that
+	// long (default 7 days). A deleted actor is purged at once.
+	PurgeAfter time.Duration
+	// MaxActors bounds the actors with state per atespace (default 4,096):
+	// a new actor past it evicts a retired actor first, else the one used
+	// least recently.
+	MaxActors int
+	// MaxOpenStores bounds the open per-actor stores (default 128).
+	MaxOpenStores int
+	// ParentOf returns the parent UID of a forked actor from its verified
+	// registration ("" for none). The leader copies the parent's windows the
+	// first time it sees the child, whatever comes first (GAP-0091).
+	ParentOf func(ctx context.Context, atespace, uid string) (string, error)
 	// OnCrashed closes the actor's open asks when it crashes (the ask store).
 	OnCrashed func(ctx context.Context, actor Actor)
 	// Now replaces the clock (tests).
@@ -75,32 +100,50 @@ type Options struct {
 	Warn io.Writer
 }
 
-// Service is the leader's chain and intent state.
+// Service is the leader's chain and intent state. Every actor has its own
+// store file, state file and intent map: an actor's expiries, prunes and
+// LRU run on its own running-time clock and never touch another actor's
+// rows (GAP-0089), and everything an actor holds is removed with it.
 type Service struct {
 	opts Options
 
-	mu       sync.Mutex
-	ensureMu sync.Mutex
-	stores   map[string]*audit.Store
-	// ensured is guarded by ensureMu.
-	ensured map[audit.ConnectorInstanceID]bool
-	clocks  map[string]*clock
-	intents map[string]*intentstore.Process
-	tasks   map[string]string
-	stripes [256]sync.Mutex
+	mu      sync.Mutex
+	actors  map[string]*actorEntry // atespace/uid
+	open    int
 	closed  bool
+	stripes [256]sync.Mutex
 }
 
-// clock is an actor's running-time state: the time it spent suspended
-// before, and the start of the current suspension.
-type clock struct {
+// actorEntry is one actor's state. Fields are guarded by Service.mu except
+// openMu, which orders opening the store.
+type actorEntry struct {
+	actor    Actor
+	state    actorState
+	store    *audit.Store
+	refs     int
+	lastUsed time.Time
+	intents  *intentstore.Process
+	openMu   sync.Mutex
+	purged   bool
+}
+
+// actorState is what the leader keeps of an actor on the volume: its
+// running-time clock, the order of its lifecycle events, and its task.
+type actorState struct {
+	// SuspendedNanos is the time suspended before the current run;
+	// SinceUnixNano the start of the current suspension (0 while running).
 	SuspendedNanos int64 `json:"suspended_nanos"`
 	SinceUnixNano  int64 `json:"since_unix_nano,omitempty"`
-	Retired        bool  `json:"retired,omitempty"`
+	// LastEventUnixNano is the time of the last suspend or resume applied;
+	// an older one arriving late is ignored (GAP-0092).
+	LastEventUnixNano int64 `json:"last_event_unix_nano,omitempty"`
+	Retired           bool  `json:"retired,omitempty"`
+	// Task is the launcher-registered --task text.
+	Task string `json:"task,omitempty"`
 }
 
 // running is wall in the actor's running time.
-func (c clock) running(wall time.Time) time.Time {
+func (c actorState) running(wall time.Time) time.Time {
 	off := c.SuspendedNanos
 	if c.SinceUnixNano != 0 && wall.UnixNano() > c.SinceUnixNano {
 		off += wall.UnixNano() - c.SinceUnixNano
@@ -108,7 +151,7 @@ func (c clock) running(wall time.Time) time.Time {
 	return wall.Add(-time.Duration(off))
 }
 
-// New opens a Service on opts.Dir.
+// New opens a Service on opts.Dir and loads the actors it knows.
 func New(opts Options) (*Service, error) {
 	if opts.Dir == "" {
 		return nil, errors.New("chainstate: a store directory is required")
@@ -123,19 +166,31 @@ func New(opts Options) (*Service, error) {
 	if opts.Retention <= 0 {
 		opts.Retention = DefaultRetention
 	}
+	if opts.PurgeAfter <= 0 {
+		opts.PurgeAfter = DefaultPurgeAfter
+	}
+	if opts.MaxActors <= 0 {
+		opts.MaxActors = DefaultMaxActors
+	}
+	if opts.MaxOpenStores <= 0 {
+		opts.MaxOpenStores = DefaultMaxOpenStores
+	}
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
 	if opts.Warn == nil {
 		opts.Warn = os.Stderr
 	}
-	for _, d := range []string{"chains", "clocks", "tasks"} {
+	for _, d := range []string{"chains", "actors"} {
 		if err := os.MkdirAll(filepath.Join(opts.Dir, d), 0o700); err != nil {
 			return nil, err
 		}
 	}
-	return &Service{opts: opts, stores: map[string]*audit.Store{}, ensured: map[audit.ConnectorInstanceID]bool{},
-		clocks: map[string]*clock{}, intents: map[string]*intentstore.Process{}, tasks: map[string]string{}}, nil
+	s := &Service{opts: opts, actors: map[string]*actorEntry{}}
+	if err := s.load(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // Register serves the chain, intent, lifecycle and egress methods on srv.
@@ -156,16 +211,32 @@ func (s *Service) logged(method string, h leader.Handler) leader.Handler {
 	}
 }
 
+// internal logs an error the transport hands back only as "internal".
+func (s *Service) internal(what string, err error) error {
+	var we *leader.WireError
+	if err != nil && !errors.As(err, &we) {
+		fmt.Fprintf(s.opts.Warn, "[chainstate] warning: %s: %v\n", what, err)
+	}
+	return err
+}
+
+func (s *Service) warnf(format string, args ...any) {
+	fmt.Fprintf(s.opts.Warn, "[chainstate] warning: "+format+"\n", args...)
+}
+
 // Close closes every store.
 func (s *Service) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
 	var errs []error
-	for _, st := range s.stores {
-		errs = append(errs, st.Close())
+	for _, e := range s.actors {
+		if e.store != nil {
+			errs = append(errs, e.store.Close())
+			e.store = nil
+		}
 	}
-	s.stores = map[string]*audit.Store{}
+	s.open = 0
 	return errors.Join(errs...)
 }
 
@@ -182,122 +253,303 @@ func (s *Service) lock(a Actor) func() {
 	return m.Unlock
 }
 
-func (s *Service) store(atespace string) (*audit.Store, error) {
+func (s *Service) dbPath(a Actor) string {
+	return filepath.Join(s.opts.Dir, "chains", a.Atespace, a.UID+".db")
+}
+
+func (s *Service) statePath(a Actor) string {
+	return filepath.Join(s.opts.Dir, "actors", a.Atespace, a.UID+".json")
+}
+
+// load builds the actor index from the volume (a new leader after a
+// failover): state files and store files.
+func (s *Service) load() error {
+	now := s.opts.Now()
+	for _, sub := range []struct{ dir, ext string }{{"actors", ".json"}, {"chains", ".db"}} {
+		root := filepath.Join(s.opts.Dir, sub.dir)
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || filepath.Ext(path) != sub.ext {
+				return err
+			}
+			rel, _ := filepath.Rel(root, path)
+			a, ok := actorFromKey(filepath.ToSlash(strings.TrimSuffix(rel, sub.ext)))
+			if !ok {
+				return nil
+			}
+			e := s.actors[a.key()]
+			if e == nil {
+				e = &actorEntry{actor: a, lastUsed: now}
+				if info, err := d.Info(); err == nil {
+					e.lastUsed = info.ModTime()
+				}
+				s.actors[a.key()] = e
+			}
+			if sub.ext == ".json" {
+				raw, err := os.ReadFile(path)
+				if err == nil {
+					_ = json.Unmarshal(raw, &e.state)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// errEvicted is returned for an actor whose state was purged while a call
+// waited for it.
+var errEvicted = &leader.WireError{Code: leader.CodeUnavailable, Message: "the actor's chain state was purged"}
+
+// acquire returns the actor's entry with a reference; release returns it.
+// An actor seen for the first time gets an entry (evicting another when the
+// atespace is full).
+func (s *Service) acquire(a Actor) (*actorEntry, func(), error) {
+	if err := a.Validate(); err != nil {
+		return nil, nil, bad(err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil, &leader.WireError{Code: leader.CodeUnavailable, Message: "chain store closed"}
+		return nil, nil, &leader.WireError{Code: leader.CodeUnavailable, Message: "chain store closed"}
 	}
-	if st, ok := s.stores[atespace]; ok {
-		return st, nil
+	e := s.actors[a.key()]
+	if e == nil {
+		s.makeRoomLocked(a.Atespace)
+		e = &actorEntry{actor: a, lastUsed: s.opts.Now()}
+		s.actors[a.key()] = e
 	}
-	st, err := audit.NewStore(filepath.Join(s.opts.Dir, "chains", atespace+".db"))
-	if err != nil {
-		return nil, err
-	}
-	if err := st.Init(); err != nil {
-		_ = st.Close()
-		return nil, err
-	}
-	s.stores[atespace] = st
-	return st, nil
+	e.refs++
+	return e, func() {
+		s.mu.Lock()
+		e.refs--
+		e.lastUsed = s.opts.Now()
+		s.closeIdleLocked()
+		s.mu.Unlock()
+	}, nil
 }
 
-// actorStore returns the actor's store and instance, the instance recorded.
-func (s *Service) actorStore(ctx context.Context, a Actor) (*audit.Store, audit.ConnectorInstanceID, error) {
-	if err := a.Validate(); err != nil {
-		return nil, "", bad(err)
+// makeRoomLocked evicts one actor of atespace when it is full: a retired
+// actor first, else the least recently used; never one in use.
+func (s *Service) makeRoomLocked(atespace string) {
+	var in []*actorEntry
+	for _, e := range s.actors {
+		if e.actor.Atespace == atespace {
+			in = append(in, e)
+		}
 	}
-	instance, err := audit.ToolChainSubstrateInstanceID(a.Atespace, a.UID)
+	if len(in) < s.opts.MaxActors {
+		return
+	}
+	sort.Slice(in, func(i, j int) bool {
+		if in[i].state.Retired != in[j].state.Retired {
+			return in[i].state.Retired
+		}
+		return in[i].lastUsed.Before(in[j].lastUsed)
+	})
+	for _, e := range in {
+		if e.refs == 0 {
+			s.purgeLocked(e)
+			return
+		}
+	}
+}
+
+// closeIdleLocked closes the least recently used idle stores past the cap.
+func (s *Service) closeIdleLocked() {
+	if s.open <= s.opts.MaxOpenStores {
+		return
+	}
+	var idle []*actorEntry
+	for _, e := range s.actors {
+		if e.store != nil && e.refs == 0 {
+			idle = append(idle, e)
+		}
+	}
+	sort.Slice(idle, func(i, j int) bool { return idle[i].lastUsed.Before(idle[j].lastUsed) })
+	for _, e := range idle {
+		if s.open <= s.opts.MaxOpenStores {
+			return
+		}
+		_ = e.store.Close()
+		e.store = nil
+		s.open--
+	}
+}
+
+// purgeLocked removes everything the leader holds of an actor.
+func (s *Service) purgeLocked(e *actorEntry) {
+	if e.store != nil {
+		_ = e.store.Close()
+		e.store = nil
+		s.open--
+	}
+	e.purged = true
+	delete(s.actors, e.actor.key())
+	db := s.dbPath(e.actor)
+	for _, p := range []string{db, db + "-wal", db + "-shm", s.statePath(e.actor)} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.warnf("purge %s/%s: %v", e.actor.Atespace, e.actor.UID, err)
+		}
+	}
+}
+
+// storeOf opens the actor's store (a held entry). A store opened for the
+// first time for an actor with a parent starts from the parent's windows.
+func (s *Service) storeOf(ctx context.Context, e *actorEntry) (*audit.Store, audit.ConnectorInstanceID, error) {
+	instance, err := audit.ToolChainSubstrateInstanceID(e.actor.Atespace, e.actor.UID)
 	if err != nil {
 		return nil, "", bad(err)
 	}
-	st, err := s.store(a.Atespace)
+	s.mu.Lock()
+	st, purged := e.store, e.purged
+	s.mu.Unlock()
+	if purged {
+		return nil, "", errEvicted
+	}
+	if st != nil {
+		return st, instance, nil
+	}
+	e.openMu.Lock()
+	defer e.openMu.Unlock()
+	s.mu.Lock()
+	st = e.store
+	s.mu.Unlock()
+	if st != nil {
+		return st, instance, nil
+	}
+	path := s.dbPath(e.actor)
+	_, statErr := os.Stat(path)
+	fresh := errors.Is(statErr, os.ErrNotExist)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, "", err
+	}
+	st, err = audit.NewStore(path)
 	if err != nil {
 		return nil, "", err
 	}
-	// The first calls of a new actor arrive together; one records the
-	// instance and the others wait for it.
-	s.ensureMu.Lock()
-	defer s.ensureMu.Unlock()
-	if !s.ensured[instance] {
-		if err := st.EnsureToolChainSubstrateInstance(ctx, instance); err != nil {
-			return nil, "", s.internal("record actor instance", err)
+	if err := st.Init(); err != nil {
+		_ = st.Close()
+		return nil, "", err
+	}
+	if err := st.EnsureToolChainSubstrateInstance(ctx, instance); err != nil {
+		_ = st.Close()
+		return nil, "", err
+	}
+	s.mu.Lock()
+	if e.purged {
+		s.mu.Unlock()
+		_ = st.Close()
+		return nil, "", errEvicted
+	}
+	e.store = st
+	s.open++
+	s.mu.Unlock()
+	if fresh && s.opts.ParentOf != nil {
+		parent, err := s.opts.ParentOf(ctx, e.actor.Atespace, e.actor.UID)
+		if err != nil {
+			s.warnf("parent of %s/%s: %v", e.actor.Atespace, e.actor.UID, err)
+		} else if parent != "" && parent != e.actor.UID {
+			if _, err := s.copyFork(ctx, e, st, instance, Actor{Atespace: e.actor.Atespace, UID: parent}, s.opts.Now()); err != nil {
+				s.warnf("fork copy for %s/%s: %v", e.actor.Atespace, e.actor.UID, err)
+			}
 		}
-		s.ensured[instance] = true
 	}
 	return st, instance, nil
 }
 
-// internal logs an error the leader cannot hand to the caller (the
-// transport answers only "internal") and returns it.
-func (s *Service) internal(what string, err error) error {
-	var we *leader.WireError
-	if err != nil && !errors.As(err, &we) {
-		fmt.Fprintf(s.opts.Warn, "[chainstate] warning: %s: %v\n", what, err)
+// copyFork copies the parent's windows, clock and task into the child (a
+// held, open entry). Asks and approvals are never copied; nor are windows
+// across atespaces (one directory each).
+func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Store, childInstance audit.ConnectorInstanceID,
+	parent Actor, at time.Time) (LifecycleResult, error) {
+	if err := parent.Validate(); err != nil {
+		return LifecycleResult{}, bad(err)
 	}
-	return err
-}
-
-func (s *Service) clockPath(a Actor) string {
-	return filepath.Join(s.opts.Dir, "clocks", a.Atespace, a.UID+".json")
-}
-
-// clockOf returns a copy of the actor's clock state.
-func (s *Service) clockOf(a Actor) clock {
+	if parent.Atespace != child.actor.Atespace {
+		return LifecycleResult{}, bad(errors.New("chainstate: a fork into another atespace inherits no windows"))
+	}
+	parentInstance, _ := audit.ToolChainSubstrateInstanceID(parent.Atespace, parent.UID)
+	parentDigest, _ := audit.ToolChainActorScopeDigest(parent.Atespace, parent.UID)
+	childDigest, _ := audit.ToolChainActorScopeDigest(child.actor.Atespace, child.actor.UID)
 	s.mu.Lock()
-	c, ok := s.clocks[a.key()]
+	var pst actorState
+	if pe := s.actors[parent.key()]; pe != nil {
+		pst = pe.state
+	}
+	cst := child.state
 	s.mu.Unlock()
-	if ok {
-		return *c
+	cst.SuspendedNanos = pst.SuspendedNanos
+	if pst.SinceUnixNano != 0 && at.UnixNano() > pst.SinceUnixNano {
+		cst.SuspendedNanos += at.UnixNano() - pst.SinceUnixNano
 	}
-	var loaded clock
-	if raw, err := os.ReadFile(s.clockPath(a)); err == nil {
-		_ = json.Unmarshal(raw, &loaded)
+	cst.SinceUnixNano = 0
+	if cst.Task == "" {
+		cst.Task = pst.Task
 	}
+	result := LifecycleResult{}
+	if _, err := os.Stat(s.dbPath(parent)); err == nil {
+		r, err := st.CopyToolChainFork(ctx, s.dbPath(parent), audit.ToolChainForkCopy{
+			ParentInstance: parentInstance, ChildInstance: childInstance,
+			ParentActorDigest: parentDigest, ChildActorDigest: childDigest, At: cst.running(at),
+		})
+		if errors.Is(err, audit.ErrToolChainForkAlreadyStarted) {
+			return LifecycleResult{}, nil
+		}
+		if err != nil {
+			return LifecycleResult{}, err
+		}
+		result.CopiedEvents, result.Skipped = r.Copied, r.Skipped
+		if r.Skipped != 0 {
+			s.warnf("fork %s/%s: %d parent windows not copied, the child already had them", child.actor.Atespace, child.actor.UID, r.Skipped)
+		}
+	}
+	return result, s.setState(child, cst)
+}
+
+func (s *Service) stateOf(e *actorEntry) actorState {
 	s.mu.Lock()
-	if c, ok := s.clocks[a.key()]; ok {
-		loaded = *c
-	} else {
-		s.clocks[a.key()] = &loaded
-	}
-	s.mu.Unlock()
-	return loaded
+	defer s.mu.Unlock()
+	return e.state
 }
 
-func (s *Service) setClock(a Actor, c clock) error {
+func (s *Service) setState(e *actorEntry, st actorState) error {
 	s.mu.Lock()
-	cp := c
-	s.clocks[a.key()] = &cp
+	e.state = st
 	s.mu.Unlock()
-	return writeFileAtomic(s.clockPath(a), mustJSON(c))
+	return writeFileAtomic(s.statePath(e.actor), mustJSON(st))
 }
 
-// runningNow is the actor's running clock for its repositories.
-func (s *Service) runningNow(a Actor) func() time.Time {
-	return func() time.Time { return s.clockOf(a).running(s.opts.Now()) }
-}
-
-func (s *Service) repo(ctx context.Context, st *audit.Store, a Actor, scope Scope) (*audit.ToolChainRepository, error) {
-	opts := []audit.ToolChainOption{audit.WithToolChainClock(s.runningNow(a))}
+func (s *Service) repo(ctx context.Context, st *audit.Store, e *actorEntry, scope Scope) (*audit.ToolChainRepository, error) {
+	opts := []audit.ToolChainOption{audit.WithToolChainClock(func() time.Time {
+		return s.stateOf(e).running(s.opts.Now())
+	})}
 	switch scope {
 	case ScopeSession:
 	case ScopeActor:
-		opts = append(opts, audit.WithToolChainActorScope(a.Atespace, a.UID))
+		opts = append(opts, audit.WithToolChainActorScope(e.actor.Atespace, e.actor.UID))
 	default:
 		return nil, bad(errors.New("chainstate: scope is session or actor"))
 	}
 	return st.ToolChainRepositoryWith(ctx, opts...)
 }
 
-// Observe serves ChainObserve: one hook chain operation.
+// Observe serves ChainObserve: one hook chain operation. The leader stamps
+// the event with its own receive time in the actor's running time.
 func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveResponse, error) {
-	st, instance, err := s.actorStore(ctx, in.Actor)
+	e, release, err := s.acquire(in.Actor)
+	if err != nil {
+		return ObserveResponse{}, err
+	}
+	defer release()
+	st, instance, err := s.storeOf(ctx, e)
 	if err != nil {
 		return ObserveResponse{}, err
 	}
 	defer s.lock(in.Actor)()
-	repo, err := s.repo(ctx, st, in.Actor, in.Scope)
+	repo, err := s.repo(ctx, st, e, in.Scope)
 	if err != nil {
 		return ObserveResponse{}, err
 	}
@@ -305,11 +557,10 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 		if in.Join == nil {
 			return ObserveResponse{}, bad(errors.New("chainstate: the operation needs its join"))
 		}
-		received := s.clockOf(in.Actor).running(time.Unix(0, in.Join.ReceivedUnixNano))
 		if err := st.RecordToolChainJoin(ctx, audit.ToolChainJoin{
 			ConnectorInstanceID: instance, SemanticEventID: audit.SemanticEventID(in.Join.SemanticEventID),
 			EventName: in.Join.EventName, InputFingerprint: in.Join.InputFingerprint,
-			ReceivedAt: received, SessionDigest: in.Join.SessionDigest,
+			ReceivedAt: s.stateOf(e).running(s.opts.Now()), SessionDigest: in.Join.SessionDigest,
 		}); err != nil {
 			return ObserveResponse{}, bad(err)
 		}
@@ -381,43 +632,25 @@ type AttachInput struct {
 	AuditEventID string
 }
 
-func (s *Service) intentProcess(atespace string) *intentstore.Process {
+func (s *Service) intents(e *actorEntry) *intentstore.Process {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok := s.intents[atespace]
-	if !ok {
-		p = intentstore.NewProcess(intentstore.Limits{MaxSessions: intentMaxSessions, MaxPrior: intentMaxPrior, TTL: intentTTL})
-		s.intents[atespace] = p
+	if e.intents == nil {
+		e.intents = intentstore.NewProcess(intentstore.Limits{MaxSessions: intentMaxSessions, MaxPrior: intentMaxPrior, TTL: intentTTL})
 	}
-	return p
+	return e.intents
 }
 
-func (s *Service) taskPath(a Actor) string {
-	return filepath.Join(s.opts.Dir, "tasks", a.Atespace, a.UID+".task")
-}
-
-// task is the launcher-registered task text of an actor, or "".
-func (s *Service) task(a Actor) string {
-	s.mu.Lock()
-	t, ok := s.tasks[a.key()]
-	s.mu.Unlock()
-	if ok {
-		return t
-	}
-	raw, _ := os.ReadFile(s.taskPath(a))
-	t = string(raw)
-	s.mu.Lock()
-	s.tasks[a.key()] = t
-	s.mu.Unlock()
-	return t
-}
-
-func intentKey(a Actor, key string) string { return a.UID + "\x00" + key }
-
+// toResponse is a session's context. A --task actor's task text is its
+// verified intent and always comes first; a prompt in the session (from the
+// agent, so a claim) is shown after it, never in its place (GAP-0093).
 func toResponse(snap intentstore.Snapshot, task string) IntentResponse {
 	out := IntentResponse{UserIntent: snap.UserIntent}
-	if out.UserIntent == "" && task != "" {
+	if task != "" {
 		out.UserIntent, out.Task = task, true
+		if snap.UserIntent != "" && snap.UserIntent != task {
+			out.UserIntent = task + "\n\nLatest prompt in this session (from the agent, not verified):\n" + snap.UserIntent
+		}
 	}
 	for _, c := range snap.Prior {
 		out.Prior = append(out.Prior, IntentCall{Tool: c.Tool, Args: c.Args})
@@ -427,155 +660,110 @@ func toResponse(snap intentstore.Snapshot, task string) IntentResponse {
 
 // IntentGet serves IntentGet: a session's context without recording.
 func (s *Service) IntentGet(_ context.Context, in IntentRequest) (IntentResponse, error) {
-	if err := in.Actor.Validate(); err != nil {
-		return IntentResponse{}, bad(err)
+	e, release, err := s.acquire(in.Actor)
+	if err != nil {
+		return IntentResponse{}, err
 	}
-	snap, _ := s.intentProcess(in.Actor.Atespace).Peek(intentKey(in.Actor, in.Key))
-	return toResponse(snap, s.task(in.Actor)), nil
+	defer release()
+	snap, _ := s.intents(e).Peek(in.Key)
+	return toResponse(snap, s.stateOf(e).Task), nil
 }
 
-// IntentPut serves IntentPut. For a --task actor the launcher's task text
-// (a verified source) is the intent until a user prompt replaces it.
+// IntentPut serves IntentPut.
 func (s *Service) IntentPut(ctx context.Context, in IntentRequest) (IntentResponse, error) {
-	if err := in.Actor.Validate(); err != nil {
-		return IntentResponse{}, bad(err)
+	e, release, err := s.acquire(in.Actor)
+	if err != nil {
+		return IntentResponse{}, err
 	}
-	p := s.intentProcess(in.Actor.Atespace)
-	key := intentKey(in.Actor, in.Key)
+	defer release()
 	if in.Op != IntentTask && in.Key == "" {
 		return IntentResponse{}, bad(errors.New("chainstate: an intent needs its session key"))
 	}
+	p := s.intents(e)
 	switch in.Op {
 	case IntentPrompt:
-		return IntentResponse{}, p.ObservePrompt(ctx, key, in.Text)
+		return IntentResponse{}, p.ObservePrompt(ctx, in.Key, in.Text)
 	case IntentAppend:
-		snap, err := p.AppendToolCall(ctx, key, intentstore.ToolCall{Tool: in.Tool, Args: in.Args})
-		return toResponse(snap, s.task(in.Actor)), err
+		snap, err := p.AppendToolCall(ctx, in.Key, intentstore.ToolCall{Tool: in.Tool, Args: in.Args})
+		return toResponse(snap, s.stateOf(e).Task), err
 	case IntentReset:
-		return IntentResponse{}, p.Reset(ctx, key)
+		return IntentResponse{}, p.Reset(ctx, in.Key)
 	case IntentTask:
 		text := in.Text
 		if len(text) > taskMaxBytes {
 			text = text[:taskMaxBytes]
 		}
-		if err := writeFileAtomic(s.taskPath(in.Actor), []byte(text)); err != nil {
-			return IntentResponse{}, err
-		}
-		s.mu.Lock()
-		s.tasks[in.Actor.key()] = text
-		s.mu.Unlock()
-		return IntentResponse{}, nil
+		defer s.lock(in.Actor)()
+		st := s.stateOf(e)
+		st.Task = text
+		return IntentResponse{}, s.setState(e, st)
 	}
 	return IntentResponse{}, bad(fmt.Errorf("chainstate: unknown intent operation %q", in.Op))
 }
 
-func (s *Service) at(nanos int64) time.Time {
-	if nanos > 0 {
-		return time.Unix(0, nanos)
-	}
-	return s.opts.Now()
-}
-
-// Lifecycle serves ChainLifecycle.
+// Lifecycle serves ChainLifecycle. Times are the controller's; zero is the
+// leader's receive time.
 func (s *Service) Lifecycle(ctx context.Context, in LifecycleEvent) (LifecycleResult, error) {
 	if err := in.Actor.Validate(); err != nil {
 		return LifecycleResult{}, bad(err)
 	}
-	at := s.at(in.AtUnixNano)
-	switch in.Event {
-	case LifecycleSuspended:
-		defer s.lock(in.Actor)()
-		c := s.clockOf(in.Actor)
-		if c.SinceUnixNano == 0 {
-			c.SinceUnixNano = at.UnixNano()
+	at := s.opts.Now()
+	if in.AtUnixNano > 0 {
+		at = time.Unix(0, in.AtUnixNano)
+	}
+	if in.Event == LifecycleDeleted {
+		s.mu.Lock()
+		if e := s.actors[in.Actor.key()]; e != nil {
+			s.purgeLocked(e)
 		}
-		return LifecycleResult{}, s.setClock(in.Actor, c)
-	case LifecycleResumed:
-		defer s.lock(in.Actor)()
-		c := s.clockOf(in.Actor)
-		if c.SinceUnixNano != 0 && at.UnixNano() > c.SinceUnixNano {
-			c.SuspendedNanos += at.UnixNano() - c.SinceUnixNano
-		}
-		c.SinceUnixNano, c.Retired = 0, false
-		return LifecycleResult{}, s.setClock(in.Actor, c)
-	case LifecycleForked:
-		return s.fork(ctx, in, at)
-	case LifecycleReverted:
-		return s.revert(ctx, in.Actor, at)
-	case LifecycleDeleted:
-		st, instance, err := s.actorStore(ctx, in.Actor)
-		if err != nil {
-			return LifecycleResult{}, err
-		}
-		defer s.lock(in.Actor)()
-		if err := st.RetireToolChainInstance(ctx, instance); err != nil {
-			return LifecycleResult{}, err
-		}
-		c := s.clockOf(in.Actor)
-		c.Retired = true
-		return LifecycleResult{}, s.setClock(in.Actor, c)
-	case LifecycleCrashed:
+		s.mu.Unlock()
+		return LifecycleResult{}, nil
+	}
+	if in.Event == LifecycleCrashed {
 		if s.opts.OnCrashed != nil {
 			s.opts.OnCrashed(ctx, in.Actor)
 		}
 		return LifecycleResult{}, nil
 	}
-	return LifecycleResult{}, bad(fmt.Errorf("chainstate: unknown lifecycle event %q", in.Event))
-}
-
-// fork starts the child's windows from the parent's, its clock from the
-// parent's running time, and its task intent from the parent's. Asks and
-// approvals are never copied.
-func (s *Service) fork(ctx context.Context, in LifecycleEvent, at time.Time) (LifecycleResult, error) {
-	if in.Parent == nil {
-		return LifecycleResult{}, bad(errors.New("chainstate: a fork names its parent"))
-	}
-	parent, child := *in.Parent, in.Actor
-	if parent.Atespace != child.Atespace {
-		// Windows never cross an atespace (one store each); the child is
-		// judged on its own history.
-		return LifecycleResult{}, bad(errors.New("chainstate: a fork into another atespace inherits no windows"))
-	}
-	st, parentInstance, err := s.actorStore(ctx, parent)
+	e, release, err := s.acquire(in.Actor)
 	if err != nil {
 		return LifecycleResult{}, err
 	}
-	_, childInstance, err := s.actorStore(ctx, child)
-	if err != nil {
-		return LifecycleResult{}, err
-	}
-	parentDigest, _ := audit.ToolChainActorScopeDigest(parent.Atespace, parent.UID)
-	childDigest, _ := audit.ToolChainActorScopeDigest(child.Atespace, child.UID)
-	unlockParent := s.lock(parent)
-	pc := s.clockOf(parent)
-	unlockParent()
-	cc := clock{SuspendedNanos: pc.SuspendedNanos}
-	if pc.SinceUnixNano != 0 && at.UnixNano() > pc.SinceUnixNano {
-		cc.SuspendedNanos += at.UnixNano() - pc.SinceUnixNano
-	}
-	defer s.lock(child)()
-	copied, err := st.CopyToolChainFork(ctx, audit.ToolChainForkCopy{
-		ParentInstance: parentInstance, ChildInstance: childInstance,
-		ParentActorDigest: parentDigest, ChildActorDigest: childDigest, At: cc.running(at),
-	})
-	if errors.Is(err, audit.ErrToolChainForkAlreadyStarted) {
-		return LifecycleResult{}, nil
-	}
-	if err != nil {
-		return LifecycleResult{}, err
-	}
-	if err := s.setClock(child, cc); err != nil {
-		return LifecycleResult{}, err
-	}
-	if t := s.task(parent); t != "" {
-		if err := writeFileAtomic(s.taskPath(child), []byte(t)); err != nil {
+	defer release()
+	switch in.Event {
+	case LifecycleSuspended, LifecycleResumed:
+		defer s.lock(in.Actor)()
+		st := s.stateOf(e)
+		if at.UnixNano() < st.LastEventUnixNano {
+			// A late event older than the last one applied (GAP-0092).
+			return LifecycleResult{Ignored: true}, nil
+		}
+		st.LastEventUnixNano = at.UnixNano()
+		if in.Event == LifecycleSuspended {
+			if st.SinceUnixNano == 0 {
+				st.SinceUnixNano = at.UnixNano()
+			}
+		} else {
+			if st.SinceUnixNano != 0 && at.UnixNano() > st.SinceUnixNano {
+				st.SuspendedNanos += at.UnixNano() - st.SinceUnixNano
+			}
+			st.SinceUnixNano, st.Retired = 0, false
+		}
+		return LifecycleResult{}, s.setState(e, st)
+	case LifecycleForked:
+		if in.Parent == nil {
+			return LifecycleResult{}, bad(errors.New("chainstate: a fork names its parent"))
+		}
+		st, instance, err := s.storeOf(ctx, e)
+		if err != nil {
 			return LifecycleResult{}, err
 		}
-		s.mu.Lock()
-		s.tasks[child.key()] = t
-		s.mu.Unlock()
+		defer s.lock(in.Actor)()
+		return s.copyFork(ctx, e, st, instance, *in.Parent, at)
+	case LifecycleReverted:
+		return s.revert(ctx, e, at)
 	}
-	return LifecycleResult{CopiedEvents: copied}, nil
+	return LifecycleResult{}, bad(fmt.Errorf("chainstate: unknown lifecycle event %q", in.Event))
 }
 
 // lifecycleSession is the session join of events the leader makes itself.
@@ -586,7 +774,7 @@ func lifecycleSession(name string) string {
 
 // syntheticEvent records a leader-made event in the actor's store.
 func (s *Service) syntheticEvent(ctx context.Context, st *audit.Store, instance audit.ConnectorInstanceID,
-	a Actor, name, session string, wall time.Time) (audit.SemanticEventID, string, error) {
+	e *actorEntry, name, session string, wall time.Time) (audit.SemanticEventID, string, error) {
 	id, err := audit.NewSemanticEventID()
 	if err != nil {
 		return "", "", err
@@ -594,19 +782,19 @@ func (s *Service) syntheticEvent(ctx context.Context, st *audit.Store, instance 
 	sum := sha256.Sum256([]byte(name + "\x00" + string(id)))
 	fp := hex.EncodeToString(sum[:])
 	err = st.RecordToolChainJoin(ctx, audit.ToolChainJoin{ConnectorInstanceID: instance, SemanticEventID: id,
-		EventName: name, InputFingerprint: fp, ReceivedAt: s.clockOf(a).running(wall), SessionDigest: session})
+		EventName: name, InputFingerprint: fp, ReceivedAt: s.stateOf(e).running(wall), SessionDigest: session})
 	return id, fp, err
 }
 
 // revert puts an artifact mutation barrier into every window of the actor:
 // the files may differ from what the window saw, so no same-artifact chain
 // joins across it. Findings and receipts stay.
-func (s *Service) revert(ctx context.Context, a Actor, at time.Time) (LifecycleResult, error) {
-	st, instance, err := s.actorStore(ctx, a)
+func (s *Service) revert(ctx context.Context, e *actorEntry, at time.Time) (LifecycleResult, error) {
+	st, instance, err := s.storeOf(ctx, e)
 	if err != nil {
 		return LifecycleResult{}, err
 	}
-	defer s.lock(a)()
+	defer s.lock(e.actor)()
 	windows, err := st.ToolChainInstanceWindows(ctx, instance)
 	if err != nil {
 		return LifecycleResult{}, err
@@ -619,11 +807,11 @@ func (s *Service) revert(ctx context.Context, a Actor, at time.Time) (LifecycleR
 		if w.Scope == audit.ToolChainScopeRoot {
 			scope, session = ScopeActor, lifecycleSession("revert")
 		}
-		repo, err := s.repo(ctx, st, a, scope)
+		repo, err := s.repo(ctx, st, e, scope)
 		if err != nil {
 			return LifecycleResult{Barriers: n}, err
 		}
-		id, fp, err := s.syntheticEvent(ctx, st, instance, a, "substrate.revert", session, at)
+		id, fp, err := s.syntheticEvent(ctx, st, instance, e, "substrate.revert", session, at)
 		if err != nil {
 			return LifecycleResult{Barriers: n}, err
 		}
@@ -637,10 +825,16 @@ func (s *Service) revert(ctx context.Context, a Actor, at time.Time) (LifecycleR
 }
 
 // Egress serves ChainEgress: the callout's observed egress step, recorded in
-// the actor window under its active ruleset and checked against the egress
-// chains. An actor with no actor window has nothing to match.
+// the actor window under its active ruleset at the leader's receive time and
+// checked against the egress chains. An actor with no actor window has
+// nothing to match.
 func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, error) {
-	st, instance, err := s.actorStore(ctx, in.Actor)
+	e, release, err := s.acquire(in.Actor)
+	if err != nil {
+		return EgressVerdict{}, err
+	}
+	defer release()
+	st, instance, err := s.storeOf(ctx, e)
 	if err != nil {
 		return EgressVerdict{}, err
 	}
@@ -664,11 +858,11 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 			mask |= bit
 		}
 	}
-	repo, err := s.repo(ctx, st, in.Actor, ScopeActor)
+	repo, err := s.repo(ctx, st, e, ScopeActor)
 	if err != nil {
 		return EgressVerdict{}, err
 	}
-	id, fp, err := s.syntheticEvent(ctx, st, instance, in.Actor, "substrate.egress", lifecycleSession("egress"), s.at(in.AtUnixNano))
+	id, fp, err := s.syntheticEvent(ctx, st, instance, e, "substrate.egress", lifecycleSession("egress"), s.opts.Now())
 	if err != nil {
 		return EgressVerdict{}, err
 	}
@@ -690,47 +884,49 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 	return v, nil
 }
 
-// Sweep marks actors suspended for longer than the retention as finished, so
-// the partition LRU evicts them before live actors. It returns how many.
-func (s *Service) Sweep(ctx context.Context) (int, error) {
+// SweepResult counts what a sweep did.
+type SweepResult struct {
+	Retired int
+	Purged  int
+}
+
+// Sweep retires actors suspended past the retention (the atespace cap
+// evicts them first) and purges actors suspended, or silent, past
+// PurgeAfter.
+func (s *Service) Sweep(_ context.Context) (SweepResult, error) {
 	now := s.opts.Now()
+	var res SweepResult
+	var retired []*actorEntry
 	s.mu.Lock()
-	var due []Actor
-	for k, c := range s.clocks {
-		if c.SinceUnixNano != 0 && !c.Retired && now.UnixNano()-c.SinceUnixNano > int64(s.opts.Retention) {
-			if a, ok := actorFromKey(k); ok {
-				due = append(due, a)
-			}
+	for _, e := range s.actors {
+		if e.refs != 0 {
+			continue
+		}
+		since := e.lastUsed
+		if e.state.SinceUnixNano != 0 {
+			since = time.Unix(0, e.state.SinceUnixNano)
+		}
+		switch {
+		case now.Sub(since) > s.opts.PurgeAfter:
+			s.purgeLocked(e)
+			res.Purged++
+		case e.state.SinceUnixNano != 0 && !e.state.Retired && now.Sub(since) > s.opts.Retention:
+			e.state.Retired = true
+			retired = append(retired, e)
 		}
 	}
 	s.mu.Unlock()
-	n := 0
-	for _, a := range due {
-		st, instance, err := s.actorStore(ctx, a)
-		if err != nil {
-			return n, err
+	for _, e := range retired {
+		if err := writeFileAtomic(s.statePath(e.actor), mustJSON(s.stateOf(e))); err != nil {
+			return res, err
 		}
-		unlock := s.lock(a)
-		err = st.RetireToolChainInstance(ctx, instance)
-		if err == nil {
-			c := s.clockOf(a)
-			c.Retired = true
-			err = s.setClock(a, c)
-		}
-		unlock()
-		if err != nil {
-			return n, err
-		}
-		n++
+		res.Retired++
 	}
-	return n, nil
+	return res, nil
 }
 
 // Run sweeps every 10 minutes until ctx ends.
 func (s *Service) Run(ctx context.Context) error {
-	if err := s.loadClocks(); err != nil {
-		fmt.Fprintf(s.opts.Warn, "[chainstate] warning: clock files not loaded: %v\n", err)
-	}
 	t := time.NewTicker(10 * time.Minute)
 	defer t.Stop()
 	for {
@@ -739,37 +935,19 @@ func (s *Service) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			if _, err := s.Sweep(ctx); err != nil {
-				fmt.Fprintf(s.opts.Warn, "[chainstate] warning: retention sweep: %v\n", err)
+				s.warnf("sweep: %v", err)
 			}
 		}
 	}
 }
 
-// loadClocks reads every persisted clock (a new leader after failover).
-func (s *Service) loadClocks() error {
-	root := filepath.Join(s.opts.Dir, "clocks")
-	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || filepath.Ext(path) != ".json" {
-			return err
-		}
-		rel, _ := filepath.Rel(root, path)
-		a, ok := actorFromKey(filepath.ToSlash(rel[:len(rel)-len(".json")]))
-		if !ok {
-			return nil
-		}
-		s.clockOf(a)
-		return nil
-	})
-}
-
 func actorFromKey(k string) (Actor, bool) {
-	for i := 0; i < len(k); i++ {
-		if k[i] == '/' {
-			a := Actor{Atespace: k[:i], UID: k[i+1:]}
-			return a, a.Validate() == nil
-		}
+	i := strings.IndexByte(k, '/')
+	if i < 0 {
+		return Actor{}, false
 	}
-	return Actor{}, false
+	a := Actor{Atespace: k[:i], UID: k[i+1:]}
+	return a, a.Validate() == nil
 }
 
 func encodeGob(v any) ([]byte, error) {

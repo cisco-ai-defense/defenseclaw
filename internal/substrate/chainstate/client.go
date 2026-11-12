@@ -6,7 +6,6 @@ package chainstate
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
@@ -36,13 +35,12 @@ type Binding struct {
 	scope     Scope
 	session   string
 	eventName string
-	received  time.Time
 }
 
 // Bind returns the binding of one hook call: the actor, the scope, the
 // connector and session id (a claim that only ever selects a window of this
-// actor), the hook event name and the gateway's receive time.
-func (c *Client) Bind(actor Actor, scope Scope, connector, sessionID, eventName string, received time.Time) (*Binding, error) {
+// actor) and the hook event name. The leader stamps the time.
+func (c *Client) Bind(actor Actor, scope Scope, connector, sessionID, eventName string) (*Binding, error) {
 	if err := actor.Validate(); err != nil {
 		return nil, err
 	}
@@ -57,10 +55,7 @@ func (c *Client) Bind(actor Actor, scope Scope, connector, sessionID, eventName 
 	if err != nil {
 		return nil, err
 	}
-	if received.IsZero() {
-		received = time.Now()
-	}
-	return &Binding{client: c, actor: actor, scope: scope, session: session, eventName: eventName, received: received}, nil
+	return &Binding{client: c, actor: actor, scope: scope, session: session, eventName: eventName}, nil
 }
 
 // Scope reports the binding's scope as a repository would.
@@ -79,7 +74,7 @@ func (b *Binding) op(ctx context.Context, op Op, semantic audit.SemanticEventID,
 	req := ObserveRequest{Actor: b.actor, Scope: b.scope, Op: op, Input: raw}
 	if op != OpAttach {
 		req.Join = &Join{SemanticEventID: string(semantic), EventName: b.eventName, InputFingerprint: fingerprint,
-			ReceivedUnixNano: b.received.UnixNano(), SessionDigest: b.session}
+			SessionDigest: b.session}
 	}
 	var resp ObserveResponse
 	if err := b.client.call(ctx, leader.MethodChainObserve, req, &resp); err != nil {
