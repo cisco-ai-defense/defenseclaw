@@ -22,6 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/signin"
 )
 
 const (
@@ -97,6 +98,18 @@ func (s *Server) init() error {
 			env = append(env, k+"="+v)
 		}
 		s.agent = &Agent{Argv: rc.Interactive, Dir: rc.Workdir, Env: env}
+		// E9: no agent that signs in to a vendor account in a managed
+		// image; an open-source image says what the sign-in costs.
+		d := s.signinDecision()
+		if !d.Allowed {
+			s.log.Warn("relay.signin_refused", "connector", rc.Connector, "reason", d.Code)
+			s.initErr = errors.New(d.Message)
+			return
+		}
+		if d.Warn {
+			s.log.Warn("relay.signin_warning", "connector", rc.Connector)
+			s.agent.Banner = d.Message
+		}
 		if s.opts.Warm == nil {
 			t, err := kit.NewTransport(s.opts.Config)
 			if err != nil {
@@ -109,6 +122,20 @@ func (s *Server) init() error {
 		go s.watchResume()
 	})
 	return s.initErr
+}
+
+// signinDecision is E9 for this image: the connector's vendor API key
+// variable counts as bound when the actor carries it (a placeholder; egress
+// adds the real key).
+func (s *Server) signinDecision() signin.Decision {
+	rc := s.opts.Config.Relay
+	var bound []string
+	if k := signin.KeyEnv(rc.Connector); k != "" {
+		if _, ok := rc.Env[k]; ok || os.Getenv(k) != "" {
+			bound = append(bound, k)
+		}
+	}
+	return signin.Evaluate(rc.Connector, s.opts.Config.Managed, bound)
 }
 
 // watchResume pre-connects after a resume (a wall-clock jump), before the

@@ -136,6 +136,13 @@ var hookCommandRewrites = map[string][]struct {
 	// "command": "/…/kiro-hook.sh"
 	"kiro": {{regexp.MustCompile(regexp.QuoteMeta(connector.SandboxHookDir) + `/kiro-hook\.sh`),
 		HookBinary + ` --connector kiro`}},
+	// "command": "'/…/cursor-hook.sh'" (Cursor runs the command through a
+	// shell; the event is in the payload)
+	"cursor": {{regexp.MustCompile(`'` + regexp.QuoteMeta(connector.SandboxHookDir) + `/cursor-hook\.sh'`),
+		`'` + HookBinary + `' --connector cursor`}},
+	// "command": "/…/devin-hook.sh" (the event is in the payload)
+	"devin": {{regexp.MustCompile(regexp.QuoteMeta(connector.SandboxHookDir) + `/devin-hook\.sh`),
+		HookBinary + ` --connector devin`}},
 }
 
 // rewriteHookCommands applies the connector's rewrites to a rendered file
@@ -292,15 +299,29 @@ func wave2UserFiles(name string, o OverlayOptions) []ImageFile {
 		// the kit has no launcher, so the image carries it.
 		doc := fmt.Sprintf("{\n  \"trustedWorkspaces\": [%q]\n}\n", o.Workdir)
 		return []ImageFile{start, {Path: path.Join(o.Home, ".gemini", "antigravity-cli", "settings.json"), Mode: 0o600, User: true, Data: []byte(doc)}}
+	case "amp":
+		// Amp has no "allow all" switch on the command line, only the
+		// setting amp.dangerouslyAllowAll. A headless run has nobody to
+		// answer a permission prompt, so it reads a root-owned settings file
+		// with the setting (--settings-file in its argv); an interactive run
+		// keeps Amp's own prompts.
+		return []ImageFile{{Path: AmpHeadlessSettings, Mode: 0o644, Data: []byte("{\n  \"amp.dangerouslyAllowAll\": true\n}\n")}}
 	}
 	return nil
 }
 
-// Wave-3 connectors (PLAN 4.3): built but refused until a vendor sign-in run
-// passes (E9, lane A11). Their argv comes from the pinned releases' --help
-// (lanes/a10/HANDOFF.md); no run was possible without a sign-in. Amp's
-// Substrate plugin transport does not exist yet, so its render is refused
-// (resolveSandboxTarget); the argv is recorded for when it does.
+// AmpHeadlessSettings is the root-owned settings file of an Amp headless run.
+const AmpHeadlessSettings = LibDir + "/amp/headless-settings.json"
+
+// Wave-3 connectors (PLAN 4.3): Cursor Agent CLI, Amp and Devin CLI. Their
+// only model route is a vendor account, so they run on a vendor API key that
+// egress adds (CURSOR_API_KEY, AMP_API_KEY) where the vendor offers one, and
+// otherwise on a sign-in held in the actor, which a managed deployment
+// refuses and an open-source one allows with a warning (E9, package signin).
+// Their argv comes from the pinned releases' --help (lanes/a10/HANDOFF.md).
+
+// Wave3Connectors are the connectors this part serves.
+var Wave3Connectors = []string{"cursor", "amp", "devin"}
 var wave3Interactive = map[string][]string{
 	"cursor": {"/usr/local/bin/cursor-agent"},
 	"amp":    {"/usr/local/bin/amp"},
@@ -309,10 +330,10 @@ var wave3Interactive = map[string][]string{
 
 var wave3Headless = map[string][]string{
 	"cursor": {"/usr/local/bin/cursor-agent", "-p", "{prompt}", "--force", "--trust"},
-	// Amp has no command-line switch for "allow all": its setting
-	// amp.dangerouslyAllowAll in ~/.config/amp/settings.json does that, and
-	// the Amp image (A11) must carry it.
-	"amp":   {"/usr/local/bin/amp", "-x", "{prompt}"},
+	// Amp has no command-line switch for "allow all": the setting
+	// amp.dangerouslyAllowAll does that, and the image carries it in a
+	// root-owned file that only a headless run reads.
+	"amp":   {"/usr/local/bin/amp", "--settings-file", AmpHeadlessSettings, "-x", "{prompt}"},
 	"devin": {"/usr/local/bin/devin", "--permission-mode", "dangerous", "--respect-workspace-trust", "false", "-p", "{prompt}"},
 }
 

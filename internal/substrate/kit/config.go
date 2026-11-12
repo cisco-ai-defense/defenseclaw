@@ -65,6 +65,11 @@ type Config struct {
 	// FailMode is the interactive outage mode, "open" or "closed" (D8).
 	// Unattended runs are always closed.
 	FailMode string `json:"fail_mode"`
+	// Managed is a managed_enterprise image: the relay refuses to start an
+	// agent that signs in to a vendor account, because the token would sit
+	// in the actor and its snapshots (E9). The gateway decides the same from
+	// its own configuration; this is the second layer inside the actor.
+	Managed bool `json:"managed,omitempty"`
 	// ConnectTimeoutMS, MaxTimeMS and RetryMaxTimeMS budget one hook post
 	// and its single retry; both must fit the agent's 30 s hook envelope.
 	ConnectTimeoutMS int `json:"connect_timeout_ms"`

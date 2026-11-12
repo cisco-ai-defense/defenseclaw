@@ -369,7 +369,50 @@ function gatewayJSON(text: string): unknown {
 	return value
 }
 
-{{if .Sandbox}}async function scopedHookToken(): Promise<string> {
+{{if .Sandbox}}{{if .SandboxSubstrate}}// Agent Substrate actor variant: the plugin holds no token and opens no
+// connection of its own. Each post goes through the actor kit's hook-post
+// command (stdin {path, headers, body}, stdout {status, body}), which sends it
+// in the kit envelope with the actor header placeholder (Substrate egress
+// swaps in the actor JWT) over the kit's kept-alive transport, retries once
+// and carries the idempotency key. No answer means a non-zero exit, which the
+// callers treat as a transport failure and fail closed.
+const DC_HOOK_POST_BINARY = "{{.SandboxHookPostBinary}}"
+
+async function scopedHookToken(): Promise<string> {
+	return ""
+}
+
+async function sandboxFetch(headers: Record<string, string>, body: string | Uint8Array): Promise<Response> {
+	const text = await new Promise<string>((resolve, reject) => {
+		const child = execFile(DC_HOOK_POST_BINARY, ["hook-post"], {
+			timeout: DC_TIMEOUT_MS + DC_RETRY_TIMEOUT_MS,
+			maxBuffer: 4 << 20,
+			windowsHide: true,
+		}, (error, stdout) => {
+			if (error) {
+				reject(error)
+				return
+			}
+			resolve(String(stdout))
+		})
+		child.stdin?.on("error", () => {})
+		child.stdin?.end(JSON.stringify({
+			path: "/api/v1/amp/hook",
+			headers,
+			body: typeof body === "string" ? body : new TextDecoder().decode(body),
+		}))
+	})
+	let out: { status?: unknown, body?: unknown }
+	try {
+		out = JSON.parse(text)
+	} catch {
+		throw new Error("hook-post answered something that is not JSON")
+	}
+	const status = Number(out && out.status)
+	if (!Number.isInteger(status) || status < 200 || status > 599) throw new Error("hook-post answered no usable status")
+	return new Response(String(out.body == null ? "" : out.body), { status })
+}
+{{else}}async function scopedHookToken(): Promise<string> {
 	const token = String(process.env.DEFENSECLAW_SANDBOX_TOKEN || "")
 	if (!DC_TOKEN_PATTERN.test(token)) throw new Error("missing or malformed sandbox binding token")
 	return token
@@ -406,7 +449,7 @@ async function sandboxFetch(headers: Record<string, string>, body: string | Uint
 	if (last instanceof Error || last === undefined) throw last ?? new Error("sandbox ingress unreachable")
 	return last
 }
-{{else}}function trustedSocketOwner(uid: number): boolean {
+{{end}}{{else}}function trustedSocketOwner(uid: number): boolean {
 	return uid === 0 || (DC_SERVICE_UID > 0 && uid === DC_SERVICE_UID)
 }
 

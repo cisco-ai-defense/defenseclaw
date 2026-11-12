@@ -260,11 +260,30 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		req.Profile, req.Atespace, req.Owner = profile, atespace, ownerOf(c.person)
+		// E9: a managed deployment refuses an agent that signs in to a
+		// vendor account. The launcher names the connector, so this
+		// refuses before an actor exists; the template's connector is
+		// checked again below, because that is what the actor runs.
+		if req.Connector != "" {
+			if d := st.cfg.signinDecision(req.Connector, req.Secrets); !d.Allowed {
+				writeSubstrateSigninRefusal(w, d)
+				return
+			}
+		}
 		created, err := st.cfg.Actions.Create(r.Context(), req)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[substrate] create actor failed: %v\n", err)
 			writeSubstrateJSONError(w, http.StatusBadGateway, "create_failed")
 			return
+		}
+		signinDecision := st.cfg.signinDecision(created.Connector, req.Secrets)
+		if !signinDecision.Allowed {
+			_ = st.cfg.Actions.Delete(context.WithoutCancel(r.Context()), created.Atespace, created.Name)
+			writeSubstrateSigninRefusal(w, signinDecision)
+			return
+		}
+		if signinDecision.Warn {
+			fmt.Fprintf(os.Stderr, "[substrate] warning: %s/%s: %s\n", created.Atespace, created.Name, signinDecision.Message)
 		}
 		reg := registry.Registration{
 			Atespace: created.Atespace, Name: created.Name, UID: created.UID, Person: req.Owner,
@@ -299,6 +318,9 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		out := substrateActorView(reg)
+		if signinDecision.Warn {
+			out["warnings"] = []string{signinDecision.Message}
+		}
 		if st.cfg.Sessions != nil && !req.Unattended {
 			tok, exp, err := st.cfg.Sessions.Issue(c.person.Subject, identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID}, 0)
 			if err == nil {
