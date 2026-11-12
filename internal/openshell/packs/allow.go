@@ -29,10 +29,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
-// OpenShellHostAlias is the name a sandbox uses to reach the host.
-const OpenShellHostAlias = "host.openshell.internal"
+// OpenShellHostAlias is the name a sandbox uses to reach the host
+// (sandboxruntime.OpenShellHostAlias, the one definition).
+const OpenShellHostAlias = sandboxruntime.OpenShellHostAlias
 
 // ActionKind names a runtime action the effective policy gates.
 type ActionKind string

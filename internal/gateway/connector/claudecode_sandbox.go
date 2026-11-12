@@ -153,7 +153,7 @@ func (c *ClaudeCodeConnector) SandboxArtifacts(target SandboxRenderTarget) (Sand
 
 	files := append(hookFiles,
 		SandboxFile{Path: ClaudeCodeSandboxDropInPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: dropIn},
-		SandboxFile{Path: claudeCodeSandboxOtelHelperPath, Mode: 0o755, Owner: SandboxOwnerRoot, Data: []byte(claudeCodeSandboxOtelHelper)},
+		SandboxFile{Path: claudeCodeSandboxOtelHelperPath, Mode: 0o755, Owner: SandboxOwnerRoot, Data: []byte(claudeCodeOtelHelperFor(rt))},
 		SandboxFile{Path: path.Join(SandboxHomeDir, ".claude.json"), Mode: 0o600, Owner: SandboxOwnerUser, Data: preseed},
 	)
 	env := make(map[string]string, len(claudeCodeSandboxStartupEnv))
@@ -161,7 +161,7 @@ func (c *ClaudeCodeConnector) SandboxArtifacts(target SandboxRenderTarget) (Sand
 		env[key] = value
 	}
 	binaries := append(sandboxHookRuntimeBinaries(), SandboxBinary{Name: "claude", Role: SandboxBinaryHarness})
-	return finalizeSandboxArtifacts(SandboxArtifacts{
+	return finalizeSandboxArtifactsFor(rt, SandboxArtifacts{
 		Connector:    c.Name(),
 		HookContract: rt.contract.ContractID,
 		TamperTier:   SandboxTamperTierManaged,
@@ -269,6 +269,9 @@ func claudeCodeSandboxManagedEnv(rt resolvedSandboxTarget) (map[string]string, e
 	env, err := sandboxSpec.EnvBlock()
 	if err != nil {
 		return nil, fmt.Errorf("render Claude Code sandbox OTLP env: %w", err)
+	}
+	for key, value := range env {
+		env[key] = rt.substrateOTLPEndpoint(value)
 	}
 	for key, value := range claudeCodeSandboxStartupEnv {
 		env[key] = value
@@ -379,6 +382,14 @@ func renderClaudeCodeSandboxPreseed() ([]byte, error) {
 		return nil, fmt.Errorf("marshal Claude Code preseed: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// claudeCodeOtelHelperFor is the otelHeadersHelper of rt's runtime.
+func claudeCodeOtelHelperFor(rt resolvedSandboxTarget) string {
+	if rt.ingress.Substrate() {
+		return claudeCodeSubstrateOtelHelper
+	}
+	return claudeCodeSandboxOtelHelper
 }
 
 // claudeCodeSandboxOtelHelper is Claude's otelHeadersHelper: it prints the

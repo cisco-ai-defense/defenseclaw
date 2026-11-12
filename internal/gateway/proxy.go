@@ -612,12 +612,19 @@ func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
 			set = pinnedGeneration(ctx).Profiles
 		}
 	}
-	if _, verified := verifiedSubjectFromContext(ctx); !verified && !p.presentsOwnerCredential(r) {
+	substrateCall := isSubstrateActorRequest(ctx)
+	if _, verified := verifiedSubjectFromContext(ctx); !verified && !substrateCall && !p.presentsOwnerCredential(r) {
 		// A provider key admits model traffic but says nothing about who sent it.
 		// Keep the proxy's base guardrail and leave the owner's agent unclaimed.
 		return r.WithContext(context.WithValue(ctx, unverifiedProxyCallerKey{}, true))
 	}
 	connectorName := p.servedConnector()
+	if substrateCall {
+		// An actor runs the connector of its registration, not the proxy's.
+		if reg, ok := substrateRegistrationFrom(ctx); ok {
+			connectorName = config.NormalizeConnectorName(reg.Connector)
+		}
+	}
 	if identity := AgentIdentityFromContext(ctx); identity.IdentityID == "" {
 		if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName}); facts.ID != "" {
 			identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
@@ -757,14 +764,8 @@ func (p *GuardrailProxy) SetWebhookDispatcher(d *WebhookDispatcher) {
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled.
-func (p *GuardrailProxy) Run(ctx context.Context) error {
-	if !p.cfg.Enabled {
-		p.health.SetGuardrail(StateDisabled, "", nil)
-		fmt.Fprintf(os.Stderr, "[guardrail] disabled (enable via: defenseclaw setup guardrail)\n")
-		<-ctx.Done()
-		return nil
-	}
-
+// proxyMux is the proxy route table.
+func (p *GuardrailProxy) proxyMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", p.handleChatCompletion)
 	mux.HandleFunc("/chat/completions", p.handleChatCompletion)
@@ -800,6 +801,27 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	// preserves the original path; we inspect the content then forward verbatim
 	// to the real upstream from X-DC-Target-URL.
 	mux.HandleFunc("/", p.handlePassthrough)
+	return mux
+}
+
+// SubstrateHandler serves the model calls of verified Agent Substrate
+// actors (the actor listener's /llm route): the proxy routes with the
+// profile threshold scope. The actor listener has already authenticated
+// the caller, minted the request ID and set the correlation; a request
+// without a verified actor is refused by authenticateRequest as usual.
+func (p *GuardrailProxy) SubstrateHandler() http.Handler {
+	return p.thresholdScopeMiddleware(p.proxyMux())
+}
+
+func (p *GuardrailProxy) Run(ctx context.Context) error {
+	if !p.cfg.Enabled {
+		p.health.SetGuardrail(StateDisabled, "", nil)
+		fmt.Fprintf(os.Stderr, "[guardrail] disabled (enable via: defenseclaw setup guardrail)\n")
+		<-ctx.Done()
+		return nil
+	}
+
+	mux := p.proxyMux()
 
 	addr := guardrailListenAddr(p.cfg.Port, p.cfg.EffectiveHost())
 	InstallSharedAgentRegistry("", strings.TrimSpace(p.defaultAgentName))
@@ -1287,6 +1309,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		Stream            bool            `json:"stream,omitempty"`
 	}
 	_ = json.Unmarshal(body, &partial)
+	if bedrockStreamingPath(r.URL.Path) {
+		// Bedrock names a stream by its path, not a body field (GAP-0098).
+		partial.Stream = true
+	}
 
 	p.rtMu.RLock()
 	mode := p.mode
@@ -1672,8 +1698,15 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 	// Determine whether the upstream response is streaming (SSE).
 	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+	// Bedrock InvokeModelWithResponseStream and ConverseStream answer in the
+	// binary AWS eventstream: streamed through like SSE, decoded frame by
+	// frame for inspection (GAP-0098).
+	var bedrockStream *bedrockEventStreamText
+	if strings.Contains(resp.Header.Get("Content-Type"), "application/vnd.amazon.eventstream") {
+		bedrockStream = newBedrockEventStreamText()
+	}
 
-	if !isSSE {
+	if !isSSE && bedrockStream == nil {
 		// --- Non-streaming: buffer response, inspect, then forward ---
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 		if readErr != nil {
@@ -1795,9 +1828,17 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			if n > 0 {
 				chunk := buf[:n]
 
-				// Parse SSE text for inspection regardless of buffer state.
-				lineBuf.Write(chunk)
-				for {
+				// Parse SSE text (or eventstream frames) for inspection
+				// regardless of buffer state.
+				if bedrockStream != nil {
+					accumulated.WriteString(bedrockStream.Feed(chunk))
+					if streamResponseModel == "" {
+						streamResponseModel = bedrockStream.Model()
+					}
+				} else {
+					lineBuf.Write(chunk)
+				}
+				for bedrockStream == nil {
 					line, rest, found := strings.Cut(lineBuf.String(), "\n")
 					if !found {
 						break
@@ -1967,9 +2008,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 
 	case "bedrock":
 		// F-1186: Bedrock Converse: {"output": {"message": {"content": [{"text": "..."}]}}}
-		// Bedrock InvokeModel responses are model-shaped and re-routed through
-		// the matching provider extractor (anthropic / cohere / etc.) by the
-		// caller, so this branch only handles the Converse envelope.
+		// InvokeModel answers in the model family's shape (bedrockInvokeText).
 		var bedrockResp struct {
 			Output struct {
 				Message struct {
@@ -1987,6 +2026,10 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 			if sb.Len() > 0 {
 				return sb.String()
 			}
+		}
+		// InvokeModel answers in the model family's own shape (GAP-0098).
+		if t := bedrockInvokeText(body); t != "" {
+			return t
 		}
 
 	default:
@@ -2131,6 +2174,13 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 		if json.Unmarshal(body, &resp) == nil {
 			for _, c := range resp.Output.Message.Content {
 				addCall(c.ToolUse.Name, c.ToolUse.Input)
+			}
+		}
+		if len(calls) == 0 {
+			// InvokeModel for Claude answers with Anthropic tool_use blocks
+			// (GAP-0098).
+			if raw := extractPassthroughToolCalls(body, "anthropic"); raw != nil {
+				return raw
 			}
 		}
 	default:
@@ -3228,7 +3278,16 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			routeOutcome = outcomeFromDecision(routerInput, p.modelRouter.Route(r.Context(), routerInput), time.Since(startedRoute))
 		}
 		p.recordSemanticRoutingDecisionV8(r.Context(), routeOutcome)
-		if decision := routeOutcome.Decision; decision != nil {
+		decision := routeOutcome.Decision
+		if decision != nil && isSubstrateActorRequest(r.Context()) && !substrateRouterAnswerNarrows(req.TargetURL, decision) {
+			// An Agent Substrate actor's provider, origin and key come from
+			// the gateway's provider table (/llm). A router answer that
+			// leaves them is not taken; the call keeps its requested route
+			// (GAP-0104, D6: the router may only narrow).
+			fmt.Fprintf(os.Stderr, "[substrate] llm: semantic router answer outside the actor's provider not taken\n")
+			decision = nil
+		}
+		if decision != nil {
 			routedDecision = decision
 			if decision.TargetURLOverride || decision.APIKeyOverride {
 				// A router-selected backend is a new credential boundary. Do not
@@ -4497,6 +4556,12 @@ func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, mode
 // authenticateRequest returns r with its verified subject bound when the
 // caller proved an owner credential (presentsOwnerCredential).
 func (p *GuardrailProxy) authenticateRequest(r *http.Request) (*http.Request, bool) {
+	// An Agent Substrate actor verified by the actor listener (its JWT and
+	// live UID): only that listener can put one on a context. It is the
+	// caller; no gateway or provider credential is involved.
+	if isSubstrateActorRequest(r.Context()) {
+		return r, true
+	}
 	if !p.credentialsAccepted(r) {
 		return r, false
 	}

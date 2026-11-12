@@ -43,7 +43,7 @@ import (
 
 // Sandbox floors: openshell.admin is the organization floor (the loosest
 // anyone gets) and guardrail.profiles.<p>.sandbox tightens it for the
-// subjects of profile p. TightenOpenShellAdmin combines the two into the
+// subjects of profile p. TightenSandboxAdmin combines the two into the
 // profile's floor F; only request_access overrides.
 
 // Bounds of the managed floor keys.
@@ -115,7 +115,7 @@ func ParseOpenShellFloorDuration(value string) (time.Duration, error) {
 
 // EffectiveRequestAccess is the contact refusals end with: RequestAccess, or
 // OpenShellRequestAccessFallback when none is configured.
-func (a OpenShellAdminConfig) EffectiveRequestAccess() string {
+func (a SandboxAdminConfig) EffectiveRequestAccess() string {
 	if s := strings.TrimSpace(a.RequestAccess); s != "" {
 		return s
 	}
@@ -124,7 +124,7 @@ func (a OpenShellAdminConfig) EffectiveRequestAccess() string {
 
 // managedFloorKeys lists the YAML names of the managed sandbox floor keys a
 // section sets (the keys Secure Client refuses).
-func (a OpenShellAdminConfig) managedFloorKeys() []string {
+func (a SandboxAdminConfig) managedFloorKeys() []string {
 	var keys []string
 	add := func(set bool, key string) {
 		if set {
@@ -150,7 +150,7 @@ func (a OpenShellAdminConfig) managedFloorKeys() []string {
 // validateManagedFloor checks the managed floor keys of one section; prefix
 // is "admin" (openshell.admin) or "sandbox" (a profile's section). The
 // messages are mirrored by the Python loader (cli/defenseclaw/config.py).
-func (a *OpenShellAdminConfig) validateManagedFloor(prefix string) error {
+func (a *SandboxAdminConfig) validateManagedFloor(prefix string) error {
 	var errs []error
 	check := func(err error) {
 		if err != nil {
@@ -282,7 +282,7 @@ func printableLine(s string) bool {
 	return true
 }
 
-// TightenOpenShellAdmin returns base tightened by overlay (plan §5.2): a nil
+// TightenSandboxAdmin returns base tightened by overlay (plan §5.2): a nil
 // overlay returns base. Unset keys add no constraint. allowed, allow_* and
 // allow_upstream_telemetry: false wins (an unset base telemetry switch, false
 // on a managed host, is never loosened); process_tree and
@@ -305,14 +305,14 @@ func printableLine(s string) bool {
 // A floor no sandbox could satisfy (allowed: false with required_for, a
 // required agent outside allowed_harnesses, an intersection that leaves
 // nothing, two pins for one pack) is a *SandboxPolicyContradictionError.
-func TightenOpenShellAdmin(base OpenShellAdminConfig, overlay *OpenShellAdminConfig) (OpenShellAdminConfig, error) {
-	out := cloneOpenShellAdmin(base)
+func TightenSandboxAdmin(base SandboxAdminConfig, overlay *SandboxAdminConfig) (SandboxAdminConfig, error) {
+	out := cloneSandboxAdmin(base)
 	if overlay == nil {
 		out.RequiredFor = canonicalConnectorNames(out.RequiredFor)
 		out.AllowedHarnesses = canonicalConnectorNames(out.AllowedHarnesses)
 		return out, nil
 	}
-	o := cloneOpenShellAdmin(*overlay)
+	o := cloneSandboxAdmin(*overlay)
 
 	if pack := strings.TrimSpace(o.RequiredPack); pack != "" {
 		switch pin := o.RequiredPackDigest; {
@@ -321,7 +321,7 @@ func TightenOpenShellAdmin(base OpenShellAdminConfig, overlay *OpenShellAdminCon
 		case pin == "":
 			// The base's own pack: its pin stays.
 		case out.RequiredPackDigest != "" && out.RequiredPackDigest != pin:
-			return OpenShellAdminConfig{}, &SandboxPolicyContradictionError{
+			return SandboxAdminConfig{}, &SandboxPolicyContradictionError{
 				Field: "required_pack_digest",
 				Message: fmt.Sprintf("sandbox: combined with openshell.admin, required_pack_digest %s contradicts %s for the same pack %q: "+
 					"no pack content matches both", pin, out.RequiredPackDigest, pack),
@@ -350,13 +350,13 @@ func TightenOpenShellAdmin(base OpenShellAdminConfig, overlay *OpenShellAdminCon
 
 	var err error
 	if out.AllowedHarnesses, err = intersectHarnesses(out.AllowedHarnesses, o.AllowedHarnesses); err != nil {
-		return OpenShellAdminConfig{}, err
+		return SandboxAdminConfig{}, err
 	}
 	if out.AllowedCredentials, err = intersectCredentials(out.AllowedCredentials, o.AllowedCredentials); err != nil {
-		return OpenShellAdminConfig{}, err
+		return SandboxAdminConfig{}, err
 	}
 	if out.EgressAllowOnly, err = intersectEgressAllowOnly(out.EgressAllowOnly, o.EgressAllowOnly); err != nil {
-		return OpenShellAdminConfig{}, err
+		return SandboxAdminConfig{}, err
 	}
 
 	out.WhenUnavailable = permissiveOnlyIfBoth(out.WhenUnavailable, o.WhenUnavailable,
@@ -384,7 +384,7 @@ func TightenOpenShellAdmin(base OpenShellAdminConfig, overlay *OpenShellAdminCon
 	}
 
 	if out.Allowed != nil && !*out.Allowed && len(out.RequiredFor) > 0 {
-		return OpenShellAdminConfig{}, &SandboxPolicyContradictionError{
+		return SandboxAdminConfig{}, &SandboxPolicyContradictionError{
 			Field: "allowed",
 			Message: fmt.Sprintf("sandbox: combined with openshell.admin, allowed: false contradicts required_for [%s]: "+
 				"a required agent could not run anywhere", strings.Join(out.RequiredFor, ", ")),
@@ -393,13 +393,19 @@ func TightenOpenShellAdmin(base OpenShellAdminConfig, overlay *OpenShellAdminCon
 	out.RequiredFor = canonicalConnectorNames(out.RequiredFor)
 	out.AllowedHarnesses = canonicalConnectorNames(out.AllowedHarnesses)
 	if outside := connectorsOutside(out.RequiredFor, out.AllowedHarnesses); len(outside) > 0 {
-		return OpenShellAdminConfig{}, &SandboxPolicyContradictionError{
+		return SandboxAdminConfig{}, &SandboxPolicyContradictionError{
 			Field: "required_for",
 			Message: fmt.Sprintf("sandbox: combined with openshell.admin, required_for [%s] is outside allowed_harnesses [%s]: "+
 				"a required agent could not run anywhere", strings.Join(outside, ", "), strings.Join(out.AllowedHarnesses, ", ")),
 		}
 	}
 	return out, nil
+}
+
+// TightenOpenShellAdmin is TightenSandboxAdmin under its 1.0.9 name, for the
+// OpenShell callers until they move to the runtime-neutral name.
+func TightenOpenShellAdmin(base OpenShellAdminConfig, overlay *OpenShellAdminConfig) (OpenShellAdminConfig, error) {
+	return TightenSandboxAdmin(base, overlay)
 }
 
 // sameSandboxPack reports whether two required_pack references name one
@@ -421,7 +427,7 @@ func sandboxPackKey(ref string) string {
 	return clean
 }
 
-func cloneOpenShellAdmin(a OpenShellAdminConfig) OpenShellAdminConfig {
+func cloneSandboxAdmin(a SandboxAdminConfig) SandboxAdminConfig {
 	out := a
 	for _, p := range []**bool{&out.AllowYolo, &out.AllowMount, &out.AllowHostPorts, &out.AllowUnblock,
 		&out.AllowLearnMode, &out.Allowed, &out.ProcessTree, &out.AllowUpstreamTelemetry} {
@@ -651,44 +657,44 @@ func minResources(a, b OpenShellResourcesConfig) OpenShellResourcesConfig {
 // SandboxFloor returns F for profile name ("" = openshell.admin alone) and
 // its digest ("sha256:..." of F's canonical JSON and the content of the pack
 // it references).
-func (c *Config) SandboxFloor(profile string) (OpenShellAdminConfig, string, error) {
+func (c *Config) SandboxFloor(profile string) (SandboxAdminConfig, string, error) {
 	return c.sandboxFloor(profile, nil)
 }
 
 // SandboxFloorWithMembers resolves a saved meet even when its telemetry name
 // was shortened to a hash and the process that created it has restarted.
-func (c *Config) SandboxFloorWithMembers(profile string, storedMembers []string) (OpenShellAdminConfig, string, error) {
+func (c *Config) SandboxFloorWithMembers(profile string, storedMembers []string) (SandboxAdminConfig, string, error) {
 	return c.sandboxFloor(profile, storedMembers)
 }
 
-func (c *Config) sandboxFloor(profile string, storedMembers []string) (OpenShellAdminConfig, string, error) {
+func (c *Config) sandboxFloor(profile string, storedMembers []string) (SandboxAdminConfig, string, error) {
 	if c == nil {
-		return OpenShellAdminConfig{}, "", errors.New("sandbox floor: configuration is unavailable")
+		return SandboxAdminConfig{}, "", errors.New("sandbox floor: configuration is unavailable")
 	}
 	if len(storedMembers) != 0 {
 		if !IsProfileMeet(profile) || ProfileMeetName(storedMembers) != profile {
-			return OpenShellAdminConfig{}, "", fmt.Errorf("sandbox floor: stored members do not match profile %q", profile)
+			return SandboxAdminConfig{}, "", fmt.Errorf("sandbox floor: stored members do not match profile %q", profile)
 		}
 		return c.meetSandboxFloor(storedMembers)
 	}
 	if members, ok := ProfileMeetMembers(profile); ok {
 		return c.meetSandboxFloor(members)
 	}
-	var overlay *OpenShellAdminConfig
+	var overlay *SandboxAdminConfig
 	if name := strings.TrimSpace(profile); name != "" {
 		p, ok := c.Guardrail.Profiles[name]
 		if !ok {
-			return OpenShellAdminConfig{}, "", fmt.Errorf("guardrail profile %q is not defined", name)
+			return SandboxAdminConfig{}, "", fmt.Errorf("guardrail profile %q is not defined", name)
 		}
 		overlay = p.Sandbox
 	}
-	f, err := TightenOpenShellAdmin(c.OpenShell.Admin, overlay)
+	f, err := TightenSandboxAdmin(c.OpenShell.Admin, overlay)
 	if err != nil {
-		return OpenShellAdminConfig{}, "", err
+		return SandboxAdminConfig{}, "", err
 	}
 	digest, err := sandboxFloorDigest(f, c.OpenShell.PackDir)
 	if err != nil {
-		return OpenShellAdminConfig{}, "", err
+		return SandboxAdminConfig{}, "", err
 	}
 	return f, digest, nil
 }
@@ -702,17 +708,17 @@ func (c *Config) sandboxFloor(profile string, storedMembers []string) (OpenShell
 // the lock already enforces at the gateway, so the daemon's own resolve of
 // the run matches the gateway's: a locked deny pack ran the default
 // balanced pack in the sandbox (GAP-0675).
-func (c *Config) SandboxManagedFloor(profile string) (OpenShellAdminConfig, string, error) {
+func (c *Config) SandboxManagedFloor(profile string) (SandboxAdminConfig, string, error) {
 	return c.sandboxManagedFloor(profile, nil)
 }
 
 // SandboxManagedFloorWithMembers is the managed floor for a saved meet whose
 // member names were stored with its sandbox registration.
-func (c *Config) SandboxManagedFloorWithMembers(profile string, members []string) (OpenShellAdminConfig, string, error) {
+func (c *Config) SandboxManagedFloorWithMembers(profile string, members []string) (SandboxAdminConfig, string, error) {
 	return c.sandboxManagedFloor(profile, members)
 }
 
-func (c *Config) sandboxManagedFloor(profile string, members []string) (OpenShellAdminConfig, string, error) {
+func (c *Config) sandboxManagedFloor(profile string, members []string) (SandboxAdminConfig, string, error) {
 	f, digest, err := c.sandboxFloor(profile, members)
 	if err != nil {
 		return f, digest, err
@@ -733,7 +739,7 @@ func (c *Config) sandboxManagedFloor(profile string, members []string) (OpenShel
 		return f, digest, nil
 	}
 	if digest, err = sandboxFloorDigest(f, o.PackDir); err != nil {
-		return OpenShellAdminConfig{}, "", err
+		return SandboxAdminConfig{}, "", err
 	}
 	return f, digest, nil
 }
@@ -742,17 +748,17 @@ func (c *Config) sandboxManagedFloor(profile string, members []string) (OpenShel
 // set-valued lists sorted, and the content digest of the referenced pack
 // (sandboxPackContentDigest).
 type sandboxFloorDigestView struct {
-	Version int                  `json:"v"`
-	Floor   OpenShellAdminConfig `json:"floor"`
-	Pack    string               `json:"pack,omitempty"`
+	Version int                `json:"v"`
+	Floor   SandboxAdminConfig `json:"floor"`
+	Pack    string             `json:"pack,omitempty"`
 }
 
 // sandboxFloorDigest returns "sha256:" + the hex SHA-256 of f's canonical
 // JSON and its pack content, a custom pack name found in packDir
 // (openshell.pack_dir). Equal floors always digest alike, whatever the order
 // of their lists.
-func sandboxFloorDigest(f OpenShellAdminConfig, packDir string) (string, error) {
-	view := sandboxFloorDigestView{Version: 1, Floor: cloneOpenShellAdmin(f)}
+func sandboxFloorDigest(f SandboxAdminConfig, packDir string) (string, error) {
+	view := sandboxFloorDigestView{Version: 1, Floor: cloneSandboxAdmin(f)}
 	for _, s := range []*[]string{&view.Floor.AllowedHarnesses, &view.Floor.EgressBlock, &view.Floor.EgressAllowOnly,
 		&view.Floor.RequireCopyFor, &view.Floor.Locked, &view.Floor.RequiredFor, &view.Floor.AllowedCredentials} {
 		sort.Strings(*s)
@@ -865,7 +871,7 @@ func (c *Config) validateSandboxProfiles() error {
 		if err := section.validateAs("sandbox"); err != nil {
 			return profileSettingError(name, err)
 		}
-		floor, err := TightenOpenShellAdmin(c.OpenShell.Admin, section)
+		floor, err := TightenSandboxAdmin(c.OpenShell.Admin, section)
 		if err != nil {
 			return profileSettingError(name, err)
 		}
@@ -903,7 +909,7 @@ func (c *Config) validateLockedSandboxPack(profiles []string) error {
 	if pack == "" || !c.StandaloneEnterprise() || SandboxProfilePackCheck == nil {
 		return nil
 	}
-	takes := func(f OpenShellAdminConfig) bool {
+	takes := func(f SandboxAdminConfig) bool {
 		return f.IsLocked("pack") && strings.TrimSpace(f.RequiredPack) == ""
 	}
 	// lockedBy names the lock that makes openshell.pack a required pack, so
@@ -916,7 +922,7 @@ func (c *Config) validateLockedSandboxPack(profiles []string) error {
 		if lockedBy != "" {
 			break
 		}
-		if floor, err := TightenOpenShellAdmin(c.OpenShell.Admin, c.Guardrail.Profiles[name].Sandbox); err == nil && takes(floor) {
+		if floor, err := TightenSandboxAdmin(c.OpenShell.Admin, c.Guardrail.Profiles[name].Sandbox); err == nil && takes(floor) {
 			lockedBy = fmt.Sprintf("guardrail.profiles[%q].sandbox.locked lists pack, so it is the required pack of that profile's sandboxes", name)
 		}
 	}
@@ -1079,7 +1085,7 @@ func (c *Config) SandboxDefaultProfileWarnings() []string {
 		if err != nil {
 			continue
 		}
-		tightened, err := TightenOpenShellAdmin(fd, &fp)
+		tightened, err := TightenSandboxAdmin(fd, &fp)
 		if err != nil {
 			out = append(out, fmt.Sprintf("%s contradicts the sandbox floor of %s: %v", label, name, err))
 			continue
@@ -1113,7 +1119,7 @@ func (c *Config) sandboxPackLooser(pack, other string) bool {
 // sandboxFloorDiff names every key where tightened is stricter than loose,
 // with the stricter value ("required_for [claudecode]", "allow_mount false").
 // request_access is not a constraint and is left out.
-func sandboxFloorDiff(loose, tightened OpenShellAdminConfig) []string {
+func sandboxFloorDiff(loose, tightened SandboxAdminConfig) []string {
 	lv, tv := reflect.ValueOf(loose), reflect.ValueOf(tightened)
 	typ := lv.Type()
 	var out []string
@@ -1158,7 +1164,7 @@ func sandboxFloorDiff(loose, tightened OpenShellAdminConfig) []string {
 	return out
 }
 
-func (a OpenShellAdminConfig) listField(key string) []string {
+func (a SandboxAdminConfig) listField(key string) []string {
 	switch key {
 	case "allowed_harnesses":
 		return a.AllowedHarnesses

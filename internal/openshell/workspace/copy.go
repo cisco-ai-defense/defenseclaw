@@ -51,7 +51,8 @@ const (
 	// project lands at <root>/<repo>. It is under the sandbox HOME, which
 	// the sandbox user can write and Landlock allows.
 	DefaultRemoteRoot = "/sandbox/work"
-	// remoteStateDir holds the hidden git dir and bundles in the sandbox.
+	// remoteStateDir holds the hidden git dir and bundles in the sandbox
+	// unless the caller picks another (StageOptions.StateDir).
 	remoteStateDir = "/sandbox/.dc"
 
 	DefaultCopyMaxBytes int64 = 500 << 20
@@ -78,6 +79,14 @@ type StageOptions struct {
 	Protected []string
 	// RemoteRoot is the sandbox parent directory (DefaultRemoteRoot).
 	RemoteRoot string
+	// StateDir is the directory in the sandbox that holds this copy's
+	// hidden git dir, the pull bundle and the upload receipts. It must be
+	// an absolute path outside the project copy. Empty means the shared
+	// /sandbox/.dc. A caller whose sandbox is shared by several sessions,
+	// or has no writable /sandbox, gives each copy its own private one;
+	// the pipeline then creates it (mode 0700) before anything is written
+	// there.
+	StateDir string
 	// GitDepth is the history depth of the shallow clone (200).
 	GitDepth int
 	// MaxBytes caps the staged copy, history included (500 MiB).
@@ -119,6 +128,10 @@ type CopyRecord struct {
 	// folders).
 	RemoteDir    string `json:"remote_dir"`
 	RemoteGitDir string `json:"remote_git_dir"`
+	// StateDir is the copy's state directory in the sandbox (bundle, upload
+	// receipts, hidden git dir of a plain folder). A record without it,
+	// written before it existed, means /sandbox/.dc.
+	StateDir string `json:"remote_state_dir,omitempty"`
 	// Stage is the local staged tree until Upload succeeds; BaseGit keeps
 	// the uploaded history and baseline for verifying pulls.
 	Stage   string `json:"stage,omitempty"`
@@ -158,8 +171,30 @@ type SandboxCopy struct {
 	Kind         CopyKind `json:"kind"`
 	RemoteDir    string   `json:"remote_dir"`
 	RemoteGitDir string   `json:"remote_git_dir"`
+	StateDir     string   `json:"remote_state_dir,omitempty"`
 	Baseline     string   `json:"baseline"`
 	Head         string   `json:"head,omitempty"`
+}
+
+// stateDir is the copy's state directory in the sandbox.
+func (r *CopyRecord) stateDir() string {
+	if r.StateDir == "" {
+		return remoteStateDir
+	}
+	return r.StateDir
+}
+
+// privateState reports whether the copy has a state directory of its own,
+// which the pipeline creates (0700) rather than finding in the sandbox.
+func (r *CopyRecord) privateState() bool { return r.StateDir != "" && r.StateDir != remoteStateDir }
+
+// mkStateDirLine is the shell line that makes sure "$D" exists: today's
+// plain mkdir for the shared default, a private one for a custom directory.
+func (r *CopyRecord) mkStateDirLine() string {
+	if !r.privateState() {
+		return `mkdir -p "$D"`
+	}
+	return `( umask 077; mkdir -p "$D" && chmod 700 "$D" )`
 }
 
 // Labels are the sandbox labels for a copy-mode sandbox.
@@ -177,7 +212,7 @@ func (r *CopyRecord) inSandbox() []*CopyRecord {
 	if p := r.Replaced; p != nil {
 		return []*CopyRecord{{
 			Version: r.Version, Name: r.Name, Project: r.Project, Kind: p.Kind,
-			RemoteDir: p.RemoteDir, RemoteGitDir: p.RemoteGitDir, Baseline: p.Baseline, Head: p.Head,
+			RemoteDir: p.RemoteDir, RemoteGitDir: p.RemoteGitDir, StateDir: p.StateDir, Baseline: p.Baseline, Head: p.Head,
 		}}
 	}
 	return nil
@@ -188,7 +223,7 @@ func (r *CopyRecord) replacing(prev *CopyRecord) {
 	switch {
 	case prev == nil:
 	case prev.UploadedAt != nil:
-		r.Replaced = &SandboxCopy{Kind: prev.Kind, RemoteDir: prev.RemoteDir, RemoteGitDir: prev.RemoteGitDir, Baseline: prev.Baseline, Head: prev.Head}
+		r.Replaced = &SandboxCopy{Kind: prev.Kind, RemoteDir: prev.RemoteDir, RemoteGitDir: prev.RemoteGitDir, StateDir: prev.StateDir, Baseline: prev.Baseline, Head: prev.Head}
 	default:
 		r.Replaced = prev.Replaced
 	}
@@ -349,6 +384,10 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	if maxBytes <= 0 {
 		maxBytes = DefaultCopyMaxBytes
 	}
+	stateDir, err := checkStateDir(opts.StateDir, path.Join(path.Clean(root), RepoName(real)))
+	if err != nil {
+		return nil, "", err
+	}
 	now := time.Now
 	if opts.Now != nil {
 		now = opts.Now
@@ -356,7 +395,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	repo := RepoName(real)
 	rec := &CopyRecord{
 		Version: 1, Name: opts.Name, Project: real, RepoName: repo,
-		RemoteDir: path.Join(path.Clean(root), repo), StagedAt: now().UTC(),
+		RemoteDir: path.Join(path.Clean(root), repo), StateDir: stateDir, StagedAt: now().UTC(),
 		Warnings: warnings,
 	}
 	dir := lay.copyDir(opts.Name) + copyNewInfix + randomSuffix()
@@ -398,7 +437,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 		err = stageGit(ctx, rec, opts, scanOpts, maxBytes)
 	} else {
 		rec.Kind = CopyPlain
-		rec.RemoteGitDir = path.Join(remoteStateDir, "git")
+		rec.RemoteGitDir = path.Join(rec.stateDir(), "git")
 		if parent := enclosingRepo(real); parent != "" {
 			rec.Warnings = append(rec.Warnings, fmt.Sprintf("%s is inside the git repository at %s; it is copied as a plain folder", real, parent))
 		}
@@ -409,6 +448,49 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	}
 	ok = true
 	return rec, dir, nil
+}
+
+// checkStateDir validates the caller's state directory for a copy whose
+// project lands at remoteDir: absolute, clean, not the root, and neither
+// the project nor inside it (the agent's edits and the pull's git add would
+// see it) nor holding it. "" and the shared default are returned as "": the
+// record keeps no field for them.
+func checkStateDir(dir, remoteDir string) (string, error) {
+	if dir == "" || dir == remoteStateDir {
+		return "", nil
+	}
+	if !path.IsAbs(dir) || path.Clean(dir) != dir || dir == "/" {
+		return "", fmt.Errorf("workspace: state directory %q must be a clean absolute directory below /", dir)
+	}
+	if dir == remoteDir || strings.HasPrefix(dir, remoteDir+"/") || strings.HasPrefix(remoteDir, dir+"/") {
+		return "", fmt.Errorf("workspace: state directory %s must be outside the project copy %s", dir, remoteDir)
+	}
+	return dir, nil
+}
+
+// ensureRemoteState creates rec's private state directory in the sandbox
+// (mode 0700, links refused) before anything is written there. The shared
+// default is left as it always was.
+func ensureRemoteState(ctx context.Context, ex Execer, rec *CopyRecord) error {
+	if !rec.privateState() {
+		return nil
+	}
+	script := strings.Join([]string{
+		"set -eu",
+		"umask 077",
+		"d=" + shellQuote(rec.StateDir),
+		`if [ -h "$d" ]; then echo "$d is a link" >&2; exit 1; fi`,
+		`mkdir -p -- "$d"`,
+		`chmod 700 -- "$d"`,
+	}, "\n")
+	res, err := ex.Exec(ctx, rec.Name, ExecRequest{Argv: []string{"sh", "-c", script}, Timeout: 2 * time.Minute, Idempotent: true})
+	if err != nil {
+		return fmt.Errorf("workspace: create the state directory in %s: %w", rec.Name, err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("workspace: create the state directory in %s (exit %d): %s", rec.Name, res.ExitCode, stderrReason(res.Stderr))
+	}
+	return nil
 }
 
 // isGitTopLevel reports whether dir is the top of a git work tree. A folder
@@ -1185,14 +1267,17 @@ func uploadStaged(ctx context.Context, dir string, rec *CopyRecord, up Uploader,
 		return fmt.Errorf("workspace: copy %s has nothing staged to upload", rec.Name)
 	}
 	remoteRoot := path.Dir(rec.RemoteDir)
-	if err := uploadChecked(ctx, up, ex, rec.Name, rec.Stage, remoteRoot); err != nil {
+	if err := ensureRemoteState(ctx, ex, rec); err != nil {
+		return err
+	}
+	if err := uploadChecked(ctx, up, ex, rec.Name, rec.Stage, remoteRoot, rec.stateDir()); err != nil {
 		return err
 	}
 	stageRoot := filepath.Dir(rec.Stage)
 	var localGit string
 	if rec.Kind == CopyPlain {
 		localGit = filepath.Join(stageRoot, ".dc", "git")
-		if err := uploadChecked(ctx, up, ex, rec.Name, localGit, remoteStateDir); err != nil {
+		if err := uploadChecked(ctx, up, ex, rec.Name, localGit, rec.stateDir(), rec.stateDir()); err != nil {
 			return err
 		}
 	} else {
@@ -1229,7 +1314,7 @@ const uploadMarkerPrefix = ".defenseclaw-upload-"
 // remoteUploadReceipts is where uploadChecked moves the marker of an
 // upload it confirmed, so that the check, run again after an attempt that
 // answered nothing, answers the same.
-var remoteUploadReceipts = path.Join(remoteStateDir, "uploads")
+func remoteUploadReceipts(stateDir string) string { return path.Join(stateDir, "uploads") }
 
 // uploadChecked uploads the directory localDir into remoteDir of sandbox,
 // then confirms over ex that it arrived there. The upload runs over the
@@ -1239,7 +1324,7 @@ var remoteUploadReceipts = path.Join(remoteStateDir, "uploads")
 // upload carries a file named for a fresh nonce, which is taken out of
 // localDir afterwards and, by the check, out of the upload in the sandbox
 // (to a receipt in DefenseClaw's state directory, replacing older ones).
-func uploadChecked(ctx context.Context, up Uploader, ex Execer, sandbox, localDir, remoteDir string) error {
+func uploadChecked(ctx context.Context, up Uploader, ex Execer, sandbox, localDir, remoteDir, stateDir string) error {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return fmt.Errorf("workspace: %w", err)
@@ -1262,7 +1347,7 @@ func uploadChecked(ctx context.Context, up Uploader, ex Execer, sandbox, localDi
 		"set -eu",
 		"d=" + shellQuote(dir),
 		"f=" + shellQuote(path.Join(dir, marker)),
-		"r=" + shellQuote(path.Join(remoteUploadReceipts, marker)),
+		"r=" + shellQuote(path.Join(remoteUploadReceipts(stateDir), marker)),
 		`if [ -f "$f" ] && [ "$(cat -- "$f")" = ` + shellQuote(nonce) + ` ]; then mkdir -p "${r%/*}" && mv -f -- "$f" "$r"; fi`,
 		`if [ -f "$r" ]; then`,
 		`  for o in "${r%/*}"/` + uploadMarkerPrefix + `*; do [ "$o" = "$r" ] || rm -f -- "$o"; done`,
@@ -1312,7 +1397,7 @@ func remoteGitPrelude(rec *CopyRecord) string {
 		"export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 LC_ALL=C",
 		"G=" + shellQuote(rec.RemoteGitDir),
 		"W=" + shellQuote(rec.RemoteDir),
-		"D=" + shellQuote(remoteStateDir),
+		"D=" + shellQuote(rec.stateDir()),
 		`g() { git --git-dir="$G" --work-tree="$W" -c core.hooksPath=/dev/null -c core.fsmonitor=false ` + extra +
 			`-c commit.gpgSign=false -c user.name=DefenseClaw -c user.email=defenseclaw@localhost "$@"; }`,
 	}, "\n")
@@ -1345,7 +1430,7 @@ func establishBaseline(ctx context.Context, rec *CopyRecord, ex Execer) error {
 		// Say which: set -e would end the script without a word.
 		`test -d "$W" || { echo "$W is missing: the copy is not in the sandbox" >&2; exit 1; }`,
 		`test -d "$G" || { echo "$G is missing: the copy has no git directory" >&2; exit 1; }`,
-		`mkdir -p "$D"`,
+		rec.mkStateDirLine(),
 		`g update-ref ` + baselineRef + ` ` + rec.Baseline,
 		`b=$(g rev-parse -q --verify '` + baselineRef + `^{commit}')`,
 		`h=$(g rev-parse -q --verify 'HEAD^{commit}' || true)`,

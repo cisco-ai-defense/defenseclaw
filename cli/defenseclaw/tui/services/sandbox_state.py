@@ -51,6 +51,10 @@ VIEW_TITLES = {"sandboxes": "Sandboxes", "activity": "Activity", "asks": "Asks"}
 # selected ask in the Asks view).
 _SELECTION_KEYS = frozenset({"u", "U", "R", "P", "s", "d", "c"})
 
+# The Runtime column of the Sandboxes table (shown once Agent Substrate agents are listed).
+RUNTIME_OPENSHELL = "openshell"
+RUNTIME_SUBSTRATE = "substrate"
+
 
 # The managed daemon's temporary setup-change notice (Go
 # sandboxapi.UnavailableSetupChanging): it says to retry, so the TUI adds no
@@ -355,6 +359,7 @@ def sandbox_keys_hint(
     has_rows: bool = True,
     copy: bool = False,
     policy: bool = False,
+    substrate: bool = False,
 ) -> str:
     """The hint bar's keys for a Sandboxes view (one line at 80 columns).
 
@@ -377,6 +382,8 @@ def sandbox_keys_hint(
             + ("u unblock | " if unblock else "")
             + "n new run | w sandboxed | r refresh"
         )
+    if substrate:
+        return "KEYS  t view | c connect | P pull | d delete | r refresh"
     workspace = "P pull" if copy else "R review"
     last = "e policy" if policy else "u unblock"
     return f"KEYS  t view | c connect | s stop | d delete | U undo | {workspace} | {last}"
@@ -1461,7 +1468,9 @@ class SandboxPanelAction:
     """What a keypress asked the panel to do.
 
     ``kind`` is one of: none, refresh, view, detail, unblock, approve, reject,
-    undo, review, pull, stop, delete, connect, new_run, wrappers, hint.
+    undo, review, pull, stop, delete, connect, new_run, wrappers, hint, and for an
+    Agent Substrate row substrate_connect, substrate_pull, substrate_delete
+    (``sandbox`` then holds the name the launcher takes).
     """
 
     kind: str = "none"
@@ -1520,6 +1529,24 @@ class SandboxesPanelModel:
     # what changed (the chip).
     policy_changed_at: datetime | None = None
     policy_change_note: str = ""
+    # Agent Substrate agents (services.substrate_state.SubstrateRow), listed after
+    # the OpenShell sandboxes, and the dim line that stands in for them or
+    # says how many more there are.
+    substrate_rows: tuple[Any, ...] = ()
+    substrate_line: str = ""
+
+    def set_substrate(self, result: Any) -> None:
+        """Keep the agents of one ``substrate list`` run (anything with ``rows`` and ``line``)."""
+        selection = self._selection()
+        self.substrate_rows = tuple(result.rows)
+        self.substrate_line = str(result.line)
+        self._follow_selection(selection)
+
+    def drop_substrate(self, ref: str) -> None:
+        """Forget a deleted agent now; the next list run confirms it."""
+        selection = self._selection()
+        self.substrate_rows = tuple(row for row in self.substrate_rows if row.ref != ref)
+        self._follow_selection(selection)
 
     def set_processes(self, name: str, payload: Any) -> None:
         """Keep a sandbox's process tree for its detail."""
@@ -1840,7 +1867,7 @@ class SandboxesPanelModel:
 
     def _view_len(self, view: str) -> int:
         if view == "sandboxes":
-            return len(self.rows)
+            return len(self.rows) + len(self.substrate_rows)
         if view == "activity":
             return len(self.feed)
         return len(self.asks)
@@ -1853,7 +1880,7 @@ class SandboxesPanelModel:
     def _item_keys(self, view: str) -> list[Any]:
         """Each row's identity, in display order: sandbox name, ask id, event key."""
         if view == "sandboxes":
-            return [row.name for row in self.rows]
+            return [row.name for row in self.rows] + [("substrate", row.ref) for row in self.substrate_rows]
         if view == "asks":
             return [ask.id for ask in self.asks]
         return [row.key for row in self.feed_rows()]
@@ -1933,6 +1960,15 @@ class SandboxesPanelModel:
             ask = self.selected_ask()
             name = ask.sandbox if ask else ""
         return next((row for row in self.rows if row.name == name), None)
+
+    def selected_substrate(self) -> Any | None:
+        """The Agent Substrate agent under the cursor of the Sandboxes view, or None."""
+        if self.view != "sandboxes":
+            return None
+        index = self.cursor - len(self.rows)
+        if 0 <= index < len(self.substrate_rows):
+            return self.substrate_rows[index]
+        return None
 
     def selected_event(self) -> ActivityRow | None:
         rows = self.feed_rows()
@@ -2040,6 +2076,10 @@ class SandboxesPanelModel:
             self._selection_lost.discard(self.view)
             return SandboxPanelAction("view")
         if key == "enter":
+            agent = self.selected_substrate()
+            if agent is not None:
+                # No detail window for an agent: the line names it and its keys.
+                return SandboxPanelAction("hint", hint=f"{agent.detail_line()} (c connect, P pull, d delete)")
             if self._view_len(self.view):
                 self.detail_open = True
                 # The detail names its item: that is the selection now.
@@ -2153,7 +2193,18 @@ class SandboxesPanelModel:
             and any(host_matches(pattern, row.host) for pattern in self.saved_unblocks)
         )
 
+    def _substrate_action(self, key: str, agent: Any) -> SandboxPanelAction:
+        kind = {"c": "substrate_connect", "P": "substrate_pull", "d": "substrate_delete"}.get(key)
+        if kind is None:
+            return SandboxPanelAction(
+                "hint", hint=f"{agent.ref} runs on Agent Substrate: c connects, P pulls its work, d deletes it."
+            )
+        return SandboxPanelAction(kind, sandbox=agent.ref)
+
     def _sandbox_action(self, key: str) -> SandboxPanelAction:
+        agent = self.selected_substrate()
+        if agent is not None:
+            return self._substrate_action(key, agent)
         row = self.selected_sandbox()
         if row is None:
             return SandboxPanelAction("hint", hint="Select a sandbox first (t switches to the Sandboxes view).")
@@ -2281,7 +2332,11 @@ class SandboxesPanelModel:
             return sandbox_keys_hint(self.view, always=self.selected_ask() is None or self.always_offered())
         selected = self.selected_sandbox()
         return sandbox_keys_hint(
-            self.view, has_rows=bool(self.rows), copy=selected is not None and selected.copy_mode, policy=policy
+            self.view,
+            has_rows=bool(self.rows) or bool(self.substrate_rows),
+            copy=selected is not None and selected.copy_mode,
+            policy=policy,
+            substrate=self.selected_substrate() is not None,
         )
 
     def data_table_columns(self, compact: bool = False) -> tuple[str, ...]:
@@ -2292,6 +2347,13 @@ class SandboxesPanelModel:
             if compact:
                 return ("Sandbox", "Destination", "Binary", "Risk", "Reason")
             return ("Sandbox", "Kind", "Destination", "Binary", "Risk", "Reason")
+        if self.substrate_rows:
+            if compact:
+                return ("Name", "Runtime", "Phase", "Harness", "Blocked", "Alerts")
+            return (
+                "Name", "Runtime", "Phase", "Harness", "Pack/Profile", "Mode", "Up",
+                "Sites", "Blocked", "Tool calls", "Alerts",
+            )  # fmt: skip
         if compact:
             return ("Name", "Phase", "Harness", "Sites", "Blocked", "Tool calls", "Alerts")
         return ("Name", "Phase", "Harness", "Pack/Profile", "Mode", "Up", "Sites", "Blocked", "Tool calls", "Alerts")
@@ -2363,7 +2425,31 @@ class SandboxesPanelModel:
                 )
                 for row in self.rows
             )
+        if self.substrate_rows:
+            rows = self._with_runtime(rows, compact)
         return _fit_last_cell(self.data_table_columns(compact), rows, width)
+
+    def _with_runtime(self, rows: tuple[tuple[str, ...], ...], compact: bool) -> tuple[tuple[str, ...], ...]:
+        """OpenShell rows with their Runtime cell, then one row per Agent Substrate agent."""
+        out: list[tuple[str, ...]] = []
+        for row in rows:
+            # Compact rows leave out Sites and Tool calls (the Enter
+            # detail shows them) to make room for Runtime at 80 columns.
+            cells = (row[0], RUNTIME_OPENSHELL, *row[1:])
+            if compact:
+                cells = (*cells[:4], cells[5], cells[7])
+            out.append(cells)
+        for agent in self.substrate_rows:
+            if compact:
+                out.append((agent.ref, RUNTIME_SUBSTRATE, agent.state or "-", agent.connector or "-", "-", "-"))
+            else:
+                out.append(
+                    (
+                        agent.ref, RUNTIME_SUBSTRATE, agent.state or "-", agent.connector or "-",
+                        agent.profile or "-", "-", agent.age_text(), "-", "-", "-", "-",
+                    )  # fmt: skip
+                )
+        return tuple(out)
 
     def empty_state(self) -> str:
         if self.view == "activity":

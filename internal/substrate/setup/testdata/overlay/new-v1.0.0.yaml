@@ -1,0 +1,7 @@
+# Written by `defenseclaw substrate setup`; pass it to ate-setup with --config.
+apiVersion: install.ate.dev/v1alpha1
+kind: SubstrateInstall
+atenet:
+  egress:
+    additionalExtprocService: defenseclaw-system/defenseclaw-callout:9443
+ingressAllowedSPIFFEIDs: spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
