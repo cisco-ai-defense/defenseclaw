@@ -7,29 +7,33 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
-// The settings layer of an actor image is the connector's OpenShell sandbox
-// artifacts (SandboxArtifactProvider), turned into their actor variant:
+// The settings layer of an actor image is the connector's sandbox artifacts
+// rendered for Agent Substrate (SubstrateArtifacts: A1's remote ingress, so
+// every side transport (native OTLP, the Claude Code otelHeadersHelper, the
+// Codex notify bridge) already posts to the actor listener with the
+// x-defenseclaw-actor placeholder and no bearer), turned into the actor
+// image's layer:
 //
-//   - every hook command runs defenseclaw-actor-hook instead of the sandbox
-//     shell hooks, which post to host.openshell.internal with a binding token;
-//   - telemetry goes to the actor listener with the x-defenseclaw-actor
-//     placeholder;
+//   - every hook command and the Codex notify program run
+//     defenseclaw-actor-hook instead of the shell hooks, so all hook traffic
+//     takes the kit's kept-alive helper and carries its file facts;
 //   - the OpenShell-only pieces (shell hooks, launchers, shims, the egress
 //     proxy profile, the supervisor) are left out: an actor has no
 //     supervisor, egress is transparent and the relay starts the agent;
 //   - the kit adds its configuration, git and npm settings that hold only
-//     placeholders, and the per-connector phone-home switches (E7, E8).
-//
-// TODO(A1): when SandboxRenderTarget takes a remote ingress, render the
-// artifacts with it and drop the rewrites below.
+//     placeholders, the model routes to the gateway's /llm with placeholder
+//     keys, and the per-connector phone-home switches (E7, E8).
 
 // ImageFile is one file of the settings layer.
 type ImageFile struct {
@@ -68,7 +72,39 @@ type OverlayOptions struct {
 	Model string
 }
 
-const openShellIngress = "http://" + connector.SandboxIngressHost + ":"
+// SubstrateIngress is the remote ingress of cfg's gateway URL.
+func SubstrateIngress(cfg Config) (connector.SandboxIngress, error) {
+	u, err := url.Parse(cfg.GatewayURL)
+	if err != nil || u.Hostname() == "" {
+		return connector.SandboxIngress{}, fmt.Errorf("actor kit: gateway_url %q has no host", cfg.GatewayURL)
+	}
+	in := connector.SandboxIngress{Runtime: sandboxruntime.Substrate, Host: u.Hostname(), Scheme: u.Scheme, ActorHeader: true}
+	switch u.Scheme {
+	case "https":
+		in.Port, in.CAFile = 443, TrustBundle
+	case "http":
+		in.Port = 80
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return connector.SandboxIngress{}, fmt.Errorf("actor kit: gateway_url port %q", p)
+		}
+		in.Port = n
+	}
+	return in, nil
+}
+
+// SubstrateArtifacts renders a connector's sandbox artifacts for an actor of
+// cfg's gateway: the input of ActorOverlay.
+func SubstrateArtifacts(p connector.SandboxArtifactProvider, agentVersion string, cfg Config) (connector.SandboxArtifacts, error) {
+	in, err := SubstrateIngress(cfg)
+	if err != nil {
+		return connector.SandboxArtifacts{}, err
+	}
+	return p.SandboxArtifacts(connector.SandboxRenderTarget{Ingress: &in, FailMode: connector.SandboxFailMode,
+		AgentVersion: agentVersion, OtelEnvironment: sandboxruntime.Substrate})
+}
 
 // openShellOnly are the harness image files an actor never uses.
 var openShellOnly = []string{
@@ -121,8 +157,8 @@ var PhoneHomeOff = map[string]map[string]string{
 	},
 }
 
-// ActorOverlay turns a connector's OpenShell sandbox artifacts into the
-// settings layer of its actor image.
+// ActorOverlay turns a connector's Substrate sandbox artifacts
+// (SubstrateArtifacts) into the settings layer of its actor image.
 func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, error) {
 	cfg := o.Config
 	if err := cfg.Validate(); err != nil {
@@ -144,13 +180,11 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 		var err error
 		switch {
 		case f.Path == connector.ClaudeCodeSandboxDropInPath:
-			data, err = claudeDropIn(data, hookCmd, gw)
+			data, err = claudeDropIn(data, hookCmd)
 		case f.Path == connector.CodexSandboxRequirementsPath:
 			data, err = rewriteCodexHooks(data, art.Connector)
 		case f.Path == connector.CodexSandboxManagedConfigPath:
 			data, err = codexManagedConfig(data, gw, o)
-		case strings.HasSuffix(f.Path, "/otel-headers.sh"):
-			data = []byte(otelHeadersHelper(art.Connector))
 		case strings.HasPrefix(f.Path, connector.SandboxHookDir+"/") && strings.HasSuffix(f.Path, ".sh"):
 			// A connector shell hook (claude-code-hook.sh, codex-hook.sh,
 			// codex-notify.sh): the actor hook replaces it.
@@ -160,7 +194,7 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 			return Overlay{}, err
 		}
 		if bytes.Contains(data, []byte(connector.SandboxIngressHost)) {
-			return Overlay{}, fmt.Errorf("actor overlay: %s still names %s", f.Path, connector.SandboxIngressHost)
+			return Overlay{}, fmt.Errorf("actor overlay: %s names %s: render the artifacts with SubstrateArtifacts", f.Path, connector.SandboxIngressHost)
 		}
 		ov.Files = append(ov.Files, ImageFile{Path: f.Path, Mode: f.Mode, User: f.Owner == connector.SandboxOwnerUser, Data: data})
 	}
@@ -247,6 +281,17 @@ func dedupe(in []string) []string {
 	return out
 }
 
+// ClaudeCodeBedrockModel is Claude Code's model on the Bedrock route of an
+// actor image (owner, 2026-11-12: Claude Haiku 5.5, us-east-1 inference
+// profile). Every model slot gets it: Claude Code also calls its opus and
+// sonnet aliases for side tasks (substrate-1 GAP-0008), and each must be a
+// model the gateway's /llm/bedrock allows.
+const ClaudeCodeBedrockModel = "us.anthropic.claude-haiku-5-5"
+
+// claudeCodeModelSlots are the Claude Code variables that name a model.
+var claudeCodeModelSlots = []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	"ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"}
+
 // InteractiveArgv is the agent the relay starts in its tmux session.
 var InteractiveArgv = map[string][]string{
 	"claudecode": {"/usr/local/bin/claude"},
@@ -269,8 +314,12 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 	env := map[string]string{}
 	switch connectorName {
 	case "claudecode":
+		model := o.Model
 		switch o.Provider {
 		case "", "bedrock":
+			if model == "" {
+				model = ClaudeCodeBedrockModel
+			}
 			env["CLAUDE_CODE_USE_BEDROCK"] = "1"
 			env["ANTHROPIC_BEDROCK_BASE_URL"] = gw + "/llm/bedrock"
 			env["AWS_BEARER_TOKEN_BEDROCK"] = "placeholder-not-a-secret"
@@ -281,11 +330,12 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 		}
 		// Model calls carry the placeholder too, so egress gives the
 		// gateway's /llm route the actor JWT as the verified caller (D2).
-		env["ANTHROPIC_CUSTOM_HEADERS"] = PlaceholderHeader + ": " + PlaceholderValue
-		if o.Model != "" {
-			for _, k := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-				"ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL"} {
-				env[k] = o.Model
+		// The actor listener's CSRF gate also wants X-DefenseClaw-Client on
+		// every POST (GAP-0037). Claude Code takes one header per line.
+		env["ANTHROPIC_CUSTOM_HEADERS"] = PlaceholderHeader + ": " + PlaceholderValue + "\nX-DefenseClaw-Client: claudecode-llm/1.0"
+		if model != "" {
+			for _, k := range claudeCodeModelSlots {
+				env[k] = model
 			}
 		}
 	case "codex":
@@ -295,9 +345,8 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 	return env
 }
 
-// claudeDropIn points the managed hook matrix at the actor hook and the
-// managed telemetry at the actor listener.
-func claudeDropIn(data []byte, hookCmd, gw string) ([]byte, error) {
+// claudeDropIn points the managed hook matrix at the actor hook.
+func claudeDropIn(data []byte, hookCmd string) ([]byte, error) {
 	var doc map[string]any
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("actor overlay: Claude Code drop-in: %w", err)
@@ -323,11 +372,6 @@ func claudeDropIn(data []byte, hookCmd, gw string) ([]byte, error) {
 		return nil, fmt.Errorf("actor overlay: the Claude Code drop-in registers no DefenseClaw hook")
 	}
 	if env, ok := doc["env"].(map[string]any); ok {
-		for k, v := range env {
-			if s, ok := v.(string); ok {
-				env[k] = rewriteIngress(s, gw)
-			}
-		}
 		env["OTEL_RESOURCE_ATTRIBUTES"] = "defenseclaw.connector=claudecode,service.name=claudecode,defenseclaw.sandbox.runtime=substrate"
 	}
 	var buf bytes.Buffer
@@ -338,20 +382,6 @@ func claudeDropIn(data []byte, hookCmd, gw string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-// rewriteIngress replaces the OpenShell ingress origin with the gateway's.
-func rewriteIngress(s, gw string) string {
-	i := strings.Index(s, openShellIngress)
-	if i < 0 {
-		return s
-	}
-	rest := s[i+len(openShellIngress):]
-	j := 0
-	for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
-		j++
-	}
-	return s[:i] + gw + rest[j:]
 }
 
 func rewriteCodexHooks(data []byte, connectorName string) ([]byte, error) {
@@ -371,18 +401,6 @@ func codexManagedConfig(data []byte, gw string, o OverlayOptions) ([]byte, error
 		return nil, fmt.Errorf("actor overlay: the Codex managed config has no DefenseClaw notify")
 	}
 	s = strings.Replace(s, oldNotify, "notify = ['"+HookBinary+"', '--connector', 'codex', '--notify']", 1)
-	var lines []string
-	for _, line := range strings.Split(s, "\n") {
-		line = rewriteIngress(line, gw)
-		if strings.HasPrefix(line, "environment = 'openshell'") {
-			line = "environment = 'substrate'"
-		}
-		lines = append(lines, line)
-		if line == "x-defenseclaw-source = 'codex'" {
-			lines = append(lines, "x-defenseclaw-actor = '"+PlaceholderValue+"'")
-		}
-	}
-	s = strings.Join(lines, "\n")
 	s = strings.Replace(s, "(OpenShell sandbox image, root-owned)", "(Agent Substrate actor image, root-owned)", 1)
 	s = strings.Replace(s, "\n[analytics]\n", "\n[feedback]\nenabled = false\n\n[analytics]\n", 1)
 	// The model route: the gateway's OpenAI Responses route with a
@@ -403,17 +421,8 @@ func codexManagedConfig(data []byte, gw string, o OverlayOptions) ([]byte, error
 		s = s[:i+1] + top + s[i+1:]
 	}
 	s += fmt.Sprintf("\n[model_providers.defenseclaw]\nname = 'DefenseClaw'\nbase_url = '%s/llm/openai/v1'\nenv_key = 'OPENAI_API_KEY'\nwire_api = 'responses'\n"+
-		"http_headers = { %s = '%s' }\n", gw, PlaceholderHeader, PlaceholderValue)
+		"http_headers = { %s = '%s', X-DefenseClaw-Client = 'codex-llm/1.0' }\n", gw, PlaceholderHeader, PlaceholderValue)
 	return []byte(s), nil
-}
-
-func otelHeadersHelper(connectorName string) string {
-	return fmt.Sprintf(`#!/bin/sh
-# defenseclaw-managed-hook v1
-# DefenseClaw Claude Code otelHeadersHelper (Agent Substrate actor images).
-# Substrate egress replaces the placeholder with the actor JWT.
-printf '{"%s":"%s","x-defenseclaw-source":"%s","x-defenseclaw-client":"%s-otel/1.0"}\n'
-`, PlaceholderHeader, PlaceholderValue, connectorName, connectorName)
 }
 
 // gitConfig is the system git configuration: SSH remotes go over HTTPS
