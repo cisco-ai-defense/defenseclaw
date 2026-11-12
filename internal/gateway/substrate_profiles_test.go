@@ -68,4 +68,8 @@ func TestSubstrateLauncherProfilesFollowTheCaller(t *testing.T) {
 	if p, s, err := SubstrateLauncherProfiles(bare)(nobody, "", "", false); err != nil || p != "default" || s != "lab" {
 		t.Fatalf("no profiles: %q %q %v", p, s, err)
 	}
+	// Found live on E1: naming that default profile is the caller's own.
+	if p, _, err := SubstrateLauncherProfiles(bare)(nobody, "default", "", false); err != nil || p != "default" {
+		t.Fatalf("no profiles, default named: %q %v", p, err)
+	}
 }

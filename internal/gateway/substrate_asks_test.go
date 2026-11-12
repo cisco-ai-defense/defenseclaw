@@ -137,7 +137,8 @@ func TestSubstrateCreateOverTheControlAPI(t *testing.T) {
 		}
 		return identity.LiveActor{UID: a.GetMetadata().GetUid(), State: identity.ActorState(strings.TrimPrefix(a.GetStatus().GetState().String(), "ACTOR_STATE_"))}, nil
 	})
-	rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"profile":"eng","template":"cc","connector":"claudecode","name":"alice-9"}`)
+	// Found live on E1: a create without a profile takes the caller's.
+	rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"template":"cc","connector":"claudecode","name":"alice-9"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create %d %s", rec.Code, rec.Body)
 	}

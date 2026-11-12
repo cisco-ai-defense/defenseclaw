@@ -257,8 +257,10 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		var req SubstrateCreate
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil || strings.TrimSpace(req.Template) == "" || strings.TrimSpace(req.Profile) == "" {
-			writeSubstrateJSONError(w, http.StatusBadRequest, "profile_and_template_required")
+		// The profile may be empty: it comes from the caller's assignment
+		// (GAP-0043); a request may only name that same one.
+		if err := dec.Decode(&req); err != nil || strings.TrimSpace(req.Template) == "" {
+			writeSubstrateJSONError(w, http.StatusBadRequest, "template_required")
 			return
 		}
 		if len(req.Task) > 64<<10 {

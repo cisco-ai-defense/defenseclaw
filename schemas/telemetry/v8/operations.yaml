@@ -5120,6 +5120,20 @@ attributes:
     overrides: {max_utf8_bytes: 64}
     notes: Present on a fork; absent on a first actor. When a fork was made outside DefenseClaw the parent is attributed from the platform and defenseclaw.sandbox.lifecycle.trigger is fork with the actor kept in a conflict state. Never a metric label
   introduced_in: telemetry-registry-v4
+- id: defenseclaw.sandbox.substrate.run_mode
+  type: string
+  brief: Whether the Agent Substrate actor runs attended or unattended
+  examples: [interactive]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [interactive, unattended]}
+    notes: From the registration the launcher wrote, never from the actor. interactive (a person attached or may attach) fails as on a host; unattended (--task or --batch) fails closed and its asks deny (D8, D12)
+  introduced_in: telemetry-registry-v4
 - id: ate.actor.uid
   type: string
   brief: Agent Substrate actor UID as named by Substrate
@@ -12212,6 +12226,8 @@ groups:
   - ref: defenseclaw.sandbox.substrate.batch_id
     requirement_level: recommended
   - ref: defenseclaw.sandbox.substrate.parent_uid
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.substrate.run_mode
     requirement_level: recommended
   - ref: ate.actor.uid
     requirement_level: recommended

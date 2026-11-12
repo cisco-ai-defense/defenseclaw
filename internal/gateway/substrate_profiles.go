@@ -45,6 +45,9 @@ func SubstrateLauncherProfiles(cfg *config.Config) SubstrateProfileResolver {
 	spaces := cfg.Substrate.LauncherAtespaces
 	return func(p identity.Person, requested, connector string, admin bool) (string, string, error) {
 		profile := substrateCallerProfile(g, p, connector)
+		if profile == "" {
+			profile = SubstrateLauncherDefaultProfile
+		}
 		requested = strings.TrimSpace(requested)
 		switch {
 		case requested == "" || requested == profile:
@@ -52,9 +55,6 @@ func SubstrateLauncherProfiles(cfg *config.Config) SubstrateProfileResolver {
 			profile = requested
 		default:
 			return "", "", fmt.Errorf("%w: %q (the caller's is %q)", ErrSubstrateProfileNotAllowed, requested, profile)
-		}
-		if profile == "" {
-			profile = SubstrateLauncherDefaultProfile
 		}
 		list := spaces[profile]
 		if len(list) == 0 {
