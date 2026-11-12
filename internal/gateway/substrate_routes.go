@@ -166,11 +166,21 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	calloutAsk := a.apiCSRFProtect(a.substrateCalloutAsk(st))
 	info := a.substrateInfo(st)
 	people := a.apiCSRFProtect(a.substrateAdminAuthenticate(st, mux))
+	attach := substrateAttachCSRF(a.substrateAdminAuthenticate(st, mux))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if !strings.HasPrefix(r.URL.Path, substrateAdminPrefix) || r.URL.RawPath != "" {
 			writeSubstrateJSONError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		if substrateAttachPath.MatchString(r.URL.Path) {
+			// Attach and workspace traffic (GAP-0134): a WebSocket upgrade,
+			// long-poll frames and a streaming tar upload. Person sign-in and
+			// ownership are checked as for every admin route; the JSON body
+			// gate and the 1 MiB cap do not fit it, so it has its own.
+			r.Body = http.MaxBytesReader(w, r.Body, substrateAttachBodyCap(r, st.cfg.WorkspaceMaxBytes))
+			attach.ServeHTTP(w, r)
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, substrateAdminMaxBody)

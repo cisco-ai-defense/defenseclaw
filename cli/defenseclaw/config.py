@@ -4280,6 +4280,8 @@ class SubstrateLLMCredentialConfig:
 class SubstrateLLMConfig:
     providers: list[str] = field(default_factory=list)
     credential: SubstrateLLMCredentialConfig = field(default_factory=SubstrateLLMCredentialConfig)
+    # Bedrock model IDs actors may call; another model goes to the first (GAP-0008).
+    bedrock_models: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -4356,6 +4358,8 @@ class SubstrateConfig:
     templates: SubstrateTemplatesConfig = field(default_factory=SubstrateTemplatesConfig)
     default_sandbox_class: str = ""
     idle_suspend_after: str = ""
+    # Workspace upload cap through the admin attach route (E23); None = 1 GiB.
+    workspace_max_bytes: int | None = None
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
@@ -7638,6 +7642,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         templates=_merge_substrate_templates(raw.get("templates")),
         default_sandbox_class=str(raw.get("default_sandbox_class", "") or ""),
         idle_suspend_after=_duration_text(raw.get("idle_suspend_after")),
+        workspace_max_bytes=_optional_number(raw.get("workspace_max_bytes"), int),
         unattended=SubstrateUnattendedConfig(
             asks=str(unattended.get("asks", "") or ""),
             ask_timeout=_duration_text(unattended.get("ask_timeout")),
@@ -7653,6 +7658,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             credential=SubstrateLLMCredentialConfig(
                 provider_uri=str(_mapping(llm.get("credential")).get("provider_uri", "") or ""),
             ),
+            bedrock_models=_string_list(llm.get("bedrock_models")),
         ),
         egress=SubstrateEgressConfig(
             allow=_string_list(egress.get("allow")),

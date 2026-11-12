@@ -89,3 +89,29 @@ func TestAsksOwnOnlyApproveAndPersist(t *testing.T) {
 		t.Fatalf("reloaded decisions %d", len(s2.decisions))
 	}
 }
+
+// E16: a crashed actor's open asks are closed; others stay.
+func TestCloseActorEndsItsAsks(t *testing.T) {
+	s := NewMemory()
+	ctx := context.Background()
+	a1, _ := s.OpenAsk(ctx, Ask{Atespace: "eng-web", Actor: "a1", UID: "u1", OwnerID: "o", Host: "x.example.org"})
+	_, _ = s.OpenAsk(ctx, Ask{Atespace: "eng-web", Actor: "a1", UID: "u1", OwnerID: "o", Tool: "mcp__t__x"})
+	other, _ := s.OpenAsk(ctx, Ask{Atespace: "eng-web", Actor: "a2", UID: "u2", OwnerID: "o", Host: "y.example.org"})
+	if n := s.CloseActor("u1", "the actor crashed"); n != 2 {
+		t.Fatalf("closed %d, want 2", n)
+	}
+	if p := s.Pending(); len(p) != 1 || p[0] != "u2" {
+		t.Fatalf("pending %v", p)
+	}
+	if _, err := s.Resolve(ctx, ResolveRequest{ID: a1.ID, Decision: "approve", CallerID: "o"}); !IsDecided(err) {
+		t.Fatalf("approve a closed ask: %v", err)
+	}
+	if got, _ := s.List(ctx, ListRequest{OwnerID: "o"}); len(got) != 3 {
+		t.Fatalf("list %d", len(got))
+	}
+	ds, _ := s.Decisions(ctx, ListRequest{OwnerID: "o"})
+	if len(ds) != 2 || ds[0].Verdict != StateExpired || ds[0].Reason != "the actor crashed" {
+		t.Fatalf("decisions %+v", ds)
+	}
+	_ = other
+}

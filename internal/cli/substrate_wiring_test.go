@@ -9,8 +9,10 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/asks"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi/ateapifake"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
@@ -102,5 +104,28 @@ func TestCreatePathEnsurePolicy(t *testing.T) {
 	}
 	if fake.Policy(ateapi.Ref("eng-web", "alice-1")) == nil {
 		t.Fatal("no policy written")
+	}
+}
+
+// E16 (A13 handoff): the leader's lifecycle handler closes a crashed
+// actor's open asks after the chain work, and only for crashed or deleted.
+func TestLifecycleClosesAsksOfACrashedActor(t *testing.T) {
+	store := asks.NewMemory()
+	ctx := context.Background()
+	_, _ = store.OpenAsk(ctx, asks.Ask{Atespace: "eng-web", Actor: "a1", UID: wireUID1, OwnerID: "o", Host: "x.example.org"})
+	chainCalls := 0
+	next := func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+		chainCalls++
+		return chainstate.LifecycleResult{}, nil
+	}
+	h := substrateLifecycleClosesAsks(next, store)
+	ev := func(kind string) chainstate.LifecycleEvent {
+		return chainstate.LifecycleEvent{Actor: chainstate.Actor{Atespace: "eng-web", UID: wireUID1}, Event: kind}
+	}
+	if _, err := h(ctx, ev(chainstate.LifecycleSuspended)); err != nil || len(store.Pending()) != 1 {
+		t.Fatalf("suspend closed the ask: %v %v", err, store.Pending())
+	}
+	if _, err := h(ctx, ev(chainstate.LifecycleCrashed)); err != nil || len(store.Pending()) != 0 || chainCalls != 2 {
+		t.Fatalf("crash: %v pending %v chain calls %d", err, store.Pending(), chainCalls)
 	}
 }
