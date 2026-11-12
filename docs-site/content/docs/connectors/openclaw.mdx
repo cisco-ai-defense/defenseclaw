@@ -20,7 +20,7 @@ DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls thr
 | Platform | Status | Notes |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | DefenseClaw hosts the required guardrail proxy and installs the first-party plugin. Subprocess policy is shell shims on both. |
-| Native Windows x64 | **Native hooks only** | OpenClaw 2026.8.35 or later. DefenseClaw hosts no guardrail proxy on Windows, so the plugin hooks guard OpenClaw. See [Hook modes](#hook-modes). The separate-user layout is not available. |
+| Native Windows x64 | **Supported** | OpenClaw 2026.8.35 or later in native hook mode: the plugin under `%USERPROFILE%\.openclaw` guards tools, prompts and model calls through its own hooks. DefenseClaw hosts no guardrail proxy on Windows, so there is no model response scan and no PATH shims. Per-user installs only; managed Windows is not in this release. |
 
 ## Setup
 
@@ -526,13 +526,13 @@ OpenClaw runs only a command it trusts. The file and every folder above it must 
 
 ## Subprocess policy
 
-The policy is `shims` on every platform. Setup installs PATH shims for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` that send each invocation to the gateway's tool-inspection endpoint before running the real binary. They inspect those command paths only and give no syscall, filesystem or network isolation. While the gateway is not running, the shims follow the policy: the default and permissive policies print `DefenseClaw warning: gateway peer is unverified or unavailable; running <tool> without inspection`, write a `hook-failures.jsonl` record and run the real tool; the strict policy refuses it (`DefenseClaw: gateway peer is unverified or unavailable — refusing to exec <tool>`, exit 1).
+The policy is `shims` on macOS and Linux. Setup installs PATH shims for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` that send each invocation to the gateway's tool-inspection endpoint before running the real binary. They inspect those command paths only and give no syscall, filesystem or network isolation. While the gateway is not running, the shims follow the policy: the default and permissive policies print `DefenseClaw warning: gateway peer is unverified or unavailable; running <tool> without inspection`, write a `hook-failures.jsonl` record and run the real tool; the strict policy refuses it (`DefenseClaw: gateway peer is unverified or unavailable — refusing to exec <tool>`, exit 1).
 
 OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox that ran it as a separate Linux user was removed. A host that still carries it removes what it left by hand ([remove a retired standalone sandbox](/docs/sandboxes/first-session)). OpenShell support for OpenClaw is pending in the [capability matrix](/docs/connectors/capability-matrix).
 
 ## Limits
 
-- Native Windows runs in native hooks mode only, with the limits under [Limits of the hook modes](#limits-of-the-hook-modes).
+- Native Windows runs native hook mode only: no guardrail proxy, so no model response scan, no exact provider bytes and no PATH shims. OpenClaw older than 2026.8.35 is refused there, and managed Windows is not in this release.
 - Raw sockets, custom transports and libraries that bypass every patched entry point are outside the boundary. They are not inspected.
 - The shims inspect those six commands only. They give no syscall, filesystem or network isolation.
 - If a Bedrock endpoint resolves to a private VPC address, the proxy refuses it. Allow it with `defenseclaw guardrail allow-private-upstream <host>`.

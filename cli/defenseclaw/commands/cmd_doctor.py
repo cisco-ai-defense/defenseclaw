@@ -13310,6 +13310,14 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
 )
 
 
+def _openclaw_runs_native_hooks(cfg) -> bool:
+    """Whether the OpenClaw plugin runs in native hook mode (Windows, no proxy)."""
+    from defenseclaw.openclaw_plugin_config import configured_openclaw_hook_mode
+    from defenseclaw.platform_support import uses_guardrail_proxy
+
+    return not uses_guardrail_proxy("openclaw") or configured_openclaw_hook_mode(cfg) == "native"
+
+
 def _guardrail_proxy_intentionally_closed(cfg) -> str:
     """Return a detail string when the proxy port is expected to be closed.
 
@@ -13334,9 +13342,18 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
     connectors = _doctor_active_connectors(cfg)
     if not connectors:
         return ""
-    if any(c not in _HOOK_ENFORCED_CONNECTORS for c in connectors):
+    native_openclaw = "openclaw" in connectors and _openclaw_runs_native_hooks(cfg)
+    if any(c not in _HOOK_ENFORCED_CONNECTORS and not (c == "openclaw" and native_openclaw) for c in connectors):
         return ""
     modes = {c: _doctor_effective_guardrail_mode(gc, c) for c in sorted(connectors)}
+    if native_openclaw:
+        # Native Windows OpenClaw: the plugin hooks guard it and DefenseClaw
+        # hosts no guardrail proxy there.
+        parts = [
+            f"{c} (mode={mode} via native plugin hooks)" if c == "openclaw" else f"{c} (mode={mode})"
+            for c, mode in modes.items()
+        ]
+        return "plugin-enforced for " + ", ".join(parts) + " — no guardrail proxy in native hook mode"
     # Preserve the exact single-connector wording; aggregate (sorted, stable)
     # for a multi-connector all-hook-enforced fan-out.
     label = connectors[0] if len(connectors) == 1 else ", ".join(sorted(connectors))
@@ -18273,12 +18290,13 @@ def _guardrail_enable_command(cfg, connector: str) -> str:
     ``guardrail enable`` refuses a proxy connector (OpenClaw, ZeptoClaw) with
     no ``guardrail.model``: it would forward model traffic to an unset
     upstream. Their setup command asks for it (docs guardrail/disabling).
+    Native Windows OpenClaw has no proxy, so it needs no model.
     """
-    from defenseclaw.platform_support import is_proxy_connector
+    from defenseclaw.platform_support import uses_guardrail_proxy
 
     gc = getattr(cfg, "guardrail", None)
     llm = getattr(cfg, "llm", None)
-    if is_proxy_connector(connector) and not (getattr(gc, "model", "") or getattr(llm, "model", "")):
+    if uses_guardrail_proxy(connector) and not (getattr(gc, "model", "") or getattr(llm, "model", "")):
         return f"defenseclaw setup {connector}"
     return "defenseclaw guardrail enable"
 

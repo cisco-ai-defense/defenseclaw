@@ -239,7 +239,8 @@ var errOpenClawListenerUnverified = errors.New("the OpenClaw gateway listener do
 
 // verifyOpenClawListener checks the account of the accepted server socket:
 // on Linux this account or root, on macOS this account only (the socket
-// owner is read from this account's processes). Replaceable in tests.
+// owner is read from this account's processes), on Windows this account or
+// LocalSystem (the kernel TCP table names the owner). Replaceable in tests.
 var verifyOpenClawListener = hookexec.VerifyLocalPeer
 
 // dialOpenClawListener opens the TCP connection of the OpenClaw WebSocket.
@@ -247,8 +248,9 @@ var verifyOpenClawListener = hookexec.VerifyLocalPeer
 // to this account, before DefenseClaw writes any byte to it, so a process
 // of another account that holds the port while OpenClaw restarts never gets
 // the WebSocket upgrade, the gateway token or the device signature
-// (GAP-0594). A listener on another host is protected by TLS, not by this
-// check. Windows does not run the OpenClaw connector.
+// (GAP-0594). On Windows (native OpenClaw) the listener must belong to this
+// account or LocalSystem. A listener on another host is protected by TLS,
+// not by this check.
 func dialOpenClawListener(ctx context.Context, network, addr string) (net.Conn, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, network, addr)
@@ -266,9 +268,9 @@ func dialOpenClawListener(ctx context.Context, network, addr string) (net.Conn, 
 }
 
 // openClawListenerOwnerChecked reports whether conn's listener account is
-// checked: a loopback connection on Linux or macOS.
+// checked: a loopback connection on Linux, macOS or Windows.
 func openClawListenerOwnerChecked(conn net.Conn) bool {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		return false
 	}
 	remote, ok := conn.RemoteAddr().(*net.TCPAddr)

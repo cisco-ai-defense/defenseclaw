@@ -780,12 +780,13 @@ class TestReadPickedConnector(unittest.TestCase):
 
 
 # These cases run `setup guardrail --non-interactive` with no connector, so
-# setup configures the implied OpenClaw default. Native Windows is hook-only
-# and refuses OpenClaw (platform_support), which
-# test_non_interactive_windows_refuses_the_implied_openclaw covers on every OS.
+# setup configures the implied OpenClaw default with its guardrail proxy.
+# Native Windows runs OpenClaw in native hook mode without the proxy;
+# test_non_interactive_windows_passes_the_openclaw_platform_check covers its
+# platform check on every OS.
 _IMPLIED_OPENCLAW_POSIX_ONLY = unittest.skipIf(
     os.name == "nt",
-    "the implied OpenClaw connector is unsupported on native Windows",
+    "these cases cover the OpenClaw guardrail proxy, which native Windows does not host",
 )
 
 
@@ -838,32 +839,20 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn("Disabling", result.output)
         self.assertIn("Config saved", result.output)
 
-    def test_non_interactive_windows_refuses_the_implied_openclaw(self):
-        # Native Windows is hook-only: the implied OpenClaw default is refused
-        # with its reason before anything is written.
+    def test_non_interactive_windows_passes_the_openclaw_platform_check(self):
+        # Native Windows runs OpenClaw in native hook mode (1.0.10): the
+        # implied OpenClaw default passes the platform check there.
         from defenseclaw.commands.cmd_setup import setup
 
         self.app.cfg.claw.home_dir = self.tmp_dir
-        config = os.path.join(self.tmp_dir, "config.yaml")
-
-        def saved() -> bytes | None:
-            if not os.path.exists(config):
-                return None
-            with open(config, "rb") as handle:
-                return handle.read()
-
-        before = saved()
         with patch("defenseclaw.platform_support.host_os", return_value="windows"):
             result = self.runner.invoke(
                 setup,
                 ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
                 obj=self.app,
             )
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("connector 'openclaw' is unsupported on windows", result.output)
-        self.assertIn("OpenClaw integration requires the guardrail proxy", result.output)
-        self.assertNotIn("Config saved", result.output)
-        self.assertEqual(saved(), before)
+        self.assertNotIn("unsupported on windows", result.output)
+        self.assertNotIn("requires the guardrail proxy", result.output)
 
     @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_non_interactive_with_model(self):

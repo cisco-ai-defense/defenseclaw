@@ -28,8 +28,8 @@ import (
 )
 
 // gatewayTokenListenerProofConnector is the in-agent plugin that proves a
-// listener with the per-user gateway token itself: the OpenClaw plugin,
-// which holds that token rather than a scoped hook credential (GAP-0594).
+// listener with a token in any format: the OpenClaw plugin, with its
+// connector-scoped credential (GAP-0594, DESIGN-REVIEW-1 P1-2).
 const gatewayTokenListenerProofConnector = "openclaw"
 
 // gatewayTokenListenerProofDomain is the proof domain of
@@ -64,8 +64,9 @@ func isGatewayTokenListenerProofRequest(r *http.Request) bool {
 // gateway token of any format. It is
 // served only on loopback, to a caller of this gateway's own account (the
 // kernel's connection table names it), so another account cannot relay a
-// challenge to this gateway from a port it squats. tokens are the gateway
-// tokens this listener accepts. It reports whether it answered with a
+// challenge to this gateway from a port it squats (on Windows the caller
+// SID must be the SID of this gateway). tokens are the credentials this
+// listener proves: the OpenClaw scoped plugin token and the gateway tokens. It reports whether it answered with a
 // proof; on false the caller refuses the request.
 func writeGatewayTokenListenerProof(w http.ResponseWriter, r *http.Request, tokens ...string) bool {
 	if r.Method != http.MethodGet || !connector.IsLoopback(r) || !isGatewayTokenListenerProofRequest(r) ||

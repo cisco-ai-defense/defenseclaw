@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"flag"
 	"runtime"
 	"strings"
 )
@@ -38,8 +39,24 @@ const (
 	OpenClawHookModeNative = "native"
 )
 
+// OpenClawManagedWindowsRefusal is why managed (enterprise) Windows refuses
+// OpenClaw in this release: the enterprise refusal list and Setup show it.
+const OpenClawManagedWindowsRefusal = "native OpenClaw plugin hooks for managed Windows are not in this release; OpenClaw is supported on per-user (OSS) Windows installs"
+
 // openClawHooksGOOS is runtime.GOOS; tests replace it.
 var openClawHooksGOOS = runtime.GOOS
+
+// PinOpenClawHooksGOOSForTest makes the OpenClaw hook mode resolve as on goos
+// and returns a restore function, so tests in other packages can exercise the
+// native Windows topology on any host. It panics outside a test binary.
+func PinOpenClawHooksGOOSForTest(goos string) func() {
+	if flag.Lookup("test.v") == nil {
+		panic("connector: PinOpenClawHooksGOOSForTest is test-only")
+	}
+	previous := openClawHooksGOOS
+	openClawHooksGOOS = goos
+	return func() { openClawHooksGOOS = previous }
+}
 
 // ResolveOpenClawHookMode picks the plugin hook mode from the configured
 // connectors.openclaw.hooks.mode (auto or proxy), the observed OpenClaw
@@ -48,14 +65,30 @@ var openClawHooksGOOS = runtime.GOOS
 // there is no proxy, so the mode is native and Setup refuses an OpenClaw
 // that is known to be older than OpenClawNativeHooksSince.
 func ResolveOpenClawHookMode(configured, rawVersion string) string {
-	native := openClawNativeHooksSupported(rawVersion)
-	if openClawHooksGOOS == "windows" {
+	return resolveOpenClawHookModeOn(openClawHooksGOOS, configured, rawVersion)
+}
+
+func resolveOpenClawHookModeOn(goos, configured, rawVersion string) string {
+	if goos == "windows" {
 		return OpenClawHookModeNative
 	}
-	if strings.EqualFold(strings.TrimSpace(configured), "proxy") || !native {
+	if strings.EqualFold(strings.TrimSpace(configured), "proxy") || !openClawNativeHooksSupported(rawVersion) {
 		return OpenClawHookModeProxy
 	}
 	return OpenClawHookModeHybrid
+}
+
+// OpenClawHookModeUsesProxy reports whether mode routes OpenClaw model
+// traffic through the guardrail proxy: proxy and hybrid do, native does not.
+// Only Windows resolves to native (hooks.mode takes auto or proxy), so on
+// Linux and macOS every mode uses the proxy whatever the OpenClaw version.
+func OpenClawHookModeUsesProxy(mode string) bool {
+	return mode != OpenClawHookModeNative
+}
+
+// openClawNativeOnly reports a host where OpenClaw runs in native mode only.
+func openClawNativeOnly() bool {
+	return !OpenClawHookModeUsesProxy(resolveOpenClawHookModeOn(openClawHooksGOOS, "", ""))
 }
 
 func openClawNativeHooksSupported(rawVersion string) bool {

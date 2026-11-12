@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // openClawPluginScope is the connector scope of the OpenClaw plugin
@@ -177,4 +178,19 @@ func (a *APIServer) openClawConnectorRegistered() bool {
 	}
 	_, ok := a.connectorRegistry.Get(openClawPluginScope)
 	return ok
+}
+
+// openClawPluginProofToken is the openclaw connector-scoped credential the
+// plugin proves the listener with (hooks/.hook-openclaw.token), or "" when
+// there is none or its teardown revoked it.
+func (a *APIServer) openClawPluginProofToken() string {
+	dataDir := a.configDataDir()
+	if dataDir == "" || connector.HookAPITokenRevoked(dataDir, openClawPluginScope) {
+		return ""
+	}
+	token, err := connector.LoadHookAPIToken(dataDir, openClawPluginScope)
+	if err != nil {
+		return ""
+	}
+	return token
 }
