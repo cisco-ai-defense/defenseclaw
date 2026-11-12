@@ -5,6 +5,9 @@ package routingadmin
 
 import (
 	"context"
+	"errors"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,24 +21,35 @@ import (
 const OwnerKey = "owner"
 
 // Runtime is the process-wide state of the admin routing policy: the spend
-// ledger (only while budgets are configured) and the recent decisions. It
-// is carried across config reloads; For compiles each generation's rules.
+// ledger and its sync loop (only while budgets are configured) and the
+// recent decisions. It is carried across config reloads; For compiles each
+// generation's rules.
 type Runtime struct {
 	decisions Decisions
 
-	mu      sync.Mutex
-	ledger  *Ledger
-	seeding map[string]bool
-	seed    SeedFunc
-	seedCtx context.Context
-	last    *config.Config
-	lastEv  *evaluator
+	mu       sync.Mutex
+	ledger   *Ledger
+	ids      []string // budget ids of the newest generation
+	last     *config.Config
+	lastEv   *evaluator
+	ctx      context.Context
+	local    SpendCounter // this device's store (per-device budgets and the fallback)
+	fleet    SpendCounter // optional: shared by devices or gateway replicas
+	interval time.Duration
+	epoch    string
+	syncing  bool
+	kick     chan struct{}
 }
+
+// DefaultSyncInterval is how often the ledger stores this process's spend
+// and reads everyone else's.
+const DefaultSyncInterval = 30 * time.Second
 
 // NewRuntime returns an empty runtime; it costs nothing until a config
 // with routing.admin rules or budgets is compiled.
 func NewRuntime() *Runtime {
-	return &Runtime{seeding: map[string]bool{}}
+	return &Runtime{interval: DefaultSyncInterval, kick: make(chan struct{}, 1),
+		epoch: strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)}
 }
 
 // Decisions returns the recent-decisions ring.
@@ -56,23 +70,25 @@ func (rt *Runtime) Ledger() *Ledger {
 	return rt.ledger
 }
 
-// SetSeeder installs the usage-store history reader (S10). Budgets already
-// compiled start seeding; ctx ends the retry loops.
-func (rt *Runtime) SetSeeder(ctx context.Context, fn SeedFunc) {
+// SetCounters installs the spend counters: local (this device; required for
+// budgets to survive a restart) and fleet (optional, nil = per-device
+// budgets). The sync loop starts when budgets exist and stops with ctx,
+// storing this process's spend one last time. interval 0 keeps the default.
+func (rt *Runtime) SetCounters(ctx context.Context, local, fleet SpendCounter, interval time.Duration) {
 	if rt == nil {
 		return
 	}
 	rt.mu.Lock()
-	rt.seed, rt.seedCtx = fn, ctx
-	ev := rt.lastEv
-	rt.mu.Unlock()
-	if ev != nil {
-		rt.startSeeding(ev.policy.BudgetIDs())
+	rt.ctx, rt.local, rt.fleet = ctx, local, fleet
+	if interval > 0 {
+		rt.interval = interval
 	}
+	rt.mu.Unlock()
+	rt.startSync()
 }
 
-// Charge counts a priced agent call against its budget keys (S10 calls it
-// with the computed cost when the call ends).
+// Charge counts a priced agent call against its budget keys (the usage
+// engine calls it with the computed cost when the call ends).
 func (rt *Runtime) Charge(keys []string, usd float64, at time.Time) {
 	if l := rt.Ledger(); l != nil {
 		l.Charge(keys, usd, at)
@@ -86,9 +102,12 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 		return nil
 	}
 	rt.mu.Lock()
-	if rt.last == cfg && rt.lastEv != nil {
+	if rt.last == cfg {
 		ev := rt.lastEv
 		rt.mu.Unlock()
+		if ev == nil {
+			return nil
+		}
 		return ev
 	}
 	rt.mu.Unlock()
@@ -96,7 +115,7 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	policy := Compile(a.Rules, a.Budgets, cfg.StandaloneEnterprise())
 	if policy == nil {
 		rt.mu.Lock()
-		rt.last, rt.lastEv = cfg, nil
+		rt.last, rt.lastEv, rt.ids = cfg, nil, nil
 		rt.mu.Unlock()
 		return nil
 	}
@@ -112,29 +131,107 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 		rt.ledger = NewLedger()
 	}
 	ev.ledger = rt.ledger
-	rt.last, rt.lastEv = cfg, ev
+	rt.last, rt.lastEv, rt.ids = cfg, ev, policy.BudgetIDs()
 	rt.mu.Unlock()
-	rt.startSeeding(policy.BudgetIDs())
+	rt.startSync()
 	return ev
 }
 
-func (rt *Runtime) startSeeding(ids []string) {
+// startSync runs the sync loop once budgets and a counter exist, and asks a
+// running loop to sync now (new budget ids after a reload).
+func (rt *Runtime) startSync() {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if rt.seed == nil || rt.ledger == nil {
+	if rt.ledger == nil || rt.local == nil || rt.ctx == nil || len(rt.ids) == 0 {
 		return
 	}
-	var fresh []string
-	for _, id := range ids {
-		if !rt.seeding[id] && !rt.ledger.Seeded(id) {
-			rt.seeding[id] = true
-			fresh = append(fresh, id)
+	if rt.syncing {
+		select {
+		case rt.kick <- struct{}{}:
+		default:
+		}
+		return
+	}
+	rt.syncing = true
+	go rt.syncLoop(rt.ctx)
+}
+
+func (rt *Runtime) syncLoop(ctx context.Context) {
+	defer func() {
+		rt.mu.Lock()
+		rt.syncing = false
+		rt.mu.Unlock()
+	}()
+	rt.SyncOnce(ctx)
+	for {
+		rt.mu.Lock()
+		interval := rt.interval
+		rt.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			// Keep this process's spend for the next one.
+			final, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			rt.push(final)
+			cancel()
+			return
+		case <-rt.kick:
+		case <-time.After(interval):
+		}
+		rt.SyncOnce(ctx)
+	}
+}
+
+// SyncOnce stores this process's spend and reads everyone else's: from the
+// fleet counter when one is set and answers, else from this device's store
+// (per-device budgets; a fleet outage falls back to them).
+func (rt *Runtime) SyncOnce(ctx context.Context) {
+	rt.mu.Lock()
+	ledger, local, fleet, ids, epoch := rt.ledger, rt.local, rt.fleet, append([]string(nil), rt.ids...), rt.epoch
+	rt.mu.Unlock()
+	if ledger == nil || local == nil {
+		return
+	}
+	rt.push(ctx)
+	since := time.Unix(int64(dayNumber(time.Now())-LedgerDays)*86400, 0).UTC()
+	var rows []SeedRow
+	var err error
+	if fleet != nil {
+		if rows, err = fleet.Totals(ctx, epoch, since); err == nil {
+			ledger.ApplyRemote(ids, rows, time.Now())
+			return
+		}
+		ledger.SyncFailed(err)
+	}
+	if rows, err = local.Totals(ctx, epoch, since); err != nil {
+		ledger.SyncFailed(err)
+		return
+	}
+	ledger.ApplyRemote(ids, rows, time.Now())
+	if fleet != nil {
+		ledger.SyncFailed(errFleetFallback)
+	}
+}
+
+var errFleetFallback = errors.New("fleet spend unavailable; counting this device only")
+
+func (rt *Runtime) push(ctx context.Context) {
+	rt.mu.Lock()
+	ledger, local, fleet, epoch := rt.ledger, rt.local, rt.fleet, rt.epoch
+	rt.mu.Unlock()
+	rows := ledger.LocalRows()
+	if len(rows) == 0 {
+		return
+	}
+	if local != nil {
+		if err := local.Push(ctx, epoch, rows); err != nil {
+			ledger.SyncFailed(err)
 		}
 	}
-	if len(fresh) == 0 {
-		return
+	if fleet != nil {
+		if err := fleet.Push(ctx, epoch, rows); err != nil {
+			ledger.SyncFailed(err)
+		}
 	}
-	go rt.ledger.SeedLoop(rt.seedCtx, fresh, time.Now, rt.seed)
 }
 
 // evaluator implements engine.AdminEvaluator for one config generation.

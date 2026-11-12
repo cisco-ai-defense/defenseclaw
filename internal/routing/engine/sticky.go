@@ -33,7 +33,9 @@ type stickyEntry struct {
 	expires time.Time
 }
 
-type stickyCache struct {
+// StickyCache is the conversation cache (one per gateway, shared by every
+// generation engine).
+type StickyCache struct {
 	mu         sync.Mutex
 	ll         *list.List
 	items      map[stickyKey]*list.Element
@@ -41,11 +43,12 @@ type stickyCache struct {
 	now        func() time.Time
 }
 
-func newStickyCache() *stickyCache {
-	return &stickyCache{ll: list.New(), items: map[stickyKey]*list.Element{}, perSubject: map[string]int{}, now: time.Now}
+// NewStickyCache returns an empty cache.
+func NewStickyCache() *StickyCache {
+	return &StickyCache{ll: list.New(), items: map[stickyKey]*list.Element{}, perSubject: map[string]int{}, now: time.Now}
 }
 
-func (c *stickyCache) get(k stickyKey) (ClassifyResult, bool) {
+func (c *StickyCache) get(k stickyKey) (ClassifyResult, bool) {
 	if c == nil || k.conversation == "" {
 		return ClassifyResult{}, false
 	}
@@ -64,7 +67,7 @@ func (c *stickyCache) get(k stickyKey) (ClassifyResult, bool) {
 	return e.result, true
 }
 
-func (c *stickyCache) put(k stickyKey, r ClassifyResult) {
+func (c *StickyCache) put(k stickyKey, r ClassifyResult) {
 	if c == nil || k.conversation == "" {
 		return
 	}
@@ -91,7 +94,7 @@ func (c *stickyCache) put(k stickyKey, r ClassifyResult) {
 	c.perSubject[k.subject]++
 }
 
-func (c *stickyCache) removeLocked(el *list.Element) {
+func (c *StickyCache) removeLocked(el *list.Element) {
 	e := el.Value.(*stickyEntry)
 	c.ll.Remove(el)
 	delete(c.items, e.key)

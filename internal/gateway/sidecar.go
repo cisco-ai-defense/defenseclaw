@@ -1032,6 +1032,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	s.beginPerUserConnectorHookSetup()
 	s.applyModelUsage(s.cfg)
 	defer s.stopModelUsage()
+	s.startRoutingAdmin(ctx)
 	s.carryObservabilityV8ShutdownDrops()
 	// Report the records an earlier run lost from the local history; the loss
 	// journal kept them across the restart (GAP-1129).

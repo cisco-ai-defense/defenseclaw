@@ -120,3 +120,25 @@ func TestNormalizeSemanticRouteOutcomeRejectsOpenEnums(t *testing.T) {
 		t.Fatalf("open enum leaked: %+v", got)
 	}
 }
+
+// DESIGN 4.6: no request header can make a caller verified or pick a
+// profile overlay.
+func TestRouteCallerIgnoresHeaders(t *testing.T) {
+	caller, profiles := routeCallerFromContext(context.Background())
+	if caller.Verified || caller.Key != "" || profiles != nil {
+		t.Fatalf("caller from an unauthenticated context = %+v %v", caller, profiles)
+	}
+	in := &ModelRouterInput{Model: "m", Messages: []ChatMessage{{Role: "user", Content: "hi"}}}
+	if req := engineRequest(in); req.Caller.Verified || len(req.Profiles) != 0 {
+		t.Fatalf("engine request = %+v", req)
+	}
+}
+
+func TestEngineRouterVLLMWithoutContainerIsInactive(t *testing.T) {
+	cfg := engineRouterTestConfig()
+	cfg.Routing.Classifier = ""
+	cfg.Routing.Decisions = cfg.Routing.Decisions[:1]
+	if newEngineRouter(cfg, nil, "").RouterActive(context.Background()) {
+		t.Fatal("vllm_sr without a started container must leave routing off, as in 1.0.9")
+	}
+}

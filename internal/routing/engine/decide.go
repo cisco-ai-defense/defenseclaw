@@ -46,37 +46,16 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		Categories: categories,
 	}
 
-	// 1. Candidate from the user override, sticky entry or the classifier.
-	var candidates []string
-	var res ClassifyResult
-	failure := FailureNone
-	classifierFailed := false
-	override := pol.AllowUserOverride && req.RequestedModel != "" && e.aliasAllowed(pol, req.RequestedModel)
+	// 1. Classifier (or its sticky answer), unless the request names an
+	// allowed alias and no admin rule needs the category.
+	overrideRequested := pol.AllowUserOverride && req.RequestedModel != "" && e.aliasAllowed(pol, req.RequestedModel)
 	needCategory := e.admin != nil && e.admin.Active() && e.admin.NeedsCategory()
-	if override {
-		d.Source = SourceUserOverride
-		candidates = []string{req.RequestedModel}
-	}
-	if !override || needCategory {
-		key := stickyKey{subject: req.Caller.Key, connector: req.Connector, conversation: req.ConversationID, requested: req.RequestedModel, policy: pol.Digest()}
-		if r, ok := e.sticky.get(key); ok {
-			res = r
-			if !override {
-				d.Source = SourceSticky
-			}
-		} else {
-			var err error
-			res, failure, err = e.classify(ctx, in)
-			classifierFailed = err != nil
-			if err == nil && (len(res.Aliases) > 0 || res.Category != "") {
-				e.sticky.put(key, res)
-			}
-			if !override {
-				d.Source = e.classifierName()
-			}
-		}
-		if !override {
-			candidates = append(candidates, res.Aliases...)
+	var res ClassifyResult
+	classifierSource, failure, classifierFailed := "", FailureNone, false
+	if !overrideRequested || needCategory {
+		res, classifierSource, failure, classifierFailed = e.classifyWithSticky(ctx, req, in, pol)
+		if failure != FailureNone && !classifierFailed {
+			d.Warnings = append(d.Warnings, "classifier_fallback:"+failure)
 		}
 	}
 	d.Category, d.RuleID, d.Confidence = res.Category, res.RuleID, res.Confidence
@@ -84,17 +63,13 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	// 2. Admin rules and budgets (S11) narrow the policy.
 	var verdict AdminVerdict
 	if e.admin != nil && e.admin.Active() {
-		verdict = e.admin.Evaluate(ctx, pol, req, res.Category, classifierFailed)
+		verdict = e.admin.Evaluate(ctx, pol.clone(), req, res.Category, classifierFailed)
 		pol = verdict.Policy
-		d.Warnings, d.RuleIDs, d.ChargeKeys = verdict.Warnings, verdict.RuleIDs, verdict.ChargeKeys
+		d.Warnings = append(d.Warnings, verdict.Warnings...)
+		d.RuleIDs, d.ChargeKeys = verdict.RuleIDs, verdict.ChargeKeys
 		if verdict.Deny != nil && e.managed {
-			d.Outcome, d.Deny, d.FailureCode = OutcomeDenied, verdict.Deny, FailureFiltered
+			d.Outcome, d.Deny, d.FailureCode, d.verdict = OutcomeDenied, verdict.Deny, FailureFiltered, verdict
 			return d
-		}
-	}
-	if !override && len(res.Aliases) == 0 && res.Category != "" {
-		if alias, ok := pol.Categories[res.Category]; ok {
-			candidates = append(candidates, alias)
 		}
 	}
 
@@ -111,30 +86,46 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	}
 	d.PolicyDigest = pol.Digest()
 
-	// 4. First eligible alias: Force, candidates, defaults.
-	order := append(append(slices.Clone(verdict.Force), candidates...), pol.DefaultAlias, e.unconditional)
-	if len(candidates) > 0 {
-		d.Candidate = candidates[0]
+	// 4. First eligible alias: Force, user override, classifier, defaults.
+	// A failed classifier keeps the 1.0.9 meaning: the request goes out
+	// unchanged, so the defaults are not tried.
+	type cand struct{ alias, source string }
+	var order []cand
+	for _, a := range verdict.Force {
+		order = append(order, cand{a, SourceForce})
 	}
-	for i, alias := range order {
-		if alias == "" {
+	if pol.AllowUserOverride && req.RequestedModel != "" && e.aliasAllowed(pol, req.RequestedModel) {
+		order = append(order, cand{req.RequestedModel, SourceUserOverride})
+	}
+	for _, a := range res.Aliases {
+		order = append(order, cand{a, classifierSource})
+	}
+	if len(res.Aliases) == 0 && res.Category != "" {
+		if a, ok := pol.Categories[res.Category]; ok {
+			order = append(order, cand{a, classifierSource})
+		}
+	}
+	for _, c := range order {
+		if c.source != SourceForce {
+			d.Candidate = c.alias
+			break
+		}
+	}
+	if !classifierFailed {
+		order = append(order, cand{pol.DefaultAlias, SourceDefault}, cand{e.unconditional, SourceDefault})
+	}
+	for _, c := range order {
+		if c.alias == "" {
 			continue
 		}
-		b, why := e.eligible(pol, alias, req)
+		b, why := e.eligible(pol, c.alias, req)
 		if why != "" {
 			if d.FilteredBy == "" {
 				d.FilteredBy = why
 			}
 			continue
 		}
-		switch {
-		case i < len(verdict.Force):
-			d.Source = SourceForce
-		case i >= len(verdict.Force)+len(candidates):
-			d.Source = SourceDefault
-		}
-		d.Outcome, d.Backend, d.FailureCode = OutcomeApplied, &b, FailureNone
-		d.verdict = verdict
+		d.Outcome, d.Backend, d.FailureCode, d.Source, d.verdict = OutcomeApplied, &b, FailureNone, c.source, verdict
 		return d
 	}
 
@@ -146,16 +137,38 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		d.Deny = &DenyReason{Code: "routing_admin_denied", Message: "routing.admin does not allow this model for you, and no allowed model can serve this request"}
 		return d
 	}
-	d.Outcome = OutcomeFallback
+	d.Outcome, d.Source = OutcomeFallback, classifierSource
 	switch {
 	case failure != FailureNone:
 		d.FailureCode = failure
-	case len(order) > 0 && d.FilteredBy != "":
+	case d.FilteredBy != "":
 		d.FailureCode = FailureFiltered
 	default:
 		d.FailureCode = FailureNoCandidate
 	}
 	return d
+}
+
+// classifyWithSticky returns the classifier answer, its source, the failure
+// code of a dropped or replaced answer, and whether the request has no
+// classifier answer at all.
+func (e *Engine) classifyWithSticky(ctx context.Context, req Request, in ClassifyInput, pol Policy) (ClassifyResult, string, string, bool) {
+	key := stickyKey{subject: req.Caller.Key, connector: req.Connector, conversation: req.ConversationID, requested: req.RequestedModel, policy: pol.Digest()}
+	if r, ok := e.sticky.get(key); ok {
+		return r, SourceSticky, FailureNone, false
+	}
+	res, failure, err := e.classify(ctx, in)
+	if err != nil {
+		return res, e.classifierName(), failure, true
+	}
+	if failure != FailureNone {
+		// The rules classifier answered for a failed classifier.
+		return res, SourceRules, failure, false
+	}
+	if len(res.Aliases) > 0 || res.Category != "" {
+		e.sticky.put(key, res)
+	}
+	return res, e.classifierName(), FailureNone, false
 }
 
 // Gate checks a forwarded exit (the routed backend or the original request)

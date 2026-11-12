@@ -5,7 +5,10 @@ package routingadmin
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,27 +45,126 @@ func TestRuntimeForCompilesPerGeneration(t *testing.T) {
 	}
 }
 
-func TestRuntimeSeedsNewBudgets(t *testing.T) {
+type fakeCounter struct {
+	mu     sync.Mutex
+	pushed map[string][]SeedRow
+	totals []SeedRow
+	err    error
+}
+
+func (f *fakeCounter) Push(_ context.Context, epoch string, rows []SeedRow) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pushed == nil {
+		f.pushed = map[string][]SeedRow{}
+	}
+	f.pushed[epoch] = append([]SeedRow(nil), rows...)
+	return f.err
+}
+
+func (f *fakeCounter) Totals(context.Context, string, time.Time) ([]SeedRow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.totals, f.err
+}
+
+func (f *fakeCounter) pushedRows() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, rows := range f.pushed {
+		n += len(rows)
+	}
+	return n
+}
+
+func dailyBudget() []config.RoutingBudget {
+	return []config.RoutingBudget{{ID: "d", Scope: "user", Subject: "*", Period: "day", LimitUSD: 1, OnExceed: "warn"}}
+}
+
+func TestRuntimeSyncsAndFallsBackToTheDevice(t *testing.T) {
+	today := time.Now().UTC().Format(time.DateOnly)
 	rt := NewRuntime()
-	done := make(chan []string, 1)
+	local := &fakeCounter{totals: []SeedRow{{Day: today, Key: "user:d:*:owner", USD: 3}}}
+	fleet := &fakeCounter{totals: []SeedRow{{Day: today, Key: "user:d:*:owner", USD: 9}}}
+	rt.For(adapterConfig(nil, dailyBudget()))
+	rt.mu.Lock()
+	rt.local, rt.fleet = local, fleet
+	rt.mu.Unlock()
+	rt.Charge([]string{"user:d:*:owner"}, 1, time.Now())
+	rt.SyncOnce(context.Background())
+	if got, ok := rt.Ledger().Spend("user:d:*:owner", "day", time.Now()); !ok || got != 10 {
+		t.Fatalf("fleet spend + local: %v %v", got, ok)
+	}
+	if local.pushedRows() != 1 || fleet.pushedRows() != 1 {
+		t.Fatal("this process's spend goes to both counters")
+	}
+	fleet.mu.Lock()
+	fleet.err = errors.New("store unreachable")
+	fleet.mu.Unlock()
+	rt.SyncOnce(context.Background())
+	if got, _ := rt.Ledger().Spend("user:d:*:owner", "day", time.Now()); got != 4 {
+		t.Fatalf("fleet outage falls back to this device: %v", got)
+	}
+	if state := rt.Ledger().SeedState([]string{"d"}); !strings.Contains(state, "counting this device only") {
+		t.Fatalf("state %q", state)
+	}
+}
+
+func TestRuntimeSyncLoopStartsOnlyWithBudgets(t *testing.T) {
+	rt := NewRuntime()
+	local := &fakeCounter{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rt.SetSeeder(ctx, func(context.Context, time.Time) ([]SeedRow, error) {
-		done <- nil
-		return nil, nil
-	})
-	rt.For(adapterConfig(nil, []config.RoutingBudget{{ID: "d", Scope: "user", Subject: "*", Period: "day", LimitUSD: 1, OnExceed: "warn"}}))
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("seed not started")
+	rt.SetCounters(ctx, local, nil, time.Hour)
+	rt.For(adapterConfig([]config.RoutingAdminRule{{ID: "r", Match: config.RoutingAdminMatch{Connectors: []string{"codex"}}, Allow: []string{"fast"}}}, nil))
+	rt.mu.Lock()
+	running := rt.syncing
+	rt.mu.Unlock()
+	if running {
+		t.Fatal("no budgets: no sync goroutine")
 	}
+	rt.For(adapterConfig(nil, dailyBudget()))
 	deadline := time.Now().Add(5 * time.Second)
 	for !rt.Ledger().Seeded("d") && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !rt.Ledger().Seeded("d") {
-		t.Fatal("budget d not seeded")
+		t.Fatal("budget d not synced")
+	}
+	rt.Charge([]string{"user:d:*:owner"}, 2, time.Now())
+	cancel()
+	deadline = time.Now().Add(5 * time.Second)
+	for local.pushedRows() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if local.pushedRows() == 0 {
+		t.Fatal("the last spend is stored when the gateway stops")
+	}
+}
+
+func TestLocalCounterKeepsEarlierProcesses(t *testing.T) {
+	c := NewLocalCounter(t.TempDir())
+	defer c.Close()
+	today := time.Now().UTC().Format(time.DateOnly)
+	old := time.Now().UTC().AddDate(0, 0, -70).Format(time.DateOnly)
+	ctx := context.Background()
+	if err := c.Push(ctx, "p1", []SeedRow{{Day: today, Key: "k", USD: 2}, {Day: old, Key: "k", USD: 50}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Push(ctx, "p1", []SeedRow{{Day: today, Key: "k", USD: 3}}); err != nil { // absolute, not added
+		t.Fatal(err)
+	}
+	if err := c.Push(ctx, "p2", []SeedRow{{Day: today, Key: "k", USD: 4}}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := c.Totals(ctx, "p2", time.Now().AddDate(0, 0, -LedgerDays))
+	if err != nil || len(rows) != 1 || rows[0].USD != 3 {
+		t.Fatalf("other epochs only, old days pruned: %+v %v", rows, err)
+	}
+	rows, _ = c.Totals(ctx, "p3", time.Now().AddDate(0, 0, -LedgerDays))
+	if len(rows) != 1 || rows[0].USD != 7 {
+		t.Fatalf("a new process sees both: %+v", rows)
 	}
 }
 
@@ -71,7 +173,7 @@ func TestAdapterEvaluateAndGate(t *testing.T) {
 	budgets := []config.RoutingBudget{{ID: "d", Scope: "user", Subject: "*", Period: "day", LimitUSD: 1, OnExceed: "downgrade:fast"}}
 	rt := NewRuntime()
 	ev := rt.For(adapterConfig(rules, budgets))
-	rt.Ledger().ApplySeed([]string{"d"}, nil)
+	rt.Ledger().ApplyRemote([]string{"d"}, nil, time.Now())
 	floor := engine.Policy{AllowedAliases: []string{"fast", "local"}, DefaultAlias: "fast"}
 
 	v := ev.Evaluate(context.Background(), floor, engine.Request{Connector: "claude-code", Severity: "HIGH"}, "", false)

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"net/http"
 	"runtime"
 	"strings"
 	"sync"
@@ -142,4 +143,81 @@ func routingGroupSIDsFor(cfg *config.Config) *profileGroupSIDs {
 		routingGroupSIDs.table = buildProfileGroupSIDs(names, profileGroupSIDLookup, profileGroupLocalSIDLookup, profileGroupSIDWait)
 	}
 	return routingGroupSIDs.table
+}
+
+// adminFor is the evaluator of cfg's generation: one installed with
+// SetAdminEvaluator wins (tests), else routing.admin rules and budgets of
+// cfg compiled once per generation (nil when there are none).
+func (r *engineRouter) adminFor(cfg *config.Config) engine.AdminEvaluator {
+	if r.admin != nil {
+		return r.admin
+	}
+	return routingAdminRuntime.For(cfg)
+}
+
+// startRoutingAdmin wires budgets for the run: the usage engine charges each
+// agent call's computed cost to the runtime, and this device's spend file
+// (data_dir/routing/routing_budgets.db) keeps spend across restarts. Nothing
+// runs while no budget is configured; the sync loop stops with ctx after a
+// last store. A fleet counter plugs in through routingadmin.SpendCounter.
+func (s *Sidecar) startRoutingAdmin(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.modelUsage().engine.SetSpendSink(routingAdminRuntime)
+	if s.cfg == nil || s.cfg.DataDir == "" {
+		return
+	}
+	routingAdminRuntime.SetCounters(ctx, routingadmin.NewLocalCounter(s.cfg.DataDir), nil, 0)
+}
+
+// gateOriginal re-runs the admin gate when a routed decision ends up sending
+// the original request (a stored response id of the original provider, a
+// backend with no known origin): on a managed device an allow list or a
+// budget downgrade binds that exit too.
+func (p *GuardrailProxy) gateOriginal(ctx context.Context, o SemanticRouteOutcome, provider, model string) SemanticRouteOutcome {
+	if o.Result == SemanticRouteDenied {
+		return o
+	}
+	o.Result, o.Decision = SemanticRouteFallback, nil
+	p.applyRouteGate(ctx, &o, provider, model)
+	return o
+}
+
+// gateUnrouted applies routing.admin rules and budgets to a passthrough
+// request the router does not route (an API family it does not rewrite such
+// as count_tokens, a signed Bedrock body): the request still goes to its
+// own model, which a managed allow list or downgrade may refuse. Read-only
+// GET requests (model lists) are exempt. Nothing runs unless routing is on
+// and routing.admin has rules or budgets.
+func (p *GuardrailProxy) gateUnrouted(r *http.Request, in passthroughRouteInput) SemanticRouteOutcome {
+	if p == nil || r.Method == http.MethodGet {
+		return SemanticRouteOutcome{}
+	}
+	ctx := r.Context()
+	router, ok := p.modelRouter.(*engineRouter)
+	if !ok || !p.routerActive(ctx) {
+		return SemanticRouteOutcome{}
+	}
+	eng, cfg := router.engineFor(ctx)
+	if eng == nil || cfg == nil || router.adminFor(cfg) == nil {
+		return SemanticRouteOutcome{}
+	}
+	model := in.Model
+	if strings.Contains(r.URL.Path, "/model/") {
+		model = bedrockModelFromPath(r.URL.Path)
+	}
+	caller, profiles := routeCallerFromContext(ctx)
+	d := eng.Decide(ctx, engineRequest(&ModelRouterInput{
+		Model: model, RequestModel: model, APIFamily: in.APIFamily, Connector: p.connectorName(),
+		Listener: engine.ListenerGuardrail, Severity: in.Severity, RequestedProvider: in.Provider,
+		Text: in.Text, Caller: caller, Profiles: profiles,
+	}))
+	o := SemanticRouteOutcome{Result: SemanticRouteFallback, Route: &d}
+	if d.Deny != nil {
+		o.Result, o.Deny = SemanticRouteDenied, d.Deny
+		return o
+	}
+	p.applyRouteGate(ctx, &o, in.Provider, model)
+	return o
 }

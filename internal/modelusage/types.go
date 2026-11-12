@@ -67,6 +67,11 @@ type CallFacts struct {
 	Groups           []string
 	IdentityVerified bool
 
+	// ChargeKeys are the routing.admin budget keys of the call (from the
+	// routing verdict). Only the budget sink reads them; they never leave
+	// the endpoint on exported records.
+	ChargeKeys []string
+
 	StartedAt time.Time
 }
 

@@ -35,7 +35,7 @@ func TestRoutingBudgetViewsShowOwnOnly(t *testing.T) {
 		t.Fatal("evaluator")
 	}
 	now := time.Now()
-	routingAdminRuntime.Ledger().ApplySeed([]string{"daily", "eng"}, nil)
+	routingAdminRuntime.Ledger().ApplyRemote([]string{"daily", "eng"}, nil, now)
 	routingAdminRuntime.Charge([]string{"user:daily:*:1001"}, 4, now)
 	routingAdminRuntime.Charge([]string{"user:daily:*:1002"}, 7, now)
 	user := routingBudgetViews(cfg, "1001", false, now)
@@ -128,4 +128,19 @@ func TestRoutingCallerMatcherUsesTheVerifiedSubject(t *testing.T) {
 func profileProcessOwnerAvailable() bool {
 	_, ok := profileProcessOwnerSubject()
 	return ok
+}
+
+func TestUnroutedGateCostsNothingWithoutAnAdminPolicy(t *testing.T) {
+	p := &GuardrailProxy{}
+	in := passthroughRouteInput{Model: "claude", Provider: "anthropic"}
+	if o := p.gateUnrouted(httptest.NewRequest(http.MethodGet, "/v1/models", nil), in); o.Result != "" || o.Route != nil {
+		t.Fatalf("GET is exempt: %+v", o)
+	}
+	if o := p.gateUnrouted(httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", nil), in); o.Result != "" || o.Route != nil {
+		t.Fatalf("no router: %+v", o)
+	}
+	denied := SemanticRouteOutcome{Result: SemanticRouteDenied, Deny: &engine.DenyReason{Code: "x"}}
+	if got := p.gateOriginal(context.Background(), denied, "anthropic", "claude"); got.Result != SemanticRouteDenied || got.Deny.Code != "x" {
+		t.Fatalf("a denied outcome stays denied: %+v", got)
+	}
 }
