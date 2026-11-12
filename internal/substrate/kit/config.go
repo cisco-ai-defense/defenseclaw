@@ -38,8 +38,10 @@ const (
 	PlaceholderHeader = "x-defenseclaw-actor"
 	PlaceholderValue  = "placeholder"
 
-	// DefaultGatewayURL is the actor listener Service (PLAN 5.1, D15).
-	DefaultGatewayURL = "https://defenseclaw-actor.defenseclaw-system.svc"
+	// DefaultGatewayURL is the actor listener Service (PLAN 5.1, D15), by
+	// its FQDN: egress resolves only names in the actor's policy, so the
+	// short .svc name is NXDOMAIN in an actor (substrate-1 GAP-0023).
+	DefaultGatewayURL = "https://defenseclaw-actor.defenseclaw-system.svc.cluster.local"
 
 	// MaxAttachBytes caps the facts a hook attaches (D9, E19, E20).
 	MaxAttachBytes int64 = 1 << 20

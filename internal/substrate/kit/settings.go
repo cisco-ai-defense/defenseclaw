@@ -279,6 +279,9 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 			env["ANTHROPIC_BASE_URL"] = gw + "/llm/anthropic"
 			env["ANTHROPIC_API_KEY"] = "placeholder-not-a-secret"
 		}
+		// Model calls carry the placeholder too, so egress gives the
+		// gateway's /llm route the actor JWT as the verified caller (D2).
+		env["ANTHROPIC_CUSTOM_HEADERS"] = PlaceholderHeader + ": " + PlaceholderValue
 		if o.Model != "" {
 			for _, k := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 				"ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL"} {
@@ -399,7 +402,8 @@ func codexManagedConfig(data []byte, gw string, o OverlayOptions) ([]byte, error
 	if i := strings.Index(s, "\n["); i >= 0 {
 		s = s[:i+1] + top + s[i+1:]
 	}
-	s += fmt.Sprintf("\n[model_providers.defenseclaw]\nname = 'DefenseClaw'\nbase_url = '%s/llm/openai/v1'\nenv_key = 'OPENAI_API_KEY'\nwire_api = 'responses'\n", gw)
+	s += fmt.Sprintf("\n[model_providers.defenseclaw]\nname = 'DefenseClaw'\nbase_url = '%s/llm/openai/v1'\nenv_key = 'OPENAI_API_KEY'\nwire_api = 'responses'\n"+
+		"http_headers = { %s = '%s' }\n", gw, PlaceholderHeader, PlaceholderValue)
 	return []byte(s), nil
 }
 
