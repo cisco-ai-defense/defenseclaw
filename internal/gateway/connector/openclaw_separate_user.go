@@ -76,6 +76,9 @@ func openClawSeparateUserBlock(opts SetupOpts, paths openClawPaths) string {
 	if opts.HILTEnabled {
 		block["approvals"] = map[string]interface{}{"plugin": map[string]interface{}{"enabled": true, "mode": "session"}}
 	}
+	if policy := openClawSeparateUserInstallPolicy(opts); policy != nil {
+		block["security"] = map[string]interface{}{"installPolicy": policy}
+	}
 	out, _ := json.MarshalIndent(block, "", "  ")
 	return string(out)
 }
@@ -111,6 +114,7 @@ func openClawSeparateUserMissing(cfg map[string]interface{}, opts SetupOpts, pat
 			missing = append(missing, "approvals.plugin.enabled true")
 		}
 	}
+	missing = append(missing, openClawSeparateUserInstallPolicyMissing(cfg, opts)...)
 	return missing
 }
 
@@ -166,6 +170,6 @@ func (c *OpenClawConnector) teardownSeparateUser(opts SetupOpts, paths openClawP
 		}
 	}
 	fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: removed the plugin credential; DefenseClaw does not write %s in the separate-user layout, "+
-		"so remove plugins.entries.defenseclaw, defenseclaw from plugins.allow and %s from plugins.load.paths there yourself\n", paths.config, paths.external)
+		"so remove plugins.entries.defenseclaw, defenseclaw from plugins.allow, %s from plugins.load.paths and a security.installPolicy that runs defenseclaw-gateway there yourself\n", paths.config, paths.external)
 	return nil
 }

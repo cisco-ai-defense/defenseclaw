@@ -168,6 +168,7 @@ DefenseClaw 1.0.5 and 1.0.6 could save the secret reference text itself in `~/.d
 | What | Where |
 | --- | --- |
 | Plugin allow and load entries | `~/.openclaw/openclaw.json` |
+| Install admission (`security.installPolicy`), when on | `~/.openclaw/openclaw.json` |
 | Plugin | `~/.openclaw/extensions/defenseclaw/` (`openclaw.plugin.json`, `package.json`, `dist/index.js`) |
 | Hook scripts | `~/.defenseclaw/hooks` |
 | Subprocess shims | on `PATH`, for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` |
@@ -234,6 +235,54 @@ OpenClaw model requests use the proxy while the gateway is running. On a classif
 When the gateway cannot write the audit record of a tool check or a prompt, for example on a full disk, the strict policy blocks the call. The default and permissive policies allow it and say that DefenseClaw audit is degraded. Tool results and model responses keep their verdict.
 
 On OpenClaw 2026.4.24 and later, Setup grants the DefenseClaw prompt hook access so the model outage warning reaches the agent, unless the operator already set `plugins.entries.defenseclaw.hooks.allowConversationAccess`. If an operator disables prompt injection hooks, the warning still appears in the OpenClaw log.
+
+## Install admission
+
+OpenClaw 2026.8.35 and later can ask a local command before they install or update a skill or plugin (`security.installPolicy`). DefenseClaw can be that command. OpenClaw then installs a skill or plugin only when DefenseClaw admission allows it: the same scan, block list and allow list as for any other skill or plugin.
+
+Turn it on or off with `connectors.openclaw.install_policy`:
+
+| Value | Effect |
+| --- | --- |
+| `auto` (default) | On with the `strict` policy and on managed installs. Off with the `default` and `permissive` policies. |
+| `on` | Always on. |
+| `off` | Always off. |
+
+```bash
+defenseclaw config set connectors.openclaw.install_policy on
+defenseclaw setup openclaw --restart
+```
+
+When it is on, setup writes this block into `openclaw.json`. The command is the `defenseclaw-gateway` binary that ran setup, and its folder is the only trusted folder:
+
+```json
+"security": {
+  "installPolicy": {
+    "enabled": true,
+    "targets": ["skill", "plugin"],
+    "exec": {
+      "source": "exec",
+      "command": "/home/alice/.local/bin/defenseclaw-gateway",
+      "args": ["connector", "openclaw", "install-policy"],
+      "timeoutMs": 315000,
+      "noOutputTimeoutMs": 315000,
+      "trustedDirs": ["/home/alice/.local/bin"]
+    }
+  }
+}
+```
+
+The block also names a few environment variables (`passEnv`, `env`) that the command needs. The timeout is the longest skill or plugin scan plus 15 seconds.
+
+- Setup leaves an `installPolicy` you wrote yourself in place and does not add its own. It says so once.
+- Teardown removes the block only while it is exactly what setup wrote.
+- OpenClaw older than 2026.8.35 does not know the key, so setup does not write it there.
+
+The answer is allow or block. A block names the reason and the findings, and OpenClaw shows them. DefenseClaw never answers with a warning, because OpenClaw blocks a warning for installs that have no operator prompt.
+
+If the DefenseClaw gateway does not answer, the `strict` policy and managed installs block the install. The `default` and `permissive` policies allow it and print a warning. A missing credential, a listener that does not prove it is your gateway, or an error from the gateway blocks the install with every policy.
+
+OpenClaw runs only a command it trusts. The file and every folder above it must be owned by root or by the account that runs OpenClaw, and must not be writable by the group or by others (a sticky folder such as `/tmp` is accepted). A link is refused. A per-user install in `~/.local/bin` passes when your home folder and ~/.local are not group-writable. Setup checks the same rule and does not write a command that OpenClaw would refuse, because OpenClaw then blocks every install. In the separate-user layout the binary must be owned by root, and setup adds the block to the JSON it asks the administrator to merge.
 
 ## Subprocess policy
 

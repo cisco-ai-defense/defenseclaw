@@ -101,6 +101,15 @@ type SetupOpts struct {
 	OpenClawPluginAccount    string
 	OpenClawPluginTokenFile  string
 	OpenClawPluginTokenGroup string
+	// OpenClawInstallPolicy is connectors.openclaw.install_policy resolved
+	// (config.OpenClawInstallPolicyOn): setup registers DefenseClaw as
+	// OpenClaw security.installPolicy. OpenClawInstallPolicyTimeoutMs is the
+	// exec timeout it writes and OpenClawInstallPolicyFailsClosed the answer
+	// on a gateway outage, which the separate-user block carries because the
+	// OpenClaw account cannot read config.yaml there.
+	OpenClawInstallPolicy            bool
+	OpenClawInstallPolicyTimeoutMs   int
+	OpenClawInstallPolicyFailsClosed bool
 	// HookAPIToken is the least-privilege credential written beside generated
 	// hook artifacts. Proxy connectors keep APIToken as the master credential
 	// for their in-process/plugin integration while their generic shell hooks

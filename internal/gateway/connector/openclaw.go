@@ -334,6 +334,9 @@ func (c *OpenClawConnector) registerPlugin(opts SetupOpts) error {
 			openClawConversationHooksSupported(observedVersion)); err != nil {
 			return fmt.Errorf("openclaw extension install: %w", err)
 		}
+		if err := applyOpenClawInstallPolicy(configPath, opts); err != nil {
+			return fmt.Errorf("openclaw install policy: %w", err)
+		}
 		if keepSnapshot {
 			if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
 				return fmt.Errorf("openclaw config backup hash: %w", err)
@@ -474,6 +477,8 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 		if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
 			errs = append(errs, fmt.Sprintf("restore openclaw.json backup: %v", err))
 		} else if restored {
+			// The restored bytes predate setup and so its install policy.
+			discardOpenClawInstallPolicyRecord(opts.DataDir)
 			if err := safeRemoveAll(paths.managedPluginDir(), paths.extensionsDir()); err != nil {
 				errs = append(errs, fmt.Sprintf("remove extension dir: %v", err))
 			}
@@ -488,6 +493,9 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 			if _, statErr := os.Stat(managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")); statErr == nil {
 				fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: %s changed after DefenseClaw set it up (OpenClaw or you saved it); "+
 					"removed only the DefenseClaw settings and kept everything else, so the file is not byte for byte the copy from before setup\n", configPath)
+			}
+			if err := removeOpenClawInstallPolicy(configPath, opts.DataDir); err != nil {
+				errs = append(errs, fmt.Sprintf("remove security.installPolicy: %v", err))
 			}
 			if err := uninstallOpenClawExtension(paths, dropRejectedApprovals, openClawSetupGrantFor(opts.DataDir, c.Name())); err != nil {
 				errs = append(errs, fmt.Sprintf("uninstall extension: %v", err))

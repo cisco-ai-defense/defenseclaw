@@ -6256,7 +6256,8 @@
             "operator_admin": {"type": "boolean", "default": true, "description": "Request the OpenClaw operator.admin scope (used only to turn off a skill, plugin or MCP server through OpenClaw). false keeps read, write and approvals."},
             "plugin_account": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.\\-]{0,63}$", "description": "OS account of the OpenClaw gateway when it is not the sidecar account (separate-user layout)."},
             "plugin_token_file": {"$ref": "#/$defs/pathString", "description": "Separate-user layout: where the sidecar publishes the plugin credential for plugin_account."},
-            "plugin_token_group": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.\\-]{0,63}$", "description": "Separate-user layout (Linux, macOS): group allowed to read plugin_token_file."}
+            "plugin_token_group": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.\\-]{0,63}$", "description": "Separate-user layout (Linux, macOS): group allowed to read plugin_token_file."},
+            "install_policy": {"type": "string", "enum": ["auto", "on", "off"], "default": "auto", "description": "Register DefenseClaw as OpenClaw security.installPolicy (OpenClaw 2026.8.35 and later), so OpenClaw asks DefenseClaw admission before a skill or plugin install or update. auto: on in the strict tier and on managed installs, off in the default and permissive tiers."}
           }
         }
       }
