@@ -66,6 +66,32 @@ type SubstrateLLMConfig struct {
 
 var substrateProviderRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
+// substrateModelPaths are the provider paths /llm serves: the model APIs
+// and nothing else. The proxy's own routes (provider registry and reload,
+// egress events, health, models) and every other provider path answer 404
+// (D15; GAP-0041). A provider with no entry serves nothing.
+var substrateModelPaths = map[string][]*regexp.Regexp{
+	"bedrock": {regexp.MustCompile(`^/model/[^/]+/(invoke|invoke-with-response-stream|converse|converse-stream)$`)},
+	"anthropic": {
+		regexp.MustCompile(`^/v1/messages$`),
+		regexp.MustCompile(`^/v1/messages/count_tokens$`),
+	},
+	"openai": {
+		regexp.MustCompile(`^/v1/chat/completions$`),
+		regexp.MustCompile(`^/v1/responses$`),
+	},
+	"gemini": {regexp.MustCompile(`^/v1(beta|alpha)?/models/[^/:]+:(generateContent|streamGenerateContent|countTokens)$`)},
+}
+
+func substrateModelPath(provider, p string) bool {
+	for _, re := range substrateModelPaths[provider] {
+		if re.MatchString(p) {
+			return true
+		}
+	}
+	return false
+}
+
 // DefaultSubstrateLLMProviders returns the upstreams of the providers the
 // proxy serves, with their keys under credDir/<provider>.
 func DefaultSubstrateLLMProviders(credDir, bedrockRegion string) map[string]SubstrateLLMProvider {
@@ -120,7 +146,7 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upstream := "/" + upstreamPath
-	if path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") {
+	if path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") || !substrateModelPath(provider, upstream) {
 		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
 		return
 	}
