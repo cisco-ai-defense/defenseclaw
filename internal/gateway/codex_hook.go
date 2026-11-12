@@ -323,7 +323,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) &&
 			(cfg == nil || !cfg.SecureClientIntegration()) {
 			actionInput.DialectHint = selectWindowsShellDialect(
-				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
+				toolName, windowsShellDialectCommand(actionInput), actionInput,
 			)
 		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{

@@ -4030,13 +4030,23 @@ func selectWindowsShellDialect(tool, command string, input actionfacts.Input) ac
 // agentHookWindowsShellDialect reads only the server-projected shell arguments.
 // A payload-supplied dialect field cannot choose the parser grammar.
 func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
-	var args struct {
-		Command string `json:"command"`
-	}
-	if json.Unmarshal(input.Args, &args) != nil {
+	return selectWindowsShellDialect(input.Tool, windowsShellDialectCommand(input), input)
+}
+
+// windowsShellDialectCommand is the shell text the Windows dialect selection
+// reads: the command the trusted-action parse itself reads from the
+// arguments (trustedTopLevelCommandField: command, cmd and the other command
+// keys; none when a key repeats). Read from "command" alone, a Codex
+// exec_command call, whose text is in cmd, got no dialect on Windows: its
+// write of a credential file was judged in no complete grammar, so the
+// credential rule only alerted, while the same text in the Bash shape was
+// blocked (GAP-1076).
+func windowsShellDialectCommand(input actionfacts.Input) string {
+	command, found, valid := trustedTopLevelCommandField(input.Args)
+	if !found || !valid {
 		return ""
 	}
-	return selectWindowsShellDialect(input.Tool, args.Command, input)
+	return command
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for
