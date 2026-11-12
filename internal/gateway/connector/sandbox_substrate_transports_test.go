@@ -85,3 +85,40 @@ func TestOpenShellSideTransportsUnchanged(t *testing.T) {
 		t.Fatal("OpenShell OTLP exporters send the actor header")
 	}
 }
+
+// The OpenCode plugin of a Substrate render holds no token and opens no
+// connection: it execs the kit's hook-post. Amp's plugin has no such
+// variant, so its Substrate render stays refused. OpenShell renders keep
+// the binding-token post.
+func TestSubstratePluginTransport(t *testing.T) {
+	oc := substrateRender(t, NewOpenCodeConnector(), "2.1.4")
+	plugin := artifactFile(oc, "/opencode/index.js")
+	for _, want := range []string{SandboxSubstrateHookBinary, `["hook-post"]`, `/api/v1/opencode/hook`, "sandbox hooks always fail closed"} {
+		if !strings.Contains(plugin, want) {
+			t.Errorf("OpenCode Substrate plugin lacks %q", want)
+		}
+	}
+	for _, bad := range []string{SandboxTokenEnv, "fetch(", "http://", "{{"} {
+		if strings.Contains(plugin, bad) {
+			t.Errorf("OpenCode Substrate plugin contains %q", bad)
+		}
+	}
+	if env := oc.Env[SandboxTokenEnv]; env != SandboxSubstrateTokenPlaceholder {
+		t.Errorf("OpenCode env %s = %q", SandboxTokenEnv, env)
+	}
+
+	in := &SandboxIngress{Runtime: sandboxruntime.Substrate, Host: substrateTestHost, Port: 443, Scheme: "https", ActorHeader: true}
+	if _, err := NewAMPConnector().SandboxArtifacts(SandboxRenderTarget{Ingress: in, AgentVersion: "0.0.1785334225-g9abe75"}); err == nil ||
+		!strings.Contains(err.Error(), "no Agent Substrate transport") {
+		t.Errorf("Amp rendered for Substrate: %v", err)
+	}
+
+	openshell, err := NewOpenCodeConnector().SandboxArtifacts(SandboxRenderTarget{IngressPort: 18970, FailMode: SandboxFailMode, AgentVersion: "2.1.4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	osPlugin := artifactFile(openshell, "/opencode/index.js")
+	if !strings.Contains(osPlugin, SandboxTokenEnv) || strings.Contains(osPlugin, "hook-post") {
+		t.Error("OpenShell OpenCode plugin changed")
+	}
+}
