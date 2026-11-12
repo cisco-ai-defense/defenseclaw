@@ -16,8 +16,10 @@
 
 // Package auth signs the substrate launcher in: cluster contexts
 // (non-secret, a JSON file under the DefenseClaw state directory), the
-// OIDC device authorization grant for people, workload tokens for CI, an
-// OS keychain token store and a token source that refreshes on demand.
+// OIDC device authorization grant for people, workload tokens for CI, the
+// Kubernetes identity of the current kubeconfig for installs without an
+// OIDC provider, an OS keychain token store and a token source that
+// refreshes on demand.
 //
 // Token values never appear in errors, in Describe() or in the String
 // form of a Token.
@@ -38,12 +40,17 @@ const (
 	EnvAdminURL           = "DEFENSECLAW_SUBSTRATE_ADMIN_URL"
 	EnvIssuer             = "DEFENSECLAW_SUBSTRATE_ISSUER"
 	EnvClientID           = "DEFENSECLAW_SUBSTRATE_CLIENT_ID"
-	EnvRouterURL          = "DEFENSECLAW_SUBSTRATE_ROUTER_URL"
+	EnvWorkloadAudience   = "DEFENSECLAW_SUBSTRATE_WORKLOAD_AUDIENCE"
 	EnvTokenStore         = "DEFENSECLAW_SUBSTRATE_TOKEN_STORE"
 	EnvWorkloadTokenFile  = "DEFENSECLAW_SUBSTRATE_WORKLOAD_TOKEN_FILE"
 	EnvK8sTokenFile       = "DEFENSECLAW_SUBSTRATE_K8S_TOKEN_FILE"
 	EnvGitHubRequestURL   = "ACTIONS_ID_TOKEN_REQUEST_URL"
 	EnvGitHubRequestToken = "ACTIONS_ID_TOKEN_REQUEST_TOKEN"
+	// EnvKube=1 (or true) turns the context into a Kubernetes-identity
+	// context for one run (CI); 0 or false turns it off.
+	EnvKube = "DEFENSECLAW_SUBSTRATE_KUBE"
+	// EnvKubeconfig is the standard kubeconfig list variable.
+	EnvKubeconfig = "KUBECONFIG"
 )
 
 const (
@@ -51,11 +58,15 @@ const (
 	KindPerson = "person"
 	// KindWorkload marks a CI workload token.
 	KindWorkload = "workload"
+	// KindKube marks a bearer read from the kubeconfig: the gateway
+	// verifies it with a TokenReview and the person is the Kubernetes
+	// user (id kind k8s_user).
+	KindKube = "k8s_user"
 
-	// DefaultWorkloadAudience is the audience asked of GitHub Actions OIDC.
+	// DefaultWorkloadAudience is the audience a workload token must carry
+	// when the context sets no workload_audience. It must be the audience
+	// the cluster trusts for the CI identity provider (workload_oidc).
 	DefaultWorkloadAudience = "defenseclaw"
-	// DefaultK8sTokenPath is the projected service-account token.
-	DefaultK8sTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 	keychainService = "defenseclaw-substrate"
 	loginHint       = "run: defenseclaw substrate login"

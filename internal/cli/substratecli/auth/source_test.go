@@ -237,7 +237,7 @@ func TestSourceRefreshFailures(t *testing.T) {
 func TestSourceWorkloadSkipsStore(t *testing.T) {
 	dir := t.TempDir()
 	clk := newClock()
-	f := writeTok(t, dir, "wl", testJWT(t, "wl-marker", map[string]any{"sub": "system:serviceaccount:t:ci-workload", "exp": clk.Now().Add(time.Hour).Unix()}))
+	f := writeTok(t, dir, "wl", testJWT(t, "wl-marker", map[string]any{"aud": "defenseclaw", "sub": "system:serviceaccount:t:ci-workload", "exp": clk.Now().Add(time.Hour).Unix()}))
 	st := newMemStore()
 	st.failAll = true
 	s := NewSource("e1", Context{AdminURL: "https://admin.example.test"}, st, SourceOptions{Workload: &WorkloadOptions{TokenFile: f, Env: emptyEnv}, Now: clk.Now})
@@ -250,7 +250,7 @@ func TestSourceWorkloadSkipsStore(t *testing.T) {
 		t.Fatalf("current = %v, %v", cur, err)
 	}
 	// Read fresh every call.
-	writeTok(t, dir, "wl", testJWT(t, "wl-marker-2", map[string]any{"exp": clk.Now().Add(time.Hour).Unix()}))
+	writeTok(t, dir, "wl", testJWT(t, "wl-marker-2", map[string]any{"aud": "defenseclaw", "exp": clk.Now().Add(time.Hour).Unix()}))
 	if b, _ := s.Token(context.Background()); decodeClaimsMarker(b) != "wl-marker-2" {
 		t.Error("workload token was cached")
 	}
