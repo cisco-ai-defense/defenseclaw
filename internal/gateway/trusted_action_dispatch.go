@@ -391,16 +391,19 @@ func dispatchTrustedAction(
 	// binding; the other tiers follow the top-level statements before it.
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
+	bound := trustedActionCommandBound(request.Input)
+	if bound == shellReadingTooDeep || bound == shellReadingNestedBodies {
+		// Past the reading bounds: no reader below parses it, and the call
+		// takes the over-limit path, which the profile decides (GAP-2537,
+		// GAP-0677). It is decided before the recovered-parse reading
+		// below, which would read the same bodies again for the same
+		// finding.
+		return trustedActionLimitFindings(request.EnforcementCapable)
+	}
 	if request.EnforcementCapable && trustedCallShellParseBound(request) {
 		return trustedActionLimitFindings(true)
 	}
-	switch trustedActionCommandBound(request.Input) {
-	case shellReadingTooDeep, shellReadingNestedBodies:
-		// Past the reading bounds: no reader below parses it, and the call
-		// takes the over-limit path, which the profile decides (GAP-2537,
-		// GAP-0677).
-		return trustedActionLimitFindings(request.EnforcementCapable)
-	case shellReadingNestedProof:
+	if bound == shellReadingNestedProof {
 		// The readers below read it, but past this weight they do not prove
 		// its protected targets: a call whose text may name one also gets
 		// the evaluation-limit finding the profile decides.
