@@ -1914,18 +1914,9 @@
         "session_token_env": {
           "$ref": "#/$defs/envName"
         },
-        "access_key_credential": {
-          "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
-        },
-        "secret_key_credential": {
-          "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
-        },
-        "session_token_credential": {
-          "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
-        }
+        "access_key_credential": {"$ref": "#/$defs/credentialName"},
+        "secret_key_credential": {"$ref": "#/$defs/credentialName"},
+        "session_token_credential": {"$ref": "#/$defs/credentialName"}
       }
     },
     "routingUpstream": {
@@ -4995,10 +4986,7 @@
             "api_key_env": {
               "$ref": "#/$defs/envName"
             },
-            "credential": {
-              "type": "string",
-              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
-            },
+            "credential": {"$ref": "#/$defs/credentialName"},
             "timeout_ms": {
               "type": "integer",
               "minimum": 0,
@@ -5123,10 +5111,7 @@
                   ]
                 }
               },
-              "credential": {
-                "type": "string",
-                "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
-              },
+              "credential": {"$ref": "#/$defs/credentialName"},
               "bedrock": {
                 "$ref": "#/$defs/routingBedrockAuth"
               }

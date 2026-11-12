@@ -21,8 +21,8 @@ func TestRoutingPolicyKeysAbsentKeep109Meaning(t *testing.T) {
 	if got := cfg.EffectiveOnClassifierError(); got != RoutingOnErrorOriginal {
 		t.Fatalf("absent on_classifier_error = %q, want original", got)
 	}
-	c := &Config{Routing: cfg}
-	if keys := c.UsesMinProductVersion1010Keys(); keys != nil {
+	raw := []byte("routing:\n  enabled: true\n  version: 0.3.0\n  models:\n    - {name: fast, provider: ollama, model: m}\n  decisions:\n    - {name: d, conditions: [{type: keyword, name: code}], model_refs: [fast]}\n")
+	if keys := RoutingMinVersionKeysInRaw(raw); keys != nil {
 		t.Fatalf("a 1.0.9 routing block needs 1.0.10 keys %v", keys)
 	}
 }
@@ -248,15 +248,35 @@ func TestRoutingSecureClientRefusesAdminAndRouteOnly(t *testing.T) {
 	}
 }
 
-func TestUsesMinProductVersion1010KeysListsNewKeys(t *testing.T) {
-	cfg := &Config{Routing: validRoutingConfigForTest()}
-	cfg.Routing.Classifier = "rules"
-	cfg.Routing.Admin = &RoutingAdminConfig{AllowedAliases: []string{"fast"}}
-	cfg.Guardrail.Profiles = map[string]GuardrailProfile{"eng": {Routing: &RoutingPolicyConfig{}}}
-	got := cfg.UsesMinProductVersion1010Keys()
-	for _, want := range []string{"routing.classifier", "routing.admin", "guardrail.profiles.*.routing"} {
+func TestRoutingMinVersionKeysInRawCountsExplicitZeroValues(t *testing.T) {
+	raw := []byte(`routing:
+  allow_user_override: false
+  min_confidence: 0
+  models:
+    - {name: fast, provider: openai, model: m, apis: [chat]}
+  decisions:
+    - {name: d, conditions: [{type: request, name: has_tools}], model_refs: [fast]}
+guardrail:
+  profiles:
+    eng:
+      routing: {}
+`)
+	got := RoutingMinVersionKeysInRaw(raw)
+	for _, want := range []string{"routing.allow_user_override", "routing.min_confidence", "routing.models[].apis/credential/bedrock", "routing.decisions[].conditions[].type", "guardrail.profiles.*.routing"} {
 		if !slices.Contains(got, want) {
 			t.Fatalf("keys = %v, missing %s", got, want)
 		}
+	}
+}
+
+func TestRoutingSystemOneNeedsAnEndpoint(t *testing.T) {
+	cfg := &Config{Routing: validRoutingConfigForTest()}
+	cfg.Routing.Classifier = RoutingClassifierSystemOne
+	if err := cfg.validateRoutingProfiles(); err == nil || !strings.Contains(err.Error(), "decision_model") {
+		t.Fatalf("systemone with no decision_model = %v, want refused", err)
+	}
+	cfg.DecisionModel.BaseURL, cfg.DecisionModel.Model = "http://127.0.0.1:8791/v1/systemone", "s1"
+	if err := cfg.validateRoutingProfiles(); err != nil {
+		t.Fatalf("systemone reusing decision_model = %v", err)
 	}
 }

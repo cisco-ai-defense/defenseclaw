@@ -8724,7 +8724,7 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
         signals=mapping("signals"),
         decisions=mapping_list("decisions"),
         classifier=str(raw.get("classifier", "") or ""),
-        min_confidence=_routing_float(raw.get("min_confidence")),
+        min_confidence=_optional_float(raw.get("min_confidence")) or 0.0,
         on_classifier_error=str(raw.get("on_classifier_error", "") or ""),
         default_alias=str(raw.get("default_alias", "") or ""),
         categories=mapping("categories"),
@@ -8734,15 +8734,6 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
         route_only=mapping("route_only"),
         admin=mapping("admin"),
     )
-
-
-def _routing_float(value: Any) -> float:
-    if isinstance(value, bool):
-        return 0.0
-    try:
-        return float(value) if value is not None else 0.0
-    except (TypeError, ValueError):
-        return 0.0
 
 
 def _merge_fleet(raw: dict[str, Any] | None) -> FleetConfig:

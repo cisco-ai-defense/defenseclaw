@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // RoutingPolicyContradictionError is returned when a tighter layer leaves
@@ -41,13 +43,16 @@ func TightenRoutingPolicy(base RoutingPolicyConfig, overlay *RoutingPolicyConfig
 		return out, nil
 	}
 	if locked != nil {
-		for key, set := range map[string]bool{
-			"default_alias":       overlay.DefaultAlias != "",
-			"categories":          overlay.Categories != nil,
-			"allow_user_override": overlay.AllowUserOverride != nil,
+		for _, k := range []struct {
+			key string
+			set bool
+		}{
+			{"default_alias", overlay.DefaultAlias != ""},
+			{"categories", overlay.Categories != nil},
+			{"allow_user_override", overlay.AllowUserOverride != nil},
 		} {
-			if set && locked(key) {
-				return RoutingPolicyConfig{}, &RoutingPolicyContradictionError{Field: key, Message: fmt.Sprintf("routing: %s is locked by routing.admin", key)}
+			if k.set && locked(k.key) {
+				return RoutingPolicyConfig{}, &RoutingPolicyContradictionError{Field: k.key, Message: fmt.Sprintf("routing: %s is locked by routing.admin", k.key)}
 			}
 		}
 	}
@@ -178,6 +183,11 @@ func (c *Config) RoutingPolicyForProfile(name string) (RoutingPolicyConfig, erro
 // guardrail profile routing overlay: its own values, then the combined
 // policy (contradictions and locked keys are load errors).
 func (c *Config) validateRoutingProfiles() error {
+	r := c.Routing
+	if r.EffectiveClassifier() == RoutingClassifierSystemOne && r.SystemOne.EffectiveUseDecisionModel() &&
+		(strings.TrimSpace(c.DecisionModel.BaseURL) == "" || strings.TrimSpace(c.DecisionModel.Model) == "") {
+		return fmt.Errorf("config: routing.classifier systemone reuses decision_model, which needs base_url and model (or set routing.systemone.use_decision_model: false with its own base_url and model)")
+	}
 	if _, err := c.RoutingFloor(); err != nil {
 		return fmt.Errorf("config: routing.admin: %w", err)
 	}
@@ -214,45 +224,58 @@ func (c *Config) validateSecureClientRouting() error {
 	return nil
 }
 
-// UsesMinProductVersion1010Keys lists the routing keys cfg sets that only
-// 1.0.10 and later read.
-func (c *Config) UsesMinProductVersion1010Keys() []string {
-	if c == nil {
+// RoutingMinVersionKeysInRaw lists the 1.0.10 routing keys a config.yaml
+// writes, read from the YAML itself so an explicit zero value (for example
+// allow_user_override: false or a profile routing: {}) counts: a 1.0.9
+// device refuses the key whatever its value.
+func RoutingMinVersionKeysInRaw(raw []byte) []string {
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil || doc == nil {
 		return nil
 	}
-	r := c.Routing
 	var keys []string
-	add := func(set bool, key string) {
-		if set {
-			keys = append(keys, key)
+	if routing, ok := doc["routing"].(map[string]any); ok {
+		for _, k := range []string{"classifier", "min_confidence", "on_classifier_error", "default_alias", "categories", "allow_user_override", "sensitive", "systemone", "route_only", "admin"} {
+			if _, set := routing[k]; set {
+				keys = append(keys, "routing."+k)
+			}
+		}
+		if models, ok := routing["models"].([]any); ok {
+			for _, m := range models {
+				entry, _ := m.(map[string]any)
+				_, apis := entry["apis"]
+				_, cred := entry["credential"]
+				_, bedrock := entry["bedrock"]
+				if apis || cred || bedrock {
+					keys = append(keys, "routing.models[].apis/credential/bedrock")
+					break
+				}
+			}
+		}
+		if decisions, ok := routing["decisions"].([]any); ok {
+		decisionLoop:
+			for _, d := range decisions {
+				entry, _ := d.(map[string]any)
+				conds, _ := entry["conditions"].([]any)
+				for _, c := range conds {
+					cond, _ := c.(map[string]any)
+					if t, _ := cond["type"].(string); t != "" && !strings.EqualFold(strings.TrimSpace(t), RoutingConditionKeyword) {
+						keys = append(keys, "routing.decisions[].conditions[].type")
+						break decisionLoop
+					}
+				}
+			}
 		}
 	}
-	add(r.Classifier != "", "routing.classifier")
-	add(r.MinConfidence != 0, "routing.min_confidence")
-	add(r.OnClassifierError != "", "routing.on_classifier_error")
-	add(r.DefaultAlias != "", "routing.default_alias")
-	add(r.Categories != nil, "routing.categories")
-	add(r.AllowUserOverride, "routing.allow_user_override")
-	add(r.Sensitive != nil, "routing.sensitive")
-	add(r.SystemOne != nil, "routing.systemone")
-	add(!r.RouteOnly.IsZero(), "routing.route_only")
-	add(r.Admin != nil, "routing.admin")
-	models := false
-	for _, m := range r.Models {
-		models = models || m.APIs != nil || m.Credential != "" || m.Bedrock != nil
-	}
-	add(models, "routing.models[].apis/credential/bedrock")
-	conditions := false
-	for _, d := range r.Decisions {
-		for _, cond := range d.Conditions {
-			conditions = conditions || !strings.EqualFold(strings.TrimSpace(cond.Type), RoutingConditionKeyword)
-		}
-	}
-	add(conditions, "routing.decisions[].conditions[].type")
-	for _, name := range sortedKeys(c.Guardrail.Profiles) {
-		if c.Guardrail.Profiles[name].Routing != nil {
-			keys = append(keys, "guardrail.profiles.*.routing")
-			break
+	if guardrail, ok := doc["guardrail"].(map[string]any); ok {
+		if profiles, ok := guardrail["profiles"].(map[string]any); ok {
+			for _, p := range profiles {
+				entry, _ := p.(map[string]any)
+				if _, set := entry["routing"]; set {
+					keys = append(keys, "guardrail.profiles.*.routing")
+					break
+				}
+			}
 		}
 	}
 	return keys

@@ -16,7 +16,7 @@ import (
 // mode for hook connectors. Absent keys keep the 1.0.9 meaning.
 
 // RoutingMinProductVersion is the first release that reads the keys
-// listed by UsesMinProductVersion1010Keys.
+// listed by RoutingMinVersionKeysInRaw.
 const RoutingMinProductVersion = "1.0.10"
 
 // Classifier names (routing.classifier).
