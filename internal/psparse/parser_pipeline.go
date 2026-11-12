@@ -320,8 +320,10 @@ func (p *parser) parseParameter() CommandElement {
 	t := p.advance()
 	par := &Parameter{span: span{t.Start, t.End}, Name: t.Value, HasColon: t.HasColon}
 	if t.HasColon {
-		// -Name:value  — the value is the immediately following token
-		if !p.at(TokNewline) && !p.at(TokEOF) && p.cur().Start == t.End {
+		adjacent := !p.at(TokNewline) && !p.at(TokEOF) && p.cur().Start == t.End
+		// -Name:value (adjacent) or -Name: value (the next value across
+		// whitespace, unless it is another parameter or a terminator).
+		if adjacent || p.colonValueFollows() {
 			if a, ok := p.parseCommandArg().(*Arg); ok && a != nil {
 				par.Colon = a.Value
 				_, par.end = a.Span()
@@ -329,6 +331,17 @@ func (p *parser) parseParameter() CommandElement {
 		}
 	}
 	return par
+}
+
+// colonValueFollows reports whether a value token (not a parameter, separator
+// or closer) follows a "-Name:" colon parameter and binds as its argument.
+func (p *parser) colonValueFollows() bool {
+	switch p.kind() {
+	case TokGeneric, TokString, TokNumber, TokVariable, TokLParen, TokDollarParen,
+		TokAtParen, TokAtBrace, TokLBrace, TokLBracket:
+		return true
+	}
+	return false
 }
 
 // parseCommandArg parses one positional argument in command mode: a run of
