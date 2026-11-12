@@ -139,13 +139,27 @@ func (s *Store) releaseUnlessGrouped(release func()) func() {
 
 // retryDurableBusy runs attempt again while the store answers SQLITE_BUSY,
 // for at most hookDeliveryJournalBusyWait, as the durable connection did
-// (commitDurableBatch); the last error is returned as it is.
-func retryDurableBusy(ctx context.Context, attempt func() error) error {
+// (commitDurableBatch); the last error is returned as it is. Each attempt is
+// recorded and counted as retryBusyObserved does, and a write lock another
+// process holds ends the wait at once (writeLockHeld).
+func (s *Store) retryDurableBusy(ctx context.Context, op string, observer SQLiteBusyObservabilityV8, attempt func() error) error {
 	deadline := time.Now().Add(hookDeliveryJournalBusyWait)
 	pause := 10 * time.Millisecond
 	for {
+		started := time.Now()
 		err := attempt()
-		if err == nil || !isSQLiteBusy(err) || ctx.Err() != nil || !time.Now().Add(pause).Before(deadline) {
+		s.noteWriteAttempt(started, err, false)
+		if err == nil || !isSQLiteBusy(err) || ctx.Err() != nil {
+			return err
+		}
+		if observer != nil {
+			_ = observer.RecordSQLiteBusyMetric(ctx, op)
+		}
+		if s.writeLockHeld() {
+			s.applyWriteLockWait(writeLockApplyWait)
+			return s.markHeldLockError(err)
+		}
+		if !time.Now().Add(pause).Before(deadline) {
 			return err
 		}
 		timer := time.NewTimer(pause)

@@ -28,7 +28,9 @@ import (
 // none comes, as before.
 const (
 	outageModeFreshness = 250 * time.Millisecond
-	outageModeLockStale = 5 * time.Second
+	// outageModeClockSkew bounds how far in the future a result may say it
+	// started: a later one is no result (a clock step, a forged file).
+	outageModeClockSkew = time.Second
 	outageModeWaitStep  = 5 * time.Millisecond
 	outageModeWaitMax   = 3 * time.Second
 )
@@ -42,11 +44,17 @@ func sharedOutageMode(gateway, hookDir string, lateAt time.Time, look func() str
 		if started, mode, ok := readOutageModeResult(result); ok && !started.Before(lateAt.Add(-outageModeFreshness)) {
 			return mode
 		}
-		if takeOutageModeLock(lock) {
+		if unlock := takeOutageModeLock(lock); unlock != nil {
+			// Look again under the lock: a look that finished while this call
+			// waited for it may be fresh enough.
+			if started, mode, ok := readOutageModeResult(result); ok && !started.Before(lateAt.Add(-outageModeFreshness)) {
+				unlock()
+				return mode
+			}
 			started := time.Now()
 			mode := look()
 			writeOutageModeResult(result, started, mode)
-			_ = os.Remove(lock)
+			unlock()
 			return mode
 		}
 		if time.Now().After(deadline) {
@@ -56,18 +64,28 @@ func sharedOutageMode(gateway, hookDir string, lateAt time.Time, look func() str
 	}
 }
 
-func takeOutageModeLock(lock string) bool {
-	file, err := os.OpenFile(lock, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
-	if err == nil {
+// takeOutageModeLock takes the account look lock: an advisory flock(2) on
+// the lock file, which the kernel releases when the holder exits, so a look
+// whose hook gave up and exited never leaves the lock held. It returns the
+// release, or nil when another call holds the lock.
+func takeOutageModeLock(lock string) func() {
+	file, err := os.OpenFile(lock, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || !ownedByMe(info) {
 		_ = file.Close()
-		return true
+		return nil
 	}
-	// A lock left by a look that died is taken over once it is stale.
-	if info, statErr := os.Lstat(lock); statErr == nil && info.Mode().IsRegular() &&
-		time.Since(info.ModTime()) > outageModeLockStale && ownedByMe(info) {
-		_ = os.Remove(lock)
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		return nil
 	}
-	return false
+	return func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}
 }
 
 // readOutageModeResult reads "v1 <unix nanos> <open|closed>" from a regular
@@ -89,11 +107,18 @@ func readOutageModeResult(path string) (time.Time, string, bool) {
 	if err != nil || nanos <= 0 {
 		return time.Time{}, "", false
 	}
-	return time.Unix(0, nanos), fields[2], true
+	started := time.Unix(0, nanos)
+	if started.After(time.Now().Add(outageModeClockSkew)) {
+		return time.Time{}, "", false
+	}
+	return started, fields[2], true
 }
 
 func writeOutageModeResult(path string, started time.Time, mode string) {
-	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
+	// The file is written under the look lock, so one temporary name is
+	// enough and none is left behind by a later look.
+	tmp := path + ".tmp"
+	_ = os.Remove(tmp)
 	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return

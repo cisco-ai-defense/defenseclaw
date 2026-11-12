@@ -188,7 +188,7 @@ func (s *Store) execHookDeliveryJournal(ctx context.Context, insert bool, query 
 		// file can be newer than the folder entry the store opened.
 		for attempt := 0; ; attempt++ {
 			var result sql.Result
-			create := insert && !s.hookJournalReady.Load()
+			create := insert && (s.secureClientSchema || !s.hookJournalReady.Load())
 			err := s.durableGrouped(ctx, insert, func(ctx context.Context, tx *sql.Tx) error {
 				if create {
 					if _, err := tx.ExecContext(ctx, hookDeliveryJournalSchema); err != nil {
@@ -293,14 +293,17 @@ func (s *Store) ForgetHookDelivery(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	defer release()
 	const forget = `DELETE FROM hook_delivery_journal WHERE id = ?`
 	if s.secureClientSchema || s.dbPathGuard == nil || s.dbPathGuard.inMemory {
+		defer release()
 		_, err = s.execDB(ctx, "hook_delivery_journal", forget, id)
 	} else {
 		// The hook-call write group: the deletion shares the commit of the
 		// call audit rows queued beside it instead of an autocommit of its
-		// own on the writer connection (#1384).
+		// own on the writer connection (#1384). The group batch runner takes
+		// the lifecycle lock itself (runCallGroupBatch); holding it here too
+		// would nest the read lock under a waiting Close.
+		release()
 		err = s.callGroupWrite(ctx, func(ctx context.Context, tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, forget, id)
 			return err

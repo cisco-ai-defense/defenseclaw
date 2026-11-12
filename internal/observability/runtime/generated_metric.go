@@ -253,6 +253,14 @@ func recordGeneratedMetricsWithLease(
 			fork.Release()
 		}
 	}
+	if inCall {
+		// The export could not wait for the call commit (no lease fork, or
+		// the batch closed): commit the observations first, as outside a
+		// call, so commit-before-export still holds.
+		if err := recordRuntimeCorrelationObservations(ctx, store, observations...); err != nil {
+			return results, &GeneratedMetricError{code: GeneratedMetricRecordFailed}
+		}
+	}
 	for _, metric := range prepared {
 		if err := exportPreparedGeneratedMetric(ctx, metric, results); err != nil {
 			return results, err

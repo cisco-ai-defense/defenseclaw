@@ -30,6 +30,11 @@ func TestCodeGuardCustomRulesCachedUntilAFileChanges(t *testing.T) {
 	if len(first) != 1 || len(second) != 1 || first[0].pattern != second[0].pattern {
 		t.Fatalf("unchanged folder was compiled again: %v %v", first, second)
 	}
+	// Same size and modification time, other bytes: still compiled anew.
+	write("dccert-marker-b", t0)
+	if got := loadCustomRules(dir); len(got) != 1 || got[0].pattern.String() != "dccert-marker-b" {
+		t.Fatalf("same-size edit kept the old rule: %v", got)
+	}
 	write("dccert-marker-bb", t0.Add(time.Second))
 	third := loadCustomRules(dir)
 	if len(third) != 1 || third[0].pattern.String() != "dccert-marker-bb" {

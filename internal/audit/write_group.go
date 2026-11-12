@@ -136,8 +136,8 @@ func (group *writeGroup) do(write *groupedWrite, execute func([]*groupedWrite)) 
 const writeGroupAging = 50 * time.Millisecond
 
 // takeBatchLocked removes the next batch from the queue: at most
-// writeGroupMax writes, durable ones (and any write queued longer than
-// writeGroupAging) first. A durable write is the hook
+// writeGroupMax writes: the head of the queue, then durable ones (and any
+// write queued longer than writeGroupAging), then the rest. A durable write is the hook
 // journal row or the commit confirmation an answer waits on (durableGrouped);
 // the other writes of the group are those of calls already answered, so a
 // full queue never makes an answer wait behind them. The rest keep their
@@ -149,14 +149,18 @@ func (group *writeGroup) takeBatchLocked() []*groupedWrite {
 		group.pending = pending[:0]
 		return batch
 	}
+	// The head of the queue leads the batch and stays its first write: do
+	// returns the result of batch[0] to the leader and sends every other
+	// write its own.
 	batch := make([]*groupedWrite, 0, writeGroupMax)
+	batch = append(batch, pending[0])
 	kept := make([]*groupedWrite, 0, len(pending)-writeGroupMax)
 	now := time.Now()
 	urgent := func(write *groupedWrite) bool {
 		return write.durable || now.Sub(write.queuedAt) > writeGroupAging
 	}
 	for _, first := range []bool{true, false} {
-		for _, write := range pending {
+		for _, write := range pending[1:] {
 			if urgent(write) != first {
 				continue
 			}
@@ -269,7 +273,7 @@ func (s *Store) runGroupedTx(batch []*groupedWrite, hooks groupedTxHooks) error 
 		// A durable write is one an answer waits on (the hook journal row):
 		// it keeps the bounded busy wait of the journal
 		// (hookDeliveryJournalBusyWait), not the longer retry of the others.
-		err = retryDurableBusy(batchCtx, attempt)
+		err = s.retryDurableBusy(batchCtx, hooks.op, s.groupedTxBusyObservabilityV8(), attempt)
 	} else {
 		err = retryBusyObserved(batchCtx, hooks.op, s.groupedTxBusyObservabilityV8(), attempt)
 	}

@@ -276,9 +276,10 @@ type Store struct {
 	// checkpoints. It is opened on first use and closed with the store.
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
-	// durableDB is a synchronous=FULL connection that makes committed
-	// writes power-loss durable (SyncCommittedWrites). It is opened on
-	// first use under checkpointMu and closed with the store.
+	// durableDB is the synchronous=FULL connection of a Secure Client
+	// store that makes committed writes power-loss durable
+	// (SyncCommittedWrites). It is opened on first use under checkpointMu
+	// and closed with the store; other stores have none (durableBatchConn).
 	durableDB *sql.DB
 	// walGuardMu guards the checkpoint connection's data_version as of the
 	// previous WAL guard pass (CheckpointWALIfLarge).
@@ -318,8 +319,7 @@ type Store struct {
 	// durableGroup groups the commits of concurrent writes to the synchronous=FULL
 	// connection into one transaction and one flush (durableGrouped).
 	durableGroup writeGroup
-	// writeBaton orders the transactions of the pool connection and the
-	// durable connection (writeBaton).
+	// writeBaton orders the write transactions of the store (writeBaton).
 	writeBaton writeBaton
 	// dirSyncedWAL is the write-ahead log file whose directory entry the last
 	// folder flush of the durable connection covered (syncDurableDir).

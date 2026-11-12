@@ -953,7 +953,11 @@ func (repo *CorrelationRepository) BeginOccurrence(
 	// SQLITE_BUSY_SNAPSHOT and the hook starts its correlation over, so this
 	// transaction takes the write baton first (writeBaton), ahead of the
 	// records of calls already answered: the answer waits on it.
-	turn, err := repo.store.writeBaton.acquireUrgent(ctx)
+	acquireTurn := repo.store.writeBaton.acquireUrgent
+	if repo.store.secureClientSchema {
+		acquireTurn = repo.store.writeBaton.acquire
+	}
+	turn, err := acquireTurn(ctx)
 	if err != nil {
 		release()
 		return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)

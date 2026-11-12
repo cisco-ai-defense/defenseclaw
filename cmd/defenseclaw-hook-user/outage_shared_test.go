@@ -81,21 +81,43 @@ func TestSharedOutageModeRefusesAForeignResult(t *testing.T) {
 	}
 }
 
-// A lock left by a look that died is taken over once stale.
-func TestSharedOutageModeTakesOverAStaleLock(t *testing.T) {
+// A lock whose holder is gone (its process exited) is free: flock is
+// released with the file, and a lock file left on disk does not block.
+func TestSharedOutageModeLockFileLeftBehindDoesNotBlock(t *testing.T) {
 	dir := t.TempDir()
 	lock := filepath.Join(dir, ".outage-mode.lock")
 	if err := os.WriteFile(lock, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-2 * outageModeLockStale)
-	if err := os.Chtimes(lock, old, old); err != nil {
-		t.Fatal(err)
-	}
 	if got := sharedOutageMode("gw", dir, time.Now(), func() string { return "open" }); got != "open" {
-		t.Fatalf("stale lock not taken over: %q", got)
+		t.Fatalf("left-behind lock file blocked the look: %q", got)
 	}
-	if _, err := os.Lstat(lock); !os.IsNotExist(err) {
-		t.Fatalf("lock left behind: %v", err)
+}
+
+// A held lock makes other calls wait for the result of its look.
+func TestSharedOutageModeWaitsForTheHolder(t *testing.T) {
+	dir := t.TempDir()
+	unlock := takeOutageModeLock(filepath.Join(dir, ".outage-mode.lock"))
+	if unlock == nil {
+		t.Fatal("lock not taken")
+	}
+	lateAt := time.Now()
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		writeOutageModeResult(filepath.Join(dir, ".outage-mode.result"), time.Now(), "closed")
+		unlock()
+	}()
+	var looks atomic.Int32
+	if got := sharedOutageMode("gw", dir, lateAt, func() string { looks.Add(1); return "open" }); got != "closed" || looks.Load() != 0 {
+		t.Fatalf("got %q with %d own looks; want the holder result", got, looks.Load())
+	}
+}
+
+// A result that says it started in the future is no result.
+func TestSharedOutageModeRefusesAFutureResult(t *testing.T) {
+	dir := t.TempDir()
+	writeOutageModeResult(filepath.Join(dir, ".outage-mode.result"), time.Now().Add(time.Hour), "open")
+	if _, _, ok := readOutageModeResult(filepath.Join(dir, ".outage-mode.result")); ok {
+		t.Fatal("a future result was read")
 	}
 }

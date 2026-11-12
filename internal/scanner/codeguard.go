@@ -19,6 +19,7 @@ package scanner
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -514,15 +515,22 @@ type customRuleYAML struct {
 }
 
 // customRulesCache keeps the compiled custom rules of a rules folder for as
-// long as its rule files keep their names, sizes, modes and modification
-// times. The gateway builds a CodeGuard scanner for every write it inspects,
-// and each one read, parsed and compiled every custom rule file again
-// (#1384); the rules a call is checked against are the same either way.
+// long as its rule files keep their names and their bytes. The gateway builds
+// a CodeGuard scanner for every write it inspects, and each one parsed and
+// compiled every custom rule file again (#1384); the files are still read on
+// every call (cheap), so an edited, replaced or relinked rule file is
+// compiled anew, and the rules a call is checked against are the same either
+// way.
 var customRulesCache sync.Map // dir -> customRulesEntry
 
 type customRulesEntry struct {
-	stamp string
-	rules []rule
+	digest [sha256.Size]byte
+	rules  []rule
+}
+
+type customRuleFile struct {
+	name string
+	data []byte
 }
 
 func loadCustomRules(dir string) []rule {
@@ -533,29 +541,8 @@ func loadCustomRules(dir string) []rule {
 	if err != nil {
 		return nil
 	}
-	var stamp strings.Builder
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			// Not cacheable now: read the folder as before.
-			return compileCustomRules(dir, entries)
-		}
-		fmt.Fprintf(&stamp, "%s\x00%d\x00%o\x00%d\x00", e.Name(), info.Size(), info.Mode(), info.ModTime().UnixNano())
-	}
-	if cached, ok := customRulesCache.Load(dir); ok && cached.(customRulesEntry).stamp == stamp.String() {
-		return cached.(customRulesEntry).rules
-	}
-	rules := compileCustomRules(dir, entries)
-	customRulesCache.Store(dir, customRulesEntry{stamp: stamp.String(), rules: rules})
-	return rules
-}
-
-// compileCustomRules reads and compiles the custom rule files of dir.
-func compileCustomRules(dir string, entries []os.DirEntry) []rule {
-	var custom []rule
+	sum := sha256.New()
+	var files []customRuleFile
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
 			continue
@@ -564,8 +551,27 @@ func compileCustomRules(dir string, entries []os.DirEntry) []rule {
 		if err != nil {
 			continue
 		}
+		fmt.Fprintf(sum, "%d:%s:%d:", len(e.Name()), e.Name(), len(data))
+		sum.Write(data)
+		files = append(files, customRuleFile{name: e.Name(), data: data})
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], sum.Sum(nil))
+	if cached, ok := customRulesCache.Load(dir); ok && cached.(customRulesEntry).digest == digest {
+		return cached.(customRulesEntry).rules
+	}
+	rules := compileCustomRules(files)
+	customRulesCache.Store(dir, customRulesEntry{digest: digest, rules: rules})
+	return rules
+}
+
+// compileCustomRules parses and compiles the custom rule files read from a
+// rules folder, in folder order.
+func compileCustomRules(files []customRuleFile) []rule {
+	var custom []rule
+	for _, file := range files {
 		var rf customRuleFileYAML
-		if err := yaml.Unmarshal(data, &rf); err != nil {
+		if err := yaml.Unmarshal(file.data, &rf); err != nil {
 			continue
 		}
 		for _, cr := range rf.Rules {

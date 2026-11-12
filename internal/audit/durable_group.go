@@ -27,7 +27,8 @@ func (e *durableDirSyncError) Error() string {
 func (e *durableDirSyncError) Unwrap() error { return e.err }
 
 // durableGrouped runs run in a transaction on the store synchronous=FULL
-// connection (auditDurablePragmas) and returns once it is committed to disk.
+// connection (secureClientAuditDurablePragmas) or, on other stores, in a
+// synchronous=FULL batch of the writer, and returns once it is committed to disk.
 // Concurrent callers share one transaction, so they share one flush of the
 // write-ahead log. Every commit on this connection costs a flush, and a
 // managed sandbox call makes about five of them: the journal row, its
@@ -155,7 +156,7 @@ func commitDurableBatch(ctx context.Context, s *Store, db *sql.DB, items []*grou
 }
 
 func attemptDurableBatch(ctx context.Context, s *Store, db *sql.DB, items []*groupedWrite) (*groupedWrite, error) {
-	release, err := s.writeBaton.acquireUrgent(ctx)
+	release, err := s.writeBaton.acquire(ctx)
 	if err != nil {
 		return nil, err
 	}

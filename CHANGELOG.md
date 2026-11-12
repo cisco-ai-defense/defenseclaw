@@ -8,6 +8,17 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.10
+
+### Changed
+- **Hook answers keep up with bursts of tool calls (S8, #1384).** Measured on 1.0.9, every test machine could start 100 hook processes a second (a no-op hook answers in under 12 ms), but the DefenseClaw path fell over between 25 and 50 calls a second. Fixed on our side: a per-user call that the gateway answered late started a 140 MB gateway process to read the outage mode, and under a burst dozens of them ran at once and took the CPU the gateway needed; the calls of one account now share one look. The correlation step of a session no longer waits behind the records of calls already answered (the audit writer serves it first, alternating with the rest). The hook journal of managed hosts commits with the other hook writes, one flush per batch, still with `synchronous=FULL` before an allow. Metrics written inside a hook call no longer add a correlation row each (13 to 4 rows per benign call). The socket ownership check polls from 1 ms instead of every 20 ms.
+- **macOS per-user Claude Code hooks use the native `defenseclaw-hook-user` launcher**, as Linux has since 1.0.8 (the shell hook started many child processes per call: p50 128 ms against 54 ms).
+- **Managed hook budgets:** 120 hook requests a second, a burst of 240 and 64 in flight per account (was 60, 120, 32); relayed sandbox hooks 100 a second with a burst of 200 per user (was 40 and 100, rel-1-0-6 GAP-0770).
+- **CodeGuard custom rules are compiled once per rule-folder content**, not for every inspected write.
+
+### Fixed
+- **A Kiro, Devin or other non-Claude-Code, non-Codex shell call on a per-user Windows gateway that does not answer is blocked again**, as the fail-mode contract and `status` say; only Claude Code and Codex take the ordinary late-call path (rel-1-0-10 GAP-0030).
+
 ## [Unreleased] — 1.0.9
 
 - **Windows Setup no longer strips an untrusted account's access entry from `targets.yaml` and keeps its bytes.** `Setup /ensure CONFIG= MANIFEST=` against a `hook-guardian\targets.yaml` that another account could write returned `0` as a compliant no-op: Setup's own process carries no standalone trust scope, so a read of the manifest for the Claude Code hook contract took the Secure Client branch and re-stamped the file's owner and access list in place, and the hook guardian then activated the bytes that account had written. That read, the repair of the manifest's access list, the restore of the runtime folder before the plan and the restore of the Claude Code drop-in now refuse in Setup's process too, so a verify that fails on the file sends `/ensure` to the recovery that writes `targets.yaml` new from `MANIFEST=` (or enumerated from `CONFIG=`) and keeps the old bytes as `rejected-targets.yaml`. `/repair` and `/ensure` without `CONFIG=` that restore `config.yaml` or `targets.yaml` from Setup's approved copy because another account could change the file now also keep the replaced file as `rejected-config.yaml` or `rejected-targets.yaml` (administrators only), log it and list it in the result's changes; before, they kept nothing. A refusal of a `deployment.json` that another account can change now names the account and the `icacls` fix. (rel-1-0-6 GAP-1048, GAP-1049, GAP-0590, GAP-0602)
