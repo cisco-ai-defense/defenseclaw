@@ -32,12 +32,12 @@ import (
 const substrateHaikuPath = "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/invoke-with-response-stream"
 
 type substrateLLMSeen struct {
-	path, userHdr string
-	subject       VerifiedSubject
-	verified      bool
-	profile       *profileSubject
-	profileSource string
-	agentUser     string
+	path, rawPath, userHdr string
+	subject                VerifiedSubject
+	verified               bool
+	profile                *profileSubject
+	profileSource          string
+	agentUser              string
 }
 
 // substrateLLMFixture is the actor listener over the real /llm handler and
@@ -55,7 +55,7 @@ func substrateLLMFixture(t *testing.T) (*substrateFixture, *substrateLLMSeen) {
 	}
 	seen := &substrateLLMSeen{}
 	proxy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*seen = substrateLLMSeen{path: r.URL.Path, userHdr: r.Header.Get("X-User-Id")}
+		*seen = substrateLLMSeen{path: r.URL.Path, rawPath: r.URL.EscapedPath(), userHdr: r.Header.Get("X-User-Id")}
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			return
@@ -193,6 +193,39 @@ func TestSubstrateLLMServesOnlyModelPaths(t *testing.T) {
 		}
 		if rec.Code != http.StatusNotFound || seen.path != "" {
 			t.Fatalf("%s %s: %d (forwarded %q)", c.method, c.path, rec.Code, seen.path)
+		}
+	}
+}
+
+func TestSubstrateLLMBedrockARNModelIDs(t *testing.T) {
+	f, seen := substrateLLMFixture(t)
+	const arnEsc = "arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Aapplication-inference-profile%2Fa1b2c3d4e5"
+	const arn = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3d4e5"
+	for _, op := range []string{"invoke", "invoke-with-response-stream", "converse", "converse-stream"} {
+		rec := f.do(t, f.actor, http.MethodPost, "/llm/bedrock/model/"+arnEsc+"/"+op, "tok-alice", `{}`)
+		if rec.Code != http.StatusOK || seen.path != "/model/"+arn+"/"+op || seen.rawPath != "/model/"+arnEsc+"/"+op {
+			t.Fatalf("%s: %d path %q raw %q", op, rec.Code, seen.path, seen.rawPath)
+		}
+	}
+	// A provisioned-throughput ARN, with the colons left unescaped.
+	if rec := f.do(t, f.actor, http.MethodPost, "/llm/bedrock/model/arn:aws:bedrock:us-west-2:123456789012:provisioned-model%2Fpm1/invoke", "tok-alice", `{}`); rec.Code != http.StatusOK ||
+		!strings.HasSuffix(seen.rawPath, "provisioned-model%2Fpm1/invoke") {
+		t.Fatalf("provisioned model: %d raw %q", rec.Code, seen.rawPath)
+	}
+	// The escaped slash is accepted only inside a Bedrock ARN model segment.
+	for _, p := range []string{
+		"/llm/bedrock/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Aapplication-inference-profile%2F..%2F..%2Fx/invoke",
+		"/llm/bedrock/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Aapplication-inference-profile%2Fa%2Fb/invoke",
+		"/llm/bedrock/model/arn%3Aaws%3As3%3A%3A%3Abucket%2Fkey/invoke",
+		"/llm/bedrock/model/haiku%2Fx/invoke",
+		"/llm/bedrock/model/" + arnEsc + "/invoke%2F..",
+		"/llm/bedrock/model/" + arnEsc + "/list",
+		"/llm/anthropic/v1%2Fmessages",
+		"/llm/openai/v1/" + arnEsc,
+	} {
+		seen.path = ""
+		if rec := f.do(t, f.actor, http.MethodPost, p, "tok-alice", `{}`); rec.Code != http.StatusNotFound || seen.path != "" {
+			t.Fatalf("%s: %d (forwarded %q)", p, rec.Code, seen.path)
 		}
 	}
 }

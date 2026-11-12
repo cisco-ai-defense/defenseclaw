@@ -731,5 +731,16 @@ func substrateLLMRawPathOK(route substrateActorRoute, raw string) bool {
 		return false
 	}
 	l := strings.ToLower(raw)
-	return !strings.Contains(l, "%2f") && !strings.Contains(l, "%5c") && !strings.Contains(l, "%2e")
+	if !strings.Contains(l, "%5c") && !strings.Contains(l, "%2e") {
+		if !strings.Contains(l, "%2f") {
+			return true
+		}
+		// The one escaped slash allowed: inside a Bedrock ARN model ID
+		// (GAP-0129).
+		if esc, ok := strings.CutPrefix(raw, substrateLLMPrefix+"bedrock"); ok {
+			_, ok := substrateBedrockARNPath(esc)
+			return ok
+		}
+	}
+	return false
 }
