@@ -1173,6 +1173,21 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return rescanSkipped
 	}
 
+	// Any other MCP baseline that holds no completed scan and records an
+	// admission (an allow without a scan, a failed scan, a server kept
+	// unverified) is admitted again, never drift-scanned. The drift scan
+	// below failed on a loopback server ("rescan could not scan it") and
+	// wrote the baseline again without its mark, which the hook read as a
+	// decided admission, so a server whose allow was gone or whose block
+	// was released kept running, also after a restart (gas-ux-r2:GAP-0088).
+	// Admission applies the failure as the tier says: blocked where MCP
+	// admission fails closed, kept with a warning in the OSS default and
+	// permissive tiers. A plain baseline without a scan is the record of a
+	// server configured before the upgrade (GAP-1227) and stays one.
+	if evt.Type == InstallMCP && !w.secureClientActive() && baseline.ScanID == "" && mcpFingerprintMarked(baseline.ScannerFingerprint) {
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
+	}
+
 	// A rejection decided while take_action was off left the target in
 	// place. Once take_action is on, admission runs again and its actions
 	// apply as for a new install. Until then the baseline keeps the mark and

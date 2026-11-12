@@ -1040,8 +1040,13 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 			// Its scan failed: tried again with backoff, not every poll
 			// (rel-1-0-6:GAP-0258).
 			added = append(added, server.Name)
-		} else if w.mcpFailureAllowed(InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector}, baseline) {
+		} else if evt := (InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector}); w.mcpFailureAllowed(evt, baseline) {
 			// An allow written after the failure admits it now.
+			added = append(added, server.Name)
+		} else if w.mcpBaselineLapsed(evt, baseline) {
+			// The allow that admitted it without a scan is gone: admitted
+			// again now, not at the next call or the hourly rescan, so its
+			// block is back within the poll (gas-ux-r2:GAP-0088).
 			added = append(added, server.Name)
 		}
 	}
@@ -5148,10 +5153,7 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 	for _, dir := range w.skillDirs {
 		dirAbs, _ := filepath.Abs(dir)
 		if parentAbs == dirAbs {
-			if isBundledSkillWatchPath(path) {
-				return false
-			}
-			return true
+			return !isBundledSkillWatchPath(path)
 		}
 	}
 	for _, dir := range w.pluginDirs {
