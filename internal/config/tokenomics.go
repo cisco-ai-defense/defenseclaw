@@ -279,10 +279,10 @@ func (p PricingConfig) Validate() error {
 		if strings.TrimSpace(m.Provider) == "" || strings.TrimSpace(m.Model) == "" {
 			return fmt.Errorf("%s: provider and model are required", path)
 		}
-		if strings.Contains(strings.TrimSuffix(m.Model, "*"), "*") {
+		if strings.Contains(strings.TrimSuffix(strings.TrimSpace(m.Model), "*"), "*") {
 			return fmt.Errorf("%s.model: %q may use * only as the last character", path, m.Model)
 		}
-		key := strings.ToLower(m.Provider) + "/" + strings.ToLower(m.Model)
+		key := strings.ToLower(strings.TrimSpace(m.Provider)) + "/" + strings.ToLower(strings.TrimSpace(m.Model))
 		if seen[key] {
 			return fmt.Errorf("%s: %s/%s is listed twice", path, m.Provider, m.Model)
 		}

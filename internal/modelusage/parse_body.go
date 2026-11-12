@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"regexp"
+	"strings"
 )
 
 // ParseBody reads the usage out of one complete non-stream response body.
@@ -21,6 +23,10 @@ func ParseBody(f APIFamily, body []byte) Usage {
 	if len(body) > maxFullDecodeBytes && f != FamilyOllama && f != FamilyOther {
 		// A huge body is not decoded whole: its usage object comes last.
 		u = usageFromTail(f, body[len(body)-maxTailBytes:])
+		if (f == FamilyChat || f == FamilyResponses) && u.Has != 0 && u.Partial == "" {
+			// service_tier is a top-level field: look at the start of the body too.
+			openAITierPartial(&u, tailTier(body[:headBytesForTier]))
+		}
 		if u.Has != 0 {
 			u.Source = SourceProvider
 		}
@@ -97,7 +103,8 @@ type anthropicUsage struct {
 // apply folds an Anthropic usage block into u. Anthropic reports uncached
 // input only, so Input is the sum of the three input counters.
 func (a anthropicUsage) apply(u *Usage) {
-	if a.InputTokens.ok || a.CacheCreationTokens.ok || a.CacheReadTokens.ok {
+	// input_tokens excludes the cache counters; without it the total is unknown.
+	if a.InputTokens.ok {
 		total := addOpt(addOpt(a.InputTokens, a.CacheCreationTokens), a.CacheReadTokens)
 		u.set(HasInput, &u.Input, total)
 		u.set(HasCacheRead, &u.CacheRead, a.CacheReadTokens)
@@ -109,7 +116,7 @@ func (a anthropicUsage) apply(u *Usage) {
 
 func (a anthropicUsage) markPartial(u *Usage) {
 	switch {
-	case a.ServiceTier != "" && a.ServiceTier != "standard":
+	case a.ServiceTier == "priority" || a.ServiceTier == "batch":
 		u.Partial = "service_tier:" + a.ServiceTier
 	case a.CacheCreation != nil && a.CacheCreation.Ephemeral1h.ok && a.CacheCreation.Ephemeral1h.v > 0:
 		u.Partial = "cache_ttl_1h"
@@ -223,7 +230,7 @@ type converseUsage struct {
 
 // apply: Converse inputTokens excludes the cache counters, so Input is the sum.
 func (c converseUsage) apply(u *Usage) {
-	if c.InputTokens.ok || c.CacheReadTokens.ok || c.CacheWriteTokens.ok {
+	if c.InputTokens.ok {
 		total := addOpt(addOpt(c.InputTokens, c.CacheReadTokens), c.CacheWriteTokens)
 		u.set(HasInput, &u.Input, total)
 		u.set(HasCacheRead, &u.CacheRead, c.CacheReadTokens)
@@ -262,9 +269,8 @@ func (g geminiUsage) apply(u *Usage) {
 		u.set(HasInput, &u.Input, addOpt(g.PromptTokens, g.ToolUsePrompt))
 	}
 	u.set(HasCacheRead, &u.CacheRead, g.CachedTokens)
-	if g.PromptTokens.ok && g.PromptTokens.v > geminiLongContext {
-		u.Partial = "long_context"
-	}
+	// long_context is set by parseGeminiDoc, which knows the model.
+
 	if g.CandidatesTokens.ok || g.ThoughtsTokens.ok {
 		u.set(HasOutput, &u.Output, addOpt(g.CandidatesTokens, g.ThoughtsTokens))
 	}
@@ -280,6 +286,9 @@ func parseGeminiDoc(body []byte) Usage {
 	var u Usage
 	if doc.UsageMetadata != nil {
 		doc.UsageMetadata.apply(&u)
+		if doc.UsageMetadata.PromptTokens.ok && doc.UsageMetadata.PromptTokens.v > geminiLongContext && strings.Contains(strings.ToLower(doc.ModelVersion), "pro") {
+			u.Partial = "long_context"
+		}
 	}
 	u.ResponseModel = doc.ModelVersion
 	return u
@@ -315,3 +324,16 @@ func openAITierPartial(u *Usage, tier string) {
 // maxFullDecodeBytes is the body size above which ParseBody reads only the
 // tail of the body.
 const maxFullDecodeBytes = 256 << 10
+
+var tailServiceTier = regexp.MustCompile(`"service_tier"\s*:\s*"(flex|priority|scale)"`)
+
+// tailTier reads a top-level OpenAI service_tier out of a body tail.
+func tailTier(tail []byte) string {
+	if m := tailServiceTier.FindSubmatch(tail); m != nil {
+		return string(m[1])
+	}
+	return ""
+}
+
+// headBytesForTier is how much of a huge body start is searched for service_tier.
+const headBytesForTier = 8 << 10

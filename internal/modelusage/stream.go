@@ -354,14 +354,27 @@ func appendTail(dst *[]byte, p []byte, max int) {
 }
 
 // lastObject returns the JSON object that follows the last occurrence of
-// "key": in tail, or nil. It brace-matches and ignores braces inside strings.
+// "key": in tail that is followed by an object, or nil. It walks back over
+// earlier matches (a metadata string value can contain the key) and
+// brace-matches ignoring braces inside strings.
 func lastObject(tail []byte, key string) []byte {
 	k := []byte(`"` + key + `"`)
-	i := bytes.LastIndex(tail, k)
-	if i < 0 {
-		return nil
+	end := len(tail)
+	for end > 0 {
+		i := bytes.LastIndex(tail[:end], k)
+		if i < 0 {
+			return nil
+		}
+		end = i
+		if obj := objectAfter(tail[i+len(k):]); obj != nil {
+			return obj
+		}
 	}
-	rest := bytes.TrimLeft(tail[i+len(k):], " \t\r\n")
+	return nil
+}
+
+func objectAfter(rest []byte) []byte {
+	rest = bytes.TrimLeft(rest, " \t\r\n")
 	if len(rest) == 0 || rest[0] != 0x3a {
 		return nil
 	}
@@ -411,6 +424,7 @@ func usageFromTail(f APIFamily, tail []byte) Usage {
 			var c chatUsage
 			if json.Unmarshal(obj, &c) == nil {
 				c.apply(&u)
+				openAITierPartial(&u, tailTier(tail))
 			}
 		}
 	case FamilyResponses:
@@ -418,6 +432,7 @@ func usageFromTail(f APIFamily, tail []byte) Usage {
 			var r responsesUsage
 			if json.Unmarshal(obj, &r) == nil {
 				r.apply(&u)
+				openAITierPartial(&u, tailTier(tail))
 			}
 		}
 	case FamilyMessages, FamilyInvoke:

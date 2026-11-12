@@ -88,8 +88,8 @@ func durMs(d time.Duration) float64 { return float64(d) / float64(time.Milliseco
 
 func emitModelUsageLogV8(ctx context.Context, emitter sidecarRuntimeEmitter, rec modelusage.Record) error {
 	f := rec.Facts
-	connector := hookModelV8StableToken(f.Connector)
-	if emitter == nil || connector == "" {
+	connector := usageConnectorToken(f.Connector)
+	if emitter == nil {
 		return nil
 	}
 	producerKey := observability.ProducerKey(gatewaylog.EventLLMResponse)
@@ -217,10 +217,7 @@ func labelValue(rec modelusage.Record, key string) observability.Optional[string
 
 func emitModelUsageMetricsV8(ctx context.Context, runtime hookLifecycleMetricV8Runtime, rec modelusage.Record) error {
 	f, u, c := rec.Facts, rec.Usage, rec.Cost
-	connector := hookModelV8StableToken(f.Connector)
-	if connector == "" {
-		return nil
-	}
+	connector := usageConnectorToken(f.Connector)
 	meta := llmEventMeta{Source: connector, RequestID: f.RequestID}
 	at := rec.EndedAt.UTC()
 	items := make([]observabilityruntime.GeneratedMetricBatchItem, 0, 6)
@@ -352,4 +349,14 @@ func applyModelUsageToSpanV8(in *observability.SpanModelChatInput, rec modelusag
 	if rec.Total > 0 {
 		in.DefenseClawModelTotalMs = observability.Present(durMs(rec.Total))
 	}
+}
+
+// usageConnectorToken is the source token of a record. Calls the gateway
+// makes itself (judge, decision model, AI Defense) carry no agent connector
+// and are attributed to the gateway.
+func usageConnectorToken(c string) string {
+	if tok := hookModelV8StableToken(c); tok != "" {
+		return tok
+	}
+	return "gateway"
 }

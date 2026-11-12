@@ -45,7 +45,9 @@ type snapshot struct {
 // entry; it never needs a restart.
 type Engine struct {
 	snap    atomic.Pointer[snapshot]
+	applyMu sync.Mutex // serialises Apply so the snapshot and the worker never disagree
 	dropped atomic.Int64
+	spend   spendTracker
 
 	mu      sync.RWMutex
 	sinks   []Sink
@@ -72,6 +74,8 @@ func (e *Engine) AddSink(s Sink) {
 // the engine becomes enabled and stops it, with a short drain, when it
 // becomes disabled.
 func (e *Engine) Apply(tok config.TokenomicsConfig, pricing config.PricingConfig) {
+	e.applyMu.Lock()
+	defer e.applyMu.Unlock()
 	s := &snapshot{
 		enabled:    tok.Enabled,
 		tok:        tok,
@@ -172,11 +176,11 @@ func (e *Engine) Begin(ctx context.Context, f CallFacts) Call {
 		return noopCall{}
 	}
 	s := e.snap.Load()
-	if !s.enabled || (!s.allRoles && !s.roles[f.CallRole]) {
-		return noopCall{}
-	}
 	if f.CallRole == "" {
 		f.CallRole = RoleAgent
+	}
+	if !s.enabled || (!s.allRoles && !s.roles[f.CallRole]) {
+		return noopCall{}
 	}
 	now := time.Now()
 	if f.StartedAt.IsZero() {
@@ -201,14 +205,15 @@ type call struct {
 	start  time.Time
 	parser *StreamParser
 
-	mu       sync.Mutex
-	status   int
-	ttfb     time.Duration
-	hdrUsage Usage
-	bodyUse  Usage
-	given    *Usage
-	done     bool
-	rec      Record
+	mu        sync.Mutex
+	status    int
+	ttfb      time.Duration
+	hdrUsage  Usage
+	bodyUse   Usage
+	streamUse Usage
+	given     *Usage
+	done      bool
+	rec       Record
 }
 
 func (c *call) UpstreamHeader(status int, h http.Header) {
@@ -225,7 +230,12 @@ func (c *call) UpstreamHeader(status int, h http.Header) {
 }
 
 func (c *call) Chunk(p []byte) {
-	if c.parser != nil {
+	if c.parser == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.done {
 		c.parser.Write(p)
 	}
 }
@@ -258,6 +268,9 @@ func (c *call) End(err error) Record {
 		}
 	}()
 	c.rec = c.build(err)
+	if c.rec.Cost.USD != nil {
+		c.e.spend.add(c.f, *c.rec.Cost.USD, c.rec.EndedAt)
+	}
 	c.e.enqueue(c.rec)
 	return c.rec
 }
@@ -273,10 +286,13 @@ func (c *call) build(err error) Record {
 	case c.status >= 400:
 		rec.Outcome, rec.ErrorType = "failed", "http_"+itoa(c.status)
 	}
+	if c.parser != nil {
+		c.streamUse = c.parser.Usage()
+	}
 	u := c.pickUsage()
 	rec.Usage = u
 	rec.Cost = c.cost(u)
-	rec.Labels = c.labels()
+	rec.Labels = c.labels(rec.Cost, u)
 	return rec
 }
 
@@ -284,10 +300,10 @@ func (c *call) build(err error) Record {
 // the body, then provider headers.
 func (c *call) pickUsage() Usage {
 	switch {
-	case c.given != nil:
+	case c.given != nil && c.given.Has != 0:
 		return *c.given
-	case c.parser != nil && c.parser.Usage().Has != 0:
-		return c.parser.Usage()
+	case c.parser != nil && c.streamUse.Has != 0:
+		return c.streamUse
 	case c.bodyUse.Has != 0:
 		return c.bodyUse
 	default:
@@ -320,9 +336,15 @@ func (c *call) cost(u Usage) Cost {
 
 // labels builds the bounded metric labels. The model label is the matched
 // price entry or other, so a client-chosen model string cannot add series.
-func (c *call) labels() []Label {
+func (c *call) labels(cost Cost, u Usage) []Label {
 	f := c.f
 	model := c.s.table.ModelKey(f.SelectedProvider, f.SelectedModel)
+	if model == "other" && u.ResponseModel != "" {
+		model = c.s.table.ModelKey(f.SelectedProvider, u.ResponseModel)
+	}
+	if cost.PriceEntry == "fallback" {
+		model = "other"
+	}
 	out := make([]Label, 0, len(c.s.labels))
 	for _, name := range c.s.labels {
 		var v string

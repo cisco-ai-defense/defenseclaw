@@ -58,7 +58,9 @@ func TestPartialMarkers(t *testing.T) {
 		{FamilyMessages, `{"usage":{"input_tokens":1,"output_tokens":1,"service_tier":"standard","server_tool_use":{"web_search_requests":0}}}`, ""},
 		{FamilyChat, `{"service_tier":"flex","usage":{"prompt_tokens":1,"completion_tokens":1}}`, "service_tier:flex"},
 		{FamilyResponses, `{"service_tier":"default","usage":{"input_tokens":1,"output_tokens":1}}`, ""},
-		{FamilyGemini, `{"usageMetadata":{"promptTokenCount":250000,"candidatesTokenCount":1}}`, "long_context"},
+		{FamilyGemini, `{"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":250000,"candidatesTokenCount":1}}`, "long_context"},
+		{FamilyGemini, `{"modelVersion":"gemini-2.5-flash","usageMetadata":{"promptTokenCount":250000,"candidatesTokenCount":1}}`, ""},
+		{FamilyMessages, `{"usage":{"input_tokens":1,"output_tokens":1,"service_tier":"made-up"}}`, ""},
 	}
 	for i, c := range cases {
 		if got := ParseBody(c.f, []byte(c.body)).Partial; got != c.want {

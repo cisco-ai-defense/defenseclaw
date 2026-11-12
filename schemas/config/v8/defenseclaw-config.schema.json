@@ -3693,7 +3693,6 @@
       "properties": {
         "version": {
           "type": "string",
-          "minLength": 1,
           "maxLength": 64,
           "description": "Table version stamped on every record. Required when models are listed."
         },

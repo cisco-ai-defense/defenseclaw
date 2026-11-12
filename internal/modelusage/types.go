@@ -144,9 +144,10 @@ type Call interface {
 	End(err error) Record
 }
 
-// Sink receives finished records on the engine worker goroutine. A sink must
-// not retain the Record slices it does not own and must not export
-// Facts.Groups.
+// Sink receives finished records on the engine worker goroutine. During a
+// disable and enable of the engine an old worker may drain while a new one
+// starts, so a sink must be safe for concurrent Emit. A sink must not retain
+// the Record slices it does not own and must not export Facts.Groups.
 type Sink interface {
 	Emit(ctx context.Context, rec Record)
 }
