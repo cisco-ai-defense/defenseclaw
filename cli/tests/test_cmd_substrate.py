@@ -214,6 +214,8 @@ def exec_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         ["policy", "show", "--json"],
         ["policy", "test", "fix-tests-7f3a", "--host", "registry.example.test"],
         ["doctor", "--json"],
+        ["verify", "--install-file", "install.yaml", "--json"],
+        ["status", "--cluster", "--api", "--json"],
         ["setup", "--remove", "--dry-run"],
         ["bundle", "apply", "bundle.dcbundle", "--atespaces", "eng,ops"],
         ["bundle", "status"],

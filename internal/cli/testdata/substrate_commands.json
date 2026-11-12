@@ -260,7 +260,7 @@
     "path": "substrate doctor",
     "use": "doctor",
     "short": "Check that this computer can run agents in the cluster",
-    "long": "Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers\nover TLS, you are signed in and the cluster accepts it, the sign-in server matches, the agent entrance answers over TLS and\nyou have what it asks for, and your sign-in can be kept safely. Nothing needs to be installed here, and nothing in the\ncluster changes.\n\nAdministrators get the cluster's own checks too (version, issuer, snapshot bucket, access policies, egress callout, router\nclients, routes, API access). They run by themselves when the cluster offers them; --cluster shows why when it does not.\n\nThe last line is \"ready for agents\" when no check failed. Otherwise it is \"not ready\" and each failed check says how to fix\nit, and the exit code is 1.",
+    "long": "Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers\nover TLS, you are signed in and the cluster accepts it, the sign-in server matches, the agent entrance answers over TLS and\nyou have what it asks for, and your sign-in can be kept safely. Nothing needs to be installed here, and nothing in the\ncluster changes.\n\nAdministrators get the cluster's own checks too (version, issuer, snapshot bucket, access policies, egress callout, router\nclients, routes, API access). They run by themselves when the cluster offers them; --cluster shows why when it does not.\nWith --install-file (the SubstrateInstall file you gave ate-setup) they are read with kubectl instead, which needs no\nsign-in to the gateway.\n\nThe last line is \"ready for agents\" when no check failed. Otherwise it is \"not ready\" and each failed check says how to fix\nit, and the exit code is 1.",
     "example": "defenseclaw substrate doctor\ndefenseclaw substrate doctor --cluster --json",
     "flags": [
       {
@@ -270,10 +270,21 @@
         "usage": "also run the cluster checks (administrators); say why they were skipped when they were"
       },
       {
+        "name": "config",
+        "type": "string",
+        "usage": "DefenseClaw config.yaml (default: read from the cluster)"
+      },
+      {
         "name": "context",
         "type": "string",
         "usage": "cluster to use (default: the one you signed in to last)",
         "metavar": "NAME"
+      },
+      {
+        "name": "install-file",
+        "type": "string",
+        "usage": "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
+        "metavar": "FILE"
       },
       {
         "name": "json",
@@ -282,12 +293,41 @@
         "usage": "same as --output json"
       },
       {
+        "name": "kube-context",
+        "type": "string",
+        "usage": "kubectl context to use"
+      },
+      {
+        "name": "kubeconfig",
+        "type": "string",
+        "usage": "kubectl configuration file (default: kubectl's own)"
+      },
+      {
+        "name": "namespace",
+        "type": "string",
+        "default": "defenseclaw-system",
+        "usage": "namespace DefenseClaw is installed in"
+      },
+      {
         "name": "output",
         "shorthand": "o",
         "type": "string",
         "default": "text",
         "usage": "output format: text or json",
         "metavar": "FORMAT"
+      },
+      {
+        "name": "substrate-namespace",
+        "type": "string",
+        "default": "ate-system",
+        "usage": "namespace Agent Substrate runs in"
+      },
+      {
+        "name": "timeout",
+        "type": "duration",
+        "default": "30s",
+        "usage": "give up on the cluster after this long",
+        "metavar": "DURATION"
       }
     ]
   },
@@ -1137,7 +1177,7 @@
     "path": "substrate status",
     "use": "status [name]",
     "short": "Show who you are signed in as, or one agent or batch in detail",
-    "long": "Without a name, shows the cluster and account in use and how many agents you have.\nWith a name, shows that agent: where it runs, which profile guards it and its batch.\nWith --batch, shows every agent of a batch run.",
+    "long": "Without a name, shows the cluster and account in use and how many agents you have.\nWith a name, shows that agent: where it runs, which profile guards it and its batch.\nWith --batch, shows every agent of a batch run.\n\nFor administrators, --cluster shows the health of the whole setup: gateway, leader, controller and callout,\nthe agents in the cluster and the setup checks. It reads the cluster with kubectl (give --install-file), or\nwith --api from the DefenseClaw gateway. Exit 75 means the cluster could not be reached; there is no document.",
     "args": [
       {
         "name": "name",
@@ -1146,10 +1186,27 @@
     ],
     "flags": [
       {
+        "name": "api",
+        "type": "bool",
+        "default": "false",
+        "usage": "read the document from the DefenseClaw gateway (needs an administrator sign-in) instead of with kubectl"
+      },
+      {
         "name": "batch",
         "type": "string",
         "usage": "show every agent of this batch",
         "metavar": "ID"
+      },
+      {
+        "name": "cluster",
+        "type": "bool",
+        "default": "false",
+        "usage": "administrators: show the health and setup checks of the whole cluster"
+      },
+      {
+        "name": "config",
+        "type": "string",
+        "usage": "DefenseClaw config.yaml (default: read from the cluster)"
       },
       {
         "name": "context",
@@ -1158,10 +1215,32 @@
         "metavar": "NAME"
       },
       {
+        "name": "install-file",
+        "type": "string",
+        "usage": "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
+        "metavar": "FILE"
+      },
+      {
         "name": "json",
         "type": "bool",
         "default": "false",
         "usage": "same as --output json"
+      },
+      {
+        "name": "kube-context",
+        "type": "string",
+        "usage": "kubectl context to use"
+      },
+      {
+        "name": "kubeconfig",
+        "type": "string",
+        "usage": "kubectl configuration file (default: kubectl's own)"
+      },
+      {
+        "name": "namespace",
+        "type": "string",
+        "default": "defenseclaw-system",
+        "usage": "namespace DefenseClaw is installed in"
       },
       {
         "name": "output",
@@ -1170,6 +1249,19 @@
         "default": "text",
         "usage": "output format: text or json",
         "metavar": "FORMAT"
+      },
+      {
+        "name": "substrate-namespace",
+        "type": "string",
+        "default": "ate-system",
+        "usage": "namespace Agent Substrate runs in"
+      },
+      {
+        "name": "timeout",
+        "type": "duration",
+        "default": "30s",
+        "usage": "give up on the cluster after this long",
+        "metavar": "DURATION"
       }
     ]
   },
@@ -1289,6 +1381,81 @@
         "default": "text",
         "usage": "output format: text or json",
         "metavar": "FORMAT"
+      }
+    ]
+  },
+  {
+    "path": "substrate verify",
+    "use": "verify",
+    "short": "Check the cluster setup: issuer, snapshot bucket, access grants, callout and version",
+    "long": "For administrators. Checks that the cluster is set up as DefenseClaw needs it: Substrate's version is\none DefenseClaw is tested on, the cluster has its own sign-in issuer, the snapshot bucket is private and\nencrypted, DefenseClaw holds the right access grants, the egress callout is registered and nobody else\ncan reach agents through the router. By default it reads the cluster with kubectl; --api reads the same\nchecks from the DefenseClaw gateway.\n\nExit 0: every check passed or warned. Exit 1: a check failed. Exit 2: wrong arguments. Exit 75: the cluster\ncould not be reached; there is no document, retry later. With --json it prints the verify document.",
+    "example": "defenseclaw substrate verify --install-file install.yaml\ndefenseclaw substrate verify --api --json",
+    "flags": [
+      {
+        "name": "api",
+        "type": "bool",
+        "default": "false",
+        "usage": "read the document from the DefenseClaw gateway (needs an administrator sign-in) instead of with kubectl"
+      },
+      {
+        "name": "config",
+        "type": "string",
+        "usage": "DefenseClaw config.yaml (default: read from the cluster)"
+      },
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "install-file",
+        "type": "string",
+        "usage": "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
+        "metavar": "FILE"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "kube-context",
+        "type": "string",
+        "usage": "kubectl context to use"
+      },
+      {
+        "name": "kubeconfig",
+        "type": "string",
+        "usage": "kubectl configuration file (default: kubectl's own)"
+      },
+      {
+        "name": "namespace",
+        "type": "string",
+        "default": "defenseclaw-system",
+        "usage": "namespace DefenseClaw is installed in"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      },
+      {
+        "name": "substrate-namespace",
+        "type": "string",
+        "default": "ate-system",
+        "usage": "namespace Agent Substrate runs in"
+      },
+      {
+        "name": "timeout",
+        "type": "duration",
+        "default": "30s",
+        "usage": "give up on the cluster after this long",
+        "metavar": "DURATION"
       }
     ]
   },

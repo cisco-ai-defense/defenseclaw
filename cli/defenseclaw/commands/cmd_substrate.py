@@ -227,6 +227,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "egress callout, router\n"
             "clients, routes, API access). They run by themselves when the cluster offers them; --cluster shows "
             "why when it does not.\n"
+            "With --install-file (the SubstrateInstall file you gave ate-setup) they are read with kubectl "
+            "instead, which needs no\n"
+            "sign-in to the gateway.\n"
             "\n"
             'The last line is "ready for agents" when no check failed. Otherwise it is "not ready" and each '
             "failed check says how to fix\n"
@@ -239,9 +242,21 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 "bool",
                 "also run the cluster checks (administrators); say why they were skipped when they were",
             ),
+            _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "install-file",
+                "string",
+                "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
+                metavar="FILE",
+            ),
             _Flag("json", "bool", "same as --output json"),
+            _Flag("kube-context", "string", "kubectl context to use"),
+            _Flag("kubeconfig", "string", "kubectl configuration file (default: kubectl's own)"),
+            _Flag("namespace", "string", "namespace DefenseClaw is installed in", default="defenseclaw-system"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag("substrate-namespace", "string", "namespace Agent Substrate runs in", default="ate-system"),
+            _Flag("timeout", "duration", "give up on the cluster after this long", default="30s", metavar="DURATION"),
         ),
     ),
     _Cmd(
@@ -649,14 +664,42 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         long=(
             "Without a name, shows the cluster and account in use and how many agents you have.\n"
             "With a name, shows that agent: where it runs, which profile guards it and its batch.\n"
-            "With --batch, shows every agent of a batch run."
+            "With --batch, shows every agent of a batch run.\n"
+            "\n"
+            "For administrators, --cluster shows the health of the whole setup: gateway, leader, controller and "
+            "callout,\n"
+            "the agents in the cluster and the setup checks. It reads the cluster with kubectl (give "
+            "--install-file), or\n"
+            "with --api from the DefenseClaw gateway. Exit 75 means the cluster could not be reached; there is "
+            "no document."
         ),
         args=(_Arg("name", required=False),),
         flags=(
+            _Flag(
+                "api",
+                "bool",
+                (
+                    "read the document from the DefenseClaw gateway (needs an administrator sign-in) instead of with "
+                    "kubectl"
+                ),
+            ),
             _Flag("batch", "string", "show every agent of this batch", metavar="ID"),
+            _Flag("cluster", "bool", "administrators: show the health and setup checks of the whole cluster"),
+            _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "install-file",
+                "string",
+                "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
+                metavar="FILE",
+            ),
             _Flag("json", "bool", "same as --output json"),
+            _Flag("kube-context", "string", "kubectl context to use"),
+            _Flag("kubeconfig", "string", "kubectl configuration file (default: kubectl's own)"),
+            _Flag("namespace", "string", "namespace DefenseClaw is installed in", default="defenseclaw-system"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag("substrate-namespace", "string", "namespace Agent Substrate runs in", default="ate-system"),
+            _Flag("timeout", "duration", "give up on the cluster after this long", default="30s", metavar="DURATION"),
         ),
     ),
     _Cmd(
@@ -864,6 +907,51 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+        ),
+    ),
+    _Cmd(
+        ("verify",),
+        "Check the cluster setup: issuer, snapshot bucket, access grants, callout and version",
+        long=(
+            "For administrators. Checks that the cluster is set up as DefenseClaw needs it: Substrate's version "
+            "is\n"
+            "one DefenseClaw is tested on, the cluster has its own sign-in issuer, the snapshot bucket is "
+            "private and\n"
+            "encrypted, DefenseClaw holds the right access grants, the egress callout is registered and nobody "
+            "else\n"
+            "can reach agents through the router. By default it reads the cluster with kubectl; --api reads the "
+            "same\n"
+            "checks from the DefenseClaw gateway.\n"
+            "\n"
+            "Exit 0: every check passed or warned. Exit 1: a check failed. Exit 2: wrong arguments. Exit 75: the "
+            "cluster\n"
+            "could not be reached; there is no document, retry later. With --json it prints the verify document."
+        ),
+        example="defenseclaw substrate verify --install-file install.yaml\ndefenseclaw substrate verify --api --json",
+        flags=(
+            _Flag(
+                "api",
+                "bool",
+                (
+                    "read the document from the DefenseClaw gateway (needs an administrator sign-in) instead of with "
+                    "kubectl"
+                ),
+            ),
+            _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "install-file",
+                "string",
+                "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
+                metavar="FILE",
+            ),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("kube-context", "string", "kubectl context to use"),
+            _Flag("kubeconfig", "string", "kubectl configuration file (default: kubectl's own)"),
+            _Flag("namespace", "string", "namespace DefenseClaw is installed in", default="defenseclaw-system"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag("substrate-namespace", "string", "namespace Agent Substrate runs in", default="ate-system"),
+            _Flag("timeout", "duration", "give up on the cluster after this long", default="30s", metavar="DURATION"),
         ),
     ),
     _Cmd(

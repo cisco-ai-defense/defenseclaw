@@ -193,7 +193,7 @@ func TestSubstrateCommandTreeCoversThePlan(t *testing.T) {
 		"login", "logout", "whoami", "run", "connect", "list", "status", "logs", "pull", "checkpoint", "undo", "delete", "migrate",
 		"approvals", "approve", "reject", "usage", "secrets list", "secrets set", "secrets rm", "secrets test",
 		"policy explain", "policy show", "policy test", "doctor", "setup", "bundle apply", "bundle status",
-		"template build", "template verify", "template scan", "template publish",
+		"verify", "template build", "template verify", "template scan", "template publish",
 	} {
 		if !slices.Contains(paths, want) {
 			t.Errorf("substrate %s is missing", want)

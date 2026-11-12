@@ -90,6 +90,7 @@ func newSubstrateDoctorCmd() *cobra.Command {
 	var (
 		out     substrateOutput
 		com     substrateCommon
+		kf      substrateClusterFlags
 		cluster bool
 	)
 	cmd := &cobra.Command{
@@ -102,18 +103,21 @@ cluster changes.
 
 Administrators get the cluster's own checks too (version, issuer, snapshot bucket, access policies, egress callout, router
 clients, routes, API access). They run by themselves when the cluster offers them; --cluster shows why when it does not.
+With --install-file (the SubstrateInstall file you gave ate-setup) they are read with kubectl instead, which needs no
+sign-in to the gateway.
 
 The last line is "ready for agents" when no check failed. Otherwise it is "not ready" and each failed check says how to fix
 it, and the exit code is 1.`,
 		Example: "defenseclaw substrate doctor\ndefenseclaw substrate doctor --cluster --json",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runSubstrateDoctor(cmd, &out, &com, cluster)
+			return runSubstrateDoctor(cmd, &out, &com, &kf, cluster)
 		},
 	}
 	out.add(cmd)
 	com.add(cmd)
 	cmd.Flags().BoolVar(&cluster, "cluster", false, "also run the cluster checks (administrators); say why they were skipped when they were")
+	kf.addKube(cmd)
 	return cmd
 }
 
@@ -125,7 +129,7 @@ func (d *doctorRun) add(id, status, summary, fix string) {
 	d.checks = append(d.checks, substrateCheck{ID: id, Status: status, Summary: summary, Fix: fix})
 }
 
-func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrateCommon, clusterFlag bool) error {
+func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrateCommon, kf *substrateClusterFlags, clusterFlag bool) error {
 	asJSON, err := out.wantJSON()
 	if err != nil {
 		return err
@@ -164,6 +168,17 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 	} else {
 		name = s.Name
 		doctorCluster(ctx, d, s, clusterFlag)
+	}
+
+	if kf.installFile != "" {
+		// Read with kubectl: these replace the gateway's own copy of the checks.
+		kept := d.checks[:0]
+		for _, c := range d.checks {
+			if !strings.HasPrefix(c.ID, "cluster") {
+				kept = append(kept, c)
+			}
+		}
+		d.checks = append(kept, doctorKubeChecks(ctx, kf)...)
 	}
 
 	rep := substrateDoctorReport{Context: name, Checks: d.checks}
@@ -390,8 +405,13 @@ func doctorFleetChecks(ctx context.Context, cl *api.Client, explicit bool) []sub
 		}
 		return []substrateCheck{{ID: "cluster", Status: doctorFail, Summary: "the cluster checks could not be read: " + doctorFirstLine(err), Fix: "run doctor again in a minute"}}
 	}
-	out := make([]substrateCheck, 0, len(doc.Checks))
-	for _, c := range doc.Checks {
+	return doctorConvertFleet(doc.Checks)
+}
+
+// doctorConvertFleet turns A8's fleet checks into doctor rows.
+func doctorConvertFleet(checks []fleet.Check) []substrateCheck {
+	out := make([]substrateCheck, 0, len(checks))
+	for _, c := range checks {
 		sc := substrateCheck{ID: "cluster." + c.ID, Summary: c.Message}
 		switch c.Status {
 		case fleet.Pass:
@@ -411,6 +431,15 @@ func doctorFleetChecks(ctx context.Context, cl *api.Client, explicit bool) []sub
 		out = append(out, sc)
 	}
 	return out
+}
+
+// doctorKubeChecks reads the cluster with kubectl and runs the fleet checks.
+func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags) []substrateCheck {
+	o, r, err := collectFleet(ctx, kf)
+	if err != nil {
+		return []substrateCheck{{ID: "cluster", Status: doctorFail, Summary: doctorFirstLine(err), Fix: "check your kubectl access and the --install-file path, then run doctor again"}}
+	}
+	return doctorConvertFleet(fleet.BuildVerify(o, r.ProductVersion, r.Now).Checks)
 }
 
 func fleetCheckFix(id string) string {

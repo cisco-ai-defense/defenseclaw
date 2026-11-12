@@ -153,23 +153,35 @@ them and how long ago they started. Administrators see only their own agents unl
 
 func newSubstrateStatusCmd() *cobra.Command {
 	var (
-		out   substrateOutput
-		com   substrateCommon
-		batch string
+		out     substrateOutput
+		cf      substrateClusterFlags
+		batch   string
+		cluster bool
 	)
+	com := &cf.com
 	cmd := &cobra.Command{
 		Use:   "status [name]",
 		Short: "Show who you are signed in as, or one agent or batch in detail",
 		Long: `Without a name, shows the cluster and account in use and how many agents you have.
 With a name, shows that agent: where it runs, which profile guards it and its batch.
-With --batch, shows every agent of a batch run.`,
+With --batch, shows every agent of a batch run.
+
+For administrators, --cluster shows the health of the whole setup: gateway, leader, controller and callout,
+the agents in the cluster and the setup checks. It reads the cluster with kubectl (give --install-file), or
+with --api from the DefenseClaw gateway. Exit 75 means the cluster could not be reached; there is no document.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cluster {
+				if len(args) > 0 || batch != "" {
+					return withExitCode(errors.New("--cluster shows the whole cluster; leave the name and --batch out"), 2)
+				}
+				return runSubstrateFleet(cmd, "status", &out, &cf)
+			}
 			asJSON, err := out.wantJSON()
 			if err != nil {
 				return err
 			}
-			s, err := substrateOpen(cmd, &com)
+			s, err := substrateOpen(cmd, com)
 			if err != nil {
 				return err
 			}
@@ -234,7 +246,8 @@ With --batch, shows every agent of a batch run.`,
 		},
 	}
 	out.add(cmd)
-	com.add(cmd)
+	cf.add(cmd)
+	cmd.Flags().BoolVar(&cluster, "cluster", false, "administrators: show the health and setup checks of the whole cluster")
 	cmd.Flags().StringVar(&batch, "batch", "", "show every agent of this batch")
 	return cmd
 }
