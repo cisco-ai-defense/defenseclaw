@@ -64,8 +64,9 @@ type ScanOptions struct {
 	// path → substrings that must all be present.
 	ConfigSwitches map[string][]string
 
-	// BlockAtOrAbove is the severity from which a finding blocks the build
-	// whatever the host admission actions say (default HIGH): a template is a
+	// BlockAtOrAbove is the severity from which a finding blocks whatever the
+	// host admission actions say (empty or FloorNone: no floor; Build
+	// defaults to HIGH): a template is a
 	// supply-chain artifact an admin builds on purpose, and a malicious skill
 	// or MCP server in it must not ship because the host default only warns.
 	BlockAtOrAbove scanner.Severity
@@ -306,10 +307,7 @@ func (o *ScanOptions) decide(ctx context.Context, kind, name, p string, res *sca
 		return VerdictBlock, "admission could not decide"
 	}
 	floor := o.BlockAtOrAbove
-	if floor == "" {
-		floor = scanner.SeverityHigh
-	}
-	if len(res.Findings) > 0 && sevRank(res.MaxSeverity()) >= sevRank(floor) && out.Verdict != "rejected" && out.Verdict != "blocked" {
+	if floor != "" && floor != FloorNone && len(res.Findings) > 0 && sevRank(res.MaxSeverity()) >= sevRank(floor) && out.Verdict != "rejected" && out.Verdict != "blocked" {
 		return VerdictBlock, fmt.Sprintf("a template build blocks %s findings (host admission said %s)", floor, out.Verdict)
 	}
 	switch out.Verdict {
@@ -686,3 +684,6 @@ func sevRank(s scanner.Severity) int {
 	}
 	return 0
 }
+
+// FloorNone turns the severity floor off.
+const FloorNone scanner.Severity = "none"

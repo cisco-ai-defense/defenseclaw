@@ -29,6 +29,8 @@ type LayerFile struct {
 	Data     []byte
 	// Symlink, when set, makes the entry a symlink and ignores Data.
 	Symlink string
+	// Dir makes the entry a folder with this owner and mode.
+	Dir bool
 }
 
 // LayerResult is a built layer.
@@ -65,7 +67,10 @@ func BuildLayer(files []LayerFile, whiteouts []string, homeOwners map[string][2]
 		}
 		h := tar.Header{Name: strings.TrimPrefix(p, "/"), Mode: f.Mode, Uid: f.UID, Gid: f.GID, ModTime: epoch, Format: tar.FormatPAX}
 		it := &item{name: p, hdr: h}
-		if f.Symlink != "" {
+		if f.Dir {
+			it.hdr.Typeflag = tar.TypeDir
+			it.hdr.Name += "/"
+		} else if f.Symlink != "" {
 			it.hdr.Typeflag = tar.TypeSymlink
 			it.hdr.Linkname = f.Symlink
 			it.hdr.Mode = 0o777

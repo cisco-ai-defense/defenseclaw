@@ -64,7 +64,7 @@ type BuildOptions struct {
 	AllowList []policy.ListEntry
 	// AllowedMCPHosts are remote MCP hosts an admin allows.
 	AllowedMCPHosts []string
-	// BlockAtOrAbove: see ScanOptions (default HIGH).
+	// BlockAtOrAbove: see ScanOptions; empty means HIGH here, FloorNone turns it off.
 	BlockAtOrAbove scanner.Severity
 
 	// TrustedBases are base image digests (sha256:...) the admin trusts.
@@ -146,6 +146,9 @@ func Build(ctx context.Context, o BuildOptions) (*BuildResult, error) {
 	}
 	if o.Platform == (Platform{}) {
 		o.Platform = DefaultPlatform
+	}
+	if o.BlockAtOrAbove == "" {
+		o.BlockAtOrAbove = scanner.SeverityHigh
 	}
 	now := time.Now
 	if o.Now != nil {
