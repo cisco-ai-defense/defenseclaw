@@ -133,6 +133,9 @@ type LLMJudge struct {
 	// shared one in its place.
 	intentsMu sync.Mutex
 	intents   intentstore.Store
+	// intentWarnAt is when a failing intent store was last reported
+	// (UnixNano; warnIntentStore).
+	intentWarnAt atomic.Int64
 
 	telemetryMu sync.RWMutex
 	traceV8     judgeTraceV8Runtime
@@ -2217,7 +2220,8 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	})
 	if err != nil {
 		// A shared store that did not answer leaves the call judged on its
-		// own, like the first call of a session.
+		// own, like the first call of a session, and says so.
+		j.warnIntentStore("record a tool call", err)
 		entry = intentstore.Snapshot{}
 	}
 	prior := entry.Prior
@@ -2290,7 +2294,9 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 	if sessionID == "" || content == "" {
 		return
 	}
-	_ = j.intentStore().ObservePrompt(ctx, sessionID, toolJudgeUserIntentExcerpt(content))
+	if err := j.intentStore().ObservePrompt(ctx, sessionID, toolJudgeUserIntentExcerpt(content)); err != nil {
+		j.warnIntentStore("record the user prompt", err)
+	}
 }
 
 // ResetToolJudgeSession drops the session's bounded context when a connector
@@ -2301,7 +2307,28 @@ func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
 	if j == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	_ = j.intentStore().Reset(context.Background(), sessionID)
+	if err := j.intentStore().Reset(context.Background(), sessionID); err != nil {
+		j.warnIntentStore("reset a session", err)
+	}
+}
+
+// intentStoreWarnEvery bounds how often a failing intent store is reported.
+const intentStoreWarnEvery = time.Minute
+
+// warnIntentStore reports, at most once per intentStoreWarnEvery, that the
+// intent store failed: tool calls are then judged without their session's
+// intent and prior calls, which lowers the judge's context, not its
+// verdict mode.
+func (j *LLMJudge) warnIntentStore(op string, err error) {
+	now := time.Now().UnixNano()
+	last := j.intentWarnAt.Load()
+	if last != 0 && now-last < int64(intentStoreWarnEvery) {
+		return
+	}
+	if !j.intentWarnAt.CompareAndSwap(last, now) {
+		return
+	}
+	fmt.Fprintf(defaultLogWriter, "  [llm-judge] warning: the session intent store could not %s (%v); tool calls are judged without their session's intent until it answers\n", op, err)
 }
 
 // RunToolJudge runs injection detection on tool call arguments.

@@ -51,6 +51,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -4603,13 +4604,25 @@ func withSubstrateActor(ctx context.Context, actor substrateActor) context.Conte
 }
 
 // substrateActorFrom returns the verified actor of ctx, if it is an
-// actor-listener request.
+// actor-listener request. An actor that is not whole (wellFormed) never
+// counts: a listener that set it before checking every claim gets a host
+// request, which the require-sandbox gate still judges.
 func substrateActorFrom(ctx context.Context) (substrateActor, bool) {
 	if ctx == nil {
 		return substrateActor{}, false
 	}
 	actor, ok := ctx.Value(substrateActorKey{}).(substrateActor)
-	return actor, ok && actor.UID != ""
+	return actor, ok && actor.wellFormed()
+}
+
+// wellFormed reports an actor whose fields agree with each other the way a
+// verified actor token's do: a DNS-label atespace, a canonical UUID, the
+// subject actor/<atespace>/<name> and the registration key of that atespace
+// and UID.
+func (actor substrateActor) wellFormed() bool {
+	key, err := sandboxreg.SubstrateKey(actor.Atespace, actor.UID)
+	return err == nil && actor.Name != "" && !strings.ContainsAny(actor.Name, "/\x00") &&
+		actor.Subject == "actor/"+actor.Atespace+"/"+actor.Name && actor.RegistrationKey == key
 }
 
 // isSubstrateActorRequest reports a request of a verified Agent Substrate
