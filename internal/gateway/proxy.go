@@ -1713,6 +1713,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
 			return
 		}
+		if enc := uninspectableEncoding(resp.Header); enc != "" {
+			if p.uninspectableReply(r.Context(), label, mode, "content-encoding "+enc) {
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
+					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
+				return
+			}
+		}
 
 		// Extract assistant text from provider-native response format.
 		content := extractPassthroughResponseContent(respBody, provider)
@@ -1774,6 +1781,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		_, _ = w.Write(respBody)
 	} else {
 		// --- Streaming: buffer initial bytes for pre-scan, then forward with periodic scans ---
+		if enc := uninspectableEncoding(resp.Header); enc != "" {
+			if p.uninspectableReply(r.Context(), label, mode, "content-encoding "+enc) {
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, true,
+					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
+				return
+			}
+		}
 		for k, vs := range resp.Header {
 			for _, v := range vs {
 				w.Header().Add(k, v)
@@ -1788,6 +1802,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		const scanInterval = 500
 		buf := make([]byte, 4096)
 		var lineBuf strings.Builder
+		bedrockStreamReported := false
 
 		streamBufferSize := 1024
 		if p.cfg != nil && p.cfg.StreamBufferBytes > 0 {
@@ -1834,6 +1849,15 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					accumulated.WriteString(bedrockStream.Feed(chunk))
 					if streamResponseModel == "" {
 						streamResponseModel = bedrockStream.Model()
+					}
+					if bedrockStream.Broken() && !bedrockStreamReported {
+						bedrockStreamReported = true
+						if p.uninspectableReply(r.Context(), label, mode, "the event stream could not be framed") {
+							// Nothing more reaches the caller; before the first
+							// flush, nothing at all.
+							preblocked = !initialFlushed
+							break
+						}
 					}
 				} else {
 					lineBuf.Write(chunk)

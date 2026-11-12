@@ -146,7 +146,18 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upstream := "/" + upstreamPath
-	if path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") || !substrateModelPath(provider, upstream) {
+	// A Bedrock ARN model ID (application inference profile, provisioned
+	// throughput) carries an escaped slash; it is forwarded escaped, and
+	// accepted only when that segment is a Bedrock ARN (GAP-0129).
+	rawUpstream := ""
+	if provider == "bedrock" {
+		if esc, ok := strings.CutPrefix(r.URL.EscapedPath(), substrateLLMPrefix+provider); ok {
+			if dec, ok := substrateBedrockARNPath(esc); ok && dec == upstream {
+				rawUpstream = esc
+			}
+		}
+	}
+	if rawUpstream == "" && (path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") || !substrateModelPath(provider, upstream)) {
 		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -174,7 +185,7 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r2.Header.Set("Authorization", "Bearer "+secret)
 	}
 	u := *r.URL
-	u.Path, u.RawPath = upstream, ""
+	u.Path, u.RawPath = upstream, rawUpstream
 	r2.URL = &u
 	r2.RequestURI = ""
 	s.cfg.Proxy.ServeHTTP(w, r2)
@@ -203,4 +214,25 @@ func substrateRouterAnswerNarrows(target string, d *ModelRouterDecision) bool {
 		return false
 	}
 	return strings.EqualFold(from.Scheme, to.Scheme) && strings.EqualFold(from.Host, to.Host)
+}
+
+var (
+	substrateBedrockRawPathRE = regexp.MustCompile(`^/model/([^/]+)/(invoke|invoke-with-response-stream|converse|converse-stream)$`)
+	substrateBedrockARNRE     = regexp.MustCompile(`^arn:aws(-[a-z]+)*:bedrock:[a-z0-9-]+:[0-9]{12}:` +
+		`(application-inference-profile|inference-profile|provisioned-model|custom-model|imported-model|foundation-model)/[A-Za-z0-9._:-]+$`)
+)
+
+// substrateBedrockARNPath reads an escaped Bedrock model path whose model
+// segment is an ARN: one segment on the wire, a Bedrock ARN with exactly
+// one slash once unescaped. It returns the decoded path.
+func substrateBedrockARNPath(escaped string) (string, bool) {
+	m := substrateBedrockRawPathRE.FindStringSubmatch(escaped)
+	if m == nil {
+		return "", false
+	}
+	id, err := url.PathUnescape(m[1])
+	if err != nil || strings.Count(id, "/") != 1 || !substrateBedrockARNRE.MatchString(id) {
+		return "", false
+	}
+	return "/model/" + id + "/" + m[2], true
 }
