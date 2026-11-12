@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
 // appendStandaloneGatewayWarnings uses the same gateway facts as the Unix
@@ -68,7 +69,12 @@ func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body, stat
 	}
 	for _, warning := range profiles.ProfileWarnings {
 		if strings.TrimSpace(warning) != "" && !slices.Contains(profiles.ProfileAssignmentWarnings, warning) {
-			result.AddWarning("guardrail_profile", warning)
+			code := "guardrail_profile"
+			if strings.HasPrefix(warning, gateway.EnrollmentExcludeWarningPrefix) {
+				// An exclude_users entry that matches no account (GAP-1111).
+				code = "enrollment_exclude_unmatched"
+			}
+			result.AddWarning(code, warning)
 		}
 	}
 	// A rejected judge key made every judge call fail while status and

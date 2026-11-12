@@ -81,20 +81,21 @@ The doctor checks that the gateway can verify agent identities, that the callout
 With your own cluster and no identity provider, use your Kubernetes identity. The launcher sends your current kubeconfig credentials and the gateway checks them with a Kubernetes TokenReview (or your client certificate through the API server). You are then the Kubernetes user, and events record that as a user ID of kind `k8s_user`.
 
 ```bash
-defenseclaw substrate login --kube --admin-url https://defenseclaw-admin.example.test --router-url https://router.example.test:8444
+defenseclaw substrate login --kube --admin-url https://defenseclaw-admin.example.test
 ```
 
-{/* TODO(substrate): `login --kube` is being built by A6 (with the TokenReview path in A2). Confirm the flags and the output when it lands. */}
+`--kube-context` and `--kubeconfig` pick a different context or file. Nothing is stored: the launcher reads your kubeconfig each time.
+
+{/* TODO(substrate): the TokenReview path in the gateway (A2b) is being built; confirm the output when it lands. */}
 
 With an OIDC provider, sign in with the device flow instead:
 
 ```bash
 defenseclaw substrate login --admin-url https://defenseclaw-admin.example.test \
-  --issuer https://idp.example.test/realms/defenseclaw --client-id defenseclaw-launcher \
-  --router-url https://router.example.test:8444
+  --issuer https://idp.example.test/realms/defenseclaw --client-id defenseclaw-launcher
 ```
 
-A browser opens on your provider's page (`--no-browser` prints the address and code instead). The launcher keeps the tokens in the operating system's keychain, and the cluster addresses in a context file with no secrets. `--router-url` is the cluster's agent entrance, which the launcher uses to reach the terminal relay. `defenseclaw substrate whoami` shows who you are signed in as. Managed installs always require OIDC.
+A browser opens on your provider's page (`--no-browser` prints the address and code instead). The launcher keeps the tokens in the operating system's keychain, and the cluster addresses in a context file with no secrets. The launcher reaches your agent's terminal through the cluster gateway, so your laptop needs access to the gateway's admin address only, not to Substrate's router. `defenseclaw substrate whoami` shows who you are signed in as. Managed installs always require OIDC.
 
 </Step>
 
