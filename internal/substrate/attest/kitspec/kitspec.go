@@ -113,6 +113,9 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 		UserFiles:  map[string]bool{},
 		PhoneHome:  map[string]string{},
 	}
+	// Golden-snapshot rule (E5): no machine id in the image.
+	spec.Remove = append(spec.Remove, "/var/lib/dbus/machine-id")
+	spec.Files = append(spec.Files, attest.LayerFile{Path: "/etc/machine-id", Mode: 0o444})
 	spec.Files = append(spec.Files,
 		attest.LayerFile{Path: kit.HookBinary, Mode: 0o755, Data: o.HookBinary},
 		attest.LayerFile{Path: kit.RelayBinary, Mode: 0o755, Data: o.RelayBinary})
