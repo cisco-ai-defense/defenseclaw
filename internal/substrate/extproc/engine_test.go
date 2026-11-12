@@ -132,16 +132,6 @@ func (c *captureSink) EgressEvent(e Event) {
 	c.mu.Unlock()
 }
 
-func (c *captureSink) last(t *testing.T) Event {
-	t.Helper()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.events) == 0 {
-		t.Fatal("no event")
-	}
-	return c.events[len(c.events)-1]
-}
-
 const testConfig = `
 request_access: the platform team
 mcp_hosts: ["mcp.example.com=tickets"]

@@ -491,7 +491,7 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 	}
 	calls, err := parseToolCalls(body)
 	if err != nil {
-		return deny(v, CategoryMCPToolBlocked, sourceTool, "jsonrpc", clip(err.Error(), 320))
+		return deny(v, CategoryMCPToolBlocked, sourceTool, "jsonrpc", clip(refusalReason(err), 320))
 	}
 	if len(calls) == 0 {
 		return v

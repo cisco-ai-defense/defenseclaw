@@ -57,7 +57,8 @@ func parseToolCalls(body []byte) ([]toolCallReq, error) {
 			return nil, nil
 		}
 		if len(msgs) > maxBatchCalls {
-			return nil, fmt.Errorf("The JSON-RPC batch has more than %d requests.", maxBatchCalls)
+			return nil, &jsonRPCError{msg: fmt.Sprintf("jsonrpc batch has more than %d requests", maxBatchCalls),
+				reason: fmt.Sprintf("The JSON-RPC batch has more than %d requests.", maxBatchCalls)}
 		}
 	case '{':
 		msgs = []json.RawMessage{b}
@@ -69,7 +70,7 @@ func parseToolCalls(body []byte) ([]toolCallReq, error) {
 		obj, err := exactObject(m)
 		if err != nil {
 			if errors.Is(err, errDuplicateKey) {
-				return nil, errors.New("The JSON-RPC request repeats a key, so it is ambiguous.")
+				return nil, &jsonRPCError{msg: "jsonrpc request repeats a key", reason: "The JSON-RPC request repeats a key, so it is ambiguous."}
 			}
 			continue
 		}
@@ -80,13 +81,13 @@ func parseToolCalls(body []byte) ([]toolCallReq, error) {
 		params, err := exactObject(obj["params"])
 		if err != nil {
 			if errors.Is(err, errDuplicateKey) {
-				return nil, errors.New("The tools/call params repeat a key, so they are ambiguous.")
+				return nil, &jsonRPCError{msg: "tools/call params repeat a key", reason: "The tools/call params repeat a key, so they are ambiguous."}
 			}
-			return nil, errors.New("The tools/call request has no params object.")
+			return nil, &jsonRPCError{msg: "tools/call has no params object", reason: "The tools/call request has no params object."}
 		}
 		var name string
 		if raw, ok := params["name"]; !ok || json.Unmarshal(raw, &name) != nil || name == "" {
-			return nil, errors.New("The tools/call request names no tool.")
+			return nil, &jsonRPCError{msg: "tools/call names no tool", reason: "The tools/call request names no tool."}
 		}
 		out = append(out, toolCallReq{name: name, args: params["arguments"]})
 	}
@@ -94,6 +95,21 @@ func parseToolCalls(body []byte) ([]toolCallReq, error) {
 }
 
 var errDuplicateKey = errors.New("duplicate key")
+
+// jsonRPCError is a body the callout refuses as ambiguous or malformed:
+// msg is the Go error text, reason the sentence the actor sees.
+type jsonRPCError struct{ msg, reason string }
+
+func (e *jsonRPCError) Error() string { return e.msg }
+
+// refusalReason is the text shown to the actor for a parseToolCalls error.
+func refusalReason(err error) string {
+	var je *jsonRPCError
+	if errors.As(err, &je) {
+		return je.reason
+	}
+	return "The MCP request body could not be read as JSON-RPC."
+}
 
 // exactObject decodes a JSON object into its raw members, refusing a
 // repeated key.
