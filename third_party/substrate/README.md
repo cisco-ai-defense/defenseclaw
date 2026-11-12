@@ -9,7 +9,8 @@ not ship Substrate.
 - `api/ateapi/v1/ateapi.proto` is the upstream file, unmodified.
 - `api/ateapi/v1/ateapi.pb.go` and `ateapi_grpc.pb.go` are generated from it by
   `make proto` (protoc 29.3, protoc-gen-go v1.36.6, protoc-gen-go-grpc v1.5.1;
-  `make proto-check` keeps them in sync). The upstream `go_package` is remapped
+  `make proto-check` keeps them in sync) from a patched copy: `make proto`
+  runs `strip-options.awk` over the vendored file first (see below). The upstream `go_package` is remapped
   to this directory with an `M` option, so the build never imports the
   `go.ate.dev/substrate` module, whose go.mod needs Go 1.27 and pulls in the
   Kubernetes module graph. The descriptor path stays
@@ -17,6 +18,31 @@ not ship Substrate.
   generated stubs, `source.go` and its declarative-validation code are not
   used; `internal/substrate/render` mirrors the admission checks DefenseClaw
   needs.
+
+## The generation patch (GAP-0014)
+
+Upstream declares its API annotations as extensions of the protobuf
+descriptor options:
+
+```proto
+extend google.protobuf.MessageOptions { ResourceAnnotation resource = 50000; }
+extend google.protobuf.MethodOptions  { MethodAnnotation method = 50000; }
+```
+
+The OpenShell SDK (`github.com/NVIDIA/OpenShell/sdk/go/proto/optionsv1`), which
+the gateway already links, registers extension 50000 on the same descriptor
+messages. Go's protobuf registry refuses the second registration at init, so a
+binary linking both panics before `main`. `strip-options.awk` writes a copy
+without the two `extend` blocks, the 50 `option (resource)` / `option
+(method)` uses and the then-unused `descriptor.proto` import, and the stubs
+are generated from that copy. Options are descriptor metadata only:
+messages, fields, services, method names and the wire format are unchanged,
+and ate-api-server never sends the annotations. The `ResourceAnnotation`,
+`MethodAnnotation` and `Scope` messages remain as ordinary messages. The
+filter fails on any other option or `extend` form, so a re-vendored file
+with new annotations stops `make proto` instead of slipping through.
+`ateapi.proto` here stays byte-identical to upstream (the hashes below).
+`GOLANG_PROTOBUF_REGISTRATION_CONFLICT` is not used.
 
 ## Provenance (checked 2026-11-12)
 
@@ -37,5 +63,6 @@ not ship Substrate.
 The tested range is `>=1.0.0 <1.1.0` (`substrate.supported_versions`).
 Upstream's version-skew policy keeps 1.x patch and minor releases compatible
 and forbids skipping a minor. A new minor release means re-vendoring this file
-from its tag, repeating the checks above, `make proto`, the controller unit
+from its tag, repeating the checks above, `make proto` (which re-applies
+the generation patch, or stops on a new annotation form), the controller unit
 tests and a live round on the Substrate dev cluster.
