@@ -46,6 +46,11 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 : "${E2E_EGRESS_PROBE_HOST:=example.com}"
 # 1 makes a missing chart a failure (CI); 0 skips the DefenseClaw phase with a notice.
 : "${E2E_REQUIRE_DEFENSECLAW:=0}"
+# Where the chart installs, and the gateway image it runs. E2E_GATEWAY_IMAGE=repo:tag@sha256:... uses an image
+# that is already in a registry the cluster reads; empty builds one from this checkout.
+: "${E2E_DC_NAMESPACE:=defenseclaw-system}"
+: "${E2E_DC_LAUNCH_ATESPACE:=dc-e2e-launch}"
+: "${E2E_GATEWAY_IMAGE:=}"
 # Kubernetes context kubectl and kubectl-ate use. In create mode it is kind-<cluster>.
 : "${E2E_CONTEXT:=}"
 
@@ -103,7 +108,7 @@ diagnostics() {
   K get workerpool,pods -n "$E2E_NAMESPACE" -o yaml >"$d/lane-ns.yaml" 2>&1
   ATE get actor -a "$E2E_ATESPACE" -o yaml >"$d/actors.yaml" 2>&1
   local ns p
-  for ns in ate-system "$E2E_NAMESPACE" defenseclaw-system; do
+  for ns in ate-system "$E2E_NAMESPACE" "$E2E_DC_NAMESPACE"; do
     for p in $(K -n "$ns" get pods -o name 2>/dev/null); do
       K -n "$ns" logs --tail=200 --all-containers "$p" >"$d/log-${ns}-${p#pod/}.txt" 2>&1
     done
@@ -248,6 +253,7 @@ containers:
   image: $stub_image
   env:
   - {name: SSL_CERT_FILE, value: /run/ate/trust-bundle.pem}
+  - {name: STUB_HOOK_URL, value: "http://defenseclaw-actor.$E2E_DC_NAMESPACE.svc.cluster.local/api/v1/substrate/hook/claudecode"}
   volumeMounts:
   - {name: system-info, mountPath: /run/ate}
   wakeupProbe:
@@ -318,13 +324,16 @@ YAML
     fail "egress is denied again after the policy is removed"
   fi
   stop_proxies
+  # The DefenseClaw controller manages this atespace once the chart is installed: leave no actor of the
+  # plain-Substrate phase behind for it.
+  ATE delete actor "$actor" -a "$E2E_ATESPACE" >/dev/null 2>&1
 }
 
 # ---- phase: defenseclaw ----
 phase_defenseclaw() {
   log "DefenseClaw on Substrate"
   local chart="$ROOT/deploy/helm/defenseclaw-substrate"
-  if [ ! -d "$chart" ] || [ ! -x "$HERE/defenseclaw.sh" ]; then
+  if [ ! -d "$chart" ] || [ ! -f "$HERE/defenseclaw.sh" ]; then
     if [ "$E2E_REQUIRE_DEFENSECLAW" = 1 ]; then
       fail "the DefenseClaw chart and test/substrate-e2e/defenseclaw.sh exist"
     else
