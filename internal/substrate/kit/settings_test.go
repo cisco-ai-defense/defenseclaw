@@ -19,7 +19,7 @@ func overlayFor(t *testing.T, h *harness.Spec, provider string) Overlay {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ov, err := ActorOverlay(art, OverlayOptions{Config: DefaultConfig(), Home: "/sandbox", Workdir: "/work", Provider: provider})
+	ov, err := ActorOverlay(art, OverlayOptions{Config: DefaultConfig(), Home: "/sandbox", Workdir: "/work", Provider: provider, HarnessVersion: "2.1.300"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,5 +163,21 @@ func TestOverlayIsDeterministic(t *testing.T) {
 				t.Fatalf("%s differs between two renders", a.Files[i].Path)
 			}
 		}
+	}
+}
+
+// Bedrock serves Haiku 5.5 only to Claude Code 2.1.280 and newer.
+func TestClaudeCodeModelFollowsTheHarnessVersion(t *testing.T) {
+	for v, want := range map[string]string{
+		"2.1.156": ClaudeCodeBedrockFallbackModel, "2.1.279": ClaudeCodeBedrockFallbackModel,
+		"2.1.280": ClaudeCodeBedrockModel, "2.2.0": ClaudeCodeBedrockModel, "": ClaudeCodeBedrockModel,
+	} {
+		if got := claudeCodeDefaultModel(v); got != want {
+			t.Errorf("%q: %s, want %s", v, got, want)
+		}
+	}
+	env := modelEnv("claudecode", "http://gw", OverlayOptions{HarnessVersion: "2.1.156", Model: "us.anthropic.claude-haiku-5-5"})
+	if env["ANTHROPIC_MODEL"] != "us.anthropic.claude-haiku-5-5" {
+		t.Fatal("an explicit --model must win")
 	}
 }

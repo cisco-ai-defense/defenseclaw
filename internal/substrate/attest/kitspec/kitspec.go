@@ -101,7 +101,7 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 	if err != nil {
 		return zero, attest.TemplateInfo{}, "", err
 	}
-	ov, err := kit.ActorOverlay(art, kit.OverlayOptions{Config: cfg, Home: Home, Workdir: Workdir, Provider: o.Provider, Model: o.Model})
+	ov, err := kit.ActorOverlay(art, kit.OverlayOptions{Config: cfg, Home: Home, Workdir: Workdir, Provider: o.Provider, Model: o.Model, HarnessVersion: ictx.HarnessVersion})
 	if err != nil {
 		return zero, attest.TemplateInfo{}, "", err
 	}

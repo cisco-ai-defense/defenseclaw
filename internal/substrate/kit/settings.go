@@ -70,6 +70,9 @@ type OverlayOptions struct {
 	Provider string
 	// Model is the default model id ("" leaves the connector's default).
 	Model string
+	// HarnessVersion is the agent version the image pins (it decides the
+	// Claude Code default model, ClaudeCodeHaiku55MinVersion).
+	HarnessVersion string
 }
 
 // SubstrateIngress is the remote ingress of cfg's gateway URL.
@@ -288,6 +291,42 @@ func dedupe(in []string) []string {
 // model the gateway's /llm/bedrock allows.
 const ClaudeCodeBedrockModel = "us.anthropic.claude-haiku-5-5"
 
+// ClaudeCodeHaiku55MinVersion is the oldest Claude Code Bedrock serves
+// Haiku 5.5 to: an older one gets "400 Claude Code <v> does not support this
+// model; version 2.1.280 or newer is required" (live on E1, 2026-11-12).
+const ClaudeCodeHaiku55MinVersion = "2.1.280"
+
+// ClaudeCodeBedrockFallbackModel is the model of an image whose pinned
+// Claude Code predates ClaudeCodeHaiku55MinVersion, until the harness pin
+// moves (substrate-1 GAP: the OpenShell harness pins 2.1.156).
+const ClaudeCodeBedrockFallbackModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+// claudeCodeDefaultModel is the Bedrock model for a Claude Code version.
+func claudeCodeDefaultModel(version string) string {
+	if version == "" || versionAtLeast(version, ClaudeCodeHaiku55MinVersion) {
+		return ClaudeCodeBedrockModel
+	}
+	return ClaudeCodeBedrockFallbackModel
+}
+
+// versionAtLeast compares dotted numeric versions.
+func versionAtLeast(v, min string) bool {
+	a, b := strings.Split(v, "."), strings.Split(min, ".")
+	for i := 0; i < len(a) || i < len(b); i++ {
+		var x, y int
+		if i < len(a) {
+			x, _ = strconv.Atoi(a[i])
+		}
+		if i < len(b) {
+			y, _ = strconv.Atoi(b[i])
+		}
+		if x != y {
+			return x > y
+		}
+	}
+	return true
+}
+
 // claudeCodeModelSlots are the Claude Code variables that name a model.
 var claudeCodeModelSlots = []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 	"ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"}
@@ -318,7 +357,7 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 		switch o.Provider {
 		case "", "bedrock":
 			if model == "" {
-				model = ClaudeCodeBedrockModel
+				model = claudeCodeDefaultModel(o.HarnessVersion)
 			}
 			env["CLAUDE_CODE_USE_BEDROCK"] = "1"
 			env["ANTHROPIC_BEDROCK_BASE_URL"] = gw + "/llm/bedrock"

@@ -119,7 +119,7 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 	if err != nil {
 		return err
 	}
-	ov, err := kit.ActorOverlay(art, kit.OverlayOptions{Config: cfg, Home: home, Workdir: workdir, Provider: provider, Model: model})
+	ov, err := kit.ActorOverlay(art, kit.OverlayOptions{Config: cfg, Home: home, Workdir: workdir, Provider: provider, Model: model, HarnessVersion: ctx.HarnessVersion})
 	if err != nil {
 		return err
 	}
