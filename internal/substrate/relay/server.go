@@ -103,7 +103,7 @@ func (s *Server) init() error {
 		d := s.signinDecision()
 		if !d.Allowed {
 			s.log.Warn("relay.signin_refused", "connector", rc.Connector, "reason", d.Code)
-			s.initErr = errors.New(d.Message)
+			s.initErr = &signinRefusal{msg: d.Message}
 			return
 		}
 		if d.Warn {
@@ -123,6 +123,12 @@ func (s *Server) init() error {
 	})
 	return s.initErr
 }
+
+// signinRefusal is the E9 refusal of an agent that signs in to a vendor
+// account, in a managed image.
+type signinRefusal struct{ msg string }
+
+func (e *signinRefusal) Error() string { return e.msg }
 
 // signinDecision is E9 for this image: the connector's vendor API key
 // variable counts as bound when the actor carries it (a placeholder; egress
@@ -223,7 +229,13 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string, open 
 		}
 	}
 	if err := s.init(); err != nil {
-		http.Error(w, "relay: "+err.Error(), http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		var refused *signinRefusal
+		if errors.As(err, &refused) {
+			// A rule, not a fault: the person is told why (E9).
+			status = http.StatusForbidden
+		}
+		http.Error(w, "relay: "+err.Error(), status)
 		return Session{}, false
 	}
 	s.log.Info("relay.accepted", "what", what, "person", sess.Person, "actor", sess.Actor, "actor_uid", sess.ActorUID, "jti", sess.TokenID)

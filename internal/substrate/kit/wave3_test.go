@@ -107,3 +107,53 @@ func TestSigninRefusalFromTheGateway(t *testing.T) {
 		t.Errorf("a refusal without a message needs a default: %q, %v", msg, ok)
 	}
 }
+
+// GAP-0136: the hook registration files of Amp and Devin, their folders and
+// ~/.config are root-owned, so the agent cannot rewrite, rename or delete them.
+func TestWave3HookRegistrationsAreRootOwned(t *testing.T) {
+	cases := map[string][]string{
+		"amp":   {"/sandbox/.config/amp/plugins/defenseclaw.ts"},
+		"devin": {"/sandbox/.config/devin/config.json", "/usr/local/lib/defenseclaw/devin/config.json"},
+	}
+	for name, files := range cases {
+		ov := wave2Overlay(t, name)
+		for _, p := range files {
+			var found bool
+			for _, f := range ov.Files {
+				if f.Path != p {
+					continue
+				}
+				found = true
+				if f.User || f.Mode != 0o644 {
+					t.Errorf("%s: %s is user-owned or writable (user=%v mode=%o)", name, p, f.User, f.Mode)
+				}
+			}
+			if !found {
+				t.Errorf("%s: %s not in the overlay", name, p)
+			}
+		}
+		roots := strings.Join(ov.RootDirs, " ")
+		for _, d := range []string{"/sandbox/.config"} {
+			if !strings.Contains(roots, d) {
+				t.Errorf("%s: %s is not root-owned (RootDirs %v)", name, d, ov.RootDirs)
+			}
+		}
+	}
+	amp := wave2Overlay(t, "amp")
+	rootSet := map[string]bool{}
+	for _, d := range amp.RootDirs {
+		rootSet[d] = true
+	}
+	for _, d := range []string{"/sandbox/.config/amp/plugins", "/sandbox/.config/amp", "/sandbox/.config"} {
+		if !rootSet[d] {
+			t.Errorf("amp: %s is not root-owned (RootDirs %v)", d, amp.RootDirs)
+		}
+	}
+	dv := wave2Overlay(t, "devin")
+	if !strings.Contains(string(file(dv, "/sandbox/.config/devin/config.json")), `"version": 1`) {
+		t.Error("devin: the config does not carry the schema version Devin would otherwise write at its first start")
+	}
+	if !bytes.Equal(file(dv, "/sandbox/.config/devin/config.json"), file(dv, "/usr/local/lib/defenseclaw/devin/config.json")) {
+		t.Error("devin: the live and canonical config differ")
+	}
+}

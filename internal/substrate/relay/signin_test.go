@@ -5,6 +5,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -58,5 +59,15 @@ func TestRelaySigninNotAskedOfOtherRoutes(t *testing.T) {
 	d := signinServer("devin", true, map[string]string{"DEVIN_API_KEY": "x"})
 	if err := d.init(); err == nil {
 		t.Error("devin managed with a made-up key variable started")
+	}
+}
+
+// The refusal is a rule, not a fault: the relay answers 403 with the reason.
+func TestRelaySigninRefusalIsForbidden(t *testing.T) {
+	s := signinServer("devin", true, nil)
+	err := s.init()
+	var refused *signinRefusal
+	if !errors.As(err, &refused) {
+		t.Fatalf("init error %T %v, want a signinRefusal", err, err)
 	}
 }

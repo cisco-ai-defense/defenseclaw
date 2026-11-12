@@ -267,9 +267,84 @@ exec /usr/local/bin/agy "$@"
 // wave2Harden applies the connector-specific ownership rules: Antigravity's
 // hooks directory is root-owned (see AntigravityStart).
 func wave2Harden(ov *Overlay, name string, o OverlayOptions) {
-	if name != "antigravity" {
-		return
+	switch name {
+	case "antigravity":
+		antigravityHarden(ov, o)
+	case "amp":
+		ampHarden(ov, o)
+	case "devin":
+		devinHarden(ov, o)
 	}
+}
+
+// configHomeDirs are the folders other tools create under ~/.config; with
+// ~/.config root-owned (below) they stay the agent's.
+var configHomeDirs = []string{"git", "pip", "uv", "gh", "pnpm", "npm", "configstore"}
+
+// rootOwnConfigHome makes ~/.config root-owned, so that neither the hook
+// registration's folder nor anything above it can be renamed or replaced
+// (GAP-0136; Antigravity's ~/.gemini still has this gap, GAP-0120), and keeps
+// the folders common tools write there the agent's.
+func rootOwnConfigHome(ov *Overlay, o OverlayOptions) {
+	cfg := path.Join(o.Home, ".config")
+	ov.RootDirs = append(ov.RootDirs, cfg)
+	for _, d := range configHomeDirs {
+		ov.UserDirs = append(ov.UserDirs, path.Join(cfg, d))
+	}
+}
+
+// ampHarden makes Amp's plugin registration the image's: Amp loads plugins
+// only from ~/.config/amp/plugins (it has no system plugin location), so the
+// plugin, its folder, ~/.config/amp and ~/.config are root-owned. Amp writes
+// nothing there at start (measured); its settings file, which it writes on
+// `amp permissions add`, stays the agent's and is pre-created empty so an
+// in-place write works.
+func ampHarden(ov *Overlay, o OverlayOptions) {
+	plugin := path.Join(o.Home, ".config", "amp", "plugins", "defenseclaw.ts")
+	for i := range ov.Files {
+		if ov.Files[i].Path == plugin {
+			ov.Files[i].User, ov.Files[i].Mode = false, 0o644
+		}
+	}
+	dir := path.Join(o.Home, ".config", "amp")
+	ov.RootDirs = append(ov.RootDirs, path.Join(dir, "plugins"), dir)
+	rootOwnConfigHome(ov, o)
+	ov.Files = append(ov.Files, ImageFile{Path: path.Join(dir, "settings.json"), Mode: 0o600, User: true, Data: []byte("{}\n")})
+}
+
+// devinHarden makes Devin's hook registration the image's: Devin reads hooks
+// from ~/.config/devin/config.json, so the file, its folder and ~/.config
+// are root-owned. Devin rewrites the file at its first start only to add the
+// schema version, so the image carries it; credentials live in
+// ~/.local/share/devin and state in ~/.config/devin/cli, which stay the
+// agent's.
+func devinHarden(ov *Overlay, o OverlayOptions) {
+	cfgFile := path.Join(o.Home, ".config", "devin", "config.json")
+	for i := range ov.Files {
+		if ov.Files[i].Path != cfgFile && ov.Files[i].Path != devinCanonicalConfig {
+			continue
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(ov.Files[i].Data, &doc); err == nil {
+			doc["version"] = 1
+			if b, err := json.MarshalIndent(doc, "", "  "); err == nil {
+				ov.Files[i].Data = append(b, '\n')
+			}
+		}
+		if ov.Files[i].Path == cfgFile {
+			ov.Files[i].User, ov.Files[i].Mode = false, 0o644
+		}
+	}
+	dir := path.Dir(cfgFile)
+	ov.RootDirs = append(ov.RootDirs, dir)
+	rootOwnConfigHome(ov, o)
+	ov.UserDirs = append(ov.UserDirs, path.Join(dir, "cli"))
+}
+
+// devinCanonicalConfig is the root-owned reference copy of Devin's hooks.
+const devinCanonicalConfig = LibDir + "/devin/config.json"
+
+func antigravityHarden(ov *Overlay, o OverlayOptions) {
 	hooks := path.Join(o.Home, ".gemini", "config", "hooks.json")
 	dir := path.Dir(hooks)
 	for i := range ov.Files {
