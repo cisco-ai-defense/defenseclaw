@@ -7,10 +7,9 @@ package psparse
 import "strings"
 
 // NestedScript is a script embedded inside a command that the effects lane
-// should re-parse (the parser does not recurse into it automatically because
-// the inner dialect or decoding differs). Static is false when the payload
-// could not be fully resolved (e.g. iex $var); such entries are never dropped
-// so the caller can escalate.
+// should re-parse (its inner dialect or encoding differs). Static is false
+// when the payload could not be fully resolved (e.g. iex $var); such entries
+// are never dropped so the caller can escalate.
 type NestedScript struct {
 	Kind    string // see the Kind* constants
 	Dialect string // "powershell" or "cmd"
@@ -29,27 +28,141 @@ const (
 	KindCmdC              = "cmd-c"              // cmd /c "<text>"
 )
 
-var psExeNames = map[string]bool{
-	"powershell": true, "powershell.exe": true, "pwsh": true, "pwsh.exe": true,
-}
-var cmdExeNames = map[string]bool{"cmd": true, "cmd.exe": true}
-
-// ExtractNestedScripts walks the whole script and returns every embedded
-// script text (PowerShell -Command / -EncodedCommand, Invoke-Expression of a
-// literal, [scriptblock]::Create of a literal, Start-Process -ArgumentList to
-// a PowerShell host, and cmd /c payloads). Each is returned with Static and,
-// when not static, a Reason — never silently dropped.
+// ExtractNestedScripts walks the whole script and returns every embedded script
+// text (PowerShell -Command / -EncodedCommand, Invoke-Expression of a literal
+// or of its pipeline input, [scriptblock]::Create of a literal, Start-Process
+// -ArgumentList to a PowerShell host, and cmd /c payloads). Each is returned
+// with Static and, when not static, a Reason — never silently dropped.
 func ExtractNestedScripts(sc *Script) []NestedScript {
 	var out []NestedScript
-	WalkCommands(sc, func(c *Command) {
-		out = append(out, nestedFromCommand(c)...)
-	})
-	walkInvokes(sc, func(inv *Invoke) {
-		if ns, ok := nestedFromScriptBlockCreate(inv); ok {
-			out = append(out, ns)
+	var walkStmts func([]Statement)
+	var walkExpr func(Expr)
+
+	walkPipeline := func(pl *Pipeline) {
+		for p := pl; p != nil; p = p.ChainRHS {
+			for idx, el := range p.Elements {
+				cmd, ok := el.(*Command)
+				if !ok {
+					if es, ok := el.(*ExprStatement); ok {
+						walkExpr(es.Expr)
+					}
+					continue
+				}
+				if ns, handled := iexNested(cmd, p.Elements, idx); handled {
+					out = append(out, ns...)
+				} else {
+					out = append(out, nestedFromCommand(cmd)...)
+				}
+				// recurse into argument expressions / script blocks
+				walkExpr(cmd.Name)
+				for _, ce := range cmd.Elements {
+					switch e := ce.(type) {
+					case *Parameter:
+						walkExpr(e.Colon)
+					case *Arg:
+						walkExpr(e.Value)
+					case Expr:
+						walkExpr(e)
+					}
+				}
+			}
+			for _, r := range p.Redirs {
+				walkExpr(r.Target)
+			}
 		}
-	})
+	}
+	walkStmts = func(sts []Statement) {
+		for _, s := range sts {
+			switch v := s.(type) {
+			case *Pipeline:
+				walkPipeline(v)
+			case *Assignment:
+				walkExpr(v.LHS)
+				walkStmts([]Statement{v.RHS})
+			case *Block:
+				walkStmts(v.Conditions)
+				for _, b := range v.Bodies {
+					if b != nil {
+						walkStmts(b.Statements)
+					}
+				}
+			case *ExprStatement:
+				walkExpr(v.Expr)
+			case *Command:
+				out = append(out, nestedFromCommand(v)...)
+			}
+		}
+	}
+	walkExpr = func(e Expr) {
+		switch v := e.(type) {
+		case nil:
+		case *ScriptBlockExpr:
+			walkStmts(v.Statements)
+		case *SubExpr:
+			walkStmts(v.Statements)
+		case *ArrayExpr:
+			walkStmts(v.Statements)
+		case *ArrayLit:
+			for _, el := range v.Elements {
+				walkExpr(el)
+			}
+		case *Hashtable:
+			for _, val := range v.Values {
+				walkExpr(val)
+			}
+		case *Paren:
+			walkStmts([]Statement{v.Inner})
+		case *Member:
+			walkExpr(v.Target)
+		case *Invoke:
+			if ns, ok := nestedFromScriptBlockCreate(v); ok {
+				out = append(out, ns)
+			}
+			walkExpr(v.Target)
+			for _, a := range v.Args {
+				walkExpr(a)
+			}
+		case *Index:
+			walkExpr(v.Target)
+			walkExpr(v.Index)
+		case *Binary:
+			walkExpr(v.LHS)
+			walkExpr(v.RHS)
+		case *Unary:
+			walkExpr(v.Operand)
+		case *Convert:
+			walkExpr(v.Operand)
+		case *StringLit:
+			for _, pt := range v.Parts {
+				walkExpr(pt.Expr)
+			}
+		case *scriptExprWrap:
+			out = append(out, nestedFromCommand(v.cmd)...)
+		}
+	}
+	if sc != nil {
+		walkStmts(sc.Statements)
+	}
 	return out
+}
+
+// baseName lower-cases and strips the directory and a trailing .exe from a
+// program name so a full path matches a host by basename.
+func baseName(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if i := strings.LastIndexAny(n, `\/`); i >= 0 {
+		n = n[i+1:]
+	}
+	n = strings.TrimSuffix(n, ".exe")
+	return n
+}
+
+func isPSHost(name string) bool {
+	switch baseName(name) {
+	case "powershell", "pwsh":
+		return true
+	}
+	return false
 }
 
 func nestedFromCommand(c *Command) []NestedScript {
@@ -57,19 +170,18 @@ func nestedFromCommand(c *Command) []NestedScript {
 	if !ok {
 		return nil
 	}
-	lower := strings.ToLower(name)
 	switch {
-	case psExeNames[lower]:
-		return powerShellHostScripts(c)
-	case cmdExeNames[lower]:
+	case isPSHost(name):
+		return powerShellHostScripts(c, hostWords(c))
+	case baseName(name) == "cmd":
 		if ns, ok := cmdCScript(c); ok {
 			return []NestedScript{ns}
 		}
-	case lower == "iex" || lower == "invoke-expression":
-		if ns, ok := iexScript(c); ok {
+	case isIEX(name):
+		if ns, ok := iexArgScript(c); ok {
 			return []NestedScript{ns}
 		}
-	case lower == "start-process" || lower == "saps":
+	case isStartProcess(name):
 		if ns, ok := startProcessScript(c); ok {
 			return []NestedScript{ns}
 		}
@@ -77,35 +189,352 @@ func nestedFromCommand(c *Command) []NestedScript {
 	return nil
 }
 
-// powerShellHostScripts pulls -Command / -EncodedCommand (and their aliases and
-// positional script) out of a powershell/pwsh invocation.
-func powerShellHostScripts(c *Command) []NestedScript {
-	var out []NestedScript
-	pos := positionalArgs(c)
-	if val, ok := paramValue(c, "command", "c"); ok {
-		out = append(out, resolveNested(val, KindPowerShellCommand, "powershell", c))
-	} else if enc, ok := paramValue(c, "encodedcommand", "e", "ec", "encoded"); ok {
-		out = append(out, decodeNested(enc, c))
-	} else if len(pos) > 0 {
-		// powershell "<script>" with no switch runs the first argument
-		out = append(out, resolveNested(pos[0], KindPowerShellCommand, "powershell", c))
+func isIEX(name string) bool {
+	n := strings.ToLower(name)
+	if i := strings.LastIndex(n, `\`); i >= 0 { // module-qualified: ...\invoke-expression
+		n = n[i+1:]
+	}
+	return n == "iex" || n == "invoke-expression"
+}
+
+func isStartProcess(name string) bool {
+	switch strings.ToLower(name) {
+	case "start-process", "saps", "start":
+		return true
+	}
+	return false
+}
+
+// hostWord is one argument word of a PowerShell/Start-Process host invocation.
+type hostWord struct {
+	text   string
+	static bool
+}
+
+func hostWords(c *Command) []hostWord {
+	var out []hostWord
+	for _, el := range c.Elements {
+		switch e := el.(type) {
+		case *Parameter:
+			out = append(out, hostWord{"-" + e.Name, true})
+			if e.Colon != nil {
+				v, ok := LiteralString(e.Colon)
+				out = append(out, hostWord{v, ok})
+			}
+		case *Arg:
+			v, ok := LiteralString(e.Value)
+			out = append(out, hostWord{v, ok})
+		case Expr:
+			v, ok := LiteralString(e)
+			out = append(out, hostWord{v, ok})
+		}
 	}
 	return out
 }
 
-func decodeNested(val Expr, src Node) NestedScript {
+// powerShellHostScripts applies the pwsh CLI parameter rules to a
+// powershell/pwsh invocation's argument words and returns the embedded script.
+func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		name, cand := stripParamLead(w.text)
+		if cand {
+			canon, takesVal, known := resolvePSParam(name)
+			if known {
+				switch canon {
+				case "command":
+					return []NestedScript{joinRest(words[i+1:], KindPowerShellCommand, "powershell", src)}
+				case "encodedcommand", "encodedarguments":
+					if i+1 < len(words) {
+						return []NestedScript{decodeWord(words[i+1], src)}
+					}
+					return []NestedScript{{Kind: KindEncodedCommand, Dialect: "powershell", Source: src, Reason: ReasonNonLiteral}}
+				case "file":
+					return nil // a script file; its content is not inline
+				default:
+					if takesVal {
+						i++ // skip the value
+					}
+					continue
+				}
+			}
+			if dashLed(w.text) {
+				// an unknown -parameter: do not guess a positional script
+				return []NestedScript{{Kind: KindPowerShellCommand, Dialect: "powershell", Source: src, Reason: ReasonNonLiteral}}
+			}
+		}
+		// a positional word before any -Command/-File: pwsh/powershell runs it
+		// as the command (join the rest of the line).
+		return []NestedScript{joinRest(words[i:], KindPowerShellCommand, "powershell", src)}
+	}
+	return nil
+}
+
+// joinRest joins the remaining words into one script, static only if every word
+// is static.
+func joinRest(words []hostWord, kind, dialect string, src Node) NestedScript {
+	ns := NestedScript{Kind: kind, Dialect: dialect, Source: src, Static: true}
+	parts := make([]string, 0, len(words))
+	for _, w := range words {
+		if !w.static {
+			ns.Static = false
+			ns.Reason = ReasonNonLiteral
+			break
+		}
+		parts = append(parts, w.text)
+	}
+	if ns.Static {
+		ns.Text = strings.Join(parts, " ")
+	}
+	return ns
+}
+
+func decodeWord(w hostWord, src Node) NestedScript {
 	ns := NestedScript{Kind: KindEncodedCommand, Dialect: "powershell", Source: src}
-	lit, ok := LiteralString(val)
-	if !ok {
+	if !w.static {
 		ns.Reason = ReasonNonLiteral
 		return ns
 	}
-	if dec, ok := DecodeEncodedCommand(lit); ok {
+	if dec, ok := DecodeEncodedCommand(w.text); ok {
 		ns.Text, ns.Static = dec, true
 	} else {
 		ns.Reason = ReasonNonLiteral
 	}
 	return ns
+}
+
+// stripParamLead strips a leading -, --, / or Unicode dash and returns the
+// lower-cased parameter name and whether the word looked like a parameter.
+func stripParamLead(w string) (string, bool) {
+	rs := []rune(w)
+	if len(rs) == 0 {
+		return "", false
+	}
+	i := 0
+	if isDash(rs[0]) {
+		i = 1
+		if i < len(rs) && isDash(rs[i]) {
+			i++
+		}
+	} else if rs[0] == '/' {
+		i = 1
+	} else {
+		return "", false
+	}
+	if i >= len(rs) {
+		return "", false
+	}
+	return strings.ToLower(string(rs[i:])), true
+}
+
+func dashLed(w string) bool {
+	rs := []rune(w)
+	return len(rs) > 0 && isDash(rs[0])
+}
+
+// psParams is the pwsh CLI parameter set with whether each takes a value.
+var psParams = []struct {
+	name string
+	val  bool
+}{
+	{"command", true}, {"encodedcommand", true}, {"encodedarguments", true},
+	{"executionpolicy", true}, {"file", true}, {"configurationname", true},
+	{"configurationfile", true}, {"custompipename", true}, {"inputformat", true},
+	{"outputformat", true}, {"windowstyle", true}, {"workingdirectory", true},
+	{"settingsfile", true},
+	{"login", false}, {"mta", false}, {"sta", false}, {"noexit", false},
+	{"nologo", false}, {"noninteractive", false}, {"noprofile", false},
+	{"noprofileloadtime", false}, {"interactive", false}, {"version", false},
+	{"help", false}, {"sshservermode", false},
+}
+
+// resolvePSParam resolves a (possibly abbreviated) pwsh CLI parameter name to
+// its canonical form, following the CLI's unambiguous-prefix rule with the
+// documented e/c tie-breaks (-e..-enc -> EncodedCommand, -c -> Command).
+func resolvePSParam(s string) (canonical string, takesValue, known bool) {
+	if s == "" {
+		return "", false, false
+	}
+	var hits []int
+	for i, p := range psParams {
+		if strings.HasPrefix(p.name, s) {
+			hits = append(hits, i)
+		}
+	}
+	switch {
+	case len(hits) == 1:
+		return psParams[hits[0]].name, psParams[hits[0]].val, true
+	case len(hits) > 1:
+		// documented pwsh tie-breaks for ambiguous prefixes
+		if s == "c" {
+			return "command", true, true
+		}
+		if s[0] == 'e' { // -e / -en / -enc ... -> EncodedCommand
+			return "encodedcommand", true, true
+		}
+		if s == "w" { // -w -> WindowStyle
+			return "windowstyle", true, true
+		}
+		// if the shortest match is itself a prefix of every other match (e.g.
+		// noprofile vs noprofileloadtime), it wins.
+		short := hits[0]
+		for _, h := range hits {
+			if len(psParams[h].name) < len(psParams[short].name) {
+				short = h
+			}
+		}
+		allExtend := true
+		for _, h := range hits {
+			if !strings.HasPrefix(psParams[h].name, psParams[short].name) {
+				allExtend = false
+				break
+			}
+		}
+		if allExtend {
+			return psParams[short].name, psParams[short].val, true
+		}
+		return "", false, false // genuinely ambiguous
+	}
+	return "", false, false
+}
+
+func cmdCScript(c *Command) (NestedScript, bool) {
+	for i, el := range c.Elements {
+		a, ok := el.(*Arg)
+		if !ok {
+			continue
+		}
+		s, ok := LiteralString(a.Value)
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(s) {
+		case "/c", "/k", "/r":
+			// the payload is every element after the switch, joined
+			ns := NestedScript{Kind: KindCmdC, Dialect: "cmd", Source: c, Static: true}
+			var parts []string
+			for _, rest := range c.Elements[i+1:] {
+				ra, ok := rest.(*Arg)
+				if !ok {
+					ns.Static = false
+					ns.Reason = ReasonNonLiteral
+					break
+				}
+				v, ok := LiteralString(ra.Value)
+				if !ok {
+					ns.Static = false
+					ns.Reason = ReasonNonLiteral
+					break
+				}
+				parts = append(parts, v)
+			}
+			if ns.Static {
+				ns.Text = strings.Join(parts, " ")
+			}
+			return ns, true
+		}
+	}
+	return NestedScript{}, false
+}
+
+// iexArgScript handles Invoke-Expression / iex with an explicit value
+// (positional or -Command).
+func iexArgScript(c *Command) (NestedScript, bool) {
+	if v, ok := paramValue(c, "command"); ok {
+		return resolveNested(v, KindIEXLiteral, "powershell", c), true
+	}
+	for _, el := range c.Elements {
+		if a, ok := el.(*Arg); ok {
+			return resolveNested(a.Value, KindIEXLiteral, "powershell", c), true
+		}
+	}
+	return NestedScript{}, false
+}
+
+// iexNested handles iex/Invoke-Expression in a pipeline: an explicit value, or
+// (the download-cradle form) its pipeline input from the previous element.
+func iexNested(c *Command, elems []PipelineElement, idx int) ([]NestedScript, bool) {
+	name, ok := LiteralString(c.Name)
+	if !ok || !isIEX(name) {
+		return nil, false
+	}
+	if ns, ok := iexArgScript(c); ok {
+		return []NestedScript{ns}, true
+	}
+	// no value: the script is this command's pipeline input.
+	if idx > 0 {
+		if prev, ok := elems[idx-1].(*ExprStatement); ok {
+			return []NestedScript{resolveNested(prev.Expr, KindIEXLiteral, "powershell", c)}, true
+		}
+	}
+	return []NestedScript{{Kind: KindIEXLiteral, Dialect: "powershell", Source: c, Reason: ReasonNonLiteral}}, true
+}
+
+func startProcessScript(c *Command) (NestedScript, bool) {
+	exe := ""
+	if v, ok := paramValue(c, "filepath", "path"); ok {
+		exe, _ = LiteralString(v)
+	} else {
+		for _, el := range c.Elements {
+			if a, ok := el.(*Arg); ok {
+				exe, _ = LiteralString(a.Value)
+				break
+			}
+		}
+	}
+	if !isPSHost(exe) {
+		return NestedScript{}, false
+	}
+	val, ok := paramValue(c, "argumentlist", "args")
+	if !ok {
+		return NestedScript{}, false
+	}
+	// the ArgumentList is a string or an array of strings; build host words.
+	var words []hostWord
+	switch v := val.(type) {
+	case *ArrayLit:
+		for _, el := range v.Elements {
+			s, ok := LiteralString(el)
+			words = append(words, hostWord{s, ok})
+		}
+	default:
+		if s, ok := LiteralString(val); ok {
+			for _, f := range strings.Fields(s) {
+				words = append(words, hostWord{f, true})
+			}
+		} else {
+			return NestedScript{Kind: KindStartProcessArgs, Dialect: "powershell", Source: c, Reason: ReasonNonLiteral}, true
+		}
+	}
+	res := powerShellHostScripts(c, words)
+	if len(res) == 0 {
+		return NestedScript{}, false
+	}
+	ns := res[0]
+	ns.Kind = KindStartProcessArgs
+	return ns, true
+}
+
+// nestedFromScriptBlockCreate handles [scriptblock]::Create('<text>') and the
+// module-qualified [System.Management.Automation.ScriptBlock]::Create(...).
+func nestedFromScriptBlockCreate(inv *Invoke) (NestedScript, bool) {
+	if !inv.Static || !strings.EqualFold(inv.Name, "Create") {
+		return NestedScript{}, false
+	}
+	te, ok := inv.Target.(*TypeExpr)
+	if !ok || !isScriptBlockType(te.Name) {
+		return NestedScript{}, false
+	}
+	if len(inv.Args) == 0 {
+		return NestedScript{}, false
+	}
+	return resolveNested(inv.Args[0], KindScriptBlockCreate, "powershell", inv), true
+}
+
+func isScriptBlockType(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	n = strings.TrimPrefix(n, "system.management.automation.")
+	return n == "scriptblock"
 }
 
 func resolveNested(val Expr, kind, dialect string, src Node) NestedScript {
@@ -118,121 +547,8 @@ func resolveNested(val Expr, kind, dialect string, src Node) NestedScript {
 	return ns
 }
 
-func cmdCScript(c *Command) (NestedScript, bool) {
-	// cmd /c <rest> : the payload is the first argument after /c or /k.
-	for i, el := range c.Elements {
-		if a, ok := el.(*Arg); ok {
-			if s, ok := LiteralString(a.Value); ok {
-				ls := strings.ToLower(s)
-				if ls == "/c" || ls == "/k" {
-					if i+1 < len(c.Elements) {
-						if next, ok := c.Elements[i+1].(*Arg); ok {
-							return resolveNested(next.Value, KindCmdC, "cmd", c), true
-						}
-					}
-				}
-			}
-		}
-	}
-	return NestedScript{}, false
-}
-
-func iexScript(c *Command) (NestedScript, bool) {
-	pos := positionalArgs(c)
-	if v, ok := paramValue(c, "command"); ok {
-		return resolveNested(v, KindIEXLiteral, "powershell", c), true
-	}
-	if len(pos) > 0 {
-		return resolveNested(pos[0], KindIEXLiteral, "powershell", c), true
-	}
-	return NestedScript{}, false
-}
-
-func startProcessScript(c *Command) (NestedScript, bool) {
-	// Start-Process <exe> -ArgumentList ... ; only interesting when the exe is
-	// a PowerShell host.
-	exe := ""
-	if v, ok := paramValue(c, "filepath", "path"); ok {
-		exe, _ = LiteralString(v)
-	} else if pos := positionalArgs(c); len(pos) > 0 {
-		exe, _ = LiteralString(pos[0])
-	}
-	if !psExeNames[strings.ToLower(exe)] {
-		return NestedScript{}, false
-	}
-	val, ok := paramValue(c, "argumentlist", "args")
-	if !ok {
-		return NestedScript{}, false
-	}
-	ns := NestedScript{Kind: KindStartProcessArgs, Dialect: "powershell", Source: c}
-	if lit, ok := LiteralString(val); ok {
-		// best-effort: if the arg list contains -EncodedCommand decode it,
-		// otherwise treat the joined text as the script after -Command.
-		if dec, kind, ok := decodeFromArgList(lit); ok {
-			ns.Text, ns.Static, ns.Kind = dec, true, kind
-		} else {
-			ns.Text, ns.Static = stripCommandSwitch(lit), true
-		}
-	} else {
-		ns.Reason = ReasonNonLiteral
-	}
-	return ns, true
-}
-
-func decodeFromArgList(s string) (string, string, bool) {
-	fields := strings.Fields(s)
-	for i, f := range fields {
-		lf := strings.ToLower(f)
-		if (lf == "-encodedcommand" || lf == "-e" || lf == "-ec") && i+1 < len(fields) {
-			if dec, ok := DecodeEncodedCommand(fields[i+1]); ok {
-				return dec, KindStartProcessArgs, true
-			}
-		}
-	}
-	return "", "", false
-}
-
-func stripCommandSwitch(s string) string {
-	fields := strings.Fields(s)
-	for i, f := range fields {
-		lf := strings.ToLower(f)
-		if lf == "-command" || lf == "-c" {
-			return strings.Join(fields[i+1:], " ")
-		}
-	}
-	return s
-}
-
-// nestedFromScriptBlockCreate handles [scriptblock]::Create('<text>') and
-// [ScriptBlock]::Create("<text>").
-func nestedFromScriptBlockCreate(inv *Invoke) (NestedScript, bool) {
-	if !inv.Static || !strings.EqualFold(inv.Name, "Create") {
-		return NestedScript{}, false
-	}
-	te, ok := inv.Target.(*TypeExpr)
-	if !ok || !strings.EqualFold(strings.TrimSpace(te.Name), "scriptblock") {
-		return NestedScript{}, false
-	}
-	if len(inv.Args) == 0 {
-		return NestedScript{}, false
-	}
-	return resolveNested(inv.Args[0], KindScriptBlockCreate, "powershell", inv), true
-}
-
-// positionalArgs returns the positional (non-parameter) argument expressions.
-func positionalArgs(c *Command) []Expr {
-	var out []Expr
-	for _, el := range c.Elements {
-		if a, ok := el.(*Arg); ok {
-			out = append(out, a.Value)
-		}
-	}
-	return out
-}
-
 // paramValue returns the value bound to the first of the given parameter names
-// (case-insensitive). It handles both -Name:value (Colon) and -Name value
-// (the following positional argument).
+// (case-insensitive), handling -Name:value (Colon) and -Name value.
 func paramValue(c *Command, names ...string) (Expr, bool) {
 	want := map[string]bool{}
 	for _, n := range names {
@@ -251,113 +567,7 @@ func paramValue(c *Command, names ...string) (Expr, bool) {
 				return a.Value, true
 			}
 		}
-		return nil, false // a switch parameter with no value
+		return nil, false
 	}
 	return nil, false
-}
-
-// walkInvokes visits every *Invoke in the script.
-func walkInvokes(sc *Script, fn func(*Invoke)) {
-	if sc == nil {
-		return
-	}
-	var we func(Expr)
-	var ws func([]Statement)
-	wcmd := func(c *Command) {
-		we(c.Name)
-		for _, el := range c.Elements {
-			switch e := el.(type) {
-			case *Parameter:
-				we(e.Colon)
-			case *Arg:
-				we(e.Value)
-			case Expr:
-				we(e)
-			}
-		}
-		for _, r := range c.Redirs {
-			we(r.Target)
-		}
-	}
-	we = func(e Expr) {
-		switch v := e.(type) {
-		case nil:
-		case *Invoke:
-			fn(v)
-			we(v.Target)
-			for _, a := range v.Args {
-				we(a)
-			}
-		case *Member:
-			we(v.Target)
-		case *Index:
-			we(v.Target)
-			we(v.Index)
-		case *Binary:
-			we(v.LHS)
-			we(v.RHS)
-		case *Unary:
-			we(v.Operand)
-		case *Convert:
-			we(v.Operand)
-		case *Paren:
-			if es, ok := v.Inner.(*ExprStatement); ok {
-				we(es.Expr)
-			} else if v.Inner != nil {
-				ws([]Statement{v.Inner})
-			}
-		case *ScriptBlockExpr:
-			ws(v.Statements)
-		case *SubExpr:
-			ws(v.Statements)
-		case *ArrayExpr:
-			ws(v.Statements)
-		case *ArrayLit:
-			for _, el := range v.Elements {
-				we(el)
-			}
-		case *Hashtable:
-			for _, val := range v.Values {
-				we(val)
-			}
-		case *StringLit:
-			for _, pt := range v.Parts {
-				we(pt.Expr)
-			}
-		case *scriptExprWrap:
-			wcmd(v.cmd)
-		}
-	}
-	ws = func(sts []Statement) {
-		for _, s := range sts {
-			switch v := s.(type) {
-			case *Pipeline:
-				for p := v; p != nil; p = p.ChainRHS {
-					for _, el := range p.Elements {
-						switch e := el.(type) {
-						case *Command:
-							wcmd(e)
-						case *ExprStatement:
-							we(e.Expr)
-						}
-					}
-				}
-			case *Assignment:
-				we(v.LHS)
-				ws([]Statement{v.RHS})
-			case *Block:
-				ws(v.Conditions)
-				for _, b := range v.Bodies {
-					if b != nil {
-						ws(b.Statements)
-					}
-				}
-			case *Command:
-				wcmd(v)
-			case *ExprStatement:
-				we(v.Expr)
-			}
-		}
-	}
-	ws(sc.Statements)
 }
