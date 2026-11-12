@@ -1,0 +1,130 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $egress := dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" .Values.substrate.namespace)) "podSelector" (dict "matchLabels" .Values.substrate.egressPodLabels) }}
+{{- $release := dict "podSelector" (dict "matchLabels" (dict "app.kubernetes.io/instance" .Release.Name "app.kubernetes.io/name" "defenseclaw-substrate")) }}
+# Deny every ingress to this release's pods; the policies below open only
+# what each listener needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-default-deny
+  labels:
+    {{- include "dc.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: defenseclaw-substrate
+  policyTypes: [Ingress]
+---
+# Gateway: the actor listener (plain HTTP) only from atenet-egress (actors
+# reach it only through egress, with the injected actor JWT); the admin listener only from
+# this namespace and adminFrom (launcher ingress, fleet).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dc.selector" (dict "ctx" . "component" "gateway") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - {{- toYaml $egress | nindent 6 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.gateway.ports.actor }}
+  - from:
+    # This namespace's pods, never a Substrate worker pod (which hosts
+    # actors) even if worker pools share the namespace.
+    - podSelector:
+        matchExpressions:
+        - {key: ate.dev/worker-pool, operator: DoesNotExist}
+    {{- with .Values.networkPolicy.adminFrom }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.gateway.ports.admin }}
+  {{- with .Values.networkPolicy.metricsFrom }}
+  - from:
+    {{- toYaml . | nindent 4 }}
+    ports:
+    - protocol: TCP
+      port: {{ $.Values.gateway.ports.metrics }}
+  {{- end }}
+---
+# Callout: only atenet-egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-callout
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "callout") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dc.selector" (dict "ctx" . "component" "callout") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - {{- toYaml $egress | nindent 6 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.callout.port }}
+  {{- with .Values.networkPolicy.metricsFrom }}
+  - from:
+    {{- toYaml . | nindent 4 }}
+    ports:
+    - protocol: TCP
+      port: {{ $.Values.callout.ports.health }}
+  {{- end }}
+---
+# Leader: only this release's pods (followers, controller, callout).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-leader
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "leader") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dc.selector" (dict "ctx" . "component" "leader") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - {{- toYaml $release | nindent 6 }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.leader.port }}
+  {{- with .Values.networkPolicy.metricsFrom }}
+  - from:
+    {{- toYaml . | nindent 4 }}
+    ports:
+    - protocol: TCP
+      port: {{ $.Values.gateway.ports.metrics }}
+  {{- end }}
+{{- with .Values.networkPolicy.metricsFrom }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-controller
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" $ "component" "controller") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dc.selector" (dict "ctx" $ "component" "controller") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    {{- toYaml . | nindent 4 }}
+    ports:
+    - protocol: TCP
+      port: {{ $.Values.controller.ports.metrics }}
+{{- end }}
+{{- end }}

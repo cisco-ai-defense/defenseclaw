@@ -1,0 +1,522 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "defenseclaw-substrate chart values",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "resources": {
+      "type": "object"
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "hpa": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "minReplicas",
+        "maxReplicas"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "minReplicas": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "maxReplicas": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "targetCPUUtilizationPercentage": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "pdb": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "minAvailable": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "args": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "dnsLabel": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+    }
+  },
+  "properties": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(sha256:[a-f0-9]{64})?$"
+        },
+        "pullPolicy": {
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array"
+    },
+    "substrate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "apiAddress",
+        "apiAudience",
+        "egressSpiffeId",
+        "egressPodLabels"
+      ],
+      "properties": {
+        "namespace": {
+          "$ref": "#/definitions/dnsLabel"
+        },
+        "apiAddress": {
+          "type": "string",
+          "pattern": "^[a-z0-9.-]+:[0-9]{1,5}$"
+        },
+        "apiAudience": {
+          "type": "string",
+          "minLength": 1
+        },
+        "egressSpiffeId": {
+          "type": "string",
+          "pattern": "^spiffe://"
+        },
+        "egressPodLabels": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "credentialProvider": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "grant": {
+              "type": "boolean"
+            },
+            "policyConfigMap": {
+              "type": "string",
+              "minLength": 1
+            },
+            "deployment": {
+              "type": "string",
+              "minLength": 1
+            },
+            "secretsNamespace": {
+              "$ref": "#/definitions/dnsLabel"
+            }
+          }
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "description": "DefenseClaw config.yaml; the config schema (schemas/config) validates it in the pre-upgrade hook.",
+      "properties": {
+        "substrate": {
+          "type": "object",
+          "properties": {
+            "launcher_atespaces": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/dnsLabel"
+                }
+              }
+            },
+            "identity": {
+              "type": "object",
+              "properties": {
+                "issuer": {
+                  "type": "string",
+                  "pattern": "^https://"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "managedAtespaces": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/dnsLabel"
+      },
+      "uniqueItems": true
+    },
+    "podCertificates": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "hpa": {
+          "$ref": "#/definitions/hpa"
+        },
+        "pdb": {
+          "$ref": "#/definitions/pdb"
+        },
+        "ports": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "$ref": "#/definitions/port"
+            },
+            "admin": {
+              "$ref": "#/definitions/port"
+            },
+            "metrics": {
+              "$ref": "#/definitions/port"
+            }
+          }
+        },
+        "args": {
+          "$ref": "#/definitions/args"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "nodeSelector": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array"
+        },
+        "affinity": {
+          "type": "object"
+        }
+      }
+    },
+    "leader": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "leaseName": {
+          "$ref": "#/definitions/dnsLabel"
+        },
+        "port": {
+          "$ref": "#/definitions/port"
+        },
+        "store": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "size": {
+              "type": "string",
+              "pattern": "^[0-9]+(Mi|Gi|Ti)$"
+            },
+            "storageClassName": {
+              "type": "string"
+            },
+            "keepOnUninstall": {
+              "type": "boolean"
+            }
+          }
+        },
+        "args": {
+          "$ref": "#/definitions/args"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "nodeSelector": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array"
+        },
+        "affinity": {
+          "type": "object"
+        }
+      }
+    },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "leaseName": {
+          "$ref": "#/definitions/dnsLabel"
+        },
+        "pdb": {
+          "$ref": "#/definitions/pdb"
+        },
+        "ports": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "metrics": {
+              "$ref": "#/definitions/port"
+            }
+          }
+        },
+        "args": {
+          "$ref": "#/definitions/args"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "nodeSelector": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array"
+        },
+        "affinity": {
+          "type": "object"
+        }
+      }
+    },
+    "callout": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hpa": {
+          "$ref": "#/definitions/hpa"
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "pdb": {
+          "$ref": "#/definitions/pdb"
+        },
+        "port": {
+          "$ref": "#/definitions/port"
+        },
+        "ports": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "health": {
+              "$ref": "#/definitions/port"
+            }
+          }
+        },
+        "args": {
+          "$ref": "#/definitions/args"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "nodeSelector": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array"
+        },
+        "affinity": {
+          "type": "object"
+        },
+        "judge": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tokenSecret": {
+              "type": "string"
+            }
+          }
+        },
+        "actorSecrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "secretName": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "serviceAccounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apiTokenExpirationSeconds": {
+          "type": "integer",
+          "minimum": 600,
+          "maximum": 86400
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "adminFrom": {
+          "type": "array"
+        },
+        "metricsFrom": {
+          "type": "array"
+        }
+      }
+    },
+    "adminIngress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "className": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "tlsSecretName": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    },
+    "bootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ownerTokenSecret": {
+          "type": "string"
+        },
+        "deleteTokenAfterUse": {
+          "type": "boolean"
+        },
+        "backoffLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
+      }
+    },
+    "hooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backoffLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 60
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prometheusRule": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "labels": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "local": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "type": "string"
+            },
+            "resources": {
+              "$ref": "#/definitions/resources"
+            }
+          }
+        }
+      }
+    },
+    "podSecurityContext": {
+      "type": "object"
+    },
+    "containerSecurityContext": {
+      "type": "object"
+    },
+    "podAnnotations": {
+      "type": "object"
+    },
+    "podLabels": {
+      "type": "object"
+    }
+  }
+}
