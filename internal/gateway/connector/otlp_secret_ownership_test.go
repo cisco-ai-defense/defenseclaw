@@ -1164,15 +1164,31 @@ func claudeMarkedOperatorCollectorKeepsBytes(t *testing.T, goos string) {
 		"product_token_mixed":    "x-tenant=traces,authorization=Bearer {tok}",
 		"product_token_encoded":  "x-defenseclaw-source=claudecode,authorization=Bearer%20{tok}",
 	}
-	for name, template := range headerSets {
+	headersKeys := []string{"OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS"}
+	paths := []string{"fresh", "upgrade", "managed_cleanup"}
+	// A product route is removed under either headers key, so a product row
+	// runs each path once with the key rotating: every product row runs both
+	// keys, and every path runs both keys over the product rows (checked
+	// below). Operator rows keep every key and path. Each subtest pays one to
+	// three product writers, which a Windows runner takes seconds for.
+	productRan := map[string]bool{}
+	for ni, name := range slices.Sorted(maps.Keys(headerSets)) {
+		template := headerSets[name]
 		product := strings.Contains(template, "{tok}")
-		for _, headersKey := range []string{"OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS"} {
-			for _, path := range []string{"fresh", "upgrade", "managed_cleanup"} {
+		for ki, headersKey := range headersKeys {
+			for pi, path := range paths {
 				if !product && path != "fresh" && headersKey == "OTEL_EXPORTER_OTLP_HEADERS" {
 					// The released per-signal traces header overrides a
 					// generic one, so that traces route carries the
 					// product credential and is the product's.
 					continue
+				}
+				if product {
+					if (ni+pi)%len(headersKeys) != ki {
+						continue
+					}
+					productRan[name+"/"+headersKey] = true
+					productRan[headersKey+"/"+path] = true
 				}
 				t.Run(name+"/"+headersKey+"/"+path, func(t *testing.T) {
 					dir := t.TempDir()
@@ -1270,6 +1286,19 @@ func claudeMarkedOperatorCollectorKeepsBytes(t *testing.T, goos string) {
 					}
 					check("teardown")
 				})
+			}
+		}
+	}
+	for name, template := range headerSets {
+		for _, headersKey := range headersKeys {
+			cells := []string{headersKey + "/fresh", headersKey + "/upgrade", headersKey + "/managed_cleanup"}
+			if strings.Contains(template, "{tok}") {
+				cells = append(cells, name+"/"+headersKey)
+			}
+			for _, cell := range cells {
+				if !productRan[cell] {
+					t.Errorf("product rotation never ran %s", cell)
+				}
 			}
 		}
 	}
