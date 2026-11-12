@@ -1023,11 +1023,16 @@ A `custom-providers.json` marked `_derived_from` is rendered from this section o
 | `substrate.services.actor`, `.admin` | `defenseclaw-actor.defenseclaw-system.svc.cluster.local`, `defenseclaw-admin.defenseclaw-system.svc.cluster.local` | The two gateway Services, fully qualified: actors resolve only names their egress policy lists, so the kit uses this exact name. Actors can reach only the actor Service. |
 | `substrate.launcher_atespaces` | none | Profile to the atespaces DefenseClaw owns for it, for example `{engineering: [eng-payments]}`. |
 | `substrate.require_attested_templates` | `true` | An actor whose template has no DefenseClaw attestation gets no network. |
+| `substrate.templates.trust_anchors` | `/etc/defenseclaw/substrate/template-anchors/anchors.pem` | The template signing keys (PEM), mounted from an admin-only Secret. A change applies at the next poll; a missing file refuses every template. |
+| `substrate.templates.min_policy_generation`, `.max_age`, `.allow_unverified_base` | `0`, none, `false` | Refuse templates scanned under an older policy, built too long ago, or on a base image that is neither allowlisted nor attested. |
+| `substrate.templates.allowed_images`, `.profile_images` | none | Repository globs (`registry/path/*`) every template container must match, and a narrower list per profile. Empty allows any attested image. Naming the registries also limits which hosts the controller connects to. |
+| `substrate.templates.volume_images` | none | Repository globs a template may mount as read-only image volumes. Any other image volume refuses the template. |
+| `substrate.templates.plain_http_registries`, `.revoked_digests` | none | Registries reached over plain HTTP (dev clusters only), and image digests never admitted again. |
 | `substrate.default_sandbox_class` | `gvisor` | `gvisor` or `microvm`. |
 | `substrate.idle_suspend_after` | `30m` | Suspends an actor with no activity and low CPU; `0s` turns it off. Never with a pending ask. |
 | `substrate.unattended.asks`, `.ask_timeout`, `.telemetry_sampling` | `deny`, `30m`, `1.0` | Unattended runs: `deny` or `queue` asks, how long a queued ask waits, the share of routine records kept. |
 | `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits on the actor Service. |
-| `substrate.extproc.enabled`, `.failure_mode`, `.body_inspection`, `.body_max_bytes` | `true`, `closed`, `auto`, `1048576` | The egress callout: what it does when it can't decide, and body mode (`auto` detects support at run time, `on`, `off`). Bodies are at most 1 MiB. |
+| `substrate.extproc.enabled`, `.failure_mode`, `.body_inspection`, `.body_max_bytes` | `true`, `closed`, `auto`, `1048576` | The egress callout: what it does when it can't decide (`open` is refused in `managed_enterprise`), and body mode (`auto` detects support at run time, `on`, `off`). Bodies are at most 1 MiB. |
 | `substrate.extproc.mcp_hosts`, `.body_hosts` | none | Remote MCP servers whose JSON-RPC bodies are inspected (`host` or `host=<server name>`; also allowed for every actor), and other hosts whose bodies get the DLP scans. |
 | `substrate.extproc.dlp.credential_headers` | `alert` | `alert` or `deny` for a secret-shaped credential header sent to a host no secret is bound to. Secret shapes in URLs and other headers are always refused. |
 | `substrate.extproc.judge.url`, `.token_file`, `.ca_file`, `.timeout` | none, none, none, `1500ms` | The gateway route that judges MCP tool calls the callout sees. |

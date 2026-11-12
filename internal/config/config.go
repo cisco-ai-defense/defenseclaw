@@ -3362,6 +3362,12 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: substrate: %w", settingErrorAt("substrate", err))
 	}
+	if err := cfg.Substrate.ValidateManaged(cfg.DeploymentMode); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "substrate_invalid")
+		}
+		return nil, fmt.Errorf("config: substrate: %w", settingErrorAt("substrate", err))
+	}
 
 	// Validate registry source kind/content shapes. The Python CLI
 	// is the authoritative writer for ``registries.sources`` (it

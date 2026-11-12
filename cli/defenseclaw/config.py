@@ -4284,6 +4284,23 @@ class SubstrateEgressConfig:
 
 
 @dataclass
+class SubstrateTemplatesConfig:
+    """``substrate.templates`` (mirrors Go ``SubstrateTemplatesConfig``):
+    how the controller admits template images (trust anchors from an
+    admin-only Secret, image allow lists, revoked digests)."""
+
+    trust_anchors: str = ""
+    min_policy_generation: int = 0
+    max_age: str = ""
+    allow_unverified_base: bool = False
+    allowed_images: list[str] = field(default_factory=list)
+    profile_images: dict[str, list[str]] = field(default_factory=dict)
+    volume_images: list[str] = field(default_factory=list)
+    plain_http_registries: list[str] = field(default_factory=list)
+    revoked_digests: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SubstrateSecretInject:
     hosts: list[str] = field(default_factory=list)
     header: str = ""
@@ -4316,6 +4333,7 @@ class SubstrateConfig:
     services: SubstrateServicesConfig = field(default_factory=SubstrateServicesConfig)
     launcher_atespaces: dict[str, list[str]] = field(default_factory=dict)
     require_attested_templates: bool | None = None
+    templates: SubstrateTemplatesConfig = field(default_factory=SubstrateTemplatesConfig)
     default_sandbox_class: str = ""
     idle_suspend_after: str = ""
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
@@ -7591,6 +7609,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         ),
         launcher_atespaces=launchers,
         require_attested_templates=_optional_bool(raw.get("require_attested_templates")),
+        templates=_merge_substrate_templates(raw.get("templates")),
         default_sandbox_class=str(raw.get("default_sandbox_class", "") or ""),
         idle_suspend_after=_duration_text(raw.get("idle_suspend_after")),
         unattended=SubstrateUnattendedConfig(
@@ -7617,6 +7636,22 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         secrets=secrets,
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
+    )
+
+
+def _merge_substrate_templates(raw: Any) -> SubstrateTemplatesConfig:
+    t = _mapping(raw)
+    generation = _optional_number(t.get("min_policy_generation"), int)
+    return SubstrateTemplatesConfig(
+        trust_anchors=str(t.get("trust_anchors", "") or ""),
+        min_policy_generation=int(generation or 0),
+        max_age=_duration_text(t.get("max_age")),
+        allow_unverified_base=t.get("allow_unverified_base") is True,
+        allowed_images=_string_list(t.get("allowed_images")),
+        profile_images={str(k): _string_list(v) for k, v in _mapping(t.get("profile_images")).items()},
+        volume_images=_string_list(t.get("volume_images")),
+        plain_http_registries=_string_list(t.get("plain_http_registries")),
+        revoked_digests=_string_list(t.get("revoked_digests")),
     )
 
 
@@ -7684,6 +7719,15 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
             extproc.pop("log_headers")
         if not extproc:
             pruned.pop("extproc")
+    templates = pruned.get("templates")
+    if isinstance(templates, dict):
+        # Go omitempty: false and 0 are not written.
+        if templates.get("allow_unverified_base") is False:
+            templates.pop("allow_unverified_base")
+        if templates.get("min_policy_generation") == 0:
+            templates.pop("min_policy_generation")
+        if not templates:
+            pruned.pop("templates")
     if packs == []:
         pruned.setdefault("egress", {})["ecosystem_packs"] = []
     d["substrate"] = pruned

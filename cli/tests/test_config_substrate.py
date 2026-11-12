@@ -43,6 +43,13 @@ _FULL = {
     "services": {"actor": "defenseclaw-actor.defenseclaw-system.svc", "admin": "defenseclaw-admin.defenseclaw-system.svc"},
     "launcher_atespaces": {"engineering": ["eng-payments", "eng-web"]},
     "require_attested_templates": False,
+    "templates": {"trust_anchors": "/etc/defenseclaw/substrate/template-anchors/anchors.pem",
+                  "min_policy_generation": 3, "max_age": "2160h", "allow_unverified_base": True,
+                  "allowed_images": ["registry.example.com/defenseclaw/*"],
+                  "profile_images": {"ci": ["registry.example.com/defenseclaw/ci-*"]},
+                  "volume_images": ["registry.example.com/models/*"],
+                  "plain_http_registries": ["10.0.0.5:5000"],
+                  "revoked_digests": ["sha256:" + "0" * 64]},
     "default_sandbox_class": "gvisor",
     "idle_suspend_after": "30m",
     "unattended": {"asks": "deny", "ask_timeout": "30m", "telemetry_sampling": 0.5},
@@ -137,6 +144,8 @@ class TestSubstrateLoadSave(unittest.TestCase):
             sub = cfg.substrate
             self.assertTrue(sub.enabled)
             self.assertIs(sub.require_attested_templates, False)
+            self.assertEqual(sub.templates.min_policy_generation, 3)
+            self.assertEqual(sub.templates.profile_images, {"ci": ["registry.example.com/defenseclaw/ci-*"]})
             self.assertEqual(sub.identity.workload_oidc[0].audience, "defenseclaw-prod")
             self.assertEqual(sub.secrets[1].scope, "per_person")
             self.assertEqual(sub.egress.ecosystem_packs, ["pypi", "npm"])

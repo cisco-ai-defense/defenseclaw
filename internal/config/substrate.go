@@ -50,6 +50,8 @@ type SubstrateConfig struct {
 	// RequireAttestedTemplates (nil = true) gives no network to an actor
 	// whose template digest has no valid DefenseClaw attestation.
 	RequireAttestedTemplates *bool `mapstructure:"require_attested_templates" yaml:"require_attested_templates,omitempty"`
+	// Templates is how the controller verifies template attestations.
+	Templates SubstrateTemplatesConfig `mapstructure:"templates" yaml:"templates,omitempty"`
 	// DefaultSandboxClass is gvisor (default) or microvm.
 	DefaultSandboxClass string `mapstructure:"default_sandbox_class" yaml:"default_sandbox_class,omitempty"`
 	// IdleSuspendAfter is a Go duration (default 30m; "0s" turns idle
@@ -67,6 +69,51 @@ type SubstrateConfig struct {
 	// Admin is the organization floor for Substrate actors, the same keys
 	// as openshell.admin; guardrail profiles tighten it.
 	Admin OpenShellAdminConfig `mapstructure:"admin" yaml:"admin,omitempty"`
+}
+
+// SubstrateTemplatesConfig is how the controller admits templates (PLAN
+// §5.3, §6.6): every container image must be pinned by digest and carry a
+// DefenseClaw attestation signed by a key in the trust anchors, and its
+// repository must be one the allow lists name.
+type SubstrateTemplatesConfig struct {
+	// TrustAnchors is the PEM trust bundle (an admin-only Secret mount;
+	// DefaultSubstrateTemplateAnchors when empty). It is re-read when it
+	// changes, so a rotation or revocation applies at the next poll.
+	TrustAnchors string `mapstructure:"trust_anchors" yaml:"trust_anchors,omitempty"`
+	// MinPolicyGeneration refuses templates scanned under an older policy.
+	MinPolicyGeneration int64 `mapstructure:"min_policy_generation" yaml:"min_policy_generation,omitempty"`
+	// MaxAge refuses templates built longer ago (Go duration; empty = no limit).
+	MaxAge string `mapstructure:"max_age" yaml:"max_age,omitempty"`
+	// AllowUnverifiedBase admits a template whose base image is neither
+	// allowlisted nor attested (default false).
+	AllowUnverifiedBase bool `mapstructure:"allow_unverified_base" yaml:"allow_unverified_base,omitempty"`
+	// AllowedImages are repository globs ("registry/team/*") an attested
+	// container image must match; empty allows any attested image.
+	AllowedImages []string `mapstructure:"allowed_images" yaml:"allowed_images,omitempty"`
+	// ProfileImages narrows AllowedImages per DefenseClaw profile: an actor
+	// whose profile is listed may run only images matching its globs.
+	ProfileImages map[string][]string `mapstructure:"profile_images" yaml:"profile_images,omitempty"`
+	// VolumeImages are repository globs a template may mount as read-only
+	// image volumes without an attestation; any other image volume refuses
+	// the template.
+	VolumeImages []string `mapstructure:"volume_images" yaml:"volume_images,omitempty"`
+	// PlainHTTPRegistries are registry host:port names reached over plain
+	// HTTP (an in-cluster dev registry only).
+	PlainHTTPRegistries []string `mapstructure:"plain_http_registries" yaml:"plain_http_registries,omitempty"`
+	// RevokedDigests are image digests (sha256:...) never admitted again,
+	// whatever their attestation says.
+	RevokedDigests []string `mapstructure:"revoked_digests" yaml:"revoked_digests,omitempty"`
+}
+
+// EffectiveTrustAnchors is TrustAnchors or the chart's Secret mount path.
+func (t SubstrateTemplatesConfig) EffectiveTrustAnchors() string {
+	return orDefault(t.TrustAnchors, DefaultSubstrateTemplateAnchors)
+}
+
+// EffectiveMaxAge is MaxAge, zero when empty or invalid (Validate refuses
+// an invalid one).
+func (t SubstrateTemplatesConfig) EffectiveMaxAge() time.Duration {
+	return durationOr(t.MaxAge, 0)
 }
 
 // SubstrateAPIConfig is how DefenseClaw reaches ate-api-server.
@@ -277,6 +324,9 @@ const (
 	DefaultSubstratePerActorRPS      = 20
 	DefaultSubstratePerAtespaceRPS   = 500
 	DefaultSubstrateBodyMaxBytes     = 1 << 20
+	// DefaultSubstrateTemplateAnchors is where the chart mounts the
+	// admin-only template trust anchors Secret.
+	DefaultSubstrateTemplateAnchors = "/etc/defenseclaw/substrate/template-anchors/anchors.pem"
 
 	SubstrateSandboxGVisor  = "gvisor"
 	SubstrateSandboxMicroVM = "microvm"
@@ -617,10 +667,71 @@ func (s *SubstrateConfig) Validate() error {
 		}
 	}
 
+	s.validateTemplates(bad)
+
 	if err := s.Admin.validateAs("admin"); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+func (s *SubstrateConfig) validateTemplates(bad func(key, format string, a ...any)) {
+	t := s.Templates
+	if g := t.MinPolicyGeneration; g < 0 {
+		bad("templates.min_policy_generation", "%d must not be negative", g)
+	}
+	if v := strings.TrimSpace(t.MaxAge); v != "" {
+		if d, err := time.ParseDuration(v); err != nil || d < 0 {
+			bad("templates.max_age", "%q must be a Go duration of 0 or more", t.MaxAge)
+		}
+	}
+	globs := func(key string, list []string) {
+		for i, g := range list {
+			slash := strings.LastIndex(g, "/")
+			if slash <= 0 || strings.ContainsAny(g, "@ ") || strings.Contains(g[slash:], ":") {
+				bad(fmt.Sprintf("%s[%d]", key, i), "%q must be a repository glob (registry/path, no tag or digest)", g)
+				continue
+			}
+			if _, err := path.Match(g, ""); err != nil {
+				bad(fmt.Sprintf("%s[%d]", key, i), "%q is not a valid glob", g)
+			}
+		}
+	}
+	globs("templates.allowed_images", t.AllowedImages)
+	globs("templates.volume_images", t.VolumeImages)
+	for _, p := range sortedKeys(t.ProfileImages) {
+		if !substrateProfileRe.MatchString(p) {
+			bad("templates.profile_images", "%q is not a profile name", p)
+		}
+		if len(t.ProfileImages[p]) == 0 {
+			bad("templates.profile_images."+p, "needs at least one repository glob")
+		}
+		globs("templates.profile_images."+p, t.ProfileImages[p])
+	}
+	for i, d := range t.RevokedDigests {
+		if !substrateDigestRe.MatchString(strings.ToLower(strings.TrimSpace(d))) {
+			bad(fmt.Sprintf("templates.revoked_digests[%d]", i), "%q must be sha256:<64 hex>", d)
+		}
+	}
+	for i, h := range t.PlainHTTPRegistries {
+		if host, port, err := net.SplitHostPort(h); err != nil || host == "" || port == "" {
+			bad(fmt.Sprintf("templates.plain_http_registries[%d]", i), "%q must be host:port", h)
+		}
+	}
+}
+
+var substrateDigestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// ValidateManaged applies the managed-enterprise rules (D8): there the
+// callout always fails closed.
+func (s *SubstrateConfig) ValidateManaged(deploymentMode string) error {
+	if s == nil || !strings.EqualFold(strings.TrimSpace(deploymentMode), string(DeploymentModeManagedEnterprise)) {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(s.Extproc.FailureMode), SubstrateFailOpen) {
+		return errors.New(`extproc.failure_mode: "open" is not allowed in managed_enterprise (the callout always fails closed)`)
+	}
+	return nil
 }
 
 func (s *SubstrateConfig) validateExtproc(bad func(key, format string, a ...any), checkPatterns func(string, []string)) {
