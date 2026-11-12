@@ -319,8 +319,11 @@ const (
 	DefaultSubstrateAPIAddress        = "api.ate-system.svc:443"
 	DefaultSubstrateSupportedVersions = ">=1.0.0 <1.1.0"
 	DefaultSubstrateAudience          = "defenseclaw"
-	DefaultSubstrateTokenLifetime     = 900
-	DefaultSubstrateActorCertOID      = "1.3.6.1.4.1.11129.2.12.2"
+	// DefaultSubstrateTokenLifetime is also the most: egress caches an actor JWT
+	// by actor name, so a recreated same-name actor gets the old one until
+	// it expires (GAP-0133); 300 s is the upstream minimum.
+	DefaultSubstrateTokenLifetime = 300
+	DefaultSubstrateActorCertOID  = "1.3.6.1.4.1.11129.2.12.2"
 	// The Service defaults are fully qualified: the egress DNS relay answers
 	// only names an actor's policy lists, so the rule, the kit's URLs and
 	// the request Host must all be this one spelling (GAP-0023).
@@ -486,8 +489,8 @@ func (s *SubstrateConfig) Validate() error {
 	if s.Enabled && id.Issuer == "" {
 		bad("identity.issuer", "is required when substrate is enabled (unique per cluster)")
 	}
-	if l := id.TokenLifetimeSeconds; l != 0 && (l < 300 || l > 3600) {
-		bad("identity.token_lifetime_seconds", "%d is outside 300-3600", l)
+	if l := id.TokenLifetimeSeconds; l != 0 && l != DefaultSubstrateTokenLifetime {
+		bad("identity.token_lifetime_seconds", "%d must be 300: egress caches the actor token by actor name, so a recreated actor would get the old one longer (GAP-0133)", l)
 	}
 	if aud := id.Audience; aud != "" && len(aud) > 512 {
 		bad("identity.audience", "is longer than 512 bytes")

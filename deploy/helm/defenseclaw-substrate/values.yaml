@@ -48,7 +48,7 @@ config:
       # Unique per cluster (E13): doctor fails when two clusters share one.
       issuer: https://idp.ate-system.svc
       audience: defenseclaw
-      token_lifetime_seconds: 900
+      token_lifetime_seconds: 300
     launcher_atespaces: {}
     require_attested_templates: true
     default_sandbox_class: gvisor

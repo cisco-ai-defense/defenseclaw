@@ -124,7 +124,17 @@ type Controller struct {
 	// actors are kept, not reported deleted. warnedList dedups warnings.
 	unlisted   map[string]bool
 	warnedList map[string]bool
+	// uidByKey is the last UID seen per atespace/name (GAP-0133).
+	uidByKey map[string]string
 }
+
+type recreatedActor struct {
+	a    *ateapi.Actor
+	prev string
+}
+
+// maxNameHistory bounds uidByKey.
+const maxNameHistory = 100000
 
 type cachedTemplate struct {
 	tmpl *ateapi.ActorTemplate
@@ -192,7 +202,7 @@ func New(o Options) (*Controller, error) {
 		o.Now = time.Now
 	}
 	return &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
-		unlisted: map[string]bool{}, warnedList: map[string]bool{}}, nil
+		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}}, nil
 }
 
 // Run polls until ctx ends: every IdleInterval, or every FastInterval for
@@ -227,13 +237,22 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	now := c.o.Now()
 	seen := make(map[string]bool, len(actors))
 	var urgent, rest []*ateapi.Actor
+	var recreated []recreatedActor
 	c.mu.Lock()
 	for _, a := range actors {
 		uid := a.GetMetadata().GetUid()
 		seen[uid] = true
 		_, known := c.actors[uid]
 		if !known {
-			c.actors[uid] = &actorState{uid: uid, key: ateapi.Key(ateapi.RefOf(a.GetMetadata())), firstSeen: now}
+			key := ateapi.Key(ateapi.RefOf(a.GetMetadata()))
+			c.actors[uid] = &actorState{uid: uid, key: key, firstSeen: now}
+			if prev, ok := c.uidByKey[key]; ok && prev != uid && c.o.LauncherAtespaces[a.GetMetadata().GetAtespace()] {
+				recreated = append(recreated, recreatedActor{a: a, prev: prev})
+			}
+			if len(c.uidByKey) >= maxNameHistory {
+				c.uidByKey = map[string]string{}
+			}
+			c.uidByKey[key] = uid
 		}
 		if !known || a.GetStatus().GetState() == ateapi.ActorStateResuming {
 			urgent = append(urgent, a)
@@ -257,6 +276,15 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	for _, st := range gone {
 		ns, name, _ := strings.Cut(st.key, "/")
 		c.emit(Event{Type: EventDeleted, Severity: SeverityInfo, Atespace: ns, Actor: name, ActorUID: st.uid, Message: "actor deleted"})
+	}
+	for _, r := range recreated {
+		// Egress caches the actor JWT by actor name: the new incarnation
+		// presents the old UID's token until it expires (at most 300 s,
+		// GAP-0133), so the gateway refuses it meanwhile.
+		md := r.a.GetMetadata()
+		c.emit(Event{Type: EventRecreatedSameName, Severity: SeverityWarn, Atespace: md.GetAtespace(), Actor: md.GetName(), ActorUID: md.GetUid(),
+			Message: "a new actor reuses the name of a deleted one: DefenseClaw refuses its calls for up to 300 s while egress serves the old actor token; reuse names only after that, or pick a new name",
+			Detail:  map[string]any{"previous_uid": r.prev}})
 	}
 	var errs []error
 	var emu sync.Mutex

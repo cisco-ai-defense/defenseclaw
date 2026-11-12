@@ -460,3 +460,30 @@ func TestScopedListingSkipsAnUnlistableAtespace(t *testing.T) {
 		t.Fatal("eng-web actor lost its policy")
 	}
 }
+
+// GAP-0133: a new UID under an old name in a launcher atespace warns.
+func TestRecreatedSameNameWarns(t *testing.T) {
+	r := newRig(t, nil)
+	a := r.actor("eng-web", "alice-1", ateapi.ActorStateSuspended, "sub-alice")
+	r.pass()
+	if _, err := r.api.DeleteActor(context.Background(), ateapi.RefOf(a.GetMetadata()), nil); err != nil {
+		t.Fatal(err)
+	}
+	r.pass()
+	b := r.actor("eng-web", "alice-1", ateapi.ActorStateSuspended, "sub-alice")
+	r.pass()
+	ev := r.sink.Events(controller.EventRecreatedSameName)
+	if len(ev) != 1 || ev[0].ActorUID != b.GetMetadata().GetUid() || ev[0].Detail["previous_uid"] != a.GetMetadata().GetUid() || ev[0].Severity != controller.SeverityWarn {
+		t.Fatalf("recreated events = %+v", ev)
+	}
+	// Outside launcher atespaces names are not tracked for this.
+	c := r.actor("ci-runs", "job", ateapi.ActorStateSuspended, "")
+	r.pass()
+	_, _ = r.api.DeleteActor(context.Background(), ateapi.RefOf(c.GetMetadata()), nil)
+	r.pass()
+	r.actor("ci-runs", "job", ateapi.ActorStateSuspended, "")
+	r.pass()
+	if len(r.sink.Events(controller.EventRecreatedSameName)) != 1 {
+		t.Fatal("a managed-atespace actor warned")
+	}
+}

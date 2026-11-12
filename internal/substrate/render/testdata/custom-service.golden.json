@@ -10,7 +10,7 @@
                   "audiences": [
                     "dc-prod"
                   ],
-                  "expirationSeconds": "600"
+                  "expirationSeconds": "300"
                 },
                 "header": "x-defenseclaw-actor",
                 "prefix": "Bearer "

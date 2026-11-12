@@ -149,6 +149,7 @@ type Sink interface {
 const (
 	EventInventory          = "sandbox.inventory"
 	EventDeleted            = "sandbox.deleted"
+	EventRecreatedSameName  = "sandbox.actor.recreated_same_name"
 	EventPolicyWritten      = "sandbox.policy.written"
 	EventPolicyRemoved      = "sandbox.policy.removed"
 	EventPolicyWriteFailed  = "sandbox.policy.write_failed"

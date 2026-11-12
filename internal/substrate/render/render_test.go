@@ -100,7 +100,7 @@ var cases = []struct {
 		Profile: Profile{Name: "eng-web", AllowedCredentials: []string{"none"}, Block: []string{"*.crates.io"}},
 	}},
 	{"custom-service", Input{Settings: Settings{
-		ActorService: "dc-actor.security.svc.cluster.local", ActorServicePort: 8443, Audience: "dc-prod", TokenLifetimeSeconds: 600,
+		ActorService: "dc-actor.security.svc.cluster.local", ActorServicePort: 8443, Audience: "dc-prod", TokenLifetimeSeconds: 300,
 		AllowHosts: []string{"*.svc.cluster.local", "other.security.svc.cluster.local", "*.cluster.local"},
 	}, Profile: Profile{Name: "default"}}},
 }
@@ -290,12 +290,12 @@ func TestActorServiceRule(t *testing.T) {
 		t.Fatalf("actor service rule = %v", r.Policy.GetRules()[0])
 	}
 	if rule.GetHostnames()[0] != "defenseclaw-actor.defenseclaw-system.svc" || h.GetHeader() != ActorHeader ||
-		h.GetPrefix() != "Bearer " || h.GetActorJwt().GetAudiences()[0] != "defenseclaw" || h.GetActorJwt().GetExpirationSeconds() != 900 ||
+		h.GetPrefix() != "Bearer " || h.GetActorJwt().GetAudiences()[0] != "defenseclaw" || h.GetActorJwt().GetExpirationSeconds() != 300 ||
 		h.GetCredentialUri() != "" {
 		t.Fatalf("actor service rule = %v", rule)
 	}
 	for _, bad := range []Settings{
-		{ActorService: ""}, {ActorService: "*.x.svc"}, {ActorService: "a.svc", TokenLifetimeSeconds: 100},
+		{ActorService: ""}, {ActorService: "*.x.svc"}, {ActorService: "a.svc", TokenLifetimeSeconds: 100}, {ActorService: "a.svc", TokenLifetimeSeconds: 900},
 		{ActorService: "a.svc", ActorServicePort: 70000}, {ActorService: "a.svc", EcosystemPacks: []string{"maven"}},
 	} {
 		if _, err := EgressPolicy(Input{Settings: bad}); err == nil {

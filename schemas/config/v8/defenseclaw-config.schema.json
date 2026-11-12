@@ -6358,8 +6358,8 @@
             "token_lifetime_seconds": {
               "type": "integer",
               "minimum": 300,
-              "maximum": 3600,
-              "default": 900
+              "maximum": 300,
+              "default": 300
             },
             "actor_cert_oid": {
               "type": "string",

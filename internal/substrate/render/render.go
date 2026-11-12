@@ -44,7 +44,7 @@ const (
 	// DefaultAudience and DefaultTokenLifetime are the actor JWT's aud and
 	// lifetime (seconds) unless the config sets others.
 	DefaultAudience      = "defenseclaw"
-	DefaultTokenLifetime = 900
+	DefaultTokenLifetime = 300
 	// DefaultActorServicePort is the actor listener Service's plain HTTP
 	// port (the chart's defenseclaw-actor Service).
 	DefaultActorServicePort = 80
@@ -351,8 +351,8 @@ func actorRule(s Settings) (*ateapi.EgressRule, pattern, error) {
 	if life == 0 {
 		life = DefaultTokenLifetime
 	}
-	if life < 300 || life > 3600 {
-		return nil, pattern{}, fmt.Errorf("render: token lifetime %d s is outside 300-3600", life)
+	if life != DefaultTokenLifetime {
+		return nil, pattern{}, fmt.Errorf("render: token lifetime %d s: egress caches the actor JWT by actor name, so it is %d s (GAP-0133)", life, DefaultTokenLifetime)
 	}
 	return &ateapi.EgressRule{Http: &ateapi.HttpRule{
 		Hostnames: []string{svc.Name},

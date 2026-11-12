@@ -35,7 +35,7 @@ _FULL = {
     "identity": {
         "issuer": "https://idp.ate-system.svc",
         "audience": "defenseclaw",
-        "token_lifetime_seconds": 900,
+        "token_lifetime_seconds": 300,
         "actor_cert_oid": "1.3.6.1.4.1.11129.2.12.2",
         "oidc": {"issuer": "https://login.example.com", "client_id": "defenseclaw-launcher", "groups_claim": "groups"},
         "workload_oidc": [
