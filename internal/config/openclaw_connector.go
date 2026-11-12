@@ -22,6 +22,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // OpenClawConnectorMinProductVersion is the first release that reads
@@ -58,6 +60,12 @@ type OpenClawConnectorConfig struct {
 	// the plugin account; PluginTokenGroup (Linux, macOS) may read it.
 	PluginTokenFile  string `mapstructure:"plugin_token_file"  yaml:"plugin_token_file,omitempty"`
 	PluginTokenGroup string `mapstructure:"plugin_token_group" yaml:"plugin_token_group,omitempty"`
+	// InstallPolicy is auto, on or off: whether setup registers DefenseClaw
+	// as OpenClaw security.installPolicy, so OpenClaw asks DefenseClaw
+	// admission before it installs or updates a skill or plugin. auto (the
+	// default) is on in the strict tier and on managed installs, off in the
+	// OSS default and permissive tiers. See OpenClawInstallPolicyOn.
+	InstallPolicy string `mapstructure:"install_policy" yaml:"install_policy,omitempty"`
 	// Hooks selects the OpenClaw native plugin hooks (1.0.10).
 	Hooks OpenClawHooksConfig `mapstructure:"hooks" yaml:"hooks,omitempty"`
 }
@@ -79,6 +87,70 @@ type OpenClawHooksConfig struct {
 	// PromptGate inspects every user prompt in before_agent_run before the
 	// model reads it, and blocks it in action mode. Off by default.
 	PromptGate bool `mapstructure:"prompt_gate" yaml:"prompt_gate,omitempty"`
+}
+
+// connectors.openclaw.install_policy values.
+const (
+	OpenClawInstallPolicyAuto     = "auto"
+	OpenClawInstallPolicyOnValue  = "on"
+	OpenClawInstallPolicyOffValue = "off"
+)
+
+// OpenClawInstallPolicyOn resolves connectors.openclaw.install_policy: on
+// and off are what they say; auto (or unset) is on when the openclaw policy
+// tier is strict or the deployment is managed, else off. The OSS default and
+// permissive tiers keep it off so a slow or failed scan never stops a normal
+// install (balanced defaults).
+func (c *Config) OpenClawInstallPolicyOn() bool {
+	if c == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Connectors.OpenClaw.InstallPolicy)) {
+	case OpenClawInstallPolicyOnValue:
+		return true
+	case OpenClawInstallPolicyOffValue:
+		return false
+	}
+	return managed.IsManagedEnterprise(c.DeploymentMode) ||
+		c.HookPolicyTierForConnector("openclaw") == HookPolicyTierStrict
+}
+
+// OpenClawInstallPolicyFailsClosed reports what the install admission
+// command answers when the DefenseClaw gateway does not answer (connection
+// refused or timed out): true blocks the install. Managed installs and the
+// strict tier always block; the OSS default and permissive tiers block only
+// when the saved openclaw outage mode is closed. Every other failure (no
+// credential, a listener that does not prove itself, an error answer)
+// blocks in every tier.
+func (c *Config) OpenClawInstallPolicyFailsClosed() bool {
+	if c == nil || managed.IsManagedEnterprise(c.DeploymentMode) {
+		return true
+	}
+	tier := c.HookPolicyTierForConnector("openclaw")
+	if tier == HookPolicyTierStrict {
+		return true
+	}
+	return c.EffectiveHookOutageFailModeForConnectorAtTier("openclaw", tier) != "open"
+}
+
+// OpenClawInstallPolicyTimeoutMs is the security.installPolicy exec timeout
+// setup writes: the longest skill or plugin scan the gateway runs plus 15 s,
+// at least 30 s and at most 600 s.
+func (c *Config) OpenClawInstallPolicyTimeoutMs() int {
+	scanS := 120
+	if c != nil {
+		if s := c.Scanners.SkillScanner.ScanTimeoutSeconds(); s > scanS {
+			scanS = s
+		}
+	}
+	ms := (scanS + 15) * 1000
+	if ms < 30000 {
+		ms = 30000
+	}
+	if ms > 600000 {
+		ms = 600000
+	}
+	return ms
 }
 
 // OpenClawPluginInstall is the resolved plugin_install mode.
@@ -190,6 +262,11 @@ func (c *Config) ValidateOpenClawConnector() error {
 		}
 	default:
 		return fmt.Errorf("config: connectors.openclaw.hooks.mode %q must be auto or proxy", oc.Hooks.Mode)
+	}
+	switch strings.ToLower(strings.TrimSpace(oc.InstallPolicy)) {
+	case "", OpenClawInstallPolicyAuto, OpenClawInstallPolicyOnValue, OpenClawInstallPolicyOffValue:
+	default:
+		return fmt.Errorf("config: connectors.openclaw.install_policy %q must be auto, on or off", oc.InstallPolicy)
 	}
 	if c.SecureClientIntegration() && oc != (OpenClawConnectorConfig{}) {
 		return fmt.Errorf("config: connectors.openclaw is not supported with the Secure Client integration")

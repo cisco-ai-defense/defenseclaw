@@ -504,6 +504,9 @@ func resolveConnectorOptsFor(dataDir, name string) connector.SetupOpts {
 	opts.OpenClawHooksMode = cfg.OpenClawHooksMode()
 	opts.OpenClawPluginTokenFile = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenFile)
 	opts.OpenClawPluginTokenGroup = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenGroup)
+	opts.OpenClawInstallPolicy = cfg.OpenClawInstallPolicyOn()
+	opts.OpenClawInstallPolicyTimeoutMs = cfg.OpenClawInstallPolicyTimeoutMs()
+	opts.OpenClawInstallPolicyFailsClosed = cfg.OpenClawInstallPolicyFailsClosed()
 	opts.PolicyTier = cfg.HookPolicyTierForConnector(name)
 	// Setup writes this into Codex's [otel] table; a surgical teardown only
 	// removes it when it knows the same value (GAP-1979).

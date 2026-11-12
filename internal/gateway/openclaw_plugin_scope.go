@@ -35,7 +35,8 @@ const openClawPluginScope = "openclaw"
 // openClawPluginRoutes are the management routes, besides /api/v1/inspect/*
 // (X-DefenseClaw-Connector: openclaw) and the listener proofs, that the
 // OpenClaw plugin credential authenticates: exactly the calls the plugin
-// makes. Before 1.0.10 the plugin held the master gateway token, which can
+// makes, and the skill scan of its install-policy command (defenseclaw-gateway
+// connector openclaw install-policy). Before 1.0.10 the plugin held the master gateway token, which can
 // also loosen policy and stop the gateway. The table is closed: an unlisted
 // route or method takes only the master gateway token, so a leaked plugin
 // credential can read the block and allow lists, write audit and scan rows
@@ -49,6 +50,7 @@ var openClawPluginRoutes = map[string]string{
 	"/policy/evaluate":  http.MethodPost,
 	"/scan/result":      http.MethodPost,
 	"/v1/plugin/scan":   http.MethodPost,
+	"/v1/skill/scan":    http.MethodPost,
 	"/api/v1/scan/code": http.MethodPost,
 	openClawRuntimePath: http.MethodGet,
 }

@@ -6265,7 +6265,8 @@
                 "mode": {"type": "string", "enum": ["auto", "proxy"], "default": "auto", "description": "auto: native plugin hooks on OpenClaw 2026.8.35 and later (with the guardrail proxy on Linux and macOS, alone on Windows), the guardrail proxy below that release. proxy: the 1.0.9 behaviour (not on Windows)."},
                 "prompt_gate": {"type": "boolean", "default": false, "description": "Inspect every user prompt in before_agent_run before the model reads it; blocks it in action mode."}
               }
-            }
+            },
+            "install_policy": {"type": "string", "enum": ["auto", "on", "off"], "default": "auto", "description": "Register DefenseClaw as OpenClaw security.installPolicy (OpenClaw 2026.8.35 and later), so OpenClaw asks DefenseClaw admission before a skill or plugin install or update. auto: on in the strict tier and on managed installs, off in the default and permissive tiers."}
           }
         }
       }

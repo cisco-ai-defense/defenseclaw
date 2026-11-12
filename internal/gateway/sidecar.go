@@ -7475,6 +7475,10 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		AgentVersion:             agentVersion,
 		AgentExecutable:          agentExecutable,
 		HookContractID:           contractResolution.Contract.ContractID,
+
+		OpenClawInstallPolicy:            cfg.OpenClawInstallPolicyOn(),
+		OpenClawInstallPolicyTimeoutMs:   cfg.OpenClawInstallPolicyTimeoutMs(),
+		OpenClawInstallPolicyFailsClosed: cfg.OpenClawInstallPolicyFailsClosed(),
 	}, nil
 }
 
