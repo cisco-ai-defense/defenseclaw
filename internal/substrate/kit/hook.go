@@ -103,7 +103,7 @@ func RunHook(ctx context.Context, o HookOptions) int {
 		return refuse("DefenseClaw could not read the hook event: it is not JSON")
 	}
 	env := HookEnvelope{
-		V: ProtocolV1, Connector: o.Connector, Event: call.Event, HookContract: call.HookContractID,
+		V: EnvelopeVersion, Connector: o.Connector, Event: call.Event, HookContract: call.HookContractID,
 		Mode: mode, KitVersion: o.Config.KitVersion, Payload: json.RawMessage(payload),
 		Facts: CollectFacts(o.Connector, call.Event, payload, o.Config.attachCap()),
 	}
@@ -123,9 +123,7 @@ func RunHook(ctx context.Context, o HookOptions) int {
 		send = defaultSend(o.Config)
 	}
 	resp, helperMode, err := send(ctx, Request{Path: HookPathPrefix + o.Connector, Header: header, Body: body})
-	if helperMode == ModeUnattend {
-		call.FailMode = "closed"
-	}
+	call.FailMode = outageMode(call.FailMode, resp, helperMode, mode)
 	if err != nil {
 		if errors.Is(err, ErrUnreachable) {
 			cause := strings.TrimPrefix(strings.TrimPrefix(err.Error(), ErrUnreachable.Error()), ": ")
@@ -148,6 +146,20 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	return code
 }
 
+// outageMode is the fail mode of a call: the gateway's word for this actor
+// when it has given one (the registration decides, D8), else the
+// configuration's; an unattended run is closed whoever says otherwise.
+func outageMode(configured string, resp Response, helperMode, envMode string) string {
+	if helperMode == ModeUnattend || resp.Mode == ModeUnattend || envMode == ModeUnattend {
+		return "closed"
+	}
+	switch resp.FailMode {
+	case "open", "closed":
+		return resp.FailMode
+	}
+	return configured
+}
+
 // runNotify forwards a Codex notify event. It is best-effort and never
 // blocks or prints, like the host notify bridge.
 func runNotify(ctx context.Context, o HookOptions, mode string) int {
@@ -160,10 +172,15 @@ func runNotify(ctx context.Context, o HookOptions, mode string) int {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	body, err := json.Marshal(HookEnvelope{V: EnvelopeVersion, Connector: o.Connector, Event: "agent-turn-complete",
+		Mode: mode, KitVersion: o.Config.KitVersion, Payload: json.RawMessage(o.NotifyJSON)})
+	if err != nil {
+		return 0
+	}
 	_, _, _ = send(ctx, Request{
 		Path:   NotifyPathPrefix + o.Connector,
 		Header: map[string]string{"X-DefenseClaw-Actor-Mode": mode, "x-defenseclaw-source": o.Connector + "-notify"},
-		Body:   []byte(o.NotifyJSON),
+		Body:   body,
 	})
 	return 0
 }
@@ -175,6 +192,9 @@ func defaultSend(cfg Config) func(ctx context.Context, r Request) (Response, str
 		budget := cfg.maxTime() + cfg.retryMaxTime() + time.Second
 		resp, err := callHelper(ctx, helperRequest{Op: "post", Request: r}, budget)
 		if err == nil {
+			if resp.Response.FailMode == "" {
+				resp.Response.FailMode = resp.FailMode
+			}
 			if resp.Unreachable {
 				return resp.Response, resp.Mode, fmt.Errorf("%w: %s", ErrUnreachable, resp.Error)
 			}
@@ -195,6 +215,14 @@ func defaultSend(cfg Config) func(ctx context.Context, r Request) (Response, str
 
 // Main is the defenseclaw-actor-hook entrypoint.
 func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "hook-post" {
+		cfg, err := LoadConfig(ConfigPath)
+		if err != nil {
+			fmt.Fprintln(stderr, "defenseclaw-actor-hook:", err)
+			return 1
+		}
+		return RunHookPost(context.Background(), cfg, stdin, stdout, stderr, nil)
+	}
 	fs := flag.NewFlagSet("defenseclaw-actor-hook", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	connectorName := fs.String("connector", "", "connector name (claudecode, codex)")

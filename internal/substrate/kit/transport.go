@@ -40,6 +40,9 @@ type Response struct {
 	Status   int    `json:"status"`
 	Body     []byte `json:"body,omitempty"`
 	Attempts int    `json:"attempts"`
+	// Mode and FailMode are the gateway's ModeHeader and FailModeHeader.
+	Mode     string `json:"mode,omitempty"`
+	FailMode string `json:"fail_mode,omitempty"`
 }
 
 // ErrUnreachable wraps a failure to get any HTTP answer.
@@ -201,7 +204,8 @@ func (t *Transport) once(ctx context.Context, r Request, key string, budget time
 	if len(body) > maxAnswerBytes {
 		return Response{Status: resp.StatusCode}, errors.New("gateway answer too large")
 	}
-	return Response{Status: resp.StatusCode, Body: body}, nil
+	return Response{Status: resp.StatusCode, Body: body,
+		Mode: resp.Header.Get(ModeHeader), FailMode: resp.Header.Get(FailModeHeader)}, nil
 }
 
 // Warm opens (or re-opens) a connection to the actor listener so the next

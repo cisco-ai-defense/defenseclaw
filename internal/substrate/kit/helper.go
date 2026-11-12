@@ -51,7 +51,10 @@ type helperResponse struct {
 	Error       string `json:"error,omitempty"`
 	// Mode is the helper's run mode (unattended once set, for good).
 	Mode string `json:"mode"`
-	PID  int    `json:"pid"`
+	// FailMode is the outage mode the gateway last named ("" before it
+	// answered once).
+	FailMode string `json:"fail_mode,omitempty"`
+	PID      int    `json:"pid"`
 }
 
 // HelperDir is the private directory of the helper's socket.
@@ -117,9 +120,10 @@ type Helper struct {
 	transport *Transport
 	log       *slog.Logger
 
-	mu   sync.Mutex
-	mode string
-	warm map[string]bool
+	mu       sync.Mutex
+	mode     string
+	failMode string
+	warm     map[string]bool
 }
 
 // NewHelper builds a helper; it makes no connection until asked.
@@ -222,6 +226,7 @@ func (h *Helper) do(ctx context.Context, req helperRequest) helperResponse {
 		}
 		resp, err := h.transport.Post(ctx, r)
 		out.Response = resp
+		h.learn(resp)
 		if err != nil {
 			out.Unreachable = errors.Is(err, ErrUnreachable)
 			out.Error = err.Error()
@@ -230,7 +235,24 @@ func (h *Helper) do(ctx context.Context, req helperRequest) helperResponse {
 		out.Error = "unknown op"
 	}
 	out.Mode = h.currentMode()
+	h.mu.Lock()
+	out.FailMode = h.failMode
+	h.mu.Unlock()
 	return out
+}
+
+// learn keeps what the gateway said about this actor's run: the mode only
+// tightens, the outage mode is the gateway's (the registration decides it).
+func (h *Helper) learn(resp Response) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if resp.Mode == ModeUnattend {
+		h.mode = ModeUnattend
+	}
+	switch resp.FailMode {
+	case "open", "closed":
+		h.failMode = resp.FailMode
+	}
 }
 
 // watchResume reads a wall-clock jump as a resume from a snapshot: the
