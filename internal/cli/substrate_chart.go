@@ -96,8 +96,8 @@ func substrateChartValidateConfig(raw []byte) error {
 
 func init() {
 	pf := substrateChartCmd.PersistentFlags()
-	pf.StringVar(&substrateChartPlan, "plan", "/etc/defenseclaw-chart/plan.json", "the chart plan")
-	pf.StringVar(&substrateChartConfig, "config", "/etc/defenseclaw-chart/config.yaml", "the release's config.yaml")
+	pf.StringVar(&substrateChartPlan, "plan", "env:DEFENSECLAW_CHART_PLAN", "the chart plan: a file, or env:NAME")
+	pf.StringVar(&substrateChartConfig, "config", "env:DEFENSECLAW_CHART_CONFIG", "the release's config.yaml: a file, or env:NAME")
 	pf.StringVar(&substrateChartOwnerToken, "owner-token", "", "a Substrate global owner's token (bootstrap)")
 	pf.StringVar(&substrateChartAPIToken, "api-token", "/var/run/ate/token", "this pod's ate-api token")
 	pf.StringVar(&substrateChartAPICA, "api-ca", "/var/run/ate/ca.crt", "the ate-api serving CA")
@@ -122,7 +122,7 @@ func init() {
 			}),
 		substrateChartStep("pre-upgrade", "Check the release about to roll out (config, skew, store schema)",
 			func(ctx context.Context, plan setup.ChartPlan) (setup.StepReport, error) {
-				raw, err := os.ReadFile(substrateChartConfig)
+				raw, err := setup.ReadSource(substrateChartConfig)
 				if err != nil {
 					return setup.StepReport{Step: "pre-upgrade"}, err
 				}

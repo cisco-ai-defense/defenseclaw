@@ -1319,110 +1319,6 @@ spec:
         type: Utilization
         averageUtilization: 70
 ---
-# Source: defenseclaw-substrate/templates/hooks/plan.yaml
-# The plan and the config.yaml the hook Jobs check. A hook resource, so it
-# exists before the pre-install and pre-upgrade Jobs and is the target
-# release's own in a rollback.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: defenseclaw-chart-plan
-  labels:
-    app.kubernetes.io/name: defenseclaw-substrate
-    app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
-    app.kubernetes.io/component: hooks
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade,pre-rollback,pre-delete,post-install,post-upgrade
-    helm.sh/hook-weight: "-10"
-    helm.sh/hook-delete-policy: before-hook-creation
-data:
-  plan.json: |
-    {
-      "actor_host": "defenseclaw-actor.defenseclaw-system.svc",
-      "api": {
-        "address": "api.ate-system.svc:443",
-        "audience": "api.ate-system.svc"
-      },
-      "app_version": "1.0.10",
-      "chart_version": "1.0.10",
-      "credential_provider": {
-        "config_map": "k8s-credential-provider-namespace-policy",
-        "deployment": "k8s-credential-provider",
-        "grant": true,
-        "secrets_namespace": "defenseclaw-actor-secrets"
-      },
-      "delete_owner_token": true,
-      "editors": [
-        "system:serviceaccount:defenseclaw-system:defenseclaw-gateway",
-        "system:serviceaccount:defenseclaw-system:defenseclaw-controller",
-        "system:serviceaccount:defenseclaw-system:defenseclaw-hooks"
-      ],
-      "global_viewers": [
-        "system:serviceaccount:defenseclaw-system:defenseclaw-gateway",
-        "system:serviceaccount:defenseclaw-system:defenseclaw-controller",
-        "system:serviceaccount:defenseclaw-system:defenseclaw-callout",
-        "system:serviceaccount:defenseclaw-system:defenseclaw-hooks"
-      ],
-      "launcher_atespaces": [
-        "data-ml",
-        "eng-payments",
-        "eng-web"
-      ],
-      "namespace": "defenseclaw-system",
-      "owner_token_secret": "ate-bootstrap-owner",
-      "release": "dc",
-      "schema": 1,
-      "store_schema": 1,
-      "store_state_config_map": "defenseclaw-store-state",
-      "substrate_namespace": "ate-system",
-      "supported_versions": "\u003e=1.0.0 \u003c1.1.0",
-      "writable_atespaces": [
-        "data-ml",
-        "eng-payments",
-        "eng-web",
-        "platform-ci"
-      ]
-    }
-  config.yaml: |
-    config_version: 9
-    substrate:
-      api:
-        address: api.ate-system.svc:443
-        auth: serviceaccount
-        ca_file: /var/run/ate/ca.crt
-        server_name: api.ate-system.svc
-        token_file: /var/run/ate/token
-      default_sandbox_class: gvisor
-      enabled: true
-      extproc:
-        body_inspection: auto
-        body_max_bytes: 1048576
-        enabled: true
-        failure_mode: closed
-      identity:
-        audience: defenseclaw
-        issuer: https://idp.ate-system.svc
-        token_lifetime_seconds: 900
-      idle_suspend_after: 30m
-      launcher_atespaces:
-        data:
-        - data-ml
-        engineering:
-        - eng-payments
-        - eng-web
-      require_attested_templates: true
-      services:
-        actor: defenseclaw-actor.defenseclaw-system.svc
-        admin: defenseclaw-admin.defenseclaw-system.svc
-      supported_versions: '>=1.0.0 <1.1.0'
-      unattended:
-        ask_timeout: 30m
-        asks: deny
----
 # Source: defenseclaw-substrate/templates/hooks/jobs.yaml
 apiVersion: batch/v1
 kind: Job
@@ -1470,9 +1366,16 @@ spec:
         args:
         - substrate-chart
         - pre-upgrade
-        - --plan=/etc/defenseclaw-chart/plan.json
-        - --config=/etc/defenseclaw-chart/config.yaml
+        - --plan=env:DEFENSECLAW_CHART_PLAN
+        - --config=env:DEFENSECLAW_CHART_CONFIG
         env:
+        # The plan and config ride in the Job itself: a hook ConfigMap would
+        # outlive the release (Helm keeps hook resources), and each hook
+        # must see its own release's plan (the target one in a rollback).
+        - name: DEFENSECLAW_CHART_PLAN
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-payments\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"ate-bootstrap-owner\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-payments\",\n    \"eng-web\",\n    \"platform-ci\"\n  ]\n}"
+        - name: DEFENSECLAW_CHART_CONFIG
+          value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 900\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-payments\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc\n    admin: defenseclaw-admin.defenseclaw-system.svc\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -1492,9 +1395,6 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
         volumeMounts:
-        - name: plan
-          mountPath: /etc/defenseclaw-chart
-          readOnly: true
         - name: tmp
           mountPath: /tmp
         - name: ate
@@ -1504,9 +1404,6 @@ spec:
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
           readOnly: true
       volumes:
-      - name: plan
-        configMap:
-          name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
       - name: ate
@@ -1585,9 +1482,16 @@ spec:
         args:
         - substrate-chart
         - pre-rollback
-        - --plan=/etc/defenseclaw-chart/plan.json
-        - --config=/etc/defenseclaw-chart/config.yaml
+        - --plan=env:DEFENSECLAW_CHART_PLAN
+        - --config=env:DEFENSECLAW_CHART_CONFIG
         env:
+        # The plan and config ride in the Job itself: a hook ConfigMap would
+        # outlive the release (Helm keeps hook resources), and each hook
+        # must see its own release's plan (the target one in a rollback).
+        - name: DEFENSECLAW_CHART_PLAN
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-payments\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"ate-bootstrap-owner\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-payments\",\n    \"eng-web\",\n    \"platform-ci\"\n  ]\n}"
+        - name: DEFENSECLAW_CHART_CONFIG
+          value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 900\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-payments\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc\n    admin: defenseclaw-admin.defenseclaw-system.svc\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -1607,9 +1511,6 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
         volumeMounts:
-        - name: plan
-          mountPath: /etc/defenseclaw-chart
-          readOnly: true
         - name: tmp
           mountPath: /tmp
         - name: ate
@@ -1619,9 +1520,6 @@ spec:
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
           readOnly: true
       volumes:
-      - name: plan
-        configMap:
-          name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
       - name: ate
@@ -1700,9 +1598,16 @@ spec:
         args:
         - substrate-chart
         - pre-delete
-        - --plan=/etc/defenseclaw-chart/plan.json
-        - --config=/etc/defenseclaw-chart/config.yaml
+        - --plan=env:DEFENSECLAW_CHART_PLAN
+        - --config=env:DEFENSECLAW_CHART_CONFIG
         env:
+        # The plan and config ride in the Job itself: a hook ConfigMap would
+        # outlive the release (Helm keeps hook resources), and each hook
+        # must see its own release's plan (the target one in a rollback).
+        - name: DEFENSECLAW_CHART_PLAN
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-payments\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"ate-bootstrap-owner\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-payments\",\n    \"eng-web\",\n    \"platform-ci\"\n  ]\n}"
+        - name: DEFENSECLAW_CHART_CONFIG
+          value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 900\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-payments\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc\n    admin: defenseclaw-admin.defenseclaw-system.svc\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -1722,9 +1627,6 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
         volumeMounts:
-        - name: plan
-          mountPath: /etc/defenseclaw-chart
-          readOnly: true
         - name: tmp
           mountPath: /tmp
         - name: ate
@@ -1734,9 +1636,6 @@ spec:
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
           readOnly: true
       volumes:
-      - name: plan
-        configMap:
-          name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
       - name: ate
@@ -1815,10 +1714,17 @@ spec:
         args:
         - substrate-chart
         - bootstrap
-        - --plan=/etc/defenseclaw-chart/plan.json
-        - --config=/etc/defenseclaw-chart/config.yaml
+        - --plan=env:DEFENSECLAW_CHART_PLAN
+        - --config=env:DEFENSECLAW_CHART_CONFIG
         - --owner-token=/var/run/secrets/ate-owner/token
         env:
+        # The plan and config ride in the Job itself: a hook ConfigMap would
+        # outlive the release (Helm keeps hook resources), and each hook
+        # must see its own release's plan (the target one in a rollback).
+        - name: DEFENSECLAW_CHART_PLAN
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-payments\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"ate-bootstrap-owner\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-payments\",\n    \"eng-web\",\n    \"platform-ci\"\n  ]\n}"
+        - name: DEFENSECLAW_CHART_CONFIG
+          value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 900\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-payments\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc\n    admin: defenseclaw-admin.defenseclaw-system.svc\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -1838,9 +1744,6 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
         volumeMounts:
-        - name: plan
-          mountPath: /etc/defenseclaw-chart
-          readOnly: true
         - name: tmp
           mountPath: /tmp
         - name: ate
@@ -1853,9 +1756,6 @@ spec:
           mountPath: /var/run/secrets/ate-owner
           readOnly: true
       volumes:
-      - name: plan
-        configMap:
-          name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
       - name: ate

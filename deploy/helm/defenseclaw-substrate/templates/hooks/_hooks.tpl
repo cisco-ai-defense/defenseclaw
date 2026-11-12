@@ -1,4 +1,4 @@
-{{/* The plan every chart hook Job reads (internal/substrate/setup.ChartPlan). */}}
+{{/* The plan every chart hook Job reads (internal/substrate/setup.ChartPlan), in its env. */}}
 {{- define "dc.hookPlan" -}}
 {{- $launcher := include "dc.launcherAtespaces" . | fromJsonArray -}}
 {{- $p := dict
@@ -55,12 +55,19 @@ spec:
         args:
         - substrate-chart
         - {{ .step }}
-        - --plan=/etc/defenseclaw-chart/plan.json
-        - --config=/etc/defenseclaw-chart/config.yaml
+        - --plan=env:DEFENSECLAW_CHART_PLAN
+        - --config=env:DEFENSECLAW_CHART_CONFIG
         {{- if .owner }}
         - --owner-token=/var/run/secrets/ate-owner/token
         {{- end }}
         env:
+        # The plan and config ride in the Job itself: a hook ConfigMap would
+        # outlive the release (Helm keeps hook resources), and each hook
+        # must see its own release's plan (the target one in a rollback).
+        - name: DEFENSECLAW_CHART_PLAN
+          value: {{ include "dc.hookPlan" $ | quote }}
+        - name: DEFENSECLAW_CHART_CONFIG
+          value: {{ include "dc.config" $ | quote }}
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -72,9 +79,6 @@ spec:
         securityContext:
           {{- toYaml $.Values.containerSecurityContext | nindent 10 }}
         volumeMounts:
-        - name: plan
-          mountPath: /etc/defenseclaw-chart
-          readOnly: true
         - name: tmp
           mountPath: /tmp
         - name: ate
@@ -89,9 +93,6 @@ spec:
           readOnly: true
         {{- end }}
       volumes:
-      - name: plan
-        configMap:
-          name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
       - name: ate

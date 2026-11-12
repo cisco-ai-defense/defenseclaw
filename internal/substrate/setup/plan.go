@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 )
 
 // PlanSchema is the version of the hook plan the chart renders.
@@ -57,9 +58,22 @@ type CredentialProvider struct {
 
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
-// LoadPlan reads and checks plan.json.
-func LoadPlan(path string) (ChartPlan, error) {
-	raw, err := os.ReadFile(path)
+// ReadSource reads a file, or the environment variable NAME for "env:NAME"
+// (the chart hook Jobs carry their plan and config in env).
+func ReadSource(source string) ([]byte, error) {
+	if name, ok := strings.CutPrefix(source, "env:"); ok {
+		v, set := os.LookupEnv(name)
+		if !set || v == "" {
+			return nil, fmt.Errorf("%s is not set", name)
+		}
+		return []byte(v), nil
+	}
+	return os.ReadFile(source)
+}
+
+// LoadPlan reads and checks the plan from a file or "env:NAME".
+func LoadPlan(source string) (ChartPlan, error) {
+	raw, err := ReadSource(source)
 	if err != nil {
 		return ChartPlan{}, err
 	}

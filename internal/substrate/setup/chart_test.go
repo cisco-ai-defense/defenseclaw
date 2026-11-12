@@ -206,10 +206,31 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 		t.Errorf("%s: no default deny", name)
 	}
 	// The hook plan parses as the plan the hook Jobs read.
-	plan := byName["ConfigMap/defenseclaw-chart-plan"]
-	p, err := ParsePlan([]byte(plan.Data["plan.json"].(string)))
+	// No hook resource but the Jobs (Helm keeps hook resources after an
+	// uninstall), and each Job's plan parses as the plan the step reads.
+	var plans []string
+	for _, o := range objs {
+		hook, _ := dig(o.Metadata, "annotations", "helm.sh/hook").(string)
+		if hook != "" && o.Kind != "Job" {
+			t.Errorf("%s: hook resource %s %v outlives the release", name, o.Kind, o.Metadata["name"])
+		}
+		if o.Kind != "Job" {
+			continue
+		}
+		for _, c := range dig(o.Spec, "template", "spec", "containers").([]any) {
+			for _, e := range dig(c, "env").([]any) {
+				if dig(e, "name") == "DEFENSECLAW_CHART_PLAN" {
+					plans = append(plans, dig(e, "value").(string))
+				}
+			}
+		}
+	}
+	if len(plans) < 3 {
+		t.Fatalf("%s: %d hook Jobs carry a plan", name, len(plans))
+	}
+	p, err := ParsePlan([]byte(plans[0]))
 	if err != nil {
-		t.Errorf("%s: plan.json: %v", name, err)
+		t.Errorf("%s: plan: %v", name, err)
 	}
 	if !slices.Contains(p.GlobalViewers, "system:serviceaccount:defenseclaw-system:defenseclaw-hooks") {
 		t.Errorf("%s: the hooks ServiceAccount cannot list actors for the uninstall", name)

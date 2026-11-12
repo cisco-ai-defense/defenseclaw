@@ -123,3 +123,13 @@ func TestParsePlan(t *testing.T) {
 		t.Error("bad atespace accepted")
 	}
 }
+
+func TestReadSource(t *testing.T) {
+	t.Setenv("A8_TEST_PLAN", "{}")
+	if b, err := ReadSource("env:A8_TEST_PLAN"); err != nil || string(b) != "{}" {
+		t.Errorf("%q %v", b, err)
+	}
+	if _, err := ReadSource("env:A8_TEST_UNSET"); err == nil {
+		t.Error("unset env accepted")
+	}
+}
