@@ -193,13 +193,18 @@ func execLine(args []string) error {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	url := fs.String("url", "", "relay origin")
 	tokenFile := fs.String("token-file", "", "session token file")
-	line := fs.String("line", "", "shell line; it must print __A5DONE__ when it ends, spelled so the echoed line does not contain it")
+	line := fs.String("line", "", "shell line; {DONE} in it becomes the end marker (a fresh nonce per call)")
 	timeout := fs.Duration("timeout", 60*time.Second, "overall timeout")
 	fs.Parse(args)
 	tok, err := readToken(*tokenFile)
 	if err != nil {
 		return err
 	}
+	nb := make([]byte, 6)
+	rand.Read(nb)
+	nonce := fmt.Sprintf("%x", nb)
+	marker := "__A5DONE_" + nonce + "__"
+	*line = strings.ReplaceAll(*line, "{DONE}", "printf '__A5D%sE_"+nonce+"__\\n' ON")
 	start := time.Now()
 	pr, pw := io.Pipe()
 	var screen strings.Builder
@@ -210,7 +215,7 @@ func execLine(args []string) error {
 		mu.Lock()
 		defer mu.Unlock()
 		screen.Write(p)
-		if strings.Contains(screen.String(), "__A5DONE__") {
+		if strings.Contains(screen.String(), marker) {
 			select {
 			case <-done:
 			default:
@@ -243,8 +248,12 @@ func execLine(args []string) error {
 	mu.Lock()
 	s := screen.String()
 	mu.Unlock()
-	if i := strings.Index(s, "__A5DONE__"); i >= 0 {
+	if i := strings.Index(s, marker); i >= 0 {
 		s = s[:i]
+		if j := strings.LastIndex(s, nonce); j >= 0 {
+			// From the end of the echoed line to the marker.
+			s = s[j+len(nonce):]
+		}
 	}
 	fmt.Print(s)
 	fmt.Fprintf(os.Stderr, "hello_ms=%d total_ms=%d session=%s detached=%v\n", helloAt.Milliseconds(), total.Milliseconds(), res.Session, res.Detached)
