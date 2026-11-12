@@ -214,3 +214,10 @@ func (k *Kube) DeploymentPods(ctx context.Context, namespace, name string) (int3
 	}
 	return d.Status.Replicas, nil
 }
+
+// CreateConfigMap creates a ConfigMap (the leader's store state).
+func (k *Kube) CreateConfigMap(ctx context.Context, cm *ConfigMap) error {
+	obj := configMapObject{APIVersion: "v1", Kind: "ConfigMap", Data: cm.Data}
+	obj.Metadata.Name, obj.Metadata.Namespace = cm.Name, cm.Namespace
+	return k.do(ctx, http.MethodPost, "/api/v1/namespaces/"+url.PathEscape(cm.Namespace)+"/configmaps", "application/json", obj, nil)
+}

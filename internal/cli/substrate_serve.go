@@ -409,6 +409,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	if host == "" {
 		return errors.New("serve: the leader runs in a cluster (KUBERNETES_SERVICE_HOST is unset)")
 	}
+	if err := substrateRecordStoreState(ctx, ns); err != nil {
+		return err
+	}
 	el := &leader.Elector{
 		API: &leader.KubeLeaseAPI{Server: "https://" + net.JoinHostPort(host, port), Namespace: ns, Name: serveFlags.lease,
 			TokenFile: serveFlags.kubeTokenFile, HTTP: kube},
