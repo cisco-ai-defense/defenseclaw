@@ -225,3 +225,37 @@ func TestRemoveOverlay(t *testing.T) {
 		t.Errorf("removed another callout: %s", out)
 	}
 }
+
+// TestRenderOverlayOfAFile renders and removes the overlay of a real
+// SubstrateInstall document (A8_OVERLAY_IN) into A8_OVERLAY_OUT/{added,removed}.yaml,
+// for checking with the target's own ate-setup parser. Skipped without it.
+func TestRenderOverlayOfAFile(t *testing.T) {
+	in, out := os.Getenv("A8_OVERLAY_IN"), os.Getenv("A8_OVERLAY_OUT")
+	if in == "" || out == "" {
+		t.Skip("A8_OVERLAY_IN and A8_OVERLAY_OUT are not set")
+	}
+	raw, err := os.ReadFile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := OverlayOptions{Namespace: os.Getenv("A8_OVERLAY_NS"), CalloutPort: 9443, BodyInspection: true}
+	added, report, err := RenderOverlay(raw, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed, _, err := RemoveOverlay(added, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, b := range map[string][]byte{"added.yaml": added, "removed.yaml": removed} {
+		if err := os.WriteFile(filepath.Join(out, name), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range report.Changes {
+		t.Logf("set %s: %q -> %q", c.Key, c.Old, c.New)
+	}
+	for _, n := range report.Notes {
+		t.Logf("note: %s", n)
+	}
+}

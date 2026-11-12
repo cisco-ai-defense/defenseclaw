@@ -345,13 +345,14 @@ func CheckRouterClients(o Observed) Check {
 	return result(CheckIngressClients, Pass, "E2", "only DefenseClaw reaches actors through the router")
 }
 
-// actorRoutePrefixes are the only routes the actor listener may serve
-// (PLAN 6.1): hooks, notify and inspect, the model proxy, and OTLP.
+// actorRoutePrefixes and actorRouteExact are the only routes the actor
+// listener may serve (PLAN 6.1): hooks, notify and inspect, the model proxy,
+// OTLP, and the relay's session check.
 var actorRoutePrefixes = []string{
 	"/api/v1/substrate/hook/", "/api/v1/substrate/notify/", "/api/v1/substrate/inspect/", "/llm/",
 }
 
-var actorRouteExact = []string{"/v1/logs", "/v1/metrics", "/v1/traces"}
+var actorRouteExact = []string{"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify"}
 
 // ActorRouteAllowed reports whether route may be on the actor listener.
 func ActorRouteAllowed(route string) bool {

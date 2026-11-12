@@ -35,7 +35,7 @@ config:
     egress:
       allow: [github.com, pypi.org]
     extproc:
-      mcp_hosts: [mcp.example.com]
+      mcp_hosts: ["mcp.example.com=tickets"]
     secrets:
     - name: github-push
       source: ate-secret://k8s.io/default/defenseclaw-actor-secrets/github-app/token
