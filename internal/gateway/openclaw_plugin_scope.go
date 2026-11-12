@@ -19,6 +19,9 @@ package gateway
 import (
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // openClawPluginScope is the connector scope of the OpenClaw plugin
@@ -60,6 +63,21 @@ func openClawPluginRoute(method, path string) bool {
 	return ok && strings.EqualFold(method, want)
 }
 
+// openClawInspectBudget is how long the plugin waits for a verdict: the hook
+// judge budget plus 2 s for the rule and AI Defense phases, or the approval
+// timeout plus 5 s when human approval is on. Before 1.0.10 the plugin waited
+// 2 s without approval, so a judge verdict arrived after the plugin had
+// already applied its outage mode.
+func openClawInspectBudget(cfg *config.Config, hilt bool, approvalTimeoutS int) time.Duration {
+	budget := hookJudgeTimeout(cfg) + 2*time.Second
+	if hilt {
+		if approval := time.Duration(approvalTimeoutS+5) * time.Second; approval > budget {
+			budget = approval
+		}
+	}
+	return budget
+}
+
 // handleOpenClawRuntime returns the guardrail settings of the openclaw
 // connector from the live config.yaml: mode, human approval and its
 // timeout. It holds no secret.
@@ -81,9 +99,12 @@ func (a *APIServer) handleOpenClawRuntime(w http.ResponseWriter, r *http.Request
 	if timeout <= 0 {
 		timeout = 30
 	}
+	hilt := cfg.EffectiveHILTForConnector(openClawPluginScope).Enabled
 	a.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"mode":               mode,
-		"hilt_enabled":       cfg.EffectiveHILTForConnector(openClawPluginScope).Enabled,
+		"hilt_enabled":       hilt,
 		"approval_timeout_s": timeout,
+		"inspect_timeout_ms": openClawInspectBudget(cfg, hilt, timeout).Milliseconds(),
+		"prompt_gate":        cfg.Connectors.OpenClaw.Hooks.PromptGate,
 	})
 }

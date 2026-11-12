@@ -36,7 +36,7 @@ func TestGAP0690OpenClawPluginConfigMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	extDir := filepath.Join(home, "extensions", "defenseclaw")
-	if err := patchOpenClawConfig(configPath, extDir, false, false, false); err != nil {
+	if err := patchOpenClawConfig(configPath, extDir, false, false, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	got := readOpenClawEntries(t, configPath)["defenseclaw"].(map[string]interface{})
@@ -74,7 +74,7 @@ func TestGAP0690OpenClawPluginConfigMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := patchOpenClawConfig(configPath, extDir, false, false, false); err != nil {
+	if err := patchOpenClawConfig(configPath, extDir, false, false, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	second, err := os.ReadFile(configPath)
@@ -91,7 +91,7 @@ func TestGAP0690OpenClawPluginConfigAcceptedTwin(t *testing.T) {
 			"config": map[string]interface{}{"awsHttp1Shim": "off", "agent": map[string]interface{}{"id": "alice"}},
 		}}},
 	})
-	if err := patchOpenClawConfig(configPath, filepath.Join(home, "extensions", "defenseclaw"), false, false, false); err != nil {
+	if err := patchOpenClawConfig(configPath, filepath.Join(home, "extensions", "defenseclaw"), false, false, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	entry := readOpenClawEntries(t, configPath)["defenseclaw"].(map[string]interface{})

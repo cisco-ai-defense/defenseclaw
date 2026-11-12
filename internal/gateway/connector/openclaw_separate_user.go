@@ -44,12 +44,16 @@ func openClawSeparateUser(opts SetupOpts) bool {
 func openClawSeparateUserEntry(opts SetupOpts) map[string]interface{} {
 	host, apiPort := splitOpenClawAddr(opts.APIAddr, 18970)
 	_, proxyPort := splitOpenClawAddr(opts.ProxyAddr, 4000)
-	return map[string]interface{}{
+	entry := map[string]interface{}{
 		"tokenFile":     strings.TrimSpace(opts.OpenClawPluginTokenFile),
 		"sidecarHost":   host,
 		"sidecarPort":   apiPort,
 		"guardrailPort": proxyPort,
 	}
+	if mode := ResolveOpenClawHookMode(opts.OpenClawHooksMode, openClawObservedVersion(opts)); mode != OpenClawHookModeProxy {
+		entry[openClawHookModeKey] = mode
+	}
+	return entry
 }
 
 func splitOpenClawAddr(addr string, defaultPort int) (string, int) {

@@ -79,9 +79,9 @@ import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
 import {
   configureSidecarConnection,
+  getRuntimeSettings,
   loadOpenClawOutageMode,
   loadSidecarConfig,
-  separateUserLayout,
   setRuntimeSettings,
 } from "./sidecar-config.js";
 import { isLoopbackHost } from "./listener-proof.js";
@@ -339,6 +339,13 @@ export default function (api: DefenseClawPluginHost) {
   // ─── Runtime: tool call interception ───
 
   configureSidecarConnection(api.pluginConfig);
+  // Setup writes hookMode from connectors.openclaw.hooks.mode and the
+  // OpenClaw version: hybrid (native hooks and the guardrail proxy), native
+  // (native hooks only, Windows) or none (the proxy, OpenClaw before
+  // 2026.8.35).
+  const configuredHookMode = (api.pluginConfig as Record<string, unknown> | undefined)?.hookMode;
+  const hookMode: "proxy" | "hybrid" | "native" =
+    configuredHookMode === "hybrid" || configuredHookMode === "native" ? configuredHookMode : "proxy";
   const sidecarConfig = loadSidecarConfig();
   const SIDECAR_API = sidecarConfig.baseUrl;
   if (!isLoopbackHost(sidecarConfig.host)) {
@@ -348,11 +355,20 @@ export default function (api: DefenseClawPluginHost) {
       `[defenseclaw] gateway.host ${sidecarConfig.host} is not a loopback address: the plugin sends nothing to it, so tool checks are blocked`,
     );
   }
-  // Read per call: in the separate-user layout the approval settings arrive
-  // from the gateway after registration (setRuntimeSettings).
+  // OpenClaw blocks a gate hook (before_tool_call, before_agent_run) that
+  // throws or runs out of its budget, whatever the DefenseClaw policy says.
+  // The plugin gives each gate hook this budget and waits for a verdict at
+  // most 3 s less, so the plugin, not the host, applies the outage mode.
+  const hostGateBudgetMs = Math.min(600_000, Math.max(30_000, (sidecarConfig.approvalTimeoutS + 15) * 1_000));
+  // The verdict wait comes from the gateway (judge budget, approvals), read
+  // per call; before it answers, the config.yaml approval settings apply.
   const inspectTimeoutMs = (): number => {
+    const runtime = getRuntimeSettings();
     const live = loadSidecarConfig();
-    return live.hiltEnabled ? Math.max(2_000, (live.approvalTimeoutS + 5) * 1_000) : 2_000;
+    const wanted = runtime.inspectTimeoutMs > 0
+      ? runtime.inspectTimeoutMs
+      : live.hiltEnabled ? Math.max(2_000, (live.approvalTimeoutS + 5) * 1_000) : 10_000;
+    return Math.min(wanted, hostGateBudgetMs - 3_000);
   };
 
   let identityCache: BootstrapPluginIdentityResult | undefined;
@@ -398,17 +414,23 @@ export default function (api: DefenseClawPluginHost) {
     daemonClient,
   );
 
-  // Separate-user layout: config.yaml is not readable from this account, so
-  // the approval settings come from the gateway, refreshed every minute.
-  if (separateUserLayout()) {
-    const refreshRuntime = () =>
-      daemonClient.runtime().then((res) => {
+  // The verdict budget and the prompt gate come from the gateway (and, in
+  // the separate-user layout, the approval settings), read when the service
+  // starts and every minute until it stops.
+  let runtimeTimer: ReturnType<typeof setInterval> | undefined;
+  const refreshRuntime = (): Promise<void> =>
+    Promise.resolve()
+      .then(() => daemonClient.runtime())
+      .then((res) => {
         if (res.ok && res.data) setRuntimeSettings(res.data);
-      }).catch(() => {});
+      })
+      .catch(() => {});
+  const startRuntimeRefresh = (): void => {
+    if (runtimeTimer) return;
     void refreshRuntime();
-    const timer = setInterval(refreshRuntime, 60_000);
-    timer.unref?.();
-  }
+    runtimeTimer = setInterval(() => void refreshRuntime(), 60_000);
+    runtimeTimer.unref?.();
+  };
 
   // ─── Health monitor ───
   // Polls the sidecar /status endpoint and warns when protection is down.
@@ -513,7 +535,7 @@ export default function (api: DefenseClawPluginHost) {
   });
   // Start immediately so gateway model prewarm (before plugin services) also
   // routes through the guardrail when Bedrock is the primary model.
-  interceptor.start();
+  if (hookMode !== "native") interceptor.start();
 
   // Stops the interceptor and the health monitor. OpenClaw calls the service
   // `stop` when it replaces or removes the plugin; it ignores what start()
@@ -522,12 +544,20 @@ export default function (api: DefenseClawPluginHost) {
   const stopService = (): void => {
     interceptor.stop();
     healthMonitor.stop();
+    if (runtimeTimer) clearInterval(runtimeTimer);
+    runtimeTimer = undefined;
   };
 
   api.registerService({
     id: "llm-interceptor",
     stop: stopService,
     start: async () => {
+      startRuntimeRefresh();
+      if (hookMode === "native") {
+        // No guardrail proxy: the native hooks guard OpenClaw.
+        healthMonitor.start();
+        return { stop: stopService };
+      }
       interceptor.start();
       const layers = interceptor.describeLayers();
       if (!layers.fetch || !layers.httpsRequest || !layers.httpRequest || !layers.httpGet) {
@@ -683,7 +713,98 @@ export default function (api: DefenseClawPluginHost) {
     if (verdict.action === "confirm" && verdict.mode === "action") {
       return buildApprovalRequest(event.toolName, verdict);
     }
-  });
+  }, { timeoutMs: hostGateBudgetMs });
+
+  // ─── Native hooks (hookMode hybrid or native, OpenClaw 2026.8.35+) ───
+
+  // A verdict from an inspect route, with the outage rule of before_tool_call:
+  // only a gateway that did not answer follows the saved outage mode; an
+  // unproven listener, a refused request and a malformed answer stay closed.
+  async function postForVerdict(
+    path: string,
+    body: Record<string, unknown>,
+    correlation: { runId?: string; sessionId?: string },
+    onOutage: (reason: string) => InspectVerdict,
+  ): Promise<InspectVerdict> {
+    const res = await daemonClient.postRaw(path, body, { timeoutMs: inspectTimeoutMs(), correlation });
+    if (res.status === 0) {
+      const msg = res.error ?? "no answer";
+      return res.outage ? onOutage(`sidecar unreachable: ${msg}`) : failClosedVerdict(`sidecar request failed: ${msg}`);
+    }
+    if (res.status < 200 || res.status >= 300) return failClosedVerdict(`sidecar returned ${res.status}`);
+    try {
+      const verdict: unknown = JSON.parse(res.body);
+      return isInspectVerdict(verdict) ? verdict : failClosedVerdict("sidecar returned invalid verdict");
+    } catch {
+      return failClosedVerdict("sidecar returned malformed verdict");
+    }
+  }
+
+  // Outage of a prompt check: open tiers let the prompt through with a
+  // warning, strict and managed tiers block it.
+  const promptOutageVerdict = (reason: string): InspectVerdict => {
+    if (loadOpenClawOutageMode() === "open") {
+      const warning = `DefenseClaw warning: ${reason}; the prompt runs without inspection.`;
+      console.warn(warning);
+      return { action: "allow", severity: "NONE", reason: warning, mode: "observe" };
+    }
+    return failClosedVerdict(reason);
+  };
+
+  const MAX_OBSERVED_TEXT = 256 * 1024;
+  const sessionOf = (ctx?: { sessionKey?: string; sessionId?: string }) => ctx?.sessionKey ?? ctx?.sessionId;
+
+  if (hookMode !== "proxy") {
+    // Prompt gate (connectors.openclaw.hooks.prompt_gate, off by default):
+    // the user prompt is inspected before the model reads it. OpenClaw keeps
+    // only the replacement message in the transcript of a blocked run.
+    api.on("before_agent_run", async (event, ctx) => {
+      if (!getRuntimeSettings().promptGate) return;
+      const prompt = typeof event?.prompt === "string" ? event.prompt : "";
+      if (!prompt) return;
+      const sessionId = sessionOf(ctx);
+      const verdict = await postForVerdict(
+        "/api/v1/inspect/request",
+        { content: prompt.slice(0, MAX_OBSERVED_TEXT), ...(sessionId ? { session_id: sessionId } : {}) },
+        { runId: ctx?.runId, sessionId },
+        promptOutageVerdict,
+      );
+      console.log(`[defenseclaw] prompt verdict:${verdict.action} severity:${verdict.severity}`);
+      if (verdict.action === "block" && verdict.mode === "action") {
+        return {
+          outcome: "block",
+          reason: `defenseclaw: ${verdict.reason}`,
+          message: `DefenseClaw blocked this message: ${verdict.reason}`,
+        };
+      }
+      return undefined;
+    }, { timeoutMs: hostGateBudgetMs });
+  }
+
+  if (hookMode === "native") {
+    // No guardrail proxy sees the traffic, so the observation hooks feed the
+    // response and tool-result scans (audit and findings; they cannot block).
+    api.on("after_tool_call", (event, ctx) => {
+      const output = event?.error !== undefined ? { error: event.error } : event?.result;
+      const sessionId = sessionOf(ctx);
+      void daemonClient.postRaw("/api/v1/inspect/tool-response", {
+        tool: event?.toolName,
+        output: output === undefined ? null : output,
+        ...(sessionId ? { session_id: sessionId } : {}),
+      }, { timeoutMs: inspectTimeoutMs(), correlation: { runId: event?.runId ?? ctx?.runId, sessionId } }).catch(() => {});
+    });
+    api.on("llm_output", (event, ctx) => {
+      const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts.filter((t: unknown) => typeof t === "string") : [];
+      const content = texts.join("\n").slice(0, MAX_OBSERVED_TEXT);
+      if (!content) return;
+      const sessionId = event?.sessionId ?? sessionOf(ctx);
+      void daemonClient.postRaw("/api/v1/inspect/response", {
+        content,
+        model: event?.model,
+        ...(sessionId ? { session_id: sessionId } : {}),
+      }, { timeoutMs: inspectTimeoutMs(), correlation: { runId: event?.runId, sessionId } }).catch(() => {});
+    });
+  }
 
   // ─── Slash command: /scan ───
 

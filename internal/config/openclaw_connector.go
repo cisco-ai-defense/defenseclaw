@@ -58,6 +58,27 @@ type OpenClawConnectorConfig struct {
 	// the plugin account; PluginTokenGroup (Linux, macOS) may read it.
 	PluginTokenFile  string `mapstructure:"plugin_token_file"  yaml:"plugin_token_file,omitempty"`
 	PluginTokenGroup string `mapstructure:"plugin_token_group" yaml:"plugin_token_group,omitempty"`
+	// Hooks selects the OpenClaw native plugin hooks (1.0.10).
+	Hooks OpenClawHooksConfig `mapstructure:"hooks" yaml:"hooks,omitempty"`
+}
+
+// OpenClaw hook modes (connectors.openclaw.hooks.mode).
+const (
+	// OpenClawHooksAuto: native plugin hooks on OpenClaw 2026.8.35 and
+	// later (with the guardrail proxy on Linux and macOS, alone on Windows),
+	// the 1.0.9 proxy below that release.
+	OpenClawHooksAuto = "auto"
+	// OpenClawHooksProxy: the 1.0.9 behaviour, guardrail proxy and the
+	// before_tool_call check only. Not available on Windows.
+	OpenClawHooksProxy = "proxy"
+)
+
+// OpenClawHooksConfig is connectors.openclaw.hooks.
+type OpenClawHooksConfig struct {
+	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
+	// PromptGate inspects every user prompt in before_agent_run before the
+	// model reads it, and blocks it in action mode. Off by default.
+	PromptGate bool `mapstructure:"prompt_gate" yaml:"prompt_gate,omitempty"`
 }
 
 // OpenClawPluginInstall is the resolved plugin_install mode.
@@ -85,6 +106,15 @@ func (c *Config) OpenClawExternalPluginDir() string {
 // OpenClawSeparateUser reports the separate-user layout: plugin_account set.
 func (c *Config) OpenClawSeparateUser() bool {
 	return c != nil && strings.TrimSpace(c.Connectors.OpenClaw.PluginAccount) != ""
+}
+
+// OpenClawHooksMode is connectors.openclaw.hooks.mode resolved: auto
+// unless proxy is set.
+func (c *Config) OpenClawHooksMode() string {
+	if c != nil && strings.EqualFold(strings.TrimSpace(c.Connectors.OpenClaw.Hooks.Mode), OpenClawHooksProxy) {
+		return OpenClawHooksProxy
+	}
+	return OpenClawHooksAuto
 }
 
 // OpenClawOperatorAdmin reports whether the OpenClaw client requests
@@ -151,6 +181,15 @@ func (c *Config) ValidateOpenClawConnector() error {
 	}
 	if g := strings.TrimSpace(oc.PluginTokenGroup); g != "" && !openClawAccountPattern.MatchString(g) {
 		return fmt.Errorf("config: connectors.openclaw.plugin_token_group %q is not a group name", oc.PluginTokenGroup)
+	}
+	switch strings.ToLower(strings.TrimSpace(oc.Hooks.Mode)) {
+	case "", OpenClawHooksAuto:
+	case OpenClawHooksProxy:
+		if openClawGOOS == "windows" {
+			return fmt.Errorf("config: connectors.openclaw.hooks.mode proxy is not available on Windows (DefenseClaw hosts no guardrail proxy there); use auto")
+		}
+	default:
+		return fmt.Errorf("config: connectors.openclaw.hooks.mode %q must be auto or proxy", oc.Hooks.Mode)
 	}
 	if c.SecureClientIntegration() && oc != (OpenClawConnectorConfig{}) {
 		return fmt.Errorf("config: connectors.openclaw is not supported with the Secure Client integration")

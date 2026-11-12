@@ -28,7 +28,7 @@ func TestPatchOpenClawConfigWaitsForTransientExclusiveHolder(t *testing.T) {
 	timer := time.AfterFunc(300*time.Millisecond, release)
 	defer timer.Stop()
 
-	if err := patchOpenClawConfig(configPath, "/tmp/ext", false, false, false); err != nil {
+	if err := patchOpenClawConfig(configPath, "/tmp/ext", false, false, false, ""); err != nil {
 		t.Fatalf("patchOpenClawConfig() error = %v, want it to wait for the holder", err)
 	}
 	data, err := os.ReadFile(configPath)
@@ -68,7 +68,7 @@ func TestPatchOpenClawConfigDuringConcurrentReplacement(t *testing.T) {
 	defer func() { close(stop); writer.Wait() }()
 
 	for i := 0; i < 50; i++ {
-		if err := patchOpenClawConfig(configPath, "/tmp/ext", false, false, false); err != nil {
+		if err := patchOpenClawConfig(configPath, "/tmp/ext", false, false, false, ""); err != nil {
 			t.Fatalf("patch %d: %v", i, err)
 		}
 	}

@@ -79,7 +79,21 @@ interface SidecarConnection {
 }
 
 let connection: SidecarConnection | undefined;
-let runtimeSettings = { hiltEnabled: false, approvalTimeoutS: 30 };
+interface RuntimeSettings {
+  hiltEnabled: boolean;
+  approvalTimeoutS: number;
+  /** How long to wait for a verdict, from the gateway; 0 until it answers. */
+  inspectTimeoutMs: number;
+  /** connectors.openclaw.hooks.prompt_gate. */
+  promptGate: boolean;
+}
+
+let runtimeSettings: RuntimeSettings = { hiltEnabled: false, approvalTimeoutS: 30, inspectTimeoutMs: 0, promptGate: false };
+
+/** The last answer of GET /api/v1/openclaw/runtime. */
+export function getRuntimeSettings(): RuntimeSettings {
+  return runtimeSettings;
+}
 
 /** Configure the separate-user layout from api.pluginConfig (no tokenFile: off). */
 export function configureSidecarConnection(pluginConfig: unknown): void {
@@ -104,13 +118,15 @@ export function separateUserLayout(): boolean {
   return connection !== undefined;
 }
 
-/** Apply the answer of GET /api/v1/openclaw/runtime (separate-user layout). */
+/** Apply the answer of GET /api/v1/openclaw/runtime. */
 export function setRuntimeSettings(answer: unknown): void {
   const a = (answer ?? {}) as Record<string, unknown>;
+  const positive = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v > 0;
   runtimeSettings = {
     hiltEnabled: a["hilt_enabled"] === true,
-    approvalTimeoutS:
-      typeof a["approval_timeout_s"] === "number" && a["approval_timeout_s"] > 0 ? a["approval_timeout_s"] : 30,
+    approvalTimeoutS: positive(a["approval_timeout_s"]) ? (a["approval_timeout_s"] as number) : 30,
+    inspectTimeoutMs: positive(a["inspect_timeout_ms"]) ? (a["inspect_timeout_ms"] as number) : 0,
+    promptGate: a["prompt_gate"] === true,
   };
   _resetSidecarConfigCache();
 }

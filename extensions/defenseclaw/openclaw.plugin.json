@@ -58,6 +58,14 @@
       "tokenFile": {
         "type": "string",
         "description": "Separate-user layout: absolute path of the plugin credential the DefenseClaw gateway publishes (connectors.openclaw.plugin_token_file). Without it the plugin reads its credential and settings from the DefenseClaw data folder of its own account."
+      },
+      "hookMode": {
+        "type": "string",
+        "enum": [
+          "hybrid",
+          "native"
+        ],
+        "description": "Written by defenseclaw setup from connectors.openclaw.hooks.mode and the OpenClaw version: hybrid = native plugin hooks plus the guardrail proxy, native = native plugin hooks only (Windows). Absent = the guardrail proxy with before_tool_call (OpenClaw before 2026.8.35)."
       }
     }
   }

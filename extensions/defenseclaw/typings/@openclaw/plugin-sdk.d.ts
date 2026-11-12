@@ -51,6 +51,48 @@ declare module "@openclaw/plugin-sdk" {
     toolCallId?: string;
   }
 
+  /** Registration options of api.on (OpenClaw 2026.8.35 and later). */
+  export interface HookOptions {
+    priority?: number;
+    /** Host await budget; OpenClaw applies the hook failure policy when it runs out. */
+    timeoutMs?: number;
+  }
+
+  /** Native hooks, OpenClaw 2026.8.35 and later. */
+  export interface AgentContext {
+    agentId?: string;
+    sessionKey?: string;
+    sessionId?: string;
+    runId?: string;
+  }
+
+  export interface BeforeAgentRunEvent {
+    prompt: string;
+    messages: unknown[];
+    systemPrompt?: string;
+  }
+
+  /** before_agent_run answer: undefined (pass), pass, or block with a user-facing message. */
+  export type InputGateDecision = { outcome: "pass" } | { outcome: "block"; reason: string; message?: string };
+
+  export interface AfterToolCallEvent {
+    toolName: string;
+    params: Record<string, unknown>;
+    runId?: string;
+    toolCallId?: string;
+    result?: unknown;
+    error?: string;
+    durationMs?: number;
+  }
+
+  export interface LlmOutputEvent {
+    runId: string;
+    sessionId: string;
+    provider: string;
+    model: string;
+    assistantTexts: string[];
+  }
+
   export interface ToolContext {
     agentId?: string;
     sessionKey?: string;
@@ -81,10 +123,13 @@ declare module "@openclaw/plugin-sdk" {
   }
 
   export interface PluginApi {
-    on(event: "before_tool_call", handler: (event: BeforeToolCallEvent, ctx?: ToolContext) => BeforeToolCallResult | void | Promise<BeforeToolCallResult | void>): void;
+    on(event: "before_tool_call", handler: (event: BeforeToolCallEvent, ctx?: ToolContext) => BeforeToolCallResult | void | Promise<BeforeToolCallResult | void>, opts?: HookOptions): void;
     on(event: "tool_result_persist", handler: (event: ToolResultPersistEvent, ctx?: ToolResultPersistContext) => { message?: unknown } | void): void;
     on(event: "before_prompt_build", handler: () => { prependContext: string } | void | Promise<{ prependContext: string } | void>): void;
-    on(event: string, handler: (...args: any[]) => void | Promise<void>): void;
+    on(event: "before_agent_run", handler: (event: BeforeAgentRunEvent, ctx?: AgentContext) => InputGateDecision | void | Promise<InputGateDecision | void>, opts?: HookOptions): void;
+    on(event: "after_tool_call", handler: (event: AfterToolCallEvent, ctx?: ToolContext) => void | Promise<void>, opts?: HookOptions): void;
+    on(event: "llm_output", handler: (event: LlmOutputEvent, ctx?: AgentContext) => void | Promise<void>, opts?: HookOptions): void;
+    on(event: string, handler: (...args: any[]) => void | Promise<void>, opts?: HookOptions): void;
     registerCommand(def: CommandRegistration): void;
     registerService(def: ServiceRegistration): void;
     /** VS Code–style extension globalState for stable ids (optional). */

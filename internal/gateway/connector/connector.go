@@ -98,7 +98,10 @@ type SetupOpts struct {
 	// (connectors.openclaw.plugin_account, plugin_token_file,
 	// plugin_token_group): OpenClaw runs as another account, owns
 	// openclaw.json, and reads the plugin credential from the token file.
-	OpenClawPluginAccount    string
+	OpenClawPluginAccount string
+	// OpenClawHooksMode is connectors.openclaw.hooks.mode (auto or proxy);
+	// Setup resolves it with the OpenClaw version (ResolveOpenClawHookMode).
+	OpenClawHooksMode        string
 	OpenClawPluginTokenFile  string
 	OpenClawPluginTokenGroup string
 	// HookAPIToken is the least-privilege credential written beside generated
