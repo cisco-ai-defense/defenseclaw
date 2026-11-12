@@ -474,6 +474,9 @@
         },
         "tlsSecretName": {
           "type": "string"
+        },
+        "url": {
+          "type": "string"
         }
       }
     },

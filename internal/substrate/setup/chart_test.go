@@ -9,6 +9,7 @@ package setup
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -86,7 +87,9 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"bad atespace":              "managedAtespaces={Bad_Name}",
 		"ingress no host":           "admin.expose.type=Ingress",
 		"ingress no tls":            "admin.expose.type=Ingress,admin.expose.ingress.host=dc.example.com",
-		"lb no source ranges":       "admin.expose.type=LoadBalancer",
+		"lb no source ranges":       "admin.expose.type=LoadBalancer,admin.url=https://dc.example.com",
+		"lb no url":                 "admin.expose.type=LoadBalancer,admin.expose.loadBalancer.sourceRanges={10.0.0.0/8}",
+		"url not https":             "admin.url=http://dc.example.com",
 		"expose nodeport":           "admin.expose.type=NodePort",
 		"managed fails open":        "config.deployment_mode=managed_enterprise,config.substrate.extproc.failure_mode=open,config.substrate.templates.allowed_images={reg.example.com/dc/*}",
 		"secrets ns = release ns":   "substrate.credentialProvider.secretsNamespace=default",
@@ -232,6 +235,22 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 				t.Errorf("%s: Ingress %v: %s", name, o.Metadata["name"], raw)
 			}
 		}
+	}
+	// GAP-0130: the launcher endpoint record names an https admin URL, and
+	// the only grant to every authenticated user is reading that record.
+	if cm, ok := byName["ConfigMap/defenseclaw-launcher-endpoint"]; !ok || !strings.HasPrefix(fmt.Sprint(cm.Data["admin_url"]), "https://") {
+		t.Errorf("%s: launcher endpoint record = %+v", name, cm.Data)
+	}
+	if n := strings.Count(string(out), "name: system:authenticated"); n != 1 {
+		t.Errorf("%s: %d grants to every authenticated user, want the endpoint read only", name, n)
+	}
+	if r, ok := byName["Role/defenseclaw-launcher-endpoint-read"]; ok {
+		raw, _ := yaml.Marshal(r)
+		if !strings.Contains(string(raw), "defenseclaw-launcher-endpoint") || strings.Contains(string(raw), "list") || strings.Contains(string(raw), "update") {
+			t.Errorf("%s: endpoint read role: %s", name, raw)
+		}
+	} else {
+		t.Errorf("%s: no endpoint read role", name)
 	}
 	np, ok := byName["NetworkPolicy/defenseclaw-gateway"]
 	if !ok {

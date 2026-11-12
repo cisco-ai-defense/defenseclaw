@@ -218,6 +218,11 @@ admin:
       # nginx.ingress.kubernetes.io/backend-protocol: HTTPS.
       tlsSecretName: ""
       annotations: {}
+  # The https URL laptops use for the admin listener, published in the
+  # ConfigMap defenseclaw-launcher-endpoint (the only URL login --kube sends
+  # a Kubernetes credential to). Default: the Ingress host, or the in-cluster
+  # admin Service; required for LoadBalancer.
+  url: ""
   # A kubernetes.io/tls Secret with a certificate for the external name
   # (LoadBalancer). Without it the admin listener presents its in-cluster
   # serving certificate, which laptops do not trust for other names.

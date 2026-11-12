@@ -7,4 +7,5 @@ admin:
       sourceRanges: [203.0.113.0/24, 198.51.100.7/32]
       annotations:
         service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+  url: https://defenseclaw.lb.example.com
   tlsSecretName: defenseclaw-admin-external-tls

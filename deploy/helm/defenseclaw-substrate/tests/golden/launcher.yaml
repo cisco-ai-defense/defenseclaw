@@ -521,6 +521,22 @@ data:
         ask_timeout: 30m
         asks: deny
 ---
+# Source: defenseclaw-substrate/templates/launcher-endpoint.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-launcher-endpoint
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+data:
+  admin_url: "https://defenseclaw-admin.defenseclaw-system.svc.cluster.local"
+---
 # Source: defenseclaw-substrate/templates/leader.yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -564,6 +580,25 @@ rules:
   resources: [secrets]
   resourceNames: ["ate-bootstrap-owner"]
   verbs: [delete]
+---
+# Source: defenseclaw-substrate/templates/launcher-endpoint.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-launcher-endpoint-read
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-launcher-endpoint]
+  verbs: [get]
 ---
 # Source: defenseclaw-substrate/templates/rbac.yaml
 # The gateway leader and the controller hold a Lease each; the leader records
@@ -638,6 +673,28 @@ subjects:
 - kind: ServiceAccount
   name: defenseclaw-hooks
   namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/launcher-endpoint.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-launcher-endpoint-read
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-launcher-endpoint-read
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:authenticated
 ---
 # Source: defenseclaw-substrate/templates/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
