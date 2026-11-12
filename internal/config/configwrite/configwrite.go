@@ -621,8 +621,9 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 // restartKeys are the keys a running gateway applies only after a restart:
 // the process-level keys of spec section 4, plus what its reload still
 // treats as restart-required (internal/gateway diffConfigs and
-// guardrailNeedsRestart): claw, agent and routing (paths, identity and the
-// model router process captured at start), plugin_dir (the connector plugins
+// guardrailNeedsRestart): claw and agent (paths and identity captured at
+// start), the vLLM Semantic Router process settings of routing (the rest of
+// routing is per-generation policy), plugin_dir (the connector plugins
 // discovered at start), the guardrail listener and enablement, and the hook
 // self-heal settings. The connector set (guardrail.connectors.<c>.enabled)
 // applies in-process.
@@ -639,7 +640,12 @@ var restartKeys = []string{
 	"guardrail.scanner_mode", "guardrail.retain_judge_bodies",
 	"guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
 	"guardrail.protected_files",
-	"claw", "agent", "routing", "plugin_dir",
+	// routing: the vLLM Semantic Router settings, plus the keys its container
+	// was started with under classifier vllm_sr. The writer cannot see the
+	// classifier of the running gateway, so it predicts conservatively; the
+	// gateway reloads the last five hot with an in-process classifier.
+	"claw", "agent", "routing.port", "routing.version", "routing.remote", "routing.algorithm",
+	"routing.enabled", "routing.classifier", "routing.models", "routing.signals", "routing.decisions", "plugin_dir",
 	"deployment_mode", "enterprise.profile", "enterprise.network", "enterprise.openshell", "enterprise.cowork_vm_sensor",
 	"environment", "tenant_id", "workspace_id", "discovery_source",
 	// Fleet keys that require a restart (MQTT connections, signing keys).
