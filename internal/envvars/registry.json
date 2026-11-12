@@ -8322,6 +8322,50 @@
         }
       ],
       "since": "1.0.7"
+    },
+    {
+      "name": "DEFENSECLAW_ACTOR_MODE",
+      "category": "hook_internal",
+      "purpose": "Run mode of an Agent Substrate actor's hooks. The actor relay sets it to unattended for a --task run, so every DefenseClaw hook of that run fails closed when the gateway does not answer (D8). Any other value, or none, is interactive: the variable can only make a run stricter. The gateway's answer names the mode authoritatively from the actor's registration.",
+      "default": "(unset: interactive)",
+      "accepted_values": [
+        "unattended",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/substrate/kit/config.go",
+          "description": "Mode: only unattended tightens; nothing loosens"
+        },
+        {
+          "location": "internal/substrate/relay/task.go",
+          "description": "RunHeadless sets it for the headless agent"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_RELAY_FILES_MAX_BYTES",
+      "category": "runtime_path",
+      "purpose": "Cap in bytes on the file content one upload or download through the Agent Substrate actor relay's file routes may carry. Read by the relay process in the actor; the launcher has its own download cap.",
+      "default": "(relay.DefaultFilesMaxBytes)",
+      "accepted_values": [
+        "positive integer (bytes)",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/substrate/relay/files.go",
+          "description": "FilesMaxBytesEnv overrides DefaultFilesMaxBytes"
+        }
+      ],
+      "since": "1.0.10"
     }
   ]
 }

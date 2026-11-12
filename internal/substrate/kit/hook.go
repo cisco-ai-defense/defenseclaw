@@ -263,7 +263,6 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	event := fs.String("event", "", "hook event, when the agent binds it on the command line")
 	contract := fs.String("hook-contract", "", "hook contract id")
 	notify := fs.Bool("notify", false, "forward a Codex notify event (the JSON is the last argument)")
-	configPath := fs.String("config", ConfigPath, "kit configuration")
 	version := fs.Bool("version", false, "print the kit version")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -272,12 +271,9 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "defenseclaw-actor-hook %s\n", Version)
 		return 0
 	}
-	if *configPath != ConfigPath && os.Getenv("DEFENSECLAW_ACTOR_KIT_TEST") != "1" {
-		// The agent can run this binary itself: only the root-owned
-		// configuration counts, a test build aside.
-		*configPath = ConfigPath
-	}
-	cfg, cfgErr := LoadConfig(*configPath)
+	// Only the root-owned configuration counts: the agent can run this
+	// binary itself.
+	cfg, cfgErr := LoadConfig(ConfigPath)
 	ctx := context.Background()
 	name := strings.TrimSpace(*connectorName)
 	if name == "" {

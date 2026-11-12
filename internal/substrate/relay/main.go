@@ -13,7 +13,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
@@ -56,14 +55,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 	fs := flag.NewFlagSet("defenseclaw-actor-relay "+args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	configPath := fs.String("config", kit.ConfigPath, "kit configuration")
 	listen := fs.String("listen", "", "listen address (default: the configuration's relay.listen)")
 	prompt := fs.String("prompt", "", "task: the task text")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
-	}
-	if *configPath != kit.ConfigPath && os.Getenv("DEFENSECLAW_ACTOR_KIT_TEST") != "1" {
-		*configPath = kit.ConfigPath
 	}
 	switch args[0] {
 	case "version", "--version":
@@ -74,7 +69,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "defenseclaw-actor-relay: unknown command %q (serve, task, version)\n", args[0])
 		return 2
 	}
-	cfg, err := kit.LoadConfig(*configPath)
+	cfg, err := kit.LoadConfig(kit.ConfigPath)
 	if err != nil {
 		fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
 		return 1
