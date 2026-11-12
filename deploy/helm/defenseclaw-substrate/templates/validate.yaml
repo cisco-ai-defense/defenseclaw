@@ -12,3 +12,11 @@
 {{- if eq .Values.substrate.credentialProvider.secretsNamespace .Values.substrate.namespace -}}
 {{- fail "substrate.credentialProvider.secretsNamespace must not be the Substrate namespace" -}}
 {{- end -}}
+{{- if has $mode (list "managed" "managed_enterprise" "managed-enterprise") -}}
+{{- if eq (toString (dig "require_attested_templates" true $sub)) "false" -}}
+{{- fail "config.substrate.require_attested_templates false is not allowed with deployment_mode managed_enterprise" -}}
+{{- end -}}
+{{- if not (dig "templates" "allowed_images" list $sub) -}}
+{{- fail "config.substrate.templates.allowed_images is required with deployment_mode managed_enterprise (name the template registries)" -}}
+{{- end -}}
+{{- end -}}

@@ -234,6 +234,7 @@ func TestTemplateAttestor(t *testing.T) {
 			"reg.example.com/dc/moved@" + digA: verified(digB, "1.0.10", now),
 		}},
 		VolumeImages: []string{"reg.example.com/models/*"},
+		Registries:   []string{"reg.example.com"},
 	}
 	tmpl := func(images []string, vols ...string) *ateapi.ActorTemplate {
 		t := &ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "a", Name: "t"}}
@@ -258,6 +259,7 @@ func TestTemplateAttestor(t *testing.T) {
 		"allowed volume":     {t: tmpl([]string{imgA}, "reg.example.com/models/m@"+digB), ok: true},
 		"volume not allowed": {t: tmpl([]string{imgA}, "reg.example.com/other/m@"+digB), reason: "volume_images"},
 		"volume by tag":      {t: tmpl([]string{imgA}, "reg.example.com/models/m:v1"), reason: "digest-pinned"},
+		"registry not named": {t: tmpl([]string{"evil.example.net/x@" + digA}), reason: "not in substrate.templates.allowed_images"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			att, err := ta.Attest(context.Background(), tc.t)
@@ -283,8 +285,8 @@ func TestAllowedRegistries(t *testing.T) {
 	if !slices.Equal(got, []string{"10.0.0.1:5000", "reg.example.com"}) {
 		t.Fatalf("registries = %v", got)
 	}
-	if got := controller.AllowedRegistries(config.SubstrateTemplatesConfig{AllowedImages: []string{"*.example.com/dc/*"}}); got != nil {
-		t.Fatalf("a host glob must not narrow the registries: %v", got)
+	if got := controller.AllowedRegistries(config.SubstrateTemplatesConfig{AllowedImages: []string{"*.example.com/dc/*"}}); len(got) != 0 {
+		t.Fatalf("a host glob names no registry: %v", got)
 	}
 }
 
@@ -485,5 +487,73 @@ func TestRecreatedSameNameWarns(t *testing.T) {
 	r.pass()
 	if len(r.sink.Events(controller.EventRecreatedSameName)) != 1 {
 		t.Fatal("a managed-atespace actor warned")
+	}
+}
+
+// GAP-0131: no named registry admits nothing.
+func TestTemplateAttestorNeedsNamedRegistries(t *testing.T) {
+	ta := &controller.TemplateAttestor{Verifier: fakeVerifier{}}
+	att, _ := ta.Attest(context.Background(), &ateapi.ActorTemplate{Containers: []*ateapi.Container{{Image: "reg.example.com/dc/claude@" + digA}}})
+	if att.Attested || !strings.Contains(att.Reason, "names no registry") {
+		t.Fatalf("attestation = %+v", att)
+	}
+}
+
+// GAP-0127: a registry outage keeps the last good verdict of an unchanged
+// template for the grace, with one alert; a real refusal cuts at once.
+func TestRegistryOutageKeepsTheLastGoodVerdict(t *testing.T) {
+	r := newRig(t, nil)
+	a := r.actor("eng-web", "alice-1", ateapi.ActorStateRunning, "sub-alice")
+	ref := ateapi.RefOf(a.GetMetadata())
+	r.pass()
+	r.att.Default = controller.Attestation{Retryable: true, Reason: "registry_error: connection refused"}
+	r.clk.Add(31 * time.Second)
+	r.pass()
+	r.clk.Add(31 * time.Second)
+	r.pass()
+	if r.api.Policy(ref) == nil {
+		t.Fatal("a registry outage cut the actor's network")
+	}
+	var alerts int
+	for _, e := range r.sink.Events(controller.EventWarning) {
+		if e.Severity == controller.SeverityAlert && strings.Contains(e.Message, "cannot be re-attested") {
+			alerts++
+		}
+	}
+	if alerts != 1 {
+		t.Fatalf("outage alerts = %d", alerts)
+	}
+	// Past the grace the refusal applies.
+	r.clk.Add(16 * time.Minute)
+	r.pass()
+	if r.api.Policy(ref) != nil {
+		t.Fatal("the grace outlived its bound")
+	}
+	// A non-retryable refusal (revoked key) cuts at once, outage or not.
+	r2 := newRig(t, nil)
+	b := r2.actor("eng-web", "bob-1", ateapi.ActorStateRunning, "sub-bob")
+	r2.pass()
+	r2.att.Default = controller.Attestation{Reason: "key_revoked"}
+	r2.clk.Add(31 * time.Second)
+	r2.pass()
+	if r2.api.Policy(ateapi.RefOf(b.GetMetadata())) != nil {
+		t.Fatal("a revoked key did not cut at once")
+	}
+}
+
+// GAP-0131: the image allow lists apply with attestation off.
+func TestImageAllowListsWithoutAttestation(t *testing.T) {
+	r := newRig(t, func(_ *config.Config, o *controller.Options) {
+		o.RequireAttestation = false
+		o.Templates = config.SubstrateTemplatesConfig{AllowedImages: []string{"reg.example.com/dc/*"}}
+	})
+	r.att.Default = controller.Attestation{}
+	r.api.PutTemplate(&ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "ci-runs", Name: "foreign"},
+		Containers: []*ateapi.Container{{Name: "agent", Image: "evil.example.net/x@" + digA}}})
+	a := r.api.PutActor(&ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Atespace: "ci-runs", Name: "f-1"}, ActorTemplate: ateapi.Ref("ci-runs", "foreign"),
+		Status: &ateapi.ActorStatus{State: ateapi.ActorStateSuspended}})
+	r.pass()
+	if r.api.Policy(ateapi.RefOf(a.GetMetadata())) != nil {
+		t.Fatal("an image outside allowed_images got a policy with attestation off")
 	}
 }

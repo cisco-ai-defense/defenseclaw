@@ -717,6 +717,11 @@ func (s *SubstrateConfig) validateTemplates(bad func(key, format string, a ...an
 		}
 	}
 	globs("templates.allowed_images", t.AllowedImages)
+	for i, g := range t.AllowedImages {
+		if host, _, _ := strings.Cut(g, "/"); strings.ContainsAny(host, "*?[") {
+			bad(fmt.Sprintf("templates.allowed_images[%d]", i), "%q: name the registry host exactly (the controller connects only to named hosts); globs go in the path", g)
+		}
+	}
 	globs("templates.volume_images", t.VolumeImages)
 	for _, p := range sortedKeys(t.ProfileImages) {
 		if !substrateProfileRe.MatchString(p) {
@@ -741,16 +746,24 @@ func (s *SubstrateConfig) validateTemplates(bad func(key, format string, a ...an
 
 var substrateDigestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
-// ValidateManaged applies the managed-enterprise rules (D8): there the
-// callout always fails closed.
+// ValidateManaged applies the managed-enterprise rules (D8): the callout
+// always fails closed, templates are always attested, and the template
+// registries are named (GAP-0131).
 func (s *SubstrateConfig) ValidateManaged(deploymentMode string) error {
 	if s == nil || !strings.EqualFold(strings.TrimSpace(deploymentMode), string(DeploymentModeManagedEnterprise)) {
 		return nil
 	}
+	var errs []error
 	if strings.EqualFold(strings.TrimSpace(s.Extproc.FailureMode), SubstrateFailOpen) {
-		return errors.New(`extproc.failure_mode: "open" is not allowed in managed_enterprise (the callout always fails closed)`)
+		errs = append(errs, errors.New(`extproc.failure_mode: "open" is not allowed in managed_enterprise (the callout always fails closed)`))
 	}
-	return nil
+	if s.Enabled && !s.AttestationRequired() {
+		errs = append(errs, errors.New("require_attested_templates: false is not allowed in managed_enterprise"))
+	}
+	if s.Enabled && len(s.Templates.AllowedImages) == 0 {
+		errs = append(errs, errors.New("templates.allowed_images: managed_enterprise names the template registries and repositories"))
+	}
+	return errors.Join(errs...)
 }
 
 func (s *SubstrateConfig) validateExtproc(bad func(key, format string, a ...any), checkPatterns func(string, []string)) {

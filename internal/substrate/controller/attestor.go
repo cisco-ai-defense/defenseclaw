@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -42,6 +43,11 @@ type TemplateAttestor struct {
 	// VolumeImages are repository globs allowed as image volumes without
 	// an attestation.
 	VolumeImages []string
+	// Registries are the registry hosts the attestations may come from
+	// (AllowedRegistries). Empty refuses every template: the image
+	// reference is untrusted input, so the controller dials only hosts the
+	// admin named (GAP-0131).
+	Registries []string
 }
 
 var _ Attestor = (*TemplateAttestor)(nil)
@@ -64,13 +70,19 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 		if ref.Digest == "" {
 			return Attestation{Reason: fmt.Sprintf("container %d image %s is not pinned by digest", i, ref.Name())}, nil
 		}
+		if len(t.Registries) == 0 {
+			return Attestation{Digest: ref.Digest, Reason: "substrate.templates.allowed_images names no registry host: no template is admitted"}, nil
+		}
+		if !slices.Contains(t.Registries, ref.Registry) {
+			return Attestation{Digest: ref.Digest, Reason: fmt.Sprintf("container %d image registry %s is not in substrate.templates.allowed_images", i, ref.Registry)}, nil
+		}
 		v, err := t.Verifier.Verify(ctx, img)
 		if err != nil {
-			reason := err.Error()
+			reason, retry := err.Error(), false
 			if r, ok := attest.AsRejection(err); ok {
-				reason = r.Code + ": " + r.Detail
+				reason, retry = r.Code+": "+r.Detail, r.Retryable
 			}
-			return Attestation{Digest: ref.Digest, Reason: fmt.Sprintf("container %d image %s: %s", i, ref.Name(), reason)}, nil
+			return Attestation{Digest: ref.Digest, Retryable: retry, Reason: fmt.Sprintf("container %d image %s: %s", i, ref.Name(), reason)}, nil
 		}
 		// The container runs ref.Digest; the attestation is about v.Digest.
 		// They must be the same digest (an index or a moved tag is not).
@@ -189,25 +201,19 @@ func VerifierFromConfig(t config.SubstrateTemplatesConfig) (*attest.Verifier, *A
 	}), af
 }
 
-// AllowedRegistries are the registry hosts the verifier may connect to: the
-// hosts of allowed_images (when none of them is a glob) and the plain HTTP
-// registries. The image reference is untrusted input (an atespace editor
-// writes the template), so naming the hosts keeps the controller from
-// dialing arbitrary in-cluster addresses. Empty means any host.
+// AllowedRegistries are the registry hosts the verifier may connect to:
+// the hosts of allowed_images (a glob in the host part is refused by config
+// validation and skipped here). The image reference is untrusted input (an
+// atespace editor writes the template), so only hosts the admin named are
+// dialed; none named means no template is admitted (GAP-0131).
 func AllowedRegistries(t config.SubstrateTemplatesConfig) []string {
 	set := map[string]bool{}
 	for _, g := range t.AllowedImages {
 		host, _, ok := strings.Cut(g, "/")
 		if !ok || strings.ContainsAny(host, "*?[") {
-			return nil
+			continue
 		}
 		set[host] = true
-	}
-	if len(set) == 0 {
-		return nil
-	}
-	for _, h := range t.PlainHTTPRegistries {
-		set[h] = true
 	}
 	out := make([]string, 0, len(set))
 	for h := range set {

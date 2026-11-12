@@ -56,7 +56,7 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 			fmt.Fprintf(events, "{\"type\":%q,\"severity\":\"warning\",\"message\":%q}\n", controller.EventWarning,
 				err.Error()+": every template is refused until the trust anchors are mounted")
 		}
-		attestor = &controller.TemplateAttestor{Verifier: ver, VolumeImages: sub.Templates.VolumeImages}
+		attestor = &controller.TemplateAttestor{Verifier: ver, VolumeImages: sub.Templates.VolumeImages, Registries: controller.AllowedRegistries(sub.Templates)}
 	}
 	return controller.New(controller.Options{
 		Client: client, Attestor: attestor, Activity: act, CPU: cpu,

@@ -279,6 +279,7 @@ func TestSubstrateValidate(t *testing.T) {
 		"templates profile empty":   func(s *SubstrateConfig) { s.Templates.ProfileImages = map[string][]string{"ci": nil} },
 		"templates plain http":      func(s *SubstrateConfig) { s.Templates.PlainHTTPRegistries = []string{"10.0.0.5"} },
 		"templates revoked digest":  func(s *SubstrateConfig) { s.Templates.RevokedDigests = []string{"sha256:abc"} },
+		"templates host glob":       func(s *SubstrateConfig) { s.Templates.AllowedImages = []string{"*.example.com/dc/*"} },
 	}
 	for name, mutate := range cases {
 		s := validSubstrate()
@@ -316,8 +317,17 @@ func TestSubstrateManagedFailsClosed(t *testing.T) {
 		t.Fatal("managed_enterprise accepted failure_mode open")
 	}
 	s.Extproc.FailureMode = "closed"
+	if err := s.ValidateManaged(string(DeploymentModeManagedEnterprise)); err == nil {
+		t.Fatal("managed accepted no templates.allowed_images (GAP-0131)")
+	}
+	s.Templates.AllowedImages = []string{"reg.example.com/dc/*"}
 	if err := s.ValidateManaged(string(DeploymentModeManagedEnterprise)); err != nil {
-		t.Fatalf("managed refused closed: %v", err)
+		t.Fatalf("managed refused a valid section: %v", err)
+	}
+	off := false
+	s.RequireAttestedTemplates = &off
+	if err := s.ValidateManaged(string(DeploymentModeManagedEnterprise)); err == nil {
+		t.Fatal("managed accepted require_attested_templates false (GAP-0131)")
 	}
 }
 

@@ -21,7 +21,8 @@ spec:
   policyTypes: [Ingress]
 ---
 # Source: defenseclaw-substrate/templates/networkpolicy.yaml
-# The pods that hold keys (gateway, leader: provider keys and the store;
+# The pods that hold keys or dial out (gateway, leader: provider keys and the
+# store; controller: template registries on 443, GAP-0131;
 # callout: actor_secrets) may connect only where they need to (GAP-0084).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -61,7 +62,8 @@ spec:
           kubernetes.io/metadata.name: ate-system
     ports:
     - {protocol: TCP, port: 443}
-  # Model providers (/llm), the Kubernetes API (leader Lease, store state;
+  # Model providers (/llm) and template registries (controller), the
+  # Kubernetes API (leader Lease, store state, resets;
   # 6443 is its usual endpoint port). The callout needs neither.
   - ports:
     - {protocol: TCP, port: 443}
@@ -110,7 +112,8 @@ spec:
           kubernetes.io/metadata.name: ate-system
     ports:
     - {protocol: TCP, port: 443}
-  # Model providers (/llm), the Kubernetes API (leader Lease, store state;
+  # Model providers (/llm) and template registries (controller), the
+  # Kubernetes API (leader Lease, store state, resets;
   # 6443 is its usual endpoint port). The callout needs neither.
   - ports:
     - {protocol: TCP, port: 443}
@@ -159,6 +162,56 @@ spec:
           kubernetes.io/metadata.name: ate-system
     ports:
     - {protocol: TCP, port: 443}
+  # OTLP export.
+  - ports:
+    - {protocol: TCP, port: 4317}
+    - {protocol: TCP, port: 4318}
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-controller-egress
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: controller
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: controller
+  policyTypes: [Egress]
+  egress:
+  # DNS.
+  - ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  # This release's pods (leader RPC, admin listener for the callout judge).
+  - to:
+    -
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: dc
+          app.kubernetes.io/name: defenseclaw-substrate
+  # The Substrate namespace (ate-api-server, the actor JWT issuer).
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ate-system
+    ports:
+    - {protocol: TCP, port: 443}
+  # Model providers (/llm) and template registries (controller), the
+  # Kubernetes API (leader Lease, store state, resets;
+  # 6443 is its usual endpoint port). The callout needs neither.
+  - ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 6443}
   # OTLP export.
   - ports:
     - {protocol: TCP, port: 4317}

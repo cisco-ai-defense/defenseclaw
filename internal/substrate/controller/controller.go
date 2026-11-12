@@ -64,6 +64,9 @@ const (
 	// registrationTTL bounds how long a registration is reused before the
 	// registry is read again (approvals and revocations).
 	registrationTTL = 30 * time.Second
+	// attestationGrace bounds how long a registry outage keeps the last good
+	// attestation of an unchanged template (GAP-0127).
+	attestationGrace = 15 * time.Minute
 	// MigrateHint is the fix the kit refusal names.
 	MigrateHint = "rebuild the template with the current kit: defenseclaw substrate migrate"
 )
@@ -140,6 +143,10 @@ type cachedTemplate struct {
 	tmpl *ateapi.ActorTemplate
 	att  Attestation
 	at   time.Time
+	// goodAt is when the template last verified; graceAlerted is set once
+	// a registry outage is being ridden out on that verdict.
+	goodAt       time.Time
+	graceAlerted bool
 }
 
 type actorState struct {
@@ -621,8 +628,9 @@ func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState,
 		c.refuseOnce(st, base, EventTemplateUnverified, "template "+ateapi.Key(ateapi.RefOf(tmpl.GetMetadata()))+" is not attested: "+reason, SignalUnattestedTemplate, att.Digest)
 		return "template_unverified"
 	}
-	if att.Attested {
-		// PLAN §5.3 step 2: an attested digest that a profile allows.
+	{
+		// PLAN §5.3 step 2: an attested digest that a profile allows. The
+		// allow lists apply with attestation off too (GAP-0131).
 		var repos []string
 		for _, ct := range tmpl.GetContainers() {
 			repos = append(repos, imageRepo(ct.GetImage()))
@@ -658,9 +666,35 @@ func (c *Controller) template(ctx context.Context, ref *ateapi.ObjectRef) (*atea
 	// registry work itself.
 	att, err := c.o.Attestor.Attest(ctx, tmpl)
 	if err != nil {
-		att = Attestation{Reason: "attestation check failed: " + err.Error()}
+		att = Attestation{Reason: "attestation check failed: " + err.Error(), Retryable: true}
+	}
+	// A registry outage is not a verdict about the template: keep the last
+	// good verdict of the same template version for a bounded grace and
+	// alert, instead of cutting every running actor's network (GAP-0127).
+	// Revocation, new anchors and other refusals still cut at once.
+	if !att.Attested && att.Retryable && ok && ct.att.Attested &&
+		ct.tmpl.GetMetadata().GetUid() == tmpl.GetMetadata().GetUid() && ct.tmpl.GetMetadata().GetVersion() == tmpl.GetMetadata().GetVersion() {
+		since := ct.goodAt
+		if since.IsZero() {
+			since = ct.at
+		}
+		if now.Sub(since) < attestationGrace {
+			if !ct.graceAlerted {
+				c.emit(Event{Type: EventWarning, Severity: SeverityAlert, Atespace: ref.GetAtespace(),
+					Message: "template " + k + " cannot be re-attested (" + att.Reason + "): keeping its last good attestation for at most " + attestationGrace.String(),
+					Detail:  map[string]any{"template": k, "good_since": since}})
+			}
+			ct.at, ct.goodAt, ct.graceAlerted = now, since, true
+			c.mu.Lock()
+			c.templates[k] = ct
+			c.mu.Unlock()
+			return ct.tmpl, ct.att, nil
+		}
 	}
 	ct = cachedTemplate{tmpl: tmpl, att: att, at: now}
+	if att.Attested {
+		ct.goodAt = now
+	}
 	c.mu.Lock()
 	c.templates[k] = ct
 	c.mu.Unlock()

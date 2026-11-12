@@ -16,10 +16,11 @@ spec:
       app.kubernetes.io/name: defenseclaw-substrate
   policyTypes: [Ingress]
 ---
-# The pods that hold keys (gateway, leader: provider keys and the store;
+# The pods that hold keys or dial out (gateway, leader: provider keys and the
+# store; controller: template registries on 443, GAP-0131;
 # callout: actor_secrets) may connect only where they need to (GAP-0084).
 {{- if .Values.networkPolicy.egress.enabled }}
-{{- range $c := list "gateway" "leader" "callout" }}
+{{- range $c := list "gateway" "leader" "callout" "controller" }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -47,7 +48,8 @@ spec:
     ports:
     - {protocol: TCP, port: 443}
   {{- if ne $c "callout" }}
-  # Model providers (/llm), the Kubernetes API (leader Lease, store state;
+  # Model providers (/llm) and template registries (controller), the
+  # Kubernetes API (leader Lease, store state, resets;
   # 6443 is its usual endpoint port). The callout needs neither.
   - ports:
     - {protocol: TCP, port: 443}

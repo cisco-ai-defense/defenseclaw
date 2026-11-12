@@ -260,7 +260,7 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 		t.Errorf("%s: no default deny", name)
 	}
 	// GAP-0084: the pods that hold keys have egress limits.
-	for _, c := range []string{"gateway", "leader", "callout"} {
+	for _, c := range []string{"gateway", "leader", "callout", "controller"} {
 		if _, ok := byName["NetworkPolicy/defenseclaw-"+c+"-egress"]; !ok {
 			t.Errorf("%s: no egress NetworkPolicy for the %s", name, c)
 		}
