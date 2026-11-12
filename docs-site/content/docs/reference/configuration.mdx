@@ -1041,7 +1041,7 @@ A `custom-providers.json` marked `_derived_from` is rendered from this section o
 | `substrate.egress.allow`, `.ecosystem_packs`, `.registries` | none, every pack, none | Hosts every actor may reach before its profile tightens them. Packs: `pypi`, `npm`, `crates`, `go`. Model provider hosts are always left out. |
 | `substrate.secrets` | none | Credentials injected at egress on bound hosts. Each entry has `name`, `source` (an `ate-secret://` reference, never a value), `inject` (`hosts`, `header`, `prefix`, `placeholder`), `scope` (`shared` or `per_person`) and `profiles`. |
 | `substrate.allow_passthrough_for` | none | Hosts forwarded without inspection, for pinned certificates. A secret is never bound to one. |
-| `substrate.admin` | none | The organization floor for actors, with the same keys as `openshell.admin`. |
+| `substrate.admin` | none | The organization floor for actors, with the keys of `openshell.admin` plus `sandbox_class`, `idle_suspend_after`, `unattended_asks`, `ask_timeout` and `actor_secrets`. The host-only keys `allow_mount`, `allow_host_ports`, `process_tree`, `driver_fallback`, `require_copy_for` and locked `workdir.*` keys are refused. See [the Substrate reference](/docs/substrate/reference). |
 
 ## Environment variables
 
