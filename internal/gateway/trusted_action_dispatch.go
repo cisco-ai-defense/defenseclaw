@@ -393,7 +393,7 @@ func dispatchTrustedAction(
 	// binding; the other tiers follow the top-level statements before it.
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
-	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
+	if request.EnforcementCapable && trustedCallShellParseBound(request) {
 		return trustedActionLimitFindings(true)
 	}
 	switch trustedActionCommandBound(request.Input) {
@@ -9633,6 +9633,19 @@ func trustedActionCommandBound(input actionfacts.Input) shellReadingBound {
 		return shellReadingNestedProof
 	}
 	return shellReadingWithinBounds
+}
+
+// trustedCallShellParseBound reports a call whose reading ends at the
+// recovered-parse proof bound. The hook client evidence tells it; a call
+// without that evidence on a gateway that reads the home (per-user: no hook
+// client sends it) is read here with the client reader, so both take the
+// same evaluation-limit path (rel-1-0-6:GAP-0534).
+func trustedCallShellParseBound(request trustedActionRequest) bool {
+	if reason := request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]; reason != "" || request.ProtectedHomeHook {
+		return reason == "shell-parse-bound"
+	}
+	command, ok := trustedBashCommandInput(request.Input)
+	return ok && hookpaths.ShellParseBound(request.Connector, request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome)
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
