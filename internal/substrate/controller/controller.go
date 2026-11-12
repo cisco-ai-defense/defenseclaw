@@ -120,6 +120,10 @@ type Controller struct {
 	templates map[string]cachedTemplate
 	fastUntil time.Time
 	scoped    bool
+	// unlisted are atespaces the last pass could not list: their known
+	// actors are kept, not reported deleted. warnedList dedups warnings.
+	unlisted   map[string]bool
+	warnedList map[string]bool
 }
 
 type cachedTemplate struct {
@@ -186,7 +190,8 @@ func New(o Options) (*Controller, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{}}, nil
+	return &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
+		unlisted: map[string]bool{}, warnedList: map[string]bool{}}, nil
 }
 
 // Run polls until ctx ends: every IdleInterval, or every FastInterval for
@@ -238,6 +243,10 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	}
 	var gone []*actorState
 	for uid, st := range c.actors {
+		ns, _, _ := strings.Cut(st.key, "/")
+		if !seen[uid] && c.unlisted[ns] {
+			continue // not listed this pass, not known to be deleted
+		}
 		if !seen[uid] {
 			gone = append(gone, st)
 			delete(c.actors, uid)
@@ -272,6 +281,7 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 func (c *Controller) listActors(ctx context.Context) ([]*ateapi.Actor, error) {
 	c.mu.Lock()
 	scoped := c.scoped
+	c.unlisted = map[string]bool{}
 	c.mu.Unlock()
 	if !scoped {
 		actors, err := ateapi.AllActors(ctx, c.o.Client, "", c.o.PageSize)
@@ -302,14 +312,57 @@ func (c *Controller) listActors(ctx context.Context) ([]*ateapi.Actor, error) {
 	}
 	sort.Strings(names)
 	var out []*ateapi.Actor
+	var failed []string
 	for _, ns := range names {
 		actors, err := ateapi.AllActors(ctx, c.o.Client, ns, c.o.PageSize)
-		if err != nil {
-			return nil, fmt.Errorf("list actors in %s: %w", ns, err)
+		switch code := status.Code(err); {
+		case err == nil:
+			c.listOK(ns)
+		case code == codes.PermissionDenied || code == codes.NotFound:
+			// One atespace without a grant (not bootstrapped yet) or gone
+			// must not stop the others: its actors stay default deny
+			// (GAP-0119). One warning until it lists again.
+			if c.listFailedOnce(ns) {
+				c.emit(Event{Type: EventWarning, Severity: SeverityWarn, Atespace: ns,
+					Message: "cannot list actors in managed atespace " + ns + " (" + code.String() + "): its actors get no policy until DefenseClaw is granted editor there"})
+			}
+			continue
+		default:
+			failed = append(failed, ns)
+			if len(failed) == len(names) {
+				return nil, fmt.Errorf("list actors in %s: %w", ns, err)
+			}
+			continue
 		}
 		out = append(out, actors...)
 	}
+	if len(failed) > 0 {
+		// Reconcile what listed; a transient error is retried next pass.
+		// Actors of a failed atespace are not reported deleted.
+		c.mu.Lock()
+		for _, ns := range failed {
+			c.unlisted[ns] = true
+		}
+		c.mu.Unlock()
+	}
 	return out, nil
+}
+
+func (c *Controller) listFailedOnce(ns string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.unlisted[ns] = true
+	if c.warnedList[ns] {
+		return false
+	}
+	c.warnedList[ns] = true
+	return true
+}
+
+func (c *Controller) listOK(ns string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.warnedList, ns)
 }
 
 func (c *Controller) parallel(actors []*ateapi.Actor, fn func(*ateapi.Actor)) {

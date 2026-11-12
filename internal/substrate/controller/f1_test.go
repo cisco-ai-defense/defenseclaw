@@ -18,6 +18,9 @@ package controller_test
 
 import (
 	"context"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"os"
 	"path/filepath"
 	"slices"
@@ -413,5 +416,44 @@ func TestAdminPolicyReset(t *testing.T) {
 	r.pass()
 	if !render.Equal(r.api.Policy(ref), full) {
 		t.Fatal("after the reset a foreign change was not reverted to DefenseClaw's policy")
+	}
+}
+
+// GAP-0119 (found live on E1): one managed atespace that cannot be listed
+// must not stop the others.
+func TestScopedListingSkipsAnUnlistableAtespace(t *testing.T) {
+	r := newRig(t, nil)
+	in := r.actor("ci-runs", "job", ateapi.ActorStateSuspended, "")
+	web := r.actor("eng-web", "alice-1", ateapi.ActorStateSuspended, "sub-alice")
+	r.pass() // both reconciled with full listing
+	denyWeb := true
+	r.api.Err = func(method, key string) error {
+		if method == "ListActors" && (key == "" || (key == "eng-web" && denyWeb)) {
+			return status.Error(codes.PermissionDenied, "denied")
+		}
+		return nil
+	}
+	in2 := r.actor("ci-runs", "job-2", ateapi.ActorStateSuspended, "")
+	r.pass()
+	r.pass()
+	if r.api.Policy(ateapi.RefOf(in2.GetMetadata())) == nil || r.api.Policy(ateapi.RefOf(in.GetMetadata())) == nil {
+		t.Fatal("ci-runs was not reconciled while eng-web could not be listed")
+	}
+	if len(r.sink.Events(controller.EventDeleted)) != 0 {
+		t.Fatal("actors of the unlistable atespace were reported deleted")
+	}
+	var warns int
+	for _, w := range r.sink.Events(controller.EventWarning) {
+		if strings.Contains(w.Message, "managed atespace eng-web") {
+			warns++
+		}
+	}
+	if warns != 1 {
+		t.Fatalf("warnings for eng-web = %d, want 1", warns)
+	}
+	denyWeb = false
+	r.pass()
+	if r.api.Policy(ateapi.RefOf(web.GetMetadata())) == nil {
+		t.Fatal("eng-web actor lost its policy")
 	}
 }
