@@ -756,7 +756,7 @@ func TestBuildLayerDeterministic(t *testing.T) {
 
 func TestParseRef(t *testing.T) {
 	cases := []struct{ in, reg, repo, tag, dig string }{
-		{"10.0.1.218:5000/a9/x:v1", "10.0.1.218:5000", "a9/x", "v1", ""},
+		{"registry.example.internal:5000/a9/x:v1", "registry.example.internal:5000", "a9/x", "v1", ""},
 		{"localhost:5000/x", "localhost:5000", "x", "latest", ""},
 		{"ghcr.io/org/img@sha256:" + strings.Repeat("a", 64), "ghcr.io", "org/img", "", "sha256:" + strings.Repeat("a", 64)},
 		{"ubuntu:24.04", "registry-1.docker.io", "library/ubuntu", "24.04", ""},
