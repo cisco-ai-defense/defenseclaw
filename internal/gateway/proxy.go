@@ -52,6 +52,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -1657,6 +1658,35 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	setPassthroughUpstreamAuth(upstreamReq.Header, provider, upstreamAuth)
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
+	{
+		requestedProvider, selectedProvider := provider, provider
+		requestedModel, selectedModel := partial.Model, partial.Model
+		if routed {
+			requestedProvider = routeRequestedProvider(r.Header.Get("X-DC-Target-URL"), r.URL.RequestURI(), requestProviderRegistry(r.Context()), provider)
+			if routeOutcome.Decision != nil {
+				selectedModel = routeOutcome.Decision.Model
+			}
+		}
+		if f := passthroughAPIFamily(r.URL.Path); f == config.RoutingAPIConverse || f == config.RoutingAPIInvoke {
+			requestedModel = bedrockModelFromPath(r.URL.Path)
+			if !routed {
+				selectedModel = requestedModel
+			}
+		}
+		var chargeKeys []string
+		if routeOutcome.Route != nil {
+			chargeKeys = routeOutcome.Route.ChargeKeys
+		}
+		var finishUsage func(error)
+		w, finishUsage = beginUsage(r.Context(), w, modelusage.CallFacts{
+			Listener: engine.ListenerGuardrail, Connector: p.connectorName(), APIFamily: usageAPIFamily(r.URL.Path),
+			CallRole: modelusage.RoleAgent, Streaming: partial.Stream || streamingPath(r.URL.Path),
+			RequestedProvider: requestedProvider, RequestedModel: requestedModel,
+			SelectedProvider: selectedProvider, SelectedModel: selectedModel,
+			Route: usageRouteFacts(routeOutcome, p.routerActive(r.Context())), ChargeKeys: chargeKeys,
+		})
+		defer finishUsage(nil)
+	}
 	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
 	if err != nil {
 		if msg, ok := privateUpstreamReply(err); ok {
@@ -3163,7 +3193,10 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// This runs AFTER guardrails (reuses their signals) and BEFORE the
 	// upstream forward. A nil return gracefully falls through.
 	var routedDecision *ModelRouterDecision
-	if p.routerActive(r.Context()) {
+	usageRequestedModel := req.Model
+	usageRouterOn := p.routerActive(r.Context())
+	var usageRoute SemanticRouteOutcome
+	if usageRouterOn {
 		routerMeta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		var routerTools []interface{}
 		if len(req.Tools) > 0 {
@@ -3196,6 +3229,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			routeOutcome = outcomeFromDecision(routerInput, p.modelRouter.Route(r.Context(), routerInput), time.Since(startedRoute))
 		}
 		p.applyRouteGate(r.Context(), &routeOutcome, routerInput.RequestedProvider, req.Model)
+		usageRoute = routeOutcome
 		p.recordSemanticRoutingDecisionV8(r.Context(), routeOutcome)
 		if routeOutcome.Result == SemanticRouteDenied {
 			p.recordRouteDeny(r.Context(), r.URL.Path, routeOutcome.Deny)
@@ -3301,6 +3335,26 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	routedProvider := ""
 	if routedDecision != nil {
 		routedProvider = routedDecision.Provider
+	}
+	// S10 usage record of the forwarded call (all chat forwarding paths).
+	{
+		selectedProvider := routedProvider
+		if selectedProvider == "" {
+			selectedProvider = promptProviderName
+		}
+		var chargeKeys []string
+		if usageRoute.Route != nil {
+			chargeKeys = usageRoute.Route.ChargeKeys
+		}
+		var finishUsage func(error)
+		w, finishUsage = beginUsage(r.Context(), w, modelusage.CallFacts{
+			Listener: engine.ListenerGuardrail, Connector: p.connectorName(), APIFamily: modelusage.FamilyChat,
+			CallRole: modelusage.RoleAgent, Streaming: req.Stream,
+			RequestedProvider: promptProviderName, RequestedModel: usageRequestedModel,
+			SelectedProvider: selectedProvider, SelectedModel: req.Model,
+			Route: usageRouteFacts(usageRoute, usageRouterOn), ChargeKeys: chargeKeys,
+		})
+		defer finishUsage(nil)
 	}
 	if req.TargetURL != "" {
 		// Revalidate the router-selected URL before forwarding.
