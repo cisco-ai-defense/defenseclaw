@@ -53,7 +53,8 @@ func TestOverLimitPatchPaddingKeepsContentRuleVerdict(t *testing.T) {
 	if err := os.Symlink("/etc/ld.so.preload", link); err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []struct {
+	used := map[[3]int]bool{}
+	for ci, c := range []struct {
 		name, target, attack, benign, rule string
 	}{
 		{"ld.so.preload", "/etc/ld.so.preload", "/usr/local/lib/liblogger.so", "# no libraries are preloaded", "persistence.global_ld_preload_install"},
@@ -62,24 +63,58 @@ func TestOverLimitPatchPaddingKeepsContentRuleVerdict(t *testing.T) {
 		{"daemon.json", "/etc/docker/daemon.json", overLimitDockerHTTPRegistry, `{"log-level":"warn"}`, dockerInsecureHTTPRegistryRuleID},
 		{"pam.d", "/etc/pam.d/sshd", "auth sufficient pam_permit.so", "auth required pam_unix.so", "tamper.pam_permit_authentication_bypass"},
 	} {
-		for _, pad := range []int{0, 250000, 300000, 1000000} {
-			for _, leading := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/pad %d leading %t", c.name, pad, leading), func(t *testing.T) {
-					got := overLimitPatchVerdict(t, home, project, overLimitPatchCall([][2]string{{c.target, c.attack}}, pad, leading))
-					if overLimitHookAction(t, got) != "block" || !strings.Contains(got, c.rule) {
-						t.Fatalf("not blocked by %s: %.600s", c.rule, got)
-					}
-					if strings.Contains(got, overLimitElidedContentTitle) {
-						t.Fatalf("padding takes the conservative finding, not the rule verdict: %.600s", got)
-					}
-					if pad != 300000 {
-						return
-					}
-					benign := overLimitPatchVerdict(t, home, project, overLimitPatchCall([][2]string{{c.target, c.benign}}, pad, leading))
-					if action := overLimitHookAction(t, benign); action == "block" {
-						t.Fatalf("benign text of %s blocked: %.600s", c.target, benign)
-					}
-				})
+		// The owner's test budget: no cross product of target x padding x
+		// side, and a large padding once per target. The cost of a call
+		// follows its bytes, so each target is judged unpadded on both sides
+		// and at one large padding, 250000 (below the argument limit) or
+		// 300000 (above it), leading or trailing, the four turning over the
+		// five targets, with its benign text at the same padding. The 1 MB
+		// padding, which alone cost more than all the others, is judged once
+		// per side: leading on the first target, trailing on the second. So
+		// every padding is judged on both sides, below and above the limit,
+		// and the benign text on both sides of both large paddings; the check
+		// at the end shows it.
+		type padding struct {
+			pad     int
+			leading bool
+		}
+		large := []padding{{250000, false}, {300000, true}, {250000, true}, {300000, false}}
+		first := large[ci%len(large)]
+		paddings := []padding{{0, false}, {0, true}, first}
+		if ci < 2 {
+			paddings = append(paddings, padding{1000000, ci == 0})
+		}
+		for _, p := range paddings {
+			pad, leading := p.pad, p.leading
+			used[[3]int{0, pad, map[bool]int{false: 0, true: 1}[leading]}] = true
+			if p == first {
+				used[[3]int{1, pad, map[bool]int{false: 0, true: 1}[leading]}] = true
+			}
+			t.Run(fmt.Sprintf("%s/pad %d leading %t", c.name, pad, leading), func(t *testing.T) {
+				got := overLimitPatchVerdict(t, home, project, overLimitPatchCall([][2]string{{c.target, c.attack}}, pad, leading))
+				if overLimitHookAction(t, got) != "block" || !strings.Contains(got, c.rule) {
+					t.Fatalf("not blocked by %s: %.600s", c.rule, got)
+				}
+				if strings.Contains(got, overLimitElidedContentTitle) {
+					t.Fatalf("padding takes the conservative finding, not the rule verdict: %.600s", got)
+				}
+				if p != first {
+					return
+				}
+				benign := overLimitPatchVerdict(t, home, project, overLimitPatchCall([][2]string{{c.target, c.benign}}, pad, leading))
+				if action := overLimitHookAction(t, benign); action == "block" {
+					t.Fatalf("benign text of %s blocked: %.600s", c.target, benign)
+				}
+			})
+		}
+	}
+	for _, pad := range []int{0, 250000, 300000, 1000000} {
+		for side := range 2 {
+			if !used[[3]int{0, pad, side}] {
+				t.Errorf("padding %d on side %d never judged", pad, side)
+			}
+			if pad > 0 && pad < 1000000 && !used[[3]int{1, pad, side}] {
+				t.Errorf("benign text never judged at padding %d on side %d", pad, side)
 			}
 		}
 	}
