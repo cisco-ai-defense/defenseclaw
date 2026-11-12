@@ -6421,9 +6421,9 @@ def _version_probe_did_not_answer(signal: Any) -> bool:
     """
     from defenseclaw.agent_selection import probe_error_means_agent_did_not_run
 
-    if signal is None or signal.version or not signal.binary_path:
+    if signal is None or getattr(signal, "version", "") or not getattr(signal, "binary_path", ""):
         return False
-    error = signal.error or ""
+    error = getattr(signal, "error", "") or ""
     return agent_discovery.VERSION_PROBE_TIMED_OUT in error or probe_error_means_agent_did_not_run(error)
 
 
