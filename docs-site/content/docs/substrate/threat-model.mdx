@@ -1,0 +1,56 @@
+---
+title: Threat model
+description: What DefenseClaw on Agent Substrate defends against, what it trusts, and what it does not defend - trust boundaries, attackers, mitigations and out-of-scope threats.
+keywords:
+  - Agent Substrate threat model
+  - DefenseClaw security boundaries
+  - untrusted agent
+---
+
+{/* TODO(substrate): this page states the design (PLAN 5.2, 9 and 12). After the adversarial review (PLAN 12.1) is done, change "designed to" to "verified" only for items with a passing live cell, and list the accepted limits it found. */}
+
+The agent is **untrusted**. The whole design follows from that: the checks that matter run outside the sandbox, and nothing the agent says about itself is believed.
+
+## Assets
+
+- Model and service credentials.
+- The user's code and data, in the actor and in snapshots.
+- The company policy and the audit trail.
+- The identity of the person and of the agent.
+- Other people's actors and data.
+
+## Trust boundaries
+
+| Boundary | Trusted? | Notes |
+|---|---|---|
+| **B1: actor to DefenseClaw** | Untrusted | Only the token Substrate's egress gateway adds counts, and the gateway verifies it and checks the actor is alive with that UID. Bodies, session IDs, timestamps and paths are claims. No request header is ever echoed |
+| **B2: DefenseClaw to Substrate** | DefenseClaw's own service account | It has the OpenFGA roles to read actors and templates, write egress policies, and create, fork, proxy and suspend actors in launcher atespaces, and nothing more |
+| **B3: administrators** | Trusted for their scope | Chart values and signed bundles, checked against trust anchors held in an admin-only Secret |
+| **B4: Agent Substrate** | Trusted for the sandbox, the egress gateway and the identity CA | Not defended against: cluster administrators, node root, a sandbox escape |
+
+## Attackers and what stops them
+
+| Attacker | Goal | What stops it |
+|---|---|---|
+| A compromised or prompt-injected agent | Exfiltrate data or secrets | Default-deny network; the callout checks every request; secrets are placeholders swapped only on bound hosts; exact-value matching on prompts and egress for any exposed value; tool chains remember a secret read when a later request leaves |
+| The same agent | Bypass the guardrails | The model provider isn't in its allow list, so every model call passes the proxy; WebSockets, tunnels, raw TCP and non-DNS UDP are blocked by Substrate; hook config is root-owned and the agent runs as an ordinary user |
+| The same agent | Pretend to be another actor or person | Identity comes from a Substrate-signed token and a live-UID check, not from anything the agent sends. A worker token, a stale UID or no token is refused. The actor listener serves only actor routes and the admin listener is unreachable |
+| The same agent | Use another actor's session or ask approval | Approvals are keyed to the actor UID. A fork inherits findings but not approvals. The relay session token is per person and per actor and is verified for the calling actor only |
+| A user | Loosen their own policy | Policy lives in the cluster. The profile can only tighten the company floor. Users see only their own policy |
+| A user | See another user's data | Usage, policy and secret names are own-data only. The fleet view is admin-only on its own listener |
+| Someone with Kubernetes access | Edit an agent's allow list | The controller reverts the change, records who made it, and stops after three reverts in ten minutes with a `policy_conflict` alert. It never adds access while reverting |
+| Someone with Kubernetes access | Start agents outside DefenseClaw | Only DefenseClaw can create actors in launcher atespaces. Unattested templates get no network. Foreign actors are reported |
+| Someone with `kubectl ate proxy` rights | Take over an actor | Substrate's router allow list names who can reach actors; the chart adds DefenseClaw's identity and `doctor` warns about any other listed client. Other access is audited as the person who did it |
+| A supply-chain attacker | Replace the agent image or the kit | Templates carry a signed attestation of the image digest, kit version and scan result; the controller admits only attested digests that a profile allows; images are pinned by digest |
+| A flood of requests or hooks | Starve other actors | Fair-share rate limits per actor and per atespace answer `429` |
+
+## Known limits
+
+- **Cluster administrators, node root and sandbox escapes are out of scope.** They can read memory, snapshots and traffic.
+- **The hop from Substrate's egress gateway to the DefenseClaw actor listener is plain HTTP inside the cluster** in Substrate v1.0.0, because that version verifies an `https` upstream only against public certificate authorities. The token travels in the clear on the cluster network for up to its lifetime (15 minutes by default). A NetworkPolicy admits only the egress gateway to that port. Use a CNI that encrypts pod traffic where this matters.
+- **Snapshots hold everything the actor held.** Encrypt and restrict the bucket, and use `delete`. Subscription sign-ins put tokens in snapshots, so managed profiles refuse them.
+- **Facts from the kit are claims.** Path facts for link-resolving rules come from inside the actor, so a compromised kit can lie. The rule that blocks the action doesn't depend on it, but link-resolving detections can be evaded by a compromised kit.
+- **Random state in a snapshot.** Actors made from one golden snapshot share the memory it captured, including the state of a random number generator in a program that started before it.
+- **Telemetry volume.** Sampling for `--task` runs never drops blocks or lifecycle records.
+- **Cross-actor findings are correlation, not proof.** They appear in telemetry and detections, and never block on their own.
+- **Not in this release:** Secure Client, a hosted control plane, process lineage and the kernel feed.
