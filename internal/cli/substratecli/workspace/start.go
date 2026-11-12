@@ -154,7 +154,7 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 	// An earlier copy of this name that was uploaded leaves its own state
 	// directory in the actor; it is tidied once this one has arrived.
 	prev, _ := osw.LoadCopy(opts.DataDir, opts.Name)
-	rec, err := osw.Stage(ctx, osw.StageOptions{
+	_, err := osw.Stage(ctx, osw.StageOptions{
 		Project: opts.Project, Name: opts.Name, DataDir: opts.DataDir, Home: opts.Home, Protected: opts.Protected,
 		RemoteRoot: root, StateDir: stateDir, GitDepth: opts.GitDepth, MaxBytes: maxBytes,
 		Masks: opts.Masks, Unmask: opts.Unmask, UnmaskAsked: opts.UnmaskAsked,
@@ -167,10 +167,11 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 		}
 		return nil, cleanErr("copy the project", err)
 	}
-	if rec, err = osw.Upload(ctx, opts.DataDir, opts.Name, t, t); err != nil {
+	if _, err = osw.Upload(ctx, opts.DataDir, opts.Name, t, t); err != nil {
 		return nil, cleanErr("upload the project to the actor", err)
 	}
-	if rec, err = osw.EstablishBaseline(ctx, opts.DataDir, opts.Name, t); err != nil {
+	rec, err := osw.EstablishBaseline(ctx, opts.DataDir, opts.Name, t)
+	if err != nil {
 		return nil, cleanErr("record the copy's baseline in the actor", err)
 	}
 	removePrevState(ctx, t, prev, rec)
