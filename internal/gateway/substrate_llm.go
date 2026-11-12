@@ -179,3 +179,28 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r2.RequestURI = ""
 	s.cfg.Proxy.ServeHTTP(w, r2)
 }
+
+// substrateRouterAnswerNarrows reports a semantic-router answer an Agent
+// Substrate actor's chat call may take (GAP-0104): the router brings no key
+// of its own and keeps the upstream origin /llm set from the provider
+// table, so it can pick another model of the same provider but never send
+// the call elsewhere (another provider, a loopback backend) or with another
+// credential. Which models a profile allows is stream 1 (routing overlay),
+// which narrows inside this.
+func substrateRouterAnswerNarrows(target string, d *ModelRouterDecision) bool {
+	if d == nil {
+		return true
+	}
+	if d.APIKeyOverride {
+		return false
+	}
+	if !d.TargetURLOverride {
+		return true
+	}
+	from, err1 := url.Parse(strings.TrimSpace(target))
+	to, err2 := url.Parse(strings.TrimSpace(d.TargetURL))
+	if err1 != nil || err2 != nil || from.Host == "" || to.User != nil {
+		return false
+	}
+	return strings.EqualFold(from.Scheme, to.Scheme) && strings.EqualFold(from.Host, to.Host)
+}
