@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
 // sandboxOpenShellExecCmd is the exec shim the managed OpenShell gateway
@@ -100,9 +101,6 @@ type openShellExecPlan struct {
 	tlsDir string
 	certs  []string
 }
-
-// openShellServerSAN is the name MicroVM guests reach the gateway by.
-const openShellServerSAN = "host.openshell.internal"
 
 // openShellGenerateCerts runs the gateway's generate-certs; a seam for tests.
 var openShellGenerateCerts = func(plan openShellExecPlan) error {
@@ -272,7 +270,7 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 		}
 	}
 	argv := append([]string{binary, "--config", configPath}, args...)
-	certs := []string{"generate-certs", "--output-dir", tlsDir, "--server-san", openShellServerSAN}
+	certs := []string{"generate-certs", "--output-dir", tlsDir, "--server-san", sandboxruntime.OpenShellHostAlias} // the name MicroVM guests reach the gateway by
 	return openShellExecPlan{binary: binary, argv: argv, env: env, tlsDir: tlsDir, certs: certs}, nil
 }
 

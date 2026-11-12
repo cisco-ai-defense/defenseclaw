@@ -2113,8 +2113,12 @@ class OpenShellMCPConfig:
 
 
 @dataclass
-class OpenShellAdminConfig:
+class SandboxAdminConfig:
     """Administrator sandbox constraints (``openshell.admin``).
+
+    Runtime-neutral (Go ``config.SandboxAdminConfig``): OpenShell sandboxes
+    read it from ``openshell.admin`` and ``guardrail.profiles.<p>.sandbox``,
+    and Agent Substrate actors take the same floor.
 
     Every field is optional; ``None`` / empty imposes no constraint. The Go
     resolver (internal/openshell/packs) enforces them at every decision point;
@@ -2160,7 +2164,11 @@ class OpenShellAdminConfig:
     driver_fallback: str = ""  # docker | none ("" = unset)
 
 
-# The managed sandbox floor keys of OpenShellAdminConfig, unset when None or
+# OpenShellAdminConfig is the name SandboxAdminConfig had through 1.0.9.
+OpenShellAdminConfig = SandboxAdminConfig
+
+
+# The managed sandbox floor keys of SandboxAdminConfig, unset when None or
 # "" (Go omitempty): a save never writes them unset.
 _OPENSHELL_ADMIN_FLOOR_KEYS = (
     "allowed",
@@ -2251,7 +2259,7 @@ class OpenShellConfig:
     # roots (a TLS-inspecting proxy's root): absolute or "~/...". Sandbox images
     # built while it is set carry them; nothing comes from the host's store.
     trusted_ca_bundle: str = ""
-    admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
+    admin: SandboxAdminConfig = field(default_factory=SandboxAdminConfig)
 
     def effective_ingress_port(self, api_port: int) -> int:
         """Sandbox hook ingress port; 0 means ``api_port + 1``."""
@@ -2969,7 +2977,7 @@ class GuardrailProfile:
     block_message: str = ""
     connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
     # Tightens openshell.admin for subjects of this profile; None adds nothing.
-    sandbox: OpenShellAdminConfig | None = None
+    sandbox: SandboxAdminConfig | None = None
     enabled: bool | None = None
     hook_fail_mode: str = ""
 
@@ -3482,7 +3490,7 @@ def validate_guardrail_profiles(gc: GuardrailConfig) -> None:
 # --- Sandbox floors ---------------------------------------------------------
 #
 # openshell.admin is the organization floor and guardrail.profiles.<p>.sandbox
-# tightens it (Go TightenOpenShellAdmin). validate_sandbox_floors mirrors the Go
+# tightens it (Go TightenSandboxAdmin). validate_sandbox_floors mirrors the Go
 # loader's refusals of the managed floor keys message for message (the shared
 # corpus internal/config/testdata/sandbox_floor_cases.yaml pins both). It reads
 # the raw document so an explicit empty list stays apart from an unset key.
@@ -3867,7 +3875,7 @@ def _sandbox_union(base: list[Any], overlay: list[Any]) -> list[str]:
 
 
 def _sandbox_tighten_error(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> str | None:
-    """The contradiction Go TightenOpenShellAdmin reports for base tightened
+    """The contradiction Go TightenSandboxAdmin reports for base tightened
     by overlay, or None."""
 
     def intersection_error(key: str, noun: str, left: list[Any], right: list[Any]) -> str:
@@ -7913,11 +7921,11 @@ def _openshell_optional_str_list(value: Any) -> list[str] | None:
     return _openshell_str_list(value)
 
 
-def _merge_openshell_admin(raw: Any) -> OpenShellAdminConfig:
+def _merge_openshell_admin(raw: Any) -> SandboxAdminConfig:
     """Parse ``openshell.admin`` or a profile's ``sandbox`` section (one type,
-    as Go ``OpenShellAdminConfig``)."""
+    as Go ``SandboxAdminConfig``)."""
     admin = _openshell_mapping(raw)
-    return OpenShellAdminConfig(
+    return SandboxAdminConfig(
         required_pack=_openshell_str(admin.get("required_pack")),
         required_pack_digest=_openshell_str(admin.get("required_pack_digest")),
         min_profile=_openshell_str(admin.get("min_profile")),

@@ -23,20 +23,20 @@ import (
 	"testing"
 )
 
-// TestGatewayStartsWithSubstrateAndOpenShellAPIs builds defenseclaw-gateway
-// with the vendored Substrate API stubs and the OpenShell SDK both linked
-// and runs --version. Before GAP-0014 both registered extension 50000 on the
+// TestGatewayStartsWithSubstrateAndOpenShellAPIs builds defenseclaw-gateway,
+// which links the vendored Substrate API stubs (substrate-controller) and
+// the OpenShell SDK, and runs --version. Before GAP-0014 both registered extension 50000 on the
 // descriptor options and the binary panicked at init, before any command.
 func TestGatewayStartsWithSubstrateAndOpenShellAPIs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the gateway")
 	}
 	bin := filepath.Join(t.TempDir(), "defenseclaw-gateway")
-	build := exec.Command("go", "build", "-tags", "substrate_linkcheck", "-o", bin, ".")
+	build := exec.Command("go", "build", "-o", bin, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
-	deps, err := exec.Command("go", "list", "-tags", "substrate_linkcheck", "-deps", ".").Output()
+	deps, err := exec.Command("go", "list", "-deps", ".").Output()
 	if err != nil {
 		t.Fatal(err)
 	}

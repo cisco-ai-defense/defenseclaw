@@ -51,7 +51,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -4561,6 +4563,106 @@ func (a *APIServer) agentHookMode(ctx context.Context, name string) string {
 // sandbox call to a local ingress and every host call are not relayed.
 func isRelayedSandboxRequest(ctx context.Context) bool {
 	return isSandboxHookRequest(ctx) && sandboxRelayStateFrom(ctx) != nil && isRelayVerifiedSandboxRequest(ctx)
+}
+
+// Hook ingress surfaces: where a hook request entered the gateway. The
+// listener that authenticated a request decides it (hookIngressSurface);
+// nothing the request carries does.
+const (
+	// hookIngressHost: the gateway's API or the managed hook socket.
+	hookIngressHost = "host"
+	// hookIngressOpenShell: an OpenShell sandbox ingress (binding token),
+	// or the managed relay of one.
+	hookIngressOpenShell = "openshell"
+	// hookIngressSubstrate: the Agent Substrate actor listener, for a
+	// request whose actor token the gateway verified (substrateActor).
+	hookIngressSubstrate = "substrate"
+)
+
+// substrateActor is the verified caller of an actor-listener request: the
+// claims of the actor token the gateway verified, with an actor UID it
+// found live. Only the actor listener builds one, after that verification
+// (withSubstrateActor); a request body, header or session ID never fills it.
+type substrateActor struct {
+	// Atespace, Name and UID are the token's actor.ate.dev claims.
+	Atespace string
+	Name     string
+	UID      string
+	// Subject is the token's sub (actor/<atespace>/<name>).
+	Subject string
+	// RegistrationKey is the actor's registration
+	// (sandboxreg.SubstrateKey(Atespace, UID)).
+	RegistrationKey string
+	// verified is set only by verifiedSubstrateActor, from an actor token
+	// the JWT verifier accepted and a registration the gateway found. A
+	// substrateActor built any other way is not an actor (the require-
+	// sandbox gate and the sandbox scope trust it).
+	verified *substrateVerification
+}
+
+// substrateVerification seals a substrateActor that came from the token
+// verifier; substrateVerified is its only instance.
+type substrateVerification struct{}
+
+var substrateVerified = &substrateVerification{}
+
+// verifiedSubstrateActor builds the actor of a verified token whose
+// registration the gateway found. Only the actor listener (after
+// identity.ActorVerifier accepted the token) and the callout route (after
+// the control API named the live UID and its registration) call it.
+func verifiedSubstrateActor(atespace, name, uid, subject, registrationKey string) substrateActor {
+	return substrateActor{Atespace: atespace, Name: name, UID: uid, Subject: subject,
+		RegistrationKey: registrationKey, verified: substrateVerified}
+}
+
+// substrateActorKey carries a substrateActor in a request context.
+type substrateActorKey struct{}
+
+// withSubstrateActor puts actor on ctx. It counts as an actor request only
+// when actor is a verifiedSubstrateActor whose fields agree.
+func withSubstrateActor(ctx context.Context, actor substrateActor) context.Context {
+	return context.WithValue(ctx, substrateActorKey{}, actor)
+}
+
+// substrateActorFrom returns the verified actor of ctx, if it is an
+// actor-listener request: sealed by the verifier path, with a canonical
+// registration key that names the actor's atespace and UID, and the
+// token subject actor/<atespace>/<name>.
+func substrateActorFrom(ctx context.Context) (substrateActor, bool) {
+	if ctx == nil {
+		return substrateActor{}, false
+	}
+	actor, ok := ctx.Value(substrateActorKey{}).(substrateActor)
+	if !ok || actor.verified != substrateVerified || actor.UID == "" || actor.Name == "" {
+		return substrateActor{}, false
+	}
+	key, err := sandboxreg.ParseKey(actor.RegistrationKey)
+	if err != nil || key.Runtime != sandboxruntime.Substrate || key.Atespace != actor.Atespace || key.ActorUID != actor.UID {
+		return substrateActor{}, false
+	}
+	if actor.Subject != "actor/"+actor.Atespace+"/"+actor.Name {
+		return substrateActor{}, false
+	}
+	return actor, true
+}
+
+// isSubstrateActorRequest reports a request of a verified Agent Substrate
+// actor.
+func isSubstrateActorRequest(ctx context.Context) bool {
+	_, ok := substrateActorFrom(ctx)
+	return ok
+}
+
+// hookIngressSurface names where the request of ctx entered the gateway:
+// the Substrate actor listener, an OpenShell sandbox ingress, or the host.
+func hookIngressSurface(ctx context.Context) string {
+	switch {
+	case isSubstrateActorRequest(ctx):
+		return hookIngressSubstrate
+	case isSandboxHookRequest(ctx):
+		return hookIngressOpenShell
+	}
+	return hookIngressHost
 }
 
 func (a *APIServer) configDataDir() string {
