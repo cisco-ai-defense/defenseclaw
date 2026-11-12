@@ -161,7 +161,7 @@ func (c *ClaudeCodeConnector) SandboxArtifacts(target SandboxRenderTarget) (Sand
 		env[key] = value
 	}
 	binaries := append(sandboxHookRuntimeBinaries(), SandboxBinary{Name: "claude", Role: SandboxBinaryHarness})
-	return finalizeSandboxArtifacts(SandboxArtifacts{
+	return finalizeSandboxArtifactsFor(rt, SandboxArtifacts{
 		Connector:    c.Name(),
 		HookContract: rt.contract.ContractID,
 		TamperTier:   SandboxTamperTierManaged,

@@ -164,6 +164,16 @@ type templateData struct {
 	// the workload's environment can set (review 2 of
 	// sandbox-visibility:GAP-0028).
 	SandboxHookDirSH string
+	// SandboxSubstrate selects the Agent Substrate transport in _sandbox.sh
+	// (SandboxIngress.Substrate): SandboxScheme, the optional
+	// SandboxCAFileSH (shell quoted) and the actor header line
+	// SandboxActorHeaderSH (shell quoted) in place of the binding token's
+	// Authorization header. OpenShell renders leave all four zero, and
+	// their bytes are those of a render without them.
+	SandboxSubstrate     bool
+	SandboxScheme        string
+	SandboxCAFileSH      string
+	SandboxActorHeaderSH string
 
 	// CursorTargetModesJSON64 is the canonical, token-free protected
 	// SID-to-delivery-mode map baked into the managed Windows Cursor adapter;
