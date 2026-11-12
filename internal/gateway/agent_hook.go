@@ -4563,6 +4563,74 @@ func isRelayedSandboxRequest(ctx context.Context) bool {
 	return isSandboxHookRequest(ctx) && sandboxRelayStateFrom(ctx) != nil && isRelayVerifiedSandboxRequest(ctx)
 }
 
+// Hook ingress surfaces: where a hook request entered the gateway. The
+// listener that authenticated a request decides it (hookIngressSurface);
+// nothing the request carries does.
+const (
+	// hookIngressHost: the gateway's API or the managed hook socket.
+	hookIngressHost = "host"
+	// hookIngressOpenShell: an OpenShell sandbox ingress (binding token),
+	// or the managed relay of one.
+	hookIngressOpenShell = "openshell"
+	// hookIngressSubstrate: the Agent Substrate actor listener, for a
+	// request whose actor token the gateway verified (substrateActor).
+	hookIngressSubstrate = "substrate"
+)
+
+// substrateActor is the verified caller of an actor-listener request: the
+// claims of the actor token the gateway verified, with an actor UID it
+// found live. Only the actor listener builds one, after that verification
+// (withSubstrateActor); a request body, header or session ID never fills it.
+type substrateActor struct {
+	// Atespace, Name and UID are the token's actor.ate.dev claims.
+	Atespace string
+	Name     string
+	UID      string
+	// Subject is the token's sub (actor/<atespace>/<name>).
+	Subject string
+	// RegistrationKey is the actor's registration
+	// (sandboxreg.SubstrateKey(Atespace, UID)).
+	RegistrationKey string
+}
+
+// substrateActorKey carries a substrateActor in a request context.
+type substrateActorKey struct{}
+
+// withSubstrateActor marks ctx as a request of the verified actor. The
+// actor listener calls it once the token verified; nothing else may.
+func withSubstrateActor(ctx context.Context, actor substrateActor) context.Context {
+	return context.WithValue(ctx, substrateActorKey{}, actor)
+}
+
+// substrateActorFrom returns the verified actor of ctx, if it is an
+// actor-listener request.
+func substrateActorFrom(ctx context.Context) (substrateActor, bool) {
+	if ctx == nil {
+		return substrateActor{}, false
+	}
+	actor, ok := ctx.Value(substrateActorKey{}).(substrateActor)
+	return actor, ok && actor.UID != ""
+}
+
+// isSubstrateActorRequest reports a request of a verified Agent Substrate
+// actor.
+func isSubstrateActorRequest(ctx context.Context) bool {
+	_, ok := substrateActorFrom(ctx)
+	return ok
+}
+
+// hookIngressSurface names where the request of ctx entered the gateway:
+// the Substrate actor listener, an OpenShell sandbox ingress, or the host.
+func hookIngressSurface(ctx context.Context) string {
+	switch {
+	case isSubstrateActorRequest(ctx):
+		return hookIngressSubstrate
+	case isSandboxHookRequest(ctx):
+		return hookIngressOpenShell
+	}
+	return hookIngressHost
+}
+
 func (a *APIServer) configDataDir() string {
 	if a != nil && a.scannerCfg != nil {
 		return a.scannerCfg.DataDir
