@@ -1831,6 +1831,12 @@ type GuardrailConfig struct {
 	DetectionStrategyPrompt     string `mapstructure:"detection_strategy_prompt"     yaml:"detection_strategy_prompt,omitempty"`
 	DetectionStrategyCompletion string `mapstructure:"detection_strategy_completion" yaml:"detection_strategy_completion,omitempty"`
 	DetectionStrategyToolCall   string `mapstructure:"detection_strategy_tool_call"  yaml:"detection_strategy_tool_call,omitempty"`
+	// EffectsRules selects the effect-model rule lane: "off" (today's
+	// ActionFacts rules only), "shadow" (compute and log effect verdicts
+	// beside today's, never changing the answer) or "on" (effect verdicts
+	// decide). Ships "shadow"; the lead flips it to "on" once the corpus
+	// numbers hold.
+	EffectsRules                string `mapstructure:"effects_rules"                 yaml:"effects_rules,omitempty"`
 	JudgeSweep                  bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
 
 	// RetainJudgeBodies controls whether raw LLM-judge responses are
@@ -4118,6 +4124,7 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
 	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
+	viper.SetDefault("guardrail.effects_rules", "shadow")
 	// judge_sweep runs the full LLM judge on content the regex
 	// triager classified as no-signal. Flipped from false to true
 	// in the multi-provider-adapters PR after internal red-team
