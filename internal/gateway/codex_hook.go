@@ -229,8 +229,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	profile connector.HookProfile,
 ) codexHookResponse {
 	callCWD := req.CWD
+	workdirPlaced := false
 	if req.HookEventName == "PreToolUse" || req.HookEventName == "PermissionRequest" {
-		callCWD = codexToolCallCWD(ctx, req)
+		callCWD, workdirPlaced = codexToolCallCWD(ctx, req)
 	}
 	// The snapshot takes the folder the call runs in, not only the session
 	// folder, before the call is judged (GAP-1388).
@@ -312,9 +313,13 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		if command == nil {
 			command, commandTool = codexPowerShellCommand(toolName, toolArgs)
 		}
+		provedArgs := toolArgs
+		if workdirPlaced && !isSandboxHookRequest(ctx) && (cfg == nil || !cfg.SecureClientIntegration()) {
+			provedArgs = codexArgsWithoutWorkdir(req, toolArgs)
+		}
 		actionInput := actionfacts.Input{
 			Tool:                     actionTool,
-			Args:                     toolArgs,
+			Args:                     provedArgs,
 			CWD:                      toolCWD,
 			ActiveHome:               hookActiveHome(ctx),
 			ToolResourceIdentity:     resourceIdentity,
@@ -876,11 +881,22 @@ func normalizeCodexAction(action string) string {
 // codexToolCallCWD is the folder a Codex tool call runs in: a shell call
 // runs in its workdir, from tool_input or, since the Codex hook leaves it
 // out, from the call in the session rollout (codexTranscriptCallWorkdir).
-func codexToolCallCWD(ctx context.Context, req codexHookRequest) string {
+// placed reports a tool_input workdir that the gateway placed itself (read
+// on its file system as the request cwd is): that folder is then the working
+// directory of the call, and the argument is no second one
+// (codexArgsWithoutWorkdir).
+func codexToolCallCWD(ctx context.Context, req codexHookRequest) (cwd string, placed bool) {
 	if !codexShellExecutionTool(codexToolName(req)) {
-		return req.CWD
+		return req.CWD, false
 	}
 	workdir, _ := req.ToolInput["workdir"].(string)
+	if workdir != "" {
+		if cleaned := agentCleanedToolCWD(ctx, "codex", req.CWD, "", workdir); cleaned != "" {
+			if placedCWD := agentHookToolCWD(ctx, req.CWD, cleaned); placedCWD != "" {
+				return placedCWD, true
+			}
+		}
+	}
 	if workdir == "" {
 		workdir = codexTranscriptCallWorkdir(ctx, req)
 	}
@@ -890,9 +906,34 @@ func codexToolCallCWD(ctx context.Context, req codexHookRequest) string {
 		workdir = resolvedWritesFromContext(ctx)[hookpaths.CallWorkdirKey]
 	}
 	if workdir == "" {
-		return req.CWD
+		return req.CWD, false
 	}
-	return agentHookTrustedActionCWDReported(ctx, "codex", req.CWD, "", workdir)
+	return agentHookTrustedActionCWDReported(ctx, "codex", req.CWD, "", workdir), false
+}
+
+// codexArgsWithoutWorkdir is the arguments of a Codex shell call that the
+// trusted-action parse proves once the gateway has placed its workdir
+// (codexToolCallCWD): without the workdir, which is the working directory of
+// the call already, as the shell calls of the other connectors are projected
+// (connector.TrustedShellArgs). Left in, its text was a second working
+// directory beside the placed one, and where the two were spelled
+// differently (a Windows host cleans and resolves the folder) the parse was
+// ambiguous: a write of a credential file in a Codex exec_command call with
+// a workdir was detection-only up to the argv bound, while the reduced
+// reading past it and the same text without a workdir were blocked
+// (GAP-1076). The recorded arguments are unchanged.
+func codexArgsWithoutWorkdir(req codexHookRequest, toolArgs json.RawMessage) json.RawMessage {
+	rest := make(map[string]interface{}, len(req.ToolInput))
+	for key, value := range req.ToolInput {
+		if key != "workdir" {
+			rest[key] = value
+		}
+	}
+	projected, err := connector.MarshalToolArgs(rest)
+	if err != nil {
+		return toolArgs
+	}
+	return projected
 }
 
 func codexToolName(req codexHookRequest) string {
