@@ -82,6 +82,12 @@ type SetupOpts struct {
 	// by hidden native-maintenance commands. Ordinary setup leaves it empty and
 	// uses each vendor's documented discovery rules.
 	ConfigHome string
+	// OpenClawHome and OpenClawConfigPath are claw.home_dir and the
+	// openclaw.json config.yaml names (config.OpenClawHome,
+	// config.OpenClawConfigPath). Empty means the connector keeps the
+	// layout it last saw, else ~/.openclaw of the process account.
+	OpenClawHome       string
+	OpenClawConfigPath string
 	// HookAPIToken is the least-privilege credential written beside generated
 	// hook artifacts. Proxy connectors keep APIToken as the master credential
 	// for their in-process/plugin integration while their generic shell hooks

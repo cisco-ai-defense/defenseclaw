@@ -2620,6 +2620,10 @@ type GatewayConfig struct {
 	Watcher      GatewayWatcherConfig      `mapstructure:"watcher"           yaml:"watcher"`
 	Watchdog     WatchdogConfig            `mapstructure:"watchdog"          yaml:"watchdog"`
 	ClawHome     string                    `mapstructure:"-"                 yaml:"-"`
+	// OpenClawConfigPath is the openclaw.json the OpenClaw client reads its
+	// gateway token from (Config.OpenClawConfigPath, set at Load). Empty
+	// falls back to <ClawHome>/.openclaw/openclaw.json.
+	OpenClawConfigPath string `mapstructure:"-" yaml:"-"`
 }
 
 type GatewayConfigReloadConfig struct {
@@ -3388,6 +3392,7 @@ func loadConfigSourceCheckedWithLayout(
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg.Gateway.ClawHome = home
 	}
+	cfg.Gateway.OpenClawConfigPath = cfg.OpenClawConfigPath()
 
 	if !inspection && !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		// Older installs can use OpenClaw only through a remote fleet gateway.

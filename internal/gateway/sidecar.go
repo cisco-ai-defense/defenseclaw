@@ -4604,6 +4604,9 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 				artifacts = append(artifacts, artifact)
 			}
 		}
+		if oc, ok := conn.(interface{ SetOpenClawPaths(home, config string) }); ok {
+			oc.SetOpenClawPaths(s.currentConfig().OpenClawHome(), s.currentConfig().OpenClawConfigPath())
+		}
 		if bundled, ok := conn.(connector.BundledPluginChecker); ok && !bundledSet {
 			bundledSet = true
 			w.SetBundledPluginCheck(bundled.IsBundledPlugin)
@@ -7444,6 +7447,8 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		DataDir:              cfg.DataDir,
 		CodexOtelEnvironment: cfg.Environment,
 		ConfigHome:           configHome,
+		OpenClawHome:         cfg.OpenClawHome(),
+		OpenClawConfigPath:   cfg.OpenClawConfigPath(),
 		ProxyAddr:            proxyAddr,
 		APIAddr:              apiAddr,
 		APIToken:             setupTokens.connectorToken,

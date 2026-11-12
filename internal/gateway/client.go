@@ -823,7 +823,7 @@ func (c *Client) persistedTokenAppeared() bool {
 	if c.cfg.ClawHome == "" {
 		return false
 	}
-	_, ok, err := readOpenClawGatewayToken(c.cfg.ClawHome)
+	_, ok, err := readOpenClawGatewayTokenAt(c.openClawConfigPath())
 	return ok || errors.Is(err, errOpenClawTokenUnreadable)
 }
 
@@ -834,7 +834,7 @@ func (c *Client) persistedTokenChanged() bool {
 	if c.cfg.ClawHome == "" {
 		return false
 	}
-	token, ok, _ := readOpenClawGatewayToken(c.cfg.ClawHome)
+	token, ok, _ := readOpenClawGatewayTokenAt(c.openClawConfigPath())
 	return ok && token != c.cfg.Token
 }
 
@@ -845,7 +845,7 @@ func (c *Client) adoptPersistedToken() {
 	if c.cfg.ClawHome == "" {
 		return
 	}
-	token, ok, _ := readOpenClawGatewayToken(c.cfg.ClawHome)
+	token, ok, _ := readOpenClawGatewayTokenAt(c.openClawConfigPath())
 	if !ok || token == c.cfg.Token {
 		return
 	}
@@ -975,10 +975,9 @@ func (c *Client) handleConnectRejection(connectErr error) string {
 		return hint
 	}
 
-	home := c.cfg.ClawHome
-	fmt.Fprintf(os.Stderr, "[gateway] auth rejected — re-reading the gateway token from openclaw.json (home=%s) ...\n", home)
+	fmt.Fprintf(os.Stderr, "[gateway] auth rejected — re-reading the gateway token from %s ...\n", c.openClawConfigPath())
 
-	newToken, ok, tokenErr := readOpenClawGatewayToken(home)
+	newToken, ok, tokenErr := readOpenClawGatewayTokenAt(c.openClawConfigPath())
 	if tokenErr != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] %v\n", tokenErr)
 	}
@@ -1210,13 +1209,28 @@ var errOpenClawTokenUnreadable = errors.New("openclaw.json gateway.auth.token is
 // that the token OpenClaw expects is one DefenseClaw cannot read.
 var errOpenClawTokenNotPersisted = errors.New("openclaw.json has no gateway.auth.token")
 
-// readOpenClawGatewayToken reads gateway.auth.token from the OpenClaw
-// config file inside the sandbox home directory. The token is a string or
+// openClawConfigPath is the openclaw.json named by config.yaml
+// (claw.config_file / claw.home_dir), else ~/.openclaw/openclaw.json under
+// ClawHome. Before 1.0.10 the client always read ~/.openclaw and ignored
+// claw.home_dir.
+func (c *Client) openClawConfigPath() string {
+	if path := strings.TrimSpace(c.cfg.OpenClawConfigPath); path != "" {
+		return path
+	}
+	return filepath.Join(c.cfg.ClawHome, ".openclaw", "openclaw.json")
+}
+
+// readOpenClawGatewayToken reads <home>/.openclaw/openclaw.json.
+func readOpenClawGatewayToken(home string) (string, bool, error) {
+	return readOpenClawGatewayTokenAt(filepath.Join(home, ".openclaw", "openclaw.json"))
+}
+
+// readOpenClawGatewayTokenAt reads gateway.auth.token from the OpenClaw
+// config file at path. The token is a string or
 // a SecretRef object; a {"source":"env","id":NAME} reference is resolved
 // from the environment, and any other reference returns
 // errOpenClawTokenUnreadable instead of a token (issue #1404).
-func readOpenClawGatewayToken(sandboxHome string) (string, bool, error) {
-	path := filepath.Join(sandboxHome, ".openclaw", "openclaw.json")
+func readOpenClawGatewayTokenAt(path string) (string, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", false, nil
