@@ -92,7 +92,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return ExitUsageError
 	}
 	var err error
-	code := ExitOK
+	var code int
 	switch args[0] {
 	case "build":
 		code, err = runBuild(ctx, args[1:], stdout)

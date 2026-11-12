@@ -12,7 +12,7 @@ import (
 // Everything an actor controls is cleaned before it reaches the terminal
 // (GAP-0101, GAP-0107).
 func TestSubstrateOutputDropsHostileControls(t *testing.T) {
-	evil := "run\x1b[2K\x1b[1Aall fine\x1b]52;c;cm0gLXJmIH4=\x07 ‮gnp.exe"
+	evil := "run\x1b[2K\x1b[1Aall fine\x1b]52;c;cm0gLXJmIH4=\x07 \u202egnp.exe"
 	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
 		"GET asks":           jsonReply(map[string]any{"asks": []map[string]any{{"id": "a1", "actor": "eng-web/x", "summary": evil, "severity": evil}}}),
 		"GET actors":         jsonReply(map[string]any{"actors": []map[string]any{{"atespace": "eng-web", "name": "x\x1b[2J", "profile": evil, "connector": evil}}}),
@@ -30,7 +30,7 @@ func TestSubstrateOutputDropsHostileControls(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if strings.ContainsAny(out, "\x1b\x07\r") || strings.ContainsRune(out, '‮') {
+		if strings.ContainsAny(out, "\x1b\x07\r") || strings.ContainsRune(out, '\u202e') {
 			t.Errorf("%s printed a terminal control: %q", name, out)
 		}
 	}
