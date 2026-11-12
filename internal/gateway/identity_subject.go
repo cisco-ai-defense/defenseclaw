@@ -457,6 +457,12 @@ func applyIdentityPosture(cfg *config.Config) {
 		}
 		groups = append(groups, assignment.Match.Groups...)
 	}
+	// routing.admin rules and budgets select by groups and users too: their
+	// facts need the same lookup and proof, or an unproven group would read
+	// as proven absent and a deny rule would not apply (S11 slice 3 F2).
+	routingGroups, routingSelects := routingAdminIdentitySelectors(cfg)
+	blocking = blocking || routingSelects
+	groups = append(groups, routingGroups...)
 	setIdentityLookupBlocking(enabled && blocking)
 	if !enabled {
 		groups = nil

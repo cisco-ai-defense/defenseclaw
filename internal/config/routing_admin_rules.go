@@ -7,7 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
+	"net/url"
+	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -380,6 +384,26 @@ func (c *Config) validateRoutingAdminRules() error {
 	if err := ValidateRoutingAdminRules(a.Rules, a.Budgets, a.Visibility, aliases); err != nil {
 		return err
 	}
+	if len(a.Budgets) > 0 {
+		if err := c.validateBudgetFeed(); err != nil {
+			return err
+		}
+	}
+	if a.BudgetStore != nil {
+		if a.BudgetStore.Server != nil && strings.TrimSpace(a.BudgetStore.URL) == "" {
+			// A store host's config: only budget-store serve reads it.
+			if err := ValidateRoutingBudgetStore(a.BudgetStore, false); err != nil {
+				return err
+			}
+		} else {
+			if !c.StandaloneEnterprise() {
+				return settingErrorAt("routing.admin.budget_store", errors.New("routing.admin.budget_store needs a standalone managed device: the store secret is a protected credential"))
+			}
+			if err := ValidateRoutingBudgetStore(a.BudgetStore, true); err != nil {
+				return err
+			}
+		}
+	}
 	if !c.StandaloneEnterprise() || (len(a.Rules) == 0 && len(a.Budgets) == 0) {
 		return nil
 	}
@@ -424,6 +448,157 @@ func validateRoutingAdminFailClosed(rules []RoutingAdminRule, floor []string) er
 		return settingErrorAt("routing.admin.rules", fmt.Errorf(
 			"routing.admin.rules %s: when the classifier is down a managed device applies every category rule at once, and their allow lists (with routing.admin.allowed_aliases) share no alias, so every call would be refused; add one alias to all of them",
 			strings.Join(ids, ", ")))
+	}
+	return nil
+}
+
+// RoutingBudgetStoreConfig is routing.admin.budget_store: the opt-in fleet
+// budget store (defenseclaw-gateway budget-store serve) that sums budget
+// spend across managed devices. Absent = budgets count on each device.
+// Devices send only charge keys (a budget id with an account join key, a
+// keyed hash of a users or groups entry, or a connector name), UTC days and
+// dollar amounts.
+type RoutingBudgetStoreConfig struct {
+	// URL is https://host[:port] of the store.
+	URL string `mapstructure:"url" yaml:"url,omitempty"`
+	// Credential names the protected credential that holds the 32-byte
+	// tenant secret (base64) the store and the devices share
+	// (default routing-budget-store-key).
+	Credential string `mapstructure:"credential" yaml:"credential,omitempty"`
+	// CAFile is a PEM file of the only CA the device trusts for the store
+	// (a private certificate); empty = the system roots.
+	CAFile string `mapstructure:"ca_file" yaml:"ca_file,omitempty"`
+	// SyncInterval is how often a device sends its spend and reads the
+	// fleet's (a Go duration, 10s to 10m; default 30s).
+	SyncInterval string `mapstructure:"sync_interval" yaml:"sync_interval,omitempty"`
+	// TimeoutMs bounds one request (100 to 10000; default 2000).
+	TimeoutMs int `mapstructure:"timeout_ms" yaml:"timeout_ms,omitempty"`
+	// Server is read only by budget-store serve on the store host.
+	Server *RoutingBudgetStoreServerConfig `mapstructure:"server" yaml:"server,omitempty"`
+}
+
+// RoutingBudgetStoreServerConfig is routing.admin.budget_store.server.
+type RoutingBudgetStoreServerConfig struct {
+	// Listen is host:port of the HTTPS listener.
+	Listen string `mapstructure:"listen" yaml:"listen,omitempty"`
+	// TLSCertFile and TLSKeyFile are the PEM certificate and key (required:
+	// the store serves HTTPS only).
+	TLSCertFile string `mapstructure:"tls_cert_file" yaml:"tls_cert_file,omitempty"`
+	TLSKeyFile  string `mapstructure:"tls_key_file"  yaml:"tls_key_file,omitempty"`
+	// SecretFile holds the tenant secret (base64, owner-only file).
+	SecretFile string `mapstructure:"secret_file" yaml:"secret_file,omitempty"`
+	// DBPath is the store's SQLite file.
+	DBPath string `mapstructure:"db_path" yaml:"db_path,omitempty"`
+	// RateLimitPerMinute caps requests per client address (default 600).
+	RateLimitPerMinute int `mapstructure:"rate_limit_per_minute" yaml:"rate_limit_per_minute,omitempty"`
+}
+
+// Defaults of routing.admin.budget_store.
+const (
+	RoutingBudgetStoreDefaultCredential = "routing-budget-store-key"
+	RoutingBudgetStoreDefaultSync       = 30 * time.Second
+	RoutingBudgetStoreDefaultTimeoutMs  = 2000
+	RoutingBudgetStoreDefaultRate       = 600
+)
+
+// EffectiveCredential returns Credential with its default.
+func (b *RoutingBudgetStoreConfig) EffectiveCredential() string {
+	if b == nil || strings.TrimSpace(b.Credential) == "" {
+		return RoutingBudgetStoreDefaultCredential
+	}
+	return strings.TrimSpace(b.Credential)
+}
+
+// EffectiveSyncInterval returns SyncInterval with its default.
+func (b *RoutingBudgetStoreConfig) EffectiveSyncInterval() time.Duration {
+	if b == nil {
+		return RoutingBudgetStoreDefaultSync
+	}
+	if d, err := time.ParseDuration(strings.TrimSpace(b.SyncInterval)); err == nil && d > 0 {
+		return d
+	}
+	return RoutingBudgetStoreDefaultSync
+}
+
+// EffectiveTimeout returns TimeoutMs with its default.
+func (b *RoutingBudgetStoreConfig) EffectiveTimeout() time.Duration {
+	if b == nil || b.TimeoutMs <= 0 {
+		return RoutingBudgetStoreDefaultTimeoutMs * time.Millisecond
+	}
+	return time.Duration(b.TimeoutMs) * time.Millisecond
+}
+
+// ValidateRoutingBudgetStore checks routing.admin.budget_store. device is
+// true when a device would use it (a gateway config); the store host's
+// serve command validates the server section with device false.
+func ValidateRoutingBudgetStore(b *RoutingBudgetStoreConfig, device bool) error {
+	if b == nil {
+		return nil
+	}
+	at := "routing.admin.budget_store"
+	if device || strings.TrimSpace(b.URL) != "" {
+		u, err := url.Parse(strings.TrimSpace(b.URL))
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return settingErrorAt(at+".url", fmt.Errorf("%s.url must be https://host[:port] (HTTPS only, no path, query or credentials)", at))
+		}
+	}
+	if c := strings.TrimSpace(b.Credential); c != "" && !ValidEnterpriseCredentialName(c) {
+		return settingErrorAt(at+".credential", fmt.Errorf("%s.credential %q is not a valid credential name", at, b.Credential))
+	}
+	if s := strings.TrimSpace(b.SyncInterval); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil || d < 10*time.Second || d > 10*time.Minute {
+			return settingErrorAt(at+".sync_interval", fmt.Errorf("%s.sync_interval must be a duration from 10s to 10m", at))
+		}
+	}
+	if b.TimeoutMs != 0 && (b.TimeoutMs < 100 || b.TimeoutMs > 10000) {
+		return settingErrorAt(at+".timeout_ms", fmt.Errorf("%s.timeout_ms must be 100 to 10000", at))
+	}
+	if b.CAFile != "" && !filepath.IsAbs(b.CAFile) {
+		return settingErrorAt(at+".ca_file", fmt.Errorf("%s.ca_file must be an absolute path", at))
+	}
+	if s := b.Server; s != nil {
+		if device {
+			return settingErrorAt(at+".server", fmt.Errorf("%s.server is read by budget-store serve on the store host; remove it from a device config", at))
+		}
+		if _, _, err := net.SplitHostPort(strings.TrimSpace(s.Listen)); err != nil {
+			return settingErrorAt(at+".server.listen", fmt.Errorf("%s.server.listen must be host:port", at))
+		}
+		for key, path := range map[string]string{"tls_cert_file": s.TLSCertFile, "tls_key_file": s.TLSKeyFile, "secret_file": s.SecretFile, "db_path": s.DBPath} {
+			if !filepath.IsAbs(strings.TrimSpace(path)) {
+				return settingErrorAt(at+".server."+key, fmt.Errorf("%s.server.%s must be an absolute path (the store serves HTTPS only)", at, key))
+			}
+		}
+		if s.RateLimitPerMinute < 0 || s.RateLimitPerMinute > 100000 {
+			return settingErrorAt(at+".server.rate_limit_per_minute", fmt.Errorf("%s.server.rate_limit_per_minute must be 0 to 100000", at))
+		}
+	}
+	return nil
+}
+
+// BudgetFeedReady reports whether agent calls are recorded with a computed
+// cost, the only spend budgets count (observability.tokenomics on, cost
+// computed, role agent recorded).
+func (c *Config) BudgetFeedReady() bool {
+	t := c.Observability.Tokenomics
+	return t.Enabled && t.ComputesCost() && t.RoleEnabled("agent")
+}
+
+// validateBudgetFeed refuses budgets that nothing would charge: on a
+// standalone managed device budgets need the usage feed and a price for
+// every model (observability.pricing.unknown_model fallback), else a deny
+// budget would never trip. OSS reports the same gaps through doctor.
+func (c *Config) validateBudgetFeed() error {
+	if !c.StandaloneEnterprise() {
+		return nil
+	}
+	if !c.BudgetFeedReady() {
+		return settingErrorAt("routing.admin.budgets", errors.New(
+			"routing.admin.budgets count the computed cost of agent calls: set observability.tokenomics.enabled true, keep cost.compute on and roles including agent"))
+	}
+	if strings.TrimSpace(c.Observability.Pricing.UnknownModel) != "fallback" {
+		return settingErrorAt("observability.pricing.unknown_model", errors.New(
+			"routing.admin.budgets on a managed device need a price for every model: set observability.pricing.unknown_model fallback with observability.pricing.fallback rates"))
 	}
 	return nil
 }

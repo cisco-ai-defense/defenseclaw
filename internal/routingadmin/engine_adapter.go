@@ -28,16 +28,20 @@ const OwnerKey = "owner"
 type Runtime struct {
 	decisions Decisions
 
-	mu       sync.Mutex
-	ledger   *Ledger
-	ids      []string // budget ids of the newest generation
-	last     *config.Config
-	lastEv   *evaluator
-	ctx      context.Context
-	local    SpendCounter // this device's store (per-device budgets and the fallback)
-	fleet    SpendCounter // optional: shared by devices or gateway replicas
-	keys     FleetKeys    // local <-> fleet key forms (nil: the same keys)
-	hash     func(string) string
+	mu     sync.Mutex
+	ledger *Ledger
+	ids    []string // budget ids of the newest generation
+	last   *config.Config
+	lastEv *evaluator
+	ctx    context.Context
+	local  SpendCounter // this device's store (per-device budgets and the fallback)
+	fleet  SpendCounter // optional: shared by devices or gateway replicas
+	keys   FleetKeys    // local <-> fleet key forms (nil: the same keys)
+	hash   func(string) string
+	// feed is true once agent call costs reach Charge (the usage engine
+	// records agent calls with a computed cost); until then budgets read
+	// as not loaded, so a managed deny budget refuses instead of counting 0.
+	feed     bool
 	interval time.Duration
 	epoch    string
 	syncing  bool
@@ -88,6 +92,22 @@ func (rt *Runtime) SetCounters(ctx context.Context, local, fleet SpendCounter, i
 	}
 	rt.mu.Unlock()
 	rt.startSync()
+}
+
+// SetFeed says whether agent call costs reach Charge (observability
+// tokenomics records agent calls with a computed cost). Generations compile
+// again.
+func (rt *Runtime) SetFeed(active bool) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	changed := rt.feed != active
+	rt.feed = active
+	if changed {
+		rt.last, rt.lastEv = nil, nil
+	}
+	rt.mu.Unlock()
 }
 
 // SetFleet installs (or, with a nil counter, removes) the fleet counter, its
@@ -148,7 +168,9 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	if len(a.Budgets) > 0 && rt.ledger == nil {
 		rt.ledger = NewLedger()
 	}
-	ev.ledger = rt.ledger
+	if rt.feed {
+		ev.ledger = rt.ledger
+	}
 	rt.last, rt.lastEv, rt.ids = cfg, ev, policy.BudgetIDs()
 	rt.mu.Unlock()
 	rt.startSync()
@@ -232,24 +254,38 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 
 var errFleetFallback = errors.New("fleet spend unavailable; counting this device only")
 
+// Flush stores this process's spend once (the gateway calls it after the
+// usage engine drained at shutdown).
+func (rt *Runtime) Flush(ctx context.Context) {
+	if rt == nil {
+		return
+	}
+	rt.push(ctx)
+}
+
 func (rt *Runtime) push(ctx context.Context) {
 	rt.mu.Lock()
 	ledger, local, fleet, epoch := rt.ledger, rt.local, rt.fleet, rt.epoch
 	rt.mu.Unlock()
+	if ledger == nil {
+		return
+	}
 	rows := ledger.LocalRows()
 	if len(rows) == 0 {
 		return
 	}
+	var failed error
 	if local != nil {
 		if err := local.Push(ctx, epoch, rows); err != nil {
-			ledger.SyncFailed(err)
+			failed = err
 		}
 	}
 	if fleet != nil {
-		if err := fleet.Push(ctx, epoch, toFleet(rows, rt.fleetKeys())); err != nil {
-			ledger.SyncFailed(err)
+		if err := fleet.Push(ctx, epoch, toFleet(rows, rt.fleetKeys())); err != nil && failed == nil {
+			failed = err
 		}
 	}
+	ledger.PushResult(failed)
 }
 
 func (rt *Runtime) fleetKeys() FleetKeys {

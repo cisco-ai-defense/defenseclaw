@@ -50,6 +50,8 @@ type Engine struct {
 	spend   spendTracker
 	// budgetSink receives agent call costs for routing.admin budgets.
 	budgetSink atomic.Pointer[spendSinkBox]
+	// spendReader replaces the local spend tracker for reads when set.
+	spendReader atomic.Pointer[SpendReader]
 
 	mu      sync.RWMutex
 	sinks   []Sink

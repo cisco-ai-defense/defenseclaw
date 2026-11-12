@@ -34,6 +34,16 @@ observability:
 
 The gateway applies the change without a restart. Change `version` whenever you change a price, because every usage record carries it. Every key, default and limit is in [Tokenomics and pricing](/docs/reference/configuration#tokenomics-and-pricing).
 
+You can do the same from the command line. This turns tokenomics and the local store on and writes the reviewed default price table only if `config.yaml` has none. It never replaces a table you wrote.
+
+```bash
+defenseclaw setup tokenomics --enable
+defenseclaw setup tokenomics --status --json
+defenseclaw setup tokenomics --disable   # the price table stays
+```
+
+Check the seeded prices against your contract before you rely on the cost. A model with no row has no cost.
+
 On a managed host both blocks come from the admin `config.yaml` in the signed bundle. A user cannot set them.
 
 ## What a usage record holds
@@ -135,7 +145,11 @@ Identity is never a label. A metric label creates one time series per value, so 
 - A user sees their own usage. An administrator sees everyone.
 - The record carries the verified identity of the caller, the same identity attributes as other model records. If the caller cannot be verified, the usage is visible to administrators only.
 - Group names stay on the endpoint, in the local store and the administrator view. They are never put on an exported record or a metric.
-- The local store, when `observability.tokenomics.local_store.enabled` is true, keeps an hourly aggregate in `<data_dir>/model_usage.db` for `retention_days`. It holds counts, cost and the dimensions above, no prompt or response text.
+- The local store, when `observability.tokenomics.local_store.enabled` is true, keeps an hourly aggregate in `<data_dir>/model_usage/model_usage.db` for `retention_days`. It holds counts, cost and the dimensions above, no prompt or response text.
+
+### Reading usage
+
+The gateway answers `GET /usage?by=model|connector|route|profile|role|provider|user|hour&since=24h|7d` from the local store. A per-user install sees its own rows. On a managed host an administrator sees all rows, and any other account sees only the rows of the identity the gateway verified for the request. The per-group rollup is for administrators. On managed Windows a standard account gets its last 24 hours in the own-status answer, because it reaches the gateway only through the own-status pipe.
 
 ## Agents that report their own usage
 

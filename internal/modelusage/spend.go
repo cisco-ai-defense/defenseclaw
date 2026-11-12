@@ -14,6 +14,7 @@ const (
 	ScopeUser      = "user"
 	ScopeGroup     = "group"
 	ScopeConnector = "connector"
+	ScopeBudget    = "budget"
 
 	PeriodDay   = "day"
 	PeriodWeek  = "week"
@@ -68,6 +69,13 @@ func (s *spendTracker) add(f CallFacts, usd float64, now time.Time) {
 	if f.Connector != "" {
 		subjects = append(subjects, spendKey{scope: ScopeConnector, subject: dim(f.Connector)})
 	}
+	seenKey := map[string]bool{}
+	for _, key := range f.ChargeKeys {
+		if key = dim(key); !seenKey[key] {
+			seenKey[key] = true
+			subjects = append(subjects, spendKey{scope: ScopeBudget, subject: key})
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.m == nil {
@@ -103,6 +111,27 @@ func (s *spendTracker) pruneLocked(now time.Time) {
 	}
 }
 
+// SpendReader answers spend questions from a backing other than this
+// process: a deployment with several gateway replicas and no shared data
+// directory (Substrate) installs one backed by its leader, so budgets count
+// every replica. Hosts keep the local tracker, which is the default.
+type SpendReader interface {
+	Spend(scope, subject, period string, now time.Time) (usd float64, known bool)
+}
+
+// SetSpendReader installs a replacement spend backing; nil restores the local
+// tracker. The local tracker keeps counting either way.
+func (e *Engine) SetSpendReader(r SpendReader) {
+	if e == nil {
+		return
+	}
+	if r == nil {
+		e.spendReader.Store(nil)
+		return
+	}
+	e.spendReader.Store(&r)
+}
+
 // Spend returns the cost spent so far in the current period by one subject:
 // scope user (subject is the owner id from OwnerID), group (the group name) or
 // connector. known is false when the engine has seen no priced call for the
@@ -110,6 +139,9 @@ func (s *spendTracker) pruneLocked(now time.Time) {
 func (e *Engine) Spend(scope, subject, period string, now time.Time) (usd float64, known bool) {
 	if e == nil {
 		return 0, false
+	}
+	if r := e.spendReader.Load(); r != nil {
+		return (*r).Spend(scope, subject, period, now)
 	}
 	start, ok := periodStart(period, now)
 	if !ok {

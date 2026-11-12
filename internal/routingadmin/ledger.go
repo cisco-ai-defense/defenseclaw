@@ -30,6 +30,7 @@ type Ledger struct {
 	// seeded holds the budget ids whose remote spend has been read once.
 	seeded    map[string]bool
 	syncErr   string
+	pushErr   string
 	lastSync  time.Time
 	lastPrune int32
 	now       func() time.Time
@@ -191,6 +192,21 @@ func (l *Ledger) SyncFailed(err error) {
 	l.mu.Unlock()
 }
 
+// PushResult records whether this process's spend was stored (an error
+// stays until a push succeeds, independent of reads).
+func (l *Ledger) PushResult(err error) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	if err != nil {
+		l.pushErr = err.Error()
+	} else {
+		l.pushErr = ""
+	}
+	l.mu.Unlock()
+}
+
 // Seeded reports whether the budget's remote spend has been read.
 func (l *Ledger) Seeded(id string) bool {
 	if l == nil {
@@ -220,6 +236,9 @@ func (l *Ledger) SeedState(ids []string) string {
 	}
 	if l.syncErr != "" {
 		return "seeded (stale: " + l.syncErr + ")"
+	}
+	if l.pushErr != "" {
+		return "seeded (not stored: " + l.pushErr + ")"
 	}
 	return "seeded"
 }

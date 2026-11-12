@@ -724,7 +724,7 @@ Both blocks reload with the rest of `config.yaml`: a change applies without a re
 | `observability.tokenomics.cost.compute` | `true` | Compute cost from `observability.pricing`. |
 | `observability.tokenomics.cost.currency` | `USD` | USD is the only value. There is no currency conversion. |
 | `observability.tokenomics.cost.keep_reported` | `true` | Keep a per-call cost that the provider or the agent reported, and mark its basis `reported`. A reported cost wins over the computed one. Running session totals are never used. |
-| `observability.tokenomics.local_store.enabled` | `false` | Keep an hourly usage aggregate in `<data_dir>/model_usage.db`. |
+| `observability.tokenomics.local_store.enabled` | `false` | Keep an hourly usage aggregate in `<data_dir>/model_usage/model_usage.db`. |
 | `observability.tokenomics.local_store.retention_days` | `30` | Days the aggregate is kept. `1` to `3650`. |
 | `observability.tokenomics.local_store.granularity` | `hour` | `hour` is the only value. |
 | `observability.tokenomics.metrics.labels` | `connector`, `provider`, `model`, `route_decision`, `call_role`, `profile` | Labels on `defenseclaw.model.cost` and `defenseclaw.model.tokens`. A closed set: list a subset to drop labels. Identity names (user, group, session, device, host and similar) are refused. |

@@ -1,0 +1,105 @@
+---
+title: Routing rules and budgets
+description: Limit which models each group may use and cap model spend per user, group or connector, on one device or across the fleet with the opt-in budget store.
+---
+
+Routing rules and budgets are part of `routing.admin` in config.yaml. On a standalone managed device they come from the signed bundle and users cannot change them. On other installs a deny is reported, never enforced.
+
+Rules and budgets need routing on (`routing.enabled: true`) and DefenseClaw 1.0.10 or later. Sign the bundle with `--min-product-version 1.0.10`.
+
+## Rules
+
+```yaml
+routing:
+  admin:
+    rules:
+      - id: secrets-stay-local
+        match: {severity_at_least: HIGH}
+        allow: [local]
+        default: local
+      - id: contractors-no-cloud
+        match: {groups: ["DCLAB\\contractors"]}
+        action: deny
+        message: "Contractors may not use cloud models. Contact IT."
+```
+
+- Every matching rule applies. A deny wins, `allow` lists intersect, and the first matching `default` that is allowed is used.
+- `allow` also binds a request that is not routed: its own model must be one of the allowed models.
+- `match` keys: `groups`, `users`, `connectors`, `agents`, `categories`, `severity_at_least`. Keys combine with AND, values of one key with OR.
+- Groups and users match only a verified caller, with the same proof rules as profile assignments. On a managed device, when DefenseClaw cannot confirm a fact, a constraining rule applies and a deny rule refuses.
+- While the classifier is down, every category rule applies on a managed device, so their `allow` lists must share a model.
+- Route-only connectors run no guardrail scan, so severity rules never apply to them.
+
+## Budgets
+
+```yaml
+routing:
+  admin:
+    budgets:
+      - id: per-user-daily
+        scope: user        # user, group or connector
+        subject: "*"       # each user has their own limit
+        period: day        # day, week (from Monday), month; UTC
+        limit_usd: 20
+        on_exceed: downgrade:fast
+```
+
+- `on_exceed` is `warn`, `deny` (managed devices only) or `downgrade:<model>[,<model>]`.
+- Budgets count the computed cost of agent calls: tokens times `observability.pricing`. A cost the agent reports is never counted. Judge and decision-model calls are not counted.
+- Budgets need `observability.tokenomics.enabled: true` with cost computed and the agent role recorded. On a managed device also set `observability.pricing.unknown_model: fallback`, so every model has a price.
+- Calls already running when a limit is reached still finish.
+
+## Spend across devices: the budget store (optional)
+
+Without a store, each device counts its own spend; a user with two devices has two limits. The opt-in budget store sums spend across devices.
+
+1. On a server you choose, create a tenant secret: 32 random bytes, base64. Store it in a file only the store's account can read (`chmod 600`), and give the same value to every device as the protected credential `routing-budget-store-key`.
+2. Run the store with a TLS certificate:
+
+   ```yaml
+   # config.yaml on the store host
+   config_version: 9
+   routing:
+     admin:
+       budget_store:
+         server:
+           listen: 0.0.0.0:8443
+           tls_cert_file: /etc/defenseclaw-budget-store/cert.pem
+           tls_key_file: /etc/defenseclaw-budget-store/key.pem
+           secret_file: /etc/defenseclaw-budget-store/secret
+           db_path: /var/lib/defenseclaw-budget-store/store.db
+   ```
+
+   ```bash
+   defenseclaw-gateway budget-store serve --config /etc/defenseclaw-budget-store/config.yaml
+   ```
+
+3. In the device bundle:
+
+   ```yaml
+   routing:
+     admin:
+       budget_store:
+         url: https://budgets.example.internal:8443
+         ca_file: /etc/defenseclaw/budget-store-ca.pem   # recommended with a private CA
+   ```
+
+What the store sees:
+
+| Sent | Not sent |
+| --- | --- |
+| Budget id, a keyed hash for each user (from the verified domain SID or UPN), group and named user, connector names, UTC days, dollar amounts | User, group, device or host names, prompts, models |
+
+- Every request is signed with a key derived from the tenant secret, over HTTPS. The device refuses plain HTTP, redirects and proxies from the environment.
+- When the store is down or refuses, budgets keep counting this device only. `defenseclaw routing budgets list` and `doctor` say so, and the fleet total comes back when the store answers.
+- A user with no verified SID or UPN on a device is counted on that device only.
+- New network traffic: each managed device's gateway connects to the store URL every 30 seconds (`sync_interval`). Allow it in your firewall.
+- Anyone with the tenant secret can write spend. Keep the secret as safe as the bundle signing key, and rotate it by giving devices and the store a new value together.
+
+## Check it
+
+```bash
+defenseclaw routing rules list      # rules and notes on rules that do less than they look
+defenseclaw routing budgets list    # spend this period, and whether it is the fleet or this device only
+defenseclaw routing test "write a parser" --as-user DCLAB\\alice   # administrators: which model, which rule
+```

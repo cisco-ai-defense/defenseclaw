@@ -172,6 +172,7 @@ func TestAdapterEvaluateAndGate(t *testing.T) {
 	rules := []config.RoutingAdminRule{{ID: "local-high", Match: config.RoutingAdminMatch{SeverityAtLeast: "HIGH"}, Allow: []string{"local"}, Default: "local"}}
 	budgets := []config.RoutingBudget{{ID: "d", Scope: "user", Subject: "*", Period: "day", LimitUSD: 1, OnExceed: "downgrade:fast"}}
 	rt := NewRuntime()
+	rt.SetFeed(true)
 	ev := rt.For(adapterConfig(rules, budgets))
 	rt.Ledger().ApplyRemote([]string{"d"}, nil, time.Now())
 	floor := engine.Policy{AllowedAliases: []string{"fast", "local"}, DefaultAlias: "fast"}
@@ -231,6 +232,19 @@ func TestToEngineVerdictKeepsNothingAllowed(t *testing.T) {
 		if (got == nil) != (tc.want == nil) || !slices.Equal(got, tc.want) {
 			t.Fatalf("%s: got %#v, want %#v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestBudgetsReadNotLoadedWithoutAFeed(t *testing.T) {
+	rt := NewRuntime()
+	budgets := []config.RoutingBudget{{ID: "d", Scope: "user", Subject: "*", Period: "day", LimitUSD: 1, OnExceed: "deny"}}
+	cfg := adapterConfig(nil, budgets)
+	cfg.DeploymentMode = "managed_enterprise"
+	ev := &evaluator{policy: Compile(nil, budgets, true)}
+	rt.For(cfg)
+	rt.Ledger().ApplyRemote([]string{"d"}, nil, time.Now())
+	if v := ev.Evaluate(context.Background(), engine.Policy{}, engine.Request{Caller: engine.Caller{Verified: true, Key: "1001"}}, "", false); v.Deny == nil || v.Deny.Code != "budget_unavailable:d" {
+		t.Fatalf("no feed: a managed deny budget refuses: %+v", v)
 	}
 }
 
