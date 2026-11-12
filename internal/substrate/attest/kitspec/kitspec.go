@@ -40,6 +40,14 @@ type Options struct {
 
 	// HookBinary and RelayBinary are the static binaries of the kit.
 	HookBinary, RelayBinary []byte
+	// AgentBinary is the connector's pinned agent build when the kit pins
+	// one (kit.AgentReleases, fetched with kit.FetchAgent); it replaces the
+	// harness's agent. Arch is its architecture ("amd64" default).
+	AgentBinary []byte
+	Arch        string
+	// MetadataOnly builds the spec for its metadata (phone-home switches,
+	// config switches) without the agent binary: never an image.
+	MetadataOnly bool
 
 	// Relay session verification (A2/A5): public keys by kid (PEM), the
 	// audience and the gateway check URL.
@@ -97,11 +105,22 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 			keyFiles[p] = pem
 		}
 	}
-	art, err := kit.SubstrateArtifacts(h.Provider, ictx.HarnessVersion, cfg)
+	// The kit may install a newer agent than the harness pins (GAP-0114).
+	agentVersion := kit.AgentVersion(o.Connector, ictx.HarnessVersion)
+	if _, pinned := kit.AgentReleases[o.Connector]; pinned && !o.MetadataOnly {
+		arch := o.Arch
+		if arch == "" {
+			arch = "amd64"
+		}
+		if err := kit.CheckAgent(o.Connector, arch, o.AgentBinary); err != nil {
+			return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: the pinned agent binary (kit.FetchAgent): %w", err)
+		}
+	}
+	art, err := kit.SubstrateArtifacts(h.Provider, agentVersion, cfg)
 	if err != nil {
 		return zero, attest.TemplateInfo{}, "", err
 	}
-	ov, err := kit.ActorOverlay(art, kit.OverlayOptions{Config: cfg, Home: Home, Workdir: Workdir, Provider: o.Provider, Model: o.Model, HarnessVersion: ictx.HarnessVersion})
+	ov, err := kit.ActorOverlay(art, kit.OverlayOptions{Config: cfg, Home: Home, Workdir: Workdir, Provider: o.Provider, Model: o.Model, HarnessVersion: agentVersion})
 	if err != nil {
 		return zero, attest.TemplateInfo{}, "", err
 	}
@@ -123,6 +142,9 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 	spec.Files = append(spec.Files,
 		attest.LayerFile{Path: kit.HookBinary, Mode: 0o755, Data: o.HookBinary},
 		attest.LayerFile{Path: kit.RelayBinary, Mode: 0o755, Data: o.RelayBinary})
+	if r, pinned := kit.AgentReleases[o.Connector]; pinned && !o.MetadataOnly {
+		spec.Files = append(spec.Files, attest.LayerFile{Path: r.Path, Mode: 0o755, Data: o.AgentBinary})
+	}
 	sort.Slice(ov.Files, func(i, j int) bool { return ov.Files[i].Path < ov.Files[j].Path })
 	rootDirs := map[string]bool{"/etc/defenseclaw": true, kit.KitDir: true, kit.HookDir: true, kit.LibDir: true}
 	for _, f := range ov.Files {
@@ -164,6 +186,6 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 			connector.CodexSandboxManagedConfigPath: {"[feedback]\nenabled = false", "[analytics]\nenabled = false"},
 		}
 	}
-	tpl := attest.TemplateInfo{Connector: o.Connector, AgentVersion: ictx.HarnessVersion, Name: o.Connector, Providers: o.Providers}
-	return spec, tpl, ictx.HarnessVersion, nil
+	tpl := attest.TemplateInfo{Connector: o.Connector, AgentVersion: agentVersion, Name: o.Connector, Providers: o.Providers}
+	return spec, tpl, agentVersion, nil
 }

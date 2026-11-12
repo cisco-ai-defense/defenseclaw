@@ -7,6 +7,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"strings"
 	"testing"
@@ -15,11 +17,40 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
+// fakeAgentPin swaps the Claude Code pin for a small fake build.
+func fakeAgentPin(t *testing.T) []byte {
+	t.Helper()
+	saved := kit.AgentReleases["claudecode"]
+	t.Cleanup(func() { kit.AgentReleases["claudecode"] = saved })
+	body := []byte("fake claude build")
+	sum := sha256.Sum256(body)
+	r := saved
+	r.SHA256 = map[string]string{"amd64": hex.EncodeToString(sum[:])}
+	kit.AgentReleases["claudecode"] = r
+	return body
+}
+
+func TestSpecRefusesAnAgentThatIsNotThePin(t *testing.T) {
+	if _, _, _, err := Spec(Options{Connector: "claudecode", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r"),
+		AgentBinary: []byte("something else")}); err == nil {
+		t.Fatal("an agent binary that is not the pinned build was accepted")
+	}
+	if _, _, _, err := Spec(Options{Connector: "claudecode", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r"),
+		MetadataOnly: true}); err != nil {
+		t.Fatalf("metadata only: %v", err)
+	}
+}
+
 func TestSpecLayerOwnershipAndSwitches(t *testing.T) {
+	agent := fakeAgentPin(t)
 	for _, name := range []string{"claudecode", "codex"} {
 		t.Run(name, func(t *testing.T) {
-			spec, tpl, version, err := Spec(Options{Connector: name, KitVersion: "1.2.3", Provider: map[string]string{"claudecode": "bedrock", "codex": "openai"}[name],
-				HookBinary: []byte("hook"), RelayBinary: []byte("relay")})
+			o := Options{Connector: name, KitVersion: "1.2.3", Provider: map[string]string{"claudecode": "bedrock", "codex": "openai"}[name],
+				HookBinary: []byte("hook"), RelayBinary: []byte("relay")}
+			if name == "claudecode" {
+				o.AgentBinary = agent
+			}
+			spec, tpl, version, err := Spec(o)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -57,6 +88,11 @@ func TestSpecLayerOwnershipAndSwitches(t *testing.T) {
 			}
 			if contents[kit.HookBinary] != "hook" || contents[kit.RelayBinary] != "relay" || contents[kit.ConfigPath] == "" {
 				t.Fatal("the hook, relay or kit config is missing from the layer")
+			}
+			if r, ok := kit.AgentReleases[name]; ok {
+				if contents[r.Path] != string(agent) || version != r.Version || tpl.AgentVersion != r.Version {
+					t.Fatalf("pinned agent: %d bytes at %s, version %q", len(contents[r.Path]), r.Path, version)
+				}
 			}
 			for k, v := range kit.PhoneHomeOff[name] {
 				if spec.PhoneHome[k] != v || spec.Env[k] != v {
