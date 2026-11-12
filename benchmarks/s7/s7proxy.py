@@ -47,6 +47,7 @@ ap.add_argument("--replay-latency", action="store_true")
 args = ap.parse_args()
 
 lock = threading.Lock()
+reserved = 0.0
 sem = threading.BoundedSemaphore(args.conc)
 spent = 0.0
 if os.path.exists(args.ledger):
@@ -142,13 +143,22 @@ def run(kind, model_tag, messages, max_tokens, temperature, response_format=None
         if args.replay_latency:
             time.sleep(hit["ms"] / 1000.0)
         return hit["text"], hit["in"], hit["out"], hit.get("stop")
-    with lock:
-        if spent >= args.cap_usd:
-            raise PermissionError("spend cap reached")
+    # Reserve a worst-case cost (about 3 characters per input token, every
+    # output token) inside the semaphore, so queued calls cannot overshoot the cap.
+    est = cost(model, len(json.dumps(messages)) // 3 + 1, max_tokens, 0)
+    global reserved
     with sem:
-        t0 = time.time()
-        text, tin, tout, tcache, stop = call_model(model, messages, max_tokens, temperature, response_format)
-        ms = int((time.time() - t0) * 1000)
+        with lock:
+            if spent + reserved + est > args.cap_usd:
+                raise PermissionError("spend cap reached")
+            reserved += est
+        try:
+            t0 = time.time()
+            text, tin, tout, tcache, stop = call_model(model, messages, max_tokens, temperature, response_format)
+            ms = int((time.time() - t0) * 1000)
+        finally:
+            with lock:
+                reserved -= est
     c = cost(model, tin, tout, tcache)
     with lock:
         spent += c
