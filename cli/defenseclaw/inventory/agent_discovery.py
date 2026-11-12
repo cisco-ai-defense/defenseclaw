@@ -1209,8 +1209,13 @@ def discover_agents(
     refresh: bool = False,
     data_dir: str | os.PathLike[str] | None = None,
     persist_cache: bool = True,
+    reuse_shared: bool = True,
 ) -> AgentDiscovery:
     """Return cached or freshly scanned local agent install signals.
+
+    ``reuse_shared=False`` reads the agents again even inside
+    :func:`share_fresh_scans`, and the new scan replaces the shared one: the
+    retry of a version probe that failed must not get the failed scan back.
 
     ``persist_cache=False`` is for a caller that needs a fresh, read-only
     admission decision for one connector.  The returned scan still covers the
@@ -1259,7 +1264,7 @@ def discover_agents(
         tuple(_prefixes),
         tuple(sorted(probe_only)),
     )
-    if shared is not None and shared_key in shared:
+    if reuse_shared and shared is not None and shared_key in shared:
         reused = shared[shared_key]
         if persist_cache:
             _write_cache(reused, data_dir=data_dir)

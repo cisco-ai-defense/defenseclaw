@@ -1829,16 +1829,30 @@ def _first_run_action_mode_warning(
     ):
         return None
 
-    discovery = None
+    return _action_downgrade_record(connector, _downgrade_discovery(connector, data_dir))
+
+
+def _downgrade_discovery(connector: str, data_dir: str | os.PathLike[str] | None, fallback=None):
+    """The scan an action downgrade is explained from: the one that probes *connector*.
+
+    A plain refresh probes only the connectors already enrolled, and a
+    connector being set up for the first time is not, so it was reported as
+    "not being set up" with the real probe failure lost (GAP-1077). Inside a
+    guided init this reuses the scan the version gate just made.
+    """
+    from defenseclaw.commands.cmd_setup import _version_scan_persists
+
+    key = _normalize_connector(connector)
     try:
-        discovery = agent_discovery.discover_agents(
+        return agent_discovery.discover_with_probes(
+            [key],
             use_cache=False,
             refresh=True,
             data_dir=data_dir,
+            persist_cache=_version_scan_persists(key),
         )
-    except Exception:
-        discovery = None
-    return _action_downgrade_record(connector, discovery)
+    except Exception:  # noqa: BLE001 - the downgrade is reported with the generic reason
+        return fallback
 
 
 def _action_downgrade_record(connector: str, discovery=None) -> dict:

@@ -6410,6 +6410,23 @@ def _version_scan_persists(connector: str) -> bool:
     )
 
 
+def _version_probe_did_not_answer(signal: Any) -> bool:
+    """Whether the probe ran the agent and got no version: it timed out or failed.
+
+    A cold first start of an agent (its first run on the account, an antivirus
+    scan of a new install) can fail one probe that the next one passes, so the
+    version gate reads such an agent once more before it refuses (GAP-1077).
+    An agent the probe never reached (not found, outside the trusted prefixes)
+    has another cause that a second reading does not change.
+    """
+    from defenseclaw.agent_selection import probe_error_means_agent_did_not_run
+
+    if signal is None or getattr(signal, "version", "") or not getattr(signal, "binary_path", ""):
+        return False
+    error = getattr(signal, "error", "") or ""
+    return agent_discovery.VERSION_PROBE_TIMED_OUT in error or probe_error_means_agent_did_not_run(error)
+
+
 def _check_connector_version_supported_for_setup(
     connector: str,
     *,
@@ -6452,6 +6469,15 @@ def _check_connector_version_supported_for_setup(
             persist_cache=_version_scan_persists(connector),
         )
         signal = disc.agents.get(connector)
+        if _discovery is None and _version_probe_did_not_answer(signal):
+            disc = agent_discovery.discover_with_probes([connector],
+                use_cache=False,
+                refresh=True,
+                data_dir=data_dir,
+                persist_cache=_version_scan_persists(connector),
+                reuse_shared=False,
+            )
+            signal = disc.agents.get(connector)
     except Exception as exc:
         compatibility = resolve_connector_contract(connector, "")
         if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:

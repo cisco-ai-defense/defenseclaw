@@ -1711,53 +1711,6 @@ def _supported_action_connectors(
     return out
 
 
-def _action_downgrade_record(connector: str, discovery=None) -> dict:
-    """Structured report for an action request that had to fall back to observe."""
-    key = connector_paths.normalize(connector)
-    record = {
-        "connector": key,
-        "requested_mode": "action",
-        "actual_mode": "observe",
-        "status": "needs_attention",
-        "reason": "connector version could not be verified against a known hook contract",
-        "next_command": f"defenseclaw setup {key} --mode action",
-    }
-    from defenseclaw.bootstrap import HERMES_INSTALL_HINT, _hermes_installed
-
-    signal = getattr(discovery, "agents", {}).get(key) if discovery is not None else None
-    if key == "hermes" and not getattr(signal, "binary_path", "") and not _hermes_installed():
-        # Setup alone cannot verify an agent that is not installed (GAP-2383).
-        record["reason"] = "Hermes is not installed, so its version cannot be checked yet"
-        record["next_command"] = f"{HERMES_INSTALL_HINT}, then run: defenseclaw setup hermes --mode action"
-        return record
-    if (
-        signal is not None
-        and getattr(signal, "error", "") == agent_discovery.UNTRUSTED_PREFIX_ERROR
-        and getattr(signal, "binary_path", "")
-    ):
-        resolved_bin = os.path.realpath(signal.binary_path)
-        parent = os.path.dirname(resolved_bin)
-        record.update(
-            {
-                "reason": "binary path outside trusted prefixes; version was not probed",
-                "binary_path": resolved_bin,
-                "trusted_path": parent,
-                "next_command": f"defenseclaw setup trusted-paths add {parent}",
-            }
-        )
-    elif signal is not None and getattr(signal, "error", ""):
-        record["reason"] = f"connector version could not be verified: {signal.error}"
-    elif signal is not None and getattr(signal, "version", ""):
-        from defenseclaw.connector_contracts import resolve_connector_contract
-
-        why = resolve_connector_contract(key, signal.version).reason
-        record["reason"] = (
-            f"installed version {signal.version} is not covered by a known hook contract ({why})"
-        )
-        record["installed_version"] = signal.version
-    return record
-
-
 def _fresh_action_downgrade_record(
     connector: str,
     *,
@@ -1771,15 +1724,9 @@ def _fresh_action_downgrade_record(
     untrusted-path probe error and fall back to the generic remediation. Refresh
     here too so scripted init reports the same concrete reason the gate saw.
     """
-    try:
-        discovery = agent_discovery.discover_agents(
-            use_cache=False,
-            refresh=True,
-            data_dir=data_dir,
-        )
-    except Exception:
-        discovery = fallback_discovery
-    return _action_downgrade_record(connector, discovery)
+    from defenseclaw.bootstrap import _action_downgrade_record, _downgrade_discovery
+
+    return _action_downgrade_record(connector, _downgrade_discovery(connector, data_dir, fallback_discovery))
 
 
 def _connector_mode_warnings(settings: list[dict]) -> list[dict]:
