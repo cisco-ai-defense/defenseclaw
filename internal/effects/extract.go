@@ -22,13 +22,22 @@ func Extract(call Call, o Options) (result Result) {
 
 	switch call.Surface {
 	case SurfaceFileTool:
-		return extractFileTool(call, o)
+		result = extractFileTool(call, o)
 	case SurfacePatch:
-		return extractPatch(call, o)
+		result = extractPatch(call, o)
 	case SurfaceMCP:
-		return extractMCP(call, o)
+		result = extractMCP(call, o)
+	default:
+		result = extractShell(call, o)
 	}
-	return extractShell(call, o)
+	// Central invariant: the shadow step always leaves every target at
+	// Link=not_checked (the resolver step, package fsres, sets it otherwise).
+	for i := range result.Effects {
+		if result.Effects[i].Target.Link == "" {
+			result.Effects[i].Target.Link = LinkNotChecked
+		}
+	}
+	return result
 }
 
 func extractShell(call Call, o Options) Result {
