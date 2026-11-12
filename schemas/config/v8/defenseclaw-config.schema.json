@@ -6436,23 +6436,6 @@
             }
           }
         },
-        "budgets": {
-          "type": "object",
-          "additionalProperties": false,
-          "description": "Token budgets of batches and atespaces; the gateway warns once when one is reached. 0 is off.",
-          "properties": {
-            "batch_tokens": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 0
-            },
-            "atespace_tokens": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 0
-            }
-          }
-        },
         "rate_limits": {
           "type": "object",
           "additionalProperties": false,

@@ -29,7 +29,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -48,7 +47,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
-	"github.com/defenseclaw/defenseclaw/internal/substrate/usage"
 )
 
 // serve --substrate runs DefenseClaw in an Agent Substrate cluster
@@ -141,72 +139,12 @@ var substrateRateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Actor requests refused by the fair-share limits (defenseclaw.substrate.rate_limited).",
 }, []string{"scope", "route"})
 
-// Model usage of actors (no identity labels: per-person usage is in the
-// leader store, behind the own-only usage route).
-var (
-	substrateModelTokens = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "defenseclaw_substrate_model_tokens_total",
-		Help: "Model tokens of Agent Substrate actors by provider, model and kind (input, output, cache_read, cache_write).",
-	}, []string{"provider", "model", "kind"})
-	substrateModelCalls = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "defenseclaw_substrate_model_calls_total",
-		Help: "Model calls of Agent Substrate actors by provider, route decision and whether the provider reported usage.",
-	}, []string{"provider", "route", "metered"})
-	substrateBudgetWarnings = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "defenseclaw_substrate_budget_warnings_total",
-		Help: "Token budget warnings of Agent Substrate batches and atespaces.",
-	}, []string{"scope"})
-	substrateUsageDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "defenseclaw_substrate_usage_dropped_total",
-		Help: "Usage records the gateway could not store on the leader.",
-	}, []string{"reason"})
-)
-
-// substrateModelLabels bounds the model label: a model ID the actor names
-// is its own text, so after maxSubstrateModelLabels distinct values (or for
-// a call the provider did not meter) the label is "other".
-const maxSubstrateModelLabels = 64
-
-var substrateModelLabels = struct {
-	sync.Mutex
-	seen map[string]bool
-}{seen: map[string]bool{}}
-
-func substrateModelLabel(r usage.Record) string {
-	if r.UsageSource == usage.SourceAbsent || r.Model == "" || r.Status < 200 || r.Status > 299 {
-		return "other"
-	}
-	substrateModelLabels.Lock()
-	defer substrateModelLabels.Unlock()
-	if !substrateModelLabels.seen[r.Model] {
-		if len(substrateModelLabels.seen) >= maxSubstrateModelLabels {
-			return "other"
-		}
-		substrateModelLabels.seen[r.Model] = true
-	}
-	return r.Model
-}
-
-func observeSubstrateUsage(r usage.Record) {
-	metered := "true"
-	if r.UsageSource == usage.SourceAbsent {
-		metered = "false"
-	}
-	substrateModelCalls.WithLabelValues(r.Provider, r.Route, metered).Inc()
-	model := substrateModelLabel(r)
-	for kind, n := range map[string]int64{"input": r.Input, "output": r.Output, "cache_read": r.CacheRead, "cache_write": r.CacheCreation} {
-		if n > 0 {
-			substrateModelTokens.WithLabelValues(r.Provider, model, kind).Add(float64(n))
-		}
-	}
-}
-
 func runServe(cmd *cobra.Command, args []string) error {
 	if !serveFlags.substrate {
 		return errors.New("serve runs only on Agent Substrate: pass --substrate")
 	}
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(substrateRateLimited, substrateModelTokens, substrateModelCalls, substrateBudgetWarnings, substrateUsageDropped)
+	reg.MustRegister(substrateRateLimited)
 	var ready atomic.Bool
 	go serveSubstrateMetrics(reg, &ready)
 	switch serveFlags.role {
@@ -344,30 +282,16 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		if err != nil {
 			return out, err
 		}
-		leaderClient := &leader.Client{BaseURL: base, HTTP: hc}
-		usageStore := &usage.Remote{Client: leaderClient}
-		budgets := gateway.SubstrateBudgets{
-			BatchTokens: c.Substrate.Budgets.BatchTokens, AtespaceTokens: c.Substrate.Budgets.AtespaceTokens,
-		}
-		// Routing (stream 1) is not on this build: no router, so every call
-		// keeps its requested route. Usage (stream 10) is the gateway meter.
-		meter := gateway.NewSubstrateUsageMeter(api, gateway.SubstrateUsageMeterConfig{
-			Store: usageStore, Budgets: budgets, OnRecord: observeSubstrateUsage,
-			OnBudgetWarn: func(scope string) { substrateBudgetWarnings.WithLabelValues(scope).Inc() },
-			OnDrop:       func(n int, reason string) { substrateUsageDropped.WithLabelValues(reason).Add(float64(n)) },
-		})
 		llm, err := gateway.NewSubstrateLLMHandler(gateway.SubstrateLLMConfig{
 			Providers: gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion),
 			Proxy:     llmProxy,
-			Meter:     meter,
 		})
 		if err != nil {
 			return out, err
 		}
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: servingTLS,
-			Actors: actors, Registrations: &registry.Remote{Client: leaderClient},
-			Usage: gateway.SubstrateUsageAPI{Store: usageStore}, Budgets: budgets,
+			Actors: actors, Registrations: &registry.Remote{Client: &leader.Client{BaseURL: base, HTTP: hc}},
 			Limiter: ratelimit.New(ratelimit.Config{
 				PerActorRPS: c.Substrate.RateLimits.PerActorRPS, PerAtespaceRPS: c.Substrate.RateLimits.PerAtespaceRPS,
 			}),
@@ -456,14 +380,8 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 		},
 		OnStopped: func() { ready.Store(false) },
 	}
-	usageStore, err := usage.OpenFileStore(filepath.Join(serveFlags.storeDir, "usage"))
-	if err != nil {
-		return err
-	}
-	defer usageStore.Close()
 	srv := &leader.Server{IsLeader: el.IsLeader}
 	registry.Serve(srv, store)
-	usage.Serve(srv, usageStore)
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
 		files, err := podcert.NewFiles(serveFlags.peerBundle, serveFlags.peerTrust)

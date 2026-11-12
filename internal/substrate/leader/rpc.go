@@ -60,11 +60,6 @@ const (
 	// followers make of the registrations the leader keeps.
 	MethodRegistrationGet  = "RegistrationGet"
 	MethodRegistrationList = "RegistrationList"
-	// MethodUsageAppend, MethodUsageSummary and MethodUsageScope are the
-	// model usage of actors (internal/substrate/usage).
-	MethodUsageAppend  = "UsageAppend"
-	MethodUsageSummary = "UsageSummary"
-	MethodUsageScope   = "UsageScope"
 )
 
 // Methods lists every method a leader serves.
@@ -72,7 +67,6 @@ var Methods = []string{
 	MethodChainObserve, MethodIntentGet, MethodIntentPut,
 	MethodAskOpen, MethodAskResolve, MethodRegistrationWrite,
 	MethodRegistrationGet, MethodRegistrationList,
-	MethodUsageAppend, MethodUsageSummary, MethodUsageScope,
 }
 
 // Error codes.

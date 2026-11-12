@@ -17,20 +17,15 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 )
 
 // Model traffic of actors (D2): every model call goes through the
@@ -46,16 +41,8 @@ import (
 // Request bodies are inspected and responses forwarded by the proxy's
 // passthrough path, which keeps Bedrock's eventstream framing unchanged.
 //
-// Two seams (lane A12, PLAN D6) take the 1.0.10 layers when they land:
-//   - SubstrateLLMRouter: stream 1 routing and the admin rules. It sees
-//     the verified caller and the requested route and may keep, narrow or
-//     refuse it, never widen it: the upstream origin always comes from
-//     the provider table, a provider outside the table is refused, and
-//     the caller is the registration's, whatever the request says.
-//   - SubstrateModelMeter: stream 10 usage. Its shape is the stream 1 and
-//     10 usage interface (internal/modelusage Recorder and Call); until
-//     that engine lands the gateway meters tokens itself
-//     (NewSubstrateUsageMeter) into the leader's usage store.
+// SubstrateLLMRouter is the seam where stream 1 routing and stream 10
+// usage plug in (lane A12): it may choose another upstream for the call.
 
 // SubstrateLLMProvider is one model provider the actor listener serves.
 type SubstrateLLMProvider struct {
@@ -71,47 +58,20 @@ type SubstrateLLMProvider struct {
 // SubstrateLLMRoute is the upstream a call goes to.
 type SubstrateLLMRoute struct {
 	Provider string
-	// Origin is ignored on a router's answer: it is always the provider
-	// table's origin for Provider.
-	Origin string
-	Path   string
-	// Model is the model the call names (from the path for Bedrock and
-	// Gemini, from the body otherwise). A router changes the model of a
-	// path-model provider by changing Path; a body model cannot be
-	// rewritten here, so a router that names another body model refuses
-	// the call.
-	Model string
+	Origin   string
+	Path     string
 }
 
 // SubstrateLLMRouter may change a call's route (routing, budgets). It
-// returns an error to refuse the call (for example a batch over budget);
-// a *SubstrateModelRefusal error carries the reason and the plain text
-// the actor sees (the request-access text).
+// returns an error to refuse the call (for example a batch over budget).
 type SubstrateLLMRouter interface {
 	RouteModelCall(ctx context.Context, actor SubstrateModelCaller, route SubstrateLLMRoute) (SubstrateLLMRoute, error)
 }
 
-// SubstrateModelRefusal is a router's refusal with words for the actor.
-type SubstrateModelRefusal struct {
-	// Reason is a closed token (model_not_allowed, budget_exceeded, ...).
-	Reason string
-	// Message is the plain text the actor sees: why, and who to ask.
-	Message string
-}
-
-func (e *SubstrateModelRefusal) Error() string { return "model call refused: " + e.Reason }
-
-// SubstrateModelCaller is what a router and a meter see of the caller:
-// all of it from the actor's registration, none from the request.
+// SubstrateModelCaller is what a router sees of the caller.
 type SubstrateModelCaller struct {
 	Atespace, Name, UID, Owner, Profile, BatchID string
 	Unattended                                   bool
-	// Principal, Kind and Groups are the verified person's (empty for an
-	// attributed actor); stream 1 admin rules match on them.
-	Principal, Kind string
-	Groups          []string
-	Connector       string
-	Template        string
 }
 
 // SubstrateLLMConfig configures /llm.
@@ -120,8 +80,6 @@ type SubstrateLLMConfig struct {
 	// Proxy serves the call (GuardrailProxy.SubstrateHandler).
 	Proxy  http.Handler
 	Router SubstrateLLMRouter
-	// Meter meters every forwarded call (nil: none).
-	Meter SubstrateModelMeter
 }
 
 var substrateProviderRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -167,17 +125,6 @@ var substrateCredentialHeaders = []string{
 	"X-Amz-Security-Token", "X-Amz-Date", "X-Amz-Content-Sha256",
 }
 
-// Route decisions on a usage record.
-const (
-	substrateRouteNone     = "none"     // no router configured
-	substrateRouteKept     = "kept"     // the router kept the requested route
-	substrateRouteNarrowed = "narrowed" // the router chose another allowed route
-)
-
-// substrateLLMMaxBody is the most of a request body /llm reads to find the
-// model; it is the guardrail proxy's own passthrough cap.
-const substrateLLMMaxBody = 10 << 20
-
 func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	actor, ok := substrateActorFrom(r.Context())
 	if !ok {
@@ -191,54 +138,20 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeSubstrateRefusal(w, http.StatusNotFound, "provider_not_served")
 		return
 	}
-	reqPath := "/" + upstreamPath
-	if !substrateCleanPath(reqPath) {
-		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
-		return
-	}
-	var body []byte
-	if r.Body != nil && substrateBodyModel(provider) {
-		b, err := io.ReadAll(io.LimitReader(r.Body, substrateLLMMaxBody+1))
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeSubstrateRefusal(w, http.StatusRequestEntityTooLarge, "body_too_large")
-			return
-		}
-		if err != nil {
-			writeSubstrateRefusal(w, http.StatusBadRequest, "body_unreadable")
-			return
-		}
-		if len(b) > substrateLLMMaxBody {
-			writeSubstrateRefusal(w, http.StatusRequestEntityTooLarge, "body_too_large")
-			return
-		}
-		body = b
-		r.Body = io.NopCloser(bytes.NewReader(b))
-	}
-	requested := SubstrateLLMRoute{Provider: provider, Origin: p.Origin, Path: reqPath}
-	requested.Model, _ = substrateCallModel(provider, reqPath, body)
-	reg, _ := substrateRegistrationFrom(r.Context())
-	caller := SubstrateModelCaller{
-		Atespace: actor.Atespace, Name: actor.Name, UID: actor.UID, Owner: reg.Person.ID(),
-		Profile: reg.Profile, BatchID: reg.BatchID, Unattended: reg.Unattended,
-		Principal: reg.Person.Principal, Kind: reg.Person.Kind, Groups: append([]string(nil), reg.Person.Groups...),
-		Connector: reg.Connector, Template: reg.Template,
-	}
-	route, decision := requested, substrateRouteNone
+	route := SubstrateLLMRoute{Provider: provider, Origin: p.Origin, Path: "/" + upstreamPath}
 	if s.cfg.Router != nil {
-		next, err := s.cfg.Router.RouteModelCall(r.Context(), caller, requested)
+		reg, _ := substrateRegistrationFrom(r.Context())
+		next, err := s.cfg.Router.RouteModelCall(r.Context(), SubstrateModelCaller{
+			Atespace: actor.Atespace, Name: actor.Name, UID: actor.UID, Owner: reg.Person.ID(),
+			Profile: reg.Profile, BatchID: reg.BatchID, Unattended: reg.Unattended,
+		}, route)
 		if err != nil {
-			writeSubstrateModelRefusal(w, err)
+			writeSubstrateRefusal(w, http.StatusForbidden, "model_call_refused")
 			return
 		}
-		var refusal *SubstrateModelRefusal
-		route, decision, refusal = substrateNarrowRoute(s.cfg.Providers, requested, next)
-		if refusal != nil {
-			fmt.Fprintf(os.Stderr, "[substrate] llm: router answer refused for %s/%s: %s\n", actor.Atespace, actor.Name, refusal.Reason)
-			writeSubstrateModelRefusal(w, refusal)
-			return
+		if np, ok := s.cfg.Providers[next.Provider]; ok {
+			route, p = next, np
 		}
-		p = s.cfg.Providers[route.Provider]
 	}
 	key, err := os.ReadFile(p.CredentialFile)
 	if err != nil || strings.TrimSpace(string(key)) == "" {
@@ -267,157 +180,5 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u.Path, u.RawPath = route.Path, ""
 	r2.URL = &u
 	r2.RequestURI = ""
-	if s.cfg.Meter == nil {
-		s.cfg.Proxy.ServeHTTP(w, r2)
-		return
-	}
-	_, streaming := substrateCallModel(route.Provider, route.Path, body)
-	call := s.cfg.Meter.Begin(r.Context(), SubstrateModelCall{
-		RequestID: RequestIDFromContext(r.Context()), Caller: caller,
-		Requested: requested, Selected: route, Route: decision,
-		API: substrateAPIFamily(route.Provider, route.Path), Streaming: streaming, StartedAt: time.Now(),
-	})
-	mw := &substrateMeterWriter{ResponseWriter: w, call: call}
-	defer func() {
-		if v := recover(); v != nil {
-			call.End(fmt.Errorf("proxy panic"))
-			panic(v)
-		}
-	}()
-	s.cfg.Proxy.ServeHTTP(mw, r2)
-	mw.header()
-	call.End(nil)
-}
-
-// substrateCleanPath refuses dot segments, empty segments and encoded
-// separators: the provider path is forwarded as it is cleaned.
-func substrateCleanPath(p string) bool {
-	if strings.Contains(p, "\\") {
-		return false
-	}
-	return path.Clean(p) == p
-}
-
-// substrateNarrowRoute enforces that a router answer only keeps, narrows
-// or refuses: the provider must be one the table serves, the origin is the
-// table's, the path is clean, and a body model cannot be swapped.
-func substrateNarrowRoute(providers map[string]SubstrateLLMProvider, requested, next SubstrateLLMRoute) (SubstrateLLMRoute, string, *SubstrateModelRefusal) {
-	if next.Provider == "" {
-		next.Provider = requested.Provider
-	}
-	if next.Path == "" {
-		next.Path = requested.Path
-	}
-	p, ok := providers[next.Provider]
-	if !ok {
-		return requested, "", &SubstrateModelRefusal{Reason: "route_outside_providers",
-			Message: "This model route is not available. Ask your DefenseClaw administrator which models your profile allows."}
-	}
-	if !substrateCleanPath(next.Path) {
-		return requested, "", &SubstrateModelRefusal{Reason: "route_path_invalid",
-			Message: "This model route is not available."}
-	}
-	next.Origin = p.Origin
-	model, _ := substrateCallModel(next.Provider, next.Path, nil)
-	if substrateBodyModel(next.Provider) {
-		if next.Model != "" && next.Model != requested.Model {
-			return requested, "", &SubstrateModelRefusal{Reason: "model_not_allowed",
-				Message: "The requested model is not allowed for your profile. Choose an allowed model, or ask your DefenseClaw administrator for access."}
-		}
-		model = requested.Model
-	}
-	next.Model = model
-	if next.Provider == requested.Provider && next.Path == requested.Path {
-		return next, substrateRouteKept, nil
-	}
-	return next, substrateRouteNarrowed, nil
-}
-
-// writeSubstrateModelRefusal answers a refused model call: 403 with a
-// closed reason and, from a SubstrateModelRefusal, the plain text.
-func writeSubstrateModelRefusal(w http.ResponseWriter, err error) {
-	var ref *SubstrateModelRefusal
-	if !errors.As(err, &ref) || ref.Reason == "" {
-		writeSubstrateRefusal(w, http.StatusForbidden, "model_call_refused")
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusForbidden)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error": http.StatusText(http.StatusForbidden), "reason": ref.Reason, "message": ref.Message,
-	})
-}
-
-// substrateBodyModel reports a provider whose model is in the body.
-func substrateBodyModel(provider string) bool {
-	switch provider {
-	case "bedrock", "gemini":
-		return false
-	}
-	return true
-}
-
-var (
-	substrateBedrockPathRE = regexp.MustCompile(`^/model/([^/]+)/(invoke|invoke-with-response-stream|converse|converse-stream)$`)
-	substrateGeminiPathRE  = regexp.MustCompile(`^/v1(?:beta|alpha)?/models/([^/:]+):([A-Za-z]+)$`)
-)
-
-// substrateCallModel finds the model a call names and whether it streams.
-func substrateCallModel(provider, p string, body []byte) (model string, streaming bool) {
-	switch provider {
-	case "bedrock":
-		if m := substrateBedrockPathRE.FindStringSubmatch(p); m != nil {
-			return m[1], strings.HasSuffix(m[2], "stream")
-		}
-		return "", false
-	case "gemini":
-		if m := substrateGeminiPathRE.FindStringSubmatch(p); m != nil {
-			return m[1], strings.HasPrefix(m[2], "stream")
-		}
-		return "", false
-	}
-	if len(body) == 0 {
-		return "", false
-	}
-	var head struct {
-		Model  string `json:"model"`
-		Stream bool   `json:"stream"`
-	}
-	if json.Unmarshal(body, &head) != nil {
-		return "", false
-	}
-	return head.Model, head.Stream
-}
-
-// substrateAPIFamily names a call's provider API.
-func substrateAPIFamily(provider, p string) string {
-	switch provider {
-	case "bedrock":
-		if m := substrateBedrockPathRE.FindStringSubmatch(p); m != nil {
-			switch m[2] {
-			case "invoke-with-response-stream":
-				return "invoke-stream"
-			default:
-				return m[2]
-			}
-		}
-	case "gemini":
-		if substrateGeminiPathRE.MatchString(p) {
-			return "generate"
-		}
-	case "anthropic":
-		if strings.HasSuffix(p, "/messages") {
-			return "messages"
-		}
-	case "openai":
-		switch {
-		case strings.HasSuffix(p, "/chat/completions"):
-			return "chat"
-		case strings.HasSuffix(p, "/responses"):
-			return "responses"
-		}
-	}
-	return "other"
+	s.cfg.Proxy.ServeHTTP(w, r2)
 }
