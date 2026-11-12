@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -788,6 +789,28 @@ func (g *hookGoldenGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 var hookGoldenRenderMu sync.Mutex
 
+// startWrittenHook starts the command newCmd builds for a hook script the
+// case has just rendered, and returns it with the time it started. The cases
+// run on parallel workers: a fork in another worker that lands while this case's
+// script is still open for writing keeps a copy of that descriptor until
+// its child execs, and an exec of the script fails with ETXTBSY ("text file
+// busy", golang/go#22315) meanwhile. That failed TestShellHookLoweredBodyCapOnlyTightens
+// on CI (a7a585cb4f, ce46cdca54, 597b55a328: "setup: fork/exec
+// .../hooks/cursor-hook.sh: text file busy"). The script is final once
+// rendered, so a fresh command for it runs the same hook: it is started
+// again for up to 5 s. Any other error, and ETXTBSY past that, is returned.
+// No stdin byte is read before a start succeeds.
+func startWrittenHook(newCmd func() *exec.Cmd) (*exec.Cmd, time.Time, error) {
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		cmd := newCmd()
+		started := time.Now()
+		err := cmd.Start()
+		if err == nil || !errors.Is(err, syscall.ETXTBSY) || time.Now().After(deadline) {
+			return cmd, started, err
+		}
+	}
+}
+
 func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservation, error) {
 	var obs hookGoldenObservation
 	caseStart := time.Now()
@@ -950,23 +973,27 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	env, review2Delay := review2Env(env, base)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, script, c.hook.args(c.event)...)
-	if sh := os.Getenv("DC_REVIEW2_BASH"); sh != "" {
-		cmd = exec.CommandContext(ctx, sh, append([]string{script}, c.hook.args(c.event)...)...)
-	}
-	cmd.Dir = work
-	cmd.Env = env
+	var input io.Reader = bytes.NewReader(stdin)
 	if review2Delay > 0 {
 		pr, pw := io.Pipe()
 		go func() { time.Sleep(review2Delay); _, _ = pw.Write(stdin); _ = pw.Close() }()
-		cmd.Stdin = pr
-	} else {
-		cmd.Stdin = bytes.NewReader(stdin)
+		input = pr
 	}
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	hookStart := time.Now()
-	runErr := cmd.Run()
+	cmd, hookStart, runErr := startWrittenHook(func() *exec.Cmd {
+		cmd := exec.CommandContext(ctx, script, c.hook.args(c.event)...)
+		if sh := os.Getenv("DC_REVIEW2_BASH"); sh != "" {
+			cmd = exec.CommandContext(ctx, sh, append([]string{script}, c.hook.args(c.event)...)...)
+		}
+		cmd.Dir = work
+		cmd.Env = env
+		cmd.Stdin = input
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		return cmd
+	})
+	if runErr == nil {
+		runErr = cmd.Wait()
+	}
 	obs.raw.HookMs = time.Since(hookStart).Milliseconds()
 	obs.raw.LoadAfter = hookGoldenLoad()
 	obs.raw.Stdout, obs.raw.Stderr, obs.raw.Root, obs.raw.Addr = stdout.String(), stderr.String(), root, addr

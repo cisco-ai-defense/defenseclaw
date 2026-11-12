@@ -305,9 +305,11 @@ def test_linux_remaining_package_times_count_the_tests_of_the_shard_that_met_the
         ("internal/cli", "TestEnterpriseHookWorkerTimedOutInsideInstallKeepsTheRestore"): 11.2,
         ("internal/gateway/connector/hookexec", "TestSlowOwnerReadOfTheOwnFrozenGatewayStaysAnOutage"): 14.7,
     }
+    # A later refresh measures them again (to the 0.1 s the file rounds to,
+    # and a run a little faster); what must not happen is the fast-test mean.
     for (package, name), seconds in observed_seconds.items():
         recorded = timings[package]
-        assert float(recorded.get(name, recorded["*"])) >= seconds, (package, name)
+        assert float(recorded.get(name, recorded["*"])) >= seconds - 0.15, (package, name)
 
 
 def test_connector_matrix_parts_balance_on_the_times_of_the_matrix_run() -> None:
@@ -352,8 +354,12 @@ def test_linux_gateway_shards_separate_the_ci_timeout_cluster() -> None:
     }
     assert all(name in seconds for name in observed)
     holders = {name: next(i for i, shard in enumerate(shards) if name in shard) for name in observed}
-    assert len(set(holders.values())) == len(observed)
-    for index in holders.values():
+    # The cluster was the 344 s flood test with the others: it keeps a shard
+    # apart from them. The other three may share one when the shard still
+    # fits (two 80 s tests in a 420 s shard is a balanced plan).
+    flood = holders.pop("TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood")
+    assert flood not in holders.values(), holders
+    for index in {flood, *holders.values()}:
         projected = sum(observed.get(name, float(seconds.get(name, seconds["*"]))) for name in shards[index])
         assert projected * 1.3 < 660, (index, projected)
 
