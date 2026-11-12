@@ -42,8 +42,9 @@ func waitStatus(t *testing.T, e *Engine, want string) {
 	}
 }
 
-// stockRound sends qualifying headers and ends the stream the way the stock
-// filter does (half-close, no body), or cancels it like an aborting client.
+// stockRound sends qualifying headers and ends the stream without a body:
+// a clean half-close, or a cancel (what stock v1.0.0 and an aborting client
+// both do).
 func stockRound(t *testing.T, c extprocv3.ExternalProcessorClient, atespace, name string, cancelIt bool) {
 	t.Helper()
 	s, cancel := open(t, c)

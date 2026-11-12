@@ -27,8 +27,13 @@ import (
 // v1.0.0 ignores it. Nothing in a request says which, so the callout
 // watches: after an override on a request with a body, the next message is
 // the body when it was honoured; when it was not, the stream ends without
-// one (stock skips the response phases, so it half-closes) or a response
-// phase arrives first.
+// one or a response phase arrives first. Measured live on stock v1.0.0
+// (response phases skipped): the filter ends the stream as cancelled,
+// exactly like a client abort, so a stock filter is never marked
+// unsupported from stream ends; it stays unknown, and every uninspected
+// request records body_not_received:canceled as an alert. Pin
+// body_inspection off on stock filters (headers only, recorded) and on with
+// #3817.
 //
 // An actor controls when its own requests end, so the signals an actor can
 // produce do not count alone (GAP-0045):
