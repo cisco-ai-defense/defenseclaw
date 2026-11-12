@@ -1,0 +1,35 @@
+{{- if .Values.adminIngress.enabled }}
+{{- if not .Values.adminIngress.host }}{{ fail "adminIngress.host is required when adminIngress.enabled" }}{{ end }}
+# Launchers reach the admin listener through this ingress; the actor
+# listener is never exposed.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: defenseclaw-admin
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
+  {{- with .Values.adminIngress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.adminIngress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.adminIngress.tlsSecretName }}
+  tls:
+  - hosts: [{{ .Values.adminIngress.host | quote }}]
+    secretName: {{ .Values.adminIngress.tlsSecretName }}
+  {{- end }}
+  rules:
+  - host: {{ .Values.adminIngress.host | quote }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: defenseclaw-admin
+            port:
+              name: https
+{{- end }}

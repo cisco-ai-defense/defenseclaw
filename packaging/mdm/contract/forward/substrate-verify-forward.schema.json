@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/forward/substrate-verify-forward-v1.json",
+  "title": "forwardable defenseclaw substrate verify --json",
+  "description": "Forwardable members of substrate-verify.schema.json (defenseclaw substrate verify --json). Project with allowlist-and-drop (forward/project.py). Everything but the checks' free-text messages passes: cluster and atespace names, the issuer digest, versions, counts, enums and times; no account, person or credential name appears in the document.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "command": {
+      "const": "verify"
+    },
+    "management_contract": {
+      "const": 1
+    },
+    "product_version": {
+      "type": "string",
+      "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$"
+    },
+    "generated_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "cluster": {
+      "$ref": "#/$defs/cluster"
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "False when any check failed; the command then exits 1."
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/check"
+      },
+      "minItems": 8,
+      "maxItems": 8
+    }
+  },
+  "$defs": {
+    "cluster": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "cluster_name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+          "description": "k8s.cluster.name, as on every telemetry record."
+        },
+        "namespace": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+          "description": "The DefenseClaw release namespace."
+        },
+        "issuer_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of substrate.identity.issuer: a fleet compares these to find two clusters sharing an issuer (E13) without the URL."
+        },
+        "issuer_default": {
+          "type": "boolean",
+          "description": "The issuer has Substrate's default shape (https://idp.<namespace>.svc), which every cluster shares."
+        },
+        "substrate_version": {
+          "type": "string",
+          "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$",
+          "description": "The Agent Substrate release (ate-api-server image tag). Absent when it could not be read."
+        },
+        "substrate_version_supported": {
+          "type": "boolean"
+        },
+        "supported_versions": {
+          "type": "string",
+          "pattern": "^[<>=v0-9. +-]{1,64}$",
+          "description": "substrate.supported_versions, for example \">=1.0.0 <1.1.0\"."
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "id": {
+          "enum": [
+            "substrate_version",
+            "issuer_unique",
+            "snapshot_bucket",
+            "openfga_grants",
+            "callout_registered",
+            "ingress_clients",
+            "actor_service_routes",
+            "api_access_label"
+          ]
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "warn",
+            "fail",
+            "skip"
+          ]
+        },
+        "edge_case": {
+          "type": "string",
+          "pattern": "^E[0-9]{1,2}$",
+          "description": "The plan edge case the check guards (E1 actor routes, E2 proxy takeover, E10 snapshots, E13 issuer)."
+        }
+      }
+    }
+  }
+}
