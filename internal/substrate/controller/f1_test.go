@@ -330,6 +330,7 @@ func TestAnchorFileReload(t *testing.T) {
 	}
 }
 
+
 // GAP-0105: new UIDs are swept and capped, not only on a rate update.
 func TestUsageCPUSweepsOnInsert(t *testing.T) {
 	now := time.Date(2026, 11, 12, 22, 0, 0, 0, time.UTC)
@@ -445,6 +446,9 @@ func TestScopedListingSkipsAnUnlistableAtespace(t *testing.T) {
 	var warns int
 	for _, w := range r.sink.Events(controller.EventWarning) {
 		if strings.Contains(w.Message, "managed atespace eng-web") {
+			if w.Severity != controller.SeverityAlert {
+				t.Fatalf("the skip is not an alert: %+v", w)
+			}
 			warns++
 		}
 	}

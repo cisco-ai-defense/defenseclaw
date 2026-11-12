@@ -315,26 +315,27 @@ func (c *Controller) listActors(ctx context.Context) ([]*ateapi.Actor, error) {
 	var failed []string
 	for _, ns := range names {
 		actors, err := ateapi.AllActors(ctx, c.o.Client, ns, c.o.PageSize)
-		switch code := status.Code(err); {
-		case err == nil:
+		if err == nil {
 			c.listOK(ns)
-		case code == codes.PermissionDenied || code == codes.NotFound:
-			// One atespace without a grant (not bootstrapped yet) or gone
-			// must not stop the others: its actors stay default deny
-			// (GAP-0119). One warning until it lists again.
-			if c.listFailedOnce(ns) {
-				c.emit(Event{Type: EventWarning, Severity: SeverityWarn, Atespace: ns,
-					Message: "cannot list actors in managed atespace " + ns + " (" + code.String() + "): its actors get no policy until DefenseClaw is granted editor there"})
-			}
-			continue
-		default:
-			failed = append(failed, ns)
-			if len(failed) == len(names) {
-				return nil, fmt.Errorf("list actors in %s: %w", ns, err)
-			}
+			out = append(out, actors...)
 			continue
 		}
-		out = append(out, actors...)
+		// One atespace that cannot be listed (no grant yet, deleted, or a
+		// transient error) must not stop the others: skip it, keep its
+		// known actors, and alert once until it lists again (GAP-0119).
+		failed = append(failed, ns)
+		if c.listFailedOnce(ns) {
+			code := status.Code(err)
+			msg := "cannot list actors in managed atespace " + ns + " (" + code.String() + "): it is skipped; new actors there get no policy (default deny) and drift there is not reverted until it lists again"
+			if code == codes.PermissionDenied {
+				msg += "; grant DefenseClaw editor on it (the chart bootstrap)"
+			}
+			c.emit(Event{Type: EventWarning, Severity: SeverityAlert, Atespace: ns, Message: msg,
+				Detail: map[string]any{"code": code.String(), "error": err.Error()}})
+		}
+		if len(failed) == len(names) {
+			return nil, fmt.Errorf("list actors in %s: %w", ns, err)
+		}
 	}
 	if len(failed) > 0 {
 		// Reconcile what listed; a transient error is retried next pass.
