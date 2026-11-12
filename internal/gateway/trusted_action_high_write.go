@@ -241,7 +241,7 @@ func provedHighWriteFindings(
 		instruction := instructionProof != instructionNotProved
 		for _, category := range generation.categories {
 			for _, rule := range category.Rules {
-				if selfOnly && rule.ID != "tamper.detector_state_write" {
+				if selfOnly && rule.ID != stateWriteRuleID {
 					continue
 				}
 				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved, flavor, instruction) {
@@ -481,7 +481,32 @@ func highWriteRuleMatchesTarget(rule PatternRule, resolved string, flavor action
 		return instruction && activeAgentInstructionBaseMatches(
 			path.Base(strings.ReplaceAll(resolved, `\`, "/")), flavor, name)
 	}
+	if rule.ID == stateWriteRuleID && flavor == actionfacts.PathFlavorPOSIX && caseSensitiveStateHost() {
+		return exactStateDirMatch(rule, resolved)
+	}
 	return rule.Pattern.MatchString(resolved)
+}
+
+// stateWriteRuleID is the catalog rule that protects DefenseClaw state.
+const stateWriteRuleID = "tamper.detector_state_write"
+
+// caseSensitiveStateHost reports a host whose file system tells .DefenseClaw
+// from .defenseclaw (Linux), the host the path rule must read exactly. macOS
+// and Windows fold the case (pathCaseFoldHost, windowsNameFold) and keep the
+// rule's case-insensitive reading.
+func caseSensitiveStateHost() bool {
+	return runtime.GOOS == "linux" && !pathCaseFoldHost
+}
+
+// exactStateDirMatch is the state rule's pattern with the state directory
+// read in its own spelling: a path under a case-different folder
+// (~/.DefenseClaw) is another directory on a case-sensitive file system, not
+// the state. The home and the names below the state directory keep the
+// pattern's reading, so a state path of another home stays protected
+// (GAP-0607).
+func exactStateDirMatch(rule PatternRule, resolved string) bool {
+	span := rule.Pattern.FindStringIndex(resolved)
+	return span != nil && strings.Contains(resolved[span[0]:span[1]], "/.defenseclaw/")
 }
 
 // instructionLocations are the places of one call that its agent loads
