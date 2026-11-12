@@ -102,13 +102,12 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 }
 
 // end closes a stream, or handles a response phase while a body is
-// awaited. A requested body that never came is recorded with how the
-// stream ended (detection weighs the signal, GAP-0045), and the request's
-// event says it went on uninspected: the filter already sent it.
+// awaited. A requested body that never came makes the request's event an
+// alert with how the stream ended: the filter already sent it on,
+// uninspected (GAP-0045).
 func (s *Server) end(st *streamState, signal string) {
 	if st.awaitingBody {
 		st.awaitingBody = false
-		s.eng.body.missed(st.req.Actor.Atespace+"/"+st.req.Actor.Name, signal)
 		st.verdict.Alert = true
 		st.verdict.Findings = append(st.verdict.Findings, "body_not_received:"+signal)
 		s.finish(st)

@@ -31,110 +31,87 @@ func mcpHeadersAs(atespace, name string, body []byte) *extprocv3.ProcessingReque
 		"content-length", strconv.Itoa(len(body)))
 }
 
-func waitStatus(t *testing.T, e *Engine, want string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for e.BodyModeStatus() != want && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if st := e.BodyModeStatus(); st != want {
-		t.Fatalf("body mode %s, want %s", st, want)
-	}
-}
-
-// stockRound sends qualifying headers and ends the stream without a body:
-// a clean half-close, or a cancel (what stock v1.0.0 and an aborting client
-// both do).
-func stockRound(t *testing.T, c extprocv3.ExternalProcessorClient, atespace, name string, cancelIt bool) {
+// endRound sends qualifying headers and ends the stream without the body:
+// a half-close, a cancel, or a response phase first (each one measured on
+// cluster a4 and each one an actor can cause).
+func endRound(t *testing.T, c extprocv3.ExternalProcessorClient, atespace, name, how string) {
 	t.Helper()
 	s, cancel := open(t, c)
 	defer cancel()
 	if r := exchange(t, s, mcpHeadersAs(atespace, name, mcpCall("x"))); r.GetModeOverride() == nil {
 		t.Fatal("no override")
 	}
-	if cancelIt {
+	switch how {
+	case signalCanceled:
 		cancel()
 		time.Sleep(20 * time.Millisecond)
-		return
-	}
-	_ = s.CloseSend()
-	if _, err := s.Recv(); err == nil {
-		t.Fatal("stream did not end")
-	}
-}
-
-// TestBodyModeDetectionStock: clean ends without a body from two actors
-// mark the replica unsupported; after that no override is requested.
-func TestBodyModeDetectionStock(t *testing.T) {
-	h := newHarness(t, nil)
-	c := dial(t, h)
-	stockRound(t, c, "t1", "c1", false)
-	stockRound(t, c, "t1", "c1", false)
-	stockRound(t, c, "t2", "c2", false)
-	waitStatus(t, h.eng, "unsupported")
-	s, cancel := open(t, c)
-	defer cancel()
-	if r := exchange(t, s, mcpHeaders(mcpCall("x"))); r.GetModeOverride() != nil {
-		t.Fatal("override still requested after detection")
-	}
-	evs := waitEvents(t, h.events, bodyMissLimit)
-	if evs[0].BodyInspected || evs[0].Decision != "allow" || !evs[0].Alert ||
-		!strings.Contains(strings.Join(evs[0].Findings, ","), "body_not_received:eof") {
-		t.Fatalf("uninspected request event: %+v", evs[0])
+	case signalResponse:
+		resp := &extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extprocv3.HttpHeaders{}}}
+		if r := exchange(t, s, resp); r.GetResponseHeaders() == nil {
+			t.Fatalf("got %v", r)
+		}
+		_ = s.CloseSend()
+		_, _ = s.Recv()
+	default:
+		_ = s.CloseSend()
+		if _, err := s.Recv(); err == nil {
+			t.Fatal("stream did not end")
+		}
 	}
 }
 
-// TestBodyModeDetectionIgnoresOneActorAndCancels is GAP-0045: aborted
-// streams and any number of clean misses from one actor never switch body
-// inspection off for the replica.
-func TestBodyModeDetectionIgnoresOneActorAndCancels(t *testing.T) {
+// TestBodyModeNeverSwitchedOffByMissingBodies is GAP-0045: no number of
+// missing bodies, from any number of actors and however the stream ends,
+// stops the callout from asking for bodies; each such request is an alert.
+func TestBodyModeNeverSwitchedOffByMissingBodies(t *testing.T) {
 	h := newHarness(t, nil)
 	c := dial(t, h)
-	for i := 0; i < 2*bodyMissLimit; i++ {
-		stockRound(t, c, "t1", "c1", true)
-		stockRound(t, c, "t1", "c1", false)
+	n := 0
+	for _, how := range []string{signalEOF, signalCanceled, signalResponse} {
+		for i := 0; i < 4; i++ {
+			endRound(t, c, "t"+strconv.Itoa(i), "c"+strconv.Itoa(i), how)
+			n++
+		}
 	}
-	// Cancels from a second actor do not count either.
-	for i := 0; i < bodyMissLimit; i++ {
-		stockRound(t, c, "t2", "c2", true)
-	}
-	time.Sleep(50 * time.Millisecond)
 	if st := h.eng.BodyModeStatus(); st != "unknown" {
-		t.Fatalf("body mode %s after one actor's misses and cancels", st)
+		t.Fatalf("body mode %s", st)
 	}
 	s, cancel := open(t, c)
 	defer cancel()
 	if r := exchange(t, s, mcpHeaders(mcpCall("x"))); r.GetModeOverride() == nil {
 		t.Fatal("override no longer requested")
 	}
+	seen := map[string]bool{}
+	for _, ev := range waitEvents(t, h.events, n) {
+		if ev.BodyInspected || ev.Decision != "allow" || !ev.Alert {
+			t.Fatalf("uninspected request event: %+v", ev)
+		}
+		for _, f := range ev.Findings {
+			if strings.HasPrefix(f, "body_not_received:") {
+				seen[strings.TrimPrefix(f, "body_not_received:")] = true
+			}
+		}
+	}
+	for _, how := range []string{signalEOF, signalCanceled, signalResponse} {
+		if !seen[how] {
+			t.Errorf("no body_not_received:%s event (%v)", how, seen)
+		}
+	}
 }
 
-// A response phase before the body is proof the filter ignored the
-// override; a body marks it supported, and misses never undo that.
-func TestBodyModeResponseSignalAndSticky(t *testing.T) {
-	b := newBodyMode(BodyAuto, time.Now)
-	b.missed("a/1", signalCanceled)
-	b.missed("a/1", signalError)
-	if b.status() != "unknown" {
+func TestBodyModeStatus(t *testing.T) {
+	b := newBodyMode(BodyAuto)
+	if b.status() != "unknown" || !b.want() {
 		t.Fatal(b.status())
 	}
-	b.missed("a/1", signalResponse)
-	if b.status() != "unsupported" || b.want() {
-		t.Fatal(b.status())
-	}
-	b = newBodyMode(BodyAuto, time.Now)
 	b.arrived()
-	for i := 0; i < 10; i++ {
-		b.missed("x/"+strconv.Itoa(i), signalEOF)
-		b.missed("x/"+strconv.Itoa(i), signalResponse)
-	}
 	if b.status() != "supported" {
 		t.Fatal(b.status())
 	}
-	// Pinned on: detection never switches it off.
-	b = newBodyMode(BodyOn, time.Now)
-	b.missed("a/1", signalResponse)
-	if !b.want() {
-		t.Fatal("pinned on stopped asking")
+	if off := newBodyMode(BodyOff); off.want() || off.status() != "off" {
+		t.Fatal("off")
+	}
+	if on := newBodyMode(BodyOn); !on.want() {
+		t.Fatal("on")
 	}
 }

@@ -139,17 +139,11 @@ func TestDecideBodyOverCapByFailureMode(t *testing.T) {
 	}
 }
 
-// Without body mode (off, or detected unsupported) an MCP request is never
-// silent: off is recorded, unsupported is an alert.
+// With body_inspection off an MCP request is never silent: it is recorded.
 func TestBodyModeUnavailableIsRecorded(t *testing.T) {
 	off := newHarness(t, func(c *Config, _ *Options) { c.BodyInspection = BodyOff })
 	r := off.eng.requestFrom(mcpHeaders(mcpCall("x")), mcpHeaders(mcpCall("x")).GetRequestHeaders())
 	if v := off.eng.DecideHeaders(context.Background(), r); !v.Allow || v.WantBody || !strings.Contains(strings.Join(v.Findings, ","), whyInspectOff) {
 		t.Fatalf("off: %+v", v)
-	}
-	auto := newHarness(t, nil)
-	auto.eng.body.missed("a/1", signalResponse)
-	if v := auto.eng.DecideHeaders(context.Background(), r); !v.Allow || !v.Alert || !strings.Contains(strings.Join(v.Findings, ","), whyUnsupported) {
-		t.Fatalf("unsupported: %+v", v)
 	}
 }

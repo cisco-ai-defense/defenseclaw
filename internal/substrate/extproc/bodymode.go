@@ -16,46 +16,25 @@
 
 package extproc
 
-import (
-	"sync"
-	"time"
-)
+import "sync"
 
-// Body mode detection (D9). The egress filter honours a mode_override only
-// when it was rendered with allow_mode_override (upstream #3817's
+// Body mode (D9). The egress filter honours a mode_override only when it
+// was rendered with allow_mode_override (upstream #3817's
 // --experimental-additional-egress-extproc-allow-mode-override); stock
-// v1.0.0 ignores it. Nothing in a request says which, so the callout
-// watches: after an override on a request with a body, the next message is
-// the body when it was honoured; when it was not, the stream ends without
-// one or a response phase arrives first. Measured live on stock v1.0.0
-// (response phases skipped): the filter ends the stream as cancelled,
-// exactly like a client abort, so a stock filter is never marked
-// unsupported from stream ends; it stays unknown, and every uninspected
-// request records body_not_received:canceled as an alert. Pin
-// body_inspection off on stock filters (headers only, recorded) and on with
-// #3817.
+// v1.0.0 ignores it. With body_inspection auto or on, the callout asks for
+// the body of every qualifying request; off never asks.
 //
-// An actor controls when its own requests end, so the signals an actor can
-// produce do not count alone (GAP-0045):
-//   - a cancelled or failed stream (the client aborted, Envoy reset) is
-//     never a miss;
-//   - a clean end without the body is a miss, and the replica is marked
-//     unsupported only after bodyMissLimit misses from at least
-//     bodyMissActors different actors, with no body in between;
-//   - a response phase before the body proves the filter sent the request
-//     on without it, and marks the replica unsupported at once.
-//
-// A body marks it supported, and supported is never undone by misses.
-// Unsupported is probed again after bodyReprobe, so a filter redeployed with
-// the setting is picked up without a restart. Managed installs should pin
-// body_inspection on, which skips detection.
-const (
-	bodyMissLimit  = 3
-	bodyMissActors = 2
-	bodyReprobe    = 10 * time.Minute
-)
+// Nothing turns body mode off at run time (GAP-0045). Every way a requested
+// body fails to arrive can be produced by an actor, as measured on cluster
+// a4: stock v1.0.0 ends the stream as cancelled, exactly like a client
+// abort; on #3817 an abort mid-body ends it cleanly; and a chunked body over
+// Envoy's buffer gets a local 413, which reaches the callout as a response
+// phase before the body. So a missing body only makes that request's event
+// an alert (body_not_received:<signal>), and a body that arrives marks the
+// filter supported for the readiness check. On a stock filter set
+// body_inspection off (headers only, recorded on every MCP request).
 
-// Stream end signals.
+// Stream end signals, recorded on the request's event.
 const (
 	signalEOF      = "eof"
 	signalCanceled = "canceled"
@@ -65,87 +44,33 @@ const (
 
 type bodyMode struct {
 	setting string
-	now     func() time.Time
 
-	mu        sync.Mutex
-	supported int // 0 unknown, 1 supported, -1 unsupported
-	misses    int
-	actors    map[string]bool
-	since     time.Time
+	mu       sync.Mutex
+	received bool
 }
 
-func newBodyMode(setting string, now func() time.Time) *bodyMode {
-	return &bodyMode{setting: setting, now: now, actors: map[string]bool{}}
-}
+func newBodyMode(setting string) *bodyMode { return &bodyMode{setting: setting} }
 
 // want reports whether to ask for the body of a qualifying request.
-func (b *bodyMode) want() bool {
-	switch b.setting {
-	case BodyOff:
-		return false
-	case BodyOn:
-		return true
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.supported >= 0 {
-		return true
-	}
-	if b.now().Sub(b.since) >= bodyReprobe {
-		b.reset(0)
-		return true
-	}
-	return false
-}
-
-func (b *bodyMode) reset(state int) {
-	b.supported, b.misses = state, 0
-	b.actors = map[string]bool{}
-}
+func (b *bodyMode) want() bool { return b.setting != BodyOff }
 
 // arrived records a requested body that came.
 func (b *bodyMode) arrived() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.reset(1)
+	b.received = true
+	b.mu.Unlock()
 }
 
-// missed records a requested body that did not come: how the stream ended
-// and whose request it was.
-func (b *bodyMode) missed(actor, signal string) {
-	if b.setting != BodyAuto {
-		return
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.supported > 0 {
-		return
-	}
-	switch signal {
-	case signalResponse:
-		b.reset(-1)
-		b.since = b.now()
-	case signalEOF:
-		b.misses++
-		b.actors[actor] = true
-		if b.misses >= bodyMissLimit && len(b.actors) >= bodyMissActors {
-			b.reset(-1)
-			b.since = b.now()
-		}
-	}
-}
-
+// status is off, supported (a body has arrived) or unknown, for the
+// readiness check and doctor.
 func (b *bodyMode) status() string {
 	if b.setting == BodyOff {
 		return "off"
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	switch b.supported {
-	case 1:
+	if b.received {
 		return "supported"
-	case -1:
-		return "unsupported"
 	}
 	return "unknown"
 }

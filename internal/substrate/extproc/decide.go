@@ -195,7 +195,7 @@ func NewEngine(o Options) (*Engine, error) {
 		}
 	}
 	e.bindings = compileBindings(cfg.Secrets)
-	e.body = newBodyMode(cfg.BodyInspection, e.now)
+	e.body = newBodyMode(cfg.BodyInspection)
 	e.chain = newChainQueue(o.ChainSink, cfg.Chain.QueueSize)
 	return e, nil
 }
@@ -207,7 +207,7 @@ func (e *Engine) Close() { e.chain.close() }
 func (e *Engine) Redactor() *Redactor { return e.red }
 
 // BodyModeStatus is the body-mode detection state (for readiness and
-// doctor): off, unknown, supported or unsupported.
+// doctor): off, unknown or supported.
 func (e *Engine) BodyModeStatus() string { return e.body.status() }
 
 // InvalidateActor is the lifecycle hook: a deleted, recreated or forked
@@ -369,18 +369,17 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 // Why an inspected host's body is not inspected. The first two are framing
 // the actor chose; the others are the deployment's.
 const (
-	whyOverCap     = "over_cap"
-	whyStreaming   = "streaming_content_type"
-	whyUnsupported = "body_mode_unsupported"
-	whyInspectOff  = "body_inspection_off"
+	whyOverCap    = "over_cap"
+	whyStreaming  = "streaming_content_type"
+	whyInspectOff = "body_inspection_off"
 )
 
 // uninspected applies GAP-0044 to a request on an MCP or admin-listed host
 // whose body won't be inspected: inspect or refuse, never allow silently.
 // Framing the actor controls (a body over the cap, a streaming content
 // type) is refused when the failure mode is closed and an alert when open.
-// A filter without body mode is an alert (the readiness check reports
-// it); body_inspection off is recorded.
+// body_inspection off is recorded; a filter that ignores the override is
+// an alert when the stream ends without the body (Server.end).
 func (e *Engine) uninspected(v Verdict, why string) Verdict {
 	switch why {
 	case "":
@@ -394,8 +393,6 @@ func (e *Engine) uninspected(v Verdict, why string) Verdict {
 			}
 			return deny(v, CategoryBodyUninspected, sourceCallout, why, reason)
 		}
-		v.Alert = true
-	case whyUnsupported:
 		v.Alert = true
 	}
 	if why == whyOverCap {
@@ -455,11 +452,8 @@ func (e *Engine) wantBody(req *Request) (bool, string) {
 	if req.ContentLength > e.cfg.BodyMaxBytes {
 		return false, whyOverCap
 	}
-	switch {
-	case e.cfg.BodyInspection == BodyOff:
+	if !e.body.want() {
 		return false, whyInspectOff
-	case !e.body.want():
-		return false, whyUnsupported
 	}
 	return true, ""
 }

@@ -140,8 +140,9 @@ type SubstrateExtprocConfig struct {
 	// FailureMode is closed (default) or open when the callout can't
 	// decide; managed installs are always closed.
 	FailureMode string `mapstructure:"failure_mode" yaml:"failure_mode,omitempty"`
-	// BodyInspection is auto (default: when the egress filter allows the
-	// body override, detected at run time), on or off.
+	// BodyInspection is auto (default) or on: the callout asks for the body
+	// of every qualifying request (an egress filter without mode override
+	// ignores it and each request is an alert); off: headers only.
 	BodyInspection string `mapstructure:"body_inspection" yaml:"body_inspection,omitempty"`
 	BodyMaxBytes   int    `mapstructure:"body_max_bytes"  yaml:"body_max_bytes,omitempty"`
 	// MCPHosts are the remote MCP servers whose JSON-RPC bodies are
