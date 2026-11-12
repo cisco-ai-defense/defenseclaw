@@ -3397,41 +3397,6 @@ func hardenWindowsUserRuntime(home, dataDir string, paths []string, target *wind
 	return nil
 }
 
-func setWindowsUserPathProtection(path string, target *windows.SID, directory bool) error {
-	if err := rejectWindowsReparseChain(path); err != nil {
-		return err
-	}
-	owner, err := windowsPathOwnerNoFollow(path)
-	if err != nil {
-		return err
-	}
-	if owner == nil || !owner.Equals(target) {
-		return fmt.Errorf(
-			"enterprise hooks: refusing to canonicalize wrong-owner path %s (owner %s, target %s)",
-			path,
-			windowsSIDString(owner),
-			windowsSIDString(target),
-		)
-	}
-	if !directory {
-		if err := validateWindowsRegularFileSingleLink(path); err != nil {
-			return err
-		}
-	}
-	if err := validateWindowsUserPathElement(path, target, directory, directory, true); err == nil {
-		return nil
-	}
-	acl, err := windowsUserPathProtectionACL(target, directory)
-	if err != nil {
-		return err
-	}
-	extended, err := winpath.Extended(path)
-	if err != nil {
-		return err
-	}
-	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
-}
-
 func windowsUserPathProtectionACL(target *windows.SID, directory bool) (*windows.ACL, error) {
 	canonical, err := windowsUserPathCanonicalACEs(target, directory)
 	if err != nil {

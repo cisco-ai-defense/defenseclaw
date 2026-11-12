@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -149,26 +150,17 @@ var testGatewayPortClaimDir string
 const testProcessIdentityNote = "an elevated administrator that is not LocalSystem (the CI runner's identity)"
 
 // normalizeTestTokenDefaultOwner makes the test binary's own account the
-// owner of everything it creates, as the CI harness does for its elevated
-// runner (scripts/windows-native-ci.ps1 Set-CurrentUserAsDefaultOwner). An
-// elevated administrator's token defaults to BUILTIN\Administrators as the
-// owner, so outside that harness every t.TempDir() looked foreign to the
-// product's ownership checks ("safefile: refusing foreign-owned directory")
-// and the watchdog, daemon and audit tests failed when an administrator ran
-// the package from an elevated prompt (GAP-0079). A standard user's and
-// LocalSystem's tokens already default to their own account.
+// owner of everything it creates (testenv.OwnNewObjectsAsTokenUser), as the
+// CI harness does for its elevated runner (scripts/windows-native-ci.ps1
+// Set-CurrentUserAsDefaultOwner). An elevated administrator's token defaults
+// to BUILTIN\Administrators as the owner, so outside that harness every
+// t.TempDir() looked foreign to the product's ownership checks ("safefile:
+// refusing foreign-owned directory") and the watchdog, daemon and audit tests
+// failed when an administrator ran the package from an elevated prompt
+// (GAP-0079). A standard user's and LocalSystem's tokens already default to
+// their own account.
 func normalizeTestTokenDefaultOwner() {
-	var token windows.Token
-	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT, &token); err != nil {
-		return
-	}
-	defer token.Close()
-	user, err := token.GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		return
-	}
-	owner := struct{ Owner *windows.SID }{Owner: user.User.Sid}
-	_ = windows.SetTokenInformation(token, windows.TokenOwner, (*byte)(unsafe.Pointer(&owner)), uint32(unsafe.Sizeof(owner)))
+	_, _ = testenv.OwnNewObjectsAsTokenUser()
 }
 
 // pinTestProcessIdentity makes every identity seam answer as the CI runner
@@ -610,7 +602,12 @@ func snapshotTestServices(snapshot map[string]string) bool {
 
 // fingerprintTestTree records root and everything under it as
 // "file <path>" = "<kind> <size> <modified>", without following links;
-// an unreadable folder is recorded as such. A path in skip is left out.
+// a folder this identity cannot list keeps its own modified time and says its
+// contents are unreadable. A path in skip is left out. A
+// folder is "folder <modified>": the size Windows reports for a folder is
+// not its content, and it changed (0 -> 4096 on C:\Windows\Logs\DefenseClaw,
+// same modified time, no entry added or removed), so the package failed
+// GAP-0079 with nothing written; an added or removed entry is its own line.
 func fingerprintTestTree(snapshot map[string]string, root string, skip []string) {
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		for _, left := range skip {
@@ -620,9 +617,23 @@ func fingerprintTestTree(snapshot map[string]string, root string, skip []string)
 			}
 		}
 		if err != nil {
-			if !errors.Is(err, fs.ErrNotExist) {
-				snapshot["file "+path] = "unreadable: " + err.Error()
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
 			}
+			// WalkDir calls back a second time for a folder it cannot list,
+			// with the ReadDir error. Its own modified time stays in the
+			// fingerprint, read from the folder itself (NTFS bumps it when an
+			// entry is added, removed or renamed in it), so a write directly
+			// under it still shows. It was the fixed text "unreadable: ...",
+			// and such a write was invisible (GAP-0672 round 2 review L4).
+			if entry != nil && entry.IsDir() {
+				if info, statErr := os.Lstat(path); statErr == nil {
+					snapshot["file "+path] = "folder " + info.ModTime().UTC().Format(time.RFC3339Nano) +
+						", contents unreadable: " + err.Error()
+					return nil
+				}
+			}
+			snapshot["file "+path] = "unreadable: " + err.Error()
 			return nil
 		}
 		info, err := entry.Info()
@@ -639,7 +650,12 @@ func fingerprintTestTree(snapshot map[string]string, root string, skip []string)
 		case !entry.Type().IsRegular():
 			kind = "other"
 		}
-		snapshot["file "+path] = fmt.Sprintf("%s %d %s", kind, info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano))
+		modified := info.ModTime().UTC().Format(time.RFC3339Nano)
+		if kind == "folder" {
+			snapshot["file "+path] = kind + " " + modified
+			return nil
+		}
+		snapshot["file "+path] = fmt.Sprintf("%s %d %s", kind, info.Size(), modified)
 		return nil
 	})
 }
@@ -1464,5 +1480,98 @@ func TestTestMachineFolderFingerprintSeesEveryChange(t *testing.T) {
 	}
 	if strings.Contains(changes, "gateway.log") || strings.Contains(changes, "kept.json") {
 		t.Errorf("the fingerprint diff reports a skipped or unchanged file:\n%s", changes)
+	}
+}
+
+// A folder this identity cannot list keeps its own modified time in the
+// fingerprint, so an entry written directly under it still shows (GAP-0672
+// round 2 review L4). The fixture denies only FILE_LIST_DIRECTORY to the test
+// account, which can still add a file, and dates the folder in the past, so
+// the write moves its modified time whatever the clock resolution.
+func TestTestMachineFolderFingerprintSeesAWriteUnderAnUnlistableFolder(t *testing.T) {
+	root := t.TempDir()
+	locked := filepath.Join(root, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("resolve the test account: %v", err)
+	}
+	me := user.User.Sid.String()
+	setDACL := func(sddl string) {
+		t.Helper()
+		descriptor, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := descriptor.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(locked, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+			t.Fatalf("set the DACL of %s: %v", locked, err)
+		}
+	}
+	allow := "(A;OICI;FA;;;" + me + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	setDACL("D:P(D;;0x1;;;" + me + ")" + allow) // 0x1: FILE_LIST_DIRECTORY
+	t.Cleanup(func() { setDACL("D:P" + allow) })
+	if _, err := os.ReadDir(locked); err == nil {
+		t.Fatalf("the test account can still list %s", locked)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(locked, past, past); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := func() map[string]string {
+		snapshot := map[string]string{}
+		fingerprintTestTree(snapshot, root, nil)
+		return snapshot
+	}
+	before := fingerprint()
+	if got := before["file "+locked]; !strings.HasPrefix(got, "folder ") || !strings.Contains(got, ", contents unreadable: ") {
+		t.Fatalf("unlistable folder fingerprint %q, want its modified time and an unreadable note", got)
+	}
+	if changes := diffTestMachineRegistry(before, fingerprint()); len(changes) != 0 {
+		t.Fatalf("an unchanged unlistable folder is reported as a machine write: %v", changes)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "written.log"), []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changes := strings.Join(diffTestMachineRegistry(before, fingerprint()), "\n"); !strings.Contains(changes, "changed file "+locked) {
+		t.Fatalf("a write under an unlistable folder is not reported:\n%s", changes)
+	}
+}
+
+// A folder's fingerprint is its modified time, not the size Windows reports
+// for it, which is no content; a folder that gains an entry still shows.
+func TestTestMachineFolderFingerprintLeavesOutTheFolderSize(t *testing.T) {
+	root := t.TempDir()
+	logs := filepath.Join(root, "Logs")
+	if err := os.Mkdir(logs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := func() map[string]string {
+		snapshot := map[string]string{}
+		fingerprintTestTree(snapshot, logs, nil)
+		return snapshot
+	}
+	info, err := os.Stat(logs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := fingerprint()
+	if got, want := before["file "+logs], "folder "+info.ModTime().UTC().Format(time.RFC3339Nano); got != want {
+		t.Fatalf("folder fingerprint %q, want %q", got, want)
+	}
+	if changes := diffTestMachineRegistry(before, fingerprint()); len(changes) != 0 {
+		t.Fatalf("an unchanged folder is reported as a machine write: %v", changes)
+	}
+	if err := os.WriteFile(filepath.Join(logs, "written.log"), []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changes := strings.Join(diffTestMachineRegistry(before, fingerprint()), "\n"); !strings.Contains(changes, "added file "+filepath.Join(logs, "written.log")) {
+		t.Fatalf("a written entry is not reported:\n%s", changes)
 	}
 }
