@@ -223,5 +223,9 @@ func (t *Transport) Warm(ctx context.Context, connector string) error {
 	return nil
 }
 
+// Client is the transport's HTTP client (same trust, no proxy), for other
+// kit callers of the actor listener such as the relay's token check.
+func (t *Transport) Client() *http.Client { return t.client }
+
 // Reset drops kept-alive connections (after a resume they lead nowhere).
 func (t *Transport) Reset() { t.client.CloseIdleConnections() }

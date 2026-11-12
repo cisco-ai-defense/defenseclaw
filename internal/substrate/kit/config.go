@@ -102,6 +102,11 @@ type RelayConfig struct {
 	VerifyURL string `json:"verify_url"`
 	// OutputBufferBytes sizes the long-poll output ring.
 	OutputBufferBytes int `json:"output_buffer_bytes"`
+	// IdentityDir holds the actor's projected identity files (atespace,
+	// name, uid), from the template's systemInfo actorMetadata volume.
+	IdentityDir string `json:"identity_dir"`
+	// Env is extra environment for the agent the relay starts.
+	Env map[string]string `json:"env"`
 }
 
 // DefaultConfig is the configuration a kit image gets when the template build
@@ -121,6 +126,7 @@ func DefaultConfig() Config {
 			Tmux:              "/usr/bin/tmux",
 			SessionAudience:   "dcrelay",
 			OutputBufferBytes: 1 << 20,
+			IdentityDir:       "/run/ate/actor",
 		},
 	}
 }
