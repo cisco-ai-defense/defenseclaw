@@ -625,6 +625,9 @@ func (s *SubstrateConfig) Validate() error {
 	if err := s.Admin.validateAs("admin"); err != nil {
 		errs = append(errs, err)
 	}
+	if err := s.Admin.substrateScopeError("admin"); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 

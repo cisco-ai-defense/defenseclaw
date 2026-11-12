@@ -457,6 +457,36 @@ type SandboxAdminConfig struct {
 	// the user, instead of the host's enterprise.openshell.driver_fallback
 	// (docker by default). none wins; docker never loosens a none.
 	DriverFallback string `mapstructure:"driver_fallback" yaml:"driver_fallback,omitempty"`
+
+	// The runtime keys (PLAN §7.3, sandbox_runtime_keys.go). Runtimes
+	// applies on computers and in clusters; the others are Agent Substrate
+	// keys that openshell.admin refuses. Their JSON names are omitted when
+	// unset, so the floor digest of a floor without them is unchanged.
+
+	// Runtimes lists the sandbox runtimes the subject's agents may use:
+	// openshell (a sandbox on the computer) and substrate (an Agent
+	// Substrate actor). Unset allows both; profiles intersect it. With
+	// required_for, runtimes: [substrate] points a refused host run to
+	// `defenseclaw substrate run` and refuses an OpenShell sandbox.
+	Runtimes []string `mapstructure:"runtimes" yaml:"runtimes,omitempty" json:",omitempty"`
+	// SandboxClass is the weakest isolation an actor may run in: gvisor or
+	// microvm (microvm wins; "" = the cluster's default_sandbox_class).
+	SandboxClass string `mapstructure:"sandbox_class" yaml:"sandbox_class,omitempty" json:",omitempty"`
+	// IdleSuspendAfter (a Go duration, at least 1m) replaces the cluster's
+	// substrate.idle_suspend_after for the actor; the shortest wins.
+	IdleSuspendAfter string `mapstructure:"idle_suspend_after" yaml:"idle_suspend_after,omitempty" json:",omitempty"`
+	// UnattendedAsks is deny or queue (D12): what an ask of an unattended
+	// actor does, over substrate.unattended.asks; deny wins.
+	UnattendedAsks string `mapstructure:"unattended_asks" yaml:"unattended_asks,omitempty" json:",omitempty"`
+	// AskTimeout (a Go duration, 1m to 24h) is how long a queued ask waits
+	// before it is denied, over substrate.unattended.ask_timeout; the
+	// shortest wins.
+	AskTimeout string `mapstructure:"ask_timeout" yaml:"ask_timeout,omitempty" json:",omitempty"`
+	// ActorSecrets names the values a program inside the actor may read
+	// (PLAN §7.2): keys of the callout's actor-secrets Secret, marked
+	// exposed, with exact-value DLP on prompts and egress. Unset exposes
+	// none; profiles intersect it.
+	ActorSecrets []string `mapstructure:"actor_secrets" yaml:"actor_secrets,omitempty" json:",omitempty"`
 }
 
 // Values of the managed sandbox floor keys of SandboxAdminConfig.
@@ -500,7 +530,9 @@ func (a SandboxAdminConfig) IsZero() bool {
 		a.Allowed == nil && len(a.RequiredFor) == 0 && a.WhenUnavailable == "" && a.UserApprovals == "" &&
 		len(a.AllowedCredentials) == 0 && a.OnSilence == "" && a.MaxSilenceAfter == "" &&
 		a.ProcessTree == nil && a.ForeignSandboxes == "" && a.AllowUpstreamTelemetry == nil &&
-		a.DeleteStoppedAfter == "" && a.RequestAccess == "" && a.DriverFallback == ""
+		a.DeleteStoppedAfter == "" && a.RequestAccess == "" && a.DriverFallback == "" &&
+		a.Runtimes == nil && a.SandboxClass == "" && a.IdleSuspendAfter == "" && a.UnattendedAsks == "" &&
+		a.AskTimeout == "" && a.ActorSecrets == nil
 }
 
 // IsLocked reports whether key is listed in Locked.
@@ -1100,6 +1132,7 @@ func (o *OpenShellConfig) Validate() error {
 	}
 	check(validateOpenShellResources("resources", o.Resources))
 	check(o.Admin.validateAs("admin"))
+	check(o.Admin.hostScopeError("admin"))
 	return errors.Join(errs...)
 }
 
@@ -1139,6 +1172,7 @@ func (a *SandboxAdminConfig) validateAs(prefix string) error {
 		}
 	}
 	check(a.validateManagedFloor(prefix))
+	check(a.validateRuntimeKeys(prefix))
 	return errors.Join(errs...)
 }
 
@@ -1183,7 +1217,8 @@ func validateOpenShellNonNegative(field string, value int) error {
 
 // openShellAdminEnumKeys are the floor settings (openshell.admin and a
 // guardrail profile's sandbox section) whose values are lowercase words.
-var openShellAdminEnumKeys = []string{"when_unavailable", "user_approvals", "on_silence", "foreign_sandboxes", "driver_fallback", "min_profile"}
+var openShellAdminEnumKeys = []string{"when_unavailable", "user_approvals", "on_silence", "foreign_sandboxes", "driver_fallback", "min_profile",
+	"sandbox_class", "unattended_asks"}
 
 // foldOpenShellEnumCase lowercases, in a parsed config document, the string
 // values of the administrator's OpenShell settings whose values are
@@ -1218,7 +1253,8 @@ func foldOpenShellEnumCase(root *yaml.Node) {
 // name, for a configuration the loader decoded from the file itself
 // (foldOpenShellEnumCase folds the same in the document).
 func (a *SandboxAdminConfig) foldEnumCase() {
-	for _, v := range []*string{&a.WhenUnavailable, &a.UserApprovals, &a.OnSilence, &a.ForeignSandboxes, &a.DriverFallback, &a.MinProfile} {
+	for _, v := range []*string{&a.WhenUnavailable, &a.UserApprovals, &a.OnSilence, &a.ForeignSandboxes, &a.DriverFallback, &a.MinProfile,
+		&a.SandboxClass, &a.UnattendedAsks} {
 		*v = strings.ToLower(*v)
 	}
 }
