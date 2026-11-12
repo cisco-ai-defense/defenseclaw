@@ -292,6 +292,9 @@ func (l *lexer) lexDollar() {
 			}
 			l.i++
 		}
+		if l.i > len(l.runes) { // a trailing backtick escape can overshoot
+			l.i = len(l.runes)
+		}
 		name := string(l.runes[start:l.i])
 		if l.cur() == '}' {
 			l.i++

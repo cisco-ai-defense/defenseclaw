@@ -12,20 +12,27 @@ func (p *parser) parsePipelineChainOrAssignment(s stopSet) Statement {
 	// Assignment is only possible when the statement begins in expression
 	// mode (a variable / index target). Try it speculatively.
 	if p.expressionLead() {
-		save := p.i
+		em := p.exprMode
+		p.exprMode = true
 		lhs := p.parseExpression()
+		p.exprMode = em
 		if p.isAssignOp() {
 			op := p.advance().Value
 			p.skipNewlines()
 			rhs := p.parseStatement(s)
-			lstart, _ := lhs.Span()
+			lstart := p.prevEnd()
+			if lhs != nil {
+				lstart, _ = lhs.Span()
+			}
 			return &Assignment{span: span{lstart, p.prevEnd()}, LHS: lhs, Op: op, RHS: rhs}
 		}
-		// not an assignment: rewind and parse as a pipeline so command and
-		// redirection semantics apply uniformly.
-		p.i = save
+		seed := &ExprStatement{Expr: lhs}
+		if lhs != nil {
+			seed.start, seed.end = lhs.Span()
+		}
+		return p.parsePipelineChain(seed)
 	}
-	return p.parsePipelineChain()
+	return p.parsePipelineChain(nil)
 }
 
 func (p *parser) isAssignOp() bool {
@@ -48,8 +55,8 @@ func (p *parser) expressionLead() bool {
 	return false
 }
 
-func (p *parser) parsePipelineChain() Statement {
-	head := p.parsePipeline()
+func (p *parser) parsePipelineChain(seed PipelineElement) Statement {
+	head := p.parsePipeline(seed)
 	cur := head
 	guard := 0
 	for (p.at(TokAmpAmp) || p.at(TokPipePipe)) && guard < 1<<16 {
@@ -63,7 +70,7 @@ func (p *parser) parsePipelineChain() Statement {
 		}
 		p.advance()
 		p.skipNewlines()
-		right := p.parsePipeline()
+		right := p.parsePipeline(nil)
 		cur.ChainOp = op
 		cur.ChainRHS = right
 		cur = right
@@ -71,11 +78,15 @@ func (p *parser) parsePipelineChain() Statement {
 	return head
 }
 
-func (p *parser) parsePipeline() *Pipeline {
+func (p *parser) parsePipeline(seed PipelineElement) *Pipeline {
 	start := p.cur().Start
 	pl := &Pipeline{}
-	el := p.parsePipelineElement()
-	if el != nil {
+	if seed != nil {
+		pl.Elements = append(pl.Elements, seed)
+		if s0, _ := seed.Span(); s0 >= 0 {
+			start = s0
+		}
+	} else if el := p.parsePipelineElement(); el != nil {
 		pl.Elements = append(pl.Elements, el)
 	}
 	for p.at(TokPipe) {
