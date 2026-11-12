@@ -218,7 +218,18 @@ func (p *GuardrailProxy) handleListenerProof(w http.ResponseWriter, r *http.Requ
 	if cfg := proxyDecisionConfig(r.Context()); cfg != nil && cfg.SecureClientIntegration() {
 		secureClient = true
 	}
-	if secureClient || ManagedEnterpriseActive() || !writeGatewayTokenListenerProof(w, r, p.gatewayToken, refreshed) {
+	// The OpenClaw plugin proves this listener with its connector-scoped
+	// credential before it sends that credential and provider keys.
+	pluginToken := ""
+	if prover, ok := p.connector.(interface{ PluginProofToken() string }); ok {
+		pluginToken = prover.PluginProofToken()
+	}
+	pluginAccount := ""
+	if cfg := proxyDecisionConfig(r.Context()); cfg != nil {
+		pluginAccount = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)
+	}
+	if secureClient || ManagedEnterpriseActive() || (!writeGatewayTokenListenerProof(w, r, p.gatewayToken, refreshed, pluginToken) &&
+		!writeOpenClawPluginAccountProof(w, r, pluginToken, pluginAccount)) {
 		p.emitProxyAuthFailure(r, "listener_proof_refused")
 		writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 	}

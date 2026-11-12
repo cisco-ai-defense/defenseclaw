@@ -105,6 +105,7 @@ var OpenClawHomeOverride string
 // /api/v1/inspect/tool.
 type OpenClawConnector struct {
 	state        openClawPathState
+	plugin       openClawPluginCredential
 	gatewayToken string
 	masterKey    string
 }
@@ -293,6 +294,8 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if !openClawExtensionAvailable() {
 		return fmt.Errorf("openclaw extension is not bundled in this gateway build — run 'make extensions' (or 'make plugin') and rebuild the gateway, or pick a different connector with 'defenseclaw setup connector'")
 	}
+
+	c.recordPluginCredential(opts)
 
 	// Surface 1: Install the embedded plugin into OpenClaw and register it
 	// in openclaw.json. Enabling the connector is the *only* step an
@@ -1054,6 +1057,9 @@ func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 }
 
 func (c *OpenClawConnector) Authenticate(r *http.Request) bool {
+	if c.pluginCredentialMatches(r) {
+		return true
+	}
 	isLoopback := IsLoopback(r)
 
 	// Check X-DC-Auth token (set by the fetch interceptor).

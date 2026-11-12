@@ -90,3 +90,25 @@ func writeGatewayTokenListenerProof(w http.ResponseWriter, r *http.Request, toke
 	}
 	return false
 }
+
+// writeOpenClawPluginAccountProof answers the listener proof in the
+// separate-user layout, where the OpenClaw plugin runs as
+// connectors.openclaw.plugin_account and not as this gateway account. It
+// proves only the plugin credential (never the gateway token), and only to a
+// caller of that account. It reports whether it answered.
+func writeOpenClawPluginAccountProof(w http.ResponseWriter, r *http.Request, pluginToken, pluginAccount string) bool {
+	pluginToken, pluginAccount = strings.TrimSpace(pluginToken), strings.TrimSpace(pluginAccount)
+	if pluginToken == "" || pluginAccount == "" || r.Method != http.MethodGet || !connector.IsLoopback(r) ||
+		!isGatewayTokenListenerProofRequest(r) || !gatewayTokenProofCallerIsAccount(r, pluginAccount) {
+		return false
+	}
+	keyID := strings.ToLower(strings.TrimSpace(r.Header.Get(connector.UserScopedListenerKeyIDHeader)))
+	nonce := strings.TrimSpace(r.Header.Get(connector.UserScopedListenerNonceHeader))
+	if !gatewayTokenListenerNonceRE.MatchString(nonce) || !constantTimeStringMatch(keyID, connector.UserScopedCredentialKeyID(pluginToken)) {
+		return false
+	}
+	w.Header().Set(connector.UserScopedListenerProofHeader, gatewayTokenListenerProof(pluginToken, nonce))
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+	return true
+}

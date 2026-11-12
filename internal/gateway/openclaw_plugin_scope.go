@@ -194,3 +194,12 @@ func (a *APIServer) openClawPluginProofToken() string {
 	}
 	return token
 }
+
+// openClawPluginAccount is connectors.openclaw.plugin_account, or "".
+func (a *APIServer) openClawPluginAccount() string {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)
+}

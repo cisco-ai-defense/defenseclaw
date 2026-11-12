@@ -45,3 +45,7 @@ func gatewayTokenProofCallerIsSelf(r *http.Request) bool {
 	self, err := gatewayProcessSID()
 	return err == nil && userScopedProofCallerMatches(r, self)
 }
+
+// gatewayTokenProofCallerIsAccount: the separate-user layout is Linux and
+// macOS only in 1.0.10.
+func gatewayTokenProofCallerIsAccount(*http.Request, string) bool { return false }

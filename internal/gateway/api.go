@@ -4394,7 +4394,8 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			if a.scannerCfg != nil {
 				expected = a.scannerCfg.Gateway.Token
 			}
-			if !writeGatewayTokenListenerProof(w, r, a.openClawPluginProofToken(), expected, a.client.RefreshedToken()) {
+			if !writeGatewayTokenListenerProof(w, r, a.openClawPluginProofToken(), expected, a.client.RefreshedToken()) &&
+				!writeOpenClawPluginAccountProof(w, r, a.openClawPluginProofToken(), a.openClawPluginAccount()) {
 				a.emitHTTPAuthFailure(r.Context(), r, connector.UserScopedListenerProofPath,
 					gatewaylog.ErrCodeAuthInvalidToken, userScopedListenerProofRefusedReason)
 				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
