@@ -343,9 +343,21 @@ export default function (api: DefenseClawPluginHost) {
   // OpenClaw version: hybrid (native hooks and the guardrail proxy), native
   // (native hooks only, Windows) or none (the proxy, OpenClaw before
   // 2026.8.35).
-  const configuredHookMode = (api.pluginConfig as Record<string, unknown> | undefined)?.hookMode;
+  const pluginCfg = (api.pluginConfig as Record<string, unknown> | undefined) ?? {};
+  const configuredHookMode = pluginCfg.hookMode;
+  // native (no interceptor, no proxy) is honoured only on Windows, where
+  // DefenseClaw hosts no proxy: elsewhere openclaw.json is writable by the
+  // agent account, and one key must not turn off model-traffic inspection.
   const hookMode: "proxy" | "hybrid" | "native" =
-    configuredHookMode === "hybrid" || configuredHookMode === "native" ? configuredHookMode : "proxy";
+    configuredHookMode === "native" && process.platform === "win32"
+      ? "native"
+      : configuredHookMode === "hybrid" || configuredHookMode === "native"
+        ? "hybrid"
+        : "proxy";
+  // The prompt gate setup derived from config.yaml (always on in native
+  // mode, the only request-side check there); the gateway answer can turn it
+  // on, never off.
+  const promptGateFloor = pluginCfg.promptGate === true || hookMode === "native";
   const sidecarConfig = loadSidecarConfig();
   const SIDECAR_API = sidecarConfig.baseUrl;
   if (!isLoopbackHost(sidecarConfig.host)) {
@@ -359,7 +371,10 @@ export default function (api: DefenseClawPluginHost) {
   // throws or runs out of its budget, whatever the DefenseClaw policy says.
   // The plugin gives each gate hook this budget and waits for a verdict at
   // most 3 s less, so the plugin, not the host, applies the outage mode.
-  const hostGateBudgetMs = Math.min(600_000, Math.max(30_000, (sidecarConfig.approvalTimeoutS + 15) * 1_000));
+  // OpenClaw allows a gate budget up to 600 s; the plugin bounds its own
+  // wait (inspectTimeoutMs) well inside it, so the host never times out first.
+  const hostGateBudgetMs = 600_000;
+  const HOST_MARGIN_MS = 10_000;
   // The verdict wait comes from the gateway (judge budget, approvals), read
   // per call; before it answers, the config.yaml approval settings apply.
   const inspectTimeoutMs = (): number => {
@@ -368,7 +383,7 @@ export default function (api: DefenseClawPluginHost) {
     const wanted = runtime.inspectTimeoutMs > 0
       ? runtime.inspectTimeoutMs
       : live.hiltEnabled ? Math.max(2_000, (live.approvalTimeoutS + 5) * 1_000) : 10_000;
-    return Math.min(wanted, hostGateBudgetMs - 3_000);
+    return Math.min(wanted, hostGateBudgetMs - HOST_MARGIN_MS);
   };
 
   let identityCache: BootstrapPluginIdentityResult | undefined;
@@ -418,11 +433,18 @@ export default function (api: DefenseClawPluginHost) {
   // the separate-user layout, the approval settings), read when the service
   // starts and every minute until it stops.
   let runtimeTimer: ReturnType<typeof setInterval> | undefined;
+  let runtimeFailureLogged = false;
   const refreshRuntime = (): Promise<void> =>
     Promise.resolve()
       .then(() => daemonClient.runtime())
       .then((res) => {
-        if (res.ok && res.data) setRuntimeSettings(res.data);
+        if (res.ok && res.data) {
+          setRuntimeSettings(res.data);
+          runtimeFailureLogged = false;
+        } else if (!runtimeFailureLogged) {
+          runtimeFailureLogged = true;
+          console.warn(`[defenseclaw] could not read the guardrail settings from the gateway (status ${res.status}); the prompt gate follows openclaw.json until it answers`);
+        }
       })
       .catch(() => {});
   const startRuntimeRefresh = (): void => {
@@ -759,13 +781,18 @@ export default function (api: DefenseClawPluginHost) {
     // the user prompt is inspected before the model reads it. OpenClaw keeps
     // only the replacement message in the transcript of a blocked run.
     api.on("before_agent_run", async (event, ctx) => {
-      if (!getRuntimeSettings().promptGate) return;
+      if (!promptGateFloor && !getRuntimeSettings().promptGate) return;
       const prompt = typeof event?.prompt === "string" ? event.prompt : "";
       if (!prompt) return;
       const sessionId = sessionOf(ctx);
       const verdict = await postForVerdict(
         "/api/v1/inspect/request",
-        { content: prompt.slice(0, MAX_OBSERVED_TEXT), ...(sessionId ? { session_id: sessionId } : {}) },
+        {
+          content: prompt.slice(0, MAX_OBSERVED_TEXT),
+          // A cut prompt is reviewed as a bounded prefix, never as complete.
+          ...(prompt.length > MAX_OBSERVED_TEXT ? { bounded_prefix_review: true } : {}),
+          ...(sessionId ? { session_id: sessionId } : {}),
+        },
         { runId: ctx?.runId, sessionId },
         promptOutageVerdict,
       );

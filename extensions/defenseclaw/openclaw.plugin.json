@@ -66,6 +66,10 @@
           "native"
         ],
         "description": "Written by defenseclaw setup from connectors.openclaw.hooks.mode and the OpenClaw version: hybrid = native plugin hooks plus the guardrail proxy, native = native plugin hooks only (Windows). Absent = the guardrail proxy with before_tool_call (OpenClaw before 2026.8.35)."
+      },
+      "promptGate": {
+        "type": "boolean",
+        "description": "Written by defenseclaw setup from connectors.openclaw.hooks.prompt_gate: check every user prompt in before_agent_run. Always on in native mode."
       }
     }
   }

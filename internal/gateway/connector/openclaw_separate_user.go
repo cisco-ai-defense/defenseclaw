@@ -55,8 +55,11 @@ func openClawSeparateUserEntry(opts SetupOpts) map[string]interface{} {
 		"sidecarPort":   apiPort,
 		"guardrailPort": proxyPort,
 	}
-	if mode := ResolveOpenClawHookMode(opts.OpenClawHooksMode, openClawObservedVersion(opts)); mode != OpenClawHookModeProxy {
-		entry[openClawHookModeKey] = mode
+	if keys := openClawPluginKeysFor(opts, openClawObservedVersion(opts)); keys.hookMode != OpenClawHookModeProxy {
+		entry[openClawHookModeKey] = keys.hookMode
+		if keys.promptGate {
+			entry[openClawPromptGateKey] = true
+		}
 	}
 	return entry
 }

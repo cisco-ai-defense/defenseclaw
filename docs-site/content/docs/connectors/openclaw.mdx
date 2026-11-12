@@ -20,7 +20,7 @@ DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls thr
 | Platform | Status | Notes |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | DefenseClaw hosts the required guardrail proxy and installs the first-party plugin. Subprocess policy is shell shims on both. |
-| Native Windows x64 | **Supported** | OpenClaw 2026.8.35 or later in native hook mode: the plugin under `%USERPROFILE%\.openclaw` guards tools, prompts and model calls through its own hooks. DefenseClaw hosts no guardrail proxy on Windows, so there is no model response scan and no PATH shims. Per-user installs only; managed Windows is not in this release. |
+| Native Windows x64 | **Supported** | OpenClaw 2026.8.35 or later in native hook mode: the plugin under `%USERPROFILE%\.openclaw` blocks tool calls and prompts (the prompt gate is always on there) through its own hooks; finished model replies and tool results are scanned and audited but cannot be blocked. DefenseClaw hosts no guardrail proxy on Windows, so there is no provider-request scan, no streaming response scan and no PATH shims. Per-user installs only; managed Windows is not in this release. |
 
 ## Setup
 
@@ -366,7 +366,6 @@ Two settings under `connectors.openclaw.hooks` change the choice. Both are optio
 
 On Windows, setup refuses an OpenClaw older than 2026.8.35 and asks you to upgrade it. After you change `hooks.mode`, run `defenseclaw setup openclaw --restart` again so setup rewrites `hookMode`.
 
-{/* pending: Windows platform support in platform_support.go and the capability matrix land with the Windows native branch; confirm before merge. */}
 
 ### Prompt gate
 

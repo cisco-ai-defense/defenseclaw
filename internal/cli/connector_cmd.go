@@ -502,6 +502,7 @@ func resolveConnectorOptsFor(dataDir, name string) connector.SetupOpts {
 	opts.OpenClawPluginDir = cfg.OpenClawExternalPluginDir()
 	opts.OpenClawPluginAccount = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)
 	opts.OpenClawHooksMode = cfg.OpenClawHooksMode()
+	opts.OpenClawPromptGate = cfg.Connectors.OpenClaw.Hooks.PromptGate
 	opts.OpenClawPluginTokenFile = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenFile)
 	opts.OpenClawPluginTokenGroup = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenGroup)
 	opts.OpenClawInstallPolicy = cfg.OpenClawInstallPolicyOn()

@@ -131,6 +131,11 @@ func (a *APIServer) refuseOpenClawPluginPath(w http.ResponseWriter, r *http.Requ
 	if openClawPathUnderAny(target, openClawPluginRoots(cfg)) {
 		return false
 	}
+	// OpenClaw stages a skill or plugin install under the temporary folder
+	// of its account; a staged folder that account owns may be scanned.
+	if openClawStagedByAccount(target, strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)) {
+		return false
+	}
 	a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "path is outside the OpenClaw account"})
 	return true
 }

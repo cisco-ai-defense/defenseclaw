@@ -83,11 +83,29 @@ describe("native hooks", () => {
     expect(listeners["after_tool_call"]).toBeUndefined();
   });
 
-  it("gives the gate hooks a host budget above the verdict wait", () => {
+  it("gives the gate hooks the largest host budget, well above the verdict wait", () => {
     const { options } = setup("hybrid");
-    const budget = (options["before_tool_call"] as { timeoutMs: number }).timeoutMs;
-    expect(budget).toBeGreaterThanOrEqual(30_000);
-    expect((options["before_agent_run"] as { timeoutMs: number }).timeoutMs).toBe(budget);
+    expect((options["before_tool_call"] as { timeoutMs: number }).timeoutMs).toBe(600_000);
+    expect((options["before_agent_run"] as { timeoutMs: number }).timeoutMs).toBe(600_000);
+  });
+
+  it("marks a cut prompt as a bounded prefix", async () => {
+    const { listeners } = setup("hybrid");
+    mockDaemonClient.postRaw.mockResolvedValueOnce(answer({ action: "allow", severity: "NONE", reason: "", mode: "action" }));
+    await listeners["before_agent_run"]({ prompt: "x".repeat(256 * 1024 + 10), messages: [] }, {});
+    expect(mockDaemonClient.postRaw.mock.calls[0][1]).toMatchObject({ bounded_prefix_review: true });
+  });
+
+  it("honours the promptGate key setup wrote before the gateway answers", async () => {
+    setRuntimeSettings({ prompt_gate: false });
+    const listeners: Record<string, Handler> = {};
+    (pluginSetup as (api: unknown) => void)({
+      config: {}, pluginConfig: { hookMode: "hybrid", promptGate: true },
+      on: vi.fn((e: string, h: Handler) => { listeners[e] = h; }), registerService: vi.fn(), registerCommand: vi.fn(),
+    });
+    mockDaemonClient.postRaw.mockResolvedValueOnce(answer({ action: "allow", severity: "NONE", reason: "", mode: "action" }));
+    await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {});
+    expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
   });
 
   it("blocks a prompt the gateway blocks in action mode", async () => {
@@ -129,11 +147,23 @@ describe("native hooks", () => {
     expect(await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {})).toMatchObject({ outcome: "block" });
   });
 
+  it("treats hookMode native as hybrid outside Windows", () => {
+    const linux = setup("native");
+    expect(linux.listeners["after_tool_call"]).toBeUndefined();
+  });
+
   it("feeds tool results and model output to the scans only in native mode", () => {
     const hybrid = setup("hybrid");
     expect(hybrid.listeners["after_tool_call"]).toBeUndefined();
     expect(hybrid.listeners["llm_output"]).toBeUndefined();
-    const native = setup("native");
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    let native: ReturnType<typeof setup>;
+    try {
+      native = setup("native");
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
     mockDaemonClient.postRaw.mockResolvedValue(answer({ action: "allow", severity: "NONE", reason: "", mode: "observe" }));
     native.listeners["after_tool_call"]({ toolName: "exec", params: {}, result: { stdout: "ok" } }, { sessionKey: "s" });
     native.listeners["llm_output"]({ runId: "r", sessionId: "s", provider: "p", model: "m", assistantTexts: ["a", "b"] }, {});

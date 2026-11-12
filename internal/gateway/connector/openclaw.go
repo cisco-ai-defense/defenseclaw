@@ -349,7 +349,7 @@ func (c *OpenClawConnector) registerPlugin(opts SetupOpts) error {
 		observedVersion := openClawObservedVersion(opts)
 		dropRejectedApprovals := OpenClawLacksPluginApprovals(observedVersion)
 		if err := installOpenClawExtension(paths, externalDir, opts.HILTEnabled, dropRejectedApprovals,
-			openClawConversationHooksSupported(observedVersion), ResolveOpenClawHookMode(opts.OpenClawHooksMode, observedVersion)); err != nil {
+			openClawConversationHooksSupported(observedVersion), openClawPluginKeysFor(opts, observedVersion)); err != nil {
 			return fmt.Errorf("openclaw extension install: %w", err)
 		}
 		if err := applyOpenClawInstallPolicy(configPath, opts); err != nil {
@@ -552,7 +552,7 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 // <home>/extensions/defenseclaw and registers the plugin in the openclaw.json
 // of paths (claw.config_file, else <home>/openclaw.json). Idempotent: re-running leaves the config in the
 // same shape (single allow entry, single load path, enabled=true).
-func installOpenClawExtension(paths openClawPaths, externalDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool, hookMode string) error {
+func installOpenClawExtension(paths openClawPaths, externalDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool, pluginKeys openClawPluginKeys) error {
 	extDir := paths.managedPluginDir()
 	parentDir := paths.extensionsDir()
 
@@ -569,7 +569,7 @@ func installOpenClawExtension(paths openClawPaths, externalDir string, enablePlu
 		extDir = externalDir
 	}
 	configPath := paths.config
-	if err := patchOpenClawConfig(configPath, extDir, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks, hookMode); err != nil {
+	if err := patchOpenClawConfig(configPath, extDir, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks, pluginKeys); err != nil {
 		return fmt.Errorf("patch openclaw.json: %w", err)
 	}
 	if externalDir != "" {
@@ -686,7 +686,7 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 // the DefenseClaw plugin is allowed, enabled, and has its extension path
 // in plugins.load.paths. Other sections are left untouched. The caller holds
 // the openclaw.json lock (see openClawConfigLocked).
-func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool, hookMode string) error {
+func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool, pluginKeys openClawPluginKeys) error {
 	cfg := map[string]interface{}{}
 	var before map[string]interface{}
 	original, readErr := readConnectorStateFile(configPath)
@@ -724,7 +724,7 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 		return err
 	}
 	entry["enabled"] = true
-	setOpenClawHookMode(entry, hookMode)
+	setOpenClawPluginKeys(entry, pluginKeys)
 	if allowConversationHooks {
 		hooks, _ := entry["hooks"].(map[string]interface{})
 		if hooks == nil {
@@ -873,7 +873,7 @@ func removeDefenseClawEntryKeys(entries map[string]interface{}, scope openClawRe
 		return
 	}
 	delete(entry, "enabled")
-	removeDefenseClawHookMode(entry)
+	removeDefenseClawPluginKeys(entry)
 	if scope.conversationGrant {
 		removeDefenseClawConversationGrant(entry, scope.keepEmptyHooks)
 	}
@@ -888,34 +888,56 @@ func removeDefenseClawEntryKeys(entries map[string]interface{}, scope openClawRe
 // resolved hook mode (ResolveOpenClawHookMode).
 const openClawHookModeKey = "hookMode"
 
-// setOpenClawHookMode writes config.hookMode for a native or hybrid mode
-// and removes it for the proxy mode, which is what a plugin without the key
-// runs (so a 1.0.9 openclaw.json does not change for the proxy mode).
-func setOpenClawHookMode(entry map[string]interface{}, mode string) {
-	if mode == "" || mode == OpenClawHookModeProxy {
-		removeDefenseClawHookMode(entry)
+// openClawPromptGateKey is the plugin config key setup writes when
+// connectors.openclaw.hooks.prompt_gate is on, so the plugin has it before
+// the gateway answers its runtime settings.
+const openClawPromptGateKey = "promptGate"
+
+// openClawSetupConfigKeys are the plugin config keys setup derives from
+// config.yaml; teardown takes them out again.
+var openClawSetupConfigKeys = []string{openClawHookModeKey, openClawPromptGateKey}
+
+// openClawPluginKeys are the derived plugin config values.
+type openClawPluginKeys struct {
+	hookMode   string
+	promptGate bool
+}
+
+// setOpenClawPluginKeys writes config.hookMode for a native or hybrid mode
+// and config.promptGate when it is on, and removes them otherwise: the proxy
+// mode is what a plugin without the keys runs, so a 1.0.9 openclaw.json does
+// not change for it.
+func setOpenClawPluginKeys(entry map[string]interface{}, keys openClawPluginKeys) {
+	removeDefenseClawPluginKeys(entry)
+	if keys.hookMode == "" || keys.hookMode == OpenClawHookModeProxy {
 		return
 	}
 	cfg, _ := entry["config"].(map[string]interface{})
 	if cfg == nil {
 		cfg = map[string]interface{}{}
 	}
-	cfg[openClawHookModeKey] = mode
+	cfg[openClawHookModeKey] = keys.hookMode
+	if keys.promptGate {
+		cfg[openClawPromptGateKey] = true
+	}
 	entry["config"] = cfg
 }
 
-// removeDefenseClawHookMode deletes config.hookMode, and the config object
-// when that leaves it empty.
-func removeDefenseClawHookMode(entry map[string]interface{}) {
+// removeDefenseClawPluginKeys deletes the derived plugin config keys, and
+// the config object when that leaves it empty.
+func removeDefenseClawPluginKeys(entry map[string]interface{}) {
 	cfg, ok := entry["config"].(map[string]interface{})
 	if !ok {
 		return
 	}
-	if _, ok := cfg[openClawHookModeKey]; !ok {
-		return
+	removed := false
+	for _, key := range openClawSetupConfigKeys {
+		if _, ok := cfg[key]; ok {
+			delete(cfg, key)
+			removed = true
+		}
 	}
-	delete(cfg, openClawHookModeKey)
-	if len(cfg) == 0 {
+	if removed && len(cfg) == 0 {
 		delete(entry, "config")
 	}
 }
@@ -1187,4 +1209,12 @@ func (c *OpenClawConnector) ComponentTargets(cwd string) map[string][]string {
 		"config": {paths.config},
 	}
 	return targets
+}
+
+// openClawPluginKeysFor derives the plugin config values from opts.
+func openClawPluginKeysFor(opts SetupOpts, observedVersion string) openClawPluginKeys {
+	return openClawPluginKeys{
+		hookMode:   ResolveOpenClawHookMode(opts.OpenClawHooksMode, observedVersion),
+		promptGate: opts.OpenClawPromptGate,
+	}
 }

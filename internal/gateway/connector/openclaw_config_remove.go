@@ -196,15 +196,20 @@ func childValue(obj *jsonc.Value, key string) *jsonc.Value {
 	return nil
 }
 
-// removeHookModeSpans returns the text ranges that drop config.hookMode
+// removeHookModeSpans returns the text ranges that drop config.hookMode or config.promptGate
 // (setup writes it) from a defenseclaw entry, and the config object with it
-// when nothing else is in it. It mirrors removeDefenseClawHookMode.
+// when nothing else is in it. It mirrors removeDefenseClawPluginKeys.
 func removeHookModeSpans(entry *jsonc.Value, data []byte) []jsonc.Span {
 	cfg := childValue(entry, "config")
 	if cfg == nil || !cfg.Object {
 		return nil
 	}
-	i, ok := cfg.Lookup(openClawHookModeKey)
+	i, ok := -1, false
+	for _, key := range openClawSetupConfigKeys {
+		if i, ok = cfg.Lookup(key); ok {
+			break
+		}
+	}
 	if !ok {
 		return nil
 	}

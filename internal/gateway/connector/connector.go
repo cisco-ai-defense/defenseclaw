@@ -101,7 +101,9 @@ type SetupOpts struct {
 	OpenClawPluginAccount string
 	// OpenClawHooksMode is connectors.openclaw.hooks.mode (auto or proxy);
 	// Setup resolves it with the OpenClaw version (ResolveOpenClawHookMode).
-	OpenClawHooksMode        string
+	OpenClawHooksMode string
+	// OpenClawPromptGate is connectors.openclaw.hooks.prompt_gate.
+	OpenClawPromptGate       bool
 	OpenClawPluginTokenFile  string
 	OpenClawPluginTokenGroup string
 	// OpenClawInstallPolicy is connectors.openclaw.install_policy resolved

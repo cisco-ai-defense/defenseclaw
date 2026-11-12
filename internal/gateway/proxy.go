@@ -4542,6 +4542,13 @@ func (p *GuardrailProxy) presentsOwnerCredential(r *http.Request) bool {
 	if p.matchesRefreshedGatewayToken(r) {
 		return true
 	}
+	// The OpenClaw plugin credential lives in the data folder of this
+	// account, so it proves the gateway account in the same-user layout. In
+	// the separate-user layout another account holds it and it proves
+	// nothing about who sent the request.
+	if p.openClawPluginCredentialIsOwner(r) {
+		return true
+	}
 	for _, presented := range []string{
 		strings.TrimPrefix(r.Header.Get("X-DC-Auth"), "Bearer "),
 		connector.ExtractBearerKey(r.Header.Get("Authorization")),
@@ -6688,4 +6695,22 @@ func mergeRequestJSON(base, overlay map[string]interface{}) map[string]interface
 	}
 
 	return out
+}
+
+// openClawPluginCredentialIsOwner reports an X-DC-Auth that carries the
+// OpenClaw plugin credential while OpenClaw runs as this account.
+func (p *GuardrailProxy) openClawPluginCredentialIsOwner(r *http.Request) bool {
+	prover, ok := p.connector.(interface{ PluginProofToken() string })
+	if !ok {
+		return false
+	}
+	token := prover.PluginProofToken()
+	presented := strings.TrimPrefix(r.Header.Get("X-DC-Auth"), "Bearer ")
+	if token == "" || presented == "" || !constantTimeStringMatch(presented, token) {
+		return false
+	}
+	if cfg := proxyDecisionConfig(r.Context()); cfg != nil && cfg.OpenClawSeparateUser() {
+		return false
+	}
+	return true
 }
