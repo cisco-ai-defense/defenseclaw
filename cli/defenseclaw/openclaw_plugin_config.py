@@ -119,3 +119,54 @@ def openclaw_hook_mode_detail(mode: str) -> str:
         "hybrid": "native plugin hooks and the guardrail proxy",
         "native": "native plugin hooks only (no guardrail proxy on this host)",
     }.get(mode, "guardrail proxy with the tool check (OpenClaw before 2026.8.35, or hooks.mode proxy)")
+
+
+def _openclaw_document(cfg: object) -> dict:
+    claw = getattr(cfg, "claw", None)
+    home = str(getattr(claw, "home_dir", "") or "~/.openclaw")
+    config_file = str(getattr(claw, "config_file", "") or os.path.join(home, "openclaw.json"))
+    try:
+        document = openclaw_json5.load_file(os.path.expanduser(config_file))
+    except (OSError, UnicodeError, openclaw_json5.OpenClawConfigSyntaxError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def openclaw_install_policy_state(cfg: object) -> str:
+    # ours: security.installPolicy runs the DefenseClaw admission command;
+    # operator: another installPolicy is configured; none: no installPolicy.
+    security = _openclaw_document(cfg).get("security")
+    policy = security.get("installPolicy") if isinstance(security, dict) else None
+    if not isinstance(policy, dict) or not policy.get("enabled"):
+        return "none"
+    exec_cfg = policy.get("exec") if isinstance(policy.get("exec"), dict) else {}
+    args = exec_cfg.get("args") if isinstance(exec_cfg.get("args"), list) else []
+    return "ours" if args[-3:] == ["connector", "openclaw", "install-policy"] else "operator"
+
+
+def openclaw_install_policy_wanted(cfg: object) -> bool:
+    # Mirrors Go Config.OpenClawInstallPolicyOn: on and off are what they
+    # say; auto is on in the strict tier and on managed installs.
+    from defenseclaw.config import config_path
+
+    setting = ""
+    try:
+        import yaml
+
+        with open(config_path(), encoding="utf-8") as stream:
+            raw = yaml.safe_load(stream) or {}
+        connectors = raw.get("connectors") if isinstance(raw, dict) else None
+        openclaw = connectors.get("openclaw") if isinstance(connectors, dict) else None
+        if isinstance(openclaw, dict):
+            setting = str(openclaw.get("install_policy") or "").strip().lower()
+    except Exception:  # noqa: BLE001 - doctor reads what it can
+        setting = ""
+    if setting in ("on", "off"):
+        return setting == "on"
+    from defenseclaw.config import _is_managed_enterprise_mode
+
+    if _is_managed_enterprise_mode(getattr(cfg, "deployment_mode", "")):
+        return True
+    guardrail = getattr(cfg, "guardrail", None)
+    tier = guardrail.hook_policy_tier("openclaw") if guardrail is not None and hasattr(guardrail, "hook_policy_tier") else ""
+    return tier == "strict"

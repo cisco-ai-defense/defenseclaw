@@ -7,7 +7,11 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from defenseclaw.openclaw_plugin_config import configured_openclaw_hook_mode, openclaw_hook_mode_detail
+from defenseclaw.openclaw_plugin_config import (
+    configured_openclaw_hook_mode,
+    openclaw_hook_mode_detail,
+    openclaw_install_policy_state,
+)
 
 
 class OpenClawHookModeTest(unittest.TestCase):
@@ -35,6 +39,25 @@ class OpenClawHookModeTest(unittest.TestCase):
     def test_detail_names_the_proxy(self):
         self.assertIn("no guardrail proxy", openclaw_hook_mode_detail("native"))
         self.assertIn("proxy", openclaw_hook_mode_detail("proxy"))
+
+
+class OpenClawInstallPolicyStateTest(unittest.TestCase):
+    def _cfg(self, security):
+        home = tempfile.mkdtemp()
+        doc = {"plugins": {}}
+        if security is not None:
+            doc["security"] = security
+        with open(os.path.join(home, "openclaw.json"), "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        return SimpleNamespace(claw=SimpleNamespace(home_dir=home, config_file=os.path.join(home, "openclaw.json")))
+
+    def test_states(self):
+        ours = {"installPolicy": {"enabled": True, "exec": {"args": ["connector", "openclaw", "install-policy"]}}}
+        other = {"installPolicy": {"enabled": True, "exec": {"args": ["--json"]}}}
+        self.assertEqual(openclaw_install_policy_state(self._cfg(ours)), "ours")
+        self.assertEqual(openclaw_install_policy_state(self._cfg(other)), "operator")
+        self.assertEqual(openclaw_install_policy_state(self._cfg(None)), "none")
+        self.assertEqual(openclaw_install_policy_state(self._cfg({"installPolicy": {"enabled": False}})), "none")
 
 
 if __name__ == "__main__":
