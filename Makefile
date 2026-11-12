@@ -470,8 +470,9 @@ dev-pycli: pycli
 # Protobuf regeneration
 # ---------------------------------------------------------------------------
 # `proto` regenerates the Go stubs for the DefenseClaw ↔ AVC (Secure
-# Client) contract, the private semantic guardrail facts and the vendored
-# Tetragon API (third_party/tetragon).
+# Client) contract, the private semantic guardrail facts, the vendored
+# Tetragon API (third_party/tetragon) and the vendored Agent Substrate control
+# API (third_party/substrate).
 # Tool binaries are installed under .tools/bin so contributors do not
 # need protoc-gen-go in their global $GOPATH/bin, and the versions
 # are pinned to what the generated files were produced against.
@@ -492,6 +493,14 @@ TETRAGON_PROTOS := tetragon/bpf.proto tetragon/capabilities.proto tetragon/event
 TETRAGON_PROTO_M := $(foreach p,$(TETRAGON_PROTOS),M$(p)=$(TETRAGON_PROTO_PKG))
 TETRAGON_PROTO_STUBS := $(addprefix third_party/tetragon/api/v1/,$(TETRAGON_PROTOS:.proto=.pb.go)) \
 	third_party/tetragon/api/v1/tetragon/sensors_grpc.pb.go
+# The Agent Substrate control API (agent-substrate/substrate v1.0.0,
+# Apache-2.0), vendored unmodified under third_party/substrate for the
+# Substrate controller. The upstream go_package is remapped so no
+# go.ate.dev/substrate module is imported; see third_party/substrate/README.md.
+SUBSTRATE_PROTO := api/ateapi/v1/ateapi.proto
+SUBSTRATE_PROTO_M := M$(SUBSTRATE_PROTO)=github.com/defenseclaw/defenseclaw/third_party/substrate/api/ateapi/v1;ateapi
+SUBSTRATE_PROTO_STUBS := third_party/substrate/api/ateapi/v1/ateapi.pb.go \
+	third_party/substrate/api/ateapi/v1/ateapi_grpc.pb.go
 
 proto-tools: _checkout-write-preflight
 	@mkdir -p $(PROTO_TOOLS_BIN)
@@ -511,6 +520,10 @@ proto: proto-tools
 		--go_out=. --go_opt=paths=source_relative $(addprefix --go_opt=,$(TETRAGON_PROTO_M)) \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative $(addprefix --go-grpc_opt=,$(TETRAGON_PROTO_M)) \
 		$(TETRAGON_PROTOS)
+	@cd third_party/substrate && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
+		--go_out=. --go_opt=paths=source_relative --go_opt='$(SUBSTRATE_PROTO_M)' \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative --go-grpc_opt='$(SUBSTRATE_PROTO_M)' \
+		$(SUBSTRATE_PROTO)
 	@echo "Regenerated committed Go protobuf stubs"
 
 proto-check: proto
@@ -518,12 +531,12 @@ proto-check: proto
 		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
 		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
 		internal/guardrail/semanticpb/facts.pb.go \
-		$(TETRAGON_PROTO_STUBS) >/dev/null
+		$(TETRAGON_PROTO_STUBS) $(SUBSTRATE_PROTO_STUBS) >/dev/null
 	@git diff --exit-code -- \
 		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
 		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
 		internal/guardrail/semanticpb/facts.pb.go \
-		$(TETRAGON_PROTO_STUBS)
+		$(TETRAGON_PROTO_STUBS) $(SUBSTRATE_PROTO_STUBS)
 
 gateway: _checkout-write-preflight sync-openclaw-extension
 	go build $(GO_BUILD_FLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
