@@ -45,7 +45,9 @@ func TestWaitForWatchdogStartWaitsForOwnedPIDLock(t *testing.T) {
 		_ = holder.Close()
 	}()
 
-	if err := waitForWatchdogStart(pidPath, info.PID, time.Second, 5*time.Millisecond); err != nil {
+	// Hosted Windows runners can take over a second to let the child take its lock;
+	// the product wait (watchdogStartTimeout) is far longer. 10 s keeps the test about the lock, not speed.
+	if err := waitForWatchdogStart(pidPath, info.PID, 10*time.Second, 5*time.Millisecond); err != nil {
 		close(release)
 		t.Fatalf("waitForWatchdogStart: %v", err)
 	}

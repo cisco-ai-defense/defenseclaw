@@ -684,7 +684,17 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	// one hold, or for the copy itself, still fails.
 	duringPass := longestFloodWrite(floodWrites(), passStarted, passEnded)
 	t.Logf("writer held %v; longest write during the pass %v, longest ordinary %v", held, duringPass, ordinary)
-	if allowed := held + 2*max(ordinary, 100*time.Millisecond); duringPass >= allowed {
+	allowed := held + 2*max(ordinary, 100*time.Millisecond)
+	// On a GitHub-hosted runner one write in this flood can be descheduled for
+	// longer than the whole allowance (835 ms against about 293 ms for the
+	// others, with held ~300 ms). The allowance is doubled there; the writer
+	// hold itself stays checked against the 500 ms bound above, and a write
+	// that waits for the copy itself (the failure this guards) is still far
+	// over a doubled allowance of about a second.
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		allowed *= 2
+	}
+	if duringPass >= allowed {
 		t.Fatalf("hook audit write waited %v during the pass; want under %v (writer held %v, longest ordinary commit %v)", duringPass, allowed, held, ordinary)
 	}
 	if store.WALOverLimit() {
