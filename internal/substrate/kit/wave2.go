@@ -172,6 +172,13 @@ func hermesManagedConfig(data []byte, o OverlayOptions) ([]byte, error) {
 		extra += fmt.Sprintf("            %s: %s\n", h[0], h[1])
 	}
 	s = strings.Replace(s, anchor, anchor+extra, 1)
+	// Luna's chat completions route rejects max_tokens, which Hermes sends
+	// for a model id it does not recognise as a gpt-5 family name
+	// ("us.openai.gpt-5.6-luna"); the Responses route has no such parameter.
+	if !strings.Contains(s, "        api_mode: chat_completions\n") {
+		return nil, fmt.Errorf("actor overlay: the Hermes managed config has no chat_completions api_mode to switch")
+	}
+	s = strings.Replace(s, "        api_mode: chat_completions\n", "        api_mode: codex_responses\n", 1)
 	if strings.Contains(s, "\nmodel:") {
 		return nil, fmt.Errorf("actor overlay: the Hermes managed config already sets a model")
 	}
