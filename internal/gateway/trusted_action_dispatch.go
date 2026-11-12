@@ -648,9 +648,18 @@ func dispatchTrustedActionWith(
 				// GAP-0568).
 				simples = []actionfacts.SimpleCommand{{EvaluationFailure: "limit"}}
 			}
+			if slices.Contains(facts.Parse.Issues, actionfacts.IssueInternalParserFailure) {
+				// Analyze recovered from an internal error: the call was not
+				// read, so it is judged unknown, with a rule id.
+				simples = append([]actionfacts.SimpleCommand{{EvaluationFailure: actionfacts.EvaluationFailureInternal}}, simples...)
+			}
 			evidenceCWDs := trustedSimpleCommandEvidenceCWDs(request, simples)
 			for index, simple := range simples {
 				if simple.EvaluationFailure != "" {
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureInternal {
+						findings = withSimpleCommandFindings(findings, trustedActionParseFailureFindings(request.EnforcementCapable))
+						break
+					}
 					if simple.EvaluationFailure != "limit" {
 						// A parser gap is already represented by the whole-action
 						// evaluation. It is not itself an enforcement finding.
@@ -9588,6 +9597,28 @@ func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
 		Severity: "CRITICAL", Confidence: 1,
 		enforcement: findingEnforcementAllowed,
 	}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
+	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
+}
+
+// parseFailureRuleID is the finding of a call the reader failed on
+// internally (a recovered panic in the per-command reading or in Analyze).
+// Like the evaluation limit it carries no target: it alerts outside the
+// strict tier and blocks in it (guardrailActionForProfile), so a reader
+// error is never a silent allow and never a refusal without a rule id
+// (gas-ux-r2:GAP-0082).
+const parseFailureRuleID = "ACTION-PARSE-FAILURE"
+
+// parseFailureTitle is the ship-authored title of parseFailureRuleID.
+const parseFailureTitle = "DefenseClaw could not read this command (internal reader error), so it was not checked"
+
+// trustedActionParseFailureFindings is the verdict of a call the reader
+// failed on.
+func trustedActionParseFailureFindings(enforcementCapable bool) []RuleFinding {
+	failure := RuleFinding{
+		RuleID: parseFailureRuleID, Title: parseFailureTitle,
+		Severity: "CRITICAL", Confidence: 1,
+		enforcement: findingEnforcementAllowed,
+	}.withTrustedActionProof(newEvaluationFailureFindingProof(parseFailureRuleID))
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
 

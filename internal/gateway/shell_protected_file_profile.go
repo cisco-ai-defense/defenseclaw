@@ -129,8 +129,9 @@ const evaluationLimitRuleID = "ACTION-COMPOUND-LIMIT"
 // protected file, so it keeps its block.
 func withoutEnforcingEvaluationLimit(findings []RuleFinding) ([]RuleFinding, bool) {
 	isLimit := func(finding RuleFinding) bool {
+		id := canonicalTrustedRuleID(finding.RuleID)
 		return finding.contributesToEnforcement() && !finding.omittedOperand &&
-			canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
+			(id == evaluationLimitRuleID || id == canonicalTrustedRuleID(parseFailureRuleID))
 	}
 	if !slices.ContainsFunc(findings, isLimit) {
 		return findings, false
