@@ -3424,6 +3424,9 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if a.refuseOpenClawPluginPath(w, r, req.Target) {
+		return
+	}
 	if a.rejectWindowsGatewayPath(w, "skill", req.Target, req.Target) {
 		return
 	}
