@@ -50,6 +50,7 @@ Every value is checked by `values.schema.json`. The main ones:
 | `callout.judge.tokenSecret` | "" | turns on the MCP verdict route on the admin Service |
 | `callout.actorSecrets.secretName` | "" | exposed `actor_secrets` values for exact-value DLP |
 | `networkPolicy.adminFrom`, `networkPolicy.metricsFrom` | [] | extra peers for the admin and metrics ports |
+| `deploymentMode` | "" | sets `config.deployment_mode`; `managed_enterprise` mounts `config.yaml` as one read-only file and gives each pod a data volume owned by the gateway account (`0700`, set by an init container running as root with only `CHOWN` and `FOWNER`), as the managed trust checks require. `managed.serviceAccountName` names that account (`nonroot`). |
 | `admin.expose.type` | `ClusterIP` | how laptops reach the admin listener (TLS): `ClusterIP` (in-cluster only), `LoadBalancer` (needs `admin.expose.loadBalancer.sourceRanges`, also enforced by the NetworkPolicy) or `Ingress` (needs `host` and `tlsSecretName`; re-encrypt to the HTTPS backend). The actor listener is never exposed. |
 | `admin.url` | Ingress host, or the in-cluster admin Service | the https URL laptops use, published in ConfigMap `defenseclaw-launcher-endpoint` (key `admin_url`) that every authenticated user may read; `login --kube` sends a Kubernetes credential only to this URL. Required for `LoadBalancer`. |
 | `admin.tlsSecretName` | "" | a `kubernetes.io/tls` Secret for the external name; without it the admin listener presents its in-cluster certificate |

@@ -36,6 +36,7 @@ spec:
         labelSelector:
           matchLabels:
             {{- include "dc.selector" $sel | nindent 12 }}
+      {{- include "dc.initContainers" . | nindent 6 }}
       containers:
       - name: gateway
         image: {{ include "dc.image" . }}

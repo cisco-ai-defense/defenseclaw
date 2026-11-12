@@ -146,6 +146,29 @@
         }
       }
     },
+    "deploymentMode": {
+      "type": "string",
+      "enum": [
+        "",
+        "managed_enterprise",
+        "unmanaged_byod",
+        "ci_cd",
+        "server"
+      ]
+    },
+    "managed": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "serviceAccountName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dataSizeLimit": {
+          "type": "string"
+        }
+      }
+    },
     "config": {
       "type": "object",
       "description": "DefenseClaw config.yaml; the config schema (schemas/config) validates it in the pre-upgrade hook.",

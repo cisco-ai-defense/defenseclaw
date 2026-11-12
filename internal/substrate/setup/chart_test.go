@@ -32,7 +32,7 @@ const chartKubeVersion = "1.34.0"
 
 // chartCases are the golden renders: values files under
 // deploy/helm/defenseclaw-substrate/tests/values (empty for the defaults).
-var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles"}
+var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed"}
 
 func helmBinary(t *testing.T) string {
 	t.Helper()
@@ -235,6 +235,32 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 				t.Errorf("%s: Ingress %v: %s", name, o.Metadata["name"], raw)
 			}
 		}
+	}
+	// GAP-0135: in managed mode every DefenseClaw pod reads config.yaml as one
+	// read-only file (no ConfigMap directory symlinks), and its data dir is
+	// its own volume that an init container gives to the gateway account
+	// with 0700.
+	if name == "managed" {
+		if !strings.Contains(fmt.Sprint(byName["ConfigMap/defenseclaw-config"].Data["config.yaml"]), "deployment_mode: managed_enterprise") {
+			t.Errorf("managed: deployment_mode not in config.yaml")
+		}
+		for _, d := range []string{"defenseclaw-gateway", "defenseclaw-gateway-leader", "defenseclaw-controller", "defenseclaw-callout"} {
+			pod := dig(byName["Deployment/"+d].Spec, "template", "spec")
+			raw, _ := yaml.Marshal(pod)
+			if !strings.Contains(string(raw), "subPath: config.yaml") || !strings.Contains(string(raw), "--mode=0700") ||
+				!strings.Contains(string(raw), "mountPath: /var/lib/defenseclaw/data") || strings.Contains(string(raw), "mountPath: /etc/defenseclaw\n") {
+				t.Errorf("managed: %s pod is not set up for the managed trust checks", d)
+			}
+			for _, ic := range dig(pod, "initContainers").([]any) {
+				caps, _ := yaml.Marshal(dig(ic, "securityContext", "capabilities"))
+				if dig(ic, "securityContext", "allowPrivilegeEscalation") != false || !strings.Contains(string(caps), "- ALL") ||
+					strings.Contains(string(caps), "SYS_ADMIN") || strings.Contains(string(caps), "DAC_OVERRIDE") {
+					t.Errorf("managed: %s init container: %s", d, caps)
+				}
+			}
+		}
+	} else if strings.Contains(string(out), "substrate-datadir") {
+		t.Errorf("%s: a non-managed render runs the data dir init container", name)
 	}
 	// GAP-0130: the launcher endpoint record names an https admin URL, and
 	// the only grant to every authenticated user is reading that record.

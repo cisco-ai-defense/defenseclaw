@@ -1,0 +1,86 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+
+	"github.com/spf13/cobra"
+)
+
+var substrateDataDirFlags struct {
+	path     string
+	uid, gid int
+	mode     string
+}
+
+// substrateDataDirCmd is the chart's init container step in managed mode
+// (GAP-0135): a volume's root is 0777 and root-owned, which the managed
+// data_dir trust check refuses, and the distroless image has no shell, so
+// the gateway binary itself gives the volume root to the gateway account.
+var substrateDataDirCmd = &cobra.Command{
+	Use:         "substrate-datadir",
+	Short:       "Give a data volume to the gateway account (chart init container, managed mode)",
+	Hidden:      true,
+	Args:        cobra.NoArgs,
+	Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		f := substrateDataDirFlags
+		mode, err := strconv.ParseUint(f.mode, 8, 32)
+		if err != nil || mode&0o077 != 0 || mode&0o700 != 0o700 {
+			return fmt.Errorf("substrate-datadir: --mode %q must be 0700 (owner only)", f.mode)
+		}
+		return prepareSubstrateDataDir(f.path, f.uid, f.gid, os.FileMode(mode))
+	},
+}
+
+func init() {
+	f := substrateDataDirCmd.Flags()
+	f.StringVar(&substrateDataDirFlags.path, "path", "", "the volume root (absolute)")
+	f.IntVar(&substrateDataDirFlags.uid, "uid", 65532, "owner UID (the gateway account)")
+	f.IntVar(&substrateDataDirFlags.gid, "gid", 65532, "owner GID")
+	f.StringVar(&substrateDataDirFlags.mode, "mode", "0700", "mode (owner only)")
+	rootCmd.AddCommand(substrateDataDirCmd)
+}
+
+func prepareSubstrateDataDir(path string, uid, gid int, mode os.FileMode) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
+		return fmt.Errorf("substrate-datadir: --path %q must be a clean absolute path below /", path)
+	}
+	if uid <= 0 || gid < 0 {
+		return errors.New("substrate-datadir: --uid must be the non-root gateway account")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("substrate-datadir: %w (it must be the mounted volume)", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("substrate-datadir: %s is not a directory", path)
+	}
+	if err := os.Lchown(path, uid, gid); err != nil {
+		return fmt.Errorf("substrate-datadir: %w", err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		return fmt.Errorf("substrate-datadir: %w", err)
+	}
+	fmt.Printf("substrate-datadir: %s owned by %d:%d mode %04o\n", path, uid, gid, mode)
+	return nil
+}

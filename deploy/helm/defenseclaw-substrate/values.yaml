@@ -34,6 +34,16 @@ substrate:
     # this release's namespace: DefenseClaw's own Secrets stay here).
     secretsNamespace: defenseclaw-actor-secrets
 
+# Sets config.deployment_mode. managed_enterprise mounts config.yaml as one
+# read-only file and gives each pod a data volume owned by the gateway
+# account (0700, through an init container), as the managed trust checks
+# require (GAP-0135).
+deploymentMode: ""
+managed:
+  # The account of the gateway UID in the image (distroless: nonroot).
+  serviceAccountName: nonroot
+  dataSizeLimit: 512Mi
+
 # DefenseClaw config.yaml, rendered as is into the defenseclaw-config
 # ConfigMap: the single source of the gateway, controller and callout config.
 # The chart fills substrate.enabled, substrate.services and substrate.api when

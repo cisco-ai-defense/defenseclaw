@@ -584,6 +584,7 @@ spec:
             app.kubernetes.io/name: defenseclaw-substrate
             app.kubernetes.io/instance: dc
             app.kubernetes.io/component: callout
+      
       containers:
       - name: callout
         image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
@@ -631,6 +632,7 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
         volumeMounts:
+        
         - name: config
           mountPath: /etc/defenseclaw
           readOnly: true
@@ -648,6 +650,9 @@ spec:
       - name: config
         configMap:
           name: defenseclaw-config
+          # Read-only for everyone (managed: the config trust check wants an
+          # admin-owned file nobody else can write).
+          defaultMode: 0444
       - name: tmp
         emptyDir: {}
       # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
@@ -714,6 +719,7 @@ spec:
         runAsUser: 65532
         seccompProfile:
           type: RuntimeDefault
+      
       containers:
       - name: controller
         image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
@@ -750,6 +756,7 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
         volumeMounts:
+        
         - name: config
           mountPath: /etc/defenseclaw
           readOnly: true
@@ -771,6 +778,9 @@ spec:
       - name: config
         configMap:
           name: defenseclaw-config
+          # Read-only for everyone (managed: the config trust check wants an
+          # admin-owned file nobody else can write).
+          defaultMode: 0444
       - name: tmp
         emptyDir: {}
       # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
@@ -866,6 +876,7 @@ spec:
             app.kubernetes.io/name: defenseclaw-substrate
             app.kubernetes.io/instance: dc
             app.kubernetes.io/component: gateway
+      
       containers:
       - name: gateway
         image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
@@ -924,6 +935,7 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
         volumeMounts:
+        
         - name: config
           mountPath: /etc/defenseclaw
           readOnly: true
@@ -948,6 +960,9 @@ spec:
       - name: config
         configMap:
           name: defenseclaw-config
+          # Read-only for everyone (managed: the config trust check wants an
+          # admin-owned file nobody else can write).
+          defaultMode: 0444
       - name: tmp
         emptyDir: {}
       # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
@@ -1033,6 +1048,7 @@ spec:
         runAsUser: 65532
         seccompProfile:
           type: RuntimeDefault
+      
       containers:
       - name: leader
         image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
@@ -1089,6 +1105,7 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
         volumeMounts:
+        
         - name: config
           mountPath: /etc/defenseclaw
           readOnly: true
@@ -1116,6 +1133,9 @@ spec:
       - name: config
         configMap:
           name: defenseclaw-config
+          # Read-only for everyone (managed: the config trust check wants an
+          # admin-owned file nobody else can write).
+          defaultMode: 0444
       - name: tmp
         emptyDir: {}
       # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and

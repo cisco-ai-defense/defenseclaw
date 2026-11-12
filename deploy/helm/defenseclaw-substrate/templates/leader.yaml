@@ -27,6 +27,7 @@ spec:
         {{- include "dc.podAnnotations" $sel | nindent 8 }}
     spec:
       {{- include "dc.podSpecCommon" (dict "ctx" . "sa" "gateway" "values" .Values.leader) | nindent 6 }}
+      {{- include "dc.initContainers" . | nindent 6 }}
       containers:
       - name: leader
         image: {{ include "dc.image" . }}

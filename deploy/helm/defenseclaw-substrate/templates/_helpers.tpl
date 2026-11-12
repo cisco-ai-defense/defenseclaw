@@ -92,6 +92,10 @@ name this release's Services and the Substrate API filled in.
 {{- $_ := set $sub "bundles" (dict "enabled" true "anchors_file" "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json" "inbox" .Values.bundles.inbox) -}}
 {{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
+{{- with .Values.deploymentMode }}{{ $_ := set $cfg "deployment_mode" . }}{{ end -}}
+{{- if and (include "dc.managed" .) (not (hasKey $cfg "data_dir")) -}}
+{{- $_ := set $cfg "data_dir" (include "dc.managedDataDir" .) -}}
+{{- end -}}
 {{- toYaml $cfg -}}
 {{- end -}}
 
@@ -130,10 +134,61 @@ Services that select the pod: only pods a Service selects ("serving" true),
 since the signer issues no certificate without a Service DNS name and the pod
 would never start.
 */}}
+{{/* "true" when the release runs in managed_enterprise (GAP-0135). */}}
+{{- define "dc.managed" -}}
+{{- $m := lower (toString (.Values.deploymentMode | default (.Values.config.deployment_mode | default ""))) -}}
+{{- if has $m (list "managed" "managed_enterprise" "managed-enterprise") }}true{{ end -}}
+{{- end -}}
+
+{{/* The managed data dir: its own volume, owned by the gateway account,
+0700 (the managed data_dir trust check refuses a 0777 volume root). */}}
+{{- define "dc.managedDataDir" -}}/var/lib/defenseclaw/data{{- end -}}
+
+{{/* Init containers of a DefenseClaw pod: in managed mode one gives the
+data volume to the gateway account (the gateway image has no shell, so
+its own hidden substrate-datadir step does it; it needs CHOWN and FOWNER
+as root, nothing else). */}}
+{{- define "dc.initContainers" -}}
+{{- if include "dc.managed" . }}
+initContainers:
+- name: data-dir
+  image: {{ include "dc.image" . }}
+  imagePullPolicy: {{ .Values.image.pullPolicy }}
+  args:
+  - substrate-datadir
+  - --path={{ include "dc.managedDataDir" . }}
+  - --uid={{ .Values.podSecurityContext.runAsUser }}
+  - --gid={{ .Values.podSecurityContext.runAsGroup }}
+  - --mode=0700
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {memory: 64Mi}
+  securityContext:
+    runAsUser: 0
+    runAsNonRoot: false
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+      add: [CHOWN, FOWNER]
+  volumeMounts:
+  - name: data
+    mountPath: {{ include "dc.managedDataDir" . }}
+{{- end }}
+{{- end -}}
+
 {{- define "dc.volumes" -}}
 - name: config
   configMap:
     name: defenseclaw-config
+    # Read-only for everyone (managed: the config trust check wants an
+    # admin-owned file nobody else can write).
+    defaultMode: 0444
+{{- if include "dc.managed" .ctx }}
+- name: data
+  emptyDir:
+    sizeLimit: {{ .ctx.Values.managed.dataSizeLimit }}
+{{- end }}
 - name: tmp
   emptyDir: {}
 # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
@@ -192,9 +247,21 @@ would never start.
 {{- end -}}
 
 {{- define "dc.volumeMounts" -}}
+{{- if include "dc.managed" .ctx }}
+# Managed: one file, not the ConfigMap directory, whose ..data symlinks the
+# managed config trust check refuses (GAP-0135). The pods roll on a config
+# change (checksum annotation), as a subPath mount is not updated in place.
+- name: config
+  mountPath: /etc/defenseclaw/config.yaml
+  subPath: config.yaml
+  readOnly: true
+- name: data
+  mountPath: {{ include "dc.managedDataDir" .ctx }}
+{{- else }}
 - name: config
   mountPath: /etc/defenseclaw
   readOnly: true
+{{- end }}
 - name: tmp
   mountPath: /tmp
 - name: run
@@ -217,8 +284,16 @@ would never start.
 {{- define "dc.env" -}}
 - name: DEFENSECLAW_CONFIG
   value: /etc/defenseclaw/config.yaml
+{{- if include "dc.managed" . }}
+- name: DEFENSECLAW_HOME
+  value: {{ include "dc.managedDataDir" . }}
+# The gateway account the managed trust checks accept (distroless "nonroot").
+- name: DEFENSECLAW_UNIX_SERVICE_ACCOUNT
+  value: {{ .Values.managed.serviceAccountName | quote }}
+{{- else }}
 - name: DEFENSECLAW_HOME
   value: /var/lib/defenseclaw/run/home
+{{- end }}
 - name: POD_NAME
   valueFrom:
     fieldRef:
