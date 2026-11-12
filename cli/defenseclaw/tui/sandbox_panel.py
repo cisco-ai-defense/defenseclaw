@@ -37,6 +37,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -46,6 +47,7 @@ from textual import events
 from defenseclaw.gateway import SandboxAPIError
 from defenseclaw.platform_support import openshell_sandboxes_supported
 from defenseclaw.tui.markup_safe import escape as rich_escape
+from defenseclaw.tui.screens.consequence import ConsequenceAction, ConsequenceModalModel, ConsequenceModalScreen
 from defenseclaw.tui.screens.field_editor import FieldEditorScreen
 from defenseclaw.tui.screens.sandbox_detail import SandboxDetailScreen
 from defenseclaw.tui.screens.sandbox_launch import (
@@ -70,6 +72,12 @@ from defenseclaw.tui.services.sandbox_state import (
     undo_preview_text,
     undo_unrestored,
     undo_unrestored_lines,
+)
+from defenseclaw.tui.services.substrate_state import (
+    SUBSTRATE_LIST_ARGS,
+    SUBSTRATE_REFRESH_SECONDS,
+    SubstrateList,
+    parse_substrate_list,
 )
 from defenseclaw.tui.theme import DEFAULT_TOKENS as TOKENS
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
@@ -331,6 +339,21 @@ def fetch_managed_explain(config: object | None) -> dict[str, Any] | None:
         client.close()
 
 
+async def load_substrate_list() -> SubstrateList:
+    """Run ``defenseclaw substrate list --json`` in the background and parse it.
+
+    Never raises: a launcher that cannot start reads as one dim line, like a
+    signed-out one.
+    """
+    from defenseclaw.tui import app as app_module
+
+    try:
+        returncode, stdout, stderr = await app_module._communicate_captured("defenseclaw", SUBSTRATE_LIST_ARGS)
+    except (OSError, RuntimeError) as exc:
+        return parse_substrate_list(127, "", str(exc))
+    return parse_substrate_list(returncode, stdout, stderr)
+
+
 def probe_sandbox_machine() -> Any:
     """Blocking ``defenseclaw-gateway sandbox doctor --json`` for the Sandbox wizard (run in a thread)."""
     from defenseclaw.commands.cmd_doctor import sandbox_doctor_report
@@ -362,6 +385,9 @@ class SandboxPanelMixin:
         self._sandbox_stream: Any = None
         self._sandbox_action_running = False
         self._sandbox_machine_checking = False
+        # Agent Substrate: the last run (time.monotonic(), None = never) and whether one is in flight.
+        self._substrate_last: float | None = None
+        self._substrate_running = False
 
     def _sandbox_supported(self) -> bool:
         return openshell_sandboxes_supported()
@@ -406,10 +432,31 @@ class SandboxPanelMixin:
             return
         if not self._sandbox_supported():
             return
+        if getattr(self, "active_panel", "") == "sandboxes":
+            self._schedule_substrate_load()
         if self._sandbox_poll_running:
             return
         self._sandbox_poll_running = True
         self.run_worker(self._poll_sandbox_once(), exclusive=False, thread=False)  # type: ignore[attr-defined]
+
+    def _schedule_substrate_load(self) -> None:
+        """List the Agent Substrate agents in the background, at most once every 15 seconds."""
+        if getattr(self, "_app_shutting_down", False) or self._substrate_running:
+            return
+        now = time.monotonic()
+        if self._substrate_last is not None and now - self._substrate_last < SUBSTRATE_REFRESH_SECONDS:
+            return
+        self._substrate_last = now
+        self._substrate_running = True
+        self.run_worker(self._load_substrate_once(), exclusive=False, thread=False)  # type: ignore[attr-defined]
+
+    async def _load_substrate_once(self) -> None:
+        try:
+            self.sandbox_model.set_substrate(await load_substrate_list())
+        finally:
+            self._substrate_running = False
+        if getattr(self, "active_panel", "") == "sandboxes" and not getattr(self, "help_open", False):
+            self._render_chrome()  # type: ignore[attr-defined]
 
     async def _poll_sandbox_once(self) -> None:
         try:
@@ -642,10 +689,15 @@ class SandboxPanelMixin:
                     f"[{color_notice}]{rich_escape(fit(text, width - len(tail) - len(suffix)))}"
                     f"{rich_escape(tail)}[/][{TOKENS.text_muted}]{rich_escape(suffix)}[/]"
                 )
+        if model.view == "sandboxes" and model.substrate_line:
+            # Why there are no Agent Substrate agents (or how many more there are): one dim line.
+            lines.append(f"[{TOKENS.text_muted}]{rich_escape(fit(model.substrate_line, width))}[/]")
         if not model.data_table_rows():
             empty = model.empty_state()
             if empty:
-                lines.append("")
+                # The dim Agent Substrate line above already separates it from the table area.
+                if not (model.view == "sandboxes" and model.substrate_line):
+                    lines.append("")
                 lines.append(f"[{TOKENS.text_secondary}]{rich_escape(empty)}[/]")
         return "\n".join(lines)
 
@@ -686,18 +738,19 @@ class SandboxPanelMixin:
         # filled the bar and pushed Approve / Always / Reject off an
         # 80-column screen.
         row = ready and selected is not None and view == "sandboxes"
+        agent = view == "sandboxes" and model.selected_substrate() is not None
         visible = {
             "sandboxes-refresh": True,
             "sandboxes-view": True,
             "sandboxes-new": ready,
             "sandboxes-wrappers": True,
-            "sandboxes-connect": row,
+            "sandboxes-connect": row or agent,
             "sandboxes-stop": row and selected.running,
-            "sandboxes-delete": row,
+            "sandboxes-delete": row or agent,
             # A copy's undo reverts its last pull --apply: it needs no snapshot.
             "sandboxes-undo": row and (selected.undo_available or selected.copy_mode),
             "sandboxes-review": row and not selected.copy_mode,
-            "sandboxes-pull": row and selected.copy_mode,
+            "sandboxes-pull": agent or (row and selected.copy_mode),
             "sandboxes-unblock": ready and self._sandbox_can_unblock(),
             "sandboxes-approve": ready and view == "asks" and model.selected_ask() is not None,
             # Private, IP-literal and host-local asks open for one sandbox only.
@@ -756,6 +809,9 @@ class SandboxPanelMixin:
         if kind == "connect":
             self.run_worker(self._sandbox_connect(action.sandbox), exclusive=False, thread=False)  # type: ignore[attr-defined]
             return True
+        if kind in {"substrate_connect", "substrate_pull"}:
+            self._substrate_terminal(kind.removeprefix("substrate_"), action.sandbox)
+            return True
         if kind == "wrappers":
             self.run_worker(self._sandbox_wrappers_menu(), exclusive=False, thread=False)  # type: ignore[attr-defined]
             return True
@@ -774,6 +830,7 @@ class SandboxPanelMixin:
             "pull": lambda: self._sandbox_pull(action.sandbox),
             "stop": lambda: self._sandbox_stop(action.sandbox),
             "delete": lambda: self._sandbox_delete(action.sandbox),
+            "substrate_delete": lambda: self._substrate_delete(action.sandbox),
         }
         factory = workers.get(kind)
         if factory is None:
@@ -1360,6 +1417,68 @@ class SandboxPanelMixin:
                 return row.project
         cwd = os.getcwd()
         return "" if launch_folder_problem(cwd) else cwd
+
+    def _run_substrate_in_terminal(self, parsed: Any) -> int | None:
+        """Run a palette ``substrate login|run|connect|pull`` on this terminal; None when it cannot be handed over.
+
+        These commands ask questions or take the whole screen, so they cannot
+        run in the Activity log. The preview was already confirmed.
+        """
+        code = self._run_sandbox_terminal(
+            SandboxLaunch(tuple(parsed.args), os.getcwd(), parsed.display_name), notify_unsupported=False
+        )
+        if code is None:
+            return None
+        with contextlib.suppress(Exception):  # the palette's recent list is cosmetic
+            self.state_store.record_command(parsed.display_name)  # type: ignore[attr-defined]
+            self.state = self.state_store.state  # type: ignore[attr-defined]
+            self.state_store.save()  # type: ignore[attr-defined]
+        self._report_command_result(parsed.display_name, code)  # type: ignore[attr-defined]
+        return code
+
+    def _substrate_terminal(self, verb: str, ref: str) -> None:
+        """Hand the terminal to ``substrate connect|pull NAME``, as ``sandbox connect`` does."""
+        self._run_sandbox_terminal(SandboxLaunch(("substrate", verb, ref), os.getcwd(), f"substrate {verb} {ref}"))
+
+    async def _substrate_delete(self, ref: str) -> bool:
+        """Delete an Agent Substrate agent after one consequence modal; whether it is gone.
+
+        The modal shows the exact command, so nothing else asks (``--yes``).
+        """
+        argv = ("substrate", "delete", ref, "--yes")
+        modal = ConsequenceModalModel(
+            title=f"Confirm: delete {ref}",
+            summary="This is a destructive action and cannot be undone.",
+            details=(f"Will run: defenseclaw {' '.join(argv)}",),
+            consequence=f"{ref} and its snapshots are removed from the cluster. Changes you did not pull (P) are lost.",
+            actions=(
+                ConsequenceAction(
+                    action_id="back", hotkey="b", label="Go back", description="Closes this without running anything."
+                ),
+                ConsequenceAction(
+                    action_id="run",
+                    hotkey="d",
+                    label=f"Delete {ref}",
+                    description="Runs the command.",
+                    variant="error",
+                    danger=True,
+                ),
+            ),
+            default_action_id="back",
+            border_color=TOKENS.accent_red,
+        )
+        chosen = await self.push_screen_wait(ConsequenceModalScreen(modal))  # type: ignore[attr-defined]
+        if chosen is None or chosen.action_id != "run":
+            self._set_status("Delete cancelled.")  # type: ignore[attr-defined]
+            return False
+        label = f"substrate delete {ref}"
+        code = await self._run_command("defenseclaw", argv, display_name=label)  # type: ignore[attr-defined]
+        self._report_command_result(label, code)  # type: ignore[attr-defined]
+        if code != 0:
+            return False
+        self.sandbox_model.drop_substrate(ref)
+        self._render_chrome()  # type: ignore[attr-defined]
+        return True
 
     async def _sandbox_connect(self, name: str) -> None:
         launch = SandboxLaunch(("sandbox", "connect", name), os.getcwd(), f"sandbox connect {name}")
