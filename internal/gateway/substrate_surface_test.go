@@ -169,7 +169,7 @@ func TestLLMJudgeUsesItsIntentStore(t *testing.T) {
 			t.Fatalf("sample lacks %q:\n%s", want, sample)
 		}
 	}
-	judge.ResetToolJudgeSession("s1")
+	judge.ResetToolJudgeSession(context.Background(), "s1")
 	if len(store.appends) != 1 || store.appends[0] != "s1/Bash" || len(store.resets) != 1 || store.resets[0] != "s1" {
 		t.Fatalf("store calls: appends %v resets %v", store.appends, store.resets)
 	}

@@ -13,30 +13,34 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // In-image layout of the actor kit. The hook binary lives in the OpenShell
 // sandbox hook directory (connector.SandboxHookDir) because Codex accepts
 // managed hook commands only from its managed_dir.
 const (
-	ConfigPath   = "/etc/defenseclaw/actor-kit.json"
-	LibDir       = "/usr/local/lib/defenseclaw"
-	HookDir      = LibDir + "/hooks"
-	HookBinary   = HookDir + "/defenseclaw-actor-hook"
-	KitDir       = LibDir + "/kit"
-	RelayBinary  = KitDir + "/defenseclaw-actor-relay"
-	CredHelper   = KitDir + "/git-credential-defenseclaw"
-	TrustBundle  = "/run/ate/trust-bundle.pem"
-	ProtocolV1   = "dcactor/1"
-	ModeEnv      = "DEFENSECLAW_ACTOR_MODE"
-	ModeUnattend = "unattended"
-	ModeInteract = "interactive"
+	ConfigPath  = "/etc/defenseclaw/actor-kit.json"
+	LibDir      = "/usr/local/lib/defenseclaw"
+	HookDir     = LibDir + "/hooks"
+	HookBinary  = HookDir + "/defenseclaw-actor-hook"
+	KitDir      = LibDir + "/kit"
+	RelayBinary = KitDir + "/defenseclaw-actor-relay"
+	CredHelper  = KitDir + "/git-credential-defenseclaw"
+	TrustBundle = "/run/ate/trust-bundle.pem"
+	// EnvelopeVersion is HookEnvelope.V, the version the gateway's actor
+	// listener accepts.
+	EnvelopeVersion = "1"
+	ModeEnv         = "DEFENSECLAW_ACTOR_MODE"
+	ModeUnattend    = "unattended"
+	ModeInteract    = "interactive"
 
 	// PlaceholderHeader is replaced by Substrate egress with the actor JWT
 	// (EgressPolicy replace_headers actor_jwt). Without it nothing is
 	// injected, so the kit always sends it.
-	PlaceholderHeader = "x-defenseclaw-actor"
-	PlaceholderValue  = "placeholder"
+	PlaceholderHeader = connector.SandboxActorHeader
+	PlaceholderValue  = connector.SandboxActorPlaceholder
 
 	// DefaultGatewayURL is the actor listener Service (PLAN 5.1, D15), by
 	// its FQDN: egress resolves only names in the actor's policy, so the

@@ -113,7 +113,7 @@ func TestHookEnvelopeAndHeaders(t *testing.T) {
 	if err := json.Unmarshal(r.Body, &env); err != nil {
 		t.Fatal(err)
 	}
-	if env.V != ProtocolV1 || env.Connector != "codex" || env.Event != "PreToolUse" || env.HookContract != "codex-hooks-v4" ||
+	if env.V != EnvelopeVersion || env.Connector != "codex" || env.Event != "PreToolUse" || env.HookContract != "codex-hooks-v4" ||
 		string(env.Payload) != `{"hook_event_name":"PreToolUse","cwd":"/tmp"}` {
 		t.Fatalf("envelope %+v", env)
 	}
@@ -309,5 +309,58 @@ func TestHelperServesPostsAndTightensMode(t *testing.T) {
 	h2, _ := NewHelper(testConfig(srv.URL), nil)
 	if err := h2.Serve(ctx); err == nil || err != errHelperRunning {
 		t.Fatalf("second helper: %v", err)
+	}
+}
+
+func TestGatewayNamesTheOutageMode(t *testing.T) {
+	for _, tc := range []struct {
+		cfg, gw, helper, env, want string
+	}{
+		{"closed", "", "", "", "closed"}, {"closed", "open", "", "", "open"}, {"open", "closed", "", "", "closed"},
+		{"open", "open", ModeUnattend, "", "closed"}, {"open", "open", "", ModeUnattend, "closed"}, {"open", "bogus", "", "", "open"},
+	} {
+		if got := outageMode(tc.cfg, Response{FailMode: tc.gw}, tc.helper, tc.env); got != tc.want {
+			t.Errorf("%+v: %s", tc, got)
+		}
+	}
+	if got := outageMode("open", Response{Mode: ModeUnattend, FailMode: "open"}, "", ""); got != "closed" {
+		t.Errorf("gateway-unattended run: %s", got)
+	}
+}
+
+func TestHookPostIsThePluginTransport(t *testing.T) {
+	cfg := testConfig("https://gw")
+	cfg.HookContracts["opencode"] = "opencode-v1"
+	var got Request
+	var out, errb bytes.Buffer
+	in := `{"path":"/api/v1/opencode/hook","headers":{"Authorization":"Bearer leaked","X-DefenseClaw-Client":"opencode-plugin/1.0"},"body":"{\"event\":\"tool.execute.before\",\"tool\":\"bash\"}"}`
+	code := RunHookPost(context.Background(), cfg, strings.NewReader(in), &out, &errb,
+		func(_ context.Context, r Request) (Response, string, error) {
+			got = r
+			return Response{Status: 200, Body: []byte(`{"action":"block","hook_output":{"decision":"deny"}}`)}, "", nil
+		})
+	if code != 0 || got.Path != HookPathPrefix+"opencode" || got.Header["Authorization"] != "" || got.Header["X-DefenseClaw-Client"] != "opencode-plugin/1.0" {
+		t.Fatalf("code %d request %+v stderr %q", code, got, errb.String())
+	}
+	var env HookEnvelope
+	if json.Unmarshal(got.Body, &env) != nil || env.V != EnvelopeVersion || env.Connector != "opencode" || env.Event != "tool.execute.before" || env.HookContract != "opencode-v1" {
+		t.Fatalf("envelope %s", got.Body)
+	}
+	var ans struct {
+		Status int    `json:"status"`
+		Body   string `json:"body"`
+	}
+	if json.Unmarshal(out.Bytes(), &ans) != nil || ans.Status != 200 || !strings.Contains(ans.Body, `"deny"`) {
+		t.Fatalf("answer %q", out.String())
+	}
+	code = RunHookPost(context.Background(), cfg, strings.NewReader(in), &out, &errb,
+		func(context.Context, Request) (Response, string, error) { return Response{}, "", ErrUnreachable })
+	if code == 0 {
+		t.Fatal("an outage must be the plugin's failure")
+	}
+	for _, bad := range []string{`{"path":"/api/v1/claude-code/hook","body":"{}"}`, `{"path":"/api/v1/opencode/hook","body":"not json"}`, `nope`} {
+		if RunHookPost(context.Background(), cfg, strings.NewReader(bad), &out, &errb, nil) != 2 {
+			t.Fatalf("accepted %s", bad)
+		}
 	}
 }
