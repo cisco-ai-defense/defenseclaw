@@ -59,6 +59,8 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
   Check: `go test ./internal/policy -run FirstParty`. Evidence: `internal/policy/first_party_verify.go`.
 - [ ] **M-POL-11** Every new failure mode (gateway down, missing token, bad response) resolves through the effective fail mode, with a test and a docs entry. Why: a failure path that opens silently is a policy bypass.
   Check: `go test ./internal/gateway/... -run FailMode`. Evidence: `docs-site/content/docs/reference/fail-modes.mdx`, `cli/defenseclaw/fail_mode.py`.
+- [ ] **M-POL-12** A fix never adds a block to the default (balanced) or permissive policy. New or tighter blocks go to strict or action mode, as a documented config knob. In default mode, an unresolvable command or path gets an audit entry, not a deny. The benign corpus stays 100% allowed in default mode. Why: a default that blocks normal work does not get used.
+  Check: `go test ./internal/gateway -run 'ProtectiveProfile|BenignNeighbors'`. Evidence: `benchmarks/fixtures/`.
 - [ ] **S-POL-1** Add hard negatives (previews, help, loopback, failed results, mismatched identities) with every new blocking rule. Why: name heuristics are not proof of production.
   Check: `go test ./internal/gateway -run 'ProtectiveProfile|BenignNeighbors'`. Evidence: `benchmarks/fixtures/`, `policies/guardrail-use-cases/`.
 - [ ] **S-POL-2** Measure attack recall on attack data and false-positive rate on separate benign data. Why: an attack-only fixture cannot show noise.
@@ -91,8 +93,8 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
   Check: `go test ./internal/managed ./internal/config -run 'Profile|Managed|Pin'`. Evidence: `internal/managed/profile.go`, `internal/config/enterprise.go`.
 - [ ] **M-DEP-2** New `enterprise.*` keys are validated against closed lists, appear in the schema, default to the secure value, and loosen only by a named value (`off`, `report`, `allow`), never by absence. Why: an unvalidated key is a silent no-op for an admin.
   Check: `go test ./schemas ./internal/config`. Evidence: `internal/config/enterprise.go`.
-- [ ] **M-DEP-3** Managed hook paths fail closed: errors, an unreachable gateway or stale guardian state deny. Only stop and session-end events are neutral. Why: empty hook binaries once allowed every call.
-  Check: `go test ./internal/managed ./internal/gateway -run 'Guardian|FailClosed'`. Evidence: `internal/managed/hook_guardian.go`.
+- [ ] **M-DEP-3** Hook outage behavior follows one table (`docs-site/content/docs/reference/fail-modes.mdx`): per-user default and permissive open, with a warning and a `hook-failures.jsonl` record; per-user strict closed; managed standalone closed unless an administrator sets `open`, which covers only a classified outage; Secure Client open unless set `closed`; an explicit saved mode wins. Outside Secure Client, integrity failures, stale guardian state, unusable answers and a gateway that took the call but missed the deadline deny. Only stop and session-end events are neutral. Why: empty hook binaries once allowed every call, and over-closing broke daily use.
+  Check: `go test ./internal/managed ./internal/gateway -run 'Guardian|FailClosed'`. Evidence: `internal/managed/hook_guardian.go`, `docs-site/content/docs/reference/fail-modes.mdx`.
 - [ ] **M-DEP-4** Managed hosts refuse local writers with a reason and exit code 3. Every new CLI or TUI writer goes through the config writer. Why: a local edit would diverge from what the gateway enforces.
   Check: `pytest cli/tests -k 'managed and refus'`. Evidence: `cli/defenseclaw/config_writer.py`, `cli/defenseclaw/commands/cmd_config.py` (`@sym:MANAGED_EXIT_CODE`), `cli/defenseclaw/commands/cmd_upgrade.py`.
 - [ ] **M-DEP-5** Apply config, policy, packs, secrets, drop-ins and binaries as one unit through the lifecycle transaction (stage, apply, verify, commit or restore). No second writer for a managed file. Why: partial application leaves a half-new policy.
@@ -121,6 +123,12 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
   Check: `go test ./internal/enterprisehooks/... ./internal/enterpriseunix -run 'Verify|Guardian'`. Evidence: `internal/enterpriseunix/verify.go`, `internal/enterprisehooks/guardianstate/state.go`.
 - [ ] **M-DEP-17** A new bundle or digest format carries config, policy, rule packs and assets together, has one deterministic digest over canonical content, verifies its signature before staging any file, applies through the lifecycle transaction, restores the previous state on failure, and reports the applied digest. Stop and ask first. Why: a partial apply mixes old and new policy.
   Check: apply, failure and rollback tests next to `internal/enterpriseunix/lifecycle.go`. Evidence: `internal/enterpriseunix/lifecycle.go`, `internal/config/validate_candidate.go`.
+- [ ] **M-DEP-18** Name the modes the change is for and the modes that must not change: OSS per-user, standalone managed and MDM, Secure Client. Gate per-mode behavior on `cfg.SecureClientIntegration()`, `cfg.StandaloneEnterprise()` or `managed.IsManagedEnterprise`, never on a user-writable key. Add a test per unchanged mode that the feature starts nothing and changes no output. Why: a Secure Client feature can leak into OSS or standalone, and a standalone feature can break the Secure Client profile.
+  Check: `go test ./internal/config ./internal/managed -run SecureClient`, plus the feature's off-path tests. Evidence: `internal/managed/profile.go`, `internal/config/enterprise.go` (`@sym:SecureClientIntegration`, `@sym:StandaloneEnterprise`), `internal/managed/managed.go` (`@sym:IsManagedEnterprise`).
+- [ ] **M-DEP-19** Work for one mode leaves shared defaults alone: config defaults, hook answers and fail modes, installer paths, telemetry routing and compiled plans, CI gates. Otherwise stop and ask, and get sign-off from a maintainer of the other modes. Why: a shared default reaches every install.
+  Check: compare the compiled plans and digests for the unchanged modes, before and after. Evidence: `internal/config/observability_v8_managed_destination.go`, `.github/managed-paths.txt`.
+- [ ] **M-DEP-20** Management-plane features are standalone managed only, never Secure Client. The control plane belongs to the management agent; DefenseClaw ships only the local contract (the enterprise `--json` results and their schemas). Forward schemas carry no member that is only for Secure Client. Why: a Secure Client member in a forward schema breaks the other modes' management agent.
+  Check: review `packaging/mdm/contract/forward/`. Evidence: `packaging/mdm/contract/lifecycle-result.schema.json`, `packaging/mdm/contract/management-agent.md`.
 
 ## REQ: external requirements
 
@@ -187,7 +195,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
   Check: `pytest cli/tests/test_ci_changes.py`. Evidence: `scripts/ci_changes.py`.
 - [ ] **M-TST-6** Regenerate a Go golden only with `DEFENSECLAW_UPDATE_GOLDEN=1` for the one affected test, then review the diff. Why: goldens encode security contracts.
   Check: `git diff` after regeneration. Evidence: `policies/kernel/kernel_test.go`.
-- [ ] **M-TST-7** Installer, migration, upgrade, rollback or gateway-startup changes run the install lifecycle scenarios, including the 0.8.x upgrade scenarios. Why: they are the only gate for rollback and migration failures.
+- [ ] **M-TST-7** Installer, migration, upgrade, rollback or gateway-startup changes run the install lifecycle scenarios. Upgrade scenarios run from the 1.0.x releases. The 0.8.x lane is legacy: keep it green while it is in CI, never extend it, and remove it in its own PR, with the reason. Why: they are the only gate for rollback and migration failures.
   Check: `scripts/test-install-lifecycle.sh --assets <dir> --previous-assets <dir>`. Evidence: `docs/TESTING.md`, `scripts/test-install-lifecycle.sh`.
 - [ ] **M-TST-8** Enterprise package, Setup, guardian and lifecycle changes pass the enterprise install jobs, run only on disposable hosts. Why: the jobs install and remove system services as root.
   Check: CI job `Enterprise Required`. Evidence: `scripts/test-enterprise-unix-install.sh`, `.github/workflows/ci.yml`.
@@ -199,10 +207,14 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
   Check: `make connector-matrix-test`. Evidence: `test/e2e/connectormatrix.go`.
 - [ ] **M-TST-12** A new managed file, or a new managed branch in a shared file, is listed in `.github/managed-paths.txt`. Why: the manifest decides which pull requests run the managed lanes; an unlisted file skips them.
   Check: `make check-managed-paths`. Evidence: `scripts/check_managed_paths.py`.
+- [ ] **M-TST-13** The required CI for every mode that is changed or at risk is green; a skipped lane is not a pass. OSS: Connector Matrix, Install and Upgrade Smoke, Go Gateway Test. Standalone: Enterprise Install Lane, Enterprise Upgrade Lane, Enterprise Required, Windows Native Required. Secure Client: macOS Enterprise Hook Hardening + Packaging, the Windows Native `Secure Client install marker regression` step, and `-run SecureClient`. Why: a green summary hides a skipped lane for the mode you did not touch.
+  Check: `gh pr checks <n>`. Evidence: `.github/workflows/ci.yml`, `.github/workflows/windows-native.yml`.
 - [ ] **S-TST-1** Iterate with the cheapest focused test, then run the full gate once. Gateway tests need an explicit `-timeout`. Why: the package exceeds the default deadline.
   Check: `make test-file FILE=<module>`. Evidence: `docs/TESTING.md`.
 - [ ] **S-TST-2** TUI tests: unit-test models first, at most two Pilot tests per new screen at 80x24, no sleeps, no copy assertions. Why: Pilot tests are slow and brittle.
   Check: `make tui-test`. Evidence: `cli/tests/tui/test_smoke.py`, `.claude/skills/defenseclaw-tui/SKILL.md`.
+- [ ] **S-TST-3** When a CI timing assertion flakes only on slow hosted runners and the code is unchanged, widen the bound in a test-only change and state the old and new values. Never widen a hook-deadline or answer-before-deadline assertion. Why: a wider hook deadline hides a real latency regression.
+  Evidence: `scripts/perf/budgets.json`.
 
 ## PERF: performance and size
 
@@ -280,7 +292,7 @@ Each item: rule, why (the failure it prevents), then the check and the evidence 
 
 ## PKG: packaging and upgrade
 
-- [ ] **M-PKG-1** The 0.8.x to 1.x upgrade keeps working: configs older than the supported floor convert with `defenseclaw migrate`, and the runtime refuses them with that one instruction. Why: operators upgrade in place.
+- [ ] **M-PKG-1** Every 1.0.x release upgrades in place from 1.0.0 and later. The runtime keeps refusing pre-floor configs with the single `defenseclaw migrate` instruction. The 0.8.x bridge behind it is legacy and is not extended. Why: operators upgrade in place.
   Check: `pytest cli/tests/test_migrations.py cli/tests/test_enterprise_upgrade_v9.py` and `go test ./internal/config -run MigrateV9`. Evidence: `scripts/check_enterprise_upgrade_config.py` (CI enterprise upgrade lanes run it with --before and --after), `cli/defenseclaw/migrations.py`, `scripts/defenseclaw-upgrade.sh`.
 - [ ] **M-PKG-2** Upgrade, downgrade and rollback are explicit and reversible; downgrades are refused without the explicit flag; files older releases read strictly are not extended. Why: managed rollbacks must work.
   Check: `go test ./internal/enterpriseunix -run 'Downgrade|Rollback'`. Evidence: `internal/enterpriseunix/lifecycle.go`.
