@@ -99,7 +99,7 @@ The rules always come first. A rule block is never revisited, and the decision m
 
 ## When it is down
 
-A decision model that is unreachable, slower than `timeout` (1 second; in cascade 3 never more than a quarter of the judge's remaining time), or answers outside the protocol never allows a call by itself:
+A decision model that is unreachable, slower than `timeout` (1 second; in cascade 3 never more than a quarter of the time left, about 0.85 s at most on a hook), or answers outside the protocol never allows a call by itself:
 
 - Cascade 2: the rule verdict stands, exactly as when the LLM judge is down. The gateway log says `hook judge unavailable`, and the judge fallback counter goes up.
 - Cascade 3: the judge decides that call exactly as it does without a decision model.
@@ -131,8 +131,8 @@ On a managed device the administrator sets `decision_model:` in the admin `confi
 | `decision_model.api_key_env` | `DEFENSECLAW_DECISION_MODEL_KEY` | Variable that holds the bearer token. An unset variable sends no token. |
 | `decision_model.credential` | empty | Managed devices only: protected credential that holds the token. |
 | `decision_model.timeout` | `1` | Seconds per call (up to 30). In cascade 3 the gateway also caps each call at a quarter of the time left for the judge. |
-| `decision_model.allow_threshold` | `0.30` | Risk at or below which an allow is confident. |
-| `decision_model.block_threshold` | `0.75` | Risk at or above which a block answer is confident. |
+| `decision_model.allow_threshold` | `0.30` | Risk at or below which an allow is confident. `0` uses the default. |
+| `decision_model.block_threshold` | `0.75` | Risk at or above which a block answer is confident. `0` uses the default. |
 | `decision_model.on_confident_block` | `escalate` | Cascade 3 only: `escalate` or `decide`. |
 
 In the TUI, open **0 Setup**, press `c` for the config editor and pick the **Decision Model** section.
@@ -144,8 +144,19 @@ The routing and thresholds are the operating point measured in the [System One b
 - Broad corpus (3,817 tool calls, 3,381 benign): cascade 3 cut judge traffic from 100% to 16% and false blocks from 23 to 14, with block-only F1 from 0.712 to 0.738. Cascade 2 had 13 false blocks, F1 0.702, and asked for confirmation on 8.5% of calls.
 - Production-weighted corpus (24,476 calls, 99% benign): cascade 2 scored F1 0.213 against 0.082 for cascade 3, with 224 false blocks of 24,255 benign calls and confirmations on 6.6%.
 - Only the single-choice question format (Q2, one disposition plus two scores) is worth a tier: the yes/no probe formats scored a block-only F1 of 0.03 to 0.04 alone (appendix, section 3). DefenseClaw sends Q2 only, with the benchmark's production bound of 12,288 bytes of state: 2,048 for the user's request, 7 earlier calls of 1,024 and 3,072 for the current call.
-- Latency depends on the server (appendix, section 3). On the production-weighted corpus the hosted Jev 1.13.0 answered in 0.40 s median (3.1 s at p95); on the broad corpus in 1.42 s median (7.4 s at p95). Every self-hosted run on the benchmark's busy GPU had a median of 1.36 s or more: DiffusionGemma 1.36 s and OpenJev 5.19 s on the production-weighted corpus, and DiffusionGemma 3.66 s and 7.35 s and OpenJev 19.4 s on the broad corpus.
-- A hook call waits only a few seconds for a model (about 3.4 s on a per-user tool-call hook) before it keeps the rule verdict. At the default `timeout` of 1 second most calls to those self-hosted models time out, so measure your server and raise `timeout` (up to the hook's wait) before you rely on cascade 2. A model slower than the hook's wait cannot answer in cascade 2: every call then keeps the rule verdict.
+- The benchmark's latency numbers (appendix, section 3) were taken under batch load and mostly measure queueing, not how fast a model answers one call. On the production-weighted corpus the hosted Jev 1.13.0 had a median of 0.40 s (3.1 s at p95); on the broad corpus 1.42 s (7.4 s at p95). The self-hosted runs shared one saturated GPU with a server that was set up slowly (see [Serve your own decision model](#serve-your-own-decision-model)): DiffusionGemma 1.36 s and OpenJev 5.19 s median on the production-weighted corpus, and DiffusionGemma 3.66 s and 7.35 s and OpenJev 19.4 s on the broad corpus. A single-call probe of the hosted Jev 1.13.0 from a cloud host on 2026-10-30 answered in 60 to 135 ms.
+- A hook waits a bounded time for the model layers. The gateway gives them at most 3.4 s from when it gets the call; a Claude Code or Codex tool-call hook that does not report progress waits less (the wait the hook names less 0.3 s, or 2 s when it names none). In cascade 3 each decision-model call gets the smaller of `timeout` and a quarter of what is left, so about 0.85 s at most on a hook, and the judge gets the rest. In cascade 2 it may use all of what is left, up to `timeout`. A model that answers later changes nothing: the rule verdict stands, as for a judge outage. Measure your server with `defenseclaw setup decision-model --ping`, which prints the round trip, and set `timeout` from your p95.
+
+### Serve your own decision model
+
+The self-hosted latencies above came from a server that did four things that cost time on every call. Avoid them:
+
+- **One prefill per request.** Each request asks three questions about the same state (the disposition, the risk score and the context check). The benchmark server ran a separate prefill of the whole state for each question. Run the state through the model once and answer the three questions from it, or at least share the prefix between them.
+- **Prefix cache on.** Consecutive calls of a session repeat the policy, the user's request and the earlier calls. Turn on your server's prefix cache (for example automatic prefix caching in vLLM) so only the new call is prefilled.
+- **No eager attention.** Run with compiled kernels and CUDA graphs (in vLLM, leave `--enforce-eager` off).
+- **One GPU when the model fits.** A small model split across GPUs pays a cross-GPU step on every token. Keep tensor parallelism at 1 unless the model does not fit, and give the server its own GPU rather than one shared with batch jobs.
+
+Then put the server close to the gateway (loopback or the same network) and check p95 under the number of agents you expect, not one call at a time.
 
 Check each model's licence before you deploy it (the OpenJev weights are CC BY-NC 4.0, non-commercial).
 
