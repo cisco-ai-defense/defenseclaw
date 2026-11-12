@@ -11,6 +11,9 @@ import (
 	"strings"
 )
 
+// CosignSignatureAnnotation is the layer annotation cosign reads the signature from.
+const CosignSignatureAnnotation = "dev.cosignproject.cosign/signature"
+
 // maxEnvelopeBytes bounds one stored attestation.
 const maxEnvelopeBytes = 1 << 20
 
@@ -65,8 +68,17 @@ func (g *Registry) PutAttestation(ctx context.Context, image Ref, digest string,
 	if len(layers) >= maxEnvelopes {
 		layers, diffIDs = layers[len(layers)-maxEnvelopes+1:], diffIDs[len(diffIDs)-maxEnvelopes+1:]
 	}
+	// The same envelope stored twice is one layer.
+	kept, keptIDs := layers[:0:0], diffIDs[:0:0]
+	for i, l := range layers {
+		if l.Digest != layerDigest {
+			kept, keptIDs = append(kept, l), append(keptIDs, diffIDs[i])
+		}
+	}
+	layers, diffIDs = kept, keptIDs
+	// cosign reads the signature from this annotation (legacy attestation layout).
 	layers = append(layers, Descriptor{MediaType: MediaDSSE, Digest: layerDigest, Size: int64(len(body)),
-		Annotations: map[string]string{"predicateType": PredicateType}})
+		Annotations: map[string]string{"predicateType": PredicateType, CosignSignatureAnnotation: env.Signatures[0].Sig}})
 	diffIDs = append(diffIDs, layerDigest)
 	cfg, _ := json.Marshal(map[string]any{
 		"architecture": "", "os": "", "created": "1970-01-01T00:00:00Z",

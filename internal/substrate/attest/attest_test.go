@@ -686,7 +686,7 @@ func TestCosignLayout(t *testing.T) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Layers) != 1 || m.Layers[0].MediaType != "application/vnd.dsse.envelope.v1+json" || m.Layers[0].Annotations["predicateType"] != PredicateType {
+	if len(m.Layers) != 1 || m.Layers[0].MediaType != "application/vnd.dsse.envelope.v1+json" || m.Layers[0].Annotations["predicateType"] != PredicateType || m.Layers[0].Annotations[CosignSignatureAnnotation] == "" {
 		t.Fatalf("layers: %+v", m.Layers)
 	}
 	raw, err := f.reg.SmallBlob(ctx, f.m.host(), "tmpl/claude", m.Layers[0].Digest, 1<<20)
