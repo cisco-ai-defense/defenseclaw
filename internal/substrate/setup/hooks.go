@@ -345,7 +345,30 @@ func PurgeSteps(plan ChartPlan) []string {
 		"  3. Check the bucket prefix for objects of deleted actors and remove them with your cloud's tools.",
 		"  4. The leader store volume (PVC defenseclaw-store) is kept on uninstall; delete it with " +
 			"kubectl -n " + plan.Namespace + " delete pvc defenseclaw-store once you no longer need the audit history.",
+		"  5. The access-policy grants stay (only a global owner can remove them): take " +
+			strings.Join(memberList(append(append([]string{}, plan.Editors...), plan.GlobalViewers...)), ", ") +
+			" out of the global policy and of the policies of " + strings.Join(orNone(plan.WritableAtespaces), ", ") +
+			" (kubectl ate get|update access-policy), so a later ServiceAccount of the same name gets nothing.",
 	}
+}
+
+func memberList(principals []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range principals {
+		if m := Member(p); !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func orNone(s []string) []string {
+	if len(s) == 0 {
+		return []string{"no atespace"}
+	}
+	return s
 }
 
 // StepTimeout bounds one hook step.

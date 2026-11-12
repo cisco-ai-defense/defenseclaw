@@ -250,7 +250,7 @@ func TestPreDeleteRemovesOnlyDefenseClawPolicies(t *testing.T) {
 	if strings.Contains(policy, "eng-web") || !strings.Contains(policy, "team-a") {
 		t.Errorf("namespace policy after uninstall:\n%s", policy)
 	}
-	if !strings.Contains(strings.Join(r.Notes, "\n"), "kubectl ate delete tag") {
+	if notes := strings.Join(r.Notes, "\n"); !strings.Contains(notes, "kubectl ate delete tag") || !strings.Contains(notes, "grants stay") {
 		t.Errorf("no purge steps: %v", r.Notes)
 	}
 }
