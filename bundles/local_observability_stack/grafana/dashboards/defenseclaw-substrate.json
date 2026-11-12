@@ -1,0 +1,1088 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "DefenseClaw on Agent Substrate: control-plane health (policy lag, unattested templates, policy conflicts, idle suspends, rate limiting), hook, resume and leader latency, actor lifecycle by trigger and phase, and egress through the callout (decisions, bodies read, secrets injected, blocked requests). Metrics carry no actor, atespace or person label; names appear only in the log panels.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "liveNow": false,
+  "links": [
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/defenseclaw-overview?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Sandboxes",
+      "type": "link",
+      "url": "/d/defenseclaw-sandboxes?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Agent 360",
+      "type": "link",
+      "url": "/d/defenseclaw-agent-360?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Control plane health",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Policy lag p99 (s)",
+      "description": "99th percentile of the time from a policy or profile change to the egress policy being active, from defenseclaw.substrate.policy_lag. Alert: over 10 s for 10 minutes. The metric has no actor, atespace or person label.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_substrate_policy_lag_seconds_bucket{deployment_environment_name=~\"$environment\"}[$__range])))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Unattested templates",
+      "description": "Agent Substrate templates DefenseClaw has seen without a valid attestation. Actors from them have no network. Zero is healthy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "max(defenseclaw_substrate_unattested_templates{deployment_environment_name=~\"$environment\"})",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Policy conflicts",
+      "description": "Actors the controller marked policy_conflict in the range: another writer reverted the egress policy three times in ten minutes and the controller stopped reverting it. Zero is healthy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_substrate_policy_conflicts_total{deployment_environment_name=~\"$environment\"}[$__range]))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Idle suspends",
+      "description": "Actors DefenseClaw suspended for being idle in the range. Batch runs started with --task are not idle-suspended by default.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_substrate_idle_suspends_total{deployment_environment_name=~\"$environment\"}[$__range]))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Rate limited",
+      "description": "Calls refused by the fair-share rate limit in the range. A steady count means one actor or atespace is starving the others, or the limit is too low.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(increase(defenseclaw_substrate_rate_limited_total{deployment_environment_name=~\"$environment\"}[$__range]))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Actors seen",
+      "description": "Distinct actors (atespace and name) that recorded a lifecycle change in the range, from the lifecycle log.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "count(sum by (body_defenseclaw_sandbox_substrate_atespace, body_defenseclaw_sandbox_substrate_actor) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | json | __error__=\"\" | body_defenseclaw_sandbox_runtime=\"substrate\" | defenseclaw_event_name=\"sandbox.lifecycle\" [$__range]))) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Latency",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Hook round trip (ms)",
+      "description": "Round trip of a hook call from the actor kit to the DefenseClaw gateway, 50th and 99th percentile.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(defenseclaw_substrate_hook_rtt_milliseconds_bucket{deployment_environment_name=~\"$environment\"}[$__rate_interval])))",
+          "refId": "A",
+          "range": true,
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_substrate_hook_rtt_milliseconds_bucket{deployment_environment_name=~\"$environment\"}[$__rate_interval])))",
+          "refId": "B",
+          "range": true,
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "First hook after resume (ms)",
+      "description": "Time the first hook call takes after an actor resumes (the relay pre-connects, so this should stay close to the normal round trip).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(defenseclaw_substrate_first_hook_after_resume_milliseconds_bucket{deployment_environment_name=~\"$environment\"}[$__rate_interval])))",
+          "refId": "A",
+          "range": true,
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_substrate_first_hook_after_resume_milliseconds_bucket{deployment_environment_name=~\"$environment\"}[$__rate_interval])))",
+          "refId": "B",
+          "range": true,
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Policy lag (s)",
+      "description": "Time from a policy change to the egress policy being active on Substrate, 50th and 99th percentile.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(defenseclaw_substrate_policy_lag_seconds_bucket{deployment_environment_name=~\"$environment\"}[$__rate_interval])))",
+          "refId": "A",
+          "range": true,
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_substrate_policy_lag_seconds_bucket{deployment_environment_name=~\"$environment\"}[$__rate_interval])))",
+          "refId": "B",
+          "range": true,
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Leader observe latency (ms)",
+      "description": "Time a stateless gateway replica waits for the leader to record a stateful observation (tool chains, intent, asks).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(defenseclaw_substrate_leader_observe_latency_milliseconds_bucket{deployment_environment_name=~\"$environment\"}[$__rate_interval])))",
+          "refId": "A",
+          "range": true,
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_substrate_leader_observe_latency_milliseconds_bucket{deployment_environment_name=~\"$environment\"}[$__rate_interval])))",
+          "refId": "B",
+          "range": true,
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "row",
+      "title": "Actor lifecycle",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Lifecycle changes by trigger",
+      "description": "Actor lifecycle records by what caused them: create, start, stop, delete, reconcile, attest, policy_lag, resume_recheck, fork, drift, policy_conflict, idle_suspend, migrate.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (body_defenseclaw_sandbox_lifecycle_trigger) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | json | __error__=\"\" | body_defenseclaw_sandbox_runtime=\"substrate\" | defenseclaw_event_name=\"sandbox.lifecycle\" [$__auto]))",
+          "refId": "A",
+          "queryType": "range",
+          "legendFormat": "{{body_defenseclaw_sandbox_lifecycle_trigger}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Phase transitions",
+      "description": "Actor phases entered over time: resuming, ready (RUNNING), suspending, suspended, crashed, deleting, reverting.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 23,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (body_defenseclaw_sandbox_phase) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | json | __error__=\"\" | body_defenseclaw_sandbox_runtime=\"substrate\" | defenseclaw_event_name=\"sandbox.lifecycle\" [$__auto]))",
+          "refId": "A",
+          "queryType": "range",
+          "legendFormat": "{{body_defenseclaw_sandbox_phase}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": "logs",
+      "title": "Recent lifecycle records",
+      "description": "Newest actor lifecycle records with the trigger and phase. Actor names are in the log line only; they are never metric labels.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | json | __error__=\"\" | body_defenseclaw_sandbox_runtime=\"substrate\" | defenseclaw_event_name=\"sandbox.lifecycle\" | line_format \"{{.body_defenseclaw_sandbox_substrate_atespace}}/{{.body_defenseclaw_sandbox_substrate_actor}} · {{.body_defenseclaw_sandbox_phase_previous}} → {{.body_defenseclaw_sandbox_phase}} · {{.body_defenseclaw_sandbox_lifecycle_trigger}} · {{.body_defenseclaw_sandbox_substrate_template}}\"",
+          "refId": "A",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true,
+        "dedupStrategy": "none"
+      }
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "Egress through the callout",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Egress decisions",
+      "description": "Egress records from the Substrate callout by decision.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (defenseclaw_event_name) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | json | __error__=\"\" | body_defenseclaw_sandbox_runtime=\"substrate\" | defenseclaw_event_name=~\"egress[.](allowed|blocked)\" [$__auto]))",
+          "refId": "A",
+          "queryType": "range",
+          "legendFormat": "{{defenseclaw_event_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Bodies read and bodies over the cap",
+      "description": "Requests whose body the callout read to decide (MCP and listed hosts only, up to the cap) and requests whose body was over the cap and was not read.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | json | __error__=\"\" | body_defenseclaw_sandbox_runtime=\"substrate\" | defenseclaw_event_name=~\"egress[.].*\" | body_defenseclaw_network_body_inspected=\"true\" [$__auto]))",
+          "refId": "A",
+          "queryType": "range",
+          "legendFormat": "body read"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | json | __error__=\"\" | body_defenseclaw_sandbox_runtime=\"substrate\" | defenseclaw_event_name=~\"egress[.].*\" | body_defenseclaw_network_body_over_cap=\"true\" [$__auto]))",
+          "refId": "B",
+          "queryType": "range",
+          "legendFormat": "over the cap"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Secrets injected",
+      "description": "Times the egress callout swapped a placeholder for a real secret, by secret name. The value is never recorded.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (body_defenseclaw_secret_name) (count_over_time({service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | json | __error__=\"\" | body_defenseclaw_sandbox_runtime=\"substrate\" | defenseclaw_event_name=\"secret.injected\" [$__auto]))",
+          "refId": "A",
+          "queryType": "range",
+          "legendFormat": "{{body_defenseclaw_secret_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "logs",
+      "title": "Recent blocked requests",
+      "description": "Newest requests the callout refused, with the host and the reason.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\"} | deployment_environment_name=~\"$environment\" | json | __error__=\"\" | body_defenseclaw_sandbox_runtime=\"substrate\" | defenseclaw_event_name=\"egress.blocked\" | line_format \"{{.body_defenseclaw_sandbox_substrate_atespace}}/{{.body_defenseclaw_sandbox_substrate_actor}} · {{.body_defenseclaw_network_target_ref}} · {{.body_defenseclaw_network_reason}}\"",
+          "refId": "A",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true,
+        "dedupStrategy": "none"
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "defenseclaw",
+    "substrate",
+    "kubernetes",
+    "sandbox",
+    "egress"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "environment",
+        "label": "Environment",
+        "description": "deployment.environment.name of the DefenseClaw gateway. Applies to every panel. Defaults to All.",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "defenseclaw-loki"
+        },
+        "definition": "label_values({service_name=\"defenseclaw\"}, deployment_environment_name)",
+        "query": {
+          "label": "deployment_environment_name",
+          "refId": "LokiVariableQueryEditor-VariableQuery",
+          "stream": "{service_name=\"defenseclaw\"}",
+          "type": 1
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "skipUrlSync": false,
+        "hide": 0,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h"
+    ],
+    "time_options": [
+      "5m",
+      "15m",
+      "1h",
+      "6h",
+      "12h",
+      "24h",
+      "2d",
+      "7d",
+      "30d"
+    ]
+  },
+  "timezone": "browser",
+  "title": "DefenseClaw — Substrate agents",
+  "uid": "defenseclaw-substrate",
+  "version": 1,
+  "weekStart": ""
+}

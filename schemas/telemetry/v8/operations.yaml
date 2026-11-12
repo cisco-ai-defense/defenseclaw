@@ -13486,6 +13486,28 @@ groups:
     route_selector: true
     compatibility_profiles:
     - local-observability-v1
+- id: metric.defenseclaw.substrate.policy_conflicts
+  type: metric
+  brief: Actors the controller marked policy_conflict after three reverts in ten minutes of a foreign egress policy change; no identity labels.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes: []
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.substrate.policy_conflicts
+    instrument_type: counter
+    value_type: int64
+    unit: '{conflict}'
+    description: Actors the controller marked policy_conflict after three reverts in ten minutes of a foreign egress policy change; no identity labels.
+    temporality: delta
+    empty_labels_reason: No instrument attributes by design; Substrate actor, atespace and person identity are never metric labels.
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
 - id: log.config.bundle.receipt
   type: log
   brief: 'Canonical config.bundle.receipt log identity; one record for every signed policy bundle receipt that ends confirmed or failed on a standalone managed device.'

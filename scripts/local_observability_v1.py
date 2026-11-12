@@ -77,6 +77,7 @@ EXPECTED_DASHBOARD_UIDS = {
     "defenseclaw-sandboxes",
     "defenseclaw-scanners",
     "defenseclaw-security",
+    "defenseclaw-substrate",
     "defenseclaw-traffic",
 }
 EXPECTED_DATASOURCE_UIDS = {
