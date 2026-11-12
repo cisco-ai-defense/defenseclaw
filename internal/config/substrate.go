@@ -57,10 +57,13 @@ type SubstrateConfig struct {
 	IdleSuspendAfter string                    `mapstructure:"idle_suspend_after" yaml:"idle_suspend_after,omitempty"`
 	Unattended       SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
 	RateLimits       SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
-	Extproc          SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
-	LLM              SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
-	Egress           SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Secrets          []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	// Budgets are token budgets of batches and atespaces (warn only until
+	// the 1.0.10 tokenomics layer brings downgrade and deny).
+	Budgets SubstrateBudgetsConfig `mapstructure:"budgets" yaml:"budgets,omitempty"`
+	Extproc SubstrateExtprocConfig `mapstructure:"extproc"            yaml:"extproc,omitempty"`
+	LLM     SubstrateLLMConfig     `mapstructure:"llm"                yaml:"llm,omitempty"`
+	Egress  SubstrateEgressConfig  `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Secrets []SubstrateSecret      `mapstructure:"secrets"            yaml:"secrets,omitempty"`
 	// AllowPassthroughFor lists hosts forwarded without inspection
 	// (certificate pinning). A secret is never bound to one.
 	AllowPassthroughFor []string `mapstructure:"allow_passthrough_for" yaml:"allow_passthrough_for,omitempty"`
@@ -129,6 +132,16 @@ type SubstrateUnattendedConfig struct {
 type SubstrateRateLimitsConfig struct {
 	PerActorRPS    float64 `mapstructure:"per_actor_rps"    yaml:"per_actor_rps,omitempty"`
 	PerAtespaceRPS float64 `mapstructure:"per_atespace_rps" yaml:"per_atespace_rps,omitempty"`
+}
+
+// SubstrateBudgetsConfig is substrate.budgets: when the model tokens of a
+// batch (one person's --batch run) or an atespace reach the limit, the
+// gateway warns once (audit, log, the batch view). Zero is off. A budget
+// counts every token the provider reports (input, output, cache read and
+// cache write).
+type SubstrateBudgetsConfig struct {
+	BatchTokens    int64 `mapstructure:"batch_tokens"    yaml:"batch_tokens,omitempty"`
+	AtespaceTokens int64 `mapstructure:"atespace_tokens" yaml:"atespace_tokens,omitempty"`
 }
 
 // SubstrateExtprocConfig is the egress callout (D9, D10).
@@ -433,6 +446,12 @@ func (s *SubstrateConfig) Validate() error {
 	}
 	if s.RateLimits.PerAtespaceRPS < 0 {
 		bad("rate_limits.per_atespace_rps", "must not be negative")
+	}
+	if s.Budgets.BatchTokens < 0 {
+		bad("budgets.batch_tokens", "must not be negative")
+	}
+	if s.Budgets.AtespaceTokens < 0 {
+		bad("budgets.atespace_tokens", "must not be negative")
 	}
 
 	switch strings.ToLower(orDefault(s.Extproc.FailureMode, SubstrateFailClosed)) {

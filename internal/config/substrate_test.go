@@ -65,6 +65,7 @@ func TestSubstrateConfigMatchesTheClosedSchema(t *testing.T) {
 		{SubstrateServicesConfig{}, []string{"substrate", "services"}},
 		{SubstrateUnattendedConfig{}, []string{"substrate", "unattended"}},
 		{SubstrateRateLimitsConfig{}, []string{"substrate", "rate_limits"}},
+		{SubstrateBudgetsConfig{}, []string{"substrate", "budgets"}},
 		{SubstrateExtprocConfig{}, []string{"substrate", "extproc"}},
 		{SubstrateLLMConfig{}, []string{"substrate", "llm"}},
 		{SubstrateLLMCredentialConfig{}, []string{"substrate", "llm", "credential"}},
@@ -127,6 +128,7 @@ substrate:
   idle_suspend_after: 30m
   unattended: {asks: deny, ask_timeout: 30m, telemetry_sampling: 1.0}
   rate_limits: {per_actor_rps: 20, per_atespace_rps: 500}
+  budgets: {batch_tokens: 2000000, atespace_tokens: 50000000}
   extproc: {enabled: true, failure_mode: closed, body_inspection: auto, body_max_bytes: 1048576, mcp_hosts: [mcp.example.com]}
   llm: {providers: [anthropic, openai, bedrock], credential: {provider_uri: "ate-secret://k8s.io/default/defenseclaw-system/llm-keys"}}
   egress: {allow: [github.com, "*.githubusercontent.com"], ecosystem_packs: [pypi, npm], registries: [ghcr.io]}
@@ -204,6 +206,7 @@ func TestSubstrateValidate(t *testing.T) {
 		"ask timeout":               func(s *SubstrateConfig) { s.Unattended.AskTimeout = "48h" },
 		"sampling":                  func(s *SubstrateConfig) { r := 1.5; s.Unattended.TelemetrySampling = &r },
 		"rps":                       func(s *SubstrateConfig) { s.RateLimits.PerActorRPS = -1 },
+		"budgets.batch_tokens":      func(s *SubstrateConfig) { s.Budgets.BatchTokens = -1 },
 		"failure mode":              func(s *SubstrateConfig) { s.Extproc.FailureMode = "ignore" },
 		"body mode":                 func(s *SubstrateConfig) { s.Extproc.BodyInspection = "always" },
 		"body cap":                  func(s *SubstrateConfig) { s.Extproc.BodyMaxBytes = 2 << 20 },

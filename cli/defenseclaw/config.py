@@ -4196,6 +4196,14 @@ class SubstrateRateLimitsConfig:
 
 
 @dataclass
+class SubstrateBudgetsConfig:
+    """substrate.budgets: token budgets of batches and atespaces (warn once)."""
+
+    batch_tokens: int | None = None
+    atespace_tokens: int | None = None
+
+
+@dataclass
 class SubstrateExtprocConfig:
     enabled: bool | None = None
     failure_mode: str = ""
@@ -4260,6 +4268,7 @@ class SubstrateConfig:
     idle_suspend_after: str = ""
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
+    budgets: SubstrateBudgetsConfig = field(default_factory=SubstrateBudgetsConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
     llm: SubstrateLLMConfig = field(default_factory=SubstrateLLMConfig)
     egress: SubstrateEgressConfig = field(default_factory=SubstrateEgressConfig)
@@ -7453,6 +7462,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
     services = _mapping(raw.get("services"))
     unattended = _mapping(raw.get("unattended"))
     limits = _mapping(raw.get("rate_limits"))
+    budgets = _mapping(raw.get("budgets"))
     extproc = _mapping(raw.get("extproc"))
     llm = _mapping(raw.get("llm"))
     egress = _mapping(raw.get("egress"))
@@ -7523,6 +7533,10 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         rate_limits=SubstrateRateLimitsConfig(
             per_actor_rps=_optional_number(limits.get("per_actor_rps"), float),
             per_atespace_rps=_optional_number(limits.get("per_atespace_rps"), float),
+        ),
+        budgets=SubstrateBudgetsConfig(
+            batch_tokens=_optional_number(budgets.get("batch_tokens"), int),
+            atespace_tokens=_optional_number(budgets.get("atespace_tokens"), int),
         ),
         extproc=SubstrateExtprocConfig(
             enabled=_optional_bool(extproc.get("enabled")),

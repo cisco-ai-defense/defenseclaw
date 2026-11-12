@@ -1027,6 +1027,7 @@ A `custom-providers.json` marked `_derived_from` is rendered from this section o
 | `substrate.idle_suspend_after` | `30m` | Suspends an actor with no activity and low CPU; `0s` turns it off. Never with a pending ask. |
 | `substrate.unattended.asks`, `.ask_timeout`, `.telemetry_sampling` | `deny`, `30m`, `1.0` | Unattended runs: `deny` or `queue` asks, how long a queued ask waits, the share of routine records kept. |
 | `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits on the actor Service. |
+| `substrate.budgets.batch_tokens`, `.atespace_tokens` | `0`, `0` | Model token budgets of one person's batch and of an atespace. When one is reached, DefenseClaw warns once (audit, gateway log, `status --batch`); the run goes on. `0` turns it off. Counts input, output and cache tokens. |
 | `substrate.extproc.enabled`, `.failure_mode`, `.body_inspection`, `.body_max_bytes`, `.mcp_hosts` | `true`, `closed`, `auto`, `1048576`, none | The egress callout. Bodies are read only for listed MCP hosts, at most 1 MiB. |
 | `substrate.llm.providers`, `.credential.provider_uri` | none | Model providers the proxy serves actors, and where it reads their keys. Model traffic always goes through the DefenseClaw proxy. |
 | `substrate.egress.allow`, `.ecosystem_packs`, `.registries` | none, every pack, none | Hosts every actor may reach before its profile tightens them. Packs: `pypi`, `npm`, `crates`, `go`. Model provider hosts are always left out. |
