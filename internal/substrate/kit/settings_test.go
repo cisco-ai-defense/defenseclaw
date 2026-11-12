@@ -90,7 +90,10 @@ func TestClaudeCodeOverlay(t *testing.T) {
 		"NODE_EXTRA_CA_CERTS": TrustBundle, "SSL_CERT_FILE": TrustBundle, "TMPDIR": "/sandbox/.cache/tmp",
 		"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_BEDROCK_BASE_URL": DefaultGatewayURL + "/llm/bedrock",
 		"AWS_BEARER_TOKEN_BEDROCK": "placeholder-not-a-secret", "NO_UPDATE_NOTIFIER": "1",
-		"ANTHROPIC_CUSTOM_HEADERS": "x-defenseclaw-actor: defenseclaw-actor-placeholder\nX-DefenseClaw-Client: claudecode-llm/1.0",
+		"ANTHROPIC_MODEL": ClaudeCodeBedrockModel, "ANTHROPIC_SMALL_FAST_MODEL": ClaudeCodeBedrockModel,
+		"ANTHROPIC_DEFAULT_OPUS_MODEL": ClaudeCodeBedrockModel, "ANTHROPIC_DEFAULT_SONNET_MODEL": ClaudeCodeBedrockModel,
+		"CLAUDE_CODE_SUBAGENT_MODEL": ClaudeCodeBedrockModel,
+		"ANTHROPIC_CUSTOM_HEADERS":   "x-defenseclaw-actor: defenseclaw-actor-placeholder\nX-DefenseClaw-Client: claudecode-llm/1.0",
 	} {
 		if ov.Env[k] != want {
 			t.Errorf("env %s=%q, want %q", k, ov.Env[k], want)

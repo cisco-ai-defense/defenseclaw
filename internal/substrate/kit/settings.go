@@ -281,6 +281,17 @@ func dedupe(in []string) []string {
 	return out
 }
 
+// ClaudeCodeBedrockModel is Claude Code's model on the Bedrock route of an
+// actor image (owner, 2026-11-12: Claude Haiku 5.5, us-east-1 inference
+// profile). Every model slot gets it: Claude Code also calls its opus and
+// sonnet aliases for side tasks (substrate-1 GAP-0008), and each must be a
+// model the gateway's /llm/bedrock allows.
+const ClaudeCodeBedrockModel = "us.anthropic.claude-haiku-5-5"
+
+// claudeCodeModelSlots are the Claude Code variables that name a model.
+var claudeCodeModelSlots = []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	"ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"}
+
 // InteractiveArgv is the agent the relay starts in its tmux session.
 var InteractiveArgv = map[string][]string{
 	"claudecode": {"/usr/local/bin/claude"},
@@ -303,8 +314,12 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 	env := map[string]string{}
 	switch connectorName {
 	case "claudecode":
+		model := o.Model
 		switch o.Provider {
 		case "", "bedrock":
+			if model == "" {
+				model = ClaudeCodeBedrockModel
+			}
 			env["CLAUDE_CODE_USE_BEDROCK"] = "1"
 			env["ANTHROPIC_BEDROCK_BASE_URL"] = gw + "/llm/bedrock"
 			env["AWS_BEARER_TOKEN_BEDROCK"] = "placeholder-not-a-secret"
@@ -318,10 +333,9 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 		// The actor listener's CSRF gate also wants X-DefenseClaw-Client on
 		// every POST (GAP-0037). Claude Code takes one header per line.
 		env["ANTHROPIC_CUSTOM_HEADERS"] = PlaceholderHeader + ": " + PlaceholderValue + "\nX-DefenseClaw-Client: claudecode-llm/1.0"
-		if o.Model != "" {
-			for _, k := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-				"ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL"} {
-				env[k] = o.Model
+		if model != "" {
+			for _, k := range claudeCodeModelSlots {
+				env[k] = model
 			}
 		}
 	case "codex":
