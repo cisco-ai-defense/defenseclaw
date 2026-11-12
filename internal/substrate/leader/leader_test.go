@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -392,4 +394,90 @@ func jsonReader(t *testing.T, v any) *bytes.Reader {
 	t.Helper()
 	b, _ := json.Marshal(v)
 	return bytes.NewReader(b)
+}
+
+// GAP-0057: read methods run on every call and keep nothing for replay.
+func TestReadMethodsAreNotKeptForReplay(t *testing.T) {
+	var reads atomic.Int64
+	s := &Server{IsLeader: func() bool { return true }}
+	s.HandleRead("Peek", Typed(func(context.Context, struct{}) (struct{}, error) {
+		reads.Add(1)
+		return struct{}{}, nil
+	}))
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client(), Retry: 200 * time.Millisecond}
+	for i := 0; i < 3; i++ {
+		if err := c.Call(context.Background(), "Peek", "req-read-0001", struct{}{}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.mu.Lock()
+	kept := len(s.done)
+	s.mu.Unlock()
+	if reads.Load() != 3 || kept != 0 {
+		t.Fatalf("reads %d, kept %d", reads.Load(), kept)
+	}
+}
+
+// GAP-0057: the replay map never grows past its cap.
+func TestIdempotencyMapIsCapped(t *testing.T) {
+	s := &Server{IsLeader: func() bool { return true }}
+	now := time.Unix(1_800_000_000, 0)
+	s.Now = func() time.Time { return now }
+	s.done = map[string]*idemEntry{}
+	for i := 0; i < maxIdempotent; i++ {
+		s.done[fmt.Sprintf("k%d", i)] = &idemEntry{ready: make(chan struct{}), at: now}
+	}
+	e, first := s.claim("new")
+	if e == nil || !first || len(s.done) > maxIdempotent {
+		t.Fatalf("claim on a full map: %v %v, size %d", e != nil, first, len(s.done))
+	}
+	// Every entry in flight: refused rather than grown.
+	s.done = map[string]*idemEntry{}
+	for i := 0; i < maxIdempotent; i++ {
+		s.done[fmt.Sprintf("k%d", i)] = &idemEntry{ready: make(chan struct{})}
+	}
+	if e, _ := s.claim("new"); e != nil || len(s.done) != maxIdempotent {
+		t.Fatalf("all in flight: entry %v size %d", e != nil, len(s.done))
+	}
+}
+
+// GAP-0094: each peer identity calls only its methods.
+func TestServerPermissionsByPeerIdentity(t *testing.T) {
+	s := &Server{IsLeader: func() bool { return true }, Permit: Permissions{
+		"spiffe://cluster.local/ns/dc/sa/gateway": {"*"},
+		"spiffe://cluster.local/ns/dc/sa/callout": {"ChainEgress"},
+	}}
+	for _, m := range []string{"ChainEgress", "ChainObserve", MethodRegistrationWrite} {
+		s.Handle(m, Typed(func(context.Context, struct{}) (struct{}, error) { return struct{}{}, nil }))
+	}
+	call := func(peer, method string) int {
+		req := httptest.NewRequest(http.MethodPost, PathPrefix+method, strings.NewReader(`{"request_id":"req-perm-`+method+peer[len(peer)-3:]+`","body":{}}`))
+		if peer != "" {
+			u, _ := url.Parse(peer)
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{URIs: []*url.URL{u}}}}
+		}
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	gw, co := "spiffe://cluster.local/ns/dc/sa/gateway", "spiffe://cluster.local/ns/dc/sa/callout"
+	if c := call(gw, "ChainObserve"); c != http.StatusOK {
+		t.Fatalf("gateway ChainObserve %d", c)
+	}
+	if c := call(co, "ChainEgress"); c != http.StatusOK {
+		t.Fatalf("callout ChainEgress %d", c)
+	}
+	for _, m := range []string{"ChainObserve", MethodRegistrationWrite} {
+		if c := call(co, m); c != http.StatusForbidden {
+			t.Fatalf("callout %s %d, want 403", m, c)
+		}
+	}
+	if c := call("spiffe://cluster.local/ns/dc/sa/other", "ChainEgress"); c != http.StatusForbidden {
+		t.Fatalf("unknown peer %d", c)
+	}
+	if got := s.Permit.Peers(); len(got) != 2 {
+		t.Fatalf("peers %v", got)
+	}
 }

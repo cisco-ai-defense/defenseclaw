@@ -53,7 +53,7 @@ func Serve(srv *leader.Server, s Store) {
 		}
 		return putOut{Key: r.Key}, nil
 	}))
-	srv.Handle(leader.MethodRegistrationGet, leader.Typed(func(ctx context.Context, in getIn) (getOut, error) {
+	srv.HandleRead(leader.MethodRegistrationGet, leader.Typed(func(ctx context.Context, in getIn) (getOut, error) {
 		r, ok, err := s.Get(ctx, in.Atespace, in.UID)
 		if err != nil {
 			return getOut{}, err
@@ -63,7 +63,7 @@ func Serve(srv *leader.Server, s Store) {
 		}
 		return getOut{Found: true, Registration: &r}, nil
 	}))
-	srv.Handle(leader.MethodRegistrationList, leader.Typed(func(ctx context.Context, f Filter) (listOut, error) {
+	srv.HandleRead(leader.MethodRegistrationList, leader.Typed(func(ctx context.Context, f Filter) (listOut, error) {
 		rs, err := s.List(ctx, f)
 		return listOut{Registrations: rs}, err
 	}))
@@ -73,6 +73,9 @@ func Serve(srv *leader.Server, s Store) {
 // registration does not change identity fields after it is written; a
 // tombstone or profile re-match reaches followers within this time.
 const remoteTTL = 15 * time.Second
+
+// remoteMissTTL is how long a follower reuses "not registered".
+const remoteMissTTL = time.Second
 
 // Remote is Store over the leader transport, with a short read cache.
 type Remote struct {
@@ -94,22 +97,31 @@ func (s *Remote) Get(ctx context.Context, atespace, uid string) (Registration, b
 	s.mu.Lock()
 	c, ok := s.cache[k]
 	s.mu.Unlock()
-	if ok && time.Since(c.at) < remoteTTL && c.found {
+	if ok && c.found && time.Since(c.at) < remoteTTL {
 		return c.r, true, nil
+	}
+	if ok && !c.found && time.Since(c.at) < remoteMissTTL {
+		return Registration{}, false, nil
 	}
 	var out getOut
 	if err := s.Client.Call(ctx, leader.MethodRegistrationGet, leader.NewRequestID(), getIn{Atespace: atespace, UID: uid}, &out); err != nil {
 		return Registration{}, false, err
 	}
-	// A miss is not cached: the launcher writes a registration before it
-	// answers, and the actor's first call may follow at once.
-	if out.Found && out.Registration != nil {
-		s.mu.Lock()
-		if s.cache == nil || len(s.cache) > 65536 {
-			s.cache = map[string]cached{}
-		}
+	found := out.Found && out.Registration != nil
+	s.mu.Lock()
+	if s.cache == nil || len(s.cache) > 65536 {
+		s.cache = map[string]cached{}
+	}
+	if found {
 		s.cache[k] = cached{r: *out.Registration, found: true, at: time.Now()}
-		s.mu.Unlock()
+	} else {
+		// A miss is cached only briefly: an unregistered actor's flood
+		// costs one leader call a second, and the launcher resumes an actor
+		// only after its registration is written (GAP-0057).
+		s.cache[k] = cached{at: time.Now()}
+	}
+	s.mu.Unlock()
+	if found {
 		return *out.Registration, true, nil
 	}
 	return Registration{}, false, nil

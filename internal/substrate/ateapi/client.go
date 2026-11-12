@@ -188,6 +188,16 @@ type Client interface {
 	// SuspendActor checkpoints a running actor (asynchronous durability:
 	// it returns once the snapshot is on the node).
 	SuspendActor(ctx context.Context, actor *ObjectRef) (*Actor, error)
+	// CreateActor creates actor (metadata atespace and name, the template)
+	// SUSPENDED: it makes no call until ResumeActor, so a launcher writes
+	// its registration and policy first.
+	CreateActor(ctx context.Context, actor *Actor) (*Actor, error)
+	// ResumeActor starts a suspended actor; resumed is false when it was
+	// already running.
+	ResumeActor(ctx context.Context, actor *ObjectRef) (a *Actor, resumed bool, err error)
+	// DeleteActor deletes an actor and its snapshots; opts may require the
+	// uid (a later actor under the same name is not deleted).
+	DeleteActor(ctx context.Context, actor *ObjectRef, opts *DeleteOptions) (*Actor, error)
 
 	GetActorEgressPolicy(ctx context.Context, actor *ObjectRef) (*EgressPolicy, error)
 	// CreateActorEgressPolicy creates the actor's policy. The policy's
@@ -415,6 +425,25 @@ func (c *GRPCClient) SuspendActor(ctx context.Context, actor *ObjectRef) (*Actor
 		return nil, err
 	}
 	return resp.GetActor(), nil
+}
+
+func (c *GRPCClient) CreateActor(ctx context.Context, actor *Actor) (*Actor, error) {
+	if actor.GetMetadata().GetAtespace() == "" || actor.GetMetadata().GetName() == "" || actor.GetActorTemplate().GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "ateapi: CreateActor needs the atespace, name and template")
+	}
+	return c.ctl.CreateActor(ctx, &pb.CreateActorRequest{Actor: actor})
+}
+
+func (c *GRPCClient) ResumeActor(ctx context.Context, actor *ObjectRef) (*Actor, bool, error) {
+	resp, err := c.ctl.ResumeActor(ctx, &pb.ResumeActorRequest{Actor: actor})
+	if err != nil {
+		return nil, false, err
+	}
+	return resp.GetActor(), resp.GetResumed(), nil
+}
+
+func (c *GRPCClient) DeleteActor(ctx context.Context, actor *ObjectRef, opts *DeleteOptions) (*Actor, error) {
+	return c.ctl.DeleteActor(ctx, &pb.DeleteActorRequest{Actor: actor, Options: opts})
 }
 
 func (c *GRPCClient) GetActorEgressPolicy(ctx context.Context, actor *ObjectRef) (*EgressPolicy, error) {

@@ -26,30 +26,33 @@ defenseclaw substrate status api-2c9e
 
 ```yaml
 # tasks.yaml
-repo: git@github.com:example/app.git
-ref: 4f1c2ab
 tasks:
   - name: fix-parser
-    prompt: make the failing tests in pkg/parser pass
+    task: make the failing tests in pkg/parser pass
   - name: bump-deps
-    prompt: update the Go dependencies and run the tests
+    task: update the Go dependencies and run the tests
 ```
 
 ```bash
-defenseclaw substrate run claude --batch tasks.yaml --parallel 8
-defenseclaw substrate status --batch batch-20261112-01
-defenseclaw substrate usage --batch batch-20261112-01
+defenseclaw substrate run claude --batch tasks.yaml --parallel 8 --clone git@github.com:example/app.git --ref 4f1c2ab
+defenseclaw substrate list --batch BATCH
+defenseclaw substrate status --batch BATCH
+defenseclaw substrate usage --batch BATCH
+defenseclaw substrate delete --batch BATCH
 ```
 
-Each task gets its own actor from the same repository and commit, with a shared batch ID. Parallel creation is rate limited, so a batch of hundreds doesn't flood the Substrate API. The `status --batch` and `usage` views show state, checks, blocks, tokens and cost for the batch.
+The file is a list of tasks (a bare list works too). Each task may also name its own `agent`. Each task gets its own actor, with a shared batch ID, and `--parallel` (default 4) limits how many run at once. Parallel creation is rate limited, so a big batch doesn't flood the Substrate API. `--clone` and `--ref` start every task from the same commit. The `status` and `usage` views show state, checks, blocks, tokens and cost for the batch.
 
 ## From CI
 
 CI has no person to sign in. The launcher signs in with a **workload identity** instead: a GitHub Actions OIDC token or a Kubernetes service-account token. The cluster accepts the issuers you list in `substrate.identity.workload_oidc`. The "person" on every event is then the workload principal, and a profile picks the policy by its `match.substrate.workloads` entry.
 
-{/* TODO(substrate): the CI sign-in command and flags. A6 DESIGN.md says "workload identity in CI" without naming flags; document the real ones after the usability pass. */}
+```bash
+defenseclaw substrate login --workload --workload-token-file "$TOKEN_FILE" --admin-url ... --issuer ... --client-id ...
+defenseclaw substrate run claude --task "triage the open dependabot PRs" --detach --workload-token-file "$TOKEN_FILE"
+```
 
-In CI the launcher takes the workload token from the job's environment instead of opening a browser, then `run --task` and `run --batch` work as on a laptop. Tokens are never printed or logged.
+`run` also accepts `--workload-token-file`, so a job can skip `login` and pass its token directly. Tokens are never printed or logged. In CI without a keychain, set `DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file`.
 
 ## What is different when nobody is there
 
@@ -68,6 +71,6 @@ A batch of hundreds of actors produces a lot of events. Set `substrate.unattende
 
 ## Limits
 
-- A task runs as the connector's headless mode allows. A connector without one is interactive only, and `run --task` says so. See [Agents and features](/docs/substrate/agents).
+- `--keep` keeps the agent after a finished `--task`; the default is that it stays until you delete it. A task runs as the connector's headless mode allows. A connector without one is interactive only, and `run --task` says so. See [Agents and features](/docs/substrate/agents).
 - The cluster's worker pools bound how many actors run at once. A full pool parks the request, then the launcher tells you the cluster is full and retries.
 - Budgets from the routing and tokenomics features apply: warn, downgrade or deny when a batch exceeds its limit.

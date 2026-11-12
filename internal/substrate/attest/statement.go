@@ -117,8 +117,12 @@ type HookChecks struct {
 	Files     []HookFile `json:"files,omitempty"`
 	// PhoneHomeOff is true when every per-connector phone-home and
 	// auto-update switch is set in the image environment.
-	PhoneHomeOff bool          `json:"phoneHomeOff"`
-	Switches     []SwitchCheck `json:"switches,omitempty"`
+	PhoneHomeOff bool `json:"phoneHomeOff"`
+	// EnvClean is true when the image environment sets none of the variables
+	// that load code into every process (LD_PRELOAD, NODE_OPTIONS, BASH_ENV ...).
+	EnvClean  bool          `json:"envClean"`
+	UnsafeEnv []string      `json:"unsafeEnv,omitempty"`
+	Switches  []SwitchCheck `json:"switches,omitempty"`
 }
 
 // HookFile is one checked hook or settings file.

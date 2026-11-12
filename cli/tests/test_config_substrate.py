@@ -38,7 +38,14 @@ _FULL = {
         "token_lifetime_seconds": 900,
         "actor_cert_oid": "1.3.6.1.4.1.11129.2.12.2",
         "oidc": {"issuer": "https://login.example.com", "client_id": "defenseclaw-launcher", "groups_claim": "groups"},
-        "workload_oidc": [{"issuer": "https://token.actions.githubusercontent.com", "audience": "defenseclaw-prod"}],
+        "workload_oidc": [
+            {
+                "issuer": "https://token.actions.githubusercontent.com",
+                "audience": "defenseclaw-prod",
+                "subject": "repo:acme/web:ref:refs/heads/*",
+                "claims": {"repository": "acme/web"},
+            }
+        ],
     },
     "services": {"actor": "defenseclaw-actor.defenseclaw-system.svc", "admin": "defenseclaw-admin.defenseclaw-system.svc"},
     "launcher_atespaces": {"engineering": ["eng-payments", "eng-web"]},
@@ -138,6 +145,8 @@ class TestSubstrateLoadSave(unittest.TestCase):
             self.assertTrue(sub.enabled)
             self.assertIs(sub.require_attested_templates, False)
             self.assertEqual(sub.identity.workload_oidc[0].audience, "defenseclaw-prod")
+            self.assertEqual(sub.identity.workload_oidc[0].subject, "repo:acme/web:ref:refs/heads/*")
+            self.assertEqual(sub.identity.workload_oidc[0].claims, {"repository": "acme/web"})
             self.assertEqual(sub.secrets[1].scope, "per_person")
             self.assertEqual(sub.egress.ecosystem_packs, ["pypi", "npm"])
             self.assertEqual(sub.admin.egress_block, ["paste.example.com"])

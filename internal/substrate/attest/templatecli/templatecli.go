@@ -44,6 +44,7 @@ type common struct {
 	json       bool
 	plain      multi
 	user       string
+	authHosts  multi
 	passFile   string
 	configPath string
 	platform   string
@@ -53,13 +54,14 @@ func (c *common) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&c.json, "json", false, "print JSON")
 	fs.Var(&c.plain, "insecure-registry", "registry host:port reached over plain HTTP (repeatable)")
 	fs.StringVar(&c.user, "registry-user", "", "registry user")
+	fs.Var(&c.authHosts, "registry-auth-host", "registry host that gets the credentials (repeatable; build adds the hosts of --from and --to)")
 	fs.StringVar(&c.passFile, "registry-password-file", "", "file with the registry password")
 	fs.StringVar(&c.configPath, "config", "", "DefenseClaw config.yaml (scanner and admission settings)")
 	fs.StringVar(&c.platform, "platform", "linux/amd64", "image platform")
 }
 
 func (c *common) registry() (*attest.Registry, error) {
-	o := attest.RegistryOptions{PlainHTTP: c.plain, Username: c.user}
+	o := attest.RegistryOptions{PlainHTTP: c.plain, Username: c.user, AuthHosts: c.authHosts}
 	if c.passFile != "" {
 		b, err := os.ReadFile(c.passFile)
 		if err != nil {
@@ -220,6 +222,11 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	if *from == "" || *to == "" || *hookBin == "" || *relayBin == "" || (*keyFile == "" && !*dry) {
 		return ExitUsageError, errors.New("build needs --from, --to, --hook-binary, --relay-binary and --key")
 	}
+	for _, img := range []string{*from, *to} {
+		if r, perr := attest.ParseRef(img); perr == nil {
+			c.authHosts = append(c.authHosts, r.Registry)
+		}
+	}
 	reg, err := c.registry()
 	if err != nil {
 		return ExitUsageError, err
@@ -285,7 +292,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 			return ExitUsageError, err
 		}
 		opts.BaseAttestor = attest.NewVerifier(reg, func() attest.Policy {
-			return attest.Policy{Anchors: ta, AllowUnverifiedBase: true}
+			return attest.Policy{Anchors: ta}
 		})
 	}
 	_ = harnessVersion
@@ -420,7 +427,7 @@ func runVerify(ctx context.Context, args []string, stdout io.Writer) (int, error
 		ta.Revoke(k)
 	}
 	v := attest.NewVerifier(reg, func() attest.Policy {
-		return attest.Policy{Anchors: ta, MinPolicyGeneration: *minGen, MaxAge: *maxAge, AllowUnverifiedBase: *allowUnv, RequireDigest: !*allowTag}
+		return attest.Policy{Anchors: ta, MinPolicyGeneration: *minGen, MaxAge: *maxAge, AllowUnverifiedBase: *allowUnv, AllowTags: *allowTag}
 	})
 	got, verr := v.Verify(ctx, image)
 	out := VerifyOutput{Image: image}
@@ -574,7 +581,7 @@ func runPublish(ctx context.Context, args []string, stdout io.Writer) (int, erro
 		return ExitUsageError, err
 	}
 	v := attest.NewVerifier(reg, func() attest.Policy {
-		return attest.Policy{Anchors: ta, MinPolicyGeneration: *minGen, RequireDigest: true}
+		return attest.Policy{Anchors: ta, MinPolicyGeneration: *minGen}
 	})
 	if tf.dryRun {
 		return runPublishDry(ctx, &c, v, plan, pos, stdout)
