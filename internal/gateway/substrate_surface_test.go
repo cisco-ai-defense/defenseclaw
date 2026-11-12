@@ -185,7 +185,7 @@ func TestLLMJudgeUsesItsIntentStore(t *testing.T) {
 	}
 	// The failure is reported once per interval, not once per call.
 	_ = judge.toolJudgeContextSample(ctx, "Bash", `{"command":"pwd"}`)
-	if n := strings.Count(logged.String(), "session intent store could not record a tool call"); n != 1 {
+	if n := strings.Count(logged.String(), "intent store AppendToolCall failed"); n != 1 {
 		t.Fatalf("store failure reported %d times:\n%s", n, logged.String())
 	}
 	if !strings.Contains(logged.String(), "leader unreachable") {
