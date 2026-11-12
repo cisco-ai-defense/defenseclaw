@@ -191,7 +191,9 @@ jobs:
             'TestStandaloneRerunWaitsForTheArmedRecoveryToFinish',
             'TestStandaloneUninstallRerunDuringTheArmedRecoveryIsBusy',
             'TestStandaloneSetupMutexIgnoresAMutexAnotherOwnerHolds',
-            'TestStandaloneSetupMutexWaitsForAMutexAdministratorsOwn'
+            'TestStandaloneSetupMutexWaitsForAMutexAdministratorsOwn',
+            'TestStandaloneRerunGoesOnWhenAnotherObjectSquatsTheRecoveryName',
+            'TestStandaloneEnsureGoesOnWithoutASquattedMutexAndHoldsNothing'
           )
           $setup = Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-v', '-count=1', '-run', ('^(' + ($setupTests -join '|') + ')$'), './cmd/defenseclaw-enterprise-setup'

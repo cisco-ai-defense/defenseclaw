@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"strings"
@@ -129,7 +130,7 @@ func TestStandaloneRerunWaitsForTheArmedRecoveryToFinish(t *testing.T) {
 	time.AfterFunc(300*time.Millisecond, release)
 	started := time.Now()
 	opts := enterpriseSetupOptions{Action: "uninstall", Standalone: true, LifecycleTimeout: 30 * time.Minute, Started: started}
-	if err := waitForStandaloneUninstallRecovery(opts); err != nil {
+	if err := waitForStandaloneUninstallRecovery(opts, io.Discard); err != nil {
 		t.Fatalf("the rerun did not go on after the recovery ended: %v", err)
 	}
 	if waited := time.Since(started); waited < 250*time.Millisecond {
@@ -178,7 +179,7 @@ func TestStandaloneUninstallRerunDuringTheArmedRecoveryIsBusy(t *testing.T) {
 	}
 }
 
-// A Global\\ mutex another account created first, and holds, stalled every
+// A Global\ mutex another account created first, and holds, stalled every
 // standalone Setup that waits for it (the 1.0.10 T1 review): Setup now goes on
 // without a mutex that SYSTEM or Administrators do not own. The test owns
 // the mutex as its own user, which is neither.
@@ -223,8 +224,8 @@ func TestStandaloneSetupMutexIgnoresAMutexAnotherOwnerHolds(t *testing.T) {
 	defer close(done)
 	started := time.Now()
 	release, err := holdStandaloneSetupMutex(name, "test squat", 5*time.Second)
-	if err != nil {
-		t.Fatalf("a mutex another owner holds stalled Setup: %v after %s", err, time.Since(started))
+	if !errors.Is(err, errStandaloneSetupMutexIgnored) || release == nil {
+		t.Fatalf("a mutex another owner holds: err=%v after %s, want it ignored", err, time.Since(started))
 	}
 	release()
 	if took := time.Since(started); took > 2*time.Second {
@@ -253,5 +254,56 @@ func TestStandaloneSetupMutexWaitsForAMutexAdministratorsOwn(t *testing.T) {
 	defer close(done)
 	if _, err := holdStandaloneSetupMutex(name, "test trusted", 300*time.Millisecond); !errors.Is(err, errStandaloneSetupMutexHeld) {
 		t.Fatalf("held trusted mutex: err=%v, want errStandaloneSetupMutexHeld", err)
+	}
+}
+
+// holdTestEventSquat holds a Global event under name, as an account squatting
+// a Setup mutex name with another object type would.
+func holdTestEventSquat(t *testing.T, name string) {
+	t.Helper()
+	pointer, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateEvent(nil, 1, 0, pointer)
+	if err != nil {
+		t.Fatalf("create the squatting event: %v", err)
+	}
+	t.Cleanup(func() { _ = windows.CloseHandle(handle) })
+}
+
+// An event under the recovery mutex name made CreateMutex fail with
+// ERROR_INVALID_HANDLE, and every standalone Setup that changes the
+// deployment failed with it (the 1.0.10 T1 review M1b). The wait now goes on
+// without the mutex and says so on stdout, never on stderr.
+func TestStandaloneRerunGoesOnWhenAnotherObjectSquatsTheRecoveryName(t *testing.T) {
+	useTestRecoveryMutex(t)
+	holdTestEventSquat(t, standaloneUninstallRecoveryMutex)
+	var notice bytes.Buffer
+	opts := enterpriseSetupOptions{Action: "uninstall", Standalone: true, LifecycleTimeout: 30 * time.Minute, Started: time.Now()}
+	if err := waitForStandaloneUninstallRecovery(opts, &notice); err != nil {
+		t.Fatalf("a squatted recovery name failed the rerun: %v", err)
+	}
+	if !strings.Contains(notice.String(), "ignores the host-wide standalone uninstall recovery mutex") {
+		t.Fatalf("notice = %q, want the ignored-mutex warning", notice.String())
+	}
+}
+
+// The ensure mutex name squatted by another object: ensure goes on without
+// it, and reports that it does not hold it, so the ensure stage sweep that
+// needs the proof that no ensure runs is skipped.
+func TestStandaloneEnsureGoesOnWithoutASquattedMutexAndHoldsNothing(t *testing.T) {
+	previous := standaloneSetupEnsureMutex
+	t.Cleanup(func() { standaloneSetupEnsureMutex = previous })
+	standaloneSetupEnsureMutex = fmt.Sprintf(`Global\Cisco-DefenseClaw-Test-Ensure-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	holdTestEventSquat(t, standaloneSetupEnsureMutex)
+	var notice bytes.Buffer
+	release, held, err := acquireStandaloneSetupEnsure(&notice)
+	if err != nil || held || release == nil {
+		t.Fatalf("squatted ensure mutex: held=%v err=%v, want a run that holds nothing", held, err)
+	}
+	release()
+	if !strings.Contains(notice.String(), "ignores the host-wide standalone ensure mutex") {
+		t.Fatalf("notice = %q, want the ignored-mutex warning", notice.String())
 	}
 }

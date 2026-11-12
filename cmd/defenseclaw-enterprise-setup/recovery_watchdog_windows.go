@@ -64,22 +64,29 @@ func holdStandaloneUninstallRecoveryNow() (func(), error) {
 // errStandaloneSetupMutexHeld when one still runs after wait.
 func awaitStandaloneUninstallRecovery(wait time.Duration) error {
 	release, err := holdStandaloneSetupMutex(standaloneUninstallRecoveryMutex, "standalone uninstall recovery", wait)
-	if err != nil {
-		return err
+	if release != nil {
+		release()
 	}
-	release()
-	return nil
+	return err
 }
 
 // waitForStandaloneUninstallRecovery is the wait of a standalone run that
 // changes the deployment for the uninstall recovery an earlier Setup armed:
 // past the bound (standaloneRecoveryWaitBound), the retryable 1618
 // lifecycle_busy with nothing changed.
-func waitForStandaloneUninstallRecovery(opts enterpriseSetupOptions) error {
+// A squatted mutex name is not waited for: the run says so on notice
+// (stdout, discarded in a JSON run) and goes on.
+func waitForStandaloneUninstallRecovery(opts enterpriseSetupOptions, notice io.Writer) error {
 	started := time.Now()
 	err := setupRecoveryAwait(standaloneRecoveryWaitBound(opts, started))
-	if errors.Is(err, errStandaloneSetupMutexHeld) {
+	switch {
+	case errors.Is(err, errStandaloneSetupMutexHeld):
 		return enterpriseSetupRecoveryBusy{action: opts.Action, waited: time.Since(started)}
+	case errors.Is(err, errStandaloneSetupMutexIgnored):
+		if !opts.JSON && notice != nil {
+			fmt.Fprintf(notice, "warning: %v\n", err)
+		}
+		return nil
 	}
 	return err
 }
