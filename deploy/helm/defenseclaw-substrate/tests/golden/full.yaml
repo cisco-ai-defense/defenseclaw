@@ -307,11 +307,14 @@ data:
     defenseclaw_hosts:
     - defenseclaw-actor.defenseclaw-system.svc.cluster.local
     - defenseclaw-actor.defenseclaw-system.svc
-    - defenseclaw-admin.defenseclaw-system.svc.cluster.local
-    - defenseclaw-admin.defenseclaw-system.svc
     egress_peers:
     - spiffe://cluster.local/ns/ate-system/sa/atenet-egress
     failure_mode: closed
+    internal_hosts:
+    - defenseclaw-admin.defenseclaw-system.svc.cluster.local
+    - defenseclaw-admin.defenseclaw-system.svc
+    - defenseclaw-admin.defenseclaw-system
+    - defenseclaw-admin
     judge:
       ca_file: /var/run/ate/ca.crt
       token_file: /var/run/secrets/defenseclaw-callout-judge/token
@@ -797,7 +800,7 @@ spec:
         app.kubernetes.io/component: callout
       annotations:
         checksum/config: ae136f4123b1e75d00c234ba8406cf90e2f02de7a6ee1fe591faaefb288b0a8c
-        checksum/callout: 696a0aa458898b276b79a026e221c30cce06810fdfb37e8fa56d6a6b5f6624e8
+        checksum/callout: a21a3ef606970d09bc35c6dd48d408de615e18c0542f7434ebc863c6761f0b37
     spec:
       
       serviceAccountName: defenseclaw-callout
