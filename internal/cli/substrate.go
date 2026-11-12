@@ -29,7 +29,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
@@ -95,25 +94,6 @@ type substrateCommon struct {
 
 func (c *substrateCommon) add(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&c.context, "context", "", "cluster to use (default: the one you signed in to last)")
-}
-
-// substrateRuntime holds what the commands use from the machine, so tests
-// replace it.
-type substrateRuntimeEnv struct {
-	In      io.Reader
-	Out     io.Writer
-	Err     io.Writer
-	InFile  *os.File
-	IsTTY   func() bool
-	OpenStr func() (auth.Store, error)
-}
-
-func substrateEnv(cmd *cobra.Command) substrateRuntimeEnv {
-	return substrateRuntimeEnv{
-		In: cmd.InOrStdin(), Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(), InFile: os.Stdin,
-		IsTTY:   func() bool { return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) },
-		OpenStr: auth.OpenStore,
-	}
 }
 
 // substrateSession is a resolved context with a way to get its bearer.
@@ -281,6 +261,3 @@ func init() {
 	)
 	rootCmd.AddCommand(substrateCmd)
 }
-
-// substrateOrWord is orWord under the name the administrator commands use.
-func substrateOrWord(v, def string) string { return orWord(v, def) }

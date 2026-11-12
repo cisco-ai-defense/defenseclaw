@@ -27,7 +27,7 @@ func TestOpenShellAdminConfigIsSandboxAdminConfig(t *testing.T) {
 	if reflect.TypeOf(OpenShellAdminConfig{}) != reflect.TypeOf(SandboxAdminConfig{}) {
 		t.Fatal("OpenShellAdminConfig is not an alias of SandboxAdminConfig")
 	}
-	var legacy OpenShellAdminConfig = SandboxAdminConfig{MinProfile: "balanced"}
+	legacy := OpenShellAdminConfig(SandboxAdminConfig{MinProfile: "balanced"})
 	if legacy.MinProfile != "balanced" {
 		t.Fatalf("alias lost a field: %+v", legacy)
 	}

@@ -472,9 +472,8 @@ func TestSubstrateAdminListener(t *testing.T) {
 
 // fakeActions creates actors in the fixture's live map.
 type fakeActions struct {
-	f       *substrateFixture
-	order   []string
-	failReg bool
+	f     *substrateFixture
+	order []string
 }
 
 func (a *fakeActions) Create(_ context.Context, req SubstrateCreate) (SubstrateCreated, error) {

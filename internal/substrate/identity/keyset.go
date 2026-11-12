@@ -319,8 +319,8 @@ func (k jwk) public() (crypto.PublicKey, error) {
 		if err1 != nil || err2 != nil || len(x) != 32 || len(y) != 32 {
 			return nil, errors.New("coordinates")
 		}
-		pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
-		if !pub.Curve.IsOnCurve(pub.X, pub.Y) { //nolint:staticcheck // validating a decoded point
+		pub, perr := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{0x04}, x...), y...))
+		if perr != nil {
 			return nil, errors.New("point is not on the curve")
 		}
 		return pub, nil

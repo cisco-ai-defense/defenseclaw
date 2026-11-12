@@ -20,16 +20,6 @@ const (
 	testActorUIDB = "2e8d6260-7d31-4e56-b416-1222430fa637"
 )
 
-func actorRepositoryForTest(t *testing.T, fixture *toolChainFixture, uid string, opts ...ToolChainOption) *ToolChainRepository {
-	t.Helper()
-	repo, err := fixture.store.ToolChainRepositoryWith(t.Context(), append([]ToolChainOption{WithToolChainActorScope("eng-web", uid)}, opts...)...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repo.now = func() time.Time { return fixture.now }
-	return repo
-}
-
 func TestToolChainRepositoryWithoutOptionsIsTheSessionRepository(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
 	repo, err := fixture.store.ToolChainRepositoryWith(t.Context())

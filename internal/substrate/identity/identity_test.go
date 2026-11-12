@@ -83,9 +83,11 @@ func jwkOf(kid, alg string, pub crypto.PublicKey) map[string]string {
 	enc := base64.RawURLEncoding.EncodeToString
 	switch k := pub.(type) {
 	case *ecdsa.PublicKey:
-		x, y := make([]byte, 32), make([]byte, 32)
-		k.X.FillBytes(x)
-		k.Y.FillBytes(y)
+		raw, err := k.Bytes() // 0x04 || X || Y
+		if err != nil {
+			panic(err)
+		}
+		x, y := raw[1:33], raw[33:]
 		return map[string]string{"kty": "EC", "kid": kid, "use": "sig", "alg": alg, "crv": "P-256", "x": enc(x), "y": enc(y)}
 	case *rsa.PublicKey:
 		return map[string]string{"kty": "RSA", "kid": kid, "use": "sig", "alg": alg, "n": enc(k.N.Bytes()), "e": enc(big.NewInt(int64(k.E)).Bytes())}

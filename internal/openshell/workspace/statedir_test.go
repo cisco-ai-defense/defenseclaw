@@ -164,7 +164,7 @@ func TestStateDirCustomIsPrivateAndUsed(t *testing.T) {
 			if len(uploadMarkers(t, log.local(dir))) == 0 || !strings.HasPrefix(uploadMarkers(t, log.local(dir))[0], "uploads/") {
 				t.Fatalf("receipts are not under %s: %v", dir, uploadMarkers(t, log.local(dir)))
 			}
-			log.fakeSandbox.write(remoteRepo+"/new.txt", "n\n")
+			log.write(remoteRepo+"/new.txt", "n\n")
 			if got := changePaths(pull(t, e, log.fakeSandbox, "s1").Changes); got != "A:new.txt" {
 				t.Fatalf("changes = %s", got)
 			}

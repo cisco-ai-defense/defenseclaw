@@ -212,8 +212,8 @@ func buildReview(res *osw.PullResult) *Review {
 		flag(fl.Path, "can run code: "+reason, 1+severityRank[fl.Severity])
 	}
 	for _, fd := range res.Review.Findings {
-		switch {
-		case fd.Scanner == "clawshield-secrets":
+		switch fd.Scanner {
+		case "clawshield-secrets":
 			flag(fd.Path, "contains what looks like a secret", 4)
 		default:
 			flag(fd.Path, fd.Title, 1)
