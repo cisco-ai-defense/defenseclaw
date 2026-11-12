@@ -92,7 +92,7 @@ func (h *harness) hook(actor Actor, session string, p guardrail.ToolChainProject
 	in := audit.ToolChainObserveInput{SemanticEventID: id, InputFingerprint: hex.EncodeToString(sum[:]),
 		RulesetFingerprint: ruleset, Projection: p, DenyEligible: true}
 	for _, scope := range []Scope{ScopeSession, ScopeActor} {
-		b, err := h.client.Bind(actor, scope, "claudecode", session, "PreToolUse", h.clock())
+		b, err := h.client.Bind(actor, scope, "claudecode", session, "PreToolUse")
 		if err != nil {
 			h.t.Fatal(err)
 		}
@@ -211,8 +211,7 @@ func TestCalloutEgressAfterSecretRead(t *testing.T) {
 		}
 		h.hook(actorA, "s1", projection(t, guardrail.ToolChainSecretReadThenEgress, 1))
 		h.advance(time.Second)
-		v, err = h.client.CheckEgress(context.Background(), EgressRequest{Actor: actorA, Host: "example.com", Method: "POST",
-			AtUnixNano: h.clock().UnixNano()})
+		v, err = h.client.CheckEgress(context.Background(), EgressRequest{Actor: actorA, Host: "example.com", Method: "POST"})
 		if err != nil || !slices.Contains(v.Detected, guardrail.ToolChainSecretReadThenEgress) ||
 			v.Deny != (mode == EgressBlock) || v.Rule != guardrail.ToolChainSecretReadThenEgress {
 			t.Fatalf("%s: after a secret read: %+v err=%v", mode, v, err)
@@ -279,9 +278,6 @@ func TestNewLeaderKeepsChainsClocksAndTasks(t *testing.T) {
 
 	n := newHarness(t, dir, Options{})
 	n.now = h.clock().Add(40 * time.Minute)
-	if err := n.svc.loadClocks(); err != nil {
-		t.Fatal(err)
-	}
 	n.life(LifecycleEvent{Actor: actorA, Event: LifecycleResumed})
 	if s, a := n.hook(actorA, "s1", projection(t, reverseShell, 2)); !slices.Contains(s.DetectedChainIDs, reverseShell) ||
 		!slices.Contains(a.DetectedChainIDs, reverseShell) {
@@ -308,34 +304,6 @@ func TestParallelCallsOfOneActorAreOrdered(t *testing.T) {
 	h.advance(time.Second)
 	if _, a := h.hook(actorA, "s9", projection(t, reverseShell, 2)); !slices.Contains(a.DetectedChainIDs, reverseShell) {
 		t.Fatalf("after parallel calls: %+v", a)
-	}
-}
-
-// Retention: an actor suspended past retention, and a deleted one, are
-// retired; a crash calls OnCrashed.
-func TestRetentionDeleteAndCrash(t *testing.T) {
-	var crashed []Actor
-	h := newHarness(t, t.TempDir(), Options{Retention: time.Hour,
-		OnCrashed: func(_ context.Context, a Actor) { crashed = append(crashed, a) }})
-	h.hook(actorA, "s1", projection(t, reverseShell, 1))
-	h.hook(actorB, "s1", projection(t, reverseShell, 1))
-	h.life(LifecycleEvent{Actor: actorA, Event: LifecycleSuspended})
-	h.advance(2 * time.Hour)
-	if n, err := h.svc.Sweep(context.Background()); err != nil || n != 1 {
-		t.Fatalf("sweep n=%d err=%v", n, err)
-	}
-	h.life(LifecycleEvent{Actor: actorB, Event: LifecycleDeleted})
-	st, _ := h.svc.store("eng-web")
-	for _, a := range []Actor{actorA, actorB} {
-		instance, _ := audit.ToolChainSubstrateInstanceID(a.Atespace, a.UID)
-		windows, err := st.ToolChainInstanceWindows(context.Background(), instance)
-		if err != nil || len(windows) != 2 || windows[0].UpdatedAtNanos != 1 || windows[1].UpdatedAtNanos != 1 {
-			t.Fatalf("%s windows %+v err=%v", a.UID, windows, err)
-		}
-	}
-	h.life(LifecycleEvent{Actor: actorA, Event: LifecycleCrashed})
-	if len(crashed) != 1 || crashed[0] != actorA {
-		t.Fatalf("crashed %+v", crashed)
 	}
 }
 

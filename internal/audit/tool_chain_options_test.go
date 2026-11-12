@@ -5,6 +5,7 @@ package audit
 
 import (
 	"errors"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -19,16 +20,6 @@ const (
 	testActorUIDA = "25a1da0f-1c9b-4ef7-8248-c276138c7f77"
 	testActorUIDB = "2e8d6260-7d31-4e56-b416-1222430fa637"
 )
-
-func actorRepositoryForTest(t *testing.T, fixture *toolChainFixture, uid string, opts ...ToolChainOption) *ToolChainRepository {
-	t.Helper()
-	repo, err := fixture.store.ToolChainRepositoryWith(t.Context(), append([]ToolChainOption{WithToolChainActorScope("eng-web", uid)}, opts...)...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repo.now = func() time.Time { return fixture.now }
-	return repo
-}
 
 func TestToolChainRepositoryWithoutOptionsIsTheSessionRepository(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
@@ -233,25 +224,32 @@ func TestRecordToolChainJoinIsOnceAndChecked(t *testing.T) {
 	}
 }
 
-// A fork starts from its parent's session and actor windows; the copy runs
-// once and leaves the parent as it was.
+// A fork starts, in its own store, from its parent's session and actor
+// windows read from the parent's store; the copy runs once, leaves the
+// parent as it was, and keeps a window the child already made (GAP-0091).
 func TestCopyToolChainForkCopiesBothScopesOnce(t *testing.T) {
-	fixture := newToolChainFixture(t, ":memory:")
-	parent := newSubstrateChain(t, fixture.store, testActorUIDA)
-	child := newSubstrateChain(t, fixture.store, testActorUIDB)
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "parent.db")
+	parentFixture := newToolChainFixture(t, parentPath)
+	childFixture := newToolChainFixture(t, filepath.Join(dir, "child.db"))
+	parent := newSubstrateChain(t, parentFixture.store, testActorUIDA)
+	child := newSubstrateChain(t, childFixture.store, testActorUIDB)
 	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	step1, step2 := toolChainProjection(t, []string{chainID}, 1, true), toolChainProjection(t, []string{chainID}, 2, true)
 	parent.observe(t, parent.repo(t, testActorUIDA, false), "s1", step1)
+	parent.observe(t, parent.repo(t, testActorUIDA, false), "s2", step1)
 	parent.observe(t, parent.repo(t, testActorUIDA, true), "s1", step1)
+	// The child posts a benign call in s2 before the copy.
+	child.observe(t, child.repo(t, testActorUIDB, false), "s2", guardrail.ToolChainProjection{ParseStatus: actionfacts.StatusNotApplicable})
 	parentDigest, _ := ToolChainActorScopeDigest("eng-web", testActorUIDA)
 	childDigest, _ := ToolChainActorScopeDigest("eng-web", testActorUIDB)
 	fork := ToolChainForkCopy{ParentInstance: parent.instance, ChildInstance: child.instance,
 		ParentActorDigest: parentDigest, ChildActorDigest: childDigest, At: parent.running}
-	copied, err := fixture.store.CopyToolChainFork(t.Context(), fork)
-	if err != nil || copied != 2 {
-		t.Fatalf("copied=%d err=%v", copied, err)
+	result, err := childFixture.store.CopyToolChainFork(t.Context(), parentPath, fork)
+	if err != nil || result.Copied != 2 || result.Skipped != 1 {
+		t.Fatalf("copy %+v err=%v", result, err)
 	}
-	if _, err := fixture.store.CopyToolChainFork(t.Context(), fork); !errors.Is(err, ErrToolChainForkAlreadyStarted) {
+	if _, err := childFixture.store.CopyToolChainFork(t.Context(), parentPath, fork); !errors.Is(err, ErrToolChainForkAlreadyStarted) {
 		t.Fatalf("second copy: %v", err)
 	}
 	child.running = parent.running.Add(time.Second)
@@ -261,8 +259,8 @@ func TestCopyToolChainForkCopiesBothScopesOnce(t *testing.T) {
 	if result := child.observe(t, child.repo(t, testActorUIDB, true), "s9", step2); !slices.Contains(result.DetectedChainIDs, chainID) {
 		t.Fatalf("child actor window: %+v", result)
 	}
-	windows, err := fixture.store.ToolChainInstanceWindows(t.Context(), parent.instance)
-	if err != nil || len(windows) != 2 {
+	windows, err := parentFixture.store.ToolChainInstanceWindows(t.Context(), parent.instance)
+	if err != nil || len(windows) != 3 {
 		t.Fatalf("parent windows %+v err=%v", windows, err)
 	}
 	for _, bad := range []ToolChainForkCopy{
@@ -270,15 +268,17 @@ func TestCopyToolChainForkCopiesBothScopesOnce(t *testing.T) {
 		{ParentInstance: parent.instance, ChildInstance: child.instance, ParentActorDigest: parentDigest, ChildActorDigest: parentDigest, At: parent.running},
 		{ParentInstance: parent.instance, ChildInstance: child.instance, ParentActorDigest: parentDigest, ChildActorDigest: childDigest},
 	} {
-		if _, err := fixture.store.CopyToolChainFork(t.Context(), bad); err == nil || errors.Is(err, ErrToolChainForkAlreadyStarted) {
+		if _, err := childFixture.store.CopyToolChainFork(t.Context(), parentPath, bad); err == nil || errors.Is(err, ErrToolChainForkAlreadyStarted) {
 			t.Fatalf("bad fork %+v: %v", bad, err)
 		}
 	}
+	if _, err := childFixture.store.CopyToolChainFork(t.Context(), "", fork); err == nil {
+		t.Fatal("a copy without the parent's store ran")
+	}
 }
 
-// A revert's mutation barrier stops a same-artifact chain across it, and a
-// retired actor's windows go first under the partition cap.
-func TestToolChainBarrierAndRetire(t *testing.T) {
+// A revert's mutation barrier stops a same-artifact chain across it.
+func TestToolChainMutationBarrier(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
 	c := newSubstrateChain(t, fixture.store, testActorUIDA)
 	chainID := guardrail.ToolChainDownloadThenExecuteSameArtifact
@@ -297,13 +297,5 @@ func TestToolChainBarrierAndRetire(t *testing.T) {
 	c.running = c.running.Add(time.Second)
 	if result := c.observe(t, repo, "s1", step2); slices.Contains(result.DetectedChainIDs, chainID) {
 		t.Fatalf("matched across a revert barrier: %+v", result)
-	}
-
-	if err := fixture.store.RetireToolChainInstance(t.Context(), c.instance); err != nil {
-		t.Fatal(err)
-	}
-	windows, err := fixture.store.ToolChainInstanceWindows(t.Context(), c.instance)
-	if err != nil || len(windows) != 1 || windows[0].UpdatedAtNanos != 1 || windows[0].Scope != ToolChainScopeRoot {
-		t.Fatalf("retired windows %+v err=%v", windows, err)
 	}
 }

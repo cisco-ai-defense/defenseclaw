@@ -67,7 +67,7 @@ func (c substrateChainChecker) CheckEgress(ctx context.Context, step extproc.Cha
 	}
 	v, err := c.client.CheckEgress(ctx, chainstate.EgressRequest{
 		Actor: chainstate.Actor{Atespace: step.Actor.Atespace, UID: step.Actor.UID},
-		Host:  step.Host, Method: step.Method, AtUnixNano: step.Time.UnixNano(),
+		Host:  step.Host, Method: step.Method,
 	})
 	return extproc.ChainVerdict{Deny: v.Deny, Rule: v.Rule, Reason: v.Reason}, err
 }

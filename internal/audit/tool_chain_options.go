@@ -286,14 +286,22 @@ type ToolChainForkCopy struct {
 	ChildInstance     ConnectorInstanceID
 	ParentActorDigest string
 	ChildActorDigest  string
-	// At is when the copy is made (lineage row; the child's clock).
+	// At is when the copy is made (lineage row, the copied partitions'
+	// update time).
 	At time.Time
 }
 
-// ErrToolChainForkAlreadyStarted is the answer to a fork copy for a child
-// that already has a window: the copy runs once, before the child's first
-// call, and never merges into history the child made itself.
-var ErrToolChainForkAlreadyStarted = errors.New("audit: the forked actor already has tool-chain state")
+// ToolChainForkResult reports a fork copy: the copied events, and the
+// parent windows that were not copied because the child already had a
+// window of the same key (it posted before the copy).
+type ToolChainForkResult struct {
+	Copied  int
+	Skipped int
+}
+
+// ErrToolChainForkAlreadyStarted is the answer to a second fork copy for the
+// same child: the copy runs once (a lineage row records it).
+var ErrToolChainForkAlreadyStarted = errors.New("audit: the forked actor's windows were already copied")
 
 const toolChainLineageDDL = `CREATE TABLE IF NOT EXISTS guardrail_chain_substrate_lineage (
 	child_instance_id TEXT PRIMARY KEY CHECK (length(child_instance_id) = 36),
@@ -310,59 +318,77 @@ const toolChainForkEventColumns = `sequence, received_time_unix_nano, input_fing
 	value_join_digests, detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask,
 	stable_action_id`
 
-// CopyToolChainFork starts a forked actor's windows from a copy of its
-// parent's: every session window of the parent instance, and the parent's
-// actor window under the child's actor digest. Copied events get new event
-// ids; partitions keep their sequence and active ruleset. Deny receipts,
-// pending proposals, boundaries and resets are not copied (asks and
-// approvals live elsewhere and are never inherited either). The copy runs
-// once per child (a lineage row records it); it returns the number of
-// copied events.
-func (s *Store) CopyToolChainFork(ctx context.Context, fork ToolChainForkCopy) (int, error) {
+// toolChainForkSource is the attached parent store's schema name.
+const toolChainForkSource = "fork_parent"
+
+// CopyToolChainFork starts a forked actor's windows in s (the child's store)
+// from a copy of its parent's, read from the parent's store at parentPath:
+// every session window of the parent instance, and the parent's actor
+// window under the child's actor digest. Copied events get new event ids;
+// partitions keep their sequence and active ruleset. Deny receipts, pending
+// proposals, boundaries and resets are not copied (asks and approvals live
+// elsewhere and are never inherited either).
+//
+// The copy runs once per child (a lineage row records it; a second copy is
+// ErrToolChainForkAlreadyStarted). A window the child already has is kept
+// and the parent's window of that key is skipped (reported in Skipped): the
+// child's own calls are never merged into or overwritten.
+func (s *Store) CopyToolChainFork(ctx context.Context, parentPath string, fork ToolChainForkCopy) (ToolChainForkResult, error) {
+	var result ToolChainForkResult
 	for _, id := range []ConnectorInstanceID{fork.ParentInstance, fork.ChildInstance} {
 		if err := validateUUIDv7("fork connector instance id", string(id)); err != nil {
-			return 0, err
+			return result, err
 		}
 	}
 	for _, d := range []string{fork.ParentActorDigest, fork.ChildActorDigest} {
 		if err := validateSHA256("fork actor digest", d, true); err != nil {
-			return 0, err
+			return result, err
 		}
 	}
 	if fork.ParentInstance == fork.ChildInstance || fork.ParentActorDigest == fork.ChildActorDigest {
-		return 0, errors.New("audit: a fork is not its own parent")
+		return result, errors.New("audit: a fork is not its own parent")
 	}
 	if fork.At.IsZero() {
-		return 0, errors.New("audit: fork copy needs a time")
+		return result, errors.New("audit: fork copy needs a time")
+	}
+	if parentPath == "" {
+		return result, errors.New("audit: fork copy needs the parent's store")
 	}
 	if err := s.ensureToolChainRootTables(ctx); err != nil {
-		return 0, err
+		return result, err
 	}
 	release, err := s.acquireReady()
 	if err != nil {
-		return 0, err
+		return result, err
 	}
 	defer release()
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return 0, err
+		return result, err
+	}
+	defer conn.Close()
+	// ATTACH cannot run inside a transaction. The parent is only read.
+	if _, err := conn.ExecContext(ctx, `ATTACH DATABASE ? AS `+toolChainForkSource, parentPath); err != nil {
+		return result, fmt.Errorf("audit: open the fork parent's store: %w", err)
+	}
+	defer conn.ExecContext(context.WithoutCancel(ctx), `DETACH DATABASE `+toolChainForkSource) //nolint:errcheck
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return result, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if _, err := tx.ExecContext(ctx, toolChainLineageDDL); err != nil {
-		return 0, err
+		return result, err
 	}
-	var started int
-	if err := tx.QueryRowContext(ctx, `SELECT
-		(SELECT COUNT(*) FROM guardrail_chain_substrate_lineage WHERE child_instance_id=?) +
-		(SELECT COUNT(*) FROM guardrail_chain_partitions WHERE connector_instance_id=?) +
-		(SELECT COUNT(*) FROM guardrail_chain_root_partitions WHERE connector_instance_id=?)`,
-		string(fork.ChildInstance), string(fork.ChildInstance), string(fork.ChildInstance)).Scan(&started); err != nil {
-		return 0, err
+	var done int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM guardrail_chain_substrate_lineage
+		WHERE child_instance_id=?`, string(fork.ChildInstance)).Scan(&done); err != nil {
+		return result, err
 	}
-	if started != 0 {
-		return 0, ErrToolChainForkAlreadyStarted
+	if done != 0 {
+		return result, ErrToolChainForkAlreadyStarted
 	}
-	copied := 0
+	src := toolChainForkSource + "."
 	for _, set := range []struct {
 		tables       toolChainTableSet
 		parentDigest string
@@ -372,79 +398,111 @@ func (s *Store) CopyToolChainFork(ctx context.Context, fork ToolChainForkCopy) (
 		{toolChainRootTables, fork.ParentActorDigest, fork.ChildActorDigest},
 	} {
 		repo := &ToolChainRepository{tables: set.tables}
+		var present int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+src+`sqlite_master
+			WHERE type='table' AND name=?`, repo.sql("guardrail_chain_partitions")).Scan(&present); err != nil {
+			return result, err
+		}
+		if present == 0 {
+			continue
+		}
 		where, args := "connector_instance_id=?", []any{string(fork.ParentInstance)}
 		if set.parentDigest != "" {
 			where += " AND session_value_digest=?"
 			args = append(args, set.parentDigest)
 		}
-		childDigest := "session_value_digest"
-		partArgs := []any{string(fork.ChildInstance)}
-		if set.childDigest != "" {
-			childDigest = "?"
-			partArgs = append(partArgs, set.childDigest)
+		type partition struct {
+			digest, ruleset string
+			next            int64
 		}
-		partArgs = append(partArgs, unixNano(fork.At))
-		partArgs = append(partArgs, args...)
-		if _, err := tx.ExecContext(ctx, repo.sql(`INSERT INTO guardrail_chain_partitions (
-			connector_instance_id, session_value_digest, active_ruleset_fingerprint,
-			next_sequence, updated_time_unix_nano)
-			SELECT ?, `+childDigest+`, active_ruleset_fingerprint, next_sequence, ?
-			FROM guardrail_chain_partitions WHERE `+where), partArgs...); err != nil {
-			return 0, fmt.Errorf("audit: copy fork partitions: %w", err)
-		}
-		rows, err := tx.QueryContext(ctx, repo.sql(`SELECT semantic_event_id, session_value_digest
-			FROM guardrail_chain_events WHERE `+where+` ORDER BY session_value_digest, sequence`), args...)
+		rows, err := tx.QueryContext(ctx, repo.sql(`SELECT session_value_digest, active_ruleset_fingerprint,
+			next_sequence FROM `+src+`guardrail_chain_partitions WHERE `+where+` ORDER BY session_value_digest`), args...)
 		if err != nil {
-			return 0, err
+			return result, err
 		}
-		type event struct{ id, session string }
-		var events []event
+		var parts []partition
 		for rows.Next() {
-			var e event
-			if err := rows.Scan(&e.id, &e.session); err != nil {
+			var p partition
+			if err := rows.Scan(&p.digest, &p.ruleset, &p.next); err != nil {
 				rows.Close()
-				return 0, err
+				return result, err
 			}
-			events = append(events, e)
+			parts = append(parts, p)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return 0, err
+			return result, err
 		}
-		for _, e := range events {
-			id, err := NewSemanticEventID()
-			if err != nil {
-				return 0, err
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO correlation_events (
-				semantic_event_id, logical_group_id, connector, connector_instance_id, source_rail,
-				event_name, received_time_unix_nano, fingerprint_sha256, profile_version, completeness)
-				SELECT ?, ?, connector, ?, source_rail, event_name, received_time_unix_nano,
-					fingerprint_sha256, profile_version, completeness
-				FROM correlation_events WHERE semantic_event_id=?`,
-				string(id), string(id), string(fork.ChildInstance), e.id); err != nil {
-				return 0, fmt.Errorf("audit: copy fork event: %w", err)
-			}
-			session := e.session
+		for _, p := range parts {
+			child := p.digest
 			if set.childDigest != "" {
-				session = set.childDigest
+				child = set.childDigest
 			}
-			if _, err := tx.ExecContext(ctx, repo.sql(`INSERT INTO guardrail_chain_events (
-				semantic_event_id, connector_instance_id, session_value_digest, `+toolChainForkEventColumns+`)
-				SELECT ?, ?, ?, `+toolChainForkEventColumns+`
-				FROM guardrail_chain_events WHERE semantic_event_id=?`),
-				string(id), string(fork.ChildInstance), session, e.id); err != nil {
-				return 0, fmt.Errorf("audit: copy fork chain event: %w", err)
+			var exists int
+			if err := tx.QueryRowContext(ctx, repo.sql(`SELECT COUNT(*) FROM guardrail_chain_partitions
+				WHERE connector_instance_id=? AND session_value_digest=?`), string(fork.ChildInstance), child).Scan(&exists); err != nil {
+				return result, err
 			}
-			copied++
+			if exists != 0 {
+				result.Skipped++
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, repo.sql(`INSERT INTO guardrail_chain_partitions (
+				connector_instance_id, session_value_digest, active_ruleset_fingerprint,
+				next_sequence, updated_time_unix_nano) VALUES (?, ?, ?, ?, ?)`),
+				string(fork.ChildInstance), child, p.ruleset, p.next, unixNano(fork.At)); err != nil {
+				return result, fmt.Errorf("audit: copy fork partition: %w", err)
+			}
+			evRows, err := tx.QueryContext(ctx, repo.sql(`SELECT semantic_event_id FROM `+src+`guardrail_chain_events
+				WHERE connector_instance_id=? AND session_value_digest=? ORDER BY sequence`),
+				string(fork.ParentInstance), p.digest)
+			if err != nil {
+				return result, err
+			}
+			var ids []string
+			for evRows.Next() {
+				var id string
+				if err := evRows.Scan(&id); err != nil {
+					evRows.Close()
+					return result, err
+				}
+				ids = append(ids, id)
+			}
+			evRows.Close()
+			if err := evRows.Err(); err != nil {
+				return result, err
+			}
+			for _, from := range ids {
+				id, err := NewSemanticEventID()
+				if err != nil {
+					return result, err
+				}
+				if _, err := tx.ExecContext(ctx, `INSERT INTO correlation_events (
+					semantic_event_id, logical_group_id, connector, connector_instance_id, source_rail,
+					event_name, received_time_unix_nano, fingerprint_sha256, profile_version, completeness)
+					SELECT ?, ?, connector, ?, source_rail, event_name, received_time_unix_nano,
+						fingerprint_sha256, profile_version, completeness
+					FROM `+src+`correlation_events WHERE semantic_event_id=?`,
+					string(id), string(id), string(fork.ChildInstance), from); err != nil {
+					return result, fmt.Errorf("audit: copy fork event: %w", err)
+				}
+				if _, err := tx.ExecContext(ctx, repo.sql(`INSERT INTO guardrail_chain_events (
+					semantic_event_id, connector_instance_id, session_value_digest, `+toolChainForkEventColumns+`)
+					SELECT ?, ?, ?, `+toolChainForkEventColumns+`
+					FROM `+src+`guardrail_chain_events WHERE semantic_event_id=?`),
+					string(id), string(fork.ChildInstance), child, from); err != nil {
+					return result, fmt.Errorf("audit: copy fork chain event: %w", err)
+				}
+				result.Copied++
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO guardrail_chain_substrate_lineage (
 		child_instance_id, parent_instance_id, copied_events, created_time_unix_nano) VALUES (?, ?, ?, ?)`,
-		string(fork.ChildInstance), string(fork.ParentInstance), copied, unixNano(fork.At)); err != nil {
-		return 0, err
+		string(fork.ChildInstance), string(fork.ParentInstance), result.Copied, unixNano(fork.At)); err != nil {
+		return result, err
 	}
-	return copied, tx.Commit()
+	return result, tx.Commit()
 }
 
 // ToolChainWindow names one window of an instance and its active ruleset.
@@ -493,29 +551,4 @@ func (s *Store) ToolChainInstanceWindows(ctx context.Context, instance Connector
 		}
 	}
 	return out, nil
-}
-
-// RetireToolChainInstance marks every window of a finished actor (deleted,
-// or suspended past retention) least recently used, so the partition cap
-// evicts finished actors before live ones. Nothing is deleted here.
-func (s *Store) RetireToolChainInstance(ctx context.Context, instance ConnectorInstanceID) error {
-	if err := validateUUIDv7("connector instance id", string(instance)); err != nil {
-		return err
-	}
-	if err := s.ensureToolChainRootTables(ctx); err != nil {
-		return err
-	}
-	release, err := s.acquireReady()
-	if err != nil {
-		return err
-	}
-	defer release()
-	for _, set := range []toolChainTableSet{toolChainSessionTables, toolChainRootTables} {
-		repo := &ToolChainRepository{tables: set}
-		if _, err := s.db.ExecContext(ctx, repo.sql(`UPDATE guardrail_chain_partitions
-			SET updated_time_unix_nano=1 WHERE connector_instance_id=?`), string(instance)); err != nil {
-			return err
-		}
-	}
-	return nil
 }

@@ -64,8 +64,7 @@ func TestToolChainStoresRouteActorsToTheLeader(t *testing.T) {
 		t.Fatalf("host session store %T", session)
 	}
 
-	ctx := withSubstrateActor(context.Background(), substrateActor{Atespace: "eng-web", Name: "alice-1",
-		UID: "25a1da0f-1c9b-4ef7-8248-c276138c7f77"})
+	ctx := withSubstrateActor(context.Background(), testSubstrateActor())
 	if _, _, ok := a.toolChainStores(ctx, req); ok {
 		t.Fatal("an actor got chain state without a leader")
 	}
@@ -87,8 +86,7 @@ func TestToolChainStoresRouteActorsToTheLeader(t *testing.T) {
 func TestJudgeIntentIsSharedThroughTheLeader(t *testing.T) {
 	useSubstrateChains(newTestChainLeader(t))
 	t.Cleanup(func() { useSubstrateChains(nil) })
-	ctx := withSubstrateActor(ContextWithSessionID(context.Background(), "s1"),
-		substrateActor{Atespace: "eng-web", Name: "alice-1", UID: "25a1da0f-1c9b-4ef7-8248-c276138c7f77"})
+	ctx := withSubstrateActor(ContextWithSessionID(context.Background(), "s1"), testSubstrateActor())
 
 	replica1, replica2 := &LLMJudge{}, &LLMJudge{}
 	replica1.ObserveSessionPrompt(ctx, "deploy the web app")

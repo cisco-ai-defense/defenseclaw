@@ -19,7 +19,6 @@ package gateway
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
@@ -59,12 +58,11 @@ func (a *APIServer) toolChainStores(ctx context.Context, req agentHookRequest) (
 			return nil, nil, false
 		}
 		who := chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID}
-		received := time.Now()
-		s, err := st.cfg.Chains.Bind(who, chainstate.ScopeSession, req.ConnectorName, req.SessionID, req.HookEventName, received)
+		s, err := st.cfg.Chains.Bind(who, chainstate.ScopeSession, req.ConnectorName, req.SessionID, req.HookEventName)
 		if err != nil {
 			return nil, nil, false
 		}
-		r, err := st.cfg.Chains.Bind(who, chainstate.ScopeActor, req.ConnectorName, req.SessionID, req.HookEventName, received)
+		r, err := st.cfg.Chains.Bind(who, chainstate.ScopeActor, req.ConnectorName, req.SessionID, req.HookEventName)
 		if err != nil {
 			return nil, nil, false
 		}

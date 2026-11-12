@@ -429,7 +429,16 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	srv := &leader.Server{IsLeader: el.IsLeader}
 	registry.Serve(srv, store)
 	chains, err := chainstate.New(chainstate.Options{Dir: serveFlags.storeDir,
-		EgressAction: serveFlags.chainEgressAction, Retention: serveFlags.chainRetention})
+		EgressAction: serveFlags.chainEgressAction, Retention: serveFlags.chainRetention,
+		// A fork starts from its parent windows the first time the leader
+		// sees it; the parent comes from the verified registration (GAP-0091).
+		ParentOf: func(ctx context.Context, atespace, uid string) (string, error) {
+			reg, ok, err := store.Get(ctx, atespace, uid)
+			if err != nil || !ok {
+				return "", err
+			}
+			return reg.ParentUID, nil
+		}})
 	if err != nil {
 		return err
 	}

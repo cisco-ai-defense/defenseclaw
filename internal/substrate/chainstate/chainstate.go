@@ -12,15 +12,21 @@
 // ChainEgress, and the controller's lifecycle events through ChainLifecycle.
 //
 // On the leader:
-//   - one audit store per atespace (<dir>/chains/<atespace>.db), so the
-//     4,096-partition cap applies per atespace; finished actors (deleted, or
-//     suspended past retention) are marked least recently used and go first;
+//   - one audit store per actor (<dir>/chains/<atespace>/<uid>.db), so every
+//     expiry, prune and LRU in it runs on that actor's own running-time
+//     clock; at most MaxActors actors per atespace (a retired actor, then
+//     the least recently used, is evicted); a deleted actor is purged, and
+//     an actor suspended or silent past PurgeAfter too;
 //   - every actor is one connector instance (audit.ToolChainSubstrateInstanceID)
 //     with a window per session and one actor window (the #1391 root tables
 //     keyed on the verified actor UID), so rotating session ids cannot empty it;
 //   - a per-actor lock orders the actor's parallel calls;
-//   - time is the actor's running time at the gateway's receive time (never a
-//     guest timestamp, E15): a suspend stops the actor's clock;
+//   - time is the actor's running time at the leader's receive time (never a
+//     guest timestamp, E15): a suspend stops the actor's clock, and a late
+//     suspend or resume older than the last one applied is ignored;
+//   - a forked actor starts from its parent's windows the first time the
+//     leader sees it (parent from the verified registration), whatever
+//     arrives first;
 //   - pending outcomes expire on the repository's TTL; a crash closes the
 //     actor's asks (OnCrashed) (E16).
 package chainstate
@@ -90,9 +96,6 @@ type Join struct {
 	SemanticEventID  string `json:"semantic_event_id"`
 	EventName        string `json:"event_name,omitempty"`
 	InputFingerprint string `json:"input_fingerprint"`
-	// ReceivedUnixNano is the gateway's receive time (wall clock); the
-	// leader turns it into the actor's running time.
-	ReceivedUnixNano int64 `json:"received_unix_nano"`
 	// SessionDigest is audit.ToolChainSubstrateSessionDigest of the
 	// connector and session id.
 	SessionDigest string `json:"session_digest"`
@@ -171,15 +174,19 @@ type LifecycleEvent struct {
 // LifecycleResult reports what a lifecycle event changed.
 type LifecycleResult struct {
 	CopiedEvents int `json:"copied_events,omitempty"`
-	Barriers     int `json:"barriers,omitempty"`
+	// Skipped counts parent windows a fork did not copy because the child
+	// already had them.
+	Skipped  int `json:"skipped,omitempty"`
+	Barriers int `json:"barriers,omitempty"`
+	// Ignored is a suspend or resume older than the last one applied.
+	Ignored bool `json:"ignored,omitempty"`
 }
 
 // EgressRequest is the ChainEgress body: one request the callout saw.
 type EgressRequest struct {
-	Actor      Actor  `json:"actor"`
-	Host       string `json:"host"`
-	Method     string `json:"method"`
-	AtUnixNano int64  `json:"at_unix_nano"`
+	Actor  Actor  `json:"actor"`
+	Host   string `json:"host"`
+	Method string `json:"method"`
 }
 
 // EgressVerdict is the ChainEgress answer.
