@@ -174,6 +174,10 @@ type templateData struct {
 	SandboxScheme        string
 	SandboxCAFileSH      string
 	SandboxActorHeaderSH string
+	// SandboxHookPostBinary is the actor kit's hook command whose hook-post
+	// mode the Substrate variant of the in-agent plugins execs instead of a
+	// bearer post (SandboxSubstrateHookBinary).
+	SandboxHookPostBinary string
 
 	// CursorTargetModesJSON64 is the canonical, token-free protected
 	// SID-to-delivery-mode map baked into the managed Windows Cursor adapter;

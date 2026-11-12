@@ -121,6 +121,12 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	header := map[string]string{"X-DefenseClaw-Actor-Mode": mode}
 	if o.Event != "" {
 		header["X-DefenseClaw-Hook-Event"] = o.Event
+		// Copilot and Antigravity bodies carry no event name: the gateway
+		// reads the registration's event from a private header, as it does
+		// for the host hooks' shell bridges.
+		if h := eventRegistrationHeader[o.Connector]; h != "" {
+			header[h] = o.Event
+		}
 	}
 	if call.HookContractID != "" {
 		header["X-DefenseClaw-Hook-Contract"] = call.HookContractID
@@ -288,4 +294,12 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		o.NotifyJSON = fs.Arg(fs.NArg() - 1)
 	}
 	return RunHook(ctx, o)
+}
+
+// eventRegistrationHeader names, per connector, the header the gateway reads
+// the command-line event from (agent_hook.go): the host shell hooks send the
+// same one.
+var eventRegistrationHeader = map[string]string{
+	"copilot":     "X-DefenseClaw-Copilot-Event",
+	"antigravity": "X-DefenseClaw-Antigravity-Event",
 }

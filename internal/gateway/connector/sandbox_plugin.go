@@ -32,12 +32,19 @@ var sandboxPluginHostOnlyMarkers = []string{"DC_TOKEN_FILE", "DC_MAX_TOKEN_FILE_
 // runtime binding token, the idempotency key and the baked closed fail mode.
 var sandboxPluginRequiredMarkers = []string{SandboxTokenEnv, "X-DefenseClaw-Hook-Idempotency-Key", "sandbox hooks always fail closed"}
 
+// sandboxPluginSubstrateRequiredMarkers are the markers of the Agent
+// Substrate variant: it has no binding token and no idempotency key of its
+// own (the kit's hook-post command sets both the actor header and the key),
+// and it must exec the kit's hook command.
+var sandboxPluginSubstrateRequiredMarkers = []string{SandboxSubstrateHookBinary, `"hook-post"`, "sandbox hooks always fail closed"}
+
 // renderSandboxPlugin renders a JS/TS bridge plugin template in its OpenShell
 // sandbox variant (baked ingress, fail closed, token from the environment,
 // retried requests with an idempotency key) and checks the result carries
 // no host-only input.
 func renderSandboxPlugin(asset string, rt resolvedSandboxTarget) ([]byte, error) {
-	body, err := renderHookTemplate(asset, templateData{
+	substrate := rt.ingress.Substrate()
+	data := templateData{
 		APIAddr:                  rt.ingressAddr,
 		FailMode:                 rt.failMode,
 		Managed:                  true,
@@ -47,7 +54,12 @@ func renderSandboxPlugin(asset string, rt resolvedSandboxTarget) ([]byte, error)
 		SandboxMaxTime:           sandboxHookMaxTimeSeconds,
 		SandboxRetryMaxTime:      sandboxHookRetryMaxTimeSeconds,
 		SandboxSessionEndMaxTime: sandboxHookSessionEndMaxTimeSeconds,
-	})
+	}
+	if substrate {
+		data.SandboxSubstrate = true
+		data.SandboxHookPostBinary = SandboxSubstrateHookBinary
+	}
+	body, err := renderHookTemplate(asset, data)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +68,14 @@ func renderSandboxPlugin(asset string, rt resolvedSandboxTarget) ([]byte, error)
 			return nil, fmt.Errorf("sandbox plugin %s still references host-only %q", asset, marker)
 		}
 	}
-	for _, marker := range sandboxPluginRequiredMarkers {
+	required := sandboxPluginRequiredMarkers
+	if substrate {
+		required = sandboxPluginSubstrateRequiredMarkers
+		if bytes.Contains(body, []byte(SandboxTokenEnv)) {
+			return nil, fmt.Errorf("sandbox plugin %s reads the binding token %s in a Substrate render", asset, SandboxTokenEnv)
+		}
+	}
+	for _, marker := range required {
 		if !bytes.Contains(body, []byte(marker)) {
 			return nil, fmt.Errorf("sandbox plugin %s lacks %q", asset, marker)
 		}
