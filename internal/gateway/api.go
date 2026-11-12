@@ -4583,6 +4583,18 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
+		// The OpenClaw plugin credential authenticates only the closed route
+		// table in openclaw_plugin_scope.go, on loopback; everything else
+		// falls through to the master gateway token check below.
+		if token != "" && !userScoped && connector.IsLoopback(r) && openClawPluginRoute(r.Method, r.URL.Path) &&
+			a.hookAPITokenMatches(openClawPluginScope, token) {
+			r = r.WithContext(withAuthenticatedInspectConnector(
+				a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
+				openClawPluginScope,
+			))
+			next.ServeHTTP(w, r)
+			return
+		}
 		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
 			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
