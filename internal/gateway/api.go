@@ -1525,6 +1525,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		mux.Handle("/api/v1/fleet/", http.StripPrefix("/api/v1/fleet", a.fleetAPI.Handler()))
 	}
 	a.registerSandboxRoutes(mux)
+	a.registerRoutingRoutes(mux)
 
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
 	handler = a.apiCSRFProtect(handler)

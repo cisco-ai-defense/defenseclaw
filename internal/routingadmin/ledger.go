@@ -6,6 +6,7 @@ package routingadmin
 import (
 	"context"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -86,6 +87,40 @@ func (l *Ledger) Spend(key, period string, now time.Time) (float64, bool) {
 		total += days[day] // in day order: the same total on every call
 	}
 	return total, true
+}
+
+// SpendPrefix sums the spend of every key that starts with prefix
+// (<scope>:<id>: gives all subjects of one budget, for administrators).
+func (l *Ledger) SpendPrefix(prefix, period string, now time.Time) (float64, bool) {
+	if l == nil {
+		return 0, false
+	}
+	today := dayNumber(now)
+	from := windowStart(period, now)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.seeded[budgetIDOfKey(prefix)] {
+		return 0, false
+	}
+	var total float64
+	for _, key := range sortedKeys(l.spend, prefix) {
+		days := l.spend[key]
+		for day := from; day <= today; day++ {
+			total += days[day]
+		}
+	}
+	return total, true
+}
+
+func sortedKeys(m map[string]map[int32]float64, prefix string) []string {
+	var keys []string
+	for k := range m {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // SeedRow is the store's spend of one key on one UTC day, from earlier

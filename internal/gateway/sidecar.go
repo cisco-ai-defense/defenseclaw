@@ -1160,7 +1160,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			}
 		}
 	}
-	s.modelRouter = newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	router := newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	s.modelRouter = router
+	activeEngineRouter.Store(router)
 
 	s.logSecureClientPolicyEngine()
 

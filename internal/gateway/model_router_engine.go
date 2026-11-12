@@ -27,7 +27,6 @@ const routerClassifierTextLimit = 8 * 1024
 type engineRouter struct {
 	boot       *config.Config
 	classifier engine.Classifier // vllm_sr client, nil unless started
-	admin      engine.AdminEvaluator
 	dotenv     string
 
 	mu    sync.Mutex
@@ -63,7 +62,7 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 	}
 	eng, err := engine.New(cfg, engine.Options{
 		Classifier:   r.classifierFor(cfg),
-		Admin:        r.admin,
+		Admin:        routingAdminRuntime.For(cfg),
 		Managed:      cfg != nil && cfg.StandaloneEnterprise(),
 		CredentialOK: func(b engine.Backend, _ engine.Request) bool { return r.backendCredentialOK(cfg, b) },
 	})
@@ -144,6 +143,7 @@ func (r *engineRouter) RouteDetailed(ctx context.Context, in *ModelRouterInput) 
 		return normalizeSemanticRouteOutcome(out)
 	}
 	d := eng.Decide(ctx, engineRequest(in))
+	recordRoutingDecision(ctx, in, &d, cfg != nil && cfg.StandaloneEnterprise())
 	out.Route = &d
 	out.Latency = time.Since(started)
 	switch d.Outcome {
