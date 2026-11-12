@@ -195,8 +195,9 @@ func (e *Engine) checkChain(ctx context.Context, step ChainStep) (ChainVerdict, 
 }
 
 // chainFailClosed reports whether an unchecked chain step refuses: always
-// with chain.failure_mode closed, never with open, and with auto (the
-// default) for unattended actors only, since nobody watches their alerts.
+// with chain.failure_mode closed, never with open (refused at load on a
+// managed install), and with auto (the default) on a managed install (D8)
+// or for an unattended actor, since nobody watches its alerts.
 func (e *Engine) chainFailClosed(pol *Policy) bool {
 	switch e.cfg.Chain.FailureMode {
 	case FailureClosed:
@@ -204,5 +205,5 @@ func (e *Engine) chainFailClosed(pol *Policy) bool {
 	case FailureOpen:
 		return false
 	}
-	return pol.Unattended
+	return e.cfg.Managed || pol.Unattended
 }
