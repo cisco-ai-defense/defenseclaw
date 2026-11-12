@@ -190,3 +190,17 @@ func TestAntigravityStartRestoresHooks(t *testing.T) {
 		t.Error("antigravity does not start through the wrapper")
 	}
 }
+
+// PLAN 4.4: every connector has a headless argv with a prompt placeholder.
+func TestEveryConnectorHasAHeadlessMode(t *testing.T) {
+	for _, name := range []string{"claudecode", "codex", "opencode", "copilot", "cursor", "amp", "kiro", "hermes", "antigravity", "devin"} {
+		argv := HeadlessArgv[name]
+		found := false
+		for _, a := range argv {
+			found = found || a == "{prompt}"
+		}
+		if len(argv) == 0 || !found || len(InteractiveArgv[name]) == 0 {
+			t.Errorf("%s: headless %v interactive %v", name, argv, InteractiveArgv[name])
+		}
+	}
+}

@@ -296,7 +296,30 @@ func wave2UserFiles(name string, o OverlayOptions) []ImageFile {
 	return nil
 }
 
+// Wave-3 connectors (PLAN 4.3): built but refused until a vendor sign-in run
+// passes (E9, lane A11). Their argv comes from the pinned releases' --help
+// (lanes/a10/HANDOFF.md); no run was possible without a sign-in. Amp's
+// Substrate plugin transport does not exist yet, so its render is refused
+// (resolveSandboxTarget); the argv is recorded for when it does.
+var wave3Interactive = map[string][]string{
+	"cursor": {"/usr/local/bin/cursor-agent"},
+	"amp":    {"/usr/local/bin/amp"},
+	"devin":  {"/usr/local/bin/devin"},
+}
+
+var wave3Headless = map[string][]string{
+	"cursor": {"/usr/local/bin/cursor-agent", "-p", "{prompt}", "--force", "--trust"},
+	"amp":    {"/usr/local/bin/amp", "-x", "{prompt}", "--dangerously-allow-all"},
+	"devin":  {"/usr/local/bin/devin", "-p", "--permission-mode", "dangerous", "--respect-workspace-trust", "false", "--", "{prompt}"},
+}
+
 func init() {
+	for k, v := range wave3Interactive {
+		InteractiveArgv[k] = v
+	}
+	for k, v := range wave3Headless {
+		HeadlessArgv[k] = v
+	}
 	for k, v := range wave2Interactive {
 		InteractiveArgv[k] = v
 	}
