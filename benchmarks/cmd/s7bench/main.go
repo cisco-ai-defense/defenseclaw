@@ -202,6 +202,7 @@ func main() {
 	dmModel := flag.String("dm-model", "", "decision model name")
 	dmTimeout := flag.Float64("dm-timeout", 0, "decision model timeout seconds (0: product default)")
 	judgeTimeout := flag.Float64("judge-timeout", 0, "hook judge timeout seconds (0: product default)")
+	judgeParallel := flag.Int("judge-max-parallel", 16, "guardrail.judge.max_parallel; the local proxy stands in for a remote endpoint, which the product does not serialize (a loopback judge URL defaults to 1)")
 	dmHook := flag.Bool("dm-hook", false, "decision model answers alone for the connector (cascade 2)")
 	layers := flag.String("layers", "", "probe layers per call: dm,judge")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
@@ -238,6 +239,8 @@ func main() {
 			cfg.Guardrail.Judge.HookTimeout = *judgeTimeout
 			cfg.Guardrail.Judge.Timeout = *judgeTimeout
 		}
+		cfg.Guardrail.Judge.MaxParallel = *judgeParallel
+		cfg.Guardrail.Judge.MaxParallelExplicit = true
 		cfg.Guardrail.Judge.LLM = config.LLMConfig{Model: "openai/" + *judgeModel, Provider: "openai", BaseURL: *judgeURL, APIKey: "s7-local-proxy"}
 	}
 	if *dmURL != "" {
