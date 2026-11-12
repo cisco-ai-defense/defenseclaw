@@ -368,8 +368,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			fmt.Fprintln(os.Stderr, "[substrate] no substrate.identity.oidc issuer: the admin listener does not run")
 		}
 		if _, err := os.Stat(serveFlags.sessionKeyFile); err == nil {
-			issuer := "https://" + strings.TrimSpace(c.Substrate.Services.Admin)
-			s, err := identity.LoadSessionSigner(serveFlags.sessionKeyFile, issuer)
+			s, err := identity.LoadSessionSigner(serveFlags.sessionKeyFile, c.Substrate.RelaySessionIssuer())
 			if err != nil {
 				return out, err
 			}

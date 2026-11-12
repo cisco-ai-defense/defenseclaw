@@ -341,6 +341,13 @@ func (s SubstrateConfig) EffectiveAdminService() string {
 	return orDefault(s.Services.Admin, DefaultSubstrateAdminService)
 }
 
+// RelaySessionIssuer is the iss of the relay session tokens the gateway
+// signs, https://<admin Service>. Template builds bake the same value into
+// the relay (substrate-1 GAP-0147), so both sides take it from here.
+func (s SubstrateConfig) RelaySessionIssuer() string {
+	return "https://" + strings.TrimSpace(s.EffectiveAdminService())
+}
+
 // EffectiveAudience and EffectiveTokenLifetime shape the actor JWT.
 func (s SubstrateConfig) EffectiveAudience() string {
 	return orDefault(s.Identity.Audience, DefaultSubstrateAudience)

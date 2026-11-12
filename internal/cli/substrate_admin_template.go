@@ -70,7 +70,13 @@ Flags:
   --dry-run                       scan the composed image and stop before pushing
   --trusted-base sha256:DIGEST    base image digest the admin trusts (repeatable)
   --mcp-host HOST                 remote MCP host that is allowed (repeatable)
-  --session-key KID=FILE          relay session public key, kid=PEM file (repeatable)
+  --session-key FILE              the gateway's relay session public key (public.pem of the relay session Secret);
+                                  KID=FILE is checked against the key's own id (repeatable)
+  --session-issuer URL            iss of the session tokens the keys verify (default https://<substrate.services.admin>
+                                  of --config, the issuer the gateway signs with)
+  --session-audience AUD          aud of the session tokens (default: the one the gateway signs)
+  --verify-url URL                ask the gateway to check each session token, instead of --session-key
+                                  An image that starts the relay needs --session-key or --verify-url.
 ` + templateCommonFlags + `
 Exit code: 0 built, 1 blocked, 2 usage error.`
 
