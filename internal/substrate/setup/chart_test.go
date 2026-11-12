@@ -38,8 +38,10 @@ func helmBinary(t *testing.T) string {
 	}
 	h, err := exec.LookPath("helm")
 	if err != nil {
-		if os.Getenv("CI") != "" {
-			t.Fatal("helm is not installed; the chart goldens need it in CI")
+		// The CI job substrate-chart installs a pinned helm and sets this;
+		// the general Go shards have no helm and skip.
+		if os.Getenv("DEFENSECLAW_HELM_REQUIRED") != "" {
+			t.Fatal("helm is not installed; the chart goldens need it here")
 		}
 		t.Skip("helm is not installed (set DEFENSECLAW_HELM)")
 	}
