@@ -80,7 +80,7 @@ func TestTokenAuth_AcceptsTokenAdoptedByAuthRepair(t *testing.T) {
 func TestGuardrailProxyAuth_AcceptsTokenAdoptedByAuthRepair(t *testing.T) {
 	client := newAuthRepairedClient(t)
 	conn := connector.NewOpenClawConnector()
-	conn.SetCredentials("boot-token", "")
+	conn.SetCredentials("boot-token")
 	proxy := &GuardrailProxy{connector: conn}
 	proxy.SetRefreshedGatewayTokenSource(client.RefreshedToken)
 

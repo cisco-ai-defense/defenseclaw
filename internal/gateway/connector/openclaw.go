@@ -112,7 +112,6 @@ func openClawHome() string {
 // /api/v1/inspect/tool.
 type OpenClawConnector struct {
 	gatewayToken string
-	masterKey    string
 }
 
 // NewOpenClawConnector creates a new OpenClaw connector.
@@ -941,18 +940,8 @@ func (c *OpenClawConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	// Check Authorization with the proxy master key.
-	if c.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
-			return true
-		}
-	}
-
-	// No gateway token configured: trust loopback callers. The masterKey is
-	// an alternative credential for programmatic/remote access — its presence
-	// alone should not revoke loopback trust. The operator opts into requiring
-	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
+	// No gateway token configured: trust loopback callers. The operator opts
+	// into requiring auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
 	if c.gatewayToken == "" {
 		return isLoopback
 	}
@@ -960,23 +949,22 @@ func (c *OpenClawConnector) Authenticate(r *http.Request) bool {
 	return false
 }
 
-// SetCredentials injects the gateway token and master key at sidecar boot.
-func (c *OpenClawConnector) SetCredentials(gatewayToken, masterKey string) {
+// SetCredentials injects the gateway token at sidecar boot.
+func (c *OpenClawConnector) SetCredentials(gatewayToken string) {
 	c.gatewayToken = gatewayToken
-	c.masterKey = masterKey
 }
 
 // HasUsableProviders implements ProviderProbe (plan A4). OpenClaw does
 // not maintain a provider snapshot: the fetch interceptor plugin
 // supplies the upstream URL + key on every call via X-DC-Target-URL /
 // X-AI-Auth. As long as openclaw.json has been patched (the plugin is
-// installed) and either a gateway token or master key is configured,
+// installed) and a gateway token is configured,
 // the gateway has at least one usable upstream. We treat the absence
 // of credentials as "no upstream" so the boot probe fails fast on
 // half-installed deployments.
 func (c *OpenClawConnector) HasUsableProviders() (int, error) {
-	if c.gatewayToken == "" && c.masterKey == "" {
-		return 0, errors.New("openclaw: no gateway token or master key configured; fetch interceptor cannot authenticate to proxy")
+	if c.gatewayToken == "" {
+		return 0, errors.New("openclaw: no gateway token configured; fetch interceptor cannot authenticate to proxy")
 	}
 	return 1, nil
 }

@@ -234,8 +234,8 @@ func TestConnectorSetCredentials(t *testing.T) {
 		c, _ := reg.Get(name)
 		t.Run(name, func(t *testing.T) {
 			// Should not panic with empty or non-empty credentials.
-			c.SetCredentials("", "")
-			c.SetCredentials("test-token", "test-master-key")
+			c.SetCredentials("")
+			c.SetCredentials("test-token")
 		})
 	}
 }

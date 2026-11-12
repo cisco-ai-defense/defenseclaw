@@ -61,7 +61,6 @@ type InstallOptions struct {
 	ProxyAddr      string
 	APIToken       string
 	OTLPPathToken  string
-	MasterKey      string
 	HookFailMode   string
 	GuardrailMode  string
 	HILTEnabled    bool
@@ -685,7 +684,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				return err
 			}
 			defer unlock()
-			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
+			conn.SetCredentials(setupOpts.APIToken)
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
 			var beforeSetup dataDirSnapshot
 			var beforeHookConfigs hookConfigSnapshot

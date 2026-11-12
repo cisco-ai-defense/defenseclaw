@@ -143,29 +143,6 @@ wait_for_url() {
     return 1
 }
 
-derive_proxy_master_key() {
-    python3 - <<'PY'
-import hashlib
-import os
-
-key_file = os.path.join(os.environ["DEFENSECLAW_HOME"], "device.key")
-try:
-    with open(key_file, "rb") as f:
-        data = f.read()
-except OSError:
-    print("")
-else:
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        data,
-        b"defenseclaw-proxy-master-key",
-        100_000,
-        dklen=32,
-    ).hex()
-    print(f"sk-dc-{digest}")
-PY
-}
-
 start_openclaw_gateway() {
     if is_full_live; then
         openclaw gateway start
@@ -2825,7 +2802,7 @@ phase_guardrail() {
     fi
     pass "guardrail proxy reachable"
 
-    local master_key response content err request_model gateway_token
+    local response content err request_model gateway_token
     request_model="${GUARDRAIL_REQUEST_MODEL:-}"
     if [ -z "$request_model" ]; then
         request_model=$(python3 - <<'PY'
@@ -2844,40 +2821,7 @@ PY
         return
     fi
 
-    master_key="$(derive_proxy_master_key)"
-
     gateway_token="$(get_gateway_token)"
-
-    # ── 6a. Master key auth (legacy path) ──
-    if [ -n "$master_key" ]; then
-        response=$(curl -sS --max-time 45 \
-            -H "Authorization: Bearer $master_key" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
-            "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
-
-        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-        if [ -n "$err" ] && echo "$err" | grep -Eqi '429|rate|overload|overloaded|too many requests|busy'; then
-            echo "  Retrying guardrail request after transient provider error..."
-            sleep 5
-            response=$(curl -sS --max-time 45 \
-                -H "Authorization: Bearer $master_key" \
-                -H "Content-Type: application/json" \
-                -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
-                "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
-        fi
-
-        echo "$response" | jq '.' 2>/dev/null || echo "$response"
-        content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
-        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-        if [ -n "$content" ] && [ -z "$err" ] && ! echo "$content" | grep -Fq "[DefenseClaw] This request was blocked"; then
-            pass "guardrail round-trip (master key): LLM responded"
-        else
-            fail "guardrail round-trip (master key): LLM responded" "err='$err' response='$response'"
-        fi
-    else
-        skip "guardrail round-trip (master key)" "device key is unavailable"
-    fi
 
     # ── 6b. X-DC-Auth header auth (hardened auth path) ──
     if [ -n "$gateway_token" ]; then
@@ -2910,8 +2854,8 @@ PY
     if [ "$response" = "401" ]; then
         pass "guardrail auth rejection: invalid token returns 401"
     else
-        # When neither token nor masterKey is configured the proxy is open (returns 200).
-        if [ -z "$gateway_token" ] && [ -z "$master_key" ]; then
+        # When no gateway token is configured the proxy is open (returns 200).
+        if [ -z "$gateway_token" ]; then
             skip "guardrail auth rejection" "no auth configured — proxy is open"
         else
             fail "guardrail auth rejection: invalid token returns 401" "got HTTP $response"
@@ -2926,7 +2870,7 @@ PY
             pt_model=$(echo "$request_model" | sed 's|^.*/||')
             sleep 2
             response=$(curl -sS --max-time 60 \
-                -H "Authorization: Bearer $master_key" \
+                -H "X-DC-Auth: Bearer $gateway_token" \
                 -H "X-DC-Target-URL: https://api.anthropic.com" \
                 -H "X-AI-Auth: Bearer $anthropic_key" \
                 -H "Content-Type: application/json" \
@@ -2960,8 +2904,7 @@ phase_provider_detection() {
     echo "=== Phase 6B: Provider Detection & Multi-Provider Auth [API] ==="
     phase_timer_start
 
-    local master_key response http_code gateway_token
-    master_key="$(derive_proxy_master_key)"
+    local response http_code gateway_token
     gateway_token="$(get_gateway_token)"
 
     # Guardrail proxy must be running for these tests.
@@ -2987,7 +2930,7 @@ phase_provider_detection() {
         local pname purl ppath
         IFS='|' read -r pname purl ppath <<< "$entry"
         http_code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $master_key" \
+            -H "X-DC-Auth: Bearer $gateway_token" \
             -H "X-DC-Target-URL: $purl" \
             -H "X-AI-Auth: Bearer dummy-key-e2e" \
             -H "Content-Type: application/json" \
@@ -3078,7 +3021,7 @@ PY
     # For Anthropic target, upstream should get x-api-key ONLY.
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
         response=$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $master_key" \
+            -H "X-DC-Auth: Bearer $gateway_token" \
             -H "X-DC-Target-URL: https://api.anthropic.com" \
             -H "X-AI-Auth: Bearer ${ANTHROPIC_API_KEY}" \
             -H "x-api-key: ${ANTHROPIC_API_KEY}" \
@@ -3158,7 +3101,7 @@ PY
         fi
         sleep 1
         response=$(curl -sS --max-time 45 \
-            -H "Authorization: Bearer $master_key" \
+            -H "X-DC-Auth: Bearer $gateway_token" \
             -H "Content-Type: application/json" \
             -d "$(jq -cn --arg model "$bmodel" '{model: $model, messages: [{role: "user", content: "Reply with exactly: BIFROST_OK"}], max_tokens: 20}')" \
             "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout"}')
@@ -3177,7 +3120,7 @@ PY
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
         sleep 1
         response=$(curl -sS --max-time 45 \
-            -H "X-DC-Auth: Bearer ${gateway_token:-$master_key}" \
+            -H "X-DC-Auth: Bearer $gateway_token" \
             -H "X-AI-Auth: Bearer ${ANTHROPIC_API_KEY}" \
             -H "Content-Type: application/json" \
             -d '{"model":"anthropic/claude-haiku-4-5-20251001","messages":[{"role":"user","content":"Reply: HEADER_KEY_OK"}],"max_tokens":20}' \

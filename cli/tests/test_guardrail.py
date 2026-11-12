@@ -45,7 +45,6 @@ from defenseclaw.config import (
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.guardrail import (
     _backup,
-    _derive_master_key,
     _remove_from_plugins_allow,
     _unregister_plugin_from_config,
     detect_api_key_env,
@@ -349,7 +348,7 @@ class TestPatchOpenclawConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
 
-            prev = patch_openclaw_config(path, "claude-opus", 4000, "sk-dc-test", "")
+            prev = patch_openclaw_config(path, "claude-opus", 4000, "")
 
             self.assertEqual(prev, "anthropic/claude-opus-4-5")
 
@@ -366,18 +365,18 @@ class TestPatchOpenclawConfig(unittest.TestCase):
     def test_creates_backup(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
-            patch_openclaw_config(path, "claude-opus", 4000, "sk-dc-test", "")
+            patch_openclaw_config(path, "claude-opus", 4000, "")
             self.assertTrue(os.path.isfile(path + ".bak"))
 
     def test_missing_file_returns_none(self):
-        result = patch_openclaw_config("/nonexistent.json", "x", 4000, "k", "")
+        result = patch_openclaw_config("/nonexistent.json", "x", 4000, "")
         self.assertIsNone(result)
 
     def test_adds_defenseclaw_to_plugins_allow(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
 
-            patch_openclaw_config(path, "claude-opus", 4000, "sk-dc-test", "")
+            patch_openclaw_config(path, "claude-opus", 4000, "")
 
             with open(path) as f:
                 cfg = json.load(f)
@@ -389,8 +388,8 @@ class TestPatchOpenclawConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
 
-            patch_openclaw_config(path, "claude-opus", 4000, "sk-dc-test", "")
-            patch_openclaw_config(path, "claude-opus", 4000, "sk-dc-test", "")
+            patch_openclaw_config(path, "claude-opus", 4000, "")
+            patch_openclaw_config(path, "claude-opus", 4000, "")
 
             with open(path) as f:
                 cfg = json.load(f)
@@ -401,7 +400,7 @@ class TestPatchOpenclawConfig(unittest.TestCase):
         """model_name parameter is accepted but no longer used."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
-            result = patch_openclaw_config(path, "", 4000, "sk-dc-test", "")
+            result = patch_openclaw_config(path, "", 4000, "")
             # Should succeed without error regardless of empty model_name
             self.assertIsNotNone(result)
 
@@ -593,39 +592,6 @@ class TestUnregisterPluginFromConfig(unittest.TestCase):
 
     def test_no_op_on_missing_file(self):
         _unregister_plugin_from_config("/nonexistent/openclaw.json")
-
-
-# ---------------------------------------------------------------------------
-# _derive_master_key
-# ---------------------------------------------------------------------------
-
-
-class TestDeriveMasterKey(unittest.TestCase):
-    def test_derives_from_device_key(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            key_file = os.path.join(tmpdir, "device.key")
-            with open(key_file, "wb") as f:
-                f.write(b"test-device-key-data")
-
-            key = _derive_master_key(key_file)
-            self.assertTrue(key.startswith("sk-dc-"))
-            self.assertEqual(len(key), 6 + 64)  # PBKDF2-SHA256, 32 bytes encoded as hex
-
-    def test_deterministic(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            key_file = os.path.join(tmpdir, "device.key")
-            with open(key_file, "wb") as f:
-                f.write(b"stable-content")
-
-            key1 = _derive_master_key(key_file)
-            key2 = _derive_master_key(key_file)
-            self.assertEqual(key1, key2)
-
-    @patch("defenseclaw.llm_keys.Path")
-    def test_raises_when_file_missing(self, mock_path):
-        mock_path.home.return_value = Path("/nonexistent-home")
-        with self.assertRaises(RuntimeError):
-            _derive_master_key("/nonexistent/device.key")
 
 
 # ---------------------------------------------------------------------------

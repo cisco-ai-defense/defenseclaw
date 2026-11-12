@@ -285,7 +285,7 @@ func TestExtractAPIKey_Priority(t *testing.T) {
 	}
 }
 
-func TestExtractAPIKey_SkipsMasterKey(t *testing.T) {
+func TestExtractAPIKey_SkipsStaleMasterKey(t *testing.T) {
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r.Header.Set("X-AI-Auth", "Bearer sk-dc-masterkey")
 	r.Header.Set("x-api-key", "real-key")
@@ -479,7 +479,7 @@ func (s *stubConnector) VerifyClean(_ SetupOpts) error                 { return 
 func (s *stubConnector) Route(_ *http.Request, _ []byte) (*ConnectorSignals, error) {
 	return &ConnectorSignals{}, nil
 }
-func (s *stubConnector) SetCredentials(_, _ string) {}
+func (s *stubConnector) SetCredentials(_ string) {}
 
 // TestRegistry_RegisterPlugin_RejectsBuiltinCollision pins PR #141 audit H2.
 // A malicious .so dropped into the plugin discovery directory must not be
@@ -947,7 +947,7 @@ func TestCodex_ImplementsStopScanner(t *testing.T) {
 
 func TestOpenClaw_Authenticate_Token(t *testing.T) {
 	c := NewOpenClawConnector()
-	c.SetCredentials("my-token", "my-master")
+	c.SetCredentials("my-token")
 
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
@@ -963,9 +963,9 @@ func TestOpenClaw_Authenticate_Token(t *testing.T) {
 
 	r2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r2.RemoteAddr = "127.0.0.1:54321"
-	r2.Header.Set("Authorization", "Bearer my-master")
-	if !c.Authenticate(r2) {
-		t.Error("expected auth to pass with master key")
+	r2.Header.Set("Authorization", "Bearer "+staleMasterKey)
+	if c.Authenticate(r2) {
+		t.Error("a stale sk-dc- master key bearer must not authenticate")
 	}
 }
 
@@ -1619,7 +1619,7 @@ func TestClaudeCode_Authenticate_Loopback(t *testing.T) {
 	}
 
 	// With credentials configured — non-loopback without token fails
-	c.SetCredentials("my-token", "")
+	c.SetCredentials("my-token")
 	r3 := httptest.NewRequest("POST", "/v1/messages", nil)
 	r3.RemoteAddr = "10.0.0.5:54321"
 	if c.Authenticate(r3) {
@@ -1629,7 +1629,7 @@ func TestClaudeCode_Authenticate_Loopback(t *testing.T) {
 
 func TestClaudeCode_Authenticate_Token(t *testing.T) {
 	c := NewClaudeCodeConnector()
-	c.SetCredentials("my-token", "my-master")
+	c.SetCredentials("my-token")
 
 	r := httptest.NewRequest("POST", "/v1/messages", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
@@ -1644,9 +1644,9 @@ func TestClaudeCode_Authenticate_Token(t *testing.T) {
 
 	r2 := httptest.NewRequest("POST", "/v1/messages", nil)
 	r2.RemoteAddr = "127.0.0.1:54321"
-	r2.Header.Set("Authorization", "Bearer my-master")
-	if !c.Authenticate(r2) {
-		t.Error("expected auth to pass with master key")
+	r2.Header.Set("Authorization", "Bearer "+staleMasterKey)
+	if c.Authenticate(r2) {
+		t.Error("a stale sk-dc- master key bearer must not authenticate")
 	}
 }
 
@@ -3639,7 +3639,7 @@ func TestClaudeCode_TeardownPreservesForeignSameBasenameExecHook(t *testing.T) {
 
 func TestCodex_Authenticate_Token(t *testing.T) {
 	c := NewCodexConnector()
-	c.SetCredentials("my-token", "my-master")
+	c.SetCredentials("my-token")
 
 	// Loopback is trusted unconditionally — see TestCodex_Authenticate_NativeBinaryLoopback
 	// for the rationale. Token-based auth is exercised on non-loopback
@@ -3657,9 +3657,9 @@ func TestCodex_Authenticate_Token(t *testing.T) {
 
 	r2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r2.RemoteAddr = "10.0.0.5:54321"
-	r2.Header.Set("Authorization", "Bearer my-master")
-	if !c.Authenticate(r2) {
-		t.Error("expected non-loopback auth to pass with master key")
+	r2.Header.Set("Authorization", "Bearer "+staleMasterKey)
+	if c.Authenticate(r2) {
+		t.Error("a stale sk-dc- master key bearer must not authenticate")
 	}
 }
 
@@ -3681,7 +3681,7 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 	}
 
 	// With token — non-loopback without token fails
-	c.SetCredentials("my-token", "")
+	c.SetCredentials("my-token")
 	r3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r3.RemoteAddr = "10.0.0.5:54321"
 	if c.Authenticate(r3) {
@@ -3729,7 +3729,7 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 // not know the provider key.
 func TestCodex_Authenticate_NativeBinaryLoopback(t *testing.T) {
 	c := NewCodexConnector()
-	c.SetCredentials("gw-tok-5c80", "")
+	c.SetCredentials("gw-tok-5c80")
 	c.SetProviderSnapshot(map[string]CodexProviderEntry{
 		"openrouter": {APIKey: "sk-or-v1-real-openrouter-key"},
 	})
@@ -3748,7 +3748,7 @@ func TestCodex_Authenticate_NativeBinaryLoopback(t *testing.T) {
 	// match any recorded provider key must be rejected (this is the
 	// shared-host bypass that the finding documented).
 	c2 := NewCodexConnector()
-	c2.SetCredentials("gw-tok-5c80", "")
+	c2.SetCredentials("gw-tok-5c80")
 	r2 := httptest.NewRequest("POST", "/c/codex/responses", nil)
 	r2.RemoteAddr = "127.0.0.1:54321"
 	r2.Header.Set("Authorization", "Bearer sk-attacker-supplied")
@@ -3782,7 +3782,7 @@ func TestCodex_Authenticate_NoCredentials(t *testing.T) {
 // not re-emit the warning.
 func TestCodex_Authenticate_LoopbackWarnOnce(t *testing.T) {
 	c := NewCodexConnector()
-	c.SetCredentials("gw-tok-h1", "")
+	c.SetCredentials("gw-tok-h1")
 
 	testStderrMu.Lock()
 	origStderr := os.Stderr
@@ -6916,7 +6916,7 @@ func TestCodex_Teardown(t *testing.T) {
 func TestCodex_SetCredentials_OnConnectorInterface(t *testing.T) {
 	c := NewCodexConnector()
 	var conn Connector = c // SetCredentials is now on the core interface
-	conn.SetCredentials("tok", "mk")
+	conn.SetCredentials("tok")
 
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
@@ -6929,7 +6929,7 @@ func TestCodex_SetCredentials_OnConnectorInterface(t *testing.T) {
 // --- ZeptoClaw connector tests ---
 
 // TestZeptoClaw_Authenticate_Loopback pins the new B1 contract: with no
-// gateway token AND no master key configured (the brief first-boot
+// gateway token configured (the brief first-boot
 // window before ensureGatewayToken runs), loopback callers are still
 // allowed so the install can complete its first request without 401.
 // Once a token is configured, this loopback-allow is no longer
@@ -6951,7 +6951,7 @@ func TestZeptoClaw_Authenticate_Loopback(t *testing.T) {
 // upstream key recorded by Route() — that path is now closed.
 func TestZeptoClaw_Authenticate_LoopbackRequiresTokenWhenConfigured(t *testing.T) {
 	c := NewZeptoClawConnector()
-	c.SetCredentials("gw-tok-configured", "")
+	c.SetCredentials("gw-tok-configured")
 
 	r := httptest.NewRequest("POST", "/c/zeptoclaw/v1/chat/completions", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
@@ -6964,7 +6964,7 @@ func TestZeptoClaw_Authenticate_LoopbackRequiresTokenWhenConfigured(t *testing.T
 
 func TestZeptoClaw_Authenticate_Token(t *testing.T) {
 	c := NewZeptoClawConnector()
-	c.SetCredentials("my-token", "my-master")
+	c.SetCredentials("my-token")
 
 	// Loopback without X-DC-Auth is now rejected when a token is
 	// configured (plan B1 / S0.3): the previous "trust loopback
@@ -7002,12 +7002,12 @@ func TestZeptoClaw_Authenticate_Token(t *testing.T) {
 		t.Error("expected non-loopback auth to pass with correct X-DC-Auth token")
 	}
 
-	// Non-loopback: master key → accept.
+	// Non-loopback: a stale sk-dc- master key bearer → reject.
 	r5 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r5.RemoteAddr = "10.0.0.5:54321"
-	r5.Header.Set("Authorization", "Bearer my-master")
-	if !c.Authenticate(r5) {
-		t.Error("expected non-loopback auth to pass with master key")
+	r5.Header.Set("Authorization", "Bearer "+staleMasterKey)
+	if c.Authenticate(r5) {
+		t.Error("a stale sk-dc- master key bearer must not authenticate")
 	}
 }
 
@@ -7017,7 +7017,7 @@ func TestZeptoClaw_Authenticate_Token(t *testing.T) {
 // remote callers. The previous "loopback always allowed" path is gone.
 func TestZeptoClaw_Authenticate_NativeBinaryLoopback(t *testing.T) {
 	c := NewZeptoClawConnector()
-	c.SetCredentials("gw-tok-5c80", "")
+	c.SetCredentials("gw-tok-5c80")
 
 	r := httptest.NewRequest("POST", "/c/zeptoclaw/v1/chat/completions", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
@@ -7035,7 +7035,7 @@ func TestZeptoClaw_Authenticate_NativeBinaryLoopback(t *testing.T) {
 // the Setup snapshot must still authenticate.
 func TestZeptoClaw_Authenticate_ProviderSnapshotBearerLoopback(t *testing.T) {
 	c := NewZeptoClawConnector()
-	c.SetCredentials("gw-tok-configured", "")
+	c.SetCredentials("gw-tok-configured")
 	c.SetProviderSnapshot(map[string]ZeptoClawProviderEntry{
 		"bedrock": {APIKey: "aws-bedrock-bearer-from-zepto-config", APIBase: "https://bedrock-runtime.us-east-1.amazonaws.com"},
 	})
@@ -8162,11 +8162,11 @@ func TestAllConnectors_Route_PassthroughNonChat(t *testing.T) {
 	}
 }
 
-// --- Auth parity: all connectors accept SetCredentials(token, masterKey) ---
+// --- Auth parity: all connectors accept SetCredentials(token) ---
 
 func TestAllConnectors_Auth_Parity(t *testing.T) {
 	type credSetter interface {
-		SetCredentials(gatewayToken, masterKey string)
+		SetCredentials(gatewayToken string)
 	}
 
 	connectors := []Connector{
@@ -8179,10 +8179,10 @@ func TestAllConnectors_Auth_Parity(t *testing.T) {
 	for _, c := range connectors {
 		cs, ok := c.(credSetter)
 		if !ok {
-			t.Errorf("%s does not implement SetCredentials(token, masterKey)", c.Name())
+			t.Errorf("%s does not implement SetCredentials(token)", c.Name())
 			continue
 		}
-		cs.SetCredentials("test-token", "test-master")
+		cs.SetCredentials("test-token")
 
 		// Token auth
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -8192,12 +8192,12 @@ func TestAllConnectors_Auth_Parity(t *testing.T) {
 			t.Errorf("%s: X-DC-Auth should authenticate", c.Name())
 		}
 
-		// Master key auth
+		// A stale sk-dc- master key bearer is not a credential.
 		r2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		r2.RemoteAddr = "127.0.0.1:54321"
-		r2.Header.Set("Authorization", "Bearer test-master")
-		if !c.Authenticate(r2) {
-			t.Errorf("%s: master key should authenticate", c.Name())
+		r2.Header.Set("Authorization", "Bearer "+staleMasterKey)
+		if c.Authenticate(r2) {
+			t.Errorf("%s: a stale sk-dc- master key bearer must not authenticate", c.Name())
 		}
 
 		// No creds on loopback should fail for every connector now —
@@ -8207,7 +8207,7 @@ func TestAllConnectors_Auth_Parity(t *testing.T) {
 		// unconditionally because the native Rust binary has no
 		// fetch-interceptor seam for X-DC-Auth. That was a shared-host
 		// local-IDOR vector. The connector now requires the loopback
-		// caller to either present X-DC-Auth, the master key, or an
+		// caller to either present X-DC-Auth or an
 		// Authorization Bearer matching a recorded provider key.
 		// Operators on single-user dev hosts can opt back into the
 		// legacy loose behavior with DEFENSECLAW_CODEX_LOOPBACK_TRUST=1.
@@ -9801,7 +9801,7 @@ func TestAuth_NoCredentials_AllConnectors_DenyNonLoopback(t *testing.T) {
 		NewZeptoClawConnector(),
 	}
 	for _, conn := range connectors {
-		conn.SetCredentials("", "")
+		conn.SetCredentials("")
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		r.RemoteAddr = "10.0.0.5:54321"
 		if conn.Authenticate(r) {
@@ -9818,7 +9818,7 @@ func TestAuth_NoCredentials_AllConnectors_AllowLoopback(t *testing.T) {
 		NewZeptoClawConnector(),
 	}
 	for _, conn := range connectors {
-		conn.SetCredentials("", "")
+		conn.SetCredentials("")
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		r.RemoteAddr = "127.0.0.1:54321"
 		if !conn.Authenticate(r) {
@@ -11184,7 +11184,7 @@ func TestAllConnectors_ImplementSetCredentials(t *testing.T) {
 		NewZeptoClawConnector(),
 	}
 	for _, conn := range connectors {
-		conn.SetCredentials("test-token", "test-master")
+		conn.SetCredentials("test-token")
 	}
 }
 
@@ -11810,7 +11810,7 @@ func (f *fakeHookScriptOwner) Authenticate(*http.Request) bool           { retur
 func (f *fakeHookScriptOwner) Route(*http.Request, []byte) (*ConnectorSignals, error) {
 	return &ConnectorSignals{}, nil
 }
-func (f *fakeHookScriptOwner) SetCredentials(string, string) {}
+func (f *fakeHookScriptOwner) SetCredentials(string) {}
 func (f *fakeHookScriptOwner) HookScriptNames(SetupOpts) []string {
 	out := make([]string, len(f.hooks))
 	copy(out, f.hooks)
@@ -12436,39 +12436,6 @@ func TestOpenClaw_IsBundledPlugin(t *testing.T) {
 	os.WriteFile(pkg, append(data, ' '), 0o644)
 	if c.IsBundledPlugin(extDir) {
 		t.Fatal("a plugin with a changed file was recognized as DefenseClaw's own")
-	}
-}
-
-func TestAuthenticateHookBridgeRequest_MasterKeyOnlyWarnsOnLoopbackBypass(t *testing.T) {
-	testStderrMu.Lock()
-	origStderr := os.Stderr
-	pipeR, pipeW, err := os.Pipe()
-	if err != nil {
-		testStderrMu.Unlock()
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	os.Stderr = pipeW
-	t.Cleanup(func() {
-		os.Stderr = origStderr
-		_ = pipeW.Close()
-		_ = pipeR.Close()
-		testStderrMu.Unlock()
-	})
-
-	var warned sync.Once
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/cursor/hook", nil)
-	r.RemoteAddr = "127.0.0.1:54321"
-	if !authenticateHookBridgeRequest(r, "", "master-key", "cursor", "test bridge", &warned) {
-		t.Fatal("loopback bridge request should be accepted")
-	}
-
-	os.Stderr = origStderr
-	if err := pipeW.Close(); err != nil {
-		t.Fatalf("close pipe writer: %v", err)
-	}
-	captured, _ := io.ReadAll(pipeR)
-	if got := string(captured); !strings.Contains(got, "[SECURITY] cursor: loopback request accepted") {
-		t.Fatalf("stderr missing configured-credential bypass warning:\n%s", got)
 	}
 }
 

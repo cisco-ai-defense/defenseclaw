@@ -78,7 +78,7 @@ func (*endpointInventoryPluginConnector) Route(
 ) (*connector.ConnectorSignals, error) {
 	return &connector.ConnectorSignals{}, nil
 }
-func (*endpointInventoryPluginConnector) SetCredentials(string, string) {}
+func (*endpointInventoryPluginConnector) SetCredentials(string) {}
 func (*endpointInventoryPluginConnector) VerifyClean(connector.SetupOpts) error {
 	return nil
 }
