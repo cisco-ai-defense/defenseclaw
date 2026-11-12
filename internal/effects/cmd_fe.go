@@ -14,12 +14,20 @@ import "strings"
 // review CM-3).
 func parseCMD(command string, o Options) *Script {
 	s := &Script{Dialect: DialectCMD}
+	prevOp := OpNone
 	for _, raw := range splitCMDStatements(command) {
+		op := raw.op
 		seg := strings.TrimSpace(raw.text)
 		if seg == "" {
+			prevOp = op
 			continue
 		}
-		c := &Cmd{Span: [2]int{raw.start, raw.start + len(raw.text)}}
+		// Cond and PipeIn describe how THIS segment is reached, i.e. the
+		// operator that preceded it (review N14/N8).
+		cond := prevOp == OpAnd || prevOp == OpOr
+		pipeIn := prevOp == OpPipe
+		prevOp = op
+		c := &Cmd{PipeIn: pipeIn, Cond: cond, Span: [2]int{raw.start, raw.start + len(raw.text)}}
 		for _, it := range tokenizeCMD(seg) {
 			if it.redir != "" {
 				red := Redir{FD: it.fd, Target: cmdWord(it.text)}
@@ -45,7 +53,7 @@ func parseCMD(command string, o Options) *Script {
 		if len(c.Words) == 0 && len(c.Redirs) == 0 {
 			continue
 		}
-		s.Stmts = append(s.Stmts, &Stmt{Cmds: []*Cmd{c}, Op: raw.op, Cond: raw.op == OpAnd || raw.op == OpOr, Span: c.Span})
+		s.Stmts = append(s.Stmts, &Stmt{Cmds: []*Cmd{c}, Op: op, Cond: cond, Span: c.Span})
 	}
 	return s
 }
@@ -68,7 +76,7 @@ func splitCMDStatements(command string) []cmdSeg {
 	}
 	for i := 0; i < len(command); i++ {
 		ch := command[i]
-		if ch == '^' && i+1 < len(command) {
+		if ch == 0x5e && !inQ && i+1 < len(command) {
 			b.WriteByte(ch)
 			i++
 			b.WriteByte(command[i])
@@ -80,6 +88,13 @@ func splitCMDStatements(command string) []cmdSeg {
 			continue
 		}
 		if !inQ {
+			// `>&`/`<&` is a stream dup (e.g. 2>&1), not a statement separator.
+			if ch == '&' && b.Len() > 0 {
+				if last := b.String()[b.Len()-1]; last == '>' || last == '<' {
+					b.WriteByte(ch)
+					continue
+				}
+			}
 			if ch == '&' && i+1 < len(command) && command[i+1] == '&' {
 				flush(i+2, OpAnd)
 				i++
@@ -145,7 +160,7 @@ func tokenizeCMD(seg string) []cmdItem {
 	}
 	for i := 0; i < len(seg); i++ {
 		ch := seg[i]
-		if ch == '^' && i+1 < len(seg) {
+		if ch == 0x5e && !inQ && i+1 < len(seg) {
 			i++
 			b.WriteByte(seg[i])
 			continue
@@ -161,6 +176,21 @@ func tokenizeCMD(seg string) []cmdItem {
 				continue
 			}
 			if ch == '>' {
+				// A stream dup `>&`/`N>&M` (e.g. 2>&1) is not a file redirect:
+				// consume &digits and emit nothing (review N15).
+				if i+1 < len(seg) && seg[i+1] == '&' {
+					if b.Len() <= 1 {
+						b.Reset()
+					} else {
+						flushWordWithRedir()
+					}
+					i += 2
+					for i < len(seg) && seg[i] >= '0' && seg[i] <= '9' {
+						i++
+					}
+					i--
+					continue
+				}
 				// optional preceding fd digit already in b (e.g. 2>)
 				fd := -1
 				if b.Len() == 1 && b.String()[0] >= '0' && b.String()[0] <= '9' {
@@ -223,14 +253,16 @@ func cmdSegs(tok string) []WordSeg {
 			lit.Reset()
 		}
 	}
+	inQ := false
 	for i := 0; i < len(tok); i++ {
 		ch := tok[i]
-		if ch == '^' && i+1 < len(tok) {
+		if ch == '^' && !inQ && i+1 < len(tok) {
 			i++
 			lit.WriteByte(tok[i])
 			continue
 		}
 		if ch == '"' {
+			inQ = !inQ
 			continue
 		}
 		if ch == '%' || ch == '!' {

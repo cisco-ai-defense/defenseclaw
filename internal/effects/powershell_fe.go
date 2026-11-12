@@ -105,14 +105,14 @@ func (lw *psLower) pipeline(p *psparse.Pipeline, cond bool) {
 	for seg := p; seg != nil; seg = seg.ChainRHS {
 		segCond := cond || !first
 		var lastCmd *Cmd
-		stage := 0
-		for _, el := range seg.Elements {
+		// A command is pipeline-fed when any element precedes it, including a
+		// bare expression/string stage (review N5 S3/S4).
+		for idx, el := range seg.Elements {
 			switch e := el.(type) {
 			case *psparse.Command:
-				c := lw.command(e, segCond, stage > 0)
+				c := lw.command(e, segCond, idx > 0)
 				lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: segCond})
 				lastCmd = c
-				stage++
 			case *psparse.ExprStatement:
 				lw.exprCommands(e.Expr, segCond)
 			}
@@ -158,13 +158,21 @@ func (lw *psLower) command(c *psparse.Command, cond, pipeIn bool) *Cmd {
 			out.Words = append(out.Words, Word{Value: "-" + e.Name, Static: true, Segs: []WordSeg{{Lit: "-" + e.Name}}})
 			if e.HasColon && e.Colon != nil {
 				out.Words = append(out.Words, lw.exprWord(e.Colon))
+				lw.exprCommands(e.Colon, true)
 			}
 		case *psparse.Arg:
 			out.Words = append(out.Words, lw.exprWord(e.Value))
+			// a script-block / sub-expression argument (& { ... },
+			// Invoke-Command -ScriptBlock { ... }) runs its inner commands
+			// (review N20 H1/H2).
+			lw.exprCommands(e.Value, true)
 		case psparse.Expr:
 			out.Words = append(out.Words, lw.exprWord(e))
+			lw.exprCommands(e, true)
 		}
 	}
+	// `& { ... }` / `. { ... }`: the command name itself is a script block.
+	lw.exprCommands(c.Name, true)
 	for _, r := range c.Redirs {
 		lw.addRedir(out, r)
 	}

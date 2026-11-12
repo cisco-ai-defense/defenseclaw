@@ -4,7 +4,11 @@
 
 package effects
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
+)
 
 // Extract is the pure entry point: one tool call -> its effects. It never
 // panics (a recovered panic becomes a single parser_failure effect), never
@@ -201,8 +205,17 @@ func (w *walker) resolveWord(wd Word) Word {
 			continue
 		}
 		lit := s.Lit
-		if i == 0 && !s.Quoted && (lit == "~" || strings.HasPrefix(lit, "~/")) && w.curHome != "" {
-			lit = w.curHome + strings.TrimPrefix(lit, "~")
+		// A leading ~ (~/ on POSIX, ~\ or ~/ on Windows) expands to the running
+		// home; with no known home it is dynamic (review N6).
+		if i == 0 && isTilde(lit, w.o.flavor()) {
+			if w.curHome == "" {
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
+			}
+			// a glob/brace after the tilde still globs (review N10 V16).
+			if s.Glob && !s.Quoted {
+				glob = true
+			}
+			lit = w.curHome + lit[1:]
 			b.WriteString(lit)
 			continue
 		}
@@ -353,7 +366,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		}
 	}
 
-	entry, known := lookupProgram(program, w.o.flavor())
+	entry, known := lookupProgram(program, w.o.flavor(), dialect)
 
 	// 5. Base exec effect for every command (review PT-1: never zero effects).
 	progTarget, progReason := w.programTarget(prog.Value)
@@ -390,11 +403,14 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		return
 	}
 
-	// cmd /c | /k: the rest is an inner command to unwrap (review CM-9).
+	// cmd /c | /k: the rest is an inner command to unwrap (review CM-9); a cmd
+	// reading its command from a pipe is opaque code (review N8 K6).
 	if entry.CmdC {
 		rest := inner[1:]
+		found := false
 		for j, a := range rest {
 			if a.Static && (strings.EqualFold(a.Value, "/c") || strings.EqualFold(a.Value, "/k")) {
+				found = true
 				parts := make([]string, 0, len(rest)-j-1)
 				allStatic := true
 				for _, p2 := range rest[j+1:] {
@@ -410,8 +426,42 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 				break
 			}
 		}
+		if !found && c.PipeIn {
+			w.opaqueExec(origin, cond)
+		}
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
+	}
+
+	// powershell/pwsh launched from any dialect: decode -enc and unwrap its
+	// -Command / positional script as PowerShell (review N8 K4/K5).
+	if entry.PSLaunch {
+		if code, ok := powershellLaunchCode(inner[1:]); ok {
+			w.unwrapCode(code, true, DialectPowerShell, depth, cond, origin)
+			w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+			return
+		}
+		// no literal command: a stdin-reading powershell is opaque code.
+		if c.PipeIn {
+			w.opaqueExec(origin, cond)
+		}
+		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+		return
+	}
+
+	// tar: mode-dependent create/extract effects, never a silent KNOWN (N7).
+	if entry.TarStyle {
+		w.tarEffects(inner[1:], origin, cond, depth)
+		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+		return
+	}
+	// git -c <exec-key>=... / git config <exec-key> runs code (review N18).
+	if program == "git" && gitHasExecConfig(inner[1:]) {
+		w.opaqueExec(origin, cond)
+	}
+	// programs that run arbitrary code from their arguments (review N18).
+	if codeRunsOpaque(program, inner[1:]) {
+		w.opaqueExec(origin, cond)
 	}
 
 	// 7. Operands.
@@ -423,6 +473,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		w.command(&Cmd{Words: argv, Cond: cond}, dialect, depth, cond)
 	}
 	readIdx := []int{}
+	emittedTargetEffect := false
 	for _, op := range ops {
 		e := w.effectForOperand(op, entry, origin, cond, foreign, fromInput, shadowed, dialect, depth)
 		if e == nil {
@@ -431,6 +482,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		idx := w.emit(*e)
 		if idx == 0 {
 			continue
+		}
+		if e.Target.Type == TargetPath || e.Target.Type == TargetRemote || e.Kind == KindNetworkSend {
+			emittedTargetEffect = true
 		}
 		switch e.Kind {
 		case KindRead:
@@ -445,6 +499,15 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		if op.role == RoleExecCode && op.static && entry.ShellCode {
 			w.unwrapCode(op.value, op.static, dialect, depth, cond, origin)
 		}
+	}
+
+	// A cmdlet fed by a pipeline with no explicit path operand acts on the
+	// piped input: emit its pipe-role effect with an unknown target (review N5).
+	if c.PipeIn && !emittedTargetEffect && entry.PipeRole != "" {
+		e := Effect{Kind: entry.PipeRole.kind(), Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
+			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+		e.addReason(ReasonDynamicExpansion, ScopeTarget)
+		w.emit(e)
 	}
 
 	// 8. Redirections.
@@ -600,6 +663,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	unknownFlag := false
 	inPlace := false
 	del := false
+	hasExpr := false
 	endOpts := false
 	for i < len(words) {
 		wd := words[i]
@@ -653,6 +717,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		if p.DeleteFlag != "" && fname == p.DeleteFlag {
 			del = true
 		}
+		if p.FirstPosIgnore && (fname == "-e" || fname == "-f" || fname == "--expression" || fname == "--file") {
+			hasExpr = true
+		}
 		if fl.Role == RoleExecProgram {
 			// find -exec / fd -x: the words up to ; or + are an inner command.
 			// Keep the roots and resume after the terminator (review N4), and
@@ -681,7 +748,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		}
 		i++
 	}
-	out = append(out, w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del})...)
+	out = append(out, w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del, hasExpr: hasExpr})...)
 	return out, inner
 }
 
@@ -793,6 +860,7 @@ type posCtx struct {
 	unknownFlag bool
 	inPlace     bool
 	del         bool
+	hasExpr     bool
 }
 
 func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand {
@@ -801,8 +869,8 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		return operand{value: wd.Value, static: wd.Static, quoted: wd.Quoted,
 			glob: wd.Glob || (p.Pattern && !wd.Quoted), role: role, pattern: p.Pattern}
 	}
-	if p.FirstPosIgnore && len(ps) > 0 {
-		ps = ps[1:] // sed script / grep pattern is not a path
+	if p.FirstPosIgnore && !ctx.hasExpr && len(ps) > 0 {
+		ps = ps[1:] // sed script / grep pattern is not a path (only when no -e/-f gave it)
 	}
 	var out []operand
 	switch p.Pos {
@@ -891,6 +959,10 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 				out = append(out, mk(wd, RoleLink))
 			}
 		}
+	case PosFirstWrite:
+		if len(ps) > 0 {
+			out = append(out, mk(ps[0], RoleWrite))
+		}
 	case PosFirstCode:
 		if len(ps) > 0 {
 			out = append(out, operand{value: ps[0].Value, static: ps[0].Static, role: RoleExecCode})
@@ -977,6 +1049,10 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	switch op.role {
 	case RoleURL:
 		w.fillURL(e, op)
+		return e
+	case RoleURLUpload:
+		w.fillURL(e, op)
+		e.Kind = KindNetworkSend // git push etc. send to the URL (review N21)
 		return e
 	case RoleExecCode:
 		e.Kind = KindExec
@@ -1271,7 +1347,7 @@ func gitOperands(ps []Word) []operand {
 		for _, wd := range rest {
 			if wd.Static {
 				if _, ok := urlHost(wd.Value); ok || strings.Contains(wd.Value, "://") {
-					out = append(out, operand{value: wd.Value, static: true, role: RoleURL})
+					out = append(out, operand{value: wd.Value, static: true, role: RoleURLUpload})
 				}
 			}
 		}
@@ -1333,7 +1409,7 @@ func commandCWDOverride(program string, words, inner []Word) string {
 		}
 	}
 	switch program {
-	case "git", "tar", "make":
+	case "git", "make":
 		for i := 1; i+1 < len(inner); i++ {
 			if inner[i].Static && (inner[i].Value == "-C" || inner[i].Value == "--directory") && inner[i+1].Static {
 				return inner[i+1].Value
@@ -1341,4 +1417,251 @@ func commandCWDOverride(program string, words, inner []Word) string {
 		}
 	}
 	return ""
+}
+
+// isTilde reports a leading ~ that expands to the home directory: ~ or ~/ on
+// POSIX; ~, ~/ or ~\ on Windows (review N6).
+func isTilde(lit string, flavor Flavor) bool {
+	if lit == "~" {
+		return true
+	}
+	if strings.HasPrefix(lit, "~/") {
+		return true
+	}
+	return flavor == FlavorWindows && strings.HasPrefix(lit, `~\`)
+}
+
+// powershellLaunchCode returns the PowerShell command text a powershell/pwsh
+// invocation runs: the value of -Command/-c, a decoded -EncodedCommand/-enc/-e,
+// or the first positional script onward. ok is false when it only reads stdin.
+func powershellLaunchCode(args []Word) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !a.Static {
+			continue
+		}
+		lc := strings.ToLower(a.Value)
+		isCmd := lc == "-command" || lc == "-c"
+		isEnc := lc == "-encodedcommand" || lc == "-enc" || lc == "-ec" || lc == "-e"
+		if (isCmd || isEnc) && i+1 < len(args) && args[i+1].Static {
+			v := args[i+1].Value
+			if isEnc {
+				if dec, ok := psparse.DecodeEncodedCommand(v); ok {
+					return dec, true
+				}
+				return "", false
+			}
+			return v, true
+		}
+		if strings.HasPrefix(a.Value, "-") {
+			continue // another switch (-NoProfile, -File handled as a read elsewhere)
+		}
+		// a bare positional: the rest is a PowerShell command (review N8 K5/S5).
+		var parts []string
+		for _, w := range args[i:] {
+			if !w.Static {
+				return "", false
+			}
+			parts = append(parts, w.Value)
+		}
+		return strings.Join(parts, " "), true
+	}
+	return "", false
+}
+
+func (w *walker) opaqueExec(origin Origin, cond bool) {
+	e := Effect{Kind: KindExec, Cond: cond, Target: Target{Type: TargetProcess, Link: LinkNotChecked},
+		TargetState: TargetStateUnknown, RoleState: RoleStateUnknown, Origin: origin}
+	e.addReason(ReasonOpaqueCode, ScopeTarget)
+	w.emit(e)
+}
+
+// tarEffects models tar: create (c) reads its source operands and writes the
+// archive; extract (x) writes into -C dir or cwd with an unknown target (the
+// archive contents are not modeled -- review N7); --to-command runs code. It
+// never reports a silent KNOWN.
+func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
+	mode := byte(0) // 'c','x','t'
+	archive := ""
+	archivePending := false
+	cdir := ""
+	var files []Word
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !a.Static {
+			if archivePending {
+				archivePending = false
+			} else {
+				files = append(files, a)
+			}
+			continue
+		}
+		v := a.Value
+		switch {
+		case v == "-C" || v == "--directory":
+			if i+1 < len(args) && args[i+1].Static {
+				cdir = args[i+1].Value
+				i++
+			}
+		case v == "-f" || v == "--file":
+			if i+1 < len(args) && args[i+1].Static {
+				archive = args[i+1].Value
+				i++
+			}
+		case v == "--to-command" || v == "--checkpoint-action":
+			w.opaqueExec(origin, cond)
+			if i+1 < len(args) {
+				i++
+			}
+		case strings.HasPrefix(v, "--"):
+			// unknown long option: ignore
+		case strings.HasPrefix(v, "-") || isTarModeBundle(v):
+			// a flag bundle like -xzf / xzf / czf: read the mode and whether -f
+			// takes the next token as the archive.
+			body := strings.TrimPrefix(v, "-")
+			for k := 0; k < len(body); k++ {
+				switch body[k] {
+				case 'c':
+					mode = 'c'
+				case 'x':
+					mode = 'x'
+				case 't':
+					mode = 't'
+				case 'f':
+					archivePending = true
+				}
+			}
+		case archivePending:
+			archive = v
+			archivePending = false
+		default:
+			files = append(files, a)
+		}
+	}
+	mk := func(kind Kind, spelling string, state TargetState, reason ReasonCode) {
+		e := Effect{Kind: kind, Cond: cond, RoleState: RoleStateKnown, TargetState: state,
+			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+		if spelling != "" {
+			e.Target.Spelling = cap4k(spelling)
+			if abs, ok, r := placePath(spelling, w.opts()); ok {
+				e.Target.Path = abs
+			} else {
+				e.TargetState = TargetStateUnknown
+				e.addReason(r, ScopeTarget)
+			}
+		}
+		if reason != "" {
+			e.addReason(reason, ScopeTarget)
+		}
+		w.emit(e)
+	}
+	switch mode {
+	case 'c':
+		if archive != "" && archive != "-" {
+			mk(KindWrite, archive, TargetStateKnown, "")
+		}
+		for _, f := range files {
+			if f.Static {
+				mk(KindRead, f.Value, TargetStateKnown, "")
+			}
+		}
+	case 'x':
+		if archive != "" && archive != "-" {
+			mk(KindRead, archive, TargetStateKnown, "")
+		}
+		// extraction writes unknown files into the destination directory.
+		dest := cdir
+		if dest == "" {
+			dest = "."
+		}
+		mk(KindWrite, dest, TargetStateUnknown, ReasonOpaqueArchive)
+	default: // list or unknown mode
+		if archive != "" && archive != "-" {
+			mk(KindRead, archive, TargetStateKnown, "")
+		}
+	}
+}
+
+func isTarModeBundle(v string) bool {
+	if v == "" || strings.ContainsAny(v, "/\\.=") {
+		return false
+	}
+	has := false
+	for i := 0; i < len(v); i++ {
+		switch v[i] {
+		case 'c', 'x', 't':
+			has = true
+		case 'f', 'z', 'j', 'v', 'J', 'a', 'p', 'h':
+		default:
+			return false
+		}
+	}
+	return has
+}
+
+// gitHasExecConfig reports a git -c <key>=... or `git config <key> ...` with a
+// config key that runs an external program (review N18).
+func gitHasExecConfig(args []Word) bool {
+	execKey := func(k string) bool {
+		k = strings.ToLower(k)
+		for _, p := range []string{"core.pager", "core.sshcommand", "core.fsmonitor", "core.hookspath",
+			"core.editor", "credential.helper", "diff.external", "alias.", "sequence.editor", "pager."} {
+			if strings.HasPrefix(k, p) {
+				return true
+			}
+		}
+		return false
+	}
+	sub := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !a.Static {
+			continue
+		}
+		if a.Value == "-c" && i+1 < len(args) && args[i+1].Static {
+			kv := args[i+1].Value
+			if eq := strings.IndexByte(kv, '='); eq > 0 && execKey(kv[:eq]) {
+				return true
+			}
+			i++
+			continue
+		}
+		if !strings.HasPrefix(a.Value, "-") && sub == "" {
+			sub = a.Value
+		}
+	}
+	if sub == "config" {
+		for _, a := range args {
+			if a.Static && execKey(a.Value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// codeRunsOpaque reports a program/argument shape that runs arbitrary code we
+// cannot see: go run/test/generate, an interpreter -m module (review N18).
+func codeRunsOpaque(program string, args []Word) bool {
+	switch program {
+	case "go":
+		for _, a := range args {
+			if a.Static {
+				switch a.Value {
+				case "run", "test", "generate":
+					return true
+				}
+				if !strings.HasPrefix(a.Value, "-") {
+					return false
+				}
+			}
+		}
+	case "python", "python3", "node", "nodejs", "ruby", "perl", "php":
+		for _, a := range args {
+			if a.Static && a.Value == "-m" {
+				return true
+			}
+		}
+	}
+	return false
 }

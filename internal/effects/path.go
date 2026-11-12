@@ -75,6 +75,11 @@ func cleanPOSIX(p string) string {
 }
 
 func placeWindows(spelling string, o Options) (string, bool, ReasonCode) {
+	// MSYS / Git Bash drive mount: /c/Users -> C:\Users (review N17).
+	if len(spelling) >= 2 && spelling[0] == '/' && isDriveLetter(spelling[1]) &&
+		(len(spelling) == 2 || spelling[2] == '/') {
+		spelling = string(spelling[1]) + ":" + spelling[2:]
+	}
 	s := strings.ReplaceAll(spelling, "/", `\`)
 	// UNC and device/extended-length prefixes are kept verbatim after cleaning
 	// their separators; they are absolute by construction.

@@ -225,10 +225,17 @@ func (w *posixWalker) scanCmdSubsts(word *syntax.Word, c *Cmd) {
 		return
 	}
 	syntax.Walk(word, func(n syntax.Node) bool {
-		if cs, ok := n.(*syntax.CmdSubst); ok {
+		var stmts []*syntax.Stmt
+		switch n2 := n.(type) {
+		case *syntax.CmdSubst:
+			stmts = n2.Stmts
+		case *syntax.ProcSubst:
+			stmts = n2.Stmts
+		}
+		if stmts != nil {
 			sub := &Script{Dialect: DialectPOSIX}
 			nw := &posixWalker{out: sub}
-			for _, inner := range cs.Stmts {
+			for _, inner := range stmts {
 				nw.stmt(inner, true, false)
 			}
 			c.Nested = append(c.Nested, sub)
@@ -271,9 +278,20 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 				red.FD = 1
 			}
 		case syntax.DplOut, syntax.DplIn:
+			// `>&word`: a numeric word is an fd dup (ignored); a file word is a
+			// stdout+stderr file write (review N9 R4/V20c).
 			red.Op = RedirDup
-		case syntax.RdrAll, syntax.AppAll:
+			if r.Op == syntax.DplOut && r.Word != nil {
+				if tw := w.word(r.Word); tw.Static && !allDigits(tw.Value) && tw.Value != "-" {
+					red.Op = RedirWrite
+					red.FD = 1
+				}
+			}
+		case syntax.RdrAll:
 			red.Op = RedirWrite
+			red.FD = 1
+		case syntax.AppAll:
+			red.Op = RedirAppend
 			red.FD = 1
 		default:
 			red.Op = RedirWrite
@@ -461,4 +479,16 @@ func hasUnescapedMeta(raw string) bool {
 		b.WriteByte(raw[i])
 	}
 	return looksGlob(b.String())
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }

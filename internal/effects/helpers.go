@@ -20,7 +20,6 @@ type wrapperSpec struct {
 var wrapperSpecs = map[string]wrapperSpec{
 	"sudo":    {kind: wrapIdentity, valFlags: set("-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "--user", "--group")},
 	"doas":    {kind: wrapIdentity, valFlags: set("-u", "-C")},
-	"su":      {kind: wrapIdentity, valFlags: set("-s", "-c", "--shell")},
 	"env":     {kind: wrapPlain, valFlags: set("-u", "-C", "--unset", "--chdir"), envAssign: true},
 	"nohup":   {kind: wrapPlain},
 	"setsid":  {kind: wrapPlain},

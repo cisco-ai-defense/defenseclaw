@@ -24,6 +24,7 @@ const (
 	RoleExecCode    Role = "exec_code"
 	RoleURL         Role = "url"
 	RoleUploadFile  Role = "upload"
+	RoleURLUpload   Role = "url_upload"
 	RoleOutput      Role = "output"
 	RolePerm        Role = "perm"
 	RoleIgnore      Role = "ignore"
@@ -45,7 +46,7 @@ func (r Role) kind() Kind {
 		return KindExec
 	case RoleURL:
 		return KindNetworkFetch
-	case RoleUploadFile:
+	case RoleUploadFile, RoleURLUpload:
 		return KindNetworkSend
 	case RolePerm:
 		return KindPermissionChange
@@ -91,6 +92,7 @@ const (
 	PosURLArgs        PosMode = "url_args"
 	PosRobocopy       PosMode = "robocopy"
 	PosGit            PosMode = "git"
+	PosFirstWrite     PosMode = "first_write"
 )
 
 // Program is one table row.
@@ -107,6 +109,9 @@ type Program struct {
 	DeleteFlag     string // flag that adds a delete of the positionals (find -delete)
 	Remote         bool   // a host:path operand is a remote target (scp/rsync)
 	CmdC           bool   // /c|/k payload is an inner command to unwrap (cmd.exe)
+	PipeRole       Role   // effect kind for pipeline-bound input with no path operand (PS cmdlets)
+	PSLaunch       bool   // powershell/pwsh: decode -enc and unwrap its command as PowerShell
+	TarStyle       bool   // tar: mode-dependent create/extract effects (review N7)
 }
 
 var (
@@ -119,7 +124,17 @@ func init() {
 	buildWindowsTable()
 }
 
-func lookupProgram(name string, flavor Flavor) (Program, bool) {
+func lookupProgram(name string, flavor Flavor, dialect Dialect) (Program, bool) {
+	// The command grammar, not the host, selects the table: a POSIX shell on
+	// Windows (Git Bash) uses the POSIX programs (review N17).
+	switch dialect {
+	case DialectCMD, DialectPowerShell:
+		p, ok := windowsTable[strings.ToLower(name)]
+		return p, ok
+	case DialectPOSIX:
+		p, ok := posixTable[name]
+		return p, ok
+	}
 	if flavor == FlavorWindows {
 		p, ok := windowsTable[strings.ToLower(name)]
 		return p, ok
@@ -162,12 +177,9 @@ func buildPOSIXTable() {
 		Flags: map[string]Flag{"-e": {Value: true}, "-f": {Value: true, Role: RoleRead}, "-i": {Role: RoleNone}}})
 	add(Program{Names: []string{"awk"}, Pos: PosAllRead, FirstPosIgnore: true,
 		Flags: map[string]Flag{"-f": {Value: true, Role: RoleRead}, "-v": {Value: true}}})
-	add(Program{Names: []string{"tar"}, Pos: PosNone,
-		Flags: map[string]Flag{
-			"-f": {Value: true, Role: RoleRead}, "-C": {Value: true, Role: RoleIgnore},
-			"-T": {Value: true, Role: RoleRead}, "--files-from": {Value: true, Role: RoleRead},
-			"--to-command": {Value: true, Role: RoleExecCode}, "--checkpoint-action": {Value: true, Role: RoleExecCode}}})
-	add(Program{Names: []string{"unzip", "zip", "gzip", "gunzip", "bzip2", "xz"}, Pos: PosAllRead})
+	add(Program{Names: []string{"tar"}, Pos: PosNone, TarStyle: true})
+	add(Program{Names: []string{"unzip"}, Pos: PosAllRead, Flags: map[string]Flag{"-d": {Value: true, Role: RoleWrite}}})
+	add(Program{Names: []string{"zip", "gzip", "gunzip", "bzip2", "xz"}, Pos: PosAllRead})
 	add(Program{Names: []string{"curl"}, Pos: PosURLArgs,
 		Flags: map[string]Flag{
 			"-o": {Value: true, Role: RoleOutput}, "--output": {Value: true, Role: RoleOutput},
@@ -198,6 +210,7 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"bash", "sh", "zsh", "dash", "ksh"}, Pos: PosFirstCode, ShellCode: true,
 		Flags: map[string]Flag{"-c": {Value: true, Role: RoleExecCode}, "-s": {Role: RoleNone}, "-l": {Role: RoleNone}, "-i": {Role: RoleNone}}})
 	add(Program{Names: []string{"eval", "source", "."}, Pos: PosFirstCode, ShellCode: true})
+	add(Program{Names: []string{"su", "runuser"}, Pos: PosNone, ShellCode: true, Flags: map[string]Flag{"-c": {Value: true, Role: RoleExecCode}, "--command": {Value: true, Role: RoleExecCode}, "-s": {Value: true, Role: RoleIgnore}, "-l": {}, "-": {}}})
 	add(Program{Names: []string{"python", "python3", "node", "nodejs", "ruby", "perl", "php"}, Pos: PosFirstExec,
 		Flags: map[string]Flag{"-c": {Value: true, Role: RoleExecCode}, "-e": {Value: true, Role: RoleExecCode}, "-m": {Value: true, Role: RoleIgnore}}})
 	add(Program{Names: []string{"git"}, Pos: PosGit,
@@ -227,16 +240,16 @@ func buildWindowsTable() {
 		Flags: map[string]Flag{"-urlcache": {Role: RoleNone}, "-decode": {Role: RoleNone}, "-f": {Role: RoleNone}, "-split": {Role: RoleNone}}})
 	add(Program{Names: []string{"bitsadmin"}, Pos: PosNone})
 	add(Program{Names: []string{"cmd"}, Pos: PosNone, CmdC: true})
-	add(Program{Names: []string{"set-content", "add-content", "out-file"}, Pos: PosNone,
+	add(Program{Names: []string{"set-content", "add-content", "out-file"}, Pos: PosFirstWrite, PipeRole: RoleWrite,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleWrite}, "-literalpath": {Value: true, Role: RoleWrite},
 			"-filepath": {Value: true, Role: RoleWrite}, "-value": {Value: true, Role: RoleIgnore}}})
-	add(Program{Names: []string{"get-content", "gc"}, Pos: PosAllRead,
+	add(Program{Names: []string{"get-content", "gc"}, Pos: PosAllRead, PipeRole: RoleRead,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleRead}, "-literalpath": {Value: true, Role: RoleRead}}})
 	add(Program{Names: []string{"copy-item", "cpi"}, Pos: PosSourcesDest,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleRead}, "-literalpath": {Value: true, Role: RoleRead}, "-destination": {Value: true, Role: RoleWrite}}})
 	add(Program{Names: []string{"move-item", "mi"}, Pos: PosSourcesDest,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleRead}, "-literalpath": {Value: true, Role: RoleRead}, "-destination": {Value: true, Role: RoleWrite}}})
-	add(Program{Names: []string{"remove-item", "ri", "rmdir"}, Pos: PosAllDelete, Strict: true,
+	add(Program{Names: []string{"remove-item", "ri", "rmdir"}, Pos: PosAllDelete, Strict: true, PipeRole: RoleDelete,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleDelete}, "-literalpath": {Value: true, Role: RoleDelete}, "-recurse": {}, "-force": {}}})
 	add(Program{Names: []string{"new-item", "ni"}, Pos: PosAllWrite,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleWrite}, "-literalpath": {Value: true, Role: RoleWrite}, "-itemtype": {Value: true, Role: RoleIgnore}, "-value": {Value: true, Role: RoleIgnore}, "-target": {Value: true, Role: RoleLinkTarget}}})
@@ -247,8 +260,8 @@ func buildWindowsTable() {
 		Flags: map[string]Flag{"-filepath": {Value: true, Role: RoleExecProgram}, "-argumentlist": {Value: true, Role: RoleIgnore}}})
 	add(Program{Names: []string{"set-acl"}, Pos: PosAllPerm,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RolePerm}, "-literalpath": {Value: true, Role: RolePerm}}})
-	add(Program{Names: []string{"powershell", "pwsh"}, Pos: PosNone,
-		Flags: map[string]Flag{"-command": {Value: true, Role: RoleExecCode}, "-c": {Value: true, Role: RoleExecCode}, "-encodedcommand": {Value: true, Role: RoleExecCode}, "-file": {Value: true, Role: RoleExecCode}}})
+	add(Program{Names: []string{"powershell", "pwsh"}, Pos: PosNone, PSLaunch: true,
+		Flags: map[string]Flag{"-command": {Value: true, Role: RoleExecCode}, "-c": {Value: true, Role: RoleExecCode}, "-encodedcommand": {Value: true, Role: RoleExecCode}, "-enc": {Value: true, Role: RoleExecCode}, "-ec": {Value: true, Role: RoleExecCode}, "-e": {Value: true, Role: RoleExecCode}, "-file": {Value: true, Role: RoleExecCode}}})
 	add(Program{Names: []string{"curl"}, Pos: PosURLArgs,
 		Flags: map[string]Flag{"-o": {Value: true, Role: RoleOutput}, "-T": {Value: true, Role: RoleUploadFile}, "-F": {Value: true, Role: RoleUploadFile}, "-d": {Value: true, Role: RoleUploadFile}}})
 }
