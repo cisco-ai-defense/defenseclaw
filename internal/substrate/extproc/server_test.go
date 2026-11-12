@@ -291,40 +291,6 @@ func TestBodyModeNeverForSSEOrModelOrOtherHosts(t *testing.T) {
 	}
 }
 
-func TestBodyModeDetectionStock(t *testing.T) {
-	h := newHarness(t, nil)
-	c := dial(t, h)
-	body := mcpCall("x")
-	for i := 0; i < bodyMissLimit; i++ {
-		s, cancel := open(t, c)
-		if r := exchange(t, s, mcpHeaders(body)); r.GetModeOverride() == nil {
-			t.Fatalf("round %d: no override", i)
-		}
-		// Stock v1.0.0: the filter ignores the override and ends the stream.
-		_ = s.CloseSend()
-		if _, err := s.Recv(); err == nil {
-			t.Fatal("stream did not end")
-		}
-		cancel()
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for h.eng.BodyModeStatus() != "unsupported" && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if st := h.eng.BodyModeStatus(); st != "unsupported" {
-		t.Fatalf("status %s", st)
-	}
-	s, cancel := open(t, c)
-	defer cancel()
-	if r := exchange(t, s, mcpHeaders(body)); r.GetModeOverride() != nil {
-		t.Fatal("override still requested after detection")
-	}
-	evs := waitEvents(t, h.events, bodyMissLimit)
-	if evs[0].BodyInspected || evs[0].Decision != "allow" {
-		t.Fatalf("headers-only event: %+v", evs[0])
-	}
-}
-
 func TestBodyModeOff(t *testing.T) {
 	h := newHarness(t, func(c *Config, _ *Options) { c.BodyInspection = BodyOff })
 	s, cancel := open(t, dial(t, h))

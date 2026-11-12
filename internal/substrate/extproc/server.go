@@ -74,11 +74,17 @@ type streamState struct {
 // Process implements ExternalProcessorServer.
 func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
 	var st streamState
-	defer s.end(&st)
+	signal := signalError
+	defer func() { s.end(&st, signal) }()
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			if errors.Is(err, io.EOF) || status.Code(err) == codes.Canceled {
+			switch {
+			case errors.Is(err, io.EOF):
+				signal = signalEOF
+				return nil
+			case status.Code(err) == codes.Canceled:
+				signal = signalCanceled
 				return nil
 			}
 			return err
@@ -95,12 +101,16 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	}
 }
 
-// end closes a stream: a requested body that never came means the filter
-// ignored the override.
-func (s *Server) end(st *streamState) {
+// end closes a stream, or handles a response phase while a body is
+// awaited. A requested body that never came is recorded with how the
+// stream ended (detection weighs the signal, GAP-0045), and the request's
+// event says it went on uninspected: the filter already sent it.
+func (s *Server) end(st *streamState, signal string) {
 	if st.awaitingBody {
 		st.awaitingBody = false
-		s.eng.body.observe(false)
+		s.eng.body.missed(st.req.Actor.Atespace+"/"+st.req.Actor.Name, signal)
+		st.verdict.Alert = true
+		st.verdict.Findings = append(st.verdict.Findings, "body_not_received:"+signal)
 		s.finish(st)
 	}
 }
@@ -138,7 +148,7 @@ func (s *Server) handle(ctx context.Context, st *streamState, msg *extprocv3.Pro
 	case *extprocv3.ProcessingRequest_RequestBody:
 		if st.awaitingBody && st.req != nil {
 			st.awaitingBody = false
-			s.eng.body.observe(true)
+			s.eng.body.arrived()
 			st.verdict = s.eng.DecideBody(ctx, st.req, st.verdict, r.RequestBody.GetBody())
 			s.finish(st)
 			if !st.verdict.Allow {
@@ -151,9 +161,13 @@ func (s *Server) handle(ctx context.Context, st *streamState, msg *extprocv3.Pro
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestTrailers{
 			RequestTrailers: &extprocv3.TrailersResponse{}}}, false
 	case *extprocv3.ProcessingRequest_ResponseHeaders:
+		// A response phase before the requested body: the filter ignored
+		// the override and sent the request on.
+		s.end(st, signalResponse)
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &extprocv3.HeadersResponse{Response: &extprocv3.CommonResponse{}}}}, false
 	case *extprocv3.ProcessingRequest_ResponseBody:
+		s.end(st, signalResponse)
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseBody{
 			ResponseBody: &extprocv3.BodyResponse{Response: &extprocv3.CommonResponse{}}}}, false
 	case *extprocv3.ProcessingRequest_ResponseTrailers:

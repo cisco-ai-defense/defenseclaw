@@ -26,13 +26,36 @@ import (
 // --experimental-additional-egress-extproc-allow-mode-override); stock
 // v1.0.0 ignores it. Nothing in a request says which, so the callout
 // watches: after an override on a request with a body, the next message is
-// the body when it was honoured, and the stream ends without one when it was
-// not. bodyMissLimit misses in a row mark it unsupported; a body marks it
-// supported. Unsupported is probed again after bodyReprobe, so a filter
-// redeployed with the setting is picked up without a restart.
+// the body when it was honoured; when it was not, the stream ends without
+// one (stock skips the response phases, so it half-closes) or a response
+// phase arrives first.
+//
+// An actor controls when its own requests end, so the signals an actor can
+// produce do not count alone (GAP-0045):
+//   - a cancelled or failed stream (the client aborted, Envoy reset) is
+//     never a miss;
+//   - a clean end without the body is a miss, and the replica is marked
+//     unsupported only after bodyMissLimit misses from at least
+//     bodyMissActors different actors, with no body in between;
+//   - a response phase before the body proves the filter sent the request
+//     on without it, and marks the replica unsupported at once.
+//
+// A body marks it supported, and supported is never undone by misses.
+// Unsupported is probed again after bodyReprobe, so a filter redeployed with
+// the setting is picked up without a restart. Managed installs should pin
+// body_inspection on, which skips detection.
 const (
-	bodyMissLimit = 3
-	bodyReprobe   = 10 * time.Minute
+	bodyMissLimit  = 3
+	bodyMissActors = 2
+	bodyReprobe    = 10 * time.Minute
+)
+
+// Stream end signals.
+const (
+	signalEOF      = "eof"
+	signalCanceled = "canceled"
+	signalError    = "error"
+	signalResponse = "response_before_body"
 )
 
 type bodyMode struct {
@@ -42,11 +65,12 @@ type bodyMode struct {
 	mu        sync.Mutex
 	supported int // 0 unknown, 1 supported, -1 unsupported
 	misses    int
+	actors    map[string]bool
 	since     time.Time
 }
 
 func newBodyMode(setting string, now func() time.Time) *bodyMode {
-	return &bodyMode{setting: setting, now: now}
+	return &bodyMode{setting: setting, now: now, actors: map[string]bool{}}
 }
 
 // want reports whether to ask for the body of a qualifying request.
@@ -63,23 +87,46 @@ func (b *bodyMode) want() bool {
 		return true
 	}
 	if b.now().Sub(b.since) >= bodyReprobe {
-		b.supported, b.misses = 0, 0
+		b.reset(0)
 		return true
 	}
 	return false
 }
 
-// observe records whether a requested body arrived.
-func (b *bodyMode) observe(arrived bool) {
+func (b *bodyMode) reset(state int) {
+	b.supported, b.misses = state, 0
+	b.actors = map[string]bool{}
+}
+
+// arrived records a requested body that came.
+func (b *bodyMode) arrived() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if arrived {
-		b.supported, b.misses = 1, 0
+	b.reset(1)
+}
+
+// missed records a requested body that did not come: how the stream ended
+// and whose request it was.
+func (b *bodyMode) missed(actor, signal string) {
+	if b.setting != BodyAuto {
 		return
 	}
-	b.misses++
-	if b.misses >= bodyMissLimit && b.supported <= 0 {
-		b.supported, b.since = -1, b.now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.supported > 0 {
+		return
+	}
+	switch signal {
+	case signalResponse:
+		b.reset(-1)
+		b.since = b.now()
+	case signalEOF:
+		b.misses++
+		b.actors[actor] = true
+		if b.misses >= bodyMissLimit && len(b.actors) >= bodyMissActors {
+			b.reset(-1)
+			b.since = b.now()
+		}
 	}
 }
 
