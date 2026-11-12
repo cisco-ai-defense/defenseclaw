@@ -329,6 +329,9 @@ func (v *Verifier) check(ctx context.Context, pol Policy, ref Ref, digest string
 		return nil, reject(CodePhoneHome, "phone-home or auto-update switches are not all off")
 	}
 	if !p.Hooks.EnvClean {
+		if len(p.Hooks.UnsafeEnv) == 0 {
+			return nil, reject(CodeEnvUnsafe, "the attestation has no environment check (built before it existed); build the template again")
+		}
 		return nil, reject(CodeEnvUnsafe, "the image environment sets variables that load code into every process: %s", strings.Join(p.Hooks.UnsafeEnv, ", "))
 	}
 	// The statement is about this digest; make sure the image it describes
