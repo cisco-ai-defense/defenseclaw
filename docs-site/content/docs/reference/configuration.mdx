@@ -679,7 +679,8 @@ Optional keys that DefenseClaw 1.0.10 reads. With none set, the plugin is manage
 | `connectors.openclaw.hooks.prompt_gate` | `false` | Check every user prompt in `before_agent_run` before the model reads it; blocks it in action mode ([Prompt gate](/docs/connectors/openclaw#prompt-gate)). |
 | `connectors.openclaw.plugin_account` | empty | OS account of the OpenClaw gateway when it is not the account of the DefenseClaw gateway (the [separate-user layout](/docs/connectors/openclaw#separate-users-linux-and-macos)). Linux and macOS only. Needs `plugin_install: external` and `plugin_token_file`. |
 | `connectors.openclaw.plugin_token_file` | empty | Clean absolute path where DefenseClaw publishes the plugin credential for `plugin_account`. Its folder must be owned by root or the DefenseClaw account and not writable by group or others. Needs `plugin_account`. |
-| `connectors.openclaw.plugin_token_group` | primary group of the DefenseClaw account | Group that may read `plugin_token_file` (mode 0640). Linux and macOS. Needs `plugin_account`. |
+| `connectors.openclaw.plugin_token_group` | none (required with `plugin_account`) | Group of the OpenClaw account that may read `plugin_token_file` (mode 0640). It must contain `plugin_account` and must not be a group every account is in, such as `staff` or `users`. Linux and macOS. |
+| `connectors.openclaw.install_policy` | `auto` | `auto`, `on` or `off`. When on (OpenClaw 2026.8.35 and later), OpenClaw asks DefenseClaw admission before it installs or updates a skill or plugin. `auto` is on in the strict tier and on managed installs, off in the default and permissive tiers ([Install admission](/docs/connectors/openclaw#install-admission)). |
 
 `plugin_account` and `plugin_token_group` take letters, digits, `_`, `.` and `-`, at most 64 characters, and do not start with `.` or `-`.
 

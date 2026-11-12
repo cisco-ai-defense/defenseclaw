@@ -139,7 +139,7 @@ How it works:
 
 - DefenseClaw writes no file in the OpenClaw home. Setup publishes the plugin credential to `plugin_token_file` and reads `openclaw.json` to check it, so the DefenseClaw account needs read access to that file.
 - The folder of `plugin_token_file` must exist, must not be a link, must be owned by root or the DefenseClaw account (never the OpenClaw account), and must not be writable by group or others. Mode 0755 fits.
-- The file is mode 0640. Its group is `plugin_token_group`, or the primary group of the DefenseClaw account when you leave it out. The OpenClaw account must be in that group. DefenseClaw writes a temporary file and renames it over the target, so the plugin never reads half a token and a link planted at the target is replaced, not followed.
+- The file is mode 0640. Its group is `plugin_token_group`, which is required. The OpenClaw account must be in that group, and it must not be a group every account is in (such as `staff` or `users`): create a group for the OpenClaw account. DefenseClaw writes a temporary file and renames it over the target, so the plugin never reads half a token and a link planted at the target is replaced, not followed.
 - The plugin cannot read `config.yaml`. It takes the gateway address, the port of the guardrail proxy and the credential file from its own entry in `openclaw.json`, and the guardrail mode, human approval, approval timeout, verdict wait and prompt gate from `GET /api/v1/openclaw/runtime`.
 - The listener proof answers the DefenseClaw account and `plugin_account`, and the DefenseClaw gateway accepts an OpenClaw gateway that listens as `plugin_account`.
 
