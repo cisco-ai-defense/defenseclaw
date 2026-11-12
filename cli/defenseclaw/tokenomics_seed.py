@@ -40,6 +40,8 @@ def pricing_changes(current: Any) -> list[Change]:
     """
     observability = current.get("observability") if isinstance(current, dict) else None
     existing = observability.get("pricing") if isinstance(observability, dict) else None
-    if isinstance(existing, dict) and (existing.get("models") or existing.get("version")):
+    # Any operator setting under pricing (a version, models, a fallback, an AI
+    # Defense rate) makes the table theirs: it is never replaced.
+    if isinstance(existing, dict) and existing:
         return []
     return [Change("observability.pricing", load_default_pricing())]

@@ -33,8 +33,9 @@ type spendKey struct {
 // bounded and resets with the process; budgets are a soft control and the
 // store is the durable record.
 type spendTracker struct {
-	mu sync.Mutex
-	m  map[spendKey]float64
+	mu       sync.Mutex
+	m        map[spendKey]float64
+	lastPrun int64 // unix hour of the last prune of finished periods
 }
 
 func periodStart(period string, now time.Time) (int64, bool) {
@@ -56,8 +57,12 @@ func (s *spendTracker) add(f CallFacts, usd float64, now time.Time) {
 	subjects := make([]spendKey, 0, 4+len(f.Groups))
 	if f.IdentityVerified && strings.TrimSpace(f.Subject) != "" {
 		subjects = append(subjects, spendKey{scope: ScopeUser, subject: OwnerID(f)})
+		seen := map[string]bool{}
 		for _, g := range f.Groups {
-			subjects = append(subjects, spendKey{scope: ScopeGroup, subject: dim(g)})
+			if g = dim(g); !seen[g] {
+				seen[g] = true
+				subjects = append(subjects, spendKey{scope: ScopeGroup, subject: g})
+			}
 		}
 	}
 	if f.Connector != "" {
@@ -74,7 +79,12 @@ func (s *spendTracker) add(f CallFacts, usd float64, now time.Time) {
 			k := base
 			k.period, k.start = p, start
 			if _, ok := s.m[k]; !ok && len(s.m) >= spendCap {
-				s.pruneLocked(now)
+				// Finished periods go at most once an hour, so a full tracker
+				// does not scan on every call.
+				if h := now.Unix() / 3600; h != s.lastPrun {
+					s.lastPrun = h
+					s.pruneLocked(now)
+				}
 				if len(s.m) >= spendCap {
 					continue
 				}

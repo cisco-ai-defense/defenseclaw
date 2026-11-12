@@ -8,6 +8,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -26,6 +28,9 @@ const (
 	storeFlushInterval = 15 * time.Second
 	storeMaxDim        = 128
 	storeBusyMillis    = 5000
+	// storeReadFlushGap is the freshest a read is guaranteed to be: a read
+	// flushes the pending aggregate unless one happened this recently.
+	storeReadFlushGap = 2 * time.Second
 )
 
 // Store is the local hourly usage aggregate (model_usage.db). It lives next
@@ -39,6 +44,9 @@ const (
 type Store struct {
 	path string
 
+	// cfgMu serialises Configure end to end, so a reload and the shutdown
+	// never run the stop path twice or interleave an enable with a close.
+	cfgMu    sync.Mutex
 	mu       sync.Mutex
 	db       *sql.DB
 	pend     map[usageKey]*usageAgg
@@ -50,6 +58,10 @@ type Store struct {
 	overflow int64
 	now      func() time.Time
 	flushDur time.Duration
+	// readFlushGap throttles flush-on-read, so a caller that reads in a loop
+	// cannot drive back-to-back write transactions.
+	readFlushGap time.Duration
+	lastFlush    time.Time
 }
 
 type usageKey struct {
@@ -74,7 +86,7 @@ type usageAgg struct {
 // NewStore returns a closed store for path. Nothing is created until
 // Configure(true).
 func NewStore(path string) *Store {
-	return &Store{path: path, now: time.Now, flushDur: storeFlushInterval}
+	return &Store{path: path, now: time.Now, flushDur: storeFlushInterval, readFlushGap: storeReadFlushGap}
 }
 
 // Configure turns the store on or off and sets the retention window. It is
@@ -83,6 +95,8 @@ func (s *Store) Configure(enabled bool, retentionDays int) error {
 	if s == nil {
 		return nil
 	}
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
 	s.mu.Lock()
 	s.retDays = retentionDays
 	if enabled {
@@ -144,6 +158,9 @@ func (s *Store) Overflow() int64 {
 }
 
 func openUsageDB(path string) (*sql.DB, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("model usage store directory: %w", err)
+	}
 	if err := sqliteperms.Prepare(path); err != nil {
 		return nil, err
 	}
@@ -234,7 +251,7 @@ func (s *Store) Emit(_ context.Context, rec Record) {
 	f, u, c := rec.Facts, rec.Usage, rec.Cost
 	hour := rec.EndedAt.UTC().Truncate(time.Hour).Unix()
 	k := usageKey{
-		hour: hour, owner: OwnerID(f), connector: dim(f.Connector), provider: dim(f.SelectedProvider), model: dim(f.SelectedModel),
+		hour: hour, owner: OwnerID(f), connector: dim(storeConnector(f.Connector)), provider: dim(f.SelectedProvider), model: dim(f.SelectedModel),
 		route: dim(f.Route.Decision), role: dim(string(f.CallRole)), prof: dim(f.ProfileName), family: dim(string(f.APIFamily)), basis: dim(c.Basis),
 	}
 	a := s.pend[k]
@@ -255,7 +272,7 @@ func (s *Store) Emit(_ context.Context, rec Record) {
 				continue
 			}
 			seen[g] = true
-			gk := groupKey{hour: hour, group: g, connector: dim(f.Connector), model: dim(f.SelectedModel)}
+			gk := groupKey{hour: hour, group: g, connector: dim(storeConnector(f.Connector)), model: dim(f.SelectedModel)}
 			ga := s.pendGrp[gk]
 			if ga == nil {
 				if len(s.pend)+len(s.pendGrp) >= storeBucketCap {
@@ -423,11 +440,12 @@ func (s *Store) Run(ctx context.Context, q Query) ([]Row, error) {
 	if s == nil {
 		return nil, errors.New("model usage store is off")
 	}
-	if err := s.Flush(); err != nil {
-		return nil, err
-	}
 	s.mu.Lock()
 	db := s.db
+	if db != nil && s.now().Sub(s.lastFlush) >= s.readFlushGap {
+		_ = s.flushLocked()
+		s.lastFlush = s.now()
+	}
 	s.mu.Unlock()
 	if db == nil {
 		return nil, errors.New("model usage store is off")
@@ -441,8 +459,14 @@ func (s *Store) Run(ctx context.Context, q Query) ([]Row, error) {
 		from = to.Add(-24 * time.Hour)
 	}
 	limit := q.Limit
-	if limit <= 0 || limit > 1000 {
+	if limit > 1000 {
+		limit = 1000
+	}
+	if limit <= 0 {
 		limit = 200
+	}
+	if q.By == "hour" {
+		limit = 1000 // a timeline is never cut to the most expensive hours
 	}
 	args := []any{from.UTC().Truncate(time.Hour).Unix(), to.UTC().Unix()}
 	if q.By == "group" {
@@ -487,7 +511,7 @@ func (s *Store) Run(ctx context.Context, q Query) ([]Row, error) {
 	}
 	query := fmt.Sprintf(`SELECT CAST(%s AS TEXT), SUM(calls), SUM(errors), SUM(usage_calls), SUM(input), SUM(output), SUM(cache_read), SUM(cache_creation),
 		SUM(reasoning), SUM(cost_usd_sum), SUM(cost_calls), SUM(latency_ms_sum) FROM model_usage WHERE %s GROUP BY %s
-		ORDER BY SUM(COALESCE(cost_usd_sum,0)) DESC, SUM(calls) DESC LIMIT ?`, col, where, col)
+		ORDER BY %s LIMIT ?`, col, where, col, orderFor(q.By, col))
 	rows, err := db.QueryContext(ctx, query, append(args, limit)...)
 	if err != nil {
 		return nil, err
@@ -510,4 +534,22 @@ func (s *Store) Run(ctx context.Context, q Query) ([]Row, error) {
 		sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	}
 	return out, rows.Err()
+}
+
+// storeConnector names the source of a record: calls the gateway makes itself
+// carry no agent connector and are attributed to the gateway, as in the logs.
+func storeConnector(c string) string {
+	if strings.TrimSpace(c) == "" {
+		return "gateway"
+	}
+	return c
+}
+
+// orderFor is the ORDER BY of a rollup: a timeline newest first (so the cap
+// keeps the latest hours), anything else most expensive first.
+func orderFor(by, col string) string {
+	if by == "hour" {
+		return col + " DESC"
+	}
+	return "SUM(COALESCE(cost_usd_sum,0)) DESC, SUM(calls) DESC"
 }

@@ -41,6 +41,12 @@ def test_seed_never_replaces_an_operator_table() -> None:
     assert len(pricing_changes({})) == 1
 
 
+def test_seed_leaves_any_operator_pricing_setting_alone() -> None:
+    fallback_only = {"observability": {"pricing": {"unknown_model": "fallback", "fallback": {"input_per_mtok": 2, "output_per_mtok": 8}}}}
+    assert pricing_changes(fallback_only) == []
+    assert pricing_changes({"observability": {"pricing": {}}}) != []
+
+
 def test_status_defaults_are_off() -> None:
     expected = {"enabled": False, "local_store": False, "retention_days": 30, "pricing_version": "", "priced_models": 0}
     assert status_of({}) == expected

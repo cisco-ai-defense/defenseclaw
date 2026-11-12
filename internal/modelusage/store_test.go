@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -27,7 +28,8 @@ func rec(owner string, groups []string, model string, usd *float64, at time.Time
 
 func openStore(t *testing.T) *Store {
 	t.Helper()
-	s := NewStore(filepath.Join(t.TempDir(), "model_usage.db"))
+	s := NewStore(filepath.Join(t.TempDir(), "model_usage", "model_usage.db"))
+	s.readFlushGap = 0
 	if err := s.Configure(true, 30); err != nil {
 		t.Fatal(err)
 	}
@@ -213,5 +215,73 @@ func TestSpendTrackerPeriodsScopesAndUnknown(t *testing.T) {
 	var nilEngine *Engine
 	if _, ok := nilEngine.Spend(ScopeUser, "x", PeriodDay, now); ok {
 		t.Fatal("nil engine")
+	}
+}
+
+func TestConcurrentConfigureNeverPanicsOrLeavesTheStoreHalfOpen(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "model_usage", "model_usage.db"))
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				if err := s.Configure((i+j)%2 == 0, 30); err != nil {
+					t.Error(err)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	if err := s.Configure(true, 30); err != nil || !s.Enabled() {
+		t.Fatalf("enabled=%v err=%v", s.Enabled(), err)
+	}
+	if err := s.Configure(false, 30); err != nil || s.Enabled() {
+		t.Fatalf("enabled=%v err=%v", s.Enabled(), err)
+	}
+}
+
+func TestHourTimelineIsNotCutToTheMostExpensiveHours(t *testing.T) {
+	s := openStore(t)
+	now := time.Now()
+	for h := 0; h < 300; h++ {
+		s.Emit(context.Background(), rec("1", nil, "m", f(float64(h+1)), now.Add(-time.Duration(h)*time.Hour)))
+	}
+	rows, err := s.Run(context.Background(), Query{By: "hour", AllOwners: true, From: now.Add(-400 * time.Hour)})
+	if err != nil || len(rows) != 300 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i-1].Key > rows[i].Key {
+			t.Fatal("a timeline must be in time order")
+		}
+	}
+}
+
+func TestGatewayOwnCallsAreStoredUnderTheGatewaySource(t *testing.T) {
+	s := openStore(t)
+	r := rec("", nil, "m", f(1), time.Now())
+	r.Facts.Connector = ""
+	s.Emit(context.Background(), r)
+	rows, _ := s.Run(context.Background(), Query{By: "connector", AllOwners: true})
+	if len(rows) != 1 || rows[0].Key != "gateway" {
+		t.Fatalf("%+v", rows)
+	}
+}
+
+func TestReadFlushIsThrottled(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "model_usage", "model_usage.db"))
+	if err := s.Configure(true, 30); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Configure(false, 30)
+	s.Emit(context.Background(), rec("1", nil, "m", f(1), time.Now()))
+	if rows, _ := s.Run(context.Background(), Query{By: "model", AllOwners: true}); len(rows) != 1 {
+		t.Fatalf("the first read flushes: %+v", rows)
+	}
+	s.Emit(context.Background(), rec("1", nil, "m", f(1), time.Now()))
+	rows, _ := s.Run(context.Background(), Query{By: "model", AllOwners: true})
+	if rows[0].Calls != 1 {
+		t.Fatalf("a read inside the gap must not write: %+v", rows)
 	}
 }

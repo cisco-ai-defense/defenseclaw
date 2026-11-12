@@ -91,8 +91,11 @@ func (a *APIServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, modelusage.ErrAdminOnly):
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
-	case err != nil:
+	case err != nil && strings.HasPrefix(err.Error(), "unknown rollup"):
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	case err != nil:
+		http.Error(w, "the usage store could not be read", http.StatusInternalServerError)
 		return
 	}
 	scope := "own"
