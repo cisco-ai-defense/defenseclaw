@@ -1311,7 +1311,7 @@ func TestOpenClaw_Setup_HILTEnablesPluginApprovalForwarding(t *testing.T) {
 	}
 }
 
-// GAP-1956: OpenClaw 2026.3.24 (the install.sh pin) rejects approvals.plugin,
+// GAP-1956: OpenClaw 2026.3.24 (the install.sh pin before 1.0.10) rejects approvals.plugin,
 // so human approval on it is refused before openclaw.json is touched. The
 // refusal precedes the extension-bundle check, so it needs no bundle.
 func TestOpenClaw_Setup_HILTRefusedOnOpenClawWithoutPluginApprovals(t *testing.T) {

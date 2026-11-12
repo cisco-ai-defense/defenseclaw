@@ -638,7 +638,7 @@ def _openclaw_install_run(tmp_path: Path, npm_rc: int, answer: int = 0) -> subpr
         "set -euo pipefail\n"
         f'has() {{ command -v "$1" >/dev/null 2>&1; }}\nask_yes_no() {{ return {answer}; }}\n'
         'warn() { echo "WARN $*"; }\ninfo() { echo "INFO $*"; }\nok() { :; }\nversion_lt() { return 1; }\n'
-        f'OPENCLAW_VERSION=2026.3.24 OPENCLAW_MISSING=false OPENCLAW_INSTALLED=false BIN_DIR="{tmp_path / "home" / ".local" / "bin"}"\n'
+        f'OPENCLAW_VERSION=2026.11.3 OPENCLAW_MISSING=false OPENCLAW_INSTALLED=false BIN_DIR="{tmp_path / "home" / ".local" / "bin"}"\n'
         + funcs
         + 'ensure_openclaw\necho "missing=${OPENCLAW_MISSING} installed=${OPENCLAW_INSTALLED}"\n',
         encoding="utf-8",
@@ -658,16 +658,16 @@ def test_openclaw_installs_into_the_user_prefix_when_the_node_prefix_is_read_onl
     assert done.returncode == 0, done.stdout + done.stderr
     home = tmp_path / "home"
     assert (tmp_path / "npm.log").read_text().split() == [
-        "install", "-g", "--prefix", f"{home}/.local", "openclaw@2026.3.24",
+        "install", "-g", "--prefix", f"{home}/.local", "openclaw@2026.11.3",
         "--no-fund", "--no-audit", "--no-update-notifier", "--loglevel=error",
     ]
-    assert "INFO Installing OpenClaw 2026.3.24 with npm" in done.stdout
+    assert "INFO Installing OpenClaw 2026.11.3 with npm" in done.stdout
     assert "missing=false installed=true" in done.stdout
 
     failed_dir = tmp_path / "f"
     failed_dir.mkdir()
     failed = _openclaw_install_run(failed_dir, 1)
-    assert f"run: npm install -g --prefix {failed_dir / 'home'}/.local openclaw@2026.3.24" in failed.stdout
+    assert f"run: npm install -g --prefix {failed_dir / 'home'}/.local openclaw@2026.11.3" in failed.stdout
     assert "missing=true installed=false" in failed.stdout
     summary = INSTALL_SH.read_text(encoding="utf-8")
     tail = summary[summary.index('if [[ "${OPENCLAW_MISSING}" == true ]]; then') :]
@@ -2515,7 +2515,7 @@ def test_declining_openclaw_names_the_working_command_and_skips_quickstart(tmp_p
     # root-owned Node), then quickstart failed on the missing agent (exit 4).
     declined = _openclaw_install_run(tmp_path, 0, answer=1)
     assert declined.returncode == 0, declined.stdout + declined.stderr
-    hint = f"install it later with: npm install -g --prefix {tmp_path / 'home'}/.local openclaw@2026.3.24"
+    hint = f"install it later with: npm install -g --prefix {tmp_path / 'home'}/.local openclaw@2026.11.3"
     assert hint in declined.stdout
     assert "missing=true installed=false" in declined.stdout
     assert not (tmp_path / "npm.log").exists()

@@ -122,7 +122,7 @@ defenseclaw policy activate strict
 defenseclaw setup openclaw --mode action --rule-pack strict --restart
 ```
 
-Human approval needs OpenClaw 2026.3.28 or later. The OpenClaw that `install.sh` installs (2026.3.24) has no plugin approvals, so setup refuses `--human-approval` there and changes nothing. Upgrade OpenClaw first (`npm install -g openclaw@2026.3.28` or later), or set up without human approval.
+Human approval needs OpenClaw 2026.3.28 or later. On an older OpenClaw setup refuses `--human-approval` and changes nothing. Upgrade OpenClaw first (`npm install -g openclaw@latest`), or set up without human approval. `install.sh` installs OpenClaw 2026.11.3.
 
 An earlier setup with `--human-approval` may have written an `approvals.plugin` block (`enabled: true`, `mode: session`) into `openclaw.json`. An OpenClaw before 2026.3.28 rejects it and its gateway does not start. A setup without human approval, and teardown, take that exact block back when OpenClaw lacks plugin approvals. Any other `approvals.plugin` shape stays as you wrote it.
 

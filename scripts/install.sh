@@ -105,7 +105,7 @@ if [[ -n "${SELF_TMP}" && -n "$(find "${SELF_TMP}" -mindepth 1 -maxdepth 1 \
     SELF_TMP=""
 fi
 [[ -z "${SELF_TMP}" ]] || trap 'rm -rf "${SELF_TMP}"' EXIT
-readonly OPENCLAW_VERSION="2026.3.24"
+readonly OPENCLAW_VERSION="2026.11.3"
 # The PATH the user's shell has. Installing uv adds BIN_DIR to this process's
 # PATH, so the PATH hint at the end checks this copy instead.
 readonly CALLER_PATH="${PATH}"
