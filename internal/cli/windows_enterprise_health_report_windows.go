@@ -15,6 +15,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -79,7 +80,9 @@ func runWindowsSecureClientLifecycle(
 	cmd.SetOut(&held)
 	err := windowsEnterpriseCommandRunner(ctx, cmd, script, args)
 	restoreWindowsCommandOutput(cmd, stdout)
-	_, _ = stdout.Write(injectWindowsSecureClientHealthReport(held.Bytes(), state))
+	if _, writeErr := stdout.Write(injectWindowsSecureClientHealthReport(held.Bytes(), state)); writeErr != nil {
+		return errors.Join(err, writeErr)
+	}
 	return err
 }
 

@@ -239,12 +239,15 @@ func TestSetHealthReportWarnsWithoutFailing(t *testing.T) {
 		state *HealthReportState
 		warn  bool
 	}{
-		"healthy":    {&HealthReportState{Status: "healthy", ObservedAt: "2026-11-12T11:30:00Z"}, false},
-		"starting":   {&HealthReportState{Status: "starting", ObservedAt: "2026-11-12T11:30:00Z"}, false},
-		"degraded":   {&HealthReportState{Status: "degraded", ReasonCodes: []string{"HOOKS_PARTIAL", "CMID_UNAVAILABLE"}}, true},
-		"unhealthy":  {&HealthReportState{Status: "unhealthy", ReasonCodes: []string{"POLICY_MISSING"}}, true},
-		"stale":      {&HealthReportState{Status: "healthy", Stale: true}, true},
-		"unreadable": {&HealthReportState{Error: HealthReportUnreadable}, false},
+		"healthy":     {&HealthReportState{Status: "healthy", ObservedAt: "2026-11-12T11:30:00Z"}, false},
+		"starting":    {&HealthReportState{Status: "starting", ObservedAt: "2026-11-12T11:30:00Z"}, false},
+		"degraded":    {&HealthReportState{Status: "degraded", ReasonCodes: []string{"HOOKS_PARTIAL", "CMID_UNAVAILABLE"}}, true},
+		"unhealthy":   {&HealthReportState{Status: "unhealthy", ReasonCodes: []string{"POLICY_MISSING"}}, true},
+		"stale":       {&HealthReportState{Status: "healthy", Stale: true}, true},
+		"unreadable":  {&HealthReportState{Error: HealthReportUnreadable}, false},
+		"delivered":   {&HealthReportState{Status: "healthy", Delivery: &HealthReportDelivery{Result: "queued"}}, false},
+		"emit failed": {&HealthReportState{Status: "healthy", Delivery: &HealthReportDelivery{Result: "failed"}}, true},
+		"not routed":  {&HealthReportState{Status: "healthy", Delivery: &HealthReportDelivery{Result: "not_routed"}}, true},
 	}
 	for name, tc := range cases {
 		for _, goos := range []string{"darwin", "windows"} {

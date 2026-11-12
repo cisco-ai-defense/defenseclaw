@@ -22,7 +22,9 @@ import (
 
 func endpointHealthManagedConfig(t *testing.T) *config.Config {
 	t.Helper()
-	return &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, DataDir: t.TempDir()}
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, DataDir: t.TempDir()}
+	cfg.CiscoAIDefense.Endpoint = "https://aid.example.test"
+	return cfg
 }
 
 func TestEndpointHealthReporterEnabledOnlyForManagedSecureClient(t *testing.T) {
@@ -256,5 +258,48 @@ func TestEndpointHealthEmitReachesManagedAIDDestination(t *testing.T) {
 	}
 	if strings.Contains(body, "permission denied") {
 		t.Error("delivered record carries raw guardian error text")
+	}
+}
+
+// Without a Cisco AI Defense endpoint the managed destination, and the drop
+// routes that keep the report off operator destinations, are not compiled,
+// so the reporter sends nothing.
+func TestEndpointHealthReportSendsNothingWithoutAIDefenseEndpoint(t *testing.T) {
+	cfg := endpointHealthManagedConfig(t)
+	cfg.CiscoAIDefense.Endpoint = "  "
+	s := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
+	r, capture := newCapturingEndpointHealthReporter(s, nil)
+	r.report(context.Background(), endpointHealthTriggerScheduled)
+	if len(capture.reports) != 0 || len(capture.files) != 0 {
+		t.Fatalf("reporter emitted %d reports and %d files without an endpoint", len(capture.reports), len(capture.files))
+	}
+}
+
+// An undelivered report leaves the "since last report" cursor where the last
+// delivered report put it, so its counts reach the next delivered report.
+func TestEndpointHealthUndeliveredReportKeepsTheCursor(t *testing.T) {
+	s := &Sidecar{cfg: endpointHealthManagedConfig(t), health: NewSidecarHealth()}
+	r, _ := newCapturingEndpointHealthReporter(s, errors.New("emit failed"))
+	before := endpointHealthCursor{previousReportAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), failOpenTotal: 3, failOpenRead: true}
+	r.cursor = before
+	r.report(context.Background(), endpointHealthTriggerScheduled)
+	if r.cursor != before {
+		t.Fatalf("cursor advanced by an undelivered report: %+v", r.cursor)
+	}
+
+	delivered, _ := newCapturingEndpointHealthReporter(s, nil)
+	delivered.cursor = before
+	delivered.report(context.Background(), endpointHealthTriggerScheduled)
+	if delivered.cursor.previousReportAt.Equal(before.previousReportAt) {
+		t.Fatal("cursor not advanced by a delivered report")
+	}
+}
+
+func TestEndpointHealthIntervalCappedAtRegistryMaximum(t *testing.T) {
+	if got := min(48*time.Hour, endpointHealthMaxInterval); got != 24*time.Hour {
+		t.Fatalf("cap = %v", got)
+	}
+	if endpointHealthMaxInterval.Seconds() != 86400 {
+		t.Fatalf("cap %v is not the report_interval_s maximum", endpointHealthMaxInterval)
 	}
 }

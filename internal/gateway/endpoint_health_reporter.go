@@ -12,6 +12,7 @@ import (
 	"math"
 	mrand "math/rand/v2"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -47,6 +48,9 @@ const (
 	endpointHealthEmitTimeout = 30 * time.Second
 	// endpointHealthJitterDivisor gives the same 10% jitter as discovery.
 	endpointHealthJitterDivisor = 10
+	// endpointHealthMaxInterval is the report_interval_s maximum the
+	// registry accepts; a longer discovery cadence still reports daily.
+	endpointHealthMaxInterval = 24 * time.Hour
 	// endpointHealthMaxFileBytes caps the read of the previous report file.
 	endpointHealthMaxFileBytes = diagnostics.MaxFileBytes
 )
@@ -72,7 +76,16 @@ func (s *Sidecar) endpointHealthInterval() time.Duration {
 			interval = scan
 		}
 	}
-	return interval
+	return min(interval, endpointHealthMaxInterval)
+}
+
+// endpointHealthDestinationConfigured reports whether the managed AI Defense
+// destination exists for cfg: it is compiled only with a Cisco AI Defense
+// endpoint, and without it operator destinations hold no reserved drop route
+// for the report. The endpoint can arrive after start through the Secure
+// Client env_config overlay, so this is checked per report.
+func endpointHealthDestinationConfigured(cfg *config.Config) bool {
+	return cfg != nil && strings.TrimSpace(cfg.CiscoAIDefense.Endpoint) != ""
 }
 
 // endpointHealthReporter is the reporter's per-process state.
@@ -178,13 +191,17 @@ func (r *endpointHealthReporter) configurationReady() bool {
 // step is logged and never affects the gateway.
 func (r *endpointHealthReporter) report(ctx context.Context, trigger string) {
 	cfg := r.sidecar.currentConfig()
-	if !endpointHealthReporterEnabled(cfg) {
-		// A reload left the managed Secure Client deployment; send nothing.
+	if !endpointHealthReporterEnabled(cfg) || !endpointHealthDestinationConfigured(cfg) {
+		// A reload left the managed Secure Client deployment, or the Cisco AI
+		// Defense endpoint is not configured yet; send nothing.
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, endpointHealthEmitTimeout)
 	defer cancel()
 
+	// The "since last report" counts are kept until a report reaches the
+	// managed destination, so an undelivered report's counts are not lost.
+	previousCursor := r.cursor
 	sources := r.sidecar.collectEndpointHealthSources(ctx, &r.cursor)
 	r.sequence++
 	report := buildEndpointHealthReport(sources, endpointHealthReportMeta{
@@ -205,6 +222,9 @@ func (r *endpointHealthReporter) report(ctx context.Context, trigger string) {
 		delivery.Result = "queued"
 	default:
 		delivery.Result = "not_routed"
+	}
+	if err != nil || !result.routedToManaged {
+		r.cursor = previousCursor
 	}
 	delivery.CloudState = report.CloudDeliveryState
 	delivery.CloudLastSuccessAt = report.CloudDeliveryLastSuccessAt

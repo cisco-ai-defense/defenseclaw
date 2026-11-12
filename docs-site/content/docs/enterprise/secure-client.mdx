@@ -456,7 +456,8 @@ The object is absent until the first report:
 
 The text output adds one line, such as `Health report: degraded (HOOKS_PARTIAL) at 2026-11-12T11:30:00Z, delivery queued`.
 The report never changes `ok` or the exit code, and `verify` does not check it. On macOS a degraded, unhealthy
-or stale report also adds one `endpoint_health_degraded` warning.
+or stale report, or one that was not delivered to Cisco AI Defense, also adds one `endpoint_health_degraded` warning.
+The gateway sends nothing until the Cisco AI Defense endpoint is configured.
 
 ## Restart-required controls
 

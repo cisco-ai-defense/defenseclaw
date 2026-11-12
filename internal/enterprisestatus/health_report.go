@@ -217,7 +217,13 @@ func (s *HealthReportState) NeedsAttention() bool {
 	if s == nil || s.Error != "" {
 		return false
 	}
-	return s.Stale || s.Status == "degraded" || s.Status == "unhealthy"
+	return s.Stale || s.Status == "degraded" || s.Status == "unhealthy" || s.deliveryFailed()
+}
+
+// deliveryFailed reports a last report that did not reach the managed
+// destination.
+func (s *HealthReportState) deliveryFailed() bool {
+	return s != nil && s.Delivery != nil && (s.Delivery.Result == "failed" || s.Delivery.Result == "not_routed")
 }
 
 // Summary is the one-line text form, such as
@@ -265,6 +271,9 @@ func (r *Result) SetHealthReport(state *HealthReportState) {
 	}
 	if state.Stale {
 		message += " and stale: the gateway has not reported for more than three report intervals"
+	}
+	if state.deliveryFailed() {
+		message += "; it was not delivered to Cisco AI Defense (" + state.Delivery.Result + ")"
 	}
 	r.AddWarning(CodeEndpointHealthDegraded, message)
 }
