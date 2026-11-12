@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -50,7 +51,11 @@ func TestCodexExecCommandWithAWorkdirKeepsTheCredentialVerdictAtTheArgvBound(t *
 		{255, "~/.netrc", true},
 		{255, "zz-ordinary", false},
 	}
-	for _, row := range rows {
+	// The calls are independent: they run at once, so the test fits its
+	// time budget under -race.
+	bodies := make([]string, len(rows))
+	var wg sync.WaitGroup
+	for i, row := range rows {
 		command := "touch " + strings.Join(names[:row.operands-1], " ") + " " + row.last
 		payload := mustJSON(t, map[string]any{"session_id": "g1076", "hook_event_name": "PreToolUse", "cwd": project,
 			"permission_mode": "default", "tool_name": "exec_command", "tool_use_id": "call_g1076", "model": "x",
@@ -62,9 +67,17 @@ func TestCodexExecCommandWithAWorkdirKeepsTheCredentialVerdictAtTheArgvBound(t *
 		api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
 		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
-		recorder := httptest.NewRecorder()
-		api.handleAgentHook("codex").ServeHTTP(recorder, req)
-		body := recorder.Body.String()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			recorder := httptest.NewRecorder()
+			api.handleAgentHook("codex").ServeHTTP(recorder, req)
+			bodies[i] = recorder.Body.String()
+		}()
+	}
+	wg.Wait()
+	for i, row := range rows {
+		body := bodies[i]
 		name := fmt.Sprintf("exec_command %d operands, last %s", row.operands, row.last)
 		switch {
 		case row.block && (!strings.HasPrefix(body, `{"action":"block"`) || !strings.Contains(body, "PATH-NETRC")):
