@@ -1,0 +1,85 @@
+diff --git a/manifests/ate-install/kind/ate-api-server/kustomization.yaml b/manifests/ate-install/kind/ate-api-server/kustomization.yaml
+index c0847da1..afc9a8f1 100644
+--- a/manifests/ate-install/kind/ate-api-server/kustomization.yaml
++++ b/manifests/ate-install/kind/ate-api-server/kustomization.yaml
+@@ -50,12 +50,3 @@ patches:
+                 value: s3
+               - name: AWS_REGION
+                 value: us-east-1
+-              - name: AWS_ENDPOINT_URL
+-                value: http://rustfs.ate-system.svc:9000
+-              - name: AWS_S3_USE_PATH_STYLE
+-                value: "true"
+-              # TODO: use a secret / identity management
+-              - name: AWS_ACCESS_KEY_ID
+-                value: rustfsadmin
+-              - name: AWS_SECRET_ACCESS_KEY
+-                value: rustfsadmin
+diff --git a/manifests/ate-install/kind/atelet/kustomization.yaml b/manifests/ate-install/kind/atelet/kustomization.yaml
+index d82589db..5704ec5a 100644
+--- a/manifests/ate-install/kind/atelet/kustomization.yaml
++++ b/manifests/ate-install/kind/atelet/kustomization.yaml
+@@ -31,7 +31,8 @@ patches:
+             containers:
+             - name: atelet
+               args:
+-              - --localhost-registry-replacement=kind-registry:5000
++              - --image-credential-provider-config=/run/image-credential-provider/config.yaml
++              - --image-credential-provider-bin-dir=/run/image-credential-provider/bin
+               - --grpc-server-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
+               - --client-ca-certs=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+               # Kind clusters are dev/CI: run atelet at debug so e2e suites can
+@@ -41,21 +42,17 @@ patches:
+               # atelet DaemonSet consumes via envFrom; the kind copy lives at
+               # ../ate-otel-config.yaml and is applied by the parent overlay or
+               # by ate-setup for a targeted redeploy.
+-              # kind nodes ship no credential provider plugin (the args above
+-              # leave the --image-credential-provider-* flags unset), so drop
+-              # the base manifest's host mounts instead of fabricating empty
+-              # ones on the node. volumeMounts merges on mountPath; volumes
+-              # merges on name.
+-              volumeMounts:
+-              - mountPath: /run/image-credential-provider/bin
+-                $patch: delete
+-              - mountPath: /run/image-credential-provider/config.yaml
+-                $patch: delete
++              # EKS nodes ship the kubelet ecr-credential-provider; the
++              # hostPath volumes below point the base mounts at its directory.
+             volumes:
+             - name: image-credential-provider-bin
+-              $patch: delete
++              hostPath:
++                path: /etc/eks/image-credential-provider
++                type: Directory
+             - name: image-credential-provider-config
+-              $patch: delete
++              hostPath:
++                path: /etc/eks/image-credential-provider/config.json
++                type: File
+             # The object-store plugin transfers atelet's external snapshots and
+             # fetches its private sandbox assets (the microVM assets
+             # ate-setup deploy ate-system uploads), so it points at rustfs.
+@@ -66,12 +63,3 @@ patches:
+                 value: s3
+               - name: AWS_REGION
+                 value: us-east-1
+-              - name: AWS_ENDPOINT_URL
+-                value: http://rustfs.ate-system.svc:9000
+-              - name: AWS_S3_USE_PATH_STYLE
+-                value: "true"
+-              # TODO: use a secret / identity management
+-              - name: AWS_ACCESS_KEY_ID
+-                value: rustfsadmin
+-              - name: AWS_SECRET_ACCESS_KEY
+-                value: rustfsadmin
+diff --git a/manifests/ate-install/kind/kustomization.yaml b/manifests/ate-install/kind/kustomization.yaml
+index 886c3dcb..4b78bcae 100644
+--- a/manifests/ate-install/kind/kustomization.yaml
++++ b/manifests/ate-install/kind/kustomization.yaml
+@@ -33,6 +33,5 @@ resources:
+   - ../atenet-router.yaml
+   - ../ate-system-networkpolicies.yaml
+   - ate-otel-config.yaml
+-  - rustfs.yaml
+   - ./otel-collector.yaml
+   - ./prometheus.yaml

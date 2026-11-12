@@ -8,7 +8,7 @@ keywords:
   - OIDC groups
 ---
 
-{/* TODO(substrate): confirm the profile keys (runtimes, sandbox_class, unattended_asks, actor_secrets, match.substrate) and the bundle apply flags against the merged config code (A3/A6), and replace example output with captured output. */}
+{/* TODO(substrate): the profile keys runtimes, sandbox_class, unattended_asks and actor_secrets are planned and not in the config yet (sub/a6 77468de3d5 has required_for, user_approvals, allowed_harnesses, egress_allow_only, allow_unblock and match.substrate). Add them to the example when they land. Replace example output with captured output. */}
 
 In a company, three people meet this feature:
 
@@ -47,7 +47,7 @@ A one-time Substrate global-owner token (`bootstrap.ownerTokenSecret`) lets the 
 
 ### Connect the identity provider
 
-Developers sign in with the company identity provider (Okta, Entra ID, or anything that speaks OIDC). The groups in the sign-in token pick the profile. CI jobs sign in with a workload identity instead (GitHub Actions OIDC or a Kubernetes service-account token).
+Developers sign in with the company identity provider (Okta, Entra ID, or anything that speaks OIDC). Managed installs require OIDC; the Kubernetes-identity sign-in is for open-source clusters. The groups in the sign-in token pick the profile. CI jobs sign in with a workload identity instead (GitHub Actions OIDC or a Kubernetes service-account token).
 
 ```yaml
 # defenseclaw-values.yaml
@@ -79,7 +79,7 @@ config:
 
 ### Write the profiles
 
-These are the same profiles as on managed laptops, plus a `substrate` match. The `sandbox` section applies to OpenShell and Agent Substrate alike. Substrate adds `runtimes`, `sandbox_class`, `idle_suspend_after`, `unattended_asks` and `actor_secrets`. Keys that only make sense on a laptop are a load error in a Substrate scope.
+These are the same profiles as on managed laptops, plus a `substrate` match. The `sandbox` section applies to OpenShell and Agent Substrate alike, and a profile can only tighten the company floor. Unattended asks are set once for the cluster in `substrate.unattended.asks` (default `deny`).
 
 ```yaml
 guardrail:
@@ -88,13 +88,10 @@ guardrail:
       mode: action
       block_at: MEDIUM
       sandbox:
-        required_for: [claudecode, codex]
-        runtimes: [substrate]            # on laptops, refuse and point to the cloud
+        required_for: [claudecode, codex]   # not allowed on the laptop itself
         allowed_harnesses: [claudecode, codex]
         egress_allow_only: ["*.amazonaws.com", github.com]
-        allow_unblock: false             # contractors can't approve new sites
-        sandbox_class: gvisor
-        unattended_asks: deny
+        allow_unblock: false                # contractors can't approve new sites
     engineering:
       mode: action
       block_at: HIGH
@@ -111,7 +108,7 @@ guardrail:
 
 An atespace pattern matches only atespaces DefenseClaw created or that you list, so a foreign `eng-evil` atespace never inherits a profile.
 
-Deliver profile changes as a signed bundle file: `defenseclaw substrate bundle apply bundle.json --atespaces eng-payments` (`--dry-run` first). The controller stages it by atespace, records a receipt, and can roll it back. It works with GitOps. See [Delivery and fleet management](/docs/substrate/delivery).
+Deliver profile changes with `helm upgrade` or GitOps. See [Delivery and fleet management](/docs/substrate/delivery).
 
 </Step>
 
@@ -137,7 +134,7 @@ Each build is scanned and attested, and the controller admits only an image whos
 
 ### Point the laptops at it
 
-On managed laptops, a profile with `runtimes: [substrate]` in `required_for` refuses a local `claude` and says where to go instead:
+On managed laptops, a profile with the connector in `required_for` refuses a local `claude` and says where to go instead:
 
 ```text
 $ claude
@@ -164,7 +161,7 @@ The launcher itself is exempt from that rule. Engineering, whose profile doesn't
 defenseclaw substrate login
 ```
 
-A browser opens on the company sign-in page. After that, the launcher knows who you are and which profile you get:
+(The admin gives you the cluster addresses once, as `--admin-url`, `--issuer`, `--client-id` and `--router-url`, or in an environment file.) A browser opens on the company sign-in page. After that, the launcher knows who you are and which profile you get:
 
 ```text
 Signed in as alice@example.test · profile engineering · atespace eng-payments
@@ -215,7 +212,7 @@ Nothing you change on your laptop loosens this, because the policy lives in the 
 ## The security team
 
 - **Every agent, by person.** Each event names the agent, the person who started it, their profile and team, the model and the route, and the cluster. It carries Substrate's own actor UID (`ate.actor.uid`). A suspended agent that resumes on another machine stays the same agent.
-- **The fleet view.** Agents by team, checks and blocks, asks and refusals, templates that failed attestation, actors DefenseClaw didn't create, policy drift and conflicts, and spend. It comes from the Grafana [Substrate agents board](/docs/observability/grafana-dashboards) and from `defenseclaw substrate status --json`. Only admins see it, and it is served on the admin listener, which actors can't reach.
+- **The fleet view.** Agents by team, checks and blocks, asks and refusals, templates that failed attestation, actors DefenseClaw didn't create, policy drift and conflicts, and spend. It comes from the Grafana [Substrate agents board](/docs/observability/grafana-dashboards) and from `defenseclaw substrate status --cluster --json`. Only admins see it, and it is served on the admin listener, which actors can't reach.
 - **Export.** The same OpenTelemetry events as on laptops, with the `substrate` rows described in [Sandbox telemetry](/docs/observability/sandbox-telemetry), so the existing Splunk or Grafana setup works unchanged.
 - **What changes when you tighten a profile.** The controller rewrites the allow list of every affected agent. New connections follow the new rule within seconds, and a suspended agent gets it before it resumes.
 

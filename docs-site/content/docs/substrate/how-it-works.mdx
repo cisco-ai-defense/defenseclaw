@@ -8,7 +8,7 @@ keywords:
   - leader
 ---
 
-{/* TODO(substrate): re-check ports, Service names and header names against the merged chart (lanes/a8) and gateway (lanes/a2) before the PR is marked ready. */}
+{/* Service names and ports checked against the chart README (sub/a8) and the A2 handoff. */}
 
 ## Where DefenseClaw runs
 
@@ -55,7 +55,7 @@ Separately, the controller decides what each agent may reach at all:
 | Part | What it does |
 |---|---|
 | **Gateway, actor listener** | The same checks as on a laptop: tool-call hooks, model request and reply guardrails, MCP and skill checks, asks. A Deployment with an autoscaler (at least two replicas). Its Service `defenseclaw-actor` is the only DefenseClaw host in an actor's allow list |
-| **Gateway, admin listener** | The launcher, fleet view and policy bundles. A separate Service `defenseclaw-admin` that is never in an allow list, so an actor cannot reach it |
+| **Gateway, admin listener** | The launcher and the fleet view. A separate Service `defenseclaw-admin` that is never in an allow list, so an actor cannot reach it |
 | **Gateway leader** | One replica holds a lease and the store volume. It keeps the state that has to survive across stateless calls |
 | **Controller** | Watches agents through Substrate's API. For each agent it writes Substrate's network allow list (`EgressPolicy`) from the agent's DefenseClaw profile, **before the agent first runs**. It also checks templates and handles suspend, resume, fork, idle suspend and drift |
 | **Egress callout** | Plugged into Substrate's egress gateway. It sees each web request the agent makes (method, address, headers, and for MCP calls the body) and can refuse it: block lists, data in URLs and headers, sites that need an ask |
@@ -77,6 +77,8 @@ Separately, the controller decides what each agent may reach at all:
   <Message from="g" to="e" kind="return" label="allow, block or ask" />
   <Message from="e" to="a" kind="return" label="verdict" />
 </Sequence>
+
+The hop from Substrate's egress gateway to the actor Service is plain HTTP on port 80 inside the cluster, because Substrate 1.0.0 verifies an `https` upstream only against public certificate authorities. The Service's NetworkPolicy admits only the egress gateway; see the [threat model](/docs/substrate/threat-model#known-limits).
 
 The gateway believes only the token Substrate adds. Everything else in the request, including the body, session IDs, timestamps and file paths, is a claim from the agent. The token must be unexpired, have the right audience, come from a key the cluster published, and name an actor that is running or resuming with that UID. A worker token, a stale UID or no token gets a `401` with a closed reason and nothing else. The gateway never echoes request headers.
 

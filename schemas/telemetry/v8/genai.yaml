@@ -822,7 +822,8 @@ attributes:
       - windows_sid
       - posix_uid
       - oidc_subject
-    notes: closed namespace so a consumer can join user.id without inferring the platform from its shape; oidc_subject is the subject claim of an OIDC person verified by the gateway (Agent Substrate actors), scoped by the issuer the gateway trusts
+      - k8s_user
+    notes: closed namespace so a consumer can join user.id without inferring the platform from its shape; on Agent Substrate, oidc_subject is the subject claim of an OIDC person verified by the gateway, scoped by the issuer the gateway trusts, and k8s_user is the Kubernetes user name the gateway verified with a TokenReview (open source clusters without an OIDC provider)
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.user.principal
   type: string

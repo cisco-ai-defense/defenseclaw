@@ -8,9 +8,9 @@ keywords:
   - gVisor microVM nodes EKS
 ---
 
-{/* TODO(substrate): this page comes from lane E2 (lanes/e2/EKS-GUIDE.md), checked on EKS 1.37 with Substrate v1.0.0. The overlay patch and the asset-staging script it mentions must be published with the docs (docs/ or deploy/), or replaced by an upstream EKS profile. Do not publish without them. */}
+{/* Checked on EKS 1.37 with Substrate v1.0.0. The example files are in docs/examples/substrate/eks/ (overlay patch, install file, asset-staging script). */}
 
-Upstream documents `kind` and GKE. This page lists what to do differently on EKS. It was run on a real EKS cluster with both sandbox classes: actors create, answer HTTP, suspend and resume with memory kept, snapshots go to S3, egress is default deny, and a Bedrock call works from an actor through an injected credential. Placeholders: `BUCKET`, `CLUSTER`.
+Upstream documents `kind` and GKE. This page lists what to do differently on EKS. The files it mentions (the overlay patch, the install file and the asset-staging script) are in [`docs/examples/substrate/eks/`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/docs/examples/substrate/eks) in the DefenseClaw repository. It was run on a real EKS cluster with both sandbox classes: actors create, answer HTTP, suspend and resume with memory kept, snapshots go to S3, egress is default deny, and a Bedrock call works from an actor through an injected credential. Placeholders: `BUCKET`, `CLUSTER`.
 
 ## The cluster
 
@@ -26,7 +26,7 @@ Upstream documents `kind` and GKE. This page lists what to do differently on EKS
 
 ## Installing Substrate
 
-`ate-setup` has no EKS profile. Outside `--kind`, it assumes Google Cloud Storage everywhere. The object-store plugin does support S3 with the pod's ambient AWS credentials, and the shortest working path is to run `ate-setup` with `--kind --context EKS_CONTEXT` and a patched copy of the kind overlay:
+`ate-setup` has no EKS profile. Outside `--kind`, it assumes Google Cloud Storage everywhere. The object-store plugin does support S3 with the pod's ambient AWS credentials, and the shortest working path is to run `ate-setup` with `--kind --context EKS_CONTEXT` and a patched copy of the kind overlay (`eks-overlay.patch`, with `substrate-install.yaml` as the install file):
 
 - keep `ATE_STORAGE_BACKEND=s3` and `AWS_REGION`, and delete `AWS_ENDPOINT_URL`, `AWS_S3_USE_PATH_STYLE` and the test object-store keys, so the plugin uses the node role;
 - drop the test object store from the kind kustomization;
@@ -35,7 +35,7 @@ Upstream documents `kind` and GKE. This page lists what to do differently on EKS
 
 Then deploy `ate-system` with `--sandbox-classes gvisor`. It takes about 80 seconds. Upstream publishes no `ate-setup` binary, so build it from the same tag as the manifests.
 
-For microVM actors, the kind-only asset step doesn't work on EKS. Assemble the assets with `ate-setup deploy sandboxconfig --sandbox-classes gvisor,microvm` (it fails at the last step; that is expected), upload each file to `s3://BUCKET/microvm-assets/amd64/<sha256>`, render the microVM template with `BUCKET_SCHEME=s3 ASSET_BUCKET_NAME=BUCKET`, and apply it. **Keep the assets outside the snapshot prefix**: the plugin refuses URLs under it.
+For microVM actors, the kind-only asset step doesn't work on EKS. Assemble the assets with `ate-setup deploy sandboxconfig --sandbox-classes gvisor,microvm` (it fails at the last step; that is expected), upload each file to `s3://BUCKET/microvm-assets/amd64/<sha256>`, render the microVM template with `BUCKET_SCHEME=s3 ASSET_BUCKET_NAME=BUCKET`, and apply it (`stage-assets.sh` does the last two steps). **Keep the assets outside the snapshot prefix**: the plugin refuses URLs under it.
 
 ## Storage and images
 
@@ -49,7 +49,7 @@ For microVM actors, the kind-only asset step doesn't work on EKS. Assemble the a
 - Install the Kubernetes credential provider with its default. Its namespace policy starts empty, so grant each atespace the namespace that holds its Secrets. The DefenseClaw chart does this for the launcher atespaces. After a manual edit, restart `k8s-credential-provider`.
 - HTTPS calls from tools need the projected trust bundle. For Python, `SSL_CERT_FILE=/run/ate/egress-trust-bundle/trust-bundle.pem` works, and the directory form doesn't.
 - **Bedrock.** Add an `https` rule to `bedrock-runtime.REGION.amazonaws.com` with `replaceHeaders` on `Authorization` (prefix `Bearer `) and a `credentialUri` of the form `ate-secret://k8s.io/default/NAMESPACE/SECRET/KEY`. The Secret holds a short-lived Bedrock API key and the actor sends a placeholder. This works on gVisor and microVM. With DefenseClaw, models are reached through the guardrail proxy and this rule belongs to the proxy, not to actors.
-- If your VPC has a Bedrock interface endpoint with private DNS, its security group must admit the node security group on 443, or calls fail with a 503 timeout.
+- If your VPC has a Bedrock interface endpoint with private DNS, its security group must admit the node security group on 443, or calls fail with a 503 timeout. DefenseClaw's guardrail proxy also needs the endpoint's address in `guardrail.allow_private_upstreams`.
 
 ## The token issuer
 

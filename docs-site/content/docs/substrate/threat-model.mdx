@@ -25,7 +25,7 @@ The agent is **untrusted**. The whole design follows from that: the checks that 
 |---|---|---|
 | **B1: actor to DefenseClaw** | Untrusted | Only the token Substrate's egress gateway adds counts, and the gateway verifies it and checks the actor is alive with that UID. Bodies, session IDs, timestamps and paths are claims. No request header is ever echoed |
 | **B2: DefenseClaw to Substrate** | DefenseClaw's own service account | It has the OpenFGA roles to read actors and templates, write egress policies, and create, fork, proxy and suspend actors in launcher atespaces, and nothing more |
-| **B3: administrators** | Trusted for their scope | Chart values and signed bundles, checked against trust anchors held in an admin-only Secret |
+| **B3: administrators** | Trusted for their scope | Chart values and signed policy, checked against trust anchors held in an admin-only Secret |
 | **B4: Agent Substrate** | Trusted for the sandbox, the egress gateway and the identity CA | Not defended against: cluster administrators, node root, a sandbox escape |
 
 ## Attackers and what stops them
@@ -49,6 +49,8 @@ The agent is **untrusted**. The whole design follows from that: the checks that 
 - **Cluster administrators, node root and sandbox escapes are out of scope.** They can read memory, snapshots and traffic.
 - **The hop from Substrate's egress gateway to the DefenseClaw actor listener is plain HTTP inside the cluster** in Substrate v1.0.0, because that version verifies an `https` upstream only against public certificate authorities. The token travels in the clear on the cluster network for up to its lifetime (15 minutes by default). A NetworkPolicy admits only the egress gateway to that port. Use a CNI that encrypts pod traffic where this matters.
 - **Snapshots hold everything the actor held.** Encrypt and restrict the bucket, and use `delete`. Subscription sign-ins put tokens in snapshots, so managed profiles refuse them.
+- **A skill that arrives mid-session reaches the model first.** A skill copied or installed while the agent runs is scanned when it is read or invoked with its files attached, but its description can reach the model's context before any hook runs. The kit attaches skill folders to close this where it can.
+- **The callout sees credentials as placeholders.** On Substrate 1.0.0 the callout sees service credentials before injection (placeholders), and the actor token after. It identifies the actor from Substrate's own identity and a live-UID check.
 - **Facts from the kit are claims.** Path facts for link-resolving rules come from inside the actor, so a compromised kit can lie. The rule that blocks the action doesn't depend on it, but link-resolving detections can be evaded by a compromised kit.
 - **Random state in a snapshot.** Actors made from one golden snapshot share the memory it captured, including the state of a random number generator in a program that started before it.
 - **Telemetry volume.** Sampling for `--task` runs never drops blocks or lifecycle records.
