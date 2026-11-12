@@ -17,8 +17,10 @@
 package gateway
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -62,7 +64,15 @@ type SubstrateLLMConfig struct {
 	Providers map[string]SubstrateLLMProvider
 	// Proxy serves the call (GuardrailProxy.SubstrateHandler).
 	Proxy http.Handler
+	// ExposedValues, when set, returns the actor_secrets values of a
+	// profile (SubstrateExposedValues): a request body that carries one is
+	// refused before it reaches the proxy (PLAN §7.2, exact-value DLP).
+	ExposedValues func(profile string) map[string]string
 }
+
+// substrateLLMMaxDLPBody bounds the body /llm reads to look for an exposed
+// value; a larger body of an actor with exposed values is refused.
+const substrateLLMMaxDLPBody = 32 << 20
 
 var substrateProviderRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
@@ -161,6 +171,9 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
 		return
 	}
+	if !s.exposedValueCheck(w, r) {
+		return
+	}
 	key, err := os.ReadFile(p.CredentialFile)
 	if err != nil || strings.TrimSpace(string(key)) == "" {
 		fmt.Fprintf(os.Stderr, "[substrate] llm: provider %s has no readable credential (%s)\n", provider, p.CredentialFile)
@@ -189,6 +202,44 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r2.URL = &u
 	r2.RequestURI = ""
 	s.cfg.Proxy.ServeHTTP(w, r2)
+}
+
+// exposedValueCheck refuses a model call whose body carries one of the
+// actor's exposed values (its profile's actor_secrets), and puts the body
+// back otherwise. A body it cannot read whole (too large, compressed) is
+// refused for an actor that has exposed values: the check fails closed.
+// The refusal names the secret, never its value.
+func (s *substrateLLM) exposedValueCheck(w http.ResponseWriter, r *http.Request) bool {
+	if s.cfg.ExposedValues == nil {
+		return true
+	}
+	reg, ok := substrateRegistrationFrom(r.Context())
+	if !ok {
+		return true
+	}
+	values := s.cfg.ExposedValues(reg.Profile)
+	if len(values) == 0 {
+		return true
+	}
+	if enc := strings.TrimSpace(r.Header.Get("Content-Encoding")); enc != "" && !strings.EqualFold(enc, "identity") {
+		writeSubstrateRefusal(w, http.StatusUnsupportedMediaType, "exposed_value_check_needs_plain_body")
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, substrateLLMMaxDLPBody+1))
+	if err != nil || len(body) > substrateLLMMaxDLPBody {
+		writeSubstrateRefusal(w, http.StatusRequestEntityTooLarge, "body_too_large")
+		return false
+	}
+	_ = r.Body.Close()
+	if name, hit := substrateExposedValueIn(body, values); hit {
+		fmt.Fprintf(os.Stderr, "[substrate] llm: refused a model call of %s/%s carrying the exposed value %s (actor_secrets)\n",
+			reg.Atespace, reg.Name, name)
+		writeSubstrateRefusal(w, http.StatusForbidden, "exposed_secret_in_request")
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	return true
 }
 
 // substrateRouterAnswerNarrows reports a semantic-router answer an Agent
