@@ -108,6 +108,7 @@ func (f fakeChecker) CheckEgress(ctx context.Context, _ ChainStep) (ChainVerdict
 
 type fakeJudge struct {
 	block bool
+	alert bool
 	err   error
 	calls []ToolCall
 }
@@ -117,7 +118,7 @@ func (f *fakeJudge) JudgeToolCall(_ context.Context, c ToolCall) (ToolVerdict, e
 	if f.err != nil {
 		return ToolVerdict{}, f.err
 	}
-	return ToolVerdict{Block: f.block, Reason: "rule TEST-MCP matched"}, nil
+	return ToolVerdict{Block: f.block, Alert: f.alert, Reason: "rule TEST-MCP matched"}, nil
 }
 
 type captureSink struct {

@@ -450,6 +450,11 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 			}
 			return deny(v, CategoryMCPToolBlocked, sourceTool, "tools/call:"+clip(c.name, 64), reason)
 		}
+		if tv.Alert {
+			// The hooks' alert action: allowed, recorded.
+			v.Alert = true
+			v.Findings = append(v.Findings, "tool_rules_alert:"+clip(c.name, 64))
+		}
 	}
 	return v
 }

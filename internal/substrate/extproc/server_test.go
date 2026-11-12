@@ -361,6 +361,11 @@ func TestDecideBody(t *testing.T) {
 			}
 		})
 	}
+	h.judge.alert = true
+	if v := h.eng.DecideBody(ctx, r, base, mcpCall("flagged")); !v.Allow || !v.Alert || len(v.Findings) != 1 || v.Findings[0] != "tool_rules_alert:flagged" {
+		t.Fatalf("alert verdict: %+v", v)
+	}
+	h.judge.alert = false
 	// Case-folded keys are not the method the server reads: not a tools/call.
 	before := len(h.judge.calls)
 	if v := h.eng.DecideBody(ctx, r, base, []byte(`{"jsonrpc":"2.0","METHOD":"tools/call","params":{"name":"x"}}`)); !v.Allow || len(h.judge.calls) != before {

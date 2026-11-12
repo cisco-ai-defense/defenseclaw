@@ -188,6 +188,8 @@ func (c *InspectToolClient) JudgeToolCall(ctx context.Context, call ToolCall) (T
 		return ToolVerdict{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// The gateway API's CSRF gate refuses a request without a client tag.
+	req.Header.Set("X-DefenseClaw-Client", "substrate-extproc")
 	if c.tokenFile != "" {
 		tok, err := os.ReadFile(c.tokenFile)
 		if err != nil {
@@ -208,7 +210,7 @@ func (c *InspectToolClient) JudgeToolCall(ctx context.Context, call ToolCall) (T
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v); err != nil {
 		return ToolVerdict{}, err
 	}
-	return ToolVerdict{Block: strings.EqualFold(v.Action, "block"), Severity: v.Severity, Reason: v.Reason, Findings: v.Findings}, nil
+	return ToolVerdict{Block: strings.EqualFold(v.Action, "block"), Alert: strings.EqualFold(v.Action, "alert"), Severity: v.Severity, Reason: v.Reason, Findings: v.Findings}, nil
 }
 
 // toolNamePart keeps an MCP server name to the characters a hook tool name

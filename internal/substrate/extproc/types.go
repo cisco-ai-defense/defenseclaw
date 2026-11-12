@@ -128,7 +128,9 @@ type ToolCall struct {
 
 // ToolVerdict is the hook tool rules' verdict for a ToolCall.
 type ToolVerdict struct {
-	Block    bool
+	Block bool
+	// Alert is an allowed call the rules flagged (the hooks' alert action).
+	Alert    bool
 	Severity string
 	Reason   string
 	Findings []string
