@@ -97,7 +97,11 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 			keyFiles[p] = pem
 		}
 	}
-	ov, err := kit.ActorOverlay(ictx.Artifacts, kit.OverlayOptions{Config: cfg, Home: Home, Workdir: Workdir, Provider: o.Provider, Model: o.Model})
+	art, err := kit.SubstrateArtifacts(h.Provider, ictx.HarnessVersion, cfg)
+	if err != nil {
+		return zero, attest.TemplateInfo{}, "", err
+	}
+	ov, err := kit.ActorOverlay(art, kit.OverlayOptions{Config: cfg, Home: Home, Workdir: Workdir, Provider: o.Provider, Model: o.Model})
 	if err != nil {
 		return zero, attest.TemplateInfo{}, "", err
 	}

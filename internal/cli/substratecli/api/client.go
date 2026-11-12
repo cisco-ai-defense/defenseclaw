@@ -178,7 +178,7 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return redactErr(err, tok)
+		return friendlyTransport(c.base.Host, redactErr(err, tok))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))

@@ -32,16 +32,62 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/extproc"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 )
 
-var substrateExtprocOpts struct {
+// substrateExtprocFlags are the callout's flags.
+type substrateExtprocFlags struct {
 	config            string
 	listen            string
 	healthListen      string
 	tlsBundle         string
 	clientCA          string
 	insecurePlaintext bool
+	// The leader's chain state (lane A13).
+	leaderAddress string
+	leaderIDs     []string
+	peerBundle    string
+	peerTrust     string
+}
+
+var substrateExtprocOpts substrateExtprocFlags
+
+// substrateChainChecker answers the callout's synchronous chain check from
+// the leader (chainstate ChainEgress). The check also records the observed
+// egress step in the actor window, so the callout sets no ChainSink.
+type substrateChainChecker struct{ client *chainstate.Client }
+
+func (c substrateChainChecker) CheckEgress(ctx context.Context, step extproc.ChainStep) (extproc.ChainVerdict, error) {
+	if step.Actor.UID == "" {
+		// No live UID (no resolver): the actor's window cannot be named.
+		return extproc.ChainVerdict{}, nil
+	}
+	v, err := c.client.CheckEgress(ctx, chainstate.EgressRequest{
+		Actor: chainstate.Actor{Atespace: step.Actor.Atespace, UID: step.Actor.UID},
+		Host:  step.Host, Method: step.Method, AtUnixNano: step.Time.UnixNano(),
+	})
+	return extproc.ChainVerdict{Deny: v.Deny, Rule: v.Rule, Reason: v.Reason}, err
+}
+
+func substrateExtprocChains(o substrateExtprocFlags) (substrateChainChecker, error) {
+	hc := &http.Client{Timeout: 5 * time.Second}
+	base := "https://" + o.leaderAddress
+	if o.insecurePlaintext {
+		base = "http://" + o.leaderAddress
+	} else {
+		if len(o.leaderIDs) == 0 {
+			return substrateChainChecker{}, errors.New("substrate-extproc: --leader-id names the leader's SPIFFE ID")
+		}
+		files, err := podcert.NewFiles(o.peerBundle, o.peerTrust)
+		if err != nil {
+			return substrateChainChecker{}, err
+		}
+		hc.Transport = &http.Transport{TLSClientConfig: files.ClientConfig(o.leaderIDs), Proxy: nil}
+	}
+	return substrateChainChecker{client: &chainstate.Client{Leader: &leader.Client{BaseURL: base, HTTP: hc, Retry: time.Second}}}, nil
 }
 
 // substrateExtprocCmd runs the Agent Substrate egress callout: the Envoy
@@ -71,6 +117,10 @@ func init() {
 	f.StringVar(&substrateExtprocOpts.healthListen, "health-listen", ":9444", "plain HTTP /healthz and /readyz address; empty turns it off")
 	f.StringVar(&substrateExtprocOpts.tlsBundle, "tls-bundle", "", "PEM credential bundle (key and chain), the servicedns podCertificate")
 	f.StringVar(&substrateExtprocOpts.clientCA, "client-ca", "", "CA bundle that verifies the egress gateway's client certificate")
+	f.StringVar(&substrateExtprocOpts.leaderAddress, "leader-address", "", "gateway leader host:port for the chain check (empty: no chain check)")
+	f.StringSliceVar(&substrateExtprocOpts.leaderIDs, "leader-id", nil, "SPIFFE IDs the leader may present")
+	f.StringVar(&substrateExtprocOpts.peerBundle, "peer-bundle", "/run/podidentity.podcert.ate.dev/credential-bundle.pem", "pod identity bundle (leader RPC)")
+	f.StringVar(&substrateExtprocOpts.peerTrust, "peer-trust", "/run/podidentity.podcert.ate.dev/trust-bundle.pem", "pod identity trust bundle")
 	f.BoolVar(&substrateExtprocOpts.insecurePlaintext, "insecure-plaintext", false, "serve gRPC without TLS (local development only)")
 	rootCmd.AddCommand(substrateExtprocCmd)
 }
@@ -91,6 +141,15 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 	}
 	if judge != nil {
 		opts.Judge = judge
+	}
+	if o.leaderAddress != "" {
+		chains, err := substrateExtprocChains(o)
+		if err != nil {
+			return err
+		}
+		opts.ChainChecker = chains
+	} else {
+		fmt.Fprintln(stderr, "substrate-extproc: no --leader-address: egress is not checked against the actors' chain windows")
 	}
 	eng, err := extproc.NewEngine(opts)
 	if err != nil {

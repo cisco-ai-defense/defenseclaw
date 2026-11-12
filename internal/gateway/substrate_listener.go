@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
@@ -134,6 +135,11 @@ type SubstrateConfig struct {
 	Activity SubstrateActivitySink
 	// OnRateLimited counts defenseclaw.substrate.rate_limited.
 	OnRateLimited func(scope ratelimit.Scope, route string)
+	// Chains is the leader's chain and intent state (lane A13): a verified
+	// actor's tool-chain windows and the judge's session intent live there,
+	// so every replica sees the same. Nil turns the chain lane off for
+	// actors and keeps the judge's intent per process.
+	Chains *chainstate.Client
 }
 
 // SubstrateActorVerifier verifies actor tokens (identity.ActorVerifier).
@@ -179,6 +185,7 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 		a.substrateMu.Lock()
 		a.substrate = nil
 		a.substrateMu.Unlock()
+		useSubstrateChains(nil)
 		return nil
 	}
 	if cfg.ActorAddr != "" {
@@ -202,6 +209,7 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 	a.substrateMu.Lock()
 	a.substrate = st
 	a.substrateMu.Unlock()
+	useSubstrateChains(cfg.Chains)
 	return nil
 }
 

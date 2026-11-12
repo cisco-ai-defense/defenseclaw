@@ -114,6 +114,9 @@ func (c *CodexConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxAr
 		return SandboxArtifacts{}, err
 	}
 	notify := renderCodexSandboxNotifyBridge(rt.ingressAddr)
+	if rt.ingress.Substrate() {
+		notify = renderCodexSubstrateNotifyBridge(rt)
+	}
 
 	files := append(hookFiles,
 		SandboxFile{Path: path.Join(SandboxHookDir, codexSandboxNotifyScript), Mode: 0o755, Owner: SandboxOwnerRoot, Data: notify},
@@ -194,12 +197,25 @@ func renderCodexSandboxManagedConfig(rt resolvedSandboxTarget, environment strin
 		}
 		headers[key] = value
 	}
+	if rt.ingress.Substrate() {
+		headers[SandboxActorHeader] = SandboxActorPlaceholder
+	}
 	sandboxSpec.Headers = headers
 	otel, err := sandboxSpec.TOMLBlock()
 	if err != nil {
 		return nil, fmt.Errorf("render Codex sandbox OTLP block: %w", err)
 	}
 	otel["environment"] = environment
+	if rt.ingress.Substrate() {
+		for _, exporter := range codexOtelExporterKeys {
+			table, _ := otel[exporter].(map[string]interface{})
+			if httpExporter, ok := table["otlp-http"].(map[string]interface{}); ok {
+				if endpoint, ok := httpExporter["endpoint"].(string); ok {
+					httpExporter["endpoint"] = rt.substrateOTLPEndpoint(endpoint)
+				}
+			}
+		}
+	}
 
 	features := make(map[string]interface{}, len(codexSandboxDisabledFeatures))
 	for _, feature := range codexSandboxDisabledFeatures {
@@ -307,12 +323,15 @@ func verifyCodexSandboxPolicy(requirements, managedConfig []byte, rt resolvedSan
 		table, _ := otel[exporter].(map[string]interface{})
 		httpExporter, _ := table["otlp-http"].(map[string]interface{})
 		endpoint, _ := httpExporter["endpoint"].(string)
-		if !strings.HasPrefix(endpoint, "http://"+rt.ingressAddr+"/v1/") {
+		if !strings.HasPrefix(endpoint, rt.otlpBase()+"/v1/") {
 			return fmt.Errorf("verify Codex sandbox managed config: otel.%s endpoint %q is not the ingress", exporter, endpoint)
 		}
 		headers, _ := httpExporter["headers"].(map[string]interface{})
 		if _, present := headers["authorization"]; present {
 			return fmt.Errorf("verify Codex sandbox managed config: otel.%s must not pin an Authorization header", exporter)
+		}
+		if rt.ingress.Substrate() && headers[SandboxActorHeader] != SandboxActorPlaceholder {
+			return fmt.Errorf("verify Codex sandbox managed config: otel.%s does not send the %s placeholder", exporter, SandboxActorHeader)
 		}
 	}
 	return nil

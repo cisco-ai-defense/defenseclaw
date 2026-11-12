@@ -86,7 +86,7 @@ func rootToolChainAdded(
 	profile connector.HookProfile,
 	req agentHookRequest,
 	resp agentHookResponse,
-	repository *audit.ToolChainRepository,
+	repository toolChainStore,
 	root, session audit.ToolChainObserveResult,
 	panicState *toolChainHookPanicState,
 ) audit.ToolChainObserveResult {
@@ -118,7 +118,7 @@ func (a *APIServer) applyToolChainRootResult(
 	req agentHookRequest,
 	resp agentHookResponse,
 	finalization *toolChainHookFinalization,
-	repository *audit.ToolChainRepository,
+	repository toolChainStore,
 	root, added audit.ToolChainObserveResult,
 	denyEligible bool,
 	latency time.Duration,

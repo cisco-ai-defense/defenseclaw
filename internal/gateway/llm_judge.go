@@ -2260,13 +2260,46 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	return sample.String()
 }
 
+// judgeIntentStores, when set (a gateway replica on Agent Substrate), gives
+// each judge its session context store by role in place of a process-local
+// one, so every replica judges an actor's call with the same intent.
+var judgeIntentStores atomic.Pointer[func(role string) intentstore.Store]
+
+// Judge roles for judgeIntentStores: the guardrail judge and the hook lane's
+// decision-only judge keep separate contexts, as they do on a host.
+const (
+	judgeIntentRoleJudge    = "judge"
+	judgeIntentRoleDecision = "decision"
+)
+
+// setJudgeIntentStores sets (nil clears) the store of judges that have none
+// yet.
+func setJudgeIntentStores(stores func(role string) intentstore.Store) {
+	if stores == nil {
+		judgeIntentStores.Store(nil)
+		return
+	}
+	judgeIntentStores.Store(&stores)
+}
+
 // intentStore is the judge's session context store: the one SetIntentStore
-// gave it, else a process-local store made on first use (a judge built as a
-// struct literal works too).
+// gave it, else the shared one for its role (judgeIntentStores), else a
+// process-local store made on first use (a judge built as a struct literal
+// works too).
 func (j *LLMJudge) intentStore() intentstore.Store {
 	j.intentsMu.Lock()
 	defer j.intentsMu.Unlock()
 	if j.intents == nil {
+		if stores := judgeIntentStores.Load(); stores != nil {
+			role := judgeIntentRoleJudge
+			if j.decisionOnly {
+				role = judgeIntentRoleDecision
+			}
+			if store := (*stores)(role); store != nil {
+				j.intents = store
+				return j.intents
+			}
+		}
 		j.intents = intentstore.NewProcess(intentstore.Limits{
 			MaxSessions: maxToolJudgeContextSessions,
 			MaxPrior:    maxToolJudgePriorEvents,
@@ -2351,12 +2384,16 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 // ResetToolJudgeSession drops the session's bounded context when a connector
 // announces a new or ended session. The process-local store persists no tool
 // arguments.
-// sessionID is the state key (sandboxSessionStateKey), not the raw ID.
-func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
+// sessionID is the state key (sandboxSessionStateKey), not the raw ID; ctx
+// is the hook call's (a shared store finds the caller in it).
+func (j *LLMJudge) ResetToolJudgeSession(ctx context.Context, sessionID string) {
 	if j == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	if err := j.intentStore().Reset(context.Background(), sessionID); err != nil {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := j.intentStore().Reset(ctx, sessionID); err != nil {
 		j.warnIntentStore("Reset", "the session's earlier intent and calls may still be shown to the judge", err)
 	}
 }
