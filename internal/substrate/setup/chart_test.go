@@ -9,6 +9,7 @@ package setup
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -31,7 +32,7 @@ const chartKubeVersion = "1.34.0"
 
 // chartCases are the golden renders: values files under
 // deploy/helm/defenseclaw-substrate/tests/values (empty for the defaults).
-var chartCases = []string{"default", "launcher", "minimal", "full"}
+var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed"}
 
 // helmPinnedVersion is the helm release the goldens are rendered with and
 // that the CI job substrate-chart installs (keep it equal to HELM_VERSION in
@@ -97,11 +98,20 @@ func TestChartGoldens(t *testing.T) {
 func TestChartRefusesBadValues(t *testing.T) {
 	helm := helmBinary(t)
 	for name, set := range map[string]string{
-		"hpa below 2":     "gateway.hpa.minReplicas=1",
-		"short digest":    "image.digest=sha256:abc",
-		"bad atespace":    "managedAtespaces={Bad_Name}",
-		"ingress no host": "adminIngress.enabled=true",
-		"unknown value":   "gateway.surprise=1",
+		"hpa below 2":               "gateway.hpa.minReplicas=1",
+		"short digest":              "image.digest=sha256:abc",
+		"bad atespace":              "managedAtespaces={Bad_Name}",
+		"ingress no host":           "admin.expose.type=Ingress",
+		"ingress no tls":            "admin.expose.type=Ingress,admin.expose.ingress.host=dc.example.com",
+		"lb no source ranges":       "admin.expose.type=LoadBalancer,admin.url=https://dc.example.com",
+		"lb no url":                 "admin.expose.type=LoadBalancer,admin.expose.loadBalancer.sourceRanges={10.0.0.0/8}",
+		"url not https":             "admin.url=http://dc.example.com",
+		"expose nodeport":           "admin.expose.type=NodePort",
+		"managed fails open":        "config.deployment_mode=managed_enterprise,config.substrate.extproc.failure_mode=open,config.substrate.templates.allowed_images={reg.example.com/dc/*}",
+		"secrets ns = release ns":   "substrate.credentialProvider.secretsNamespace=default",
+		"managed no allowed_images": "config.deployment_mode=managed_enterprise",
+		"managed unattested":        "config.deployment_mode=managed_enterprise,config.substrate.require_attested_templates=false,config.substrate.templates.allowed_images={reg.example.com/dc/*}",
+		"unknown value":             "gateway.surprise=1",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {
@@ -232,6 +242,97 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	if p := dig(byName["Service/defenseclaw-actor"].Spec, "ports").([]any)[0]; dig(p, "port") != 80 {
 		t.Errorf("%s: actor Service port %v, want 80", name, dig(p, "port"))
 	}
+	// GAP-0086: only the admin listener is ever exposed outside the cluster.
+	for _, o := range objs {
+		switch o.Kind {
+		case "Service":
+			if typ := dig(o.Spec, "type"); typ == "LoadBalancer" || typ == "NodePort" {
+				for _, pt := range dig(o.Spec, "ports").([]any) {
+					if dig(pt, "targetPort") != "admin" {
+						t.Errorf("%s: %s Service %v exposes %v", name, typ, o.Metadata["name"], dig(pt, "targetPort"))
+					}
+				}
+			}
+		case "Ingress":
+			raw, _ := yaml.Marshal(o.Spec)
+			if strings.Contains(string(raw), "defenseclaw-actor") || dig(o.Spec, "tls") == nil {
+				t.Errorf("%s: Ingress %v: %s", name, o.Metadata["name"], raw)
+			}
+		}
+	}
+	// GAP-0135: in managed mode every DefenseClaw pod reads config.yaml as one
+	// read-only file (no ConfigMap directory symlinks), and its data dir is
+	// its own volume that an init container gives to the gateway account
+	// with 0700.
+	if name == "managed" {
+		if !strings.Contains(fmt.Sprint(byName["ConfigMap/defenseclaw-config"].Data["config.yaml"]), "deployment_mode: managed_enterprise") {
+			t.Errorf("managed: deployment_mode not in config.yaml")
+		}
+		for _, d := range []string{"defenseclaw-gateway", "defenseclaw-gateway-leader", "defenseclaw-controller", "defenseclaw-callout"} {
+			pod := dig(byName["Deployment/"+d].Spec, "template", "spec")
+			raw, _ := yaml.Marshal(pod)
+			if !strings.Contains(string(raw), "subPath: config.yaml") || !strings.Contains(string(raw), "--mode=0700") ||
+				!strings.Contains(string(raw), "mountPath: /var/lib/defenseclaw/data") || strings.Contains(string(raw), "mountPath: /etc/defenseclaw\n") {
+				t.Errorf("managed: %s pod is not set up for the managed trust checks", d)
+			}
+			for _, ic := range dig(pod, "initContainers").([]any) {
+				caps, _ := yaml.Marshal(dig(ic, "securityContext", "capabilities"))
+				if dig(ic, "securityContext", "allowPrivilegeEscalation") != false || !strings.Contains(string(caps), "- ALL") ||
+					strings.Contains(string(caps), "SYS_ADMIN") || strings.Contains(string(caps), "DAC_OVERRIDE") {
+					t.Errorf("managed: %s init container: %s", d, caps)
+				}
+			}
+		}
+	} else if strings.Contains(string(out), "substrate-datadir") {
+		t.Errorf("%s: a non-managed render runs the data dir init container", name)
+	}
+	// A pre-install hook Job cannot use a release ServiceAccount: install
+	// creates those after the pre-install hooks.
+	for _, o := range objs {
+		hook, _ := dig(o.Metadata, "annotations", "helm.sh/hook").(string)
+		if o.Kind != "Job" || !strings.Contains(hook, "pre-install") {
+			continue
+		}
+		sa, _ := dig(o.Spec, "template", "spec", "serviceAccountName").(string)
+		if s, ok := byName["ServiceAccount/"+sa]; !ok || !strings.Contains(fmt.Sprint(dig(s.Metadata, "annotations", "helm.sh/hook")), "pre-install") {
+			t.Errorf("%s: pre-install Job %v runs as %q, which is not a pre-install hook resource", name, o.Metadata["name"], sa)
+		}
+	}
+	// GAP-0143: the actor listener serves plain HTTP (egress uses an http
+	// rule on port 80); --plain-http (both listeners) is never rendered.
+	if gw, ok := byName["Deployment/defenseclaw-gateway"]; ok {
+		raw, _ := yaml.Marshal(gw.Spec)
+		if !strings.Contains(string(raw), "- --actor-plain-http") || strings.Contains(string(raw), "- --plain-http") {
+			t.Errorf("%s: gateway args: actor listener not plain HTTP, or --plain-http set", name)
+		}
+	}
+	// A13: the chain key is created by a hook (never rendered), mounted
+	// into the gateway and the leader; the callout reaches the leader.
+	if !strings.Contains(string(out), "- chain-key") || !strings.Contains(string(out), "secretName: defenseclaw-chain-key") {
+		t.Errorf("%s: no chain-key hook or Secret mount", name)
+	}
+	if c, ok := byName["Deployment/defenseclaw-callout"]; ok {
+		raw, _ := yaml.Marshal(c.Spec)
+		if name != "minimal" && !strings.Contains(string(raw), "--leader-address=defenseclaw-leader.") {
+			t.Errorf("%s: the callout has no leader address", name)
+		}
+	}
+	// GAP-0130: the launcher endpoint record names an https admin URL, and
+	// the only grant to every authenticated user is reading that record.
+	if cm, ok := byName["ConfigMap/defenseclaw-launcher-endpoint"]; !ok || !strings.HasPrefix(fmt.Sprint(cm.Data["admin_url"]), "https://") {
+		t.Errorf("%s: launcher endpoint record = %+v", name, cm.Data)
+	}
+	if n := strings.Count(string(out), "name: system:authenticated"); n != 1 {
+		t.Errorf("%s: %d grants to every authenticated user, want the endpoint read only", name, n)
+	}
+	if r, ok := byName["Role/defenseclaw-launcher-endpoint-read"]; ok {
+		raw, _ := yaml.Marshal(r)
+		if !strings.Contains(string(raw), "defenseclaw-launcher-endpoint") || strings.Contains(string(raw), "list") || strings.Contains(string(raw), "update") {
+			t.Errorf("%s: endpoint read role: %s", name, raw)
+		}
+	} else {
+		t.Errorf("%s: no endpoint read role", name)
+	}
 	np, ok := byName["NetworkPolicy/defenseclaw-gateway"]
 	if !ok {
 		if name != "minimal" {
@@ -260,14 +361,34 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	if _, ok := byName["NetworkPolicy/defenseclaw-default-deny"]; !ok {
 		t.Errorf("%s: no default deny", name)
 	}
+	// GAP-0139: egress to the Substrate namespace allows the idp pod port
+	// (8443 behind Service port 443), or the gateway cannot fetch the JWKS.
+	if gw, ok := byName["NetworkPolicy/defenseclaw-gateway-egress"]; ok {
+		raw, _ := yaml.Marshal(gw.Spec)
+		if !strings.Contains(string(raw), "port: 8443") {
+			t.Errorf("%s: gateway egress does not allow the idp pod port 8443", name)
+		}
+	}
+	// GAP-0084: the pods that hold keys have egress limits.
+	for _, c := range []string{"gateway", "leader", "callout", "controller"} {
+		if _, ok := byName["NetworkPolicy/defenseclaw-"+c+"-egress"]; !ok {
+			t.Errorf("%s: no egress NetworkPolicy for the %s", name, c)
+		}
+	}
 	// The hook plan parses as the plan the hook Jobs read.
-	// No hook resource but the Jobs (Helm keeps hook resources after an
-	// uninstall), and each Job's plan parses as the plan the step reads.
+	// Hook resources are the Jobs and RBAC that exists only while the hooks
+	// run (GAP-0080: deleted once they succeed; Helm keeps other hook
+	// resources after an uninstall), and each Job's plan parses as the plan
+	// the step reads.
 	var plans []string
 	for _, o := range objs {
 		hook, _ := dig(o.Metadata, "annotations", "helm.sh/hook").(string)
-		if hook != "" && o.Kind != "Job" {
+		del, _ := dig(o.Metadata, "annotations", "helm.sh/hook-delete-policy").(string)
+		if hook != "" && o.Kind != "Job" && ((o.Kind != "Role" && o.Kind != "RoleBinding" && o.Kind != "ServiceAccount") || !strings.Contains(del, "hook-succeeded")) {
 			t.Errorf("%s: hook resource %s %v outlives the release", name, o.Kind, o.Metadata["name"])
+		}
+		if (o.Kind == "Role" || o.Kind == "RoleBinding") && dig(o.Metadata, "namespace") == "ate-system" && hook == "" {
+			t.Errorf("%s: a standing grant in the Substrate namespace: %s %v", name, o.Kind, o.Metadata["name"])
 		}
 		if o.Kind != "Job" {
 			continue

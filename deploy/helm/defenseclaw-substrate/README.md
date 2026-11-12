@@ -50,17 +50,54 @@ Every value is checked by `values.schema.json`. The main ones:
 | `callout.judge.tokenSecret` | "" | turns on the MCP verdict route on the admin Service |
 | `callout.actorSecrets.secretName` | "" | exposed `actor_secrets` values for exact-value DLP |
 | `networkPolicy.adminFrom`, `networkPolicy.metricsFrom` | [] | extra peers for the admin and metrics ports |
-| `adminIngress.*` | off | an Ingress for launchers to the admin Service |
+| `deploymentMode` | "" | sets `config.deployment_mode`; `managed_enterprise` mounts `config.yaml` as one read-only file and gives each pod a data volume owned by the gateway account (`0700`, set by an init container running as root with only `CHOWN` and `FOWNER`), as the managed trust checks require. `managed.serviceAccountName` names that account (`nonroot`). |
+| `admin.expose.type` | `ClusterIP` | how laptops reach the admin listener (TLS): `ClusterIP` (in-cluster only), `LoadBalancer` (needs `admin.expose.loadBalancer.sourceRanges`, also enforced by the NetworkPolicy) or `Ingress` (needs `host` and `tlsSecretName`; re-encrypt to the HTTPS backend). The actor listener is never exposed. |
+| `admin.url` | Ingress host, or the in-cluster admin Service | the https URL laptops use, published in ConfigMap `defenseclaw-launcher-endpoint` (key `admin_url`) that every authenticated user may read; `login --kube` sends a Kubernetes credential only to this URL. Required for `LoadBalancer`. |
+| `admin.tlsSecretName` | "" | a `kubernetes.io/tls` Secret for the external name; without it the admin listener presents its in-cluster certificate |
+| `controller.templateAnchorsSecret` | `defenseclaw-template-anchors` | admin-only Secret (key `anchors.pem`) with the template signing keys; without it every template is refused |
+| `substrate.podPorts` | `[443, 8443, 8445]` | container ports of the Substrate pods DefenseClaw calls (ate-api-server, the idp JWKS); NetworkPolicies match pod ports, so change them when a Substrate release moves a port |
+| `networkPolicy.egress.*` | on, OTLP 4317/4318 | egress limits for the gateway, leader and callout (DNS, Kubernetes and Substrate APIs, the release, OTLP; providers on 443 for gateway and leader) |
 | `metrics.prometheusRule.enabled` | false | alert rules |
 | `observability.local.enabled` | false | a local OTel collector for trying the chart |
+| `bundles.enabled`, `bundles.anchorsSecret`, `bundles.inbox` | off, `defenseclaw-bundle-anchors`, `defenseclaw-bundle-inbox` | signed policy bundles; see below |
+
+## Signed policy bundles
+
+A bundle is signed with `defenseclaw-gateway enterprise bundle sign --platform linux --device-group <cluster group>` from a
+directory whose `config.yaml` holds only `guardrail.profiles` (description and `sandbox`) and `guardrail.profile_assignments`
+with `match.substrate`. It is applied to a stage: named atespaces, or `all` for every other atespace. The controller layers a
+stage's active bundle over `config.yaml` for its atespaces; `substrate.admin` still tightens every profile.
+
+1. Create the anchors Secret (key `bundle-anchors.json`, the enterprise anchors format) and give only administrators access to
+   it: `kubectl -n <ns> create secret generic defenseclaw-bundle-anchors --from-file=bundle-anchors.json`.
+2. Install with `--set bundles.enabled=true`.
+3. Apply: `defenseclaw substrate bundle apply v3.dcbundle --stage canary --atespaces team-a`, then the same bundle with
+   `--stage all`. Or write it to the inbox ConfigMap (`<stage>.dcbundle` binaryData, `<stage>.atespaces` data) from GitOps.
+4. `defenseclaw substrate bundle status` shows each stage's active and previous bundle and the receipts;
+   `defenseclaw substrate bundle rollback --stage canary` puts the previous bundle back after verifying it again.
+
+A bundle that does not verify is refused with a receipt (bad signature, unknown or revoked key, edited content, another
+tenant or device group, a version at or below the stage's floor). The controller re-verifies every stage on each refresh.
+When a stage's active bundle stops verifying (its key is revoked, the anchors are removed or their `min_version` passes it,
+or the kept copy was changed), an alert event is written and that stage's atespaces get:
+
+- **managed installs** (`config.deployment_mode: managed_enterprise`): deny-only. Actors keep only the DefenseClaw rule (the
+  actor JWT to the actor listener, so hooks still get verdicts) until a trusted bundle is applied. A managed policy never
+  loosens by itself.
+- **OSS installs:** `config.yaml` again, as if no bundle had been applied.
+
+Inside the cluster, `defenseclaw-gateway substrate-bundle test --bundle v3.dcbundle --atespace team-a`
+shows the profile and egress an actor would get before you apply.
 
 ## Upgrade, rollback, uninstall
 
 - `helm upgrade` checks the new config, refuses a skipped minor (N-1 to N only) and rolls under the PDBs. The leader
   migrates the store at start after a backup.
 - `helm rollback` to a release with an older store schema is refused, naming the backup.
-- `helm uninstall` first removes every egress policy DefenseClaw wrote (actors fall back to deny-all) and the
-  credential provider grant, and fails while any remain. It prints the snapshot purge steps. Then run
+- `helm uninstall` first stops the controller (it would write the policies again), then removes every egress policy
+  DefenseClaw wrote (actors fall back to deny-all), looks again after a poll interval, and revokes every credential
+  provider grant of the secrets namespace. It fails while any policy remains, and then scales the controller back so
+  the remaining policies stay enforced. It prints the snapshot purge steps. Then run
   `defenseclaw substrate setup --remove`.
 
 ## Known limits

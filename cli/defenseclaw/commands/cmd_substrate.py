@@ -121,7 +121,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ("bundle", "apply"),
         "Send a signed policy bundle to the cluster",
         long=(
-            "Sends the bundle file to the cluster as it is (up to 32 MiB). With --atespaces the bundle applies "
+            "Sends the bundle file to the cluster as it is (up to 48 KiB). With --atespaces the bundle applies "
             "to those groups\n"
             "of agents only; without it, to the whole cluster. With --dry-run it only checks that the file can "
             "be read and is not\n"
@@ -138,6 +138,29 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("dry-run", "bool", "check the file and send nothing"),
             _Flag("json", "bool", "same as --output json"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag(
+                "stage",
+                "string",
+                "rollout stage name (default: all without --atespaces, one stage per atespace set with it)",
+            ),
+        ),
+    ),
+    _Cmd(
+        ("bundle", "rollback"),
+        "Put a stage's previous policy bundle back in force",
+        long=(
+            "Puts the previous policy bundle of a stage back in force. The cluster checks its signature again "
+            "first, so a\n"
+            "bundle signed with a key revoked since is refused. Running it again puts the newer bundle back. "
+            "Needs an administrator\n"
+            "sign-in."
+        ),
+        example="defenseclaw substrate bundle rollback --stage canary",
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag("stage", "string", "the stage to roll back"),
         ),
     ),
     _Cmd(

@@ -30,6 +30,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
@@ -123,13 +124,36 @@ type SubstrateConfig struct {
 	LLM http.Handler
 	// Actions creates and deletes actors for the launcher (nil: 501).
 	Actions SubstrateActorActions
+	// PolicyReset records an admin policy_conflict reset for the
+	// controller (nil: 501).
+	PolicyReset SubstratePolicyReset
 	// Profiles picks a create's profile and launcher atespace (nil: every
 	// create is refused).
 	Profiles SubstrateProfileResolver
 	// Usage answers own-only usage (stream 10 seam; nil: 501).
 	Usage SubstrateUsage
+	// Bundles applies and shows signed policy bundles (nil: 501).
+	Bundles SubstrateBundles
 	// Activity receives the last-activity feed of A3's idle logic.
 	Activity SubstrateActivitySink
+	// Skills scans the skill folders the kit attaches (GAP-0039); nil
+	// scans nothing.
+	Skills SubstrateSkillScanner
+	// Asks is the leader's ask and decision store (nil: 501).
+	Asks SubstrateAskStore
+	// Policies reads an actor's egress policy for policy explain.
+	Policies SubstratePolicyReader
+	// Relays reaches an actor's relay through the router for attach
+	// (nil: attach answers 503).
+	Relays SubstrateRelayDialer
+	// Doctor runs the gateway-side doctor checks; Info is the
+	// unauthenticated sign-in information (issuer, client_id, sign_in).
+	Doctor func(ctx context.Context) []SubstrateCheck
+	Info   map[string]any
+	// Secrets are substrate.secrets; SecretStore writes Kubernetes-backed
+	// values (nil: list only).
+	Secrets     []config.SubstrateSecret
+	SecretStore SubstrateSecretStore
 	// OnRateLimited counts defenseclaw.substrate.rate_limited.
 	OnRateLimited func(scope ratelimit.Scope, route string)
 	// Chains is the leader's chain and intent state (lane A13): a verified
@@ -415,7 +439,6 @@ func (a *APIServer) newSubstrateActorHandler(st *substrateState) http.Handler {
 	// tag (GAP-0037, lead ruling 11-12 21:05Z). The admin listener keeps it.
 	h = a.metricsMiddleware(h)
 	h = a.substrateActorScope(st, h)
-	h = a.substrateActorLimit(st, h)
 	h = CorrelationMiddleware(reg)(h)
 	h = sandboxRequestIDMiddleware(h)
 	h = inboundTraceContextMiddleware(h)
@@ -501,6 +524,19 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 			writeSubstrateRefusal(w, status, string(reason))
 			return
 		}
+		// The fair-share limits run right after the token check, before
+		// the registration lookup and the envelope read, so a flooding
+		// actor costs no leader call and no body read (GAP-0057).
+		release, lerr := st.cfg.Limiter.Acquire(actor.Atespace, actor.UID)
+		if lerr != nil {
+			scope, _ := ratelimit.IsLimited(lerr)
+			if st.cfg.OnRateLimited != nil {
+				st.cfg.OnRateLimited(scope, substrateRouteName(route))
+			}
+			writeHookRateLimited(w, "substrate_"+string(scope), "this actor is over its request budget; retry shortly")
+			return
+		}
+		defer release()
 		reg, ok, err := st.cfg.Registrations.Get(r.Context(), actor.Atespace, actor.UID)
 		switch {
 		case err != nil:
@@ -512,7 +548,7 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 			writeSubstrateRefusal(w, http.StatusForbidden, "actor_not_registered")
 			return
 		}
-		if route.connector != "" && sandboxauth.CanonicalConnector(route.connector) != sandboxauth.CanonicalConnector(reg.Connector) {
+		if route.connector != "" && reg.Connector != "" && sandboxauth.CanonicalConnector(route.connector) != sandboxauth.CanonicalConnector(reg.Connector) {
 			writeSubstrateRefusal(w, http.StatusForbidden, "connector_mismatch")
 			return
 		}
@@ -543,24 +579,6 @@ func substrateFailMode(cfg SubstrateConfig, reg registry.Registration) string {
 		return "closed"
 	}
 	return "open"
-}
-
-func (a *APIServer) substrateActorLimit(st *substrateState, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		actor, _ := substrateActorFrom(r.Context())
-		route := substrateRouteFrom(r.Context())
-		release, err := st.cfg.Limiter.Acquire(actor.Atespace, actor.UID)
-		if err != nil {
-			scope, _ := ratelimit.IsLimited(err)
-			if st.cfg.OnRateLimited != nil {
-				st.cfg.OnRateLimited(scope, substrateRouteName(route))
-			}
-			writeHookRateLimited(w, "substrate_"+string(scope), "this actor is over its request budget; retry shortly")
-			return
-		}
-		defer release()
-		next.ServeHTTP(w, r)
-	})
 }
 
 func substrateRouteName(r substrateActorRoute) string {

@@ -88,7 +88,17 @@ name this release's Services and the Substrate API filled in.
 {{- if not (hasKey $sub "api") -}}
 {{- $_ := set $sub "api" (dict "address" .Values.substrate.apiAddress "server_name" .Values.substrate.apiAudience "auth" "serviceaccount" "token_file" "/var/run/ate/token" "ca_file" "/var/run/ate/ca.crt") -}}
 {{- end -}}
+{{- if and .Values.bundles.enabled (not (hasKey $sub "bundles")) -}}
+{{- $_ := set $sub "bundles" (dict "enabled" true "anchors_file" "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json" "inbox" .Values.bundles.inbox) -}}
+{{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
+{{- with .Values.deploymentMode }}{{ $_ := set $cfg "deployment_mode" . }}{{ end -}}
+{{- if and (include "dc.managed" .) (not (hasKey $cfg "data_dir")) -}}
+{{- $_ := set $cfg "data_dir" (include "dc.managedDataDir" .) -}}
+{{- end -}}
+{{- if and (include "dc.managed" .) (not (hasKey $cfg "policy_dir")) -}}
+{{- $_ := set $cfg "policy_dir" (include "dc.managedPolicyDir" .) -}}
+{{- end -}}
 {{- toYaml $cfg -}}
 {{- end -}}
 
@@ -127,10 +137,70 @@ Services that select the pod: only pods a Service selects ("serving" true),
 since the signer issues no certificate without a Service DNS name and the pod
 would never start.
 */}}
+{{/* "true" when the release runs in managed_enterprise (GAP-0135). */}}
+{{- define "dc.managed" -}}
+{{- $m := lower (toString (.Values.deploymentMode | default (.Values.config.deployment_mode | default ""))) -}}
+{{- if has $m (list "managed" "managed_enterprise" "managed-enterprise") }}true{{ end -}}
+{{- end -}}
+
+{{/* The managed data dir: its own volume, owned by the gateway account,
+0700 (the managed data_dir trust check refuses a 0777 volume root). */}}
+{{- define "dc.managedDataDir" -}}/var/lib/defenseclaw/data{{- end -}}
+{{/* The managed policy_dir: the root-owned vendor folder of the Linux
+layout, seeded by the init container and read-only to the gateway. */}}
+{{- define "dc.managedPolicyDir" -}}/opt/defenseclaw/share/policies{{- end -}}
+
+{{/* Init containers of a DefenseClaw pod: in managed mode one gives the
+data volume to the gateway account (the gateway image has no shell, so
+its own hidden substrate-datadir step does it; it needs CHOWN and FOWNER
+as root, nothing else). */}}
+{{- define "dc.initContainers" -}}
+{{- if include "dc.managed" . }}
+initContainers:
+- name: data-dir
+  image: {{ include "dc.image" . }}
+  imagePullPolicy: {{ .Values.image.pullPolicy }}
+  args:
+  - substrate-datadir
+  - --path={{ include "dc.managedDataDir" . }}
+  - --uid={{ .Values.podSecurityContext.runAsUser }}
+  - --gid={{ .Values.podSecurityContext.runAsGroup }}
+  - --mode=0700
+  - --policies={{ include "dc.managedPolicyDir" . }}
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {memory: 64Mi}
+  securityContext:
+    runAsUser: 0
+    runAsNonRoot: false
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+      add: [CHOWN, FOWNER]
+  volumeMounts:
+  - name: data
+    mountPath: {{ include "dc.managedDataDir" . }}
+  - name: policies
+    mountPath: {{ include "dc.managedPolicyDir" . }}
+{{- end }}
+{{- end -}}
+
 {{- define "dc.volumes" -}}
 - name: config
   configMap:
     name: defenseclaw-config
+    # Read-only for everyone (managed: the config trust check wants an
+    # admin-owned file nobody else can write).
+    defaultMode: 0444
+{{- if include "dc.managed" .ctx }}
+- name: data
+  emptyDir:
+    sizeLimit: {{ .ctx.Values.managed.dataSizeLimit }}
+- name: policies
+  emptyDir:
+    sizeLimit: 64Mi
+{{- end }}
 - name: tmp
   emptyDir: {}
 # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
@@ -180,12 +250,33 @@ would never start.
             podcert.ate.dev/canarying: live
         path: trust-bundle.pem
 {{- end }}
+{{- if and .ctx.Values.bundles.enabled (has .component (list "controller" "gateway")) }}
+- name: bundle-anchors
+  secret:
+    secretName: {{ .ctx.Values.bundles.anchorsSecret }}
+    defaultMode: 0444
+{{- end }}
 {{- end -}}
 
 {{- define "dc.volumeMounts" -}}
+{{- if include "dc.managed" .ctx }}
+# Managed: one file, not the ConfigMap directory, whose ..data symlinks the
+# managed config trust check refuses (GAP-0135). The pods roll on a config
+# change (checksum annotation), as a subPath mount is not updated in place.
+- name: config
+  mountPath: /etc/defenseclaw/config.yaml
+  subPath: config.yaml
+  readOnly: true
+- name: data
+  mountPath: {{ include "dc.managedDataDir" .ctx }}
+- name: policies
+  mountPath: {{ include "dc.managedPolicyDir" .ctx }}
+  readOnly: true
+{{- else }}
 - name: config
   mountPath: /etc/defenseclaw
   readOnly: true
+{{- end }}
 - name: tmp
   mountPath: /tmp
 - name: run
@@ -198,13 +289,26 @@ would never start.
   mountPath: /run/servicedns.podcert.ate.dev
   readOnly: true
 {{- end }}
+{{- if and .ctx.Values.bundles.enabled (has .component (list "controller" "gateway")) }}
+- name: bundle-anchors
+  mountPath: /etc/defenseclaw-substrate/bundle-anchors
+  readOnly: true
+{{- end }}
 {{- end -}}
 
 {{- define "dc.env" -}}
 - name: DEFENSECLAW_CONFIG
   value: /etc/defenseclaw/config.yaml
+{{- if include "dc.managed" . }}
+- name: DEFENSECLAW_HOME
+  value: {{ include "dc.managedDataDir" . }}
+# The gateway account the managed trust checks accept (distroless "nonroot").
+- name: DEFENSECLAW_UNIX_SERVICE_ACCOUNT
+  value: {{ .Values.managed.serviceAccountName | quote }}
+{{- else }}
 - name: DEFENSECLAW_HOME
   value: /var/lib/defenseclaw/run/home
+{{- end }}
 - name: POD_NAME
   valueFrom:
     fieldRef:
@@ -224,16 +328,23 @@ checksum/config: {{ include "dc.config" .ctx | sha256sum }}
 {{- end -}}
 
 {{/* Leader RPC mTLS: the pod-identity bundle and the SPIFFE IDs that may call the leader (A2 serve flags). */}}
+{{/* Leader peers: gateway replicas may call every method; the callout
+ only the egress chain check and the controller only registrations,
+ lifecycle and activity (leader.Permissions, GAP-0094). */}}
 {{- define "dc.peerFlags" -}}
 - --peer-bundle=/var/run/ate/credential-bundle.pem
 - --peer-trust=/var/run/ate/podidentity-ca.crt
 - --peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
-- --peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "callout") }}
-- --peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "controller") }}
+- --callout-peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "callout") }}
+- --controller-peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "controller") }}
 {{- end -}}
 
 {{/* Optional Secrets of the gateway and leader (absent ones are skipped). */}}
 {{- define "dc.gatewaySecretMounts" -}}
+# The value-lineage key every replica shares (the chain-key hook creates it).
+- name: chain-key
+  mountPath: /var/run/secrets/defenseclaw-chain-key
+  readOnly: true
 - name: relay-session
   mountPath: /var/run/secrets/defenseclaw-relay-session
   readOnly: true
@@ -248,6 +359,13 @@ checksum/config: {{ include "dc.config" .ctx | sha256sum }}
 {{- end -}}
 
 {{- define "dc.gatewaySecretVolumes" -}}
+- name: chain-key
+  secret:
+    secretName: defenseclaw-chain-key
+    optional: true
+    defaultMode: 0440
+    items:
+    - {key: key, path: key}
 - name: relay-session
   secret:
     secretName: {{ .Values.gateway.relaySessionSecret }}
@@ -263,4 +381,28 @@ checksum/config: {{ include "dc.config" .ctx | sha256sum }}
     items:
     - {key: token, path: token}
 {{- end }}
+{{- end -}}
+
+{{/* The Kubernetes API token for pods that call the Kubernetes API (the
+service account automount stays off). */}}
+{{- define "dc.kubeTokenMount" -}}
+- name: kube-api-token
+  mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+  readOnly: true
+{{- end -}}
+{{- define "dc.kubeTokenVolume" -}}
+- name: kube-api-token
+  projected:
+    sources:
+    - serviceAccountToken:
+        expirationSeconds: 3600
+        path: token
+    - configMap:
+        name: kube-root-ca.crt
+        items:
+        - {key: ca.crt, path: ca.crt}
+    - downwardAPI:
+        items:
+        - path: namespace
+          fieldRef: {fieldPath: metadata.namespace}
 {{- end -}}

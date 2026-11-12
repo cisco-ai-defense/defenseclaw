@@ -100,7 +100,6 @@ type SubstrateAttachedFile struct {
 	Truncated bool   `json:"truncated,omitempty"`
 }
 
-type substrateFactsKey struct{}
 type substrateEnvelopeKey struct{}
 
 func substrateEnvelopeFrom(ctx context.Context) (substrateEnvelope, bool) {
@@ -171,10 +170,9 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 				return
 			}
 		}
+		// The facts stay on the envelope (substrateEnvelopeFrom); the skill
+		// scan below reads the attached files from it.
 		ctx := context.WithValue(r.Context(), substrateEnvelopeKey{}, env)
-		if env.Facts != nil {
-			ctx = context.WithValue(ctx, substrateFactsKey{}, env.Facts)
-		}
 		r = r.WithContext(ctx)
 		r.Body = io.NopCloser(bytes.NewReader(env.Payload))
 		r.ContentLength = int64(len(env.Payload))
@@ -182,6 +180,14 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 		r.Header.Set("Content-Type", "application/json")
 		if env.Event != "" && r.Header.Get("X-DefenseClaw-Hook-Event") == "" {
 			r.Header.Set("X-DefenseClaw-Hook-Event", env.Event)
+		}
+		if route.class == sandboxauth.RouteHook {
+			q := st.substrateScanSkills(ctx, env.Facts)
+			answer := withSubstrateAnswer(w, r, next, q)
+			if reg, ok := substrateRegistrationFrom(ctx); ok {
+				st.substrateRecordDecision(ctx, reg, env.Event, answer)
+			}
+			return
 		}
 		next.ServeHTTP(w, r)
 	})

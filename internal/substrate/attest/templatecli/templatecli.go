@@ -216,6 +216,9 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		sessionKeys   multi
 	)
 	fs.Var(&trusted, "trusted-base", "base image digest the admin trusts (repeatable)")
+	var acceptIDs multi
+	fs.Var(&acceptIDs, "accept-finding", "finding rule id the build floor accepts (a known false positive; repeatable; needs --reason; recorded in the attestation)")
+	acceptReason := fs.String("reason", "", "why the --accept-finding rules are accepted (recorded in the attestation)")
 	fs.Var(&mcpHosts, "mcp-host", "remote MCP host that is allowed (repeatable)")
 	fs.Var(&sessionKeys, "session-key", "relay session public key, kid=PEM file (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -295,11 +298,21 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 			return ExitUsageError, err
 		}
 	}
+	if len(acceptIDs) > 0 && strings.TrimSpace(*acceptReason) == "" {
+		return ExitUsageError, errors.New("--accept-finding needs --reason (it is recorded in the attestation)")
+	}
+	if len(acceptIDs) == 0 && *acceptReason != "" {
+		return ExitUsageError, errors.New("--reason goes with --accept-finding")
+	}
+	var accepted []attest.AcceptedFinding
+	for _, id := range acceptIDs {
+		accepted = append(accepted, attest.AcceptedFinding{RuleID: strings.TrimSpace(id), Reason: strings.TrimSpace(*acceptReason), By: *builder})
+	}
 	skill, mcp := scanners(cfg, *noMCP, *analyzers)
 	opts := attest.BuildOptions{
 		Registry: reg, Base: *from, Target: *to, Template: tpl, Kit: spec, Signer: signer,
 		Skill: skill, MCPStatic: mcp, Compiled: policy.CompileAdmission(cfg),
-		AllowedMCPHosts: mcpHosts, BlockAtOrAbove: floor,
+		AllowedMCPHosts: mcpHosts, BlockAtOrAbove: floor, AcceptFindings: accepted,
 		TrustedBases: trusted, AllowUnverifiedBase: *allowUnv, PolicyGeneration: *gen, BuilderID: *builder,
 		Platform: plat, DryRun: *dry,
 	}
@@ -382,6 +395,7 @@ func printScan(w io.Writer, s attest.ScanSummary, h attest.HookChecks) {
 			fmt.Fprintf(w, "  %-5s %s %s (%s) %s\n", strings.ToUpper(it.Verdict), it.Kind, it.Name, it.Path, it.Reason)
 		}
 	}
+	printAccepted(w, s.Accepted)
 	fmt.Fprintf(w, "hook files root-owned: %v; phone-home switches off: %v\n", h.RootOwned, h.PhoneHomeOff)
 	for _, f := range h.Files {
 		if !f.OK {
@@ -392,6 +406,17 @@ func printScan(w io.Writer, s attest.ScanSummary, h attest.HookChecks) {
 		if !sw.OK {
 			fmt.Fprintf(w, "  switch %s is not set\n", sw.Name)
 		}
+	}
+}
+
+// printAccepted shows the admin's audited acceptances (build floor only).
+func printAccepted(w io.Writer, acc []attest.AcceptedFinding) {
+	for _, a := range acc {
+		by := a.By
+		if by == "" {
+			by = "unknown"
+		}
+		fmt.Fprintf(w, "  ACCEPTED %s by %s at %s: %q (%s)\n", a.RuleID, by, a.At.UTC().Format(time.RFC3339), a.Reason, strings.Join(a.Items, ", "))
 	}
 }
 
@@ -472,6 +497,10 @@ func runVerify(ctx context.Context, args []string, stdout io.Writer) (int, error
 	fmt.Fprintf(stdout, "ADMITTED %s\n  connector %s, kit %s (hook contract %s), base %s (%s)\n  scan %s: %d skills, %d MCP servers; policy generation %d; signed by key %s\n",
 		out.Digest, out.Template.Connector, out.Kit.Version, out.Kit.HookContract, short(out.Base.Digest), out.Base.Trust,
 		out.Scan.Verdict, out.Scan.Skills, out.Scan.MCPServers, out.PolicyGen, short(out.KeyID))
+	if len(out.Scan.Accepted) > 0 {
+		fmt.Fprintf(stdout, "  %d accepted finding rule(s) at the build floor:\n", len(out.Scan.Accepted))
+		printAccepted(stdout, out.Scan.Accepted)
+	}
 	return code, nil
 }
 

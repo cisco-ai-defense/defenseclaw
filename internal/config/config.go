@@ -3356,15 +3356,17 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: openshell: %w", settingErrorAt("openshell", err))
 	}
-	subErr := cfg.Substrate.Validate()
-	if subErr == nil {
-		subErr = cfg.Substrate.ValidateManaged(managed.IsManagedEnterprise(cfg.DeploymentMode))
-	}
-	if subErr != nil {
+	if subErr := cfg.Substrate.Validate(); subErr != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "substrate_invalid")
 		}
 		return nil, fmt.Errorf("config: substrate: %w", settingErrorAt("substrate", subErr))
+	}
+	if err := cfg.Substrate.ValidateManaged(cfg.DeploymentMode); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "substrate_invalid")
+		}
+		return nil, fmt.Errorf("config: substrate: %w", settingErrorAt("substrate", err))
 	}
 
 	// Validate registry source kind/content shapes. The Python CLI

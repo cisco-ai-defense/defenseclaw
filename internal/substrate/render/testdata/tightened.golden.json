@@ -2,7 +2,7 @@
   "policy": {
     "rules": [
       {
-        "https": {
+        "http": {
           "effects": {
             "replaceHeaders": [
               {
@@ -10,7 +10,7 @@
                   "audiences": [
                     "defenseclaw"
                   ],
-                  "expirationSeconds": "900"
+                  "expirationSeconds": "300"
                 },
                 "header": "x-defenseclaw-actor",
                 "prefix": "Bearer "
@@ -22,7 +22,7 @@
           ],
           "ports": {
             "numbers": [
-              443
+              80
             ]
           }
         }

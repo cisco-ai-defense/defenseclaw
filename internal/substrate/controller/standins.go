@@ -26,9 +26,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 )
 
-// NoAttestor attests nothing. It stands in until the gateway carries the
-// attestation verifier: with require_attested_templates on (the default)
-// every actor is refused, which is the fail-closed answer.
+// NoAttestor attests nothing. The controller uses it only with
+// require_attested_templates false (then every template is admitted
+// unchecked, a dev setting); with it on, TemplateAttestor verifies.
 type NoAttestor struct{}
 
 func (NoAttestor) Attest(context.Context, *ateapi.ActorTemplate) (Attestation, error) {

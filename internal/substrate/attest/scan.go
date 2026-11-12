@@ -70,6 +70,10 @@ type ScanOptions struct {
 	// supply-chain artifact an admin builds on purpose, and a malicious skill
 	// or MCP server in it must not ship because the host default only warns.
 	BlockAtOrAbove scanner.Severity
+	// AcceptFindings are rule ids an admin accepted at the build floor
+	// (each with a reason). An accepted rule that lifts no block is an
+	// error, so an acceptance never outlives the finding it was for.
+	AcceptFindings []AcceptedFinding
 
 	PolicyGeneration int64
 	Now              func() time.Time
@@ -135,10 +139,14 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 			sum.Scanners = append(sum.Scanners, ScannerInfo{Name: name, Version: version})
 		}
 	}
+	lifted := map[string][]string{} // accepted rule id → items
 	record := func(kind, name, p, scanName string, res *scanner.ScanResult) {
-		verdict, reason := o.decide(ctx, kind, name, p, res)
+		verdict, reason, accepted := o.decide(ctx, kind, name, p, res)
 		item := ScanItem{Kind: kind, Name: name, Path: p, Scanner: scanName, Verdict: verdict,
-			Findings: len(res.Findings), Reason: reason}
+			Findings: len(res.Findings), Reason: reason, Accepted: accepted}
+		for _, id := range accepted {
+			lifted[id] = append(lifted[id], kind+":"+p)
+		}
 		if len(res.Findings) > 0 {
 			item.MaxSeverity = string(res.MaxSeverity())
 		}
@@ -288,11 +296,23 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 	rep.User = user
 	rep.Hooks = checkHooks(fsys, env, user, o)
 	sum.Verdict = worse(sum.Verdict, VerdictClean)
+	for _, a := range o.AcceptFindings {
+		items := lifted[a.RuleID]
+		if len(items) == 0 {
+			return nil, fmt.Errorf("scan: --accept-finding %s lifts no blocked finding; remove it", a.RuleID)
+		}
+		a.Items = items
+		if a.At.IsZero() {
+			a.At = o.now()
+		}
+		sum.Accepted = append(sum.Accepted, a)
+	}
 	return rep, nil
 }
 
-// decide runs the admission rules on one result.
-func (o *ScanOptions) decide(ctx context.Context, kind, name, p string, res *scanner.ScanResult) (verdict, reason string) {
+// decide runs the admission rules on one result. accepted are the rule ids
+// of AcceptFindings that lifted the build floor for this item.
+func (o *ScanOptions) decide(ctx context.Context, kind, name, p string, res *scanner.ScanResult) (verdict, reason string, accepted []string) {
 	in := policy.AdmissionInput{TargetType: kind, TargetName: name, Path: p, BlockList: o.BlockList, AllowList: o.AllowList}
 	if c, ok := o.Compiled[kind]; ok {
 		cc := c
@@ -310,23 +330,59 @@ func (o *ScanOptions) decide(ctx context.Context, kind, name, p string, res *sca
 	}
 	out, err := o.Admission(ctx, in)
 	if err != nil || out == nil {
-		return VerdictBlock, "admission could not decide"
+		return VerdictBlock, "admission could not decide", nil
 	}
 	floor := o.BlockAtOrAbove
-	if floor != "" && floor != FloorNone && len(res.Findings) > 0 && sevRank(res.MaxSeverity()) >= sevRank(floor) && out.Verdict != "rejected" && out.Verdict != "blocked" {
-		return VerdictBlock, fmt.Sprintf("a template build blocks %s findings (host admission said %s)", floor, out.Verdict)
+	hostBlocks := out.Verdict == "rejected" || out.Verdict == "blocked"
+	if floor != "" && floor != FloorNone && !hostBlocks {
+		// The floor counts every finding at or above it except those of an
+		// accepted rule; the accepted ones are recorded on the item.
+		blocking, liftedBy := false, map[string]bool{}
+		for _, f := range res.Findings {
+			if sevRank(f.Severity) < sevRank(floor) {
+				continue
+			}
+			if o.accepts(f.RuleID) {
+				liftedBy[f.RuleID] = true
+				continue
+			}
+			blocking = true
+		}
+		if blocking {
+			return VerdictBlock, fmt.Sprintf("a template build blocks %s findings (host admission said %s)", floor, out.Verdict), nil
+		}
+		for id := range liftedBy {
+			accepted = append(accepted, id)
+		}
+		sort.Strings(accepted)
 	}
 	switch out.Verdict {
 	case "rejected", "blocked":
-		return VerdictBlock, out.Reason
+		return VerdictBlock, out.Reason, nil
 	case "warning":
-		return VerdictWarn, out.Reason
+		return VerdictWarn, out.Reason, accepted
 	case "clean", "allowed":
-		return VerdictClean, out.Reason
+		if len(accepted) > 0 {
+			// An accepted finding is never "clean": the item warns.
+			return VerdictWarn, "accepted findings: " + strings.Join(accepted, ", "), accepted
+		}
+		return VerdictClean, out.Reason, nil
 	default:
 		// "scan" or unknown: nothing admitted the item.
-		return VerdictBlock, "not admitted: " + out.Verdict
+		return VerdictBlock, "not admitted: " + out.Verdict, nil
 	}
+}
+
+func (o *ScanOptions) accepts(ruleID string) bool {
+	if ruleID == "" {
+		return false
+	}
+	for _, a := range o.AcceptFindings {
+		if a.RuleID == ruleID {
+			return true
+		}
+	}
+	return false
 }
 
 func failedScan(name, target string, err error) *scanner.ScanResult {

@@ -154,6 +154,9 @@ type ScanSummary struct {
 	// block. A block never gets an attestation from the build.
 	Verdict string     `json:"verdict"`
 	Items   []ScanItem `json:"items,omitempty"`
+	// Accepted are the admin's audited acceptances of findings that the
+	// build floor would have blocked (template build --accept-finding).
+	Accepted []AcceptedFinding `json:"acceptedFindings,omitempty"`
 	// ScannedAt is the build's clock.
 	ScannedAt time.Time `json:"scannedAt"`
 }
@@ -176,6 +179,23 @@ type ScanItem struct {
 	MaxSeverity string `json:"maxSeverity,omitempty"`
 	Findings    int    `json:"findings"`
 	Reason      string `json:"reason,omitempty"`
+	// Accepted are rule ids whose findings were accepted for this item:
+	// without them the build floor blocked it.
+	Accepted []string `json:"accepted,omitempty"`
+}
+
+// AcceptedFinding is an admin's audited acceptance of one finding rule at
+// the template build floor (a known false positive). It lifts only the
+// build floor; host admission rules (block lists, rejected verdicts) still
+// block, and the run-time scan is unchanged. The HIGH floor stays the
+// default.
+type AcceptedFinding struct {
+	RuleID string    `json:"ruleId"`
+	Reason string    `json:"reason"`
+	By     string    `json:"by,omitempty"`
+	At     time.Time `json:"at"`
+	// Items are the scanned items (kind:path) whose block it lifted.
+	Items []string `json:"items"`
 }
 
 // PolicyInfo says which admission policy the scan used.

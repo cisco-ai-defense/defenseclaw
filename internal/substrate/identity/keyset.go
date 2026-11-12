@@ -49,6 +49,9 @@ const (
 	// next verification refreshes it. A key removed from the pool (a
 	// compromised key) stops verifying within this time.
 	DefaultKeyMaxAge = 5 * time.Minute
+	// DefaultKeyStaleLimit is how long the keys of the last good fetch
+	// are used while the issuer cannot be reached.
+	DefaultKeyStaleLimit = time.Hour
 	// DefaultFetchTimeout bounds one discovery plus key-set fetch.
 	DefaultFetchTimeout = 5 * time.Second
 )
@@ -201,10 +204,16 @@ func (ks *KeySet) key(ctx context.Context, kid string) (publicKey, error) {
 	ks.mu.RLock()
 	k, ok = ks.keys[kid]
 	haveKeys := ks.keys != nil
+	expired := !ks.fetched.IsZero() && ks.now().Sub(ks.fetched) >= DefaultKeyStaleLimit
 	ks.mu.RUnlock()
 	if ok {
-		// A failed refresh keeps the keys of the last good fetch: an
-		// ate-idp-server outage must not stop tokens it already signed.
+		// A failed refresh keeps the keys of the last good fetch for at
+		// most DefaultKeyStaleLimit: an issuer outage must not stop tokens
+		// it already signed, but a key it may have withdrawn is not kept
+		// forever (GAP-0061).
+		if ferr != nil && expired {
+			return publicKey{}, ferr
+		}
 		return k, nil
 	}
 	if !haveKeys && ferr != nil {

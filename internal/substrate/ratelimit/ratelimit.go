@@ -131,6 +131,9 @@ func (l *Limiter) Acquire(atespace, actorUID string) (func(), error) {
 	s := l.atespace(atespace)
 	a.last = now
 	s.active[actorUID] = now
+	if len(s.active) > maxTracked {
+		l.activeCount(s, now) // drops actors idle past the window (GAP-0061)
+	}
 	if a.inFlight >= l.cfg.PerActorInFlight {
 		return nil, &ErrLimited{Scope: ScopeInFlight}
 	}
@@ -205,11 +208,22 @@ func (l *Limiter) activeCount(s *atespaceState, now time.Time) int {
 	return n
 }
 
-// prune drops idle actors (no request in flight, none for a minute).
+// prune drops idle actors (no request in flight, none for a minute) and
+// atespaces with no active actor left.
 func (l *Limiter) prune(now time.Time) {
 	for uid, a := range l.actors {
 		if a.inFlight == 0 && now.Sub(a.last) > time.Minute {
 			delete(l.actors, uid)
+		}
+	}
+	for name, s := range l.atespaces {
+		for uid, last := range s.active {
+			if now.Sub(last) > activeWindow {
+				delete(s.active, uid)
+			}
+		}
+		if len(s.active) == 0 {
+			delete(l.atespaces, name)
 		}
 	}
 }

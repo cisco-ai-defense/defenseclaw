@@ -94,6 +94,13 @@ func (a *APIServer) substrateCalloutVerdict(st *substrateState) http.Handler {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "control_api_unavailable")
 			return
 		}
+		// An actor that is not running makes no call: a request that names
+		// one is stale or forged, as on the actor listener (GAP-0061).
+		if live.State != identity.ActorRunning && live.State != identity.ActorResuming {
+			writeSubstrateJSON(w, http.StatusOK, SubstrateCalloutVerdict{V: "1", Verdict: "deny",
+				Reason: "the actor is not running", Source: "none", ActorUID: live.UID})
+			return
+		}
 		reg, found, err := st.cfg.Registrations.Get(r.Context(), req.Actor.Atespace, live.UID)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "registrations_unavailable")

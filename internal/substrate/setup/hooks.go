@@ -81,6 +81,12 @@ type KubeAPI interface {
 	// RestartDeployment rolls a Deployment (kubectl rollout restart).
 	RestartDeployment(ctx context.Context, namespace, name string) error
 	DeleteSecret(ctx context.Context, namespace, name string) error
+	// ScaleDeployment sets a Deployment's replicas and returns the previous
+	// count; found is false when the Deployment does not exist.
+	ScaleDeployment(ctx context.Context, namespace, name string, replicas int32) (prev int32, found bool, err error)
+	// DeploymentPods is the number of pods a Deployment still runs
+	// (status.replicas); 0 when it does not exist.
+	DeploymentPods(ctx context.Context, namespace, name string) (int32, error)
 }
 
 // StepReport is what a hook step did, for the Job log and `--json`.
@@ -161,7 +167,7 @@ func Bootstrap(ctx context.Context, plan ChartPlan, owner SubstrateAPI, kube Kub
 				"and edit launcher atespaces. Keep the list short (E3).", n)
 		}
 	}
-	if plan.CredentialProvider.Grant && len(plan.LauncherAtespaces) > 0 {
+	if plan.CredentialProvider.Grant {
 		if err := grantProvider(ctx, plan, kube, &r); err != nil {
 			return r, err
 		}
@@ -203,8 +209,17 @@ func grantProvider(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepRep
 		return nil
 	}
 	text, changes, err := GrantNamespace(cm.Data[NamespacePolicyKey], plan.LauncherAtespaces, cp.SecretsNamespace)
-	if err != nil || len(changes) == 0 {
+	if err != nil {
 		return err
+	}
+	// An atespace that left launcher_atespaces loses the grant (GAP-0083).
+	text, revoked, err := RevokeNamespaceExcept(text, plan.LauncherAtespaces, cp.SecretsNamespace)
+	if err != nil {
+		return err
+	}
+	changes = append(changes, revoked...)
+	if len(changes) == 0 {
+		return nil
 	}
 	if cm.Data == nil {
 		cm.Data = map[string]string{}
@@ -275,15 +290,113 @@ func PreRollback(ctx context.Context, plan ChartPlan, kube KubeAPI) (StepReport,
 // policies remain: without DefenseClaw their hosts would stay open.
 var ErrPoliciesLeft = errors.New("DefenseClaw egress policies remain")
 
-// PreDelete removes every egress policy DefenseClaw wrote, so actors fall
-// back to Substrate's default deny, then the credential provider grant. It
-// fails while any of them remain, which stops `helm uninstall`.
+// Uninstall timing: how long PreDelete waits for the controller's pods to
+// stop, and how long after the sweep it looks again. The recheck covers a
+// write the controller had in flight when it stopped (it polls every 2 s).
+var (
+	ControllerStopTimeout = 2 * time.Minute
+	RecheckAfter          = 5 * time.Second
+	pollEvery             = time.Second
+)
+
+// PreDelete first stops the controller (it would recreate every policy on
+// its next poll), then removes every egress policy DefenseClaw wrote, so
+// actors fall back to Substrate's default deny, looks again after
+// RecheckAfter, and revokes every credential provider grant of the secrets
+// namespace. It fails while any DefenseClaw policy remains, which stops
+// `helm uninstall`; the controller is then scaled back so the policies
+// that remain stay enforced (GAP-0056).
 func PreDelete(ctx context.Context, plan ChartPlan, api SubstrateAPI, kube KubeAPI) (StepReport, error) {
 	r := StepReport{Step: "pre-delete"}
+	prev, stopped, err := stopController(ctx, plan, kube, &r)
+	if err != nil {
+		return r, fmt.Errorf("stop the controller before removing policies (it would write them again): %w", err)
+	}
+	restore := func() {
+		if !stopped || prev == 0 {
+			return
+		}
+		if _, _, err := kube.ScaleDeployment(context.WithoutCancel(ctx), plan.Namespace, plan.ControllerDeployment, prev); err != nil {
+			r.note("could not scale %s back to %d: %v; scale it by hand so the remaining policies stay enforced", plan.ControllerDeployment, prev, err)
+		} else {
+			r.note("scaled %s back to %d: the uninstall stopped and the remaining policies stay enforced", plan.ControllerDeployment, prev)
+		}
+	}
+	left, err := sweepPolicies(ctx, plan, api, &r)
+	if err == nil && len(left) == 0 {
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-time.After(RecheckAfter):
+			before := len(r.Removed)
+			left, err = sweepPolicies(ctx, plan, api, &r)
+			if n := len(r.Removed) - before; n > 0 {
+				r.note("%d DefenseClaw policies came back after the first sweep and were removed again", n)
+			}
+		}
+	}
+	if err != nil {
+		restore()
+		return r, err
+	}
+	if plan.CredentialProvider.Grant {
+		if err := revokeProvider(ctx, plan, kube, &r); err != nil {
+			r.note("the credential provider grant stays: %v", err)
+		}
+	}
+	r.Notes = append(r.Notes, PurgeSteps(plan)...)
+	if len(left) > 0 {
+		restore()
+		return r, fmt.Errorf("%w on %d actor(s): %s. Delete them as an atespace editor "+
+			"(kubectl ate delete egress-policy -a <atespace> <actor>), then uninstall again",
+			ErrPoliciesLeft, len(left), strings.Join(left, ", "))
+	}
+	return r, nil
+}
+
+// stopController scales the controller to 0 and waits for its pods to go.
+func stopController(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepReport) (int32, bool, error) {
+	if plan.ControllerDeployment == "" {
+		r.note("the plan names no controller Deployment; nothing was stopped")
+		return 0, false, nil
+	}
+	prev, found, err := kube.ScaleDeployment(ctx, plan.Namespace, plan.ControllerDeployment, 0)
+	if err != nil {
+		return 0, false, err
+	}
+	if !found {
+		return 0, false, nil
+	}
+	deadline := time.Now().Add(ControllerStopTimeout)
+	for {
+		n, err := kube.DeploymentPods(ctx, plan.Namespace, plan.ControllerDeployment)
+		if err != nil {
+			return prev, true, err
+		}
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			_, _, _ = kube.ScaleDeployment(context.WithoutCancel(ctx), plan.Namespace, plan.ControllerDeployment, prev)
+			return prev, true, fmt.Errorf("%s still runs %d pod(s) after %s", plan.ControllerDeployment, n, ControllerStopTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return prev, true, ctx.Err()
+		case <-time.After(pollEvery):
+		}
+	}
+	r.note("stopped %s (was %d replicas) so it cannot write policies during the uninstall", plan.ControllerDeployment, prev)
+	return prev, true, nil
+}
+
+// sweepPolicies deletes every DefenseClaw egress policy and returns the
+// actors whose policy could not be read or removed.
+func sweepPolicies(ctx context.Context, plan ChartPlan, api SubstrateAPI, r *StepReport) ([]string, error) {
 	actors, err := api.ListActors(ctx, "")
 	if err != nil {
 		// Fail closed: an unchecked uninstall could leave policies open.
-		return r, fmt.Errorf("list actors: %w. DefenseClaw cannot see the actors (is it a global viewer? the "+
+		return nil, fmt.Errorf("list actors: %w. DefenseClaw cannot see the actors (is it a global viewer? the "+
 			"bootstrap may never have run), so it cannot tell whether its egress policies remain. As a Substrate "+
 			"admin, delete every egress policy that names %s (kubectl ate get egress-policy -a <atespace> <actor>), "+
 			"then run helm uninstall --no-hooks", err, plan.ActorHost)
@@ -304,18 +417,7 @@ func PreDelete(ctx context.Context, plan ChartPlan, api SubstrateAPI, kube KubeA
 		}
 		r.Removed = append(r.Removed, a.String())
 	}
-	if plan.CredentialProvider.Grant && len(plan.LauncherAtespaces) > 0 {
-		if err := revokeProvider(ctx, plan, kube, &r); err != nil {
-			r.note("the credential provider grant stays: %v", err)
-		}
-	}
-	r.Notes = append(r.Notes, PurgeSteps(plan)...)
-	if len(left) > 0 {
-		return r, fmt.Errorf("%w on %d actor(s): %s. Delete them as an atespace editor "+
-			"(kubectl ate delete egress-policy -a <atespace> <actor>), then uninstall again",
-			ErrPoliciesLeft, len(left), strings.Join(left, ", "))
-	}
-	return r, nil
+	return left, nil
 }
 
 func revokeProvider(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepReport) error {
@@ -324,7 +426,10 @@ func revokeProvider(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepRe
 	if err != nil || cm == nil {
 		return err
 	}
-	text, changes, err := RevokeNamespace(cm.Data[NamespacePolicyKey], plan.LauncherAtespaces, cp.SecretsNamespace)
+	// Every atespace granted the secrets namespace, not only today's
+	// launcher list: one removed from launcher_atespaces earlier keeps its
+	// grant otherwise (GAP-0083). Only DefenseClaw grants that namespace.
+	text, changes, err := RevokeNamespaceExcept(cm.Data[NamespacePolicyKey], nil, cp.SecretsNamespace)
 	if err != nil || len(changes) == 0 {
 		return err
 	}

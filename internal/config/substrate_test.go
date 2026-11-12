@@ -74,6 +74,7 @@ func TestSubstrateConfigMatchesTheClosedSchema(t *testing.T) {
 		{SubstrateLLMConfig{}, []string{"substrate", "llm"}},
 		{SubstrateLLMCredentialConfig{}, []string{"substrate", "llm", "credential"}},
 		{SubstrateEgressConfig{}, []string{"substrate", "egress"}},
+		{SubstrateTemplatesConfig{}, []string{"substrate", "templates"}},
 	} {
 		got := yamlFieldNames(reflect.TypeOf(tc.typ))
 		if want := schemaObjectProperties(t, tc.path...); !reflect.DeepEqual(got, want) {
@@ -121,13 +122,23 @@ substrate:
   identity:
     issuer: https://idp.ate-system.svc
     audience: defenseclaw
-    token_lifetime_seconds: 900
+    token_lifetime_seconds: 300
     actor_cert_oid: 1.3.6.1.4.1.11129.2.12.2
     oidc: {issuer: https://login.example.com, client_id: defenseclaw-launcher, groups_claim: groups}
-    workload_oidc: [{issuer: https://token.actions.githubusercontent.com, audience: defenseclaw-prod}]
+    workload_oidc: [{issuer: https://token.actions.githubusercontent.com, audience: defenseclaw-prod, claims: {repository: acme/web}}]
   services: {actor: defenseclaw-actor.defenseclaw-system.svc, admin: defenseclaw-admin.defenseclaw-system.svc}
   launcher_atespaces: {engineering: [eng-payments, eng-web]}
   require_attested_templates: true
+  templates:
+    trust_anchors: /etc/defenseclaw/substrate/template-anchors/anchors.pem
+    min_policy_generation: 3
+    max_age: 2160h
+    allow_unverified_base: false
+    allowed_images: ["registry.example.com/defenseclaw/*"]
+    profile_images: {ci: ["registry.example.com/defenseclaw/ci-*"]}
+    volume_images: ["registry.example.com/models/*"]
+    plain_http_registries: ["10.0.0.5:5000"]
+    revoked_digests: ["sha256:0000000000000000000000000000000000000000000000000000000000000000"]
   default_sandbox_class: gvisor
   idle_suspend_after: 30m
   unattended: {asks: deny, ask_timeout: 30m, telemetry_sampling: 1.0}
@@ -215,7 +226,17 @@ func TestSubstrateValidate(t *testing.T) {
 		"actor_cert_oid":     func(s *SubstrateConfig) { s.Identity.ActorCertOID = "1.3.x" },
 		"oidc client":        func(s *SubstrateConfig) { s.Identity.OIDC.Issuer = "https://login" },
 		"workload audience": func(s *SubstrateConfig) {
-			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t"}}
+			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Claims: map[string]string{"repository": "a/b"}}}
+		},
+		// GAP-0043: issuer and audience alone trust every repository.
+		"workload binding": func(s *SubstrateConfig) {
+			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Audience: "dc"}}
+		},
+		"workload wildcard subject": func(s *SubstrateConfig) {
+			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Audience: "dc", Subject: "*"}}
+		},
+		"workload empty claim": func(s *SubstrateConfig) {
+			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Audience: "dc", Claims: map[string]string{"repository": ""}}}
 		},
 		"services same":             func(s *SubstrateConfig) { s.Services = SubstrateServicesConfig{Actor: "a.svc", Admin: "a.svc"} },
 		"services host":             func(s *SubstrateConfig) { s.Services.Actor = "http://x" },
@@ -250,6 +271,16 @@ func TestSubstrateValidate(t *testing.T) {
 		"secret bad glob":           func(s *SubstrateConfig) { s.Secrets[0].Profiles = []string{"eng-["} },
 		"secret on passthrough":     func(s *SubstrateConfig) { s.AllowPassthroughFor = []string{"GitHub.com"} },
 		"admin floor (min_profile)": func(s *SubstrateConfig) { s.Admin.MinProfile = "loose" },
+		"templates generation":      func(s *SubstrateConfig) { s.Templates.MinPolicyGeneration = -1 },
+		"templates max_age":         func(s *SubstrateConfig) { s.Templates.MaxAge = "a while" },
+		"templates image tag":       func(s *SubstrateConfig) { s.Templates.AllowedImages = []string{"reg.example.com/dc:1.0"} },
+		"templates image digest":    func(s *SubstrateConfig) { s.Templates.AllowedImages = []string{"reg.example.com/dc@sha256:00"} },
+		"templates image no host":   func(s *SubstrateConfig) { s.Templates.AllowedImages = []string{"claude"} },
+		"templates bad glob":        func(s *SubstrateConfig) { s.Templates.VolumeImages = []string{"reg.example.com/[x"} },
+		"templates profile empty":   func(s *SubstrateConfig) { s.Templates.ProfileImages = map[string][]string{"ci": nil} },
+		"templates plain http":      func(s *SubstrateConfig) { s.Templates.PlainHTTPRegistries = []string{"10.0.0.5"} },
+		"templates revoked digest":  func(s *SubstrateConfig) { s.Templates.RevokedDigests = []string{"sha256:abc"} },
+		"templates host glob":       func(s *SubstrateConfig) { s.Templates.AllowedImages = []string{"*.example.com/dc/*"} },
 	}
 	for name, mutate := range cases {
 		s := validSubstrate()
@@ -273,12 +304,57 @@ func TestSubstrateValidate(t *testing.T) {
 	}
 }
 
+// GAP-0063: in managed_enterprise the callout always fails closed (D8).
+func TestSubstrateManagedFailsClosed(t *testing.T) {
+	s := validSubstrate()
+	s.Extproc.FailureMode = "open"
+	if err := s.Validate(); err != nil {
+		t.Fatalf("open is valid outside managed: %v", err)
+	}
+	if err := s.ValidateManaged(string(DeploymentModeUnmanagedBYOD)); err != nil {
+		t.Fatalf("unmanaged refused open: %v", err)
+	}
+	if err := s.ValidateManaged(string(DeploymentModeManagedEnterprise)); err == nil {
+		t.Fatal("managed_enterprise accepted failure_mode open")
+	}
+	s.Extproc.FailureMode = "closed"
+	if err := s.ValidateManaged(string(DeploymentModeManagedEnterprise)); err == nil {
+		t.Fatal("managed accepted no templates.allowed_images (GAP-0131)")
+	}
+	s.Templates.AllowedImages = []string{"reg.example.com/dc/*"}
+	if err := s.ValidateManaged(string(DeploymentModeManagedEnterprise)); err != nil {
+		t.Fatalf("managed refused a valid section: %v", err)
+	}
+	off := false
+	s.RequireAttestedTemplates = &off
+	if err := s.ValidateManaged(string(DeploymentModeManagedEnterprise)); err == nil {
+		t.Fatal("managed accepted require_attested_templates false (GAP-0131)")
+	}
+}
+
+func TestSubstrateTemplatesDefaults(t *testing.T) {
+	var tc SubstrateTemplatesConfig
+	if tc.EffectiveTrustAnchors() != DefaultSubstrateTemplateAnchors || tc.EffectiveMaxAge() != 0 {
+		t.Fatalf("defaults = %q %v", tc.EffectiveTrustAnchors(), tc.EffectiveMaxAge())
+	}
+	tc.MaxAge = "720h"
+	if tc.EffectiveMaxAge() != 720*time.Hour {
+		t.Fatal("max_age")
+	}
+	ok := validSubstrate()
+	ok.Templates = SubstrateTemplatesConfig{AllowedImages: []string{"10.0.1.2:5000/f1/*"}, ProfileImages: map[string][]string{"ci": {"10.0.1.2:5000/f1/ci-*"}},
+		PlainHTTPRegistries: []string{"10.0.1.2:5000"}, RevokedDigests: []string{"sha256:" + strings.Repeat("ab", 32)}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid templates refused: %v", err)
+	}
+}
+
 func TestSubstrateDefaults(t *testing.T) {
 	var s SubstrateConfig
 	if s.EffectiveSupportedVersions() != ">=1.0.0 <1.1.0" || !s.AttestationRequired() || s.EffectiveSandboxClass() != "gvisor" ||
 		s.EffectiveIdleSuspendAfter() != 30*time.Minute || s.EffectiveAsks() != "deny" || s.EffectiveAskTimeout() != 30*time.Minute ||
 		s.EffectiveActorService() != DefaultSubstrateActorService || s.EffectiveAdminService() != DefaultSubstrateAdminService ||
-		s.EffectiveAudience() != "defenseclaw" || s.EffectiveTokenLifetime() != 900 || len(s.EffectiveEcosystemPacks()) != 4 {
+		s.EffectiveAudience() != "defenseclaw" || s.EffectiveTokenLifetime() != 300 || len(s.EffectiveEcosystemPacks()) != 4 {
 		t.Fatalf("defaults: %+v", s)
 	}
 	f := false

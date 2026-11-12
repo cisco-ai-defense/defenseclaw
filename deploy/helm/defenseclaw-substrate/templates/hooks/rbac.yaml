@@ -41,7 +41,93 @@ subjects:
 - kind: ServiceAccount
   name: defenseclaw-hooks
   namespace: {{ .Release.Namespace }}
+---
+# The chain-key hook runs before install creates the release's resources
+# (defenseclaw-hooks among them), so it has its own ServiceAccount, which
+# exists only while the hook runs.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: defenseclaw-chain-key
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-install,pre-upgrade") | nindent 4 }}
+automountServiceAccountToken: false
+---
+# Only while the chain-key hook runs: create the shared chain key Secret
+# when it is absent (create cannot be limited to one name; get can).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-hooks-chain-key
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-install,pre-upgrade") | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: [defenseclaw-chain-key]
+  verbs: [get]
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-hooks-chain-key
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-install,pre-upgrade") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-hooks-chain-key
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-chain-key
+  namespace: {{ .Release.Namespace }}
+---
+# Only while the pre-delete hook runs: stop the controller before the
+# policies are removed (GAP-0056). A hook resource, so no standing grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-hooks-uninstall
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-delete") | nindent 4 }}
+rules:
+- apiGroups: [apps]
+  resources: [deployments, deployments/scale]
+  resourceNames: [defenseclaw-controller]
+  verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-hooks-uninstall
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-delete") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-hooks-uninstall
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-hooks
+  namespace: {{ .Release.Namespace }}
 {{- if .Values.substrate.credentialProvider.grant }}
+{{- /* The grant in the Substrate namespace exists only while the bootstrap
+and pre-delete hooks run (GAP-0080): a standing Role would let any pod run
+as defenseclaw-hooks rewrite the credential provider policy. */}}
+{{- $when := ternary "post-install,post-upgrade,pre-delete" "pre-delete" (not (empty .Values.bootstrap.ownerTokenSecret)) }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -50,6 +136,8 @@ metadata:
   namespace: {{ .Values.substrate.namespace }}
   labels:
     {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" $when) | nindent 4 }}
 rules:
 - apiGroups: [""]
   resources: [configmaps]
@@ -67,6 +155,8 @@ metadata:
   namespace: {{ .Values.substrate.namespace }}
   labels:
     {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" $when) | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

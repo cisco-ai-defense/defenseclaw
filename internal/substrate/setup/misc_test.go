@@ -25,7 +25,7 @@ func TestNamespaceGrantRoundTrip(t *testing.T) {
 	if err != nil || len(none) != 0 || same != out {
 		t.Errorf("not idempotent: %v", none)
 	}
-	back, removed, err := RevokeNamespace(out, []string{"team-a", "eng"}, "dc-secrets")
+	back, removed, err := RevokeNamespaceExcept(out, nil, "dc-secrets")
 	if err != nil || len(removed) != 2 {
 		t.Fatalf("%v %v", removed, err)
 	}
