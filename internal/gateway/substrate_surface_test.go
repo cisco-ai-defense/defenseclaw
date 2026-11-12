@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -26,9 +27,42 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
+// testSubstrateActor is a whole, sealed actor, as the actor listener builds it from
+// a verified token.
+func testSubstrateActor() substrateActor {
+	return verifiedSubstrateActor("eng-web", "cc-1", "25a1da0f-1c9b-4ef7-8248-c276138c7f77",
+		"actor/eng-web/cc-1", "substrate:eng-web/25a1da0f-1c9b-4ef7-8248-c276138c7f77")
+}
+
+// malformedSubstrateActors are partly filled or inconsistent actors: none
+// may count as a verified actor.
+func malformedSubstrateActors() map[string]substrateActor {
+	out := map[string]substrateActor{}
+	for name, mutate := range map[string]func(*substrateActor){
+		"uid only":              func(a *substrateActor) { *a = substrateActor{UID: a.UID} },
+		"no key":                func(a *substrateActor) { a.RegistrationKey = "" },
+		"unsealed":              func(a *substrateActor) { a.verified = nil },
+		"openshell key":         func(a *substrateActor) { a.RegistrationKey = "reg-0123456789abcdef" },
+		"key of other atespace": func(a *substrateActor) { a.RegistrationKey = "substrate:eng-evil/" + a.UID },
+		"key of other uid":      func(a *substrateActor) { a.RegistrationKey = "substrate:eng-web/2e8d6260-7d31-4e56-b416-1222430fa637" },
+		"subject mismatch":      func(a *substrateActor) { a.Subject = "actor/eng-pay/cc-1" },
+		"worker subject":        func(a *substrateActor) { a.Subject = "worker-for-actor/eng-web/cc-1" },
+		"no name":               func(a *substrateActor) { a.Name, a.Subject = "", "actor/eng-web/" },
+		"slash in name":         func(a *substrateActor) { a.Name, a.Subject = "cc/1", "actor/eng-web/cc/1" },
+		"bad uid":               func(a *substrateActor) { a.UID, a.RegistrationKey = "not-a-uuid", "substrate:eng-web/not-a-uuid" },
+		"bad atespace": func(a *substrateActor) {
+			a.Atespace, a.Subject, a.RegistrationKey = "Eng", "actor/Eng/cc-1", "substrate:Eng/"+a.UID
+		},
+	} {
+		actor := testSubstrateActor()
+		mutate(&actor)
+		out[name] = actor
+	}
+	return out
+}
+
 func TestHookIngressSurface(t *testing.T) {
-	actor := substrateActor{Atespace: "eng-web", Name: "cc-1", UID: "25a1da0f-1c9b-4ef7-8248-c276138c7f77",
-		Subject: "actor/eng-web/cc-1", RegistrationKey: "substrate:eng-web/25a1da0f-1c9b-4ef7-8248-c276138c7f77"}
+	actor := testSubstrateActor()
 	sandbox := sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{ID: "b1", Connector: "claudecode"}, nil)
 	for name, tc := range map[string]struct {
 		ctx  context.Context
@@ -43,6 +77,11 @@ func TestHookIngressSurface(t *testing.T) {
 	} {
 		if got := hookIngressSurface(tc.ctx); got != tc.want {
 			t.Errorf("%s: surface %q, want %q", name, got, tc.want)
+		}
+	}
+	for name, bad := range malformedSubstrateActors() {
+		if got := hookIngressSurface(withSubstrateActor(context.Background(), bad)); got != hookIngressHost {
+			t.Errorf("malformed actor (%s): surface %q", name, got)
 		}
 	}
 	got, ok := substrateActorFrom(withSubstrateActor(context.Background(), actor))
@@ -70,9 +109,19 @@ func TestRequireSandboxNeverRefusesASubstrateActor(t *testing.T) {
 	if !sessionStart(peer) {
 		t.Fatal("host SessionStart not gated")
 	}
-	actor := withSubstrateActor(peer, substrateActor{Atespace: "eng-web", Name: "cc-1", UID: "25a1da0f-1c9b-4ef7-8248-c276138c7f77"})
+	actor := withSubstrateActor(peer, testSubstrateActor())
 	if got := api.requireSandboxDecision(actor, "claudecode", "UserPromptSubmit", "/p", ""); got.Outcome != "" {
 		t.Fatalf("substrate actor gated: %+v", got)
+	}
+	// A partly filled or inconsistent actor is a host run: still refused.
+	for name, bad := range malformedSubstrateActors() {
+		ctx := withSubstrateActor(peer, bad)
+		if got := api.requireSandboxDecision(ctx, "claudecode", "UserPromptSubmit", "/p", ""); got.Outcome != requireSandboxRefused {
+			t.Errorf("malformed actor (%s) not gated: %+v", name, got)
+		}
+		if !sessionStart(ctx) {
+			t.Errorf("malformed actor (%s) SessionStart not gated", name)
+		}
 	}
 	if sessionStart(actor) {
 		t.Fatal("substrate actor's SessionStart gated")
@@ -125,10 +174,22 @@ func TestLLMJudgeUsesItsIntentStore(t *testing.T) {
 		t.Fatalf("store calls: appends %v resets %v", store.appends, store.resets)
 	}
 
+	var logged bytes.Buffer
+	previous := defaultLogWriter
+	defaultLogWriter = &logged
+	t.Cleanup(func() { defaultLogWriter = previous })
 	store.fail = true
 	sample = judge.toolJudgeContextSample(ctx, "Bash", `{"command":"ls"}`)
 	if strings.Contains(sample, "SESSION_USER_INTENT") || strings.Contains(sample, "RECENT_TOOL_CALL") || !strings.Contains(sample, "ls") {
 		t.Fatalf("failed store sample:\n%s", sample)
+	}
+	// The failure is reported once per interval, not once per call.
+	_ = judge.toolJudgeContextSample(ctx, "Bash", `{"command":"pwd"}`)
+	if n := strings.Count(logged.String(), "intent store AppendToolCall failed"); n != 1 {
+		t.Fatalf("store failure reported %d times:\n%s", n, logged.String())
+	}
+	if !strings.Contains(logged.String(), "leader unreachable") {
+		t.Fatalf("warning lacks the cause: %s", logged.String())
 	}
 
 	// A judge built as a literal keeps its own process-local context.

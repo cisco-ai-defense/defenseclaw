@@ -10,6 +10,12 @@ import (
 )
 
 func TestInstructionStartupSurvivesNonterminalSessionError(t *testing.T) {
+	// The startup snapshot also lists the user's own instruction files
+	// (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md); a box that has them must not
+	// change what this test sees: the same-host home is os.UserHomeDir.
+	home := instructionIdentityTestRoot(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	project := t.TempDir()
 	dataDir := t.TempDir()
 	newGateway := func() *APIServer {

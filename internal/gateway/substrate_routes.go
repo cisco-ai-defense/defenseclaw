@@ -144,8 +144,12 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	}
 	mux.HandleFunc("/api/v1/substrate/asks/{id}", substrateNotYet)
 	mux.HandleFunc("/api/v1/substrate/secrets/{name}", substrateNotYet)
-	callout := a.substrateCalloutVerdict(st)
-	people := a.substrateAdminAuthenticate(st, mux)
+	// The admin listener keeps the browser CSRF gate: people reach it from
+	// the launcher and possibly from a browser session, so a state-changing
+	// request must carry X-DefenseClaw-Client (the actor listener does not
+	// apply it, GAP-0037).
+	callout := a.apiCSRFProtect(a.substrateCalloutVerdict(st))
+	people := a.apiCSRFProtect(a.substrateAdminAuthenticate(st, mux))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")

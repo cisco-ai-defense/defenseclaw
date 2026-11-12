@@ -166,6 +166,11 @@ status does not report bundle state that the caller could not read.
 A management agent that runs the `enterprise` commands itself
 (`management-agent.md`) gets the same codes:
 
+- `defenseclaw substrate status --json` and `verify --json` (a cluster, from
+  1.0.10): `0` with the document; `verify` exits `1` when a check failed
+  (`ok: false`); `2` invalid arguments; `75` when the cluster or the
+  Substrate API could not be reached, with no document. Retry `75` later.
+
 - `enterprise bundle verify` and `apply`: `0`; `1` / `1603` for a refusal or
   a failed apply; `75` / `1618` for `lifecycle_busy`; `2` / `1639` for invalid
   arguments, with `errors[0].code` `invalid_arguments` in the JSON document.

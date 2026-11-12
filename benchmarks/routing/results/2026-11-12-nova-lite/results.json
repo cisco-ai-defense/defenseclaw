@@ -1,0 +1,1007 @@
+{
+  "generated": "2026-11-12T20:33:14Z",
+  "eval_n": 555,
+  "adversarial_n": 358,
+  "prices_version": "placeholder-2026-11-12.1",
+  "prices_note": "placeholder prices (Haiku/Sonnet/Opus 5.5 list, 2026-11-03); replace with the S10 table",
+  "systemone_backend": "stand-in: Amazon Nova Lite via Bedrock (backend us.amazon.nova-lite-v1:0)",
+  "systemone_budget": "300ms",
+  "min_confidence": 0.6,
+  "quality_target": 0.95,
+  "guardrail_sensitive_recall": 0.45,
+  "guardrail_false_narrowing": 0,
+  "guardrail_rule_hits": {
+    "ENT-BULK-SSN": [
+      7,
+      0
+    ],
+    "ENT-CC-MC": [
+      1,
+      0
+    ],
+    "ENT-CC-VISA": [
+      2,
+      0
+    ],
+    "ENT-DOB-PATTERN": [
+      3,
+      0
+    ],
+    "ENT-EMAIL-BULK": [
+      14,
+      0
+    ],
+    "ENT-IBAN": [
+      1,
+      0
+    ],
+    "ENT-MEDICAL-RECORD": [
+      2,
+      0
+    ],
+    "ENT-PHONE-E164": [
+      2,
+      0
+    ],
+    "ENT-US-PHONE": [
+      6,
+      0
+    ],
+    "SEC-AWS-KEY": [
+      2,
+      0
+    ],
+    "SEC-AWS-SECRET": [
+      2,
+      0
+    ],
+    "SEC-BEARER": [
+      1,
+      0
+    ],
+    "SEC-CONNSTR": [
+      4,
+      0
+    ],
+    "SEC-JWT": [
+      2,
+      0
+    ],
+    "SEC-SLACK-WEBHOOK": [
+      1,
+      0
+    ],
+    "local-secret": [
+      7,
+      0
+    ]
+  },
+  "guardrail_narrow_prefixes": [
+    "SEC-",
+    "ENT-"
+  ],
+  "classifiers": {
+    "hybrid": {
+      "name": "hybrid",
+      "f1": {
+        "macro_f1": 0.5075418276491411,
+        "accuracy": 0.5135135135135135,
+        "per_class": {
+          "chat": {
+            "precision": 0.3252032520325203,
+            "recall": 0.9876543209876543,
+            "f1": 0.4892966360856269,
+            "support": 81
+          },
+          "cheap_fast": {
+            "precision": 0.8108108108108109,
+            "recall": 0.375,
+            "f1": 0.5128205128205128,
+            "support": 80
+          },
+          "coding": {
+            "precision": 0.4878048780487805,
+            "recall": 0.7692307692307693,
+            "f1": 0.5970149253731344,
+            "support": 78
+          },
+          "reasoning": {
+            "precision": 0.7111111111111111,
+            "recall": 0.41025641025641024,
+            "f1": 0.5203252032520325,
+            "support": 78
+          },
+          "sensitive": {
+            "precision": 0.9032258064516129,
+            "recall": 0.35,
+            "f1": 0.5045045045045045,
+            "support": 80
+          },
+          "summarize": {
+            "precision": 0.8043478260869565,
+            "recall": 0.4567901234567901,
+            "f1": 0.5826771653543307,
+            "support": 81
+          },
+          "tool_heavy": {
+            "precision": 0.6666666666666666,
+            "recall": 0.23376623376623376,
+            "f1": 0.34615384615384615,
+            "support": 77
+          }
+        },
+        "confusion": {
+          "chat": {
+            "chat": 80,
+            "coding": 1
+          },
+          "cheap_fast": {
+            "chat": 40,
+            "cheap_fast": 30,
+            "coding": 1,
+            "reasoning": 8,
+            "summarize": 1
+          },
+          "coding": {
+            "chat": 17,
+            "coding": 60,
+            "reasoning": 1
+          },
+          "reasoning": {
+            "chat": 33,
+            "cheap_fast": 2,
+            "coding": 6,
+            "reasoning": 32,
+            "sensitive": 1,
+            "tool_heavy": 4
+          },
+          "sensitive": {
+            "chat": 30,
+            "cheap_fast": 1,
+            "coding": 13,
+            "sensitive": 28,
+            "summarize": 7,
+            "tool_heavy": 1
+          },
+          "summarize": {
+            "chat": 9,
+            "cheap_fast": 2,
+            "coding": 23,
+            "reasoning": 4,
+            "sensitive": 2,
+            "summarize": 37,
+            "tool_heavy": 4
+          },
+          "tool_heavy": {
+            "chat": 37,
+            "cheap_fast": 2,
+            "coding": 19,
+            "summarize": 1,
+            "tool_heavy": 18
+          }
+        },
+        "errors": 0
+      },
+      "error_rate": 0,
+      "latency": {
+        "p50_ms": 300.291,
+        "p95_ms": 301.314,
+        "p99_ms": 302.324,
+        "max_ms": 304.751
+      },
+      "raw_quality": 0.7423423423423423,
+      "profiles": {
+        "default": {
+          "violations_before_filter": 52,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 35,
+          "denied": 0,
+          "quality": 0.772972972972973,
+          "filtered_by": {
+            "guardrail": 17
+          }
+        },
+        "local_only": {
+          "violations_before_filter": 524,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 0,
+          "denied": 0,
+          "quality": 0.33693693693693694,
+          "filtered_by": {
+            "guardrail": 17,
+            "profile": 507
+          }
+        },
+        "restricted": {
+          "violations_before_filter": 97,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 35,
+          "denied": 0,
+          "quality": 0.7657657657657657,
+          "filtered_by": {
+            "guardrail": 17,
+            "profile": 45
+          }
+        }
+      },
+      "cost_default_profile": {
+        "target": 0.95,
+        "target_quality": 0.8746846846846846,
+        "router": {
+          "quality": 0.772972972972973,
+          "cost_per_1k": 3.29548518018018
+        },
+        "reference": {
+          "quality": 0.9207207207207208,
+          "cost_per_1k": 10.051668468468472
+        },
+        "oracle_ceiling": {
+          "quality": 1,
+          "cost_per_1k": 9.47378918918919
+        },
+        "all_fast": {
+          "quality": 0.4774774774774775,
+          "cost_per_1k": 0.26315972972972995
+        },
+        "random_mix": {
+          "quality": 0.8746846846846846,
+          "cost_per_1k": 7.946540626812787,
+          "escalated": 0.688414634146341
+        },
+        "threshold_sweep": {
+          "quality": 0.9171171171171171,
+          "cost_per_1k": 7.500712882882888,
+          "threshold": 0.05,
+          "escalated": 0.44324324324324327
+        },
+        "best_cost_per_1k": 7.500712882882888,
+        "target_reached": true,
+        "saving_vs_reference": 0.2537842939794315
+      },
+      "flips_default_profile": {
+        "n": 358,
+        "flips": 103,
+        "flip_rate": 0.2877094972067039,
+        "upgrade_n": 220,
+        "upgrade_flips": 102,
+        "leak_n": 138,
+        "leak_flips": 1,
+        "leaks_total": 74,
+        "category_flips": 104,
+        "by_family": {
+          "category_claim": [
+            0,
+            40
+          ],
+          "category_claim_chat": [
+            0,
+            30
+          ],
+          "inject_cloud": [
+            0,
+            30
+          ],
+          "inject_route": [
+            0,
+            40
+          ],
+          "kw_prefix": [
+            34,
+            40
+          ],
+          "kw_suffix": [
+            34,
+            40
+          ],
+          "launder_claim": [
+            0,
+            30
+          ],
+          "system_note": [
+            0,
+            20
+          ],
+          "system_note_leak": [
+            0,
+            20
+          ],
+          "token_gadget": [
+            34,
+            40
+          ],
+          "zero_width": [
+            1,
+            28
+          ]
+        },
+        "error_pairs": 0
+      }
+    },
+    "hybrid@1s": {
+      "name": "hybrid@1s",
+      "f1": {
+        "macro_f1": 0.8650797795415291,
+        "accuracy": 0.8684684684684685,
+        "per_class": {
+          "chat": {
+            "precision": 0.7431192660550459,
+            "recall": 1,
+            "f1": 0.8526315789473684,
+            "support": 81
+          },
+          "cheap_fast": {
+            "precision": 0.958904109589041,
+            "recall": 0.875,
+            "f1": 0.9150326797385621,
+            "support": 80
+          },
+          "coding": {
+            "precision": 0.7425742574257426,
+            "recall": 0.9615384615384616,
+            "f1": 0.8379888268156426,
+            "support": 78
+          },
+          "reasoning": {
+            "precision": 0.9146341463414634,
+            "recall": 0.9615384615384616,
+            "f1": 0.9375000000000001,
+            "support": 78
+          },
+          "sensitive": {
+            "precision": 0.98,
+            "recall": 0.6125,
+            "f1": 0.7538461538461539,
+            "support": 80
+          },
+          "summarize": {
+            "precision": 0.9069767441860465,
+            "recall": 0.9629629629629629,
+            "f1": 0.934131736526946,
+            "support": 81
+          },
+          "tool_heavy": {
+            "precision": 1,
+            "recall": 0.7012987012987013,
+            "f1": 0.8244274809160306,
+            "support": 77
+          }
+        },
+        "confusion": {
+          "chat": {
+            "chat": 81
+          },
+          "cheap_fast": {
+            "chat": 9,
+            "cheap_fast": 70,
+            "reasoning": 1
+          },
+          "coding": {
+            "chat": 1,
+            "cheap_fast": 1,
+            "coding": 75,
+            "reasoning": 1
+          },
+          "reasoning": {
+            "chat": 2,
+            "cheap_fast": 1,
+            "reasoning": 75
+          },
+          "sensitive": {
+            "chat": 7,
+            "cheap_fast": 1,
+            "coding": 13,
+            "reasoning": 2,
+            "sensitive": 49,
+            "summarize": 8
+          },
+          "summarize": {
+            "chat": 2,
+            "reasoning": 1,
+            "summarize": 78
+          },
+          "tool_heavy": {
+            "chat": 7,
+            "coding": 13,
+            "reasoning": 2,
+            "sensitive": 1,
+            "tool_heavy": 54
+          }
+        },
+        "errors": 0
+      },
+      "error_rate": 0,
+      "latency": {
+        "p50_ms": 701.469,
+        "p95_ms": 901.641,
+        "p99_ms": 1000.131,
+        "max_ms": 1000.972
+      },
+      "raw_quality": 0.9099099099099099,
+      "profiles": {
+        "default": {
+          "violations_before_filter": 31,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 16,
+          "denied": 0,
+          "quality": 0.9369369369369369,
+          "filtered_by": {
+            "guardrail": 15
+          }
+        },
+        "local_only": {
+          "violations_before_filter": 505,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 0,
+          "denied": 0,
+          "quality": 0.33693693693693694,
+          "filtered_by": {
+            "guardrail": 15,
+            "profile": 490
+          }
+        },
+        "restricted": {
+          "violations_before_filter": 111,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 16,
+          "denied": 0,
+          "quality": 0.9207207207207208,
+          "filtered_by": {
+            "guardrail": 15,
+            "profile": 81
+          }
+        }
+      },
+      "cost_default_profile": {
+        "target": 0.95,
+        "target_quality": 0.8746846846846846,
+        "router": {
+          "quality": 0.9369369369369369,
+          "cost_per_1k": 5.4129740540540485
+        },
+        "reference": {
+          "quality": 0.9207207207207208,
+          "cost_per_1k": 10.051668468468472
+        },
+        "oracle_ceiling": {
+          "quality": 1,
+          "cost_per_1k": 9.47378918918919
+        },
+        "all_fast": {
+          "quality": 0.4774774774774775,
+          "cost_per_1k": 0.26315972972972995
+        },
+        "random_mix": {
+          "quality": 0.9369369369369369,
+          "cost_per_1k": 5.4129740540540485
+        },
+        "threshold_sweep": {
+          "quality": 0.9369369369369369,
+          "cost_per_1k": 5.4129740540540485
+        },
+        "best_cost_per_1k": 5.4129740540540485,
+        "target_reached": true,
+        "saving_vs_reference": 0.46148501902602057
+      },
+      "flips_default_profile": {
+        "n": 358,
+        "flips": 65,
+        "flip_rate": 0.18156424581005587,
+        "upgrade_n": 220,
+        "upgrade_flips": 48,
+        "leak_n": 138,
+        "leak_flips": 17,
+        "leaks_total": 36,
+        "category_flips": 108,
+        "by_family": {
+          "category_claim": [
+            7,
+            40
+          ],
+          "category_claim_chat": [
+            7,
+            30
+          ],
+          "inject_cloud": [
+            2,
+            30
+          ],
+          "inject_route": [
+            15,
+            40
+          ],
+          "kw_prefix": [
+            10,
+            40
+          ],
+          "kw_suffix": [
+            2,
+            40
+          ],
+          "launder_claim": [
+            7,
+            30
+          ],
+          "system_note": [
+            3,
+            20
+          ],
+          "system_note_leak": [
+            1,
+            20
+          ],
+          "token_gadget": [
+            11,
+            40
+          ],
+          "zero_width": [
+            0,
+            28
+          ]
+        },
+        "error_pairs": 0
+      }
+    },
+    "keyword": {
+      "name": "keyword",
+      "f1": {
+        "macro_f1": 0.5075418276491411,
+        "accuracy": 0.5135135135135135,
+        "per_class": {
+          "chat": {
+            "precision": 0.3252032520325203,
+            "recall": 0.9876543209876543,
+            "f1": 0.4892966360856269,
+            "support": 81
+          },
+          "cheap_fast": {
+            "precision": 0.8108108108108109,
+            "recall": 0.375,
+            "f1": 0.5128205128205128,
+            "support": 80
+          },
+          "coding": {
+            "precision": 0.4878048780487805,
+            "recall": 0.7692307692307693,
+            "f1": 0.5970149253731344,
+            "support": 78
+          },
+          "reasoning": {
+            "precision": 0.7111111111111111,
+            "recall": 0.41025641025641024,
+            "f1": 0.5203252032520325,
+            "support": 78
+          },
+          "sensitive": {
+            "precision": 0.9032258064516129,
+            "recall": 0.35,
+            "f1": 0.5045045045045045,
+            "support": 80
+          },
+          "summarize": {
+            "precision": 0.8043478260869565,
+            "recall": 0.4567901234567901,
+            "f1": 0.5826771653543307,
+            "support": 81
+          },
+          "tool_heavy": {
+            "precision": 0.6666666666666666,
+            "recall": 0.23376623376623376,
+            "f1": 0.34615384615384615,
+            "support": 77
+          }
+        },
+        "confusion": {
+          "chat": {
+            "chat": 80,
+            "coding": 1
+          },
+          "cheap_fast": {
+            "chat": 40,
+            "cheap_fast": 30,
+            "coding": 1,
+            "reasoning": 8,
+            "summarize": 1
+          },
+          "coding": {
+            "chat": 17,
+            "coding": 60,
+            "reasoning": 1
+          },
+          "reasoning": {
+            "chat": 33,
+            "cheap_fast": 2,
+            "coding": 6,
+            "reasoning": 32,
+            "sensitive": 1,
+            "tool_heavy": 4
+          },
+          "sensitive": {
+            "chat": 30,
+            "cheap_fast": 1,
+            "coding": 13,
+            "sensitive": 28,
+            "summarize": 7,
+            "tool_heavy": 1
+          },
+          "summarize": {
+            "chat": 9,
+            "cheap_fast": 2,
+            "coding": 23,
+            "reasoning": 4,
+            "sensitive": 2,
+            "summarize": 37,
+            "tool_heavy": 4
+          },
+          "tool_heavy": {
+            "chat": 37,
+            "cheap_fast": 2,
+            "coding": 19,
+            "summarize": 1,
+            "tool_heavy": 18
+          }
+        },
+        "errors": 0
+      },
+      "error_rate": 0,
+      "latency": {
+        "p50_ms": 0.291,
+        "p95_ms": 1.314,
+        "p99_ms": 2.324,
+        "max_ms": 4.751
+      },
+      "raw_quality": 0.7423423423423423,
+      "profiles": {
+        "default": {
+          "violations_before_filter": 52,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 35,
+          "denied": 0,
+          "quality": 0.772972972972973,
+          "filtered_by": {
+            "guardrail": 17
+          }
+        },
+        "local_only": {
+          "violations_before_filter": 524,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 0,
+          "denied": 0,
+          "quality": 0.33693693693693694,
+          "filtered_by": {
+            "guardrail": 17,
+            "profile": 507
+          }
+        },
+        "restricted": {
+          "violations_before_filter": 97,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 35,
+          "denied": 0,
+          "quality": 0.7657657657657657,
+          "filtered_by": {
+            "guardrail": 17,
+            "profile": 45
+          }
+        }
+      },
+      "cost_default_profile": {
+        "target": 0.95,
+        "target_quality": 0.8746846846846846,
+        "router": {
+          "quality": 0.772972972972973,
+          "cost_per_1k": 3.29548518018018
+        },
+        "reference": {
+          "quality": 0.9207207207207208,
+          "cost_per_1k": 10.051668468468472
+        },
+        "oracle_ceiling": {
+          "quality": 1,
+          "cost_per_1k": 9.47378918918919
+        },
+        "all_fast": {
+          "quality": 0.4774774774774775,
+          "cost_per_1k": 0.26315972972972995
+        },
+        "random_mix": {
+          "quality": 0.8746846846846846,
+          "cost_per_1k": 7.946540626812787,
+          "escalated": 0.688414634146341
+        },
+        "threshold_sweep": {
+          "quality": 0.9171171171171171,
+          "cost_per_1k": 7.500712882882888,
+          "threshold": 0.05,
+          "escalated": 0.44324324324324327
+        },
+        "best_cost_per_1k": 7.500712882882888,
+        "target_reached": true,
+        "saving_vs_reference": 0.2537842939794315
+      },
+      "flips_default_profile": {
+        "n": 358,
+        "flips": 103,
+        "flip_rate": 0.2877094972067039,
+        "upgrade_n": 220,
+        "upgrade_flips": 102,
+        "leak_n": 138,
+        "leak_flips": 1,
+        "leaks_total": 74,
+        "category_flips": 104,
+        "by_family": {
+          "category_claim": [
+            0,
+            40
+          ],
+          "category_claim_chat": [
+            0,
+            30
+          ],
+          "inject_cloud": [
+            0,
+            30
+          ],
+          "inject_route": [
+            0,
+            40
+          ],
+          "kw_prefix": [
+            34,
+            40
+          ],
+          "kw_suffix": [
+            34,
+            40
+          ],
+          "launder_claim": [
+            0,
+            30
+          ],
+          "system_note": [
+            0,
+            20
+          ],
+          "system_note_leak": [
+            0,
+            20
+          ],
+          "token_gadget": [
+            34,
+            40
+          ],
+          "zero_width": [
+            1,
+            28
+          ]
+        },
+        "error_pairs": 0
+      }
+    },
+    "systemone": {
+      "name": "systemone",
+      "f1": {
+        "macro_f1": 0.889028260167936,
+        "accuracy": 0.8828828828828829,
+        "per_class": {
+          "chat": {
+            "precision": 0.8901098901098901,
+            "recall": 1,
+            "f1": 0.9418604651162791,
+            "support": 81
+          },
+          "cheap_fast": {
+            "precision": 0.972972972972973,
+            "recall": 0.9,
+            "f1": 0.935064935064935,
+            "support": 80
+          },
+          "coding": {
+            "precision": 0.76,
+            "recall": 0.9743589743589743,
+            "f1": 0.853932584269663,
+            "support": 78
+          },
+          "reasoning": {
+            "precision": 0.9259259259259259,
+            "recall": 0.9615384615384616,
+            "f1": 0.9433962264150944,
+            "support": 78
+          },
+          "sensitive": {
+            "precision": 0.9787234042553191,
+            "recall": 0.575,
+            "f1": 0.7244094488188976,
+            "support": 80
+          },
+          "summarize": {
+            "precision": 0.9080459770114943,
+            "recall": 0.9753086419753086,
+            "f1": 0.9404761904761905,
+            "support": 81
+          },
+          "tool_heavy": {
+            "precision": 1,
+            "recall": 0.7922077922077922,
+            "f1": 0.8840579710144928,
+            "support": 77
+          }
+        },
+        "confusion": {
+          "chat": {
+            "chat": 81
+          },
+          "cheap_fast": {
+            "chat": 6,
+            "cheap_fast": 72,
+            "error": 1,
+            "reasoning": 1
+          },
+          "coding": {
+            "cheap_fast": 1,
+            "coding": 76,
+            "reasoning": 1
+          },
+          "reasoning": {
+            "error": 3,
+            "reasoning": 75
+          },
+          "sensitive": {
+            "chat": 2,
+            "cheap_fast": 1,
+            "coding": 11,
+            "error": 10,
+            "reasoning": 2,
+            "sensitive": 46,
+            "summarize": 8
+          },
+          "summarize": {
+            "chat": 2,
+            "summarize": 79
+          },
+          "tool_heavy": {
+            "coding": 13,
+            "reasoning": 2,
+            "sensitive": 1,
+            "tool_heavy": 61
+          }
+        },
+        "errors": 14
+      },
+      "error_rate": 0.025225225225225224,
+      "errors_by_code": {
+        "decode": 14
+      },
+      "latency": {
+        "p50_ms": 701.076,
+        "p95_ms": 901.569,
+        "p99_ms": 1096.376,
+        "max_ms": 4169.788
+      },
+      "raw_quality": 0.9171171171171171,
+      "profiles": {
+        "default": {
+          "violations_before_filter": 34,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 17,
+          "denied": 0,
+          "quality": 0.954954954954955,
+          "filtered_by": {
+            "fallback": 9,
+            "guardrail": 17
+          }
+        },
+        "local_only": {
+          "violations_before_filter": 508,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 0,
+          "denied": 0,
+          "quality": 0.33693693693693694,
+          "filtered_by": {
+            "guardrail": 17,
+            "profile": 491
+          }
+        },
+        "restricted": {
+          "violations_before_filter": 117,
+          "violations_after_filter": 0,
+          "sensitive_leaks_after_filter": 17,
+          "denied": 0,
+          "quality": 0.9387387387387387,
+          "filtered_by": {
+            "guardrail": 17,
+            "profile": 89
+          }
+        }
+      },
+      "cost_default_profile": {
+        "target": 0.95,
+        "target_quality": 0.8746846846846846,
+        "router": {
+          "quality": 0.954954954954955,
+          "cost_per_1k": 5.706847432432429
+        },
+        "reference": {
+          "quality": 0.9207207207207208,
+          "cost_per_1k": 10.051668468468472
+        },
+        "oracle_ceiling": {
+          "quality": 1,
+          "cost_per_1k": 9.47378918918919
+        },
+        "all_fast": {
+          "quality": 0.4774774774774775,
+          "cost_per_1k": 0.26315972972972995
+        },
+        "random_mix": {
+          "quality": 0.954954954954955,
+          "cost_per_1k": 5.706847432432429
+        },
+        "threshold_sweep": {
+          "quality": 0.954954954954955,
+          "cost_per_1k": 5.706847432432429
+        },
+        "best_cost_per_1k": 5.706847432432429,
+        "target_reached": true,
+        "saving_vs_reference": 0.4322487405613811
+      },
+      "flips_default_profile": {
+        "n": 320,
+        "flips": 57,
+        "flip_rate": 0.178125,
+        "upgrade_n": 210,
+        "upgrade_flips": 43,
+        "leak_n": 110,
+        "leak_flips": 14,
+        "leaks_total": 23,
+        "category_flips": 79,
+        "by_family": {
+          "category_claim": [
+            8,
+            39
+          ],
+          "category_claim_chat": [
+            7,
+            23
+          ],
+          "inject_cloud": [
+            0,
+            22
+          ],
+          "inject_route": [
+            16,
+            35
+          ],
+          "kw_prefix": [
+            5,
+            39
+          ],
+          "kw_suffix": [
+            1,
+            38
+          ],
+          "launder_claim": [
+            5,
+            23
+          ],
+          "system_note": [
+            3,
+            20
+          ],
+          "system_note_leak": [
+            1,
+            18
+          ],
+          "token_gadget": [
+            10,
+            39
+          ],
+          "zero_width": [
+            1,
+            24
+          ]
+        },
+        "error_pairs": 38
+      }
+    }
+  }
+}

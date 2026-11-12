@@ -1181,7 +1181,9 @@ func (set *guardrailProfileSet) decision(name, reason, group, source string) pro
 }
 
 func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *subjectGroups, verified bool, connectorName, agent string) (reason, group string, ok bool) {
-	if m.Empty() {
+	// A substrate selector names actors only; a host subject has no
+	// atespace, so the AND of the keys never holds for it.
+	if m.Empty() || !m.Substrate.Empty() {
 		return "", "", false
 	}
 	if (len(m.Users) > 0 || len(m.Groups) > 0 || len(m.Agents) > 0) && !verified {

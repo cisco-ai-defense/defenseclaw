@@ -14,12 +14,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build substrate_linkcheck
+//go:build !darwin && !linux && !windows
 
-package main
+package auth
 
-// Links the Substrate control API stubs into the gateway for
-// TestGatewayStartsWithSubstrateAndOpenShellAPIs (GAP-0014) until the
-// substrate-controller subcommand links them for real; that change removes
-// this file and the tag.
-import _ "github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+func osStore() (Store, error) {
+	return nil, noKeychain("no OS keychain is supported on this system")
+}

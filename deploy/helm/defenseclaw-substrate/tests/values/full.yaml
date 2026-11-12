@@ -1,0 +1,49 @@
+# Every optional part: digest pin, admin ingress, alerts, local collector,
+# metrics peers, store class.
+image:
+  repository: registry.example.com/defenseclaw-gateway
+  digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+adminIngress:
+  enabled: true
+  className: nginx
+  host: defenseclaw.example.com
+  tlsSecretName: defenseclaw-admin-tls
+metrics:
+  prometheusRule:
+    enabled: true
+    labels: {release: kube-prometheus}
+observability:
+  local:
+    enabled: true
+networkPolicy:
+  metricsFrom:
+  - namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: monitoring
+leader:
+  store:
+    storageClassName: gp3
+    size: 20Gi
+    keepOnUninstall: false
+config:
+  substrate:
+    identity:
+      issuer: https://idp.cluster-a.example
+    launcher_atespaces:
+      engineering: [eng-web]
+      data: [data-ml]
+    egress:
+      allow: [github.com, pypi.org]
+    extproc:
+      mcp_hosts: ["mcp.example.com=tickets"]
+    secrets:
+    - name: github-push
+      source: ate-secret://k8s.io/default/defenseclaw-actor-secrets/github-app/token
+      inject: {hosts: [github.com, api.github.com], header: Authorization, prefix: "Bearer ", placeholder: DC_SECRET_GITHUB}
+      scope: shared
+      profiles: [engineering]
+callout:
+  judge:
+    tokenSecret: defenseclaw-callout-judge
+  actorSecrets:
+    secretName: defenseclaw-actor-secrets-dlp

@@ -260,6 +260,23 @@ func TestInternalServicesUnreachable(t *testing.T) {
 	}
 }
 
+func TestInternalServicesUnreachableInBothSpellings(t *testing.T) {
+	s := Settings{ActorService: "defenseclaw-actor.defenseclaw-system.svc.cluster.local",
+		AdminService: "defenseclaw-admin.defenseclaw-system.svc.cluster.local",
+		AllowHosts: []string{"defenseclaw-admin.defenseclaw-system.svc", "defenseclaw-actor.defenseclaw-system.svc",
+			"*.defenseclaw-system.svc", "*.defenseclaw-system.svc.cluster.local", "other.team.svc.cluster.local"}}
+	r, err := EgressPolicy(Input{Settings: s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(r.Policy.GetRules()); n != 2 || r.Policy.GetRules()[1].GetHttps().GetHostnames()[0] != "other.team.svc.cluster.local" {
+		t.Fatalf("rules = %v", r.Policy.GetRules())
+	}
+	if len(r.Dropped) != 4 {
+		t.Fatalf("dropped = %+v", r.Dropped)
+	}
+}
+
 func TestActorServiceRule(t *testing.T) {
 	r, err := EgressPolicy(Input{Settings: baseSettings()})
 	if err != nil {

@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "command": "status",
+  "management_contract": 1,
+  "product_version": "1.0.10",
+  "generated_at": "2026-11-13T15:04:05Z",
+  "cluster": {
+    "cluster_name": "dc-substrate-e1",
+    "namespace": "defenseclaw-system",
+    "issuer_sha256": "4b0f3f5c0a8a5b1e8d2c2f6b0d7f7d8a9e0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a",
+    "issuer_default": true,
+    "substrate_version": "1.0.0",
+    "substrate_version_supported": true,
+    "supported_versions": ">=1.0.0 <1.1.0"
+  },
+  "health": {
+    "state": "healthy",
+    "gateway": {
+      "desired": 2,
+      "ready": 2
+    },
+    "leader": {
+      "ready": true,
+      "lease_held": true,
+      "store_schema": 1
+    },
+    "controller": {
+      "desired": 2,
+      "ready": 2,
+      "lag_seconds": 1
+    },
+    "callout": {
+      "desired": 2,
+      "ready": 2,
+      "registered": true,
+      "body_mode": "headers_only"
+    }
+  },
+  "atespaces": [
+    {
+      "atespace": "eng-web",
+      "launcher": true,
+      "actors": 3,
+      "policies": 3,
+      "drift": 0,
+      "conflicts": 0,
+      "unattested": 0
+    }
+  ],
+  "inventory": {
+    "actors": 3,
+    "running": 1,
+    "suspended": 2,
+    "templates": 2,
+    "unattested_templates": 0,
+    "foreign_actors": 0
+  },
+  "activity": {
+    "window_seconds": 3600,
+    "hook_decisions": 120,
+    "blocked": 2,
+    "model_requests": 40,
+    "cost_micro_usd": 1250000
+  },
+  "batches": [
+    {
+      "batch_id": "b-20261113-1",
+      "tasks": 50,
+      "running": 10,
+      "succeeded": 38,
+      "failed": 2
+    }
+  ],
+  "checks": [
+    {
+      "id": "substrate_version",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "issuer_unique",
+      "status": "warn",
+      "message": "the default issuer is fine for one cluster; set a unique one before adding another",
+      "edge_case": "E13"
+    },
+    {
+      "id": "snapshot_bucket",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "openfga_grants",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "callout_registered",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "ingress_clients",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "actor_service_routes",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "api_access_label",
+      "status": "pass",
+      "message": "ok"
+    }
+  ]
+}
