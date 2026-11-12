@@ -34,6 +34,7 @@ const (
 	CategoryActorNotLive    = "actor_not_live"
 	CategoryActorUnverified = "actor_unverified"
 	CategoryURLRule         = "url_rule"
+	CategoryPathAmbiguous   = "path_ambiguous"
 	CategoryChainEgress     = "chain_egress"
 	CategoryAskDenied       = "ask_denied"
 	CategoryAskPending      = "ask_pending"
@@ -273,13 +274,23 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	}
 
 	askRule := ""
-	reqPath := req.Path
-	if i := strings.IndexAny(reqPath, "?#"); i >= 0 {
-		reqPath = reqPath[:i]
-	}
+	// URL rules match the canonical path (GAP-0046): an equivalent
+	// spelling (/./admin, /%61dmin, //admin) matches like the plain one, and
+	// a path an origin could read another way is refused where a path rule
+	// applies.
+	reqPath, pathErr := canonicalPath(pathOnly(req.Path))
 	for _, r := range pol.urlRules {
-		if !r.matches(req.Host, req.Method, reqPath) {
+		if !r.appliesTo(req.Host, req.Method) {
 			continue
+		}
+		if r.pathPrefix != "" {
+			if pathErr != nil {
+				return deny(v, CategoryPathAmbiguous, sourceProfile, r.name,
+					"The request path uses an ambiguous encoding (an encoded slash, backslash, percent sign or control character), so DefenseClaw can't check it against this profile's path rules for "+req.Host+".")
+			}
+			if !pathHasPrefix(reqPath, r.pathPrefix) {
+				continue
+			}
 		}
 		switch r.action {
 		case "deny":

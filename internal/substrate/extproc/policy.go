@@ -45,14 +45,13 @@ type urlRule struct {
 	action     string
 }
 
-func (r urlRule) matches(host, method, reqPath string) bool {
+// appliesTo reports whether the rule covers the host and method; its path
+// prefix is matched separately, on the canonical path.
+func (r urlRule) appliesTo(host, method string) bool {
 	if _, ok := r.hosts.match(host); !ok {
 		return false
 	}
-	if len(r.methods) > 0 && !r.methods[method] {
-		return false
-	}
-	return r.pathPrefix == "" || strings.HasPrefix(reqPath, r.pathPrefix)
+	return len(r.methods) == 0 || r.methods[method]
 }
 
 // compilePolicy builds a Policy. The Decider runs in open mode: the
@@ -87,7 +86,13 @@ func compilePolicy(cfg *Config, p ProfileConfig, blocklists []*egress.Feed) (*Po
 		if err != nil {
 			return nil, err
 		}
-		ur := urlRule{name: r.Name, hosts: hm, pathPrefix: r.PathPrefix, action: r.Action}
+		prefix := r.PathPrefix
+		if prefix != "" {
+			if prefix, err = canonicalPath(prefix); err != nil {
+				return nil, fmt.Errorf("profile %s: url rule %q: path_prefix %q is ambiguous", p.Name, r.Name, r.PathPrefix)
+			}
+		}
+		ur := urlRule{name: r.Name, hosts: hm, pathPrefix: prefix, action: r.Action}
 		if len(r.Methods) > 0 {
 			ur.methods = map[string]bool{}
 			for _, m := range r.Methods {
