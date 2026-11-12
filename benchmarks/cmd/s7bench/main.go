@@ -125,6 +125,27 @@ func mapTool(ev event) (string, json.RawMessage, string) {
 		b, _ := json.Marshal(in)
 		return "Bash", b, "shell"
 	}
+	if lower == "text_editor" || lower == "str_replace_based_edit_tool" || lower == "str_replace_editor" {
+		// The Anthropic text-editor tool: create is a file write, str_replace an edit.
+		p := str(args, "path", "file_path")
+		switch str(args, "command") {
+		case "create":
+			if p != "" {
+				b, _ := json.Marshal(map[string]any{"file_path": p, "content": str(args, "file_text", "content")})
+				return "Write", b, "write"
+			}
+		case "str_replace", "insert":
+			if p != "" {
+				b, _ := json.Marshal(map[string]any{"file_path": p, "old_string": str(args, "old_str"), "new_string": str(args, "new_str")})
+				return "Edit", b, "edit"
+			}
+		case "view":
+			if p != "" {
+				b, _ := json.Marshal(map[string]any{"file_path": p})
+				return "Read", b, "read"
+			}
+		}
+	}
 	switch lower {
 	case "write", "write_file", "create_file", "file_write", "writefile", "save_file":
 		p := str(args, "file_path", "path", "filename", "file", "target")
