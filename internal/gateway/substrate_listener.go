@@ -491,9 +491,7 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 			writeSubstrateRefusal(w, http.StatusForbidden, "actor_not_registered")
 			return
 		}
-		ctx := withSubstrateActor(r.Context(), substrateActor{
-			Atespace: actor.Atespace, Name: actor.Name, UID: actor.UID, Subject: actor.Subject, RegistrationKey: key,
-		})
+		ctx := withSubstrateActor(r.Context(), verifiedSubstrateActor(actor.Atespace, actor.Name, actor.UID, actor.Subject, key))
 		ctx = context.WithValue(ctx, substrateRegistrationKey{}, reg)
 		w.Header().Set(substrateModeHeader, substrateMode(reg))
 		w.Header().Set(substrateFailModeHeader, substrateFailMode(st.cfg, reg))

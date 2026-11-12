@@ -27,8 +27,8 @@ import (
 )
 
 func TestHookIngressSurface(t *testing.T) {
-	actor := substrateActor{Atespace: "eng-web", Name: "cc-1", UID: "25a1da0f-1c9b-4ef7-8248-c276138c7f77",
-		Subject: "actor/eng-web/cc-1", RegistrationKey: "substrate:eng-web/25a1da0f-1c9b-4ef7-8248-c276138c7f77"}
+	actor := verifiedSubstrateActor("eng-web", "cc-1", "25a1da0f-1c9b-4ef7-8248-c276138c7f77",
+		"actor/eng-web/cc-1", "substrate:eng-web/25a1da0f-1c9b-4ef7-8248-c276138c7f77")
 	sandbox := sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{ID: "b1", Connector: "claudecode"}, nil)
 	for name, tc := range map[string]struct {
 		ctx  context.Context
@@ -70,7 +70,33 @@ func TestRequireSandboxNeverRefusesASubstrateActor(t *testing.T) {
 	if !sessionStart(peer) {
 		t.Fatal("host SessionStart not gated")
 	}
-	actor := withSubstrateActor(peer, substrateActor{Atespace: "eng-web", Name: "cc-1", UID: "25a1da0f-1c9b-4ef7-8248-c276138c7f77"})
+	// A forged actor context (a substrateActor not built by the verifier
+	// path, or one whose key, UID or subject disagree) is a host run.
+	const uid = "25a1da0f-1c9b-4ef7-8248-c276138c7f77"
+	good := verifiedSubstrateActor("eng-web", "cc-1", uid, "actor/eng-web/cc-1", "substrate:eng-web/"+uid)
+	forged := map[string]substrateActor{
+		"unsealed":       {Atespace: "eng-web", Name: "cc-1", UID: uid, Subject: "actor/eng-web/cc-1", RegistrationKey: "substrate:eng-web/" + uid},
+		"uid only":       {Atespace: "eng-web", Name: "cc-1", UID: uid},
+		"no key":         verifiedSubstrateActor("eng-web", "cc-1", uid, "actor/eng-web/cc-1", ""),
+		"other atespace": verifiedSubstrateActor("eng-web", "cc-1", uid, "actor/eng-web/cc-1", "substrate:eng-evil/"+uid),
+		"other uid":      verifiedSubstrateActor("eng-web", "cc-1", uid, "actor/eng-web/cc-1", "substrate:eng-web/35a1da0f-1c9b-4ef7-8248-c276138c7f77"),
+		"openshell key":  verifiedSubstrateActor("eng-web", "cc-1", uid, "actor/eng-web/cc-1", "reg-0123456789abcdef"),
+		"bad subject":    verifiedSubstrateActor("eng-web", "cc-1", uid, "worker-for-actor/eng-web/cc-1", "substrate:eng-web/"+uid),
+		"not a uuid":     verifiedSubstrateActor("eng-web", "cc-1", "x", "actor/eng-web/cc-1", "substrate:eng-web/x"),
+	}
+	for name, f := range forged {
+		ctx := withSubstrateActor(peer, f)
+		if isSubstrateActorRequest(ctx) {
+			t.Errorf("%s: forged actor accepted", name)
+		}
+		if got := api.requireSandboxDecision(ctx, "claudecode", "UserPromptSubmit", "/p", ""); got.Outcome != requireSandboxRefused {
+			t.Errorf("%s: forged actor not refused as a host run: %+v", name, got)
+		}
+		if !sessionStart(ctx) {
+			t.Errorf("%s: forged actor's SessionStart not gated", name)
+		}
+	}
+	actor := withSubstrateActor(peer, good)
 	if got := api.requireSandboxDecision(actor, "claudecode", "UserPromptSubmit", "/p", ""); got.Outcome != "" {
 		t.Fatalf("substrate actor gated: %+v", got)
 	}

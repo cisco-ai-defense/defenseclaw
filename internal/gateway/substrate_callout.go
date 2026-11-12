@@ -212,8 +212,8 @@ func (a *APIServer) substrateEvaluationContext(ctx context.Context, reg registry
 		Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy}, RegistrationID: reg.Key,
 	}
 	ctx = sandboxauth.WithRequest(ctx, binding, nil)
-	ctx = withSubstrateActor(ctx, substrateActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID,
-		Subject: identity.ActorSubjectPrefix + reg.Atespace + "/" + reg.Name, RegistrationKey: reg.Key})
+	ctx = withSubstrateActor(ctx, verifiedSubstrateActor(reg.Atespace, reg.Name, reg.UID,
+		identity.ActorSubjectPrefix+reg.Atespace+"/"+reg.Name, reg.Key))
 	ctx = context.WithValue(ctx, substrateRegistrationKey{}, reg)
 	ctx = withAuthenticatedHookConnector(ctx, binding.Connector)
 	ctx = withProfilePath(ctx, profilePathHook)
