@@ -376,11 +376,21 @@ func (p *parser) parseHashValue() Expr {
 	if p.at(TokLBrace) {
 		return p.parseScriptBlock()
 	}
-	em := p.exprMode
-	p.exprMode = true
-	e := p.parseExpression()
-	p.exprMode = em
-	return e
+	// A hashtable value is a pipeline, which may be a command
+	// (@{ a = Remove-Item x }); parse it as a statement and keep it walkable.
+	start := p.cur().Start
+	st := p.parsePipelineChainOrAssignment(stopBrace)
+	switch v := st.(type) {
+	case *ExprStatement:
+		return v.Expr
+	case *Pipeline:
+		if v.ChainRHS == nil && len(v.Redirs) == 0 && len(v.Elements) == 1 {
+			if es, ok := v.Elements[0].(*ExprStatement); ok {
+				return es.Expr
+			}
+		}
+	}
+	return &SubExpr{span: span{start, p.prevEnd()}, Statements: []Statement{st}}
 }
 
 func (p *parser) skipToHashBoundary() {

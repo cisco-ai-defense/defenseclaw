@@ -381,7 +381,8 @@ func (p *parser) parseRedirection() *Redirection {
 // next newline (PowerShell treats the rest of the line as literal args).
 func (p *parser) consumeStopParsingTail() string {
 	var b strings.Builder
-	for !p.at(TokNewline) && !p.at(TokEOF) && !p.at(TokSemi) {
+	for !p.at(TokNewline) && !p.at(TokEOF) && !p.at(TokSemi) &&
+		!p.at(TokPipe) && !p.at(TokPipePipe) && !p.at(TokAmpAmp) {
 		if b.Len() > 0 {
 			b.WriteByte(' ')
 		}

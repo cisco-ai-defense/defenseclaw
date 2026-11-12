@@ -380,7 +380,20 @@ func (l *lexer) lexDash() {
 			l.i++
 		}
 		vs := l.i
-		for l.i < len(l.runes) && l.cur() != '\n' {
+		var q rune
+		for l.i < len(l.runes) {
+			c := l.cur()
+			if c == '\n' {
+				break
+			}
+			if q == 0 && c == '|' { // an unquoted pipe ends the verbatim tail
+				break
+			}
+			if q == 0 && (c == '\'' || c == '"') {
+				q = c
+			} else if q != 0 && c == q {
+				q = 0
+			}
 			l.i++
 		}
 		if l.i > vs {
