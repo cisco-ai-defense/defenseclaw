@@ -18,5 +18,5 @@ LABEL org.opencontainers.image.title="defenseclaw-gateway" \
 COPY LICENSE NOTICE THIRD_PARTY_LICENSES.txt /usr/share/doc/defenseclaw/
 COPY --chmod=0755 linux-${TARGETARCH}/defenseclaw-gateway /usr/local/bin/defenseclaw-gateway
 USER 65532:65532
-ENV DEFENSECLAW_HOME=/tmp/defenseclaw
+ENV DEFENSECLAW_HOME=/var/lib/defenseclaw/run/home
 ENTRYPOINT ["/usr/local/bin/defenseclaw-gateway"]
