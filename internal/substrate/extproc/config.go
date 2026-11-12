@@ -153,8 +153,9 @@ type SecretBinding struct {
 // ProfileConfig is the egress part of a profile.
 type ProfileConfig struct {
 	Name string `yaml:"name"`
-	// Atespaces are path.Match globs (eng-*) of the atespaces the profile
-	// applies to; the first matching profile wins.
+	// Atespaces are names or path.Match globs (eng-*) of the atespaces the
+	// profile applies to. An exact name wins over a glob; an atespace two
+	// profiles match equally is refused per the failure mode.
 	Atespaces []string     `yaml:"atespaces"`
 	Egress    EgressLists  `yaml:"egress"`
 	URLRules  []URLRuleCfg `yaml:"url_rules"`
