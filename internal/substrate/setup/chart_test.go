@@ -31,7 +31,7 @@ const chartKubeVersion = "1.34.0"
 
 // chartCases are the golden renders: values files under
 // deploy/helm/defenseclaw-substrate/tests/values (empty for the defaults).
-var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress"}
+var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles"}
 
 func helmBinary(t *testing.T) string {
 	t.Helper()

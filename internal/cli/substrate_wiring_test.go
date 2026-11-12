@@ -74,7 +74,7 @@ func TestCreatePathEnsurePolicy(t *testing.T) {
 	fake := ateapifake.New()
 	fake.PutTemplate(&ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "cc"}})
 	fs, _ := registry.OpenFileStore(t.TempDir())
-	ctl, err := newSubstrateController(cfg, fake, &controller.LeaderRegistry{Store: fs}, nil, nil, os.Stderr, false, nil, "")
+	ctl, err := newSubstrateController(cfg, fake, &controller.LeaderRegistry{Store: fs}, nil, nil, &controller.JSONSink{W: os.Stderr}, false, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

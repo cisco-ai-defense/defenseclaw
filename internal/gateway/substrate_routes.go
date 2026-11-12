@@ -154,6 +154,9 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("PUT /api/v1/substrate/secrets/{name}", a.substrateSetSecret(st))
 	mux.HandleFunc("DELETE /api/v1/substrate/secrets/{name}", a.substrateRemoveSecret(st))
 	mux.HandleFunc("POST /api/v1/substrate/secrets/{name}/test", a.substrateTestSecret(st))
+	mux.HandleFunc("POST /api/v1/substrate/bundle", a.substrateBundleApply(st))
+	mux.HandleFunc("POST /api/v1/substrate/bundle/rollback", a.substrateBundleRollback(st))
+	mux.HandleFunc("GET /api/v1/substrate/bundle/status", a.substrateBundleStatus(st))
 	// The admin listener keeps the browser CSRF gate: people reach it from
 	// the launcher and possibly from a browser session, so a state-changing
 	// request must carry X-DefenseClaw-Client (the actor listener does not

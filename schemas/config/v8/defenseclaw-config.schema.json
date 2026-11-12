@@ -6894,6 +6894,31 @@
         },
         "admin": {
           "$ref": "#/$defs/openShellAdmin"
+        },
+        "bundles": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "anchors_file": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "default": "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json"
+            },
+            "inbox": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253,
+              "default": "defenseclaw-bundle-inbox"
+            },
+            "refresh_interval": {
+              "$ref": "#/$defs/duration"
+            }
+          }
         }
       }
     }

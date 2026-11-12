@@ -567,6 +567,25 @@
     "homeSizeLimit": {
       "type": "string",
       "pattern": "^[0-9]+(Mi|Gi)$"
+    },
+    "bundles": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "anchorsSecret": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "inbox": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        }
+      }
     }
   }
 }

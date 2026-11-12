@@ -42,7 +42,7 @@ func newSubstrateBundleCmd() *cobra.Command {
 with "bundle apply" and read which bundles are in force with "bundle status". The cluster checks the signature; this
 command only sends the file as it is.`,
 	}
-	cmd.AddCommand(newSubstrateBundleApplyCmd(), newSubstrateBundleStatusCmd())
+	cmd.AddCommand(newSubstrateBundleApplyCmd(), newSubstrateBundleStatusCmd(), newSubstrateBundleRollbackCmd())
 	return cmd
 }
 
@@ -51,12 +51,13 @@ func newSubstrateBundleApplyCmd() *cobra.Command {
 		out       substrateOutput
 		com       substrateCommon
 		atespaces []string
+		stage     string
 		dryRun    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "apply <file>",
 		Short: "Send a signed policy bundle to the cluster",
-		Long: `Sends the bundle file to the cluster as it is (up to 32 MiB). With --atespaces the bundle applies to those groups
+		Long: `Sends the bundle file to the cluster as it is (up to 48 KiB). With --atespaces the bundle applies to those groups
 of agents only; without it, to the whole cluster. With --dry-run it only checks that the file can be read and is not
 empty, and sends nothing. Needs an administrator sign-in.`,
 		Example: "defenseclaw substrate bundle apply policy.bundle\ndefenseclaw substrate bundle apply policy.bundle --atespaces team-a,team-b --dry-run",
@@ -87,7 +88,7 @@ empty, and sends nothing. Needs an administrator sign-in.`,
 			}
 			ctx, stop := substrateContext(cmd)
 			defer stop()
-			res, err := s.Client.ApplyBundle(ctx, name, f, atespaces)
+			res, err := s.Client.ApplyBundle(ctx, name, f, stage, atespaces)
 			if err != nil {
 				return substrateBundleFail(err)
 			}
@@ -105,6 +106,7 @@ empty, and sends nothing. Needs an administrator sign-in.`,
 	out.add(cmd)
 	com.add(cmd)
 	cmd.Flags().StringSliceVar(&atespaces, "atespaces", nil, "apply to these groups of agents only (comma separated)")
+	cmd.Flags().StringVar(&stage, "stage", "", "rollout stage name (default: all without --atespaces, one stage per atespace set with it)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "check the file and send nothing")
 	return cmd
 }

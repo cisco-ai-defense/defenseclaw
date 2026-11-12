@@ -75,7 +75,7 @@
     "path": "substrate bundle apply",
     "use": "apply \u003cfile\u003e",
     "short": "Send a signed policy bundle to the cluster",
-    "long": "Sends the bundle file to the cluster as it is (up to 32 MiB). With --atespaces the bundle applies to those groups\nof agents only; without it, to the whole cluster. With --dry-run it only checks that the file can be read and is not\nempty, and sends nothing. Needs an administrator sign-in.",
+    "long": "Sends the bundle file to the cluster as it is (up to 48 KiB). With --atespaces the bundle applies to those groups\nof agents only; without it, to the whole cluster. With --dry-run it only checks that the file can be read and is not\nempty, and sends nothing. Needs an administrator sign-in.",
     "example": "defenseclaw substrate bundle apply policy.bundle\ndefenseclaw substrate bundle apply policy.bundle --atespaces team-a,team-b --dry-run",
     "args": [
       {
@@ -115,6 +115,45 @@
         "default": "text",
         "usage": "output format: text or json",
         "metavar": "FORMAT"
+      },
+      {
+        "name": "stage",
+        "type": "string",
+        "usage": "rollout stage name (default: all without --atespaces, one stage per atespace set with it)"
+      }
+    ]
+  },
+  {
+    "path": "substrate bundle rollback",
+    "use": "rollback",
+    "short": "Put a stage's previous policy bundle back in force",
+    "long": "Puts the previous policy bundle of a stage back in force. The cluster checks its signature again first, so a\nbundle signed with a key revoked since is refused. Running it again puts the newer bundle back. Needs an administrator\nsign-in.",
+    "example": "defenseclaw substrate bundle rollback --stage canary",
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      },
+      {
+        "name": "stage",
+        "type": "string",
+        "usage": "the stage to roll back"
       }
     ]
   },

@@ -132,6 +132,8 @@ type SubstrateConfig struct {
 	Profiles SubstrateProfileResolver
 	// Usage answers own-only usage (stream 10 seam; nil: 501).
 	Usage SubstrateUsage
+	// Bundles applies and shows signed policy bundles (nil: 501).
+	Bundles SubstrateBundles
 	// Activity receives the last-activity feed of A3's idle logic.
 	Activity SubstrateActivitySink
 	// Skills scans the skill folders the kit attaches (GAP-0039); nil

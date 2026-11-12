@@ -182,7 +182,14 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: policy resets are off: %v\n", err)
 		}
 	}
-	ctl, err := newSubstrateController(cfg, client, reg, act, cpu, cmd.OutOrStdout(), true, resets, ns)
+	// Bundle mode: profiles come from the active signed bundle of each
+	// stage layered over config.yaml (PLAN §9); otherwise config.yaml.
+	sink := &controller.JSONSink{W: cmd.OutOrStdout()}
+	resolver, err := substrateProfileResolver(ctx, cfg, sink)
+	if err != nil {
+		return err
+	}
+	ctl, err := newSubstrateController(cfg, client, reg, act, cpu, sink, true, resets, ns, resolver)
 	if err != nil {
 		return err
 	}

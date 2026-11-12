@@ -130,6 +130,9 @@ type Resolution struct {
 	// Warnings are shown as events (for example a glob on a foreign
 	// atespace, E3).
 	Warnings []string
+	// DenyOnly, when set, is why the actor keeps only the DefenseClaw rule
+	// (a managed install whose bundle no longer verifies, D8).
+	DenyOnly string
 }
 
 // ProfileResolver picks an actor's profile.

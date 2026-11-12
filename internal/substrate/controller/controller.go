@@ -164,12 +164,14 @@ type actorState struct {
 	// lastForeign is the last foreign change seen while in conflict.
 	lastForeign time.Time
 	refused     string
-	recheckGen  int32
-	reg         Registration
-	regOK       bool
-	regAt       time.Time
-	regState    ateapi.ActorState
-	written     bool
+	// forcedDeny is why the resolver gives the actor deny-only (D8).
+	forcedDeny string
+	recheckGen int32
+	reg        Registration
+	regOK      bool
+	regAt      time.Time
+	regState   ateapi.ActorState
+	written    bool
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
 	unmanagedChecked bool
@@ -510,6 +512,14 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 		if res.Refuse != "" {
 			c.refuseOnce(st, base, EventProfileRefused, res.Refuse, "", "")
 		} else if c.admit(ctx, a, st, base, res.Profile.Name) == "" {
+			if res.DenyOnly != st.forcedDeny {
+				st.forcedDeny = res.DenyOnly
+				if res.DenyOnly != "" {
+					ev := base
+					ev.Type, ev.Severity, ev.Message = EventWarning, SeverityWarn, "the actor keeps only the DefenseClaw rule: "+res.DenyOnly
+					c.emit(ev)
+				}
+			}
 			if err := c.apply(ctx, a, st, reg, res.Profile, base); err != nil {
 				return err
 			}
@@ -763,7 +773,7 @@ func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState,
 	// actor JWT to the actor listener, so hooks still get verdicts): a
 	// foreign policy is never left in force (GAP-0055).
 	want := full
-	if st.conflict {
+	if st.conflict || st.forcedDeny != "" {
 		want = deny
 	}
 	state := a.GetStatus().GetState()
@@ -849,6 +859,8 @@ func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState,
 		how = "reverted"
 	case st.conflict:
 		how = "deny-only (policy_conflict)"
+	case st.forcedDeny != "":
+		how = "deny-only (" + st.forcedDeny + ")"
 	}
 	// One foreign_rule event per revert outside a conflict; inside one, at
 	// most one per conflict window (a GitOps loop would flood otherwise).

@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
@@ -35,9 +34,13 @@ import (
 // runs and the gateway's create path uses for EnsurePolicy: the same
 // admission, profiles and render in both.
 func newSubstrateController(cfg *config.Config, client ateapi.Client, reg controller.Registry,
-	act controller.ActivitySource, cpu controller.CPUSource, events io.Writer, idleAfter bool,
-	resets controller.ResetStore, namespace string) (*controller.Controller, error) {
+	act controller.ActivitySource, cpu controller.CPUSource, sink controller.Sink, idleAfter bool,
+	resets controller.ResetStore, namespace string, resolver controller.ProfileResolver) (*controller.Controller, error) {
 	sub := cfg.Substrate
+	if resolver == nil {
+		resolver = &controller.ConfigResolver{Config: cfg}
+	}
+
 	if act == nil {
 		act = controller.NoActivity{}
 	}
@@ -53,15 +56,15 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 	if sub.AttestationRequired() {
 		ver, anchors := controller.VerifierFromConfig(sub.Templates)
 		if _, err := anchors.Get(); err != nil {
-			fmt.Fprintf(events, "{\"type\":%q,\"severity\":\"warning\",\"message\":%q}\n", controller.EventWarning,
-				err.Error()+": every template is refused until the trust anchors are mounted")
+			sink.Emit(controller.Event{Type: controller.EventWarning, Severity: controller.SeverityAlert,
+				Message: err.Error() + ": every template is refused until the trust anchors are mounted"})
 		}
 		attestor = &controller.TemplateAttestor{Verifier: ver, VolumeImages: sub.Templates.VolumeImages, Registries: controller.AllowedRegistries(sub.Templates)}
 	}
 	return controller.New(controller.Options{
 		Client: client, Attestor: attestor, Activity: act, CPU: cpu,
-		Registry: reg, Resolver: &controller.ConfigResolver{Config: cfg},
-		Sink:     &controller.JSONSink{W: events},
+		Registry: reg, Resolver: resolver,
+		Sink:     sink,
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
 		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(), Templates: sub.Templates,
 		KitVersion: appVersion, IdleSuspendAfter: idle, Resets: resets, Namespace: namespace,

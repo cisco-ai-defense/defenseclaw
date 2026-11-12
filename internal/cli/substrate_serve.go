@@ -426,7 +426,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		go recorder.Run(context.Background())
 		// The create path's policy writer: the controller's own admission,
 		// profiles and render, run before the first resume.
-		ctl, err := newSubstrateController(c, ate, &controller.LeaderRegistry{Store: regs}, nil, nil, os.Stderr, false, nil, "")
+		ctl, err := newSubstrateController(c, ate, &controller.LeaderRegistry{Store: regs}, nil, nil, &controller.JSONSink{W: os.Stderr}, false, nil, "", nil)
 		if err != nil {
 			return out, fmt.Errorf("serve: controller for the create path: %w", err)
 		}
@@ -474,6 +474,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				return false
 			}
 			out.Profiles = gateway.SubstrateLauncherProfiles(c)
+			if out.Bundles, err = substrateBundleStore(c); err != nil {
+				return out, err
+			}
 			if _, err := os.Stat(serveFlags.calloutTokenFile); err == nil {
 				out.CalloutToken = readSecretFile(serveFlags.calloutTokenFile)
 			}
