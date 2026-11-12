@@ -9057,6 +9057,31 @@ function Enter-DefenseClawLifecycleLock {
     # ReadOnly, Hidden or System; the ReadWrite open below would then fail with
     # access denied that no retry can fix. Clear them on the exact leaf.
     [void](Clear-DefenseClawRestrictiveFileAttributes -Path $path)
+    # A Programs and Features uninstall, a restored folder access list or an
+    # icacls /reset can leave the lock with a descriptor that inherits from
+    # its folder, and the standalone verdict below never re-stamps a lost
+    # protected flag, so every later Setup /ensure ended 1603 until an
+    # administrator fixed the lock by hand (rel-1-0-10:GAP-0028). The lock
+    # holds no data (its length is 0, checked above), so when SYSTEM,
+    # Administrators or TrustedInstaller own it, as for every lock a
+    # DefenseClaw lifecycle created, the canonical protected descriptor is
+    # written back here. A lock another account owns is not re-stamped and
+    # stays refused below (the ownership rule of the Setup mutexes).
+    $lockAcl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path
+    if (-not $lockAcl.AreAccessRulesProtected -and
+        [string](Get-DefenseClawAclOwnerSID -Acl $lockAcl) -in @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        )) {
+        Write-DefenseClawAclSelfHealAdvisory `
+            -Path $path `
+            -Reason 're-stamping the canonical AdminFile ACL of the lifecycle lock after: managed DACL inherits from an ancestor'
+        Set-DefenseClawPathAcl `
+            -Path $path `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+    }
     # The lock holds no data, so repair runs before the verdict: an inherited,
     # re-owned or extra-entry descriptor (a crash between creation and the
     # first stamp, an icacls reset, a takeown) is re-stamped to the canonical
