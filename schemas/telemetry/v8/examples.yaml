@@ -959,6 +959,68 @@ examples:
       /defenseclaw.sandbox.condition.type: identifier
       /defenseclaw.sandbox.condition.status: metadata
       /defenseclaw.sandbox.condition.reason: identifier
+- id: valid-sandbox-lifecycle-substrate-ready
+  valid: true
+  signal: logs
+  family: log.sandbox.lifecycle
+  description: An Agent Substrate actor on the gVisor sandbox class reaches ready; runtime and driver name Substrate and its class instead of OpenShell and its compute driver.
+  builder_context:
+    inheritance: {mode: explicit}
+    occurrence: {timestamp: '2026-09-26T12:00:00Z', record_id: rec-sandbox-lifecycle-substrate-001}
+    condition_facts: {}
+    mandatory_facts: {}
+  record:
+    schema_version: 1
+    bucket_catalog_version: 1
+    timestamp: '2026-09-26T12:00:00Z'
+    record_id: rec-sandbox-lifecycle-substrate-001
+    bucket: agent.lifecycle
+    signal: logs
+    event_name: sandbox.lifecycle
+    severity: INFO
+    source: gateway
+    connector: claudecode
+    outcome: completed
+    mandatory: false
+    correlation:
+      connector_id: claudecode
+    provenance:
+      producer: defenseclaw
+      binary_version: 8.0.0
+      registry_schema_version: 1
+      config_generation: 8
+    body:
+      defenseclaw.sandbox.id: 25a1da0f-1c9b-4ef7-8248-c276138c7f77
+      defenseclaw.sandbox.name: cc-payments-1
+      defenseclaw.sandbox.runtime: substrate
+      defenseclaw.sandbox.driver: gvisor
+      defenseclaw.sandbox.image.digest: sha256:aeef1c63b8d64c0f9f4d8a7d2f0c3b1e6a5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b
+      defenseclaw.sandbox.policy.version: 3
+      defenseclaw.sandbox.profile: open
+      defenseclaw.sandbox.pack: open
+      defenseclaw.sandbox.phase: ready
+      defenseclaw.sandbox.workdir.mode: copy
+      defenseclaw.sandbox.phase.previous: starting
+      defenseclaw.sandbox.lifecycle.trigger: watch
+      defenseclaw.sandbox.condition.type: Ready
+      defenseclaw.sandbox.condition.status: 'True'
+      defenseclaw.sandbox.condition.reason: SupervisorReady
+    field_classes:
+      /defenseclaw.sandbox.id: identifier
+      /defenseclaw.sandbox.name: identifier
+      /defenseclaw.sandbox.runtime: metadata
+      /defenseclaw.sandbox.driver: metadata
+      /defenseclaw.sandbox.image.digest: identifier
+      /defenseclaw.sandbox.policy.version: metadata
+      /defenseclaw.sandbox.profile: metadata
+      /defenseclaw.sandbox.pack: identifier
+      /defenseclaw.sandbox.phase: metadata
+      /defenseclaw.sandbox.workdir.mode: metadata
+      /defenseclaw.sandbox.phase.previous: metadata
+      /defenseclaw.sandbox.lifecycle.trigger: metadata
+      /defenseclaw.sandbox.condition.type: identifier
+      /defenseclaw.sandbox.condition.status: metadata
+      /defenseclaw.sandbox.condition.reason: identifier
 - id: valid-sandbox-workspace-review
   valid: true
   signal: logs

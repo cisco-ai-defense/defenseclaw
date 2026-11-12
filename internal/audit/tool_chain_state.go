@@ -75,6 +75,10 @@ type ToolChainRepository struct {
 	tables toolChainTableSet
 	// rootDigest is the root scope a root-set repository reads and writes.
 	rootDigest string
+	// horizon and forkParent are Agent Substrate options
+	// (tool_chain_options.go); nil for every host repository.
+	horizon    ToolChainHorizon
+	forkParent *ToolChainPartition
 }
 
 func (s *Store) ToolChainRepository() (*ToolChainRepository, error) {
@@ -656,6 +660,10 @@ func (repo *ToolChainRepository) activatePartition(
 				connector_instance_id, session_value_digest, active_ruleset_fingerprint,
 				next_sequence, updated_time_unix_nano) VALUES (?, ?, ?, 2, ?)`),
 			string(input.ConnectorInstanceID), session, input.RulesetFingerprint, unixNano(now))
+		if err == nil && repo.forkParent != nil {
+			err = toolChainCopyForkWindow(ctx, tx, repo, *repo.forkParent,
+				ToolChainPartition{ConnectorInstanceID: input.ConnectorInstanceID, ScopeDigest: session}, now)
+		}
 	case err == nil:
 		if next == 0 {
 			return 0, ErrToolChainIntegrity
@@ -694,7 +702,7 @@ func (repo *ToolChainRepository) loadWindow(
 			AND sequence>=? AND sequence<? AND received_time_unix_nano>=?
 		ORDER BY sequence, received_time_unix_nano, semantic_event_id LIMIT ?`),
 		string(input.ConnectorInstanceID), session, input.RulesetFingerprint,
-		minSequence, sequence, unixNano(received.Add(-repo.maxHorizon)), repo.maxEvents-1)
+		minSequence, sequence, unixNano(repo.horizonCutoff(received)), repo.maxEvents-1)
 	if err != nil {
 		return nil, err
 	}
@@ -910,7 +918,7 @@ func (repo *ToolChainRepository) prune(
 			WHERE connector_instance_id=? AND session_value_digest=?
 			AND (sequence<? OR received_time_unix_nano<?)`),
 			[]any{string(input.ConnectorInstanceID), session, minSequence,
-				unixNano(received.Add(-repo.maxHorizon))}},
+				unixNano(repo.horizonCutoff(received))}},
 		{"guardrail_chain_prune_empty", repo.sql(`DELETE FROM guardrail_chain_partitions
 			WHERE updated_time_unix_nano<? AND NOT EXISTS (
 				SELECT 1 FROM guardrail_chain_events event
