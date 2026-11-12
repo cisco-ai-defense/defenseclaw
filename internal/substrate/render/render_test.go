@@ -32,6 +32,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/*.golden.json")
@@ -443,11 +444,11 @@ func TestCanonicalIgnoresServerDefaults(t *testing.T) {
 }
 
 func TestPatternHelpers(t *testing.T) {
-	if !covered([]string{"*.github.com"}, pattern{name: "github.com", wildcard: true}) ||
-		!covered([]string{"*.github.com"}, pattern{name: "a.github.com"}) ||
-		covered([]string{"*.github.com"}, pattern{name: "github.com"}) ||
-		covered([]string{"github.com"}, pattern{name: "github.com", wildcard: true}) ||
-		covered([]string{"*"}, pattern{name: "x.y"}) {
+	if !covered([]string{"*.github.com"}, pattern{Name: "github.com", Wildcard: true}) ||
+		!covered([]string{"*.github.com"}, pattern{Name: "a.github.com"}) ||
+		covered([]string{"*.github.com"}, pattern{Name: "github.com"}) ||
+		covered([]string{"github.com"}, pattern{Name: "github.com", Wildcard: true}) ||
+		covered([]string{"*"}, pattern{Name: "x.y"}) {
 		t.Fatal("covered")
 	}
 	b := blockClasses([]string{"gist.github.com", "*.evil.com", "10.0.0.0/8"})
@@ -466,7 +467,7 @@ func TestPatternHelpers(t *testing.T) {
 			t.Errorf("block overlap %s = %v", p, hit)
 		}
 	}
-	if got := EcosystemPacks(); !slices.Equal(got, []string{"crates", "go", "npm", "pypi"}) || len(PackHosts("go")) != 2 || PackHosts("x") != nil {
+	if got := egressspec.EcosystemPacks(); !slices.Equal(got, []string{"crates", "go", "npm", "pypi"}) || len(egressspec.PackHosts("go")) != 2 || egressspec.PackHosts("x") != nil {
 		t.Fatalf("packs %v", got)
 	}
 }
