@@ -951,8 +951,9 @@ func (repo *CorrelationRepository) BeginOccurrence(
 	// The occurrence reads before it writes. Another writer of this process
 	// that commits in between makes the upgrade fail at once with
 	// SQLITE_BUSY_SNAPSHOT and the hook starts its correlation over, so this
-	// transaction takes the write baton first (writeBaton).
-	turn, err := repo.store.writeBaton.acquire(ctx)
+	// transaction takes the write baton first (writeBaton), ahead of the
+	// records of calls already answered: the answer waits on it.
+	turn, err := repo.store.writeBaton.acquireUrgent(ctx)
 	if err != nil {
 		release()
 		return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)

@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -512,6 +513,18 @@ type customRuleYAML struct {
 	Extensions  []string `yaml:"extensions"`
 }
 
+// customRulesCache keeps the compiled custom rules of a rules folder for as
+// long as its rule files keep their names, sizes, modes and modification
+// times. The gateway builds a CodeGuard scanner for every write it inspects,
+// and each one read, parsed and compiled every custom rule file again
+// (#1384); the rules a call is checked against are the same either way.
+var customRulesCache sync.Map // dir -> customRulesEntry
+
+type customRulesEntry struct {
+	stamp string
+	rules []rule
+}
+
 func loadCustomRules(dir string) []rule {
 	if dir == "" {
 		return nil
@@ -520,6 +533,28 @@ func loadCustomRules(dir string) []rule {
 	if err != nil {
 		return nil
 	}
+	var stamp strings.Builder
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			// Not cacheable now: read the folder as before.
+			return compileCustomRules(dir, entries)
+		}
+		fmt.Fprintf(&stamp, "%s\x00%d\x00%o\x00%d\x00", e.Name(), info.Size(), info.Mode(), info.ModTime().UnixNano())
+	}
+	if cached, ok := customRulesCache.Load(dir); ok && cached.(customRulesEntry).stamp == stamp.String() {
+		return cached.(customRulesEntry).rules
+	}
+	rules := compileCustomRules(dir, entries)
+	customRulesCache.Store(dir, customRulesEntry{stamp: stamp.String(), rules: rules})
+	return rules
+}
+
+// compileCustomRules reads and compiles the custom rule files of dir.
+func compileCustomRules(dir string, entries []os.DirEntry) []rule {
 	var custom []rule
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {

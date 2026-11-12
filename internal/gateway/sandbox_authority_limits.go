@@ -31,8 +31,8 @@ import (
 // Each class has its own limiter key per peer uid (hookCallerBudgetKey), so
 // a flood of relayed hooks from one sandbox never refuses the same user's
 // host hooks or a new sandbox's create, and a burst of daemon events never
-// takes the budget a relayed hook needs. The host key (<uid>, 60/s burst
-// 120, 32 in flight) and the OTLP key (<uid>|otlp) are unchanged; the
+// takes the budget a relayed hook needs. The host key (<uid>, 120/s burst
+// 240, 64 in flight) and the OTLP key (<uid>|otlp) are unchanged; the
 // gateway-wide in-flight cap stays shared by every key.
 //
 // Sizing: a daemon's per-binding limiter (sandboxauth.DefaultLimiterConfig,
@@ -42,8 +42,10 @@ import (
 // audit writes under one SQLite write lock, and four sandboxes at 10 calls a
 // second answer in about a second on the shared build box (p95 under 1 s),
 // while 96 calls a second did not answer in time in half the runs
-// (rel-1-0-6 GAP-0490). The budget is therefore 40 calls a second with a
-// burst of 100 (the burst one sandbox may itself send), and a call past it
+// (rel-1-0-6 GAP-0490). The budget was therefore 40 calls a second with a
+// burst of 100; since one call no longer waits for a dozen commits one
+// after the other (#1384) it is 100 calls a second with a burst of 200
+// (rel-1-0-6 GAP-0770), and a call past it
 // is refused at once with a 429 and a message that names the budget, instead
 // of waiting past the hook's window for an answer that comes too late. The
 // delivery receipt that confirms an allowed answer is a second post on the
@@ -63,8 +65,20 @@ const (
 	sandboxBudgetPending = "sandbox-pending"
 	sandboxBudgetPolicy  = "sandbox-policy"
 	sandboxBudgetEvents  = "sandbox-events"
-	sandboxUserHookRate  = 40
-	sandboxUserHookBurst = 100
+	// The account budget is 100 calls a second with a burst of 200
+	// (rel-1-0-6 GAP-0770): one hook call no longer waits for the commits of
+	// a dozen writes one after the other (#1384), so the managed gateway
+	// answers four sandboxes at 25 calls a second inside the hook window.
+	sandboxUserHookRate  = 100
+	sandboxUserHookBurst = 200
+	// sandboxInFlightSizingRate sizes the in-flight bounds
+	// (sandboxWindowCapacity): the requests a stalled gateway holds over one
+	// request lifetime at the earlier 40 calls a second, plus the burst. A
+	// call at the new rate is answered in well under a second, so it holds
+	// far fewer; keeping the bound near its earlier size keeps the
+	// gateway-wide minimum (hookGlobalInFlightMin, four of the largest) and
+	// the memory it can hold for queued bodies where they were.
+	sandboxInFlightSizingRate = 40
 )
 
 var sandboxUserHookInFlight, sandboxUserReceiptInFlight = managedSandboxInFlightLimits()
@@ -78,7 +92,7 @@ func managedSandboxInFlightLimits() (hook, receipt int) {
 }
 
 func sandboxWindowCapacity(window time.Duration) int {
-	return sandboxUserHookBurst + int((time.Duration(sandboxUserHookRate)*window+time.Second-1)/time.Second)
+	return sandboxUserHookBurst + int((time.Duration(sandboxInFlightSizingRate)*window+time.Second-1)/time.Second)
 }
 
 // sandboxBudgetLimit is one class's rate, burst and in-flight bound per

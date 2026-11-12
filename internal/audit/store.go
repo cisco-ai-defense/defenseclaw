@@ -325,6 +325,9 @@ type Store struct {
 	// folder flush of the durable connection covered (syncDurableDir).
 	dirSyncMu    sync.Mutex
 	dirSyncedWAL os.FileInfo
+	// hookJournalReady is set once this store created the hook delivery
+	// journal table, so later inserts skip the CREATE TABLE (#1384).
+	hookJournalReady atomic.Bool
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8

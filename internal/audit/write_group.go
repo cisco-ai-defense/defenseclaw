@@ -51,6 +51,12 @@ type groupedWrite struct {
 	// committed, when set, runs once the shared transaction that ran this
 	// write has committed (runCallGroupBatch).
 	committed func()
+	// durable asks for a commit that survives a power loss: the batch that
+	// carries it commits with synchronous=FULL (and fullfsync where the
+	// platform has it), which also makes every earlier commit durable.
+	// dirSync asks for the database folder to be flushed once that commit
+	// landed (syncDurableDir). Both are set only by durableGrouped.
+	durable, dirSync bool
 	// result receives exactly one message: the outcome of the write, or lead
 	// when the write heads the queue and runs the next transaction.
 	result  chan groupedWriteResult
@@ -107,9 +113,7 @@ func (group *writeGroup) do(write *groupedWrite, execute func([]*groupedWrite)) 
 		}
 	}
 	group.mu.Lock()
-	count := min(len(group.pending), writeGroupMax)
-	batch := append([]*groupedWrite(nil), group.pending[:count]...)
-	group.pending = append(group.pending[:0], group.pending[count:]...)
+	batch := group.takeBatchLocked()
 	group.mu.Unlock()
 
 	execute(batch)
@@ -125,6 +129,46 @@ func (group *writeGroup) do(write *groupedWrite, execute func([]*groupedWrite)) 
 		item.result <- groupedWriteResult{err: item.err}
 	}
 	return batch[0].err
+}
+
+// writeGroupAging is how long a write may wait before it goes ahead of
+// newer writes in takeBatchLocked, so durable writes never starve the rest.
+const writeGroupAging = 50 * time.Millisecond
+
+// takeBatchLocked removes the next batch from the queue: at most
+// writeGroupMax writes, durable ones (and any write queued longer than
+// writeGroupAging) first. A durable write is the hook
+// journal row or the commit confirmation an answer waits on (durableGrouped);
+// the other writes of the group are those of calls already answered, so a
+// full queue never makes an answer wait behind them. The rest keep their
+// order.
+func (group *writeGroup) takeBatchLocked() []*groupedWrite {
+	pending := group.pending
+	if len(pending) <= writeGroupMax {
+		batch := append([]*groupedWrite(nil), pending...)
+		group.pending = pending[:0]
+		return batch
+	}
+	batch := make([]*groupedWrite, 0, writeGroupMax)
+	kept := make([]*groupedWrite, 0, len(pending)-writeGroupMax)
+	now := time.Now()
+	urgent := func(write *groupedWrite) bool {
+		return write.durable || now.Sub(write.queuedAt) > writeGroupAging
+	}
+	for _, first := range []bool{true, false} {
+		for _, write := range pending {
+			if urgent(write) != first {
+				continue
+			}
+			if len(batch) < writeGroupMax {
+				batch = append(batch, write)
+			} else {
+				kept = append(kept, write)
+			}
+		}
+	}
+	group.pending = append(pending[:0], kept...)
+	return batch
 }
 
 // WriteQueueSnapshot is the number of writes waiting for the next grouped
@@ -211,7 +255,7 @@ func (s *Store) runGroupedTx(batch []*groupedWrite, hooks groupedTxHooks) error 
 	}
 	single := len(batch) == 1
 	isolate := false
-	err := retryBusyObserved(batchCtx, hooks.op, s.groupedTxBusyObservabilityV8(), func() error {
+	attempt := func() error {
 		for {
 			err, fallBack := s.attemptGroupedTx(batchCtx, batch, hooks, single, isolate)
 			if !fallBack {
@@ -219,7 +263,16 @@ func (s *Store) runGroupedTx(batch []*groupedWrite, hooks groupedTxHooks) error 
 			}
 			isolate = true
 		}
-	})
+	}
+	var err error
+	if groupedBatchDurable(batch) {
+		// A durable write is one an answer waits on (the hook journal row):
+		// it keeps the bounded busy wait of the journal
+		// (hookDeliveryJournalBusyWait), not the longer retry of the others.
+		err = retryDurableBusy(batchCtx, attempt)
+	} else {
+		err = retryBusyObserved(batchCtx, hooks.op, s.groupedTxBusyObservabilityV8(), attempt)
+	}
 	for _, item := range batch {
 		if err != nil && !item.skipped {
 			item.err, item.ran = err, false
@@ -237,12 +290,25 @@ func (s *Store) attemptGroupedTx(
 	hooks groupedTxHooks,
 	single, isolate bool,
 ) (err error, fallBack bool) {
-	release, turnErr := s.writeBaton.acquire(batchCtx)
+	acquire := s.writeBaton.acquire
+	if groupedBatchDurable(batch) {
+		acquire = s.writeBaton.acquireUrgent
+	}
+	release, turnErr := acquire(batchCtx)
 	if turnErr != nil {
 		return hooks.begin(turnErr), false
 	}
 	defer release()
-	tx, beginErr := s.db.BeginTx(batchCtx, nil)
+	begin := s.db.BeginTx
+	if groupedBatchDurable(batch) {
+		conn, connErr := s.durableBatchConn(batchCtx)
+		if connErr != nil {
+			return hooks.begin(connErr), false
+		}
+		defer conn.restore()
+		begin = conn.BeginTx
+	}
+	tx, beginErr := begin(batchCtx, nil)
 	if beginErr != nil {
 		return hooks.begin(beginErr), false
 	}
@@ -369,8 +435,13 @@ func (writer *EventHistoryWriter) appendGrouped(
 	projection observabilityredaction.Projection,
 ) error {
 	outcome := new(eventHistoryAppendOutcome)
+	// The reprojection, validation and envelope of the row need no store: do
+	// them before the write queues, so the shared transaction holds the one
+	// writer connection only for its statements (#1384), as the deferred
+	// appends of a hook call already do (deferAppend).
+	prepared := writer.prepareAppend(ctx, record, projection)
 	write := &groupedWrite{ctx: ctx, data: outcome, run: func(ctx context.Context, tx *sql.Tx) error {
-		appended, err := writer.appendContextTx(ctx, tx, record, projection)
+		appended, err := writer.appendPreparedTx(ctx, tx, record, projection, prepared)
 		*outcome = appended
 		return err
 	}}

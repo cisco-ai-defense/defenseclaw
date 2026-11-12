@@ -54,7 +54,10 @@ func (s *Store) SyncCommittedWrites(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer release()
+	// The hook-call write group takes the store lifecycle lock in its own
+	// batch runner; holding it here too would nest the read lock under a
+	// waiting Close (durableQueue).
+	defer s.releaseUnlessGrouped(release)()
 	// Concurrent callers share one commit, and so one flush (durableGrouped):
 	// the flush of a commit covers every write committed before it.
 	invalid := false
