@@ -75,11 +75,24 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 	return eng, cfg
 }
 
+// classifierFor returns the classifier of cfg: the sidecar vLLM client for
+// vllm_sr, a System One client built for this generation for systemone
+// (its breaker restarts with the generation), nil for rules (in-process).
 func (r *engineRouter) classifierFor(cfg *config.Config) engine.Classifier {
-	if cfg == nil || cfg.Routing.EffectiveClassifier() != config.RoutingClassifierVLLMSR || r.classifier == nil {
+	if cfg == nil {
 		return nil
 	}
-	return r.classifier
+	switch cfg.Routing.EffectiveClassifier() {
+	case config.RoutingClassifierVLLMSR:
+		if r.classifier != nil {
+			return r.classifier
+		}
+	case config.RoutingClassifierSystemOne:
+		if c := newSystemOneClassifier(cfg, r.dotenv); c != nil {
+			return c
+		}
+	}
+	return nil
 }
 
 // RouterActive reports whether the generation of ctx routes at all; the

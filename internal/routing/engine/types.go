@@ -161,6 +161,9 @@ type ClassifyInput struct {
 	LongContext    bool
 	// Signals are the keyword signals that matched Text.
 	Signals map[string]bool
+	// Categories are the category names of the effective policy, sorted
+	// (the choices a category classifier such as systemone picks from).
+	Categories []string
 }
 
 // ClassifyResult is a classifier answer. Aliases are candidates in order;

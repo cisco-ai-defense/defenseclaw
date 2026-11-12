@@ -35,9 +35,15 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	}
 	pol := e.policyFor(req)
 	signals := e.matcher.Match(req.Text)
+	categories := make([]string, 0, len(pol.Categories))
+	for c := range pol.Categories {
+		categories = append(categories, c)
+	}
+	slices.Sort(categories)
 	in := ClassifyInput{
 		Text: req.Text, APIFamily: req.APIFamily, Connector: req.Connector, RequestedModel: req.RequestedModel,
 		HasTools: req.HasTools, ToolTurn: req.ToolTurn, HasImages: req.HasImages, LongContext: req.LongContext, Signals: signals,
+		Categories: categories,
 	}
 
 	// 1. Candidate from the user override, sticky entry or the classifier.
