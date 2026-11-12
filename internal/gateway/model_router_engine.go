@@ -242,6 +242,7 @@ func routeCallerFromContext(ctx context.Context) (engine.Caller, []string) {
 	var caller engine.Caller
 	if s, ok := verifiedSubjectFromContext(ctx); ok {
 		caller = engine.Caller{Verified: true, Key: s.UserID, Source: s.Source}
+		caller.Matches = routingCallerMatcher(ctx)
 	}
 	resolved := resolvedGuardrailProfileFrom(ctx)
 	if resolved == nil || !caller.Verified {

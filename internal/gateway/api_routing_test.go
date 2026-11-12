@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func routingAPIConfig() *config.Config {
@@ -102,4 +104,28 @@ func TestRecordRoutingDecisionKeepsNoPrompt(t *testing.T) {
 	if strings.Contains(string(b), "secret prompt") {
 		t.Fatal("the prompt must never be recorded")
 	}
+}
+
+func TestRoutingCallerMatcherUsesTheVerifiedSubject(t *testing.T) {
+	if routingCallerMatcher(context.Background()) != nil && !profileProcessOwnerAvailable() {
+		t.Fatal("a request without a verified subject has no matcher")
+	}
+	ctx := withVerifiedSubject(context.Background(), VerifiedSubject{UserID: "1001", IDKind: useridentity.KindPOSIXUID, UserName: "alice", Source: subjectSourcePeerCredentials})
+	match := routingCallerMatcher(ctx)
+	if match == nil {
+		t.Fatal("verified subject: matcher")
+	}
+	if got := match(config.ProfileMatch{Users: []string{"1001"}}); got != engine.Yes {
+		t.Fatalf("own uid: %v", got)
+	}
+	if got := match(config.ProfileMatch{Users: []string{"1002"}}); got != engine.No {
+		t.Fatalf("another uid: %v", got)
+	}
+}
+
+// profileProcessOwnerAvailable reports whether the test process itself is a
+// subject (the per-user gateway owner fallback of profileRequestSubject).
+func profileProcessOwnerAvailable() bool {
+	_, ok := profileProcessOwnerSubject()
+	return ok
 }
