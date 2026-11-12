@@ -1041,6 +1041,10 @@ A `custom-providers.json` marked `_derived_from` is rendered from this section o
 | `substrate.secrets` | none | Credentials injected at egress on bound hosts. Each entry has `name`, `source` (an `ate-secret://` reference, never a value), `inject` (`hosts`, `header`, `prefix`, `placeholder`), `scope` (`shared` or `per_person`) and `profiles`. |
 | `substrate.allow_passthrough_for` | none | Hosts forwarded without inspection, for pinned certificates. A secret is never bound to one. |
 | `substrate.admin` | none | The organization floor for actors, with the same keys as `openshell.admin`. |
+| `substrate.bundles.enabled` | `false` | The controller applies signed policy bundles: profiles and `match.substrate` assignments for a stage of atespaces, over `config.yaml`. `substrate.admin` still applies. |
+| `substrate.bundles.anchors_file` | `/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json` | The bundle trust anchors (`bundle-anchors.json`), mounted from an admin-only Secret. |
+| `substrate.bundles.inbox` | `defenseclaw-bundle-inbox` | The ConfigMap a GitOps tool writes signed bundles to: `<stage>.dcbundle` and `<stage>.atespaces`. |
+| `substrate.bundles.refresh_interval` | `10s` | How often the controller re-reads the bundle state, the inbox and the anchors (1s to 10m). |
 
 ## Environment variables
 

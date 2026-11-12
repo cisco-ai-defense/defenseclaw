@@ -67,6 +67,8 @@ type SubstrateConfig struct {
 	// Admin is the organization floor for Substrate actors, the same keys
 	// as openshell.admin; guardrail profiles tighten it.
 	Admin OpenShellAdminConfig `mapstructure:"admin" yaml:"admin,omitempty"`
+	// Bundles is signed policy bundles (substrate_bundles.go).
+	Bundles SubstrateBundlesConfig `mapstructure:"bundles" yaml:"bundles,omitempty"`
 }
 
 // SubstrateAPIConfig is how DefenseClaw reaches ate-api-server.
@@ -617,6 +619,7 @@ func (s *SubstrateConfig) Validate() error {
 		}
 	}
 
+	s.Bundles.validate(bad)
 	if err := s.Admin.validateAs("admin"); err != nil {
 		errs = append(errs, err)
 	}

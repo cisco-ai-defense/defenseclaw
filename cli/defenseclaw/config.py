@@ -4303,6 +4303,19 @@ class SubstrateSecret:
 
 
 @dataclass
+class SubstrateBundlesConfig:
+    """``substrate.bundles``: signed policy bundles for the cluster (mirrors
+    Go ``SubstrateBundlesConfig``). Empty strings take the defaults: the
+    chart's anchors mount, the ``defenseclaw-bundle-inbox`` ConfigMap and a
+    10 s refresh."""
+
+    enabled: bool = False
+    anchors_file: str = ""
+    inbox: str = ""
+    refresh_interval: str = ""
+
+
+@dataclass
 class SubstrateConfig:
     """``substrate:``, DefenseClaw on Agent Substrate (mirrors Go
     ``SubstrateConfig``). Off by default and read only in the cluster; the
@@ -4326,6 +4339,7 @@ class SubstrateConfig:
     secrets: list[SubstrateSecret] = field(default_factory=list)
     allow_passthrough_for: list[str] = field(default_factory=list)
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
+    bundles: SubstrateBundlesConfig = field(default_factory=SubstrateBundlesConfig)
 
 
 @dataclass
@@ -7617,6 +7631,17 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         secrets=secrets,
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
+        bundles=_merge_substrate_bundles(raw.get("bundles")),
+    )
+
+
+def _merge_substrate_bundles(raw: Any) -> SubstrateBundlesConfig:
+    raw = _mapping(raw)
+    return SubstrateBundlesConfig(
+        enabled=raw.get("enabled") is True,
+        anchors_file=str(raw.get("anchors_file", "") or ""),
+        inbox=str(raw.get("inbox", "") or ""),
+        refresh_interval=_duration_text(raw.get("refresh_interval")),
     )
 
 
@@ -7684,6 +7709,12 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
             extproc.pop("log_headers")
         if not extproc:
             pruned.pop("extproc")
+    bundles = pruned.get("bundles")
+    if isinstance(bundles, dict):
+        if bundles.get("enabled") is False:  # Go omitempty
+            bundles.pop("enabled")
+        if not bundles:
+            pruned.pop("bundles")
     if packs == []:
         pruned.setdefault("egress", {})["ecosystem_packs"] = []
     d["substrate"] = pruned
