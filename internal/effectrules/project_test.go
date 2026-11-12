@@ -1,0 +1,162 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package effectrules
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
+)
+
+const testHome = "/home/u"
+
+// fakeResolver resolves the listed links; any path in unresolvable returns
+// ok=false (the link reading could not complete); every other path resolves
+// to itself, trusted.
+func fakeResolver(links map[string]string, unresolvable ...string) func(string) (string, bool) {
+	bad := map[string]bool{}
+	for _, p := range unresolvable {
+		bad[p] = true
+	}
+	return func(p string) (string, bool) {
+		if bad[p] {
+			return "", false
+		}
+		if r, ok := links[p]; ok {
+			return r, true
+		}
+		return p, true
+	}
+}
+
+func projectCommand(t *testing.T, command string, env Env) []*semanticpb.EffectFact {
+	t.Helper()
+	args, _ := json.Marshal(map[string]string{"command": command})
+	call := effects.Normalize("claudecode", "bash", args)
+	res := effects.Extract(call, effects.Options{Home: env.Home, CWD: env.Home + "/work", Flavor: env.Flavor})
+	return Project(res, env)
+}
+
+// pathEffectState returns the folded protected state of the first path-target
+// effect, for the named set ("" = any set).
+func pathEffectState(facts []*semanticpb.EffectFact, set string) (string, bool) {
+	for _, f := range facts {
+		if f.GetTarget().GetType() == "path" {
+			return semantic.ProtectedState(f.GetTarget(), set), true
+		}
+	}
+	return "", false
+}
+
+func TestProjectProtectedGrades(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		env     Env
+		set     string
+		want    string
+	}{
+		{
+			name:    "protected-set case 1: append to authorized_keys is known",
+			command: `echo k >> ~/.ssh/authorized_keys`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
+			set:     SetSSHAuthorizedKeys, want: semantic.ProtectedKnown,
+		},
+		{
+			name:    "protected-set case 2: write to .bashrc is known shell_rc",
+			command: `echo x > ~/.bashrc`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
+			set:     SetShellRC, want: semantic.ProtectedKnown,
+		},
+		{
+			name:    "protected-set case 3: read of aws credentials is known",
+			command: `cat ~/.aws/credentials`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
+			set:     SetCredentials, want: semantic.ProtectedKnown,
+		},
+		{
+			name:    "protected-set case 4: ordinary temp write is no",
+			command: `echo x > /tmp/ordinary.txt`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
+			set:     "", want: semantic.ProtectedNo,
+		},
+		{
+			name:    "protected-set case 5: write through a link into .ssh is known",
+			command: `echo x > /tmp/link`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(map[string]string{"/tmp/link": testHome + "/.ssh/authorized_keys"})},
+			set:     SetSSHAuthorizedKeys, want: semantic.ProtectedKnown,
+		},
+		{
+			name:    "protected-set case 6: dynamic destination could touch any set",
+			command: `echo x > "$DEST"`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
+			set:     SetSSHAuthorizedKeys, want: semantic.ProtectedUnknown,
+		},
+		{
+			name:    "protected-set case 7: delete under .ssh (glob child) is unknown",
+			command: `rm -rf ~/.ssh/*`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
+			set:     SetSSHAuthorizedKeys, want: semantic.ProtectedUnknown,
+		},
+		{
+			name:    "protected-set case 8: a link that cannot be followed is unknown, never no",
+			command: `echo x > /tmp/maybe`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil, "/tmp/maybe")},
+			set:     SetSSHAuthorizedKeys, want: semantic.ProtectedUnknown,
+		},
+		{
+			name:    "protected-set case 9: write to a DefenseClaw state file is self_protection",
+			command: `echo x > ~/.defenseclaw/config.yaml`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
+			set:     SetSelfProtection, want: semantic.ProtectedKnown,
+		},
+		{
+			name:    "protected-set case 10: write under the hooks tree is agent_hook_config",
+			command: `echo x > ~/.claude/hooks/pre.sh`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
+			set:     SetAgentHookConfig, want: semantic.ProtectedKnown,
+		},
+		{
+			name:    "protected-set case 11: ordinary temp write is not credentials either",
+			command: `echo x > /tmp/ordinary.txt`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
+			set:     SetCredentials, want: semantic.ProtectedNo,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := projectCommand(t, tc.command, tc.env)
+			got, ok := pathEffectState(facts, tc.set)
+			if !ok {
+				t.Fatalf("no path-target effect for %q", tc.command)
+			}
+			if got != tc.want {
+				t.Fatalf("command %q set %q: protected = %q, want %q", tc.command, tc.set, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProjectAgentCreated(t *testing.T) {
+	created := map[string]bool{"/tmp/test-artifact": true}
+	env := Env{
+		Home:    testHome,
+		Resolve: fakeResolver(nil),
+		AgentCreated: func(key string) bool { return created[key] },
+	}
+	facts := projectCommand(t, `rm /tmp/test-artifact`, env)
+	var marked bool
+	for _, f := range facts {
+		if f.GetTarget().GetType() == "path" && f.GetTarget().GetAgentCreated() {
+			marked = true
+		}
+	}
+	if !marked {
+		t.Fatalf("expected the agent-created target to be flagged; facts=%+v", facts)
+	}
+}
