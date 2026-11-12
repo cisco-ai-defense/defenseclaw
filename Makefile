@@ -499,6 +499,10 @@ TETRAGON_PROTO_STUBS := $(addprefix third_party/tetragon/api/v1/,$(TETRAGON_PROT
 # go.ate.dev/substrate module is imported; see third_party/substrate/README.md.
 SUBSTRATE_PROTO := api/ateapi/v1/ateapi.proto
 SUBSTRATE_PROTO_M := M$(SUBSTRATE_PROTO)=github.com/defenseclaw/defenseclaw/third_party/substrate/api/ateapi/v1;ateapi
+# The stubs are generated from a copy without upstream's custom options
+# (extensions 50000 collide with the OpenShell SDK's optionsv1, GAP-0014);
+# third_party/substrate/strip-options.awk documents the patch.
+SUBSTRATE_PROTO_STAGE := $(PROTO_TOOLS_DIR)/substrate-proto
 SUBSTRATE_PROTO_STUBS := third_party/substrate/api/ateapi/v1/ateapi.pb.go \
 	third_party/substrate/api/ateapi/v1/ateapi_grpc.pb.go
 
@@ -520,9 +524,12 @@ proto: proto-tools
 		--go_out=. --go_opt=paths=source_relative $(addprefix --go_opt=,$(TETRAGON_PROTO_M)) \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative $(addprefix --go-grpc_opt=,$(TETRAGON_PROTO_M)) \
 		$(TETRAGON_PROTOS)
-	@cd third_party/substrate && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
-		--go_out=. --go_opt=paths=source_relative --go_opt='$(SUBSTRATE_PROTO_M)' \
-		--go-grpc_out=. --go-grpc_opt=paths=source_relative --go-grpc_opt='$(SUBSTRATE_PROTO_M)' \
+	@rm -rf $(SUBSTRATE_PROTO_STAGE) && mkdir -p $(dir $(SUBSTRATE_PROTO_STAGE)/$(SUBSTRATE_PROTO))
+	@awk -f third_party/substrate/strip-options.awk third_party/substrate/$(SUBSTRATE_PROTO) \
+		> $(SUBSTRATE_PROTO_STAGE)/$(SUBSTRATE_PROTO)
+	@cd $(SUBSTRATE_PROTO_STAGE) && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
+		--go_out=$(CURDIR)/third_party/substrate --go_opt=paths=source_relative --go_opt='$(SUBSTRATE_PROTO_M)' \
+		--go-grpc_out=$(CURDIR)/third_party/substrate --go-grpc_opt=paths=source_relative --go-grpc_opt='$(SUBSTRATE_PROTO_M)' \
 		$(SUBSTRATE_PROTO)
 	@echo "Regenerated committed Go protobuf stubs"
 
