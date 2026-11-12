@@ -176,7 +176,7 @@ func (v *Verifier) Verify(ctx context.Context, image string) (*Verified, error) 
 		}
 		digest = d
 	}
-	ck, pk := digest, policyKey(pol)
+	ck, pk := ref.Name()+"@"+digest, policyKey(pol)
 	v.mu.Lock()
 	if c, ok := v.cache[ck]; ok && c.pkey == pk {
 		ttl := v.SuccessTTL

@@ -218,8 +218,11 @@ func (c *ConfigDoc) AppendLayer(diffID, createdBy string) error {
 
 // Image is a single-platform image loaded from a registry.
 type Image struct {
-	Ref         Ref
-	Digest      string // manifest digest
+	Ref    Ref
+	Digest string // manifest digest
+	// IndexDigest is the digest of the index the platform image was picked
+	// from; empty when the reference named the image itself.
+	IndexDigest string
 	Manifest    Manifest
 	ManifestRaw []byte
 	Config      *ConfigDoc
@@ -233,6 +236,7 @@ func (g *Registry) Image(ctx context.Context, ref Ref, platform Platform) (*Imag
 	if err != nil {
 		return nil, err
 	}
+	indexDigest := ""
 	if mt == MediaOCIIndex || mt == MediaDockerList {
 		var idx indexDoc
 		if err := json.Unmarshal(body, &idx); err != nil {
@@ -249,6 +253,7 @@ func (g *Registry) Image(ctx context.Context, ref Ref, platform Platform) (*Imag
 		if pick == nil {
 			return nil, fmt.Errorf("image %s has no %s/%s manifest", ref, platform.OS, platform.Architecture)
 		}
+		indexDigest = digest
 		ref = ref.WithDigest(pick.Digest)
 		body, mt, digest, err = g.Manifest(ctx, ref)
 		if err != nil {
@@ -258,7 +263,7 @@ func (g *Registry) Image(ctx context.Context, ref Ref, platform Platform) (*Imag
 	if mt != MediaOCIManifest && mt != MediaDockerManifest {
 		return nil, fmt.Errorf("image %s: unsupported manifest type %q", ref, mt)
 	}
-	img := &Image{Ref: ref.WithDigest(digest), Digest: digest, ManifestRaw: body}
+	img := &Image{Ref: ref.WithDigest(digest), Digest: digest, IndexDigest: indexDigest, ManifestRaw: body}
 	if err := json.Unmarshal(body, &img.Manifest); err != nil {
 		return nil, fmt.Errorf("image manifest: %w", err)
 	}

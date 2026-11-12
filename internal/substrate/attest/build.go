@@ -268,7 +268,7 @@ func Build(ctx context.Context, o BuildOptions) (*BuildResult, error) {
 func judgeBase(ctx context.Context, o BuildOptions, base *Image) (BaseInfo, error) {
 	info := BaseInfo{Ref: o.Base, Digest: base.Digest}
 	for _, d := range o.TrustedBases {
-		if d == base.Digest {
+		if d == base.Digest || (base.IndexDigest != "" && d == base.IndexDigest) {
 			info.Trust = BaseTrustAllowlisted
 			return info, nil
 		}

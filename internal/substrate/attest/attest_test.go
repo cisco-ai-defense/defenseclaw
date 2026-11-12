@@ -808,3 +808,35 @@ func TestParseMCPStaticOutput(t *testing.T) {
 		t.Fatal("failed tool read as clean")
 	}
 }
+
+// The same image bytes in two repositories have the same digest (builds are
+// deterministic) but each repository has its own attestation: a verdict for
+// one must never be served for the other. Found by the J7 live cell.
+func TestVerifierCacheIsPerRepository(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	good := mustBuild(t, f)
+	attacker, _ := GenerateSigner()
+	evilOpts := f.opts()
+	evilOpts.Signer, evilOpts.Target = attacker, f.m.host()+"/tmpl/evil:v1"
+	evilRes, err := Build(ctx, evilOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evilRes.Digest != good.Digest {
+		t.Fatalf("test setup: builds should be deterministic (%s vs %s)", evilRes.Digest, good.Digest)
+	}
+	v := NewVerifier(f.reg, f.policy(nil)) // cache on
+	_, err = v.Verify(ctx, f.m.host()+"/tmpl/evil@"+good.Digest)
+	wantCode(t, err, CodeUntrustedKey)
+	if _, err := v.Verify(ctx, f.m.host()+"/tmpl/claude@"+good.Digest); err != nil {
+		t.Fatalf("a rejection in another repository leaked through the cache: %v", err)
+	}
+	// And the other way round.
+	v = NewVerifier(f.reg, f.policy(nil))
+	if _, err := v.Verify(ctx, f.m.host()+"/tmpl/claude@"+good.Digest); err != nil {
+		t.Fatal(err)
+	}
+	_, err = v.Verify(ctx, f.m.host()+"/tmpl/evil@"+good.Digest)
+	wantCode(t, err, CodeUntrustedKey)
+}

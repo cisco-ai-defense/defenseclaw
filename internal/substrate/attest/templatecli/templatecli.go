@@ -204,6 +204,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		failMode      = fs.String("fail-mode", "", "interactive outage mode: open or closed")
 		noMCP         = fs.Bool("no-mcp-static", false, "do not run mcp-scanner over tool descriptions")
 		analyzers     = fs.String("mcp-analyzers", "yara", "mcp-scanner analyzers")
+		keepEP        = fs.Bool("keep-entrypoint", false, "keep the base image ENTRYPOINT and CMD (tests; a real actor image starts the relay)")
 		dry           = fs.Bool("dry-run", false, "scan the composed image and stop before pushing")
 		trusted       multi
 		mcpHosts      multi
@@ -259,6 +260,9 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		Providers: providers(*connectorName, *provider)})
 	if err != nil {
 		return ExitUsageError, err
+	}
+	if *keepEP {
+		spec.Entrypoint, spec.Cmd = nil, nil
 	}
 	var signer *attest.Signer
 	if *keyFile != "" {
