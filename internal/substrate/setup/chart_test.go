@@ -181,9 +181,17 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	if err != nil {
 		t.Errorf("%s: callout.yaml: %v", name, err)
 	} else {
+		// The admin Service is never a callout-allowed host; it is refused in
+		// every spelling (D15, GAP-0066).
 		if !slices.Contains(cc.DefenseClawHosts, "defenseclaw-actor.defenseclaw-system.svc.cluster.local") ||
-			!slices.Contains(cc.DefenseClawHosts, "defenseclaw-admin.defenseclaw-system.svc") {
+			slices.ContainsFunc(cc.DefenseClawHosts, func(h string) bool { return strings.HasPrefix(h, "defenseclaw-admin") }) {
 			t.Errorf("%s: defenseclaw_hosts %v", name, cc.DefenseClawHosts)
+		}
+		for _, h := range []string{"defenseclaw-admin.defenseclaw-system.svc.cluster.local", "defenseclaw-admin.defenseclaw-system.svc",
+			"defenseclaw-admin.defenseclaw-system", "defenseclaw-admin"} {
+			if !slices.Contains(cc.InternalHosts, h) {
+				t.Errorf("%s: internal_hosts %v lacks %s", name, cc.InternalHosts, h)
+			}
 		}
 		if len(cc.EgressPeers) != 1 || !strings.HasSuffix(cc.EgressPeers[0], "/sa/atenet-egress") || cc.FailureMode != extproc.FailureClosed {
 			t.Errorf("%s: egress peers %v, failure mode %s", name, cc.EgressPeers, cc.FailureMode)

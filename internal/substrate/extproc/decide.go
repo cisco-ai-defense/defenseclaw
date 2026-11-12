@@ -42,6 +42,7 @@ const (
 	CategoryMCPToolBlocked  = "mcp_tool_blocked"
 	CategoryBodyUninspected = "body_uninspectable"
 	CategoryCalloutError    = "callout_error"
+	CategoryInternalHost    = "defenseclaw_internal"
 )
 
 // Decision sources the callout adds to egress.Source.
@@ -147,6 +148,7 @@ type Engine struct {
 	red        *Redactor
 	secrets    *secretValues
 	dcHosts    *hostMatcher
+	internal   *hostMatcher
 	mcpHosts   *hostMatcher
 	bodyHosts  *hostMatcher
 	mcpNames   map[string]string
@@ -183,6 +185,7 @@ func NewEngine(o Options) (*Engine, error) {
 	e.secrets.now = e.now
 	e.red = newRedactor(cfg, e.secrets)
 	e.dcHosts = mustHostMatcher(cfg.DefenseClawHosts)
+	e.internal = mustHostMatcher(cfg.InternalHosts)
 	e.mcpHosts = mustHostMatcher(mcpHostNames(cfg.MCPHosts))
 	e.bodyHosts = mustHostMatcher(cfg.BodyHosts)
 	for _, entry := range cfg.MCPHosts {
@@ -249,6 +252,12 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	}
 	if req.Host == "" {
 		return deny(v, string(egress.CategoryInvalidDestination), string(egress.SourceGuard), "", egress.CategoryInvalidDestination.Reason())
+	}
+	if _, ok := e.internal.match(req.Host); ok {
+		// D15: the admin listener is never reachable from an actor, even
+		// if a policy or a looser NetworkPolicy would let it through.
+		return deny(v, CategoryInternalHost, sourceOwnHost, "",
+			"Actors can't reach this DefenseClaw service; it is for people and DefenseClaw itself.")
 	}
 	if _, ok := e.dcHosts.match(req.Host); ok {
 		// The actor listener: the gateway verifies the JWT and inspects the

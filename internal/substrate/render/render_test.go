@@ -264,7 +264,9 @@ func TestInternalServicesUnreachableInBothSpellings(t *testing.T) {
 	s := Settings{ActorService: "defenseclaw-actor.defenseclaw-system.svc.cluster.local",
 		AdminService: "defenseclaw-admin.defenseclaw-system.svc.cluster.local",
 		AllowHosts: []string{"defenseclaw-admin.defenseclaw-system.svc", "defenseclaw-actor.defenseclaw-system.svc",
-			"*.defenseclaw-system.svc", "*.defenseclaw-system.svc.cluster.local", "other.team.svc.cluster.local"}}
+			"*.defenseclaw-system.svc", "*.defenseclaw-system.svc.cluster.local", "other.team.svc.cluster.local",
+			// Short forms resolve through the search path (GAP-0066).
+			"defenseclaw-admin.defenseclaw-system", "defenseclaw-admin", "defenseclaw-actor.defenseclaw-system"}}
 	r, err := EgressPolicy(Input{Settings: s})
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +274,7 @@ func TestInternalServicesUnreachableInBothSpellings(t *testing.T) {
 	if n := len(r.Policy.GetRules()); n != 2 || r.Policy.GetRules()[1].GetHttps().GetHostnames()[0] != "other.team.svc.cluster.local" {
 		t.Fatalf("rules = %v", r.Policy.GetRules())
 	}
-	if len(r.Dropped) != 4 {
+	if len(r.Dropped) != 7 {
 		t.Fatalf("dropped = %+v", r.Dropped)
 	}
 }

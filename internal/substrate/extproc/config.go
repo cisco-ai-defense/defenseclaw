@@ -52,6 +52,11 @@ type Config struct {
 	// requests (hooks, model calls) are allowed without inspection: the
 	// gateway inspects them, and their bodies are never buffered.
 	DefenseClawHosts []string `yaml:"defenseclaw_hosts"`
+	// InternalHosts are DefenseClaw Services an actor must never reach
+	// through egress, in every spelling (the admin Service, D15). They are
+	// refused before any other check. The chart renders them; the default
+	// is the admin Service in defenseclaw-system.
+	InternalHosts []string `yaml:"internal_hosts"`
 	// ClusterDomains are in-cluster name suffixes (svc.cluster.local). The
 	// EgressPolicy decided they are reachable; the egress guard's intranet
 	// rule (.local) must not refuse them.
@@ -293,6 +298,10 @@ func (c *Config) normalize() error {
 	if len(c.DefenseClawHosts) == 0 {
 		c.DefenseClawHosts = []string{"defenseclaw-actor.defenseclaw-system.svc", "defenseclaw-actor.defenseclaw-system.svc.cluster.local"}
 	}
+	if len(c.InternalHosts) == 0 {
+		c.InternalHosts = []string{"defenseclaw-admin.defenseclaw-system.svc.cluster.local", "defenseclaw-admin.defenseclaw-system.svc",
+			"defenseclaw-admin.defenseclaw-system", "defenseclaw-admin"}
+	}
 	setDur := func(d *time.Duration, def time.Duration, name string, max time.Duration) error {
 		if *d == 0 {
 			*d = def
@@ -333,7 +342,7 @@ func (c *Config) normalize() error {
 	for _, list := range []struct {
 		name  string
 		hosts []string
-	}{{"mcp_hosts", mcpHostNames(c.MCPHosts)}, {"body_hosts", c.BodyHosts}, {"defenseclaw_hosts", c.DefenseClawHosts}} {
+	}{{"mcp_hosts", mcpHostNames(c.MCPHosts)}, {"body_hosts", c.BodyHosts}, {"defenseclaw_hosts", c.DefenseClawHosts}, {"internal_hosts", c.InternalHosts}} {
 		if _, err := newHostMatcher(list.hosts); err != nil {
 			return bad("%s: %v", list.name, err)
 		}

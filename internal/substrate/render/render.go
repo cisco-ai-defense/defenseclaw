@@ -412,17 +412,32 @@ func bindSecrets(in Input, admit func(raw, source, secret string) (pattern, bool
 	return effects
 }
 
-// spellings returns a Service name in both its short (.svc) and fully
-// qualified (.svc.cluster.local) form; other names unchanged.
+// spellings returns a Service name (given first) in every form that names
+// it from a pod: fully qualified (.svc.cluster.local), .svc, <svc>.<ns> and
+// <svc>; other names unchanged.
 func spellings(name string) []string {
 	const fq = ".svc.cluster.local"
+	var svc string
 	switch {
 	case strings.HasSuffix(name, fq):
-		return []string{name, strings.TrimSuffix(name, ".cluster.local")}
+		svc = strings.TrimSuffix(name, fq)
 	case strings.HasSuffix(name, ".svc"):
-		return []string{name, name + ".cluster.local"}
+		svc = strings.TrimSuffix(name, ".svc")
+	default:
+		return []string{name}
 	}
-	return []string{name}
+	// <svc>.<ns> and <svc> resolve through the pod's search path, so they
+	// name the same Service (GAP-0066).
+	out := []string{name}
+	for _, n := range []string{svc + fq, svc + ".svc", svc} {
+		if n != name {
+			out = append(out, n)
+		}
+	}
+	if i := strings.IndexByte(svc, '.'); i > 0 {
+		out = append(out, svc[:i])
+	}
+	return out
 }
 
 func hasHeader(hs []*ateapi.CredentialHeader, h string) bool {
