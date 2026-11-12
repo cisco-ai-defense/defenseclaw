@@ -277,7 +277,11 @@ func PreDelete(ctx context.Context, plan ChartPlan, api SubstrateAPI, kube KubeA
 	r := StepReport{Step: "pre-delete"}
 	actors, err := api.ListActors(ctx, "")
 	if err != nil {
-		return r, fmt.Errorf("list actors: %w", err)
+		// Fail closed: an unchecked uninstall could leave policies open.
+		return r, fmt.Errorf("list actors: %w. DefenseClaw cannot see the actors (is it a global viewer? the "+
+			"bootstrap may never have run), so it cannot tell whether its egress policies remain. As a Substrate "+
+			"admin, delete every egress policy that names %s (kubectl ate get egress-policy -a <atespace> <actor>), "+
+			"then run helm uninstall --no-hooks", err, plan.ActorHost)
 	}
 	var left []string
 	for _, a := range actors {
