@@ -111,10 +111,15 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	} else {
 		idleAfter = 0 // no CPU source: never suspend on silence alone (E4)
 	}
+	sink := &controller.JSONSink{W: cmd.OutOrStdout()}
+	resolver, err := substrateProfileResolver(ctx, cfg, sink)
+	if err != nil {
+		return err
+	}
 	ctl, err := controller.New(controller.Options{
 		Client: client, Attestor: controller.NoAttestor{}, Activity: controller.NoActivity{}, CPU: cpu,
-		Registry: controller.NewMemoryRegistry(), Resolver: &controller.ConfigResolver{Config: cfg},
-		Sink:     &controller.JSONSink{W: cmd.OutOrStdout()},
+		Registry: controller.NewMemoryRegistry(), Resolver: resolver,
+		Sink:     sink,
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
 		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(),
 		KitVersion: appVersion, IdleSuspendAfter: idleAfter,

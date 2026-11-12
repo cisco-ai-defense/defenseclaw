@@ -37,19 +37,30 @@ import (
 // followed (the enterprise reader refuses links on a laptop, where the
 // file's owner is what makes it trusted; here it is the Secret's RBAC).
 func LoadAnchorsFile(path string) (*eb.Anchors, error) {
+	a, _, err := ReadAnchorsFile(path)
+	return a, err
+}
+
+// ReadAnchorsFile is LoadAnchorsFile that also returns the bytes it
+// decoded (for the anchors summary).
+func ReadAnchorsFile(path string) (*eb.Anchors, []byte, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, &eb.Error{Code: eb.CodeAnchorMissing, Path: eb.AnchorsName, Detail: "no trust anchor file at " + path + "; mount the admin bundle-anchors Secret"}
+		return nil, nil, &eb.Error{Code: eb.CodeAnchorMissing, Path: eb.AnchorsName, Detail: "no trust anchor file at " + path + "; mount the admin bundle-anchors Secret"}
 	}
 	if err != nil {
-		return nil, &eb.Error{Code: eb.CodeAnchorInsecure, Path: eb.AnchorsName, Detail: "cannot open the trust anchor file"}
+		return nil, nil, &eb.Error{Code: eb.CodeAnchorInsecure, Path: eb.AnchorsName, Detail: "cannot open the trust anchor file"}
 	}
 	defer f.Close()
 	raw, err := io.ReadAll(io.LimitReader(f, eb.MaxAnchorsBytes+1))
 	if err != nil {
-		return nil, &eb.Error{Code: eb.CodeAnchorInvalid, Path: eb.AnchorsName, Detail: "cannot read the trust anchor file"}
+		return nil, nil, &eb.Error{Code: eb.CodeAnchorInvalid, Path: eb.AnchorsName, Detail: "cannot read the trust anchor file"}
 	}
-	return eb.DecodeAnchors(raw)
+	a, err := eb.DecodeAnchors(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return a, raw, nil
 }
 
 // Resolver is the controller's ProfileResolver in bundle mode: an actor in

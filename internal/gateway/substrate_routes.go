@@ -139,6 +139,9 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/batches", a.substrateListBatches(st))
 	mux.HandleFunc("GET /api/v1/substrate/batches/{id}", a.substrateGetBatch(st))
 	mux.HandleFunc("GET /api/v1/substrate/usage", a.substrateUsage(st))
+	mux.HandleFunc("POST /api/v1/substrate/bundle", a.substrateBundleApply(st))
+	mux.HandleFunc("POST /api/v1/substrate/bundle/rollback", a.substrateBundleRollback(st))
+	mux.HandleFunc("GET /api/v1/substrate/bundle/status", a.substrateBundleStatus(st))
 	for _, p := range []string{"asks", "decisions", "policy/explain", "secrets"} {
 		mux.HandleFunc("/api/v1/substrate/"+p, substrateNotYet)
 	}

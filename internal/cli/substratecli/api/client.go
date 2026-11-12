@@ -173,6 +173,7 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.ua)
+	req.Header.Set("X-DefenseClaw-Client", "substrate-launcher")
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

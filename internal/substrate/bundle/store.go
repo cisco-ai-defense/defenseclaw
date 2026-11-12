@@ -54,6 +54,7 @@ const (
 const (
 	SourceCLI   = "cli"
 	SourceInbox = "inbox"
+	SourceAdmin = "admin"
 )
 
 // Actions and results of a receipt.
@@ -129,6 +130,9 @@ type Store struct {
 	// Anchors loads the current trust anchors (nil, err when missing or
 	// invalid).
 	Anchors func() (*eb.Anchors, error)
+	// AnchorsFile, when set, is summarized in Status (key ids and
+	// validity, never the keys).
+	AnchorsFile string
 	// Base is config.yaml; bundles are verified as layered over it.
 	Base *config.Config
 	Now  func() time.Time
@@ -573,6 +577,10 @@ func (s *Store) Status(ctx context.Context, receipts int) (*Status, error) {
 	out := &Status{Stages: d.state.Stages, Problems: problems}
 	if _, err := s.Anchors(); err != nil {
 		out.AnchorsError = bounded(err.Error())
+	} else if s.AnchorsFile != "" {
+		if a, raw, err := ReadAnchorsFile(s.AnchorsFile); err == nil {
+			out.Anchors = eb.SummarizeAnchors(a, raw)
+		}
 	}
 	if out.Receipts, err = s.Receipts(ctx, receipts); err != nil {
 		return nil, err

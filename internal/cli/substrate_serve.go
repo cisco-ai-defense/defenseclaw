@@ -348,6 +348,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				return false
 			}
 			out.Profiles = launcherProfiles(c)
+			if out.Bundles, err = substrateBundleStore(c); err != nil {
+				return out, err
+			}
 			if _, err := os.Stat(serveFlags.calloutTokenFile); err == nil {
 				out.CalloutToken = readSecretFile(serveFlags.calloutTokenFile)
 			}
