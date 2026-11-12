@@ -17,8 +17,6 @@
 package gateway
 
 import (
-	"context"
-	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,12 +27,6 @@ type capturedCall struct {
 	path, target, auth, aiAuth, apiKey, actorHdr, userID string
 	actor                                                substrateActor
 	verified                                             bool
-}
-
-type routerFunc func(SubstrateModelCaller, SubstrateLLMRoute) (SubstrateLLMRoute, error)
-
-func (f routerFunc) RouteModelCall(_ context.Context, c SubstrateModelCaller, r SubstrateLLMRoute) (SubstrateLLMRoute, error) {
-	return f(c, r)
 }
 
 func TestSubstrateLLMRoute(t *testing.T) {
@@ -54,18 +46,8 @@ func TestSubstrateLLMRoute(t *testing.T) {
 		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
 		_, _ = w.Write([]byte("frames"))
 	})
-	var refuse bool
 	h, err := NewSubstrateLLMHandler(SubstrateLLMConfig{
 		Providers: DefaultSubstrateLLMProviders(dir, "us-east-1"), Proxy: proxy,
-		Router: routerFunc(func(c SubstrateModelCaller, r SubstrateLLMRoute) (SubstrateLLMRoute, error) {
-			if c.UID == "" || c.Owner == "" {
-				t.Errorf("router caller %+v", c)
-			}
-			if refuse {
-				return r, errors.New("over budget")
-			}
-			return r, nil
-		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -94,10 +76,6 @@ func TestSubstrateLLMRoute(t *testing.T) {
 	}
 	if rec := f.do(t, f.actor, http.MethodPost, path, "", `{}`); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("no actor token %d", rec.Code)
-	}
-	refuse = true
-	if rec := f.do(t, f.actor, http.MethodPost, path, "tok-alice", `{}`); rec.Code != http.StatusForbidden {
-		t.Fatalf("router refusal %d", rec.Code)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()

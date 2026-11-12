@@ -385,7 +385,17 @@ func (a *APIServer) newSubstrateActorHandler(st *substrateState) http.Handler {
 		reg = InstallSharedAgentRegistry("", "")
 	}
 	var h http.Handler = http.HandlerFunc(a.serveSubstrateActorRoute)
-	h = apiBodyLimitMiddleware(h, apiRequestBodyMaxBytes, defaultSandboxOTLPMaxBodyBytes)
+	// A model call carries the whole conversation: /llm takes the guardrail
+	// proxy's own passthrough cap, every other route the API cap.
+	h = bodyLimitMiddleware(h, func(r *http.Request) int64 {
+		switch {
+		case strings.HasPrefix(r.URL.Path, substrateLLMPrefix):
+			return substrateLLMMaxBody
+		case isOTLPEndpointPath(r.URL.Path):
+			return defaultSandboxOTLPMaxBodyBytes
+		}
+		return apiRequestBodyMaxBytes
+	})
 	h = a.apiCSRFProtect(h)
 	h = a.metricsMiddleware(h)
 	h = a.substrateActorScope(st, h)
@@ -397,7 +407,7 @@ func (a *APIServer) newSubstrateActorHandler(st *substrateState) http.Handler {
 	h = a.substrateActorAuthenticate(st, h)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		route, ok := a.classifySubstrateActorPath(r.URL.Path)
-		if !ok || r.URL.RawPath != "" {
+		if !ok || (r.URL.RawPath != "" && !substrateLLMRawPathOK(route, r.URL.RawPath)) {
 			writeSandboxIngressError(w, http.StatusNotFound, "not found")
 			return
 		}
@@ -583,6 +593,11 @@ func (a *APIServer) substrateActorScope(st *substrateState, next http.Handler) h
 		}
 		ctx = PromoteSessionIfAuthenticated(ctx)
 		ctx = contextWithSubstratePerson(ctx, reg)
+		if route.llm {
+			// The model call's verified caller for routing, usage and the
+			// profile (substrate_identity.go).
+			ctx = a.attachSubstrateSubject(ctx, reg)
+		}
 		if route.class != "" && route.class != sandboxauth.RouteOTLP {
 			ctx = a.withGuardrailProfileDecision(ctx, binding.Connector)
 		}
@@ -684,4 +699,19 @@ func substrateProfileSubject(ctx context.Context) (profileSubject, bool) {
 		Principal: reg.Person.Principal, UPN: reg.Person.Principal,
 		Groups: append([]string(nil), reg.Person.Groups...),
 	}, true
+}
+
+// substrateLLMMaxBody is the guardrail proxy's passthrough body cap, which
+// a model call through /llm gets too.
+const substrateLLMMaxBody = 10 << 20
+
+// substrateLLMRawPathOK admits an escaped /llm path: provider SDKs escape
+// the model ID (Bedrock "...-v1%3A0"). An escaped separator, backslash or
+// dot is still refused, so the decoded path is the one the route checks.
+func substrateLLMRawPathOK(route substrateActorRoute, raw string) bool {
+	if !route.llm {
+		return false
+	}
+	l := strings.ToLower(raw)
+	return !strings.Contains(l, "%2f") && !strings.Contains(l, "%5c") && !strings.Contains(l, "%2e")
 }
