@@ -1,0 +1,13 @@
+# Written by `defenseclaw substrate setup`; pass it to ate-setup with --config.
+apiVersion: install.ate.dev/v1alpha1
+kind: SubstrateInstall
+actorJWT:
+  issuer: https://idp.cluster-a.example
+atenet:
+  egress:
+    additionalExtprocAllowModeOverride: "true"
+    additionalExtprocService: defenseclaw-system/defenseclaw-callout:9443
+    additionalExtprocTimeout: 5s
+  router:
+    routeTimeout: 4h
+ingressAllowedSPIFFEIDs: spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway

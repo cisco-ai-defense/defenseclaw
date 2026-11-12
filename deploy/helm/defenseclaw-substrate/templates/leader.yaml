@@ -1,0 +1,111 @@
+{{- $sel := dict "ctx" . "component" "leader" }}
+# The gateway leader: one replica holding the lease and the RWO store. Recreate,
+# so the old pod releases the volume before the new one mounts it; failover
+# is the lease moving and the volume reattaching (about 30 s).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: defenseclaw-gateway-leader
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "dc.selector" $sel | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dc.selector" $sel | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- include "dc.podAnnotations" $sel | nindent 8 }}
+    spec:
+      {{- include "dc.podSpecCommon" (dict "ctx" . "sa" "gateway" "values" .Values.leader) | nindent 6 }}
+      containers:
+      - name: leader
+        image: {{ include "dc.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args:
+        {{- if .Values.leader.args }}
+        {{- toYaml .Values.leader.args | nindent 8 }}
+        {{- else }}
+        - serve
+        - --substrate
+        - --substrate-role=leader
+        - --leader-listen=:{{ .Values.leader.port }}
+        - --metrics-listen=:{{ .Values.gateway.ports.metrics }}
+        - --lease={{ .Values.leader.leaseName }}
+        - --store-dir=/var/lib/defenseclaw/store
+        - --store-state-configmap=defenseclaw-store-state
+        {{- end }}
+        env:
+        {{- include "dc.env" . | nindent 8 }}
+        ports:
+        - name: leader
+          containerPort: {{ .Values.leader.port }}
+        - name: metrics
+          containerPort: {{ .Values.gateway.ports.metrics }}
+        readinessProbe:
+          httpGet: {path: /readyz, port: metrics}
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: {path: /healthz, port: metrics}
+          periodSeconds: 10
+          failureThreshold: 6
+        resources:
+          {{- toYaml .Values.leader.resources | nindent 10 }}
+        securityContext:
+          {{- toYaml .Values.containerSecurityContext | nindent 10 }}
+        volumeMounts:
+        {{- include "dc.volumeMounts" $sel | nindent 8 }}
+        - name: store
+          mountPath: /var/lib/defenseclaw/store
+      volumes:
+      {{- include "dc.volumes" $sel | nindent 6 }}
+      - name: store
+        persistentVolumeClaim:
+          claimName: defenseclaw-store
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: defenseclaw-store
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+  {{- if .Values.leader.store.keepOnUninstall }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.leader.store.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.leader.store.size }}
+---
+# Internal: followers forward stateful RPCs here (mTLS between pods).
+apiVersion: v1
+kind: Service
+metadata:
+  name: defenseclaw-leader
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "dc.selector" $sel | nindent 4 }}
+  ports:
+  - name: leader
+    port: {{ .Values.leader.port }}
+    targetPort: leader
+  - name: metrics
+    port: {{ .Values.gateway.ports.metrics }}
+    targetPort: metrics

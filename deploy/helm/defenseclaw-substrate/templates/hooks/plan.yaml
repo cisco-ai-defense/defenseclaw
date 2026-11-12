@@ -1,0 +1,18 @@
+# The plan and the config.yaml the hook Jobs check. A hook resource, so it
+# exists before the pre-install and pre-upgrade Jobs and is the target
+# release's own in a rollback.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-chart-plan
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade,pre-rollback,pre-delete,post-install,post-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+data:
+  plan.json: |
+    {{- include "dc.hookPlan" . | nindent 4 }}
+  config.yaml: |
+    {{- include "dc.config" . | nindent 4 }}

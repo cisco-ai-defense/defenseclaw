@@ -1,0 +1,164 @@
+{{- $sel := dict "ctx" . "component" "gateway" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+spec:
+  {{- if not .Values.gateway.hpa.enabled }}
+  replicas: {{ .Values.gateway.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "dc.selector" $sel | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dc.selector" $sel | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- include "dc.podAnnotations" $sel | nindent 8 }}
+    spec:
+      {{- include "dc.podSpecCommon" (dict "ctx" . "sa" "gateway" "values" .Values.gateway) | nindent 6 }}
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            {{- include "dc.selector" $sel | nindent 12 }}
+      containers:
+      - name: gateway
+        image: {{ include "dc.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args:
+        {{- if .Values.gateway.args }}
+        {{- toYaml .Values.gateway.args | nindent 8 }}
+        {{- else }}
+        - serve
+        - --substrate
+        - --substrate-role=gateway
+        - --actor-listen=:{{ .Values.gateway.ports.actor }}
+        - --admin-listen=:{{ .Values.gateway.ports.admin }}
+        - --metrics-listen=:{{ .Values.gateway.ports.metrics }}
+        - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc:{{ .Values.leader.port }}
+        {{- end }}
+        env:
+        {{- include "dc.env" . | nindent 8 }}
+        ports:
+        - name: actor
+          containerPort: {{ .Values.gateway.ports.actor }}
+        - name: admin
+          containerPort: {{ .Values.gateway.ports.admin }}
+        - name: metrics
+          containerPort: {{ .Values.gateway.ports.metrics }}
+        readinessProbe:
+          httpGet: {path: /readyz, port: metrics}
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: {path: /healthz, port: metrics}
+          periodSeconds: 10
+          failureThreshold: 6
+        resources:
+          {{- toYaml .Values.gateway.resources | nindent 10 }}
+        securityContext:
+          {{- toYaml .Values.containerSecurityContext | nindent 10 }}
+        volumeMounts:
+        {{- include "dc.volumeMounts" $sel | nindent 8 }}
+      volumes:
+      {{- include "dc.volumes" $sel | nindent 6 }}
+---
+# The actor Service: the only DefenseClaw host in rendered egress policies.
+# It exposes the actor listener and nothing else (D15).
+apiVersion: v1
+kind: Service
+metadata:
+  name: defenseclaw-actor
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+    defenseclaw.cisco.com/listener: actor
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "dc.selector" $sel | nindent 4 }}
+  ports:
+  - name: https
+    port: 443
+    targetPort: actor
+---
+# The admin Service: launcher, fleet and bundle APIs. Never in an egress
+# policy; the NetworkPolicy admits only this namespace and adminFrom.
+apiVersion: v1
+kind: Service
+metadata:
+  name: defenseclaw-admin
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+    defenseclaw.cisco.com/listener: admin
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "dc.selector" $sel | nindent 4 }}
+  ports:
+  - name: https
+    port: 443
+    targetPort: admin
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: defenseclaw-gateway-metrics
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "dc.selector" $sel | nindent 4 }}
+  ports:
+  - name: metrics
+    port: {{ .Values.gateway.ports.metrics }}
+    targetPort: metrics
+{{- if .Values.gateway.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: defenseclaw-gateway
+  minReplicas: {{ .Values.gateway.hpa.minReplicas }}
+  maxReplicas: {{ .Values.gateway.hpa.maxReplicas }}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ .Values.gateway.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.gateway.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "dc.selector" $sel | nindent 6 }}

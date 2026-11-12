@@ -1,0 +1,97 @@
+{{- if .Values.observability.local.enabled }}
+{{- $sel := dict "ctx" . "component" "otel-collector" }}
+# A local OpenTelemetry collector for trying the chart: OTLP in, the debug
+# exporter out. Not for production.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-otel-collector
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc: {endpoint: 0.0.0.0:4317}
+          http: {endpoint: 0.0.0.0:4318}
+    processors:
+      batch: {}
+    exporters:
+      debug: {verbosity: basic}
+    service:
+      pipelines:
+        traces: {receivers: [otlp], processors: [batch], exporters: [debug]}
+        metrics: {receivers: [otlp], processors: [batch], exporters: [debug]}
+        logs: {receivers: [otlp], processors: [batch], exporters: [debug]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: defenseclaw-otel-collector
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dc.selector" $sel | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dc.selector" $sel | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: collector
+        image: {{ .Values.observability.local.image }}
+        args: [--config=/etc/otelcol/config.yaml]
+        ports:
+        - {name: otlp-grpc, containerPort: 4317}
+        - {name: otlp-http, containerPort: 4318}
+        resources:
+          {{- toYaml .Values.observability.local.resources | nindent 10 }}
+        securityContext:
+          {{- toYaml .Values.containerSecurityContext | nindent 10 }}
+        volumeMounts:
+        - {name: config, mountPath: /etc/otelcol, readOnly: true}
+      volumes:
+      - name: config
+        configMap:
+          name: defenseclaw-otel-collector
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: defenseclaw-otel-collector
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+spec:
+  selector:
+    {{- include "dc.selector" $sel | nindent 4 }}
+  ports:
+  - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc}
+  - {name: otlp-http, port: 4318, targetPort: otlp-http}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-otel-collector
+  labels:
+    {{- include "dc.componentLabels" $sel | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dc.selector" $sel | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector: {}
+    ports:
+    - {protocol: TCP, port: 4317}
+    - {protocol: TCP, port: 4318}
+{{- end }}
+{{- end }}
