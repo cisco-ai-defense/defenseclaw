@@ -1,0 +1,34 @@
+{
+  "policy": {
+    "rules": [
+      {
+        "https": {
+          "effects": {
+            "replaceHeaders": [
+              {
+                "actorJwt": {
+                  "audiences": [
+                    "defenseclaw"
+                  ],
+                  "expirationSeconds": "900"
+                },
+                "header": "x-defenseclaw-actor",
+                "prefix": "Bearer "
+              }
+            ]
+          },
+          "hostnames": [
+            "defenseclaw-actor.defenseclaw-system.svc"
+          ],
+          "ports": {
+            "numbers": [
+              443
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "dropped": null,
+  "bindings": null
+}

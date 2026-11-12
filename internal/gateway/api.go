@@ -439,6 +439,10 @@ type APIServer struct {
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
 	sandboxIngressMu sync.RWMutex
 	sandboxIngress   *sandboxIngressState
+	// substrate is the Agent Substrate actor and admin listeners
+	// (substrate_listener.go); nil outside serve --substrate.
+	substrateMu sync.RWMutex
+	substrate   *substrateState
 	// hookCorrelationTurns holds the hooks of one session to one correlation
 	// attempt at a time (hookCorrelationSerial).
 	hookCorrelationTurns hookCorrelationSerial
