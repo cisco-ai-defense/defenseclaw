@@ -501,6 +501,7 @@ data:
     config_version: 9
     data_dir: /var/lib/defenseclaw/data
     deployment_mode: managed_enterprise
+    policy_dir: /opt/defenseclaw/share/policies
     substrate:
       api:
         address: api.ate-system.svc:443
@@ -924,7 +925,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: callout
       annotations:
-        checksum/config: b0b7b3652388ba2b8801fb693d2d1bfa8489913c23b0fd8a98fd0070b6997e64
+        checksum/config: 65f038e5ddec77d32ae672859921165f74c628c10b8bd0ba012fe3d968e43229
         checksum/callout: 51cf9e9ab50c510cf7bde1cd5721b7426a469564e9de4c431885bbb340b3a520
     spec:
       
@@ -958,6 +959,7 @@ spec:
         - --uid=65532
         - --gid=65532
         - --mode=0700
+        - --policies=/opt/defenseclaw/share/policies
         resources:
           requests: {cpu: 10m, memory: 16Mi}
           limits: {memory: 64Mi}
@@ -972,6 +974,8 @@ spec:
         volumeMounts:
         - name: data
           mountPath: /var/lib/defenseclaw/data
+        - name: policies
+          mountPath: /opt/defenseclaw/share/policies
       containers:
       - name: callout
         image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
@@ -1040,6 +1044,9 @@ spec:
           readOnly: true
         - name: data
           mountPath: /var/lib/defenseclaw/data
+        - name: policies
+          mountPath: /opt/defenseclaw/share/policies
+          readOnly: true
         - name: tmp
           mountPath: /tmp
         - name: run
@@ -1063,6 +1070,9 @@ spec:
       - name: data
         emptyDir:
           sizeLimit: 512Mi
+      - name: policies
+        emptyDir:
+          sizeLimit: 64Mi
       - name: tmp
         emptyDir: {}
       # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
@@ -1145,7 +1155,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: controller
       annotations:
-        checksum/config: b0b7b3652388ba2b8801fb693d2d1bfa8489913c23b0fd8a98fd0070b6997e64
+        checksum/config: 65f038e5ddec77d32ae672859921165f74c628c10b8bd0ba012fe3d968e43229
     spec:
       
       serviceAccountName: defenseclaw-controller
@@ -1169,6 +1179,7 @@ spec:
         - --uid=65532
         - --gid=65532
         - --mode=0700
+        - --policies=/opt/defenseclaw/share/policies
         resources:
           requests: {cpu: 10m, memory: 16Mi}
           limits: {memory: 64Mi}
@@ -1183,6 +1194,8 @@ spec:
         volumeMounts:
         - name: data
           mountPath: /var/lib/defenseclaw/data
+        - name: policies
+          mountPath: /opt/defenseclaw/share/policies
       containers:
       - name: controller
         image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
@@ -1232,6 +1245,9 @@ spec:
           readOnly: true
         - name: data
           mountPath: /var/lib/defenseclaw/data
+        - name: policies
+          mountPath: /opt/defenseclaw/share/policies
+          readOnly: true
         - name: tmp
           mountPath: /tmp
         - name: run
@@ -1256,6 +1272,9 @@ spec:
       - name: data
         emptyDir:
           sizeLimit: 512Mi
+      - name: policies
+        emptyDir:
+          sizeLimit: 64Mi
       - name: tmp
         emptyDir: {}
       # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
@@ -1344,7 +1363,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: gateway
       annotations:
-        checksum/config: b0b7b3652388ba2b8801fb693d2d1bfa8489913c23b0fd8a98fd0070b6997e64
+        checksum/config: 65f038e5ddec77d32ae672859921165f74c628c10b8bd0ba012fe3d968e43229
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1377,6 +1396,7 @@ spec:
         - --uid=65532
         - --gid=65532
         - --mode=0700
+        - --policies=/opt/defenseclaw/share/policies
         resources:
           requests: {cpu: 10m, memory: 16Mi}
           limits: {memory: 64Mi}
@@ -1391,6 +1411,8 @@ spec:
         volumeMounts:
         - name: data
           mountPath: /var/lib/defenseclaw/data
+        - name: policies
+          mountPath: /opt/defenseclaw/share/policies
       containers:
       - name: gateway
         image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
@@ -1465,6 +1487,9 @@ spec:
           readOnly: true
         - name: data
           mountPath: /var/lib/defenseclaw/data
+        - name: policies
+          mountPath: /opt/defenseclaw/share/policies
+          readOnly: true
         - name: tmp
           mountPath: /tmp
         - name: run
@@ -1499,6 +1524,9 @@ spec:
       - name: data
         emptyDir:
           sizeLimit: 512Mi
+      - name: policies
+        emptyDir:
+          sizeLimit: 64Mi
       - name: tmp
         emptyDir: {}
       # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
@@ -1607,7 +1635,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: leader
       annotations:
-        checksum/config: b0b7b3652388ba2b8801fb693d2d1bfa8489913c23b0fd8a98fd0070b6997e64
+        checksum/config: 65f038e5ddec77d32ae672859921165f74c628c10b8bd0ba012fe3d968e43229
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1631,6 +1659,7 @@ spec:
         - --uid=65532
         - --gid=65532
         - --mode=0700
+        - --policies=/opt/defenseclaw/share/policies
         resources:
           requests: {cpu: 10m, memory: 16Mi}
           limits: {memory: 64Mi}
@@ -1645,6 +1674,8 @@ spec:
         volumeMounts:
         - name: data
           mountPath: /var/lib/defenseclaw/data
+        - name: policies
+          mountPath: /opt/defenseclaw/share/policies
       containers:
       - name: leader
         image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
@@ -1714,6 +1745,9 @@ spec:
           readOnly: true
         - name: data
           mountPath: /var/lib/defenseclaw/data
+        - name: policies
+          mountPath: /opt/defenseclaw/share/policies
+          readOnly: true
         - name: tmp
           mountPath: /tmp
         - name: run
@@ -1751,6 +1785,9 @@ spec:
       - name: data
         emptyDir:
           sizeLimit: 512Mi
+      - name: policies
+        emptyDir:
+          sizeLimit: 64Mi
       - name: tmp
         emptyDir: {}
       # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
@@ -2123,7 +2160,7 @@ spec:
         - name: DEFENSECLAW_CHART_PLAN
           value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\ndata_dir: /var/lib/defenseclaw/data\ndeployment_mode: managed_enterprise\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-m.example\n    oidc:\n      client_id: defenseclaw-launcher\n      issuer: https://login.example.com\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  templates:\n    allowed_images:\n    - registry.example.com/defenseclaw/*\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\ndata_dir: /var/lib/defenseclaw/data\ndeployment_mode: managed_enterprise\npolicy_dir: /opt/defenseclaw/share/policies\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-m.example\n    oidc:\n      client_id: defenseclaw-launcher\n      issuer: https://login.example.com\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  templates:\n    allowed_images:\n    - registry.example.com/defenseclaw/*\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -2239,7 +2276,7 @@ spec:
         - name: DEFENSECLAW_CHART_PLAN
           value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\ndata_dir: /var/lib/defenseclaw/data\ndeployment_mode: managed_enterprise\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-m.example\n    oidc:\n      client_id: defenseclaw-launcher\n      issuer: https://login.example.com\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  templates:\n    allowed_images:\n    - registry.example.com/defenseclaw/*\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\ndata_dir: /var/lib/defenseclaw/data\ndeployment_mode: managed_enterprise\npolicy_dir: /opt/defenseclaw/share/policies\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-m.example\n    oidc:\n      client_id: defenseclaw-launcher\n      issuer: https://login.example.com\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  templates:\n    allowed_images:\n    - registry.example.com/defenseclaw/*\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -2355,7 +2392,7 @@ spec:
         - name: DEFENSECLAW_CHART_PLAN
           value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\ndata_dir: /var/lib/defenseclaw/data\ndeployment_mode: managed_enterprise\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-m.example\n    oidc:\n      client_id: defenseclaw-launcher\n      issuer: https://login.example.com\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  templates:\n    allowed_images:\n    - registry.example.com/defenseclaw/*\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\ndata_dir: /var/lib/defenseclaw/data\ndeployment_mode: managed_enterprise\npolicy_dir: /opt/defenseclaw/share/policies\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-m.example\n    oidc:\n      client_id: defenseclaw-launcher\n      issuer: https://login.example.com\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  templates:\n    allowed_images:\n    - registry.example.com/defenseclaw/*\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE
@@ -2471,7 +2508,7 @@ spec:
         - name: DEFENSECLAW_CHART_PLAN
           value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
-          value: "config_version: 9\ndata_dir: /var/lib/defenseclaw/data\ndeployment_mode: managed_enterprise\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-m.example\n    oidc:\n      client_id: defenseclaw-launcher\n      issuer: https://login.example.com\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  templates:\n    allowed_images:\n    - registry.example.com/defenseclaw/*\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+          value: "config_version: 9\ndata_dir: /var/lib/defenseclaw/data\ndeployment_mode: managed_enterprise\npolicy_dir: /opt/defenseclaw/share/policies\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-m.example\n    oidc:\n      client_id: defenseclaw-launcher\n      issuer: https://login.example.com\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  templates:\n    allowed_images:\n    - registry.example.com/defenseclaw/*\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
           value: /tmp/defenseclaw
         - name: POD_NAMESPACE

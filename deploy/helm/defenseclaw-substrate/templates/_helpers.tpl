@@ -96,6 +96,9 @@ name this release's Services and the Substrate API filled in.
 {{- if and (include "dc.managed" .) (not (hasKey $cfg "data_dir")) -}}
 {{- $_ := set $cfg "data_dir" (include "dc.managedDataDir" .) -}}
 {{- end -}}
+{{- if and (include "dc.managed" .) (not (hasKey $cfg "policy_dir")) -}}
+{{- $_ := set $cfg "policy_dir" (include "dc.managedPolicyDir" .) -}}
+{{- end -}}
 {{- toYaml $cfg -}}
 {{- end -}}
 
@@ -143,6 +146,9 @@ would never start.
 {{/* The managed data dir: its own volume, owned by the gateway account,
 0700 (the managed data_dir trust check refuses a 0777 volume root). */}}
 {{- define "dc.managedDataDir" -}}/var/lib/defenseclaw/data{{- end -}}
+{{/* The managed policy_dir: the root-owned vendor folder of the Linux
+layout, seeded by the init container and read-only to the gateway. */}}
+{{- define "dc.managedPolicyDir" -}}/opt/defenseclaw/share/policies{{- end -}}
 
 {{/* Init containers of a DefenseClaw pod: in managed mode one gives the
 data volume to the gateway account (the gateway image has no shell, so
@@ -160,6 +166,7 @@ initContainers:
   - --uid={{ .Values.podSecurityContext.runAsUser }}
   - --gid={{ .Values.podSecurityContext.runAsGroup }}
   - --mode=0700
+  - --policies={{ include "dc.managedPolicyDir" . }}
   resources:
     requests: {cpu: 10m, memory: 16Mi}
     limits: {memory: 64Mi}
@@ -174,6 +181,8 @@ initContainers:
   volumeMounts:
   - name: data
     mountPath: {{ include "dc.managedDataDir" . }}
+  - name: policies
+    mountPath: {{ include "dc.managedPolicyDir" . }}
 {{- end }}
 {{- end -}}
 
@@ -188,6 +197,9 @@ initContainers:
 - name: data
   emptyDir:
     sizeLimit: {{ .ctx.Values.managed.dataSizeLimit }}
+- name: policies
+  emptyDir:
+    sizeLimit: 64Mi
 {{- end }}
 - name: tmp
   emptyDir: {}
@@ -257,6 +269,9 @@ initContainers:
   readOnly: true
 - name: data
   mountPath: {{ include "dc.managedDataDir" .ctx }}
+- name: policies
+  mountPath: {{ include "dc.managedPolicyDir" .ctx }}
+  readOnly: true
 {{- else }}
 - name: config
   mountPath: /etc/defenseclaw

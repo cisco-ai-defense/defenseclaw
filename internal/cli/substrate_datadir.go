@@ -30,6 +30,7 @@ var substrateDataDirFlags struct {
 	path     string
 	uid, gid int
 	mode     string
+	policies string
 }
 
 // substrateDataDirCmd is the chart's init container step in managed mode
@@ -48,7 +49,13 @@ var substrateDataDirCmd = &cobra.Command{
 		if err != nil || mode&0o077 != 0 || mode&0o700 != 0o700 {
 			return fmt.Errorf("substrate-datadir: --mode %q must be 0700 (owner only)", f.mode)
 		}
-		return prepareSubstrateDataDir(f.path, f.uid, f.gid, os.FileMode(mode))
+		if err := prepareSubstrateDataDir(f.path, f.uid, f.gid, os.FileMode(mode)); err != nil {
+			return err
+		}
+		if f.policies != "" {
+			return seedRootPolicies(f.policies)
+		}
+		return nil
 	},
 }
 
@@ -58,6 +65,7 @@ func init() {
 	f.IntVar(&substrateDataDirFlags.uid, "uid", 65532, "owner UID (the gateway account)")
 	f.IntVar(&substrateDataDirFlags.gid, "gid", 65532, "owner GID")
 	f.StringVar(&substrateDataDirFlags.mode, "mode", "0700", "mode (owner only)")
+	f.StringVar(&substrateDataDirFlags.policies, "policies", "", "also write the embedded policies into this volume root, root-owned and read-only (managed policy_dir)")
 	rootCmd.AddCommand(substrateDataDirCmd)
 }
 
@@ -82,5 +90,39 @@ func prepareSubstrateDataDir(path string, uid, gid int, mode os.FileMode) error 
 		return fmt.Errorf("substrate-datadir: %w", err)
 	}
 	fmt.Printf("substrate-datadir: %s owned by %d:%d mode %04o\n", path, uid, gid, mode)
+	return nil
+}
+
+// seedRootPolicies writes the embedded policies into a volume root as the
+// managed policy_dir: root-owned, folders 0755, files 0444, so the gateway
+// account reads them and cannot change them (the managed trust check).
+func seedRootPolicies(dir string) error {
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || dir == "/" {
+		return fmt.Errorf("substrate-datadir: --policies %q must be a clean absolute path below /", dir)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("substrate-datadir: --policies %s must be the mounted volume", dir)
+	}
+	if err := writeSubstratePolicies(dir, 0o755, 0o444); err != nil {
+		return err
+	}
+	err = filepath.WalkDir(dir, func(p string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if err := os.Lchown(p, 0, 0); err != nil {
+			return err
+		}
+		mode := os.FileMode(0o444)
+		if d.IsDir() {
+			mode = 0o755
+		}
+		return os.Chmod(p, mode)
+	})
+	if err != nil {
+		return fmt.Errorf("substrate-datadir: policies: %w", err)
+	}
+	fmt.Printf("substrate-datadir: policies written to %s (root-owned, read-only)\n", dir)
 	return nil
 }

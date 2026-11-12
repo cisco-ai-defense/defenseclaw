@@ -200,8 +200,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if !cfg.Substrate.Enabled {
 			return errors.New("serve: substrate.enabled is false in the configuration")
 		}
-		if err := seedSubstratePolicies(cfg.PolicyDir); err != nil {
-			return err
+		// Managed: policy_dir is the root-owned vendor folder the chart's
+		// init container seeds (substrate-datadir --policies) and mounts
+		// read-only; the gateway account must not write its own policy.
+		if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+			if err := seedSubstratePolicies(cfg.PolicyDir); err != nil {
+				return err
+			}
 		}
 		substrateStartupChecks(cfg)
 		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
@@ -233,6 +238,12 @@ func serveSubstrateMetrics(reg *prometheus.Registry, ready *atomic.Bool) {
 // so the packs come from the binary that runs, never from an older copy.
 // Files are written read-only to the gateway account.
 func seedSubstratePolicies(policyDir string) error {
+	return writeSubstratePolicies(policyDir, 0o700, 0o400)
+}
+
+// writeSubstratePolicies writes the embedded policies into policyDir with
+// the given folder and file modes.
+func writeSubstratePolicies(policyDir string, dirMode, fileMode os.FileMode) error {
 	if strings.TrimSpace(policyDir) == "" {
 		return errors.New("serve: policy_dir is empty")
 	}
@@ -242,11 +253,11 @@ func seedSubstratePolicies(policyDir string) error {
 	}
 	for _, f := range files {
 		dst := filepath.Join(policyDir, filepath.FromSlash(f.Path))
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(dst), dirMode); err != nil {
 			return fmt.Errorf("serve: seed policies: %w", err)
 		}
 		_ = os.Remove(dst + ".tmp")
-		if err := os.WriteFile(dst+".tmp", f.Data, 0o400); err != nil {
+		if err := os.WriteFile(dst+".tmp", f.Data, fileMode); err != nil {
 			return fmt.Errorf("serve: seed policies: %w", err)
 		}
 		if err := os.Rename(dst+".tmp", dst); err != nil {
