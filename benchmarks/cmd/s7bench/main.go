@@ -78,7 +78,8 @@ type record struct {
 
 var shellTools = map[string]bool{"bash_command": true, "bash": true, "execute_command": true, "shell": true,
 	"run_command": true, "terminal": true, "exec": true, "run_shell_command": true, "execute_bash": true,
-	"run_terminal_cmd": true, "command": true, "sh": true, "zsh": true, "shell_exec": true, "local_shell": true}
+	"run_terminal_cmd": true, "command": true, "sh": true, "zsh": true, "shell_exec": true, "local_shell": true,
+	"shell.run": true, "shell.exec": true, "system.execute": true, "terminal.execute": true}
 var nativeTools = map[string]string{"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "multiedit": "MultiEdit",
 	"glob": "Glob", "grep": "Grep", "webfetch": "WebFetch", "websearch": "WebSearch", "todowrite": "TodoWrite",
 	"task": "Task", "notebookedit": "NotebookEdit", "toolsearch": "ToolSearch"}
