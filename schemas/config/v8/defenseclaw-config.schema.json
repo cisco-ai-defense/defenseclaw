@@ -6478,6 +6478,11 @@
         "idle_suspend_after": {
           "$ref": "#/$defs/duration"
         },
+        "workspace_max_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 68719476736
+        },
         "unattended": {
           "type": "object",
           "additionalProperties": false,

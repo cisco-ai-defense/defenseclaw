@@ -1025,6 +1025,7 @@ A `custom-providers.json` marked `_derived_from` is rendered from this section o
 | `substrate.require_attested_templates` | `true` | An actor whose template has no DefenseClaw attestation gets no network. |
 | `substrate.default_sandbox_class` | `gvisor` | `gvisor` or `microvm`. |
 | `substrate.idle_suspend_after` | `30m` | Suspends an actor with no activity and low CPU; `0s` turns it off. Never with a pending ask. |
+| `substrate.workspace_max_bytes` | `1073741824` (1 GiB) | Largest workspace upload a launcher may send through the gateway; above it the upload is refused with a `--clone` hint. |
 | `substrate.unattended.asks`, `.ask_timeout`, `.telemetry_sampling` | `deny`, `30m`, `1.0` | Unattended runs: `deny` or `queue` asks, how long a queued ask waits, the share of routine records kept. |
 | `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits on the actor Service. |
 | `substrate.extproc.enabled`, `.failure_mode`, `.body_inspection`, `.body_max_bytes` | `true`, `closed`, `auto`, `1048576` | The egress callout: what it does when it can't decide, and body mode (`auto` detects support at run time, `on`, `off`). Bodies are at most 1 MiB. |

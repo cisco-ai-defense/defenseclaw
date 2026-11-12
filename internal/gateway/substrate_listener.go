@@ -141,6 +141,9 @@ type SubstrateConfig struct {
 	// Relays reaches an actor's relay through the router for attach
 	// (nil: attach answers 503).
 	Relays SubstrateRelayDialer
+	// WorkspaceMaxBytes caps a workspace upload through attach
+	// (substrate.workspace_max_bytes, E23).
+	WorkspaceMaxBytes int64
 	// Doctor runs the gateway-side doctor checks; Info is the
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck
@@ -624,9 +627,10 @@ func (a *APIServer) substrateActorScope(st *substrateState, next http.Handler) h
 		}
 		ctx = PromoteSessionIfAuthenticated(ctx)
 		ctx = contextWithSubstratePerson(ctx, reg)
-		if route.llm {
-			// The model call's verified caller for routing, usage and the
-			// profile (substrate_identity.go).
+		// The verified caller on every actor route, as for /llm: hook
+		// decisions, profiles and audit rows see the same person
+		// (substrate_identity.go).
+		if route.llm || route.class == sandboxauth.RouteHook || route.class == sandboxauth.RouteNotify || route.class == sandboxauth.RouteInspect {
 			ctx = a.attachSubstrateSubject(ctx, reg)
 		}
 		if route.class != "" && route.class != sandboxauth.RouteOTLP {

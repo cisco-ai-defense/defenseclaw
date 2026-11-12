@@ -54,13 +54,16 @@ type SubstrateConfig struct {
 	DefaultSandboxClass string `mapstructure:"default_sandbox_class" yaml:"default_sandbox_class,omitempty"`
 	// IdleSuspendAfter is a Go duration (default 30m; "0s" turns idle
 	// suspend off).
-	IdleSuspendAfter string                    `mapstructure:"idle_suspend_after" yaml:"idle_suspend_after,omitempty"`
-	Unattended       SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
-	RateLimits       SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
-	Extproc          SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
-	LLM              SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
-	Egress           SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Secrets          []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	IdleSuspendAfter string `mapstructure:"idle_suspend_after" yaml:"idle_suspend_after,omitempty"`
+	// WorkspaceMaxBytes caps a workspace upload through the admin
+	// listener's attach route (E23; 0 = DefaultSubstrateWorkspaceMaxBytes).
+	WorkspaceMaxBytes int64                     `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
+	Unattended        SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
+	RateLimits        SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
+	Extproc           SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
+	LLM               SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
+	Egress            SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Secrets           []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
 	// AllowPassthroughFor lists hosts forwarded without inspection
 	// (certificate pinning). A secret is never bound to one.
 	AllowPassthroughFor []string `mapstructure:"allow_passthrough_for" yaml:"allow_passthrough_for,omitempty"`
@@ -319,6 +322,18 @@ func (s SubstrateConfig) EffectiveSandboxClass() string {
 }
 
 // EffectiveIdleSuspendAfter is the idle suspend delay; zero means off.
+// DefaultSubstrateWorkspaceMaxBytes is the workspace upload cap, the relay's
+// own default (1 GiB).
+const DefaultSubstrateWorkspaceMaxBytes int64 = 1 << 30
+
+// EffectiveWorkspaceMaxBytes is WorkspaceMaxBytes or its default.
+func (s SubstrateConfig) EffectiveWorkspaceMaxBytes() int64 {
+	if s.WorkspaceMaxBytes > 0 {
+		return s.WorkspaceMaxBytes
+	}
+	return DefaultSubstrateWorkspaceMaxBytes
+}
+
 func (s SubstrateConfig) EffectiveIdleSuspendAfter() time.Duration {
 	return durationOr(s.IdleSuspendAfter, DefaultSubstrateIdleSuspendAfter)
 }

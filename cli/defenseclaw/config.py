@@ -4324,6 +4324,8 @@ class SubstrateConfig:
     require_attested_templates: bool | None = None
     default_sandbox_class: str = ""
     idle_suspend_after: str = ""
+    # Workspace upload cap through the admin attach route (E23); None = 1 GiB.
+    workspace_max_bytes: int | None = None
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
@@ -7604,6 +7606,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         require_attested_templates=_optional_bool(raw.get("require_attested_templates")),
         default_sandbox_class=str(raw.get("default_sandbox_class", "") or ""),
         idle_suspend_after=_duration_text(raw.get("idle_suspend_after")),
+        workspace_max_bytes=_optional_number(raw.get("workspace_max_bytes"), int),
         unattended=SubstrateUnattendedConfig(
             asks=str(unattended.get("asks", "") or ""),
             ask_timeout=_duration_text(unattended.get("ask_timeout")),
