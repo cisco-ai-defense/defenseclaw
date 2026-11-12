@@ -186,6 +186,10 @@ func (f *fakeAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		routeRefusal(w, http.StatusUnauthorized, "not_signed_in")
 		return
 	}
+	if !websocket.IsWebSocketUpgrade(r) && r.Header.Get("X-DefenseClaw-Client") == "" {
+		routeRefusal(w, http.StatusForbidden, "missing_client_tag")
+		return
+	}
 	if !strings.HasPrefix(r.URL.EscapedPath(), testPrefixPath+"/") {
 		routeRefusal(w, http.StatusNotFound, "no_actor")
 		return

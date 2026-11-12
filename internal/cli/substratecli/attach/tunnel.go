@@ -377,6 +377,8 @@ func (b bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	r := req.Clone(req.Context())
 	r.Header.Set("Authorization", "Bearer "+tok)
+	// The admin listener refuses a write without the client tag (its CSRF gate).
+	r.Header.Set("X-DefenseClaw-Client", "substrate-launcher")
 	resp, err := tu.tr.RoundTrip(r)
 	if err != nil {
 		return nil, tu.netError(err)
