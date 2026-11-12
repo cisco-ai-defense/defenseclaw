@@ -72,7 +72,7 @@ func enrollmentExcludeWarnings(cfg *config.Config) []string {
 			noun, verb, pronoun = "entries", "match", "they exclude"
 		}
 		warnings = []string{fmt.Sprintf("%s %d %s (position %s in the list) %s no account this host knows, so %s nobody; "+
-			"check the spelling (DOMAIN\\name, AzureAD\\<name or UPN>, the SID or uid) or remove it",
+			"check the spelling (on Linux and macOS the exact account name or uid, on Windows DOMAIN\\name, AzureAD\\<name or UPN> or the SID) or remove it",
 			EnrollmentExcludeWarningPrefix, len(positions), noun, strings.Join(positions, ", "), verb, pronoun)}
 	}
 	enrollmentExcludeCache.Lock()

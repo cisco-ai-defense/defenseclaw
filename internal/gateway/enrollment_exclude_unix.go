@@ -7,10 +7,17 @@ package gateway
 
 import "github.com/defenseclaw/defenseclaw/internal/unixidentity"
 
-// enrollmentExcludeEntryUnknown reports an exclude_users entry the platform
-// resolver (NSS on Linux, Open Directory on macOS) answers with a definitive
-// "no such account"; a failed or ambiguous lookup is not reported.
+// enrollmentExcludeEntryUnknown reports an exclude_users entry that excludes
+// nobody on Linux and macOS: the platform resolver (NSS on Linux, Open
+// Directory on macOS) answers "no such account", or it resolves a spelling
+// (DOMAIN\\name, name@domain, a bare name for a fully qualified account) that
+// the enumerator does not match, because exclude_users matches the exact
+// account name or its decimal uid. A failed or ambiguous lookup is not
+// reported.
 var enrollmentExcludeEntryUnknown = func(entry string) bool {
-	_, _, err := profileExplainAccount(entry)
-	return err != nil && unixidentity.IsNotFound(err)
+	uid, name, err := profileExplainAccount(entry)
+	if err != nil {
+		return unixidentity.IsNotFound(err)
+	}
+	return entry != name && entry != uid
 }

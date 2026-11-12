@@ -25,6 +25,11 @@ func TestStandaloneStatusNamesExcludeEntriesThatMatchNoAccount(t *testing.T) {
 		switch name {
 		case "r106fxe8-alice":
 			return "1001", "r106fxe8-alice", nil
+		case "CORP\\r106fxe8-alice", "r106fxe8-alice@corp.test":
+			// resolves, but the enumerator matches only the exact name or uid
+			return "1001", "r106fxe8-alice", nil
+		case "1001":
+			return "1001", "r106fxe8-alice", nil
 		case "r106fxe8-flaky":
 			return "", "", errors.New("lookup timed out")
 		}
@@ -32,14 +37,14 @@ func TestStandaloneStatusNamesExcludeEntriesThatMatchNoAccount(t *testing.T) {
 	}
 	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
 	cfg.Enterprise.Profile = "standalone"
-	cfg.Enterprise.Enrollment.ExcludeUsers = []string{"r106fxe8-alice", "r106fxe8-nosuch", `CORP\r106fxe8-gone`, "r106fxe8-flaky", "r106fxe8-*"}
+	cfg.Enterprise.Enrollment.ExcludeUsers = []string{"r106fxe8-alice", "r106fxe8-nosuch", `CORP\r106fxe8-gone`, "r106fxe8-flaky", "r106fxe8-*", "CORP\\r106fxe8-alice", "r106fxe8-alice@corp.test", "1001"}
 	var got []string
 	for _, warning := range standaloneProfileWarnings(nil, cfg) {
 		if strings.Contains(warning, "exclude_users") {
 			got = append(got, warning)
 		}
 	}
-	if len(got) != 1 || !strings.Contains(got[0], "2 entries (position 2, 3 in the list) match no account") ||
+	if len(got) != 1 || !strings.Contains(got[0], "4 entries (position 2, 3, 6, 7 in the list) match no account") ||
 		strings.Contains(got[0], "r106fxe8") {
 		t.Fatalf("exclude warnings = %q", got)
 	}
