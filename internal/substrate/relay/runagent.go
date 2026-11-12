@@ -22,7 +22,7 @@ import (
 //
 // tmux's own #{pane_dead_status} cannot be trusted for this: tmux 3.4 marks a
 // pane dead when its terminal closes, before it has reaped the process, and
-// sometimes never fills the status in (substrate-1 GAP-0032: on dc-build-1 a
+// sometimes never fills the status in (GAP-0032: on a loaded Linux build host a
 // pane that exited 7 read as dead with no status in 2 of 30 probes, and the
 // relay reported -1 in 22 of 60 test runs).
 const RunAgentCommand = "run-agent"
