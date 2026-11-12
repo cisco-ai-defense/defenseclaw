@@ -74,3 +74,11 @@ func TestOpenClawSetupWritesAndRemovesHookMode(t *testing.T) {
 		}
 	}
 }
+
+// The plugin reads only the scoped credential, so setup must not fall back
+// to the master gateway token for openclaw.
+func TestOpenClawRequiresScopedPluginCredential(t *testing.T) {
+	if !RequiresScopedHookToken(NewOpenClawConnector()) {
+		t.Fatal("openclaw must require the connector-scoped plugin credential")
+	}
+}

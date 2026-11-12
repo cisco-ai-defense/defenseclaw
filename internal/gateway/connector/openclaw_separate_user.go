@@ -173,3 +173,10 @@ func (c *OpenClawConnector) teardownSeparateUser(opts SetupOpts, paths openClawP
 		"so remove plugins.entries.defenseclaw, defenseclaw from plugins.allow and %s from plugins.load.paths there yourself\n", paths.config, paths.external)
 	return nil
 }
+
+// RequiresScopedHookToken makes setup fail with the reason when the
+// connector-scoped plugin credential cannot be issued (an untrusted data
+// folder), instead of falling back to the master gateway token: since 1.0.10
+// the plugin reads only the scoped credential, so a fallback would leave it
+// with none and every tool call blocked without saying why.
+func (c *OpenClawConnector) RequiresScopedHookToken() bool { return true }
