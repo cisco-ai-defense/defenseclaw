@@ -1086,6 +1086,9 @@ func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
 
 // SetRouteOnly installs the route-only server for hook connectors.
 func (a *APIServer) SetRouteOnly(s *routeOnlyServer) {
+	if s != nil {
+		s.api = a
+	}
 	a.routeOnly.Store(s)
 }
 
@@ -1652,6 +1655,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 			errCh <- fmt.Errorf("record the running gateway listener: %w; check data directory permissions and run defenseclaw-gateway start", err)
 			return
 		}
+		// The port is ours again: a managed Windows gateway rotates its
+		// route epoch before the first request (S1 DESIGN 17.1, 18.4, 19).
+		a.rotateRouteEpoch()
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
