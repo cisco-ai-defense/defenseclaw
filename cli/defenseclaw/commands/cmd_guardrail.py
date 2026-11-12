@@ -207,7 +207,7 @@ def _resolve_active_connector(cfg) -> str:
 
 def _enabled_connectors_need_model(cfg, connector: str) -> bool:
     """Report whether re-enabling routes LLM traffic through the proxy."""
-    from defenseclaw.platform_support import is_proxy_connector
+    from defenseclaw.platform_support import uses_guardrail_proxy
 
     names: list[str] = []
     resolver = getattr(cfg, "active_connectors", None)
@@ -218,7 +218,7 @@ def _enabled_connectors_need_model(cfg, connector: str) -> bool:
             names = []
     if not names:
         names = [connector]
-    return any(is_proxy_connector(normalize_connector(name) or name) for name in names)
+    return any(uses_guardrail_proxy(normalize_connector(name) or name) for name in names)
 
 
 def _connector_label(name: str) -> str:

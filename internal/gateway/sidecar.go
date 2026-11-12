@@ -7529,7 +7529,10 @@ func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayTo
 		return fallback, nil
 	}
 	out := connectorSetupTokens{connectorToken: scoped, hookToken: scoped, hookTokenScoped: true}
-	if connector.IsProxyConnector(conn.Name()) {
+	// The guardrail proxy authenticates its connector with the gateway token.
+	// OpenClaw in native mode (Windows) has no proxy, so it gets only the
+	// scoped plugin credential (DESIGN-REVIEW-1 P2-12).
+	if connector.UsesGuardrailProxy(conn.Name()) {
 		out.connectorToken = gatewayToken
 	}
 	return out, nil
@@ -7671,9 +7674,11 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 		}
 	}
 	// Built-ins that predate ConnectorCapabilityProvider still use the shared
-	// proxy classification. Unknown/plugin connectors retain the conservative
-	// historical default unless they explicitly advertise a traffic mode.
-	if connector.IsProxyConnector(conn.Name()) {
+	// proxy classification, which follows the resolved OpenClaw hook mode (no
+	// proxy for native OpenClaw on Windows). Unknown/plugin connectors retain
+	// the conservative historical default unless they explicitly advertise a
+	// traffic mode.
+	if connector.UsesGuardrailProxy(conn.Name()) {
 		return true
 	}
 	return !connector.IsKnownBuiltinConnector(conn.Name())
@@ -7728,7 +7733,7 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 		return false
 	}
 	name := configuredConnectorName(cfg)
-	if connector.IsProxyConnector(name) {
+	if connector.UsesGuardrailProxy(name) {
 		return true
 	}
 	return !connector.IsKnownBuiltinConnector(name)

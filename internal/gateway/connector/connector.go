@@ -566,11 +566,11 @@ const (
 
 // LLMTrafficModeForConnector returns the traffic mode for a connector
 // name: "proxy" for the proxy/chat connectors (OpenClaw, ZeptoClaw)
-// that interpose on the LLM data path, "hooks-only" for every hook
-// connector. This is the authoritative classifier the API and CLI use
+// that interpose on the LLM data path on this host, "hooks-only" for every
+// hook connector and for OpenClaw in native mode (Windows). This is the authoritative classifier the API and CLI use
 // to describe custom-provider enforcement per connector.
 func LLMTrafficModeForConnector(name string) string {
-	if IsProxyConnector(normalizeConnectorName(name)) {
+	if UsesGuardrailProxy(normalizeConnectorName(name)) {
 		return LLMTrafficModeProxy
 	}
 	return LLMTrafficModeHooksOnly

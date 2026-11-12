@@ -4381,13 +4381,14 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			return
 		}
 		if isGatewayTokenListenerProofRequest(r) && (a.scannerCfg == nil || !a.scannerCfg.SecureClientIntegration()) {
-			// The per-user OpenClaw plugin proves this listener with the
-			// gateway token before it sends that token (GAP-0594).
+			// The per-user OpenClaw plugin proves this listener with its
+			// credential before it sends it (GAP-0594): the connector-scoped
+			// plugin token (DESIGN-REVIEW-1 P1-2), or the gateway token.
 			expected := ""
 			if a.scannerCfg != nil {
 				expected = a.scannerCfg.Gateway.Token
 			}
-			if !writeGatewayTokenListenerProof(w, r, expected, a.client.RefreshedToken()) {
+			if !writeGatewayTokenListenerProof(w, r, a.openClawPluginProofToken(), expected, a.client.RefreshedToken()) {
 				a.emitHTTPAuthFailure(r.Context(), r, connector.UserScopedListenerProofPath,
 					gatewaylog.ErrCodeAuthInvalidToken, userScopedListenerProofRefusedReason)
 				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)

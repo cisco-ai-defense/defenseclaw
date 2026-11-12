@@ -30,7 +30,6 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/firewall"
@@ -119,6 +118,11 @@ func (c *OpenClawConnector) Name() string                           { return "op
 func (c *OpenClawConnector) Description() string                    { return "fetch interceptor plugin" }
 func (c *OpenClawConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *OpenClawConnector) SubprocessPolicy() SubprocessPolicy {
+	if openClawNativeOnly() {
+		// The PATH shims are bash scripts for a proxy-era OpenClaw; native
+		// Windows has no bash on its PATH and runs no shims.
+		return SubprocessNone
+	}
 	return ResolveSubprocessPolicy(SubprocessShims)
 }
 
@@ -256,11 +260,15 @@ func OpenClawPluginApprovalsRefusal(rawVersion string) string {
 }
 
 func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	// Proxy connectors require the local guardrail proxy, which DefenseClaw
-	// does not host on Windows (hook-only there). Fail clearly instead of
-	// planting a half-configured proxy connector.
-	if !ConnectorSupportedOnHostOS(c.Name()) {
-		return errConnectorUnsupportedOnOS(c.Name(), runtime.GOOS)
+	// The platform row decides (native Windows runs OpenClaw in native hook
+	// mode, without the guardrail proxy).
+	if err := validateConnectorSupportedOnOS(c.Name(), openClawHooksGOOS); err != nil {
+		return err
+	}
+	// Managed Windows stays refused: the Windows enterprise profile does not
+	// deliver the per-user plugin credential or repair openclaw.json yet.
+	if openClawHooksGOOS == "windows" && opts.ManagedEnterprise {
+		return errors.New("openclaw: " + OpenClawManagedWindowsRefusal)
 	}
 
 	// The Makefile keeps the gateway buildable on machines without the
@@ -293,13 +301,14 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return err
 	}
 
-	// Surface 2: Plugin subprocess enforcement
-	policy := ResolveSubprocessPolicy(SubprocessShims)
-	if err := SetupSubprocessEnforcement(policy, opts, c.Name()); err != nil {
+	// Surface 2: Plugin subprocess enforcement (bash PATH shims). Native
+	// Windows has none (SubprocessPolicy is none there).
+	if err := SetupSubprocessEnforcement(c.SubprocessPolicy(), opts, c.Name()); err != nil {
 		return fmt.Errorf("openclaw subprocess enforcement: %w", err)
 	}
 
-	// Surface 3: Hook script for tool inspection
+	// Surface 3: the hook folder with the connector-scoped plugin credential
+	// (hooks/.hook-openclaw.token) the plugin authenticates with, on every OS.
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("openclaw hook script: %w", err)
@@ -1098,16 +1107,18 @@ func (c *OpenClawConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 // under <DataDir>/hooks/ are written for proxy-side tool inspection.
 func (c *OpenClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	paths := c.pathsFor(opts)
-	return AgentPaths{
-		PatchedFiles:         []string{paths.config},
-		BackupFiles:          []string{managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")},
-		HookScripts:          hookScriptPathsForConnector(opts, c),
-		GeneratedFiles:       subprocessGeneratedFiles(opts),
-		GeneratedExecutables: subprocessGeneratedExecutables(opts),
-		CreatedDirs: append([]string{
-			paths.managedPluginDir(),
-		}, subprocessCreatedDirs(opts)...),
+	out := AgentPaths{
+		PatchedFiles: []string{paths.config},
+		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")},
+		HookScripts:  hookScriptPathsForConnector(opts, c),
+		CreatedDirs:  []string{paths.managedPluginDir()},
 	}
+	if c.SubprocessPolicy() == SubprocessShims {
+		out.GeneratedFiles = subprocessGeneratedFiles(opts)
+		out.GeneratedExecutables = subprocessGeneratedExecutables(opts)
+		out.CreatedDirs = append(out.CreatedDirs, subprocessCreatedDirs(opts)...)
+	}
+	return out
 }
 
 func (c *OpenClawConnector) HookScripts(opts SetupOpts) []string {
