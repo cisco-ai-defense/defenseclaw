@@ -106,6 +106,9 @@ if [[ -n "${SELF_TMP}" && -n "$(find "${SELF_TMP}" -mindepth 1 -maxdepth 1 \
 fi
 [[ -z "${SELF_TMP}" ]] || trap 'rm -rf "${SELF_TMP}"' EXIT
 readonly OPENCLAW_VERSION="2026.11.3"
+# OpenClaw 2026.9 and later need Node.js 24.16 (or 26.1); 2026.8.35, the first
+# release with the native plugin hooks DefenseClaw uses, still runs on Node 22.
+readonly OPENCLAW_NODE22_VERSION="2026.8.35"
 # The PATH the user's shell has. Installing uv adds BIN_DIR to this process's
 # PATH, so the PATH hint at the end checks this copy instead.
 readonly CALLER_PATH="${PATH}"
@@ -3581,29 +3584,53 @@ first_install_extras() {
 }
 
 ensure_openclaw() {
-    local found
+    local found want
+    want="$(openclaw_version_for_node)"
+    if [[ -z "${want}" ]]; then
+        warn "OpenClaw needs Node.js 22.22.3 or later (24.16 or later for OpenClaw ${OPENCLAW_VERSION}); found $(node -v 2>/dev/null || echo none). Update Node.js, then run this installer again"
+        has openclaw || OPENCLAW_MISSING=true
+        return
+    fi
     # GAP-1523: a system Node (/usr, /opt/node22) has a root-owned global
     # prefix; a standard user installs into ~/.local, whose bin is BIN_DIR.
     # GAP-1798: every hint names the command this run would use.
     local cmd=(npm install -g)
     if has npm && ! npm_global_prefix_writable; then cmd+=(--prefix "${HOME}/.local"); fi
-    cmd+=("openclaw@${OPENCLAW_VERSION}")
+    cmd+=("openclaw@${want}")
     if has openclaw; then
         found="$(openclaw --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-        if [[ -n "${found}" ]] && ! version_lt "${found}" "${OPENCLAW_VERSION}"; then
+        if [[ -n "${found}" ]] && ! version_lt "${found}" "${want}"; then
             ok "OpenClaw ${found} found"; return
         fi
-        ask_yes_no "Update OpenClaw ${found:-?} to ${OPENCLAW_VERSION}?" || { warn "Keeping OpenClaw ${found:-?}"; return; }
+        ask_yes_no "Update OpenClaw ${found:-?} to ${want}?" || { warn "Keeping OpenClaw ${found:-?}"; return; }
     else
-        ask_yes_no "Install OpenClaw ${OPENCLAW_VERSION}?" || { warn "Skipping OpenClaw; install it later with: ${cmd[*]}"; OPENCLAW_MISSING=true; return; }
+        ask_yes_no "Install OpenClaw ${want}?" || { warn "Skipping OpenClaw; install it later with: ${cmd[*]}"; OPENCLAW_MISSING=true; return; }
     fi
     has npm || { warn "npm is not installed; install Node.js with npm, then run: ${cmd[*]}"; OPENCLAW_MISSING=true; return; }
-    info "Installing OpenClaw ${OPENCLAW_VERSION} with npm (this can take a minute)"
+    info "Installing OpenClaw ${want} with npm (this can take a minute)"
     if "${cmd[@]}" --no-fund --no-audit --no-update-notifier --loglevel=error; then
         OPENCLAW_INSTALLED=true
     else
         warn "Could not install OpenClaw; run: ${cmd[*]}"
         PATH="${BIN_DIR}:${PATH}" has openclaw || OPENCLAW_MISSING=true
+    fi
+}
+
+# openclaw_version_for_node prints the OpenClaw release this Node.js runs:
+# OPENCLAW_VERSION on Node 24.16+ (or 26.1+), OPENCLAW_NODE22_VERSION on Node
+# 22.22.3+, 24.15 or 25.9+, nothing on an older Node. Without node it prints
+# OPENCLAW_VERSION (the npm check names the missing Node.js).
+openclaw_version_for_node() {
+    local v major minor patch
+    if ! has node; then echo "${OPENCLAW_VERSION}"; return; fi
+    v="$(node -v 2>/dev/null | sed -e "s/^v//")"
+    IFS=. read -r major minor patch <<<"${v}"
+    major="${major//[!0-9]/}"; minor="${minor//[!0-9]/}"; patch="${patch//[!0-9]/}"
+    major="${major:-0}"; minor="${minor:-0}"; patch="${patch:-0}"
+    if (( major > 26 || (major == 26 && minor >= 1) || (major == 24 && minor >= 16) )); then
+        echo "${OPENCLAW_VERSION}"
+    elif (( major == 26 || major == 25 && minor >= 9 || major == 24 && minor >= 15 || major == 22 && (minor > 22 || (minor == 22 && patch >= 3)) )); then
+        echo "${OPENCLAW_NODE22_VERSION}"
     fi
 }
 
