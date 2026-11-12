@@ -71,8 +71,7 @@ type CallFacts struct {
 
 	// ChargeKeys are the budget keys the admin routing verdict says this call
 	// is charged to (S11 AdminVerdict.ChargeKeys). The record keeps them and the
-	// spend tracker adds the call cost to each, so a budget check reads Spend
-	// with ScopeBudget.
+	// SpendSink charges the resolved call cost to each of them.
 	ChargeKeys []string
 }
 

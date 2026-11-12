@@ -181,43 +181,6 @@ func TestStorePersistsAcrossReopen(t *testing.T) {
 	}
 }
 
-func TestSpendTrackerPeriodsScopesAndUnknown(t *testing.T) {
-	e := NewEngine()
-	now := time.Date(2026, 11, 12, 15, 0, 0, 0, time.UTC) // Thursday
-	cf := CallFacts{Connector: "codex", Subject: "7", SubjectKind: "posix_uid", IdentityVerified: true, Groups: []string{"eng"}}
-	e.spend.add(cf, 1.5, now)
-	e.spend.add(cf, 0.5, now.Add(-24*time.Hour)) // Wednesday: same week, other day
-	e.spend.add(cf, 4, now.AddDate(0, -1, 0))    // last month
-	owner := OwnerID(cf)
-	if v, ok := e.Spend(ScopeUser, owner, PeriodDay, now); !ok || v != 1.5 {
-		t.Fatal(v, ok)
-	}
-	if v, ok := e.Spend(ScopeUser, owner, PeriodWeek, now); !ok || v != 2 {
-		t.Fatal(v, ok)
-	}
-	if v, ok := e.Spend(ScopeGroup, "eng", PeriodMonth, now); !ok || v != 2 {
-		t.Fatal(v, ok)
-	}
-	if v, ok := e.Spend(ScopeConnector, "codex", PeriodDay, now); !ok || v != 1.5 {
-		t.Fatal(v, ok)
-	}
-	if _, ok := e.Spend(ScopeUser, "posix_uid:nobody", PeriodDay, now); ok {
-		t.Fatal("a subject with no priced call must be unknown, not 0")
-	}
-	if _, ok := e.Spend(ScopeUser, owner, "year", now); ok {
-		t.Fatal("unknown period")
-	}
-	// unverified calls never count toward a user or group
-	e.spend.add(CallFacts{Connector: "codex", Subject: "7", Groups: []string{"eng"}}, 100, now)
-	if v, _ := e.Spend(ScopeGroup, "eng", PeriodDay, now); v != 1.5 {
-		t.Fatalf("unverified identity counted: %v", v)
-	}
-	var nilEngine *Engine
-	if _, ok := nilEngine.Spend(ScopeUser, "x", PeriodDay, now); ok {
-		t.Fatal("nil engine")
-	}
-}
-
 func TestConcurrentConfigureNeverPanicsOrLeavesTheStoreHalfOpen(t *testing.T) {
 	s := NewStore(filepath.Join(t.TempDir(), "model_usage", "model_usage.db"))
 	var wg sync.WaitGroup
@@ -283,44 +246,5 @@ func TestReadFlushIsThrottled(t *testing.T) {
 	rows, _ := s.Run(context.Background(), Query{By: "model", AllOwners: true})
 	if rows[0].Calls != 1 {
 		t.Fatalf("a read inside the gap must not write: %+v", rows)
-	}
-}
-
-type fixedSpend struct{ usd float64 }
-
-func (f fixedSpend) Spend(string, string, string, time.Time) (float64, bool) { return f.usd, true }
-
-func TestSpendReaderReplacesTheLocalTrackerForReads(t *testing.T) {
-	e := NewEngine()
-	now := time.Now()
-	cf := CallFacts{Connector: "codex", Subject: "7", SubjectKind: "posix_uid", IdentityVerified: true}
-	e.spend.add(cf, 1.5, now)
-	owner := OwnerID(cf)
-	if v, _ := e.Spend(ScopeUser, owner, PeriodDay, now); v != 1.5 {
-		t.Fatalf("local tracker: %v", v)
-	}
-	e.SetSpendReader(fixedSpend{usd: 42})
-	if v, ok := e.Spend(ScopeUser, owner, PeriodDay, now); !ok || v != 42 {
-		t.Fatalf("a replica-backed reader must answer: %v %v", v, ok)
-	}
-	e.SetSpendReader(nil)
-	if v, _ := e.Spend(ScopeUser, owner, PeriodDay, now); v != 1.5 {
-		t.Fatalf("nil restores the local tracker: %v", v)
-	}
-}
-
-func TestChargeKeysAreTrackedAsBudgetSpend(t *testing.T) {
-	e := NewEngine()
-	now := time.Now()
-	cf := CallFacts{Connector: "codex", ChargeKeys: []string{"team-a", "team-a", "all"}}
-	e.spend.add(cf, 2, now)
-	if v, ok := e.Spend(ScopeBudget, "team-a", PeriodDay, now); !ok || v != 2 {
-		t.Fatalf("a repeated key is charged once: %v %v", v, ok)
-	}
-	if v, ok := e.Spend(ScopeBudget, "all", PeriodMonth, now); !ok || v != 2 {
-		t.Fatal(v, ok)
-	}
-	if _, ok := e.Spend(ScopeBudget, "team-b", PeriodDay, now); ok {
-		t.Fatal("an uncharged key is unknown")
 	}
 }
