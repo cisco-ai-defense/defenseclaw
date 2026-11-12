@@ -111,14 +111,16 @@ func runSubstrate(t *testing.T, cmd *cobra.Command, args ...string) (stdout, std
 	return out.String(), errb.String(), err
 }
 
-var sampleActors = map[string]any{"actors": []map[string]any{
-	{"atespace": "eng-web", "name": "fix-tests-1", "uid": "u1", "profile": "eng", "connector": "claudecode", "created_at": time.Now().Add(-5 * time.Minute)},
-	{"atespace": "eng-web", "name": "old", "uid": "u2", "profile": "eng", "connector": "codex", "deleted": true},
-	{"atespace": "eng-web", "name": "batch-1", "uid": "u3", "profile": "eng", "connector": "codex", "batch_id": "b-1", "created_at": time.Now().Add(-3 * time.Hour)},
-}}
+func sampleActors() map[string]any {
+	return map[string]any{"actors": []map[string]any{
+		{"atespace": "eng-web", "name": "fix-tests-1", "uid": "u1", "profile": "eng", "connector": "claudecode", "created_at": time.Now().Add(-5 * time.Minute)},
+		{"atespace": "eng-web", "name": "old", "uid": "u2", "profile": "eng", "connector": "codex", "deleted": true},
+		{"atespace": "eng-web", "name": "batch-1", "uid": "u3", "profile": "eng", "connector": "codex", "batch_id": "b-1", "created_at": time.Now().Add(-3 * time.Hour)},
+	}}
+}
 
 func TestSubstrateListShowsOnlyLiveAgents(t *testing.T) {
-	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){"GET actors": jsonReply(sampleActors)}}
+	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){"GET actors": jsonReply(sampleActors())}}
 	useFakeAdmin(t, f)
 	out, _, err := runSubstrate(t, newSubstrateListCmd())
 	if err != nil {
@@ -210,7 +212,7 @@ func TestSubstrateActorReferenceIsResolvedAndAmbiguityRefused(t *testing.T) {
 func TestSubstrateDeleteNeedsAYesAndDeletes(t *testing.T) {
 	var deleted []string
 	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
-		"GET actors": jsonReply(sampleActors),
+		"GET actors": jsonReply(sampleActors()),
 		"DELETE actors/eng-web/fix-tests-1": func(w http.ResponseWriter, r *http.Request) {
 			deleted = append(deleted, r.URL.Path)
 			w.WriteHeader(http.StatusNoContent)
@@ -289,7 +291,7 @@ func TestSubstrateSecretsNeverTakeAValueOnTheCommandLine(t *testing.T) {
 func TestSubstrateUsageAndPolicyPrintTheDocument(t *testing.T) {
 	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
 		"GET usage":          jsonReply(map[string]any{"calls": 12, "tokens": map[string]any{"in": 100, "out": 50}}),
-		"GET actors":         jsonReply(sampleActors),
+		"GET actors":         jsonReply(sampleActors()),
 		"GET policy/explain": jsonReply(map[string]any{"model": "claude", "verdict": "allow"}),
 	}}
 	useFakeAdmin(t, f)
