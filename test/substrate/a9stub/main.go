@@ -159,9 +159,17 @@ func proxyTo(target, prefix, tokenFile string) http.Handler {
 }
 
 func main() {
+	// The LLM judge (A9_JUDGE_MODEL, for example bedrock/<profile>) runs when set; the
+	// Bedrock bearer comes from AWS_BEARER_TOKEN_BEDROCK in the environment.
+	skillCfg := config.SkillScannerConfig{}
+	llm := config.LLMConfig{}
+	if m := os.Getenv("A9_JUDGE_MODEL"); m != "" {
+		skillCfg.UseLLM = true
+		llm = config.LLMConfig{Model: m, Region: os.Getenv("AWS_REGION")}
+	}
 	floor := scanner.Severity(strings.ToUpper(os.Getenv("A9_BLOCK_AT")))
 	rt = &attest.RuntimeScanner{
-		Skill:     scanner.NewSkillScannerFromLLM(config.SkillScannerConfig{}, config.LLMConfig{}, config.CiscoAIDefenseConfig{}),
+		Skill:     scanner.NewSkillScannerFromLLM(skillCfg, llm, config.CiscoAIDefenseConfig{}),
 		MCPStatic: &attest.MCPStaticScanner{}, Compiled: policy.CompileAdmission(&config.Config{}), BlockAtOrAbove: floor,
 	}
 	mode.Store(os.Getenv("STUB_MODE"))
