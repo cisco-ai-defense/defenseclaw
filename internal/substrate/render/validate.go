@@ -19,11 +19,10 @@ package render
 import (
 	"errors"
 	"fmt"
-	"net/url"
-	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 )
 
 // Validate runs the admission checks ate-api-server v1.0.0 applies to an
@@ -184,10 +183,10 @@ func validateEffects(e *ateapi.HttpRuleEffects) error {
 }
 
 func validateHeader(h *ateapi.CredentialHeader) error {
-	if !validHeaderName(h.GetHeader()) {
+	if !egressspec.ValidHeaderName(h.GetHeader()) {
 		return fmt.Errorf("header %q must be an HTTP header name", h.GetHeader())
 	}
-	if !validHeaderValue(h.GetPrefix()) {
+	if !egressspec.ValidHeaderValue(h.GetPrefix()) {
 		return errors.New("prefix must be a valid HTTP field value prefix")
 	}
 	jwt := h.GetActorJwt()
@@ -221,60 +220,5 @@ func ValidateCredentialHeader(header, prefix, uri string) error {
 	return validateHeader(&ateapi.CredentialHeader{Header: header, Prefix: prefix, CredentialUri: uri})
 }
 
-// ValidCredentialURI mirrors upstream validCredentialURI:
-// ate-secret://<DNS-1123 provider class>/<provider-name>/<tail>, with no
-// user, query, fragment, percent-encoding or empty path segment.
-func ValidCredentialURI(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "ate-secret" || u.Host == "" || u.Host != u.Hostname() || u.User != nil ||
-		u.RawQuery != "" || u.Fragment != "" || strings.Contains(raw, "?") || strings.Contains(raw, "#") || !isDNS1123Subdomain(u.Host) {
-		return false
-	}
-	p := u.EscapedPath()
-	if p != u.Path || !strings.HasPrefix(p, "/") || strings.HasSuffix(p, "/") {
-		return false
-	}
-	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
-	return len(parts) >= 2 && !slices.Contains(parts, "")
-}
-
-func isDNS1123Subdomain(s string) bool {
-	if len(s) == 0 || len(s) > 253 {
-		return false
-	}
-	for _, l := range strings.Split(s, ".") {
-		if len(l) == 0 || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
-			return false
-		}
-		for i := 0; i < len(l); i++ {
-			if c := l[i]; !isLowerAlnum(c) && c != '-' {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func validHeaderName(v string) bool {
-	if v == "" {
-		return false
-	}
-	for i := 0; i < len(v); i++ {
-		c := v[i]
-		if !isLowerAlnum(c) && (c < 'A' || c > 'Z') && strings.IndexByte("!#$%&'*+-.^_`|~", c) < 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func isLowerAlnum(c byte) bool { return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' }
-
-func validHeaderValue(v string) bool {
-	for i := 0; i < len(v); i++ {
-		if c := v[i]; c != '\t' && (c < ' ' || c == 0x7f) {
-			return false
-		}
-	}
-	return true
-}
+// ValidCredentialURI is egressspec.ValidCredentialURI.
+func ValidCredentialURI(raw string) bool { return egressspec.ValidCredentialURI(raw) }

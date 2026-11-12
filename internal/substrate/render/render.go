@@ -34,6 +34,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 )
 
 const (
@@ -51,13 +52,13 @@ const (
 	maxHeadersPerRule   = 16
 	// PersonPlaceholder in a per_person secret's source is replaced with
 	// PersonKey of the actor's person.
-	PersonPlaceholder = "{person}"
+	PersonPlaceholder = egressspec.PersonPlaceholder
 )
 
 // Secret scopes.
 const (
-	ScopeShared    = "shared"
-	ScopePerPerson = "per_person"
+	ScopeShared    = egressspec.ScopeShared
+	ScopePerPerson = egressspec.ScopePerPerson
 )
 
 // Settings are the cluster-wide inputs, from the substrate config section.
@@ -194,7 +195,7 @@ type candidate struct {
 func EgressPolicy(in Input) (Result, error) {
 	s := in.Settings
 	svc, ok := parsePattern(s.ActorService)
-	if !ok || svc.wildcard || svc.any {
+	if !ok || svc.Wildcard || svc.Any {
 		return Result{}, fmt.Errorf("render: actor service %q is not a host name", s.ActorService)
 	}
 	port := s.ActorServicePort
@@ -215,12 +216,12 @@ func EgressPolicy(in Input) (Result, error) {
 	if life < 300 || life > 3600 {
 		return Result{}, fmt.Errorf("render: token lifetime %d s is outside 300-3600", life)
 	}
-	internal := []hostClass{{suffix: svc.name}}
-	if ns := parent(svc.name); strings.Contains(ns, ".") {
+	internal := []hostClass{{suffix: svc.Name}}
+	if ns := parent(svc.Name); strings.Contains(ns, ".") {
 		internal = append(internal, hostClass{suffix: ns})
 	}
-	if a, ok := parsePattern(s.AdminService); ok && !a.any {
-		internal = append(internal, hostClass{suffix: a.name})
+	if a, ok := parsePattern(s.AdminService); ok && !a.Any {
+		internal = append(internal, hostClass{suffix: a.Name})
 	}
 	providers := append(slices.Clone(providerHosts), blockClasses(s.ProviderHosts)...)
 	blocks := blockClasses(in.Profile.Block)
@@ -277,8 +278,8 @@ func EgressPolicy(in Input) (Result, error) {
 	packs := slices.Clone(s.EcosystemPacks)
 	slices.Sort(packs)
 	for _, name := range slices.Compact(packs) {
-		hosts, ok := ecosystemPacks[name]
-		if !ok {
+		hosts := egressspec.PackHosts(name)
+		if hosts == nil {
 			return Result{}, fmt.Errorf("render: unknown ecosystem pack %q", name)
 		}
 		for _, h := range hosts {
@@ -301,7 +302,7 @@ func EgressPolicy(in Input) (Result, error) {
 	}
 
 	rules := []*ateapi.EgressRule{{Https: &ateapi.HttpsRule{
-		Hostnames: []string{svc.name},
+		Hostnames: []string{svc.Name},
 		Ports:     &ateapi.Ports{Numbers: []int32{port}},
 		Effects: &ateapi.HttpRuleEffects{ReplaceHeaders: []*ateapi.CredentialHeader{{
 			Header: ActorHeader, Prefix: "Bearer ",

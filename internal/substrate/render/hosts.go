@@ -18,32 +18,10 @@ package render
 
 import (
 	"regexp"
-	"slices"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 )
-
-// Ecosystem allow packs (E22): the package indexes and mirrors a coding
-// agent needs to install dependencies. Each is rendered as inspected https,
-// so the callout sees every request.
-var ecosystemPacks = map[string][]string{
-	"pypi":   {"pypi.org", "files.pythonhosted.org"},
-	"npm":    {"registry.npmjs.org", "registry.yarnpkg.com"},
-	"crates": {"crates.io", "index.crates.io", "static.crates.io"},
-	"go":     {"proxy.golang.org", "sum.golang.org"},
-}
-
-// EcosystemPacks are the pack names, sorted.
-func EcosystemPacks() []string {
-	out := make([]string, 0, len(ecosystemPacks))
-	for k := range ecosystemPacks {
-		out = append(out, k)
-	}
-	slices.Sort(out)
-	return out
-}
-
-// PackHosts returns a pack's hosts, or nil for an unknown pack.
-func PackHosts(name string) []string { return slices.Clone(ecosystemPacks[name]) }
 
 // hostClass is a set of host names: a suffix family (the name and every
 // name under it) or a regular expression. parent matches the parent of
@@ -87,48 +65,10 @@ var providerHosts = []hostClass{
 	{suffix: "replicate.com"},
 }
 
-// pattern is a Substrate hostname pattern: an exact name, "*.<name>"
-// (exactly one more label) or "*" (every name).
-type pattern struct {
-	name     string
-	wildcard bool
-	any      bool
-}
+// pattern is egressspec.Pattern; parsePattern its parser.
+type pattern = egressspec.Pattern
 
-func (p pattern) String() string {
-	switch {
-	case p.any:
-		return "*"
-	case p.wildcard:
-		return "*." + p.name
-	}
-	return p.name
-}
-
-// parsePattern normalizes and parses a Substrate hostname pattern: lower
-// case, one trailing dot dropped, a DNS-1123 subdomain whose last label is
-// not all digits (so no IP addresses), optionally "*." in front, or "*".
-func parsePattern(raw string) (pattern, bool) {
-	s := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
-	if s == "*" {
-		return pattern{any: true}, true
-	}
-	name, wildcard := strings.CutPrefix(s, "*.")
-	if !isHostname(name) {
-		return pattern{}, false
-	}
-	return pattern{name: name, wildcard: wildcard}, true
-}
-
-// isHostname mirrors upstream egresspolicy.isHostname: a DNS-1123
-// subdomain whose top label is not all digits.
-func isHostname(name string) bool {
-	if !isDNS1123Subdomain(name) {
-		return false
-	}
-	top := name[strings.LastIndexByte(name, '.')+1:]
-	return strings.Trim(top, "0123456789") != ""
-}
+func parsePattern(raw string) (pattern, bool) { return egressspec.ParsePattern(raw) }
 
 func parent(name string) string {
 	_, rest, ok := strings.Cut(name, ".")
@@ -141,18 +81,18 @@ func parent(name string) string {
 // overlaps reports whether p matches any name in c.
 func (c hostClass) overlaps(p pattern) bool {
 	switch {
-	case p.any:
+	case p.Any:
 		return true
-	case !p.wildcard:
+	case !p.Wildcard:
 		if c.re != nil {
-			return c.re.MatchString(p.name)
+			return c.re.MatchString(p.Name)
 		}
-		return (!c.subOnly && p.name == c.suffix) || strings.HasSuffix(p.name, "."+c.suffix)
+		return (!c.subOnly && p.Name == c.suffix) || strings.HasSuffix(p.Name, "."+c.suffix)
 	case c.re != nil:
-		return c.parent.MatchString(p.name)
+		return c.parent.MatchString(p.Name)
 	}
 	// "*.<name>" matches one label under name.
-	return p.name == c.suffix || strings.HasSuffix(p.name, "."+c.suffix) || (!c.subOnly && parent(c.suffix) == p.name)
+	return p.Name == c.suffix || strings.HasSuffix(p.Name, "."+c.suffix) || (!c.subOnly && parent(c.suffix) == p.Name)
 }
 
 // blockClasses reads blocklist entries the way OpenShell does
@@ -168,7 +108,7 @@ func blockClasses(hosts []string) []hostClass {
 			continue
 		}
 		if p, ok := parsePattern(s); ok {
-			out = append(out, hostClass{suffix: p.name, subOnly: p.wildcard})
+			out = append(out, hostClass{suffix: p.Name, subOnly: p.Wildcard})
 		}
 	}
 	return out
@@ -178,25 +118,25 @@ func blockClasses(hosts []string) []hostClass {
 // allow-only list in OpenShell syntax: a host name admits itself only,
 // "*.<name>" every name under it at any depth.
 func covered(allowOnly []string, p pattern) bool {
-	if p.any {
+	if p.Any {
 		return false
 	}
 	for _, raw := range allowOnly {
 		a, ok := parsePattern(raw)
-		if !ok || a.any {
+		if !ok || a.Any {
 			continue
 		}
 		switch {
-		case !a.wildcard:
-			if !p.wildcard && p.name == a.name {
+		case !a.Wildcard:
+			if !p.Wildcard && p.Name == a.Name {
 				return true
 			}
-		case p.wildcard:
-			if p.name == a.name || strings.HasSuffix(p.name, "."+a.name) {
+		case p.Wildcard:
+			if p.Name == a.Name || strings.HasSuffix(p.Name, "."+a.Name) {
 				return true
 			}
 		default:
-			if strings.HasSuffix(p.name, "."+a.name) {
+			if strings.HasSuffix(p.Name, "."+a.Name) {
 				return true
 			}
 		}
