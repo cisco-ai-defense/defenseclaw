@@ -106,7 +106,7 @@ func (s *Server) init() error {
 			env = append(env, k+"="+v)
 		}
 		s.tmux = &Tmux{Bin: rc.Tmux, Socket: filepath.Join(dir, "tmux.sock"), Name: "dc",
-			Workdir: rc.Workdir, Argv: rc.Interactive, Env: env}
+			Workdir: rc.Workdir, Argv: rc.Interactive, Env: env, Status: filepath.Join(dir, "agent.exit")}
 		s.session = newID()
 		go s.watchResume()
 	})

@@ -51,6 +51,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		args = []string{"serve"}
 	}
+	if args[0] == RunAgentCommand {
+		return runAgent(args[1:], stderr)
+	}
 	fs := flag.NewFlagSet("defenseclaw-actor-relay "+args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", kit.ConfigPath, "kit configuration")

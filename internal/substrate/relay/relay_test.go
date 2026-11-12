@@ -30,6 +30,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
+// The test binary is the relay's run-agent wrapper in the tmux tests, as the
+// relay binary is in an actor.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == RunAgentCommand {
+		os.Exit(runAgent(os.Args[2:], os.Stderr))
+	}
+	os.Exit(m.Run())
+}
+
 func TestFramesRoundTrip(t *testing.T) {
 	for _, tc := range []struct {
 		t byte
@@ -403,6 +412,22 @@ func TestWebSocketSessionSurvivesReconnect(t *testing.T) {
 	}
 }
 
+func TestRunAgentRecordsStatus(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		argv []string
+		want int
+	}{{[]string{"sh", "-c", "exit 7"}, 7}, {[]string{"sh", "-c", "exit 0"}, 0}, {[]string{"sh", "-c", "kill -TERM $$"}, 128 + 15}, {[]string{"/nonexistent/agent"}, 127}} {
+		f := filepath.Join(dir, "exit")
+		os.Remove(f)
+		got := runAgent(append([]string{"--status", f, "--"}, tc.argv...), &bytes.Buffer{})
+		code, ok := readStatus(f)
+		if got != tc.want || !ok || code != tc.want {
+			t.Fatalf("%v: exit %d, recorded %d %v, want %d", tc.argv, got, code, ok, tc.want)
+		}
+	}
+}
+
 func TestAgentExitIsReported(t *testing.T) {
 	needTmux(t)
 	s, _, _, ec := testServer(t, []string{"sh", "-c", "read l; exit 7"})
@@ -421,8 +446,11 @@ func TestAgentExitIsReported(t *testing.T) {
 			code = cc.Code
 		}
 	})
-	if code == nil || *code != 7 {
-		t.Fatalf("exit code %v", code)
+	if code == nil {
+		t.Fatal("no exit code")
+	}
+	if *code != 7 {
+		t.Fatalf("exit code %d, want 7", *code)
 	}
 }
 
