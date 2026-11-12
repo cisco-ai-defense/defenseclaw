@@ -59,7 +59,7 @@ config:
     # The stub agent template is not attested (that is a separate journey); an unattested template gets no network.
     require_attested_templates: false
     launcher_atespaces:
-      engineering: [$E2E_DC_LAUNCH_ATESPACE]
+      default: [$E2E_DC_LAUNCH_ATESPACE]
   # The default profile only observes; the smoke test needs a gateway that blocks.
   # An actor in the managed atespace gets the policy of the profile whose match.substrate selects its atespace.
   guardrail:
