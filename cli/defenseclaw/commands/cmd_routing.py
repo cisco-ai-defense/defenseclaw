@@ -235,6 +235,8 @@ def _status_data(app: AppContext) -> dict[str, Any]:
             ],
             rules=len(_list(admin.get("rules"))),
             budgets=len(_list(admin.get("budgets"))),
+            rule_list=_list(admin.get("rules")),
+            budget_list=_list(admin.get("budgets")),
             route_only=[str(c) for c in _list((routing.get("route_only") or {}).get("connectors"))],
             locked=sorted(locked),
         )
