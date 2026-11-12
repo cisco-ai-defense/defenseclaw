@@ -1076,6 +1076,11 @@ def _print_agents(
                 ux.warn(f"{issue}. Fix the syntax error in openclaw.json (OpenClaw reads JSON5).")
             else:
                 ux.warn(f"{issue}; OpenClaw may skip reload. Run defenseclaw setup openclaw.")
+        else:
+            from defenseclaw.openclaw_plugin_config import configured_openclaw_hook_mode, openclaw_hook_mode_detail
+
+            hook_mode = configured_openclaw_hook_mode(cfg)
+            _status_row("OpenClaw hooks", f"{hook_mode} ({openclaw_hook_mode_detail(hook_mode)})")
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
     if sidecar_down and enabled_count and not sidecar_unread and not sidecar_unchecked:

@@ -89,3 +89,33 @@ def configured_openclaw_plugin_config_issue(cfg: object) -> str | None:
     home = str(getattr(claw, "home_dir", "") or "~/.openclaw")
     config_file = str(getattr(claw, "config_file", "") or os.path.join(home, "openclaw.json"))
     return openclaw_plugin_config_issue(config_file, home)
+
+
+# Plugin hook modes setup writes to plugins.entries.defenseclaw.config.hookMode
+# (internal/gateway/connector/openclaw_hook_mode.go). No key is the proxy mode.
+OPENCLAW_HOOK_MODES = ("hybrid", "native")
+
+
+def configured_openclaw_hook_mode(cfg: object) -> str:
+    # The OpenClaw plugin hook mode in openclaw.json: hybrid, native or proxy.
+    claw = getattr(cfg, "claw", None)
+    home = str(getattr(claw, "home_dir", "") or "~/.openclaw")
+    config_file = str(getattr(claw, "config_file", "") or os.path.join(home, "openclaw.json"))
+    try:
+        document = openclaw_json5.load_file(os.path.expanduser(config_file))
+    except (OSError, UnicodeError, openclaw_json5.OpenClawConfigSyntaxError):
+        return "proxy"
+    plugins = document.get("plugins") if isinstance(document, dict) else None
+    entries = plugins.get("entries") if isinstance(plugins, dict) else None
+    entry = entries.get("defenseclaw") if isinstance(entries, dict) else None
+    plugin_cfg = entry.get("config") if isinstance(entry, dict) else None
+    mode = plugin_cfg.get("hookMode") if isinstance(plugin_cfg, dict) else None
+    return mode if mode in OPENCLAW_HOOK_MODES else "proxy"
+
+
+def openclaw_hook_mode_detail(mode: str) -> str:
+    # One line for doctor and status.
+    return {
+        "hybrid": "native plugin hooks and the guardrail proxy",
+        "native": "native plugin hooks only (no guardrail proxy on this host)",
+    }.get(mode, "guardrail proxy with the tool check (OpenClaw before 2026.8.35, or hooks.mode proxy)")

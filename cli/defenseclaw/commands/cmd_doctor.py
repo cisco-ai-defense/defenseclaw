@@ -13039,9 +13039,19 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
     if "openclaw" in connectors:
         from defenseclaw.openclaw_plugin_config import (
+            configured_openclaw_hook_mode,
             configured_openclaw_plugin_config_issue,
+            openclaw_hook_mode_detail,
             openclaw_plugin_config_unreadable,
         )
+
+        hook_mode = configured_openclaw_hook_mode(cfg)
+        if hook_mode != "proxy":
+            _emit("pass", "OpenClaw hook mode", f"{hook_mode}: {openclaw_hook_mode_detail(hook_mode)}", r=r)
+        if hook_mode == "native" and connectors == ["openclaw"]:
+            # No guardrail proxy carries OpenClaw traffic in native mode, so
+            # there is no proxy hop to prove; the plugin hooks guard it.
+            return
 
         if issue := configured_openclaw_plugin_config_issue(cfg):
             _emit(
