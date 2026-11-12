@@ -8,10 +8,12 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -193,11 +195,42 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Chdir(project)
 	benign := filepath.Join(home, targets["ordinary"])
+	labels := slices.Sorted(maps.Keys(targets))
 	cells := []struct {
 		profile string
 		managed bool
 	}{{"default", false}, {"default", true}, {"strict", false}, {"strict", true}}
-	for _, cell := range cells {
+	// The owner's test budget: no cross product of file tool x target x
+	// argument variant x cell. Every file tool is judged on every target,
+	// with its reviewed call and a third of the variants (variant j on tool
+	// i and target k when i+j+k is a multiple of 3), in one cell: cell
+	// (i+k) mod 4 for a protected target, and for the ordinary file a
+	// balanced cell, per user or managed by i, where its allow is asserted.
+	// So every variant is judged on every target (by six tools) and by every
+	// tool (on two or three targets), and every variant on a protected target
+	// in all four cells; every cell judges protected targets and the ordinary
+	// file of its tier. The export forms rotate the same way over target,
+	// connector and form. The checks at the end show the rotation is complete.
+	type rotation struct{ a, b string }
+	used := map[rotation]bool{}
+	cellOf := func(i, k int, label string) int {
+		if label == "ordinary" {
+			return i % 2
+		}
+		return (i + k) % len(cells)
+	}
+	calls := fileToolUnknownKeyCalls()
+	bashForms := func(target string) []string {
+		return []string{
+			"export F=" + target + `; printf x > "$F"`,
+			"export F=" + target + ` && printf x > "$F"`,
+			"declare -x F=" + target + `; printf x > "$F"`,
+			"readonly F=" + target + `; printf x > "$F"`,
+			"export -n F=" + target + `; printf x > "$F"`,
+			"f() { local F=" + target + `; printf x > "$F"; }; f`,
+		}
+	}
+	for ci, cell := range cells {
 		name := cell.profile + map[bool]string{false: "/per-user", true: "/managed"}[cell.managed]
 		t.Run(name, func(t *testing.T) {
 			for _, connector := range []string{"claudecode", "codex", "copilot", "opencode", "cursor", "hermes"} {
@@ -208,9 +241,14 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 				n++
 				return fileToolUnknownKeyVerdict(t, connector, tool, args, cell.profile, cell.managed, home, project, fmt.Sprintf("%s-%d", strings.ReplaceAll(name, "/", "-"), n))
 			}
-			for i, call := range fileToolUnknownKeyCalls() {
-				for label, rel := range targets {
-					target := filepath.Join(home, rel)
+			for i, call := range calls {
+				for k, label := range labels {
+					if cellOf(i, k, label) != ci {
+						continue
+					}
+					target := filepath.Join(home, targets[label])
+					used[rotation{fmt.Sprintf("tool %d", i), "target " + label}] = true
+					used[rotation{"cell " + name, "target " + label}] = true
 					reviewed, _ := verdict(call.connector, call.tool, call.args(target))
 					if label == "state" && call.tool != "Read" && reviewed != "block" {
 						t.Fatalf("%s %s-%d: the reviewed write of DefenseClaw's state is %q, not block", name, call.tool, i, reviewed)
@@ -221,8 +259,16 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 							variants[hidden] = func(map[string]any) map[string]any { return variant(call.args(benign)) }
 						}
 					}
-					for variantName, variant := range variants {
-						got, body := verdict(call.connector, call.tool, variant(call.args(target)))
+					for j, variantName := range slices.Sorted(maps.Keys(variants)) {
+						if (i+j+k)%3 != 0 {
+							continue
+						}
+						used[rotation{"variant " + variantName, "target " + label}] = true
+						used[rotation{"variant " + variantName, fmt.Sprintf("tool %d", i)}] = true
+						if label != "ordinary" {
+							used[rotation{"variant " + variantName + " on " + label, "cell " + name}] = true
+						}
+						got, body := verdict(call.connector, call.tool, variants[variantName](call.args(target)))
 						if label == "ordinary" {
 							// Copilot CLI refuses a call with an unreviewed key
 							// before any rule (HOOK-TOOL-CALL-UNPARSED); every
@@ -242,18 +288,25 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 					}
 				}
 			}
-			for label, rel := range targets {
-				target := filepath.Join(home, rel)
-				for _, connector := range []string{"claudecode", "codex"} {
-					literal, _ := verdict(connector, "Bash", map[string]any{"command": "printf x > " + target})
-					for _, form := range []string{
-						"export F=" + target + `; printf x > "$F"`,
-						"export F=" + target + ` && printf x > "$F"`,
-						"declare -x F=" + target + `; printf x > "$F"`,
-						"readonly F=" + target + `; printf x > "$F"`,
-						"export -n F=" + target + `; printf x > "$F"`,
-						"f() { local F=" + target + `; printf x > "$F"; }; f`,
-					} {
+			for k, label := range labels {
+				target := filepath.Join(home, targets[label])
+				for c, connector := range []string{"claudecode", "codex"} {
+					literal := ""
+					for f, form := range bashForms(target) {
+						formCell := (k + c + f) % len(cells)
+						if label == "ordinary" {
+							formCell = (c + f) % 2
+						}
+						if formCell != ci {
+							continue
+						}
+						used[rotation{fmt.Sprintf("form %d %s", f, connector), "target " + label}] = true
+						if label != "ordinary" {
+							used[rotation{fmt.Sprintf("form %d", f), "cell " + name}] = true
+						}
+						if literal == "" {
+							literal, _ = verdict(connector, "Bash", map[string]any{"command": "printf x > " + target})
+						}
 						got, body := verdict(connector, "Bash", map[string]any{"command": form})
 						if label == "ordinary" {
 							if cell.profile == "default" && got != "allow" {
@@ -268,6 +321,58 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 				}
 			}
 		})
+	}
+	// The rotation is complete: every tool on every target, every variant on
+	// every target and by every tool, every variant on a protected target in
+	// every cell, every export form for both connectors on every target and
+	// in every cell, and every cell on a protected target and every balanced
+	// cell on the ordinary file.
+	var missing []string
+	need := func(a, b string) {
+		if !used[rotation{a, b}] {
+			missing = append(missing, a+" x "+b)
+		}
+	}
+	cellNames := []string{"default/per-user", "default/managed", "strict/per-user", "strict/managed"}
+	variantNames := slices.Sorted(maps.Keys(fileToolUnknownKeyVariants(benign)))
+	hiddenNames := slices.Sorted(maps.Keys(fileToolHiddenTargetVariants(benign)))
+	for _, label := range labels {
+		names := variantNames
+		if label != "ordinary" {
+			names = append(slices.Clone(variantNames), hiddenNames...)
+		}
+		for i := range calls {
+			need(fmt.Sprintf("tool %d", i), "target "+label)
+		}
+		for _, v := range names {
+			need("variant "+v, "target "+label)
+			if label != "ordinary" {
+				for _, cell := range cellNames {
+					need("variant "+v+" on "+label, "cell "+cell)
+				}
+			}
+		}
+		for f := range 6 {
+			for _, connector := range []string{"claudecode", "codex"} {
+				need(fmt.Sprintf("form %d %s", f, connector), "target "+label)
+			}
+		}
+	}
+	for i := range calls {
+		for _, v := range variantNames {
+			need("variant "+v, fmt.Sprintf("tool %d", i))
+		}
+	}
+	for _, cell := range cellNames {
+		need("cell "+cell, "target state")
+		for f := range 6 {
+			need(fmt.Sprintf("form %d", f), "cell "+cell)
+		}
+	}
+	need("cell default/per-user", "target ordinary")
+	need("cell default/managed", "target ordinary")
+	if len(missing) > 0 {
+		t.Errorf("the rotation left %d combinations unjudged: %v", len(missing), missing)
 	}
 }
 
