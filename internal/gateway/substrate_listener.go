@@ -123,8 +123,10 @@ type SubstrateConfig struct {
 	// Profiles picks a create's profile and launcher atespace (nil: every
 	// create is refused).
 	Profiles SubstrateProfileResolver
-	// Usage answers own-only usage (stream 10 seam; nil: 501).
+	// Usage answers own-only usage and batch budgets (nil: 501).
 	Usage SubstrateUsage
+	// Budgets are substrate.budgets (warn only until stream 10).
+	Budgets SubstrateBudgets
 	// Activity receives the last-activity feed of A3's idle logic.
 	Activity SubstrateActivitySink
 	// OnRateLimited counts defenseclaw.substrate.rate_limited.
@@ -385,7 +387,17 @@ func (a *APIServer) newSubstrateActorHandler(st *substrateState) http.Handler {
 		reg = InstallSharedAgentRegistry("", "")
 	}
 	var h http.Handler = http.HandlerFunc(a.serveSubstrateActorRoute)
-	h = apiBodyLimitMiddleware(h, apiRequestBodyMaxBytes, defaultSandboxOTLPMaxBodyBytes)
+	// A model call carries the whole conversation: /llm takes the guardrail
+	// proxy's own passthrough cap, every other route the API cap.
+	h = bodyLimitMiddleware(h, func(r *http.Request) int64 {
+		switch {
+		case strings.HasPrefix(r.URL.Path, substrateLLMPrefix):
+			return substrateLLMMaxBody
+		case isOTLPEndpointPath(r.URL.Path):
+			return defaultSandboxOTLPMaxBodyBytes
+		}
+		return apiRequestBodyMaxBytes
+	})
 	h = a.apiCSRFProtect(h)
 	h = a.metricsMiddleware(h)
 	h = a.substrateActorScope(st, h)
@@ -397,7 +409,7 @@ func (a *APIServer) newSubstrateActorHandler(st *substrateState) http.Handler {
 	h = a.substrateActorAuthenticate(st, h)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		route, ok := a.classifySubstrateActorPath(r.URL.Path)
-		if !ok || r.URL.RawPath != "" {
+		if !ok || (r.URL.RawPath != "" && !substrateLLMRawPathOK(route, r.URL.RawPath)) {
 			writeSandboxIngressError(w, http.StatusNotFound, "not found")
 			return
 		}
@@ -684,4 +696,15 @@ func substrateProfileSubject(ctx context.Context) (profileSubject, bool) {
 		Principal: reg.Person.Principal, UPN: reg.Person.Principal,
 		Groups: append([]string(nil), reg.Person.Groups...),
 	}, true
+}
+
+// substrateLLMRawPathOK admits an escaped /llm path: provider SDKs escape
+// the model ID (Bedrock "...-v1%3A0"). An escaped separator, backslash or
+// dot is still refused, so the decoded path is the one the route checks.
+func substrateLLMRawPathOK(route substrateActorRoute, raw string) bool {
+	if !route.llm {
+		return false
+	}
+	l := strings.ToLower(raw)
+	return !strings.Contains(l, "%2f") && !strings.Contains(l, "%5c") && !strings.Contains(l, "%2e")
 }

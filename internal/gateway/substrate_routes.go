@@ -28,11 +28,13 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/usage"
 )
 
 // The admin listener: people sign in with OIDC (the launcher's device
@@ -99,9 +101,12 @@ type SubstrateActorActions interface {
 	Delete(ctx context.Context, atespace, name string) error
 }
 
-// SubstrateUsage answers usage for one owner ("" for every owner).
+// SubstrateUsage answers the usage route and the batch budget view from
+// the leader's usage store (SubstrateUsageAPI). The admin listener decides
+// the filter's owner: a person's own, or every owner for administrators.
 type SubstrateUsage interface {
-	Usage(ctx context.Context, ownerID, batchID string) (any, error)
+	Usage(ctx context.Context, f usage.Filter) (usage.Summary, error)
+	BudgetSpent(ctx context.Context, q usage.ScopeQuery) (int64, error)
 }
 
 // SubstrateProfileResolver picks the profile and launcher atespace of a
@@ -480,9 +485,52 @@ func (a *APIServer) substrateGetBatch(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusNotFound, "batch_not_found")
 			return
 		}
-		writeSubstrateJSON(w, http.StatusOK, map[string]any{"batch_id": id, "actors": b[id]})
+		out := map[string]any{"batch_id": id, "actors": b[id]}
+		if st.cfg.Usage != nil {
+			out["usage"], out["budget"] = a.substrateBatchUsage(st, r, id)
+		}
+		writeSubstrateJSON(w, http.StatusOK, out)
 	}
 }
+
+// substrateBatchUsage is a batch's usage totals and its token budget
+// state (warn only until stream 10). A batch belongs to one person; an
+// administrator looking at another person's batch sees that person's.
+func (a *APIServer) substrateBatchUsage(st *substrateState, r *http.Request, id string) (any, any) {
+	c, _ := substrateCallerFrom(r.Context())
+	owner := ownerOf(c.person).ID()
+	if c.admin && r.URL.Query().Get("all") == "1" {
+		regs, err := st.cfg.Registrations.List(r.Context(), registry.Filter{BatchID: id, IncludeDeleted: true})
+		if err == nil && len(regs) > 0 {
+			owner = regs[0].Person.ID()
+		}
+	}
+	if owner == "" {
+		return nil, nil
+	}
+	sum, err := st.cfg.Usage.Usage(r.Context(), usage.Filter{OwnerID: owner, BatchID: id})
+	if err != nil {
+		return map[string]any{"error": "usage_unavailable"}, nil
+	}
+	limit := st.cfg.Budgets.BatchTokens
+	if limit <= 0 {
+		return sum.Totals, map[string]any{"state": "none"}
+	}
+	spent, err := st.cfg.Usage.BudgetSpent(r.Context(), usage.ScopeQuery{Scope: usage.ScopeBatch, OwnerID: owner, ID: id})
+	if err != nil {
+		return sum.Totals, map[string]any{"error": "usage_unavailable"}
+	}
+	state := "ok"
+	if spent >= limit {
+		state = "warned"
+	}
+	return sum.Totals, map[string]any{"limit_tokens": limit, "spent_tokens": spent, "state": state, "on_exceed": "warn"}
+}
+
+// The usage route: a person sees only their own usage. Naming anyone
+// else (owner, person, user, principal) or all=1 is refused unless the
+// caller is an administrator.
+const substrateOwnUsageOnly = "you can see only your own usage"
 
 func (a *APIServer) substrateUsage(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -491,17 +539,78 @@ func (a *APIServer) substrateUsage(st *substrateState) http.HandlerFunc {
 			return
 		}
 		c, _ := substrateCallerFrom(r.Context())
-		owner := ownerOf(c.person).ID()
-		if c.admin && r.URL.Query().Get("all") == "1" {
-			owner = ""
+		self := ownerOf(c.person).ID()
+		q := r.URL.Query()
+		f := usage.Filter{OwnerID: self, BatchID: q.Get("batch"), Atespace: q.Get("atespace")}
+		other := ""
+		for _, k := range []string{"owner", "person", "user", "principal"} {
+			if v := strings.TrimSpace(q.Get(k)); v != "" {
+				other = k
+				break
+			}
 		}
-		u, err := st.cfg.Usage.Usage(r.Context(), owner, r.URL.Query().Get("batch"))
+		if other != "" || q.Get("all") == "1" {
+			if !c.admin {
+				writeSubstrateJSON(w, http.StatusForbidden, map[string]string{
+					"error": "forbidden", "reason": "own_usage_only", "message": substrateOwnUsageOnly,
+				})
+				return
+			}
+			f.OwnerID, f.AllOwners = "", true
+			switch other {
+			case "owner":
+				f.OwnerID, f.AllOwners = q.Get("owner"), false
+			case "person":
+				// An OIDC subject of the administrator's own issuer.
+				f.OwnerID, f.AllOwners = c.person.Issuer+"#"+q.Get("person"), false
+			case "user", "principal":
+				f.Principal = strings.TrimSpace(q.Get(other))
+			}
+		}
+		if f.OwnerID == "" && !f.AllOwners {
+			// A caller with no subject cannot have usage.
+			writeSubstrateJSON(w, http.StatusOK, usage.Summary{CostBasis: "none", Actors: []usage.ActorUsage{}, Models: []usage.ModelUsage{}})
+			return
+		}
+		if v := q.Get("since"); v != "" {
+			t, ok := substrateSince(v, time.Now())
+			if !ok {
+				writeSubstrateJSONError(w, http.StatusBadRequest, "bad_since")
+				return
+			}
+			f.Since = t
+		}
+		if v := q.Get("records"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				writeSubstrateJSONError(w, http.StatusBadRequest, "bad_records")
+				return
+			}
+			f.Records = min(n, usage.MaxRecords)
+		}
+		u, err := st.cfg.Usage.Usage(r.Context(), f)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "usage_unavailable")
 			return
 		}
+		if !c.admin {
+			// Defense in depth: a user's answer carries only their rows.
+			u.Owners = nil
+		}
 		writeSubstrateJSON(w, http.StatusOK, u)
 	}
+}
+
+// substrateSince reads since= as a Go duration back from now (1h, 30m)
+// or an RFC 3339 time.
+func substrateSince(v string, now time.Time) (time.Time, bool) {
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return now.Add(-d), true
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 // substrateCalloutAuthorized compares the callout's service token in
