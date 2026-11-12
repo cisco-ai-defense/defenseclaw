@@ -112,6 +112,11 @@ func (p *parser) parsePipelineElement() PipelineElement {
 		_ = w
 		return p.parseCommand("")
 	}
+	// % (ForEach-Object) and ? (Where-Object) are command aliases when they
+	// appear in command position.
+	if p.at(TokOperator) && (p.cur().Value == "%" || p.cur().Value == "?") {
+		return p.parseCommand("")
+	}
 	// expression element (command-expression): parse in expression mode so
 	// operators like -eq / + bind here (unlike command arguments).
 	em := p.exprMode
@@ -187,6 +192,11 @@ func (p *parser) parseCommandName() Expr {
 			p.diag0(e, ReasonDynamicName, "call target is a variable")
 		}
 		return e
+	case TokOperator:
+		if v := p.cur().Value; v == "%" || v == "?" {
+			t := p.advance()
+			return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
+		}
 	}
 	// no recognisable name
 	t := p.cur()
@@ -220,6 +230,7 @@ func (p *parser) parseCommandArg() CommandElement {
 		if e == nil {
 			return nil
 		}
+		e = p.fuseAdjacent(e)
 		s0, s1 := e.Span()
 		return &Arg{span: span{s0, s1}, Value: e}
 	case TokOperator:
@@ -229,6 +240,44 @@ func (p *parser) parseCommandArg() CommandElement {
 		return &Arg{span: span{t.Start, t.End}, Value: &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}}
 	}
 	return nil
+}
+
+// fuseAdjacent joins a dynamic leading argument atom (a variable or $( )
+// sub-expression) with immediately following value tokens that have no
+// whitespace between them, as PowerShell forms one expandable-string argument
+// (for example $env:TEMP\lsass.dmp or $(Get-Date).log). A space ends the arg.
+func (p *parser) fuseAdjacent(e Expr) Expr {
+	switch e.(type) {
+	case *Variable, *SubExpr:
+	default:
+		return e
+	}
+	s0, end := e.Span()
+	fused := false
+	for !p.at(TokEOF) {
+		t := p.cur()
+		if t.Start != end {
+			break
+		}
+		switch t.Kind {
+		case TokGeneric, TokString, TokNumber, TokVariable, TokDollarParen:
+			p.advance()
+			end = t.End
+			fused = true
+		default:
+			return finishFuse(e, s0, end, fused)
+		}
+	}
+	return finishFuse(e, s0, end, fused)
+}
+
+func finishFuse(e Expr, s0, end int, fused bool) Expr {
+	if !fused {
+		return e
+	}
+	// Preserve the leading dynamic part so the effects lane can still read it;
+	// the composite is an expandable string for projection purposes.
+	return &StringLit{span: span{s0, end}, Kind: StrDouble, Static: false, Parts: []StringPart{{Expr: e}}}
 }
 
 func (p *parser) parseRedirection() *Redirection {

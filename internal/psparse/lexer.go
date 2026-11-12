@@ -349,11 +349,23 @@ func (l *lexer) scanVarName() (name, scope string) {
 }
 
 func (l *lexer) lexDash() {
-	// --% stop-parsing
+	// --% stop-parsing: the remainder of the logical line is verbatim and must
+	// not be tokenized (an apostrophe or quote after it is literal text).
 	if l.peek(1) == '-' && l.peek(2) == '%' {
 		a := l.i
 		l.i += 3
 		l.emit(TokStopParse, a, l.i)
+		for l.i < len(l.runes) && isSpace(l.cur()) {
+			l.i++
+		}
+		vs := l.i
+		for l.i < len(l.runes) && l.cur() != '\n' {
+			l.i++
+		}
+		if l.i > vs {
+			raw := l.slice(vs, l.i)
+			l.push(Token{Kind: TokGeneric, Str: StrBare, Raw: raw, Value: raw, Start: l.byteAt(vs), End: l.byteAt(l.i)})
+		}
 		return
 	}
 	// '--name' is a double-dash bareword argument in PowerShell, not an
@@ -500,17 +512,19 @@ func (l *lexer) lexOperatorOrWord() {
 		l.emit(TokRBracket, a, l.i)
 		return
 	case '.':
-		// member access ".", or dot-source, or a bareword like ./script.ps1
+		// member access "." directly after a value with no space: $x.Prop
 		if l.prevWasValue && !isSpace(l.peek(-1)) {
 			l.i++
 			l.emit(TokDot, a, l.i)
 			return
 		}
-		// could be . at command start (dot-source) or part of a path bareword
-		if l.peek(1) == '/' || l.peek(1) == '\\' || l.peek(1) == '.' {
+		// a '.' glued to a path or name char begins a bareword (relative path
+		// or a hidden file such as .ssh, .git, .env), not a dot-source operator
+		if l.peek(1) == '/' || l.peek(1) == '\\' || l.peek(1) == '.' || isNameStart(l.peek(1)) {
 			l.lexBareword()
 			return
 		}
+		// otherwise a dot-source operator (dot then space) or a stray dot
 		l.i++
 		l.emit(TokDot, a, l.i)
 		return
@@ -549,6 +563,12 @@ func (l *lexer) lexSymbolOperator() {
 			l.lexBareword()
 			return
 		}
+	}
+	// '%' glued to a name char begins a bareword (a cmd-style %VAR% or a
+	// percent-prefixed token), not the modulo / ForEach alias operator.
+	if r == '%' && isNameChar(l.peek(1)) {
+		l.lexBareword()
+		return
 	}
 	// redirections: > >> 2> *> n> n>> n>&m  and input <
 	if r == '>' {
