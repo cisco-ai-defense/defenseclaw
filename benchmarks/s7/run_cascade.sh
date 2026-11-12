@@ -13,7 +13,7 @@ mkdir -p $OUT
 JF=()
 [ "$JM" != "-" ] && JF=(-judge-model $JM -judge-url http://127.0.0.1:18992/v1)
 for corpus in ${CORPORA:-s3 s2}; do
-  GOMAXPROCS=3 nice -n 15 $B/.s7out/s7bench -corpus ~/.system-one-data/outputs/$corpus/cases.jsonl -ids $IDS \
+  GOMAXPROCS=3 nice -n 15 ${BIN:-$B/.s7out/s7bench} -corpus ~/.system-one-data/outputs/$corpus/cases.jsonl -ids $IDS \
     -out $OUT/$NAME-$corpus.jsonl -policy-dir $B/policies -pack ${PACK:-default} -workers ${WORKERS:-12} \
     -strategy $ST -answer-within-ms ${ANSWER_MS:-3700} "${JF[@]}" "$@" \
     2> >(grep -v "applying migration\|notification suppressed" > $OUT/$NAME-$corpus.err)
