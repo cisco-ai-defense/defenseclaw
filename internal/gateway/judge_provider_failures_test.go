@@ -71,6 +71,9 @@ func judgeProviderFailureCases() []judgeFailureCase {
 		{"http500 server error", status(500, `{"error":{"message":"internal"}}`)},
 		{"http503 overloaded", status(503, `upstream overloaded`)},
 		{"timeout", func(w http.ResponseWriter, r *http.Request) {
+			// Read the body so net/http watches the connection and cancels
+			// r.Context() when the client gives up.
+			_, _ = io.Copy(io.Discard, r.Body)
 			select {
 			case <-r.Context().Done():
 			case <-time.After(5 * time.Second):
@@ -209,6 +212,7 @@ func TestDecisionModelFailuresFollowTheCascade(t *testing.T) {
 			_, _ = io.WriteString(w, "nope")
 		},
 		"timeout": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
 			select {
 			case <-r.Context().Done():
 			case <-time.After(3 * time.Second):
@@ -247,7 +251,7 @@ func TestDecisionModelFailuresFollowTheCascade(t *testing.T) {
 				a.SetHookDecisionJudge(newDecisionOnlyJudge(a.scannerCfg))
 				resp := escalationPreToolUse(t, a, escalated)
 				refused := findingStringHasRuleID(resp.Findings, "llm-judge:"+escalatedJudgeUnavailableFinding)
-				if want := mode == "closed"; refused != want {
+				if want := mode == "closed"; refused != want || (resp.RawAction == guardrailActionBlock) != want {
 					t.Fatalf("raw_action=%q findings=%v, want refusal=%v", resp.RawAction, resp.Findings, want)
 				}
 				if dmHits.Load() != 1 {

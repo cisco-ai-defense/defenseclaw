@@ -2233,17 +2233,6 @@ func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
 	j.toolContextMu.Unlock()
 }
 
-// toolJudgeNoEffectTools are agent built-ins whose call acts on nothing
-// outside the agent: Claude Code's ToolSearch loads tool definitions and
-// TodoWrite edits the agent's own task list. The judge read the tool names
-// in a ToolSearch query ("select:mcp__gmail__search_messages,...") as data
-// access and blocked 17 of 127 benign ToolSearch calls on the s3 corpus
-// (Gemma 3 27B judge); a call that does nothing cannot exfiltrate. The rules
-// still see these calls, and they stay out of the session history the judge
-// reads. Names are exact (Claude Code's casing), so an MCP tool or another
-// connector's tool of a similar name is still judged.
-var toolJudgeNoEffectTools = map[string]bool{"ToolSearch": true, "TodoWrite": true}
-
 // RunToolJudge runs injection detection on tool call arguments.
 // Returns an allow verdict if the judge is disabled, not configured, or
 // tool_injection is false.
@@ -2263,9 +2252,6 @@ func (j *LLMJudge) prepareToolJudgeSample(ctx context.Context, toolName, args st
 		return "", false
 	}
 	if !j.cfg.ToolInjection {
-		return "", false
-	}
-	if toolJudgeNoEffectTools[toolName] {
 		return "", false
 	}
 	if trimmedArgs := strings.TrimSpace(args); trimmedArgs == "" || len(trimmedArgs) < minJudgeContentLen {
