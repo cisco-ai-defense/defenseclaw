@@ -43,6 +43,7 @@ type substrateLoginFlags struct {
 	kube         bool
 	kubeconfig   string
 	kubeContext  string
+	kubeNS       string
 	noBrowser    bool
 	workload     bool
 	workloadFile string
@@ -84,6 +85,7 @@ pipeline's own identity, with a GitHub Actions token or a projected Kubernetes t
 	fl.BoolVar(&f.kube, "kube", false, "sign in with your current kubeconfig identity (clusters without a sign-in server)")
 	fl.StringVar(&f.kubeconfig, "kubeconfig", "", "with --kube, the kubeconfig file (default: kubectl's own rules)")
 	fl.StringVar(&f.kubeContext, "kube-context", "", "with --kube, the kubeconfig context (default: its current one)")
+	fl.StringVar(&f.kubeNS, "kube-namespace", "", "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)")
 	fl.BoolVar(&f.noBrowser, "no-browser", false, "do not open a browser; print the address and code only")
 	fl.BoolVar(&f.workload, "workload", false, "sign in as a CI workload with the pipeline's own token")
 	fl.StringVar(&f.workloadFile, "workload-token-file", "", "file holding the workload token (CI)")
@@ -133,6 +135,7 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	}
 	set("kubeconfig", &c.Kubeconfig, f.kubeconfig)
 	set("kube-context", &c.KubeContext, f.kubeContext)
+	set("kube-namespace", &c.KubeNamespace, f.kubeNS)
 	if c.Kube && (f.workload || f.noBrowser || fl.Changed("issuer") || fl.Changed("client-id")) {
 		return withExitCode(errors.New("--kube signs in with your kubeconfig; leave --workload, --issuer, --client-id and --no-browser out"), 2)
 	}
@@ -157,6 +160,13 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	}
 	var tok *auth.Token
 	if kube {
+		// The kube credential goes only to an admin address the cluster itself
+		// names (GAP-0130); the check sends it to the Kubernetes API server alone.
+		var pin auth.KubePin
+		if pin, err = auth.KubeVerifyEndpoint(ctx, c.KubeOptions(), c.AdminURL, c.KubeNamespace); err != nil {
+			return substrateFail(err)
+		}
+		c = c.WithKubePin(pin)
 		tok, err = auth.KubeLogin(ctx, c.KubeOptions())
 	} else if workload {
 		tok, err = auth.WorkloadLogin(ctx, c, auth.WorkloadOptions{TokenFile: f.workloadFile})

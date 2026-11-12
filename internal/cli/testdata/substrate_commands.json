@@ -477,6 +477,11 @@
         "usage": "with --kube, the kubeconfig context (default: its current one)"
       },
       {
+        "name": "kube-namespace",
+        "type": "string",
+        "usage": "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)"
+      },
+      {
         "name": "kubeconfig",
         "type": "string",
         "usage": "with --kube, the kubeconfig file (default: kubectl's own rules)"
@@ -928,7 +933,7 @@
       {
         "name": "name",
         "type": "string",
-        "usage": "name for the agent (default: chosen by the cluster)",
+        "usage": "a readable start for the agent's name; a random suffix is added, so a name is never used twice (default: the agent's command)",
         "metavar": "NAME"
       },
       {
@@ -1081,6 +1086,12 @@
         "metavar": "NAME"
       },
       {
+        "name": "mine",
+        "type": "bool",
+        "default": "true",
+        "usage": "your own secret (the only kind this command acts on)"
+      },
+      {
         "name": "yes",
         "shorthand": "y",
         "type": "bool",
@@ -1113,6 +1124,12 @@
         "usage": "read the value from this environment variable"
       },
       {
+        "name": "mine",
+        "type": "bool",
+        "default": "true",
+        "usage": "your own secret (the only kind this command acts on)"
+      },
+      {
         "name": "stdin",
         "type": "bool",
         "default": "false",
@@ -1142,6 +1159,12 @@
         "type": "bool",
         "default": "false",
         "usage": "same as --output json"
+      },
+      {
+        "name": "mine",
+        "type": "bool",
+        "default": "true",
+        "usage": "your own secret (the only kind this command acts on)"
       },
       {
         "name": "output",

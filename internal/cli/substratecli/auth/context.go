@@ -56,6 +56,14 @@ type Context struct {
 	Kubeconfig string `json:"kubeconfig,omitempty"`
 	// KubeContext is the kubeconfig context; empty is its current-context.
 	KubeContext string `json:"kube_context,omitempty"`
+	// KubeNamespace is where the cluster publishes its launcher endpoint
+	// record (default DefaultKubeNamespace).
+	KubeNamespace string `json:"kube_namespace,omitempty"`
+	// KubePinServer and KubePinAdminURL are what login --kube verified:
+	// the kubeconfig cluster's API server and the admin URL it publishes.
+	// The kube bearer is handed out only while both still match.
+	KubePinServer   string `json:"kube_pin_server,omitempty"`
+	KubePinAdminURL string `json:"kube_pin_admin_url,omitempty"`
 }
 
 // ContextFile is <StateDir>/substrate/contexts.json.
@@ -189,6 +197,9 @@ func (c Context) Validate(needIssuer bool) error {
 	}
 	if k := c.KubeContext; k != "" && (strings.TrimSpace(k) != k || strings.ContainsAny(k, "\r\n\t\x00")) {
 		errs = append(errs, fmt.Sprintf("kube_context %q is not valid: use the context name as kubectl config get-contexts shows it", clean(k, 80)))
+	}
+	if c.KubeNamespace != "" {
+		add(checkKubeNamespace(c.KubeNamespace))
 	}
 	if c.Kube {
 		if len(errs) > 0 {

@@ -463,7 +463,7 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 		// from here, and HTTPClient puts a fresh one on every long-poll
 		// request.
 		BaseURL: a.tun.BaseURL(), Token: tok, Cols: sz.Cols, Rows: sz.Rows,
-		LongPoll: a.mode == TransportLongPoll, HTTPClient: a.tun.HTTPClient(), Dialer: a.tun.Dialer(),
+		LongPoll: a.mode == TransportLongPoll, HTTPClient: a.tun.HTTPClient(), Dialer: a.tun.Dialer(), FlatRoutes: true,
 		Resize: ch,
 		OnControl: func(c relay.Control) {
 			if c.Type == relay.CtlHello {

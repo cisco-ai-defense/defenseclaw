@@ -98,7 +98,7 @@ func newSubAdminFake(t *testing.T) *subAdminFake {
 		b, _ := json.Marshal(f.verifyDoc)
 		writeJSONStatus(w, 200, string(b))
 	})
-	mux.HandleFunc("/api/v1/substrate/actors/a1/n1/attach/dcrelay/1/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/substrate/actors/a1/n1/attach/status", func(w http.ResponseWriter, r *http.Request) {
 		if f.attachStatus != 200 {
 			writeJSONStatus(w, f.attachStatus, `{"error":"x","reason":"attach"}`)
 			return
