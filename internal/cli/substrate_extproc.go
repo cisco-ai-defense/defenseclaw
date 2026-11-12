@@ -70,7 +70,7 @@ func init() {
 	f.StringVar(&substrateExtprocOpts.listen, "listen", ":9443", "gRPC ext_proc listen address")
 	f.StringVar(&substrateExtprocOpts.healthListen, "health-listen", ":9444", "plain HTTP /healthz and /readyz address; empty turns it off")
 	f.StringVar(&substrateExtprocOpts.tlsBundle, "tls-bundle", "", "PEM credential bundle (key and chain), the servicedns podCertificate")
-	f.StringVar(&substrateExtprocOpts.clientCA, "client-ca", "", "CA bundle that verifies the egress gateway's client certificate")
+	f.StringVar(&substrateExtprocOpts.clientCA, "client-ca", "", "CA bundle that verifies the egress gateway's client certificate (required with --tls-bundle)")
 	f.BoolVar(&substrateExtprocOpts.insecurePlaintext, "insecure-plaintext", false, "serve gRPC without TLS (local development only)")
 	rootCmd.AddCommand(substrateExtprocCmd)
 }
@@ -107,9 +107,6 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 	default:
 		if tlsCfg, err = extproc.ServerTLS(extproc.TLSOptions{Bundle: o.tlsBundle, ClientCA: o.clientCA, Peers: cfg.EgressPeers}); err != nil {
 			return err
-		}
-		if o.clientCA == "" {
-			fmt.Fprintln(stderr, "substrate-extproc: no --client-ca: the egress gateway's SPIFFE ID is checked but its chain is not")
 		}
 	}
 	lis, err := net.Listen("tcp", o.listen)

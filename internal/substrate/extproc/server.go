@@ -255,9 +255,10 @@ type TLSOptions struct {
 	// podCertificate credential bundle), read again on every handshake so
 	// rotation needs no restart.
 	Bundle string
-	// ClientCA verifies the egress gateway's client certificate. Without it
-	// the certificate is required and its SPIFFE ID checked, but its chain
-	// is not.
+	// ClientCA verifies the egress gateway's client certificate (the
+	// podidentity CA). It is required: without a verified chain any pod
+	// could present a self-signed certificate naming the egress SPIFFE ID
+	// (GAP-0065).
 	ClientCA string
 	// Peers are the SPIFFE IDs allowed to connect (Config.EgressPeers).
 	Peers []string
@@ -267,6 +268,9 @@ type TLSOptions struct {
 func ServerTLS(o TLSOptions) (*tls.Config, error) {
 	if o.Bundle == "" {
 		return nil, errors.New("extproc: a TLS credential bundle is required")
+	}
+	if o.ClientCA == "" {
+		return nil, errors.New("extproc: a client CA is required to verify the egress gateway (--client-ca)")
 	}
 	var mu sync.Mutex
 	var cached *tls.Certificate
@@ -299,21 +303,19 @@ func ServerTLS(o TLSOptions) (*tls.Config, error) {
 	for _, p := range o.Peers {
 		peers[p] = true
 	}
+	pem, err := os.ReadFile(o.ClientCA)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, errors.New("extproc: client CA file has no certificates")
+	}
 	cfg := &tls.Config{
 		MinVersion:     tls.VersionTLS12,
-		ClientAuth:     tls.RequireAnyClientCert,
+		ClientAuth:     tls.RequireAndVerifyClientCert,
+		ClientCAs:      pool,
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return load() },
-	}
-	if o.ClientCA != "" {
-		pem, err := os.ReadFile(o.ClientCA)
-		if err != nil {
-			return nil, err
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, errors.New("extproc: client CA file has no certificates")
-		}
-		cfg.ClientCAs, cfg.ClientAuth = pool, tls.RequireAndVerifyClientCert
 	}
 	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
 		if len(cs.PeerCertificates) == 0 {
