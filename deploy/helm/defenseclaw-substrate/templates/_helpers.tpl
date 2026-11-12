@@ -78,7 +78,7 @@ name this release's Services and the Substrate API filled in.
 {{- $_ := set $sub "services" (dict "actor" (include "dc.actorHost" .) "admin" (include "dc.adminHost" .)) -}}
 {{- end -}}
 {{- if not (hasKey $sub "api") -}}
-{{- $_ := set $sub "api" (dict "address" .Values.substrate.apiAddress "auth" "serviceaccount" "token_file" "/var/run/secrets/ate-api/token" "ca_file" "/run/servicedns.podcert.ate.dev/trust-bundle.pem") -}}
+{{- $_ := set $sub "api" (dict "address" .Values.substrate.apiAddress "auth" "serviceaccount" "token_file" "/var/run/ate/token" "ca_file" "/var/run/ate/ca.crt") -}}
 {{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
 {{- toYaml $cfg -}}
@@ -109,20 +109,45 @@ affinity:
 {{- end }}
 {{- end -}}
 
-{{/* Volumes every DefenseClaw pod mounts: (dict "ctx" $). */}}
+{{/*
+Volumes every DefenseClaw pod mounts: (dict "ctx" $). /var/run/ate holds what
+the ateapi client reads by default (internal/substrate/ateapi): the token for
+ate-api-server, its serving CA, the pod's podidentity client certificate and
+the podidentity CA the callout checks atenet-egress against.
+/run/servicedns.podcert.ate.dev holds the serving certificate for the
+Services that select the pod.
+*/}}
 {{- define "dc.volumes" -}}
 - name: config
   configMap:
     name: defenseclaw-config
 - name: tmp
   emptyDir: {}
-- name: ate-api-token
+- name: ate
   projected:
     sources:
     - serviceAccountToken:
         audience: {{ .ctx.Values.substrate.apiAudience }}
         expirationSeconds: {{ .ctx.Values.serviceAccounts.apiTokenExpirationSeconds }}
         path: token
+    {{- if .ctx.Values.podCertificates.enabled }}
+    - clusterTrustBundle:
+        signerName: servicedns.podcert.ate.dev/identity
+        labelSelector:
+          matchLabels:
+            podcert.ate.dev/canarying: live
+        path: ca.crt
+    - podCertificate:
+        signerName: podidentity.podcert.ate.dev/identity
+        keyType: ECDSAP256
+        credentialBundlePath: credential-bundle.pem
+    - clusterTrustBundle:
+        signerName: podidentity.podcert.ate.dev/identity
+        labelSelector:
+          matchLabels:
+            podcert.ate.dev/canarying: live
+        path: podidentity-ca.crt
+    {{- end }}
 {{- if .ctx.Values.podCertificates.enabled }}
 - name: servicedns
   projected:
@@ -133,19 +158,6 @@ affinity:
         credentialBundlePath: credential-bundle.pem
     - clusterTrustBundle:
         signerName: servicedns.podcert.ate.dev/identity
-        labelSelector:
-          matchLabels:
-            podcert.ate.dev/canarying: live
-        path: trust-bundle.pem
-- name: podidentity
-  projected:
-    sources:
-    - podCertificate:
-        signerName: podidentity.podcert.ate.dev/identity
-        keyType: ECDSAP256
-        credentialBundlePath: credential-bundle.pem
-    - clusterTrustBundle:
-        signerName: podidentity.podcert.ate.dev/identity
         labelSelector:
           matchLabels:
             podcert.ate.dev/canarying: live
@@ -159,15 +171,12 @@ affinity:
   readOnly: true
 - name: tmp
   mountPath: /tmp
-- name: ate-api-token
-  mountPath: /var/run/secrets/ate-api
+- name: ate
+  mountPath: /var/run/ate
   readOnly: true
 {{- if .ctx.Values.podCertificates.enabled }}
 - name: servicedns
   mountPath: /run/servicedns.podcert.ate.dev
-  readOnly: true
-- name: podidentity
-  mountPath: /run/podidentity.podcert.ate.dev
   readOnly: true
 {{- end }}
 {{- end -}}

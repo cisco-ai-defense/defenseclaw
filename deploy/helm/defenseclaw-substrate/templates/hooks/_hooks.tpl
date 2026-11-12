@@ -77,17 +77,12 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: kube-api-token
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
           readOnly: true
-        {{- if $.Values.podCertificates.enabled }}
-        - name: servicedns
-          mountPath: /run/servicedns.podcert.ate.dev
-          readOnly: true
-        {{- end }}
         {{- if .owner }}
         - name: owner-token
           mountPath: /var/run/secrets/ate-owner
@@ -99,13 +94,21 @@ spec:
           name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
               audience: {{ $.Values.substrate.apiAudience }}
               expirationSeconds: 600
               path: token
+          {{- if $.Values.podCertificates.enabled }}
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+          {{- end }}
       # The Kubernetes API token for the configmap and rollout steps.
       - name: kube-api-token
         projected:
@@ -121,17 +124,6 @@ spec:
               items:
               - path: namespace
                 fieldRef: {fieldPath: metadata.namespace}
-      {{- if $.Values.podCertificates.enabled }}
-      - name: servicedns
-        projected:
-          sources:
-          - clusterTrustBundle:
-              signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
-      {{- end }}
       {{- if .owner }}
       - name: owner-token
         secret:

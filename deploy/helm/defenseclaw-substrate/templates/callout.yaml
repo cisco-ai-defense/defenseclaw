@@ -51,7 +51,7 @@ spec:
         - --listen=:{{ .Values.callout.port }}
         - --metrics-listen=:{{ .Values.callout.ports.metrics }}
         - --tls-cert=/run/servicedns.podcert.ate.dev/credential-bundle.pem
-        - --client-ca=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+        - --client-ca=/var/run/ate/podidentity-ca.crt
         - --client-spiffe-id={{ .Values.substrate.egressSpiffeId }}
         - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc:{{ .Values.leader.port }}
         {{- end }}

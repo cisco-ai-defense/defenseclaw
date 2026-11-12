@@ -349,8 +349,8 @@ data:
       api:
         address: api.ate-system.svc:443
         auth: serviceaccount
-        ca_file: /run/servicedns.podcert.ate.dev/trust-bundle.pem
-        token_file: /var/run/secrets/ate-api/token
+        ca_file: /var/run/ate/ca.crt
+        token_file: /var/run/ate/token
       default_sandbox_class: gvisor
       enabled: true
       extproc:
@@ -806,7 +806,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: callout
       annotations:
-        checksum/config: 4a9863d84b9361f348eca35ea082acab5744d9d46c5488e12438df05b7052950
+        checksum/config: 3f36443733397257544d22286b50ac19bf5fc8d2c35f49c12083d9677b9691d7
     spec:
       
       serviceAccountName: defenseclaw-callout
@@ -837,7 +837,7 @@ spec:
         - --listen=:9443
         - --metrics-listen=:9464
         - --tls-cert=/run/servicedns.podcert.ate.dev/credential-bundle.pem
-        - --client-ca=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+        - --client-ca=/var/run/ate/podidentity-ca.crt
         - --client-spiffe-id=spiffe://cluster.local/ns/ate-system/sa/atenet-egress
         - --leader-address=defenseclaw-leader.defenseclaw-system.svc:7443
         env:
@@ -883,14 +883,11 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
-          readOnly: true
-        - name: podidentity
-          mountPath: /run/podidentity.podcert.ate.dev
           readOnly: true
       volumes:
       - name: config
@@ -898,13 +895,29 @@ spec:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
               audience: api.ate-system.svc
               expirationSeconds: 3600
               path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: podidentity-ca.crt
       - name: servicedns
         projected:
           sources:
@@ -914,19 +927,6 @@ spec:
               credentialBundlePath: credential-bundle.pem
           - clusterTrustBundle:
               signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
-      - name: podidentity
-        projected:
-          sources:
-          - podCertificate:
-              signerName: podidentity.podcert.ate.dev/identity
-              keyType: ECDSAP256
-              credentialBundlePath: credential-bundle.pem
-          - clusterTrustBundle:
-              signerName: podidentity.podcert.ate.dev/identity
               labelSelector:
                 matchLabels:
                   podcert.ate.dev/canarying: live
@@ -967,7 +967,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: controller
       annotations:
-        checksum/config: 4a9863d84b9361f348eca35ea082acab5744d9d46c5488e12438df05b7052950
+        checksum/config: 3f36443733397257544d22286b50ac19bf5fc8d2c35f49c12083d9677b9691d7
     spec:
       
       serviceAccountName: defenseclaw-controller
@@ -1029,14 +1029,11 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
-          readOnly: true
-        - name: podidentity
-          mountPath: /run/podidentity.podcert.ate.dev
           readOnly: true
       volumes:
       - name: config
@@ -1044,13 +1041,29 @@ spec:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
               audience: api.ate-system.svc
               expirationSeconds: 3600
               path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: podidentity-ca.crt
       - name: servicedns
         projected:
           sources:
@@ -1060,19 +1073,6 @@ spec:
               credentialBundlePath: credential-bundle.pem
           - clusterTrustBundle:
               signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
-      - name: podidentity
-        projected:
-          sources:
-          - podCertificate:
-              signerName: podidentity.podcert.ate.dev/identity
-              keyType: ECDSAP256
-              credentialBundlePath: credential-bundle.pem
-          - clusterTrustBundle:
-              signerName: podidentity.podcert.ate.dev/identity
               labelSelector:
                 matchLabels:
                   podcert.ate.dev/canarying: live
@@ -1110,7 +1110,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: gateway
       annotations:
-        checksum/config: 4a9863d84b9361f348eca35ea082acab5744d9d46c5488e12438df05b7052950
+        checksum/config: 3f36443733397257544d22286b50ac19bf5fc8d2c35f49c12083d9677b9691d7
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1189,14 +1189,11 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
-          readOnly: true
-        - name: podidentity
-          mountPath: /run/podidentity.podcert.ate.dev
           readOnly: true
       volumes:
       - name: config
@@ -1204,13 +1201,29 @@ spec:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
               audience: api.ate-system.svc
               expirationSeconds: 3600
               path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: podidentity-ca.crt
       - name: servicedns
         projected:
           sources:
@@ -1220,19 +1233,6 @@ spec:
               credentialBundlePath: credential-bundle.pem
           - clusterTrustBundle:
               signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
-      - name: podidentity
-        projected:
-          sources:
-          - podCertificate:
-              signerName: podidentity.podcert.ate.dev/identity
-              keyType: ECDSAP256
-              credentialBundlePath: credential-bundle.pem
-          - clusterTrustBundle:
-              signerName: podidentity.podcert.ate.dev/identity
               labelSelector:
                 matchLabels:
                   podcert.ate.dev/canarying: live
@@ -1271,7 +1271,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: leader
       annotations:
-        checksum/config: 4a9863d84b9361f348eca35ea082acab5744d9d46c5488e12438df05b7052950
+        checksum/config: 3f36443733397257544d22286b50ac19bf5fc8d2c35f49c12083d9677b9691d7
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -1340,14 +1340,11 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
-          readOnly: true
-        - name: podidentity
-          mountPath: /run/podidentity.podcert.ate.dev
           readOnly: true
         - name: store
           mountPath: /var/lib/defenseclaw/store
@@ -1357,13 +1354,29 @@ spec:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
               audience: api.ate-system.svc
               expirationSeconds: 3600
               path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: podidentity-ca.crt
       - name: servicedns
         projected:
           sources:
@@ -1373,19 +1386,6 @@ spec:
               credentialBundlePath: credential-bundle.pem
           - clusterTrustBundle:
               signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
-      - name: podidentity
-        projected:
-          sources:
-          - podCertificate:
-              signerName: podidentity.podcert.ate.dev/identity
-              keyType: ECDSAP256
-              credentialBundlePath: credential-bundle.pem
-          - clusterTrustBundle:
-              signerName: podidentity.podcert.ate.dev/identity
               labelSelector:
                 matchLabels:
                   podcert.ate.dev/canarying: live
@@ -1676,8 +1676,8 @@ data:
       api:
         address: api.ate-system.svc:443
         auth: serviceaccount
-        ca_file: /run/servicedns.podcert.ate.dev/trust-bundle.pem
-        token_file: /var/run/secrets/ate-api/token
+        ca_file: /var/run/ate/ca.crt
+        token_file: /var/run/ate/token
       default_sandbox_class: gvisor
       enabled: true
       extproc:
@@ -1776,14 +1776,11 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: kube-api-token
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
-          readOnly: true
-        - name: servicedns
-          mountPath: /run/servicedns.podcert.ate.dev
           readOnly: true
       volumes:
       - name: plan
@@ -1791,13 +1788,19 @@ spec:
           name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
               audience: api.ate-system.svc
               expirationSeconds: 600
               path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
       # The Kubernetes API token for the configmap and rollout steps.
       - name: kube-api-token
         projected:
@@ -1813,15 +1816,6 @@ spec:
               items:
               - path: namespace
                 fieldRef: {fieldPath: metadata.namespace}
-      - name: servicedns
-        projected:
-          sources:
-          - clusterTrustBundle:
-              signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
 ---
 # Source: defenseclaw-substrate/templates/hooks/jobs.yaml
 apiVersion: batch/v1
@@ -1897,14 +1891,11 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: kube-api-token
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
-          readOnly: true
-        - name: servicedns
-          mountPath: /run/servicedns.podcert.ate.dev
           readOnly: true
       volumes:
       - name: plan
@@ -1912,13 +1903,19 @@ spec:
           name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
               audience: api.ate-system.svc
               expirationSeconds: 600
               path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
       # The Kubernetes API token for the configmap and rollout steps.
       - name: kube-api-token
         projected:
@@ -1934,15 +1931,6 @@ spec:
               items:
               - path: namespace
                 fieldRef: {fieldPath: metadata.namespace}
-      - name: servicedns
-        projected:
-          sources:
-          - clusterTrustBundle:
-              signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
 ---
 # Source: defenseclaw-substrate/templates/hooks/jobs.yaml
 apiVersion: batch/v1
@@ -2018,14 +2006,11 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: kube-api-token
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
-          readOnly: true
-        - name: servicedns
-          mountPath: /run/servicedns.podcert.ate.dev
           readOnly: true
       volumes:
       - name: plan
@@ -2033,13 +2018,19 @@ spec:
           name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
               audience: api.ate-system.svc
               expirationSeconds: 600
               path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
       # The Kubernetes API token for the configmap and rollout steps.
       - name: kube-api-token
         projected:
@@ -2055,12 +2046,3 @@ spec:
               items:
               - path: namespace
                 fieldRef: {fieldPath: metadata.namespace}
-      - name: servicedns
-        projected:
-          sources:
-          - clusterTrustBundle:
-              signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem

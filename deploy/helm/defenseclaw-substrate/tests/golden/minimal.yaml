@@ -144,8 +144,8 @@ data:
       api:
         address: api.ate-system.svc:443
         auth: serviceaccount
-        ca_file: /run/servicedns.podcert.ate.dev/trust-bundle.pem
-        token_file: /var/run/secrets/ate-api/token
+        ca_file: /var/run/ate/ca.crt
+        token_file: /var/run/ate/token
       default_sandbox_class: gvisor
       enabled: true
       extproc:
@@ -500,7 +500,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: callout
       annotations:
-        checksum/config: 54f3ffeefadcc37732708d777c704ede2edb54cf7c664cf21a4ac803d7fc7e1e
+        checksum/config: bbdb70bdc64f2b9b1b139a086d7560691df58401b65751048d0f6643e0fcd672
     spec:
       
       serviceAccountName: defenseclaw-callout
@@ -531,7 +531,7 @@ spec:
         - --listen=:9443
         - --metrics-listen=:9464
         - --tls-cert=/run/servicedns.podcert.ate.dev/credential-bundle.pem
-        - --client-ca=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+        - --client-ca=/var/run/ate/podidentity-ca.crt
         - --client-spiffe-id=spiffe://cluster.local/ns/ate-system/sa/atenet-egress
         - --leader-address=defenseclaw-leader.defenseclaw-system.svc:7443
         env:
@@ -577,8 +577,8 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
       volumes:
       - name: config
@@ -586,7 +586,7 @@ spec:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
@@ -629,7 +629,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: controller
       annotations:
-        checksum/config: 54f3ffeefadcc37732708d777c704ede2edb54cf7c664cf21a4ac803d7fc7e1e
+        checksum/config: bbdb70bdc64f2b9b1b139a086d7560691df58401b65751048d0f6643e0fcd672
     spec:
       
       serviceAccountName: defenseclaw-controller
@@ -691,8 +691,8 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
       volumes:
       - name: config
@@ -700,7 +700,7 @@ spec:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
@@ -741,7 +741,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: gateway
       annotations:
-        checksum/config: 54f3ffeefadcc37732708d777c704ede2edb54cf7c664cf21a4ac803d7fc7e1e
+        checksum/config: bbdb70bdc64f2b9b1b139a086d7560691df58401b65751048d0f6643e0fcd672
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -820,8 +820,8 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
       volumes:
       - name: config
@@ -829,7 +829,7 @@ spec:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
@@ -870,7 +870,7 @@ spec:
         app.kubernetes.io/instance: dc
         app.kubernetes.io/component: leader
       annotations:
-        checksum/config: 54f3ffeefadcc37732708d777c704ede2edb54cf7c664cf21a4ac803d7fc7e1e
+        checksum/config: bbdb70bdc64f2b9b1b139a086d7560691df58401b65751048d0f6643e0fcd672
     spec:
       
       serviceAccountName: defenseclaw-gateway
@@ -939,8 +939,8 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: store
           mountPath: /var/lib/defenseclaw/store
@@ -950,7 +950,7 @@ spec:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
@@ -1026,8 +1026,8 @@ data:
       api:
         address: api.ate-system.svc:443
         auth: serviceaccount
-        ca_file: /run/servicedns.podcert.ate.dev/trust-bundle.pem
-        token_file: /var/run/secrets/ate-api/token
+        ca_file: /var/run/ate/ca.crt
+        token_file: /var/run/ate/token
       default_sandbox_class: gvisor
       enabled: true
       extproc:
@@ -1124,8 +1124,8 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: kube-api-token
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
@@ -1136,7 +1136,7 @@ spec:
           name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
@@ -1233,8 +1233,8 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: kube-api-token
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
@@ -1245,7 +1245,7 @@ spec:
           name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:
@@ -1342,8 +1342,8 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-        - name: ate-api-token
-          mountPath: /var/run/secrets/ate-api
+        - name: ate
+          mountPath: /var/run/ate
           readOnly: true
         - name: kube-api-token
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
@@ -1354,7 +1354,7 @@ spec:
           name: defenseclaw-chart-plan
       - name: tmp
         emptyDir: {}
-      - name: ate-api-token
+      - name: ate
         projected:
           sources:
           - serviceAccountToken:

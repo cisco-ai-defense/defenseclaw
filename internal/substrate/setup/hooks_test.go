@@ -79,7 +79,9 @@ func (f *fakeAPI) ListActors(_ context.Context, a string) ([]ActorRef, error) {
 	slices.SortFunc(out, func(x, y ActorRef) int { return strings.Compare(x.String(), y.String()) })
 	return out, nil
 }
-func (f *fakeAPI) GetEgressPolicy(_ context.Context, r ActorRef) (*EgressPolicy, error) { return f.egress[r], nil }
+func (f *fakeAPI) GetEgressPolicy(_ context.Context, r ActorRef) (*EgressPolicy, error) {
+	return f.egress[r], nil
+}
 func (f *fakeAPI) DeleteEgressPolicy(_ context.Context, r ActorRef) error {
 	if err := f.deleteErr[r]; err != nil {
 		return err
