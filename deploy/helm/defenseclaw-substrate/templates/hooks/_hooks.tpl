@@ -18,10 +18,19 @@
   "global_viewers" (list (include "dc.principal" (dict "ctx" . "component" "gateway")) (include "dc.principal" (dict "ctx" . "component" "controller")) (include "dc.principal" (dict "ctx" . "component" "callout")) (include "dc.principal" (dict "ctx" . "component" "hooks")))
   "credential_provider" (dict "grant" .Values.substrate.credentialProvider.grant "config_map" .Values.substrate.credentialProvider.policyConfigMap "deployment" .Values.substrate.credentialProvider.deployment "secrets_namespace" .Values.substrate.credentialProvider.secretsNamespace)
   "store_state_config_map" "defenseclaw-store-state"
+  "controller_deployment" "defenseclaw-controller"
   "owner_token_secret" .Values.bootstrap.ownerTokenSecret
   "delete_owner_token" .Values.bootstrap.deleteTokenAfterUse
 -}}
 {{- toPrettyJson $p -}}
+{{- end -}}
+
+{{/* Annotations of RBAC that exists only while its hooks run: created
+before the Jobs (weight -10) and deleted once the hooks succeed. */}}
+{{- define "dc.hookRBACAnnotations" -}}
+helm.sh/hook: {{ .hooks }}
+helm.sh/hook-weight: "-10"
+helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 {{- end -}}
 
 {{/* One hook Job: (dict "ctx" $ "name" "pre-upgrade" "hook" "pre-upgrade" "weight" "0" "step" "pre-upgrade" "owner" false). */}}

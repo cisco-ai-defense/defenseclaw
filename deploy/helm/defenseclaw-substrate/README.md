@@ -50,7 +50,10 @@ Every value is checked by `values.schema.json`. The main ones:
 | `callout.judge.tokenSecret` | "" | turns on the MCP verdict route on the admin Service |
 | `callout.actorSecrets.secretName` | "" | exposed `actor_secrets` values for exact-value DLP |
 | `networkPolicy.adminFrom`, `networkPolicy.metricsFrom` | [] | extra peers for the admin and metrics ports |
-| `adminIngress.*` | off | an Ingress for launchers to the admin Service |
+| `admin.expose.type` | `ClusterIP` | how laptops reach the admin listener (TLS): `ClusterIP` (in-cluster only), `LoadBalancer` (needs `admin.expose.loadBalancer.sourceRanges`, also enforced by the NetworkPolicy) or `Ingress` (needs `host` and `tlsSecretName`; re-encrypt to the HTTPS backend). The actor listener is never exposed. |
+| `admin.tlsSecretName` | "" | a `kubernetes.io/tls` Secret for the external name; without it the admin listener presents its in-cluster certificate |
+| `controller.templateAnchorsSecret` | `defenseclaw-template-anchors` | admin-only Secret (key `anchors.pem`) with the template signing keys; without it every template is refused |
+| `networkPolicy.egress.*` | on, OTLP 4317/4318 | egress limits for the gateway, leader and callout (DNS, Kubernetes and Substrate APIs, the release, OTLP; providers on 443 for gateway and leader) |
 | `metrics.prometheusRule.enabled` | false | alert rules |
 | `observability.local.enabled` | false | a local OTel collector for trying the chart |
 
@@ -59,8 +62,10 @@ Every value is checked by `values.schema.json`. The main ones:
 - `helm upgrade` checks the new config, refuses a skipped minor (N-1 to N only) and rolls under the PDBs. The leader
   migrates the store at start after a backup.
 - `helm rollback` to a release with an older store schema is refused, naming the backup.
-- `helm uninstall` first removes every egress policy DefenseClaw wrote (actors fall back to deny-all) and the
-  credential provider grant, and fails while any remain. It prints the snapshot purge steps. Then run
+- `helm uninstall` first stops the controller (it would write the policies again), then removes every egress policy
+  DefenseClaw wrote (actors fall back to deny-all), looks again after a poll interval, and revokes every credential
+  provider grant of the secrets namespace. It fails while any policy remains, and then scales the controller back so
+  the remaining policies stay enforced. It prints the snapshot purge steps. Then run
   `defenseclaw substrate setup --remove`.
 
 ## Known limits

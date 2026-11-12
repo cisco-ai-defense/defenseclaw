@@ -98,7 +98,9 @@ func (c PolicyChange) String() string {
 // LauncherPolicy returns the access policy of launcher atespace from its
 // current one (nil when it has none): DefenseClaw's principals are the only
 // editors and owners, so only DefenseClaw creates, forks (tag and create),
-// suspends, resumes and reverts actors there (D3, E2, E17). Viewers stay.
+// suspends, resumes and reverts actors there (D3, E2, E17). Other viewers
+// are removed too: people see only their own actors, through DefenseClaw
+// (own data only, GAP-0084).
 func LauncherPolicy(atespace string, current *AccessPolicy, editors []string) (AccessPolicy, []PolicyChange) {
 	next := AccessPolicy{Atespace: atespace}
 	if current != nil {
@@ -111,11 +113,11 @@ func LauncherPolicy(atespace string, current *AccessPolicy, editors []string) (A
 		want = append(want, Member(e))
 	}
 	var changes []PolicyChange
-	for _, role := range []string{RoleOwner, RoleEditor} {
+	for _, role := range []string{RoleOwner, RoleEditor, RoleViewer} {
 		b := next.binding(role)
 		var keep []string
 		for _, m := range b.Members {
-			if role == RoleEditor && slices.Contains(want, m) {
+			if role != RoleOwner && slices.Contains(want, m) {
 				keep = append(keep, m)
 				continue
 			}

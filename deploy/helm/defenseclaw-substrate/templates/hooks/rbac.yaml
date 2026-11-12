@@ -41,7 +41,44 @@ subjects:
 - kind: ServiceAccount
   name: defenseclaw-hooks
   namespace: {{ .Release.Namespace }}
+---
+# Only while the pre-delete hook runs: stop the controller before the
+# policies are removed (GAP-0056). A hook resource, so no standing grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-hooks-uninstall
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-delete") | nindent 4 }}
+rules:
+- apiGroups: [apps]
+  resources: [deployments, deployments/scale]
+  resourceNames: [defenseclaw-controller]
+  verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-hooks-uninstall
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-delete") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-hooks-uninstall
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-hooks
+  namespace: {{ .Release.Namespace }}
 {{- if .Values.substrate.credentialProvider.grant }}
+{{- /* The grant in the Substrate namespace exists only while the bootstrap
+and pre-delete hooks run (GAP-0080): a standing Role would let any pod run
+as defenseclaw-hooks rewrite the credential provider policy. */}}
+{{- $when := ternary "post-install,post-upgrade,pre-delete" "pre-delete" (not (empty .Values.bootstrap.ownerTokenSecret)) }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -50,6 +87,8 @@ metadata:
   namespace: {{ .Values.substrate.namespace }}
   labels:
     {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" $when) | nindent 4 }}
 rules:
 - apiGroups: [""]
   resources: [configmaps]
@@ -67,6 +106,8 @@ metadata:
   namespace: {{ .Values.substrate.namespace }}
   labels:
     {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" $when) | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

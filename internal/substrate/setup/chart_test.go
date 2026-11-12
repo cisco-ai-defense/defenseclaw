@@ -31,7 +31,7 @@ const chartKubeVersion = "1.34.0"
 
 // chartCases are the golden renders: values files under
 // deploy/helm/defenseclaw-substrate/tests/values (empty for the defaults).
-var chartCases = []string{"default", "launcher", "minimal", "full"}
+var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress"}
 
 func helmBinary(t *testing.T) string {
 	t.Helper()
@@ -81,11 +81,16 @@ func TestChartGoldens(t *testing.T) {
 func TestChartRefusesBadValues(t *testing.T) {
 	helm := helmBinary(t)
 	for name, set := range map[string]string{
-		"hpa below 2":     "gateway.hpa.minReplicas=1",
-		"short digest":    "image.digest=sha256:abc",
-		"bad atespace":    "managedAtespaces={Bad_Name}",
-		"ingress no host": "adminIngress.enabled=true",
-		"unknown value":   "gateway.surprise=1",
+		"hpa below 2":             "gateway.hpa.minReplicas=1",
+		"short digest":            "image.digest=sha256:abc",
+		"bad atespace":            "managedAtespaces={Bad_Name}",
+		"ingress no host":         "admin.expose.type=Ingress",
+		"ingress no tls":          "admin.expose.type=Ingress,admin.expose.ingress.host=dc.example.com",
+		"lb no source ranges":     "admin.expose.type=LoadBalancer",
+		"expose nodeport":         "admin.expose.type=NodePort",
+		"managed fails open":      "config.deployment_mode=managed_enterprise,config.substrate.extproc.failure_mode=open",
+		"secrets ns = release ns": "substrate.credentialProvider.secretsNamespace=default",
+		"unknown value":           "gateway.surprise=1",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {
@@ -208,6 +213,24 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	if p := dig(byName["Service/defenseclaw-actor"].Spec, "ports").([]any)[0]; dig(p, "port") != 80 {
 		t.Errorf("%s: actor Service port %v, want 80", name, dig(p, "port"))
 	}
+	// GAP-0086: only the admin listener is ever exposed outside the cluster.
+	for _, o := range objs {
+		switch o.Kind {
+		case "Service":
+			if typ := dig(o.Spec, "type"); typ == "LoadBalancer" || typ == "NodePort" {
+				for _, pt := range dig(o.Spec, "ports").([]any) {
+					if dig(pt, "targetPort") != "admin" {
+						t.Errorf("%s: %s Service %v exposes %v", name, typ, o.Metadata["name"], dig(pt, "targetPort"))
+					}
+				}
+			}
+		case "Ingress":
+			raw, _ := yaml.Marshal(o.Spec)
+			if strings.Contains(string(raw), "defenseclaw-actor") || dig(o.Spec, "tls") == nil {
+				t.Errorf("%s: Ingress %v: %s", name, o.Metadata["name"], raw)
+			}
+		}
+	}
 	np, ok := byName["NetworkPolicy/defenseclaw-gateway"]
 	if !ok {
 		if name != "minimal" {
@@ -236,14 +259,26 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	if _, ok := byName["NetworkPolicy/defenseclaw-default-deny"]; !ok {
 		t.Errorf("%s: no default deny", name)
 	}
+	// GAP-0084: the pods that hold keys have egress limits.
+	for _, c := range []string{"gateway", "leader", "callout"} {
+		if _, ok := byName["NetworkPolicy/defenseclaw-"+c+"-egress"]; !ok {
+			t.Errorf("%s: no egress NetworkPolicy for the %s", name, c)
+		}
+	}
 	// The hook plan parses as the plan the hook Jobs read.
-	// No hook resource but the Jobs (Helm keeps hook resources after an
-	// uninstall), and each Job's plan parses as the plan the step reads.
+	// Hook resources are the Jobs and RBAC that exists only while the hooks
+	// run (GAP-0080: deleted once they succeed; Helm keeps other hook
+	// resources after an uninstall), and each Job's plan parses as the plan
+	// the step reads.
 	var plans []string
 	for _, o := range objs {
 		hook, _ := dig(o.Metadata, "annotations", "helm.sh/hook").(string)
-		if hook != "" && o.Kind != "Job" {
+		del, _ := dig(o.Metadata, "annotations", "helm.sh/hook-delete-policy").(string)
+		if hook != "" && o.Kind != "Job" && ((o.Kind != "Role" && o.Kind != "RoleBinding") || !strings.Contains(del, "hook-succeeded")) {
 			t.Errorf("%s: hook resource %s %v outlives the release", name, o.Kind, o.Metadata["name"])
+		}
+		if (o.Kind == "Role" || o.Kind == "RoleBinding") && dig(o.Metadata, "namespace") == "ate-system" && hook == "" {
+			t.Errorf("%s: a standing grant in the Substrate namespace: %s %v", name, o.Kind, o.Metadata["name"])
 		}
 		if o.Kind != "Job" {
 			continue

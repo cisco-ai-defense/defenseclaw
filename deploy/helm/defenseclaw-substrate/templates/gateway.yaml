@@ -49,6 +49,10 @@ spec:
         - --substrate-role=gateway
         - --actor-listen=:{{ .Values.gateway.ports.actor }}
         - --admin-listen=:{{ .Values.gateway.ports.admin }}
+        {{- if .Values.admin.tlsSecretName }}
+        - --admin-tls-cert=/etc/defenseclaw/admin-tls/tls.crt
+        - --admin-tls-key=/etc/defenseclaw/admin-tls/tls.key
+        {{- end }}
         - --metrics-listen=:{{ .Values.gateway.ports.metrics }}
         - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.leader.port }}
         - --leader-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
@@ -77,9 +81,20 @@ spec:
         volumeMounts:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
         {{- include "dc.gatewaySecretMounts" . | nindent 8 }}
+        {{- if .Values.admin.tlsSecretName }}
+        - name: admin-tls
+          mountPath: /etc/defenseclaw/admin-tls
+          readOnly: true
+        {{- end }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
       {{- include "dc.gatewaySecretVolumes" . | nindent 6 }}
+      {{- if .Values.admin.tlsSecretName }}
+      - name: admin-tls
+        secret:
+          secretName: {{ .Values.admin.tlsSecretName }}
+          defaultMode: 0440
+      {{- end }}
 ---
 # The actor Service: the only DefenseClaw host in rendered egress policies,
 # as an http rule on port 80 to defenseclaw-actor.<ns>.svc.cluster.local

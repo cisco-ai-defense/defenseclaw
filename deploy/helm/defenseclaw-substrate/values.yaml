@@ -122,6 +122,10 @@ leader:
 
 controller:
   # One replica (no Lease client in the controller yet).
+  # The admin-only Secret with the template signing keys (key anchors.pem),
+  # mounted for substrate.templates.trust_anchors. Without it every template
+  # is refused (require_attested_templates).
+  templateAnchorsSecret: defenseclaw-template-anchors
   args: []
   resources:
     requests: {cpu: 100m, memory: 128Mi}
@@ -175,14 +179,39 @@ networkPolicy:
   adminFrom: []
   # Peers that may scrape the metrics ports.
   metricsFrom: []
+  # Egress limits for the pods that hold keys (gateway, leader, callout):
+  # DNS, the Kubernetes and Substrate APIs, the release's own Services,
+  # OTLP, and (gateway and leader only) model providers on 443.
+  egress:
+    enabled: true
+    # Ports of the OTLP collector(s) the pods export to.
+    otlpPorts: [4317, 4318]
+    # Extra egress rules (NetworkPolicyEgressRule) for every key-holding pod.
+    extra: []
 
-# The admin Service ingress for launchers (optional).
-adminIngress:
-  enabled: false
-  className: ""
-  host: ""
+# How launchers on laptops reach the admin listener (TLS). The actor
+# listener is never exposed outside the cluster.
+admin:
+  expose:
+    # ClusterIP (in-cluster only), LoadBalancer or Ingress.
+    type: ClusterIP
+    loadBalancer:
+      # Required for LoadBalancer: the client ranges allowed (also put in
+      # the NetworkPolicy; the Service keeps client addresses).
+      sourceRanges: []
+      annotations: {}
+    ingress:
+      className: ""
+      host: ""
+      # Required for Ingress: the TLS Secret the ingress serves. The ingress
+      # must re-encrypt to the admin listener (HTTPS backend), for example
+      # nginx.ingress.kubernetes.io/backend-protocol: HTTPS.
+      tlsSecretName: ""
+      annotations: {}
+  # A kubernetes.io/tls Secret with a certificate for the external name
+  # (LoadBalancer). Without it the admin listener presents its in-cluster
+  # serving certificate, which laptops do not trust for other names.
   tlsSecretName: ""
-  annotations: {}
 
 # OpenFGA bootstrap (post-install and post-upgrade Job). It creates the
 # launcher atespaces, writes their access policies (only DefenseClaw's

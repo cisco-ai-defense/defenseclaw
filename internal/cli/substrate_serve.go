@@ -337,7 +337,13 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			},
 		}
 		if people != nil {
-			out.AdminAddr, out.AdminTLS, out.People = serveFlags.adminListen, servingTLS, people
+			adminTLS := servingTLS
+			if !serveFlags.plainHTTP {
+				if adminTLS, err = substrateAdminTLS(servingTLS); err != nil {
+					return out, err
+				}
+			}
+			out.AdminAddr, out.AdminTLS, out.People = serveFlags.adminListen, adminTLS, people
 			admins := slices.Clone(serveFlags.adminGroups)
 			out.IsAdmin = func(p identity.Person) bool {
 				for _, g := range p.Groups {

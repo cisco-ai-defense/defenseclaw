@@ -46,5 +46,21 @@ spec:
           {{- toYaml .Values.containerSecurityContext | nindent 10 }}
         volumeMounts:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
+        {{- if .Values.controller.templateAnchorsSecret }}
+        - name: template-anchors
+          mountPath: /etc/defenseclaw/substrate/template-anchors
+          readOnly: true
+        {{- end }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
+      {{- if .Values.controller.templateAnchorsSecret }}
+      # Admin-only: only the controller mounts it; a Secret update reaches
+      # the file in about a minute and the controller re-reads it.
+      - name: template-anchors
+        secret:
+          secretName: {{ .Values.controller.templateAnchorsSecret }}
+          optional: true
+          defaultMode: 0440
+          items:
+          - {key: anchors.pem, path: anchors.pem}
+      {{- end }}

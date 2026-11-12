@@ -21,6 +21,150 @@ spec:
   policyTypes: [Ingress]
 ---
 # Source: defenseclaw-substrate/templates/networkpolicy.yaml
+# The pods that hold keys (gateway, leader: provider keys and the store;
+# callout: actor_secrets) may connect only where they need to (GAP-0084).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-gateway-egress
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: gateway
+  policyTypes: [Egress]
+  egress:
+  # DNS.
+  - ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  # This release's pods (leader RPC, admin listener for the callout judge).
+  - to:
+    -
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: dc
+          app.kubernetes.io/name: defenseclaw-substrate
+  # The Substrate namespace (ate-api-server, the actor JWT issuer).
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ate-system
+    ports:
+    - {protocol: TCP, port: 443}
+  # Model providers (/llm), the Kubernetes API (leader Lease, store state;
+  # 6443 is its usual endpoint port). The callout needs neither.
+  - ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 6443}
+  # OTLP export.
+  - ports:
+    - {protocol: TCP, port: 4317}
+    - {protocol: TCP, port: 4318}
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-leader-egress
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: leader
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: leader
+  policyTypes: [Egress]
+  egress:
+  # DNS.
+  - ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  # This release's pods (leader RPC, admin listener for the callout judge).
+  - to:
+    -
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: dc
+          app.kubernetes.io/name: defenseclaw-substrate
+  # The Substrate namespace (ate-api-server, the actor JWT issuer).
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ate-system
+    ports:
+    - {protocol: TCP, port: 443}
+  # Model providers (/llm), the Kubernetes API (leader Lease, store state;
+  # 6443 is its usual endpoint port). The callout needs neither.
+  - ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 6443}
+  # OTLP export.
+  - ports:
+    - {protocol: TCP, port: 4317}
+    - {protocol: TCP, port: 4318}
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-callout-egress
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: callout
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: callout
+  policyTypes: [Egress]
+  egress:
+  # DNS.
+  - ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  # This release's pods (leader RPC, admin listener for the callout judge).
+  - to:
+    -
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: dc
+          app.kubernetes.io/name: defenseclaw-substrate
+  # The Substrate namespace (ate-api-server, the actor JWT issuer).
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ate-system
+    ports:
+    - {protocol: TCP, port: 443}
+  # OTLP export.
+  - ports:
+    - {protocol: TCP, port: 4317}
+    - {protocol: TCP, port: 4318}
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
 # Gateway: the actor listener (plain HTTP) only from atenet-egress (actors
 # reach it only through egress, with the injected actor JWT); the admin listener only from
 # this namespace and adminFrom (launcher ingress, fleet).
@@ -481,30 +625,6 @@ rules:
   resourceNames: [defenseclaw-store-state]
   verbs: [get]
 ---
-# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: defenseclaw-defenseclaw-system-hooks
-  namespace: ate-system
-  labels:
-    app.kubernetes.io/name: defenseclaw-substrate
-    app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
-    app.kubernetes.io/component: hooks
-rules:
-- apiGroups: [""]
-  resources: [configmaps]
-  resourceNames: ["k8s-credential-provider-namespace-policy"]
-  verbs: [get, update]
-- apiGroups: [apps]
-  resources: [deployments]
-  resourceNames: ["k8s-credential-provider"]
-  verbs: [get, patch]
----
 # Source: defenseclaw-substrate/templates/rbac.yaml
 # The gateway leader and the controller hold a Lease each; the leader records
 # the store schema in defenseclaw-store-state (read by the rollback check).
@@ -553,29 +673,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: defenseclaw-hooks
-subjects:
-- kind: ServiceAccount
-  name: defenseclaw-hooks
-  namespace: defenseclaw-system
----
-# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: defenseclaw-defenseclaw-system-hooks
-  namespace: ate-system
-  labels:
-    app.kubernetes.io/name: defenseclaw-substrate
-    app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
-    app.kubernetes.io/component: hooks
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: defenseclaw-defenseclaw-system-hooks
 subjects:
 - kind: ServiceAccount
   name: defenseclaw-hooks
@@ -1041,6 +1138,9 @@ spec:
         - name: ate
           mountPath: /var/run/ate
           readOnly: true
+        - name: template-anchors
+          mountPath: /etc/defenseclaw/substrate/template-anchors
+          readOnly: true
       volumes:
       - name: config
         configMap:
@@ -1077,6 +1177,15 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: podidentity-ca.crt
+      # Admin-only: only the controller mounts it; a Secret update reaches
+      # the file in about a minute and the controller re-reads it.
+      - name: template-anchors
+        secret:
+          secretName: defenseclaw-template-anchors
+          optional: true
+          defaultMode: 0440
+          items:
+          - {key: anchors.pem, path: anchors.pem}
 ---
 # Source: defenseclaw-substrate/templates/gateway.yaml
 apiVersion: apps/v1
@@ -1604,7 +1713,7 @@ spec:
         averageUtilization: 70
 ---
 # Source: defenseclaw-substrate/templates/ingress.yaml
-# Launchers reach the admin listener through this ingress; the actor
+# Launchers reach the admin listener through this ingress (TLS); the actor
 # listener is never exposed.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -1699,6 +1808,112 @@ spec:
       annotations:
         summary: Actors run from templates without a valid attestation; they have no network.
 ---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+# Only while the pre-delete hook runs: stop the controller before the
+# policies are removed (GAP-0056). A hook resource, so no standing grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-hooks-uninstall
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+- apiGroups: [apps]
+  resources: [deployments, deployments/scale]
+  resourceNames: [defenseclaw-controller]
+  verbs: [get, patch]
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-defenseclaw-system-hooks
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: ["k8s-credential-provider-namespace-policy"]
+  verbs: [get, update]
+- apiGroups: [apps]
+  resources: [deployments]
+  resourceNames: ["k8s-credential-provider"]
+  verbs: [get, patch]
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-hooks-uninstall
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-hooks-uninstall
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-hooks
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-defenseclaw-system-hooks
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-defenseclaw-system-hooks
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-hooks
+  namespace: defenseclaw-system
+---
 # Source: defenseclaw-substrate/templates/hooks/jobs.yaml
 apiVersion: batch/v1
 kind: Job
@@ -1753,7 +1968,7 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
           value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - pypi.org\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n    mcp_hosts:\n    - mcp.example.com=tickets\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-a.example\n    token_lifetime_seconds: 900\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  secrets:\n  - inject:\n      header: Authorization\n      hosts:\n      - github.com\n      - api.github.com\n      placeholder: DC_SECRET_GITHUB\n      prefix: 'Bearer '\n    name: github-push\n    profiles:\n    - engineering\n    scope: shared\n    source: ate-secret://k8s.io/default/defenseclaw-actor-secrets/github-app/token\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
@@ -1869,7 +2084,7 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
           value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - pypi.org\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n    mcp_hosts:\n    - mcp.example.com=tickets\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-a.example\n    token_lifetime_seconds: 900\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  secrets:\n  - inject:\n      header: Authorization\n      hosts:\n      - github.com\n      - api.github.com\n      placeholder: DC_SECRET_GITHUB\n      prefix: 'Bearer '\n    name: github-push\n    profiles:\n    - engineering\n    scope: shared\n    source: ate-secret://k8s.io/default/defenseclaw-actor-secrets/github-app/token\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
@@ -1985,7 +2200,7 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
           value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - pypi.org\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n    mcp_hosts:\n    - mcp.example.com=tickets\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-a.example\n    token_lifetime_seconds: 900\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  secrets:\n  - inject:\n      header: Authorization\n      hosts:\n      - github.com\n      - api.github.com\n      placeholder: DC_SECRET_GITHUB\n      prefix: 'Bearer '\n    name: github-push\n    profiles:\n    - engineering\n    scope: shared\n    source: ate-secret://k8s.io/default/defenseclaw-actor-secrets/github-app/token\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME

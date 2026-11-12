@@ -28,7 +28,7 @@ import (
 // and CA.
 const InClusterDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 
-// Kube is a small Kubernetes REST client for the hook steps: four calls do
+// Kube is a small Kubernetes REST client for the hook steps: a few calls do
 // not need client-go. It rereads the projected token on every request.
 type Kube struct {
 	base      string
@@ -163,8 +163,7 @@ func (k *Kube) RestartDeployment(ctx context.Context, namespace, name string) er
 	patch := map[string]any{"spec": map[string]any{"template": map[string]any{"metadata": map[string]any{
 		"annotations": map[string]string{"kubectl.kubernetes.io/restartedAt": time.Now().UTC().Format(time.RFC3339)},
 	}}}}
-	path := "/apis/apps/v1/namespaces/" + url.PathEscape(namespace) + "/deployments/" + url.PathEscape(name)
-	return k.do(ctx, http.MethodPatch, path, "application/strategic-merge-patch+json", patch, nil)
+	return k.do(ctx, http.MethodPatch, deployPath(namespace, name), "application/strategic-merge-patch+json", patch, nil)
 }
 
 // DeleteSecret implements KubeAPI.
@@ -174,4 +173,44 @@ func (k *Kube) DeleteSecret(ctx context.Context, namespace, name string) error {
 		return err
 	}
 	return nil
+}
+
+func deployPath(namespace, name string) string {
+	return "/apis/apps/v1/namespaces/" + url.PathEscape(namespace) + "/deployments/" + url.PathEscape(name)
+}
+
+// ScaleDeployment implements KubeAPI through the scale subresource.
+func (k *Kube) ScaleDeployment(ctx context.Context, namespace, name string, replicas int32) (int32, bool, error) {
+	var cur struct {
+		Spec struct {
+			Replicas int32 `json:"replicas"`
+		} `json:"spec"`
+	}
+	if err := k.do(ctx, http.MethodGet, deployPath(namespace, name)+"/scale", "", nil, &cur); err != nil {
+		if isNotFound(err) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	patch := map[string]any{"spec": map[string]any{"replicas": replicas}}
+	if err := k.do(ctx, http.MethodPatch, deployPath(namespace, name)+"/scale", "application/merge-patch+json", patch, nil); err != nil {
+		return cur.Spec.Replicas, true, err
+	}
+	return cur.Spec.Replicas, true, nil
+}
+
+// DeploymentPods implements KubeAPI.
+func (k *Kube) DeploymentPods(ctx context.Context, namespace, name string) (int32, error) {
+	var d struct {
+		Status struct {
+			Replicas int32 `json:"replicas"`
+		} `json:"status"`
+	}
+	if err := k.do(ctx, http.MethodGet, deployPath(namespace, name), "", nil, &d); err != nil {
+		if isNotFound(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return d.Status.Replicas, nil
 }
