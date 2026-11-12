@@ -292,7 +292,9 @@ func codexSecretOwnershipAcrossWriters(t *testing.T, goos string) {
 // the whole table is too long for one CI shard (about 18 minutes on a
 // Windows runner), one GOOS alone took 422 s of a shard's 660 s timeout and
 // timed out on a slower runner (rel-1-0-6:GAP-0030), and the shard scripts
-// split only top-level tests.
+// split only top-level tests. The released subject is a label only (the seed
+// takes no release input), so the 102 and 103 tests of a GOOS split its row x
+// writer table between them (claudeSecretOwnershipRelease).
 func TestClaudeSecretOwnershipAcrossWritersLinux102(t *testing.T) {
 	claudeSecretOwnershipAcrossWriters(t, "linux", "1.0.2")
 }
@@ -321,8 +323,11 @@ func claudeSecretOwnershipAcrossWriters(t *testing.T, goos, release string) {
 	if err := json.Unmarshal(fixture, &operator); err != nil {
 		t.Fatal(err)
 	}
-	for _, row := range otlpSecretRows() {
-		for _, writer := range []string{"setup", "managed_cleanup"} {
+	for ri, row := range otlpSecretRows() {
+		for wi, writer := range []string{"setup", "managed_cleanup"} {
+			if claudeSecretOwnershipRelease(ri, wi) != release {
+				continue
+			}
 			t.Run(release+"/"+goos+"/"+row.name+"/"+writer, func(t *testing.T) {
 				dir := t.TempDir()
 				pinClaudeUpgradeTestOwner(t, dir)
@@ -430,6 +435,28 @@ func claudeSecretOwnershipAcrossWriters(t *testing.T, goos, release string) {
 					t.Fatalf("residue after %s: %v", writer, left)
 				}
 			})
+		}
+	}
+}
+
+// claudeSecretOwnershipRelease is the released-subject test (1.0.2 or 1.0.3)
+// that runs row ri with writer wi. The released install is the same Setup for
+// both releases (the seed takes no release input), so the two tests of a GOOS
+// split the row x writer table instead of each running it whole: every row
+// runs both writers on every GOOS, and each release runs every row once
+// (TestClaudeSecretOwnershipAcrossWritersRotationIsComplete).
+func claudeSecretOwnershipRelease(ri, wi int) string {
+	return []string{"1.0.2", "1.0.3"}[(ri+wi)%2]
+}
+
+func TestClaudeSecretOwnershipAcrossWritersRotationIsComplete(t *testing.T) {
+	for ri, row := range otlpSecretRows() {
+		releases := map[string]bool{}
+		for wi := range []string{"setup", "managed_cleanup"} {
+			releases[claudeSecretOwnershipRelease(ri, wi)] = true
+		}
+		if !releases["1.0.2"] || !releases["1.0.3"] {
+			t.Errorf("row %s runs only on %v", row.name, releases)
 		}
 	}
 }
