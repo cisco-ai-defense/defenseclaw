@@ -3483,7 +3483,9 @@ def validate_guardrail_profiles(gc: GuardrailConfig) -> None:
             raise ValueError(f"guardrail.profile_assignments[{i}]: unknown profile {assignment.profile!r}")
         match = assignment.match
         substrate = match.substrate
-        has_substrate = substrate is not None and bool(substrate.atespaces or substrate.templates or substrate.workloads)
+        has_substrate = substrate is not None and bool(
+            substrate.atespaces or substrate.templates or substrate.workloads
+        )
         if not (match.groups or match.users or match.connectors or match.agents or has_substrate):
             raise ValueError(
                 f"guardrail.profile_assignments[{i}]: match needs at least one of groups, users, "
