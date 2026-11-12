@@ -360,11 +360,11 @@ type Connector interface {
 	Authenticate(r *http.Request) bool
 	Route(r *http.Request, body []byte) (*ConnectorSignals, error)
 
-	// SetCredentials injects the gateway token and master key at sidecar
+	// SetCredentials injects the gateway token at sidecar
 	// boot. Every connector must implement this so that a missing
 	// implementation causes a compile-time error rather than a silent
 	// runtime auth bypass via the old type-assertion path.
-	SetCredentials(gatewayToken, masterKey string)
+	SetCredentials(gatewayToken string)
 
 	// VerifyClean checks that the connector's teardown left no stale
 	// artifacts (hooks, env files, config patches, shims). Returns nil

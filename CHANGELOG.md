@@ -117,6 +117,7 @@ for current behavior.
 - **A linked skill or plugin folder that was made safe again stops being reported as unavailable within one watcher tick, with no gateway restart.** After `chmod go-w` on the folders of a linked agent folder, `status`, `doctor` and the watcher health kept saying admission scanning was off and naming the repaired folder until the gateway restarted: the watcher recorded the folder once and only judged a root again when it existed and was watched, so a root the agent had not created yet, and a path that is both a skill root and a plugin root, kept the old record. The watcher now judges every root recorded for a writable folder again on each tick; a folder that is still writable keeps scanning off and stays named. A root the agent has not created yet has no watch after the repair, so it stays reported as unavailable (strict and managed keep holding what appears there) without the folder named, until the watcher registers it. A path that is both a skill root and a plugin root ends the record of each kind once it is watched. The two kinds share the one watch, so they also share its lifecycle: if the watched root is made writable again or replaced, both kinds are reported as unavailable (strict and managed hold a plugin there, not only a skill), and both are admitted again before the report ends. A plugin cache configured under a skill root, whose watch comes from the skill root, gets the same record and the same hold. A root the watcher holds no usable watch on keeps its record until it is watched and admitted.
 
 ### Removed
+- **Removed the device.key-derived `sk-dc-` proxy master key; the guardrail proxy and connector routes accept only the gateway token or connector-scoped credentials.** No release has issued it since 0.3.0, none logged it, and it was never a supported credential. The Python `derive_master_key` helper, the unused `master_key` argument of `patch_openclaw_config` and the `SetCredentials` master key argument are gone. A stale `sk-dc-` value in an agent config is still never forwarded as a provider key (remove that guard in 1.1).
 - **The OpenClaw pairing repair** (`RepairPairing`) and the unused OpenClaw RPC helpers `GetStatus` and `GetSkillsBins`.
 - **The per-user Windows Setup (`DefenseClawSetup-x64.exe`) and its source.** No 1.0 release published it; per-user Windows installs use `install.ps1` since 1.0.0. `defenseclaw uninstall` no longer hands off to it, and the hidden `defenseclaw init --native-setup-copilot` option and `connector verify` Setup flags are gone. The 0.8.x upgrade path is unchanged: `install.ps1` still imports a 0.8.7-0.8.10 Setup install, and the rollback steps still point at that release's Setup. (cowork-1-0-8 GAP-0088)
 
@@ -3753,7 +3754,7 @@ branch's baseline. Each is additive — there is no removed protection.
   recomputes at boot. `sk-dc-` is an internal fallback credential and
   not the supported caller-side bearer; use the connector-issued
   bearer instead. (Corrected in 1.0.9: no release logs the value to
-  `gateway.log`.) Adds direct
+  `gateway.log`. Removed in 1.0.10.) Adds direct
   `golang.org/x/crypto` dep (was indirect).
 - **M1** `isPrivateHost()` resolves hostnames through `net.LookupHost`
   and inspects every returned address before deciding whether to

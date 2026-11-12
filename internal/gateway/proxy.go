@@ -20,7 +20,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -40,7 +39,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/crypto/pbkdf2"
+
 	"golang.org/x/time/rate"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -113,7 +112,6 @@ type GuardrailProxy struct {
 
 	inspector    ContentInspector
 	secureClient atomic.Bool
-	masterKey    string
 	gatewayToken string // gateway token, accepted in X-DC-Auth
 	notify       *NotificationQueue
 	webhooks     *WebhookDispatcher
@@ -452,8 +450,6 @@ func NewGuardrailProxy(
 	// for non-gateway callers like direct `opa eval` runs).
 	inspector.SetHILTConfig(cfg.HILT.Enabled, cfg.HILT.MinSeverity)
 
-	masterKey := deriveMasterKey(dataDir)
-
 	// Sidecar resolves or synthesizes the gateway token synchronously before
 	// starting the API and guardrail runtimes. Reuse that exact credential
 	// here. Independently calling EnsureGatewayToken would generate a dotenv
@@ -466,7 +462,7 @@ func NewGuardrailProxy(
 	// Inject credentials into the connector so its Authenticate() method
 	// can validate tokens without the proxy duplicating the logic.
 	if conn != nil {
-		conn.SetCredentials(gatewayToken, masterKey)
+		conn.SetCredentials(gatewayToken)
 	}
 
 	p := &GuardrailProxy{
@@ -477,7 +473,6 @@ func NewGuardrailProxy(
 		dataDir:      dataDir,
 		connector:    conn,
 		inspector:    inspector,
-		masterKey:    masterKey,
 		gatewayToken: gatewayToken,
 		notify:       notify,
 		limiter:      rate.NewLimiter(rate.Limit(100), 200),
@@ -1008,7 +1003,8 @@ func (p *GuardrailProxy) requestLogger(next http.Handler) http.Handler {
 // passthroughUpstreamAuth picks the upstream credential of a passthrough
 // request. Priority: (1) X-AI-Auth from the fetch interceptor (normalized to
 // "Bearer <key>" regardless of the original header), (2) api-key (Azure),
-// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
+// (3) x-api-key (Anthropic), (4) Authorization. A stale sk-dc- value left in a pre-1.0.10 agent config
+// is skipped so it is never forwarded as a provider key (remove in 1.1).
 func passthroughUpstreamAuth(h http.Header) string {
 	if aiAuth := h.Get("X-AI-Auth"); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
 		return aiAuth
@@ -1573,7 +1569,8 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// Resolve the key to use for the upstream provider.
 	// Priority: (1) X-AI-Auth from the fetch interceptor (normalized to
 	// "Bearer <key>" regardless of the original header), (2) api-key (Azure),
-	// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
+	// (3) x-api-key (Anthropic), (4) Authorization. Stale sk-dc- values are
+	// skipped (see passthroughUpstreamAuth).
 	upstreamAuth := passthroughUpstreamAuth(r.Header)
 	// Fallback: when the caller supplied X-DC-Target-URL but no credential
 	// headers (the "third_party_injected" mode used by ZeptoClaw/PulseClaw),
@@ -4503,7 +4500,7 @@ func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, mode
 //     trusted unconditionally to avoid breaking existing setups. A warning is
 //     logged at startup (see NewGuardrailProxy).
 //   - For non-loopback (sandbox / bridge deployments), authentication is always
-//     required via X-DC-Auth or the master key.
+//     required via X-DC-Auth.
 
 // authenticateRequest returns r with its verified subject bound when the
 // caller proved an owner credential (presentsOwnerCredential).
@@ -4537,8 +4534,8 @@ func dropProxyUserClaims(next http.Handler) http.Handler {
 }
 
 // presentsOwnerCredential reports whether r carries a credential only the
-// gateway's account can read: the gateway token or the master key derived
-// from its device key. Connectors also admit loopback callers without one
+// gateway's account can read: the gateway token. Connectors also admit
+// loopback callers without one
 // (legacy hook installs) or with a provider key, which prove nothing about
 // who sent the request.
 func (p *GuardrailProxy) presentsOwnerCredential(r *http.Request) bool {
@@ -4549,8 +4546,7 @@ func (p *GuardrailProxy) presentsOwnerCredential(r *http.Request) bool {
 		strings.TrimPrefix(r.Header.Get("X-DC-Auth"), "Bearer "),
 		connector.ExtractBearerKey(r.Header.Get("Authorization")),
 	} {
-		if presented != "" && ((p.gatewayToken != "" && constantTimeStringMatch(presented, p.gatewayToken)) ||
-			(p.masterKey != "" && constantTimeStringMatch(presented, p.masterKey))) {
+		if presented != "" && p.gatewayToken != "" && constantTimeStringMatch(presented, p.gatewayToken) {
 			return true
 		}
 	}
@@ -4572,7 +4568,7 @@ func (p *GuardrailProxy) credentialsAccepted(r *http.Request) bool {
 			return true
 		}
 		reason := "invalid_token"
-		if strings.TrimSpace(r.Header.Get("X-DC-Auth")) == "" && (p.masterKey == "" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")) {
+		if strings.TrimSpace(r.Header.Get("X-DC-Auth")) == "" && !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 			reason = "missing_token"
 		}
 		p.emitProxyAuthFailure(r, reason)
@@ -4590,13 +4586,6 @@ func (p *GuardrailProxy) credentialsAccepted(r *http.Request) bool {
 		}
 	}
 
-	if p.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(p.masterKey)) == 1 {
-			return true
-		}
-	}
-
 	// Plan B2 / S0.2: no longer fall through to loopback-trust when the
 	// gateway token is empty. EnsureGatewayToken synthesizes one at boot
 	// if the operator hasn't supplied one, so this case is unreachable
@@ -4609,7 +4598,7 @@ func (p *GuardrailProxy) credentialsAccepted(r *http.Request) bool {
 	}
 
 	reason := "invalid_token"
-	if strings.TrimSpace(r.Header.Get("X-DC-Auth")) == "" && (p.masterKey == "" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")) {
+	if strings.TrimSpace(r.Header.Get("X-DC-Auth")) == "" && !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 		reason = "missing_token"
 	}
 	p.emitProxyAuthFailure(r, reason)
@@ -4635,39 +4624,6 @@ func (p *GuardrailProxy) emitProxyAuthFailure(r *http.Request, metricReason stri
 		metricReason,
 		apiAuthenticationFailureFacts{},
 	)
-}
-
-// deriveMasterKey produces a deterministic master key from the device key
-// file using PBKDF2-SHA256 with 100k iterations.
-//
-// PR #141 audit H9: the previous implementation was a single HMAC-SHA256
-// round. With ~16 bytes of effective entropy in `device.key` and zero
-// stretching, a leak of `device.key` (a 0600 file in dataDir, but anyone
-// with that fd has full master-key control) was instantly equivalent to
-// a master-key compromise — and a leak of the master key gave the
-// attacker an `Authorization: Bearer sk-dc-…` that bypasses the entire
-// connector auth chain (see Codex/ZeptoClaw Authenticate). PBKDF2 with
-// 100k iterations puts a CPU cost on each crack attempt, so an attacker
-// needs the live file plus seconds-per-guess of compute even when both
-// the device.key contents and the salt are known.
-//
-// BREAKING for any persisted `sk-dc-…` value derived under the old
-// algorithm: those will no longer match the master key the proxy
-// recomputes at boot. The gateway never logs or prints the value. Callers
-// use the connector-issued bearer their tooling has: `sk-dc-` master keys
-// are an internal fallback, not a supported credential.
-func deriveMasterKey(dataDir string) string {
-	keyFile := filepath.Join(dataDir, "device.key")
-	data, err := os.ReadFile(keyFile)
-	if err != nil {
-		return ""
-	}
-	// 32-byte output (= 64 hex chars) — wider than the previous
-	// truncated-to-16-byte digest so a brute-force attacker now also
-	// needs to cover a meaningfully larger search space if they ever
-	// recover only the published `sk-dc-…` string.
-	dk := pbkdf2.Key(data, []byte("defenseclaw-proxy-master-key"), 100_000, 32, sha256.New)
-	return "sk-dc-" + fmt.Sprintf("%x", dk)
 }
 
 // switchConnectorLocked tears down the current connector and sets up the
@@ -4700,7 +4656,7 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	ctx := context.Background()
 	oldConn := p.connector
 
-	newConn.SetCredentials(p.gatewayToken, p.masterKey)
+	newConn.SetCredentials(p.gatewayToken)
 
 	// Pause self-heal across the swap. Teardown below strips the outgoing
 	// connector's hook entries, which must NOT be auto-restored; without

@@ -1653,11 +1653,10 @@ func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiTo
 	}
 	apiAddr := apiListenAddr(s.currentConfig())
 	proxyAddr := guardrailListenAddr(s.currentConfig().Guardrail.Port, s.currentConfig().Guardrail.Host)
-	masterKey := deriveMasterKey(s.currentConfig().DataDir)
 	if s.appProtection == nil {
-		s.appProtection = newApplicationProtectionController(s, registry, apiToken, proxyAddr, apiAddr, masterKey)
+		s.appProtection = newApplicationProtectionController(s, registry, apiToken, proxyAddr, apiAddr)
 	} else {
-		s.appProtection.UpdateRuntime(registry, apiToken, proxyAddr, apiAddr, masterKey)
+		s.appProtection.UpdateRuntime(registry, apiToken, proxyAddr, apiAddr)
 	}
 	controller := s.appProtection
 	aiDiscovery.AddReportObserver(func(reportCtx context.Context, report inventory.AIDiscoveryReport) {
@@ -5147,15 +5146,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// S0.12 follow-up: inject credentials into the connector NOW, before
 	// Setup() and before the HasUsableProviders() probe below. Without
 	// this, OpenClaw's probe (which is keyed off the connector's
-	// gatewayToken/masterKey fields) returns a false-negative
-	// "no gateway token or master key configured" error and runGuardrail
+	// gatewayToken field) returns a false-negative
+	// "no gateway token configured" error and runGuardrail
 	// aborts even though the token is correctly resolved on disk. The
 	// historical wiring relied on NewGuardrailProxy() to call
 	// SetCredentials, but that runs *after* the probe — leaving the
 	// connector blind during the gate. NewGuardrailProxy() will call
 	// SetCredentials() again with the same values (idempotent restore).
-	masterKey := deriveMasterKey(s.currentConfig().DataDir)
-	conn.SetCredentials(apiToken, masterKey)
+	conn.SetCredentials(apiToken)
 	// Initial single-connector setup shares the same effective policy and
 	// credential wiring as multi-connector setup and subsequent self-heal.
 	setupOpts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
@@ -5278,7 +5276,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
 		}
 		singleRollback, err = s.prepareSingleConnectorSetupTransaction(
-			ctx, registry, setupOpts, conn, apiToken, proxyAddr, apiAddr, masterKey,
+			ctx, registry, setupOpts, conn, apiToken, proxyAddr, apiAddr,
 		)
 		if err != nil {
 			s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -5742,10 +5740,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		apiToken = tok
 		_ = os.Setenv("DEFENSECLAW_GATEWAY_TOKEN", tok)
 	}
-	masterKey := deriveMasterKey(s.currentConfig().DataDir)
 
 	if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
-		return s.runManagedEnterpriseMultiHookGuardrail(ctx, registry, conns, apiToken, proxyAddr, apiAddr, masterKey)
+		return s.runManagedEnterpriseMultiHookGuardrail(ctx, registry, conns, apiToken, proxyAddr, apiAddr)
 	}
 
 	// A pre-transaction runtime may contain an old lock-only registration that
@@ -5794,7 +5791,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		setupSeed.activeState = activeState
 		setupSeed.hookLockState = hookLockState
 		candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
-			registry, previous, names, apiToken, proxyAddr, apiAddr, masterKey, hookLockState,
+			registry, previous, names, apiToken, proxyAddr, apiAddr, hookLockState,
 		)
 		removed, teardownFailed := teardownRemovedConnectorCandidates(candidates, ctx, func(conn connector.Connector, priorOpts connector.SetupOpts) error {
 			if containsFold(configured, conn.Name()) {
@@ -5895,7 +5892,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	cache := guardrail.NewRulePackCache()
 	setupSeed.publishSetupProgress = true
 	setupTransaction, setupErr := s.setupConnectorsIsolatedTransaction(
-		ctx, conns, apiToken, proxyAddr, apiAddr, masterKey, cache, setupSeed,
+		ctx, conns, apiToken, proxyAddr, apiAddr, cache, setupSeed,
 	)
 	if setupErr != nil {
 		if len(setupTransaction.removed) > 0 {
@@ -6001,7 +5998,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	return nil
 }
 
-func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, registry *connector.Registry, conns []connector.Connector, apiToken, proxyAddr, apiAddr, masterKey string) error {
+func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, registry *connector.Registry, conns []connector.Connector, apiToken, proxyAddr, apiAddr string) error {
 	if !s.currentConfig().Guardrail.Enabled {
 		for _, conn := range conns {
 			if conn != nil {
@@ -6080,7 +6077,7 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: managed connector %s rule pack activation rejected, skipping (other connectors unaffected): %v\n", name, compileErr)
 			continue
 		}
-		registration.conn.SetCredentials(registration.opts.APIToken, masterKey)
+		registration.conn.SetCredentials(registration.opts.APIToken)
 		publishConnectorRulePackOverrides(name, compiled)
 		succeeded = append(succeeded, name)
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: registered %s for hook evaluation; lifecycle is owned by enterprise hook guardian\n", name)
@@ -6597,7 +6594,7 @@ func (s *Sidecar) prepareSingleConnectorSetupTransaction(
 	registry *connector.Registry,
 	opts connector.SetupOpts,
 	requested connector.Connector,
-	apiToken, proxyAddr, apiAddr, masterKey string,
+	apiToken, proxyAddr, apiAddr string,
 ) (multiConnectorSetupTransaction, error) {
 	transaction, err := captureSingleConnectorRollbackAuthority(opts, requested)
 	if err != nil {
@@ -6615,7 +6612,7 @@ func (s *Sidecar) prepareSingleConnectorSetupTransaction(
 		transaction.applied[0].pluginSnapshot = pluginSnapshot
 	}
 	if err := s.teardownPreviousConnectorTransaction(
-		ctx, registry, requested, apiToken, proxyAddr, apiAddr, masterKey, &transaction,
+		ctx, registry, requested, apiToken, proxyAddr, apiAddr, &transaction,
 	); err != nil {
 		return transaction, fmt.Errorf("connector switch rollback boundary: %w", err)
 	}
@@ -6626,7 +6623,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 	ctx context.Context,
 	registry *connector.Registry,
 	requested connector.Connector,
-	apiToken, proxyAddr, apiAddr, masterKey string,
+	apiToken, proxyAddr, apiAddr string,
 	transaction *multiConnectorSetupTransaction,
 ) error {
 	if requested == nil {
@@ -6673,7 +6670,6 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 		apiToken,
 		proxyAddr,
 		apiAddr,
-		masterKey,
 		transaction.hookLockState,
 	)
 	// A dropped name left the roster without a teardown, so it needs no
@@ -6757,14 +6753,14 @@ func keepAgentSettingsRefusedTeardowns(
 	return restore, stillFailed
 }
 
-func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector.Connector, apiToken, proxyAddr, apiAddr, masterKey string, cache *guardrail.RulePackCache) ([]string, error) {
+func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector.Connector, apiToken, proxyAddr, apiAddr string, cache *guardrail.RulePackCache) ([]string, error) {
 	transaction, err := s.setupConnectorsIsolatedTransaction(
-		ctx, conns, apiToken, proxyAddr, apiAddr, masterKey, cache,
+		ctx, conns, apiToken, proxyAddr, apiAddr, cache,
 	)
 	return transaction.succeeded, err
 }
 
-func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns []connector.Connector, apiToken, proxyAddr, apiAddr, masterKey string, cache *guardrail.RulePackCache, seed ...multiConnectorSetupTransaction) (multiConnectorSetupTransaction, error) {
+func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns []connector.Connector, apiToken, proxyAddr, apiAddr string, cache *guardrail.RulePackCache, seed ...multiConnectorSetupTransaction) (multiConnectorSetupTransaction, error) {
 	type connectorRegistration struct {
 		conn connector.Connector
 		opts connector.SetupOpts
@@ -6870,7 +6866,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				continue
 			}
 		}
-		err := s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
+		err := s.setupOneConnector(ctx, registration.conn, registration.opts, cache)
 		// A probe that ran out of time on a busy host changed nothing and says
 		// nothing about the agent: try again before leaving the connector
 		// unenforced until the next restart (GAP-1714).
@@ -6888,7 +6884,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					"setup_attempt":   attempt,
 				})
 			}
-			err = s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
+			err = s.setupOneConnector(ctx, registration.conn, registration.opts, cache)
 		}
 		// An agent that has its settings file open (Claude Code writes
 		// settings.json while it runs) makes a Windows open or replace fail
@@ -6905,7 +6901,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				})
 			}
 		}, func() error {
-			return s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
+			return s.setupOneConnector(ctx, registration.conn, registration.opts, cache)
 		})
 		if errors.Is(err, connector.ErrAgentConfigRefusal) {
 			// The agent's own settings refuse the hooks, for example after
@@ -7548,7 +7544,7 @@ func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayTo
 // the other connectors running. On a post-Setup verification failure it
 // returns the error to its caller, which owns rollback to the pre-setup
 // registration. Teardown here would erase a previously active guard.
-func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connector, opts connector.SetupOpts, masterKey string, cache *guardrail.RulePackCache) error {
+func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connector, opts connector.SetupOpts, cache *guardrail.RulePackCache) error {
 	rulesPublished := false
 	defer func() {
 		if !rulesPublished {
@@ -7576,7 +7572,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 
 	// Inject credentials only after the connector's immutable policy candidate
 	// has passed strict load, validation, and gateway compilation.
-	conn.SetCredentials(opts.APIToken, masterKey)
+	conn.SetCredentials(opts.APIToken)
 
 	// Enforce the same hook-contract gate the single-connector path applies in
 	// runGuardrail (see HookContractNeedsActionOverride call above). Without
@@ -8499,7 +8495,7 @@ func canonicalConnectorPathSet(paths []string) (map[string]struct{}, error) {
 func (s *Sidecar) removedConnectorRollbackCandidates(
 	registry *connector.Registry,
 	previous, current []string,
-	apiToken, proxyAddr, apiAddr, masterKey string,
+	apiToken, proxyAddr, apiAddr string,
 	lockState *connector.HookContractLockSnapshot,
 ) ([]multiConnectorSetupRollbackPoint, []string, []string) {
 	if registry == nil || len(previous) == 0 {
@@ -8549,7 +8545,7 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 			failed = append(failed, name)
 			continue
 		}
-		conn.SetCredentials(opts.APIToken, masterKey)
+		conn.SetCredentials(opts.APIToken)
 		point := multiConnectorSetupRollbackPoint{
 			conn:             conn,
 			opts:             opts,
