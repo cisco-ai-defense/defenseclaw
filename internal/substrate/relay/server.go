@@ -170,6 +170,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /dcrelay/1/task", s.taskStart)
 	mux.HandleFunc("GET /dcrelay/1/task/{id}", s.taskFollow)
 	mux.HandleFunc("GET /dcrelay/1/status", s.status)
+	mux.HandleFunc("POST /dcrelay/1/exec", s.fileExec)
+	mux.HandleFunc("PUT /dcrelay/1/files", s.filePut)
+	mux.HandleFunc("GET /dcrelay/1/files", s.fileGet)
 	return mux
 }
 
@@ -556,7 +559,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"version": Version, "session": s.session, "agent_running": s.tmux.Alive(r.Context()),
-		"last_preconnect_ms": float64(warm.Microseconds()) / 1000, "tasks": tasks,
+		"last_preconnect_ms": float64(warm.Microseconds()) / 1000, "tasks": tasks, "workdir": relayWorkdir(s.opts.Config.Relay.Workdir),
 	})
 }
 
