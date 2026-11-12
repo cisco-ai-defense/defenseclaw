@@ -86,9 +86,15 @@ func WithObservabilityV8ManagedAIDDestination(
 	plan *ObservabilityV8Plan,
 	options ObservabilityV8ManagedAIDOptions,
 ) (*ObservabilityV8Plan, error) {
-	if plan == nil || !managed.IsManagedEnterprise(options.DeploymentMode) || options.Endpoint == "" ||
+	if plan == nil || !managed.IsManagedEnterprise(options.DeploymentMode) ||
 		managed.IsStandaloneProfile(options.Profile) {
 		return plan, nil
+	}
+	if options.Endpoint == "" {
+		// No Cisco AI Defense endpoint: there is no managed destination, but
+		// the managed inventory actions stay reserved, so an operator log
+		// destination never receives them; local SQLite keeps them (#1453).
+		return withObservabilityV8ManagedInventoryReserved(plan)
 	}
 	origin, ok := observabilityV8ManagedAIDOrigin(options.Endpoint)
 	if !ok {
@@ -250,15 +256,36 @@ func ObservabilityV8ManagedAIDDeploymentAliases(destination ObservabilityV8Effec
 	return !destination.managedAIDDeploymentAliasesOff
 }
 
+// withObservabilityV8ManagedInventoryReserved returns plan with the managed
+// inventory actions reserved on every operator log destination and no
+// managed destination. A plan that has the reservation already is returned
+// as it is.
+func withObservabilityV8ManagedInventoryReserved(plan *ObservabilityV8Plan) (*ObservabilityV8Plan, error) {
+	effective := cloneObservabilityV8EffectivePlan(plan.effective)
+	if !reserveObservabilityV8ManagedInventory(&effective) {
+		return plan, nil
+	}
+	return newObservabilityV8Plan(effective)
+}
+
+// observabilityV8ManagedInventoryDropRoute names the release-owned route that
+// reserveObservabilityV8ManagedInventory puts first on an operator
+// destination.
+const observabilityV8ManagedInventoryDropRoute = "drop-managed-endpoint-inventory"
+
 // reserveObservabilityV8ManagedInventory prepends a release-owned drop route
 // to every operator-configured log destination. The required local SQLite
 // destination is deliberately excluded so inventory remains durable; the
-// managed destination is appended only after this pass and is therefore the
-// sole optional exporter allowed to receive these actions.
-func reserveObservabilityV8ManagedInventory(effective *ObservabilityV8EffectivePlan) {
+// managed destination, when there is one, is appended only after this pass
+// and is therefore the sole optional exporter allowed to receive these
+// actions. A destination that has the route first already keeps its routes,
+// so a repeated pass adds no route and moves none. It reports whether it
+// changed a destination.
+func reserveObservabilityV8ManagedInventory(effective *ObservabilityV8EffectivePlan) bool {
 	if effective == nil {
-		return
+		return false
 	}
+	changed := false
 	for destinationIndex := range effective.Destinations {
 		destination := &effective.Destinations[destinationIndex]
 		if destination.Kind == ObservabilityV8DestinationLocalSQLite ||
@@ -267,11 +294,16 @@ func reserveObservabilityV8ManagedInventory(effective *ObservabilityV8EffectiveP
 			!observabilityV8SignalsContain(destination.SelectedSignals, observability.SignalLogs) {
 			continue
 		}
+		if len(destination.Routes) > 0 && destination.Routes[0].Generated &&
+			destination.Routes[0].Name == observabilityV8ManagedInventoryDropRoute {
+			continue
+		}
+		changed = true
 		for routeIndex := range destination.Routes {
 			destination.Routes[routeIndex].Index = routeIndex + 1
 		}
 		destination.Routes = append([]ObservabilityV8EffectiveRoute{{
-			Index: 0, Name: "drop-managed-endpoint-inventory", Generated: true,
+			Index: 0, Name: observabilityV8ManagedInventoryDropRoute, Generated: true,
 			Signals: []observability.Signal{observability.SignalLogs},
 			Selector: ObservabilityV8EffectiveSelector{
 				Buckets: []observability.Bucket{observability.BucketAIDiscovery},
@@ -291,6 +323,7 @@ func reserveObservabilityV8ManagedInventory(effective *ObservabilityV8EffectiveP
 			Action: ObservabilityV8RouteDrop,
 		}}, destination.Routes...)
 	}
+	return changed
 }
 
 // observabilityV8ManagedAIDOrigin accepts only the release-owned base origin.
