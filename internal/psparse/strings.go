@@ -16,15 +16,15 @@ func (p *parser) stringLit(t Token) *StringLit {
 	sl := &StringLit{span: span{t.Start, t.End}, Kind: t.Str}
 	switch t.Str {
 	case StrSingle:
-		inner := trimDelims(t.Raw, 1, 1)
-		sl.Value = strings.ReplaceAll(inner, "''", "'")
+		inner := trimRuneDelims(t.Raw)
+		sl.Value = collapseDoubled(inner, isSingleQuote, '\'')
 		sl.Static = true
 	case StrHereSingle:
 		sl.Value = hereBody(t.Raw)
 		sl.Static = true
 	case StrDouble:
-		inner := trimDelims(t.Raw, 1, 1)
-		inner = strings.ReplaceAll(inner, `""`, `"`)
+		inner := trimRuneDelims(t.Raw)
+		inner = collapseDoubled(inner, isDoubleQuote, '"')
 		parts, static, lit := p.expandable(inner, t.Start+1)
 		sl.Parts, sl.Static, sl.Value = parts, static, lit
 	case StrHereDouble:
@@ -38,11 +38,30 @@ func (p *parser) stringLit(t Token) *StringLit {
 	return sl
 }
 
-func trimDelims(s string, left, right int) string {
-	if len(s) >= left+right {
-		return s[left : len(s)-right]
+// trimRuneDelims drops the first and last rune (the quote delimiters), which
+// may be multi-byte Unicode quote characters.
+func trimRuneDelims(s string) string {
+	rs := []rune(s)
+	if len(rs) >= 2 {
+		return string(rs[1 : len(rs)-1])
 	}
-	return s
+	return ""
+}
+
+// collapseDoubled replaces each doubled quote-class pair (the quote-escape
+// form) with one repl rune.
+func collapseDoubled(s string, isClass func(rune) bool, repl rune) string {
+	rs := []rune(s)
+	var b strings.Builder
+	for i := 0; i < len(rs); i++ {
+		if isClass(rs[i]) && i+1 < len(rs) && isClass(rs[i+1]) {
+			b.WriteRune(repl)
+			i++
+			continue
+		}
+		b.WriteRune(rs[i])
+	}
+	return b.String()
 }
 
 // hereBody extracts the content of a here-string (@" ... "@ / @' ... '@),
