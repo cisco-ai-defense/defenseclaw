@@ -52,39 +52,78 @@ var shellArgv0 = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash": 
 // payload uses that payload; any other argv is kept structured as SurfaceArgv so
 // an element like "/tmp/a b" is not re-split (review SF-3).
 func shellCall(tool string, args json.RawMessage) Call {
+	// Args is always kept on the Call so executableContent/Extract can fall back
+	// to a reasoned unknown if no command is found (review N1).
+	base := Call{Surface: SurfaceShell, Tool: tool, Args: args}
 	if len(args) == 0 {
-		return Call{Surface: SurfaceShell, Tool: tool}
+		return base
+	}
+	// A JSON-string body is itself the command.
+	var s string
+	if json.Unmarshal(args, &s) == nil {
+		if s != "" {
+			base.Command = s
+		}
+		return base
 	}
 	var m map[string]any
 	if json.Unmarshal(args, &m) != nil {
-		return Call{Surface: SurfaceShell, Tool: tool}
+		return base
 	}
-	for _, k := range []string{"command", "cmd", "script", "code", "input", "keystrokes", "commandLine"} {
+	// Codex local_shell: {"action":{"command":[...]}}.
+	if act, ok := m["action"].(map[string]any); ok {
+		if c := shellFromValue(tool, act["command"]); c.Command != "" || len(c.Argv) > 0 {
+			c.Args = args
+			return c
+		}
+	}
+	for _, k := range []string{"command", "cmd", "script", "code", "input", "keystrokes", "commandLine", "CommandLine", "commands"} {
 		v, ok := m[k]
 		if !ok {
 			continue
 		}
-		switch t := v.(type) {
-		case string:
-			if t != "" {
-				return Call{Surface: SurfaceShell, Tool: tool, Command: t}
-			}
-		case []any:
-			argv := toStrings(t)
-			if len(argv) == 0 {
-				continue
-			}
-			if len(argv) >= 2 && shellArgv0[baseName(argv[0])] {
-				for i := 0; i+1 < len(argv); i++ {
-					if argv[i] == "-c" || argv[i] == "-lc" {
-						return Call{Surface: SurfaceShell, Tool: tool, Command: argv[i+1]}
-					}
-				}
-			}
-			return Call{Surface: SurfaceArgv, Tool: tool, Argv: argv}
+		c := shellFromValue(tool, v)
+		if c.Command != "" || len(c.Argv) > 0 {
+			c.Args = args
+			return c
 		}
 	}
-	return Call{Surface: SurfaceShell, Tool: tool}
+	return base
+}
+
+// shellFromValue interprets one command-bearing value: a string, an argv array
+// (with a shell -c payload lifted out), or an array of command strings.
+func shellFromValue(tool string, v any) Call {
+	switch t := v.(type) {
+	case string:
+		if t != "" {
+			return Call{Surface: SurfaceShell, Tool: tool, Command: t}
+		}
+	case []any:
+		argv := toStrings(t)
+		if len(argv) == 0 {
+			return Call{}
+		}
+		// an array of plain command strings (no program path) is joined.
+		if len(argv) >= 1 && !looksProgram(argv[0]) {
+			return Call{Surface: SurfaceShell, Tool: tool, Command: strings.Join(argv, "\n")}
+		}
+		if len(argv) >= 2 && shellArgv0[baseName(argv[0])] {
+			for i := 0; i+1 < len(argv); i++ {
+				if argv[i] == "-c" || argv[i] == "-lc" || argv[i] == "-ec" {
+					return Call{Surface: SurfaceShell, Tool: tool, Command: argv[i+1]}
+				}
+			}
+		}
+		return Call{Surface: SurfaceArgv, Tool: tool, Argv: argv}
+	}
+	return Call{}
+}
+
+// looksProgram reports whether an argv[0] is a program token (a path or bare
+// name) rather than a whole command line with spaces.
+func looksProgram(s string) bool {
+	return s != "" && !strings.ContainsAny(s, " \t")
 }
 
 func shellStringArg(args json.RawMessage) string {

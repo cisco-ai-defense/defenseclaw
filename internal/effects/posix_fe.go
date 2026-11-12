@@ -30,7 +30,10 @@ func parsePOSIX(command string, o Options) *Script {
 	return s
 }
 
-type posixWalker struct{ out *Script }
+type posixWalker struct {
+	out       *Script
+	pipeDepth int
+}
 
 func (w *posixWalker) unknown(reason ReasonCode, node syntax.Node) {
 	w.out.Unknowns = append(w.out.Unknowns, UnknownNode{Reason: reason, Span: span(node)})
@@ -85,6 +88,10 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 						w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{{Sub: sub, Cond: true}}, Cond: true})
 					}
 				}
+				// the loop rebinds its variable: drop its static value.
+				if wl.Name != nil && wl.Name.Value != "" {
+					w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{{Assigns: []Assign{{Name: wl.Name.Value, Unbind: true}}}}})
+				}
 			}
 		}
 		for _, inner := range cmd.Do {
@@ -103,7 +110,14 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 			w.out.Funcs = append(w.out.Funcs, cmd.Name.Value)
 		}
 		if cmd.Body != nil {
-			w.stmt(cmd.Body, true, false)
+			// A function body runs where it is called, not at definition: scope
+			// it like a subshell so a cd/assignment inside does not leak into
+			// the straight-line cwd (review N2 V6).
+			sub := &Script{Dialect: DialectPOSIX}
+			nw := &posixWalker{out: sub}
+			nw.stmt(cmd.Body, true, false)
+			sub.Funcs = nil // a nested function definition does not shadow outside
+			w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{{Sub: sub, Cond: true}}, Cond: true})
 		}
 	case *syntax.DeclClause:
 		w.declClause(st, cmd, cond, pipeIn)
@@ -138,8 +152,10 @@ func (w *posixWalker) binary(st *syntax.Stmt, cmd *syntax.BinaryCmd, cond bool) 
 		w.stmt(cmd.X, cond, false)
 		w.stmt(cmd.Y, true, false)
 	case syntax.Pipe, syntax.PipeAll:
+		w.pipeDepth++
 		w.stmt(cmd.X, cond, false)
 		w.stmt(cmd.Y, cond, true)
+		w.pipeDepth--
 	default:
 		w.unknown(ReasonUnparsedConstruct, cmd)
 	}
@@ -158,7 +174,7 @@ func (w *posixWalker) ifClause(cmd *syntax.IfClause, cond bool) {
 }
 
 func (w *posixWalker) declClause(st *syntax.Stmt, cmd *syntax.DeclClause, cond, pipeIn bool) {
-	c := &Cmd{Cond: cond, PipeIn: pipeIn, Span: span(cmd)}
+	c := &Cmd{Cond: cond, PipeIn: pipeIn, Pipeline: w.pipeDepth > 0, Span: span(cmd)}
 	exported := cmd.Variant != nil && (cmd.Variant.Value == "export" || cmd.Variant.Value == "declare")
 	for _, a := range cmd.Args {
 		if a.Name == nil {
@@ -178,7 +194,7 @@ func (w *posixWalker) declClause(st *syntax.Stmt, cmd *syntax.DeclClause, cond, 
 }
 
 func (w *posixWalker) emitCall(st *syntax.Stmt, call *syntax.CallExpr, cond, pipeIn bool) {
-	c := &Cmd{Cond: cond, PipeIn: pipeIn, Span: span(st)}
+	c := &Cmd{Cond: cond, PipeIn: pipeIn, Pipeline: w.pipeDepth > 0, Async: st.Background, Span: span(st)}
 	if call != nil {
 		for _, a := range call.Assigns {
 			if a.Name == nil {
@@ -283,7 +299,7 @@ func (w *posixWalker) word(word *syntax.Word) Word {
 	}
 	out := Word{Span: span(word)}
 	var segs []WordSeg
-	addLit := func(s string, quoted bool) { segs = append(segs, WordSeg{Lit: s, Quoted: quoted}) }
+	addLit := func(s string, quoted, glob bool) { segs = append(segs, WordSeg{Lit: s, Quoted: quoted, Glob: glob}) }
 	dynamic := func(reason ReasonCode) {
 		out.Static = false
 		out.Segs = nil
@@ -298,16 +314,16 @@ func (w *posixWalker) word(word *syntax.Word) Word {
 			// An escaped metachar (\*) is a literal, not a glob: mark the
 			// segment quoted so resolveWord does not treat it as a pattern
 			// (review PX-6, Q5).
-			addLit(unescapePOSIX(p.Value, false), escapedMetaOnly(p.Value))
+			addLit(unescapePOSIX(p.Value, false), false, hasUnescapedMeta(p.Value))
 		case *syntax.SglQuoted:
-			addLit(p.Value, true)
+			addLit(p.Value, true, false)
 			out.Quoted = true
 		case *syntax.DblQuoted:
 			out.Quoted = true
 			for _, inner := range p.Parts {
 				switch ip := inner.(type) {
 				case *syntax.Lit:
-					addLit(unescapePOSIX(ip.Value, true), true)
+					addLit(unescapePOSIX(ip.Value, true), true, false)
 				case *syntax.ParamExp:
 					if name, ok := simpleParam(ip); ok {
 						segs = append(segs, WordSeg{Var: name, Quoted: true})
@@ -427,21 +443,22 @@ func atoiSafe(s string) (int, bool) {
 	return n, true
 }
 
-// escapedMetaOnly reports that a raw literal contains a backslash-escaped glob
-// metacharacter and no unescaped one, so after unescaping it is a literal name.
-func escapedMetaOnly(raw string) bool {
-	escaped, unescaped := false, false
+// hasUnescapedMeta reports whether a raw POSIX literal has an unescaped glob
+// metacharacter (*?[) or a brace list {a,b}. Escaped characters are masked to a
+// non-meta placeholder first, so an escaped \* is literal while an unescaped
+// {a,b} alongside it still globs (review N10).
+func hasUnescapedMeta(raw string) bool {
+	if !strings.Contains(raw, `\`) {
+		return looksGlob(raw)
+	}
+	var b strings.Builder
 	for i := 0; i < len(raw); i++ {
 		if raw[i] == '\\' && i+1 < len(raw) {
-			if strings.IndexByte("*?[{", raw[i+1]) >= 0 {
-				escaped = true
-			}
 			i++
+			b.WriteByte('x') // mask the escaped char
 			continue
 		}
-		if strings.IndexByte("*?[", raw[i]) >= 0 {
-			unescaped = true
-		}
+		b.WriteByte(raw[i])
 	}
-	return escaped && !unescaped
+	return looksGlob(b.String())
 }

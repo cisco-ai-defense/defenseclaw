@@ -48,12 +48,13 @@ func Extract(call Call, o Options) (result Result) {
 
 func executableContent(call Call) bool {
 	switch call.Surface {
-	case SurfaceFileTool, SurfacePatch, SurfaceMCP:
-		return len(call.Args) > 0 || call.Command != ""
 	case SurfaceArgv:
 		return len(call.Argv) > 0
 	default:
-		return strings.TrimSpace(call.Command) != "" || len(call.Argv) > 0
+		// Args counts for every surface, including a shell tool whose argument
+		// shape Normalize did not recognize (review N1): the call still ran a
+		// command, so a zero-effect/zero-reason result is a silent drop.
+		return strings.TrimSpace(call.Command) != "" || len(call.Argv) > 0 || len(call.Args) > 0
 	}
 }
 
@@ -185,6 +186,17 @@ func (w *walker) resolveWord(wd Word) Word {
 			if !ok {
 				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
 			}
+			// An unquoted variable undergoes field splitting and globbing: if
+			// its value carries IFS whitespace or a glob metachar we cannot
+			// resolve it to one static target (review N3 V14/V15).
+			if !s.Quoted && w.o.flavor() != FlavorWindows {
+				if strings.ContainsAny(v, " \t\n") {
+					return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
+				}
+				if looksGlob(v) {
+					return Word{Static: true, Glob: true, Value: b.String() + v, Span: wd.Span}
+				}
+			}
 			b.WriteString(v)
 			continue
 		}
@@ -197,10 +209,15 @@ func (w *walker) resolveWord(wd Word) Word {
 		if s.Quoted {
 			quoted = true
 		}
-		// A wildcard is a glob when unquoted (POSIX), or always on Windows,
-		// where cmd/PowerShell expand wildcards even inside quotes (review
-		// CM-3, PS-6, PX-6).
-		if looksGlob(lit) && (!s.Quoted || w.o.flavor() == FlavorWindows) {
+		// A wildcard is a glob when unquoted (POSIX uses the frontend's
+		// per-segment unescaped-metachar flag), or always on Windows, where
+		// cmd/PowerShell expand wildcards even inside quotes (review CM-3, PS-6,
+		// PX-6, N10).
+		if w.o.flavor() == FlavorWindows {
+			if looksGlob(lit) {
+				glob = true
+			}
+		} else if s.Glob && !s.Quoted {
 			glob = true
 		}
 		b.WriteString(lit)
@@ -220,59 +237,71 @@ func (w *walker) resolveWords(in []Word) []Word {
 func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// Subshell: runs in a child shell; save/restore cwd/home/env.
 	if c.Sub != nil {
-		savedCWD, savedHome, savedStack := w.curCWD, w.curHome, w.cwdStack
-		savedEnv := w.env
+		saved := w.saveScope()
 		w.env = cloneEnv(w.env)
 		w.walkScript(c.Sub, depth)
-		w.curCWD, w.curHome, w.cwdStack, w.env = savedCWD, savedHome, savedStack, savedEnv
+		w.restoreScope(saved)
 		w.handleRedirs(c, dialect, w.cmdNo, depth, cond, nil)
 		return
+	}
+
+	// A pipeline stage or a background command runs in a child shell: its cd and
+	// assignments must not leak into the parent (review N2 V3/V7).
+	if c.Pipeline || c.Async {
+		saved := w.saveScope()
+		defer w.restoreScope(saved)
 	}
 
 	w.cmdNo++
 	cmdNo := w.cmdNo
 
-	// 1. Assignments. A prefix assignment (command present) applies only to this
-	// command via a temporary env; a bare assignment statement updates the
-	// running env (review PX-2, E3).
+	// 1. Assignments. A prefix assignment (command present) applies only to a
+	// nested child's environment; the command's own argv is expanded with the
+	// parent env first (POSIX order -- review N3 V11). A bare assignment updates
+	// the running env.
 	prefix := len(c.Words) > 0
-	cmdEnv := w.env
+	childEnv := w.env
 	if prefix && len(c.Assigns) > 0 {
-		cmdEnv = cloneEnv(w.env)
+		childEnv = cloneEnv(w.env)
 	}
 	for _, a := range c.Assigns {
 		rv := w.resolveWord(a.ValueWord)
 		if role, ok := envRoles[a.Name]; ok && role == EnvCode {
 			w.envCodeEffect(a.Name, dialect, cmdNo, depth, cond, c.Span)
 		}
-		if !rv.Static {
-			if !prefix {
-				delete(w.env, a.Name)
+		if prefix {
+			if rv.Static {
+				childEnv[a.Name] = rv.Value
+			} else {
+				delete(childEnv, a.Name)
 			}
 			continue
 		}
-		if prefix {
-			cmdEnv[a.Name] = rv.Value
-		} else {
+		if rv.Static {
 			w.env[a.Name] = rv.Value
 			if a.Name == "HOME" || a.Name == "USERPROFILE" {
 				w.curHome = rv.Value
+			}
+		} else {
+			delete(w.env, a.Name)
+			if a.Name == "HOME" || a.Name == "USERPROFILE" {
+				w.curHome = "" // a dynamic home makes ~ dynamic (review N3 E2)
 			}
 		}
 	}
 	if len(c.Words) == 0 {
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		for _, sub := range c.Nested {
+			s := w.saveScope()
 			w.walkScript(sub, depth)
+			w.restoreScope(s)
 		}
 		return
 	}
 
-	// Resolve the command's words against the (possibly prefixed) env.
-	savedEnv := w.env
-	w.env = cmdEnv
+	// Resolve the command's words against the parent env.
 	words := w.resolveWords(c.Words)
-	w.env = savedEnv
+	// Variables a for-loop rebinds are dropped via its own Unbind statement.
 
 	// 2. Strip wrappers.
 	inner, wrappers, foreign, fromInput := w.stripWrappers(words)
@@ -293,9 +322,20 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	origin := Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: program, Wrappers: wrappers, Depth: depth, Span: c.Span}
 
 	// 3. cwd changes (review PX-1).
-	if w.applyCWDChange(program, inner[1:], dialect) {
+	if w.applyCWDChange(program, inner[1:], dialect, cond) {
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
+	}
+	w.unbindReader(program, inner)
+
+	// A per-command working directory from env -C / git -C / make -C / tar -C
+	// (review N2): applied to this command's placements only, then restored.
+	if dir := commandCWDOverride(program, words, inner); dir != "" {
+		if abs, ok, _ := placePath(dir, w.opts()); ok {
+			saved := w.curCWD
+			w.curCWD = abs
+			defer func() { w.curCWD = saved }()
+		}
 	}
 
 	// 4. Shadowing.
@@ -316,8 +356,12 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	entry, known := lookupProgram(program, w.o.flavor())
 
 	// 5. Base exec effect for every command (review PT-1: never zero effects).
+	progTarget, progReason := w.programTarget(prog.Value)
 	base := Effect{Kind: KindExec, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
-		Target: w.programTarget(prog.Value), Origin: origin}
+		Target: progTarget, Origin: origin}
+	if progReason != "" {
+		base.addReason(progReason, ScopeTarget)
+	}
 	if !known {
 		base.RoleState = RoleStateUnknown
 		base.addReason(ReasonUnmodeledProgram, ScopeRole)
@@ -339,7 +383,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if !known {
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		for _, sub := range c.Nested {
+			s := w.saveScope()
 			w.walkScript(sub, depth)
+			w.restoreScope(s)
 		}
 		return
 	}
@@ -369,7 +415,13 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 
 	// 7. Operands.
-	ops := w.classifyOperands(inner[1:], entry, dialect)
+	ops, execCmds := w.classifyOperands(inner[1:], entry, dialect)
+	// find/xargs -exec inner commands run with the matched paths; walk each so
+	// its effects (incl. an inner sh -c) appear (review N4). The roots stay as
+	// read operands below.
+	for _, argv := range execCmds {
+		w.command(&Cmd{Words: argv, Cond: cond}, dialect, depth, cond)
+	}
 	readIdx := []int{}
 	for _, op := range ops {
 		e := w.effectForOperand(op, entry, origin, cond, foreign, fromInput, shadowed, dialect, depth)
@@ -400,13 +452,15 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// 9. Nested command substitutions.
 	for _, sub := range c.Nested {
+		s := w.saveScope()
 		w.walkScript(sub, depth)
+		w.restoreScope(s)
 	}
 }
 
 // applyCWDChange updates the running cwd for cd/pushd/popd/Set-Location, and
 // returns true when the command is purely a directory change (no other effect).
-func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect) bool {
+func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect, cond bool) bool {
 	cd := program == "cd" || (dialect == DialectPowerShell && (program == "set-location" || program == "sl" || program == "cd"))
 	pushd := program == "pushd" || (dialect == DialectPowerShell && program == "push-location")
 	popd := program == "popd" || (dialect == DialectPowerShell && program == "pop-location")
@@ -417,14 +471,18 @@ func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect) bo
 		if n := len(w.cwdStack); n > 0 {
 			w.curCWD = w.cwdStack[n-1]
 			w.cwdStack = w.cwdStack[:n-1]
+		} else {
+			w.curCWD = ""
 		}
 		return true
 	}
-	// first non-flag arg is the directory
+	// first non-switch arg is the directory. A bare "-" (cd -) is the previous
+	// directory, which we cannot know (review N2/J6). cmd's /d is a switch.
 	var dir Word
 	found := false
 	for _, a := range args {
-		if a.Static && strings.HasPrefix(a.Value, "-") {
+		if a.Static && a.Value != "-" && (strings.HasPrefix(a.Value, "-") ||
+			(dialect == DialectCMD && strings.HasPrefix(a.Value, "/"))) {
 			continue
 		}
 		dir = a
@@ -434,35 +492,46 @@ func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect) bo
 	if pushd {
 		w.cwdStack = append(w.cwdStack, w.curCWD)
 	}
-	if !found {
-		return true // bare cd -> home; leave cwd (benign)
+	switch {
+	case !found:
+		// bare cd -> the home directory.
+		w.curCWD = w.curHome
+	case !dir.Static || dir.Value == "-":
+		w.curCWD = "" // cd - or a dynamic directory
+	default:
+		if abs, ok, _ := placePath(dir.Value, w.opts()); ok {
+			w.curCWD = abs
+		} else {
+			w.curCWD = ""
+		}
 	}
-	if !dir.Static || dir.Value == "-" {
-		w.curCWD = "" // dynamic cd: later relative targets become dynamic_cwd
-		return true
-	}
-	if abs, ok, _ := placePath(dir.Value, w.opts()); ok {
-		w.curCWD = abs
-	} else {
+	// A conditional cd (in an if/case/loop/&&-tail/function) cannot be proven to
+	// run, so afterwards the cwd is unknown (review N2).
+	if cond {
 		w.curCWD = ""
 	}
 	return true
 }
 
-func (w *walker) programTarget(spelling string) Target {
+// programTarget builds the target for a program spelling. A path spelling that
+// cannot be placed (dynamic cwd, drive-relative) is reported unknown with the
+// reason, never a KNOWN empty path (review N11); reason is "" when known.
+func (w *walker) programTarget(spelling string) (Target, ReasonCode) {
 	t := Target{Flavor: w.o.flavor(), Link: LinkNotChecked}
 	hasSep := strings.Contains(spelling, "/") || (w.o.flavor() == FlavorWindows && strings.Contains(spelling, `\`))
 	if hasSep {
 		t.Type = TargetPath
 		t.Spelling = cap4k(spelling)
-		if abs, ok, _ := placePath(spelling, w.opts()); ok {
+		if abs, ok, reason := placePath(spelling, w.opts()); ok {
 			t.Path = abs
+			return t, ""
+		} else {
+			return t, reason
 		}
-		return t
 	}
 	t.Type = TargetProcess
 	t.Spelling = cap4k(programBasename(spelling, w.o.flavor()))
-	return t
+	return t, ""
 }
 
 // interpreterStdin emits an exec for a shell/interpreter reading its code from a
@@ -523,8 +592,9 @@ type operand struct {
 }
 
 // classifyOperands walks flags and positionals of a command against a table row.
-func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) []operand {
+func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]operand, [][]Word) {
 	var out []operand
+	var inner [][]Word
 	var positionals []Word
 	i := 0
 	unknownFlag := false
@@ -584,13 +654,18 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) []op
 			del = true
 		}
 		if fl.Role == RoleExecProgram {
+			// find -exec / fd -x: the words up to ; or + are an inner command.
+			// Keep the roots and resume after the terminator (review N4), and
+			// walk the inner command (its {}/stdin operands are dynamic).
 			rest := collectExecArgv(words[i+1:])
-			if len(rest) > 0 && rest[0].Static {
-				out = append(out, operand{value: rest[0].Value, static: true, role: RoleExecProgram})
-			} else {
-				out = append(out, operand{role: RoleExecProgram})
+			if len(rest) > 0 {
+				inner = append(inner, execPlaceholders(rest))
 			}
-			return out
+			i += 1 + len(rest)
+			if i < len(words) && words[i].Static && (words[i].Value == ";" || words[i].Value == "+" || words[i].Value == `\;`) {
+				i++
+			}
+			continue
 		}
 		if hasInline {
 			out = append(out, operandValue(fl, Word{Value: inlineVal, Static: true}, p))
@@ -607,6 +682,20 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) []op
 		i++
 	}
 	out = append(out, w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del})...)
+	return out, inner
+}
+
+// execPlaceholders marks the {} and stdin (-) operands of a find/xargs inner
+// command as dynamic (their real value comes from the match / stdin).
+func execPlaceholders(in []Word) []Word {
+	out := make([]Word, len(in))
+	for i, wd := range in {
+		if wd.Static && (wd.Value == "{}" || wd.Value == "-") {
+			out[i] = Word{Reason: ReasonDynamicExpansion, Span: wd.Span}
+			continue
+		}
+		out[i] = wd
+	}
 	return out
 }
 
@@ -901,7 +990,11 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	case RoleExecProgram:
 		e.Kind = KindExec
 		if op.static {
-			e.Target = w.programTarget(op.value)
+			t, reason := w.programTarget(op.value)
+			e.Target = t
+			if reason != "" {
+				e.addReason(reason, ScopeTarget)
+			}
 		} else {
 			e.Target.Type = TargetProcess
 			e.addReason(ReasonDynamicExpansion, ScopeTarget)
@@ -1101,7 +1194,11 @@ func (w *walker) unwrapCode(code string, static bool, dialect Dialect, depth int
 	default:
 		sub = parsePOSIX(code, w.o)
 	}
+	// unwrapped code runs in a child shell: scope cwd/env (review N2 V5).
+	s := w.saveScope()
+	w.env = cloneEnv(w.env)
 	w.walkScript(sub, depth+1)
+	w.restoreScope(s)
 }
 
 func (w *walker) recordLink(op operand, ops []operand) {
@@ -1180,4 +1277,68 @@ func gitOperands(ps []Word) []operand {
 		}
 	}
 	return out
+}
+
+// scopeState is the running state saved around a child shell (subshell,
+// pipeline stage, background command, command substitution, unwrapped code).
+type scopeState struct {
+	cwd, home string
+	stack     []string
+	env       map[string]string
+}
+
+func (w *walker) saveScope() scopeState {
+	return scopeState{cwd: w.curCWD, home: w.curHome, stack: w.cwdStack, env: w.env}
+}
+
+func (w *walker) restoreScope(s scopeState) {
+	w.curCWD, w.curHome, w.cwdStack, w.env = s.cwd, s.home, s.stack, s.env
+}
+
+// unbindReader drops the variables a read-like builtin binds.
+func (w *walker) unbindReader(program string, inner []Word) {
+	switch program {
+	case "read", "mapfile", "readarray", "getopts":
+		for _, wd := range inner[1:] {
+			if wd.Static && !strings.HasPrefix(wd.Value, "-") && wd.Value != "" {
+				delete(w.env, wd.Value)
+			}
+		}
+	}
+}
+
+// commandCWDOverride returns a per-command working directory from env -C DIR
+// (a stripped wrapper, recovered from the full words) or git/tar/make -C DIR
+// (an operand), else "".
+func commandCWDOverride(program string, words, inner []Word) string {
+	// env -C DIR cmd... : scan the leading words for the env wrapper's -C.
+	for i := 0; i+1 < len(words); i++ {
+		if !words[i].Static {
+			break
+		}
+		b := programBasename(words[i].Value, FlavorPOSIX)
+		if b == "env" {
+			for j := i + 1; j+1 < len(words); j++ {
+				if words[j].Static && (words[j].Value == "-C" || words[j].Value == "--chdir") && words[j+1].Static {
+					return words[j+1].Value
+				}
+				if words[j].Static && !strings.HasPrefix(words[j].Value, "-") && !strings.Contains(words[j].Value, "=") {
+					break // reached env's inner program
+				}
+			}
+			break
+		}
+		if _, isWrap := wrapperSpecs[b]; !isWrap {
+			break
+		}
+	}
+	switch program {
+	case "git", "tar", "make":
+		for i := 1; i+1 < len(inner); i++ {
+			if inner[i].Static && (inner[i].Value == "-C" || inner[i].Value == "--directory") && inner[i+1].Static {
+				return inner[i+1].Value
+			}
+		}
+	}
+	return ""
 }

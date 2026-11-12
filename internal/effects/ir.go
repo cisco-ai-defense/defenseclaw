@@ -54,9 +54,14 @@ type Cmd struct {
 	// Sub, when set, is a subshell body `( ... )`: it runs in a child shell,
 	// so a cd inside it does not change the parent's cwd. The walker saves and
 	// restores cwd/env around it.
-	Sub  *Script
-	Cond bool
-	Span [2]int
+	Sub *Script
+	// Pipeline marks a command that is one stage of a pipeline, and Async a
+	// background (`&`) command: both run in a child shell, so a cd/assignment
+	// inside them must not change the parent's cwd/env (review N2).
+	Pipeline bool
+	Async    bool
+	Cond     bool
+	Span     [2]int
 }
 
 // WordSeg is one piece of a word: a literal run (Lit) or a simple variable
@@ -68,6 +73,10 @@ type WordSeg struct {
 	Lit    string
 	Var    string
 	Quoted bool
+	// Glob marks a literal segment that holds an unescaped glob/brace
+	// metacharacter (so an escaped `\*` is literal but an unescaped `{a,b}`
+	// alongside it still globs -- review N10).
+	Glob bool
 }
 
 // Word is one argv element. The frontend fills Segs for a word built only of
@@ -94,6 +103,9 @@ type Assign struct {
 	Name      string
 	ValueWord Word
 	Exported  bool
+	// Unbind marks a name a for-loop rebinds: the walker drops it so later
+	// commands do not read a stale static value (review N3).
+	Unbind bool
 }
 
 // RedirOp is the kind of a redirection.
