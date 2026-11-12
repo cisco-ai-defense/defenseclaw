@@ -133,6 +133,13 @@ would never start.
     name: defenseclaw-config
 - name: tmp
   emptyDir: {}
+# DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
+# sticky (3777), which the audit store's directory trust check accepts; a
+# disk emptyDir (2777) or a PVC root (0777 or 2775) is refused.
+- name: run
+  emptyDir:
+    medium: Memory
+    sizeLimit: {{ .ctx.Values.homeSizeLimit }}
 - name: ate
   projected:
     sources:
@@ -181,6 +188,8 @@ would never start.
   readOnly: true
 - name: tmp
   mountPath: /tmp
+- name: run
+  mountPath: /var/lib/defenseclaw/run
 - name: ate
   mountPath: /var/run/ate
   readOnly: true
@@ -195,7 +204,7 @@ would never start.
 - name: DEFENSECLAW_CONFIG
   value: /etc/defenseclaw/config.yaml
 - name: DEFENSECLAW_HOME
-  value: /tmp/defenseclaw
+  value: /var/lib/defenseclaw/run/home
 - name: POD_NAME
   valueFrom:
     fieldRef:
