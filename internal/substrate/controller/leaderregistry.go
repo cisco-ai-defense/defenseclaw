@@ -18,20 +18,20 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
 
-// ConnectorUnknown is the connector of an attributed registration the
-// controller writes before the template's attestation names one.
-const ConnectorUnknown = "unknown"
-
-// LeaderRegistry is Registry over the gateway leader's registration store
+// LeaderRegistry is Registry over the gateway leader's registrations
 // (registry.Remote over the leader RPC, mTLS with the controller's pod
-// identity): the single source of truth the launcher writes to (GAP-0125).
-// A leader error is returned as is, so the controller holds and changes no
-// policy; a miss means the leader has no registration.
+// identity), so the controller and the gateway share one record per actor
+// UID: the launcher's registration is what attributes a launcher actor
+// (GAP-0125), and the controller's attributed and fork records reach the
+// gateway. A store error is returned as is, so the controller holds and
+// changes no policy; a miss or a tombstone is no registration.
 type LeaderRegistry struct {
 	Store registry.Store
 	Now   func() time.Time
@@ -39,7 +39,7 @@ type LeaderRegistry struct {
 
 var _ Registry = (*LeaderRegistry)(nil)
 
-// Get implements Registry. A tombstone is no registration.
+// Get implements Registry.
 func (l *LeaderRegistry) Get(ctx context.Context, atespace, uid string) (Registration, bool, error) {
 	r, ok, err := l.Store.Get(ctx, atespace, uid)
 	if err != nil || !ok || r.Deleted {
@@ -48,31 +48,18 @@ func (l *LeaderRegistry) Get(ctx context.Context, atespace, uid string) (Registr
 	return fromLeader(r), true, nil
 }
 
-// Put implements Registry: the controller writes attributed actors and
-// adopted forks.
-func (l *LeaderRegistry) Put(ctx context.Context, c Registration) error {
-	now := time.Now
-	if l.Now != nil {
-		now = l.Now
-	}
-	return l.Store.Put(ctx, toLeader(c, now()))
-}
-
 func fromLeader(r registry.Registration) Registration {
 	out := Registration{Atespace: r.Atespace, Name: r.Name, UID: r.UID, Template: r.Template, Profile: r.Profile,
-		Task: r.Unattended, BatchID: r.BatchID, ParentUID: r.ParentUID, owner: r.Person, connector: r.Connector}
+		Task: r.Unattended, BatchID: r.BatchID, ParentUID: r.ParentUID, ForkedBy: r.ForkedBy,
+		Approved: slices.Clone(r.Approved), Source: SourceLauncher}
 	switch {
-	case r.Attributed && r.ParentUID != "":
-		out.Source, out.ForkedBy = SourceFork, ForkedByUnknown
+	case r.ParentUID != "":
+		out.Source = SourceFork
 	case r.Attributed:
 		out.Source = SourceAtespace
-	case r.ParentUID != "":
-		out.Source, out.ForkedBy = SourceFork, ForkedByDefenseClaw
-	default:
-		out.Source = SourceLauncher
 	}
 	if !r.Attributed {
-		if r.Person.Kind == "workload" {
+		if r.Person.Kind == identity.PersonWorkload {
 			out.Workload = r.Person.Subject
 		} else {
 			out.Person = r.Person.Subject
@@ -81,24 +68,41 @@ func fromLeader(r registry.Registration) Registration {
 	return out
 }
 
-func toLeader(c Registration, now time.Time) registry.Registration {
-	r := registry.Registration{Atespace: c.Atespace, Name: c.Name, UID: c.UID, Template: c.Template, Profile: c.Profile,
-		Unattended: c.Task, BatchID: c.BatchID, ParentUID: c.ParentUID, Connector: c.connector, CreatedAt: now.UTC()}
-	if r.Connector == "" {
-		r.Connector = ConnectorUnknown
+// Put implements Registry: an attributed actor, an adopted fork, or a
+// change (approvals, forked_by) to a record that exists. An existing
+// record keeps every field the launcher wrote.
+func (l *LeaderRegistry) Put(ctx context.Context, in Registration) error {
+	cur, ok, err := l.Store.Get(ctx, in.Atespace, in.UID)
+	if err != nil {
+		return err
 	}
-	if c.Person == "" && c.Workload == "" {
-		r.Attributed = true // D3: attributed to its atespace, never a person
-		return r
+	if ok {
+		cur.Approved, cur.ForkedBy = slices.Clone(in.Approved), in.ForkedBy
+		if cur.Template == "" {
+			cur.Template = in.Template
+		}
+		return l.Store.Put(ctx, cur)
 	}
-	r.Person = c.owner
-	if r.Person.Subject == "" {
-		// A registration made in this process without the leader's record
-		// (tests, the in-memory registry): keep the subject.
-		r.Person = registry.Person{Kind: "person", Subject: c.Person}
-		if c.Workload != "" {
-			r.Person = registry.Person{Kind: "workload", Subject: c.Workload}
+	now := time.Now
+	if l.Now != nil {
+		now = l.Now
+	}
+	reg := registry.Registration{Atespace: in.Atespace, Name: in.Name, UID: in.UID, Template: in.Template, Profile: in.Profile,
+		Unattended: in.Task, BatchID: in.BatchID, ParentUID: in.ParentUID, ForkedBy: in.ForkedBy,
+		Approved: slices.Clone(in.Approved), Attributed: true, CreatedAt: now().UTC()}
+	// Only a fork DefenseClaw made keeps the parent's person (and with it
+	// per-person secrets); a fork made outside DefenseClaw is attributed
+	// to its atespace (GAP-0082).
+	if in.Source == SourceFork && in.ParentUID != "" && in.ForkedBy == ForkedByDefenseClaw {
+		parent, pok, perr := l.Store.Get(ctx, in.Atespace, in.ParentUID)
+		if perr != nil {
+			return perr
+		}
+		if pok && !parent.Attributed && !parent.Deleted {
+			reg.Attributed = false
+			reg.Person, reg.Connector, reg.KitVersion, reg.HookContract = parent.Person, parent.Connector, parent.KitVersion, parent.HookContract
+			reg.HarnessVersion, reg.TemplateDigest, reg.Secrets = parent.HarnessVersion, parent.TemplateDigest, slices.Clone(parent.Secrets)
 		}
 	}
-	return r
+	return l.Store.Put(ctx, reg)
 }

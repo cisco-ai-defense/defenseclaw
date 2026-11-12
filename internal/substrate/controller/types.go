@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
-	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 )
 
@@ -104,12 +103,6 @@ type Registration struct {
 	ForkedBy        string   `json:"forked_by,omitempty"`
 	Approved        []string `json:"approved,omitempty"`
 	Source          string   `json:"source"`
-
-	// owner is the leader record's full person (issuer, kind), kept so a
-	// fork DefenseClaw made is written back with it; connector the
-	// record's connector.
-	owner     registry.Person
-	connector string
 }
 
 // Registry stores registrations. The shipped controller uses

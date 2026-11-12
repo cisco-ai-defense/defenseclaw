@@ -62,22 +62,79 @@ type PersonIssuer struct {
 	GroupsClaim string
 	// Kind is PersonHuman or PersonWorkload.
 	Kind string
+	// APIAudience, when set, is DefenseClaw's own audience
+	// (substrate.identity.audience): an access token whose aud names it and
+	// whose azp is the client (Audience) is accepted too, the shape a
+	// Keycloak device-flow token with an audience mapper has.
+	APIAudience string
+	// Binding is what a workload token must also carry (Kind
+	// PersonWorkload); a workload issuer without one is refused.
+	Binding WorkloadBinding
+}
+
+// WorkloadBinding names the workloads of an issuer DefenseClaw trusts.
+type WorkloadBinding struct {
+	// Subject is the token subject, exact, or a prefix when it ends in
+	// "*" (for example "repo:acme/web:ref:refs/heads/*").
+	Subject string
+	// Claims are top-level string claims the token must carry exactly
+	// (for example repository: acme/web).
+	Claims map[string]string
+}
+
+// Empty reports a binding that names nothing.
+func (b WorkloadBinding) Empty() bool {
+	return strings.Trim(strings.TrimSpace(b.Subject), "*") == "" && len(b.Claims) == 0
+}
+
+func (b WorkloadBinding) matches(sub string, raw map[string]json.RawMessage) bool {
+	if b.Empty() {
+		return false
+	}
+	if want := strings.TrimSpace(b.Subject); want != "" {
+		if prefix, ok := strings.CutSuffix(want, "*"); ok {
+			if !strings.HasPrefix(sub, prefix) {
+				return false
+			}
+		} else if sub != want {
+			return false
+		}
+	}
+	for k, want := range b.Claims {
+		var got string
+		v, ok := raw[k]
+		if !ok || json.Unmarshal(v, &got) != nil || got != want {
+			return false
+		}
+	}
+	return true
+}
+
+// audienceOK is the audience rule (GAP-0059): aud names the client or
+// workload audience, or aud names DefenseClaw's API audience and azp is the
+// client. azp alone, with aud naming another API, is refused.
+func (is PersonIssuer) audienceOK(aud audience, azp string) bool {
+	if aud.contains(is.Audience) {
+		return azp == "" || azp == is.Audience || is.Kind == PersonWorkload
+	}
+	return is.APIAudience != "" && aud.contains(is.APIAudience) && azp == is.Audience
 }
 
 // PersonVerifier verifies person tokens against a list of issuers.
 type PersonVerifier struct {
-	issuers map[string]PersonIssuer
+	issuers map[string][]PersonIssuer
 	skew    time.Duration
 	now     func() time.Time
 }
 
-// NewPersonVerifier validates the issuers. Two entries may not share an
-// issuer.
+// NewPersonVerifier validates the issuers. Several workload entries may
+// share an issuer (one per trusted workload); a person issuer is listed
+// once, and a workload entry needs a binding.
 func NewPersonVerifier(issuers []PersonIssuer, now func() time.Time) (*PersonVerifier, error) {
 	if len(issuers) == 0 {
 		return nil, errors.New("identity: no person issuer is configured")
 	}
-	v := &PersonVerifier{issuers: map[string]PersonIssuer{}, skew: DefaultSkew, now: now}
+	v := &PersonVerifier{issuers: map[string][]PersonIssuer{}, skew: DefaultSkew, now: now}
 	if v.now == nil {
 		v.now = time.Now
 	}
@@ -91,10 +148,16 @@ func NewPersonVerifier(issuers []PersonIssuer, now func() time.Time) (*PersonVer
 		if is.GroupsClaim == "" {
 			is.GroupsClaim = "groups"
 		}
-		if _, dup := v.issuers[is.KeySet.Issuer()]; dup {
-			return nil, errors.New("identity: person issuer listed twice")
+		if is.Kind == PersonWorkload && is.Binding.Empty() {
+			return nil, errors.New("identity: a workload issuer needs a subject or claims binding")
 		}
-		v.issuers[is.KeySet.Issuer()] = is
+		iss := is.KeySet.Issuer()
+		for _, old := range v.issuers[iss] {
+			if old.Kind == PersonHuman && is.Kind == PersonHuman {
+				return nil, errors.New("identity: person issuer listed twice")
+			}
+		}
+		v.issuers[iss] = append(v.issuers[iss], is)
 	}
 	return v, nil
 }
@@ -116,11 +179,11 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 	if err := json.Unmarshal(t.claims, &peek); err != nil {
 		return Person{}, reasonf(ReasonMalformed, "token claims are not a JSON object")
 	}
-	is, ok := v.issuers[peek.Issuer]
-	if !ok {
+	cands, ok := v.issuers[peek.Issuer]
+	if !ok || len(cands) == 0 {
 		return Person{}, reasonf(ReasonIssuer, "token issuer is not trusted")
 	}
-	if err := is.KeySet.verify(ctx, t); err != nil {
+	if err := cands[0].KeySet.verify(ctx, t); err != nil {
 		return Person{}, err
 	}
 	var raw map[string]json.RawMessage
@@ -142,11 +205,31 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 	if err := json.Unmarshal(t.claims, &c); err != nil {
 		return Person{}, reasonf(ReasonMalformed, "token claims have the wrong types")
 	}
-	if c.Issuer != is.KeySet.Issuer() {
+	if c.Issuer != cands[0].KeySet.Issuer() {
 		return Person{}, reasonf(ReasonIssuer, "token issuer is not trusted")
 	}
-	if !c.Audience.contains(is.Audience) && c.AZP != is.Audience {
+	// The first entry whose audience and workload binding the token meets
+	// decides its kind (GAP-0043: a CI issuer such as GitHub Actions signs
+	// tokens for every repository, so issuer and audience alone trust any
+	// workflow that picks the audience).
+	var is PersonIssuer
+	matched, audOK := false, false
+	for _, cand := range cands {
+		if !cand.audienceOK(c.Audience, c.AZP) {
+			continue
+		}
+		audOK = true
+		if cand.Kind == PersonWorkload && !cand.Binding.matches(c.Subject, raw) {
+			continue
+		}
+		is, matched = cand, true
+		break
+	}
+	switch {
+	case !audOK:
 		return Person{}, reasonf(ReasonAudience, "token is not for DefenseClaw")
+	case !matched:
+		return Person{}, reasonf(ReasonSubject, "token is from a workload this install does not trust")
 	}
 	if err := checkTimes(v.now(), v.skew, c.Expiry, c.NotBefore, c.IssuedAt, MaxPersonTokenLifetime); err != nil {
 		return Person{}, err

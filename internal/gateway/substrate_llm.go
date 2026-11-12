@@ -66,6 +66,32 @@ type SubstrateLLMConfig struct {
 
 var substrateProviderRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
+// substrateModelPaths are the provider paths /llm serves: the model APIs
+// and nothing else. The proxy's own routes (provider registry and reload,
+// egress events, health, models) and every other provider path answer 404
+// (D15; GAP-0041). A provider with no entry serves nothing.
+var substrateModelPaths = map[string][]*regexp.Regexp{
+	"bedrock": {regexp.MustCompile(`^/model/[^/]+/(invoke|invoke-with-response-stream|converse|converse-stream)$`)},
+	"anthropic": {
+		regexp.MustCompile(`^/v1/messages$`),
+		regexp.MustCompile(`^/v1/messages/count_tokens$`),
+	},
+	"openai": {
+		regexp.MustCompile(`^/v1/chat/completions$`),
+		regexp.MustCompile(`^/v1/responses$`),
+	},
+	"gemini": {regexp.MustCompile(`^/v1(beta|alpha)?/models/[^/:]+:(generateContent|streamGenerateContent|countTokens)$`)},
+}
+
+func substrateModelPath(provider, p string) bool {
+	for _, re := range substrateModelPaths[provider] {
+		if re.MatchString(p) {
+			return true
+		}
+	}
+	return false
+}
+
 // DefaultSubstrateLLMProviders returns the upstreams of the providers the
 // proxy serves, with their keys under credDir/<provider>.
 func DefaultSubstrateLLMProviders(credDir, bedrockRegion string) map[string]SubstrateLLMProvider {
@@ -120,7 +146,12 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upstream := "/" + upstreamPath
-	if path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") {
+	if path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") || !substrateModelPath(provider, upstream) {
+		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
+		return
+	}
+	// Every model API call is a POST; a GET of a model path is a probe.
+	if r.Method != http.MethodPost {
 		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -152,4 +183,29 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r2.URL = &u
 	r2.RequestURI = ""
 	s.cfg.Proxy.ServeHTTP(w, r2)
+}
+
+// substrateRouterAnswerNarrows reports a semantic-router answer an Agent
+// Substrate actor's chat call may take (GAP-0104): the router brings no key
+// of its own and keeps the upstream origin /llm set from the provider
+// table, so it can pick another model of the same provider but never send
+// the call elsewhere (another provider, a loopback backend) or with another
+// credential. Which models a profile allows is stream 1 (routing overlay),
+// which narrows inside this.
+func substrateRouterAnswerNarrows(target string, d *ModelRouterDecision) bool {
+	if d == nil {
+		return true
+	}
+	if d.APIKeyOverride {
+		return false
+	}
+	if !d.TargetURLOverride {
+		return true
+	}
+	from, err1 := url.Parse(strings.TrimSpace(target))
+	to, err2 := url.Parse(strings.TrimSpace(d.TargetURL))
+	if err1 != nil || err2 != nil || from.Host == "" || to.User != nil {
+		return false
+	}
+	return strings.EqualFold(from.Scheme, to.Scheme) && strings.EqualFold(from.Host, to.Host)
 }

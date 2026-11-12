@@ -154,6 +154,13 @@ type SubstrateOIDCConfig struct {
 type SubstrateWorkloadOIDCConfig struct {
 	Issuer   string `mapstructure:"issuer"   yaml:"issuer"`
 	Audience string `mapstructure:"audience" yaml:"audience"`
+	// Subject and Claims bind the entry to the workloads it trusts; at
+	// least one is required, since a CI issuer signs tokens for every
+	// repository (GAP-0043). Subject is exact, or a prefix when it ends
+	// in "*"; Claims are top-level string claims compared exactly (for
+	// GitHub Actions: repository, ref, environment).
+	Subject string            `mapstructure:"subject" yaml:"subject,omitempty"`
+	Claims  map[string]string `mapstructure:"claims"  yaml:"claims,omitempty"`
 }
 
 // SubstrateServicesConfig names the gateway's two Services (D15).
@@ -502,6 +509,15 @@ func (s *SubstrateConfig) Validate() error {
 		}
 		if strings.TrimSpace(w.Audience) == "" {
 			bad(fmt.Sprintf("identity.workload_oidc[%d].audience", i), "is required (use one unique to this install)")
+		}
+		if strings.Trim(strings.TrimSpace(w.Subject), "*") == "" && len(w.Claims) == 0 {
+			bad(fmt.Sprintf("identity.workload_oidc[%d]", i),
+				"needs subject or claims naming the trusted workloads (for example claims: {repository: acme/web}); the issuer signs tokens for every repository")
+		}
+		for k, v := range w.Claims {
+			if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+				bad(fmt.Sprintf("identity.workload_oidc[%d].claims", i), "keys and values must not be empty")
+			}
 		}
 	}
 

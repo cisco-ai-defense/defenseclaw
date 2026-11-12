@@ -59,7 +59,8 @@ Commit the chart reference and `defenseclaw-values.yaml` to the repo Argo CD or 
 Policy goes out as a signed bundle with a generation number:
 
 ```bash
-defenseclaw substrate bundle apply oci://registry.example.test/defenseclaw/policy:2026-11-10 --atespaces 'eng-canary-*'
+defenseclaw substrate bundle apply policy-2026-11-10.json --dry-run
+defenseclaw substrate bundle apply policy-2026-11-10.json --atespaces 'eng-canary-*'
 defenseclaw substrate bundle status
 ```
 
@@ -103,7 +104,7 @@ A fleet here is **clusters, then atespaces (teams), then agents, then the people
 - **Activity:** checks, blocks and asks per team and per agent; sites refused; unattested templates; spend; batches.
 
 **How to read it**
-- `defenseclaw substrate status --json` and `defenseclaw substrate verify --json` follow the same machine-readable contract as the managed-laptop commands (`defenseclaw-gateway enterprise ... --json`). A management agent, a GitOps pipeline or a script can read health and apply bundles the same way for clusters and laptops.
+- The output of `defenseclaw substrate status --json` and `defenseclaw substrate doctor --cluster --json` follows the same machine-readable contract as the [managed-laptop commands](/docs/enterprise/managed-commands). A management agent, a GitOps pipeline or a script can read health and apply bundles the same way for clusters and laptops.
 - The OpenTelemetry stream carries all of it, so the Grafana dashboards, Splunk or any OTLP backend show the fleet next to your laptops. Every record carries `k8s.cluster.name`.
 
 **Many clusters.** Install DefenseClaw once per cluster, with the same signed bundles and trust anchors, and a unique actor-token issuer per cluster. One dashboard covers all of them.

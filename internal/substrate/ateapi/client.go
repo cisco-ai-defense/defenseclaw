@@ -50,7 +50,21 @@ type (
 	ActorStatus          = pb.ActorStatus
 	ActorTemplate        = pb.ActorTemplate
 	Container            = pb.Container
+	EnvVar               = pb.EnvVar
 	Volume               = pb.Volume
+	VolumeMount          = pb.VolumeMount
+	DurableDirVolume     = pb.DurableDirVolumeSource
+	SystemInfoVolume     = pb.SystemInfoVolumeSource
+	SystemInfoDataSource = pb.SystemInfoDataSource
+	TrustBundleSource    = pb.TrustBundleDataSource
+	ActorMetadataSource  = pb.ActorMetadataDataSource
+	ActorMetadataItem    = pb.ActorMetadataItem
+	WakeupProbe          = pb.WakeupProbe
+	HttpGetAction        = pb.HttpGetAction
+	Selector             = pb.Selector
+	SnapshotConfig       = pb.SnapshotConfig
+	ResourceRequirements = pb.ResourceRequirements
+	Resources            = pb.Resources
 	ImageVolumeSource    = pb.ImageVolumeSource
 	Atespace             = pb.Atespace
 	AccessPolicy         = pb.AccessPolicy
@@ -87,6 +101,14 @@ const (
 	ActorStateCrashed     = pb.ActorState_ACTOR_STATE_CRASHED
 	ActorStateDeleting    = pb.ActorState_ACTOR_STATE_DELETING
 	ActorStateReverting   = pb.ActorState_ACTOR_STATE_REVERTING
+)
+
+// Snapshot fidelity and actor metadata fields used when building a template.
+const (
+	SnapshotFidelityMemory     = pb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	ActorMetadataFieldAtespace = pb.ActorMetadataField_ACTOR_METADATA_FIELD_ATESPACE
+	ActorMetadataFieldName     = pb.ActorMetadataField_ACTOR_METADATA_FIELD_NAME
+	ActorMetadataFieldUID      = pb.ActorMetadataField_ACTOR_METADATA_FIELD_UID
 )
 
 // RegisterControlServer registers a Control implementation on a gRPC server
@@ -169,6 +191,16 @@ type Client interface {
 	// SuspendActor checkpoints a running actor (asynchronous durability:
 	// it returns once the snapshot is on the node).
 	SuspendActor(ctx context.Context, actor *ObjectRef) (*Actor, error)
+	// CreateActor creates actor (metadata atespace and name, the template)
+	// SUSPENDED: it makes no call until ResumeActor, so a launcher writes
+	// its registration and policy first.
+	CreateActor(ctx context.Context, actor *Actor) (*Actor, error)
+	// ResumeActor starts a suspended actor; resumed is false when it was
+	// already running.
+	ResumeActor(ctx context.Context, actor *ObjectRef) (a *Actor, resumed bool, err error)
+	// DeleteActor deletes an actor and its snapshots; opts may require the
+	// uid (a later actor under the same name is not deleted).
+	DeleteActor(ctx context.Context, actor *ObjectRef, opts *DeleteOptions) (*Actor, error)
 
 	GetActorEgressPolicy(ctx context.Context, actor *ObjectRef) (*EgressPolicy, error)
 	// CreateActorEgressPolicy creates the actor's policy. The policy's
@@ -183,6 +215,11 @@ type Client interface {
 	GetTag(ctx context.Context, tag *ObjectRef) (*Tag, error)
 
 	GetActorTemplate(ctx context.Context, template *ObjectRef) (*ActorTemplate, error)
+	// CreateActorTemplate creates a template. A template is immutable (there
+	// is no update call): a changed image or setting is a new template under
+	// a new name. The server ignores the uid, version, timestamps and status
+	// in template.
+	CreateActorTemplate(ctx context.Context, template *ActorTemplate) (*ActorTemplate, error)
 	ListActorTemplates(ctx context.Context, atespace string, opts ListOptions) (Page[*ActorTemplate], error)
 
 	GetAtespace(ctx context.Context, name string) (*Atespace, error)
@@ -405,6 +442,25 @@ func (c *GRPCClient) SuspendActor(ctx context.Context, actor *ObjectRef) (*Actor
 	return resp.GetActor(), nil
 }
 
+func (c *GRPCClient) CreateActor(ctx context.Context, actor *Actor) (*Actor, error) {
+	if actor.GetMetadata().GetAtespace() == "" || actor.GetMetadata().GetName() == "" || actor.GetActorTemplate().GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "ateapi: CreateActor needs the atespace, name and template")
+	}
+	return c.ctl.CreateActor(ctx, &pb.CreateActorRequest{Actor: actor})
+}
+
+func (c *GRPCClient) ResumeActor(ctx context.Context, actor *ObjectRef) (*Actor, bool, error) {
+	resp, err := c.ctl.ResumeActor(ctx, &pb.ResumeActorRequest{Actor: actor})
+	if err != nil {
+		return nil, false, err
+	}
+	return resp.GetActor(), resp.GetResumed(), nil
+}
+
+func (c *GRPCClient) DeleteActor(ctx context.Context, actor *ObjectRef, opts *DeleteOptions) (*Actor, error) {
+	return c.ctl.DeleteActor(ctx, &pb.DeleteActorRequest{Actor: actor, Options: opts})
+}
+
 func (c *GRPCClient) GetActorEgressPolicy(ctx context.Context, actor *ObjectRef) (*EgressPolicy, error) {
 	return c.ctl.GetActorEgressPolicy(ctx, &pb.GetActorEgressPolicyRequest{Actor: actor, Name: PolicyName})
 }
@@ -434,6 +490,10 @@ func (c *GRPCClient) GetTag(ctx context.Context, tag *ObjectRef) (*Tag, error) {
 
 func (c *GRPCClient) GetActorTemplate(ctx context.Context, template *ObjectRef) (*ActorTemplate, error) {
 	return c.ctl.GetActorTemplate(ctx, &pb.GetActorTemplateRequest{ActorTemplate: template})
+}
+
+func (c *GRPCClient) CreateActorTemplate(ctx context.Context, template *ActorTemplate) (*ActorTemplate, error) {
+	return c.ctl.CreateActorTemplate(ctx, &pb.CreateActorTemplateRequest{ActorTemplate: template})
 }
 
 func (c *GRPCClient) ListActorTemplates(ctx context.Context, atespace string, opts ListOptions) (Page[*ActorTemplate], error) {

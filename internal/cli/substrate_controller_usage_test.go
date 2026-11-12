@@ -43,20 +43,22 @@ func TestSubstrateUsageListenerAuth(t *testing.T) {
 func TestSubstrateControllerNeedsTheLeader(t *testing.T) {
 	save := func() func() {
 		a, ids, b := substrateControllerLeader, substrateControllerLeaderIDs, substrateControllerPeerBundle
-		return func() { substrateControllerLeader, substrateControllerLeaderIDs, substrateControllerPeerBundle = a, ids, b }
+		return func() {
+			substrateControllerLeader, substrateControllerLeaderIDs, substrateControllerPeerBundle = a, ids, b
+		}
 	}()
 	defer save()
 	substrateControllerLeader, substrateControllerLeaderIDs = "", nil
-	if _, err := substrateControllerRegistry(); err == nil {
+	if _, err := substrateControllerLeaderClient(); err == nil {
 		t.Fatal("the controller started without --leader-address")
 	}
 	substrateControllerLeader = "defenseclaw-leader.dc.svc.cluster.local:7443"
-	if _, err := substrateControllerRegistry(); err == nil {
+	if _, err := substrateControllerLeaderClient(); err == nil {
 		t.Fatal("the controller started without --leader-id")
 	}
 	substrateControllerLeaderIDs = []string{"spiffe://cluster.local/ns/dc/sa/defenseclaw-gateway"}
 	substrateControllerPeerBundle = "/nonexistent/credential-bundle.pem"
-	if _, err := substrateControllerRegistry(); err == nil {
+	if _, err := substrateControllerLeaderClient(); err == nil {
 		t.Fatal("the controller started without its pod identity")
 	}
 }

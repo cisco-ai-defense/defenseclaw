@@ -112,7 +112,7 @@ func TestLeaderRegistrations(t *testing.T) {
 	c := r.actor("ci-runs", "job-1", ateapi.ActorStateSuspended, "")
 	r.pass()
 	got, ok, _ := store.Get(context.Background(), "ci-runs", c.GetMetadata().GetUid())
-	if !ok || !got.Attributed || got.Person.Subject != "" || got.Connector != controller.ConnectorUnknown {
+	if !ok || !got.Attributed || got.Person.Subject != "" {
 		t.Fatalf("attributed registration = %+v", got)
 	}
 	// The launcher revokes alice (tombstone): on her next resume she is foreign.

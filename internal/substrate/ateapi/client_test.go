@@ -113,6 +113,7 @@ type server struct {
 	peerCN   []string
 	policies []*pb.EgressPolicy
 	actors   int
+	creates  []*pb.ActorTemplate
 }
 
 func (s *server) seen(ctx context.Context) {
@@ -154,6 +155,17 @@ func (s *server) ListActors(ctx context.Context, req *pb.ListActorsRequest) (*pb
 		resp.NextPageToken = fmt.Sprintf("t%d", off+size)
 	}
 	return resp, nil
+}
+
+func (s *server) CreateActorTemplate(ctx context.Context, req *pb.CreateActorTemplateRequest) (*pb.ActorTemplate, error) {
+	s.seen(ctx)
+	s.mu.Lock()
+	s.creates = append(s.creates, req.GetActorTemplate())
+	s.mu.Unlock()
+	if req.GetActorTemplate().GetMetadata().GetName() == "taken" {
+		return nil, status.Error(codes.AlreadyExists, "template exists")
+	}
+	return req.GetActorTemplate(), nil
 }
 
 func (s *server) CreateActorEgressPolicy(ctx context.Context, req *pb.CreateActorEgressPolicyRequest) (*pb.EgressPolicy, error) {
@@ -387,6 +399,31 @@ func TestPreviewHeaderAndPolicyMetadata(t *testing.T) {
 	}
 	if in.Metadata.Atespace != "wrong" {
 		t.Fatal("caller's policy was modified")
+	}
+}
+
+func TestCreateActorTemplateSendsTheTemplate(t *testing.T) {
+	ca := newCA(t, "servicedns")
+	r := newRig(t, ca, nil)
+	c := r.client(t, r.opts())
+	in := &ActorTemplate{Metadata: &ResourceMetadata{Atespace: "team-a", Name: "kit"},
+		Containers: []*pb.Container{{Name: "agent", Image: "registry.example.test/kit@sha256:" + strings.Repeat("a", 64)}}}
+	out, err := c.CreateActorTemplate(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.GetMetadata().GetName() != "kit" || out.GetContainers()[0].GetImage() != in.Containers[0].Image {
+		t.Fatalf("created = %v", out)
+	}
+	r.srv.mu.Lock()
+	n := len(r.srv.creates)
+	r.srv.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("server saw %d creates", n)
+	}
+	in.Metadata.Name = "taken"
+	if _, err := c.CreateActorTemplate(context.Background(), in); !IsAlreadyExists(err) {
+		t.Fatalf("second create: %v", err)
 	}
 }
 

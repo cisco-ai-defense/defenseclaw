@@ -6403,8 +6403,33 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 512
+                  },
+                  "subject": {
+                    "type": "string",
+                    "maxLength": 1024
+                  },
+                  "claims": {
+                    "type": "object",
+                    "maxProperties": 16,
+                    "additionalProperties": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    }
                   }
-                }
+                },
+                "anyOf": [
+                  {
+                    "required": [
+                      "subject"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "claims"
+                    ]
+                  }
+                ]
               }
             }
           }

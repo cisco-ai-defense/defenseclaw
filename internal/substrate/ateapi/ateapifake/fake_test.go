@@ -19,6 +19,7 @@ package ateapifake
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -96,6 +97,53 @@ func TestForkAndRecreate(t *testing.T) {
 	}
 }
 
+func TestCreateActorTemplate(t *testing.T) {
+	f := New()
+	ctx := context.Background()
+	f.PutAtespace("a")
+	good := func(name string) *ateapi.ActorTemplate {
+		return &ateapi.ActorTemplate{
+			Metadata:   &ateapi.ResourceMetadata{Atespace: "a", Name: name, Uid: "ignored", Version: 9},
+			Containers: []*ateapi.Container{{Name: "agent", Image: "registry.example.test/kit@sha256:" + strings.Repeat("b", 64)}},
+			Resources:  &ateapi.ResourceRequirements{Limits: &ateapi.Resources{CpuMillicores: 1000, MemoryBytes: 1 << 30}},
+		}
+	}
+	got, err := f.CreateActorTemplate(ctx, good("kit"))
+	if err != nil || got.GetMetadata().GetUid() == "ignored" || got.GetMetadata().GetVersion() != 1 {
+		t.Fatalf("create = %v %v", got, err)
+	}
+	if again, err := f.GetActorTemplate(ctx, ateapi.Ref("a", "kit")); err != nil || again.GetContainers()[0].GetName() != "agent" {
+		t.Fatalf("get = %v %v", again, err)
+	}
+	if _, err := f.CreateActorTemplate(ctx, good("kit")); !ateapi.IsAlreadyExists(err) {
+		t.Fatalf("second create: %v", err)
+	}
+	tag := good("tagged")
+	tag.Containers[0].Image = "registry.example.test/kit:v1"
+	noLimits := good("nolimits")
+	noLimits.Resources = nil
+	noContainer := good("nocontainer")
+	noContainer.Containers = nil
+	elsewhere := good("elsewhere")
+	elsewhere.Metadata.Atespace = "missing"
+	for name, tc := range map[string]struct {
+		in   *ateapi.ActorTemplate
+		code codes.Code
+	}{
+		"tag":          {tag, codes.InvalidArgument},
+		"no limits":    {noLimits, codes.InvalidArgument},
+		"no container": {noContainer, codes.InvalidArgument},
+		"no atespace":  {elsewhere, codes.NotFound},
+	} {
+		if _, err := f.CreateActorTemplate(ctx, tc.in); status.Code(err) != tc.code {
+			t.Errorf("%s: err = %v, want %v", name, err, tc.code)
+		}
+	}
+	if f.Calls("CreateActorTemplate") != 6 {
+		t.Fatalf("calls = %d", f.Calls("CreateActorTemplate"))
+	}
+}
+
 func TestPagination(t *testing.T) {
 	f := New()
 	f.PageSize = 4
@@ -137,5 +185,41 @@ func TestErrInjectionAndClose(t *testing.T) {
 	_ = f.Close()
 	if _, err := f.ListAtespaces(context.Background(), ateapi.ListOptions{}); status.Code(err) != codes.Canceled {
 		t.Fatalf("after close: %v", err)
+	}
+}
+
+func TestFakeCreateResumeDelete(t *testing.T) {
+	f := New()
+	ctx := context.Background()
+	f.PutTemplate(&ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "cc"}})
+	mk := func(name, tmpl string) (*ateapi.Actor, error) {
+		return f.CreateActor(ctx, &ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: name},
+			ActorTemplate: ateapi.Ref("eng-web", tmpl)})
+	}
+	a, err := mk("a1", "cc")
+	if err != nil || a.GetStatus().GetState() != ateapi.ActorStateSuspended || a.GetMetadata().GetUid() == "" {
+		t.Fatalf("create %v %v", a, err)
+	}
+	if _, err := mk("a1", "cc"); !ateapi.IsAlreadyExists(err) {
+		t.Fatalf("duplicate %v", err)
+	}
+	if _, err := mk("a2", "nope"); !ateapi.IsNotFound(err) {
+		t.Fatalf("missing template %v", err)
+	}
+	ref := ateapi.Ref("eng-web", "a1")
+	if got, resumed, err := f.ResumeActor(ctx, ref); err != nil || !resumed || got.GetStatus().GetState() != ateapi.ActorStateRunning {
+		t.Fatalf("resume %v %v %v", got, resumed, err)
+	}
+	if _, resumed, _ := f.ResumeActor(ctx, ref); resumed {
+		t.Fatal("second resume resumed")
+	}
+	if _, err := f.DeleteActor(ctx, ref, &ateapi.DeleteOptions{Uid: "other"}); !ateapi.IsConflict(err) {
+		t.Fatalf("uid precondition %v", err)
+	}
+	if _, err := f.DeleteActor(ctx, ref, &ateapi.DeleteOptions{Uid: a.GetMetadata().GetUid()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.GetActor(ctx, ref); !ateapi.IsNotFound(err) {
+		t.Fatalf("after delete %v", err)
 	}
 }

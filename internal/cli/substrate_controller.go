@@ -33,6 +33,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/activity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
@@ -91,6 +92,24 @@ func init() {
 	rootCmd.AddCommand(substrateControllerCmd)
 }
 
+func substrateControllerLeaderClient() (*leader.Client, error) {
+	if substrateControllerLeader == "" {
+		return nil, errors.New("substrate-controller: --leader-address is required (the gateway leader holds the actor registrations, GAP-0125)")
+	}
+	if len(substrateControllerLeaderIDs) == 0 {
+		return nil, errors.New("substrate-controller: --leader-id names the leader's SPIFFE ID")
+	}
+	files, err := podcert.NewFiles(substrateControllerPeerBundle, substrateControllerPeerTrust)
+	if err != nil {
+		return nil, fmt.Errorf("substrate-controller: pod identity: %w", err)
+	}
+	tr := &http.Transport{TLSClientConfig: files.ClientConfig(substrateControllerLeaderIDs), Proxy: nil, MaxIdleConnsPerHost: 16}
+	// Short retries: while the leader is unreachable the controller holds
+	// (no policy change) and tries again next pass.
+	return &leader.Client{BaseURL: "https://" + substrateControllerLeader, HTTP: &http.Client{Transport: tr, Timeout: 10 * time.Second},
+		Retry: 5 * time.Second}, nil
+}
+
 func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	path := substrateControllerConfig
 	if path == "" {
@@ -121,18 +140,7 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	if substrateControllerCheck {
 		return substrateControllerReport(ctx, cmd, client)
 	}
-	attestor := controller.Attestor(controller.NoAttestor{})
-	if sub.AttestationRequired() {
-		// Anchors come from the admin-only Secret mount and are re-read on
-		// change; a missing file refuses every template (fail closed).
-		ver, anchors := controller.VerifierFromConfig(sub.Templates)
-		if _, err := anchors.Get(); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v: every template is refused until the trust anchors are mounted\n", err)
-		}
-		attestor = &controller.TemplateAttestor{Verifier: ver, VolumeImages: sub.Templates.VolumeImages}
-	}
 	var cpu controller.CPUSource
-	idleAfter := sub.EffectiveIdleSuspendAfter()
 	if substrateControllerUsage != "" {
 		usage := controller.NewUsageCPU(nil)
 		mux := http.NewServeMux()
@@ -152,13 +160,17 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 		}()
 		defer srv.Close()
 		cpu = usage
-	} else {
-		idleAfter = 0 // no CPU source: never suspend on silence alone (E4)
 	}
-	reg, err := substrateControllerRegistry()
+	// Registrations and activity come from the gateway leader: the
+	// launcher's registration attributes a launcher actor (without it the
+	// actor is foreign and gets no policy, GAP-0125), and idle suspend
+	// reads the gateways' hook, model and relay activity.
+	toLeader, err := substrateControllerLeaderClient()
 	if err != nil {
 		return err
 	}
+	reg := &controller.LeaderRegistry{Store: &registry.Remote{Client: toLeader}}
+	act := &activity.Source{Leader: toLeader}
 	// Admin policy_conflict resets arrive through a ConfigMap in our own
 	// namespace (the gateway's admin route writes them).
 	var resets controller.ResetStore
@@ -170,15 +182,7 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: policy resets are off: %v\n", err)
 		}
 	}
-	ctl, err := controller.New(controller.Options{
-		Resets: resets, Namespace: ns,
-		Client: client, Attestor: attestor, Activity: controller.NoActivity{}, CPU: cpu,
-		Registry: reg, Resolver: &controller.ConfigResolver{Config: cfg},
-		Sink:     &controller.JSONSink{W: cmd.OutOrStdout()},
-		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
-		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(), Templates: sub.Templates,
-		KitVersion: appVersion, IdleSuspendAfter: idleAfter,
-	})
+	ctl, err := newSubstrateController(cfg, client, reg, act, cpu, cmd.OutOrStdout(), true, resets, ns)
 	if err != nil {
 		return err
 	}
@@ -205,28 +209,6 @@ func substrateControllerReport(ctx context.Context, cmd *cobra.Command, client a
 		names = append(names, s.GetMetadata().GetName())
 	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"atespaces": names, "actors": len(actors)})
-}
-
-// substrateControllerRegistry is the leader's registration store: the
-// launcher writes registrations there, so an in-memory registry would call
-// every launcher-created actor foreign (GAP-0125). Reads retry briefly;
-// while the leader is unreachable the controller holds.
-func substrateControllerRegistry() (controller.Registry, error) {
-	if substrateControllerLeader == "" {
-		return nil, errors.New("substrate-controller: --leader-address is required (the gateway leader holds the actor registrations)")
-	}
-	if len(substrateControllerLeaderIDs) == 0 {
-		return nil, errors.New("substrate-controller: --leader-id names the leader's SPIFFE ID")
-	}
-	files, err := podcert.NewFiles(substrateControllerPeerBundle, substrateControllerPeerTrust)
-	if err != nil {
-		return nil, fmt.Errorf("substrate-controller: pod identity: %w", err)
-	}
-	tr := &http.Transport{TLSClientConfig: files.ClientConfig(substrateControllerLeaderIDs), Proxy: nil,
-		MaxIdleConnsPerHost: 32, IdleConnTimeout: 90 * time.Second}
-	client := &leader.Client{BaseURL: "https://" + substrateControllerLeader, HTTP: &http.Client{Transport: tr, Timeout: 10 * time.Second},
-		Retry: 5 * time.Second}
-	return &controller.LeaderRegistry{Store: &registry.Remote{Client: client}}, nil
 }
 
 // substrateUsageTLS decides how the usage listener is protected: forged

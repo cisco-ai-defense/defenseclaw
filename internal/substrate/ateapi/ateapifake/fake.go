@@ -354,6 +354,78 @@ func (f *Fake) SuspendActor(_ context.Context, ref *ateapi.ObjectRef) (*ateapi.A
 	return clone(a), nil
 }
 
+// CreateActor creates a SUSPENDED actor from an existing template, as
+// ate-api-server does.
+func (f *Fake) CreateActor(_ context.Context, a *ateapi.Actor) (*ateapi.Actor, error) {
+	ref := ateapi.RefOf(a.GetMetadata())
+	if err := f.enter("CreateActor", key(ref)); err != nil {
+		return nil, err
+	}
+	if ref.GetAtespace() == "" || ref.GetName() == "" || a.GetActorTemplate().GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "atespace, name and template are required")
+	}
+	f.mu.Lock()
+	_, exists := f.actors[key(ref)]
+	_, tmpl := f.templates[key(a.GetActorTemplate())]
+	f.mu.Unlock()
+	switch {
+	case exists:
+		return nil, status.Errorf(codes.AlreadyExists, "actor %s already exists", key(ref))
+	case !tmpl:
+		return nil, status.Errorf(codes.NotFound, "actor template %s not found", key(a.GetActorTemplate()))
+	}
+	a = clone(a)
+	a.Status = &ateapi.ActorStatus{State: ateapi.ActorStateSuspended}
+	return f.PutActor(a), nil
+}
+
+// ResumeActor moves a SUSPENDED actor to RUNNING.
+func (f *Fake) ResumeActor(_ context.Context, ref *ateapi.ObjectRef) (*ateapi.Actor, bool, error) {
+	if err := f.enter("ResumeActor", key(ref)); err != nil {
+		return nil, false, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.actors[key(ref)]
+	if !ok {
+		return nil, false, status.Errorf(codes.NotFound, "actor %s not found", key(ref))
+	}
+	switch a.Status.State {
+	case ateapi.ActorStateRunning:
+		return clone(a), false, nil
+	case ateapi.ActorStateSuspended:
+		a.Status.State = ateapi.ActorStateRunning
+		f.bump(a.Metadata)
+		return clone(a), true, nil
+	}
+	return nil, false, status.Errorf(codes.FailedPrecondition, "actor %s is %s", key(ref), a.Status.State)
+}
+
+// DeleteActor removes an actor and its policy; opts.Uid and opts.Version
+// are preconditions.
+func (f *Fake) DeleteActor(_ context.Context, ref *ateapi.ObjectRef, opts *ateapi.DeleteOptions) (*ateapi.Actor, error) {
+	if err := f.enter("DeleteActor", key(ref)); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.actors[key(ref)]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "actor %s not found", key(ref))
+	}
+	if u := opts.GetUid(); u != "" && u != a.GetMetadata().GetUid() {
+		return nil, status.Errorf(codes.Aborted, "actor %s has another uid", key(ref))
+	}
+	if v := opts.GetVersion(); v != 0 && v != a.GetMetadata().GetVersion() {
+		return nil, status.Errorf(codes.Aborted, "actor %s has another version", key(ref))
+	}
+	out := clone(a)
+	out.Status.State = ateapi.ActorStateDeleting
+	delete(f.actors, key(ref))
+	delete(f.policies, key(ref))
+	return out, nil
+}
+
 func (f *Fake) GetActorEgressPolicy(_ context.Context, ref *ateapi.ObjectRef) (*ateapi.EgressPolicy, error) {
 	if err := f.enter("GetActorEgressPolicy", key(ref)); err != nil {
 		return nil, err
@@ -506,6 +578,46 @@ func (f *Fake) GetActorTemplate(_ context.Context, ref *ateapi.ObjectRef) (*atea
 		return nil, status.Errorf(codes.NotFound, "actor template %s not found", key(ref))
 	}
 	return clone(t), nil
+}
+
+// CreateActorTemplate stores a new template the way ate-api-server admits one:
+// the atespace must exist, the name must be unused, there must be at least one
+// container, every container image must be pinned by digest, and the template
+// must set both a cpu and a memory limit. Server metadata is assigned and any
+// status is dropped.
+func (f *Fake) CreateActorTemplate(_ context.Context, t *ateapi.ActorTemplate) (*ateapi.ActorTemplate, error) {
+	ns, name := t.GetMetadata().GetAtespace(), t.GetMetadata().GetName()
+	if err := f.enter("CreateActorTemplate", ns+"/"+name); err != nil {
+		return nil, err
+	}
+	if ns == "" || name == "" {
+		return nil, status.Error(codes.InvalidArgument, "actor_template.metadata: atespace and name are required")
+	}
+	if len(t.GetContainers()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "actor_template.containers: at least one container is required")
+	}
+	for _, c := range t.GetContainers() {
+		if !strings.Contains(c.GetImage(), "@sha256:") {
+			return nil, status.Errorf(codes.InvalidArgument, "actor_template.containers[%s].image: must be pinned by digest", c.GetName())
+		}
+	}
+	if lim := t.GetResources().GetLimits(); lim.GetCpuMillicores() <= 0 || lim.GetMemoryBytes() <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "actor_template.resources: cpu and memory limits are both required")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.atespaces[ns]; !ok {
+		return nil, status.Errorf(codes.NotFound, "atespace %s not found", ns)
+	}
+	k := ns + "/" + name
+	if _, ok := f.templates[k]; ok {
+		return nil, status.Errorf(codes.AlreadyExists, "actor template %s already exists", k)
+	}
+	nt := clone(t)
+	nt.Metadata = f.newMeta(ns, name)
+	nt.Status = nil
+	f.templates[k] = nt
+	return clone(nt), nil
 }
 
 func (f *Fake) ListActorTemplates(_ context.Context, atespace string, opts ateapi.ListOptions) (ateapi.Page[*ateapi.ActorTemplate], error) {

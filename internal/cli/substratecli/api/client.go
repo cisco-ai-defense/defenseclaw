@@ -39,6 +39,8 @@ const (
 	prefix       = "/api/v1/substrate/"
 	maxResponse  = 8 << 20
 	defaultTimes = 30 * time.Second
+	// clientTag is the X-DefenseClaw-Client value of the launcher.
+	clientTag = "substrate-launcher"
 )
 
 // TokenFunc returns the bearer for one request.
@@ -173,7 +175,10 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.ua)
-	if in != nil {
+	// The admin listener refuses a write that does not carry the client tag
+	// and a JSON content type, even a DELETE with no body (its CSRF gate).
+	req.Header.Set("X-DefenseClaw-Client", clientTag)
+	if method != http.MethodGet && method != http.MethodHead {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.hc.Do(req)

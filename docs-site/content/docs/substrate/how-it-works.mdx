@@ -42,7 +42,7 @@ DefenseClaw doesn't run inside the agent's sandbox. It runs next to Substrate in
 
 Separately, the controller decides what each agent may reach at all:
 
-<Flow direction="LR" caption="The controller turns each agent's DefenseClaw profile into Substrate's own network allow list. Substrate enforces it; an agent without one has no network.">
+<Flow direction="TB" caption="The controller turns each agent's DefenseClaw profile into Substrate's own network allow list. Substrate enforces it; an agent without one has no network.">
   <Node id="prof" kind="policy">{`DefenseClaw profile\npack, team, template`}</Node>
   <Node id="ctl" kind="operator">{`Controller\nrenders the allow list`}</Node>
   <Node id="api" kind="datastore">{`Substrate control plane\nEgressPolicy per agent`}</Node>

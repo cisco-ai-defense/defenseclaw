@@ -224,12 +224,15 @@ checksum/config: {{ include "dc.config" .ctx | sha256sum }}
 {{- end -}}
 
 {{/* Leader RPC mTLS: the pod-identity bundle and the SPIFFE IDs that may call the leader (A2 serve flags). */}}
+{{/* Leader peers: gateway replicas may call every method; the callout
+ only the egress chain check and the controller only registrations,
+ lifecycle and activity (leader.Permissions, GAP-0094). */}}
 {{- define "dc.peerFlags" -}}
 - --peer-bundle=/var/run/ate/credential-bundle.pem
 - --peer-trust=/var/run/ate/podidentity-ca.crt
 - --peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
-- --peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "callout") }}
-- --peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "controller") }}
+- --callout-peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "callout") }}
+- --controller-peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "controller") }}
 {{- end -}}
 
 {{/* Optional Secrets of the gateway and leader (absent ones are skipped). */}}

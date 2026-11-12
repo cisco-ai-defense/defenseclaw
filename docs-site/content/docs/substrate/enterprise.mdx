@@ -111,7 +111,7 @@ guardrail:
 
 An atespace pattern matches only atespaces DefenseClaw created or that you list, so a foreign `eng-evil` atespace never inherits a profile.
 
-Deliver profile changes as a signed bundle: `defenseclaw substrate bundle apply --atespaces eng-payments`. The controller stages it by atespace, records a receipt, and can roll it back. It works with GitOps. See [Delivery and fleet management](/docs/substrate/delivery).
+Deliver profile changes as a signed bundle file: `defenseclaw substrate bundle apply bundle.json --atespaces eng-payments` (`--dry-run` first). The controller stages it by atespace, records a receipt, and can roll it back. It works with GitOps. See [Delivery and fleet management](/docs/substrate/delivery).
 
 </Step>
 
@@ -119,15 +119,17 @@ Deliver profile changes as a signed bundle: `defenseclaw substrate bundle apply 
 
 ### Publish the templates
 
-The platform team builds the approved agent images once and publishes them to each team's atespace:
+The platform team builds the approved agent images once, signs them with the company attestation key, and publishes them to the registry the cluster pulls from:
 
 ```bash
-defenseclaw substrate template build claude --atespace eng-shared --publish
-defenseclaw substrate template build codex  --atespace eng-shared --publish
-defenseclaw substrate template verify claude --atespace eng-shared
+defenseclaw substrate template build --connector claudecode --from REGISTRY/harness/claudecode@sha256:... \
+  --to REGISTRY/actors/claudecode:1.0.10 --hook-binary defenseclaw-actor-hook --relay-binary defenseclaw-actor-relay \
+  --key attestation.key
+defenseclaw substrate template verify REGISTRY/actors/claudecode@sha256:... --anchors attestation.pub
+defenseclaw substrate template publish REGISTRY/actors/claudecode@sha256:... TARGET:TAG --anchors attestation.pub
 ```
 
-Each build is scanned and attested. A template made any other way, for example with plain `kubectl ate create actor-template`, still starts, but its agents get no network. The admin sees why in `doctor` and in the fleet view.
+Each build is scanned and attested, and the controller admits only an image whose attestation verifies against the anchors. A template made any other way, for example with plain `kubectl ate create actor-template`, still starts, but its agents get no network. The admin sees why in `doctor` and in the fleet view.
 
 </Step>
 

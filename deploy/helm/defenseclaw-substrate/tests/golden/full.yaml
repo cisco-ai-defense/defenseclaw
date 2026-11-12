@@ -1321,8 +1321,8 @@ spec:
         - --peer-bundle=/var/run/ate/credential-bundle.pem
         - --peer-trust=/var/run/ate/podidentity-ca.crt
         - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
-        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
-        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
+        - --callout-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
+        - --controller-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
         env:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml
@@ -1528,8 +1528,8 @@ spec:
         - --peer-bundle=/var/run/ate/credential-bundle.pem
         - --peer-trust=/var/run/ate/podidentity-ca.crt
         - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
-        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
-        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
+        - --callout-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
+        - --controller-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
         env:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml

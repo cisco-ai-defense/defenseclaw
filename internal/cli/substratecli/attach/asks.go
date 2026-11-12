@@ -11,68 +11,54 @@
 package attach
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
 const (
 	askPollEvery = 2 * time.Second
 	askPollMax   = 30 * time.Second
-	// askArmDelay: keys typed this soon after a prompt appears were meant
-	// for the agent (the person had not seen the prompt yet).
-	askArmDelay    = 400 * time.Millisecond
+	// askArmDelay: a key this soon after the answer prompt (or its
+	// confirmation) appears was not typed in answer to it (a paste that
+	// arrives one byte at a time); it cancels the prompt.
+	askArmDelay    = 250 * time.Millisecond
 	askConfirmFor  = 2 * time.Second
-	askRedrawQuiet = 100 * time.Millisecond
 	askTick        = 200 * time.Millisecond
 	askDecideLimit = 15 * time.Second
-	askPrefix      = "DefenseClaw asks: "
-	askSuffix      = " [o]nce [a]lways [d]eny"
+	// askChord is Ctrl-\. Raw mode turns the terminal's signal keys off, so
+	// it arrives as a byte; it opens the answer prompt only when it is the
+	// whole keyboard read and an ask is pending.
+	askChord    = 0x1c
+	askIDMax    = 16
+	askActorMax = 64
+
+	askHeadLabel   = "DefenseClaw ask "
+	askAnnounceEnd = " -- press Ctrl-\\ to answer"
+	askModalEnd    = " -- [o]nce [a]lways [d]eny [Esc] cancel"
+	askAlwaysText  = ": Approve this and every later identical ask?"
+	askAlwaysEnd   = " press y to confirm, anything else cancels"
 )
 
-// screen is the agent's output. It remembers when the agent last wrote so
-// the ask row is redrawn only once the agent's output settles.
-type screen struct {
-	mu    sync.Mutex
-	w     io.Writer
-	now   func() time.Time
-	dirty bool
-	last  time.Time
-}
+type askMode int
 
-func (s *screen) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n, err := s.w.Write(p)
-	s.dirty, s.last = true, s.now()
-	return n, err
-}
+const (
+	modeNone    askMode = iota
+	modeAsk             // the answer prompt is open
+	modeConfirm         // "always" waits for y
+)
 
-func (s *screen) draw(seq string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, _ = io.WriteString(s.w, seq)
-}
-
-// settled reports, once, that the agent wrote and then stayed quiet.
-func (s *screen) settled(quiet time.Duration) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.dirty && s.now().Sub(s.last) >= quiet {
-		s.dirty = false
-		return true
-	}
-	return false
-}
-
-// askUI shows pending asks on the bottom row of the terminal and takes the
-// answer from the keyboard.
+// askUI shows the pending asks of the attached actor on the launcher's row
+// (the last terminal row) and takes an answer only through a deliberate
+// chord: Ctrl-\ opens a prompt that holds the agent's output and takes one
+// key (o, d, or a then y). Ordinary typing and pastes reach the agent and
+// never answer.
 type askUI struct {
 	src   AskSource
 	t     Target
@@ -83,26 +69,45 @@ type askUI struct {
 
 	mu           sync.Mutex
 	ctx          context.Context
+	cancel       context.CancelFunc
+	active       bool
 	queue        []Ask
 	cur          *Ask
-	shownAt      time.Time
+	mode         askMode
+	armedAt      time.Time
+	sending      string // the ask whose answer is in flight
+	errText      string // why the last answer was not sent
 	decided      map[string]bool
 	confirm      string
 	confirmUntil time.Time
-	drawn        bool
 }
 
 func newAskUI(src AskSource, t Target, scr *screen, size func() relay.Resize, now func() time.Time, guard func()) *askUI {
-	return &askUI{src: src, t: t, scr: scr, size: size, now: now, guard: guard, decided: map[string]bool{}, ctx: context.Background()}
+	u := &askUI{src: src, t: t, scr: scr, size: size, now: now, guard: guard, decided: map[string]bool{}, ctx: context.Background(), active: true}
+	scr.onOverflow = u.overflow
+	return u
 }
 
-// start polls and redraws until ctx (one connection) ends.
+// start polls and redraws until ctx (one connection) ends or stop runs.
 func (u *askUI) start(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
 	u.mu.Lock()
-	u.ctx = ctx
+	u.ctx, u.cancel, u.active, u.mode = ctx, cancel, true, modeNone
+	u.drawLocked()
 	u.mu.Unlock()
 	go u.pollLoop(ctx)
 	go u.drawLoop(ctx)
+}
+
+// stop ends one connection's prompt: an open prompt closes with no answer.
+func (u *askUI) stop() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.cancel != nil {
+		u.cancel()
+	}
+	u.closeModalLocked()
+	u.active = false
 }
 
 func (u *askUI) pollLoop(ctx context.Context) {
@@ -141,29 +146,34 @@ func (u *askUI) drawLoop(ctx context.Context) {
 	}
 }
 
-// tick redraws the row after the agent's output settles, and clears an
-// expired confirmation.
+// tick clears an expired confirmation.
 func (u *askUI) tick() {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	showing := u.cur != nil || (u.confirm != "" && u.now().Before(u.confirmUntil))
-	switch {
-	case showing && u.scr.settled(askRedrawQuiet):
-		u.drawLocked()
-	case !showing && u.drawn:
+	if u.confirm != "" && !u.now().Before(u.confirmUntil) {
 		u.confirm = ""
 		u.drawLocked()
 	}
 }
 
-// update takes the pending list: asks no longer pending leave (their
-// prompt clears), new ones queue in the order they were created.
+// update takes the pending list. Only asks of exactly this actor count; an
+// ask no longer pending leaves (its prompt closes), new ones queue in the
+// order they were created.
 func (u *askUI) update(list []Ask) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	pending := make(map[string]bool, len(list))
+	if !u.active {
+		return
+	}
+	me := u.t.String()
+	pending := map[string]bool{}
+	var mine []Ask
 	for _, a := range list {
+		if a.ID == "" || a.Actor == "" || a.Actor != me {
+			continue
+		}
 		pending[a.ID] = true
+		mine = append(mine, a)
 	}
 	changed := false
 	q := u.queue[:0]
@@ -174,7 +184,8 @@ func (u *askUI) update(list []Ask) {
 	}
 	u.queue = q
 	if u.cur != nil && !pending[u.cur.ID] {
-		u.cur, changed = nil, true
+		u.closeModalLocked()
+		u.cur, u.errText, changed = nil, "", true
 	}
 	known := map[string]bool{}
 	if u.cur != nil {
@@ -183,9 +194,10 @@ func (u *askUI) update(list []Ask) {
 	for _, a := range u.queue {
 		known[a.ID] = true
 	}
-	fresh := make([]Ask, 0, len(list))
-	for _, a := range list {
-		if a.ID != "" && !known[a.ID] && !u.decided[a.ID] {
+	var fresh []Ask
+	for _, a := range mine {
+		if !known[a.ID] && !u.decided[a.ID] {
+			known[a.ID] = true
 			fresh = append(fresh, a)
 		}
 	}
@@ -208,161 +220,269 @@ func (u *askUI) update(list []Ask) {
 func (u *askUI) showNextLocked() {
 	a := u.queue[0]
 	u.queue = u.queue[1:]
-	u.cur, u.shownAt = &a, u.now()
+	u.cur, u.errText = &a, ""
 }
 
-// key answers the shown ask. It reports false (the key goes to the agent)
-// when no prompt is shown or it appeared too recently.
-func (u *askUI) key(d Decision) bool {
+// input routes one keyboard read and returns what reaches the agent. paste
+// says the read is (in part) a bracketed paste. swallow asks the caller to
+// drop the rest of a paste that closed the prompt.
+func (u *askUI) input(b []byte, paste bool) (fwd []byte, swallow bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.cur == nil || u.now().Sub(u.shownAt) < askArmDelay {
-		return false
+	if u.mode == modeNone {
+		if u.cur == nil || !u.active {
+			return b, false
+		}
+		if !paste && len(b) == 1 && b[0] == askChord && u.sending != u.cur.ID {
+			u.openModalLocked()
+			return nil, false
+		}
+		// The chord inside a paste or a burst neither opens the prompt nor
+		// reaches the agent.
+		return dropByte(b, askChord), false
 	}
-	a := *u.cur
-	u.decided[a.ID] = true
-	u.cur = nil
-	u.confirm, u.confirmUntil = confirmText(d, a), u.now().Add(askConfirmFor)
-	if len(u.queue) > 0 {
-		u.showNextLocked()
+	if bytes.IndexByte(b, relay.DetachKey) >= 0 {
+		u.closeModalLocked()
+		return []byte{relay.DetachKey}, paste
 	}
+	// Only one key on its own, after the prompt could be seen, answers.
+	if paste || len(b) != 1 || u.now().Sub(u.armedAt) < askArmDelay {
+		u.closeModalLocked()
+		return nil, paste
+	}
+	switch k := b[0]; {
+	case u.mode == modeAsk && (k == 'o' || k == 'O'):
+		u.decideLocked(DecideOnce)
+	case u.mode == modeAsk && (k == 'd' || k == 'D'):
+		u.decideLocked(DecideDeny)
+	case u.mode == modeAsk && (k == 'a' || k == 'A'):
+		u.mode, u.armedAt = modeConfirm, u.now()
+		u.drawLocked()
+	case u.mode == modeConfirm && (k == 'y' || k == 'Y'):
+		u.decideLocked(DecideAlways)
+	default:
+		u.closeModalLocked()
+	}
+	return nil, false
+}
+
+func dropByte(b []byte, c byte) []byte {
+	if bytes.IndexByte(b, c) < 0 {
+		return b
+	}
+	out := b[:0]
+	for _, x := range b {
+		if x != c {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func (u *askUI) openModalLocked() {
+	u.mode, u.armedAt, u.errText = modeAsk, u.now(), ""
+	u.scr.setHold(true)
 	u.drawLocked()
+}
+
+// closeModalLocked closes the prompt with no answer and shows the held
+// output.
+func (u *askUI) closeModalLocked() {
+	if u.mode == modeNone {
+		return
+	}
+	u.mode = modeNone
+	u.drawLocked()
+	u.scr.setHold(false)
+}
+
+// overflow runs when the agent printed more than the screen holds: the
+// prompt closes with no answer.
+func (u *askUI) overflow() {
+	go func() {
+		defer u.guard()
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		if u.mode != modeNone {
+			u.mode = modeNone
+			u.errText = "the agent printed too much while the prompt was open, nothing was sent"
+			u.drawLocked()
+		}
+	}()
+}
+
+// decideLocked sends the answer once, in the background. Until the cluster
+// takes it the ask stays shown; a failure keeps it pending.
+func (u *askUI) decideLocked(d Decision) {
+	a := *u.cur
+	u.sending, u.mode = a.ID, modeNone
+	u.drawLocked()
+	u.scr.setHold(false)
 	ctx := u.ctx
 	go func() {
 		defer u.guard()
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), askDecideLimit)
 		defer cancel()
-		if err := u.src.Decide(dctx, a.ID, d); err != nil {
-			u.mu.Lock()
-			u.confirm, u.confirmUntil = "DefenseClaw: the answer was not sent: "+clean(err.Error()), u.now().Add(askConfirmFor)
-			if u.cur == nil {
+		err := u.src.Decide(dctx, a.ID, d)
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		if u.sending == a.ID {
+			u.sending = ""
+		}
+		here := u.cur != nil && u.cur.ID == a.ID
+		if err != nil {
+			if here {
+				u.errText = safetext.Line(err.Error())
 				u.drawLocked()
 			}
-			u.mu.Unlock()
+			return
 		}
-	}()
-	return true
-}
-
-func (u *askUI) redraw() {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if u.drawn || u.cur != nil {
+		u.decided[a.ID] = true
+		u.confirm, u.confirmUntil = doneText(d, a), u.now().Add(askConfirmFor)
+		if here {
+			u.cur, u.errText = nil, ""
+			if len(u.queue) > 0 {
+				u.showNextLocked()
+			}
+		}
 		u.drawLocked()
-	}
+	}()
 }
 
 func (u *askUI) drawLocked() {
-	sz := u.size()
-	cols, rows := int(sz.Cols), int(sz.Rows)
-	var text string
-	switch {
-	case u.cur != nil:
-		text = promptText(*u.cur, cols)
-	case u.confirm != "" && u.now().Before(u.confirmUntil):
-		text = fit(u.confirm, cols-1)
-	default:
-		if u.drawn {
-			u.scr.draw(clearRow(rows))
-			u.drawn = false
-		}
+	if !u.active {
 		return
 	}
-	u.scr.draw(drawRow(rows, text))
-	u.drawn = true
+	u.scr.setRow(u.rowLocked())
 }
 
-// drawRow writes text on the bottom row and puts the cursor back (ESC 7,
-// ESC 8): nothing scrolls.
-func drawRow(rows int, text string) string {
-	return "\x1b7\x1b[" + strconv.Itoa(rows) + ";1H\x1b[2K\x1b[7m" + text + "\x1b[0m\x1b8"
+// rowLocked is the launcher's row. Every row about an ask starts with the
+// fixed label and the ask id, and names the actor.
+func (u *askUI) rowLocked() string {
+	cols := int(u.size().Cols)
+	a := u.cur
+	switch {
+	case a != nil && u.mode == modeAsk:
+		return rowText(askHead(*a), askFrom(*a)+": "+askLabel(*a), askModalEnd, cols)
+	case a != nil && u.mode == modeConfirm:
+		return rowText(askHead(*a), askAlwaysText, askAlwaysEnd, cols)
+	case u.confirm != "" && u.now().Before(u.confirmUntil):
+		return fitWidth(u.confirm, max(cols-1, 1))
+	case a != nil && u.sending == a.ID:
+		return rowText(askHead(*a), askFrom(*a)+": sending the answer...", "", cols)
+	case a != nil && u.errText != "":
+		return rowText(askHead(*a), askFrom(*a)+": the answer was not sent: "+u.errText, askAnnounceEnd, cols)
+	case a != nil:
+		return rowText(askHead(*a), askFrom(*a)+": "+askLabel(*a), askAnnounceEnd, cols)
+	}
+	return ""
 }
 
-func clearRow(rows int) string {
-	return "\x1b7\x1b[" + strconv.Itoa(rows) + ";1H\x1b[2K\x1b8"
-}
+func askHead(a Ask) string { return askHeadLabel + fitWidth(safetext.Line(a.ID), askIDMax) }
+
+func askFrom(a Ask) string { return " from " + fitWidth(safetext.Line(a.Actor), askActorMax) }
 
 func askLabel(a Ask) string {
-	s := clean(a.Summary)
+	s := safetext.Line(a.Summary)
 	if s == "" {
-		s = clean(strings.TrimSpace(a.Tool + " " + a.Reason))
+		s = safetext.Line(a.Tool + " " + a.Reason)
 	}
 	if s == "" {
 		s = "an action needs your answer"
 	}
+	if sev := safetext.Line(a.Severity); sev != "" {
+		s = fitWidth(sev, 16) + ": " + s
+	}
 	return s
 }
 
-// promptText fits the prompt to cols-1 columns (the last column would wrap
-// on some terminals), keeping the keys visible.
-func promptText(a Ask, cols int) string {
+// rowText fits head+mid+tail to cols-1 columns (the last column would wrap
+// on some terminals). The head and the keys stay; the middle is cut.
+func rowText(head, mid, tail string, cols int) string {
 	w := max(cols-1, 1)
-	s := askLabel(a)
-	room := w - len([]rune(askPrefix)) - len([]rune(askSuffix))
+	room := w - textWidth(head) - textWidth(tail)
 	if room >= 4 {
-		return askPrefix + fit(s, room) + askSuffix
+		return head + fitWidth(mid, room) + tail
 	}
-	return fit(askPrefix+s+askSuffix, w)
+	return fitWidth(head+mid+tail, w)
 }
 
-func confirmText(d Decision, a Ask) string {
+func doneText(d Decision, a Ask) string {
+	what := "denied"
 	switch d {
 	case DecideOnce:
-		return "DefenseClaw: allowed once: " + askLabel(a)
+		what = "allowed once"
 	case DecideAlways:
-		return "DefenseClaw: allowed always: " + askLabel(a)
+		what = "allowed always"
 	}
-	return "DefenseClaw: denied: " + askLabel(a)
+	return askHead(a) + ": " + what + ": " + askLabel(a)
 }
 
-// clean drops control characters: a summary must not move the cursor or
-// change the terminal.
-func clean(s string) string {
-	return strings.TrimSpace(strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
-			return ' '
-		}
-		return r
-	}, s))
+// runeWidth over-counts: anything from U+1100 on may be two columns wide.
+func runeWidth(r rune) int {
+	if r >= 0x1100 {
+		return 2
+	}
+	return 1
 }
 
-// fit truncates s to n runes, ending in "..." when cut.
-func fit(s string, n int) string {
-	r := []rune(s)
+func textWidth(s string) int {
+	n := 0
+	for _, r := range s {
+		n += runeWidth(r)
+	}
+	return n
+}
+
+// fitWidth truncates s to n columns, ending in "..." when cut.
+func fitWidth(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
-	if len(r) <= n {
+	if textWidth(s) <= n {
 		return s
 	}
+	tail := "..."
 	if n <= 3 {
-		return string(r[:n])
+		tail = ""
 	}
-	return string(r[:n-3]) + "..."
+	room := n - len(tail)
+	var b []rune
+	w := 0
+	for _, r := range s {
+		if w+runeWidth(r) > room {
+			break
+		}
+		w += runeWidth(r)
+		b = append(b, r)
+	}
+	return string(b) + tail
 }
 
-// filter wraps the keyboard: while a prompt is shown o, a and d (either
-// case) answer it instead of reaching the agent. Escape sequences (arrow
-// keys and the like) and bracketed pastes always reach the agent, and so
-// does Ctrl-], so the relay's detach keeps working.
+// filter wraps the keyboard: while no prompt is open every byte reaches
+// the agent (the chord excepted while an ask is pending); while it is open
+// nothing does but Ctrl-], so the relay's detach keeps working.
 func (u *askUI) filter(r io.Reader) io.Reader { return &askFilter{r: r, ui: u} }
 
-type keySink interface{ key(Decision) bool }
+type keySink interface {
+	input(b []byte, paste bool) ([]byte, bool)
+}
 
 type askFilter struct {
 	r  io.Reader
 	ui keySink
 	// st: 0 plain, 1 after ESC, 2 in a CSI sequence, 3 after ESC O.
-	st     int
-	params []byte
-	paste  bool
+	st      int
+	params  []byte
+	paste   bool
+	swallow bool
 }
 
 func (f *askFilter) Read(p []byte) (int, error) {
 	for {
 		n, err := f.r.Read(p)
 		if n > 0 {
-			m := f.apply(p[:n])
+			m := f.apply(p, n)
 			if m > 0 || err != nil {
 				return m, err
 			}
@@ -372,9 +492,27 @@ func (f *askFilter) Read(p []byte) (int, error) {
 	}
 }
 
-// apply filters b in place and returns the length kept.
-func (f *askFilter) apply(b []byte) int {
-	out := b[:0]
+// apply routes the n bytes read into p and returns how many are kept.
+func (f *askFilter) apply(p []byte, n int) int {
+	b := p[:n]
+	inPaste := f.paste
+	paste := f.scan(b) || inPaste
+	if f.swallow {
+		f.swallow = f.paste
+		if bytes.IndexByte(b, relay.DetachKey) >= 0 {
+			p[0] = relay.DetachKey
+			return 1
+		}
+		return 0
+	}
+	fwd, swallow := f.ui.input(b, paste)
+	f.swallow = swallow && f.paste
+	return copy(p, fwd)
+}
+
+// scan follows escape sequences across reads to see bracketed pastes
+// (ESC[200~ ... ESC[201~); it reports whether one starts in b.
+func (f *askFilter) scan(b []byte) (started bool) {
 	for _, c := range b {
 		switch f.st {
 		case 1:
@@ -386,15 +524,12 @@ func (f *askFilter) apply(b []byte) int {
 			default:
 				f.st = 0
 			}
-			out = append(out, c)
-			continue
 		case 2:
-			out = append(out, c)
 			if c >= 0x40 && c <= 0x7e {
 				if c == '~' {
 					switch string(f.params) {
 					case "200":
-						f.paste = true
+						f.paste, started = true, true
 					case "201":
 						f.paste = false
 					}
@@ -403,35 +538,13 @@ func (f *askFilter) apply(b []byte) int {
 			} else if len(f.params) < 16 {
 				f.params = append(f.params, c)
 			}
-			continue
 		case 3:
-			out = append(out, c)
 			f.st = 0
-			continue
-		}
-		if c == 0x1b {
-			f.st = 1
-			out = append(out, c)
-			continue
-		}
-		if !f.paste {
-			if d, ok := decisionKey(c); ok && f.ui.key(d) {
-				continue
+		default:
+			if c == 0x1b {
+				f.st = 1
 			}
 		}
-		out = append(out, c)
 	}
-	return len(out)
-}
-
-func decisionKey(c byte) (Decision, bool) {
-	switch c {
-	case 'o', 'O':
-		return DecideOnce, true
-	case 'a', 'A':
-		return DecideAlways, true
-	case 'd', 'D':
-		return DecideDeny, true
-	}
-	return "", false
+	return started
 }
