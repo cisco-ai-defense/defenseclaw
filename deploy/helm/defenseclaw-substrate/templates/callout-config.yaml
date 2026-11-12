@@ -15,7 +15,7 @@ the single source.
   "body_max_bytes" ($xp.body_max_bytes | default 1048576 | int)
   "mcp_hosts" ($xp.mcp_hosts | default list)
   "body_hosts" ($xp.body_hosts | default list)
-  "defenseclaw_hosts" (list $actor (printf "%s.cluster.local" $actor) $admin (printf "%s.cluster.local" $admin))
+  "defenseclaw_hosts" (list $actor (trimSuffix ".cluster.local" $actor) $admin (trimSuffix ".cluster.local" $admin))
   "egress_peers" (list .Values.substrate.egressSpiffeId)
 -}}
 {{- with $xp.request_access }}{{ $_ := set $c "request_access" . }}{{ end -}}

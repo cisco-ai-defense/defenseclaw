@@ -42,9 +42,14 @@ app.kubernetes.io/component: {{ .component }}
 {{- define "dc.sa" -}}defenseclaw-{{ . }}{{- end -}}
 {{- define "dc.principal" -}}system:serviceaccount:{{ .ctx.Release.Namespace }}:defenseclaw-{{ .component }}{{- end -}}
 
-{{/* Service DNS names. */}}
-{{- define "dc.actorHost" -}}defenseclaw-actor.{{ .Release.Namespace }}.svc{{- end -}}
-{{- define "dc.adminHost" -}}defenseclaw-admin.{{ .Release.Namespace }}.svc{{- end -}}
+{{/*
+Service DNS names, fully qualified: an actor's DNS goes through the egress
+relay, which answers only the names in its policy, so the short
+"<svc>.<ns>.svc" name (expanded by the search path) never resolves there
+(GAP-0023). Rules and kit base URLs use these exact names.
+*/}}
+{{- define "dc.actorHost" -}}defenseclaw-actor.{{ .Release.Namespace }}.svc.cluster.local{{- end -}}
+{{- define "dc.adminHost" -}}defenseclaw-admin.{{ .Release.Namespace }}.svc.cluster.local{{- end -}}
 {{- define "dc.calloutService" -}}{{ .Release.Namespace }}/defenseclaw-callout:{{ .Values.callout.port }}{{- end -}}
 
 {{/*

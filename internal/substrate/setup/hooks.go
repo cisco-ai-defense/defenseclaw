@@ -52,8 +52,13 @@ type EgressPolicy struct {
 // DefenseClaw policy has the rule to the actor Service, and no other writer
 // has a reason to name it.
 func (p EgressPolicy) IsDefenseClaws(actorHost string) bool {
+	short := strings.TrimSuffix(actorHost, ".cluster.local")
 	for _, h := range p.Hostnames {
-		if h == actorHost || strings.HasPrefix(h, actorHost+":") || h == actorHost+".cluster.local" {
+		h = strings.TrimSuffix(strings.ToLower(h), ".")
+		if hp, _, ok := strings.Cut(h, ":"); ok {
+			h = hp
+		}
+		if h == actorHost || h == short || h == short+".cluster.local" {
 			return true
 		}
 	}

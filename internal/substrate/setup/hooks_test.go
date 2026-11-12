@@ -269,7 +269,10 @@ func TestPreDeleteFailsWhilePoliciesRemain(t *testing.T) {
 
 func TestIsDefenseClaws(t *testing.T) {
 	host := "defenseclaw-actor.dc.svc"
-	for h, want := range map[string]bool{host: true, host + ":443": true, host + ".cluster.local": true,
+	if !(EgressPolicy{Hostnames: []string{host}}).IsDefenseClaws(host + ".cluster.local") {
+		t.Error("an FQDN actor host does not match the short rule name")
+	}
+	for h, want := range map[string]bool{host: true, host + ":443": true, host + ".cluster.local": true, "DefenseClaw-Actor.dc.svc.": true,
 		"defenseclaw-actor.other.svc": false, "evil-" + host: false, "x.defenseclaw-actor.dc.svc": false} {
 		if got := (EgressPolicy{Hostnames: []string{h}}).IsDefenseClaws(host); got != want {
 			t.Errorf("%s: %v", h, got)

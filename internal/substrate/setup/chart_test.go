@@ -181,7 +181,7 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	if err != nil {
 		t.Errorf("%s: callout.yaml: %v", name, err)
 	} else {
-		if !slices.Contains(cc.DefenseClawHosts, "defenseclaw-actor.defenseclaw-system.svc") ||
+		if !slices.Contains(cc.DefenseClawHosts, "defenseclaw-actor.defenseclaw-system.svc.cluster.local") ||
 			!slices.Contains(cc.DefenseClawHosts, "defenseclaw-admin.defenseclaw-system.svc") {
 			t.Errorf("%s: defenseclaw_hosts %v", name, cc.DefenseClawHosts)
 		}
@@ -258,6 +258,9 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	p, err := ParsePlan([]byte(plans[0]))
 	if err != nil {
 		t.Errorf("%s: plan: %v", name, err)
+	}
+	if p.ActorHost != "defenseclaw-actor.defenseclaw-system.svc.cluster.local" {
+		t.Errorf("%s: actor host %q is not the FQDN actors can resolve through egress (GAP-0023)", name, p.ActorHost)
 	}
 	if !slices.Contains(p.GlobalViewers, "system:serviceaccount:defenseclaw-system:defenseclaw-hooks") {
 		t.Errorf("%s: the hooks ServiceAccount cannot list actors for the uninstall", name)
