@@ -138,7 +138,8 @@ def test_short_help_is_the_go_short_description() -> None:
 
 def test_long_help_and_examples_are_the_go_ones() -> None:
     def words(text: str) -> str:
-        return " ".join(text.split())
+        # Click may wrap at a hyphen, so compare without any whitespace.
+        return "".join(text.split())
 
     for path, entry in _manifest().items():
         if entry.get("passthrough"):

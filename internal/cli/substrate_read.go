@@ -665,6 +665,7 @@ variable with --from-env VAR. It is never put on the command line.`,
 	}
 	com.add(cmd)
 	cmd.Flags().StringVar(&fromEnv, "from-env", "", "read the value from this environment variable")
+	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
 	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read the value from standard input")
 	return cmd
 }
@@ -737,6 +738,7 @@ func newSubstrateSecretsRmCmd() *cobra.Command {
 	}
 	com.add(cmd)
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
+	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
 	return cmd
 }
 
@@ -773,6 +775,7 @@ func newSubstrateSecretsTestCmd() *cobra.Command {
 	}
 	out.add(cmd)
 	com.add(cmd)
+	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
 	return cmd
 }
 

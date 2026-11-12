@@ -58,7 +58,7 @@ def render_flag(flag: dict, indent: int) -> str:
     if flag.get("shorthand"):
         parts.append("short=" + repr(flag["shorthand"]))
     default = flag.get("default", "")
-    if default and flag["type"] not in {"bool"} and default not in {"[]", "false"}:
+    if default and (flag["type"] != "bool" or default == "true") and default not in {"[]", "false"}:
         parts.append("default=" + repr(default))
     if flag.get("metavar"):
         parts.append("metavar=" + repr(flag["metavar"]))

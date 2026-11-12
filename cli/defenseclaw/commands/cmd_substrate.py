@@ -592,6 +592,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
             _Flag("yes", "bool", "do not ask", short="y"),
         ),
     ),
@@ -607,6 +608,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("from-env", "string", "read the value from this environment variable"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
             _Flag("stdin", "bool", "read the value from standard input"),
         ),
     ),
@@ -617,6 +619,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
         ),
     ),

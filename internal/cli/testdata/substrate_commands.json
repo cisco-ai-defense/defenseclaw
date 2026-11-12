@@ -1042,6 +1042,12 @@
         "metavar": "NAME"
       },
       {
+        "name": "mine",
+        "type": "bool",
+        "default": "true",
+        "usage": "your own secret (the only kind this command acts on)"
+      },
+      {
         "name": "yes",
         "shorthand": "y",
         "type": "bool",
@@ -1074,6 +1080,12 @@
         "usage": "read the value from this environment variable"
       },
       {
+        "name": "mine",
+        "type": "bool",
+        "default": "true",
+        "usage": "your own secret (the only kind this command acts on)"
+      },
+      {
         "name": "stdin",
         "type": "bool",
         "default": "false",
@@ -1103,6 +1115,12 @@
         "type": "bool",
         "default": "false",
         "usage": "same as --output json"
+      },
+      {
+        "name": "mine",
+        "type": "bool",
+        "default": "true",
+        "usage": "your own secret (the only kind this command acts on)"
       },
       {
         "name": "output",
