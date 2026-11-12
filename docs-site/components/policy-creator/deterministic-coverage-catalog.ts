@@ -422,6 +422,14 @@ export const HIGH_ASSURANCE_PACKS = [
     coverage:
       'Exact authorized_keys write and fingerprint allowlist contract; activation awaits trusted content and outcome bindings.',
   },
+  {
+    id: 'active-directory-protection',
+    title: 'Active Directory protection',
+    status: 'selectable',
+    ruleCount: 5,
+    coverage:
+      'Kerberos ticket requests, NTDS database export, NetExec/CrackMapExec credential use, bulk LDAP collection, and password spraying against a managed domain.',
+  },
 ] as const satisfies readonly HighAssurancePack[];
 
 export const DETERMINISTIC_COVERAGE_TOTALS = {

@@ -642,3 +642,75 @@ func unresolvedHashcatArgument(value string) bool {
 		strings.Contains(value, "}}") || strings.Contains(lower, "placeholder") ||
 		strings.Contains(lower, "your_")
 }
+
+// --- Active Directory protection pack (rel-1-0-10:GAP-0014) ---------------
+//
+// netExecDirectoryPrograms, netExecDirectoryProtocols and the recognizer
+// below complete the parse of a NetExec / CrackMapExec invocation that
+// authenticates to a domain service with a password or NT hash on the
+// command line. Before this, such a call parsed partial
+// (unknown_operand_grammar): the per-command argv was complete but no owner
+// claimed the operand grammar, so the action was never enforcement-eligible
+// and the opt-in active-directory-protection pack could not block it.
+//
+// This recognizer does not mint a credential-acquisition fact (that vocabulary
+// stays reserved for dumps and offline cracks). It only proves that the call
+// is a complete, statically resolved credentialed domain-service invocation so
+// classifyCommand can keep the parse authoritative and add a credential-read
+// operation. The opt-in pack's CEL rules then decide the action; no built-in
+// default rule claims this operation, so default behaviour is unchanged.
+var netExecDirectoryPrograms = map[string]struct{}{
+	"nxc": {}, "netexec": {}, "crackmapexec": {},
+}
+
+var netExecDirectoryProtocols = map[string]struct{}{
+	"smb": {}, "ldap": {}, "mssql": {}, "winrm": {}, "wmi": {},
+	"rdp": {}, "ssh": {}, "ftp": {}, "vnc": {}, "nfs": {}, "smtp": {},
+}
+
+// ExactNetExecDomainServiceAuth reports whether command is a complete
+// NetExec/CrackMapExec invocation that authenticates to a domain service with
+// a statically resolved password or NT hash. It is case-sensitive on the hash
+// short option (-H) so the help flag (-h) is never read as a credential.
+func ExactNetExecDomainServiceAuth(command CommandFact) bool {
+	argv, ok := directoryCredentialStaticArgv(command)
+	if !ok || len(argv) < 3 ||
+		(command.Effect != EffectExecute && command.Effect != EffectUncertain) {
+		return false
+	}
+	if _, ok := netExecDirectoryPrograms[strings.ToLower(command.Program)]; !ok {
+		return false
+	}
+	args := argv[1:]
+	if _, ok := netExecDirectoryProtocols[strings.ToLower(args[0])]; !ok {
+		return false
+	}
+	target := args[1]
+	if target == "" || strings.HasPrefix(target, "-") ||
+		unresolvedCredentialRemoteScalar(target) {
+		return false
+	}
+	hasCredential := false
+	for index := 1; index < len(args); index++ {
+		arg := args[index]
+		lower := strings.ToLower(arg)
+		if arg == "-h" || lower == "--help" || lower == "--version" {
+			return false
+		}
+		switch {
+		case arg == "-p" || lower == "--password" || arg == "-H" ||
+			lower == "--hash" || lower == "--hashes":
+			if index+1 >= len(args) {
+				return false
+			}
+			value := args[index+1]
+			if value == "" || strings.HasPrefix(value, "-") ||
+				unresolvedCredentialRemoteScalar(value) {
+				return false
+			}
+			hasCredential = true
+			index++
+		}
+	}
+	return hasCredential
+}

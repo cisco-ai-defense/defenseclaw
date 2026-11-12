@@ -116,6 +116,10 @@ permissive, or strict profiles.
   closed set of `delete --all` workload forms for production-scoped contexts.
 - `infrastructure-destruction-protection` blocks unscoped Terraform, OpenTofu,
   and Pulumi destruction while allowing plans, previews, and targeted changes.
+- `active-directory-protection` blocks Kerberos ticket requests, NTDS database
+  export, NetExec/CrackMapExec credential use and password spraying against
+  domain services, and bulk LDAP collection. Assign it to a connector on a
+  host that can reach a managed Active Directory domain.
 - `ssh-authorized-keys-protection` is a contract only and cannot be activated.
   It defines how an approved-fingerprint allowlist would guard writes to
   `~/.ssh/authorized_keys`. Do not point `policy_dir` at it; see its

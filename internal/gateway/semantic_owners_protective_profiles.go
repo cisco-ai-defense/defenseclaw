@@ -79,6 +79,18 @@ var semanticProtectiveProfileOwners = map[string]semanticOwner{
 		prerequisite:     infrastructureAsCodeFullDestroyPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
+	"credential.directory_service_credential_use": {
+		prerequisite:     directoryServiceCredentialUsePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"recon.directory_bulk_collection": {
+		prerequisite:     directoryBulkCollectionPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"credential.directory_password_spray": {
+		prerequisite:     directoryPasswordSprayPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
 }
 
 func cloudBulkDataDeletePrerequisite(facts actionfacts.Facts) bool {
@@ -372,4 +384,60 @@ func staticProtectiveOperand(value string) bool {
 		!strings.ContainsAny(value, "$`\r\n") &&
 		!strings.Contains(value, "$(") &&
 		!strings.Contains(value, "${")
+}
+
+// --- Active Directory protection pack owners (rel-1-0-10:GAP-0014/0017) ----
+
+func directoryServiceCredentialUsePrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !reconImpactExecutingOwned(command) ||
+			!oneOfFold(command.Program, "nxc", "netexec", "crackmapexec") {
+			continue
+		}
+		if hasAnyArgFold(command.Argv, "--ntds") {
+			// The NTDS secrets dump is owned by the built-in default rule
+			// credential.directory_credential_acquisition, which blocks it.
+			continue
+		}
+		if actionfacts.ExactNetExecDomainServiceAuth(command) {
+			return true
+		}
+	}
+	return false
+}
+
+func directoryBulkCollectionPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !reconImpactExecutingOwned(command) ||
+			!oneOfFold(command.Program, "nxc", "netexec", "crackmapexec") {
+			continue
+		}
+		if len(command.Argv) < 2 || !strings.EqualFold(command.Argv[1], "ldap") {
+			continue
+		}
+		if hasAnyArgFold(command.Argv, "--bloodhound", "--users", "--groups",
+			"--kerberoasting", "--asreproast") {
+			return true
+		}
+	}
+	return false
+}
+
+func directoryPasswordSprayPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !reconImpactExecutingOwned(command) ||
+			!oneOfFold(command.Program, "nxc", "netexec", "crackmapexec") {
+			continue
+		}
+		if !actionfacts.ExactNetExecDomainServiceAuth(command) {
+			continue
+		}
+		for _, arg := range command.Argv {
+			lower := strings.ToLower(arg)
+			if strings.HasSuffix(lower, ".txt") || strings.HasSuffix(lower, ".lst") {
+				return true
+			}
+		}
+	}
+	return false
 }

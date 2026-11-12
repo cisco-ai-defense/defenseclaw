@@ -749,6 +749,12 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "nxc", "netexec", "crackmapexec", "john", "john.exe":
 		if _, ok := exactDirectoryCredentialCommand(*command); ok {
 			addOperation(command, OperationCredentialRead)
+		} else if ExactNetExecDomainServiceAuth(*command) {
+			// A complete, statically credentialed NetExec/CrackMapExec
+			// domain-service invocation (rel-1-0-10:GAP-0014). Keeping the
+			// parse authoritative lets the opt-in active-directory-protection
+			// pack block it; no built-in default rule claims this operation.
+			addOperation(command, OperationCredentialRead)
 		} else {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
