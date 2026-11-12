@@ -1311,6 +1311,9 @@ spec:
         - --substrate
         - --substrate-role=gateway
         - --actor-listen=:8080
+        # Egress reaches the actor listener on an http rule, port 80 (GAP-0023):
+        # it serves plain HTTP; the admin listener keeps TLS (GAP-0143).
+        - --actor-plain-http
         - --admin-listen=:9443
         - --metrics-listen=:9464
         - --leader-address=defenseclaw-leader.defenseclaw-system.svc.cluster.local:7443

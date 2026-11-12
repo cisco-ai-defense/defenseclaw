@@ -49,6 +49,9 @@ spec:
         - --substrate
         - --substrate-role=gateway
         - --actor-listen=:{{ .Values.gateway.ports.actor }}
+        # Egress reaches the actor listener on an http rule, port 80 (GAP-0023):
+        # it serves plain HTTP; the admin listener keeps TLS (GAP-0143).
+        - --actor-plain-http
         - --admin-listen=:{{ .Values.gateway.ports.admin }}
         {{- if .Values.admin.tlsSecretName }}
         - --admin-tls-cert=/etc/defenseclaw/admin-tls/tls.crt

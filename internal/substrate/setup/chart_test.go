@@ -274,6 +274,14 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 			t.Errorf("%s: pre-install Job %v runs as %q, which is not a pre-install hook resource", name, o.Metadata["name"], sa)
 		}
 	}
+	// GAP-0143: the actor listener serves plain HTTP (egress uses an http
+	// rule on port 80); --plain-http (both listeners) is never rendered.
+	if gw, ok := byName["Deployment/defenseclaw-gateway"]; ok {
+		raw, _ := yaml.Marshal(gw.Spec)
+		if !strings.Contains(string(raw), "- --actor-plain-http") || strings.Contains(string(raw), "- --plain-http") {
+			t.Errorf("%s: gateway args: actor listener not plain HTTP, or --plain-http set", name)
+		}
+	}
 	// A13: the chain key is created by a hook (never rendered), mounted
 	// into the gateway and the leader; the callout reaches the leader.
 	if !strings.Contains(string(out), "- chain-key") || !strings.Contains(string(out), "secretName: defenseclaw-chain-key") {
