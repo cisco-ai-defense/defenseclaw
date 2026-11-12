@@ -1,0 +1,228 @@
+---
+title: Managed enterprise
+description: A platform team runs Agent Substrate with DefenseClaw for the whole company. What the admin sets up, what a developer sees, and what security gets.
+keywords:
+  - Agent Substrate enterprise
+  - managed cloud agent sandbox
+  - DefenseClaw profiles Agent Substrate
+  - OIDC groups
+---
+
+{/* TODO(substrate): confirm the profile keys (runtimes, sandbox_class, unattended_asks, actor_secrets, match.substrate) and the bundle apply flags against the merged config code (A3/A6), and replace example output with captured output. */}
+
+In a company, three people meet this feature:
+
+- **The platform admin** runs the cluster and DefenseClaw on it.
+- **The developer** runs agents from a laptop.
+- **The security team** watches what the agents do.
+
+Policy comes from the same [identity-based profiles](/docs/enterprise) DefenseClaw uses on managed laptops. Your group picks your profile, and a profile can only tighten the company floor.
+
+## The platform admin
+
+<Steps>
+
+<Step>
+
+### Install
+
+Install the signed chart in its own namespace. Substrate admits only namespaces labelled `ate.dev/api-access=true`.
+
+```bash
+kubectl create namespace defenseclaw-system
+kubectl label namespace defenseclaw-system ate.dev/api-access=true
+helm install defenseclaw oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate \
+  --version 1.0.10 -n defenseclaw-system -f defenseclaw-values.yaml
+defenseclaw substrate setup
+defenseclaw substrate doctor
+```
+
+The chart installs the gateway (an HPA with at least two replicas, a PDB and two Services), the gateway leader, the controller and the egress callout. `setup` registers the callout with Substrate. DefenseClaw gets the Substrate roles it needs and no more: read actors and templates, write egress policies, and create, fork, proxy and suspend actors in the launcher atespaces.
+
+A one-time Substrate global-owner token (`bootstrap.ownerTokenSecret`) lets the chart's bootstrap Job write those roles. Without it, `setup --print-access-policies` prints them for you to apply. Only a global owner can create atespaces, and DefenseClaw never does.
+
+</Step>
+
+<Step>
+
+### Connect the identity provider
+
+Developers sign in with the company identity provider (Okta, Entra ID, or anything that speaks OIDC). The groups in the sign-in token pick the profile. CI jobs sign in with a workload identity instead (GitHub Actions OIDC or a Kubernetes service-account token).
+
+```yaml
+# defenseclaw-values.yaml
+config:
+  deployment_mode: managed_enterprise
+  substrate:
+    identity:
+      issuer: https://idp.cluster-a.example.test   # unique per cluster
+      oidc:
+        issuer: https://idp.corp.example.test/oauth2/default
+        client_id: defenseclaw-launcher
+        groups_claim: groups
+      workload_oidc:
+        - issuer: https://token.actions.githubusercontent.com
+          audience: defenseclaw
+    launcher_atespaces:             # only DefenseClaw may create actors here
+      engineering: [eng-payments, eng-web]
+      contractors: [ctr-main]
+    require_attested_templates: true
+    llm:
+      providers: [bedrock]          # agents reach models only through the guardrail proxy
+```
+
+`identity.issuer` is the issuer of the tokens Substrate gives actors. Give each cluster its own: the default is the same on every cluster, and `doctor` fails when two clusters share one.
+
+</Step>
+
+<Step>
+
+### Write the profiles
+
+These are the same profiles as on managed laptops, plus a `substrate` match. The `sandbox` section applies to OpenShell and Agent Substrate alike. Substrate adds `runtimes`, `sandbox_class`, `idle_suspend_after`, `unattended_asks` and `actor_secrets`. Keys that only make sense on a laptop are a load error in a Substrate scope.
+
+```yaml
+guardrail:
+  profiles:
+    contractors:
+      mode: action
+      block_at: MEDIUM
+      sandbox:
+        required_for: [claudecode, codex]
+        runtimes: [substrate]            # on laptops, refuse and point to the cloud
+        allowed_harnesses: [claudecode, codex]
+        egress_allow_only: ["*.amazonaws.com", github.com]
+        allow_unblock: false             # contractors can't approve new sites
+        sandbox_class: gvisor
+        unattended_asks: deny
+    engineering:
+      mode: action
+      block_at: HIGH
+      sandbox:
+        allowed_harnesses: [claudecode, codex, opencode, hermes]
+        user_approvals: session
+  profile_assignments:
+    - profile: contractors
+      match: {groups: ["contractors"]}
+    - profile: engineering
+      match: {groups: ["engineering"], substrate: {atespaces: ["eng-*"]}}
+  default_profile: contractors
+```
+
+An atespace pattern matches only atespaces DefenseClaw created or that you list, so a foreign `eng-evil` atespace never inherits a profile.
+
+Deliver profile changes as a signed bundle: `defenseclaw substrate bundle apply --atespaces eng-payments`. The controller stages it by atespace, records a receipt, and can roll it back. It works with GitOps. See [Delivery and fleet management](/docs/substrate/delivery).
+
+</Step>
+
+<Step>
+
+### Publish the templates
+
+The platform team builds the approved agent images once and publishes them to each team's atespace:
+
+```bash
+defenseclaw substrate template build claude --atespace eng-shared --publish
+defenseclaw substrate template build codex  --atespace eng-shared --publish
+defenseclaw substrate template verify claude --atespace eng-shared
+```
+
+Each build is scanned and attested. A template made any other way, for example with plain `kubectl ate create actor-template`, still starts, but its agents get no network. The admin sees why in `doctor` and in the fleet view.
+
+</Step>
+
+<Step>
+
+### Point the laptops at it
+
+On managed laptops, a profile with `runtimes: [substrate]` in `required_for` refuses a local `claude` and says where to go instead:
+
+```text
+$ claude
+DefenseClaw: your organization runs Claude Code in the cloud sandbox.
+  Start it with:  defenseclaw substrate run claude
+  Questions:      it-security@example.test
+```
+
+The launcher itself is exempt from that rule. Engineering, whose profile doesn't require it, can still run locally or in an OpenShell sandbox.
+
+</Step>
+
+</Steps>
+
+## The developer
+
+<Steps>
+
+<Step>
+
+### Sign in once
+
+```bash
+defenseclaw substrate login
+```
+
+A browser opens on the company sign-in page. After that, the launcher knows who you are and which profile you get:
+
+```text
+Signed in as alice@example.test · profile engineering · atespace eng-payments
+```
+
+</Step>
+
+<Step>
+
+### Run an agent
+
+```bash
+cd ~/code/payments
+defenseclaw substrate run claude
+```
+
+```text
+Agent payments-41d2 · Claude Code · Agent Substrate (microvm) · eng-payments
+  Profile   engineering (set by your organization; see: defenseclaw substrate policy explain)
+  Project   ~/code/payments → /work (copy; .env held back)
+  Model     Bedrock through the DefenseClaw guardrail proxy
+  Network   allowed: github.com, registry.npmjs.org, *.amazonaws.com · asks: once per session
+  Leave     Ctrl-] detaches; the agent suspends when idle
+```
+
+The rest of the session is the same as the [open-source walkthrough](/docs/substrate/open-source): asks, detach, `connect`, `pull`.
+
+</Step>
+
+<Step>
+
+### Hit a limit
+
+When the profile doesn't let you approve something yourself, you get the company's request-access text instead of an ask:
+
+```text
+DefenseClaw · payments-41d2 was blocked from api.stripe.com
+  Your profile (contractors) doesn't allow new sites.
+  Request access: it-security@example.test
+```
+
+Nothing you change on your laptop loosens this, because the policy lives in the cluster. `defenseclaw substrate policy explain` shows your own effective policy and where each value comes from. `defenseclaw substrate usage` and `secrets list --mine` show your own usage and the names of your own secrets. You never see anyone else's.
+
+</Step>
+
+</Steps>
+
+## The security team
+
+- **Every agent, by person.** Each event names the agent, the person who started it, their profile and team, the model and the route, and the cluster. It carries Substrate's own actor UID (`ate.actor.uid`). A suspended agent that resumes on another machine stays the same agent.
+- **The fleet view.** Agents by team, checks and blocks, asks and refusals, templates that failed attestation, actors DefenseClaw didn't create, policy drift and conflicts, and spend. It comes from the Grafana [Substrate agents board](/docs/observability/grafana-dashboards) and from `defenseclaw substrate status --json`. Only admins see it, and it is served on the admin listener, which actors can't reach.
+- **Export.** The same OpenTelemetry events as on laptops, with the `substrate` rows described in [Sandbox telemetry](/docs/observability/sandbox-telemetry), so the existing Splunk or Grafana setup works unchanged.
+- **What changes when you tighten a profile.** The controller rewrites the allow list of every affected agent. New connections follow the new rule within seconds, and a suspended agent gets it before it resumes.
+
+## How this differs from managed laptops
+
+|  | Managed laptop (with or without OpenShell) | Managed Agent Substrate |
+|---|---|---|
+| Who you are | The signed-in OS user, through AD or the IdP | The OIDC sign-in, checked by the cluster; each agent's identity is signed by Substrate |
+| Where policy is enforced | On each laptop, protected from the user | In the cluster. The laptop holds nothing to tamper with |
+| Model keys | The user's own, or the company's on the laptop | The company's, in the cluster only |
+| A gateway outage | Hooks fail closed (managed rule) | Same. Unattended runs fail closed too |
+| Windows and Intel Macs | No sandboxes | Full support. Only the launcher runs there |

@@ -52,7 +52,7 @@ attribute_extensions:
   cardinality: high
   normalization:
     id: identifier-v1
-    notes: NFC bounded host identity emitted only when local policy permits
+    notes: NFC bounded host identity emitted only when local policy permits. On Agent Substrate it is the pod that runs the DefenseClaw component, never the actor (the actor is defenseclaw.sandbox.substrate.actor)
 - ref: http.request.method
   field_class: metadata
   sensitivity: safe
@@ -97,6 +97,20 @@ attribute_extensions:
   normalization:
     id: bounded-v1
     notes: bounded registered protocol version token
+- ref: k8s.cluster.name
+  field_class: identifier
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    notes: Kubernetes cluster name the DefenseClaw component runs in; set by the chart from substrate.cluster_name, absent outside Kubernetes; never a metric label
+- ref: k8s.namespace.name
+  field_class: identifier
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    notes: Kubernetes namespace of the DefenseClaw component (for example defenseclaw-system), not the namespace of an actor; absent outside Kubernetes; never a metric label
 - ref: os.type
   field_class: metadata
   sensitivity: safe
@@ -141,7 +155,7 @@ attribute_extensions:
   cardinality: high
   normalization:
     id: identifier-v1
-    notes: nonempty bounded process-instance identity; never copy into a registered metric family label
+    notes: nonempty bounded process-instance identity; never copy into a registered metric family label. On Agent Substrate each gateway, callout or controller replica has its own value
 - ref: service.name
   field_class: metadata
   sensitivity: safe
@@ -3377,7 +3391,7 @@ attributes:
   normalization:
     id: identifier-v1
     overrides: {max_utf8_bytes: 63, pattern: '^[a-z0-9][a-z0-9-]{0,62}$'}
-    notes: the --name of enterprise secret set or remove; a name the command refused is left out. Never the value or a hash of it
+    notes: the --name of enterprise secret set or remove, or the name of a Substrate secret an egress rule injected (log.secret.injected); a name the command refused is left out. Never the value, a prefix, a placeholder or a hash of it
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.secret.action
   type: string
@@ -4955,7 +4969,7 @@ attributes:
 - id: defenseclaw.sandbox.runtime
   type: string
   brief: Isolation runtime hosting the sandbox
-  examples: [openshell, substrate]
+  examples: [openshell]
   stability: stable
   owner: defenseclaw
   field_class: metadata
@@ -4964,12 +4978,12 @@ attributes:
   normalization:
     id: enum-v1
     overrides: {enum: [openshell, substrate]}
-    notes: openshell is NVIDIA OpenShell on the user's machine; substrate is an Agent Substrate actor in a Kubernetes cluster
+    notes: openshell (NVIDIA OpenShell 0.1.x on a host) or substrate (an Agent Substrate actor in a Kubernetes cluster)
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.driver
   type: string
-  brief: Compute driver or sandbox class running the sandbox
-  examples: [docker, gvisor]
+  brief: OpenShell compute driver running the sandbox
+  examples: [docker]
   stability: stable
   owner: defenseclaw
   field_class: metadata
@@ -4978,7 +4992,7 @@ attributes:
   normalization:
     id: enum-v1
     overrides: {enum: [docker, podman, vm, k8s, gvisor, microvm]}
-    notes: The OpenShell gateway compute driver (docker, podman, vm, k8s), or the Agent Substrate sandbox class of an actor (gvisor, microvm)
+    notes: On OpenShell, the gateway compute driver (DefenseClaw supports only docker today). On Agent Substrate, the actor sandbox runtime class, gvisor by default or microvm
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.driver_reason
   type: string
@@ -4994,6 +5008,158 @@ attributes:
     overrides: {enum: [configured, kvm_available, kvm_missing, kvm_access, cpu_virtualization, vm_driver_missing, vm_prerequisite_missing]}
     notes: configured (the organization set the driver), kvm_available (driver auto and the per-user KVM probe passed), or the probe's reason when the Linux docker fallback replaced the MicroVM driver (enterprise.openshell.driver_fallback docker)
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.substrate.atespace
+  type: string
+  brief: Agent Substrate atespace the actor lives in
+  examples: [dc-alice]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Atespace name. Launcher atespaces are named from the person or the workload, so it can hold a person's name and is classed like the other person identifiers. Never a metric label
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.sandbox.substrate.actor
+  type: string
+  brief: Agent Substrate actor name
+  examples: [claude-7f3a]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Actor name inside its atespace; unique only together with the atespace. Never a metric label
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.sandbox.substrate.actor_uid
+  type: string
+  brief: Agent Substrate actor UID
+  examples: [5d1c9a3e-6b0f-4c1d-9a52-3e8f7b2a1c40]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: Substrate-assigned UID, the same value as defenseclaw.sandbox.id and ate.actor.uid; a new actor, including a fork, has a new UID. Never a metric label
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.sandbox.substrate.template
+  type: string
+  brief: Agent Substrate actor template the actor was created from
+  examples: [claude-code-1.4]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Template name; a template is attested before DefenseClaw lets its actors start. Never a metric label
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.sandbox.substrate.worker_pool
+  type: string
+  brief: Agent Substrate worker pool that runs the actor
+  examples: [default]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Worker pool name; absent while the actor is suspended. Never a metric label
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.sandbox.substrate.kit_version
+  type: string
+  brief: Version of the DefenseClaw actor kit inside the template
+  examples: [1.0.10]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 32, pattern: '^[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}$'}
+    notes: Release of the kit baked into the template image; the gateway accepts the current and the previous release. Never a metric label
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.sandbox.substrate.batch_id
+  type: string
+  brief: Batch run an unattended actor belongs to
+  examples: [batch-20261112-01]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Caller-chosen identifier of a batch of unattended actors, used to sample telemetry and to read one batch together. Never a metric label
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.sandbox.substrate.parent_uid
+  type: string
+  brief: UID of the actor this actor was forked from
+  examples: [5d1c9a3e-6b0f-4c1d-9a52-3e8f7b2a1c40]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: Present on a fork; absent on a first actor. When a fork was made outside DefenseClaw the parent is attributed from the platform and defenseclaw.sandbox.lifecycle.trigger is fork with the actor kept in a conflict state. Never a metric label
+  introduced_in: telemetry-registry-v4
+- id: ate.actor.uid
+  type: string
+  brief: Agent Substrate actor UID as named by Substrate
+  examples: [5d1c9a3e-6b0f-4c1d-9a52-3e8f7b2a1c40]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: The attribute name Substrate uses on its own spans and logs; equal to defenseclaw.sandbox.substrate.actor_uid, so DefenseClaw records join Substrate traces. Never a metric label
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.network.body_inspected
+  type: boolean
+  brief: Whether the egress callout read the request body to decide
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: True only for a POST to an MCP or listed host whose body was at most the body cap; the body itself is never recorded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.network.body_over_cap
+  type: boolean
+  brief: Whether the request body was larger than the inspection cap and was not read
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: True when the body would have been inspected but exceeded the cap (1 MiB by default); the decision then comes from headers and host alone
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.sandbox.image.digest
   type: string
   brief: Content digest of the sandbox workload image
@@ -5077,8 +5243,8 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, unknown]}
-    notes: OpenShell SandboxPhase values plus the DefenseClaw-only creating (before the gateway accepts the sandbox) and deleted (after it is gone) bookends
+    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, resuming, suspending, suspended, crashed, reverting, unknown]}
+    notes: OpenShell SandboxPhase values plus the DefenseClaw-only creating (before the gateway accepts the sandbox) and deleted (after it is gone) bookends. Agent Substrate actor states map to ready (RUNNING), resuming, suspending, suspended, crashed, deleting and reverting
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.workdir.mode
   type: string
@@ -5105,7 +5271,7 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, unknown]}
+    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, resuming, suspending, suspended, crashed, reverting, unknown]}
     notes: Absent when the producer did not observe the prior phase; never inferred
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.phase.from
@@ -5119,7 +5285,7 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, unknown]}
+    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, resuming, suspending, suspended, crashed, reverting, unknown]}
     notes: Metric dimension only; the per-sandbox record carries defenseclaw.sandbox.phase.previous
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.phase.to
@@ -5133,7 +5299,7 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, unknown]}
+    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, resuming, suspending, suspended, crashed, reverting, unknown]}
     notes: Metric dimension only; the per-sandbox record carries defenseclaw.sandbox.phase
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.lifecycle.trigger
@@ -5147,8 +5313,8 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [create, start, stop, delete, reconcile, watch]}
-    notes: create, start, stop, and delete are DefenseClaw-initiated operations; watch is a gateway status update; reconcile is drift found by the controller (for example a sandbox deleted outside DefenseClaw)
+    overrides: {enum: [create, start, stop, delete, reconcile, watch, attest, policy_lag, resume_recheck, fork, drift, policy_conflict, idle_suspend, migrate]}
+    notes: create, start, stop, and delete are DefenseClaw-initiated operations; watch is a gateway status update; reconcile is drift found by the controller (for example a sandbox deleted outside DefenseClaw). Agent Substrate adds attest (a template was attested or refused), policy_lag (the egress policy was not active in time), resume_recheck (policy checked again at resume), fork, drift (a foreign change was reverted), policy_conflict (three reverts in ten minutes; the controller stopped reverting), idle_suspend and migrate (an old kit was refused with a migrate hint)
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.exit_code
   type: int64
@@ -5983,6 +6149,10 @@ groups:
   - ref: defenseclaw.instance.id
     requirement_level: required
   - ref: defenseclaw.device.public_key_fingerprint
+    requirement_level: recommended
+  - ref: k8s.cluster.name
+    requirement_level: recommended
+  - ref: k8s.namespace.name
     requirement_level: recommended
   body_fields: []
   x-defenseclaw:
@@ -12027,6 +12197,24 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.subject.key
     requirement_level: recommended
+  - ref: defenseclaw.sandbox.substrate.atespace
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.substrate.actor
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.substrate.actor_uid
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.substrate.template
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.substrate.worker_pool
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.substrate.kit_version
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.substrate.batch_id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.substrate.parent_uid
+    requirement_level: recommended
+  - ref: ate.actor.uid
+    requirement_level: recommended
   body_fields: []
 - id: body.policy.updated
   type: body_group
@@ -12822,6 +13010,42 @@ groups:
     - enforced_outcome
     compatibility_profiles:
     - local-observability-v1
+- id: body.secret.injected
+  type: body_group
+  brief: A Substrate egress rule swapped a secret placeholder for the real value on a host the secret is bound to; carries the secret name and the host, never the value.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends:
+  - correlation.sandbox
+  - correlation.interaction
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.secret.name
+    requirement_level: required
+  - ref: defenseclaw.network.target_ref
+    requirement_level: required
+- id: log.secret.injected
+  type: log
+  brief: Canonical secret.injected log identity; one record per injection by the Substrate egress callout, without the secret value.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends:
+  - body.secret.injected
+  attributes: []
+  body_fields: []
+  log:
+    event_name: secret.injected
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
 - id: metric.defenseclaw.sandbox.transitions
   type: metric
   brief: Sandbox lifecycle phase transitions aggregated by harness connector and phase pair; sandbox identities are never labels.
@@ -13086,6 +13310,186 @@ groups:
         label: connector
   x-defenseclaw:
     bucket: enforcement.action
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.substrate.policy_lag
+  type: metric
+  brief: Time from a policy or profile change to the egress policy being active on Agent Substrate; no identity labels.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes: []
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.substrate.policy_lag
+    instrument_type: histogram
+    value_type: double
+    unit: 's'
+    description: Time from a policy or profile change to the egress policy being active on Agent Substrate; no identity labels.
+    temporality: delta
+    boundaries: []
+    empty_labels_reason: No instrument attributes by design; Substrate actor, atespace and person identity are never metric labels.
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.substrate.hook_rtt
+  type: metric
+  brief: Hook call time measured by the gateway, from request received to response written; recorded only by the gateway, never by the actor kit; no identity labels.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes: []
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.substrate.hook_rtt
+    instrument_type: histogram
+    value_type: double
+    unit: 'ms'
+    description: Hook call time measured by the gateway, from request received to response written; recorded only by the gateway, never by the actor kit; no identity labels.
+    temporality: delta
+    boundaries: []
+    empty_labels_reason: No instrument attributes by design; Substrate actor, atespace and person identity are never metric labels.
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.substrate.first_hook_after_resume
+  type: metric
+  brief: Time the first hook call takes after an actor resumes; no identity labels.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes: []
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.substrate.first_hook_after_resume
+    instrument_type: histogram
+    value_type: double
+    unit: 'ms'
+    description: Time the first hook call takes after an actor resumes; no identity labels.
+    temporality: delta
+    boundaries: []
+    empty_labels_reason: No instrument attributes by design; Substrate actor, atespace and person identity are never metric labels.
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.substrate.unattested_templates
+  type: metric
+  brief: Agent Substrate templates DefenseClaw has seen without a valid attestation; no identity labels.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes: []
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.substrate.unattested_templates
+    instrument_type: gauge
+    value_type: int64
+    unit: '{template}'
+    description: Agent Substrate templates DefenseClaw has seen without a valid attestation; no identity labels.
+    temporality: unspecified
+    empty_labels_reason: No instrument attributes by design; Substrate actor, atespace and person identity are never metric labels.
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.substrate.idle_suspends
+  type: metric
+  brief: Actors suspended by DefenseClaw for being idle; no identity labels.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes: []
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.substrate.idle_suspends
+    instrument_type: counter
+    value_type: int64
+    unit: '{suspend}'
+    description: Actors suspended by DefenseClaw for being idle; no identity labels.
+    temporality: delta
+    empty_labels_reason: No instrument attributes by design; Substrate actor, atespace and person identity are never metric labels.
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.substrate.leader_observe_latency
+  type: metric
+  brief: Time a stateless gateway waits for the leader to record a stateful observation; no identity labels.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes: []
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.substrate.leader_observe_latency
+    instrument_type: histogram
+    value_type: double
+    unit: 'ms'
+    description: Time a stateless gateway waits for the leader to record a stateful observation; no identity labels.
+    temporality: delta
+    boundaries: []
+    empty_labels_reason: No instrument attributes by design; Substrate actor, atespace and person identity are never metric labels.
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.substrate.rate_limited
+  type: metric
+  brief: Calls refused by the per-actor or per-atespace fair-share limit, counted in total; no identity labels.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes: []
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.substrate.rate_limited
+    instrument_type: counter
+    value_type: int64
+    unit: '{request}'
+    description: Calls refused by the per-actor or per-atespace fair-share limit, counted in total; no identity labels.
+    temporality: delta
+    empty_labels_reason: No instrument attributes by design; Substrate actor, atespace and person identity are never metric labels.
+  x-defenseclaw:
+    bucket: network.egress
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.substrate.policy_conflicts
+  type: metric
+  brief: Actors the controller marked policy_conflict after three reverts in ten minutes of a foreign egress policy change; no identity labels.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes: []
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.substrate.policy_conflicts
+    instrument_type: counter
+    value_type: int64
+    unit: '{conflict}'
+    description: Actors the controller marked policy_conflict after three reverts in ten minutes of a foreign egress policy change; no identity labels.
+    temporality: delta
+    empty_labels_reason: No instrument attributes by design; Substrate actor, atespace and person identity are never metric labels.
+  x-defenseclaw:
+    bucket: agent.lifecycle
     family_schema_version: 1
     route_selector: true
     compatibility_profiles:

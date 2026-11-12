@@ -8,7 +8,7 @@ dependencies:
   snapshot:
     path: schemas/telemetry/v8/upstream/otel-core-v1.42.0.normalized.json
     format: defenseclaw-selected-semconv-v1
-    sha256: 4e26b63cf3aaad7065a00bccf83c5fe9bb0074f83d25bc99e8c197633def0d2d
+    sha256: 6b94b953e08104f072e8d8f8b3b700cb89b5ae2f17705fbb4cedab773966268a
 - id: otel_genai
   repository: https://github.com/open-telemetry/semantic-conventions-genai
   version: b028dceecdad117461a785c3af35315e7184e813

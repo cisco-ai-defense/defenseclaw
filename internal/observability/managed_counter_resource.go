@@ -16,8 +16,9 @@
 
 package observability
 
-// The managed sandbox counters (defenseclaw.sandbox.managed.*) carry no
-// user, account, host or device label. A collector that turns resource
+// The managed sandbox counters (defenseclaw.sandbox.managed.*) and the
+// Agent Substrate metrics (defenseclaw.substrate.*) carry no
+// user, account, host, pod or device label. A collector that turns resource
 // attributes into labels (Prometheus remote write, for one) would add the
 // host, tenant, workspace and device key ones, so a metric destination
 // sends these counters with a resource cut to the keys below. The bundled
@@ -27,11 +28,19 @@ package observability
 // each process keeps its own running total.
 
 var resourceRestrictedMetrics = map[string]bool{
-	TelemetryInstrumentDefenseClawSandboxManagedRefusals:     true,
-	TelemetryInstrumentDefenseClawSandboxManagedAsks:         true,
-	TelemetryInstrumentDefenseClawSandboxManagedForeignItems: true,
-	TelemetryInstrumentDefenseClawSandboxManagedProvisional:  true,
-	TelemetryInstrumentDefenseClawSandboxManagedDrift:        true,
+	TelemetryInstrumentDefenseClawSandboxManagedRefusals:        true,
+	TelemetryInstrumentDefenseClawSandboxManagedAsks:            true,
+	TelemetryInstrumentDefenseClawSandboxManagedForeignItems:    true,
+	TelemetryInstrumentDefenseClawSandboxManagedProvisional:     true,
+	TelemetryInstrumentDefenseClawSandboxManagedDrift:           true,
+	TelemetryInstrumentDefenseClawSubstrateFirstHookAfterResume: true,
+	TelemetryInstrumentDefenseClawSubstrateHookRtt:              true,
+	TelemetryInstrumentDefenseClawSubstrateIdleSuspends:         true,
+	TelemetryInstrumentDefenseClawSubstrateLeaderObserveLatency: true,
+	TelemetryInstrumentDefenseClawSubstratePolicyConflicts:      true,
+	TelemetryInstrumentDefenseClawSubstratePolicyLag:            true,
+	TelemetryInstrumentDefenseClawSubstrateRateLimited:          true,
+	TelemetryInstrumentDefenseClawSubstrateUnattestedTemplates:  true,
 }
 
 var restrictedMetricResourceKeys = map[string]bool{
