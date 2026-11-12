@@ -57,7 +57,7 @@ func (c *hookOnlyConnector) SandboxArtifacts(target SandboxRenderTarget) (Sandbo
 	if artifacts.Connector != c.name {
 		return SandboxArtifacts{}, fmt.Errorf("%s sandbox renderer returned %q artifacts", c.name, artifacts.Connector)
 	}
-	return finalizeSandboxArtifacts(artifacts)
+	return finalizeSandboxArtifactsFor(rt, artifacts)
 }
 
 // sandboxArtifactsGate is implemented by connector types whose

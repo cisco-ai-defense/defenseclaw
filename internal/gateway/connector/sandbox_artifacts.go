@@ -19,21 +19,27 @@ package connector
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"path"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
 // In-image layout of DefenseClaw's OpenShell overlay images. Everything under
 // SandboxLibDir and the harness system-policy paths is root-owned and
 // read-only to the workload; SandboxHomeDir belongs to the sandbox run-as uid.
 const (
-	// SandboxIngressHost is the name the OpenShell docker driver resolves to
-	// a synthetic address inside the workload and relays to host loopback.
-	SandboxIngressHost = "host.openshell.internal"
+	// SandboxIngressHost is the OpenShell ingress host: the name the
+	// OpenShell docker driver resolves to a synthetic address inside the
+	// workload and relays to host loopback (sandboxruntime.OpenShellHostAlias).
+	// A render target with a SandboxIngress names its own host.
+	SandboxIngressHost = sandboxruntime.OpenShellHostAlias
 	// SandboxLibDir holds DefenseClaw's in-image runtime.
 	SandboxLibDir = "/usr/local/lib/defenseclaw"
 	// SandboxHookDir holds the sandbox hook scripts and their helpers.
@@ -53,6 +59,70 @@ const (
 	// into static configuration.
 	SandboxTokenEnv = "DEFENSECLAW_SANDBOX_TOKEN"
 )
+
+// Agent Substrate transport. An actor holds no DefenseClaw credential: every
+// hook request carries SandboxActorHeader with SandboxActorPlaceholder, and
+// the actor's EgressPolicy rule to the gateway's actor Service replaces the
+// header with the actor's signed token (replace_headers actor_jwt). With no
+// header sent Substrate injects nothing, so a Substrate render always sends
+// it, and never the binding token's Authorization header.
+const (
+	// SandboxActorHeader names the header Substrate egress replaces.
+	SandboxActorHeader = "x-defenseclaw-actor"
+	// SandboxActorPlaceholder is the value the actor sends; only the
+	// injected token is ever trusted.
+	SandboxActorPlaceholder = "defenseclaw-actor-placeholder"
+	// SandboxSubstrateTokenPlaceholder is SandboxTokenEnv in a Substrate
+	// actor. It is not a credential and no Substrate hook request carries
+	// it as one: it only satisfies the token presence checks the hook
+	// scripts share with OpenShell.
+	SandboxSubstrateTokenPlaceholder = "substrate-actor"
+)
+
+// SandboxIngress is where a sandbox's hooks reach DefenseClaw. The zero
+// value with a port is the OpenShell ingress.
+type SandboxIngress struct {
+	// Runtime is sandboxruntime.OpenShell ("" selects it) or
+	// sandboxruntime.Substrate.
+	Runtime string
+	// Host is the ingress host. OpenShell: empty or SandboxIngressHost.
+	// Substrate: required, the gateway's actor Service DNS name.
+	Host string
+	// Port is the ingress port. Required.
+	Port int
+	// Scheme is "http" (empty selects it) or "https". OpenShell relays
+	// plain HTTP only; a Substrate actor may use https when its rule to the
+	// actor Service is an inspected https rule.
+	Scheme string
+	// CAFile is the absolute in-image CA bundle an https ingress is
+	// verified with (Substrate's projected bundle). It is baked into the
+	// hooks as curl --cacert, because they drop every inherited variable.
+	// Empty keeps curl's default trust. https only.
+	CAFile string
+	// ActorHeader sends SandboxActorHeader: SandboxActorPlaceholder on every
+	// hook request in place of the binding token's Authorization header.
+	// Substrate requires it; OpenShell refuses it.
+	ActorHeader bool
+}
+
+// Addr is the ingress host:port.
+func (in SandboxIngress) Addr() string {
+	return net.JoinHostPort(in.Host, strconv.Itoa(in.Port))
+}
+
+// URL is the ingress URL of an absolute request path.
+func (in SandboxIngress) URL(requestPath string) string {
+	scheme := in.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	return scheme + "://" + in.Addr() + requestPath
+}
+
+// Substrate reports an Agent Substrate ingress.
+func (in SandboxIngress) Substrate() bool {
+	return sandboxruntime.Normalize(in.Runtime) == sandboxruntime.Substrate
+}
 
 // Tamper tiers published for a sandboxed connector.
 const (
@@ -131,8 +201,12 @@ type SandboxBinary struct {
 // harness, uid and ingress port.
 type SandboxRenderTarget struct {
 	// IngressPort is the host-loopback hook ingress port the sandbox reaches
-	// as host.openshell.internal:<IngressPort>. Required.
+	// as host.openshell.internal:<IngressPort>. Required unless Ingress is
+	// set; with Ingress it must be zero or Ingress.Port.
 	IngressPort int
+	// Ingress is a remote ingress (ResolveIngress): an Agent Substrate
+	// actor's gateway Service. Nil renders for OpenShell on IngressPort.
+	Ingress *SandboxIngress
 	// FailMode must be empty or "closed": sandbox hooks always fail closed.
 	// Every request crosses the OpenShell relay and carries a token from the
 	// workload's environment, so the workload can make the ingress answer
@@ -169,7 +243,8 @@ type SandboxArtifacts struct {
 }
 
 // SandboxArtifactProvider is implemented by connectors that can run inside
-// an OpenShell sandbox.
+// a sandbox: an OpenShell sandbox, or an Agent Substrate actor when the
+// target names a Substrate SandboxIngress (SandboxRenderTarget.Ingress).
 type SandboxArtifactProvider interface {
 	SandboxArtifacts(SandboxRenderTarget) (SandboxArtifacts, error)
 }
@@ -217,12 +292,85 @@ func sandboxOnlyHookContracts(connectorName string) []HookContract {
 	return contracts()
 }
 
-// SandboxIngressAddr returns host.openshell.internal:<port>.
-func SandboxIngressAddr(port int) (string, error) {
-	if port < 1 || port > 65535 {
-		return "", fmt.Errorf("sandbox ingress port %d is out of range", port)
+// ResolveIngress returns the validated ingress of t: the OpenShell ingress
+// (SandboxIngressHost, plain HTTP, binding token) on IngressPort when
+// Ingress is nil, else Ingress with its defaults filled in.
+//
+// OpenShell refuses another host, https and the actor header: its relay
+// carries plain HTTP to host loopback and the binding token is its only
+// credential. Substrate needs a DNS host other than the OpenShell alias and
+// the actor header, and takes a CA bundle only with https.
+func (t SandboxRenderTarget) ResolveIngress() (SandboxIngress, error) {
+	in := SandboxIngress{Port: t.IngressPort}
+	if t.Ingress != nil {
+		in = *t.Ingress
+		if t.IngressPort != 0 && t.IngressPort != in.Port {
+			return SandboxIngress{}, fmt.Errorf("sandbox ingress port %d contradicts the ingress's port %d", t.IngressPort, in.Port)
+		}
 	}
-	return fmt.Sprintf("%s:%d", SandboxIngressHost, port), nil
+	if in.Port < 1 || in.Port > 65535 {
+		return SandboxIngress{}, fmt.Errorf("sandbox ingress port %d is out of range", in.Port)
+	}
+	runtimeName := sandboxruntime.Normalize(in.Runtime)
+	if runtimeName == "" {
+		return SandboxIngress{}, fmt.Errorf("sandbox runtime %q is not supported", in.Runtime)
+	}
+	in.Runtime = runtimeName
+	switch in.Scheme {
+	case "":
+		in.Scheme = "http"
+	case "http", "https":
+	default:
+		return SandboxIngress{}, fmt.Errorf("sandbox ingress scheme %q is not http or https", in.Scheme)
+	}
+	if in.CAFile != "" {
+		if in.Scheme != "https" {
+			return SandboxIngress{}, fmt.Errorf("a sandbox ingress CA bundle needs https")
+		}
+		if !path.IsAbs(in.CAFile) || path.Clean(in.CAFile) != in.CAFile || strings.ContainsAny(in.CAFile, "\x00\n\r") {
+			return SandboxIngress{}, fmt.Errorf("sandbox ingress CA bundle %q is not an absolute, clean in-image path", in.CAFile)
+		}
+	}
+	if runtimeName == sandboxruntime.OpenShell {
+		switch {
+		case in.Host != "" && in.Host != SandboxIngressHost:
+			return SandboxIngress{}, fmt.Errorf("an OpenShell sandbox reaches DefenseClaw only at %s, not %q", SandboxIngressHost, in.Host)
+		case in.Scheme != "http":
+			return SandboxIngress{}, fmt.Errorf("the OpenShell relay carries plain HTTP only")
+		case in.ActorHeader:
+			return SandboxIngress{}, fmt.Errorf("an OpenShell sandbox authenticates with its binding token, not the actor header")
+		}
+		in.Host = SandboxIngressHost
+		return in, nil
+	}
+	if !validSandboxIngressDNSName(in.Host) || sandboxruntime.IsOpenShellHostAlias(in.Host) {
+		return SandboxIngress{}, fmt.Errorf("a Substrate sandbox ingress needs the gateway Service's DNS name, not %q", in.Host)
+	}
+	if !in.ActorHeader {
+		return SandboxIngress{}, fmt.Errorf("a Substrate sandbox ingress always sends the %s header: Substrate injects the actor token only into a header the request carries", SandboxActorHeader)
+	}
+	return in, nil
+}
+
+// validSandboxIngressDNSName reports a lowercase DNS name of at most 253
+// bytes whose labels are 1 to 63 letters, digits and inner hyphens. It is
+// baked into shell scripts, so nothing else is allowed.
+func validSandboxIngressDNSName(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // sandboxHookScriptsByConnector lists the connector-owned lifecycle scripts
@@ -254,6 +402,8 @@ var sandboxHookHostOnlyMarkers = []string{
 
 // resolvedSandboxTarget is a validated SandboxRenderTarget.
 type resolvedSandboxTarget struct {
+	// ingress is the validated ingress; ingressAddr is its host:port.
+	ingress     SandboxIngress
 	ingressAddr string
 	failMode    string
 	contract    HookContract
@@ -264,9 +414,15 @@ func resolveSandboxTarget(connectorName string, target SandboxRenderTarget) (res
 	if runtime.GOOS == "windows" {
 		return resolvedSandboxTarget{}, fmt.Errorf("OpenShell sandbox artifacts cannot be rendered on Windows hosts")
 	}
-	ingress, err := SandboxIngressAddr(target.IngressPort)
+	ingress, err := target.ResolveIngress()
 	if err != nil {
 		return resolvedSandboxTarget{}, err
+	}
+	if _, shell := sandboxHookScriptsByConnector[normalizeConnectorName(connectorName)]; ingress.Substrate() && !shell {
+		// Only the shared shell transport (_sandbox.sh) sends the actor
+		// header; a plugin transport would send the bearer and no header,
+		// and Substrate would inject no token.
+		return resolvedSandboxTarget{}, fmt.Errorf("%s has no Agent Substrate transport yet: its in-agent plugin does not send the %s header", connectorName, SandboxActorHeader)
 	}
 	version := strings.TrimSpace(target.AgentVersion)
 	if version == "" {
@@ -292,14 +448,15 @@ func resolveSandboxTarget(connectorName string, target SandboxRenderTarget) (res
 		)
 	}
 	return resolvedSandboxTarget{
-		ingressAddr: ingress,
+		ingress:     ingress,
+		ingressAddr: ingress.Addr(),
 		failMode:    SandboxFailMode,
 		contract:    resolution.Contract,
 		opts: SetupOpts{
 			// DataDir anchors the existing hook-matrix verifiers: they expect
 			// <DataDir>/hooks/<script>, which is SandboxHookDir here.
 			DataDir:           SandboxLibDir,
-			APIAddr:           ingress,
+			APIAddr:           ingress.Addr(),
 			AgentVersion:      version,
 			HookContractID:    resolution.Contract.ContractID,
 			HookFailMode:      SandboxFailMode,
@@ -329,6 +486,14 @@ func renderSandboxHookFiles(connectorName string, rt resolvedSandboxTarget) ([]S
 		SandboxRetryMaxTime:      sandboxHookRetryMaxTimeSeconds,
 		SandboxSessionEndMaxTime: sandboxHookSessionEndMaxTimeSeconds,
 		SandboxHookDirSH:         shellSingleQuote(SandboxHookDir),
+	}
+	if rt.ingress.Substrate() {
+		data.SandboxSubstrate = true
+		data.SandboxScheme = rt.ingress.Scheme
+		data.SandboxActorHeaderSH = shellSingleQuote(SandboxActorHeader + ": " + SandboxActorPlaceholder)
+		if rt.ingress.CAFile != "" {
+			data.SandboxCAFileSH = shellSingleQuote(rt.ingress.CAFile)
+		}
 	}
 	// One harness per image: the shared scripts bake the same connector.
 	scripts, err := renderHookScriptSet(data, data, extras)
@@ -426,6 +591,24 @@ func renderSandboxHardening() ([]byte, error) {
 		return nil, fmt.Errorf("_hardening.sh must create the hook-failure log directory once")
 	}
 	return bytes.Replace(content, []byte(mkdirSentinel), []byte(`  mkdir -p "$log_dir" 2>/dev/null || return 0`), 1), nil
+}
+
+// finalizeSandboxArtifactsFor is finalizeSandboxArtifacts for rt's runtime: a
+// Substrate actor's create-time env carries SandboxSubstrateTokenPlaceholder
+// as SandboxTokenEnv, which no connector may set itself.
+func finalizeSandboxArtifactsFor(rt resolvedSandboxTarget, a SandboxArtifacts) (SandboxArtifacts, error) {
+	if rt.ingress.Substrate() {
+		if _, set := a.Env[SandboxTokenEnv]; set {
+			return SandboxArtifacts{}, fmt.Errorf("sandbox artifacts may not set %s", SandboxTokenEnv)
+		}
+		env := make(map[string]string, len(a.Env)+1)
+		for key, value := range a.Env {
+			env[key] = value
+		}
+		env[SandboxTokenEnv] = SandboxSubstrateTokenPlaceholder
+		a.Env = env
+	}
+	return finalizeSandboxArtifacts(a)
 }
 
 // finalizeSandboxArtifacts validates paths, rejects duplicates and sorts the

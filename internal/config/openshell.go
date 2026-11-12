@@ -208,7 +208,7 @@ type OpenShellConfig struct {
 	// Admin holds the administrator's constraints. In managed_enterprise the
 	// config file is administrator-owned and Admin is authoritative;
 	// elsewhere it is still enforced, but the user owns the file.
-	Admin OpenShellAdminConfig `mapstructure:"admin" yaml:"admin,omitempty"`
+	Admin SandboxAdminConfig `mapstructure:"admin" yaml:"admin,omitempty"`
 }
 
 // OpenShellGatewayConfig selects the local OpenShell gateway registration and
@@ -358,10 +358,15 @@ type OpenShellMCPConfig struct {
 	HostPorts []int `mapstructure:"host_ports" yaml:"host_ports,omitempty"`
 }
 
-// OpenShellAdminConfig is the administrator's sandbox policy. Every field is
+// SandboxAdminConfig is the administrator's sandbox policy. Every field is
 // optional; an unset field imposes no constraint. The Allow* switches are
 // tri-state so an absent key never reads as "false".
-type OpenShellAdminConfig struct {
+//
+// It is runtime-neutral: OpenShell sandboxes read it from openshell.admin
+// and guardrail.profiles.<p>.sandbox, and Agent Substrate actors take the
+// same floor. The YAML keys and the Python mirror's field names are
+// unchanged.
+type SandboxAdminConfig struct {
 	// RequiredPack forces the pack (name or absolute path) and makes its
 	// posture a floor: user keys and run flags may tighten its profile,
 	// skip-permissions default, workspace mode, MCP import, blocklist feeds
@@ -410,7 +415,7 @@ type OpenShellAdminConfig struct {
 	// The keys below serve managed identity-based sandboxes. The same type
 	// is openshell.admin (the organization floor: the loosest anyone gets)
 	// and guardrail.profiles.<p>.sandbox (a tighten-only overlay, combined
-	// by TightenOpenShellAdmin). Intersect lists (AllowedHarnesses,
+	// by TightenSandboxAdmin). Intersect lists (AllowedHarnesses,
 	// AllowedCredentials, EgressAllowOnly, RequiredFor) are unset = no
 	// constraint; the schema refuses an explicit empty list.
 
@@ -454,7 +459,7 @@ type OpenShellAdminConfig struct {
 	DriverFallback string `mapstructure:"driver_fallback" yaml:"driver_fallback,omitempty"`
 }
 
-// Values of the managed sandbox floor keys of OpenShellAdminConfig.
+// Values of the managed sandbox floor keys of SandboxAdminConfig.
 const (
 	OpenShellWhenUnavailableRefuse = "refuse"
 	OpenShellWhenUnavailableAlert  = "alert"
@@ -479,8 +484,13 @@ const (
 	OpenShellRequestAccessFallback = "contact your IT help desk"
 )
 
+// OpenShellAdminConfig is the name SandboxAdminConfig had through 1.0.9.
+// The OpenShell packages still use it; it stays until they move to the
+// runtime-neutral name.
+type OpenShellAdminConfig = SandboxAdminConfig
+
 // IsZero reports whether no administrator constraint is configured.
-func (a OpenShellAdminConfig) IsZero() bool {
+func (a SandboxAdminConfig) IsZero() bool {
 	return a.RequiredPack == "" && a.RequiredPackDigest == "" && a.MinProfile == "" && a.AllowYolo == nil &&
 		a.AllowMount == nil && a.AllowHostPorts == nil && a.AllowUnblock == nil &&
 		a.AllowLearnMode == nil && len(a.AllowedHarnesses) == 0 &&
@@ -494,7 +504,7 @@ func (a OpenShellAdminConfig) IsZero() bool {
 }
 
 // IsLocked reports whether key is listed in Locked.
-func (a OpenShellAdminConfig) IsLocked(key string) bool {
+func (a SandboxAdminConfig) IsLocked(key string) bool {
 	for _, locked := range a.Locked {
 		if strings.TrimSpace(locked) == key {
 			return true
@@ -1095,7 +1105,7 @@ func (o *OpenShellConfig) Validate() error {
 
 // validateAs checks one floor section: openshell.admin (prefix "admin") or a
 // profile's sandbox section (prefix "sandbox", the same type).
-func (a *OpenShellAdminConfig) validateAs(prefix string) error {
+func (a *SandboxAdminConfig) validateAs(prefix string) error {
 	a.foldEnumCase()
 	var errs []error
 	check := func(err error) {
@@ -1207,7 +1217,7 @@ func foldOpenShellEnumCase(root *yaml.Node) {
 // foldEnumCase lowercases a floor's settings that openShellAdminEnumKeys
 // name, for a configuration the loader decoded from the file itself
 // (foldOpenShellEnumCase folds the same in the document).
-func (a *OpenShellAdminConfig) foldEnumCase() {
+func (a *SandboxAdminConfig) foldEnumCase() {
 	for _, v := range []*string{&a.WhenUnavailable, &a.UserApprovals, &a.OnSilence, &a.ForeignSandboxes, &a.DriverFallback, &a.MinProfile} {
 		*v = strings.ToLower(*v)
 	}
