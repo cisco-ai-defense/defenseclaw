@@ -17,12 +17,12 @@
 package gateway
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -41,8 +41,10 @@ import (
 // Request bodies are inspected and responses forwarded by the proxy's
 // passthrough path, which keeps Bedrock's eventstream framing unchanged.
 //
-// SubstrateLLMRouter is the seam where stream 1 routing and stream 10
-// usage plug in (lane A12): it may choose another upstream for the call.
+// Routing (1.0.10 stream 1) and usage (stream 10) run inside the proxy
+// (handleChatCompletion and handlePassthrough) for this call as for any
+// other, on the verified caller the actor listener attached
+// (substrate_identity.go); /llm adds neither.
 
 // SubstrateLLMProvider is one model provider the actor listener serves.
 type SubstrateLLMProvider struct {
@@ -55,31 +57,11 @@ type SubstrateLLMProvider struct {
 	AuthHeader string
 }
 
-// SubstrateLLMRoute is the upstream a call goes to.
-type SubstrateLLMRoute struct {
-	Provider string
-	Origin   string
-	Path     string
-}
-
-// SubstrateLLMRouter may change a call's route (routing, budgets). It
-// returns an error to refuse the call (for example a batch over budget).
-type SubstrateLLMRouter interface {
-	RouteModelCall(ctx context.Context, actor SubstrateModelCaller, route SubstrateLLMRoute) (SubstrateLLMRoute, error)
-}
-
-// SubstrateModelCaller is what a router sees of the caller.
-type SubstrateModelCaller struct {
-	Atespace, Name, UID, Owner, Profile, BatchID string
-	Unattended                                   bool
-}
-
 // SubstrateLLMConfig configures /llm.
 type SubstrateLLMConfig struct {
 	Providers map[string]SubstrateLLMProvider
 	// Proxy serves the call (GuardrailProxy.SubstrateHandler).
-	Proxy  http.Handler
-	Router SubstrateLLMRouter
+	Proxy http.Handler
 }
 
 var substrateProviderRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -126,8 +108,7 @@ var substrateCredentialHeaders = []string{
 }
 
 func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	actor, ok := substrateActorFrom(r.Context())
-	if !ok {
+	if _, ok := substrateActorFrom(r.Context()); !ok {
 		writeSubstrateRefusal(w, http.StatusUnauthorized, "missing_token")
 		return
 	}
@@ -138,24 +119,14 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeSubstrateRefusal(w, http.StatusNotFound, "provider_not_served")
 		return
 	}
-	route := SubstrateLLMRoute{Provider: provider, Origin: p.Origin, Path: "/" + upstreamPath}
-	if s.cfg.Router != nil {
-		reg, _ := substrateRegistrationFrom(r.Context())
-		next, err := s.cfg.Router.RouteModelCall(r.Context(), SubstrateModelCaller{
-			Atespace: actor.Atespace, Name: actor.Name, UID: actor.UID, Owner: reg.Person.ID(),
-			Profile: reg.Profile, BatchID: reg.BatchID, Unattended: reg.Unattended,
-		}, route)
-		if err != nil {
-			writeSubstrateRefusal(w, http.StatusForbidden, "model_call_refused")
-			return
-		}
-		if np, ok := s.cfg.Providers[next.Provider]; ok {
-			route, p = next, np
-		}
+	upstream := "/" + upstreamPath
+	if path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") {
+		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
+		return
 	}
 	key, err := os.ReadFile(p.CredentialFile)
 	if err != nil || strings.TrimSpace(string(key)) == "" {
-		fmt.Fprintf(os.Stderr, "[substrate] llm: provider %s has no readable credential (%s)\n", route.Provider, p.CredentialFile)
+		fmt.Fprintf(os.Stderr, "[substrate] llm: provider %s has no readable credential (%s)\n", provider, p.CredentialFile)
 		writeSubstrateRefusal(w, http.StatusServiceUnavailable, "provider_credential_unavailable")
 		return
 	}
@@ -164,7 +135,7 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, h := range substrateCredentialHeaders {
 		r2.Header.Del(h)
 	}
-	r2.Header.Set("X-DC-Target-URL", route.Origin)
+	r2.Header.Set("X-DC-Target-URL", p.Origin)
 	r2.Header.Set("X-AI-Auth", "Bearer "+secret)
 	switch strings.ToLower(p.AuthHeader) {
 	case "x-api-key":
@@ -177,7 +148,7 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r2.Header.Set("Authorization", "Bearer "+secret)
 	}
 	u := *r.URL
-	u.Path, u.RawPath = route.Path, ""
+	u.Path, u.RawPath = upstream, ""
 	r2.URL = &u
 	r2.RequestURI = ""
 	s.cfg.Proxy.ServeHTTP(w, r2)
