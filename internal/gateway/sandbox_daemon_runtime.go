@@ -2251,6 +2251,7 @@ func managedExplainFloor(me sandboxapi.ManagedExplain) config.OpenShellAdminConf
 	}
 	f := config.OpenShellAdminConfig{
 		Allowed: deny(me.Allowed), RequiredFor: slices.Clone(me.RequiredFor), WhenUnavailable: me.WhenUnavailable,
+		Runtimes:         slices.Clone(me.Runtimes),
 		AllowedHarnesses: slices.Clone(me.AllowedHarnesses), AllowedCredentials: slices.Clone(me.AllowedCredentials),
 		EgressAllowOnly: slices.Clone(me.EgressAllowOnly), EgressBlock: slices.Clone(me.EgressBlock),
 		UserApprovals: me.UserApprovals, AllowUnblock: deny(me.AllowUnblock), AllowHostPorts: deny(me.AllowHostPorts),

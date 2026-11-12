@@ -2203,7 +2203,13 @@ _OPENSHELL_ADMIN_FLOOR_KEYS = (
 
 # The Agent Substrate floor keys, refused in openshell.admin (Go
 # SandboxSubstrateOnlyKeys).
-_SANDBOX_SUBSTRATE_ONLY_KEYS = ("sandbox_class", "idle_suspend_after", "unattended_asks", "ask_timeout", "actor_secrets")
+_SANDBOX_SUBSTRATE_ONLY_KEYS = (
+    "sandbox_class",
+    "idle_suspend_after",
+    "unattended_asks",
+    "ask_timeout",
+    "actor_secrets",
+)
 
 
 @dataclass
@@ -3782,8 +3788,12 @@ def _sandbox_runtime_keys_error(section: Mapping[str, Any], prefix: str) -> str 
             return error
     minute, day = 60 * 10**9, 24 * 3600 * 10**9
     for error in (
-        _sandbox_go_duration_error(f"{prefix}.idle_suspend_after", section.get("idle_suspend_after"), minute, 0, "1m", "", "30m"),
-        _sandbox_go_duration_error(f"{prefix}.ask_timeout", section.get("ask_timeout"), minute, day, "1m", "24h0m0s", "30m"),
+        _sandbox_go_duration_error(
+            f"{prefix}.idle_suspend_after", section.get("idle_suspend_after"), minute, 0, "1m", "", "30m"
+        ),
+        _sandbox_go_duration_error(
+            f"{prefix}.ask_timeout", section.get("ask_timeout"), minute, day, "1m", "24h0m0s", "30m"
+        ),
     ):
         if error:
             return error
@@ -3795,7 +3805,10 @@ def _sandbox_runtime_keys_error(section: Mapping[str, Any], prefix: str) -> str 
         return f"{prefix}.actor_secrets: at most 64 entries"
     for index, name in enumerate(secrets):
         if not isinstance(name, str) or not _SANDBOX_ACTOR_SECRET_RE.match(name):
-            return f'{prefix}.actor_secrets[{index}]: {_go_quote(name)} must be a secret key (letters, digits, ".", "_" and "-")'
+            return (
+                f"{prefix}.actor_secrets[{index}]: {_go_quote(name)} "
+                'must be a secret key (letters, digits, ".", "_" and "-")'
+            )
     return None
 
 
