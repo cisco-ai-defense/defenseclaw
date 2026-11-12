@@ -68,11 +68,25 @@ func NewTransport(cfg Config) (*Transport, error) {
 		return nil, err
 	}
 	dialer := &net.Dialer{Timeout: cfg.connectTimeout(), KeepAlive: 30 * time.Second}
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// Every hook is a new process with no DNS cache, and in an actor
+		// each lookup goes through egress DNS. An absolute name skips the
+		// ndots search list (the gateway FQDN has four dots, under
+		// Kubernetes' ndots:5), and tcp4 asks for A only. The plain dial is
+		// the fallback (an IPv6-only cluster).
+		if host, port, err := net.SplitHostPort(addr); err == nil && net.ParseIP(host) == nil &&
+			strings.Contains(host, ".") && !strings.HasSuffix(host, ".") {
+			if c, err := dialer.DialContext(ctx, "tcp4", net.JoinHostPort(host+".", port)); err == nil {
+				return c, nil
+			}
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}
 	tr := &http.Transport{
 		// Hook traffic never follows the workload's proxy variables: the
 		// agent controls them. Substrate egress is transparent.
 		Proxy:               nil,
-		DialContext:         dialer.DialContext,
+		DialContext:         dial,
 		TLSClientConfig:     &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout: cfg.connectTimeout() + time.Second,
 		ForceAttemptHTTP2:   true,
