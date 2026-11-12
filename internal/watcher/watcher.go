@@ -4742,6 +4742,9 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 			continue
 		}
 		child := filepath.Join(dir, entry.Name())
+		if w.inClaudeCacheTransient(child) {
+			continue
+		}
 		if root, copied := w.cachePluginCopyRoot(child); copied {
 			if !sameWatcherPath(root, child) {
 				continue
@@ -4776,12 +4779,53 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 	if w.secureClientActive() {
 		return false
 	}
-	pathAbs, err := filepath.Abs(path)
-	if err != nil {
+	rootAbs, parts, ok := w.claudeCacheParts(path)
+	if !ok {
 		return false
 	}
-	for _, root := range w.pluginDirs {
-		rootAbs, absErr := filepath.Abs(root)
+	if claudeCacheTransientParts(parts) {
+		return true
+	}
+	first := parts[0]
+	if !isPluginStagingFolder(first) {
+		return false
+	}
+	if grace <= 0 {
+		return true
+	}
+	info, statErr := os.Lstat(filepath.Join(rootAbs, first))
+	return statErr == nil && time.Since(info.ModTime()) < grace
+}
+
+// inClaudeCacheTransient reports a path that is never a plugin in a Claude
+// Code plugin cache: the temp_subdir_<n>_<random>.clone folder "claude plugin
+// update" clones a marketplace into, and anything below a .git folder. The
+// watcher read each .git/<hooks|objects|refs|...> folder of a staging clone
+// as a <marketplace>/<plugin>/<version> plugin named
+// ".git@temp_subdir_<n>.clone", scanned it, found no manifest and
+// quarantined the git object store while git still used it, so the update
+// failed (issue #1428). The clone is a git checkout of the marketplace, not
+// something Claude Code loads, so unlike the temp_local_ staging folder it is
+// left alone however long it lives. The Secure Client profile keeps the
+// earlier behaviour.
+func (w *InstallWatcher) inClaudeCacheTransient(path string) bool {
+	if w.secureClientActive() {
+		return false
+	}
+	_, parts, ok := w.claudeCacheParts(path)
+	return ok && claudeCacheTransientParts(parts)
+}
+
+// claudeCacheParts splits path, when it lies below a plugin root named
+// cache, into the root and its folder names relative to it. Both separators
+// split, so a Windows path reads the same on every host.
+func (w *InstallWatcher) claudeCacheParts(path string) (root string, parts []string, ok bool) {
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return "", nil, false
+	}
+	for _, dir := range w.pluginDirs {
+		rootAbs, absErr := filepath.Abs(dir)
 		if absErr != nil || !strings.EqualFold(filepath.Base(rootAbs), "cache") {
 			continue
 		}
@@ -4790,17 +4834,41 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			continue
 		}
-		first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
-		if !isPluginStagingFolder(first) {
-			return false
-		}
-		if grace <= 0 {
+		return rootAbs, splitCacheRelative(relative), true
+	}
+	return "", nil, false
+}
+
+// splitCacheRelative splits a path relative to a plugin cache on both
+// separators.
+func splitCacheRelative(relative string) []string {
+	return strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })
+}
+
+// claudeCacheTransientParts is the name test behind inClaudeCacheTransient
+// on the folder names of a path relative to the cache root.
+func claudeCacheTransientParts(parts []string) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	if isClaudeCloneStaging(parts[0]) {
+		return true
+	}
+	for _, part := range parts {
+		if strings.EqualFold(part, ".git") {
 			return true
 		}
-		info, statErr := os.Lstat(filepath.Join(rootAbs, first))
-		return statErr == nil && time.Since(info.ModTime()) < grace
 	}
 	return false
+}
+
+// isClaudeCloneStaging names the temp_subdir_<n>_<random>.clone folder
+// "claude plugin update" clones into.
+func isClaudeCloneStaging(name string) bool {
+	const prefix, suffix = "temp_subdir_", ".clone"
+	lower := strings.ToLower(name)
+	return len(lower) > len(prefix)+len(suffix) &&
+		strings.HasPrefix(lower, prefix) && strings.HasSuffix(lower, suffix)
 }
 
 // isPluginStagingFolder names a staging folder in a plugin cache: Claude
