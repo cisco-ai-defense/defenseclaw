@@ -207,7 +207,7 @@ func engineRequest(in *ModelRouterInput) engine.Request {
 		APIFamily: in.APIFamily, Connector: in.Connector, Listener: in.Listener, Severity: in.Severity,
 		RequestedModel: strings.TrimSpace(in.RequestModel), RequestedProvider: in.RequestedProvider,
 		CredentialClass: in.CredentialClass, HasTools: len(in.Tools) > 0, HasImages: in.HasImages,
-		ConversationID: in.ConversationID, Profiles: in.Profiles, Caller: in.Caller,
+		ConversationID: in.ConversationID, Profiles: in.Profiles, Caller: in.Caller, ToolTurn: in.ToolTurn,
 	}
 	if req.APIFamily == "" {
 		req.APIFamily = config.RoutingAPIChat
@@ -229,7 +229,7 @@ func engineRequest(in *ModelRouterInput) engine.Request {
 	// About four bytes per token: more than 100k estimated input tokens.
 	req.LongContext = size > 400_000
 	if n := len(in.Messages); n > 0 {
-		req.ToolTurn = in.Messages[n-1].Role == "tool"
+		req.ToolTurn = in.ToolTurn || in.Messages[n-1].Role == "tool"
 		if text == "" {
 			for i := n - 1; i >= 0; i-- {
 				if in.Messages[i].Role == "user" {

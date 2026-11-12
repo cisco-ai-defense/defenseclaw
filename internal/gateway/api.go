@@ -71,10 +71,12 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health *SidecarHealth
-	client *Client
-	store  *audit.Store
-	logger *audit.Logger
+	// routeOnly serves /r/<connector>/ (route-only mode); nil = not mounted.
+	routeOnly atomic.Pointer[routeOnlyServer]
+	health    *SidecarHealth
+	client    *Client
+	store     *audit.Store
+	logger    *audit.Logger
 	// protectedFiles is the sidecar's protected-file watch (nil when off or
 	// in a test server); the hook handler records tool calls for it.
 	protectedFiles *protectedFileWatch
@@ -1084,6 +1086,11 @@ func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
 
 // SetFleetAPI registers the Edge Connector fleet management API so its
 // routes are mounted when the HTTP server starts.
+// SetRouteOnly installs the route-only server for hook connectors.
+func (a *APIServer) SetRouteOnly(s *routeOnlyServer) {
+	a.routeOnly.Store(s)
+}
+
 func (a *APIServer) SetFleetAPI(api *fleet.API) {
 	if a == nil {
 		return
@@ -1537,6 +1544,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 		reg = InstallSharedAgentRegistry("", "")
 	}
 	handler = CorrelationMiddleware(reg)(handler)
+	// Route-only requests leave before Correlation, token auth, CSRF and
+	// the body limit (DESIGN 16.1); everything else is untouched.
+	handler = routeOnlyDispatch(a.routeOnly.Load, handler)
 	// request-ID then scoped W3C extraction so generated hook spans retain the
 	// agent parent without creating an unregistered SDK server span.
 	handler = requestIDMiddleware(handler)
