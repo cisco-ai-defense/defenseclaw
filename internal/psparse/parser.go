@@ -18,9 +18,9 @@ const maxDepth = 200
 // Diagnostic and resynchronises to the next statement boundary rather than
 // failing. It never panics.
 type parser struct {
-	toks    []Token
-	i       int
-	diags   []Diagnostic
+	toks      []Token
+	i         int
+	diags     []Diagnostic
 	dialect   Dialect
 	depth     int
 	topParams []*Variable
@@ -48,7 +48,7 @@ func Parse(src string, opts Options) (*Script, error) {
 
 // topParams accumulates names from a top-level param() block.
 // (stored on the parser to thread through parseStatementList)
-func (p *parser) cur() Token  { return p.toks[p.i] }
+func (p *parser) cur() Token { return p.toks[p.i] }
 func (p *parser) kind() TokenKind {
 	return p.toks[p.i].Kind
 }

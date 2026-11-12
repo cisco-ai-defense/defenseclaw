@@ -15,24 +15,24 @@ func (s span) Span() (int, int) { return s.start, s.end }
 // statically. They are stable strings so rules and the effects lane can key
 // on them.
 const (
-	ReasonNone             = ""
-	ReasonUnterminated     = "ps_unterminated"       // unterminated string/here-string/block/comment
-	ReasonUnknownToken     = "ps_unknown_token"      // a lexeme the lexer could not classify
-	ReasonUnbalanced       = "ps_unbalanced"         // mismatched (), {}, [], @()
-	ReasonDynamicName      = "ps_dynamic_command"    // command name is a non-literal expression (& $var)
-	ReasonDynamicMember    = "ps_dynamic_member"     // member/method name is computed
-	ReasonStopParsing      = "ps_stop_parsing"       // --% verbatim remainder (not structured)
-	ReasonNonLiteral       = "ps_non_literal"        // a value that is not a static literal
-	ReasonDepthLimit       = "ps_depth_limit"        // recursion/size guard tripped
-	ReasonTruncated        = "ps_truncated"          // input exceeded the byte budget
-	ReasonIncompleteExpr   = "ps_incomplete_expr"    // expression ended unexpectedly
+	ReasonNone           = ""
+	ReasonUnterminated   = "ps_unterminated"    // unterminated string/here-string/block/comment
+	ReasonUnknownToken   = "ps_unknown_token"   // a lexeme the lexer could not classify
+	ReasonUnbalanced     = "ps_unbalanced"      // mismatched (), {}, [], @()
+	ReasonDynamicName    = "ps_dynamic_command" // command name is a non-literal expression (& $var)
+	ReasonDynamicMember  = "ps_dynamic_member"  // member/method name is computed
+	ReasonStopParsing    = "ps_stop_parsing"    // --% verbatim remainder (not structured)
+	ReasonNonLiteral     = "ps_non_literal"     // a value that is not a static literal
+	ReasonDepthLimit     = "ps_depth_limit"     // recursion/size guard tripped
+	ReasonTruncated      = "ps_truncated"       // input exceeded the byte budget
+	ReasonIncompleteExpr = "ps_incomplete_expr" // expression ended unexpectedly
 )
 
 // Script is the root: an ordered list of statements plus the parameter block
 // if any. Diagnostics collects every Reason the parser attached anywhere.
 type Script struct {
 	span
-	Params      []*Variable  // from a top-level param( ) block, names only
+	Params      []*Variable // from a top-level param( ) block, names only
 	Statements  []Statement
 	Diagnostics []Diagnostic
 	Dialect     Dialect
@@ -68,9 +68,9 @@ type Pipeline struct {
 	Elements []PipelineElement // joined by |
 	// Chain, when non-nil, means this pipeline is the left side of a
 	// &&/|| chain whose right side is ChainRHS.
-	ChainOp  string // "" | "&&" | "||"
-	ChainRHS *Pipeline
-	Redirs   []*Redirection
+	ChainOp    string // "" | "&&" | "||"
+	ChainRHS   *Pipeline
+	Redirs     []*Redirection
 	Background bool // trailing &
 }
 
@@ -158,8 +158,8 @@ func (*Assignment) stmt() {}
 type Block struct {
 	span
 	Keyword    string
-	Name       string       // function name / label, when applicable
-	Conditions []Statement  // conditions and headers (recursed too)
+	Name       string      // function name / label, when applicable
+	Conditions []Statement // conditions and headers (recursed too)
 	Bodies     []*ScriptBlockExpr
 }
 

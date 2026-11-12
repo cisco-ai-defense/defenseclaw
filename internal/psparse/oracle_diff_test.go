@@ -98,9 +98,9 @@ foreach ($line in $lines) {
 `
 
 type oracleLine struct {
-	I    int          `json:"i"`
-	Err  bool         `json:"err"`
-	Proj []oracleInv  `json:"proj"`
+	I    int         `json:"i"`
+	Err  bool        `json:"err"`
+	Proj []oracleInv `json:"proj"`
 }
 
 type oracleInv struct {

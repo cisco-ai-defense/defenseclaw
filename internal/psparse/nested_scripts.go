@@ -21,12 +21,12 @@ type NestedScript struct {
 }
 
 const (
-	KindPowerShellCommand = "powershell-command"  // powershell -Command "<text>"
-	KindEncodedCommand    = "encodedcommand"      // powershell -EncodedCommand <b64 utf16le>
-	KindIEXLiteral        = "iex-literal"         // Invoke-Expression '<text>'
-	KindScriptBlockCreate = "scriptblock-create"  // [scriptblock]::Create('<text>')
-	KindStartProcessArgs  = "start-process-args"  // Start-Process powershell -ArgumentList ...
-	KindCmdC              = "cmd-c"               // cmd /c "<text>"
+	KindPowerShellCommand = "powershell-command" // powershell -Command "<text>"
+	KindEncodedCommand    = "encodedcommand"     // powershell -EncodedCommand <b64 utf16le>
+	KindIEXLiteral        = "iex-literal"        // Invoke-Expression '<text>'
+	KindScriptBlockCreate = "scriptblock-create" // [scriptblock]::Create('<text>')
+	KindStartProcessArgs  = "start-process-args" // Start-Process powershell -ArgumentList ...
+	KindCmdC              = "cmd-c"              // cmd /c "<text>"
 )
 
 var psExeNames = map[string]bool{

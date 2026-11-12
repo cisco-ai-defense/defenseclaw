@@ -78,8 +78,8 @@ func FuzzParse(f *testing.F) {
 	f.Add(strings.Repeat("@{", 5000))
 	f.Add(strings.Repeat("& ", 5000) + "x")
 	f.Add(strings.Repeat("'a", 5000))
-	f.Add("${`")           // fuzz regression: backtick escape at end of ${ }
-	f.Add("${a`")          //                  and with a name
+	f.Add("${`")  // fuzz regression: backtick escape at end of ${ }
+	f.Add("${a`") //                  and with a name
 	f.Add(strings.Repeat("${`", 2000))
 	f.Fuzz(func(t *testing.T, s string) {
 		sc, err := Parse(s, Options{})

@@ -200,7 +200,7 @@ func (l *lexer) lexSingleString() {
 
 func (l *lexer) lexDoubleString() {
 	a := l.i
-	l.i++ // opening "
+	l.i++      // opening "
 	depth := 0 // $( ) nesting so a ) inside does not confuse us
 	for l.i < len(l.runes) {
 		r := l.cur()
@@ -670,7 +670,7 @@ func isNameStart(r rune) bool {
 func isNameChar(r rune) bool {
 	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
-func isLetter(r rune) bool  { return unicode.IsLetter(r) }
+func isLetter(r rune) bool { return unicode.IsLetter(r) }
 func isHex(r rune) bool {
 	return unicode.IsDigit(r) || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
 }
