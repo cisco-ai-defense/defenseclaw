@@ -52,7 +52,11 @@ const (
 	RoutingConditionKeyword   = "keyword"
 	RoutingConditionConnector = "connector"
 	RoutingConditionAPIFamily = "api_family"
+	RoutingConditionRequest   = "request"
 )
+
+// RoutingRequestConditions are the names a request condition accepts.
+var RoutingRequestConditions = []string{"has_tools", "tool_turn", "has_images", "long_context"}
 
 // RoutingLockableKeys are the names routing.admin.locked accepts. The
 // first three are the keys a guardrail profile overlay may otherwise set;
@@ -121,10 +125,12 @@ func (a *RoutingAdminConfig) IsLocked(key string) bool {
 	return false
 }
 
-// RoutingSensitiveConfig narrows the allowed set when the pre-call
-// guardrail verdict is at or above SeverityAtLeast.
+// RoutingSensitiveConfig narrows the allowed set to Aliases when the
+// pre-call guardrail verdict is at or above SeverityAtLeast or one of the
+// keyword Signals matches (best effort: neither catches prose PII).
 type RoutingSensitiveConfig struct {
 	SeverityAtLeast string   `mapstructure:"severity_at_least" yaml:"severity_at_least,omitempty"`
+	Signals         []string `mapstructure:"signals"           yaml:"signals,omitempty"`
 	Aliases         []string `mapstructure:"aliases"           yaml:"aliases,omitempty"`
 }
 

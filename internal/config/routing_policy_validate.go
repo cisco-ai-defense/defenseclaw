@@ -157,8 +157,19 @@ func (r *RoutingConfig) validatePolicyKeys(aliases map[string]string) error {
 		return err
 	}
 	if s := r.Sensitive; s != nil {
-		if !validRoutingSeverity(s.SeverityAtLeast) {
+		if s.SeverityAtLeast == "" && len(s.Signals) == 0 {
+			return fmt.Errorf("sensitive needs severity_at_least or signals")
+		}
+		if s.SeverityAtLeast != "" && !validRoutingSeverity(s.SeverityAtLeast) {
 			return fmt.Errorf("sensitive.severity_at_least %q must be LOW, MEDIUM, HIGH or CRITICAL", s.SeverityAtLeast)
+		}
+		for i, name := range s.Signals {
+			if !slices.ContainsFunc(r.Signals.Keywords, func(k RoutingKeywordSignal) bool { return strings.TrimSpace(k.Name) == name }) {
+				return fmt.Errorf("sensitive.signals[%d] references unknown keyword signal %q", i, name)
+			}
+		}
+		if len(s.Signals) > 0 && r.EffectiveClassifier() == RoutingClassifierVLLMSR {
+			return fmt.Errorf("sensitive.signals needs classifier rules or systemone (the gateway evaluates the signals)")
 		}
 		if len(s.Aliases) == 0 {
 			return fmt.Errorf("sensitive.aliases must name at least one routing.models alias")

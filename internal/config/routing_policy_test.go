@@ -45,6 +45,26 @@ func TestRoutingPolicyKeysValidate(t *testing.T) {
 			r.Sensitive = &RoutingSensitiveConfig{SeverityAtLeast: "high", Aliases: []string{"fast"}}
 		}, ""},
 		{"sensitive no aliases", func(r *RoutingConfig) { r.Sensitive = &RoutingSensitiveConfig{SeverityAtLeast: "HIGH"} }, "sensitive.aliases"},
+		{"sensitive needs a trigger", func(r *RoutingConfig) { r.Sensitive = &RoutingSensitiveConfig{Aliases: []string{"fast"}} }, "severity_at_least or signals"},
+		{"sensitive signals on rules", func(r *RoutingConfig) {
+			r.Classifier = "rules"
+			r.Sensitive = &RoutingSensitiveConfig{Signals: []string{"code"}, Aliases: []string{"fast"}}
+		}, ""},
+		{"sensitive signals unknown", func(r *RoutingConfig) {
+			r.Classifier = "rules"
+			r.Sensitive = &RoutingSensitiveConfig{Signals: []string{"pii"}, Aliases: []string{"fast"}}
+		}, "unknown keyword signal"},
+		{"sensitive signals on vllm", func(r *RoutingConfig) {
+			r.Sensitive = &RoutingSensitiveConfig{Signals: []string{"code"}, Aliases: []string{"fast"}}
+		}, "needs classifier rules"},
+		{"request condition ok", func(r *RoutingConfig) {
+			r.Classifier = "rules"
+			r.Decisions = append(r.Decisions, RoutingDecisionRule{Name: "t", Conditions: []RoutingCondition{{Type: "request", Name: "tool_turn"}}, ModelRefs: []string{"fast"}})
+		}, ""},
+		{"request condition bad", func(r *RoutingConfig) {
+			r.Classifier = "rules"
+			r.Decisions = append(r.Decisions, RoutingDecisionRule{Name: "t", Conditions: []RoutingCondition{{Type: "request", Name: "is_long"}}, ModelRefs: []string{"fast"}})
+		}, "must be one of"},
 		{"systemone timeout", func(r *RoutingConfig) { r.SystemOne = &RoutingSystemOneConfig{TimeoutMs: 5000} }, "timeout_ms"},
 		{"systemone own endpoint missing", func(r *RoutingConfig) {
 			r.Classifier = "systemone"

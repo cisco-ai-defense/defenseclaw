@@ -165,9 +165,12 @@ func (r *RoutingConfig) Validate() error {
 				if _, exists := keywordSignals[conditionName]; !exists {
 					return fmt.Errorf("decisions[%d].conditions[%d] references unknown keyword signal %q", i, j, condition.Name)
 				}
-			case RoutingConditionConnector, RoutingConditionAPIFamily:
+			case RoutingConditionConnector, RoutingConditionAPIFamily, RoutingConditionRequest:
 				if r.EffectiveClassifier() == RoutingClassifierVLLMSR {
 					return fmt.Errorf("decisions[%d].conditions[%d].type %q needs classifier rules or systemone (vllm_sr supports keyword only)", i, j, condition.Type)
+				}
+				if strings.EqualFold(condition.Type, RoutingConditionRequest) && !slices.Contains(RoutingRequestConditions, conditionName) {
+					return fmt.Errorf("decisions[%d].conditions[%d].name %q must be one of %s", i, j, condition.Name, strings.Join(RoutingRequestConditions, ", "))
 				}
 				if strings.EqualFold(condition.Type, RoutingConditionAPIFamily) && !slices.Contains(RoutingAPIs, conditionName) {
 					return fmt.Errorf("decisions[%d].conditions[%d].name %q must be one of %s", i, j, condition.Name, strings.Join(RoutingAPIs, ", "))
@@ -176,7 +179,7 @@ func (r *RoutingConfig) Validate() error {
 					return fmt.Errorf("decisions[%d].conditions[%d].name must be non-empty", i, j)
 				}
 			default:
-				return fmt.Errorf("decisions[%d].conditions[%d].type %q is unsupported (supported: keyword, connector, api_family)", i, j, condition.Type)
+				return fmt.Errorf("decisions[%d].conditions[%d].type %q is unsupported (supported: keyword, connector, api_family, request)", i, j, condition.Type)
 			}
 		}
 	}

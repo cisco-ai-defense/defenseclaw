@@ -680,12 +680,12 @@ Routing keys added in 1.0.10. Each one is optional; leaving it out keeps the 1.0
 | `routing.default_alias` | a `routing.models` alias used when nothing else is picked | the unconditional decision |
 | `routing.categories` | map of classifier category to alias | none |
 | `routing.allow_user_override` | `true` lets a request that names an allowed alias keep it | `false` |
-| `routing.sensitive` | `severity_at_least` and `aliases`: at or above that guardrail severity only these aliases are used | none |
+| `routing.sensitive` | `aliases` plus `severity_at_least` and/or `signals` (keyword signal names): at or above that guardrail severity, or when a listed signal matches, only these aliases are used. Best effort: regex and keyword checks miss personal data written in prose; for regulated groups give their profile an `allowed_aliases` list of local models only | none |
 | `routing.systemone` | `use_decision_model` (reuse `decision_model`), `base_url`, `model`, `api_key_env`, `credential`, `timeout_ms` (default 300, at most 1000) | none |
 | `routing.models[].apis` | `chat`, `messages`, `responses`, `converse`, `invoke`: API families the backend serves without translation | the provider default |
 | `routing.models[].credential` | protected credential name on a managed host (`api_key_env` is for per-user installs) | none |
 | `routing.models[].bedrock` | `region`, `auth` (`passthrough`, `profile`, `instance_role`, `iam_credentials`) and the key names for gateway signing | none |
-| `routing.decisions[].conditions[].type` | `keyword`, plus `connector` and `api_family` with the `rules` or `systemone` classifier | `keyword` only |
+| `routing.decisions[].conditions[].type` | `keyword`, plus `connector`, `api_family` and `request` (`has_tools`, `tool_turn`, `has_images`, `long_context`) with the `rules` or `systemone` classifier | `keyword` only |
 | `routing.route_only.connectors` | `claudecode`, `codex`: hook connectors whose model calls go through the gateway for routing and usage only | none |
 | `routing.route_only.upstreams.<connector>` | `base_url`, `api`, `bedrock`: where unrouted calls go; `defenseclaw routing enable` writes it | none |
 | `routing.admin` | `allowed_aliases`, `denied_providers`, `default_alias`, `categories`, `allow_user_override`, `locked`: the organization floor | no floor |
