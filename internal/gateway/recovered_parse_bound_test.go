@@ -24,7 +24,11 @@ import (
 // window under a capped stack, through the hook client write evidence and
 // the gateway decision, for both connectors, per user and managed. The
 // protected form keeps a finding (action blocks, observe alerts), and the
-// ordinary calls around it are answered as before.
+// ordinary calls around it are answered as before. The ordinary twin behind
+// the same unparsed statement, sent without client write evidence, takes
+// the profile-decided evaluation-limit finding on a per-user gateway (which
+// reads the recovered-parse bound itself, as the hook client does), and
+// allows on a managed gateway, which keeps the client evidence.
 func TestGAP0534HookCallIsAnsweredWithoutCrash(t *testing.T) {
 	defer debug.SetMaxStack(debug.SetMaxStack(64 << 20))
 	home := t.TempDir()
@@ -85,7 +89,15 @@ func TestGAP0534HookCallIsAnsweredWithoutCrash(t *testing.T) {
 					t.Errorf("%s: protected recovered form %q has no finding", cell, command)
 				}
 			}
-			if _, action := judge(ordinary, false); action != guardrailActionAllow {
+			findings, action := judge(ordinary, false)
+			bound := !managed && hookpaths.ShellParseBound(connector, tool, ordinary, cwd, home)
+			if !managed && runtime.GOOS != "windows" && !bound {
+				t.Errorf("%s: ordinary twin is not read as shell-parse-bound", cell)
+			}
+			switch {
+			case bound && (len(findings) != 1 || findings[0].RuleID != "ACTION-COMPOUND-LIMIT"):
+				t.Errorf("%s: ordinary twin without write evidence: %s %v, want the evaluation-limit finding", cell, action, findings)
+			case !bound && action != guardrailActionAllow:
 				t.Errorf("%s: ordinary twin without write evidence: %s", cell, action)
 			}
 			if _, action := judge(benign, true); action != guardrailActionAllow {
