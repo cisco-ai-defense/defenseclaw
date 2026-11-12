@@ -189,8 +189,8 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		case KindLink:
 			w.recordLink(op, ops)
 		}
-		// exec_code: unwrap one level.
-		if op.role == RoleExecCode {
+		// exec_code we can read as shell: unwrap one level.
+		if op.role == RoleExecCode && op.static && entry.ShellCode {
 			w.unwrapCode(op.value, op.static, dialect, depth, cond, origin)
 		}
 	}
@@ -214,6 +214,10 @@ type operand struct {
 	pattern        bool
 	fromURL        bool
 	uploadFromPath string
+	// roleUncertain marks an operand whose role may be wrong because a strict
+	// program carried an unknown flag; the effect keeps its kind but gains a
+	// role-scoped unknown_flag reason (review P2, balanced default).
+	roleUncertain bool
 }
 
 // classifyOperands walks flags and positionals of a command against a table row.
@@ -288,9 +292,16 @@ func (w *walker) positionalOperands(ps []Word, p Program, unknownFlag bool) []op
 		for _, wd := range ps {
 			out = append(out, mk(wd, RoleRead))
 		}
-	case PosReadStdout:
+	case PosURLArgs:
 		for _, wd := range ps {
-			out = append(out, mk(wd, RoleRead))
+			if wd.Static {
+				if _, host, _ := parseURL(wd.Value); host != "" {
+					out = append(out, operand{value: wd.Value, static: true, role: RoleURL, fromURL: true})
+					continue
+				}
+			} else {
+				out = append(out, operand{role: RoleURL})
+			}
 		}
 	case PosAllDelete:
 		for _, wd := range ps {
@@ -336,14 +347,13 @@ func (w *walker) positionalOperands(ps []Word, p Program, unknownFlag bool) []op
 	}
 	if taint {
 		for i := range out {
-			// a strict program with an unknown flag may have shifted roles.
-			out[i].role = roleUnknownSentinel
+			// a strict program with an unknown flag may have shifted roles;
+			// keep the kind, flag the uncertainty (never silently drop it).
+			out[i].roleUncertain = true
 		}
 	}
 	return out
 }
-
-const roleUnknownSentinel Role = "unknown_role"
 
 // effectForOperand turns one classified operand into an effect, or nil.
 func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, foreign, fromInput, shadowed bool, dialect Dialect, depth int) *Effect {
@@ -352,12 +362,10 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	}
 	e := &Effect{Origin: origin, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
 		Target: Target{Flavor: w.o.flavor(), Link: LinkNotChecked}}
-	if op.role == roleUnknownSentinel {
-		e.Kind = KindOpaque
-		e.addReason(ReasonUnknownFlag, ScopeRole)
-		return e
-	}
 	e.Kind = op.role.kind()
+	if op.roleUncertain {
+		e.addReason(ReasonUnknownFlag, ScopeRole)
+	}
 	if shadowed {
 		e.addReason(ReasonProgramShadowed, ScopeRole)
 	}
@@ -376,10 +384,13 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	case RoleExecCode:
 		e.Kind = KindExec
 		e.Target.Type = TargetProcess
-		if op.static {
-			d := &Data{Kind: DataCode, Bytes: len(op.value), Text: cap8k(op.value)}
-			e.Data = d
+		if op.static && p.ShellCode {
+			// shell code we can read and unwrap one level (bash/sh/zsh/eval).
+			e.Data = &Data{Kind: DataCode, Bytes: len(op.value), Text: cap8k(op.value)}
 		} else {
+			// a non-shell interpreter's code (python -c, node -e), an opaque
+			// exec-flag value (go -exec, rsync -e), or a dynamic string: we
+			// cannot parse it as shell, so it stays opaque code.
 			e.addReason(ReasonOpaqueCode, ScopeTarget)
 		}
 		return e
