@@ -17,6 +17,9 @@ import urllib.request
 
 PORT = int(os.environ.get("STUB_PORT", "8080"))
 HOOK_URL = os.environ.get("STUB_HOOK_URL", "")
+# The version the gateway's actor listener accepts (internal/gateway/substrate_hook.go). The real kit sends
+# kit.EnvelopeVersion; GAP-0138 is the disagreement between the two.
+ENVELOPE_VERSION = os.environ.get("STUB_ENVELOPE_VERSION", "dcactor/1")
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -57,7 +60,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # What the actor hook helper of the kit sends: the hook event wrapped in the envelope, with the
             # placeholder header that egress replaces with the actor's JWT.
             envelope = json.dumps({
-                "v": "1", "connector": "claudecode", "event": "PreToolUse", "mode": "interactive",
+                "v": ENVELOPE_VERSION, "connector": "claudecode", "event": "PreToolUse", "mode": "interactive",
                 "kit_version": "0.0.0-e2e", "payload": json.loads(body or b"{}"),
             }).encode()
             req = urllib.request.Request(HOOK_URL, data=envelope, method="POST", headers={
