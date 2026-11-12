@@ -598,8 +598,11 @@ func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState,
 	}
 	m := cur.GetMetadata()
 	if render.Equal(cur, want) {
+		// Our own last write matching is no news. A conflict clears only
+		// when another writer brings the policy back to DefenseClaw's.
+		ours := m.GetUid() == st.ourUID && m.GetVersion() == st.ourVersion
 		st.ourUID, st.ourVersion, st.written = m.GetUid(), m.GetVersion(), true
-		if st.conflict {
+		if st.conflict && !ours {
 			st.conflict, st.reverts = false, nil
 			ev := base
 			ev.Type, ev.Severity, ev.Message = EventConflictCleared, SeverityInfo, "the actor's policy matches DefenseClaw's again"

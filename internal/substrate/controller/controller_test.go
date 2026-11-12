@@ -313,6 +313,13 @@ func TestDriftRevertAndConflictRule(t *testing.T) {
 	if len(conf) != 1 || conf[0].Severity != controller.SeverityAlert || conf[0].Signal.SignalID != controller.SignalPolicyConflict {
 		t.Fatalf("conflict events = %+v", conf)
 	}
+	// Idle passes after the third revert keep the conflict: the matching
+	// policy is DefenseClaw's own write (live run, TST A3-C3).
+	r.pass()
+	r.pass()
+	if len(r.sink.Events(controller.EventConflictCleared)) != 0 {
+		t.Fatal("the conflict cleared on DefenseClaw's own revert")
+	}
 	// A fourth change is not reverted.
 	r.clk.Add(time.Minute)
 	_ = r.api.ForeignSetPolicy(ref, wide)
