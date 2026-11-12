@@ -70,9 +70,9 @@ func peerIsSameUser(conn net.Conn) bool {
 	return err == nil && int(cred.Uid) == os.Getuid()
 }
 
-// peerIsThisBinary checks that the helper is this user's process running this
-// same executable, so a process the agent started cannot stand in for the
-// helper and answer every hook itself.
+// peerIsThisBinary checks that the helper is this user's process running the
+// helper program (helperPath), so a process the agent started cannot stand
+// in for the helper and answer every hook itself.
 func peerIsThisBinary(conn net.Conn) bool {
 	cred, err := peerCred(conn)
 	if err != nil || int(cred.Uid) != os.Getuid() {
@@ -82,7 +82,7 @@ func peerIsThisBinary(conn net.Conn) bool {
 	if err != nil {
 		return false
 	}
-	self, err := os.Executable()
+	self, err := helperPath()
 	if err != nil {
 		return false
 	}

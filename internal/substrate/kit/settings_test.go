@@ -89,6 +89,7 @@ func TestClaudeCodeOverlay(t *testing.T) {
 		"NODE_EXTRA_CA_CERTS": TrustBundle, "SSL_CERT_FILE": TrustBundle, "TMPDIR": "/sandbox/.cache/tmp",
 		"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_BEDROCK_BASE_URL": DefaultGatewayURL + "/llm/bedrock",
 		"AWS_BEARER_TOKEN_BEDROCK": "placeholder-not-a-secret", "NO_UPDATE_NOTIFIER": "1",
+		"ANTHROPIC_CUSTOM_HEADERS": "x-defenseclaw-actor: placeholder",
 	} {
 		if ov.Env[k] != want {
 			t.Errorf("env %s=%q, want %q", k, ov.Env[k], want)
@@ -121,6 +122,7 @@ func TestCodexOverlay(t *testing.T) {
 		"endpoint = '" + DefaultGatewayURL + "/v1/logs'", "x-defenseclaw-actor = 'placeholder'", "environment = 'substrate'",
 		"check_for_update_on_startup = false", "[feedback]\nenabled = false", "model_provider = 'defenseclaw'",
 		"base_url = '" + DefaultGatewayURL + "/llm/openai/v1'", "web_search = 'disabled'", "multi_agent = false",
+		"http_headers = { x-defenseclaw-actor = 'placeholder' }",
 	} {
 		if !strings.Contains(mc, want) {
 			t.Errorf("managed config lacks %q:\n%s", want, mc)

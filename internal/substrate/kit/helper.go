@@ -303,10 +303,20 @@ func callHelper(ctx context.Context, req helperRequest, budget time.Duration) (h
 	return resp, nil
 }
 
-// StartHelper starts a detached helper (this binary with --serve) and does
-// not wait for it.
+// helperPath is the helper's program: the installed hook binary, so that the
+// relay (another binary) starts and accepts the same helper the hooks use; a
+// test binary, which has no installed kit, serves as its own helper.
+var helperPath = func() (string, error) {
+	if _, err := os.Stat(HookBinary); err == nil {
+		return HookBinary, nil
+	}
+	return os.Executable()
+}
+
+// StartHelper starts a detached helper (the hook binary with --serve) and
+// does not wait for it.
 func StartHelper() error {
-	self, err := os.Executable()
+	self, err := helperPath()
 	if err != nil {
 		return err
 	}
