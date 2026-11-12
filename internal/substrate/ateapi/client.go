@@ -49,6 +49,22 @@ type (
 	ActorState           = pb.ActorState
 	ActorStatus          = pb.ActorStatus
 	ActorTemplate        = pb.ActorTemplate
+	Container            = pb.Container
+	EnvVar               = pb.EnvVar
+	Volume               = pb.Volume
+	VolumeMount          = pb.VolumeMount
+	DurableDirVolume     = pb.DurableDirVolumeSource
+	SystemInfoVolume     = pb.SystemInfoVolumeSource
+	SystemInfoDataSource = pb.SystemInfoDataSource
+	TrustBundleSource    = pb.TrustBundleDataSource
+	ActorMetadataSource  = pb.ActorMetadataDataSource
+	ActorMetadataItem    = pb.ActorMetadataItem
+	WakeupProbe          = pb.WakeupProbe
+	HttpGetAction        = pb.HttpGetAction
+	Selector             = pb.Selector
+	SnapshotConfig       = pb.SnapshotConfig
+	ResourceRequirements = pb.ResourceRequirements
+	Resources            = pb.Resources
 	Atespace             = pb.Atespace
 	Tag                  = pb.Tag
 	TagScope             = pb.TagScope
@@ -82,6 +98,14 @@ const (
 	ActorStateCrashed     = pb.ActorState_ACTOR_STATE_CRASHED
 	ActorStateDeleting    = pb.ActorState_ACTOR_STATE_DELETING
 	ActorStateReverting   = pb.ActorState_ACTOR_STATE_REVERTING
+)
+
+// Snapshot fidelity and actor metadata fields used when building a template.
+const (
+	SnapshotFidelityMemory     = pb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	ActorMetadataFieldAtespace = pb.ActorMetadataField_ACTOR_METADATA_FIELD_ATESPACE
+	ActorMetadataFieldName     = pb.ActorMetadataField_ACTOR_METADATA_FIELD_NAME
+	ActorMetadataFieldUID      = pb.ActorMetadataField_ACTOR_METADATA_FIELD_UID
 )
 
 // RegisterControlServer registers a Control implementation on a gRPC server
@@ -188,6 +212,11 @@ type Client interface {
 	GetTag(ctx context.Context, tag *ObjectRef) (*Tag, error)
 
 	GetActorTemplate(ctx context.Context, template *ObjectRef) (*ActorTemplate, error)
+	// CreateActorTemplate creates a template. A template is immutable (there
+	// is no update call): a changed image or setting is a new template under
+	// a new name. The server ignores the uid, version, timestamps and status
+	// in template.
+	CreateActorTemplate(ctx context.Context, template *ActorTemplate) (*ActorTemplate, error)
 	ListActorTemplates(ctx context.Context, atespace string, opts ListOptions) (Page[*ActorTemplate], error)
 
 	GetAtespace(ctx context.Context, name string) (*Atespace, error)
@@ -446,6 +475,10 @@ func (c *GRPCClient) GetTag(ctx context.Context, tag *ObjectRef) (*Tag, error) {
 
 func (c *GRPCClient) GetActorTemplate(ctx context.Context, template *ObjectRef) (*ActorTemplate, error) {
 	return c.ctl.GetActorTemplate(ctx, &pb.GetActorTemplateRequest{ActorTemplate: template})
+}
+
+func (c *GRPCClient) CreateActorTemplate(ctx context.Context, template *ActorTemplate) (*ActorTemplate, error) {
+	return c.ctl.CreateActorTemplate(ctx, &pb.CreateActorTemplateRequest{ActorTemplate: template})
 }
 
 func (c *GRPCClient) ListActorTemplates(ctx context.Context, atespace string, opts ListOptions) (Page[*ActorTemplate], error) {

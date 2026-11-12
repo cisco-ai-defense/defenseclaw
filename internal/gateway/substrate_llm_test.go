@@ -14,6 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package gateway
 
 import (
@@ -128,7 +130,6 @@ func TestSubstrateLLMOnlyModelPaths(t *testing.T) {
 		"/llm/bedrock/model/us.anthropic.claude-haiku-5-5/invoke-with-response-stream",
 		"/llm/bedrock/model/global.anthropic.claude-haiku-5-5/converse-stream",
 		"/llm/bedrock/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/invoke",
-		"/llm/bedrock/model/us.anthropic.claude-haiku-5-5/count-tokens",
 		"/llm/anthropic/v1/messages",
 		"/llm/anthropic/v1/messages/count_tokens",
 		"/llm/openai/v1/chat/completions",

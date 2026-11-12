@@ -210,7 +210,7 @@ func Build(ctx context.Context, o BuildOptions) (*BuildResult, error) {
 	var expected []ExpectedFile
 	paths := make([]string, 0, len(o.Kit.Files))
 	for _, f := range o.Kit.Files {
-		if !o.Kit.UserFiles[f.Path] && f.Symlink == "" && !(f.Dir && (f.UID != 0 || f.GID != 0)) {
+		if !o.Kit.UserFiles[f.Path] && f.Symlink == "" && (!f.Dir || (f.UID == 0 && f.GID == 0)) {
 			paths = append(paths, f.Path)
 		}
 	}
@@ -276,6 +276,13 @@ func judgeBase(ctx context.Context, o BuildOptions, base *Image) (BaseInfo, erro
 	if o.BaseAttestor != nil {
 		if v, err := o.BaseAttestor.Verify(ctx, base.Ref.String()); err == nil {
 			info.Trust, info.AttestedBy = BaseTrustAttested, v.KeyID
+			if v.Statement != nil && v.Statement.Predicate.Base.Trust == BaseTrustUnverified {
+				// Built on an unverified base: the weakest link stays the weakest.
+				info.Trust = BaseTrustUnverified
+				if !o.AllowUnverifiedBase {
+					return info, fmt.Errorf("%w: %s is itself built on an unverified base", ErrBaseUnverified, o.Base)
+				}
+			}
 			return info, nil
 		}
 	}

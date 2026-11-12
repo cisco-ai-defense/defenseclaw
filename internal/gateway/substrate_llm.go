@@ -66,29 +66,26 @@ type SubstrateLLMConfig struct {
 
 var substrateProviderRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
-// Model API paths per provider (GAP-0041). A Bedrock model ID may be an
-// inference profile (us. or global. prefix, for example
-// us.anthropic.claude-haiku-5-5) or an ARN-free ID with a version suffix.
-var (
-	substrateBedrockModelPath = regexp.MustCompile(`^/model/[A-Za-z0-9._:-]{1,256}/(invoke|invoke-with-response-stream|converse|converse-stream|count-tokens)$`)
-	substrateGeminiModelPath  = regexp.MustCompile(`^/v1(beta)?/models/[A-Za-z0-9._-]{1,128}:(generateContent|streamGenerateContent|countTokens)$`)
-	substrateModelPaths       = map[string][]string{
-		"anthropic": {"/v1/messages", "/v1/messages/count_tokens"},
-		"openai":    {"/v1/chat/completions", "/v1/responses", "/v1/completions", "/v1/embeddings"},
-	}
-)
+// substrateModelPaths are the provider paths /llm serves: the model APIs
+// and nothing else. The proxy's own routes (provider registry and reload,
+// egress events, health, models) and every other provider path answer 404
+// (D15; GAP-0041). A provider with no entry serves nothing.
+var substrateModelPaths = map[string][]*regexp.Regexp{
+	"bedrock": {regexp.MustCompile(`^/model/[^/]+/(invoke|invoke-with-response-stream|converse|converse-stream)$`)},
+	"anthropic": {
+		regexp.MustCompile(`^/v1/messages$`),
+		regexp.MustCompile(`^/v1/messages/count_tokens$`),
+	},
+	"openai": {
+		regexp.MustCompile(`^/v1/chat/completions$`),
+		regexp.MustCompile(`^/v1/responses$`),
+	},
+	"gemini": {regexp.MustCompile(`^/v1(beta|alpha)?/models/[^/:]+:(generateContent|streamGenerateContent|countTokens)$`)},
+}
 
-// substrateModelPathOK reports whether upstream is a model API path of
-// provider. Everything else on /llm answers 404.
-func substrateModelPathOK(provider, upstream string) bool {
-	switch provider {
-	case "bedrock":
-		return substrateBedrockModelPath.MatchString(upstream)
-	case "gemini":
-		return substrateGeminiModelPath.MatchString(upstream)
-	}
-	for _, p := range substrateModelPaths[provider] {
-		if upstream == p {
+func substrateModelPath(provider, p string) bool {
+	for _, re := range substrateModelPaths[provider] {
+		if re.MatchString(p) {
 			return true
 		}
 	}
@@ -149,15 +146,13 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upstream := "/" + upstreamPath
-	if path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") {
+	if path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") || !substrateModelPath(provider, upstream) {
 		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
 		return
 	}
-	// Only the provider's model API reaches the proxy: its other routes
-	// (provider registry and reload, egress event intake, health, model
-	// lists) are for the host and the operator, never an actor (GAP-0041).
-	if r.Method != http.MethodPost || !substrateModelPathOK(provider, upstream) {
-		writeSubstrateRefusal(w, http.StatusNotFound, "not_a_model_call")
+	// Every model API call is a POST; a GET of a model path is a probe.
+	if r.Method != http.MethodPost {
+		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
 		return
 	}
 	key, err := os.ReadFile(p.CredentialFile)
@@ -188,4 +183,29 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r2.URL = &u
 	r2.RequestURI = ""
 	s.cfg.Proxy.ServeHTTP(w, r2)
+}
+
+// substrateRouterAnswerNarrows reports a semantic-router answer an Agent
+// Substrate actor's chat call may take (GAP-0104): the router brings no key
+// of its own and keeps the upstream origin /llm set from the provider
+// table, so it can pick another model of the same provider but never send
+// the call elsewhere (another provider, a loopback backend) or with another
+// credential. Which models a profile allows is stream 1 (routing overlay),
+// which narrows inside this.
+func substrateRouterAnswerNarrows(target string, d *ModelRouterDecision) bool {
+	if d == nil {
+		return true
+	}
+	if d.APIKeyOverride {
+		return false
+	}
+	if !d.TargetURLOverride {
+		return true
+	}
+	from, err1 := url.Parse(strings.TrimSpace(target))
+	to, err2 := url.Parse(strings.TrimSpace(d.TargetURL))
+	if err1 != nil || err2 != nil || from.Host == "" || to.User != nil {
+		return false
+	}
+	return strings.EqualFold(from.Scheme, to.Scheme) && strings.EqualFold(from.Host, to.Host)
 }

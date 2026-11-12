@@ -19,6 +19,7 @@ package ateapifake
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -93,6 +94,53 @@ func TestForkAndRecreate(t *testing.T) {
 	re, err := f.Recreate(pref)
 	if err != nil || re.GetMetadata().GetUid() == parent.GetMetadata().GetUid() {
 		t.Fatalf("recreate = %v %v", re, err)
+	}
+}
+
+func TestCreateActorTemplate(t *testing.T) {
+	f := New()
+	ctx := context.Background()
+	f.PutAtespace("a")
+	good := func(name string) *ateapi.ActorTemplate {
+		return &ateapi.ActorTemplate{
+			Metadata:   &ateapi.ResourceMetadata{Atespace: "a", Name: name, Uid: "ignored", Version: 9},
+			Containers: []*ateapi.Container{{Name: "agent", Image: "registry.example.test/kit@sha256:" + strings.Repeat("b", 64)}},
+			Resources:  &ateapi.ResourceRequirements{Limits: &ateapi.Resources{CpuMillicores: 1000, MemoryBytes: 1 << 30}},
+		}
+	}
+	got, err := f.CreateActorTemplate(ctx, good("kit"))
+	if err != nil || got.GetMetadata().GetUid() == "ignored" || got.GetMetadata().GetVersion() != 1 {
+		t.Fatalf("create = %v %v", got, err)
+	}
+	if again, err := f.GetActorTemplate(ctx, ateapi.Ref("a", "kit")); err != nil || again.GetContainers()[0].GetName() != "agent" {
+		t.Fatalf("get = %v %v", again, err)
+	}
+	if _, err := f.CreateActorTemplate(ctx, good("kit")); !ateapi.IsAlreadyExists(err) {
+		t.Fatalf("second create: %v", err)
+	}
+	tag := good("tagged")
+	tag.Containers[0].Image = "registry.example.test/kit:v1"
+	noLimits := good("nolimits")
+	noLimits.Resources = nil
+	noContainer := good("nocontainer")
+	noContainer.Containers = nil
+	elsewhere := good("elsewhere")
+	elsewhere.Metadata.Atespace = "missing"
+	for name, tc := range map[string]struct {
+		in   *ateapi.ActorTemplate
+		code codes.Code
+	}{
+		"tag":          {tag, codes.InvalidArgument},
+		"no limits":    {noLimits, codes.InvalidArgument},
+		"no container": {noContainer, codes.InvalidArgument},
+		"no atespace":  {elsewhere, codes.NotFound},
+	} {
+		if _, err := f.CreateActorTemplate(ctx, tc.in); status.Code(err) != tc.code {
+			t.Errorf("%s: err = %v, want %v", name, err, tc.code)
+		}
+	}
+	if f.Calls("CreateActorTemplate") != 6 {
+		t.Fatalf("calls = %d", f.Calls("CreateActorTemplate"))
 	}
 }
 

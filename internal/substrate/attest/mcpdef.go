@@ -215,7 +215,7 @@ var sourceExt = map[string]bool{".py": true, ".js": true, ".mjs": true, ".cjs": 
 var runtimeFetchers = map[string]bool{"npx": true, "uvx": true, "pipx": true, "bunx": true, "pnpx": true}
 
 var pinnedPkg = regexp.MustCompile(`(@\d+\.\d+\.\d+|==\d+\.\d+|@sha256:[0-9a-f]{64})`)
-var fetchAndExec = regexp.MustCompile(`(?i)(curl|wget)[^|;&]*\|\s*(ba|z|da)?sh\b|\b(ba|z)?sh\s+-c\s+["']?\$\((curl|wget)|base64\s+(-d|--decode)[^|;]*\|\s*(ba|z)?sh|\beval\s+["']?\$\((curl|wget)`)
+var fetchAndExec = regexp.MustCompile(`(?i)(curl|wget)[^|;&]*\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:/(?:usr/)?bin/(?:env\s+)?)?(ba|z|da)?sh\b|\b(ba|z|da)?sh\s+(?:-\S+\s+)*<\(\s*(curl|wget)|\b(ba|z)?sh\s+-c\s+["']?(?:\$\(|\x60)\s*(curl|wget)|base64\s+(-d|--decode)[^|;]*\|\s*(?:/\S*/)?(ba|z)?sh|\beval\s+["']?(?:\$\(|\x60)\s*(curl|wget)`)
 var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ash": true, "cmd": true, "cmd.exe": true, "powershell": true, "pwsh": true}
 
 // ConfigRules returns the findings of the config-level checks on a server:
@@ -234,7 +234,7 @@ func ConfigRules(s MCPServer, allowedHosts []string) []scanner.Finding {
 		add("mcp-fetch-and-exec", scanner.SeverityHigh, "MCP server downloads and runs code",
 			fmt.Sprintf("server %q launches a command that pipes a download into a shell", s.Name),
 			"Install the server into the image at build time and pin it")
-	} else if shells[base] {
+	} else if shells[base] || (base == "env" && firstShellArg(s.Args)) {
 		add("mcp-shell-wrapper", scanner.SeverityMedium, "MCP server starts through a shell",
 			fmt.Sprintf("server %q runs %s, so its real command line is hidden from review", s.Name, base),
 			"Start the server binary directly")
@@ -305,6 +305,17 @@ func hostAllowed(host string, allowed []string) bool {
 		if a == host || (strings.HasPrefix(a, "*.") && strings.HasSuffix(host, a[1:])) {
 			return true
 		}
+	}
+	return false
+}
+
+// firstShellArg reports whether "env [-flags] [VAR=x] <shell>" starts a shell.
+func firstShellArg(args []string) bool {
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") || strings.Contains(a, "=") {
+			continue
+		}
+		return shells[path.Base(a)]
 	}
 	return false
 }

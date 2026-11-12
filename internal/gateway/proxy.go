@@ -1316,6 +1316,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		Stream            bool            `json:"stream,omitempty"`
 	}
 	_ = json.Unmarshal(body, &partial)
+	if bedrockStreamingPath(r.URL.Path) {
+		// Bedrock names a stream by its path, not a body field (GAP-0098).
+		partial.Stream = true
+	}
 
 	p.rtMu.RLock()
 	mode := p.mode
@@ -1701,8 +1705,15 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 	// Determine whether the upstream response is streaming (SSE).
 	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+	// Bedrock InvokeModelWithResponseStream and ConverseStream answer in the
+	// binary AWS eventstream: streamed through like SSE, decoded frame by
+	// frame for inspection (GAP-0098).
+	var bedrockStream *bedrockEventStreamText
+	if strings.Contains(resp.Header.Get("Content-Type"), "application/vnd.amazon.eventstream") {
+		bedrockStream = newBedrockEventStreamText()
+	}
 
-	if !isSSE {
+	if !isSSE && bedrockStream == nil {
 		// --- Non-streaming: buffer response, inspect, then forward ---
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 		if readErr != nil {
@@ -1824,9 +1835,17 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			if n > 0 {
 				chunk := buf[:n]
 
-				// Parse SSE text for inspection regardless of buffer state.
-				lineBuf.Write(chunk)
-				for {
+				// Parse SSE text (or eventstream frames) for inspection
+				// regardless of buffer state.
+				if bedrockStream != nil {
+					accumulated.WriteString(bedrockStream.Feed(chunk))
+					if streamResponseModel == "" {
+						streamResponseModel = bedrockStream.Model()
+					}
+				} else {
+					lineBuf.Write(chunk)
+				}
+				for bedrockStream == nil {
 					line, rest, found := strings.Cut(lineBuf.String(), "\n")
 					if !found {
 						break
@@ -1996,9 +2015,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 
 	case "bedrock":
 		// F-1186: Bedrock Converse: {"output": {"message": {"content": [{"text": "..."}]}}}
-		// Bedrock InvokeModel responses are model-shaped and re-routed through
-		// the matching provider extractor (anthropic / cohere / etc.) by the
-		// caller, so this branch only handles the Converse envelope.
+		// InvokeModel answers in the model family's shape (bedrockInvokeText).
 		var bedrockResp struct {
 			Output struct {
 				Message struct {
@@ -2016,6 +2033,10 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 			if sb.Len() > 0 {
 				return sb.String()
 			}
+		}
+		// InvokeModel answers in the model family's own shape (GAP-0098).
+		if t := bedrockInvokeText(body); t != "" {
+			return t
 		}
 
 	default:
@@ -2160,6 +2181,13 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 		if json.Unmarshal(body, &resp) == nil {
 			for _, c := range resp.Output.Message.Content {
 				addCall(c.ToolUse.Name, c.ToolUse.Input)
+			}
+		}
+		if len(calls) == 0 {
+			// InvokeModel for Claude answers with Anthropic tool_use blocks
+			// (GAP-0098).
+			if raw := extractPassthroughToolCalls(body, "anthropic"); raw != nil {
+				return raw
 			}
 		}
 	default:
@@ -3257,7 +3285,16 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			routeOutcome = outcomeFromDecision(routerInput, p.modelRouter.Route(r.Context(), routerInput), time.Since(startedRoute))
 		}
 		p.recordSemanticRoutingDecisionV8(r.Context(), routeOutcome)
-		if decision := routeOutcome.Decision; decision != nil {
+		decision := routeOutcome.Decision
+		if decision != nil && isSubstrateActorRequest(r.Context()) && !substrateRouterAnswerNarrows(req.TargetURL, decision) {
+			// An Agent Substrate actor's provider, origin and key come from
+			// the gateway's provider table (/llm). A router answer that
+			// leaves them is not taken; the call keeps its requested route
+			// (GAP-0104, D6: the router may only narrow).
+			fmt.Fprintf(os.Stderr, "[substrate] llm: semantic router answer outside the actor's provider not taken\n")
+			decision = nil
+		}
+		if decision != nil {
 			routedDecision = decision
 			if decision.TargetURLOverride || decision.APIKeyOverride {
 				// A router-selected backend is a new credential boundary. Do not

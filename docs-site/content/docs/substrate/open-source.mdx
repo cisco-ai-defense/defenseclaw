@@ -82,25 +82,34 @@ The doctor checks that the gateway can verify agent identities, that the callout
 
 ```bash
 defenseclaw substrate login --admin-url https://defenseclaw-admin.example.test \
-  --issuer https://idp.example.test/realms/defenseclaw --client-id defenseclaw-launcher
+  --issuer https://idp.example.test/realms/defenseclaw --client-id defenseclaw-launcher \
+  --router-url https://router.example.test:8444
 ```
 
-A browser opens on your provider's page. The launcher keeps the tokens in the operating system's keychain, and the cluster address in a context file with no secrets. `defenseclaw substrate whoami` shows who you are signed in as.
+A browser opens on your provider's page (`--no-browser` prints the address and code instead). The launcher keeps the tokens in the operating system's keychain, and the cluster addresses in a context file with no secrets. `--router-url` is the cluster's agent entrance, which the launcher uses to reach the terminal relay. `defenseclaw substrate whoami` shows who you are signed in as.
 
 </Step>
 
 <Step>
 
-### Build an agent template
+### Build an agent image
+
+Make a signing key once, then build the Claude Code (or Codex) image from the OpenShell harness image for that agent:
 
 ```bash
-defenseclaw substrate template build claude
-defenseclaw substrate template build codex
+defenseclaw substrate template keygen --out ./keys
+defenseclaw substrate template build --connector claudecode \
+  --from registry.example.test/harness/claudecode@sha256:... \
+  --to registry.example.test/actors/claudecode:1.0.10 \
+  --hook-binary defenseclaw-actor-hook --relay-binary defenseclaw-actor-relay \
+  --key ./keys/attestation.key
 ```
 
-A template is the image an agent starts from. `template build` takes the Claude Code (or Codex) image DefenseClaw already uses for OpenShell, adds the DefenseClaw kit, scans the agent's config, skills, plugins and MCP servers, signs a record of the result, and creates the template. Agents from a template that was not built and checked this way get no network at all.
+`template build` adds the DefenseClaw hook and relay to the base image, scans the agent's config, skills, plugins and MCP servers, and pushes the image with a signed record of the result (the attestation). Wave 1 builds `claudecode` and `codex`. `template verify IMAGE --anchors ./keys/attestation.pub` checks an image the way the cluster does, `template scan IMAGE` scans one without changing it, and `template publish` copies a verified image to the registry the cluster pulls from. Run `defenseclaw substrate template build --help` for every flag.
 
-You can bring your own image: `defenseclaw substrate template build claude --from registry.example.test/my-agent@sha256:...`. Substrate needs the image pinned by digest.
+Agents from an image that was not built and checked this way get no network at all. Substrate needs the image pinned by digest.
+
+{/* TODO(substrate): confirm with A6/A9 how the built image becomes an ActorTemplate in an atespace (kubectl ate create actor-template, or a launcher step), and how run --template names it. The commands above stop at the pushed, attested image. */}
 
 </Step>
 
@@ -127,11 +136,11 @@ Agent myapp-7f3a · Claude Code · Agent Substrate (gvisor) · atespace dc-alice
   Changes   come back with: defenseclaw substrate pull myapp-7f3a
   Model     Anthropic through the DefenseClaw guardrail proxy (the key stays in the cluster)
   Network   denied by default · allowed: github.com, registry.npmjs.org, pypi.org
-  Asks      appear here, or watch: defenseclaw substrate approvals --watch
+  Asks      appear here, or answer them later with: defenseclaw substrate approvals
   Leave     Ctrl-] detaches; the agent keeps going and suspends when idle
 ```
 
-Prefer git to an upload? `defenseclaw substrate run claude --clone git@github.com:me/myapp.git --branch agent/fix-tests` clones inside the agent. The git credential is added by the cluster's egress gateway on the git host only, so the agent never holds it. See [Secrets](/docs/substrate/secrets).
+Prefer git to an upload? `defenseclaw substrate run claude --clone git@github.com:me/myapp.git --ref agent/fix-tests` clones inside the agent. The git credential is added by the cluster's egress gateway on the git host only, so the agent never holds it. See [Secrets](/docs/substrate/secrets).
 
 </Step>
 

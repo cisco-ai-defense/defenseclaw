@@ -116,7 +116,8 @@ type call struct {
 	stdin string
 }
 
-// fakeKeychain emulates the macOS security tool for the key item.
+// fakeKeychain emulates the macOS security tool for the key item. It
+// records the program name exactly as given, not its base name.
 type fakeKeychain struct {
 	calls   []call
 	key     string
@@ -124,7 +125,7 @@ type fakeKeychain struct {
 }
 
 func (f *fakeKeychain) run(_ context.Context, stdin []byte, name string, args ...string) ([]byte, string, int, error) {
-	f.calls = append(f.calls, call{append([]string{filepath.Base(name)}, args...), string(stdin)})
+	f.calls = append(f.calls, call{append([]string{name}, args...), string(stdin)})
 	switch {
 	case len(args) > 0 && args[0] == "find-generic-password":
 		if f.key == "" {
@@ -143,15 +144,22 @@ func (f *fakeKeychain) run(_ context.Context, stdin []byte, name string, args ..
 }
 
 func TestMacKeychainCommands(t *testing.T) {
+	// A "security" earlier on PATH is never used.
+	decoy := t.TempDir()
+	if err := os.WriteFile(filepath.Join(decoy, "security"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", decoy+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	dir := t.TempDir()
 	kc := &fakeKeychain{}
-	st := newMacStore(kc.run, "/usr/bin/security", dir)
+	st := newMacStore(kc.run, dir)
 	roundTrip(t, st)
 
 	want := [][]string{
-		{"security", "find-generic-password", "-s", "defenseclaw-substrate", "-a", "token-key", "-w"},
-		{"security", "-i"},
-		{"security", "find-generic-password", "-s", "defenseclaw-substrate", "-a", "token-key", "-w"},
+		{"/usr/bin/security", "find-generic-password", "-s", "defenseclaw-substrate", "-a", "token-key", "-w"},
+		{"/usr/bin/security", "-i"},
+		{"/usr/bin/security", "find-generic-password", "-s", "defenseclaw-substrate", "-a", "token-key", "-w"},
 	}
 	if len(kc.calls) != len(want) {
 		t.Fatalf("calls = %d, want %d", len(kc.calls), len(want))
@@ -162,10 +170,16 @@ func TestMacKeychainCommands(t *testing.T) {
 		}
 	}
 	add := kc.calls[1].stdin
-	if !strings.HasPrefix(add, "add-generic-password -U -s defenseclaw-substrate -a token-key -l defenseclaw-substrate-token-key -w ") || !strings.HasSuffix(add, "\n") {
+	if !strings.HasPrefix(add, `add-generic-password -U -s defenseclaw-substrate -a token-key -l defenseclaw-substrate-token-key -T "" -w `) || !strings.HasSuffix(add, "\n") {
 		t.Errorf("add line shape is wrong")
 	}
+	if strings.Contains(add, " -A ") || strings.Count(add, " -T ") != 1 {
+		t.Errorf("the item must trust no application")
+	}
 	for _, c := range kc.calls {
+		if c.args[0] != securityTool || !strings.HasPrefix(c.args[0], "/") {
+			t.Errorf("security tool run as %q, not by its absolute path", c.args[0])
+		}
 		for _, a := range c.args {
 			if strings.Contains(a, kc.key) {
 				t.Fatal("the key appears in a command argument")
@@ -175,6 +189,12 @@ func TestMacKeychainCommands(t *testing.T) {
 			if strings.Contains(c.stdin, m) || strings.Contains(strings.Join(c.args, " "), m) {
 				t.Fatal("a token went through the security tool")
 			}
+		}
+	}
+	d := st.Describe()
+	for _, w := range []string{dir, "mode 0600", "macOS default keychain", "service defenseclaw-substrate", "account token-key", "trusts no application", "Always Allow", "/usr/bin/security"} {
+		if !strings.Contains(d, w) {
+			t.Errorf("Describe() = %q, want %q", d, w)
 		}
 	}
 	// The sealed file holds no plaintext token.
@@ -195,7 +215,7 @@ func TestMacKeychainCommands(t *testing.T) {
 		t.Fatalf("swapped file: %v", err)
 	}
 	// A new process with the key gone.
-	st2 := newMacStore((&fakeKeychain{}).run, "/usr/bin/security", dir)
+	st2 := newMacStore((&fakeKeychain{}).run, dir)
 	if _, err := st2.Load("e1"); err == nil || !strings.Contains(err.Error(), "key is missing") {
 		t.Fatalf("missing key: %v", err)
 	}
@@ -203,7 +223,7 @@ func TestMacKeychainCommands(t *testing.T) {
 
 func TestMacKeychainLocked(t *testing.T) {
 	kc := &fakeKeychain{failAdd: true}
-	st := newMacStore(kc.run, "/usr/bin/security", t.TempDir())
+	st := newMacStore(kc.run, t.TempDir())
 	err := st.Save("e1", sampleToken())
 	if err == nil || !strings.Contains(err.Error(), "User interaction is not allowed") || !strings.Contains(err.Error(), EnvTokenStore+"=file") {
 		t.Fatalf("err = %v", err)
