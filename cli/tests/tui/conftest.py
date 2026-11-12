@@ -111,6 +111,19 @@ def _no_sandbox_machine_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_substrate_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never run the real ``defenseclaw substrate list`` when a test opens the Sandboxes panel."""
+
+    from defenseclaw.tui import sandbox_panel
+    from defenseclaw.tui.services.substrate_state import SIGNED_OUT_NOTE, SubstrateList
+
+    async def signed_out() -> SubstrateList:
+        return SubstrateList(note=SIGNED_OUT_NOTE)
+
+    monkeypatch.setattr(sandbox_panel, "load_substrate_list", signed_out)
+
+
+@pytest.fixture(autouse=True)
 def _no_agent_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never scan the host for installed agents (binaries, configs, versions).
 
