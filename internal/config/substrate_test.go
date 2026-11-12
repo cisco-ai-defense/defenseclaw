@@ -66,6 +66,11 @@ func TestSubstrateConfigMatchesTheClosedSchema(t *testing.T) {
 		{SubstrateUnattendedConfig{}, []string{"substrate", "unattended"}},
 		{SubstrateRateLimitsConfig{}, []string{"substrate", "rate_limits"}},
 		{SubstrateExtprocConfig{}, []string{"substrate", "extproc"}},
+		{SubstrateExtprocUIDConfig{}, []string{"substrate", "extproc", "uid"}},
+		{SubstrateExtprocChainConfig{}, []string{"substrate", "extproc", "chain"}},
+		{SubstrateExtprocAskConfig{}, []string{"substrate", "extproc", "ask"}},
+		{SubstrateExtprocJudgeConfig{}, []string{"substrate", "extproc", "judge"}},
+		{SubstrateExtprocDLPConfig{}, []string{"substrate", "extproc", "dlp"}},
 		{SubstrateLLMConfig{}, []string{"substrate", "llm"}},
 		{SubstrateLLMCredentialConfig{}, []string{"substrate", "llm", "credential"}},
 		{SubstrateEgressConfig{}, []string{"substrate", "egress"}},
@@ -127,7 +132,26 @@ substrate:
   idle_suspend_after: 30m
   unattended: {asks: deny, ask_timeout: 30m, telemetry_sampling: 1.0}
   rate_limits: {per_actor_rps: 20, per_atespace_rps: 500}
-  extproc: {enabled: true, failure_mode: closed, body_inspection: auto, body_max_bytes: 1048576, mcp_hosts: [mcp.example.com]}
+  extproc:
+    enabled: true
+    failure_mode: closed
+    body_inspection: on
+    body_max_bytes: 1048576
+    mcp_hosts: [mcp.example.com=docs]
+    body_hosts: [api.example.com]
+    cluster_domains: [svc.cluster.local]
+    actor_trust_domain: cluster.local
+    egress_peers: [spiffe://cluster.local/ns/ate-system/sa/atenet-egress]
+    request_access: security@example.com
+    log_headers: true
+    redact_headers: [X-Team-Token]
+    blocklist_files: [/etc/defenseclaw/feeds/egress.yaml]
+    actor_secrets_dir: /var/run/dc/actor-secrets
+    uid: {cache_ttl: 60s, stale_max: 60s}
+    chain: {check_budget: 20ms, queue_size: 4096}
+    ask: {hold: 1500ms}
+    judge: {url: https://defenseclaw-leader.defenseclaw-system.svc/api/v1/substrate/callout/verdict, token_file: /var/run/dc/judge-token, ca_file: /var/run/dc/ca.crt, timeout: 1500ms}
+    dlp: {credential_headers: deny}
   llm: {providers: [anthropic, openai, bedrock], credential: {provider_uri: "ate-secret://k8s.io/default/defenseclaw-system/llm-keys"}}
   egress: {allow: [github.com, "*.githubusercontent.com"], ecosystem_packs: [pypi, npm], registries: [ghcr.io]}
   secrets:
@@ -285,5 +309,40 @@ func TestSubstrateVersionRange(t *testing.T) {
 		if _, err := ParseSubstrateVersionRange(bad); err == nil {
 			t.Errorf("%q parsed", bad)
 		}
+	}
+}
+
+func TestProfileMatchSubstrate(t *testing.T) {
+	cfg := &Config{}
+	cfg.Guardrail.Profiles = map[string]GuardrailProfile{"ci": {}}
+	cfg.Guardrail.ProfileAssignments = []ProfileAssignment{{Profile: "ci",
+		Match: ProfileMatch{Substrate: &ProfileMatchSubstrate{Atespaces: []string{"ci-runs", "eng-*"}, Templates: []string{"ci-runs/claude"}}}}}
+	if err := cfg.ValidateGuardrailProfiles(); err != nil {
+		t.Fatalf("a substrate-only match was refused: %v", err)
+	}
+	for name, m := range map[string]*ProfileMatchSubstrate{
+		"empty":         {},
+		"atespace case": {Atespaces: []string{"CI"}},
+		"template form": {Templates: []string{"claude"}},
+		"bad glob":      {Atespaces: []string{"eng-["}},
+		"workload":      {Workloads: []string{" "}},
+	} {
+		cfg.Guardrail.ProfileAssignments[0].Match.Substrate = m
+		if err := cfg.ValidateGuardrailProfiles(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	doc := "config_version: 9\nguardrail:\n  profiles: {ci: {}}\n  profile_assignments:\n    - {profile: ci, match: {substrate: {atespaces: [ci-runs], templates: [ci-runs/claude], workloads: [repo:org/x]}}}\n"
+	if err := ValidateV8SchemaBytes("m.yaml", []byte(doc)); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	if err := ValidateV8SchemaBytes("m.yaml", []byte("config_version: 9\nguardrail:\n  profiles: {ci: {}}\n  profile_assignments:\n    - {profile: ci, match: {substrate: {}}}\n")); err == nil {
+		t.Fatal("schema accepted an empty substrate match")
+	}
+}
+
+func TestMCPHostName(t *testing.T) {
+	if MCPHostName("mcp.example.com=docs") != "mcp.example.com" || MCPHostName(" a.b ") != "a.b" {
+		t.Fatal("MCPHostName")
 	}
 }

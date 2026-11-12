@@ -2924,6 +2924,15 @@ class PerConnectorGuardrailConfig:
 
 
 @dataclass
+class GuardrailProfileMatchSubstrate:
+    """``match.substrate``: Substrate actors by atespace, template or workload."""
+
+    atespaces: list[str] = field(default_factory=list)
+    templates: list[str] = field(default_factory=list)
+    workloads: list[str] = field(default_factory=list)
+
+
+@dataclass
 class GuardrailProfileMatch:
     """Subjects one ``guardrail.profile_assignments`` entry selects.
 
@@ -2935,6 +2944,8 @@ class GuardrailProfileMatch:
     users: list[str] = field(default_factory=list)
     connectors: list[str] = field(default_factory=list)
     agents: list[str] = field(default_factory=list)
+    # Agent Substrate actors (``config.ProfileMatchSubstrate``); None = unset.
+    substrate: GuardrailProfileMatchSubstrate | None = None
 
 
 @dataclass
@@ -3463,10 +3474,12 @@ def validate_guardrail_profiles(gc: GuardrailConfig) -> None:
         if assignment.profile not in gc.profiles:
             raise ValueError(f"guardrail.profile_assignments[{i}]: unknown profile {assignment.profile!r}")
         match = assignment.match
-        if not (match.groups or match.users or match.connectors or match.agents):
+        substrate = match.substrate
+        has_substrate = substrate is not None and bool(substrate.atespaces or substrate.templates or substrate.workloads)
+        if not (match.groups or match.users or match.connectors or match.agents or has_substrate):
             raise ValueError(
                 f"guardrail.profile_assignments[{i}]: match needs at least one of groups, users, "
-                "connectors or agents; use guardrail.default_profile for everyone else"
+                "connectors, agents or substrate; use guardrail.default_profile for everyone else"
             )
         for agent in match.agents:
             if not _AGENT_IDENTITY_RE.match(agent):
@@ -4188,12 +4201,59 @@ class SubstrateRateLimitsConfig:
 
 
 @dataclass
+class SubstrateExtprocUIDConfig:
+    cache_ttl: str = ""
+    stale_max: str = ""
+
+
+@dataclass
+class SubstrateExtprocChainConfig:
+    check_budget: str = ""
+    queue_size: int | None = None
+
+
+@dataclass
+class SubstrateExtprocAskConfig:
+    hold: str = ""
+
+
+@dataclass
+class SubstrateExtprocJudgeConfig:
+    url: str = ""
+    token_file: str = ""
+    ca_file: str = ""
+    timeout: str = ""
+
+
+@dataclass
+class SubstrateExtprocDLPConfig:
+    credential_headers: str = ""
+
+
+@dataclass
 class SubstrateExtprocConfig:
+    """``substrate.extproc``: the egress callout (mirrors Go
+    ``SubstrateExtprocConfig``; the callout validates the same bounds)."""
+
     enabled: bool | None = None
     failure_mode: str = ""
     body_inspection: str = ""
     body_max_bytes: int | None = None
     mcp_hosts: list[str] = field(default_factory=list)
+    body_hosts: list[str] = field(default_factory=list)
+    cluster_domains: list[str] = field(default_factory=list)
+    actor_trust_domain: str = ""
+    egress_peers: list[str] = field(default_factory=list)
+    request_access: str = ""
+    log_headers: bool = False
+    redact_headers: list[str] = field(default_factory=list)
+    blocklist_files: list[str] = field(default_factory=list)
+    actor_secrets_dir: str = ""
+    uid: SubstrateExtprocUIDConfig = field(default_factory=SubstrateExtprocUIDConfig)
+    chain: SubstrateExtprocChainConfig = field(default_factory=SubstrateExtprocChainConfig)
+    ask: SubstrateExtprocAskConfig = field(default_factory=SubstrateExtprocAskConfig)
+    judge: SubstrateExtprocJudgeConfig = field(default_factory=SubstrateExtprocJudgeConfig)
+    dlp: SubstrateExtprocDLPConfig = field(default_factory=SubstrateExtprocDLPConfig)
 
 
 @dataclass
@@ -5867,6 +5927,13 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
                 for key in ("groups", "users", "connectors", "agents"):
                     if not match.get(key):
                         match.pop(key, None)
+                sub = match.get("substrate")
+                if isinstance(sub, dict):
+                    for key in ("atespaces", "templates", "workloads"):
+                        if not sub.get(key):
+                            sub.pop(key, None)
+                if not match.get("substrate"):
+                    match.pop("substrate", None)
     if not guardrail.get("default_profile"):
         guardrail.pop("default_profile", None)
 
@@ -7141,10 +7208,21 @@ def _merge_guardrail_profile_assignments(raw: Any) -> list[GuardrailProfileAssig
                     users=_string_list(match.get("users")),
                     connectors=_string_list(match.get("connectors")),
                     agents=_string_list(match.get("agents")),
+                    substrate=_merge_profile_match_substrate(match.get("substrate")),
                 ),
             )
         )
     return out
+
+
+def _merge_profile_match_substrate(raw: Any) -> GuardrailProfileMatchSubstrate | None:
+    if not isinstance(raw, dict):
+        return None
+    return GuardrailProfileMatchSubstrate(
+        atespaces=_string_list(raw.get("atespaces")),
+        templates=_string_list(raw.get("templates")),
+        workloads=_string_list(raw.get("workloads")),
+    )
 
 
 def _normalize_llm_role(value: Any) -> str:
@@ -7516,13 +7594,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             per_actor_rps=_optional_number(limits.get("per_actor_rps"), float),
             per_atespace_rps=_optional_number(limits.get("per_atespace_rps"), float),
         ),
-        extproc=SubstrateExtprocConfig(
-            enabled=_optional_bool(extproc.get("enabled")),
-            failure_mode=str(extproc.get("failure_mode", "") or ""),
-            body_inspection=str(extproc.get("body_inspection", "") or ""),
-            body_max_bytes=_optional_number(extproc.get("body_max_bytes"), int),
-            mcp_hosts=_string_list(extproc.get("mcp_hosts")),
-        ),
+        extproc=_merge_substrate_extproc(extproc),
         llm=SubstrateLLMConfig(
             providers=_string_list(llm.get("providers")),
             credential=SubstrateLLMCredentialConfig(
@@ -7537,6 +7609,45 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         secrets=secrets,
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
+    )
+
+
+def _merge_substrate_extproc(extproc: dict[str, Any]) -> SubstrateExtprocConfig:
+    uid = _mapping(extproc.get("uid"))
+    chain = _mapping(extproc.get("chain"))
+    judge = _mapping(extproc.get("judge"))
+    return SubstrateExtprocConfig(
+        enabled=_optional_bool(extproc.get("enabled")),
+        failure_mode=str(extproc.get("failure_mode", "") or ""),
+        body_inspection=str(extproc.get("body_inspection", "") or ""),
+        body_max_bytes=_optional_number(extproc.get("body_max_bytes"), int),
+        mcp_hosts=_string_list(extproc.get("mcp_hosts")),
+        body_hosts=_string_list(extproc.get("body_hosts")),
+        cluster_domains=_string_list(extproc.get("cluster_domains")),
+        actor_trust_domain=str(extproc.get("actor_trust_domain", "") or ""),
+        egress_peers=_string_list(extproc.get("egress_peers")),
+        request_access=str(extproc.get("request_access", "") or ""),
+        log_headers=extproc.get("log_headers") is True,
+        redact_headers=_string_list(extproc.get("redact_headers")),
+        blocklist_files=_string_list(extproc.get("blocklist_files")),
+        actor_secrets_dir=str(extproc.get("actor_secrets_dir", "") or ""),
+        uid=SubstrateExtprocUIDConfig(
+            cache_ttl=_duration_text(uid.get("cache_ttl")), stale_max=_duration_text(uid.get("stale_max"))
+        ),
+        chain=SubstrateExtprocChainConfig(
+            check_budget=_duration_text(chain.get("check_budget")),
+            queue_size=_optional_number(chain.get("queue_size"), int),
+        ),
+        ask=SubstrateExtprocAskConfig(hold=_duration_text(_mapping(extproc.get("ask")).get("hold"))),
+        judge=SubstrateExtprocJudgeConfig(
+            url=str(judge.get("url", "") or ""),
+            token_file=str(judge.get("token_file", "") or ""),
+            ca_file=str(judge.get("ca_file", "") or ""),
+            timeout=_duration_text(judge.get("timeout")),
+        ),
+        dlp=SubstrateExtprocDLPConfig(
+            credential_headers=str(_mapping(extproc.get("dlp")).get("credential_headers", "") or "")
+        ),
     )
 
 
@@ -7559,6 +7670,12 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
     if pruned is _V8_MISSING:
         pruned = {}
     pruned["enabled"] = cfg.substrate.enabled
+    extproc = pruned.get("extproc")
+    if isinstance(extproc, dict):
+        if extproc.get("log_headers") is False:  # Go omitempty
+            extproc.pop("log_headers")
+        if not extproc:
+            pruned.pop("extproc")
     if packs == []:
         pruned.setdefault("egress", {})["ecosystem_packs"] = []
     d["substrate"] = pruned

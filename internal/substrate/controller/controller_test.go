@@ -25,6 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi/ateapifake"
@@ -63,13 +66,18 @@ func newRig(t *testing.T, mutate func(*config.Config, *controller.Options)) *rig
 		Egress:            config.SubstrateEgressConfig{Allow: []string{"github.com"}, EcosystemPacks: []string{"pypi"}},
 	}
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"eng": {}, "ci": {}}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "ci", Match: config.ProfileMatch{Substrate: &config.ProfileMatchSubstrate{Atespaces: []string{"ci-runs", "eng-*"}}}},
+		// Host selectors never apply to actors.
+		{Profile: "eng", Match: config.ProfileMatch{Users: []string{"alice"}}},
+	}
 	r := &rig{t: t, api: ateapifake.New(), att: &controllerfake.Attestor{Default: controller.Attestation{Attested: true, KitVersion: "1.0.10"}},
 		act: &controllerfake.Activity{}, sink: &controllerfake.Sink{}, reg: controller.NewMemoryRegistry(),
 		clk: &clock{t: time.Date(2026, 11, 12, 20, 0, 0, 0, time.UTC)}, cfg: cfg, tmpls: map[string]bool{}}
 	r.api.Now = r.clk.Now
 	o := controller.Options{
-		Client: r.api, Attestor: r.att, Activity: r.act, Registry: r.reg, Sink: r.sink,
-		Resolver:           &controller.ConfigResolver{Config: cfg, Rules: []controller.AtespaceRule{{Atespaces: []string{"ci-runs", "eng-*"}, Profile: "ci"}}},
+		Client: r.api, Attestor: r.att, Activity: r.act, CPU: r.act, Registry: r.reg, Sink: r.sink,
+		Resolver:           &controller.ConfigResolver{Config: cfg},
 		RequireAttestation: true, KitVersion: "1.0.10", IdleSuspendAfter: 30 * time.Minute, Now: r.clk.Now,
 	}
 	if mutate != nil {
@@ -481,5 +489,46 @@ func TestMatchAtespace(t *testing.T) {
 		if m != tc.match || (w != "") != tc.warn {
 			t.Errorf("%v %s owned=%v: match=%v warn=%q", tc.pats, tc.ns, tc.owned, m, w)
 		}
+	}
+}
+
+func TestStrictestCombinationAndTemplates(t *testing.T) {
+	r := newRig(t, func(cfg *config.Config, _ *controller.Options) {
+		cfg.Guardrail.Profiles["tight"] = config.GuardrailProfile{Sandbox: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}}
+		cfg.Guardrail.ProfileAssignments = append(cfg.Guardrail.ProfileAssignments, config.ProfileAssignment{Profile: "tight",
+			Match: config.ProfileMatch{Substrate: &config.ProfileMatchSubstrate{Templates: []string{"ci-runs/claude"}}}})
+	})
+	a := r.actor("ci-runs", "job", ateapi.ActorStateSuspended, "")
+	r.pass()
+	p := render.Canonical(r.api.Policy(ateapi.RefOf(a.GetMetadata())))
+	if strings.Contains(p, " github.com") || !strings.Contains(p, "pypi.org") {
+		t.Fatalf("the template-matched profile did not tighten the atespace one:\n%s", p)
+	}
+}
+
+func TestScopedListingWithoutGlobalViewer(t *testing.T) {
+	r := newRig(t, nil)
+	in := r.actor("ci-runs", "job", ateapi.ActorStateSuspended, "")
+	r.actor("other-team", "x", ateapi.ActorStateSuspended, "")
+	r.api.Err = func(method, key string) error {
+		if method == "ListActors" && key == "" {
+			return status.Error(codes.PermissionDenied, "no global viewer")
+		}
+		return nil
+	}
+	r.pass()
+	r.pass()
+	if r.api.Policy(ateapi.RefOf(in.GetMetadata())) == nil {
+		t.Fatal("a managed atespace was not reconciled in scoped mode")
+	}
+	if r.api.Calls("ListActors") != 1+2*2 { // one refused global list, then eng-web and ci-runs each pass
+		t.Fatalf("ListActors calls = %d", r.api.Calls("ListActors"))
+	}
+	ws := r.sink.Events(controller.EventWarning)
+	if len(ws) != 1 || !strings.Contains(ws[0].Message, "global viewer") {
+		t.Fatalf("warnings = %+v", ws)
+	}
+	if n := len(r.sink.Events(controller.EventInventory)); n != 1 {
+		t.Fatalf("inventory = %d, want only the managed atespace", n)
 	}
 }

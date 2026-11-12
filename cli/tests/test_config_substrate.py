@@ -47,8 +47,17 @@ _FULL = {
     "idle_suspend_after": "30m",
     "unattended": {"asks": "deny", "ask_timeout": "30m", "telemetry_sampling": 0.5},
     "rate_limits": {"per_actor_rps": 20, "per_atespace_rps": 500},
-    "extproc": {"enabled": True, "failure_mode": "closed", "body_inspection": "auto", "body_max_bytes": 1048576,
-                "mcp_hosts": ["mcp.example.com"]},
+    "extproc": {"enabled": True, "failure_mode": "closed", "body_inspection": "on", "body_max_bytes": 1048576,
+                "mcp_hosts": ["mcp.example.com=docs"], "body_hosts": ["api.example.com"],
+                "cluster_domains": ["svc.cluster.local"], "actor_trust_domain": "cluster.local",
+                "egress_peers": ["spiffe://cluster.local/ns/ate-system/sa/atenet-egress"],
+                "request_access": "security@example.com", "log_headers": True, "redact_headers": ["X-Team-Token"],
+                "blocklist_files": ["/etc/defenseclaw/feeds/egress.yaml"], "actor_secrets_dir": "/var/run/dc/actor-secrets",
+                "uid": {"cache_ttl": "60s", "stale_max": "60s"}, "chain": {"check_budget": "20ms", "queue_size": 4096},
+                "ask": {"hold": "1500ms"},
+                "judge": {"url": "https://defenseclaw-leader.defenseclaw-system.svc/api/v1/substrate/callout/verdict",
+                          "token_file": "/var/run/dc/judge-token", "ca_file": "/var/run/dc/ca.crt", "timeout": "1500ms"},
+                "dlp": {"credential_headers": "deny"}},
     "llm": {"providers": ["anthropic", "bedrock"],
             "credential": {"provider_uri": "ate-secret://k8s.io/default/defenseclaw-system/llm-keys"}},
     "egress": {"allow": ["github.com", "*.githubusercontent.com"], "ecosystem_packs": ["pypi", "npm"],
@@ -176,3 +185,27 @@ class TestSubstrateLoadSave(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProfileMatchSubstrate(unittest.TestCase):
+    def test_round_trip(self):
+        doc = {
+            "profiles": {"ci": {}},
+            "profile_assignments": [
+                {"profile": "ci", "match": {"substrate": {"atespaces": ["ci-runs"], "templates": ["ci-runs/claude"]}}}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "config.yaml")
+            with open(path, "w") as f:
+                yaml.safe_dump({"config_version": 9, "data_dir": tmpdir, "guardrail": doc}, f)
+            load_validate_v8(Path(path).read_bytes(), source_name=path)
+            with patch("defenseclaw.config.default_data_path") as mock_dp:
+                mock_dp.return_value = Path(tmpdir)
+                cfg = load()
+            match = cfg.guardrail.profile_assignments[0].match
+            self.assertEqual(match.substrate.atespaces, ["ci-runs"])
+            self.assertEqual(match.substrate.workloads, [])
+            cfg.save()
+            saved = yaml.safe_load(Path(path).read_text())["guardrail"]["profile_assignments"][0]["match"]
+            self.assertEqual(saved, {"substrate": {"atespaces": ["ci-runs"], "templates": ["ci-runs/claude"]}})
