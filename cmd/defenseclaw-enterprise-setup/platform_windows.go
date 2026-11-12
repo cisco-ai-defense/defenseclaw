@@ -202,6 +202,14 @@ func executeEnterpriseSetup(
 	opts.Standalone = standalone
 	opts.StandaloneUnsigned = standalone && payload.Manifest.Unsigned
 	opts.ProductVersion = payload.Manifest.Version
+	if standaloneSetupWaitsForRecovery(opts) {
+		// Before anything is read or staged: the recovery an earlier
+		// /uninstall armed may still be finishing its clean-up
+		// (rel-1-0-6:GAP-1080).
+		if err := waitForStandaloneUninstallRecovery(opts); err != nil {
+			return 0, err
+		}
+	}
 	// A policy-less /install is only the first half of a fresh deployment.
 	// Refuse an existing or unproven deployment before staging a child: the
 	// lifecycle used to publish a fresh-install rollback receipt first, then
@@ -444,6 +452,24 @@ func executeEnterpriseSetup(
 // stale file after a killed Setup. The owning thread stays fixed until the
 // returned release runs; another active Setup gets MSI's retryable 1618.
 func acquireStandaloneSetupEnsure() (release func(), err error) {
+	release, err = holdStandaloneSetupMutex(`Global\Cisco-DefenseClaw-Standalone-Setup-Ensure`, "standalone ensure", 0)
+	if errors.Is(err, errStandaloneSetupMutexHeld) {
+		return nil, errEnterpriseSetupEnsureBusy
+	}
+	return release, err
+}
+
+// errStandaloneSetupMutexHeld is a host-wide Setup mutex another process
+// still held when the wait for it ended.
+var errStandaloneSetupMutexHeld = errors.New("standalone Setup mutex is held")
+
+// holdStandaloneSetupMutex takes the host-wide named mutex name, waiting up
+// to wait for another holder to let go (errStandaloneSetupMutexHeld past it).
+// Only SYSTEM and Administrators can open it, and creating a Global\ object
+// needs a privilege a standard account does not have, so no other account
+// can hold it to stall Setup. An abandoned mutex (a killed holder) is taken.
+// The owning thread stays fixed until the returned release runs.
+func holdStandaloneSetupMutex(name, label string, wait time.Duration) (release func(), err error) {
 	runtime.LockOSThread()
 	defer func() {
 		if release == nil {
@@ -452,39 +478,41 @@ func acquireStandaloneSetupEnsure() (release func(), err error) {
 	}()
 	descriptor, err := windows.SecurityDescriptorFromString("O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)")
 	if err != nil {
-		return nil, fmt.Errorf("build standalone ensure mutex ACL: %w", err)
+		return nil, fmt.Errorf("build %s mutex ACL: %w", label, err)
 	}
 	attrs := &windows.SecurityAttributes{
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		SecurityDescriptor: descriptor,
 	}
-	name, err := windows.UTF16PtrFromString(`Global\Cisco-DefenseClaw-Standalone-Setup-Ensure`)
+	namePointer, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return nil, err
 	}
-	handle, createErr := windows.CreateMutex(attrs, true, name)
+	handle, createErr := windows.CreateMutex(attrs, false, namePointer)
 	if handle == 0 {
-		return nil, fmt.Errorf("create standalone ensure mutex: %w", createErr)
+		return nil, fmt.Errorf("create %s mutex: %w", label, createErr)
 	}
-	closeWith := func(err error) (func(), error) {
+	if createErr != nil && !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
 		_ = windows.CloseHandle(handle)
-		return nil, err
+		return nil, fmt.Errorf("open %s mutex: %w", label, createErr)
 	}
-	if createErr != nil {
-		if !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
-			return closeWith(fmt.Errorf("open standalone ensure mutex: %w", createErr))
-		}
-		state, waitErr := windows.WaitForSingleObject(handle, 0)
-		if waitErr != nil {
-			return closeWith(fmt.Errorf("wait for standalone ensure mutex: %w", waitErr))
-		}
-		switch state {
-		case uint32(windows.WAIT_OBJECT_0), uint32(windows.WAIT_ABANDONED):
-		case uint32(windows.WAIT_TIMEOUT):
-			return closeWith(errEnterpriseSetupEnsureBusy)
-		default:
-			return closeWith(fmt.Errorf("standalone ensure mutex returned unexpected wait state %d", state))
-		}
+	milliseconds := uint32(0)
+	if wait > 0 {
+		milliseconds = uint32(min(wait.Milliseconds(), int64(windows.INFINITE-1)))
+	}
+	state, waitErr := windows.WaitForSingleObject(handle, milliseconds)
+	if waitErr != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, fmt.Errorf("wait for %s mutex: %w", label, waitErr)
+	}
+	switch state {
+	case uint32(windows.WAIT_OBJECT_0), uint32(windows.WAIT_ABANDONED):
+	case uint32(windows.WAIT_TIMEOUT):
+		_ = windows.CloseHandle(handle)
+		return nil, errStandaloneSetupMutexHeld
+	default:
+		_ = windows.CloseHandle(handle)
+		return nil, fmt.Errorf("%s mutex returned unexpected wait state %d", label, state)
 	}
 	return func() {
 		_ = windows.ReleaseMutex(handle)
