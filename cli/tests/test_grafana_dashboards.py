@@ -4117,3 +4117,157 @@ def test_identity_dashboard_keeps_host_local_user_ids_separate() -> None:
             expression = target.get("expr", "")
             if "$user" in expression:
                 assert 'host_name=~"$host"' in expression, panel["title"]
+
+
+# --- Tokenomics dashboard (item 10) -----------------------------------------
+
+_TOKENOMICS_METRICS = {
+    "defenseclaw_model_cost_USD_total": "metric.defenseclaw.model.cost",
+    "defenseclaw_model_tokens_total": "metric.defenseclaw.model.tokens",
+    "defenseclaw_tokenomics_dropped_total": "metric.defenseclaw.tokenomics.dropped",
+}
+
+
+def _genai_registry() -> dict:
+    return yaml.safe_load((ROOT / "schemas/telemetry/v8/genai.yaml").read_text(encoding="utf-8"))
+
+
+def _tokenomics_targets(datasource: str) -> list[tuple[str, str]]:
+    dashboard = _dashboard("defenseclaw-tokenomics.json")
+    found = []
+    for panel in _all_panels(dashboard["panels"]):
+        for target in panel.get("targets", []):
+            if (target.get("datasource") or panel["datasource"])["type"] == datasource:
+                found.append((panel["title"], target["expr"]))
+    return found
+
+
+def test_tokenomics_metric_label_contract_matches_the_registry() -> None:
+    """The label sets the audit enforces are the local-observability-v1
+    projections of the three instruments, and none carries a user or group."""
+    audit = _load_audit_module()
+    groups = {group["id"]: group for group in _genai_registry()["groups"]}
+    for prometheus_name, group_id in _TOKENOMICS_METRICS.items():
+        metric = groups[group_id]["metric"]
+        projected = {
+            mapping["label"]
+            for projection in metric.get("label_projections", [])
+            if projection["profile"] == "local-observability-v1"
+            for mapping in projection["mappings"]
+        }
+        assert audit.PROMETHEUS_METRIC_LABELS[prometheus_name] == projected, prometheus_name
+        assert not {"user", "user_id", "group", "identity"} & projected
+        # The Prometheus name follows the OTLP conversion the other
+        # dashboards rely on: unit USD is appended, {token} and {record} are not.
+        suffix = "_USD" if metric["unit"] == "USD" else ""
+        assert prometheus_name == metric["instrument_name"].replace(".", "_") + suffix + "_total"
+    assert audit.PROMETHEUS_EXACT_LABEL_VALUES[("defenseclaw_model_tokens_total", "kind")] == {
+        "input", "cache_read", "cache_creation", "output", "reasoning",
+    }
+
+
+def test_tokenomics_dashboard_prometheus_queries_use_only_the_three_instruments() -> None:
+    audit = _load_audit_module()
+    seen: set[str] = set()
+    for title, expression in _tokenomics_targets("prometheus"):
+        names = set(re.findall(r"\b(defenseclaw_[a-zA-Z_]+_total)\b", expression))
+        assert names and names <= set(_TOKENOMICS_METRICS), (title, names)
+        seen |= names
+        assert "vector(0)" not in expression, f"{title}: absent cost must not be fabricated as zero"
+        grouped = {label.strip() for group in re.findall(r"\bby\s*\(([^)]*)\)", expression) for label in group.split(",")}
+        allowed = set().union(*(audit.PROMETHEUS_METRIC_LABELS[name] for name in names))
+        assert grouped <= allowed, (title, grouped - allowed)
+    assert seen == set(_TOKENOMICS_METRICS)
+
+
+def test_tokenomics_dashboard_log_panels_read_registered_model_usage_fields() -> None:
+    registry = _genai_registry()
+    registered = {
+        attribute["id"].replace(".", "_")
+        for path in sorted((ROOT / "schemas/telemetry/v8").glob("*.yaml"))
+        for attribute in (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("attributes", [])
+    }
+    # OTel semconv attributes (gen_ai.*, user.id) are defined upstream and only referenced by the groups.
+    registered |= {
+        ref["ref"].replace(".", "_")
+        for group in registry["groups"]
+        for ref in (group.get("attributes") or [])
+        if "ref" in ref
+    }
+    usage = {group["id"]: group for group in registry["groups"]}["log.model.usage"]
+    assert usage["log"]["event_name"] == "model.usage"
+    log_panels = _tokenomics_targets("loki")
+    assert len(log_panels) >= 8
+    fields = set()
+    for title, expression in log_panels:
+        assert "event_name=\"model.usage\"" in expression and "| json" in expression, title
+        assert "$__rate_interval" not in expression, title
+        fields |= set(re.findall(r"\bbody_[a-z0-9_]+", expression))
+    unknown = {field for field in fields if field[len("body_"):] not in registered}
+    assert not unknown, f"log fields the registry does not define: {sorted(unknown)}"
+    # Per-user rollups come from logs only; the metrics have no user label.
+    assert "body_defenseclaw_cost_basis" in fields and "body_defenseclaw_cost_usd" in fields
+    assert not any("user" in expression for _title, expression in _tokenomics_targets("prometheus"))
+    top_users = _panel(_dashboard("defenseclaw-tokenomics.json"), "Top users by cost")
+    assert top_users["datasource"]["type"] == "loki"
+    assert "sum by (user)" in top_users["targets"][0]["expr"]
+
+
+def test_tokenomics_dashboard_has_the_requested_panels() -> None:
+    dashboard = _dashboard("defenseclaw-tokenomics.json")
+    titles = {panel["title"] for panel in dashboard["panels"]}
+    assert {
+        "Cost over time (USD per interval)",
+        "Cost by model",
+        "Cost by route decision",
+        "Cost by connector",
+        "Cost by guardrail profile",
+        "Tokens by kind",
+        "Cache-read share of prompt tokens over time",
+        "Reasoning share of output tokens over time",
+        "Calls with absent cost (share)",
+        "Routed vs requested model",
+        "Top users by cost",
+        "Dropped usage records",
+    } <= titles
+    assert dashboard["uid"] == "defenseclaw-tokenomics"
+    assert {variable["name"] for variable in dashboard["templating"]["list"]} == {
+        "connector", "model", "profile", "route_decision", "user",
+    }
+
+
+def test_static_audit_rejects_a_user_label_on_the_tokenomics_counters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audit = _load_audit_module()
+    dashboard_dir = tmp_path / "dashboards"
+    dashboard_dir.mkdir()
+    prometheus = {"type": "prometheus", "uid": "defenseclaw-prometheus"}
+    dashboard = {
+        "uid": "tokenomics-fixture",
+        "title": "Tokenomics fixture",
+        "description": "Exercises the tokenomics label contract.",
+        "panels": [
+            {
+                "type": "timeseries", "title": "Per-user metric label", "datasource": prometheus,
+                "targets": [{"expr": "sum(rate(defenseclaw_model_cost_USD_total{user=\"alice\"}[5m]))", "refId": "A"}],
+            },
+            {
+                "type": "timeseries", "title": "Unknown token kind", "datasource": prometheus,
+                "targets": [{"expr": "sum(rate(defenseclaw_model_tokens_total{kind=\"tool\"}[5m]))", "refId": "A"}],
+            },
+        ],
+    }
+    (dashboard_dir / "fixture.json").write_text(json.dumps(dashboard), encoding="utf-8")
+    datasource = tmp_path / "datasources.yml"
+    datasource.write_text("jsonData:\n  timeInterval: 60s\n", encoding="utf-8")
+    monkeypatch.setattr(audit, "SOURCE_DIR", dashboard_dir)
+    monkeypatch.setattr(audit, "PACKAGED_DIR", tmp_path / "missing-dashboards")
+    monkeypatch.setattr(audit, "SOURCE_DATASOURCES", datasource)
+    monkeypatch.setattr(audit, "PACKAGED_DATASOURCES", tmp_path / "missing-datasources.yml")
+
+    _dashboards, errors = audit.static_audit()
+
+    assert any("defenseclaw_model_cost_USD_total filters on unknown labels: user" in error for error in errors)
+    assert any("uses unknown exact kind value" in error for error in errors)

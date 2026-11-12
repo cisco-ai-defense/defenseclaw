@@ -93,6 +93,42 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.connectors.<name>.webhooks[].timeout_seconds` | integer | `10` |  |  |
 | `observability.connectors.<name>.webhooks[].cooldown_seconds` | integer |  |  |  |
 | `observability.connectors.<name>.webhooks[].enabled` | boolean | `false` |  |  |
+| `observability.tokenomics` | object |  |  | Per-call model usage records, cost and the local usage aggregate. Off by default; an absent block is the pre-1.0.10 behaviour. |
+| `observability.tokenomics.enabled` | boolean | `false` |  | Master switch. Off: no usage record, no store, no goroutine. |
+| `observability.tokenomics.record_routing_provenance` | boolean | `true` |  | Put requested and selected model, route decision and profile on each usage record. |
+| `observability.tokenomics.roles` | array |  |  | Call roles to record. Empty or absent: all. |
+| `observability.tokenomics.native_otel_import` | object |  |  |  |
+| `observability.tokenomics.native_otel_import.claudecode` | boolean | `true` |  | Import per-call usage from the Claude Code OTLP stream (cross-check only while the proxy carries the connector). |
+| `observability.tokenomics.native_otel_import.codex` | boolean | `true` |  | Import per-call usage from the Codex OTLP stream (cross-check only while the proxy carries the connector). |
+| `observability.tokenomics.cost` | object |  |  |  |
+| `observability.tokenomics.cost.compute` | boolean | `true` |  | Compute cost from observability.pricing. |
+| `observability.tokenomics.cost.currency` | constant | `"USD"` | `"USD"` |  |
+| `observability.tokenomics.cost.keep_reported` | boolean | `true` |  | Keep a per-call provider or agent reported cost and mark its basis as reported. |
+| `observability.tokenomics.local_store` | object |  |  |  |
+| `observability.tokenomics.local_store.enabled` | boolean | `false` |  | Keep an hourly usage aggregate in <data_dir>/model_usage.db for the usage API and status. |
+| `observability.tokenomics.local_store.retention_days` | integer | `30` |  |  |
+| `observability.tokenomics.local_store.granularity` | constant | `"hour"` | `"hour"` |  |
+| `observability.tokenomics.metrics` | object |  |  |  |
+| `observability.tokenomics.metrics.labels` | array |  |  | Labels on defenseclaw.model.cost and defenseclaw.model.tokens. A closed set: identity labels are refused. |
+| `observability.pricing` | object |  |  | Versioned price table. The gateway prices only from this table; no price is compiled into a binary. Managed hosts take it from the admin config in the signed bundle. |
+| `observability.pricing.version` | string |  |  | Table version stamped on every record. Required when models are listed. |
+| `observability.pricing.models` | array |  |  |  |
+| `observability.pricing.models[].provider` | string |  |  | Required. |
+| `observability.pricing.models[].model` | string |  |  | Required. Exact model id, or a prefix ending in * (longest prefix wins). |
+| `observability.pricing.models[].input_per_mtok` | number |  |  | Required. USD per million input tokens (uncached). |
+| `observability.pricing.models[].output_per_mtok` | number |  |  | Required. USD per million output tokens (reasoning included unless reasoning_per_mtok is set). |
+| `observability.pricing.models[].cache_read_per_mtok` | number |  |  | USD per million cache-read input tokens. Absent: priced at input_per_mtok. |
+| `observability.pricing.models[].cache_write_per_mtok` | number |  |  | USD per million cache-creation input tokens. Absent: priced at input_per_mtok. |
+| `observability.pricing.models[].reasoning_per_mtok` | number |  |  | USD per million reasoning output tokens. Absent: priced at output_per_mtok. |
+| `observability.pricing.ai_defense` | object |  |  |  |
+| `observability.pricing.ai_defense.per_call_usd` | number |  |  |  |
+| `observability.pricing.unknown_model` | constraint | `"omit"` | `omit, fallback` | omit: a model without a price entry has no cost. fallback: price it with fallback. |
+| `observability.pricing.fallback` | object |  |  |  |
+| `observability.pricing.fallback.input_per_mtok` | number |  |  | USD per million input tokens (uncached). |
+| `observability.pricing.fallback.output_per_mtok` | number |  |  | USD per million output tokens (reasoning included unless reasoning_per_mtok is set). |
+| `observability.pricing.fallback.cache_read_per_mtok` | number |  |  | USD per million cache-read input tokens. Absent: priced at input_per_mtok. |
+| `observability.pricing.fallback.cache_write_per_mtok` | number |  |  | USD per million cache-creation input tokens. Absent: priced at input_per_mtok. |
+| `observability.pricing.fallback.reasoning_per_mtok` | number |  |  | USD per million reasoning output tokens. Absent: priced at output_per_mtok. |
 | `observability.local` | object |  |  |  |
 | `observability.local.path` | string |  |  | Defaults dynamically to <data_dir>/audit.db. |
 | `observability.local.judge_bodies_path` | string |  |  | Defaults dynamically to <data_dir>/judge_bodies.db. |
