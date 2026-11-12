@@ -26,7 +26,7 @@ import (
 // loopback only; a gateway that issued none accepts nothing new.
 func TestOpenClawAuthenticateAcceptsThePluginCredential(t *testing.T) {
 	c := NewOpenClawConnector()
-	c.SetCredentials("master-token", "")
+	c.SetCredentials("master-token")
 	plugin := strings.Repeat("a", 64)
 	req := func(remote, token string) bool {
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
