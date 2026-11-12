@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
 // Rules a DecisionRefusedError names: the floor key that refuses the
@@ -39,10 +40,6 @@ const (
 
 // maxCheckedHostBytes bounds a decision's host (a DNS name's limit).
 const maxCheckedHostBytes = 253
-
-// openShellHostAlias is how a sandbox names this computer
-// (packs.OpenShellHostAlias): a decision for it opens a host port.
-const openShellHostAlias = "host.openshell.internal"
 
 // CheckDecision refuses a decision f does not allow, as a
 // *DecisionRefusedError. It is the plan's §6.2 truth table:
@@ -85,7 +82,7 @@ func CheckDecision(f config.SandboxAdminConfig, d sandboxrelay.DecisionRequest) 
 	if err := CheckApprovals(f, kind, scope); err != nil {
 		return err
 	}
-	if host == openShellHostAlias {
+	if host == sandboxruntime.OpenShellHostAlias { // this computer: a decision for it opens a host port
 		switch {
 		case kind != sandboxrelay.DecisionEgressAllow || scope != sandboxrelay.DecisionScopeSession:
 			return refused(RuleInvalid, "a port on this computer is opened for one sandbox's session only")

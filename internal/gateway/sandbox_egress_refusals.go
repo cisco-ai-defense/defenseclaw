@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
 // A sandbox's egress proxy refuses an HTTPS destination by answering the
@@ -204,7 +205,7 @@ var sandboxDirectRefusalErrors = []string{"eacces", "econnrefused", "connection 
 // direct connections OpenShell refuses (a --host-port ask among them).
 func sandboxDirectRefusalResult(rawBody []byte) bool {
 	body := strings.ToLower(string(rawBody))
-	if !strings.Contains(body, "host.openshell.internal") && !strings.Contains(body, "198.18.") {
+	if !strings.Contains(body, sandboxruntime.OpenShellHostAlias) && !strings.Contains(body, "198.18.") {
 		return false
 	}
 	return slices.ContainsFunc(sandboxDirectRefusalErrors, func(e string) bool { return strings.Contains(body, e) })
@@ -295,7 +296,7 @@ func sandboxEgressTarget(r SandboxEgressRefusal) string {
 // sandboxAskTarget names an asked destination: a port on the user's
 // machine (host.openshell.internal) as such.
 func sandboxAskTarget(r SandboxEgressRefusal) string {
-	if r.Host == "host.openshell.internal" && r.Port > 0 {
+	if r.Host == sandboxruntime.OpenShellHostAlias && r.Port > 0 {
 		return "port " + strconv.Itoa(r.Port) + " on the user's machine (" + sandboxEgressTarget(r) + ")"
 	}
 	return sandboxEgressTarget(r)
