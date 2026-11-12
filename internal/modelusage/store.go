@@ -398,6 +398,17 @@ func (s *Store) pruneLocked() {
 	_, _ = s.db.Exec("DELETE FROM model_usage_group WHERE hour_start < ?", cutoff)
 }
 
+// Querier is what the usage API reads. The local Store is the default; a
+// deployment whose gateway replicas share no data directory installs one
+// backed by its leader. The caller scope (Owner, AllOwners) is part of the
+// Query, so a replacement must apply the same server-side filter.
+type Querier interface {
+	Enabled() bool
+	Run(ctx context.Context, q Query) ([]Row, error)
+}
+
+var _ Querier = (*Store)(nil)
+
 // Query selects usage rolled up by one dimension.
 type Query struct {
 	By       string    // model | connector | route | profile | role | provider | user | group | hour

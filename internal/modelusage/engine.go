@@ -48,6 +48,8 @@ type Engine struct {
 	applyMu sync.Mutex // serialises Apply so the snapshot and the worker never disagree
 	dropped atomic.Int64
 	spend   spendTracker
+	// spendReader replaces the local spend tracker for reads when set.
+	spendReader atomic.Pointer[SpendReader]
 
 	mu      sync.RWMutex
 	sinks   []Sink

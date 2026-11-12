@@ -285,3 +285,26 @@ func TestReadFlushIsThrottled(t *testing.T) {
 		t.Fatalf("a read inside the gap must not write: %+v", rows)
 	}
 }
+
+type fixedSpend struct{ usd float64 }
+
+func (f fixedSpend) Spend(string, string, string, time.Time) (float64, bool) { return f.usd, true }
+
+func TestSpendReaderReplacesTheLocalTrackerForReads(t *testing.T) {
+	e := NewEngine()
+	now := time.Now()
+	cf := CallFacts{Connector: "codex", Subject: "7", SubjectKind: "posix_uid", IdentityVerified: true}
+	e.spend.add(cf, 1.5, now)
+	owner := OwnerID(cf)
+	if v, _ := e.Spend(ScopeUser, owner, PeriodDay, now); v != 1.5 {
+		t.Fatalf("local tracker: %v", v)
+	}
+	e.SetSpendReader(fixedSpend{usd: 42})
+	if v, ok := e.Spend(ScopeUser, owner, PeriodDay, now); !ok || v != 42 {
+		t.Fatalf("a replica-backed reader must answer: %v %v", v, ok)
+	}
+	e.SetSpendReader(nil)
+	if v, _ := e.Spend(ScopeUser, owner, PeriodDay, now); v != 1.5 {
+		t.Fatalf("nil restores the local tracker: %v", v)
+	}
+}
