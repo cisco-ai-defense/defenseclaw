@@ -59,6 +59,10 @@ func (v coworkVerdict) equal(o coworkVerdict) bool {
 // the verdicts must be equal for every command the Windows hint reads as
 // POSIX, and for the others the Cowork verdict must never be the stricter
 // one (no benign command blocked only in Cowork).
+//
+// Every corpus row is judged in the strict profile and in one of the other
+// two, not in all twelve profile, mode and event cells (see the rotation
+// below).
 func TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts(t *testing.T) {
 	cases := readJSONL[toolCallCorpusCase](t, "toolcall", "corpus.jsonl")
 	var commands []toolCallCorpusCase
@@ -75,49 +79,82 @@ func TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts(t *testing.T) {
 	}
 	root := guardrailPoliciesRoot(t)
 	var compared, bashBlocks, benign, windowsOnly int
-	for _, profile := range []string{"default", "strict", "permissive"} {
-		for _, mode := range []string{"action", "observe"} {
+	// The owner's test budget: no cross product of corpus row x profile x
+	// mode x event. Each row is judged in two cells, not all twelve: once in
+	// the strict profile and once in the default or the permissive one, with
+	// mode and event turning between the two and from row to row. Attack and
+	// benign rows rotate separately, so each walks all the cells in turn; the
+	// check at the end shows every cell judged both.
+	type cell struct{ profile, mode, event string }
+	apis := map[cell]*APIServer{}
+	api := func(c cell) *APIServer {
+		if apis[c] == nil {
 			cfg := &config.Config{}
-			cfg.Guardrail.Mode = mode
+			cfg.Guardrail.Mode = c.mode
 			cfg.Guardrail.Connector = "claudecode"
-			cfg.Guardrail.RulePackDir = filepath.Join(root, profile)
-			api := &APIServer{scannerCfg: cfg}
-			for _, test := range commands {
-				cwd := test.CWD
-				if cwd == "" {
-					cwd = "/repo"
+			cfg.Guardrail.RulePackDir = filepath.Join(root, c.profile)
+			apis[c] = &APIServer{scannerCfg: cfg}
+		}
+		return apis[c]
+	}
+	modes, events := []string{"action", "observe"}, []string{"PreToolUse", "PermissionRequest"}
+	judged := map[cell][2]int{}
+	turn := map[bool]int{}
+	for _, test := range commands {
+		k := turn[test.IsAttack]
+		turn[test.IsAttack]++
+		cwd := test.CWD
+		if cwd == "" {
+			cwd = "/repo"
+		}
+		for _, c := range []cell{
+			{"strict", modes[k%2], events[(k/2)%2]},
+			{[]string{"default", "permissive"}[(k/4)%2], modes[(k+1)%2], events[(k/2+1)%2]},
+		} {
+			counts := judged[c]
+			if test.IsAttack {
+				counts[0]++
+			} else {
+				counts[1]++
+			}
+			judged[c] = counts
+			evaluate := func(tool string, server map[string]interface{}) coworkVerdict {
+				payload := map[string]interface{}{"hook_event_name": c.event, "tool_name": tool}
+				if server != nil {
+					payload["mcp_server"] = server
 				}
-				for _, event := range []string{"PreToolUse", "PermissionRequest"} {
-					evaluate := func(tool string, server map[string]interface{}) coworkVerdict {
-						payload := map[string]interface{}{"hook_event_name": event, "tool_name": tool}
-						if server != nil {
-							payload["mcp_server"] = server
-						}
-						return coworkVerdictOf(api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
-							HookEventName: event, ToolName: tool, CWD: cwd,
-							ToolInput: map[string]interface{}{"command": test.Command},
-							Payload:   payload,
-						}))
-					}
-					bash := evaluate("Bash", nil)
-					cowork := evaluate("mcp__workspace__bash", coworkWorkspaceServer())
-					compared++
-					if bash.raw == "block" {
-						bashBlocks++
-					}
-					if !test.IsAttack {
-						benign++
-					}
-					if coworkBashReadsPOSIX(test.Command) {
-						if !cowork.equal(bash) {
-							t.Errorf("%s/%s %s %q (%s): Cowork %+v, Bash %+v", profile, mode, event, test.Command, test.ID, cowork, bash)
-						}
-					} else {
-						windowsOnly++
-						if coworkActionRank(cowork.raw) > coworkActionRank(bash.raw) {
-							t.Errorf("%s/%s %s %q (%s): Cowork %+v is stricter than Bash %+v on Windows", profile, mode, event, test.Command, test.ID, cowork, bash)
-						}
-					}
+				return coworkVerdictOf(api(c).evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+					HookEventName: c.event, ToolName: tool, CWD: cwd,
+					ToolInput: map[string]interface{}{"command": test.Command},
+					Payload:   payload,
+				}))
+			}
+			bash := evaluate("Bash", nil)
+			cowork := evaluate("mcp__workspace__bash", coworkWorkspaceServer())
+			compared++
+			if bash.raw == "block" {
+				bashBlocks++
+			}
+			if !test.IsAttack {
+				benign++
+			}
+			if coworkBashReadsPOSIX(test.Command) {
+				if !cowork.equal(bash) {
+					t.Errorf("%s/%s %s %q (%s): Cowork %+v, Bash %+v", c.profile, c.mode, c.event, test.Command, test.ID, cowork, bash)
+				}
+			} else {
+				windowsOnly++
+				if coworkActionRank(cowork.raw) > coworkActionRank(bash.raw) {
+					t.Errorf("%s/%s %s %q (%s): Cowork %+v is stricter than Bash %+v on Windows", c.profile, c.mode, c.event, test.Command, test.ID, cowork, bash)
+				}
+			}
+		}
+	}
+	for _, profile := range []string{"default", "strict", "permissive"} {
+		for _, mode := range modes {
+			for _, event := range events {
+				if counts := judged[cell{profile, mode, event}]; counts[0] == 0 || counts[1] == 0 {
+					t.Errorf("cell %s/%s %s judged %d attack and %d benign rows; the rotation must give it both", profile, mode, event, counts[0], counts[1])
 				}
 			}
 		}
