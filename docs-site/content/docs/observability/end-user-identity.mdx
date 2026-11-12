@@ -17,7 +17,7 @@ An absent field means DefenseClaw could not establish it safely. Do not infer `i
 | Attribute | Meaning |
 | --- | --- |
 | `user.id` | POSIX effective uid or Windows token SID. |
-| `defenseclaw.user.id_kind` | `posix_uid` or `windows_sid`, set only when the id came from the matching trusted OS source. `oidc_subject` on an [Agent Substrate](/docs/substrate) actor: the subject of an OIDC person the gateway verified, scoped by the issuer it trusts. |
+| `defenseclaw.user.id_kind` | `posix_uid` or `windows_sid`, set only when the id came from the matching trusted OS source. `oidc_subject` on an [Agent Substrate](/docs/substrate) actor: the subject of an OIDC person the gateway verified, scoped by the issuer it trusts. `k8s_user`: the Kubernetes user the gateway verified with a TokenReview, on an open-source cluster with no OIDC provider. |
 | `defenseclaw.user.name` | OS account name without its domain: `alice` for the SSSD account `alice@corp.example.com` or for `CORP\alice`. The qualified form is the principal. Every record of the account carries the same spelling. A local and a directory account with the same bare name differ by `user.id`, `defenseclaw.user.directory` and `defenseclaw.user.domain`. Names in any script are kept. |
 | `defenseclaw.user.email` | Optional connector-account email. Off by default. |
 | `defenseclaw.user.principal` | Directory principal (UPN, Kerberos principal or `DOMAIN\user`), for example `alice@CORP.EXAMPLE.COM`. Sent only with `ai_discovery.include_user_principal`. |

@@ -216,7 +216,7 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 | `defenseclaw.sandbox.substrate.batch_id` | The batch an unattended actor belongs to |
 | `defenseclaw.sandbox.substrate.parent_uid` | The actor a fork was made from |
 | `k8s.cluster.name`, `k8s.namespace.name` | Resource attributes of the DefenseClaw component, from the chart. `host.name` is the pod, never the actor |
-| `defenseclaw.user.id_kind=oidc_subject` | The person is an OIDC subject. `defenseclaw.user.identity.source` is `oidc` for a person or `workload_oidc` for CI. `defenseclaw.user.principal.assurance` is `verified` only for a person or workload the gateway verified and bound to a live actor UID; anything the actor says about itself is `claimed` |
+| `defenseclaw.user.id_kind=oidc_subject` or `k8s_user` | The person is an OIDC subject, or a Kubernetes user the gateway verified (open-source clusters without OIDC). `defenseclaw.user.identity.source` is `oidc` for a person or `workload_oidc` for CI. `defenseclaw.user.principal.assurance` is `verified` only for a person or workload the gateway verified and bound to a live actor UID; anything the actor says about itself is `claimed` |
 
 **Lifecycle.** `sandbox.lifecycle` records use the actor phases `resuming`, `ready` (Substrate's RUNNING), `suspending`, `suspended`, `crashed`, `deleting` and `reverting`, and these triggers: `attest` (a template was attested or refused), `policy_lag`, `resume_recheck`, `fork`, `drift` (a foreign change to the egress policy was reverted), `policy_conflict`, `idle_suspend` and `migrate`.
 

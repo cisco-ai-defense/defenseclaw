@@ -4,13 +4,13 @@ description: How DefenseClaw, its config, its policy and the agent kit reach an 
 keywords:
   - Agent Substrate Helm
   - DefenseClaw GitOps
-  - policy bundles Kubernetes
+  - policy rollout Kubernetes
   - fleet management agents
 ---
 
-{/* TODO(substrate): bundle apply flags and the status/verify JSON follow PLAN 9 and 10 and the chart README (lanes/a8). Confirm against the merged launcher and chart, and against the management contract tests. */}
+{/* Commands checked against sub/a6 77468de3d5 and the chart README (sub/a8). */}
 
-On laptops, an MDM (Intune, Jamf) delivers DefenseClaw, its config and its policy, and keeps them in place. Kubernetes has no MDM. Its equivalents are a package manager (Helm), a source of truth in git (GitOps with Argo CD or Flux), and Kubernetes access control. DefenseClaw uses those, and keeps the trust model it already has: **signed artifacts and signed policy bundles, verified by DefenseClaw itself.**
+On laptops, an MDM (Intune, Jamf) delivers DefenseClaw, its config and its policy, and keeps them in place. Kubernetes has no MDM. Its equivalents are a package manager (Helm), a source of truth in git (GitOps with Argo CD or Flux), and Kubernetes access control. DefenseClaw uses those, and keeps the trust model it already has: **signed artifacts, verified by DefenseClaw itself.**
 
 ## What gets delivered
 
@@ -19,8 +19,8 @@ On laptops, an MDM (Intune, Jamf) delivers DefenseClaw, its config and its polic
 | DefenseClaw | Signed package (pkg, msi, rpm, deb) | Signed container image (one binary for gateway, leader, controller and callout) |
 | How it's installed | MDM pushes the package | Signed Helm chart from an OCI registry |
 | Config (`config.yaml`) | MDM profile or file | Helm values (`config:`), rendered into one ConfigMap that every component reads |
-| Policy (rule packs, admission, profiles, sandbox packs) | Signed policy bundle | The same signed policy bundle, from an OCI registry or a ConfigMap |
-| Trust anchors (who may sign bundles) | Installed by MDM | Set at install, held in a Secret only platform admins can change |
+| Policy (rule packs, admission, profiles, sandbox packs) | Signed policy delivered by the MDM | Helm values and profiles, applied by Helm or GitOps; the same policy files and rules |
+| Trust anchors (who may sign policy) | Installed by MDM | Set at install, held in a Secret only platform admins can change |
 | Keys (model providers, AI Defense, LLM judge) | Protected credential on each laptop | Kubernetes Secrets, or Substrate's credential provider (Vault, cloud secret managers) |
 | What runs in the agent | Hooks written into each agent's config | The DefenseClaw kit, built into the agent template with `template build`, as signed per-connector kit images pinned by digest |
 
@@ -56,19 +56,12 @@ Commit the chart reference and `defenseclaw-values.yaml` to the repo Argo CD or 
 
 ## Rolling out policy
 
-Policy goes out as a signed bundle with a generation number:
+Policy lives in the chart values (`config:`) and in the profiles. Change them the way you change any cluster setting: `helm upgrade`, or a commit that Argo CD or Flux applies.
 
-```bash
-defenseclaw substrate bundle apply policy-2026-11-10.json --dry-run
-defenseclaw substrate bundle apply policy-2026-11-10.json --atespaces 'eng-canary-*'
-defenseclaw substrate bundle status
-```
-
-- **The signature is checked first.** The gateway checks it against the trust anchors and refuses a bundle that fails, keeping the one it has.
-- **Staged rollout.** A bundle can go to some atespaces first, such as a canary team, then everyone.
-- **Receipts.** Each apply leaves a receipt (bundle digest, generation, when, by whom), shown by `bundle status`.
+- **The change is checked first.** `helm upgrade` checks the new config and refuses one that does not load.
 - **Running agents.** The controller rewrites their allow lists. Suspended agents get the new policy before they resume.
-- **Rollback.** Apply the previous bundle. Nothing on a laptop needs to change.
+- **Rollback.** `helm rollback`, or revert the commit. Nothing on a laptop needs to change.
+- **Trust anchors.** Who may sign policy for the cluster is set at install and held in a Secret only platform admins can change. Staged, signed rollouts per atespace are for administrators and are described in the management documentation, not here.
 
 ## Upgrades
 
@@ -99,12 +92,12 @@ A fleet here is **clusters, then atespaces (teams), then agents, then the people
 
 **What each install reports**
 - **Health:** gateway replicas ready, which replica is the leader, controller lag (agent created to allow list written), callout answering and whether it reads bodies, the Substrate version.
-- **Policy:** bundle digest and generation per atespace, receipts, and allow lists changed outside DefenseClaw (drift and conflicts).
+- **Policy:** the policy generation per atespace, and allow lists changed outside DefenseClaw (drift and conflicts).
 - **Inventory:** templates with their agent, version, kit version and scan result; agents running and suspended; who started each.
 - **Activity:** checks, blocks and asks per team and per agent; sites refused; unattested templates; spend; batches.
 
 **How to read it**
-- The output of `defenseclaw substrate status --json` and `defenseclaw substrate doctor --cluster --json` follows the same machine-readable contract as the [managed-laptop commands](/docs/enterprise/managed-commands). A management agent, a GitOps pipeline or a script can read health and apply bundles the same way for clusters and laptops.
+- The output of `defenseclaw substrate status --cluster --json` and `defenseclaw substrate verify --json` follows the same machine-readable contract as the [managed-laptop commands](/docs/enterprise/managed-commands). A management agent, a GitOps pipeline or a script can read health the same way for clusters and laptops.
 - The OpenTelemetry stream carries all of it, so the Grafana dashboards, Splunk or any OTLP backend show the fleet next to your laptops. Every record carries `k8s.cluster.name`.
 
-**Many clusters.** Install DefenseClaw once per cluster, with the same signed bundles and trust anchors, and a unique actor-token issuer per cluster. One dashboard covers all of them.
+**Many clusters.** Install DefenseClaw once per cluster, with the same values and trust anchors, and a unique actor-token issuer per cluster. One dashboard covers all of them.

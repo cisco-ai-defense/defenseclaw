@@ -36,9 +36,7 @@ Unattended runs deny asks by default. Either allow the site in the profile, or s
 
 ### An actor is marked `policy_conflict`
 
-Another writer reverted DefenseClaw's egress policy three times in ten minutes, usually a GitOps tool or a script that owns `EgressPolicy` objects. The controller stopped reverting (it never adds access while doing so) and raised an alert. Find the other writer in the actor's audit records (`drift` and `policy_conflict` lifecycle records name the change), stop it, then delete and recreate the actor.
-
-{/* TODO(substrate): confirm the recovery step with A3. Is there a way to clear policy_conflict without recreating the actor? */}
+Another writer reverted DefenseClaw's egress policy three times in ten minutes, usually a GitOps tool or a script that owns `EgressPolicy` objects. The controller stopped reverting (it never adds access while doing so) and raised an alert. Find the other writer in the actor's audit records (`drift` and `policy_conflict` lifecycle records name the change) and stop it. The conflict clears when another writer restores DefenseClaw's policy. An administrator can also clear it with `defenseclaw substrate policy reset <actor>`, which is audited: the controller then writes the policy again and starts reverting again.
 
 ### `setup` says another callout is registered
 
@@ -55,6 +53,14 @@ The default actor-token issuer is the same on every cluster. Give each cluster i
 ### `doctor` warns about the snapshot bucket
 
 Snapshots hold everything an actor held, so the bucket should be encrypted, private, region-correct and have a retention rule. Fix the bucket, or accept the warning knowingly. `delete` removes an agent's snapshots.
+
+### Model calls to Bedrock fail through a VPC endpoint
+
+A Bedrock interface endpoint with private DNS resolves to a private address, and the guardrail proxy refuses private upstreams by default. Add the endpoint's address to `guardrail.allow_private_upstreams` (individual IPs, not ranges). The endpoint's security group must also admit the node security group on 443, or calls time out with a 503.
+
+### A new actor is briefly offline
+
+An actor created and resumed outside DefenseClaw, inside one poll interval, gets its policy just after the resume. Until then it has no network (default deny). Actors started with `defenseclaw substrate run` get their policy before the first resume.
 
 ### A kit version refusal with a `migrate` hint
 
