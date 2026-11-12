@@ -17,6 +17,7 @@
 package extproc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -24,18 +25,26 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 )
 
 func TestVerdictClient(t *testing.T) {
-	var got VerdictRequest
-	answer := `{"action":"block","severity":"HIGH","reason":"matched","source":"asset_policy","rule_ids":["R1"]}`
+	var got calloutapi.Request
+	answer := `{"v":"1","verdict":"deny","severity":"HIGH","reason":"matched","source":"mcp_asset_policy","findings":["R1"]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != VerdictPath || r.Header.Get("Authorization") != "Bearer tok-1" ||
-			r.Header.Get("X-DefenseClaw-Client") == "" || r.Header.Get("Content-Type") != "application/json" {
+		if r.URL.Path != calloutapi.Path || r.Header.Get("Authorization") != "Bearer tok-1" ||
+			r.Header.Get("X-DefenseClaw-Client") != calloutapi.ClientTag || r.Header.Get("Content-Type") != "application/json" {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		_ = json.NewDecoder(r.Body).Decode(&got)
+		// The gateway decodes strictly: unknown fields are refused.
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&got); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		_, _ = w.Write([]byte(answer))
 	}))
 	defer srv.Close()
@@ -43,27 +52,43 @@ func TestVerdictClient(t *testing.T) {
 	if err := os.WriteFile(tok, []byte("tok-1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c, err := NewVerdictClient(JudgeConfig{URL: srv.URL + VerdictPath, TokenFile: tok})
+	c, err := NewVerdictClient(JudgeConfig{URL: srv.URL + calloutapi.Path, TokenFile: tok})
 	if err != nil {
 		t.Fatal(err)
 	}
 	call := ToolCall{Actor: ActorRef{Atespace: "a4-gv", Name: "p1", UID: "u1"}, Host: "mcp.x", Server: "tickets", Tool: "run",
-		Args: json.RawMessage(`{"a":1}`)}
+		URL: "https://mcp.x/mcp", SessionID: "s-1", RequestID: "r-1", Args: json.RawMessage(`{"a":1}`)}
 	v, err := c.JudgeToolCall(context.Background(), call)
-	if err != nil || !v.Block || v.Reason != "matched" || len(v.Findings) != 1 {
+	if err != nil || !v.Block || v.Ask || v.Reason != "matched" || v.Source != "mcp_asset_policy" || len(v.Findings) != 1 {
 		t.Fatalf("%+v %v", v, err)
 	}
-	if got.Actor != (VerdictActor{"a4-gv", "p1", "u1"}) || got.MCP.Host != "mcp.x" || got.MCP.Server != "tickets" ||
-		got.MCP.Tool != "run" || string(got.MCP.Arguments) != `{"a":1}` {
-		t.Fatalf("request: %+v", got)
+	want := calloutapi.Request{V: "1", RequestID: "r-1", Actor: calloutapi.Actor{Atespace: "a4-gv", Name: "p1"},
+		MCP:  calloutapi.MCP{Server: "tickets", URL: "https://mcp.x/mcp", Transport: "http", Method: "tools/call", Tool: "run"},
+		Args: json.RawMessage(`{"a":1}`), SessionID: "s-1"}
+	gb, _ := json.Marshal(got)
+	wb, _ := json.Marshal(want)
+	if !bytes.Equal(gb, wb) {
+		t.Fatalf("request\n got %s\nwant %s", gb, wb)
 	}
-	answer = `{"action":"alert"}`
-	if v, err := c.JudgeToolCall(context.Background(), call); err != nil || v.Block || !v.Alert {
-		t.Fatalf("alert: %+v %v", v, err)
+	for _, tc := range []struct {
+		answer            string
+		block, ask, alert bool
+	}{
+		{`{"v":"1","verdict":"allow","source":"none"}`, false, false, false},
+		{`{"v":"1","verdict":"allow","source":"tool_rules","findings":["F1"]}`, false, false, true},
+		{`{"v":"1","verdict":"ask","source":"tool_rules","reason":"needs approval"}`, true, true, false},
+	} {
+		answer = tc.answer
+		v, err := c.JudgeToolCall(context.Background(), call)
+		if err != nil || v.Block != tc.block || v.Ask != tc.ask || v.Alert != tc.alert {
+			t.Fatalf("%s: %+v %v", tc.answer, v, err)
+		}
 	}
-	answer = `{"action":"maybe"}`
-	if _, err := c.JudgeToolCall(context.Background(), call); err == nil {
-		t.Fatal("unknown action accepted")
+	for _, bad := range []string{`{"v":"1","verdict":"block"}`, `{"v":"2","verdict":"allow"}`, `{"verdict":"allow"}`, `not json`} {
+		answer = bad
+		if _, err := c.JudgeToolCall(context.Background(), call); err == nil {
+			t.Fatalf("answer %s accepted", bad)
+		}
 	}
 	if c, err := NewVerdictClient(JudgeConfig{}); c != nil || err != nil {
 		t.Fatalf("empty URL: %v %v", c, err)

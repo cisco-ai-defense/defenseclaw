@@ -115,7 +115,7 @@ type AskConfig struct {
 }
 
 // JudgeConfig points the MCP tool judge at the gateway's callout verdict
-// route (VerdictPath) on an internal listener.
+// route (calloutapi.Path) on the admin listener.
 type JudgeConfig struct {
 	URL       string        `yaml:"url"`
 	TokenFile string        `yaml:"token_file"`

@@ -122,18 +122,29 @@ type ToolCall struct {
 	// "host=name"), or the host.
 	Server string
 	Host   string
-	Tool   string
-	Args   json.RawMessage
+	// URL is scheme, host and path of the request, never the query.
+	URL  string
+	Tool string
+	Args json.RawMessage
+	// SessionID is the Mcp-Session-Id the actor sent, if any.
+	SessionID string
+	// RequestID ties the verdict to the callout's event.
+	RequestID string
 }
 
 // ToolVerdict is the hook tool rules' verdict for a ToolCall.
 type ToolVerdict struct {
 	Block bool
+	// Ask is a refusal until a person approves: the route answered ask.
+	Ask bool
 	// Alert is an allowed call the rules flagged (the hooks' alert action).
 	Alert    bool
 	Severity string
 	Reason   string
 	Findings []string
+	// Source is the evaluation that decided (mcp_asset_policy, tool_rules,
+	// none).
+	Source string
 }
 
 // ToolJudge runs a tool call through the same MCP and tool rules the hooks

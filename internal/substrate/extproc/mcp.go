@@ -28,6 +28,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 )
 
 // maxBatchCalls bounds a JSON-RPC batch the callout judges.
@@ -126,15 +128,11 @@ func exactObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	return out, nil
 }
 
-// VerdictPath is the gateway's callout verdict route (A2): it runs the hook
-// path's MCP evaluation, the MCP asset policy and the tool rules in action
-// mode, for one tools/call, and answers allow, alert or block. It is served
-// on an internal listener, never the actor listener.
-const VerdictPath = "/api/v1/substrate/callout/mcp-verdict"
-
 // VerdictClient is the ToolJudge adapter to the gateway's callout verdict
-// route, so a tools/call the hooks would refuse is refused at egress with
-// the same verdict, and the callout adds no rules of its own.
+// route (calloutapi.Path, admin listener): the route runs the hook path's
+// MCP evaluation, the MCP asset policy and the tool rules in action mode,
+// so a tools/call the hooks would refuse is refused at egress with the same
+// verdict, and the callout adds no rules of its own.
 type VerdictClient struct {
 	url       string
 	tokenFile string
@@ -166,44 +164,16 @@ func NewVerdictClient(cfg JudgeConfig) (*VerdictClient, error) {
 	return &VerdictClient{url: cfg.URL, tokenFile: cfg.TokenFile, http: &http.Client{Transport: tr}}, nil
 }
 
-// VerdictRequest is the callout verdict route's request body.
-type VerdictRequest struct {
-	Actor VerdictActor `json:"actor"`
-	MCP   VerdictMCP   `json:"mcp"`
-}
-
-// VerdictActor names the actor; UID is empty until a UIDResolver is wired.
-type VerdictActor struct {
-	Atespace string `json:"atespace"`
-	Name     string `json:"name"`
-	UID      string `json:"uid,omitempty"`
-}
-
-// VerdictMCP is the tools/call: the destination host, the MCP server name the
-// admin gave it, the tool and its arguments as sent.
-type VerdictMCP struct {
-	Host      string          `json:"host"`
-	Server    string          `json:"server"`
-	Tool      string          `json:"tool"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
-}
-
-// VerdictResponse is the route's answer. Action is allow, alert or block;
-// Source says which evaluation decided (asset_policy or tool_rules).
-type VerdictResponse struct {
-	Action   string   `json:"action"`
-	Severity string   `json:"severity,omitempty"`
-	Reason   string   `json:"reason,omitempty"`
-	Source   string   `json:"source,omitempty"`
-	RuleIDs  []string `json:"rule_ids,omitempty"`
-}
-
-// JudgeToolCall implements ToolJudge. Any answer but 200 with a known action
-// is an error, which the engine's failure mode handles.
+// JudgeToolCall implements ToolJudge. Any answer but 200 with contract
+// version 1 and a known verdict is an error, which the engine's failure
+// mode handles.
 func (c *VerdictClient) JudgeToolCall(ctx context.Context, call ToolCall) (ToolVerdict, error) {
-	body, err := json.Marshal(VerdictRequest{
-		Actor: VerdictActor{Atespace: call.Actor.Atespace, Name: call.Actor.Name, UID: call.Actor.UID},
-		MCP:   VerdictMCP{Host: call.Host, Server: call.Server, Tool: call.Tool, Arguments: call.Args},
+	body, err := json.Marshal(calloutapi.Request{
+		V: calloutapi.Version, RequestID: call.RequestID,
+		Actor: calloutapi.Actor{Atespace: call.Actor.Atespace, Name: call.Actor.Name},
+		MCP: calloutapi.MCP{Server: call.Server, URL: call.URL, Transport: "http", Method: "tools/call",
+			Tool: call.Tool},
+		Args: call.Args, SessionID: call.SessionID,
 	})
 	if err != nil {
 		return ToolVerdict{}, err
@@ -213,8 +183,8 @@ func (c *VerdictClient) JudgeToolCall(ctx context.Context, call ToolCall) (ToolV
 		return ToolVerdict{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// The gateway API's CSRF gate refuses a request without a client tag.
-	req.Header.Set("X-DefenseClaw-Client", "substrate-extproc")
+	// The admin listener keeps the CSRF gate: a POST needs a client tag.
+	req.Header.Set("X-DefenseClaw-Client", calloutapi.ClientTag)
 	if c.tokenFile != "" {
 		tok, err := os.ReadFile(c.tokenFile)
 		if err != nil {
@@ -231,19 +201,25 @@ func (c *VerdictClient) JudgeToolCall(ctx context.Context, call ToolCall) (ToolV
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		return ToolVerdict{}, fmt.Errorf("callout verdict: HTTP %d", resp.StatusCode)
 	}
-	var v VerdictResponse
+	var v calloutapi.Response
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v); err != nil {
 		return ToolVerdict{}, err
 	}
-	out := ToolVerdict{Severity: v.Severity, Reason: v.Reason, Findings: v.RuleIDs}
-	switch strings.ToLower(v.Action) {
-	case "block":
+	if v.V != calloutapi.Version {
+		return ToolVerdict{}, fmt.Errorf("callout verdict: contract version %q", v.V)
+	}
+	out := ToolVerdict{Severity: v.Severity, Reason: v.Reason, Findings: v.Findings, Source: v.Source}
+	switch v.Verdict {
+	case calloutapi.VerdictDeny:
 		out.Block = true
-	case "alert":
-		out.Alert = true
-	case "allow":
+	case calloutapi.VerdictAsk:
+		// The callout can't hold a request for a person: an ask the route
+		// raised is a refusal until it is approved (D12).
+		out.Block, out.Ask = true, true
+	case calloutapi.VerdictAllow:
+		out.Alert = len(v.Findings) > 0
 	default:
-		return ToolVerdict{}, fmt.Errorf("callout verdict: unknown action %q", v.Action)
+		return ToolVerdict{}, fmt.Errorf("callout verdict: unknown verdict %q", v.Verdict)
 	}
 	return out, nil
 }
