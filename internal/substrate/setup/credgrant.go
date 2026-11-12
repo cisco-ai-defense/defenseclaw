@@ -74,9 +74,9 @@ func GrantNamespace(text string, atespaces []string, namespace string) (string, 
 	return out, changes, err
 }
 
-// RevokeNamespace removes namespace from the grants of atespaces, and an
-// entry left with no namespace.
-func RevokeNamespace(text string, atespaces []string, namespace string) (string, []GrantChange, error) {
+// RevokeNamespaceExcept removes namespace from the grants of every atespace
+// not in keep (nil keep: every atespace), and an entry left with nothing.
+func RevokeNamespaceExcept(text string, keep []string, namespace string) (string, []GrantChange, error) {
 	p, err := parseNamespacePolicy(text)
 	if err != nil {
 		return "", nil, err
@@ -84,7 +84,7 @@ func RevokeNamespace(text string, atespaces []string, namespace string) (string,
 	var changes []GrantChange
 	kept := p.Policies[:0]
 	for _, e := range p.Policies {
-		if slices.Contains(atespaces, e.Atespace) && slices.Contains(e.AllowedNamespaces, namespace) {
+		if !slices.Contains(keep, e.Atespace) && slices.Contains(e.AllowedNamespaces, namespace) {
 			e.AllowedNamespaces = slices.DeleteFunc(e.AllowedNamespaces, func(n string) bool { return n == namespace })
 			changes = append(changes, GrantChange{Atespace: e.Atespace, Namespace: namespace, Removed: true})
 			if len(e.AllowedNamespaces) == 0 && len(e.Rest) == 0 {

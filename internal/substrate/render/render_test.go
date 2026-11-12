@@ -100,7 +100,7 @@ var cases = []struct {
 		Profile: Profile{Name: "eng-web", AllowedCredentials: []string{"none"}, Block: []string{"*.crates.io"}},
 	}},
 	{"custom-service", Input{Settings: Settings{
-		ActorService: "dc-actor.security.svc.cluster.local", ActorServicePort: 8443, Audience: "dc-prod", TokenLifetimeSeconds: 600,
+		ActorService: "dc-actor.security.svc.cluster.local", ActorServicePort: 8443, Audience: "dc-prod", TokenLifetimeSeconds: 300,
 		AllowHosts: []string{"*.svc.cluster.local", "other.security.svc.cluster.local", "*.cluster.local"},
 	}, Profile: Profile{Name: "default"}}},
 }
@@ -284,15 +284,20 @@ func TestActorServiceRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rule := r.Policy.GetRules()[0].GetHttps()
+	// Plain HTTP on port 80 (GAP-0023 outcome: egress trusts only public
+	// CAs for an https upstream).
+	rule := r.Policy.GetRules()[0].GetHttp()
 	h := rule.GetEffects().GetReplaceHeaders()[0]
+	if !slices.Equal(rule.GetPorts().GetNumbers(), []int32{80}) || r.Policy.GetRules()[0].GetHttps() != nil {
+		t.Fatalf("actor service rule = %v", r.Policy.GetRules()[0])
+	}
 	if rule.GetHostnames()[0] != "defenseclaw-actor.defenseclaw-system.svc" || h.GetHeader() != ActorHeader ||
-		h.GetPrefix() != "Bearer " || h.GetActorJwt().GetAudiences()[0] != "defenseclaw" || h.GetActorJwt().GetExpirationSeconds() != 900 ||
+		h.GetPrefix() != "Bearer " || h.GetActorJwt().GetAudiences()[0] != "defenseclaw" || h.GetActorJwt().GetExpirationSeconds() != 300 ||
 		h.GetCredentialUri() != "" {
 		t.Fatalf("actor service rule = %v", rule)
 	}
 	for _, bad := range []Settings{
-		{ActorService: ""}, {ActorService: "*.x.svc"}, {ActorService: "a.svc", TokenLifetimeSeconds: 100},
+		{ActorService: ""}, {ActorService: "*.x.svc"}, {ActorService: "a.svc", TokenLifetimeSeconds: 100}, {ActorService: "a.svc", TokenLifetimeSeconds: 900},
 		{ActorService: "a.svc", ActorServicePort: 70000}, {ActorService: "a.svc", EcosystemPacks: []string{"maven"}},
 	} {
 		if _, err := EgressPolicy(Input{Settings: bad}); err == nil {
@@ -346,6 +351,40 @@ func TestPerPersonSourceUsesPersonKey(t *testing.T) {
 	r, _ = EgressPolicy(shared)
 	if r.Dropped[len(r.Dropped)-1].Reason != ReasonSecretInvalid {
 		t.Fatal("a shared secret naming {person} must be refused")
+	}
+	// GAP-0068: a per_person source without {person} would serve one secret
+	// to everyone; the renderer refuses it even when validation was skipped.
+	pp := cases[1].in
+	pp.Secrets = []Secret{{Name: "p", Source: "ate-secret://k8s.io/default/x/everyone/t", Hosts: []string{"a.example.com"},
+		Header: "Authorization", Scope: ScopePerPerson, Profiles: []string{"*"}}}
+	r, _ = EgressPolicy(pp)
+	if d := r.Dropped[len(r.Dropped)-1]; d.Secret != "p" || d.Reason != ReasonSecretInvalid || len(r.Bindings) != 0 {
+		t.Fatalf("a per_person secret without {person} was bound: %+v %+v", d, r.Bindings)
+	}
+}
+
+// GAP-0055: the policy_conflict policy is the actor rule alone.
+func TestDenyOnlyAndIsDefenseClaw(t *testing.T) {
+	s := baseSettings()
+	d, err := DenyOnly(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, _ := EgressPolicy(cases[1].in)
+	d1, _ := DenyOnly(cases[1].in.Settings)
+	if len(d.GetRules()) != 1 || !Equal(d1, &ateapi.EgressPolicy{Rules: full.Policy.GetRules()[:1]}) {
+		t.Fatalf("deny-only = %v", d.GetRules())
+	}
+	if !IsDefenseClaw(d, s) || !IsDefenseClaw(full.Policy, cases[1].in.Settings) {
+		t.Fatal("DefenseClaw's policies not recognised")
+	}
+	other := &ateapi.EgressPolicy{Rules: []*ateapi.EgressRule{{Https: &ateapi.HttpsRule{Hostnames: []string{"pypi.org"}}},
+		{Http: &ateapi.HttpRule{Hostnames: []string{s.ActorService}}}}}
+	if IsDefenseClaw(other, s) {
+		t.Fatal("a policy without the actor JWT rule counted as DefenseClaw's")
+	}
+	if _, err := DenyOnly(Settings{ActorService: "*"}); err == nil {
+		t.Fatal("deny-only accepted a bad actor service")
 	}
 }
 

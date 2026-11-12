@@ -73,7 +73,7 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 | `substrate.supported_versions` | `>=1.0.0 <1.1.0` | The Substrate versions `doctor` accepts |
 | `substrate.identity.issuer` | `https://idp.ate-system.svc` | Issuer of the actor tokens. Make it unique per cluster |
 | `substrate.identity.audience` | `defenseclaw` | Audience of actor tokens |
-| `substrate.identity.token_lifetime_seconds` | `900` | Lifetime of the token the egress gateway adds |
+| `substrate.identity.token_lifetime_seconds` | `300` | Lifetime of the token the egress gateway adds. Fixed at 300 s: egress caches the token by actor name, so a recreated actor with the same name is refused until the old token expires. |
 | `substrate.identity.oidc.issuer`, `.client_id`, `.groups_claim` | none, none, `groups` | The OIDC provider people sign in with. Unset on an open-source cluster to accept Kubernetes identities (`login --kube`) instead. Managed installs require it |
 | `substrate.identity.workload_oidc` | `[]` | Issuers accepted for CI workloads: `issuer`, `audience` |
 | `substrate.services.actor`, `.admin` | `defenseclaw-actor...svc`, `defenseclaw-admin...svc` | Service names (the chart fills them) |

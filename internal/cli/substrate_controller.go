@@ -18,9 +18,12 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,8 +33,14 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/activity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
 )
 
 var (
@@ -39,6 +48,12 @@ var (
 	substrateControllerOnce   bool
 	substrateControllerCheck  bool
 	substrateControllerUsage  string
+	// The gateway leader that holds registrations (GAP-0125), reached
+	// over mTLS with this pod's identity.
+	substrateControllerLeader, substrateControllerPeerBundle, substrateControllerPeerTrust string
+	substrateControllerLeaderIDs                                                           []string
+	// mTLS for a non-loopback usage listener (GAP-0105).
+	substrateControllerUsageCert, substrateControllerUsageKey, substrateControllerUsageCA string
 )
 
 var substrateControllerCmd = &cobra.Command{
@@ -47,7 +62,8 @@ var substrateControllerCmd = &cobra.Command{
 	Long: `Run the DefenseClaw controller for Agent Substrate actors: it writes each
 actor's egress policy before its first resume, re-checks it on resume,
 reverts foreign policy changes (three reverts in ten minutes mark the actor
-policy_conflict), adopts forks, suspends idle actors and reports inventory.
+policy_conflict: it keeps only the DefenseClaw rule until its policy is
+DefenseClaw's again), admits only attested, digest-pinned templates, adopts forks, suspends idle actors and reports inventory.
 It reads substrate: from config.yaml and runs as one replica in the
 DefenseClaw namespace; events go to stdout as JSON lines.
 
@@ -64,8 +80,35 @@ func init() {
 	substrateControllerCmd.Flags().BoolVar(&substrateControllerOnce, "once", false, "run one reconcile pass and exit")
 	substrateControllerCmd.Flags().BoolVar(&substrateControllerCheck, "check", false, "check access to ate-api-server and exit")
 	substrateControllerCmd.Flags().StringVar(&substrateControllerUsage, "usage-listen", "",
-		"address for Substrate's per-actor usage records (OTLP/HTTP POST /v1/logs or ndjson), the CPU source of idle suspend; empty turns idle suspend off")
+		"address for Substrate's per-actor usage records (OTLP/HTTP POST /v1/logs or ndjson), the CPU source of idle suspend; empty turns idle suspend off. "+
+			"Loopback only, unless --usage-tls-cert, --usage-tls-key and --usage-client-ca make it mutual TLS")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerLeader, "leader-address", "",
+		"gateway leader host:port: the registrations the launcher writes (required)")
+	substrateControllerCmd.Flags().StringSliceVar(&substrateControllerLeaderIDs, "leader-id", nil, "SPIFFE IDs the leader may present")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerPeerBundle, "peer-bundle", "/var/run/ate/credential-bundle.pem", "this pod's identity bundle (leader mTLS)")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerPeerTrust, "peer-trust", "/var/run/ate/podidentity-ca.crt", "pod identity trust bundle")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerUsageCert, "usage-tls-cert", "", "usage listener certificate (PEM)")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerUsageKey, "usage-tls-key", "", "usage listener key (PEM)")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerUsageCA, "usage-client-ca", "", "CA bundle the usage clients' certificates must chain to")
 	rootCmd.AddCommand(substrateControllerCmd)
+}
+
+func substrateControllerLeaderClient() (*leader.Client, error) {
+	if substrateControllerLeader == "" {
+		return nil, errors.New("substrate-controller: --leader-address is required (the gateway leader holds the actor registrations, GAP-0125)")
+	}
+	if len(substrateControllerLeaderIDs) == 0 {
+		return nil, errors.New("substrate-controller: --leader-id names the leader's SPIFFE ID")
+	}
+	files, err := podcert.NewFiles(substrateControllerPeerBundle, substrateControllerPeerTrust)
+	if err != nil {
+		return nil, fmt.Errorf("substrate-controller: pod identity: %w", err)
+	}
+	tr := &http.Transport{TLSClientConfig: files.ClientConfig(substrateControllerLeaderIDs), Proxy: nil, MaxIdleConnsPerHost: 16}
+	// Short retries: while the leader is unreachable the controller holds
+	// (no policy change) and tries again next pass.
+	return &leader.Client{BaseURL: "https://" + substrateControllerLeader, HTTP: &http.Client{Transport: tr, Timeout: 10 * time.Second},
+		Retry: 5 * time.Second}, nil
 }
 
 func runSubstrateController(cmd *cobra.Command, _ []string) error {
@@ -99,26 +142,60 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 		return substrateControllerReport(ctx, cmd, client)
 	}
 	var cpu controller.CPUSource
-	idleAfter := sub.EffectiveIdleSuspendAfter()
 	if substrateControllerUsage != "" {
 		usage := controller.NewUsageCPU(nil)
 		mux := http.NewServeMux()
 		mux.Handle("/v1/logs", usage.Handler())
 		srv := &http.Server{Addr: substrateControllerUsage, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-		go func() { _ = srv.ListenAndServe() }()
+		tlsCfg, err := substrateUsageTLS(substrateControllerUsage, substrateControllerUsageCert, substrateControllerUsageKey, substrateControllerUsageCA)
+		if err != nil {
+			return err
+		}
+		srv.TLSConfig = tlsCfg
+		go func() {
+			if tlsCfg != nil {
+				_ = srv.ListenAndServeTLS("", "")
+			} else {
+				_ = srv.ListenAndServe()
+			}
+		}()
 		defer srv.Close()
 		cpu = usage
-	} else {
-		idleAfter = 0 // no CPU source: never suspend on silence alone (E4)
 	}
-	ctl, err := controller.New(controller.Options{
-		Client: client, Attestor: controller.NoAttestor{}, Activity: controller.NoActivity{}, CPU: cpu,
-		Registry: controller.NewMemoryRegistry(), Resolver: &controller.ConfigResolver{Config: cfg},
-		Sink:     &controller.JSONSink{W: cmd.OutOrStdout()},
-		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
-		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(),
-		KitVersion: appVersion, IdleSuspendAfter: idleAfter,
-	})
+	// Registrations and activity come from the gateway leader: the
+	// launcher's registration attributes a launcher actor (without it the
+	// actor is foreign and gets no policy, GAP-0125), and idle suspend
+	// reads the gateways' hook, model and relay activity.
+	toLeader, err := substrateControllerLeaderClient()
+	if err != nil {
+		return err
+	}
+	reg := &controller.LeaderRegistry{Store: &registry.Remote{Client: toLeader}}
+	act := &activity.Source{Leader: toLeader}
+	// Admin policy_conflict resets arrive through a ConfigMap in our own
+	// namespace (the gateway's admin route writes them).
+	var resets controller.ResetStore
+	ns := os.Getenv("POD_NAMESPACE")
+	if ns != "" && os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		if kube, err := setup.NewInClusterKube(setup.InClusterDir); err == nil {
+			resets = kube
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: policy resets are off: %v\n", err)
+		}
+	}
+	// Bundle mode: profiles come from the active signed bundle of each
+	// stage layered over config.yaml (PLAN §9); otherwise config.yaml.
+	sink := &controller.JSONSink{W: cmd.OutOrStdout()}
+	resolver, err := substrateProfileResolver(ctx, cfg, sink)
+	if err != nil {
+		return err
+	}
+	ctl, err := newSubstrateController(cfg, client, reg, act, cpu, sink, true, resets, ns, resolver)
+	if err == nil {
+		// The leader's chain state runs each actor's clock on the
+		// controller's lifecycle events (A13).
+		ctl.SetLifecycle(&chainstate.Client{Leader: toLeader})
+	}
 	if err != nil {
 		return err
 	}
@@ -145,6 +222,40 @@ func substrateControllerReport(ctx context.Context, cmd *cobra.Command, client a
 		names = append(names, s.GetMetadata().GetName())
 	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"atespaces": names, "actors": len(actors)})
+}
+
+// substrateUsageTLS decides how the usage listener is protected: forged
+// usage records would keep a busy actor from idle suspend or suspend a
+// working one (GAP-0105). A loopback address (a collector sidecar) needs
+// nothing; any other address needs mutual TLS with a client CA.
+func substrateUsageTLS(addr, cert, key, clientCA string) (*tls.Config, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("--usage-listen %q: %w", addr, err)
+	}
+	if cert == "" && key == "" && clientCA == "" {
+		if ip := net.ParseIP(host); host == "localhost" || (ip != nil && ip.IsLoopback()) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("--usage-listen %q is not loopback: set --usage-tls-cert, --usage-tls-key and --usage-client-ca (mutual TLS), or listen on 127.0.0.1 for a collector sidecar", addr)
+	}
+	if cert == "" || key == "" || clientCA == "" {
+		return nil, errors.New("--usage-tls-cert, --usage-tls-key and --usage-client-ca go together")
+	}
+	pair, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		return nil, fmt.Errorf("usage listener key pair: %w", err)
+	}
+	pem, err := os.ReadFile(clientCA)
+	if err != nil {
+		return nil, fmt.Errorf("usage client CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, errors.New("usage client CA: no certificate")
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{pair},
+		ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool}, nil
 }
 
 func orDefaultString(v, def string) string {

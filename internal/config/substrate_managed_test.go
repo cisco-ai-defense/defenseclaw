@@ -40,10 +40,15 @@ func TestSubstrateChainFailureModeManaged(t *testing.T) {
 	} {
 		s := validSubstrate()
 		s.Extproc.Chain.FailureMode = tc.mode
+		s.Templates.AllowedImages = []string{"registry.example.com/team/*"}
 		if err := s.Validate(); err != nil {
 			t.Fatalf("%q: base validation: %v", tc.mode, err)
 		}
-		err := s.ValidateManaged(tc.managed)
+		mode := string(DeploymentModeUnmanagedBYOD)
+		if tc.managed {
+			mode = string(DeploymentModeManagedEnterprise)
+		}
+		err := s.ValidateManaged(mode)
 		if (err == nil) != tc.ok {
 			t.Errorf("managed=%v chain.failure_mode=%q: err %v", tc.managed, tc.mode, err)
 		}
@@ -52,7 +57,7 @@ func TestSubstrateChainFailureModeManaged(t *testing.T) {
 		}
 	}
 	var nilCfg *SubstrateConfig
-	if err := nilCfg.ValidateManaged(true); err != nil {
+	if err := nilCfg.ValidateManaged(string(DeploymentModeManagedEnterprise)); err != nil {
 		t.Fatal(err)
 	}
 }

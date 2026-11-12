@@ -6358,8 +6358,8 @@
             "token_lifetime_seconds": {
               "type": "integer",
               "minimum": 300,
-              "maximum": 3600,
-              "default": 900
+              "maximum": 300,
+              "default": 300
             },
             "actor_cert_oid": {
               "type": "string",
@@ -6403,8 +6403,33 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 512
+                  },
+                  "subject": {
+                    "type": "string",
+                    "maxLength": 1024
+                  },
+                  "claims": {
+                    "type": "object",
+                    "maxProperties": 16,
+                    "additionalProperties": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    }
                   }
-                }
+                },
+                "anyOf": [
+                  {
+                    "required": [
+                      "subject"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "claims"
+                    ]
+                  }
+                ]
               }
             }
           }
@@ -6441,6 +6466,62 @@
         "require_attested_templates": {
           "type": "boolean",
           "default": true
+        },
+        "templates": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "trust_anchors": {
+              "type": "string",
+              "default": "/etc/defenseclaw/substrate/template-anchors/anchors.pem"
+            },
+            "min_policy_generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_age": {
+              "$ref": "#/$defs/duration"
+            },
+            "allow_unverified_base": {
+              "type": "boolean",
+              "default": false
+            },
+            "allowed_images": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "profile_images": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "volume_images": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "plain_http_registries": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "revoked_digests": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              }
+            }
+          }
         },
         "default_sandbox_class": {
           "type": "string",
@@ -6818,6 +6899,31 @@
         },
         "admin": {
           "$ref": "#/$defs/openShellAdmin"
+        },
+        "bundles": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "anchors_file": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "default": "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json"
+            },
+            "inbox": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253,
+              "default": "defenseclaw-bundle-inbox"
+            },
+            "refresh_interval": {
+              "$ref": "#/$defs/duration"
+            }
+          }
         }
       }
     }

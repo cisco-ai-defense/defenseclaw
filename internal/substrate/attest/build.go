@@ -66,6 +66,9 @@ type BuildOptions struct {
 	AllowedMCPHosts []string
 	// BlockAtOrAbove: see ScanOptions; empty means HIGH here, FloorNone turns it off.
 	BlockAtOrAbove scanner.Severity
+	// AcceptFindings: see ScanOptions. Each needs a reason; By defaults to
+	// BuilderID. They are recorded in the signed statement.
+	AcceptFindings []AcceptedFinding
 
 	// TrustedBases are base image digests (sha256:...) the admin trusts.
 	TrustedBases []string
@@ -218,11 +221,22 @@ func Build(ctx context.Context, o BuildOptions) (*BuildResult, error) {
 	for _, p := range paths {
 		expected = append(expected, ExpectedFile{Path: p})
 	}
+	accepts := make([]AcceptedFinding, 0, len(o.AcceptFindings))
+	for _, a := range o.AcceptFindings {
+		if strings.TrimSpace(a.RuleID) == "" || strings.TrimSpace(a.Reason) == "" {
+			return nil, errors.New("build: an accepted finding needs a rule id and a reason")
+		}
+		if a.By == "" {
+			a.By = o.BuilderID
+		}
+		accepts = append(accepts, a)
+	}
 	rep, err := ScanImage(ctx, fsys, composed, ScanOptions{
 		Skill: o.Skill, MCPStatic: o.MCPStatic, Admission: o.Admission, Compiled: o.Compiled,
 		BlockList: o.BlockList, AllowList: o.AllowList, AllowedMCPHosts: o.AllowedMCPHosts, BlockAtOrAbove: o.BlockAtOrAbove,
 		Connector: o.Template.Connector, Expected: expected, PhoneHome: o.Kit.PhoneHome,
 		ConfigSwitches: o.Kit.ConfigSwitches, PolicyGeneration: o.PolicyGeneration, Now: now,
+		AcceptFindings: accepts,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build: scan: %w", err)

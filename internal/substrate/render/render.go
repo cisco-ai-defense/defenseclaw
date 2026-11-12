@@ -44,7 +44,10 @@ const (
 	// DefaultAudience and DefaultTokenLifetime are the actor JWT's aud and
 	// lifetime (seconds) unless the config sets others.
 	DefaultAudience      = "defenseclaw"
-	DefaultTokenLifetime = 900
+	DefaultTokenLifetime = 300
+	// DefaultActorServicePort is the actor listener Service's plain HTTP
+	// port (the chart's defenseclaw-actor Service).
+	DefaultActorServicePort = 80
 	// MaxRules is upstream's limit on rules per policy, and
 	// maxHostnamesPerRule its limit on hostnames per rule.
 	MaxRules            = 256
@@ -65,7 +68,7 @@ const (
 type Settings struct {
 	// ActorService is the DefenseClaw actor listener's Service host
 	// (substrate.services.actor), the only DefenseClaw host an actor may
-	// reach; ActorServicePort its port (443 when zero). AdminService is
+	// reach, over an http rule; ActorServicePort its port (80 when zero). AdminService is
 	// never reachable (D15); no rule may overlap it or the actor
 	// Service's namespace domain.
 	ActorService     string
@@ -194,27 +197,9 @@ type candidate struct {
 // not be allowed are dropped and reported.
 func EgressPolicy(in Input) (Result, error) {
 	s := in.Settings
-	svc, ok := parsePattern(s.ActorService)
-	if !ok || svc.Wildcard || svc.Any {
-		return Result{}, fmt.Errorf("render: actor service %q is not a host name", s.ActorService)
-	}
-	port := s.ActorServicePort
-	if port == 0 {
-		port = 443
-	}
-	if port < 1 || port > 65535 {
-		return Result{}, fmt.Errorf("render: actor service port %d", port)
-	}
-	aud := s.Audience
-	if aud == "" {
-		aud = DefaultAudience
-	}
-	life := s.TokenLifetimeSeconds
-	if life == 0 {
-		life = DefaultTokenLifetime
-	}
-	if life < 300 || life > 3600 {
-		return Result{}, fmt.Errorf("render: token lifetime %d s is outside 300-3600", life)
+	actor, svc, err := actorRule(s)
+	if err != nil {
+		return Result{}, err
 	}
 	// DefenseClaw's own namespace domain and the admin Service are never
 	// reachable (D15), in both the short (<svc>.<ns>.svc) and the fully
@@ -309,14 +294,7 @@ func EgressPolicy(in Input) (Result, error) {
 		delete(cands, k) // a secret host gets its own rule
 	}
 
-	rules := []*ateapi.EgressRule{{Https: &ateapi.HttpsRule{
-		Hostnames: []string{svc.Name},
-		Ports:     &ateapi.Ports{Numbers: []int32{port}},
-		Effects: &ateapi.HttpRuleEffects{ReplaceHeaders: []*ateapi.CredentialHeader{{
-			Header: ActorHeader, Prefix: "Bearer ",
-			ActorJwt: &ateapi.ActorJwtSource{Audiences: []string{aud}, ExpirationSeconds: life},
-		}}},
-	}}}
+	rules := []*ateapi.EgressRule{actor}
 	for _, k := range sortedKeys(effects) {
 		rules = append(rules, &ateapi.EgressRule{Https: &ateapi.HttpsRule{
 			Hostnames: []string{k}, Ports: port443(), Effects: &ateapi.HttpRuleEffects{ReplaceHeaders: effects[k]},
@@ -348,6 +326,91 @@ func EgressPolicy(in Input) (Result, error) {
 	return res, nil
 }
 
+// actorRule is the one rule every DefenseClaw policy has: cleartext HTTP
+// to the actor listener's Service (port 80 unless set) with the actor JWT
+// injected. Egress trusts only public CAs for an https upstream, so the
+// in-cluster hop egress -> actor listener is plain HTTP, limited to
+// atenet-egress by NetworkPolicy (GAP-0023 outcome; chart README).
+func actorRule(s Settings) (*ateapi.EgressRule, pattern, error) {
+	svc, ok := parsePattern(s.ActorService)
+	if !ok || svc.Wildcard || svc.Any {
+		return nil, pattern{}, fmt.Errorf("render: actor service %q is not a host name", s.ActorService)
+	}
+	port := s.ActorServicePort
+	if port == 0 {
+		port = DefaultActorServicePort
+	}
+	if port < 1 || port > 65535 {
+		return nil, pattern{}, fmt.Errorf("render: actor service port %d", port)
+	}
+	aud := s.Audience
+	if aud == "" {
+		aud = DefaultAudience
+	}
+	life := s.TokenLifetimeSeconds
+	if life == 0 {
+		life = DefaultTokenLifetime
+	}
+	if life != DefaultTokenLifetime {
+		return nil, pattern{}, fmt.Errorf("render: token lifetime %d s: egress caches the actor JWT by actor name, so it is %d s (GAP-0133)", life, DefaultTokenLifetime)
+	}
+	return &ateapi.EgressRule{Http: &ateapi.HttpRule{
+		Hostnames: []string{svc.Name},
+		Ports:     &ateapi.Ports{Numbers: []int32{port}},
+		Effects: &ateapi.HttpRuleEffects{ReplaceHeaders: []*ateapi.CredentialHeader{{
+			Header: ActorHeader, Prefix: "Bearer ",
+			ActorJwt: &ateapi.ActorJwtSource{Audiences: []string{aud}, ExpirationSeconds: life},
+		}}},
+	}}, svc, nil
+}
+
+// DenyOnly is the policy of an actor in policy_conflict: the actor rule
+// alone, so its hooks still reach DefenseClaw and every other destination
+// is denied (GAP-0055).
+func DenyOnly(s Settings) (*ateapi.EgressPolicy, error) {
+	r, _, err := actorRule(s)
+	if err != nil {
+		return nil, err
+	}
+	p := &ateapi.EgressPolicy{Rules: []*ateapi.EgressRule{r}}
+	if err := Validate(p); err != nil {
+		return nil, fmt.Errorf("render: deny-only policy fails admission: %w", err)
+	}
+	return p, nil
+}
+
+// IsDefenseClaw reports whether a policy carries DefenseClaw's actor rule
+// (a rule to the actor Service that injects the actor JWT): DefenseClaw
+// wrote it, or someone copied it, and either way only DefenseClaw may keep
+// it in force.
+func IsDefenseClaw(p *ateapi.EgressPolicy, s Settings) bool {
+	svc, ok := parsePattern(s.ActorService)
+	if !ok {
+		return false
+	}
+	for _, r := range p.GetRules() {
+		var hosts []string
+		var eff *ateapi.HttpRuleEffects
+		switch {
+		case r.GetHttp() != nil:
+			hosts, eff = r.GetHttp().GetHostnames(), r.GetHttp().GetEffects()
+		case r.GetHttps() != nil:
+			hosts, eff = r.GetHttps().GetHostnames(), r.GetHttps().GetEffects()
+		default:
+			continue
+		}
+		if !slices.Contains(hosts, svc.Name) {
+			continue
+		}
+		for _, h := range eff.GetReplaceHeaders() {
+			if h.GetActorJwt() != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // bindSecrets returns the credential headers per host pattern for every
 // secret the actor may receive, in secret-name order, recording drops and
 // bindings in res.
@@ -370,6 +433,12 @@ func bindSecrets(in Input, admit func(raw, source, secret string) (pattern, bool
 			d.Reason, d.Detail = ReasonSecretInvalid, "scope"
 		default:
 			if sec.Scope == ScopePerPerson {
+				if !strings.Contains(uri, PersonPlaceholder) {
+					// Without {person} one secret would serve every person
+					// (config validation refuses it too; GAP-0068).
+					d.Reason, d.Detail = ReasonSecretInvalid, "per_person source does not name "+PersonPlaceholder
+					break
+				}
 				uri = strings.ReplaceAll(uri, PersonPlaceholder, PersonKey(in.Person))
 			} else if strings.Contains(uri, PersonPlaceholder) {
 				d.Reason, d.Detail = ReasonSecretInvalid, "shared source names "+PersonPlaceholder

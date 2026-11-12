@@ -91,6 +91,10 @@ type ContentInspector interface {
 // requests, runs guardrail inspection, and forwards to the upstream LLM
 // provider.
 type GuardrailProxy struct {
+	// substrateOnce builds substrateHandler, the actor listener's view of
+	// the proxy mux (SubstrateHandler).
+	substrateOnce    sync.Once
+	substrateHandler http.Handler
 	// generationSource is the gateway's published generation; each request
 	// pins it in withProxyAgent. nil outside a gateway.
 	generationSource func() *Generation
@@ -810,7 +814,10 @@ func (p *GuardrailProxy) proxyMux() *http.ServeMux {
 // the caller, minted the request ID and set the correlation; a request
 // without a verified actor is refused by authenticateRequest as usual.
 func (p *GuardrailProxy) SubstrateHandler() http.Handler {
-	return p.thresholdScopeMiddleware(p.proxyMux())
+	// Built once per proxy: the actor listener calls it per request
+	// (GAP-0061).
+	p.substrateOnce.Do(func() { p.substrateHandler = p.thresholdScopeMiddleware(p.proxyMux()) })
+	return p.substrateHandler
 }
 
 func (p *GuardrailProxy) Run(ctx context.Context) error {

@@ -1,0 +1,22 @@
+{{- /* Values and config checks that render nothing. */ -}}
+{{- $cfg := .Values.config | default dict -}}
+{{- $sub := $cfg.substrate | default dict -}}
+{{- $mode := lower (toString ($cfg.deployment_mode | default "")) -}}
+{{- $fail := lower (toString (dig "extproc" "failure_mode" "closed" $sub)) -}}
+{{- if and (has $mode (list "managed" "managed_enterprise" "managed-enterprise")) (eq $fail "open") -}}
+{{- fail "config.substrate.extproc.failure_mode open is not allowed with deployment_mode managed_enterprise: the callout always fails closed there" -}}
+{{- end -}}
+{{- if eq .Values.substrate.credentialProvider.secretsNamespace .Release.Namespace -}}
+{{- fail "substrate.credentialProvider.secretsNamespace must not be the release namespace: the credential provider would hand DefenseClaw's own Secrets to actors" -}}
+{{- end -}}
+{{- if eq .Values.substrate.credentialProvider.secretsNamespace .Values.substrate.namespace -}}
+{{- fail "substrate.credentialProvider.secretsNamespace must not be the Substrate namespace" -}}
+{{- end -}}
+{{- if has $mode (list "managed" "managed_enterprise" "managed-enterprise") -}}
+{{- if eq (toString (dig "require_attested_templates" true $sub)) "false" -}}
+{{- fail "config.substrate.require_attested_templates false is not allowed with deployment_mode managed_enterprise" -}}
+{{- end -}}
+{{- if not (dig "templates" "allowed_images" list $sub) -}}
+{{- fail "config.substrate.templates.allowed_images is required with deployment_mode managed_enterprise (name the template registries)" -}}
+{{- end -}}
+{{- end -}}

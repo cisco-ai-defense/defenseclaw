@@ -3,11 +3,13 @@
 image:
   repository: registry.example.com/defenseclaw-gateway
   digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-adminIngress:
-  enabled: true
-  className: nginx
-  host: defenseclaw.example.com
-  tlsSecretName: defenseclaw-admin-tls
+admin:
+  expose:
+    type: Ingress
+    ingress:
+      className: nginx
+      host: defenseclaw.example.com
+      tlsSecretName: defenseclaw-admin-tls
 metrics:
   prometheusRule:
     enabled: true

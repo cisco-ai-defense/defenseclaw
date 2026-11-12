@@ -1017,17 +1017,22 @@ A `custom-providers.json` marked `_derived_from` is rendered from this section o
 | `substrate.api.address`, `.server_name`, `.ca_file` | `api.ate-system.svc:443`, `api.ate-system.svc`, `/var/run/ate/ca.crt` | Where ate-api-server is and how its certificate is checked. The trust bundle is reread when it rotates. |
 | `substrate.api.auth`, `.token_file`, `.credential_bundle` | `serviceaccount`, `/var/run/ate/token`, `/var/run/ate/credential-bundle.pem` | `serviceaccount` sends a projected token, `mtls` presents a pod certificate. Both are reread from disk. |
 | `substrate.supported_versions` | `>=1.0.0 <1.1.0` | Substrate versions DefenseClaw is tested on. |
-| `substrate.identity.issuer`, `.audience`, `.token_lifetime_seconds` | none, `defenseclaw`, `900` | The cluster's actor token issuer (unique per cluster), the audience DefenseClaw accepts and the token lifetime (300-3600 s). |
+| `substrate.identity.issuer`, `.audience`, `.token_lifetime_seconds` | none, `defenseclaw`, `300` | The cluster's actor token issuer (unique per cluster), the audience DefenseClaw accepts and the token lifetime (300 s only: egress caches the token by actor name). |
 | `substrate.identity.actor_cert_oid` | `1.3.6.1.4.1.11129.2.12.2` | The actor identity extension in actor certificates. |
-| `substrate.identity.oidc`, `.workload_oidc` | none | Sign-in for people (`issuer`, `client_id`, `groups_claim`) and trusted CI identity providers (`issuer`, `audience`). |
+| `substrate.identity.oidc`, `.workload_oidc` | none | Sign-in for people (`issuer`, `client_id`, `groups_claim`) and trusted CI identity providers (`issuer`, `audience`, and `subject` or `claims` naming the trusted workloads, for example `claims: {repository: acme/web}`; an entry without them is refused). |
 | `substrate.services.actor`, `.admin` | `defenseclaw-actor.defenseclaw-system.svc.cluster.local`, `defenseclaw-admin.defenseclaw-system.svc.cluster.local` | The two gateway Services, fully qualified: actors resolve only names their egress policy lists, so the kit uses this exact name. Actors can reach only the actor Service. |
 | `substrate.launcher_atespaces` | none | Profile to the atespaces DefenseClaw owns for it, for example `{engineering: [eng-payments]}`. |
 | `substrate.require_attested_templates` | `true` | An actor whose template has no DefenseClaw attestation gets no network. |
+| `substrate.templates.trust_anchors` | `/etc/defenseclaw/substrate/template-anchors/anchors.pem` | The template signing keys (PEM), mounted from an admin-only Secret. A change applies at the next poll; a missing file refuses every template. |
+| `substrate.templates.min_policy_generation`, `.max_age`, `.allow_unverified_base` | `0`, none, `false` | Refuse templates scanned under an older policy, built too long ago, or on a base image that is neither allowlisted nor attested. |
+| `substrate.templates.allowed_images`, `.profile_images` | none | Repository globs (`registry/path/*`, the registry host named exactly) every template container must match, and a narrower list per profile. The controller fetches attestations only from these registry hosts, so with none no template is admitted. Required in `managed_enterprise`, where `require_attested_templates: false` is refused. |
+| `substrate.templates.volume_images` | none | Repository globs a template may mount as read-only image volumes. Any other image volume refuses the template. |
+| `substrate.templates.plain_http_registries`, `.revoked_digests` | none | Registries reached over plain HTTP (dev clusters only), and image digests never admitted again. |
 | `substrate.default_sandbox_class` | `gvisor` | `gvisor` or `microvm`. |
 | `substrate.idle_suspend_after` | `30m` | Suspends an actor with no activity and low CPU; `0s` turns it off. Never with a pending ask. |
 | `substrate.unattended.asks`, `.ask_timeout`, `.telemetry_sampling` | `deny`, `30m`, `1.0` | Unattended runs: `deny` or `queue` asks, how long a queued ask waits, the share of routine records kept. |
 | `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits on the actor Service. |
-| `substrate.extproc.enabled`, `.failure_mode`, `.body_inspection`, `.body_max_bytes` | `true`, `closed`, `auto`, `1048576` | The egress callout: what it does when it can't decide, and body mode (`auto` and `on` ask for the body of every MCP or listed-host request, `off` checks headers only). Bodies are at most 1 MiB. Body mode needs Agent Substrate's egress filter with mode override (upstream #3817); on a stock v1.0.0 filter set `off`. Requests the callout can't inspect (over 1 MiB, event-stream, gRPC or multipart bodies) are refused when `failure_mode` is `closed`. |
+| `substrate.extproc.enabled`, `.failure_mode`, `.body_inspection`, `.body_max_bytes` | `true`, `closed`, `auto`, `1048576` | The egress callout: what it does when it can't decide (`open` is refused in `managed_enterprise`), and body mode (`auto` and `on` ask for the body of every MCP or listed-host request, `off` checks headers only). Bodies are at most 1 MiB. Body mode needs Agent Substrate's egress filter with mode override (upstream #3817); on a stock v1.0.0 filter set `off`. Requests the callout can't inspect (over 1 MiB, event-stream, gRPC or multipart bodies) are refused when `failure_mode` is `closed`. |
 | `substrate.extproc.mcp_hosts`, `.body_hosts` | none | Remote MCP servers whose JSON-RPC bodies are inspected (`host` or `host=<server name>`; also allowed for every actor), and other hosts whose bodies get the DLP scans. |
 | `substrate.extproc.dlp.credential_headers` | `alert` | `alert` or `deny` for a secret-shaped credential header sent to a host no secret is bound to. Secret shapes in URLs and other headers are always refused. |
 | `substrate.extproc.judge.url`, `.token_file`, `.ca_file`, `.timeout` | none, none, none, `1500ms` | The gateway route that judges MCP tool calls the callout sees; the timeout is at most `1800ms`, and all calls of one batch share that budget. |
@@ -1042,6 +1047,10 @@ A `custom-providers.json` marked `_derived_from` is rendered from this section o
 | `substrate.secrets` | none | Credentials injected at egress on bound hosts. Each entry has `name`, `source` (an `ate-secret://` reference, never a value), `inject` (`hosts`, `header`, `prefix`, `placeholder`), `scope` (`shared` or `per_person`) and `profiles`. |
 | `substrate.allow_passthrough_for` | none | Hosts forwarded without inspection, for pinned certificates. A secret is never bound to one. |
 | `substrate.admin` | none | The organization floor for actors, with the same keys as `openshell.admin`. |
+| `substrate.bundles.enabled` | `false` | The controller applies signed policy bundles: profiles and `match.substrate` assignments for a stage of atespaces, over `config.yaml`. `substrate.admin` still applies. |
+| `substrate.bundles.anchors_file` | `/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json` | The bundle trust anchors (`bundle-anchors.json`), mounted from an admin-only Secret. |
+| `substrate.bundles.inbox` | `defenseclaw-bundle-inbox` | The ConfigMap a GitOps tool writes signed bundles to: `<stage>.dcbundle` and `<stage>.atespaces`. |
+| `substrate.bundles.refresh_interval` | `10s` | How often the controller re-reads the bundle state, the inbox and the anchors (1s to 10m). |
 
 ## Environment variables
 

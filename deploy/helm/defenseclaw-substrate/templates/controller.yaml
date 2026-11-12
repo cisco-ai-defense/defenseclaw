@@ -27,6 +27,7 @@ spec:
         {{- include "dc.podAnnotations" $sel | nindent 8 }}
     spec:
       {{- include "dc.podSpecCommon" (dict "ctx" . "sa" "controller" "values" .Values.controller) | nindent 6 }}
+      {{- include "dc.initContainers" . | nindent 6 }}
       containers:
       - name: controller
         image: {{ include "dc.image" . }}
@@ -37,6 +38,9 @@ spec:
         {{- else }}
         - substrate-controller
         - --config=/etc/defenseclaw/config.yaml
+        # Registrations live on the gateway leader (GAP-0125), over mTLS.
+        - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.leader.port }}
+        - --leader-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
         {{- end }}
         env:
         {{- include "dc.env" . | nindent 8 }}
@@ -46,5 +50,24 @@ spec:
           {{- toYaml .Values.containerSecurityContext | nindent 10 }}
         volumeMounts:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
+        # Reads admin policy_conflict resets (defenseclaw-policy-resets).
+        {{- include "dc.kubeTokenMount" . | nindent 8 }}
+        {{- if .Values.controller.templateAnchorsSecret }}
+        - name: template-anchors
+          mountPath: /etc/defenseclaw/substrate/template-anchors
+          readOnly: true
+        {{- end }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
+      {{- include "dc.kubeTokenVolume" . | nindent 6 }}
+      {{- if .Values.controller.templateAnchorsSecret }}
+      # Admin-only: only the controller mounts it; a Secret update reaches
+      # the file in about a minute and the controller re-reads it.
+      - name: template-anchors
+        secret:
+          secretName: {{ .Values.controller.templateAnchorsSecret }}
+          optional: true
+          defaultMode: 0440
+          items:
+          - {key: anchors.pem, path: anchors.pem}
+      {{- end }}

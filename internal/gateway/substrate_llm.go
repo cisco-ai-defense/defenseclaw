@@ -161,6 +161,11 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
 		return
 	}
+	// Every model API call is a POST; a GET of a model path is a probe.
+	if r.Method != http.MethodPost {
+		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
+		return
+	}
 	key, err := os.ReadFile(p.CredentialFile)
 	if err != nil || strings.TrimSpace(string(key)) == "" {
 		fmt.Fprintf(os.Stderr, "[substrate] llm: provider %s has no readable credential (%s)\n", provider, p.CredentialFile)

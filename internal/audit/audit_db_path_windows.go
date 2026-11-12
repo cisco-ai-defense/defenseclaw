@@ -839,3 +839,7 @@ func auditDBImmediateDirectoryModeTrusted(os.FileInfo) bool { return true }
 // auditDBOpenElsewhere needs no probe on Windows: SQLite opens the database
 // without delete sharing, so renaming a file another process has open fails.
 func auditDBOpenElsewhere(string) error { return nil }
+
+// auditDBVolumeRootOwnerTrusted: TrustVolumeRoot is for Kubernetes volumes
+// on Linux; no Windows directory qualifies.
+func auditDBVolumeRootOwnerTrusted(os.FileInfo) bool { return false }

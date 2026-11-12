@@ -40,6 +40,7 @@ spec:
         labelSelector:
           matchLabels:
             {{- include "dc.selector" $sel | nindent 12 }}
+      {{- include "dc.initContainers" . | nindent 6 }}
       containers:
       - name: callout
         image: {{ include "dc.image" . }}
@@ -55,6 +56,12 @@ spec:
         {{- if .Values.podCertificates.enabled }}
         - --tls-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem
         - --client-ca=/var/run/ate/podidentity-ca.crt
+        # The egress chain check (a secret read followed by egress) on the
+        # leader, over mTLS with this pod's identity (A13; ChainEgress only).
+        - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.leader.port }}
+        - --leader-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
+        - --peer-bundle=/var/run/ate/credential-bundle.pem
+        - --peer-trust=/var/run/ate/podidentity-ca.crt
         {{- end }}
         {{- end }}
         env:

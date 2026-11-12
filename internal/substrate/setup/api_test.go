@@ -8,7 +8,6 @@ package setup
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
@@ -59,18 +58,48 @@ func TestPreDeleteOverTheAteapiClient(t *testing.T) {
 	if ok, err := api.GetAtespace(ctx, "missing"); ok || err != nil {
 		t.Errorf("GetAtespace(missing) = %v, %v", ok, err)
 	}
-	if err := api.CreateAtespace(ctx, "x"); !errors.Is(err, errNoAccess) {
-		t.Errorf("CreateAtespace without access: %v", err)
-	}
 }
 
-func TestAccessPolicyMessageNamesNoAtespace(t *testing.T) {
-	msg := toPB(AccessPolicy{Atespace: "eng-web", UID: "u", Version: 2, Bindings: []Binding{{Role: RoleEditor, Members: []string{"user:a"}}}})
-	if msg.GetMetadata().GetAtespace() != "" || msg.GetMetadata().GetName() != "default" || msg.GetMetadata().GetUid() != "u" {
-		t.Errorf("metadata %+v", msg.GetMetadata())
+// The bootstrap writes atespaces and access policies through ateapi.Client
+// (A8's separate access connection is gone): create, then update with the
+// uid and version preconditions, never naming the atespace in metadata.
+func TestBootstrapOverTheAteapiClient(t *testing.T) {
+	plan := testPlan()
+	plan.CredentialProvider.Grant = false
+	plan.DeleteOwnerToken = false
+	f := ateapifake.New()
+	f.PutAtespace("data-team")
+	api := &API{Client: f}
+	ctx := context.Background()
+	r, err := Bootstrap(ctx, plan, api, newFakeKube())
+	if err != nil {
+		t.Fatal(err)
 	}
-	back := fromPB("eng-web", msg)
-	if back.Atespace != "eng-web" || back.Version != 2 || len(back.Bindings) != 1 {
-		t.Errorf("round trip %+v", back)
+	if len(r.Policies) == 0 {
+		t.Fatal("no access policy written")
+	}
+	for _, ns := range []string{"eng-web", "eng-payments"} {
+		if _, err := f.GetAtespace(ctx, ns); err != nil {
+			t.Errorf("launcher atespace %s not created: %v", ns, err)
+		}
+		p, err := api.GetAccessPolicy(ctx, ns)
+		if err != nil || p == nil || len(p.Members(RoleEditor)) != len(plan.Editors) {
+			t.Errorf("%s policy = %+v, %v", ns, p, err)
+		}
+	}
+	g, err := api.GetAccessPolicy(ctx, "")
+	if err != nil || g == nil || len(g.Members(RoleViewer)) != len(plan.GlobalViewers) {
+		t.Fatalf("global policy = %+v, %v", g, err)
+	}
+	// A second run updates in place (preconditions hold) and changes nothing.
+	r2, err := Bootstrap(ctx, plan, api, newFakeKube())
+	if err != nil || len(r2.Policies) != 0 {
+		t.Fatalf("second bootstrap: %+v, %v", r2.Policies, err)
+	}
+	// An update with a stale version is refused, not overwritten.
+	g.Bindings = append(g.Bindings, Binding{Role: RoleViewer, Members: []string{"user:x"}})
+	g.Version--
+	if err := api.PutAccessPolicy(ctx, *g); err == nil {
+		t.Fatal("a stale access policy update was accepted")
 	}
 }
