@@ -45,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -6631,11 +6632,10 @@ func TestHandleToolCallRecordsJudgeContextBeforeAsyncDispatch(t *testing.T) {
 		router.handleToolCall(EventFrame{Type: "tool_call", Payload: payload})
 	}
 
-	judge.toolContextMu.Lock()
-	events := append([]toolJudgeContextEvent(nil), judge.toolContext["ordered-session"].events...)
-	judge.toolContextMu.Unlock()
-	if len(events) != 2 || !strings.Contains(events[0].args, "first prerequisite") ||
-		!strings.Contains(events[1].args, "second dependent") {
+	snapshot, _ := judge.intentStore().(*intentstore.Process).Peek("ordered-session")
+	events := snapshot.Prior
+	if len(events) != 2 || !strings.Contains(events[0].Args, "first prerequisite") ||
+		!strings.Contains(events[1].Args, "second dependent") {
 		t.Fatalf("tool context event order = %+v", events)
 	}
 

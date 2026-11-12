@@ -1,0 +1,22 @@
+DefenseClaw for Agent Substrate {{ .Chart.AppVersion }} is installed in {{ .Release.Namespace }}.
+
+Next:
+  1. Register the egress callout and the ingress client with Substrate (writes
+     the SubstrateInstall overlay; refuses when another callout is set):
+       defenseclaw substrate setup --namespace {{ .Release.Namespace }}
+     and run ate-setup with the overlay it prints.
+{{- if not .Values.bootstrap.ownerTokenSecret }}
+  2. Grant DefenseClaw its Substrate roles. No bootstrap.ownerTokenSecret was
+     given, so print the access policies and apply them as a global owner:
+       defenseclaw substrate setup --print-access-policies
+{{- end }}
+  3. Check everything:
+       defenseclaw substrate doctor
+
+Actor Service (the only DefenseClaw host in egress policies): {{ include "dc.actorHost" . }}
+Admin Service (launcher, fleet; never reachable from actors): {{ include "dc.adminHost" . }}
+
+Uninstall removes DefenseClaw-written egress policies first (actors fall back
+to deny-all), then run `defenseclaw substrate setup --remove` to take the
+callout out of Substrate. Snapshots stay in the Substrate bucket: the
+uninstall log and docs/SUBSTRATE.md list the purge steps.

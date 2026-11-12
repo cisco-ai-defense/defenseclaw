@@ -121,7 +121,7 @@ func (c *CodexConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxAr
 		SandboxFile{Path: CodexSandboxManagedConfigPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: managedConfig},
 	)
 	binaries := append(sandboxHookRuntimeBinaries(), SandboxBinary{Name: "codex", Role: SandboxBinaryHarness})
-	return finalizeSandboxArtifacts(SandboxArtifacts{
+	return finalizeSandboxArtifactsFor(rt, SandboxArtifacts{
 		Connector:    c.Name(),
 		HookContract: rt.contract.ContractID,
 		TamperTier:   SandboxTamperTierManaged,

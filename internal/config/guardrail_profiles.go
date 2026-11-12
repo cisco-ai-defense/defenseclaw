@@ -65,8 +65,8 @@ type GuardrailProfile struct {
 	Connectors map[string]PerConnectorGuardrailConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
 	// Sandbox tightens openshell.admin for subjects of this profile (only
 	// request_access overrides); nil adds nothing. See
-	// TightenOpenShellAdmin.
-	Sandbox *OpenShellAdminConfig `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
+	// TightenSandboxAdmin.
+	Sandbox *SandboxAdminConfig `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
 
 	// Enabled and HookFailMode are NOT allowed in a profile: both are baked
 	// into the hooks installed on the machine, so they cannot vary by
@@ -100,9 +100,28 @@ type ProfileMatch struct {
 	// Agents are stable agent identities (defenseclaw.agent.identity.id,
 	// "agt-" followed by 16 hex digits).
 	Agents []string `mapstructure:"agents" yaml:"agents,omitempty"`
+	// Substrate selects Agent Substrate actors (PLAN §7.3). A match that
+	// carries it never selects a host subject, which has no atespace.
+	Substrate *ProfileMatchSubstrate `mapstructure:"substrate" yaml:"substrate,omitempty"`
 }
 
-// Empty reports whether no selector key is set.
+// ProfileMatchSubstrate selects Substrate actors by atespace, template
+// ("<atespace>/<name>") or verified workload principal. Set keys combine
+// with AND. An atespace glob matches only atespaces DefenseClaw created or
+// lists (E3).
+type ProfileMatchSubstrate struct {
+	Atespaces []string `mapstructure:"atespaces" yaml:"atespaces,omitempty"`
+	Templates []string `mapstructure:"templates" yaml:"templates,omitempty"`
+	Workloads []string `mapstructure:"workloads" yaml:"workloads,omitempty"`
+}
+
+// Empty reports whether no Substrate selector is set.
+func (m *ProfileMatchSubstrate) Empty() bool {
+	return m == nil || len(m.Atespaces) == 0 && len(m.Templates) == 0 && len(m.Workloads) == 0
+}
+
+// Empty reports whether no host selector key is set. Substrate selectors
+// do not count: they never select a host subject.
 func (m ProfileMatch) Empty() bool {
 	return len(m.Groups) == 0 && len(m.Users) == 0 && len(m.Connectors) == 0 && len(m.Agents) == 0
 }
@@ -179,9 +198,14 @@ func (g *GuardrailConfig) validateProfiles(secureClient bool) error {
 				Profile: assignment.Profile, Defined: names,
 			}
 		}
-		if assignment.Match.Empty() {
+		if assignment.Match.Empty() && assignment.Match.Substrate.Empty() {
 			return settingErrorAt(fmt.Sprintf("guardrail.profile_assignments[%d]", i),
-				fmt.Errorf("guardrail.profile_assignments[%d]: match needs at least one of groups, users, connectors or agents; use guardrail.default_profile for everyone else", i))
+				fmt.Errorf("guardrail.profile_assignments[%d]: match needs at least one of groups, users, connectors, agents or substrate; use guardrail.default_profile for everyone else", i))
+		}
+		if sub := assignment.Match.Substrate; sub != nil {
+			if err := sub.validate(fmt.Sprintf("guardrail.profile_assignments[%d].match.substrate", i)); err != nil {
+				return settingErrorAt(fmt.Sprintf("guardrail.profile_assignments[%d].match.substrate", i), err)
+			}
 		}
 		// A selector that is only white space is trimmed to nothing at match
 		// time and selects nobody, while the assignment looked set
@@ -343,7 +367,7 @@ type DerivedGuardrailProfile struct {
 	// Sandbox is the profile's sandbox floor F: openshell.admin tightened
 	// by the profile's sandbox section. SandboxDigest is "sha256:..." of
 	// F's canonical JSON and the content of every pack it references.
-	Sandbox             OpenShellAdminConfig
+	Sandbox             SandboxAdminConfig
 	SandboxDigest       string
 	policySandboxDigest string
 }

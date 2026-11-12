@@ -1007,6 +1007,41 @@ The `domains` array drives the gateway's URL → instance lookup: when an inboun
 
 A `custom-providers.json` marked `_derived_from` is rendered from this section on config writes. Do not edit it: the gateway does not read its edits back, `defenseclaw doctor` reports drift in the **Custom-provider overlay** row, and `defenseclaw doctor --fix` regenerates it. An unmarked overlay with `request_overrides` is a **live input** the gateway still merges ([Custom providers](/docs/reference/migrate-v9#custom-providers)).
 
+## Agent Substrate settings (`substrate.*`)
+
+`substrate:` configures DefenseClaw for coding agents that run as [Agent Substrate](https://github.com/agent-substrate/substrate) actors in Kubernetes. It is off by default and only the cluster components read it; the chart writes it into the cluster ConfigMap. The gateway validates the whole section at load, enabled or not.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `substrate.enabled` | `false` | Turns the Substrate components on. Needs `identity.issuer`. |
+| `substrate.api.address`, `.server_name`, `.ca_file` | `api.ate-system.svc:443`, `api.ate-system.svc`, `/var/run/ate/ca.crt` | Where ate-api-server is and how its certificate is checked. The trust bundle is reread when it rotates. |
+| `substrate.api.auth`, `.token_file`, `.credential_bundle` | `serviceaccount`, `/var/run/ate/token`, `/var/run/ate/credential-bundle.pem` | `serviceaccount` sends a projected token, `mtls` presents a pod certificate. Both are reread from disk. |
+| `substrate.supported_versions` | `>=1.0.0 <1.1.0` | Substrate versions DefenseClaw is tested on. |
+| `substrate.identity.issuer`, `.audience`, `.token_lifetime_seconds` | none, `defenseclaw`, `900` | The cluster's actor token issuer (unique per cluster), the audience DefenseClaw accepts and the token lifetime (300-3600 s). |
+| `substrate.identity.actor_cert_oid` | `1.3.6.1.4.1.11129.2.12.2` | The actor identity extension in actor certificates. |
+| `substrate.identity.oidc`, `.workload_oidc` | none | Sign-in for people (`issuer`, `client_id`, `groups_claim`) and trusted CI identity providers (`issuer`, `audience`). |
+| `substrate.services.actor`, `.admin` | `defenseclaw-actor.defenseclaw-system.svc.cluster.local`, `defenseclaw-admin.defenseclaw-system.svc.cluster.local` | The two gateway Services, fully qualified: actors resolve only names their egress policy lists, so the kit uses this exact name. Actors can reach only the actor Service. |
+| `substrate.launcher_atespaces` | none | Profile to the atespaces DefenseClaw owns for it, for example `{engineering: [eng-payments]}`. |
+| `substrate.require_attested_templates` | `true` | An actor whose template has no DefenseClaw attestation gets no network. |
+| `substrate.default_sandbox_class` | `gvisor` | `gvisor` or `microvm`. |
+| `substrate.idle_suspend_after` | `30m` | Suspends an actor with no activity and low CPU; `0s` turns it off. Never with a pending ask. |
+| `substrate.unattended.asks`, `.ask_timeout`, `.telemetry_sampling` | `deny`, `30m`, `1.0` | Unattended runs: `deny` or `queue` asks, how long a queued ask waits, the share of routine records kept. |
+| `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits on the actor Service. |
+| `substrate.extproc.enabled`, `.failure_mode`, `.body_inspection`, `.body_max_bytes` | `true`, `closed`, `auto`, `1048576` | The egress callout: what it does when it can't decide, and body mode (`auto` detects support at run time, `on`, `off`). Bodies are at most 1 MiB. |
+| `substrate.extproc.mcp_hosts`, `.body_hosts` | none | Remote MCP servers whose JSON-RPC bodies are inspected (`host` or `host=<server name>`; also allowed for every actor), and other hosts whose bodies get the DLP scans. |
+| `substrate.extproc.dlp.credential_headers` | `alert` | `alert` or `deny` for a secret-shaped credential header sent to a host no secret is bound to. Secret shapes in URLs and other headers are always refused. |
+| `substrate.extproc.judge.url`, `.token_file`, `.ca_file`, `.timeout` | none, none, none, `1500ms` | The gateway route that judges MCP tool calls the callout sees. |
+| `substrate.extproc.uid.cache_ttl`, `.stale_max` | `60s`, `60s` | How long a verified actor UID is reused, and served while ate-api-server is down (at most `10m`). |
+| `substrate.extproc.chain.check_budget`, `.queue_size` | `20ms`, `4096` | Time for the tool-chain check of a request (at most `500ms`), and the observed-egress queue. |
+| `substrate.extproc.ask.hold` | `1500ms` | How long a request waits for an ask. Keep it under the egress filter's 2 s message timeout. |
+| `substrate.extproc.cluster_domains`, `.actor_trust_domain`, `.egress_peers` | `svc.cluster.local`, the callout's defaults | In-cluster name suffixes, the SPIFFE trust domain of actors, and the SPIFFE IDs allowed to call the callout. |
+| `substrate.extproc.request_access`, `.log_headers`, `.redact_headers`, `.blocklist_files`, `.actor_secrets_dir` | none, `false`, none, the built-in feed, none | The contact refusals name; redacted request headers in events; extra headers to redact; egress feeds instead of the built-in one; where the profiles' `actor_secrets` values are mounted. |
+| `substrate.llm.providers`, `.credential.provider_uri` | none | Model providers the proxy serves actors, and where it reads their keys. Model traffic always goes through the DefenseClaw proxy. |
+| `substrate.egress.allow`, `.ecosystem_packs`, `.registries` | none, every pack, none | Hosts every actor may reach before its profile tightens them. Packs: `pypi`, `npm`, `crates`, `go`. Model provider hosts are always left out. |
+| `substrate.secrets` | none | Credentials injected at egress on bound hosts. Each entry has `name`, `source` (an `ate-secret://` reference, never a value), `inject` (`hosts`, `header`, `prefix`, `placeholder`), `scope` (`shared` or `per_person`) and `profiles`. |
+| `substrate.allow_passthrough_for` | none | Hosts forwarded without inspection, for pinned certificates. A secret is never bound to one. |
+| `substrate.admin` | none | The organization floor for actors, with the same keys as `openshell.admin`. |
+
 ## Environment variables
 
 Every variable DefenseClaw reads, with defaults, is on [Environment variables](/docs/reference/env-vars). `DEFENSECLAW_HOME` relocates the data directory and `DEFENSECLAW_LLM_KEY` is the unified LLM key. On a managed standalone device some variables are ignored or may only tighten a setting ([Managed hosts](/docs/reference/env-vars#managed-hosts-and-the-environment)).
