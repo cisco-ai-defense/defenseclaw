@@ -156,6 +156,22 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 	fmt.Fprintf(&df, "COPY --chown=0:0 --chmod=0755 kit/bin/defenseclaw-actor-hook %s\n", kit.HookBinary)
 	fmt.Fprintf(&df, "COPY --chown=0:0 --chmod=0755 kit/bin/defenseclaw-actor-relay %s\n", kit.RelayBinary)
 	dirs := map[string]bool{"/etc/defenseclaw": true, kit.KitDir: true, kit.HookDir: true, kit.LibDir: true}
+	// Directories of user-owned files: COPY would create them root-owned, and
+	// the agent could not write its own state there (~/.codex).
+	userDirs := map[string]bool{}
+	for _, f := range ov.Files {
+		if d := path.Dir(f.Path); f.User && d != home && strings.HasPrefix(d, home+"/") {
+			userDirs[d] = true
+		}
+	}
+	if len(userDirs) > 0 {
+		var ud []string
+		for d := range userDirs {
+			ud = append(ud, d)
+		}
+		sort.Strings(ud)
+		fmt.Fprintf(&df, "RUN install -d -o %d -g %d -m 0700 %s\n", uid, gid, strings.Join(ud, " "))
+	}
 	for _, f := range ov.Files {
 		rel := path.Join("kit/files", f.Path)
 		if err := write(rel, f.Data); err != nil {
