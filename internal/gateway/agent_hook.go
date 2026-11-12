@@ -822,7 +822,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if shouldResetToolJudgeSession(req) {
 			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
 			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ResetToolJudgeSession(sessionKey)
+				judge.ResetToolJudgeSession(ctx, sessionKey)
 			}
 			a.resetUserDownloadRequests(sessionKey)
 		}

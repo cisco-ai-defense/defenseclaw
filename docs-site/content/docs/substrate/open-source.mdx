@@ -1,0 +1,220 @@
+---
+title: Open source on your own cluster
+description: One developer runs Agent Substrate on their own cluster, adds DefenseClaw with a Helm chart, and runs Claude Code or Codex in a protected actor.
+keywords:
+  - Agent Substrate open source
+  - defenseclaw substrate run
+  - kind cluster agent sandbox
+  - Helm chart defenseclaw-substrate
+---
+
+{/* TODO(substrate): command output on this page is example output. Replace it with captured output from the usability pass (lanes/a7/PROGRESS.md) before the PR is marked ready. */}
+
+This page follows one developer, on their own cluster, from install to a finished session. You own the cluster, the config file and the decisions.
+
+## What you need
+
+- A Kubernetes cluster, version 1.34 or later, with [Agent Substrate](https://ate.dev) `1.0.x` installed. For a first try, a Linux machine with Docker and the upstream `kind` [quickstart](https://ate.dev/docs/get-started/quickstart/) is enough. For EKS, follow the [EKS guide](/docs/substrate/eks). GKE works with the upstream guide. `kind` and ordinary cloud nodes run the `gvisor` sandbox. The `microvm` sandbox needs nodes with KVM.
+- `kubectl` and `helm` pointed at that cluster, and the `kubectl ate` plugin.
+- DefenseClaw 1.0.10 or later on your laptop. Any OS works, because the agent doesn't run on your laptop.
+- A model key: an Anthropic or OpenAI API key, or Amazon Bedrock. It goes into the cluster once, and agents never see it.
+- An OpenID Connect (OIDC) provider the launcher can sign you in with (device flow). Any provider works. For a lab, Keycloak is enough.
+
+{/* TODO(substrate): confirm with A2/A6 whether an OSS cluster can run without an OIDC provider (a single-user token). Until then the page says an OIDC provider is needed. */}
+
+## Set up once
+
+<Steps>
+
+<Step>
+
+### Install DefenseClaw in the cluster
+
+Create the namespace, label it so Substrate admits it, and install the chart:
+
+```bash
+kubectl create namespace defenseclaw-system
+kubectl label namespace defenseclaw-system ate.dev/api-access=true
+helm install defenseclaw oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate \
+  --version 1.0.10 -n defenseclaw-system -f my-values.yaml
+```
+
+The chart installs the gateway (two replicas, with a separate single-replica leader that holds the state), the controller that writes each agent's network allow list, and the egress callout that checks each web request. The values file sets your OIDC issuer, the atespaces the launcher may create agents in, and the model providers. The [reference](/docs/substrate/reference#configuration) lists the keys.
+
+Substrate checks who may create agents in an atespace. If you hold a Substrate global-owner token, give it to the install once (the chart deletes it afterward):
+
+```bash
+kubectl -n defenseclaw-system create secret generic ate-bootstrap-owner --from-file=token=owner.token
+helm upgrade defenseclaw ... --set bootstrap.ownerTokenSecret=ate-bootstrap-owner
+```
+
+Without a token, `defenseclaw substrate setup --print-access-policies` prints the policies for an admin to apply.
+
+</Step>
+
+<Step>
+
+### Connect Substrate to DefenseClaw
+
+```bash
+defenseclaw substrate setup
+```
+
+This writes the `SubstrateInstall` overlay that registers the egress callout with Substrate's egress gateway. It refuses if another callout is registered, because Substrate has one callout slot and DefenseClaw never replaces someone else's. Store the model key as a Kubernetes Secret as the command tells you.
+
+</Step>
+
+<Step>
+
+### Check it
+
+```bash
+defenseclaw substrate doctor
+```
+
+The doctor checks that the gateway can verify agent identities, that the callout answers, that every running agent has a current allow list, that the Substrate version is in the tested range, that the actor-token issuer is unique to this cluster, that the snapshot bucket is encrypted, and that your templates carry the DefenseClaw kit. It ends with `ready for agents`. A failed check names the fix.
+
+</Step>
+
+<Step>
+
+### Sign in
+
+```bash
+defenseclaw substrate login --admin-url https://defenseclaw-admin.example.test \
+  --issuer https://idp.example.test/realms/defenseclaw --client-id defenseclaw-launcher
+```
+
+A browser opens on your provider's page. The launcher keeps the tokens in the operating system's keychain, and the cluster address in a context file with no secrets. `defenseclaw substrate whoami` shows who you are signed in as.
+
+</Step>
+
+<Step>
+
+### Build an agent template
+
+```bash
+defenseclaw substrate template build claude
+defenseclaw substrate template build codex
+```
+
+A template is the image an agent starts from. `template build` takes the Claude Code (or Codex) image DefenseClaw already uses for OpenShell, adds the DefenseClaw kit, scans the agent's config, skills, plugins and MCP servers, signs a record of the result, and creates the template. Agents from a template that was not built and checked this way get no network at all.
+
+You can bring your own image: `defenseclaw substrate template build claude --from registry.example.test/my-agent@sha256:...`. Substrate needs the image pinned by digest.
+
+</Step>
+
+</Steps>
+
+## A session
+
+<Steps>
+
+<Step>
+
+### Start the agent
+
+```bash
+cd ~/code/myapp
+defenseclaw substrate run claude
+```
+
+The launcher copies your project up (secret files such as `.env` and keys are held back, as in OpenShell copy mode), creates an actor, waits for it to start, and connects your terminal.
+
+```text
+Agent myapp-7f3a · Claude Code · Agent Substrate (gvisor) · atespace dc-alice
+  Project   ~/code/myapp → /work (copy, 14 MB up; .env and certs/dev.pem held back)
+  Changes   come back with: defenseclaw substrate pull myapp-7f3a
+  Model     Anthropic through the DefenseClaw guardrail proxy (the key stays in the cluster)
+  Network   denied by default · allowed: github.com, registry.npmjs.org, pypi.org
+  Asks      appear here, or watch: defenseclaw substrate approvals --watch
+  Leave     Ctrl-] detaches; the agent keeps going and suspends when idle
+```
+
+Prefer git to an upload? `defenseclaw substrate run claude --clone git@github.com:me/myapp.git --branch agent/fix-tests` clones inside the agent. The git credential is added by the cluster's egress gateway on the git host only, so the agent never holds it. See [Secrets](/docs/substrate/secrets).
+
+</Step>
+
+<Step>
+
+### Work as usual
+
+Claude Code behaves as it does on your machine. DefenseClaw checks every tool call with the same rules: a blocked command, a write outside the project, or a secret about to leave shows the same message as on your laptop. Model requests and replies go through the guardrail proxy, so a prompt injection in a fetched page or a key pasted into a prompt is caught there.
+
+When the agent tries a site that isn't allowed, you get an ask in the session:
+
+```text
+DefenseClaw · myapp-7f3a wants to reach api.stripe.com (HTTPS)
+  [o] once   [a] always for this agent   [d] deny        (no answer in 60 s = deny)
+```
+
+After you approve, the held request goes through within about ten seconds, once Substrate has applied the new allow list.
+
+</Step>
+
+<Step>
+
+### Leave and come back
+
+Press `Ctrl-]` to detach. The agent keeps working. When it has nothing to do, DefenseClaw suspends it (after 30 minutes without hooks, model calls, terminal traffic, web requests or CPU use), and Substrate frees the machine. Later, from this laptop or another one:
+
+```bash
+defenseclaw substrate list
+defenseclaw substrate connect myapp-7f3a
+```
+
+The agent resumes where it stopped, with its terminal, its running processes and its files, usually in under a second.
+
+</Step>
+
+<Step>
+
+### Bring the changes back
+
+```bash
+defenseclaw substrate pull myapp-7f3a
+```
+
+As in OpenShell copy mode, you see the changed files first, with any file that could run code on your machine flagged (git hooks, build scripts, shell config). Then you choose: apply them to your folder, put them on a branch, or write a patch. If you cloned with `--clone`, the agent can push a branch instead.
+
+To go back in time, `defenseclaw substrate checkpoint myapp-7f3a` saves one, and `defenseclaw substrate undo myapp-7f3a` returns the whole agent, files and memory, to the last checkpoint.
+
+</Step>
+
+<Step>
+
+### Finish
+
+```bash
+defenseclaw substrate delete myapp-7f3a
+```
+
+Suspended agents cost storage only, so you can keep them as long as you like. `delete` also removes the agent's snapshots from the bucket.
+
+</Step>
+
+</Steps>
+
+## Background agents
+
+Not every agent needs your terminal:
+
+```bash
+defenseclaw substrate run codex --task "make the failing tests in pkg/parser pass" --detach
+defenseclaw substrate logs api-2c9e -f
+```
+
+Several at once is fine: each gets its own sandbox and allow list. Asks wait for you in `defenseclaw substrate approvals`, and unattended runs deny them by default. See [Unattended runs](/docs/substrate/unattended).
+
+## Where to look
+
+- The [TUI](/docs/tui) Sandboxes panel lists your Substrate agents beside your OpenShell sandboxes, marked `substrate`.
+- Every event carries the agent's name and Substrate UID, so the [observability stack](/docs/observability) shows them on the same dashboards. The [Substrate agents board](/docs/observability/grafana-dashboards) shows the cluster side.
+
+## What you give up compared with OpenShell
+
+- No live folder. The agent works on a copy or a clone.
+- No ports on your machine (`--host-port`) and no local MCP servers. MCP servers must be in the image or reachable over the network.
+- No process-tree or kernel feed. Substrate reports each agent's CPU and memory, not its processes.
+
+See [Agents and features](/docs/substrate/agents) for the full list.

@@ -104,6 +104,10 @@ var serveFlags struct {
 	// Leader RPC permissions by peer (GAP-0094).
 	calloutPeerIDs    []string
 	controllerPeerIDs []string
+	// Chain state (lane A13).
+	chainKeyFile      string
+	chainEgressAction string
+	chainRetention    time.Duration
 }
 
 // sidecarSubstrateBuild, when set, makes runSidecar serve the Substrate
@@ -159,6 +163,9 @@ func init() {
 	f.BoolVar(&serveFlags.noKubeSignIn, "no-kube-sign-in", false, "with no OIDC issuer, do not accept Kubernetes credentials on the admin listener")
 	f.BoolVar(&serveFlags.actorPlainHTTP, "actor-plain-http", false,
 		"serve the actor listener as plain HTTP (egress reaches it on an http rule; the actor JWT authenticates); the admin listener and the leader RPC keep TLS")
+	f.StringVar(&serveFlags.chainKeyFile, "chain-key-file", "/var/run/secrets/defenseclaw-chain-key/key", "value lineage key every gateway replica shares (gateway)")
+	f.StringVar(&serveFlags.chainEgressAction, "chain-egress-action", chainstate.EgressBlock, "block or alert a secret read followed by egress at the callout (leader)")
+	f.DurationVar(&serveFlags.chainRetention, "chain-retention", chainstate.DefaultRetention, "how long a suspended actor's chain windows count as live (leader)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -407,6 +414,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		if serveFlags.actorPlainHTTP {
 			actorTLS = nil
 		}
+		if err := loadChainKey(serveFlags.chainKeyFile); err != nil {
+			return out, err
+		}
 		toLeader := &leader.Client{BaseURL: base, HTTP: hc}
 		regs := &registry.Remote{Client: toLeader}
 		// The idle feed: last hook, model call and relay byte per actor,
@@ -422,7 +432,8 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
 			Actors: actors, Registrations: regs, Activity: recorder,
-			Asks: &asks.Client{Leader: toLeader}, Policies: ate,
+			Chains: &chainstate.Client{Leader: toLeader},
+			Asks:   &asks.Client{Leader: toLeader}, Policies: ate,
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
 			Relays: substrateRelays(),
 			Skills: newRuntimeSkillScanner(c),
@@ -541,6 +552,14 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	asks.Serve(srv, askStore)
 	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
+	chains, err := chainstate.New(chainstate.Options{Dir: serveFlags.storeDir,
+		EgressAction: serveFlags.chainEgressAction, Retention: serveFlags.chainRetention})
+	if err != nil {
+		return err
+	}
+	defer chains.Close()
+	chains.Register(srv)
+	go func() { _ = chains.Run(ctx) }()
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
 		files, err := podcert.NewFiles(serveFlags.peerBundle, serveFlags.peerTrust)
@@ -670,4 +689,19 @@ func substrateStartupChecks(c *config.Config) {
 			fmt.Fprintf(os.Stderr, "[substrate] %s: %s; fix: %s\n", chk.ID, chk.Detail, chk.Fix)
 		}
 	}()
+}
+
+// loadChainKey sets the value lineage key every gateway replica shares
+// (Secret defenseclaw-chain-key). Without it each replica keeps its own
+// random key and value joins only match on the replica that saw both calls.
+func loadChainKey(path string) error {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "[substrate] warning: no chain key at %s: value-lineage chains match only within one replica\n", path)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("serve: chain key: %w", err)
+	}
+	return gateway.SetToolValueLineageKey([]byte(strings.TrimSpace(string(raw))))
 }

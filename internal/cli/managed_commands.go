@@ -140,11 +140,11 @@ var managedCommands = []managedCommand{
 		Note: "Runs your coding agents in your organization's Agent Substrate cluster, for the account that signed in to it. It talks only to that cluster, so it needs no managed install, daemon or sandbox on this computer.",
 	},
 	{
-		Command: "defenseclaw substrate setup, bundle, template",
+		Command: "defenseclaw substrate setup",
 		Windows: managedOffered,
 		Probes:  [][]string{{"substrate", "setup"}, {"substrate", "bundle"}, {"substrate", "template"}},
 		PerUser: perUserEverywhere, PerUserPath: []string{"substrate", "setup"},
-		Note: "Cluster administrator tools. They read and write the files named on the command line and, for `bundle`, use the administrator's own sign-in, so they need no managed install. The Linux and macOS launcher does not offer them; an administrator runs them with `defenseclaw-gateway` or on their own computer.",
+		Note: "Cluster administrator tools: setup, bundle and template. They read and write the files named on the command line and, for `bundle`, use the administrator's own sign-in, so they need no managed install. The Linux and macOS launcher does not offer them; an administrator runs them with `defenseclaw-gateway` or on their own computer.",
 	},
 	{
 		Command:  "defenseclaw guardrail profile explain",

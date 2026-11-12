@@ -1,0 +1,69 @@
+---
+title: Agents and features
+description: Which agents can run as Agent Substrate actors, how each runs unattended, and how each DefenseClaw feature compares with the host and OpenShell sandboxes.
+keywords:
+  - Agent Substrate agent support
+  - DefenseClaw parity
+  - cloud sandbox connectors
+  - headless coding agents
+---
+
+{/* TODO(substrate): the waves and headless flags come from PLAN 4.3 and 4.4. A5, A10 and A11 confirm per connector that the flag works and that hooks fire; update the Status column from their HANDOFFs and from docs-site/data/capability-matrix.json. */}
+
+## Short answer
+
+- **Every agent that DefenseClaw runs in OpenShell can run in Agent Substrate**, in three waves. An actor is a Linux container, and DefenseClaw reuses the same harness images it builds for OpenShell. Only the address the hooks call changes. Amp and OpenCode need a plugin transport change first, so they are refused in the first build.
+- **Desktop and IDE apps can't.** An actor has no screen, so the Claude desktop app, Cowork, and the Cursor, Kiro and Antigravity editors keep their host connectors. Their command-line versions can run in an actor.
+- **The checks are the same.** The same hooks, rules, guardrails, scans and asks apply.
+- **The surroundings are not.** There's no live folder and nothing on your machine is reachable. In return you get suspend and resume, any laptop OS, model traffic that always passes the guardrail proxy, and unattended runs.
+
+## Agents
+
+| Wave | Agent | Interactive | Headless (`run --task`) | Condition |
+|---|---|---|---|---|
+| 1 | Claude Code | Yes | `claude -p` | First release; managed tamper tier |
+| 1 | Codex | Yes | `codex exec` | First release; managed tamper tier |
+| 2 | OpenCode | Yes | `opencode run` | Verified OpenShell image |
+| 2 | GitHub Copilot CLI | Yes | `copilot -p` | Verified OpenShell image |
+| 2 | Hermes | Yes | Found per connector | Verified OpenShell image |
+| 2 | Kiro CLI | Yes | `kiro-cli chat --no-interactive` | Verified OpenShell image |
+| 2 | Antigravity CLI | Yes | Found per connector | Verified OpenShell image |
+| 3 | Cursor Agent CLI | Yes | `cursor-agent -p` | Refused until a vendor sign-in run passes |
+| 3 | Amp | Yes | `amp -x` | Refused until a vendor sign-in run passes |
+| 3 | Devin CLI | Yes | Found per connector | Refused until a vendor sign-in run passes |
+| — | OpenClaw, ZeptoClaw | No | No | Not in this release |
+| — | Claude desktop and Cowork, Cursor, Kiro and Antigravity editors, Copilot in VS Code | No | No | Desktop apps need a screen |
+
+A connector without a usable headless mode is interactive only, and `run --task` says so.
+
+**Vendor sign-in.** Substrate's egress gateway can add an API key or token to an agent's requests, so the agent never holds it. That covers API keys (Anthropic, OpenAI, Bedrock, `AMP_API_KEY`, `CURSOR_API_KEY`). Subscription sign-ins that open a browser and refresh their own tokens, such as a Claude or ChatGPT plan login or `devin auth login`, put tokens in the actor's snapshots. In a managed profile they are refused. In open source you get a warning. Wave 3 stays refused until a run with a real key passes.
+
+## Features
+
+| Feature | On your machine | OpenShell sandbox | Agent Substrate |
+|---|---|---|---|
+| Tool-call checks (hooks) | Yes | Yes | Yes, same rules and messages |
+| Tool chains and intent | Per session | Per session | Per session and per actor, kept across suspend and resume |
+| Model request and reply guardrails | Through the guardrail proxy, where the connector routes to it | The model call goes to the provider directly | **Always**, because the provider is only reachable through the proxy |
+| Routing, budgets and cost | Where the proxy is used | Where the proxy is used | For every agent, keyed to the verified person and actor |
+| Network control | Not isolated | Egress proxy, block and allow lists, asks | Denied by default; DefenseClaw writes each agent's allow list and checks each request; asks |
+| Secrets | In the user's environment | Placeholder key in the sandbox | No secret value in the actor; the egress gateway swaps placeholders on bound hosts only |
+| Asks and approvals | In the agent | In the activity feed and `approvals` | In your terminal session and `approvals`, so you can answer after detaching |
+| Unattended runs | n/a | n/a | `--task`, `--batch`, from CI |
+| Your project | In place | Live (Linux, Docker) or copy | Copy or git clone only |
+| Undo | No | Undo point, or pull from a copy | Checkpoints of the whole agent (files and memory), and pull |
+| Your local MCP servers | Yes | Imported (Claude Code, Codex) | No. Only MCP servers in the image or reachable over the network |
+| Ports on your machine | Yes | `--host-port`, after approval | No |
+| Process tree, kernel feed | Host feeds | Linux | No. Substrate reports CPU and memory per agent |
+| Interactive terminal | Yes | Yes, over SSH | Yes, through the launcher and the terminal relay in the kit |
+| Leave and come back | n/a | Stop and connect on the same machine | Suspends when idle; resume from any machine in under a second |
+| Many agents at once | Limited by the machine | Limited by the machine | Limited by the cluster |
+| Laptop OS | All | Linux, Apple-silicon Mac | All, including Windows and Intel Macs |
+| Several people on one host | Yes | One account per host | Yes, each agent isolated |
+| Identity | OS user | OS user (verified on managed hosts) | Company sign-in for the person; each agent's identity is signed by Substrate |
+
+## The interactive terminal
+
+Substrate doesn't attach a terminal to an actor the way `ssh` or `docker exec` does. It forwards HTTP to the actor and streams its logs. So the DefenseClaw kit in the image carries a small relay that carries the agent's terminal over that HTTP path (a WebSocket, with a long-poll fallback for proxies that block WebSockets), and `run` and `connect` speak to it. Press `Ctrl-]` to detach.
+
+The relay needs no inbound port on your laptop. The launcher reaches it through Substrate's router, with a short-lived token that the cluster gateway issues for one person and one actor. A different person can't attach to the actor, and an unauthenticated connection gets nothing.

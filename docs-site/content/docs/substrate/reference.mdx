@@ -1,0 +1,116 @@
+---
+title: defenseclaw substrate reference
+description: Every defenseclaw substrate command, its exit codes and environment variables, the substrate configuration section, the chart values that matter, and the files the launcher keeps.
+keywords:
+  - defenseclaw substrate
+  - substrate configuration
+  - substrate CLI reference
+---
+
+{/* TODO(substrate): this page is the contract from PLAN 6.5, 7.1 and lanes/a6/DESIGN.md. Replace it with output generated from the merged command tree (internal/cli/testdata/substrate_commands.json) and the config schema, and make sure the docs-claims test covers it. */}
+
+`defenseclaw substrate` runs on your laptop or in CI. It needs no `config.yaml` on the laptop: every command except the admin ones reads a small context file.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `login`, `logout`, `whoami` | Sign in with your organization's OIDC provider (device flow), in CI with a workload identity. Tokens go in the operating system keychain |
+| `run <connector> [-- args]` | Start an agent in an actor and attach. `--task "..."` runs the connector's headless mode, `--detach` doesn't attach, `--batch tasks.yaml --parallel N` runs one actor per task, `--clone URL --branch B` clones inside the actor instead of uploading |
+| `connect <name>` | Attach to an actor, resuming it first if it is suspended |
+| `list` | Your actors with state, last activity, checks and asks |
+| `status [name]` | One actor, or the cluster and fleet view for admins. `--batch` for a batch |
+| `logs <name> [-f]` | The agent's output |
+| `pull <name>` | See the changed files, flagged for risk, then apply, branch or patch |
+| `checkpoint <name> [--every D]` | Save the whole actor, files and memory |
+| `undo <name>` | Return the actor to its last checkpoint |
+| `delete <name>...` | Delete actors, their allow lists and their snapshots |
+| `migrate <name>` | Move an actor with an old kit to a rebuilt template |
+| `approvals`, `approve <id>`, `reject <id>` | Answer asks, including for detached and unattended runs. `approvals --watch` follows them |
+| `usage [--batch ID]` | Your own usage and cost. Admins can read the fleet |
+| `secrets list\|set\|rm\|test [--mine]` | Names of your secrets and their bindings. Values are never shown |
+| `policy explain\|show\|test` | Your own effective policy and where each value comes from; `test` runs a pack without applying it |
+| `doctor` | Checks the cluster side. Ends with `ready for agents` |
+| `setup [--remove] [--print-access-policies]` | Writes the Substrate install overlay, or prints the access policies |
+| `bundle apply\|status` | Apply or show signed policy bundles. `apply --atespaces PATTERN` stages by atespace |
+| `template build\|verify\|scan\|publish` | Build an agent image with the kit, check or scan it, publish it to an atespace |
+
+Every read command has `--output text|json` and `--json`. Errors say what failed and how to fix it. `--yes` answers questions.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Done |
+| 1 | The command failed |
+| 2 | Usage error |
+| 3 | Unsupported or refused (a profile or setting forbids it) |
+| 4 | Not signed in; run `defenseclaw substrate login` |
+
+### Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `DEFENSECLAW_SUBSTRATE_CONTEXT` | Which saved cluster to use |
+| `DEFENSECLAW_SUBSTRATE_ADMIN_URL`, `DEFENSECLAW_SUBSTRATE_ISSUER`, `DEFENSECLAW_SUBSTRATE_CLIENT_ID`, `DEFENSECLAW_SUBSTRATE_ROUTER_URL` | Override the saved context, for CI |
+| `DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file` | Keep tokens in a 0600 file instead of the keychain (headless Linux and CI). The launcher never falls back to this on its own; it says so and names the variable |
+
+### Files
+
+`substrate/contexts.json` under the DefenseClaw state directory holds your contexts: addresses, issuer, client ID and the CA files. It has no secrets and mode 0600. Tokens live in the keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service).
+
+## Configuration
+
+The `substrate` section of the DefenseClaw configuration. On a cluster it comes from the chart's `config:` values.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `substrate.enabled` | `false` (the chart sets `true`) | Turns the Substrate components on |
+| `substrate.api.address`, `.ca_file`, `.auth` | `api.ate-system:443`, in-cluster CA, `serviceaccount` | How DefenseClaw reaches the Substrate control API |
+| `substrate.supported_versions` | `>=1.0.0 <1.1.0` | The Substrate versions `doctor` accepts |
+| `substrate.identity.issuer` | `https://idp.ate-system.svc` | Issuer of the actor tokens. Make it unique per cluster |
+| `substrate.identity.audience` | `defenseclaw` | Audience of actor tokens |
+| `substrate.identity.token_lifetime_seconds` | `900` | Lifetime of the token the egress gateway adds |
+| `substrate.identity.oidc.issuer`, `.client_id`, `.groups_claim` | none, none, `groups` | The OIDC provider people sign in with |
+| `substrate.identity.workload_oidc` | `[]` | Issuers accepted for CI workloads: `issuer`, `audience` |
+| `substrate.services.actor`, `.admin` | `defenseclaw-actor...svc`, `defenseclaw-admin...svc` | Service names (the chart fills them) |
+| `substrate.launcher_atespaces` | `{}` | Profile name to the atespaces the launcher may create actors in. Only DefenseClaw edits these |
+| `substrate.require_attested_templates` | `true` | Actors from unattested templates get no network |
+| `substrate.default_sandbox_class` | `gvisor` | `gvisor` or `microvm` |
+| `substrate.idle_suspend_after` | `30m` | Idle time before DefenseClaw suspends an actor. `--task` runs are exempt unless the profile says so |
+| `substrate.unattended.asks` | `deny` | What an unattended run does with an ask |
+| `substrate.unattended.ask_timeout` | `30m` | How long an allowed ask waits for a person |
+| `substrate.unattended.telemetry_sampling` | `1.0` | Fraction of routine events kept for `--task` runs. Blocks and lifecycle records are never sampled |
+| `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits. Over budget answers `429` with `Retry-After` |
+| `substrate.extproc.enabled` | `true` | The egress callout |
+| `substrate.extproc.failure_mode` | `closed` | What the egress gateway does when the callout fails |
+| `substrate.extproc.body_inspection` | `auto` | Read bodies of POSTs to MCP and listed hosts when Substrate supports it |
+| `substrate.extproc.body_max_bytes` | `1048576` | Largest body the callout reads |
+| `substrate.extproc.mcp_hosts` | `[]` | Hosts whose bodies are read as MCP calls |
+| `substrate.llm.providers` | all the gateway proxy serves | Providers actors may reach, only through the proxy |
+| `substrate.llm.credential.provider_uri` | none | Where the model key comes from (`ate-secret://...`) |
+| `substrate.secrets` | `[]` | See [Secrets](/docs/substrate/secrets) |
+| `substrate.allow_passthrough_for` | `[]` | Hosts that are not inspected. Never given a secret |
+
+Profile keys for Substrate: `sandbox.runtimes`, `sandbox.sandbox_class`, `sandbox.idle_suspend_after`, `sandbox.unattended_asks`, `sandbox.actor_secrets`, and `profile_assignments[].match.substrate` (`atespaces`, `templates`, `workloads`). See [Managed enterprise](/docs/substrate/enterprise).
+
+## Chart values
+
+The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate`. Every value is checked by its schema. The ones you will set:
+
+| Value | Meaning |
+|---|---|
+| `config` | The DefenseClaw configuration, rendered into one ConfigMap |
+| `bootstrap.ownerTokenSecret` | A Substrate global owner's token for the one-time access-policy bootstrap |
+| `managedAtespaces` | Other atespaces DefenseClaw writes policy in |
+| `substrate.namespace`, `substrate.apiAddress` | Where Substrate runs |
+| `gateway.hpa.*`, `gateway.pdb.*` | Scaling and disruption budget of the gateway |
+| `leader.store.size`, `leader.store.keepOnUninstall` | The leader's volume |
+| `callout.judge.tokenSecret` | Turns on the MCP verdict route for the callout |
+| `networkPolicy.adminFrom`, `adminIngress.*` | Who can reach the admin Service |
+| `metrics.prometheusRule.enabled` | Install the alert rules |
+| `observability.local.enabled` | A local collector for trying the chart |
+
+## Telemetry
+
+The new attributes, families and metrics are in [Sandbox telemetry](/docs/observability/sandbox-telemetry#agent-substrate). Metrics carry no actor, atespace or person labels.

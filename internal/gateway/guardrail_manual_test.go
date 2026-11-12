@@ -1363,7 +1363,7 @@ func TestRunToolJudgeUsesBoundedSameSessionContext(t *testing.T) {
 		t.Fatalf("same-session context missing from request: %q", second.Messages[1].Content)
 	}
 
-	judge.ResetToolJudgeSession("session-a")
+	judge.ResetToolJudgeSession(context.Background(), "session-a")
 	judge.RunToolJudge(ctx, "shell", `{"command":"echo reset context"}`)
 	afterReset := provider.getLastReq()
 	if afterReset == nil || strings.Contains(afterReset.Messages[1].Content, "RECENT_TOOL_CALL") {

@@ -2232,6 +2232,10 @@ groups:
     requirement_level: recommended
   - ref: server.port
     requirement_level: recommended
+  - ref: defenseclaw.network.body_inspected
+    requirement_level: recommended
+  - ref: defenseclaw.network.body_over_cap
+    requirement_level: recommended
   body_fields: []
   x-defenseclaw:
     legacy_bindings:

@@ -20,10 +20,15 @@ import "encoding/json"
 //	                          (the same on the one retry)
 //	body: HookEnvelope
 //
+// The gateway answers X-DefenseClaw-Actor-Mode and X-DefenseClaw-Fail-Mode
+// with every reply: the registration's run mode and the mode the kit applies
+// when the gateway cannot answer (D8). The kit keeps them in its helper.
+//
 // The answer is the host hook answer for the connector (action, reason,
 // claude_code_output, codex_output or hook_output, ...), which the kit
 // shapes with hookexec exactly as a host hook does. Codex notify events go
-// to /api/v1/substrate/notify/codex with the same headers.
+// to /api/v1/substrate/notify/codex in the same envelope (payload: Codex's
+// notify JSON, event agent-turn-complete).
 //
 // A warm-up is GET <gateway_url>/api/v1/substrate/hook/<connector> with
 // X-DefenseClaw-Warm: 1; any HTTP answer counts (the connection through
@@ -34,11 +39,13 @@ const (
 	HookPathPrefix   = "/api/v1/substrate/hook/"
 	NotifyPathPrefix = "/api/v1/substrate/notify/"
 	WarmHeader       = "X-DefenseClaw-Warm"
+	ModeHeader       = "X-DefenseClaw-Actor-Mode"
+	FailModeHeader   = "X-DefenseClaw-Fail-Mode"
 )
 
 // HookEnvelope is the body of an actor hook post.
 type HookEnvelope struct {
-	// V is ProtocolV1.
+	// V is EnvelopeVersion.
 	V string `json:"v"`
 	// Connector is the connector name ("claudecode", "codex").
 	Connector string `json:"connector"`
