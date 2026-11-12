@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity/ateactors"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
@@ -86,6 +87,10 @@ var serveFlags struct {
 	kubeCAFile       string
 	adminGroups      []string
 	plainHTTP        bool
+	// Chain state (lane A13).
+	chainKeyFile      string
+	chainEgressAction string
+	chainRetention    time.Duration
 }
 
 // sidecarSubstrateBuild, when set, makes runSidecar serve the Substrate
@@ -131,6 +136,9 @@ func init() {
 	f.StringVar(&serveFlags.kubeCAFile, "kube-ca-file", leader.DefaultKubeCAFile, "Kubernetes API CA (leader Lease)")
 	f.StringSliceVar(&serveFlags.adminGroups, "admin-groups", nil, "OIDC groups whose members are administrators")
 	f.BoolVar(&serveFlags.plainHTTP, "plain-http", false, "serve without TLS (tests only)")
+	f.StringVar(&serveFlags.chainKeyFile, "chain-key-file", "/var/run/secrets/defenseclaw-chain-key/key", "value lineage key every gateway replica shares (gateway)")
+	f.StringVar(&serveFlags.chainEgressAction, "chain-egress-action", chainstate.EgressBlock, "block or alert a secret read followed by egress at the callout (leader)")
+	f.DurationVar(&serveFlags.chainRetention, "chain-retention", chainstate.DefaultRetention, "how long a suspended actor's chain windows count as live (leader)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -322,9 +330,14 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		if err != nil {
 			return out, err
 		}
+		if err := loadChainKey(serveFlags.chainKeyFile); err != nil {
+			return out, err
+		}
+		toLeader := &leader.Client{BaseURL: base, HTTP: hc}
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: servingTLS,
-			Actors: actors, Registrations: &registry.Remote{Client: &leader.Client{BaseURL: base, HTTP: hc}},
+			Actors: actors, Registrations: &registry.Remote{Client: toLeader},
+			Chains: &chainstate.Client{Leader: toLeader},
 			Limiter: ratelimit.New(ratelimit.Config{
 				PerActorRPS: c.Substrate.RateLimits.PerActorRPS, PerAtespaceRPS: c.Substrate.RateLimits.PerAtespaceRPS,
 			}),
@@ -415,6 +428,14 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	srv := &leader.Server{IsLeader: el.IsLeader}
 	registry.Serve(srv, store)
+	chains, err := chainstate.New(chainstate.Options{Dir: serveFlags.storeDir,
+		EgressAction: serveFlags.chainEgressAction, Retention: serveFlags.chainRetention})
+	if err != nil {
+		return err
+	}
+	defer chains.Close()
+	chains.Register(srv)
+	go func() { _ = chains.Run(ctx) }()
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
 		files, err := podcert.NewFiles(serveFlags.peerBundle, serveFlags.peerTrust)
@@ -461,4 +482,19 @@ func kubeHTTPClient() (*http.Client, error) {
 	return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}, Proxy: nil,
 	}}, nil
+}
+
+// loadChainKey sets the value lineage key every gateway replica shares
+// (Secret defenseclaw-chain-key). Without it each replica keeps its own
+// random key and value joins only match on the replica that saw both calls.
+func loadChainKey(path string) error {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "[substrate] warning: no chain key at %s: value-lineage chains match only within one replica\n", path)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("serve: chain key: %w", err)
+	}
+	return gateway.SetToolValueLineageKey([]byte(strings.TrimSpace(string(raw))))
 }
