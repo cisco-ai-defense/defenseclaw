@@ -245,13 +245,14 @@ func ParsePolicy(raw []byte, base *config.Config) (Policy, error) {
 		return bad(eb.ConfigName, "not a YAML mapping")
 	}
 	for k := range top {
-		if k != "config_version" && k != "guardrail" {
+		if k != "config_version" && k != "deployment_mode" && k != "guardrail" {
 			return Policy{}, refuse(CodeNotSubstrate, k, "a Substrate bundle sets only guardrail.profiles and guardrail.profile_assignments")
 		}
 	}
 	var doc struct {
-		ConfigVersion int `yaml:"config_version"`
-		Guardrail     struct {
+		ConfigVersion  int    `yaml:"config_version"`
+		DeploymentMode string `yaml:"deployment_mode"`
+		Guardrail      struct {
 			Profiles    map[string]config.GuardrailProfile `yaml:"profiles"`
 			Assignments []config.ProfileAssignment         `yaml:"profile_assignments"`
 		} `yaml:"guardrail"`
@@ -260,6 +261,9 @@ func ParsePolicy(raw []byte, base *config.Config) (Policy, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&doc); err != nil {
 		return Policy{}, refuse(CodeNotSubstrate, "guardrail", "a Substrate bundle sets only guardrail.profiles and guardrail.profile_assignments: %s", boundedYAMLError(err))
+	}
+	if doc.DeploymentMode != "" && doc.DeploymentMode != "managed_enterprise" {
+		return bad("deployment_mode", "want managed_enterprise (bundle sign needs it) or nothing")
 	}
 	if doc.ConfigVersion != 0 && doc.ConfigVersion != 8 && doc.ConfigVersion != 9 {
 		return bad("config_version", "want 8 or 9")

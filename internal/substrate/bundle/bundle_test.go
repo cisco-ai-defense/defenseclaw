@@ -142,6 +142,7 @@ func buildBundle(t *testing.T, s signer, version uint64, cfgYAML string, mutate 
 
 func policyYAML(block string) string {
 	return fmt.Sprintf(`config_version: 9
+deployment_mode: managed_enterprise
 guardrail:
   profiles:
     eng:
@@ -278,6 +279,7 @@ func TestTamperIsRefusedAndReceipted(t *testing.T) {
 		"host assignment": {buildBundle(t, e.key, 6, "guardrail:\n  profiles:\n    eng: {}\n  profile_assignments:\n    - profile: eng\n      match: {groups: [eng]}\n"), CodeNotSubstrate},
 		"guardrail mode":  {buildBundle(t, e.key, 6, "guardrail:\n  profiles:\n    eng: {mode: observe}\n"), CodeNotSubstrate},
 		"garbage":         {[]byte("not a bundle"), eb.CodeArchiveInvalid},
+		"other mode":      {buildBundle(t, e.key, 6, "deployment_mode: standalone\nguardrail:\n  profiles:\n    eng: {}\n"), eb.CodeConfigInvalid},
 	}
 	for name, tc := range cases {
 		rc, err := e.store.Apply(ctx, tc.archive, "canary", []string{"team-a"}, SourceCLI)
