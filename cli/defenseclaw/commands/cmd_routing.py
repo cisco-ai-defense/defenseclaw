@@ -1108,3 +1108,23 @@ def routing_setup(app: AppContext, classifier: str | None, yes: bool) -> None:
         click.echo(f'Test skipped: {error}. Run later: defenseclaw routing test "<prompt>"')
     elif isinstance(answer, dict):
         click.echo(f"Test: a coding prompt goes to {answer.get('selected_alias') or answer.get('outcome')}.")
+
+
+# ---------------- doctor
+
+
+def doctor_rows() -> list[tuple[str, str]]:
+    """(status, detail) rows for defenseclaw doctor: one pass row, or one warn
+    row per Lint note; [] when no routing.admin rules or budgets exist."""
+    try:
+        doc = _document()
+    except click.ClickException:
+        return []
+    admin = _admin(doc)
+    rules, budgets = _list(admin.get("rules")), _list(admin.get("budgets"))
+    if not rules and not budgets:
+        return []
+    notes = _lint(doc)
+    if not notes:
+        return [("pass", f"{len(rules)} rule(s), {len(budgets)} budget(s)")]
+    return [("warn", note) for note in notes]

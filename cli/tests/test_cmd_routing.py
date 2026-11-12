@@ -34,9 +34,7 @@ def home(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text(BODY)
     monkeypatch.setattr(cmd_routing, "_health_routing", lambda app: {"state": "running"})
-    monkeypatch.setattr(
-        cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (None, "the gateway is not running")
-    )
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (None, "the gateway is not running"))
     return tmp_path
 
 
@@ -50,9 +48,7 @@ def written(home: Path) -> dict:
 
 
 def test_models_add_list_and_duplicate(home: Path) -> None:
-    result = run(
-        "models", "add", "coder", "--provider", "anthropic", "--model", "claude-sonnet-5-5", "--api", "messages"
-    )
+    result = run("models", "add", "coder", "--provider", "anthropic", "--model", "claude-sonnet-5-5", "--api", "messages")
     assert result.exit_code == 0, result.output
     models = written(home)["routing"]["models"]
     assert models[-1] == {"name": "coder", "provider": "anthropic", "model": "claude-sonnet-5-5", "apis": ["messages"]}
@@ -63,26 +59,11 @@ def test_models_add_list_and_duplicate(home: Path) -> None:
 
 
 def test_rules_add_move_remove(home: Path) -> None:
-    assert (
-        run(
-            "rules", "add", "local-high", "--severity-at-least", "high", "--allow", "local", "--default", "local"
-        ).exit_code
-        == 0
-    )
-    assert (
-        run(
-            "rules", "add", "ctr", "--groups", "DCLAB\\contractors", "--deny", "--message", "No cloud.", "--at", "1"
-        ).exit_code
-        == 0
-    )
+    assert run("rules", "add", "local-high", "--severity-at-least", "high", "--allow", "local", "--default", "local").exit_code == 0
+    assert run("rules", "add", "ctr", "--groups", "DCLAB\\contractors", "--deny", "--message", "No cloud.", "--at", "1").exit_code == 0
     rules = written(home)["routing"]["admin"]["rules"]
     assert [r["id"] for r in rules] == ["ctr", "local-high"]
-    assert rules[0] == {
-        "id": "ctr",
-        "match": {"groups": ["DCLAB\\contractors"]},
-        "action": "deny",
-        "message": "No cloud.",
-    }
+    assert rules[0] == {"id": "ctr", "match": {"groups": ["DCLAB\\contractors"]}, "action": "deny", "message": "No cloud."}
     assert rules[1]["match"] == {"severity_at_least": "HIGH"}
     assert run("rules", "move", "ctr", "--to", "2").exit_code == 0
     assert [r["id"] for r in written(home)["routing"]["admin"]["rules"]] == ["local-high", "ctr"]
@@ -104,51 +85,16 @@ def test_rules_add_refuses_contradictions_before_writing(home: Path) -> None:
 
 def test_validation_refusal_leaves_the_file(home: Path) -> None:
     before = (home / "config.yaml").read_bytes()
-    bad = run(
-        "budgets",
-        "add",
-        "b",
-        "--scope",
-        "user",
-        "--subject",
-        "*",
-        "--period",
-        "day",
-        "--limit-usd",
-        "5",
-        "--on-exceed",
-        "block",
-    )
+    bad = run("budgets", "add", "b", "--scope", "user", "--subject", "*", "--period", "day", "--limit-usd", "5", "--on-exceed", "block")
     assert bad.exit_code != 0 and "config.yaml was not changed" in bad.output
     assert (home / "config.yaml").read_bytes() == before
 
 
 def test_budgets_add_and_list(home: Path, monkeypatch) -> None:
-    ok = run(
-        "budgets",
-        "add",
-        "daily",
-        "--scope",
-        "user",
-        "--subject",
-        "*",
-        "--period",
-        "day",
-        "--limit-usd",
-        "20",
-        "--on-exceed",
-        "downgrade:local",
-    )
+    ok = run("budgets", "add", "daily", "--scope", "user", "--subject", "*", "--period", "day", "--limit-usd", "20", "--on-exceed", "downgrade:local")
     assert ok.exit_code == 0, ok.output
     assert written(home)["routing"]["admin"]["budgets"] == [
-        {
-            "id": "daily",
-            "scope": "user",
-            "subject": "*",
-            "period": "day",
-            "limit_usd": 20.0,
-            "on_exceed": "downgrade:local",
-        }
+        {"id": "daily", "scope": "user", "subject": "*", "period": "day", "limit_usd": 20.0, "on_exceed": "downgrade:local"}
     ]
     live = {"budgets": [{"id": "daily", "spent_usd": 12.5, "resets_at": "2026-11-19T00:00:00Z", "exceeded": False}]}
     monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (live, ""))
@@ -160,13 +106,8 @@ def test_managed_device_refuses_writes_with_the_reason(home: Path, monkeypatch) 
     monkeypatch.setattr(cmd_routing.config_writer, "machine_managed_standalone", lambda: True)
     monkeypatch.setattr("defenseclaw.enforce.asset_lists.audit_managed_config_refusal", lambda *a: None)
     before = (home / "config.yaml").read_bytes()
-    for args in (
-        ["rules", "add", "r", "--groups", "g", "--allow", "fast"],
-        ["models", "set-default", "fast"],
-        ["budgets", "remove", "x"],
-        ["enable"],
-        ["pricing", "set", "openai/gpt", "--input", "1", "--output", "2"],
-    ):
+    for args in (["rules", "add", "r", "--groups", "g", "--allow", "fast"], ["models", "set-default", "fast"],
+                 ["budgets", "remove", "x"], ["enable"], ["pricing", "set", "openai/gpt", "--input", "1", "--output", "2"]):
         result = CliRunner().invoke(cmd_routing.routing_cmd, args)
         assert result.exit_code == 3, (args, result.output)
         assert "set by your administrator" in result.output
@@ -187,16 +128,9 @@ def test_pricing_set_bumps_the_version(home: Path) -> None:
 
 
 def test_status_json_reports_budget_and_off_warnings(home: Path, monkeypatch) -> None:
-    (home / "config.yaml").write_text(
-        BODY + "  admin:\n    rules:\n      - {id: r, match: {connectors: [codex]}, allow: [fast]}\n"
-    )
-    effective = {
-        "allowed_aliases": ["fast"],
-        "recent": [],
-        "budgets": [
-            {"id": "daily", "period": "day", "on_exceed": "warn", "resets_at": "2026-11-19T00:00:00Z", "exceeded": True}
-        ],
-    }
+    (home / "config.yaml").write_text(BODY + "  admin:\n    rules:\n      - {id: r, match: {connectors: [codex]}, allow: [fast]}\n")
+    effective = {"allowed_aliases": ["fast"], "recent": [], "budgets": [
+        {"id": "daily", "period": "day", "on_exceed": "warn", "resets_at": "2026-11-19T00:00:00Z", "exceeded": True}]}
     monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (effective, ""))
     data = json.loads(run("status", "--json").output)
     assert data["enabled"] is False and data["classifier"] == "vllm_sr" and data["rules"] == 1
@@ -206,23 +140,13 @@ def test_status_json_reports_budget_and_off_warnings(home: Path, monkeypatch) ->
 
 
 def test_test_and_explain_show_the_gateway_answer(home: Path, monkeypatch) -> None:
-    answer = {
-        "category": "code",
-        "confidence": 1.0,
-        "candidate_alias": "coder",
-        "filtered_by": "admin",
-        "rule_ids": ["local-high"],
-        "outcome": "applied",
-        "selected_alias": "local",
-        "selected_model": "qwen-local",
-        "estimated_cost_usd": 0.0012,
-    }
+    answer = {"category": "code", "confidence": 1.0, "candidate_alias": "coder", "filtered_by": "admin", "rule_ids": ["local-high"],
+              "outcome": "applied", "selected_alias": "local", "selected_model": "qwen-local", "estimated_cost_usd": 0.0012}
     monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (answer, ""))
     out = run("test", "write a parser").output
     assert "Candidate:  coder" in out and "-> local (qwen-local)" in out and "Est. cost:  0.0012 USD" in out
-    monkeypatch.setattr(
-        cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (None, RoutingAPIError(404, "").plain())
-    )
+    monkeypatch.setattr(cmd_routing, "_ask_gateway",
+                        lambda app, method, path, **kw: (None, RoutingAPIError(404, "").plain()))
     missing = CliRunner().invoke(cmd_routing.routing_cmd, ["explain", "req-1"])
     assert missing.exit_code == 1 and "not in its recent decisions" in missing.output
     assert CliRunner().invoke(cmd_routing.routing_cmd, ["test", "x" * 9000]).exit_code == 2
@@ -232,3 +156,11 @@ def test_enable_needs_a_model(home: Path) -> None:
     (home / "config.yaml").write_text("config_version: 9\n")
     result = run("enable")
     assert result.exit_code != 0 and "needs at least one model" in result.output
+
+
+def test_doctor_rows(home: Path) -> None:
+    assert cmd_routing.doctor_rows() == []
+    (home / "config.yaml").write_text(BODY + "  admin:\n    rules:\n      - {id: c, match: {groups: [g]}, action: deny}\n")
+    rows = cmd_routing.doctor_rows()
+    assert ("warn", "routing is off: no rule or budget is applied until defenseclaw routing enable") in rows
+    assert any("deny is reported, not enforced" in detail for _status, detail in rows)
