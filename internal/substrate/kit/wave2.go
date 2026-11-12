@@ -309,8 +309,11 @@ var wave3Interactive = map[string][]string{
 
 var wave3Headless = map[string][]string{
 	"cursor": {"/usr/local/bin/cursor-agent", "-p", "{prompt}", "--force", "--trust"},
-	"amp":    {"/usr/local/bin/amp", "-x", "{prompt}", "--dangerously-allow-all"},
-	"devin":  {"/usr/local/bin/devin", "-p", "--permission-mode", "dangerous", "--respect-workspace-trust", "false", "--", "{prompt}"},
+	// Amp has no command-line switch for "allow all": its setting
+	// amp.dangerouslyAllowAll in ~/.config/amp/settings.json does that, and
+	// the Amp image (A11) must carry it.
+	"amp":   {"/usr/local/bin/amp", "-x", "{prompt}"},
+	"devin": {"/usr/local/bin/devin", "--permission-mode", "dangerous", "--respect-workspace-trust", "false", "-p", "{prompt}"},
 }
 
 func init() {
