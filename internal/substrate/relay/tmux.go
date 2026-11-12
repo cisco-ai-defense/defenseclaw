@@ -64,8 +64,11 @@ func (t *Tmux) RecoverSocket() bool {
 		return false
 	}
 	signalRecreateSocket(pid)
-	for i := 0; i < 100; i++ {
-		if _, err := os.Stat(t.Socket); err == nil {
+	// The file comes back before the server listens on it again: wait
+	// until a client gets an answer, or an attachment right after a
+	// resume finds no server and ends at once.
+	for i := 0; i < 200; i++ {
+		if _, err := os.Stat(t.Socket); err == nil && t.Alive(context.Background()) {
 			return true
 		}
 		time.Sleep(10 * time.Millisecond)
