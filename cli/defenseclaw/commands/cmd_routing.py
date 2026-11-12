@@ -51,15 +51,46 @@ def _managed() -> bool:
     return config_writer.machine_managed_standalone()
 
 
-def _document() -> dict[str, Any]:
-    """config.yaml as written; {} when it does not exist yet."""
-    from defenseclaw.commands.cmd_config import _written_config
+# sha256 of the config.yaml bytes the last _document() read: every write
+# passes it, so a change made by another writer meanwhile is refused instead
+# of lost.
+_READ_SHA256: str | None = None
 
-    doc = _written_config()
-    if doc is None:
+
+def _document() -> dict[str, Any]:
+    """config.yaml as written (unmasked: lists are written back whole, and a
+    masked value would replace the real one); {} when it does not exist yet."""
+    import hashlib
+
+    import yaml
+
+    from defenseclaw import config as config_module
+    from defenseclaw.observability.v8_config import load_validate_v8
+
+    global _READ_SHA256
+    path = config_module.config_path()
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        _READ_SHA256 = None
+        return {}
+    except PermissionError as exc:
+        if _managed():
+            raise click.ClickException(
+                "config.yaml on this managed device is readable only by administrators; "
+                "defenseclaw routing status shows your own routing"
+            ) from exc
+        raise click.ClickException(f"cannot read {path}: {exc}") from exc
+    try:
+        load_validate_v8(raw, source_name=str(path))
+        doc = yaml.safe_load(raw) or {}
+    except Exception as exc:  # noqa: BLE001 - shown as one plain line
         raise click.ClickException(
-            "config.yaml cannot be read or does not validate; run defenseclaw config validate to see why"
-        )
+            "config.yaml does not validate; run defenseclaw config validate to see why"
+        ) from exc
+    if not isinstance(doc, dict):
+        raise click.ClickException("config.yaml is not a mapping; run defenseclaw config validate")
+    _READ_SHA256 = hashlib.sha256(raw).hexdigest()
     return doc
 
 
@@ -110,12 +141,14 @@ def _write(app: AppContext, changes: dict[str, Any], *, unset: list[str] | None 
     keys = list(changes) + list(unset or [])
     _refuse_on_managed(keys)
     written = False
+    expect = _READ_SHA256
     if changes:
-        written = _write_config_change(app, [Change(k, v) for k, v in changes.items()], None, "set")
+        written = _write_config_change(app, [Change(k, v) for k, v in changes.items()], expect, "set")
+        expect = None if written else expect
     if unset:
         for key in unset:
             parse_path(key)
-        written = _write_config_change(app, [Change(k, unset=True) for k in unset], None, "unset") or written
+        written = _write_config_change(app, [Change(k, unset=True) for k in unset], expect, "unset") or written
     return written
 
 
@@ -318,6 +351,7 @@ def _route_only():
 @pass_ctx
 def routing_enable(app: AppContext, connector: str) -> None:
     """Turn routing on (or route one connector's model calls)."""
+    _refuse_on_managed(["routing.route_only" if connector else "routing.enabled"])
     if connector:
         _route_only().enable(app, connector)
         return
@@ -335,9 +369,11 @@ def routing_enable(app: AppContext, connector: str) -> None:
 @pass_ctx
 def routing_disable(app: AppContext, connector: str) -> None:
     """Turn routing off (or stop routing one connector; works with the gateway stopped)."""
+    _refuse_on_managed(["routing.route_only" if connector else "routing.enabled"])
     if connector:
         _route_only().disable(app, connector)
         return
+    _document()
     _write(app, {"routing.enabled": False})
 
 
@@ -991,7 +1027,9 @@ def routing_test(app: AppContext, prompt: str, connector: str, as_profile: str, 
 @pass_ctx
 def routing_explain(app: AppContext, request_id: str, as_json: bool) -> None:
     """Why a recent call went where it went (the gateway keeps the last 256 decisions)."""
-    answer, error = _ask_gateway(app, "GET", f"/api/v1/routing/explain/{request_id}")
+    from urllib.parse import quote
+
+    answer, error = _ask_gateway(app, "GET", "/api/v1/routing/explain/" + quote(request_id, safe=""))
     if error:
         raise click.ClickException(error)
     if as_json:
@@ -1054,13 +1092,24 @@ def routing_usage(app: AppContext, group_by: str, since: str, as_json: bool) -> 
     "--classifier", type=click.Choice(CLASSIFIERS), default=None, help="rules (built in), systemone or vllm_sr."
 )
 @click.option("--yes", "-y", is_flag=True, help="Accept the defaults and the models already configured.")
+@click.option("--model", "add_models", multiple=True, metavar="ALIAS=PROVIDER/MODEL",
+              help="Add a model alias without prompting (repeat for more).")
 @pass_ctx
-def routing_setup(app: AppContext, classifier: str | None, yes: bool) -> None:
+def routing_setup(app: AppContext, classifier: str | None, yes: bool, add_models: tuple[str, ...]) -> None:
     """Guided setup: models, classifier and default model, then a test."""
     _refuse_on_managed(["routing"])
     doc = _document()
     routing = _routing(doc)
     models = copy.deepcopy(_list(routing.get("models")))
+    for spec in add_models:
+        alias, _, target = spec.partition("=")
+        provider, _, model_id = target.partition("/")
+        if not (alias and provider and model_id):
+            raise click.UsageError(
+                f"--model {spec}: use ALIAS=PROVIDER/MODEL, for example fast=anthropic/claude-haiku-4-5"
+            )
+        if alias not in [str(m.get("name")) for m in models if isinstance(m, dict)]:
+            models.append({"name": alias, "provider": provider, "model": model_id})
     interactive = not yes and sys.stdin.isatty()
     if classifier is None:
         classifier = (

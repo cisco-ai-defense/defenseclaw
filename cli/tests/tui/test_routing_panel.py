@@ -63,14 +63,14 @@ def test_keys_build_the_cli_commands() -> None:
     model = loaded()
     model.handle_key("down")
     action = model.handle_key("d")
-    assert action.kind == "intent" and action.intent.args == ("routing", "models", "remove", "local")
+    assert action.kind == "intent" and action.intent.args == ("routing", "models", "remove", "--", "local")
     assert action.intent.risk == "destructive"
     assert model.handle_key("e").intent.args == ("routing", "disable")
     assert model.handle_key("p").intent.risk == "read-only"
     assert model.handle_key("t").prompt == "test"
-    assert model.intent_for_prompt("test", "write a parser").args == ("routing", "test", "write a parser")
+    assert model.intent_for_prompt("test", "--as-user root").args == ("routing", "test", "--", "--as-user root")
     assert model.intent_for_prompt("model", "coder anthropic/claude-sonnet-5-5").args == (
-        "routing", "models", "add", "coder", "--provider", "anthropic", "--model", "claude-sonnet-5-5")
+        "routing", "models", "add", "--provider", "anthropic", "--model", "claude-sonnet-5-5", "--", "coder")
     assert model.intent_for_prompt("model", "just-one-word") is None
     assert parse_model_entry('a "b c" d') == ("a", "b c", "d")
 
@@ -139,4 +139,4 @@ async def test_delete_journey_runs_the_remove_command(tmp_path) -> None:
             await pilot.press(key)
             await pilot.pause()
         await app.workers.wait_for_complete()
-    assert ("defenseclaw", "routing", "models", "remove", "fast") in calls
+    assert ("defenseclaw", "routing", "models", "remove", "--", "fast") in calls

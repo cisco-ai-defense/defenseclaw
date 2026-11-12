@@ -10,8 +10,6 @@ previews (destructive ones through the consequence modal).
 
 from __future__ import annotations
 
-from typing import Any
-
 from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.screens.field_editor import FieldEditorScreen
 from defenseclaw.tui.services.routing_state import (
@@ -25,10 +23,6 @@ ROUTING_PROMPTS = {
     "test": ("Test a prompt", "Type a prompt; DefenseClaw shows which model it would go to. No model is called."),
     "model": ("Add a model", "Alias, provider and model, for example: fast anthropic claude-haiku-4-5"),
 }
-
-# CLI commands after which the panel re-reads its data.
-ROUTING_REFRESH_COMMANDS = frozenset({"routing"})
-
 
 class RoutingPanelMixin:
     """Routing panel wiring; DefenseClawTUI supplies run_worker and the intent runner."""
@@ -141,9 +135,27 @@ class RoutingPanelMixin:
 
         self.push_screen(FieldEditorScreen(title, hint=hint), done)  # type: ignore[attr-defined]
 
-    def _routing_after_command(self, args: tuple[str, ...] | list[Any]) -> None:
-        if args and args[0] in ROUTING_REFRESH_COMMANDS:
-            self._schedule_routing_load()
+    def _routing_command_done(self) -> None:
+        """After a routing command: re-read config.yaml, the status, and show
+        the tab once routing applies (setup or enable from the wizard or the
+        palette) without a restart."""
+        refresh = getattr(self, "_refresh_cached_config", None)
+        if callable(refresh):
+            refresh()
+        self._schedule_routing_load()
+        if self._routing_tab_wanted():
+            self._ensure_routing_tab()
+
+    def _ensure_routing_tab(self) -> None:
+        from textual.widgets import Tab, Tabs
+
+        try:
+            tabs = self.query_one("#tabs", Tabs)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - no tab strip (tests, early start)
+            return
+        if any(tab.id == "tab-routing" for tab in tabs.query(Tab)):
+            return
+        tabs.add_tab(Tab("M Routing", id="tab-routing"))
 
 
 def _first_line(stderr: bytes | str) -> str:

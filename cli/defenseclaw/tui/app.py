@@ -13785,7 +13785,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
         elif command == "doctor":
             self._load_doctor_cache()
         elif command == "routing":
-            self._schedule_routing_load()
+            self._routing_command_done()
         elif command == "policy" or (
             command == "guardrail"
             and len(args) > 1

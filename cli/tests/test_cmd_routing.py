@@ -164,3 +164,32 @@ def test_doctor_rows(home: Path) -> None:
     rows = cmd_routing.doctor_rows()
     assert ("warn", "routing is off: no rule or budget is applied until defenseclaw routing enable") in rows
     assert any("deny is reported, not enforced" in detail for _status, detail in rows)
+
+
+def test_writes_keep_values_a_masked_read_would_hide(home: Path) -> None:
+    (home / "config.yaml").write_text(BODY.replace("      model: qwen-local\n", "      model: qwen-local\n      base_url: http://localhost:8000/v1\n"))
+    assert run("models", "add", "coder", "--provider", "anthropic", "--model", "claude-sonnet-5-5").exit_code == 0
+    local = [m for m in written(home)["routing"]["models"] if m["name"] == "local"][0]
+    assert local["base_url"] == "http://localhost:8000/v1"
+
+
+def test_setup_adds_models_without_prompting(home: Path, monkeypatch) -> None:
+    (home / "config.yaml").write_text("config_version: 9\n")
+    result = run("setup", "--yes", "--classifier", "rules", "--model", "fast=openai/gpt-4.1-mini")
+    assert result.exit_code == 0, result.output
+    routing = written(home)["routing"]
+    assert routing["models"] == [{"name": "fast", "provider": "openai", "model": "gpt-4.1-mini"}]
+    assert routing["enabled"] is True and routing["default_alias"] == "fast"
+    assert run("setup", "--yes", "--model", "bad").exit_code == 2
+
+
+def test_managed_unreadable_config_says_so(home: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cmd_routing.config_writer, "machine_managed_standalone", lambda: True)
+    monkeypatch.setattr("defenseclaw.enforce.asset_lists.audit_managed_config_refusal", lambda *a: None)
+    (home / "config.yaml").chmod(0)
+    try:
+        listed = CliRunner().invoke(cmd_routing.routing_cmd, ["models", "list"])
+        assert listed.exit_code == 1 and "readable only by administrators" in listed.output
+        assert CliRunner().invoke(cmd_routing.routing_cmd, ["enable"]).exit_code == 3
+    finally:
+        (home / "config.yaml").chmod(0o600)

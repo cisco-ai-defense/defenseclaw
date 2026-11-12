@@ -2272,6 +2272,14 @@ def _routing_wizard_fields() -> tuple[WizardFormField, ...]:
             required=True,
             hint="rules is built in; systemone uses a decision model; vllm_sr the vLLM Semantic Router.",
         ),
+        WizardFormField(
+            "First model",
+            "text",
+            "--model",
+            value="",
+            default="",
+            hint="Optional when routing.models has one: ALIAS=PROVIDER/MODEL, for example fast=anthropic/claude-haiku-4-5.",
+        ),
     )
 
 
@@ -2283,7 +2291,7 @@ def _routing_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, 
             "Route by task with built-in rules",
             summary="Use the models in routing.models and turn routing on, then test one prompt.",
             presets={"--classifier": "rules"},
-            fields=("Classifier",),
+            fields=("Classifier", "First model"),
         ),
     )
 
@@ -2293,6 +2301,9 @@ def _build_routing_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     classifier = wizard_field_value(fields, "Classifier").strip()
     if classifier:
         args.extend(("--classifier", classifier))
+    model = wizard_field_value(fields, "First model").strip()
+    if model:
+        args.extend(("--model", model))
     return tuple(args)
 
 

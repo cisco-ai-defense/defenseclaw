@@ -232,7 +232,7 @@ class RoutingPanelModel:
             return RoutingPanelAction("none", hint="Pick a model, rule or budget first.")
         group = {"model": "models", "rule": "rules", "budget": "budgets"}[row.kind]
         return RoutingPanelAction("intent", RoutingCommandIntent(
-            f"routing {group} remove {row.name}", ("routing", group, "remove", row.name), risk="destructive",
+            f"routing {group} remove {row.name}", ("routing", group, "remove", "--", row.name), risk="destructive",
             hint=f"Remove the {row.kind} {row.name} from config.yaml.",
             consequence=f"Removes the {row.kind} {row.name} from config.yaml; the gateway stops using it at the next reload."))
 
@@ -243,7 +243,7 @@ class RoutingPanelModel:
         if not text:
             return None
         if prompt == "test":
-            return RoutingCommandIntent(f"routing test {text[:40]}", ("routing", "test", text), risk="read-only",
+            return RoutingCommandIntent(f"routing test {text[:40]}", ("routing", "test", "--", text), risk="read-only",
                                         hint="Dry run: no model is called.")
         if prompt == "model":
             parts = parse_model_entry(text)
@@ -251,7 +251,7 @@ class RoutingPanelModel:
                 return None
             alias, provider, model = parts
             return RoutingCommandIntent(f"routing models add {alias}",
-                                        ("routing", "models", "add", alias, "--provider", provider, "--model", model),
+                                        ("routing", "models", "add", "--provider", provider, "--model", model, "--", alias),
                                         hint=f"Add the model alias {alias} ({provider}/{model}).")
         return None
 
