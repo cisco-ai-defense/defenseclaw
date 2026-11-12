@@ -30,8 +30,23 @@ type SpendCounter interface {
 	// (idempotent: a retry or a re-send of the same totals changes nothing).
 	Push(ctx context.Context, epoch string, rows []SeedRow) error
 	// Totals returns the spend of every other epoch per (key, day) since the
-	// given UTC day.
-	Totals(ctx context.Context, epoch string, since time.Time) ([]SeedRow, error)
+	// given UTC day, for keys (nil: every key the counter holds; a fleet
+	// counter needs the list, a device or replica store may ignore it).
+	Totals(ctx context.Context, epoch string, since time.Time, keys []string) ([]SeedRow, error)
+}
+
+// FleetKeys maps this device's charge keys to a fleet counter's form and
+// back. Keys of a per-user budget name a person by a uid or SID here and
+// by the account join key in the fleet, so no name leaves the device; a
+// user without a join key is counted on this device only.
+type FleetKeys interface {
+	// ToFleet returns the fleet form of a local key (false: none).
+	ToFleet(local string) (string, bool)
+	// FromFleet returns the local form of a fleet key (false: none).
+	FromFleet(fleet string) (string, bool)
+	// Wanted lists fleet keys this device needs beyond its own spend
+	// (named and group budgets, users who ran agents here).
+	Wanted() []string
 }
 
 // LocalCounterFile is the budget spend file in data_dir.
@@ -113,8 +128,9 @@ func (c *LocalCounter) Push(ctx context.Context, epoch string, rows []SeedRow) e
 	return tx.Commit()
 }
 
-// Totals sums every other epoch's spend per (key, day) since since.
-func (c *LocalCounter) Totals(ctx context.Context, epoch string, since time.Time) ([]SeedRow, error) {
+// Totals sums every other epoch's spend per (key, day) since since (all
+// keys: the device holds only its own).
+func (c *LocalCounter) Totals(ctx context.Context, epoch string, since time.Time, _ []string) ([]SeedRow, error) {
 	if c == nil {
 		return nil, errors.New("budget spend: no counter")
 	}

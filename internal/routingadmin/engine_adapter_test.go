@@ -62,7 +62,7 @@ func (f *fakeCounter) Push(_ context.Context, epoch string, rows []SeedRow) erro
 	return f.err
 }
 
-func (f *fakeCounter) Totals(context.Context, string, time.Time) ([]SeedRow, error) {
+func (f *fakeCounter) Totals(context.Context, string, time.Time, []string) ([]SeedRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.totals, f.err
@@ -158,11 +158,11 @@ func TestLocalCounterKeepsEarlierProcesses(t *testing.T) {
 	if err := c.Push(ctx, "p2", []SeedRow{{Day: today, Key: "k", USD: 4}}); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := c.Totals(ctx, "p2", time.Now().AddDate(0, 0, -LedgerDays))
+	rows, err := c.Totals(ctx, "p2", time.Now().AddDate(0, 0, -LedgerDays), nil)
 	if err != nil || len(rows) != 1 || rows[0].USD != 3 {
 		t.Fatalf("other epochs only, old days pruned: %+v %v", rows, err)
 	}
-	rows, _ = c.Totals(ctx, "p3", time.Now().AddDate(0, 0, -LedgerDays))
+	rows, _ = c.Totals(ctx, "p3", time.Now().AddDate(0, 0, -LedgerDays), nil)
 	if len(rows) != 1 || rows[0].USD != 7 {
 		t.Fatalf("a new process sees both: %+v", rows)
 	}
@@ -246,4 +246,51 @@ func TestCallerFromEngine(t *testing.T) {
 	if c := CallerFromEngine(engine.Caller{Verified: true, Key: "1001"}, false); c.Key != OwnerKey {
 		t.Fatalf("every OSS caller is the owner: %+v", c)
 	}
+}
+
+type mapKeys struct{ to, from map[string]string }
+
+func (m mapKeys) ToFleet(k string) (string, bool)   { v, ok := m.to[k]; return v, ok }
+func (m mapKeys) FromFleet(k string) (string, bool) { v, ok := m.from[k]; return v, ok }
+func (m mapKeys) Wanted() []string                  { return []string{"group:g:hX"} }
+
+func TestRuntimeTranslatesKeysForTheFleet(t *testing.T) {
+	today := time.Now().UTC().Format(time.DateOnly)
+	rt := NewRuntime()
+	rt.For(adapterConfig(nil, dailyBudget()))
+	fleet := &recordingFleet{totals: []SeedRow{{Day: today, Key: "user:d:*:ak1:1:abc", USD: 5}, {Day: today, Key: "user:d:*:ak1:1:other", USD: 50}}}
+	keys := mapKeys{to: map[string]string{"user:d:*:1001": "user:d:*:ak1:1:abc"}, from: map[string]string{"user:d:*:ak1:1:abc": "user:d:*:1001"}}
+	rt.mu.Lock()
+	rt.local, rt.fleet, rt.keys = &fakeCounter{}, fleet, keys
+	rt.mu.Unlock()
+	rt.Charge([]string{"user:d:*:1001", "user:d:*:1002"}, 1, time.Now())
+	rt.SyncOnce(context.Background())
+	if got, _ := rt.Ledger().Spend("user:d:*:1001", "day", time.Now()); got != 6 {
+		t.Fatalf("own key in the fleet form, mapped back: %v", got)
+	}
+	if got, _ := rt.Ledger().Spend("user:d:*:1002", "day", time.Now()); got != 1 {
+		t.Fatalf("a user without a join key counts on this device only: %v", got)
+	}
+	if len(fleet.pushed) != 1 || fleet.pushed[0].Key != "user:d:*:ak1:1:abc" {
+		t.Fatalf("only fleet-form keys leave the device: %+v", fleet.pushed)
+	}
+	if !slices.Equal(fleet.asked, []string{"group:g:hX", "user:d:*:ak1:1:abc"}) {
+		t.Fatalf("asked %v", fleet.asked)
+	}
+}
+
+type recordingFleet struct {
+	pushed []SeedRow
+	asked  []string
+	totals []SeedRow
+}
+
+func (f *recordingFleet) Push(_ context.Context, _ string, rows []SeedRow) error {
+	f.pushed = append([]SeedRow(nil), rows...)
+	return nil
+}
+
+func (f *recordingFleet) Totals(_ context.Context, _ string, _ time.Time, keys []string) ([]SeedRow, error) {
+	f.asked = keys
+	return f.totals, nil
 }

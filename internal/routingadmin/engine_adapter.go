@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +36,8 @@ type Runtime struct {
 	ctx      context.Context
 	local    SpendCounter // this device's store (per-device budgets and the fallback)
 	fleet    SpendCounter // optional: shared by devices or gateway replicas
+	keys     FleetKeys    // local <-> fleet key forms (nil: the same keys)
+	hash     func(string) string
 	interval time.Duration
 	epoch    string
 	syncing  bool
@@ -87,6 +90,20 @@ func (rt *Runtime) SetCounters(ctx context.Context, local, fleet SpendCounter, i
 	rt.startSync()
 }
 
+// SetFleet installs (or, with a nil counter, removes) the fleet counter, its
+// key mapping and the subject hash budget keys use (a keyed hash shared by
+// the fleet; nil = the device-only hash). Generations compile again.
+func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys, hash func(string) string) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	rt.fleet, rt.keys, rt.hash = fleet, keys, hash
+	rt.last, rt.lastEv = nil, nil
+	rt.mu.Unlock()
+	rt.startSync()
+}
+
 // Charge counts a priced agent call against its budget keys (the usage
 // engine calls it with the computed cost when the call ends).
 func (rt *Runtime) Charge(keys []string, usd float64, at time.Time) {
@@ -110,9 +127,10 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 		}
 		return ev
 	}
+	hash := rt.hash
 	rt.mu.Unlock()
 	a := cfg.Routing.Admin
-	policy := Compile(a.Rules, a.Budgets, cfg.StandaloneEnterprise())
+	policy := CompileWith(a.Rules, a.Budgets, cfg.StandaloneEnterprise(), hash)
 	if policy == nil {
 		rt.mu.Lock()
 		rt.last, rt.lastEv, rt.ids = cfg, nil, nil
@@ -186,7 +204,7 @@ func (rt *Runtime) syncLoop(ctx context.Context) {
 // (per-device budgets; a fleet outage falls back to them).
 func (rt *Runtime) SyncOnce(ctx context.Context) {
 	rt.mu.Lock()
-	ledger, local, fleet, ids, epoch := rt.ledger, rt.local, rt.fleet, append([]string(nil), rt.ids...), rt.epoch
+	ledger, local, fleet, keys, ids, epoch := rt.ledger, rt.local, rt.fleet, rt.keys, append([]string(nil), rt.ids...), rt.epoch
 	rt.mu.Unlock()
 	if ledger == nil || local == nil {
 		return
@@ -196,13 +214,13 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 	var rows []SeedRow
 	var err error
 	if fleet != nil {
-		if rows, err = fleet.Totals(ctx, epoch, since); err == nil {
-			ledger.ApplyRemote(ids, rows, time.Now())
+		if rows, err = fleet.Totals(ctx, epoch, since, fleetWanted(ledger, keys)); err == nil {
+			ledger.ApplyRemote(ids, fromFleet(rows, keys), time.Now())
 			return
 		}
 		ledger.SyncFailed(err)
 	}
-	if rows, err = local.Totals(ctx, epoch, since); err != nil {
+	if rows, err = local.Totals(ctx, epoch, since, nil); err != nil {
 		ledger.SyncFailed(err)
 		return
 	}
@@ -228,10 +246,71 @@ func (rt *Runtime) push(ctx context.Context) {
 		}
 	}
 	if fleet != nil {
-		if err := fleet.Push(ctx, epoch, rows); err != nil {
+		if err := fleet.Push(ctx, epoch, toFleet(rows, rt.fleetKeys())); err != nil {
 			ledger.SyncFailed(err)
 		}
 	}
+}
+
+func (rt *Runtime) fleetKeys() FleetKeys {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.keys
+}
+
+// toFleet keeps the rows that have a fleet form, in that form.
+func toFleet(rows []SeedRow, keys FleetKeys) []SeedRow {
+	if keys == nil {
+		return rows
+	}
+	out := make([]SeedRow, 0, len(rows))
+	for _, r := range rows {
+		if k, ok := keys.ToFleet(r.Key); ok {
+			out = append(out, SeedRow{Day: r.Day, Key: k, USD: r.USD})
+		}
+	}
+	return out
+}
+
+// fromFleet keeps the rows with a local form, in that form.
+func fromFleet(rows []SeedRow, keys FleetKeys) []SeedRow {
+	if keys == nil {
+		return rows
+	}
+	out := make([]SeedRow, 0, len(rows))
+	for _, r := range rows {
+		if k, ok := keys.FromFleet(r.Key); ok {
+			out = append(out, SeedRow{Day: r.Day, Key: k, USD: r.USD})
+		}
+	}
+	return out
+}
+
+// fleetWanted is every fleet key this device needs: its own spend's keys and
+// the mapper's (named budgets, users seen here).
+func fleetWanted(ledger *Ledger, keys FleetKeys) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(k string) {
+		if k != "" && !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	for _, r := range ledger.LocalRows() {
+		if keys == nil {
+			add(r.Key)
+		} else if k, ok := keys.ToFleet(r.Key); ok {
+			add(k)
+		}
+	}
+	if keys != nil {
+		for _, k := range keys.Wanted() {
+			add(k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // evaluator implements engine.AdminEvaluator for one config generation.
