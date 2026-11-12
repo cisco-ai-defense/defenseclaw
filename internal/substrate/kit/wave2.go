@@ -230,17 +230,20 @@ func opencodeManagedConfig(data []byte, gw string, o OverlayOptions) ([]byte, er
 }
 
 // AntigravityStart is the root-owned start wrapper of an Antigravity actor.
-// Antigravity reads its hooks from the agent user's ~/.gemini/config/hooks.json,
-// which the agent can write, so (as the OpenShell launcher does) every start
-// restores the file from the root-owned canonical copy and refuses to start
-// when it cannot (GAP-0117). The agent can still rewrite the file during a
-// session; the next start repairs it, and the gateway sees every tool call
-// that still reaches a hook. The same tier as OpenShell's.
+// Antigravity 1.2.12 has no system or managed hooks tier: it reads
+// ~/.gemini/config/hooks.json (GAP-0117). The image therefore makes
+// ~/.gemini/config a root-owned directory (0755) holding a root-owned
+// hooks.json (0644), plus the user-owned entries agy writes there itself
+// (.migrated, mcp_config.json, projects/), so the agent can neither rewrite
+// nor delete nor replace the file. This wrapper refuses to start agy when
+// the file differs from the root-owned canonical copy (a base image or a
+// future change that left it writable) and otherwise execs agy.
 const AntigravityStart = LibDir + "/kit/agy-start"
 
 const antigravityStartScript = `#!/bin/sh
 # DefenseClaw Agent Substrate actor start for Antigravity (root-owned).
-# Restores ~/.gemini/config/hooks.json from the root-owned copy, then starts agy.
+# Refuses to start agy unless ~/.gemini/config/hooks.json is the root-owned,
+# agent-unwritable copy of the canonical hooks, then starts agy.
 home="${HOME:-/sandbox}"
 canonical=/usr/local/lib/defenseclaw/antigravity/hooks.json
 dir="$home/.gemini/config"
@@ -248,15 +251,33 @@ dst="$dir/hooks.json"
 fail() { echo "defenseclaw: $1; refusing to start agy without DefenseClaw's hooks" >&2; exit 2; }
 [ -f "$canonical" ] || fail "the canonical hooks file $canonical is missing"
 if [ -L "$home/.gemini" ] || [ -L "$dir" ] || [ -L "$dst" ]; then fail "$dir is reached through a symbolic link"; fi
-if [ -e "$dst" ] && [ ! -f "$dst" ]; then fail "$dst is not a regular file"; fi
-mkdir -p "$dir" 2>/dev/null || fail "cannot create $dir"
-tmp="$(mktemp "$dir/hooks.json.XXXXXX" 2>/dev/null)" || fail "cannot write in $dir"
-if ! cat "$canonical" >"$tmp" 2>/dev/null || ! mv -f "$tmp" "$dst" 2>/dev/null || [ -L "$dst" ] || ! cmp -s "$canonical" "$dst"; then
-  rm -f "$tmp" 2>/dev/null
-  fail "cannot restore $dst"
-fi
+[ -f "$dst" ] || fail "$dst is missing"
+cmp -s "$canonical" "$dst" || fail "$dst differs from the canonical hooks"
+[ "$(stat -c %u "$dst" 2>/dev/null)" = 0 ] && [ "$(stat -c %u "$dir" 2>/dev/null)" = 0 ] || fail "$dst or its directory is not root-owned"
 exec /usr/local/bin/agy "$@"
 `
+
+// wave2Harden applies the connector-specific ownership rules: Antigravity's
+// hooks directory is root-owned (see AntigravityStart).
+func wave2Harden(ov *Overlay, name string, o OverlayOptions) {
+	if name != "antigravity" {
+		return
+	}
+	hooks := path.Join(o.Home, ".gemini", "config", "hooks.json")
+	dir := path.Dir(hooks)
+	for i := range ov.Files {
+		if ov.Files[i].Path == hooks {
+			ov.Files[i].User, ov.Files[i].Mode = false, 0o644
+		}
+	}
+	// What agy itself creates in the directory at its first start; with a
+	// root-owned directory it could not, so the image creates them.
+	ov.Files = append(ov.Files,
+		ImageFile{Path: path.Join(dir, ".migrated"), Mode: 0o644, User: true, Data: []byte{}},
+		ImageFile{Path: path.Join(dir, "mcp_config.json"), Mode: 0o644, User: true, Data: []byte{}})
+	ov.UserDirs = append(ov.UserDirs, path.Join(dir, "projects"))
+	ov.RootDirs = append(ov.RootDirs, dir)
+}
 
 // wave2UserFiles are first-run state files the agent would otherwise stop
 // to ask about (folder trust), owned by the image USER under HOME.

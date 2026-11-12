@@ -55,6 +55,13 @@ type Overlay struct {
 	Remove []string
 	// Env is the image environment (ENV), sorted by Dockerfile order.
 	Env map[string]string
+	// UserDirs are extra directories owned by the image USER (mode 0755),
+	// created before the files are copied.
+	UserDirs []string
+	// RootDirs are directories under HOME that end up root-owned 0755
+	// after the files are copied, so the agent can neither delete nor
+	// replace a root-owned file in them (Antigravity's hooks.json).
+	RootDirs []string
 }
 
 // OverlayOptions are the template-build inputs of an overlay.
@@ -253,6 +260,7 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 	}
 
 	ov.Files = append(ov.Files, wave2UserFiles(art.Connector, o)...)
+	wave2Harden(&ov, art.Connector, o)
 
 	// The image environment.
 	for k, v := range art.Env {

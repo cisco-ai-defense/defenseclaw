@@ -176,6 +176,9 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 		sort.Strings(ud)
 		fmt.Fprintf(&df, "RUN install -d -o %d -g %d -m 0700 %s\n", uid, gid, strings.Join(ud, " "))
 	}
+	if len(ov.UserDirs) > 0 {
+		fmt.Fprintf(&df, "RUN install -d -o %d -g %d -m 0755 %s\n", uid, gid, strings.Join(ov.UserDirs, " "))
+	}
 	for _, f := range ov.Files {
 		rel := path.Join("kit/files", f.Path)
 		if err := write(rel, f.Data); err != nil {
@@ -188,6 +191,9 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 			dirs[path.Dir(f.Path)] = true
 		}
 		fmt.Fprintf(&df, "COPY --chown=%s --chmod=%04o %s %s\n", owner, uint32(f.Mode.Perm()), rel, f.Path)
+	}
+	for _, d := range ov.RootDirs {
+		fmt.Fprintf(&df, "RUN chown root:root %s && chmod 0755 %s\n", d, d)
 	}
 	var dl []string
 	for d := range dirs {

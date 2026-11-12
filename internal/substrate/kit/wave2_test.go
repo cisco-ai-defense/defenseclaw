@@ -166,7 +166,7 @@ func TestEventRegistrationHeaders(t *testing.T) {
 func TestAntigravityStartRestoresHooks(t *testing.T) {
 	ov := wave2Overlay(t, "antigravity")
 	w := string(file(ov, AntigravityStart))
-	for _, want := range []string{"canonical=/usr/local/lib/defenseclaw/antigravity/hooks.json", "cmp -s", "exec /usr/local/bin/agy"} {
+	for _, want := range []string{"canonical=/usr/local/lib/defenseclaw/antigravity/hooks.json", "cmp -s", "not root-owned", "exec /usr/local/bin/agy"} {
 		if !strings.Contains(w, want) {
 			t.Errorf("wrapper lacks %q", want)
 		}
@@ -175,6 +175,16 @@ func TestAntigravityStartRestoresHooks(t *testing.T) {
 		if f.Path == AntigravityStart && (f.User || f.Mode != 0o755) {
 			t.Errorf("wrapper must be root-owned 0755: %+v", f)
 		}
+	}
+	// GAP-0117: the hooks file and its directory are root-owned.
+	hooks := "/sandbox/.gemini/config/hooks.json"
+	for _, f := range ov.Files {
+		if f.Path == hooks && (f.User || f.Mode != 0o644) {
+			t.Errorf("hooks.json must be root-owned 0644: %+v", f)
+		}
+	}
+	if len(ov.RootDirs) != 1 || ov.RootDirs[0] != "/sandbox/.gemini/config" {
+		t.Errorf("RootDirs %v", ov.RootDirs)
 	}
 	if InteractiveArgv["antigravity"][0] != AntigravityStart || HeadlessArgv["antigravity"][0] != AntigravityStart {
 		t.Error("antigravity does not start through the wrapper")
