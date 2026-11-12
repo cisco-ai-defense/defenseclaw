@@ -73,8 +73,19 @@ type Facts struct {
 	// read, or the repository's MCP configuration and the stdio server files
 	// it starts (E20).
 	Files []AttachedFile `json:"files,omitempty"`
+	// Skills fingerprints every skill folder after PostToolUse,
+	// SessionStart and Stop (GAP-0039).
+	Skills []SkillFingerprint `json:"skills,omitempty"`
 	// Truncated is set when a cap dropped paths or file bytes.
 	Truncated bool `json:"truncated,omitempty"`
+}
+
+// SkillFingerprint is one skill folder's lstat fingerprint. Attached says
+// its files are in Files (role skill_file) in this post.
+type SkillFingerprint struct {
+	Path     string `json:"path"`
+	FP       string `json:"fp"`
+	Attached bool   `json:"attached,omitempty"`
 }
 
 // PathFact is one path argument as the actor's file system resolves it.

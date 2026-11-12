@@ -53,19 +53,24 @@ func main() {
 	keys := keyFlag{}
 	flag.Var(keys, "session-key", "launcher session-token public key, kid=PEM file (repeatable)")
 	audience := flag.String("session-audience", "dcrelay", "session token audience")
+	issuer := flag.String("session-issuer", "", "session token issuer (required with --session-key)")
 	verifyURL := flag.String("verify-url", "", "gateway session-token check URL (instead of keys)")
 	interactive := flag.String("interactive", "", "relay interactive argv, space-separated (test variants; default: the connector)")
 	flag.Parse()
 	if *interactive != "" {
 		interactiveArgv = strings.Fields(*interactive)
 	}
+	sessionIssuer = *issuer
 	if err := run(*connectorName, *out, *uid, *gid, *gateway, *failMode, *provider, *model, *version, *listen, keys, *audience, *verifyURL); err != nil {
 		fmt.Fprintln(os.Stderr, "kitgen:", err)
 		os.Exit(1)
 	}
 }
 
-var interactiveArgv []string
+var (
+	interactiveArgv []string
+	sessionIssuer   string
+)
 
 const (
 	home    = "/sandbox"
@@ -93,6 +98,10 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 	cfg.GatewayURL, cfg.FailMode, cfg.KitVersion = gateway, failMode, version
 	cfg.Relay.Listen, cfg.Relay.SessionAudience, cfg.Relay.VerifyURL = listen, audience, verifyURL
 	cfg.Relay.Interactive = interactiveArgv
+	cfg.Relay.SessionIssuer = sessionIssuer
+	if len(keys) > 0 && sessionIssuer == "" {
+		return fmt.Errorf("--session-key needs --session-issuer")
+	}
 	keyFiles := map[string][]byte{}
 	if len(keys) > 0 {
 		cfg.Relay.SessionKeys = map[string]string{}
@@ -151,8 +160,8 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 		df.WriteString(line + "\n")
 	}
 	df.WriteString("\n# Stage 2: the actor kit layer (internal/substrate/kit).\nFROM harness\nUSER root\n")
-	df.WriteString("# The relay holds the agent in tmux. OpenShell-only pieces are removed: an actor has no supervisor, launcher or shell hooks.\n")
-	df.WriteString("RUN set -eu; if ! command -v tmux >/dev/null 2>&1; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tmux && rm -rf /var/lib/apt/lists/*; fi; rm -rf")
+	df.WriteString("# OpenShell-only pieces are removed: an actor has no supervisor, launcher or shell hooks. The relay holds the agent's terminal itself.\n")
+	df.WriteString("RUN set -eu; rm -rf")
 	for _, r := range ov.Remove {
 		df.WriteString(" '" + r + "'")
 	}

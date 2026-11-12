@@ -93,6 +93,7 @@ func mint(args []string) error {
 	iss := fs.String("iss", "", "issuer")
 	ttl := fs.Duration("ttl", 10*time.Minute, "lifetime")
 	typ := fs.String("typ", relay.TokenType, "JWS typ (tests of refusals)")
+	taskText := fs.String("task", "", "bind the token to this --task text (dc.task_sha256)")
 	fs.Parse(args)
 	b, err := os.ReadFile(*keyPath)
 	if err != nil {
@@ -114,6 +115,12 @@ func mint(args []string) error {
 		"iss": *iss, "sub": *sub, "aud": []string{*aud}, "iat": now.Unix(), "nbf": now.Unix(),
 		"exp": now.Add(*ttl).Unix(), "jti": base64.RawURLEncoding.EncodeToString(jti),
 		"dc.actor": map[string]string{"atespace": *atespace, "actorName": *name, "actorUID": *uid},
+		"dc.task_sha256": func() string {
+			if *taskText == "" {
+				return ""
+			}
+			return relay.TaskDigest(*taskText)
+		}(),
 	})
 	in := base64.RawURLEncoding.EncodeToString(h) + "." + base64.RawURLEncoding.EncodeToString(c)
 	d := sha256.Sum256([]byte(in))
@@ -278,6 +285,6 @@ func task(args []string) (int, error) {
 		return -1, err
 	}
 	enc := json.NewEncoder(os.Stdout)
-	return relay.RunTask(context.Background(), nil, *url, tok, relay.TaskRequest{Prompt: *prompt, Args: fs.Args()},
+	return relay.RunTask(context.Background(), nil, *url, tok, relay.TaskRequest{Prompt: *prompt},
 		func(e relay.TaskEvent) { _ = enc.Encode(e) })
 }

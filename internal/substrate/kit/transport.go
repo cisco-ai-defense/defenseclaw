@@ -33,9 +33,6 @@ type Request struct {
 	// and ignores any caller value for them.
 	Header map[string]string `json:"header,omitempty"`
 	Body   []byte            `json:"body,omitempty"`
-	// SkillCommit are skill-folder fingerprints the helper records as seen
-	// by the gateway once it answers 2xx (skills.go).
-	SkillCommit map[string]string `json:"skill_commit,omitempty"`
 }
 
 // Response is the gateway's answer.
@@ -211,8 +208,9 @@ func (t *Transport) once(ctx context.Context, r Request, key string, budget time
 		Mode: resp.Header.Get(ModeHeader), FailMode: resp.Header.Get(FailModeHeader)}, nil
 }
 
-// Warm opens (or re-opens) a connection to the actor listener so the next
-// hook does not pay for TCP and TLS through egress. Any HTTP answer counts.
+// Warm makes one request to the actor listener so the egress path (the
+// policy's DNS name and rule) is ready before the first hook after a resume
+// (E6). Any HTTP answer counts.
 func (t *Transport) Warm(ctx context.Context, connector string) error {
 	ctx, cancel := context.WithTimeout(ctx, t.cfg.maxTime())
 	defer cancel()

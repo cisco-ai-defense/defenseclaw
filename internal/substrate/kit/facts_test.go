@@ -17,7 +17,9 @@ func TestFactsResolveLinksAndAttachReadTargets(t *testing.T) {
 	secret := filepath.Join(outside, "id_rsa")
 	os.WriteFile(secret, []byte("KEY"), 0o600)
 	os.Symlink(secret, filepath.Join(repo, "notes.txt"))
-	os.WriteFile(filepath.Join(repo, "big.txt"), []byte(strings.Repeat("x", 100)), 0o644)
+	skill := filepath.Join(repo, ".claude", "skills", "s1")
+	os.MkdirAll(skill, 0o755)
+	os.WriteFile(filepath.Join(skill, "big.txt"), []byte(strings.Repeat("x", 100)), 0o644)
 
 	payload, _ := json.Marshal(map[string]any{
 		"hook_event_name": "PreToolUse", "cwd": repo, "tool_name": "Read",
@@ -33,12 +35,14 @@ func TestFactsResolveLinksAndAttachReadTargets(t *testing.T) {
 		p.InsideCWD || len(p.LinkChain) != 1 || p.Type != "file" {
 		t.Fatalf("path fact %+v", p)
 	}
-	if len(f.Files) != 1 || f.Files[0].Role != "read_target" || string(f.Files[0].Content) != "KEY" {
+	// An ordinary read target's content has no reader at the gateway
+	// (GAP-0072): only its path facts go.
+	if len(f.Files) != 0 {
 		t.Fatalf("files %+v", f.Files)
 	}
 
 	payload, _ = json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": repo, "tool_name": "Read",
-		"tool_input": map[string]any{"file_path": filepath.Join(repo, "big.txt")}})
+		"tool_input": map[string]any{"file_path": filepath.Join(skill, "big.txt")}})
 	f = CollectFacts("claudecode", "", payload, 10)
 	if !f.Truncated || len(f.Files) != 1 || len(f.Files[0].Content) != 10 || !f.Files[0].Truncated || f.Files[0].Size != 100 {
 		t.Fatalf("capped %+v", f)

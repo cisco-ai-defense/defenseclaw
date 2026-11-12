@@ -40,9 +40,8 @@ type HookOptions struct {
 	Getenv    func(string) string
 	// Send overrides the helper-then-direct transport (tests).
 	Send func(ctx context.Context, r Request) (Response, string, error)
-	// KnownSkills overrides the helper's skill fingerprints (tests).
-	KnownSkills func(ctx context.Context) map[string]string
-	// Home is the agent's HOME for the skill roots (default $HOME).
+	// Home is the agent's HOME for the skill roots and the kit's state
+	// (default $HOME).
 	Home string
 }
 
@@ -113,7 +112,7 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	}
 	var skillsSent map[string]string
 	if skillScanEvents[call.Event] {
-		skillsSent = o.attachSkills(ctx, &env, payload)
+		skillsSent = o.attachSkills(&env, payload)
 	}
 	body, err := json.Marshal(env)
 	if err != nil {
@@ -130,13 +129,14 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	if send == nil {
 		send = defaultSend(o.Config)
 	}
-	resp, helperMode, err := send(ctx, Request{Path: HookPathPrefix + o.Connector, Header: header, Body: body, SkillCommit: skillsSent})
-	if err == nil && resp.Status >= 200 && resp.Status < 300 {
+	resp, _, err := send(ctx, Request{Path: HookPathPrefix + o.Connector, Header: header, Body: body})
+	if err == nil && resp.Status >= 200 && resp.Status < 300 && skillsSent != nil {
+		o.rememberSkills(skillsSent)
 		if moved := quarantineSkills(resp.Body, skillsSent, time.Now()); len(moved) > 0 {
 			fmt.Fprintf(o.Stderr, "defenseclaw: blocked skill folders moved out of the skill root: %s\n", strings.Join(moved, ", "))
 		}
 	}
-	call.FailMode = outageMode(call.FailMode, resp, helperMode, mode)
+	call.FailMode = outageMode(call.FailMode, resp, mode)
 	if err != nil {
 		if errors.Is(err, ErrUnreachable) {
 			cause := strings.TrimPrefix(strings.TrimPrefix(err.Error(), ErrUnreachable.Error()), ": ")
@@ -159,24 +159,17 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	return code
 }
 
-// attachSkills adds the new or changed skill folders to env's facts and
-// returns their fingerprints, for the helper to record once the gateway
-// answers.
-func (o HookOptions) attachSkills(ctx context.Context, env *HookEnvelope, payload []byte) map[string]string {
+// attachSkills lists every skill folder's fingerprint in env's facts and
+// attaches the files of the folders not in the kit's seen-cache. It returns
+// the fingerprints it sent. The cache only saves bytes: the gateway decides
+// on the fingerprints, and a folder it has not scanned whose files are not
+// attached is not scanned, so it is quarantined (a cache the agent edited
+// hides nothing).
+func (o HookOptions) attachSkills(env *HookEnvelope, payload []byte) map[string]string {
 	var v struct {
 		CWD string `json:"cwd"`
 	}
 	_ = json.Unmarshal(payload, &v)
-	home := o.Home
-	if home == "" {
-		home, _ = os.UserHomeDir()
-	}
-	known := map[string]string{}
-	if o.KnownSkills != nil {
-		known = o.KnownSkills(ctx)
-	} else if r, err := callHelper(ctx, helperRequest{Op: "skills"}, 500*time.Millisecond); err == nil && r.Skills != nil {
-		known = r.Skills
-	}
 	f := env.Facts
 	if f == nil {
 		f = &Facts{}
@@ -185,18 +178,29 @@ func (o HookOptions) attachSkills(ctx context.Context, env *HookEnvelope, payloa
 	for _, a := range f.Files {
 		used += int64(len(a.Content))
 	}
-	sent, _ := collectSkills(f, skillRoots(home, filepath.Clean(v.CWD)), known, o.Config.attachCap()-used)
-	if len(f.Paths) > 0 || len(f.Files) > 0 || f.Truncated {
+	sent, _ := collectSkills(f, skillRoots(o.home(), filepath.Clean(v.CWD)), loadSkillCache(o.home()), o.Config.attachCap()-used)
+	if len(f.Paths) > 0 || len(f.Files) > 0 || len(f.Skills) > 0 || f.Truncated {
 		env.Facts = f
 	}
 	return sent
 }
 
+func (o HookOptions) home() string {
+	if o.Home != "" {
+		return o.Home
+	}
+	h, _ := os.UserHomeDir()
+	return h
+}
+
+// rememberSkills adds the fingerprints the gateway answered for to the cache.
+func (o HookOptions) rememberSkills(sent map[string]string) { saveSkillCache(o.home(), sent) }
+
 // outageMode is the fail mode of a call: the gateway's word for this actor
-// when it has given one (the registration decides, D8), else the
-// configuration's; an unattended run is closed whoever says otherwise.
-func outageMode(configured string, resp Response, helperMode, envMode string) string {
-	if helperMode == ModeUnattend || resp.Mode == ModeUnattend || envMode == ModeUnattend {
+// when it answered (the registration decides, D8), else the configuration's;
+// an unattended run is closed whoever says otherwise.
+func outageMode(configured string, resp Response, envMode string) string {
+	if resp.Mode == ModeUnattend || envMode == ModeUnattend {
 		return "closed"
 	}
 	switch resp.FailMode {
@@ -231,31 +235,15 @@ func runNotify(ctx context.Context, o HookOptions, mode string) int {
 	return 0
 }
 
-// defaultSend posts through the resident helper, starting one for the next
-// call when none answers, and posts directly meanwhile.
+// defaultSend posts on a connection of this call's own (GAP-0047).
 func defaultSend(cfg Config) func(ctx context.Context, r Request) (Response, string, error) {
 	return func(ctx context.Context, r Request) (Response, string, error) {
-		budget := cfg.maxTime() + cfg.retryMaxTime() + time.Second
-		resp, err := callHelper(ctx, helperRequest{Op: "post", Request: r}, budget)
-		if err == nil {
-			if resp.Response.FailMode == "" {
-				resp.Response.FailMode = resp.FailMode
-			}
-			if resp.Unreachable {
-				return resp.Response, resp.Mode, fmt.Errorf("%w: %s", ErrUnreachable, resp.Error)
-			}
-			if resp.Error != "" {
-				return resp.Response, resp.Mode, errors.New(resp.Error)
-			}
-			return resp.Response, resp.Mode, nil
+		t, err := NewTransport(cfg)
+		if err != nil {
+			return Response{}, "", err
 		}
-		_ = StartHelper()
-		t, terr := NewTransport(cfg)
-		if terr != nil {
-			return Response{}, "", terr
-		}
-		out, perr := t.Post(ctx, r)
-		return out, "", perr
+		out, err := t.Post(ctx, r)
+		return out, "", err
 	}
 }
 
@@ -275,9 +263,6 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	event := fs.String("event", "", "hook event, when the agent binds it on the command line")
 	contract := fs.String("hook-contract", "", "hook contract id")
 	notify := fs.Bool("notify", false, "forward a Codex notify event (the JSON is the last argument)")
-	serve := fs.Bool("serve", false, "run the resident transport helper")
-	warm := fs.Bool("warm", false, "start the helper if needed and connect it to the gateway")
-	unattended := fs.Bool("unattended", false, "with --warm: mark this actor's run unattended (fail closed)")
 	configPath := fs.String("config", ConfigPath, "kit configuration")
 	version := fs.Bool("version", false, "print the kit version")
 	if err := fs.Parse(args); err != nil {
@@ -294,43 +279,6 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	cfg, cfgErr := LoadConfig(*configPath)
 	ctx := context.Background()
-	switch {
-	case *serve:
-		if cfgErr != nil {
-			fmt.Fprintln(stderr, "defenseclaw-actor-hook:", cfgErr)
-			return 1
-		}
-		h, err := NewHelper(cfg, nil)
-		if err != nil {
-			fmt.Fprintln(stderr, "defenseclaw-actor-hook:", err)
-			return 1
-		}
-		if err := h.Serve(ctx); err != nil && !errors.Is(err, errHelperRunning) {
-			fmt.Fprintln(stderr, "defenseclaw-actor-hook:", err)
-			return 1
-		}
-		return 0
-	case *warm:
-		if cfgErr != nil {
-			fmt.Fprintln(stderr, "defenseclaw-actor-hook:", cfgErr)
-			return 1
-		}
-		budget := cfg.maxTime()
-		if *unattended {
-			if err := SetUnattended(ctx, budget); err != nil {
-				fmt.Fprintln(stderr, "defenseclaw-actor-hook:", err)
-				return 1
-			}
-		}
-		if *connectorName == "" {
-			return 0
-		}
-		if err := Warm(ctx, *connectorName, budget); err != nil {
-			fmt.Fprintln(stderr, "defenseclaw-actor-hook: warm:", err)
-			return 1
-		}
-		return 0
-	}
 	name := strings.TrimSpace(*connectorName)
 	if name == "" {
 		// The command name can carry the connector (a symlink per agent).

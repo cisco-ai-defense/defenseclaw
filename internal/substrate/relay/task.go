@@ -6,6 +6,8 @@ package relay
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,10 +26,17 @@ import (
 // hook fails closed (D8). It runs on its own: a launcher that disconnects
 // (--detach) leaves it running and follows it again later.
 
-// TaskRequest starts a task.
+// TaskRequest starts a task. The headless command is the template's; a
+// request carries only the task text, which must be the text the launcher
+// registered (its SHA-256 is the session's TaskDigest, GAP-0071).
 type TaskRequest struct {
-	Prompt string   `json:"prompt"`
-	Args   []string `json:"args,omitempty"`
+	Prompt string `json:"prompt"`
+}
+
+// TaskDigest is the registration's digest of a task text.
+func TaskDigest(prompt string) string {
+	sum := sha256.Sum256([]byte(prompt))
+	return hex.EncodeToString(sum[:])
 }
 
 // TaskEvent is one NDJSON line of a task's log.
@@ -61,29 +70,22 @@ func (t *task) emit(e TaskEvent) {
 }
 
 // RunHeadless runs the connector's headless command for prompt, writes each
-// TaskEvent to emit and returns the exit code. It marks the actor unattended
-// and pre-connects the hook helper first.
-func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest, setUnattended func(context.Context) error,
+// TaskEvent to emit and returns the exit code. The agent and its hooks run
+// unattended (fail closed, D8); the gateway path is warmed first.
+func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest,
 	warm func(context.Context, string) error, emit func(TaskEvent)) int {
 	argv, err := expandHeadless(cfg.Relay.Headless, req.Prompt)
 	if err != nil {
 		emit(TaskEvent{Type: "error", Data: err.Error()})
 		return 2
 	}
-	// Unattended before anything runs: a hook must never see an
-	// interactive fail mode during a task.
-	if err := setUnattended(ctx); err != nil {
-		emit(TaskEvent{Type: "error", Data: "the hook helper could not be marked unattended: " + err.Error()})
-		return 2
-	}
-	if c := cfg.Relay.Connector; c != "" {
+	if c := cfg.Relay.Connector; c != "" && warm != nil {
 		wctx, cancel := context.WithTimeout(ctx, warmBudget)
 		if err := warm(wctx, c); err != nil {
 			emit(TaskEvent{Type: "stderr", Data: "defenseclaw: the gateway did not answer the pre-connect: " + err.Error()})
 		}
 		cancel()
 	}
-	argv = append(argv, req.Args...)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = cfg.Relay.Workdir
 	cmd.Env = append(os.Environ(), kit.ModeEnv+"="+kit.ModeUnattend)
@@ -124,13 +126,20 @@ func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest, setUnatte
 }
 
 func (s *Server) taskStart(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.auth(w, r, "task")
+	sess, ok := s.auth(w, r, "task", true)
 	if !ok {
 		return
 	}
 	var req TaskRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil || req.Prompt == "" {
-		http.Error(w, "relay: a task needs a prompt", http.StatusBadRequest)
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || req.Prompt == "" {
+		http.Error(w, "relay: a task is {\"prompt\": ...} and nothing else", http.StatusBadRequest)
+		return
+	}
+	if sess.TaskDigest == "" || TaskDigest(req.Prompt) != sess.TaskDigest {
+		s.log.Warn("relay.refused", "what", "task", "reason", "task text is not the registered task", "person", sess.Person)
+		http.Error(w, "relay: this task text is not the task this actor was registered for", http.StatusForbidden)
 		return
 	}
 	s.mu.Lock()
@@ -149,7 +158,7 @@ func (s *Server) taskStart(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	t.emit(TaskEvent{Type: "start", ID: t.id})
 	go func() {
-		code := RunHeadless(context.Background(), s.opts.Config, req, s.opts.SetUnattended, s.opts.Warm, t.emit)
+		code := RunHeadless(context.Background(), s.opts.Config, req, s.opts.Warm, t.emit)
 		t.mu.Lock()
 		t.code = &code
 		t.mu.Unlock()
@@ -160,7 +169,7 @@ func (s *Server) taskStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) taskFollow(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.auth(w, r, "task-follow")
+	sess, ok := s.auth(w, r, "task-follow", false)
 	if !ok {
 		return
 	}

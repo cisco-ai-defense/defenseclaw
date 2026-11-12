@@ -114,6 +114,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 		return conn.WriteMessage(websocket.BinaryMessage, frame)
 	}
 	var res AttachResult
+	var resMu sync.Mutex
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -134,12 +135,14 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 				if o.OnControl != nil {
 					o.OnControl(c)
 				}
+				resMu.Lock()
 				switch c.Type {
 				case CtlHello:
 					res.Session = c.Session
 				case CtlExit:
 					res.ExitCode = c.Code
 				}
+				resMu.Unlock()
 			}
 		}
 	}()
@@ -162,7 +165,9 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 	case <-done:
 	case d := <-detached:
 		if d {
+			resMu.Lock()
 			res.Detached = true
+			resMu.Unlock()
 			_ = send(EncodeControl(Control{Type: CtlDetach}))
 			wmu.Lock()
 			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "detach"), time.Now().Add(time.Second))
@@ -170,6 +175,8 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 		}
 	case <-ctx.Done():
 	}
+	resMu.Lock()
+	defer resMu.Unlock()
 	return res, nil
 }
 
@@ -201,6 +208,7 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	}
 	path := "/dcrelay/1/poll/" + open.ID
 	var res AttachResult
+	var resMu sync.Mutex
 	var outMu sync.Mutex
 	send := func(frame []byte) error {
 		r, err := do(ctx, http.MethodPost, path, AppendStream(nil, frame))
@@ -249,12 +257,14 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 					if o.OnControl != nil {
 						o.OnControl(cc)
 					}
+					resMu.Lock()
 					switch cc.Type {
 					case CtlHello:
 						res.Session = cc.Session
 					case CtlExit:
 						res.ExitCode = cc.Code
 					}
+					resMu.Unlock()
 				}
 			}
 		}
@@ -278,13 +288,17 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	case <-done:
 	case d := <-detached:
 		if d {
+			resMu.Lock()
 			res.Detached = true
+			resMu.Unlock()
 			if r, err := do(context.Background(), http.MethodDelete, path, nil); err == nil {
 				r.Body.Close()
 			}
 		}
 	case <-ctx.Done():
 	}
+	resMu.Lock()
+	defer resMu.Unlock()
 	return res, nil
 }
 

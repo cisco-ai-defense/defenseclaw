@@ -23,13 +23,18 @@ import (
 // (lstat only), and attaches each new or changed folder's files with role
 // skill_file; the gateway scans them (attest.RuntimeScanner) and names a
 // folder it blocks in its answer, which the kit then moves out of the skill
-// root (quarantine). The fingerprints the gateway has seen live in the
-// resident helper, never in a file the agent could edit; without a helper
-// every folder counts as new, which only costs bytes.
+// root (quarantine).
+//
+// Every such call also lists the fingerprint of every folder (facts.skills).
+// The kit keeps the fingerprints the gateway has answered for in a cache to
+// skip re-sending files; the cache is the agent's to edit, so the gateway
+// must not trust it: a folder whose fingerprint the gateway has not scanned
+// and whose files are not attached counts as not scanned (A2: quarantine it,
+// and deny the skill at its next use).
 //
 // Gateway answer field (A2): "substrate_quarantine": [{"path": "<the
-// folder>", "reason": "..."}]. The kit acts only on folders it attached in
-// that call.
+// folder>", "reason": "..."}]. The kit moves only folders it listed in that
+// call.
 
 const (
 	// SkillQuarantineField is the answer field naming blocked folders.
@@ -42,6 +47,8 @@ const (
 	maxSkillFoldersPerRoot = 64
 	maxSkillDepth          = 3
 	quarantineDirName      = ".defenseclaw-quarantine"
+	skillCacheName         = "skills-seen.json"
+	maxSkillCacheEntries   = 512
 )
 
 // skillScanEvents are the events after which the kit looks at the roots.
@@ -148,28 +155,73 @@ func fingerprintFolder(dir string) skillFolder {
 	return f
 }
 
-// collectSkills attaches the new or changed folders (known says what the
-// gateway has seen) to f within budget and returns the folders it attached
-// with their fingerprints. Folders left over go with a later call.
+// collectSkills lists every folder's fingerprint in f and attaches the files
+// of the folders not in known (the cache) within budget, at most
+// maxSkillFoldersPerCall. It returns every listed fingerprint.
 func collectSkills(f *Facts, roots []string, known map[string]string, budget int64) (map[string]string, int64) {
-	attached := map[string]string{}
+	listed := map[string]string{}
+	attachedFolders := 0
 	for _, folder := range scanSkillFolders(roots) {
-		if known[folder.Path] == folder.FP {
-			continue
+		fp := SkillFingerprint{Path: folder.Path, FP: folder.FP}
+		listed[folder.Path] = folder.FP
+		if known[folder.Path] != folder.FP {
+			if attachedFolders >= maxSkillFoldersPerCall || budget <= 0 {
+				f.Truncated = true
+			} else {
+				for _, file := range folder.Files {
+					budget = attach(f, RoleSkillFile, file, "", budget)
+				}
+				if folder.Over {
+					f.Truncated = true
+				}
+				fp.Attached = true
+				attachedFolders++
+			}
 		}
-		if len(attached) >= maxSkillFoldersPerCall || budget <= 0 {
-			f.Truncated = true
-			continue
-		}
-		for _, file := range folder.Files {
-			budget = attach(f, RoleSkillFile, file, "", budget)
-		}
-		if folder.Over {
-			f.Truncated = true
-		}
-		attached[folder.Path] = folder.FP
+		f.Skills = append(f.Skills, fp)
 	}
-	return attached, budget
+	return listed, budget
+}
+
+// The seen-cache, ~/.defenseclaw/skills-seen.json, is only an optimization
+// (see above); unreadable means empty.
+func skillCachePath(home string) string { return filepath.Join(home, ".defenseclaw", skillCacheName) }
+
+func loadSkillCache(home string) map[string]string {
+	m := map[string]string{}
+	if home == "" {
+		return m
+	}
+	b, err := os.ReadFile(skillCachePath(home))
+	if err == nil && len(b) < 1<<20 {
+		_ = json.Unmarshal(b, &m)
+	}
+	return m
+}
+
+func saveSkillCache(home string, sent map[string]string) {
+	if home == "" || len(sent) == 0 {
+		return
+	}
+	m := loadSkillCache(home)
+	for k, v := range sent {
+		m[k] = v
+	}
+	if len(m) > maxSkillCacheEntries {
+		m = sent
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	p := skillCachePath(home)
+	if os.MkdirAll(filepath.Dir(p), 0o700) != nil {
+		return
+	}
+	tmp := p + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) == nil {
+		_ = os.Rename(tmp, p)
+	}
 }
 
 // quarantineSkills moves the folders the gateway blocked out of their skill

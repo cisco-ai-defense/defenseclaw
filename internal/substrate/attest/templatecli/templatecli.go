@@ -187,7 +187,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	c.bind(fs)
 	var (
 		connectorName = fs.String("connector", "claudecode", "claudecode or codex")
-		from          = fs.String("from", "", "base image (the OpenShell harness image for the connector, with tmux)")
+		from          = fs.String("from", "", "base image (the OpenShell harness image for the connector)")
 		to            = fs.String("to", "", "target repository and tag")
 		kitVersion    = fs.String("kit-version", "dev", "kit version")
 		hookBin       = fs.String("hook-binary", "", "defenseclaw-actor-hook (linux static)")

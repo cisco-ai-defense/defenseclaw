@@ -34,6 +34,9 @@ func NewVerifier(cfg kit.Config) (Verifier, error) {
 	if len(rc.SessionKeys) == 0 {
 		return nil, nil
 	}
+	if rc.SessionIssuer == "" {
+		return nil, errors.New("relay session keys need relay.session_issuer (the issuer whose tokens they verify)")
+	}
 	keys := map[string]crypto.PublicKey{}
 	for kid, path := range rc.SessionKeys {
 		k, err := LoadPublicKey(path)
@@ -50,9 +53,6 @@ func NewVerifier(cfg kit.Config) (Verifier, error) {
 func Main(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		args = []string{"serve"}
-	}
-	if args[0] == RunAgentCommand {
-		return runAgent(args[1:], stderr)
 	}
 	fs := flag.NewFlagSet("defenseclaw-actor-relay "+args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -81,11 +81,19 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 	if args[0] == "task" {
 		enc := json.NewEncoder(stdout)
-		code := RunHeadless(context.Background(), cfg, TaskRequest{Prompt: *prompt, Args: fs.Args()},
-			func(ctx context.Context) error { return kit.SetUnattended(ctx, warmBudget) },
-			func(ctx context.Context, c string) error { return kit.Warm(ctx, c, warmBudget) },
+		t, err := kit.NewTransport(cfg)
+		if err != nil {
+			fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
+			return 1
+		}
+		return RunHeadless(context.Background(), cfg, TaskRequest{Prompt: *prompt}, t.Warm,
 			func(e TaskEvent) { e.TS = time.Now().UTC().Format(time.RFC3339Nano); _ = enc.Encode(e) })
-		return code
+	}
+	// No process of the agent's user may trace the relay or open its
+	// descriptors, the agent's PTY master among them (GAP-0048).
+	if err := hardenProcess(); err != nil {
+		fmt.Fprintln(stderr, "defenseclaw-actor-relay: harden:", err)
+		return 1
 	}
 	v, err := NewVerifier(cfg)
 	if err != nil {

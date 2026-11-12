@@ -14,8 +14,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,11 +25,14 @@ import (
 )
 
 const (
-	pollWait     = 25 * time.Second
-	pollIdle     = 60 * time.Second
-	wsPing       = 20 * time.Second
-	warmBudget   = 2 * time.Second
-	exitInterval = time.Second
+	pollWait   = 25 * time.Second
+	pollIdle   = 60 * time.Second
+	wsPing     = 20 * time.Second
+	warmBudget = 2 * time.Second
+	// maxPollsPerPerson and maxPolls cap open long-poll attachments
+	// (GAP-0074): each holds an output ring.
+	maxPollsPerPerson = 4
+	maxPolls          = 16
 )
 
 // Options configure a Server.
@@ -39,30 +40,31 @@ type Options struct {
 	Config   kit.Config
 	Verifier Verifier
 	Log      *slog.Logger
-	// Warm pre-connects the hook helper for the connector (kit.Warm).
+	// Warm makes one request to the gateway so the egress path is ready
+	// before the agent gets input (E6); default kit.Transport.Warm.
 	Warm func(ctx context.Context, connector string) error
-	// SetUnattended marks the actor's hooks unattended (kit.SetUnattended).
-	SetUnattended func(ctx context.Context) error
-	// TmuxDir is where the tmux socket lives (default kit.HelperDir()).
-	TmuxDir string
+	Now  func() time.Time
 }
 
 // Server is the relay. NewServer has no side effect: the golden snapshot of
 // a template holds a relay that has only bound its port. Everything else
-// (directories, the tmux session, the hook helper, session IDs) starts on
-// the first authenticated request after a resume (E5).
+// (the agent, session IDs) starts on the first authenticated request after
+// a resume (E5).
 type Server struct {
 	opts Options
 	log  *slog.Logger
 
 	initOnce sync.Once
 	initErr  error
-	tmux     *Tmux
+	agent    *Agent
 	session  string
 
 	mu    sync.Mutex
 	polls map[string]*pollAttachment
 	tasks map[string]*task
+	// used are the session token IDs that opened an attachment or a task,
+	// with their expiry: a token opens one (GAP-0070).
+	used map[string]time.Time
 	// lastWarm is how long the last pre-connect took (E6 measurements).
 	lastWarm time.Duration
 }
@@ -73,13 +75,10 @@ func NewServer(opts Options) *Server {
 	if log == nil {
 		log = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	}
-	if opts.Warm == nil {
-		opts.Warm = func(ctx context.Context, c string) error { return kit.Warm(ctx, c, warmBudget) }
+	if opts.Now == nil {
+		opts.Now = time.Now
 	}
-	if opts.SetUnattended == nil {
-		opts.SetUnattended = func(ctx context.Context) error { return kit.SetUnattended(ctx, warmBudget) }
-	}
-	return &Server{opts: opts, log: log, polls: map[string]*pollAttachment{}, tasks: map[string]*task{}}
+	return &Server{opts: opts, log: log, polls: map[string]*pollAttachment{}, tasks: map[string]*task{}, used: map[string]time.Time{}}
 }
 
 func newID() string {
@@ -92,29 +91,28 @@ func newID() string {
 
 func (s *Server) init() error {
 	s.initOnce.Do(func() {
-		dir := s.opts.TmuxDir
-		if dir == "" {
-			dir = kit.HelperDir()
-		}
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			s.initErr = err
-			return
-		}
 		rc := s.opts.Config.Relay
 		env := os.Environ()
 		for k, v := range rc.Env {
 			env = append(env, k+"="+v)
 		}
-		s.tmux = &Tmux{Bin: rc.Tmux, Socket: filepath.Join(dir, "tmux.sock"), Name: "dc",
-			Workdir: rc.Workdir, Argv: rc.Interactive, Env: env, Status: filepath.Join(dir, "agent.exit")}
+		s.agent = &Agent{Argv: rc.Interactive, Dir: rc.Workdir, Env: env}
+		if s.opts.Warm == nil {
+			t, err := kit.NewTransport(s.opts.Config)
+			if err != nil {
+				s.initErr = err
+				return
+			}
+			s.opts.Warm = t.Warm
+		}
 		s.session = newID()
 		go s.watchResume()
 	})
 	return s.initErr
 }
 
-// watchResume re-warms the hook helper and recovers the tmux socket after a
-// resume (a wall-clock jump).
+// watchResume pre-connects after a resume (a wall-clock jump), before the
+// agent's next hook.
 func (s *Server) watchResume() {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -127,14 +125,13 @@ func (s *Server) watchResume() {
 			continue
 		}
 		s.log.Info("relay.resume", "gap_ms", gap.Milliseconds())
-		s.tmux.RecoverSocket()
 		s.preconnect(context.Background())
 	}
 }
 
-// preconnect makes sure the hook helper runs and holds a connection to the
-// gateway before the agent gets input (E6). A failure is logged: the hooks
-// then follow their fail mode.
+// preconnect makes one request to the gateway so the actor's egress path to
+// it is ready before the agent gets input (E6). A failure is logged: the
+// hooks then follow their fail mode.
 func (s *Server) preconnect(ctx context.Context) time.Duration {
 	c := s.opts.Config.Relay.Connector
 	if c == "" {
@@ -173,8 +170,10 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// auth verifies the request's session token and audits the outcome.
-func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string) (Session, bool) {
+// auth verifies the request's session token and audits the outcome. With
+// open set the token opens something (an attachment or a task) and may do
+// so once.
+func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string, open bool) (Session, bool) {
 	if s.opts.Verifier == nil {
 		s.log.Warn("relay.refused", "what", what, "reason", "no session verifier configured")
 		http.Error(w, "relay: no session verifier is configured", http.StatusServiceUnavailable)
@@ -186,12 +185,47 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string) (Sess
 		http.Error(w, "relay: "+err.Error(), http.StatusUnauthorized)
 		return Session{}, false
 	}
+	if open {
+		if err := s.useToken(sess); err != nil {
+			s.log.Warn("relay.refused", "what", what, "reason", err.Error(), "person", sess.Person, "jti", sess.TokenID)
+			http.Error(w, "relay: "+err.Error(), http.StatusUnauthorized)
+			return Session{}, false
+		}
+	}
 	if err := s.init(); err != nil {
 		http.Error(w, "relay: "+err.Error(), http.StatusInternalServerError)
 		return Session{}, false
 	}
 	s.log.Info("relay.accepted", "what", what, "person", sess.Person, "actor", sess.Actor, "actor_uid", sess.ActorUID, "jti", sess.TokenID)
 	return sess, true
+}
+
+// useToken records that sess's token opened something; a token opens one.
+func (s *Server) useToken(sess Session) error {
+	if sess.TokenID == "" {
+		return errors.New("session token has no jti")
+	}
+	now := s.opts.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, exp := range s.used {
+		if now.After(exp.Add(2 * time.Minute)) {
+			delete(s.used, id)
+		}
+	}
+	if _, seen := s.used[sess.TokenID]; seen {
+		return errors.New("session token already used: the launcher asks for a new one")
+	}
+	s.used[sess.TokenID] = sess.Expires
+	return nil
+}
+
+// untilExpiry is how long sess may stay attached.
+func (s *Server) untilExpiry(sess Session) time.Duration {
+	if sess.Expires.IsZero() {
+		return time.Hour
+	}
+	return sess.Expires.Sub(s.opts.Now())
 }
 
 func termSize(r *http.Request) (uint16, uint16) {
@@ -205,63 +239,15 @@ func termSize(r *http.Request) (uint16, uint16) {
 	return cols, rows
 }
 
-// attachment is one tmux client on a PTY.
-type attachment struct {
-	pty  *os.File
-	cmd  *exec.Cmd
-	once sync.Once
-	done chan struct{}
-}
-
-func (a *attachment) close() {
-	a.once.Do(func() {
-		if a.cmd.Process != nil {
-			_ = a.cmd.Process.Kill()
-		}
-		a.pty.Close()
-		_ = a.cmd.Wait()
-		close(a.done)
-	})
-}
-
-// open pre-connects the hook helper, starts the agent's session if needed
-// and attaches a tmux client to it.
-func (s *Server) open(ctx context.Context, cols, rows uint16) (*attachment, error) {
+// open pre-connects, starts the agent if needed and attaches to it.
+func (s *Server) open(ctx context.Context, cols, rows uint16) (*Attachment, error) {
 	s.preconnect(ctx)
-	if _, err := s.tmux.Ensure(ctx, cols, rows); err != nil {
-		return nil, err
-	}
-	cmd := s.tmux.AttachCmd()
-	p, err := startPTY(cmd, cols, rows)
-	if err != nil {
-		return nil, err
-	}
-	return &attachment{pty: p, cmd: cmd, done: make(chan struct{})}, nil
-}
-
-// watchExit sends the agent's exit status once its pane dies, and ends the
-// session so the next attachment starts the agent again.
-func (s *Server) watchExit(a *attachment, send func(Control)) {
-	t := time.NewTicker(exitInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-a.done:
-			return
-		case <-t.C:
-		}
-		if code, dead := s.tmux.PaneExit(context.Background()); dead {
-			send(Control{Type: CtlExit, Code: &code})
-			s.tmux.Kill(context.Background())
-			a.close()
-			return
-		}
-	}
+	return s.agent.Attach(cols, rows)
 }
 
 // input applies one client frame to an attachment. It reports false when
 // the client detached.
-func input(a *attachment, frame []byte, send func(Control)) bool {
+func input(a *Attachment, frame []byte, send func(Control)) bool {
 	t, p, err := Decode(frame)
 	if err != nil {
 		send(Control{Type: CtlError, Message: err.Error()})
@@ -269,10 +255,10 @@ func input(a *attachment, frame []byte, send func(Control)) bool {
 	}
 	switch t {
 	case FrameData:
-		_, _ = a.pty.Write(p)
+		_, _ = a.Write(p)
 	case FrameResize:
 		if rs, err := DecodeResize(p); err == nil {
-			_ = setSize(a.pty, rs.Cols, rs.Rows)
+			a.Resize(rs.Cols, rs.Rows)
 		} else {
 			send(Control{Type: CtlError, Message: err.Error()})
 		}
@@ -293,8 +279,7 @@ func input(a *attachment, frame []byte, send func(Control)) bool {
 }
 
 func (s *Server) hello() Control {
-	mode := kit.ModeInteract
-	return Control{Type: CtlHello, Version: Version, Session: s.session, Mode: mode}
+	return Control{Type: CtlHello, Version: Version, Session: s.session, Mode: kit.ModeInteract}
 }
 
 var upgrader = websocket.Upgrader{
@@ -308,7 +293,8 @@ var upgrader = websocket.Upgrader{
 }
 
 func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r, "ws"); !ok {
+	sess, ok := s.auth(w, r, "ws", true)
+	if !ok {
 		return
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -331,34 +317,38 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		send(Control{Type: CtlError, Message: err.Error()})
 		return
 	}
-	defer a.close()
+	defer a.Close()
 	send(s.hello())
-	go s.watchExit(a, send)
+	done := make(chan struct{})
 	go func() {
-		buf := make([]byte, 32<<10)
-		for {
-			n, err := a.pty.Read(buf)
-			if n > 0 {
-				if write(Encode(FrameData, buf[:n])) != nil {
-					break
-				}
+		defer close(done)
+		for ev := range a.Events {
+			if ev.exit != nil {
+				send(Control{Type: CtlExit, Code: ev.exit})
+				continue
 			}
-			if err != nil {
+			if write(Encode(FrameData, ev.data)) != nil {
 				break
 			}
 		}
-		a.close()
 		wmu.Lock()
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent detached"), time.Now().Add(time.Second))
 		wmu.Unlock()
 		conn.Close()
 	}()
+	// The attachment ends with its token (GAP-0070); the launcher
+	// reconnects with a new one.
+	expiry := time.AfterFunc(s.untilExpiry(sess), func() {
+		send(Control{Type: CtlError, Message: "session token expired"})
+		a.Close()
+	})
+	defer expiry.Stop()
 	go func() {
 		t := time.NewTicker(wsPing)
 		defer t.Stop()
 		for {
 			select {
-			case <-a.done:
+			case <-done:
 				return
 			case <-t.C:
 				wmu.Lock()
@@ -386,12 +376,15 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 
 // pollAttachment is an attachment served over long-poll.
 type pollAttachment struct {
-	*attachment
+	*Attachment
 	id       string
 	person   string
+	jti      string
 	out      *ring
 	mu       sync.Mutex
 	lastSeen time.Time
+	done     chan struct{}
+	once     sync.Once
 }
 
 func (p *pollAttachment) touch() {
@@ -400,9 +393,29 @@ func (p *pollAttachment) touch() {
 	p.mu.Unlock()
 }
 
+func (p *pollAttachment) end() {
+	p.once.Do(func() {
+		p.Attachment.Close()
+		close(p.done)
+	})
+}
+
 func (s *Server) pollOpen(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.auth(w, r, "poll")
+	sess, ok := s.auth(w, r, "poll", true)
 	if !ok {
+		return
+	}
+	s.mu.Lock()
+	mine := 0
+	for _, p := range s.polls {
+		if p.person == sess.Person {
+			mine++
+		}
+	}
+	full := mine >= maxPollsPerPerson || len(s.polls) >= maxPolls
+	s.mu.Unlock()
+	if full {
+		http.Error(w, "relay: too many long-poll attachments; close one first", http.StatusTooManyRequests)
 		return
 	}
 	cols, rows := termSize(r)
@@ -411,60 +424,67 @@ func (s *Server) pollOpen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "relay: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	p := &pollAttachment{attachment: a, id: newID(), person: sess.Person, out: newRing(s.opts.Config.Relay.OutputBufferBytes), lastSeen: time.Now()}
+	p := &pollAttachment{Attachment: a, id: newID(), person: sess.Person, jti: sess.TokenID,
+		out: newRing(s.opts.Config.Relay.OutputBufferBytes), lastSeen: time.Now(), done: make(chan struct{})}
 	p.out.Append(EncodeControl(s.hello()))
 	s.mu.Lock()
 	s.polls[p.id] = p
 	s.mu.Unlock()
-	send := func(c Control) { p.out.Append(EncodeControl(c)) }
-	go s.watchExit(a, send)
 	go func() {
-		buf := make([]byte, 32<<10)
-		for {
-			n, err := a.pty.Read(buf)
-			if n > 0 {
-				p.out.Append(Encode(FrameData, buf[:n]))
+		for ev := range a.Events {
+			if ev.exit != nil {
+				p.out.Append(EncodeControl(Control{Type: CtlExit, Code: ev.exit}))
+				continue
 			}
-			if err != nil {
-				break
-			}
+			p.out.Append(Encode(FrameData, ev.data))
 		}
-		a.close()
 		p.out.Close()
+		p.end()
 	}()
-	go s.reapPoll(p)
+	go s.reapPoll(p, s.untilExpiry(sess))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"id": p.id, "cursor": 0, "version": Version})
 }
 
-func (s *Server) reapPoll(p *pollAttachment) {
+// reapPoll ends an attachment that is idle or whose token expired.
+func (s *Server) reapPoll(p *pollAttachment, life time.Duration) {
+	expiry := time.NewTimer(life)
+	defer expiry.Stop()
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
+loop:
 	for {
 		select {
 		case <-p.done:
+			break loop
+		case <-expiry.C:
+			p.out.Append(EncodeControl(Control{Type: CtlError, Message: "session token expired"}))
+			p.end()
+			break loop
 		case <-t.C:
 			p.mu.Lock()
 			idle := time.Since(p.lastSeen)
 			p.mu.Unlock()
-			if idle < pollIdle {
-				continue
+			if idle >= pollIdle {
+				p.end()
+				break loop
 			}
-			p.close()
 		}
-		s.mu.Lock()
-		delete(s.polls, p.id)
-		s.mu.Unlock()
-		return
 	}
+	s.mu.Lock()
+	delete(s.polls, p.id)
+	s.mu.Unlock()
 }
 
+// pollFor is the attachment the request names; only the token that opened
+// it may use it.
 func (s *Server) pollFor(w http.ResponseWriter, r *http.Request, sess Session) *pollAttachment {
 	s.mu.Lock()
 	p := s.polls[r.PathValue("id")]
 	s.mu.Unlock()
-	if p == nil || p.person != sess.Person {
-		// Another person's attachment is as absent as a closed one.
+	if p == nil || p.person != sess.Person || p.jti != sess.TokenID {
+		// Another person's (or token's) attachment is as absent as a
+		// closed one.
 		http.Error(w, "relay: no such attachment", http.StatusNotFound)
 		return nil
 	}
@@ -473,7 +493,7 @@ func (s *Server) pollFor(w http.ResponseWriter, r *http.Request, sess Session) *
 }
 
 func (s *Server) pollRead(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.auth(w, r, "poll-read")
+	sess, ok := s.auth(w, r, "poll-read", false)
 	if !ok {
 		return
 	}
@@ -501,7 +521,7 @@ func (s *Server) pollRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pollWrite(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.auth(w, r, "poll-write")
+	sess, ok := s.auth(w, r, "poll-write", false)
 	if !ok {
 		return
 	}
@@ -521,8 +541,8 @@ func (s *Server) pollWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	send := func(c Control) { p.out.Append(EncodeControl(c)) }
 	for _, f := range frames {
-		if !input(p.attachment, f, send) {
-			p.close()
+		if !input(p.Attachment, f, send) {
+			p.end()
 			break
 		}
 	}
@@ -530,12 +550,12 @@ func (s *Server) pollWrite(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pollClose(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.auth(w, r, "poll-close")
+	sess, ok := s.auth(w, r, "poll-close", false)
 	if !ok {
 		return
 	}
 	if p := s.pollFor(w, r, sess); p != nil {
-		p.close()
+		p.end()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -543,7 +563,7 @@ func (s *Server) pollClose(w http.ResponseWriter, r *http.Request) {
 // status reports what a launcher's `status` shows: the session, whether
 // the agent runs, the last pre-connect time and the tasks.
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r, "status"); !ok {
+	if _, ok := s.auth(w, r, "status", false); !ok {
 		return
 	}
 	s.mu.Lock()
@@ -555,7 +575,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"version": Version, "session": s.session, "agent_running": s.tmux.Alive(r.Context()),
+		"version": Version, "session": s.session, "agent_running": s.agent.Running(),
 		"last_preconnect_ms": float64(warm.Microseconds()) / 1000, "tasks": tasks,
 	})
 }

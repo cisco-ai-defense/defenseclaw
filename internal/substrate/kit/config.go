@@ -45,7 +45,10 @@ const (
 	// DefaultGatewayURL is the actor listener Service (PLAN 5.1, D15), by
 	// its FQDN: egress resolves only names in the actor's policy, so the
 	// short .svc name is NXDOMAIN in an actor (substrate-1 GAP-0023).
-	DefaultGatewayURL = "https://defenseclaw-actor.defenseclaw-system.svc.cluster.local"
+	// It is plain HTTP on port 80: the hop from atenet-egress to the Service
+	// stays in the cluster, and egress puts the actor JWT in the request
+	// (A8 ruling for GAP-0023/GAP-0042).
+	DefaultGatewayURL = "http://defenseclaw-actor.defenseclaw-system.svc.cluster.local"
 
 	// MaxAttachBytes caps the facts a hook attaches (D9, E19, E20).
 	MaxAttachBytes int64 = 1 << 20
@@ -93,14 +96,13 @@ type RelayConfig struct {
 	Headless []string `json:"headless"`
 	// Workdir is where the agent starts ("" keeps the image WORKDIR).
 	Workdir string `json:"workdir"`
-	// Tmux is the tmux binary.
-	Tmux string `json:"tmux"`
 	// SessionKeys are the launcher session-token verification keys (E2):
 	// key id to a PEM public key file. A2 issues tokens; until then a test key.
 	SessionKeys map[string]string `json:"session_keys"`
 	// SessionAudience is the aud a session token must carry.
 	SessionAudience string `json:"session_audience"`
-	// SessionIssuer, when set, is the iss a session token must carry.
+	// SessionIssuer is the iss a session token must carry; required with
+	// SessionKeys (GAP-0073).
 	SessionIssuer string `json:"session_issuer"`
 	// VerifyURL, when set, makes the relay ask the gateway (through egress,
 	// with the actor JWT) whether a presented token is bound to this actor
@@ -129,7 +131,6 @@ func DefaultConfig() Config {
 		KitVersion:       Version,
 		Relay: RelayConfig{
 			Listen:            ":8080",
-			Tmux:              "/usr/bin/tmux",
 			SessionAudience:   "dcrelay",
 			OutputBufferBytes: 1 << 20,
 			IdentityDir:       "/run/ate/actor",
