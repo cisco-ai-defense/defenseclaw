@@ -1527,12 +1527,12 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	}
 	commandText := strings.ToLower(input.Command)
 	overBudget, unresolved, resolvedTarget := false, false, false
-	unprovenClass := ""
+	var unprovenTarget unprovenWrite
 	evidence := request
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
 	evidence.resolvedTarget = &resolvedTarget
-	evidence.unprovenTarget = &unprovenClass
+	evidence.unprovenTarget = &unprovenTarget
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
@@ -1596,8 +1596,8 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			// A write the link walk held only because it could not resolve
 			// the target is not a known key write: outside the strict and
 			// managed tiers it warns (rel-1-0-10:GAP-0013, GAP-0004).
-			unprovenOnly := symlinkWrite && unprovenClass != "" && named.ID == rule.ID &&
-				unprovenKeyWriteMayWarn(request, commandText) &&
+			unprovenOnly := symlinkWrite && unprovenTarget.class != "" && named.ID == rule.ID &&
+				unprovenKeyWriteMayWarn(request, commandText, facts.ActiveHome, unprovenTarget) &&
 				!trustedAuthorizedKeysSymlinkWrite(input) &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request)
@@ -1607,7 +1607,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
 			} else if unprovenOnly && !unresolved {
-				title = hookpaths.UnprovenWriteTitle(unprovenClass) + unprovenWriteGuidance
+				title = hookpaths.UnprovenWriteTitle(unprovenTarget.class) + unprovenWriteGuidance
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request) {
@@ -1646,14 +1646,67 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 // default; lead answer 2026-11-12 for rel-1-0-10:GAP-0013). A target the
 // proof found protected blocks in every tier. The confirm ("ask") ceiling
 // for these calls belongs to the hook answer path (S8), so they alert.
-func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText string) bool {
+//
+// The held write must also be away from every protected file: its operand
+// is outside the active home (where the key files, DefenseClaw state and the
+// agent hook configs live) and outside sshd's ProgramData folder, and the
+// command names no home spelling (~, $HOME, %USERPROFILE%, the home path,
+// OLDPWD). An unreadable link or copy scope inside the home can reach those
+// files, so it keeps the block (owner rule: self-protection blocks whenever
+// an effect can plausibly reach the protected file).
+func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home string, held unprovenWrite) bool {
 	if request.StrictPolicy || request.ManagedInstall || request.ProtectedHomeHook ||
 		!trustedShellCommandInput(request.Input) {
 		return false
 	}
-	return !strings.Contains(commandText, "authorized_k") &&
-		!strings.Contains(commandText, "administrators_authorized") &&
-		!strings.Contains(commandText, "base64")
+	if held.operand == "" || !filepath.IsAbs(held.operand) || home == "" || !filepath.IsAbs(home) ||
+		unprovenOperandNearProtected(held.operand, home) {
+		return false
+	}
+	lower := strings.ToLower(commandText)
+	for _, spelling := range []string{
+		"authorized_k", "administrators_authorized", "base64", "~", "$home", "${home", "%userprofile%",
+		"$env:userprofile", "$env:home", "oldpwd", "programdata", strings.ToLower(filepath.ToSlash(home)),
+		strings.ToLower(home),
+	} {
+		if strings.Contains(lower, spelling) {
+			return false
+		}
+	}
+	return true
+}
+
+// unprovenWrite is what the authorized-keys proof held as unknown: the
+// hookpaths.UnprovenWriteTitle class and the operand at fault, if one was.
+type unprovenWrite struct {
+	class, operand string
+}
+
+// unprovenOperandNearProtected reports an operand at or under the active
+// home or sshd's Windows ProgramData folder, or one that holds either (/,
+// /home), compared without case on Windows.
+func unprovenOperandNearProtected(operand, home string) bool {
+	clean := func(path string) string {
+		path = filepath.Clean(path)
+		if runtime.GOOS == "windows" {
+			path = strings.ToLower(path)
+		}
+		return path
+	}
+	near := func(path, root string) bool {
+		path, root = clean(path), clean(root)
+		return path == root || strings.HasPrefix(path, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator)) ||
+			strings.HasPrefix(root, strings.TrimSuffix(path, string(filepath.Separator))+string(filepath.Separator))
+	}
+	if near(operand, home) {
+		return true
+	}
+	for _, path := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
+		if near(operand, filepath.Dir(path)) {
+			return true
+		}
+	}
+	return false
 }
 
 // sshControlFileTitlePrefix opens the title of a block whose only SSH target

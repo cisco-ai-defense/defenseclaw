@@ -1051,9 +1051,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// protected file: class (hookpaths.UnprovenWriteTitle) names why. The
 	// first true answer decides the call, so the class is that answer's
 	// (rel-1-0-10:GAP-0013).
-	unproven := func(class string) bool {
-		if request.unprovenTarget != nil && *request.unprovenTarget == "" {
-			*request.unprovenTarget = class
+	unproven := func(class, operand string) bool {
+		if request.unprovenTarget != nil && request.unprovenTarget.class == "" {
+			*request.unprovenTarget = unprovenWrite{class: class, operand: operand}
 		}
 		return true
 	}
@@ -1235,7 +1235,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// bounded map omits. A path fact with no name adds nothing once
 			// the shell operands are placed in a known cwd.
 			if truncated && cannotResolveLocally && !filepath.IsAbs(clientCWD) {
-				return unproven(hookpaths.UnprovenTargetUnresolved)
+				return unproven(hookpaths.UnprovenTargetUnresolved, "")
 			}
 			return false
 		}
@@ -1251,27 +1251,27 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// is walked here, and fails closed where it cannot be.
 			if !hermesClientPatchTarget(request, clientTargets, clientCWD, target) {
 				if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
-					return unproven(hookpaths.UnprovenTargetUnresolved)
+					return unproven(hookpaths.UnprovenTargetUnresolved, target)
 				}
 			}
 		}
 		// Only the event cwd can interpret the process-dependent alias.
 		if hookpaths.ProcCWDWriteOperand(target) {
 			if !strings.HasPrefix(target, "/proc/self/cwd/") {
-				return unproven(hookpaths.UnprovenTargetUnresolved)
+				return unproven(hookpaths.UnprovenTargetUnresolved, target)
 			}
 			if resolved, present := request.ResolvedWriteTargets[target]; present {
 				if resolved == "" {
-					return unproven(hookpaths.UnprovenTargetUnresolved)
+					return unproven(hookpaths.UnprovenTargetUnresolved, target)
 				}
 				return isProtected(resolved)
 			}
 			if cannotResolveLocally {
-				return unproven(hookpaths.UnprovenTargetUnresolved)
+				return unproven(hookpaths.UnprovenTargetUnresolved, target)
 			}
 			mapped, ok := hookpaths.ResolveProcSelfCWDTarget(target, clientCWD)
 			if !ok {
-				return unproven(hookpaths.UnprovenTargetUnresolved)
+				return unproven(hookpaths.UnprovenTargetUnresolved, target)
 			}
 			target = mapped
 		}
@@ -1281,7 +1281,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
 			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
 			if !ok {
-				return unproven(hookpaths.UnprovenTargetUnresolved)
+				return unproven(hookpaths.UnprovenTargetUnresolved, target)
 			}
 			return isProtected(filepath.Join(parent, filepath.Base(moved)))
 		}
@@ -1301,7 +1301,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// the same operand replaces only that missing view (GAP-0278).
 		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
 			if info, err := hookpaths.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
-				return unproven(hookpaths.UnprovenLinkUnread)
+				return unproven(hookpaths.UnprovenLinkUnread, target)
 			}
 		}
 		// On a static reading of a call with a runtime-expanded operand
@@ -1345,7 +1345,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					if request.unresolvedTarget != nil {
 						*request.unresolvedTarget = true
 					}
-					return unproven(hookpaths.UnprovenTargetUnresolved)
+					return unproven(hookpaths.UnprovenTargetUnresolved, target)
 				}
 			case truncated && cannotResolveLocally:
 				// The bounded map omits this operand, which may be a link
@@ -1404,7 +1404,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			if ok {
 				return confirmed()
 			}
-			return unproven(hookpaths.UnprovenLinkUnread)
+			return unproven(hookpaths.UnprovenLinkUnread, target)
 		}
 		info, err := hookpaths.Lstat(walked)
 		if err != nil && !hookpaths.NotExist(err) {
@@ -1454,7 +1454,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return confirmed()
 		}
 		if !ok && !windowsLocationOrdinaryWriteTarget(target) {
-			return unproven(hookpaths.UnprovenTargetUnresolved)
+			return unproven(hookpaths.UnprovenTargetUnresolved, target)
 		}
 		return false
 	}
@@ -1542,7 +1542,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				input.Command, input.CWD, input.ActiveHome, startDirectoryFacts, false, cannotResolveLocally,
 			)
 			if unknown {
-				return unproven(hookpaths.UnprovenTargetUnresolved)
+				return unproven(hookpaths.UnprovenTargetUnresolved, "")
 			}
 		}
 		for i, operand := range operands {
@@ -1587,7 +1587,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// Bash expands the bound redirect as a pathname pattern at run
 			// time, which may select a link to the protected file. The opened
 			// file is unknown, so fail closed.
-			return unproven("dynamic-argument")
+			return unproven("dynamic-argument", "")
 		}
 		for _, operand := range boundedOperands {
 			if writeTarget(operand, false, false) {
@@ -1618,7 +1618,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command, input.CWD, input.ActiveHome, directoryFacts, false, cannotResolveLocally,
 		)
 		if directoryUnknown {
-			return unproven(hookpaths.UnprovenTargetUnresolved)
+			return unproven(hookpaths.UnprovenTargetUnresolved, "")
 		}
 		for _, operand := range directoryOperands {
 			if writeTarget(operand.Path, operand.Safe, operand.OwnCopy) {
@@ -1775,7 +1775,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					// holds, wherever it holds them: each is a patch operand.
 					text, closed := closedLinkText(operand)
 					if !closed {
-						return unproven(hookpaths.UnprovenTargetUnresolved)
+						return unproven(hookpaths.UnprovenTargetUnresolved, operand)
 					}
 					if !nativeFileToolWriteOperand(request.Input, facts, clientCWD, operand) {
 						// A header the text holds in a body no call runs

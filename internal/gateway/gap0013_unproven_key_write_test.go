@@ -18,8 +18,9 @@ import (
 // as the key file. A file name with a star, quote, newline, space or
 // semicolon is a file name; a link command whose names are absolute does not
 // depend on the working directory. A write the proof can only hold as
-// unknown warns in the default and permissive tiers and blocks in strict and
-// managed; a target it finds protected blocks everywhere.
+// unknown away from the home warns in the default and permissive tiers and
+// blocks in strict and managed; one in the home, and a target it finds
+// protected, block everywhere.
 func TestGAP0013ProtectedTargetBlocksOnlyWhenKnownClaudeCode(t *testing.T) {
 	gap0013EveryCell(t, "claudecode")
 }
@@ -55,7 +56,8 @@ func gap0013EveryCell(t *testing.T, connectorName string) {
 		{"link then move to a semicolon name", cwd, fmt.Sprintf("ln %s /tmp/gap13l && mv /tmp/gap13l '%s/file;with;semicolon.dat'", a, data), allow},
 		{"link then move, escaped star", cwd, fmt.Sprintf(`ln %s /tmp/gap13l && mv /tmp/gap13l %s/file\*star.dat`, a, data), allow},
 		{"absolute link then move, no cwd", "", fmt.Sprintf("ln %s /tmp/gap13l && mv /tmp/gap13l %s", a, b), allow},
-		{"interpreter link to a runtime target then write", cwd, `python3 -c "import os,sys; os.symlink(sys.argv[1], 'gap13lnk')" "$T"; echo marker >> gap13lnk`, warn},
+		{"interpreter link to a runtime target then write, outside the home", data, `python3 -c "import os,sys; os.symlink(sys.argv[1], 'gap13lnk')" "$T"; echo marker >> gap13lnk`, warn},
+		{"interpreter link to a runtime target then write, in the home", cwd, `python3 -c "import os,sys; os.symlink(sys.argv[1], 'gap13lnk')" "$T"; echo marker >> gap13lnk`, block},
 		{"archive extract before a write", cwd, fmt.Sprintf("tar -xf %s/missing.tar -C %s && echo marker >> %s/ledger.db", data, data, data), warn},
 		{"keys: symbolic link then append", cwd, "ln -s ~/.ssh/authorized_keys /tmp/gap13k && echo marker >> /tmp/gap13k", block},
 		{"keys: hard link then append", cwd, "ln ~/.ssh/authorized_keys gap13hl && echo marker >> gap13hl", block},

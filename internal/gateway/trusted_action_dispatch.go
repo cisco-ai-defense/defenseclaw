@@ -247,9 +247,11 @@ type trustedActionRequest struct {
 	// unresolved write.
 	resolvedTarget *bool
 	// unprovenTarget, when set, is told the class (hookpaths.UnprovenWriteTitle)
-	// of an authorized-keys proof that held a write whose target it could not
-	// resolve, rather than a protected file it found (rel-1-0-10:GAP-0013).
-	unprovenTarget *string
+	// and the operand of an authorized-keys proof that held a write whose
+	// target it could not resolve, rather than a protected file it found
+	// (rel-1-0-10:GAP-0013). The operand is empty when no one operand was
+	// at fault (a directory walk or a pattern the shell expands).
+	unprovenTarget *unprovenWrite
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
