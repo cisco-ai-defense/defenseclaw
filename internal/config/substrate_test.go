@@ -124,7 +124,7 @@ substrate:
     token_lifetime_seconds: 900
     actor_cert_oid: 1.3.6.1.4.1.11129.2.12.2
     oidc: {issuer: https://login.example.com, client_id: defenseclaw-launcher, groups_claim: groups}
-    workload_oidc: [{issuer: https://token.actions.githubusercontent.com, audience: defenseclaw-prod}]
+    workload_oidc: [{issuer: https://token.actions.githubusercontent.com, audience: defenseclaw-prod, claims: {repository: acme/web}}]
   services: {actor: defenseclaw-actor.defenseclaw-system.svc, admin: defenseclaw-admin.defenseclaw-system.svc}
   launcher_atespaces: {engineering: [eng-payments, eng-web]}
   require_attested_templates: true
@@ -215,7 +215,17 @@ func TestSubstrateValidate(t *testing.T) {
 		"actor_cert_oid":     func(s *SubstrateConfig) { s.Identity.ActorCertOID = "1.3.x" },
 		"oidc client":        func(s *SubstrateConfig) { s.Identity.OIDC.Issuer = "https://login" },
 		"workload audience": func(s *SubstrateConfig) {
-			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t"}}
+			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Claims: map[string]string{"repository": "a/b"}}}
+		},
+		// GAP-0043: issuer and audience alone trust every repository.
+		"workload binding": func(s *SubstrateConfig) {
+			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Audience: "dc"}}
+		},
+		"workload wildcard subject": func(s *SubstrateConfig) {
+			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Audience: "dc", Subject: "*"}}
+		},
+		"workload empty claim": func(s *SubstrateConfig) {
+			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Audience: "dc", Claims: map[string]string{"repository": ""}}}
 		},
 		"services same":             func(s *SubstrateConfig) { s.Services = SubstrateServicesConfig{Actor: "a.svc", Admin: "a.svc"} },
 		"services host":             func(s *SubstrateConfig) { s.Services.Actor = "http://x" },

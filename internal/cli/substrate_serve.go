@@ -37,10 +37,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/activity"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/asks"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity/ateactors"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
@@ -86,6 +90,20 @@ var serveFlags struct {
 	kubeCAFile       string
 	adminGroups      []string
 	plainHTTP        bool
+	actorPlainHTTP   bool
+	// oidcCAFile is the trust bundle of a private OIDC issuer (a lab or
+	// in-house Keycloak); noKubeSignIn turns the Kubernetes sign-in off.
+	oidcCAFile   string
+	noKubeSignIn bool
+	// The atenet router for attach (GAP-0085): its CONNECT-TLS address,
+	// TLS name and CA, and the relay port inside actors.
+	routerAddress    string
+	routerServerName string
+	routerCAFile     string
+	relayPort        int
+	// Leader RPC permissions by peer (GAP-0094).
+	calloutPeerIDs    []string
+	controllerPeerIDs []string
 }
 
 // sidecarSubstrateBuild, when set, makes runSidecar serve the Substrate
@@ -120,7 +138,9 @@ func init() {
 	f.StringVar(&serveFlags.tlsTrust, "tls-trust", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "serving trust bundle")
 	f.StringVar(&serveFlags.peerBundle, "peer-bundle", "/run/podidentity.podcert.ate.dev/credential-bundle.pem", "pod identity bundle (leader RPC)")
 	f.StringVar(&serveFlags.peerTrust, "peer-trust", "/run/podidentity.podcert.ate.dev/trust-bundle.pem", "pod identity trust bundle")
-	f.StringSliceVar(&serveFlags.peerIDs, "peer-id", nil, "SPIFFE IDs allowed to call the leader")
+	f.StringSliceVar(&serveFlags.peerIDs, "peer-id", nil, "SPIFFE IDs of the gateway replicas (every leader method)")
+	f.StringSliceVar(&serveFlags.calloutPeerIDs, "callout-peer-id", nil, "SPIFFE IDs of the callout (the egress chain check only)")
+	f.StringSliceVar(&serveFlags.controllerPeerIDs, "controller-peer-id", nil, "SPIFFE IDs of the controller (registrations, lifecycle and activity)")
 	f.StringSliceVar(&serveFlags.leaderIDs, "leader-id", nil, "SPIFFE IDs the leader may present")
 	f.StringVar(&serveFlags.issuerCA, "issuer-ca", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "trust bundle of the actor JWT issuer")
 	f.StringVar(&serveFlags.sessionKeyFile, "session-key-file", "/var/run/secrets/defenseclaw-relay-session/private.pem", "relay session signing key")
@@ -130,7 +150,15 @@ func init() {
 	f.StringVar(&serveFlags.kubeTokenFile, "kube-token-file", leader.DefaultKubeTokenFile, "Kubernetes API token (leader Lease)")
 	f.StringVar(&serveFlags.kubeCAFile, "kube-ca-file", leader.DefaultKubeCAFile, "Kubernetes API CA (leader Lease)")
 	f.StringSliceVar(&serveFlags.adminGroups, "admin-groups", nil, "OIDC groups whose members are administrators")
-	f.BoolVar(&serveFlags.plainHTTP, "plain-http", false, "serve without TLS (tests only)")
+	f.BoolVar(&serveFlags.plainHTTP, "plain-http", false, "serve every listener and the leader RPC without TLS (tests outside a cluster only)")
+	f.StringVar(&serveFlags.oidcCAFile, "oidc-ca-file", "", "PEM trust bundle of the OIDC issuer (empty: the system roots)")
+	f.StringVar(&serveFlags.routerAddress, "router-address", "", "atenet router CONNECT-TLS host:port, for attach through the admin listener (empty: attach is off)")
+	f.StringVar(&serveFlags.routerServerName, "router-server-name", "", "TLS name of the router certificate (default: the address host)")
+	f.StringVar(&serveFlags.routerCAFile, "router-ca-file", "", "PEM trust bundle of the router certificate (empty: the system roots)")
+	f.IntVar(&serveFlags.relayPort, "relay-port", 8080, "the actor relay's port")
+	f.BoolVar(&serveFlags.noKubeSignIn, "no-kube-sign-in", false, "with no OIDC issuer, do not accept Kubernetes credentials on the admin listener")
+	f.BoolVar(&serveFlags.actorPlainHTTP, "actor-plain-http", false,
+		"serve the actor listener as plain HTTP (egress reaches it on an http rule; the actor JWT authenticates); the admin listener and the leader RPC keep TLS")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -143,6 +171,12 @@ var substrateRateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
 func runServe(cmd *cobra.Command, args []string) error {
 	if !serveFlags.substrate {
 		return errors.New("serve runs only on Agent Substrate: pass --substrate")
+	}
+	// In a cluster the admin listener always serves TLS and the leader RPC
+	// always uses mTLS; only the actor listener may be plain HTTP, on its
+	// own flag (GAP-0042, GAP-0023).
+	if serveFlags.plainHTTP && os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		return errors.New("serve: --plain-http is for tests outside a cluster; use --actor-plain-http to serve only the actor listener without TLS")
 	}
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(substrateRateLimited)
@@ -161,6 +195,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if err := seedSubstratePolicies(cfg.PolicyDir); err != nil {
 			return err
 		}
+		substrateStartupChecks(cfg)
 		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
 		return runSidecar(cmd, args)
 	}
@@ -262,22 +297,68 @@ func substrateATEClient(c *config.Config) (ateapi.Client, error) {
 	})
 }
 
-func substratePeople(c *config.Config) (*identity.PersonVerifier, error) {
+// substratePeople is the admin listener's sign-in: the OIDC issuer and the
+// workload issuers, and, for an open source cluster with no OIDC issuer,
+// the person's Kubernetes token (TokenReview). Managed installs require
+// OIDC (STEER 11-12 22:55Z). Nil when nothing is configured.
+func substratePeople(c *config.Config) (gateway.SubstratePersonVerifier, error) {
+	oidc, err := substrateOIDCPeople(c)
+	if err != nil {
+		return nil, err
+	}
+	var kube *identity.KubeTokenVerifier
+	if substrateKubeSignIn(c) {
+		kube = substrateKubePeople()
+	}
+	switch {
+	case kube != nil && oidc != nil:
+		return identity.PersonVerifiers{OIDC: oidc, Kube: kube}, nil
+	case kube != nil:
+		fmt.Fprintln(os.Stderr, "[substrate] no substrate.identity.oidc issuer: people sign in with their Kubernetes credentials")
+		return identity.PersonVerifiers{Kube: kube}, nil
+	case oidc != nil:
+		return oidc, nil
+	}
+	return nil, nil
+}
+
+// substrateKubeSignIn reports whether people sign in with Kubernetes
+// credentials: no OIDC issuer, not a managed install, not turned off.
+func substrateKubeSignIn(c *config.Config) bool {
+	return c.Substrate.Identity.OIDC.Issuer == "" && !managed.IsManagedEnterprise(c.DeploymentMode) && !serveFlags.noKubeSignIn
+}
+
+func substrateKubePeople() *identity.KubeTokenVerifier {
+	host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
+	if host == "" {
+		return nil
+	}
+	hc, err := kubeHTTPClient()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[substrate] Kubernetes sign-in: %v\n", err)
+		return nil
+	}
+	return &identity.KubeTokenVerifier{Server: "https://" + net.JoinHostPort(host, port), TokenFile: serveFlags.kubeTokenFile, HTTP: hc}
+}
+
+func substrateOIDCPeople(c *config.Config) (*identity.PersonVerifier, error) {
 	var issuers []identity.PersonIssuer
 	id := c.Substrate.Identity
 	if id.OIDC.Issuer != "" {
-		ks, err := identity.NewKeySet(identity.KeySetOptions{Issuer: id.OIDC.Issuer})
+		ks, err := identity.NewKeySet(identity.KeySetOptions{Issuer: id.OIDC.Issuer, CAFile: serveFlags.oidcCAFile})
 		if err != nil {
 			return nil, err
 		}
-		issuers = append(issuers, identity.PersonIssuer{KeySet: ks, Audience: id.OIDC.ClientID, GroupsClaim: id.OIDC.GroupsClaim})
+		issuers = append(issuers, identity.PersonIssuer{KeySet: ks, Audience: id.OIDC.ClientID, GroupsClaim: id.OIDC.GroupsClaim,
+			APIAudience: c.Substrate.EffectiveAudience()})
 	}
 	for _, w := range id.WorkloadOIDC {
 		ks, err := identity.NewKeySet(identity.KeySetOptions{Issuer: w.Issuer})
 		if err != nil {
 			return nil, err
 		}
-		issuers = append(issuers, identity.PersonIssuer{KeySet: ks, Audience: w.Audience, Kind: identity.PersonWorkload})
+		issuers = append(issuers, identity.PersonIssuer{KeySet: ks, Audience: w.Audience, Kind: identity.PersonWorkload,
+			Binding: identity.WorkloadBinding{Subject: w.Subject, Claims: w.Claims}})
 	}
 	if len(issuers) == 0 {
 		return nil, nil
@@ -322,9 +403,35 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		if err != nil {
 			return out, err
 		}
+		actorTLS := servingTLS
+		if serveFlags.actorPlainHTTP {
+			actorTLS = nil
+		}
+		toLeader := &leader.Client{BaseURL: base, HTTP: hc}
+		regs := &registry.Remote{Client: toLeader}
+		// The idle feed: last hook, model call and relay byte per actor,
+		// sent to the leader every few seconds (A3's ActivitySource reads it).
+		recorder := &activity.Recorder{Leader: toLeader}
+		go recorder.Run(context.Background())
+		// The create path's policy writer: the controller's own admission,
+		// profiles and render, run before the first resume.
+		ctl, err := newSubstrateController(c, ate, controllerRegistry{store: regs}, nil, nil, os.Stderr, false)
+		if err != nil {
+			return out, fmt.Errorf("serve: controller for the create path: %w", err)
+		}
 		out = gateway.SubstrateConfig{
-			ActorAddr: serveFlags.actorListen, ActorTLS: servingTLS,
-			Actors: actors, Registrations: &registry.Remote{Client: &leader.Client{BaseURL: base, HTTP: hc}},
+			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
+			Actors: actors, Registrations: regs, Activity: recorder,
+			Asks: &asks.Client{Leader: toLeader}, Policies: ate,
+			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
+			Relays: substrateRelays(),
+			Skills: newRuntimeSkillScanner(c),
+			Info:   substrateInfo(c),
+			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
+				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
+					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil)}
+			},
+			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl)},
 			Limiter: ratelimit.New(ratelimit.Config{
 				PerActorRPS: c.Substrate.RateLimits.PerActorRPS, PerAtespaceRPS: c.Substrate.RateLimits.PerAtespaceRPS,
 			}),
@@ -347,7 +454,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				}
 				return false
 			}
-			out.Profiles = launcherProfiles(c)
+			out.Profiles = gateway.SubstrateLauncherProfiles(c)
 			if _, err := os.Stat(serveFlags.calloutTokenFile); err == nil {
 				out.CalloutToken = readSecretFile(serveFlags.calloutTokenFile)
 			}
@@ -369,16 +476,6 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 
 // launcherProfiles allows a create for a profile listed in
 // substrate.launcher_atespaces, in its first atespace.
-func launcherProfiles(c *config.Config) gateway.SubstrateProfileResolver {
-	spaces := c.Substrate.LauncherAtespaces
-	return func(_ identity.Person, requested string) (string, string, error) {
-		list := spaces[requested]
-		if len(list) == 0 {
-			return "", "", fmt.Errorf("profile %q has no launcher atespace", requested)
-		}
-		return requested, list[0], nil
-	}
-}
 
 func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	if parent == nil {
@@ -386,6 +483,10 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// The store volume's root is 0777 or 2777 (Kubernetes), which the audit
+	// store refuses as an ancestor; the leader alone mounts it (RWO) and
+	// keeps its stores in 0700 directories under it (A8 item).
+	audit.TrustVolumeRoot(serveFlags.storeDir)
 	store, err := registry.OpenFileStore(filepath.Join(serveFlags.storeDir, "registrations"))
 	if err != nil {
 		return err
@@ -415,6 +516,31 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	srv := &leader.Server{IsLeader: el.IsLeader}
 	registry.Serve(srv, store)
+	askStore, err := asks.Open(filepath.Join(serveFlags.storeDir, "asks"))
+	if err != nil {
+		return err
+	}
+	defer askStore.Close()
+	if cfg != nil {
+		askStore.Expiry = cfg.Substrate.EffectiveAskTimeout()
+	}
+	// An approved host joins the actor's registration; the controller adds
+	// it to the policy on its next pass.
+	askStore.OnApprove = func(ctx context.Context, a asks.Ask) error {
+		if a.Host == "" {
+			return nil
+		}
+		reg, ok, err := store.Get(ctx, a.Atespace, a.UID)
+		if err != nil || !ok {
+			return fmt.Errorf("approve: registration of %s/%s: %v", a.Atespace, a.Actor, err)
+		}
+		if !slices.Contains(reg.Approved, a.Host) {
+			reg.Approved = append(reg.Approved, a.Host)
+		}
+		return store.Put(ctx, reg)
+	}
+	asks.Serve(srv, askStore)
+	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
 		files, err := podcert.NewFiles(serveFlags.peerBundle, serveFlags.peerTrust)
@@ -424,7 +550,8 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 		if len(serveFlags.peerIDs) == 0 {
 			return errors.New("serve: --peer-id names the gateway SPIFFE IDs allowed to call the leader")
 		}
-		hs.TLSConfig = files.ServerConfig(serveFlags.peerIDs)
+		srv.Permit = substrateLeaderPermissions(serveFlags.peerIDs, serveFlags.calloutPeerIDs, serveFlags.controllerPeerIDs)
+		hs.TLSConfig = files.ServerConfig(srv.Permit.Peers())
 	}
 	errCh := make(chan error, 2)
 	go func() {
@@ -461,4 +588,86 @@ func kubeHTTPClient() (*http.Client, error) {
 	return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}, Proxy: nil,
 	}}, nil
+}
+
+// substrateLeaderPermissions is who may call what on the leader
+// (GAP-0094): gateway replicas every method; the callout only the egress
+// chain check; the controller the registrations, the chain lifecycle and
+// the activity feed. An identity listed in two roles gets both sets.
+func substrateLeaderPermissions(gateways, callouts, controllers []string) leader.Permissions {
+	p := leader.Permissions{}
+	add := func(ids []string, methods ...string) {
+		for _, id := range ids {
+			if id = strings.TrimSpace(id); id != "" {
+				p[id] = append(p[id], methods...)
+			}
+		}
+	}
+	add(gateways, "*")
+	add(callouts, chainstate.MethodChainEgress)
+	add(controllers, leader.MethodRegistrationGet, leader.MethodRegistrationList, leader.MethodRegistrationWrite,
+		chainstate.MethodChainLifecycle, leader.MethodActivitySnapshot)
+	return p
+}
+
+// substrateKubeSecrets is the secrets admin API's writer over the
+// Kubernetes API (nil outside a cluster: the list still answers).
+func substrateKubeSecrets() gateway.SubstrateSecretStore {
+	host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
+	if host == "" {
+		return nil
+	}
+	hc, err := kubeHTTPClient()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[substrate] secrets admin API: no Kubernetes client: %v\n", err)
+		return nil
+	}
+	return &kubeSecrets{server: "https://" + net.JoinHostPort(host, port), tokenFile: serveFlags.kubeTokenFile, http: hc}
+}
+
+// substrateRelays is attach's way to the relays (nil when no router is
+// configured or the pod identity bundle is missing).
+func substrateRelays() gateway.SubstrateRelayDialer {
+	if serveFlags.routerAddress == "" {
+		return nil
+	}
+	files, err := podcert.NewFiles(serveFlags.peerBundle, serveFlags.peerTrust)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[substrate] attach is off: pod identity: %v\n", err)
+		return nil
+	}
+	d, err := newRouterDialer(serveFlags.routerAddress, serveFlags.routerServerName, serveFlags.routerCAFile, serveFlags.relayPort, files)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[substrate] attach is off: %v\n", err)
+		return nil
+	}
+	return d
+}
+
+// substrateInfo is the admin listener's unauthenticated sign-in
+// information (A6's `login --admin-url`).
+func substrateInfo(c *config.Config) map[string]any {
+	info := map[string]any{"sign_in": "none"}
+	switch {
+	case c.Substrate.Identity.OIDC.Issuer != "":
+		info["sign_in"] = "oidc"
+		info["issuer"], info["client_id"] = c.Substrate.Identity.OIDC.Issuer, c.Substrate.Identity.OIDC.ClientID
+	case substrateKubeSignIn(c):
+		info["sign_in"] = "kubernetes"
+	}
+	return info
+}
+
+// substrateStartupChecks logs the gateway-side doctor checks that fail at
+// start (GAP-0040), so an operator sees them in the pod log too.
+func substrateStartupChecks(c *config.Config) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		chk := gateway.SubstrateUpstreamCheck(ctx, gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion),
+			c.Guardrail.AllowPrivateUpstreams, nil)
+		if chk.Status == "fail" {
+			fmt.Fprintf(os.Stderr, "[substrate] %s: %s; fix: %s\n", chk.ID, chk.Detail, chk.Fix)
+		}
+	}()
 }

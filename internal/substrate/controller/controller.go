@@ -128,6 +128,7 @@ type actorState struct {
 	recheckGen int32
 	reg        Registration
 	regOK      bool
+	regAt      time.Time
 	written    bool
 }
 
@@ -405,11 +406,19 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 // attribution finds or creates the actor's registration. A non-empty
 // refuse means the actor gets no policy.
 func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actorState, launcher bool, base Event) (Registration, string, error) {
+	md := a.GetMetadata()
 	if st.regOK {
+		// Re-read now and then: the gateway changes a registration when an
+		// ask approves a host (Approved), and the policy follows it.
+		if c.o.Now().Sub(st.regAt) >= registrationRefresh {
+			if fresh, ok, err := c.o.Registry.Get(ctx, md.GetAtespace(), md.GetUid()); err == nil && ok {
+				st.reg = fresh
+			}
+			st.regAt = c.o.Now()
+		}
 		st.reg.Template = ateapi.Key(a.GetActorTemplate())
 		return st.reg, "", nil
 	}
-	md := a.GetMetadata()
 	reg, ok, err := c.o.Registry.Get(ctx, md.GetAtespace(), md.GetUid())
 	if err != nil {
 		return Registration{}, "", fmt.Errorf("%s: registry: %w", st.key, err)
@@ -452,9 +461,13 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 		}
 	}
 	reg.Template = ateapi.Key(a.GetActorTemplate())
-	st.reg, st.regOK = reg, true
+	st.reg, st.regOK, st.regAt = reg, true, c.o.Now()
 	return reg, "", nil
 }
+
+// registrationRefresh is how often a known actor's registration is read
+// again.
+const registrationRefresh = 15 * time.Second
 
 func (c *Controller) parentRegistration(ctx context.Context, tag *ateapi.ObjectRef) (Registration, error) {
 	t, err := c.o.Client.GetTag(ctx, tag)

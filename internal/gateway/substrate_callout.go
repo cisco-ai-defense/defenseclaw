@@ -35,49 +35,57 @@ import (
 // verdict the hook path gives the same call, MCP asset policy included,
 // so a call the hook would refuse is refused at egress too.
 //
+// The shape is the callout's (extproc.VerdictRequest and VerdictResponse),
+// agreed with lane F2 in lanes/a2/PROGRESS.md:
+//
 //	POST /api/v1/substrate/callout/verdict   (admin listener only)
 //	Authorization: Bearer <callout service token>
-//	{"v":"1","request_id":"...","actor":{"atespace":"...","name":"..."},
-//	 "mcp":{"server":"...","url":"https://...","transport":"http",
-//	        "method":"tools/call","tool":"..."},
-//	 "args":{...},"session_id":"..."}
-//	-> {"v":"1","verdict":"allow|deny|ask","reason":"...","severity":"...",
-//	    "findings":[...],"source":"mcp_asset_policy|tool_rules|none",
-//	    "actor_uid":"...","profile":"..."}
+//	X-DefenseClaw-Client: substrate-extproc
+//	{"actor":{"atespace":"...","name":"...","uid":"<optional>"},
+//	 "mcp":{"host":"mcp.example.com","server":"<admin name>","tool":"...",
+//	        "arguments":{...},"url":"<optional>","transport":"<optional>"},
+//	 "session_id":"<Mcp-Session-Id, optional>"}
+//	-> 200 {"action":"allow|alert|block","severity":"...","reason":"...",
+//	        "source":"asset_policy|tool_rules|none","rule_ids":[...],
+//	        "actor_uid":"...","profile":"..."}
 //
-// The callout knows the actor by atespace and name only (upstream gives
-// ext_proc no UID): the gateway finds the live UID and its registration.
-// Verdicts are in action mode, as for every sandboxed hook: a rule that
-// blocks denies. An unattended actor's ask is a deny (D12).
+// Any other status is the callout's failure mode. The callout knows the
+// actor by atespace and name (upstream gives ext_proc no UID): the gateway
+// finds the live UID and its registration; a uid the callout sends must
+// be the live one. Verdicts are in action mode, as for every sandboxed
+// hook: a rule that blocks blocks. Egress cannot hold a tools/call for an
+// approval, so a rule that asks blocks too, with the reason saying so.
 
 type substrateCalloutRequest struct {
-	V         string `json:"v"`
-	RequestID string `json:"request_id,omitempty"`
-	Actor     struct {
+	Actor struct {
 		Atespace string `json:"atespace"`
 		Name     string `json:"name"`
+		UID      string `json:"uid,omitempty"`
 	} `json:"actor"`
 	MCP struct {
-		Server    string `json:"server"`
-		URL       string `json:"url,omitempty"`
-		Transport string `json:"transport,omitempty"`
-		Method    string `json:"method,omitempty"`
-		Tool      string `json:"tool"`
+		Host      string          `json:"host,omitempty"`
+		Server    string          `json:"server"`
+		Tool      string          `json:"tool"`
+		Arguments json.RawMessage `json:"arguments,omitempty"`
+		URL       string          `json:"url,omitempty"`
+		Transport string          `json:"transport,omitempty"`
 	} `json:"mcp"`
-	Args      json.RawMessage `json:"args,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // SubstrateCalloutVerdict is the route's answer.
 type SubstrateCalloutVerdict struct {
-	V        string   `json:"v"`
-	Verdict  string   `json:"verdict"`
-	Reason   string   `json:"reason,omitempty"`
+	Action   string   `json:"action"`
 	Severity string   `json:"severity,omitempty"`
-	Findings []string `json:"findings,omitempty"`
+	Reason   string   `json:"reason,omitempty"`
 	Source   string   `json:"source"`
+	RuleIDs  []string `json:"rule_ids,omitempty"`
 	ActorUID string   `json:"actor_uid,omitempty"`
 	Profile  string   `json:"profile,omitempty"`
+}
+
+func substrateCalloutBlock(reason, uid string) SubstrateCalloutVerdict {
+	return SubstrateCalloutVerdict{Action: "block", Reason: reason, Source: "none", ActorUID: uid}
 }
 
 func (a *APIServer) substrateCalloutVerdict(st *substrateState) http.Handler {
@@ -98,8 +106,8 @@ func (a *APIServer) substrateCalloutVerdict(st *substrateState) http.Handler {
 		var req substrateCalloutRequest
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil || req.V != "1" || req.Actor.Atespace == "" || req.Actor.Name == "" ||
-			strings.TrimSpace(req.MCP.Tool) == "" || strings.TrimSpace(req.MCP.Server) == "" {
+		if err := dec.Decode(&req); err != nil || req.Actor.Atespace == "" || req.Actor.Name == "" ||
+			strings.TrimSpace(req.MCP.Tool) == "" || (strings.TrimSpace(req.MCP.Server) == "" && strings.TrimSpace(req.MCP.Host) == "") {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "invalid_request")
 			return
 		}
@@ -109,11 +117,21 @@ func (a *APIServer) substrateCalloutVerdict(st *substrateState) http.Handler {
 		}
 		live, err := st.cfg.Lookup.LookupActor(r.Context(), req.Actor.Atespace, req.Actor.Name)
 		if errors.Is(err, identity.ErrActorNotFound) {
-			writeSubstrateJSON(w, http.StatusOK, SubstrateCalloutVerdict{V: "1", Verdict: "deny", Reason: "the actor no longer exists", Source: "none"})
+			writeSubstrateJSON(w, http.StatusOK, substrateCalloutBlock("the actor no longer exists", ""))
 			return
 		}
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "control_api_unavailable")
+			return
+		}
+		// An actor that is not running makes no call: a request that names
+		// one is stale or forged, as on the actor listener (GAP-0061).
+		if live.State != identity.ActorRunning && live.State != identity.ActorResuming {
+			writeSubstrateJSON(w, http.StatusOK, substrateCalloutBlock("the actor is not running", live.UID))
+			return
+		}
+		if req.Actor.UID != "" && req.Actor.UID != live.UID {
+			writeSubstrateJSON(w, http.StatusOK, substrateCalloutBlock("the call names an earlier actor with this name", live.UID))
 			return
 		}
 		reg, found, err := st.cfg.Registrations.Get(r.Context(), req.Actor.Atespace, live.UID)
@@ -122,8 +140,7 @@ func (a *APIServer) substrateCalloutVerdict(st *substrateState) http.Handler {
 			return
 		}
 		if !found || reg.Deleted {
-			writeSubstrateJSON(w, http.StatusOK, SubstrateCalloutVerdict{V: "1", Verdict: "deny",
-				Reason: "this actor is not registered with DefenseClaw", Source: "none", ActorUID: live.UID})
+			writeSubstrateJSON(w, http.StatusOK, substrateCalloutBlock("this actor is not registered with DefenseClaw", live.UID))
 			return
 		}
 		v := a.substrateMCPVerdict(r.Context(), reg, req)
@@ -137,23 +154,30 @@ func (a *APIServer) substrateMCPVerdict(ctx context.Context, reg registry.Regist
 	ctx = a.substrateEvaluationContext(ctx, reg, sandboxauth.RouteHook)
 	connectorName := sandboxauth.CanonicalConnector(reg.Connector)
 	server := strings.TrimSpace(req.MCP.Server)
+	if server == "" {
+		server = strings.TrimSpace(req.MCP.Host)
+	}
 	tool := strings.TrimSpace(req.MCP.Tool)
 	hookTool := "mcp__" + mcpToolNamePart(server) + "__" + tool
 
-	out := SubstrateCalloutVerdict{V: "1", Verdict: "allow", Source: "none"}
+	out := SubstrateCalloutVerdict{Action: "allow", Source: "none"}
+	url := strings.TrimSpace(req.MCP.URL)
+	if url == "" && req.MCP.Host != "" {
+		url = "https://" + strings.TrimSpace(req.MCP.Host)
+	}
 	probe := mcpRuntimeProbe{
-		ServerName: server, ToolName: hookTool, URL: strings.TrimSpace(req.MCP.URL),
+		ServerName: server, ToolName: hookTool, URL: url,
 		Transport: strings.TrimSpace(req.MCP.Transport), Surface: "hook", Matched: true, SessionID: req.SessionID,
 	}
 	if probe.Transport == "" && probe.URL != "" {
 		probe.Transport = "http"
 	}
 	if decision, matched := a.evaluateRuntimeMCPAssetPolicy(ctx, connectorName, "PreToolUse", probe); matched && substrateAssetDenies(decision) {
-		out.Verdict, out.Source, out.Reason, out.Severity = "deny", "mcp_asset_policy", decision.Reason, "HIGH"
+		out.Action, out.Source, out.Reason, out.Severity = "block", "asset_policy", decision.Reason, "HIGH"
 		return out
 	}
 	tv := a.inspectToolPolicyCtx(ctx, &ToolInspectRequest{
-		Tool: hookTool, Args: req.Args, SessionID: req.SessionID, Connector: connectorName, MCPServerName: server,
+		Tool: hookTool, Args: req.MCP.Arguments, SessionID: req.SessionID, Connector: connectorName, MCPServerName: server,
 	})
 	if tv == nil {
 		return out
@@ -164,18 +188,22 @@ func (a *APIServer) substrateMCPVerdict(ctx context.Context, reg registry.Regist
 			action = "block" // observe mode never relaxes a sandboxed call
 		}
 	}
+	reason := tv.Reason
 	switch action {
 	case "block":
-		out.Verdict = "deny"
+		out.Action = "block"
 	case "confirm", "ask":
-		out.Verdict = "ask"
-		if reg.Unattended {
-			out.Verdict = "deny" // D12: unattended asks deny by default
-		}
+		// Egress cannot hold the call for an answer; unattended asks deny
+		// anyway (D12).
+		out.Action = "block"
+		reason = strings.TrimSpace("approval needed, which egress cannot hold for: " + reason)
+	case "alert":
+		out.Action = "alert"
 	default:
 		return out
 	}
-	out.Source, out.Reason, out.Severity, out.Findings = "tool_rules", tv.Reason, tv.Severity, tv.Findings
+	out.Source, out.Reason, out.Severity, out.RuleIDs = "tool_rules", reason, tv.Severity, tv.Findings
+	_ = reg
 	return out
 }
 

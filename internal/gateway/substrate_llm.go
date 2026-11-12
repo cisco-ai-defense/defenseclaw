@@ -66,6 +66,35 @@ type SubstrateLLMConfig struct {
 
 var substrateProviderRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
+// Model API paths per provider (GAP-0041). A Bedrock model ID may be an
+// inference profile (us. or global. prefix, for example
+// us.anthropic.claude-haiku-5-5) or an ARN-free ID with a version suffix.
+var (
+	substrateBedrockModelPath = regexp.MustCompile(`^/model/[A-Za-z0-9._:-]{1,256}/(invoke|invoke-with-response-stream|converse|converse-stream|count-tokens)$`)
+	substrateGeminiModelPath  = regexp.MustCompile(`^/v1(beta)?/models/[A-Za-z0-9._-]{1,128}:(generateContent|streamGenerateContent|countTokens)$`)
+	substrateModelPaths       = map[string][]string{
+		"anthropic": {"/v1/messages", "/v1/messages/count_tokens"},
+		"openai":    {"/v1/chat/completions", "/v1/responses", "/v1/completions", "/v1/embeddings"},
+	}
+)
+
+// substrateModelPathOK reports whether upstream is a model API path of
+// provider. Everything else on /llm answers 404.
+func substrateModelPathOK(provider, upstream string) bool {
+	switch provider {
+	case "bedrock":
+		return substrateBedrockModelPath.MatchString(upstream)
+	case "gemini":
+		return substrateGeminiModelPath.MatchString(upstream)
+	}
+	for _, p := range substrateModelPaths[provider] {
+		if upstream == p {
+			return true
+		}
+	}
+	return false
+}
+
 // DefaultSubstrateLLMProviders returns the upstreams of the providers the
 // proxy serves, with their keys under credDir/<provider>.
 func DefaultSubstrateLLMProviders(credDir, bedrockRegion string) map[string]SubstrateLLMProvider {
@@ -122,6 +151,13 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	upstream := "/" + upstreamPath
 	if path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") {
 		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
+		return
+	}
+	// Only the provider's model API reaches the proxy: its other routes
+	// (provider registry and reload, egress event intake, health, model
+	// lists) are for the host and the operator, never an actor (GAP-0041).
+	if r.Method != http.MethodPost || !substrateModelPathOK(provider, upstream) {
+		writeSubstrateRefusal(w, http.StatusNotFound, "not_a_model_call")
 		return
 	}
 	key, err := os.ReadFile(p.CredentialFile)

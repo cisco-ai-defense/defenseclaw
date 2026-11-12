@@ -93,7 +93,12 @@ type Registration struct {
 	// the intent store, a verified source of the run's intent).
 	TaskDigest string `json:"task_digest,omitempty"`
 	// Secrets are the names of the per-person secrets bound to the actor.
-	Secrets   []string  `json:"secrets,omitempty"`
+	Secrets []string `json:"secrets,omitempty"`
+	// Approved are the hosts asks approved for this actor (the controller
+	// adds them to its policy).
+	Approved []string `json:"approved,omitempty"`
+	// ForkedBy is defenseclaw or unknown for a fork (ParentUID set).
+	ForkedBy  string    `json:"forked_by,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// Deleted is a tombstone: the actor was deleted (E10).
 	Deleted bool `json:"deleted,omitempty"`
@@ -112,8 +117,13 @@ func (r *Registration) Validate() error {
 		return errors.New("registry: key does not name the atespace and UID")
 	}
 	r.Key = key
-	if strings.TrimSpace(r.Name) == "" || strings.TrimSpace(r.Connector) == "" {
-		return errors.New("registry: a registration names its actor and connector")
+	if strings.TrimSpace(r.Name) == "" {
+		return errors.New("registry: a registration names its actor")
+	}
+	// An attributed actor (made outside DefenseClaw) has no launcher to
+	// name its connector; every launched one has.
+	if !r.Attributed && strings.TrimSpace(r.Connector) == "" {
+		return errors.New("registry: a launched actor names its connector")
 	}
 	if !r.Attributed && r.Person.Subject == "" {
 		return errors.New("registry: a launched actor has a verified person")

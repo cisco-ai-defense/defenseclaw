@@ -4177,6 +4177,10 @@ class SubstrateOIDCConfig:
 class SubstrateWorkloadOIDCConfig:
     issuer: str = ""
     audience: str = ""
+    # Bind the entry to the workloads it trusts (GAP-0043): subject exact or
+    # prefix with a trailing "*", claims compared exactly.
+    subject: str = ""
+    claims: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -7581,6 +7585,11 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
                 SubstrateWorkloadOIDCConfig(
                     issuer=str(_mapping(w).get("issuer", "") or ""),
                     audience=str(_mapping(w).get("audience", "") or ""),
+                    subject=str(_mapping(w).get("subject", "") or ""),
+                    claims={
+                        str(k): str(v)
+                        for k, v in (_mapping(_mapping(w).get("claims")) or {}).items()
+                    },
                 )
                 for w in ident.get("workload_oidc") or []
             ],

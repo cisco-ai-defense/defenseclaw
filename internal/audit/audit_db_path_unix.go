@@ -207,3 +207,10 @@ func auditDBOpenElsewhere(path string) error {
 func auditDBPlatformHardeningFailureIsDrift(error) bool { return false }
 
 func auditDBPlatformReportAccept(string, string) {}
+
+// auditDBVolumeRootOwnerTrusted reports a volume root whose owner is a
+// trusted runtime owner (root or the process account; TrustVolumeRoot).
+func auditDBVolumeRootOwnerTrusted(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && runtimeowner.Trusted(stat.Uid)
+}

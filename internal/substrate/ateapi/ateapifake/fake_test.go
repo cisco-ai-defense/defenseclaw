@@ -139,3 +139,39 @@ func TestErrInjectionAndClose(t *testing.T) {
 		t.Fatalf("after close: %v", err)
 	}
 }
+
+func TestFakeCreateResumeDelete(t *testing.T) {
+	f := New()
+	ctx := context.Background()
+	f.PutTemplate(&ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "cc"}})
+	mk := func(name, tmpl string) (*ateapi.Actor, error) {
+		return f.CreateActor(ctx, &ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: name},
+			ActorTemplate: ateapi.Ref("eng-web", tmpl)})
+	}
+	a, err := mk("a1", "cc")
+	if err != nil || a.GetStatus().GetState() != ateapi.ActorStateSuspended || a.GetMetadata().GetUid() == "" {
+		t.Fatalf("create %v %v", a, err)
+	}
+	if _, err := mk("a1", "cc"); !ateapi.IsAlreadyExists(err) {
+		t.Fatalf("duplicate %v", err)
+	}
+	if _, err := mk("a2", "nope"); !ateapi.IsNotFound(err) {
+		t.Fatalf("missing template %v", err)
+	}
+	ref := ateapi.Ref("eng-web", "a1")
+	if got, resumed, err := f.ResumeActor(ctx, ref); err != nil || !resumed || got.GetStatus().GetState() != ateapi.ActorStateRunning {
+		t.Fatalf("resume %v %v %v", got, resumed, err)
+	}
+	if _, resumed, _ := f.ResumeActor(ctx, ref); resumed {
+		t.Fatal("second resume resumed")
+	}
+	if _, err := f.DeleteActor(ctx, ref, &ateapi.DeleteOptions{Uid: "other"}); !ateapi.IsConflict(err) {
+		t.Fatalf("uid precondition %v", err)
+	}
+	if _, err := f.DeleteActor(ctx, ref, &ateapi.DeleteOptions{Uid: a.GetMetadata().GetUid()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.GetActor(ctx, ref); !ateapi.IsNotFound(err) {
+		t.Fatalf("after delete %v", err)
+	}
+}

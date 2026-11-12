@@ -27,6 +27,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ import (
 const (
 	substrateAdminPrefix   = "/api/v1/substrate/"
 	substrateCalloutPath   = "/api/v1/substrate/callout/verdict"
+	substrateInfoPath      = "/api/v1/substrate/info"
 	substrateAdminMaxBody  = 1 << 20
 	substrateSessionMaxTTL = identity.MaxSessionLifetime
 )
@@ -105,8 +107,8 @@ type SubstrateUsage interface {
 }
 
 // SubstrateProfileResolver picks the profile and launcher atespace of a
-// create for person, or refuses.
-type SubstrateProfileResolver func(person identity.Person, requested string) (profile, atespace string, err error)
+// create for the verified caller, or refuses (SubstrateLauncherProfiles).
+type SubstrateProfileResolver func(person identity.Person, requested, connector string, admin bool) (profile, atespace string, err error)
 
 type substratePersonKey struct{}
 
@@ -136,19 +138,27 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/actors/{atespace}/{name}", a.substrateGetActor(st))
 	mux.HandleFunc("DELETE /api/v1/substrate/actors/{atespace}/{name}", a.substrateDeleteActor(st))
 	mux.HandleFunc("POST /api/v1/substrate/session-cert", a.substrateSessionCert(st))
+	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach", a.substrateAttach(st))
+	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach/{rest...}", a.substrateAttach(st))
 	mux.HandleFunc("GET /api/v1/substrate/batches", a.substrateListBatches(st))
 	mux.HandleFunc("GET /api/v1/substrate/batches/{id}", a.substrateGetBatch(st))
 	mux.HandleFunc("GET /api/v1/substrate/usage", a.substrateUsage(st))
-	for _, p := range []string{"asks", "decisions", "policy/explain", "secrets"} {
-		mux.HandleFunc("/api/v1/substrate/"+p, substrateNotYet)
-	}
-	mux.HandleFunc("/api/v1/substrate/asks/{id}", substrateNotYet)
-	mux.HandleFunc("/api/v1/substrate/secrets/{name}", substrateNotYet)
+	mux.HandleFunc("GET /api/v1/substrate/doctor", a.substrateDoctor(st))
+	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
+	mux.HandleFunc("POST /api/v1/substrate/asks/{id}", a.substrateDecideAsk(st))
+	mux.HandleFunc("GET /api/v1/substrate/decisions", a.substrateDecisions(st))
+	mux.HandleFunc("GET /api/v1/substrate/policy/explain", a.substratePolicyExplain(st))
+	mux.HandleFunc("GET /api/v1/substrate/secrets", a.substrateListSecrets(st))
+	mux.HandleFunc("PUT /api/v1/substrate/secrets/{name}", a.substrateSetSecret(st))
+	mux.HandleFunc("DELETE /api/v1/substrate/secrets/{name}", a.substrateRemoveSecret(st))
+	mux.HandleFunc("POST /api/v1/substrate/secrets/{name}/test", a.substrateTestSecret(st))
 	// The admin listener keeps the browser CSRF gate: people reach it from
 	// the launcher and possibly from a browser session, so a state-changing
 	// request must carry X-DefenseClaw-Client (the actor listener does not
 	// apply it, GAP-0037).
 	callout := a.apiCSRFProtect(a.substrateCalloutVerdict(st))
+	calloutAsk := a.apiCSRFProtect(a.substrateCalloutAsk(st))
+	info := a.substrateInfo(st)
 	people := a.apiCSRFProtect(a.substrateAdminAuthenticate(st, mux))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -158,8 +168,19 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, substrateAdminMaxBody)
-		if r.URL.Path == substrateCalloutPath {
+		switch r.URL.Path {
+		case substrateInfoPath:
+			if r.Method != http.MethodGet {
+				writeSubstrateJSONError(w, http.StatusMethodNotAllowed, "method")
+				return
+			}
+			info(w, r)
+			return
+		case substrateCalloutPath:
 			callout.ServeHTTP(w, r)
+			return
+		case substrateCalloutAskPath:
+			calloutAsk.ServeHTTP(w, r)
 			return
 		}
 		people.ServeHTTP(w, r)
@@ -176,10 +197,6 @@ func writeSubstrateJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-func substrateNotYet(w http.ResponseWriter, _ *http.Request) {
-	writeSubstrateJSONError(w, http.StatusNotImplemented, "not_implemented")
 }
 
 func bearer(r *http.Request) string {
@@ -247,8 +264,12 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusRequestEntityTooLarge, "task_too_long")
 			return
 		}
+		if req.BatchID != "" && !substrateBatchIDRE.MatchString(req.BatchID) {
+			writeSubstrateJSONError(w, http.StatusBadRequest, "batch_id_invalid")
+			return
+		}
 		resolve := st.cfg.substrateProfiles()
-		profile, atespace, err := resolve(c.person, req.Profile)
+		profile, atespace, err := resolve(c.person, req.Profile, req.Connector, c.admin)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusForbidden, "profile_not_allowed")
 			return
@@ -257,9 +278,20 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusForbidden, "atespace_not_allowed")
 			return
 		}
+		if strings.TrimSpace(req.Connector) == "" {
+			writeSubstrateJSONError(w, http.StatusBadRequest, "connector_required")
+			return
+		}
 		req.Profile, req.Atespace, req.Owner = profile, atespace, ownerOf(c.person)
 		created, err := st.cfg.Actions.Create(r.Context(), req)
-		if err != nil {
+		switch {
+		case errors.Is(err, ErrSubstrateTemplateNotFound):
+			writeSubstrateJSONError(w, http.StatusNotFound, "template_not_found")
+			return
+		case errors.Is(err, ErrSubstrateActorExists):
+			writeSubstrateJSONError(w, http.StatusConflict, "actor_exists")
+			return
+		case err != nil:
 			fmt.Fprintf(os.Stderr, "[substrate] create actor failed: %v\n", err)
 			writeSubstrateJSONError(w, http.StatusBadGateway, "create_failed")
 			return
@@ -284,13 +316,23 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		if err := st.cfg.Actions.Resume(r.Context(), created.Atespace, created.Name); err != nil {
+			if errors.Is(err, ErrSubstrateActorRefused) {
+				// No policy, no actor: delete it and leave a tombstone.
+				ctx := context.WithoutCancel(r.Context())
+				_ = st.cfg.Actions.Delete(ctx, created.Atespace, created.Name)
+				reg.Deleted = true
+				_ = st.cfg.Registrations.Put(ctx, reg)
+				fmt.Fprintf(os.Stderr, "[substrate] actor %s/%s refused and removed: %v\n", created.Atespace, created.Name, err)
+				writeSubstrateJSONError(w, http.StatusForbidden, "actor_refused")
+				return
+			}
 			fmt.Fprintf(os.Stderr, "[substrate] resume failed: %v\n", err)
 			writeSubstrateJSONError(w, http.StatusBadGateway, "resume_failed")
 			return
 		}
 		out := substrateActorView(reg)
 		if st.cfg.Sessions != nil && !req.Unattended {
-			tok, exp, err := st.cfg.Sessions.Issue(c.person.Subject, identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID}, 0)
+			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID}, 0)
 			if err == nil {
 				out["session_token"], out["session_expires"] = tok, exp
 			}
@@ -305,7 +347,7 @@ func (c SubstrateConfig) substrateProfiles() SubstrateProfileResolver {
 	if c.Profiles != nil {
 		return c.Profiles
 	}
-	return func(identity.Person, string) (string, string, error) {
+	return func(identity.Person, string, string, bool) (string, string, error) {
 		return "", "", errors.New("no launcher profiles are configured")
 	}
 }
@@ -417,7 +459,9 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 		if ttl > substrateSessionMaxTTL {
 			ttl = substrateSessionMaxTTL
 		}
-		tok, exp, err := st.cfg.Sessions.Issue(c.person.Subject, identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID}, ttl)
+		// The token names the person as issuer#subject: two issuers may
+		// use the same subject (GAP-0061).
+		tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID}, ttl)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return
@@ -433,20 +477,28 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 	}
 }
 
-func (a *APIServer) substrateBatches(st *substrateState, r *http.Request, batchID string) (map[string][]map[string]any, error) {
+// substrateBatchIDRE is a batch ID the launcher may send (GAP-0106).
+var substrateBatchIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// substrateBatchKey is one owner's batch: two people may pick the same
+// batch ID, and an administrator's all=1 view keeps them apart (GAP-0106).
+type substrateBatchKey struct{ owner, id string }
+
+func (a *APIServer) substrateBatches(st *substrateState, r *http.Request, batchID string) (map[substrateBatchKey][]map[string]any, error) {
 	c, _ := substrateCallerFrom(r.Context())
 	f := registry.Filter{OwnerID: ownerOf(c.person).ID(), BatchID: batchID, IncludeDeleted: true}
 	if c.admin && r.URL.Query().Get("all") == "1" {
-		f.OwnerID = ""
+		f.OwnerID = r.URL.Query().Get("owner") // "" is every owner
 	}
 	regs, err := st.cfg.Registrations.List(r.Context(), f)
 	if err != nil {
 		return nil, err
 	}
-	out := map[string][]map[string]any{}
+	out := map[substrateBatchKey][]map[string]any{}
 	for _, reg := range regs {
 		if reg.BatchID != "" {
-			out[reg.BatchID] = append(out[reg.BatchID], substrateActorView(reg))
+			k := substrateBatchKey{owner: reg.Person.ID(), id: reg.BatchID}
+			out[k] = append(out[k], substrateActorView(reg))
 		}
 	}
 	return out, nil
@@ -459,14 +511,23 @@ func (a *APIServer) substrateListBatches(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "registrations_unavailable")
 			return
 		}
-		ids := make([]string, 0, len(b))
-		for id := range b {
-			ids = append(ids, id)
+		keys := make([]substrateBatchKey, 0, len(b))
+		for k := range b {
+			keys = append(keys, k)
 		}
-		sort.Strings(ids)
-		out := make([]map[string]any, 0, len(ids))
-		for _, id := range ids {
-			out = append(out, map[string]any{"batch_id": id, "actors": len(b[id])})
+		sort.Slice(keys, func(i, j int) bool {
+			if keys[i].id != keys[j].id {
+				return keys[i].id < keys[j].id
+			}
+			return keys[i].owner < keys[j].owner
+		})
+		out := make([]map[string]any, 0, len(keys))
+		for _, k := range keys {
+			row := map[string]any{"batch_id": k.id, "actors": len(b[k])}
+			if owner, _ := b[k][0]["owner"].(string); owner != "" {
+				row["owner"] = owner
+			}
+			out = append(out, row)
 		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"batches": out})
 	}
@@ -475,16 +536,26 @@ func (a *APIServer) substrateListBatches(st *substrateState) http.HandlerFunc {
 func (a *APIServer) substrateGetBatch(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		if !substrateBatchIDRE.MatchString(id) {
+			writeSubstrateJSONError(w, http.StatusNotFound, "batch_not_found")
+			return
+		}
 		b, err := a.substrateBatches(st, r, id)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "registrations_unavailable")
 			return
 		}
-		if len(b[id]) == 0 {
+		switch len(b) {
+		case 0:
 			writeSubstrateJSONError(w, http.StatusNotFound, "batch_not_found")
-			return
+		case 1:
+			for _, actors := range b {
+				writeSubstrateJSON(w, http.StatusOK, map[string]any{"batch_id": id, "actors": actors})
+			}
+		default:
+			// Several owners use this ID (all=1): name one with owner=.
+			writeSubstrateJSONError(w, http.StatusConflict, "batch_id_ambiguous")
 		}
-		writeSubstrateJSON(w, http.StatusOK, map[string]any{"batch_id": id, "actors": b[id]})
 	}
 }
 

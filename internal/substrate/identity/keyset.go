@@ -49,6 +49,9 @@ const (
 	// next verification refreshes it. A key removed from the pool (a
 	// compromised key) stops verifying within this time.
 	DefaultKeyMaxAge = 5 * time.Minute
+	// DefaultKeyStaleLimit is how long the keys of the last good fetch
+	// are used while the issuer cannot be reached.
+	DefaultKeyStaleLimit = time.Hour
 	// DefaultFetchTimeout bounds one discovery plus key-set fetch.
 	DefaultFetchTimeout = 5 * time.Second
 )
@@ -201,10 +204,16 @@ func (ks *KeySet) key(ctx context.Context, kid string) (publicKey, error) {
 	ks.mu.RLock()
 	k, ok = ks.keys[kid]
 	haveKeys := ks.keys != nil
+	expired := !ks.fetched.IsZero() && ks.now().Sub(ks.fetched) >= DefaultKeyStaleLimit
 	ks.mu.RUnlock()
 	if ok {
-		// A failed refresh keeps the keys of the last good fetch: an
-		// ate-idp-server outage must not stop tokens it already signed.
+		// A failed refresh keeps the keys of the last good fetch for at
+		// most DefaultKeyStaleLimit: an issuer outage must not stop tokens
+		// it already signed, but a key it may have withdrawn is not kept
+		// forever (GAP-0061).
+		if ferr != nil && expired {
+			return publicKey{}, ferr
+		}
 		return k, nil
 	}
 	if !haveKeys && ferr != nil {
@@ -319,8 +328,9 @@ func (k jwk) public() (crypto.PublicKey, error) {
 		if err1 != nil || err2 != nil || len(x) != 32 || len(y) != 32 {
 			return nil, errors.New("coordinates")
 		}
-		pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
-		if !pub.Curve.IsOnCurve(pub.X, pub.Y) { //nolint:staticcheck // validating a decoded point
+		// ParseUncompressedPublicKey checks that the point is on the curve.
+		pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{4}, x...), y...))
+		if err != nil {
 			return nil, errors.New("point is not on the curve")
 		}
 		return pub, nil

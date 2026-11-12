@@ -30,8 +30,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/activity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
 
 var (
@@ -39,6 +43,12 @@ var (
 	substrateControllerOnce   bool
 	substrateControllerCheck  bool
 	substrateControllerUsage  string
+	// The gateway leader (registrations, activity) and the controller's
+	// pod identity for its mTLS.
+	substrateControllerLeader     string
+	substrateControllerLeaderIDs  []string
+	substrateControllerPeerBundle string
+	substrateControllerPeerTrust  string
 )
 
 var substrateControllerCmd = &cobra.Command{
@@ -65,7 +75,23 @@ func init() {
 	substrateControllerCmd.Flags().BoolVar(&substrateControllerCheck, "check", false, "check access to ate-api-server and exit")
 	substrateControllerCmd.Flags().StringVar(&substrateControllerUsage, "usage-listen", "",
 		"address for Substrate's per-actor usage records (OTLP/HTTP POST /v1/logs or ndjson), the CPU source of idle suspend; empty turns idle suspend off")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerLeader, "leader-address", "", "gateway leader host:port (registrations and activity)")
+	substrateControllerCmd.Flags().StringSliceVar(&substrateControllerLeaderIDs, "leader-id", nil, "SPIFFE IDs the leader may present")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerPeerBundle, "peer-bundle", "/run/podidentity.podcert.ate.dev/credential-bundle.pem", "pod identity bundle (leader RPC)")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerPeerTrust, "peer-trust", "/run/podidentity.podcert.ate.dev/trust-bundle.pem", "pod identity trust bundle")
 	rootCmd.AddCommand(substrateControllerCmd)
+}
+
+func substrateControllerLeaderClient() (*leader.Client, error) {
+	files, err := podcert.NewFiles(substrateControllerPeerBundle, substrateControllerPeerTrust)
+	if err != nil {
+		return nil, err
+	}
+	if len(substrateControllerLeaderIDs) == 0 {
+		return nil, errors.New("substrate-controller: --leader-id names the leader's SPIFFE ID")
+	}
+	tr := &http.Transport{TLSClientConfig: files.ClientConfig(substrateControllerLeaderIDs), Proxy: nil, MaxIdleConnsPerHost: 16}
+	return &leader.Client{BaseURL: "https://" + substrateControllerLeader, HTTP: &http.Client{Transport: tr, Timeout: 30 * time.Second}}, nil
 }
 
 func runSubstrateController(cmd *cobra.Command, _ []string) error {
@@ -99,7 +125,6 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 		return substrateControllerReport(ctx, cmd, client)
 	}
 	var cpu controller.CPUSource
-	idleAfter := sub.EffectiveIdleSuspendAfter()
 	if substrateControllerUsage != "" {
 		usage := controller.NewUsageCPU(nil)
 		mux := http.NewServeMux()
@@ -108,17 +133,24 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 		go func() { _ = srv.ListenAndServe() }()
 		defer srv.Close()
 		cpu = usage
-	} else {
-		idleAfter = 0 // no CPU source: never suspend on silence alone (E4)
 	}
-	ctl, err := controller.New(controller.Options{
-		Client: client, Attestor: controller.NoAttestor{}, Activity: controller.NoActivity{}, CPU: cpu,
-		Registry: controller.NewMemoryRegistry(), Resolver: &controller.ConfigResolver{Config: cfg},
-		Sink:     &controller.JSONSink{W: cmd.OutOrStdout()},
-		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
-		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(),
-		KitVersion: appVersion, IdleSuspendAfter: idleAfter,
-	})
+	// Registrations and activity come from the gateway leader: the
+	// launcher's registration attributes a launcher actor (without it the
+	// actor is foreign and gets no policy), and idle suspend reads the
+	// gateways' hook, model and relay activity.
+	var reg controller.Registry = controller.NewMemoryRegistry()
+	var act controller.ActivitySource
+	if substrateControllerLeader != "" {
+		toLeader, err := substrateControllerLeaderClient()
+		if err != nil {
+			return err
+		}
+		reg = controllerRegistry{store: &registry.Remote{Client: toLeader}}
+		act = &activity.Source{Leader: toLeader}
+	} else {
+		fmt.Fprintln(os.Stderr, "[substrate] warning: no --leader-address: launcher actors are not attributed and idle suspend sees no activity")
+	}
+	ctl, err := newSubstrateController(cfg, client, reg, act, cpu, cmd.OutOrStdout(), true)
 	if err != nil {
 		return err
 	}

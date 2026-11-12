@@ -43,7 +43,13 @@ const (
 	// MaxActorTokenLifetime is upstream's longest expiration_seconds.
 	MaxActorTokenLifetime = time.Hour
 	// DefaultLiveTTL is how long a live-UID answer is cached.
-	DefaultLiveTTL = 60 * time.Second
+	// It is short because only the replica that served a DefenseClaw
+	// delete invalidates its own cache: every other replica sees a deleted
+	// or recreated actor within this time (GAP-0060).
+	DefaultLiveTTL = 10 * time.Second
+	// DefaultLiveGrace is how long the last good answer serves while the
+	// control API cannot answer (PLAN 5.5: 60 s, then refuse).
+	DefaultLiveGrace = 60 * time.Second
 	// liveRecheck is the least time between two forced re-checks of one
 	// actor whose token names a UID the cache does not hold.
 	liveRecheck = time.Second
@@ -301,8 +307,11 @@ func (v *ActorVerifier) checkLive(ctx context.Context, a Actor) error {
 	case errors.Is(err, ErrActorNotFound):
 		e = liveEntry{found: false, at: now, recheck: now.Add(liveRecheck)}
 	case err != nil:
-		// The control API is down: a fresh answer for this UID would have
-		// returned above, so there is nothing to decide with.
+		// The control API is down: the last good answer for this UID
+		// serves for DefaultLiveGrace (PLAN 5.5), then the call is refused.
+		if ok && e.found && e.actor.UID == a.UID && now.Sub(e.at) < DefaultLiveGrace {
+			return liveState(e.actor)
+		}
 		return reasonf(ReasonUnavailable, "control API: actor lookup failed")
 	default:
 		e = liveEntry{actor: got, found: true, at: now, recheck: now.Add(liveRecheck)}
