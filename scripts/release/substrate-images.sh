@@ -14,14 +14,15 @@
 # Signing is not done here: the workflow signs every digest in images.txt
 # with cosign keyless, under the identity that signs checksums.txt.
 #
-# usage: substrate-images.sh --version X.Y.Z --registry REG --dist DIR --out DIR [--push]
+# usage: substrate-images.sh --version X.Y.Z --registry REG --dist DIR --out DIR [--push] [--plain-http]
 #   --dist  the directory with defenseclaw-X.Y.Z-linux-{amd64,arm64}.tar.gz
 #   --out   receives defenseclaw-substrate-X.Y.Z.tgz and images.txt
 #   without --push nothing leaves the machine: the images are built into the
 #   buildx cache only and images.txt lists them without digests.
+#   --plain-http pushes the chart over HTTP (a test registry; never the release).
 set -euo pipefail
 
-version="" registry="" dist="" out="" push=false
+version="" registry="" dist="" out="" push=false plain=()
 while (($#)); do
   case "$1" in
     --version) version=$2; shift 2 ;;
@@ -29,6 +30,7 @@ while (($#)); do
     --dist) dist=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
     --push) push=true; shift ;;
+    --plain-http) plain=(--plain-http); shift ;;
     *) echo "substrate-images: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -118,7 +120,7 @@ helm package "$chart" --version "$version" --app-version "$version" --destinatio
 tgz="$out/defenseclaw-substrate-$version.tgz"
 [[ -f "$tgz" ]] || { echo "substrate-images: helm package wrote no $tgz" >&2; exit 1; }
 if [[ "$push" == true ]]; then
-  pushed=$(helm push "$tgz" "oci://$registry/charts" 2>&1)
+  pushed=$(helm push ${plain[@]+"${plain[@]}"} "$tgz" "oci://$registry/charts" 2>&1)
   digest=$(sed -n 's/^Digest: //p' <<<"$pushed")
   [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "substrate-images: helm push gave no digest: $pushed" >&2; exit 1; }
   echo "$registry/charts/defenseclaw-substrate@$digest" >> "$out/images.txt"
