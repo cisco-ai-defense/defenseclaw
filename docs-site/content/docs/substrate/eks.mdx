@@ -1,0 +1,65 @@
+---
+title: Agent Substrate on Amazon EKS
+description: What differs from kind and GKE when you run Agent Substrate v1.0.0 on EKS for DefenseClaw - private nodes, S3 snapshots, microVM nodes, ECR images, credential injection and a unique token issuer.
+keywords:
+  - Agent Substrate EKS
+  - Amazon EKS agent sandbox
+  - Substrate S3 snapshots
+  - gVisor microVM nodes EKS
+---
+
+{/* TODO(substrate): this page comes from lane E2 (lanes/e2/EKS-GUIDE.md), checked on EKS 1.37 with Substrate v1.0.0. The overlay patch and the asset-staging script it mentions must be published with the docs (docs/ or deploy/), or replaced by an upstream EKS profile. Do not publish without them. */}
+
+Upstream documents `kind` and GKE. This page lists what to do differently on EKS. It was run on a real EKS cluster with both sandbox classes: actors create, answer HTTP, suspend and resume with memory kept, snapshots go to S3, egress is default deny, and a Bedrock call works from an actor through an injected credential. Placeholders: `BUCKET`, `CLUSTER`.
+
+## The cluster
+
+- **Version.** The account default (1.37 when tested). Nodes: Amazon Linux 2023.
+- **Endpoint.** Private only is fine. Add an ingress rule on the cluster security group (tcp 443) from the VPC range so the hosts that use `kubectl` can reach it, and give each caller an EKS access entry.
+- **Subnets and egress.** Private nodes need a way out: the control plane pulls images from `ghcr.io`, the node agent fetches gVisor from a Google bucket, and the microVM install downloads Kata and Cloud Hypervisor from GitHub. VPC endpoints alone are not enough. Use private subnets with a NAT gateway.
+- **Node metadata.** Require IMDSv2 with a **hop limit of 2**. The object-store plugin runs in a pod and takes its S3 credentials from the node role. With a hop limit of 1 the pod can't reach the metadata service.
+- **Node disk.** gp3, 200 GiB, encrypted. The snapshot cache lives on the boot disk.
+- **Node groups.** Managed groups with a launch template.
+  - `gvisor`: two `m8i.2xlarge`, no taint. It also hosts the control plane, Postgres, the router and the egress gateway.
+  - `microvm`: one `m8i.2xlarge` with `CpuOptions.NestedVirtualization=enabled` in the launch template. EKS managed node groups accept it; `/dev/kvm` appears and the CPU shows `vmx`. Taint it `ate.dev/sandboxClass=microvm:NoSchedule` and label it. The microVM worker pool selects it with `template.nodeSelector`. Use a current boto3 or AWS CLI, because older ones don't know the parameter.
+- **Add-ons.** EKS installs vpc-cni, kube-proxy and coredns. Postgres needs a volume, and EKS 1.37 has no in-tree EBS provisioner, so install the `aws-ebs-csi-driver` add-on (an IRSA role with `AmazonEBSCSIDriverPolicy`, which needs the cluster OIDC provider) and make a `gp3` StorageClass the default.
+
+## Installing Substrate
+
+`ate-setup` has no EKS profile. Outside `--kind`, it assumes Google Cloud Storage everywhere. The object-store plugin does support S3 with the pod's ambient AWS credentials, and the shortest working path is to run `ate-setup` with `--kind --context EKS_CONTEXT` and a patched copy of the kind overlay:
+
+- keep `ATE_STORAGE_BACKEND=s3` and `AWS_REGION`, and delete `AWS_ENDPOINT_URL`, `AWS_S3_USE_PATH_STYLE` and the test object-store keys, so the plugin uses the node role;
+- drop the test object store from the kind kustomization;
+- point the image credential provider paths at the EKS node provider (`/etc/eks/image-credential-provider/config.json`) so actors can use ECR images;
+- in the install config, set prebuilt images (`images.repo`, `images.tag=v1.0.0`) and name the snapshot location explicitly: `storage.snapshotLocation: s3://BUCKET/snapshots/`.
+
+Then deploy `ate-system` with `--sandbox-classes gvisor`. It takes about 80 seconds. Upstream publishes no `ate-setup` binary, so build it from the same tag as the manifests.
+
+For microVM actors, the kind-only asset step doesn't work on EKS. Assemble the assets with `ate-setup deploy sandboxconfig --sandbox-classes gvisor,microvm` (it fails at the last step; that is expected), upload each file to `s3://BUCKET/microvm-assets/amd64/<sha256>`, render the microVM template with `BUCKET_SCHEME=s3 ASSET_BUCKET_NAME=BUCKET`, and apply it. **Keep the assets outside the snapshot prefix**: the plugin refuses URLs under it.
+
+## Storage and images
+
+- One S3 bucket with server-side encryption, public access blocked and a lifecycle rule. Snapshots under `snapshots/`, assets under `microvm-assets/`.
+- Give the node role a policy limited to that bucket: list, get, put, delete and multipart. With S3 there is no per-actor storage credential, unlike Google Cloud Storage.
+- An ActorTemplate image must be pinned by digest. A tag fails with `must be pinned by digest`. For ECR, push and use the digest.
+- Upstream demo images aren't published. Use your own.
+
+## Egress and credentials
+
+- Install the Kubernetes credential provider with its default. Its namespace policy starts empty, so grant each atespace the namespace that holds its Secrets. The DefenseClaw chart does this for the launcher atespaces. After a manual edit, restart `k8s-credential-provider`.
+- HTTPS calls from tools need the projected trust bundle. For Python, `SSL_CERT_FILE=/run/ate/egress-trust-bundle/trust-bundle.pem` works, and the directory form doesn't.
+- **Bedrock.** Add an `https` rule to `bedrock-runtime.REGION.amazonaws.com` with `replaceHeaders` on `Authorization` (prefix `Bearer `) and a `credentialUri` of the form `ate-secret://k8s.io/default/NAMESPACE/SECRET/KEY`. The Secret holds a short-lived Bedrock API key and the actor sends a placeholder. This works on gVisor and microVM. With DefenseClaw, models are reached through the guardrail proxy and this rule belongs to the proxy, not to actors.
+- If your VPC has a Bedrock interface endpoint with private DNS, its security group must admit the node security group on 443, or calls fail with a 503 timeout.
+
+## The token issuer
+
+Set a unique issuer per cluster: `--actor-jwt-issuer https://UNIQUE-HOST` on `deploy apiserver`. The default is the same on every cluster. With S3 nothing in the cluster fetches the issuer's URL, so actors and egress keep working with a non-resolving name. In-cluster verifiers fetch keys from the `idp` Service and compare `iss` as a string. Real federation needs a public host with a certificate in front of that Service. Set the same value in `substrate.identity.issuer`.
+
+## Things that tripped us
+
+- In zsh, `"$ACCT:role"` is a history modifier and builds a broken ARN. EKS then says "Cross-account pass role is not allowed". Use `${ACCT}`.
+- `create-cluster` has no dry run. Check subnets, roles and versions first.
+- A worker pool that asks for more actors than there is room for answers "no worker has room for the actor". A golden-snapshot build also takes a worker.
+- Deleting the instances of a managed node group by hand makes the autoscaling group recreate them. Delete the node group.
+
+Then continue with the [open-source walkthrough](/docs/substrate/open-source).

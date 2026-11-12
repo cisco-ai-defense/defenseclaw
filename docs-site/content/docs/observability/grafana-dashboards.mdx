@@ -31,6 +31,7 @@ DefenseClaw provisions 18 Grafana dashboards into a **DefenseClaw** folder, or 1
 | **DefenseClaw — Scanners (Ops)** (`defenseclaw-scanners`) | Are scans healthy and producing the expected findings? | Prometheus |
 | **DefenseClaw — Proxy & LLM Guard** (`defenseclaw-traffic`) | What happens on proxy and router deployments? Empty unless proxy mode is active. | Prometheus, Loki, Tempo |
 | **DefenseClaw — Sandboxes** (`defenseclaw-sandboxes`) | What are OpenShell sandboxes doing, reaching and being refused? See [Sandboxes board](#sandboxes-board). | Prometheus, Loki |
+| **DefenseClaw — Substrate agents** (`defenseclaw-substrate`) | Is DefenseClaw healthy on Agent Substrate, and what are the actors doing? See [Substrate agents board](#substrate-agents-board). | Prometheus, Loki |
 | **DefenseClaw — Runtime & Reliability** (`defenseclaw-runtime`) | Is the process, database, exporter or destination delivery unhealthy? | Prometheus, Loki |
 
 ## Kernel controls and your Tetragon policies
@@ -125,6 +126,19 @@ Things to know when you read it:
 ![Grafana Sandboxes board, Egress decisions and Traffic volume rows: egress by source and decision as logs and as a metric (all names), the top blocked host (webhook.site) and the top allowed hosts, and bytes up and down by destination and over time](/images/grafana/sandboxes-egress.png)
 
 ![Grafana Sandboxes board, Process starts row: process starts over time and the top started programs, filled because the sandbox ran with the process tree on](/images/grafana/sandboxes-processes.png)
+
+## Substrate agents board
+
+The **Substrate agents** board (`defenseclaw-substrate`) shows [Agent Substrate](/docs/substrate) clusters. It has the **Environment** box (`$environment`) and four rows:
+
+| Row | Panels | What it shows |
+| --- | --- | --- |
+| Control plane health | Policy lag p99, Unattested templates, Policy conflicts, Idle suspends, Rate limited, Actors seen | Whether policy reaches new actors in time, whether any template or actor has no valid policy, and how often the controller, the idle rule and the rate limit act. Zero conflicts and zero unattested templates are healthy |
+| Latency | Hook round trip, First hook after resume, Policy lag, Leader observe latency | The 50th and 99th percentile of each histogram |
+| Actor lifecycle | Lifecycle changes by trigger, Phase transitions, Recent lifecycle records | What caused each change (create, resume re-check, fork, drift, idle suspend) and which phase it entered |
+| Egress through the callout | Egress decisions, Bodies read and bodies over the cap, Secrets injected, Recent blocked requests | What the callout allowed and refused, how often it read a body, and which secrets it injected (names only) |
+
+The metric panels have no actor, atespace or person label, because those are never metric labels. Actor names appear only in the log panels. Alert rules for the same signals are in the chart (`metrics.prometheusRule.enabled`).
 
 ## How the drill-down works
 
