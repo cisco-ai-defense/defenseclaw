@@ -21,8 +21,8 @@ spec:
   policyTypes: [Ingress]
 ---
 # Source: defenseclaw-substrate/templates/networkpolicy.yaml
-# Gateway: the actor listener only from atenet-egress (actors reach it only
-# through egress, with the injected actor JWT); the admin listener only from
+# Gateway: the actor listener (plain HTTP) only from atenet-egress (actors
+# reach it only through egress, with the injected actor JWT); the admin listener only from
 # this namespace and adminFrom (launcher ingress, fleet).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -54,7 +54,7 @@ spec:
           app: atenet-egress
     ports:
     - protocol: TCP
-      port: 8443
+      port: 8080
   - from:
     # This namespace's pods, never a Substrate worker pod (which hosts
     # actors) even if worker pools share the namespace.
@@ -151,27 +151,6 @@ spec:
       app.kubernetes.io/name: defenseclaw-substrate
       app.kubernetes.io/instance: dc
       app.kubernetes.io/component: callout
----
-# Source: defenseclaw-substrate/templates/controller.yaml
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: defenseclaw-controller
-  labels:
-    app.kubernetes.io/name: defenseclaw-substrate
-    app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
-    app.kubernetes.io/component: controller
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: defenseclaw-substrate
-      app.kubernetes.io/instance: dc
-      app.kubernetes.io/component: controller
 ---
 # Source: defenseclaw-substrate/templates/gateway.yaml
 apiVersion: policy/v1
@@ -272,7 +251,6 @@ metadata:
     app.kubernetes.io/component: callout
 data:
   callout.yaml: |
-    body_hosts: []
     body_inspection: auto
     body_max_bytes: 1048576
     defenseclaw_hosts:
@@ -283,7 +261,6 @@ data:
     egress_peers:
     - spiffe://cluster.local/ns/ate-system/sa/atenet-egress
     failure_mode: closed
-    mcp_hosts: []
 ---
 # Source: defenseclaw-substrate/templates/configmap.yaml
 apiVersion: v1
@@ -424,32 +401,6 @@ rules:
   resourceNames: [defenseclaw-store-state]
   verbs: [get, update, patch]
 ---
-# Source: defenseclaw-substrate/templates/rbac.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: defenseclaw-controller
-  labels:
-    app.kubernetes.io/name: defenseclaw-substrate
-    app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
-    app.kubernetes.io/component: controller
-rules:
-- apiGroups: [coordination.k8s.io]
-  resources: [leases]
-  verbs: [create]
-- apiGroups: [coordination.k8s.io]
-  resources: [leases]
-  resourceNames: ["defenseclaw-controller"]
-  verbs: [get, update]
-- apiGroups: [""]
-  resources: [configmaps]
-  resourceNames: [defenseclaw-store-state]
-  verbs: [get]
----
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -517,28 +468,6 @@ subjects:
   name: defenseclaw-gateway
   namespace: defenseclaw-system
 ---
-# Source: defenseclaw-substrate/templates/rbac.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: defenseclaw-controller
-  labels:
-    app.kubernetes.io/name: defenseclaw-substrate
-    app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
-    app.kubernetes.io/component: controller
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: defenseclaw-controller
-subjects:
-- kind: ServiceAccount
-  name: defenseclaw-controller
-  namespace: defenseclaw-system
----
 # Source: defenseclaw-substrate/templates/callout.yaml
 apiVersion: v1
 kind: Service
@@ -567,8 +496,11 @@ spec:
     targetPort: health
 ---
 # Source: defenseclaw-substrate/templates/gateway.yaml
-# The actor Service: the only DefenseClaw host in rendered egress policies.
-# It exposes the actor listener and nothing else (D15).
+# The actor Service: the only DefenseClaw host in rendered egress policies,
+# as an http rule on port 80 to defenseclaw-actor.<ns>.svc.cluster.local
+# (GAP-0023: egress trusts only public CAs upstream, and actors resolve only
+# the exact names in their policy). It exposes the actor listener and nothing
+# else (D15); the actor JWT egress injects is the authentication.
 apiVersion: v1
 kind: Service
 metadata:
@@ -589,8 +521,8 @@ spec:
     app.kubernetes.io/instance: dc
     app.kubernetes.io/component: gateway
   ports:
-  - name: https
-    port: 443
+  - name: http
+    port: 80
     targetPort: actor
 ---
 # Source: defenseclaw-substrate/templates/gateway.yaml
@@ -708,7 +640,7 @@ spec:
         app.kubernetes.io/component: callout
       annotations:
         checksum/config: 9250fc1897492948415eb36b75b72d659a5e677753511083087c46ee7ea8aa2a
-        checksum/callout: 69722565edffc9177434a060d503ea53ab56b3d19a5280b3ad394e1ecbb66d80
+        checksum/callout: e88070e3703ffb6827422f8a74e5190074b5c5ec17d42026165119518f1f61ba
     spec:
       
       serviceAccountName: defenseclaw-callout
@@ -840,8 +772,9 @@ spec:
           name: defenseclaw-callout
 ---
 # Source: defenseclaw-substrate/templates/controller.yaml
-# Two replicas, one active through the lease: policies, admission, idle
-# suspend, drift and inventory.
+# One replica, Recreate: policies, admission, idle suspend, drift and
+# inventory. The controller has no Lease client yet (A3), so two would both
+# act; when it gets one this becomes two replicas with a PDB.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -855,13 +788,10 @@ metadata:
     helm.sh/chart: defenseclaw-substrate-1.0.10
     app.kubernetes.io/component: controller
 spec:
-  replicas: 2
+  replicas: 1
   revisionHistoryLimit: 5
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: defenseclaw-substrate
@@ -893,8 +823,7 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - substrate-controller
-        - --lease=defenseclaw-controller
-        - --metrics-listen=:9464
+        - --config=/etc/defenseclaw/config.yaml
         env:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml
@@ -908,16 +837,6 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        ports:
-        - name: metrics
-          containerPort: 9464
-        readinessProbe:
-          httpGet: {path: /readyz, port: metrics}
-          periodSeconds: 5
-        livenessProbe:
-          httpGet: {path: /healthz, port: metrics}
-          periodSeconds: 10
-          failureThreshold: 6
         resources:
           limits:
             memory: 512Mi
@@ -1031,10 +950,16 @@ spec:
         - serve
         - --substrate
         - --substrate-role=gateway
-        - --actor-listen=:8443
+        - --actor-listen=:8080
         - --admin-listen=:9443
         - --metrics-listen=:9464
-        - --leader-address=defenseclaw-leader.defenseclaw-system.svc:7443
+        - --leader-address=defenseclaw-leader.defenseclaw-system.svc.cluster.local:7443
+        - --leader-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        - --peer-bundle=/var/run/ate/credential-bundle.pem
+        - --peer-trust=/var/run/ate/podidentity-ca.crt
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
         env:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml
@@ -1050,7 +975,7 @@ spec:
               fieldPath: metadata.namespace
         ports:
         - name: actor
-          containerPort: 8443
+          containerPort: 8080
         - name: admin
           containerPort: 9443
         - name: metrics
@@ -1085,6 +1010,12 @@ spec:
           readOnly: true
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
+          readOnly: true
+        - name: relay-session
+          mountPath: /var/run/secrets/defenseclaw-relay-session
+          readOnly: true
+        - name: llm-credentials
+          mountPath: /var/run/secrets/defenseclaw-llm
           readOnly: true
       volumes:
       - name: config
@@ -1128,6 +1059,14 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: trust-bundle.pem
+      - name: relay-session
+        secret:
+          secretName: defenseclaw-relay-session
+          optional: true
+      - name: llm-credentials
+        secret:
+          secretName: defenseclaw-llm
+          optional: true
 ---
 # Source: defenseclaw-substrate/templates/leader.yaml
 # The gateway leader: one replica holding the lease and the RWO store. Recreate,
@@ -1188,6 +1127,11 @@ spec:
         - --lease=defenseclaw-gateway-leader
         - --store-dir=/var/lib/defenseclaw/store
         - --store-state-configmap=defenseclaw-store-state
+        - --peer-bundle=/var/run/ate/credential-bundle.pem
+        - --peer-trust=/var/run/ate/podidentity-ca.crt
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
         env:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml
@@ -1237,8 +1181,19 @@ spec:
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
           readOnly: true
+        - name: relay-session
+          mountPath: /var/run/secrets/defenseclaw-relay-session
+          readOnly: true
+        - name: llm-credentials
+          mountPath: /var/run/secrets/defenseclaw-llm
+          readOnly: true
         - name: store
           mountPath: /var/lib/defenseclaw/store
+        # The Kubernetes API token for the leader Lease and the store state
+        # ConfigMap (the gateway's automount stays off).
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
       volumes:
       - name: config
         configMap:
@@ -1281,6 +1236,28 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: trust-bundle.pem
+      - name: relay-session
+        secret:
+          secretName: defenseclaw-relay-session
+          optional: true
+      - name: llm-credentials
+        secret:
+          secretName: defenseclaw-llm
+          optional: true
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
       - name: store
         persistentVolumeClaim:
           claimName: defenseclaw-store

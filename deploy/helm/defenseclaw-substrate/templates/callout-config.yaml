@@ -6,22 +6,21 @@ the single source.
 */ -}}
 {{- define "dc.calloutConfig" -}}
 {{- $sub := .Values.config.substrate | default dict -}}
-{{- $xp := $sub.extproc | default dict -}}
+{{- /* config.substrate.extproc uses the callout file's own keys (A3 config,
+A4 extproc.Config); "enabled" is the chart's, not the callout's. */ -}}
+{{- $c := omit (deepCopy ($sub.extproc | default dict)) "enabled" -}}
 {{- $actor := include "dc.actorHost" . -}}
 {{- $admin := include "dc.adminHost" . -}}
-{{- $c := dict
-  "failure_mode" ($xp.failure_mode | default "closed")
-  "body_inspection" ($xp.body_inspection | default "auto")
-  "body_max_bytes" ($xp.body_max_bytes | default 1048576 | int)
-  "mcp_hosts" ($xp.mcp_hosts | default list)
-  "body_hosts" ($xp.body_hosts | default list)
-  "defenseclaw_hosts" (list $actor (trimSuffix ".cluster.local" $actor) $admin (trimSuffix ".cluster.local" $admin))
-  "egress_peers" (list .Values.substrate.egressSpiffeId)
--}}
-{{- with $xp.request_access }}{{ $_ := set $c "request_access" . }}{{ end -}}
-{{- with $xp.dlp }}{{ $_ := set $c "dlp" . }}{{ end -}}
-{{- if .Values.callout.judge.tokenSecret -}}
-{{- $_ := set $c "judge" (dict "url" (printf "https://%s/api/v1/substrate/callout/mcp-verdict" $admin) "token_file" "/var/run/defenseclaw/callout-judge/token" "ca_file" "/var/run/ate/ca.crt") -}}
+{{- if not (hasKey $c "failure_mode") }}{{ $_ := set $c "failure_mode" "closed" }}{{ end -}}
+{{- if not (hasKey $c "defenseclaw_hosts") -}}
+{{- $_ := set $c "defenseclaw_hosts" (list $actor (trimSuffix ".cluster.local" $actor) $admin (trimSuffix ".cluster.local" $admin)) -}}
+{{- end -}}
+{{- if not (hasKey $c "egress_peers") }}{{ $_ := set $c "egress_peers" (list .Values.substrate.egressSpiffeId) }}{{ end -}}
+{{- if and .Values.callout.judge.tokenSecret (not (hasKey $c "judge")) -}}
+{{- $_ := set $c "judge" (dict "url" (printf "https://%s/api/v1/substrate/callout/verdict" $admin) "token_file" "/var/run/secrets/defenseclaw-callout-judge/token" "ca_file" "/var/run/ate/ca.crt") -}}
+{{- end -}}
+{{- if and .Values.callout.actorSecrets.secretName (not (hasKey $c "actor_secrets_dir")) -}}
+{{- $_ := set $c "actor_secrets_dir" "/run/defenseclaw/actor-secrets" -}}
 {{- end -}}
 {{- $secrets := list -}}
 {{- range ($sub.secrets | default list) -}}
@@ -30,13 +29,8 @@ the single source.
 {{- $secrets = append $secrets $s -}}
 {{- end -}}
 {{- if $secrets }}{{ $_ := set $c "secrets" $secrets }}{{ end -}}
-{{- if .Values.callout.actorSecrets.secretName }}{{ $_ := set $c "actor_secrets_dir" "/run/defenseclaw/actor-secrets" }}{{ end -}}
-{{- /* Profiles: config.substrate.extproc.profiles when given (the callout's own
-shape); otherwise one per launcher profile, with its atespaces, the egress
-allow list and the unattended ask mode. */ -}}
-{{- if $xp.profiles -}}
-{{- $_ := set $c "profiles" $xp.profiles -}}
-{{- else -}}
+{{- /* One profile per launcher profile: its atespaces, the egress allow
+list and the unattended ask mode. */ -}}
 {{- $profiles := list -}}
 {{- $egress := $sub.egress | default dict -}}
 {{- $asks := ($sub.unattended | default dict).asks | default "deny" -}}
@@ -46,7 +40,6 @@ allow list and the unattended ask mode. */ -}}
 {{- $profiles = append $profiles $p -}}
 {{- end -}}
 {{- if $profiles }}{{ $_ := set $c "profiles" $profiles }}{{ end -}}
-{{- end -}}
 {{- toYaml $c -}}
 {{- end -}}
 apiVersion: v1

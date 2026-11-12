@@ -28,6 +28,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
@@ -155,6 +157,9 @@ const (
 
 type substrateState struct {
 	cfg SubstrateConfig
+	// refusals bounds refusal log lines: a flood of bad tokens is still
+	// refused, not logged line by line.
+	refusals *rate.Limiter
 
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler
@@ -190,7 +195,7 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 	if cfg.IsAdmin == nil {
 		cfg.IsAdmin = func(identity.Person) bool { return false }
 	}
-	st := &substrateState{cfg: cfg}
+	st := &substrateState{cfg: cfg, refusals: rate.NewLimiter(5, 20)}
 	a.substrateMu.Lock()
 	a.substrate = st
 	a.substrateMu.Unlock()
@@ -385,19 +390,32 @@ func (a *APIServer) newSubstrateActorHandler(st *substrateState) http.Handler {
 		reg = InstallSharedAgentRegistry("", "")
 	}
 	var h http.Handler = http.HandlerFunc(a.serveSubstrateActorRoute)
-	h = apiBodyLimitMiddleware(h, apiRequestBodyMaxBytes, defaultSandboxOTLPMaxBodyBytes)
-	h = a.apiCSRFProtect(h)
+	// A model call carries the whole conversation: /llm takes the guardrail
+	// proxy's own passthrough cap, every other route the API cap.
+	h = bodyLimitMiddleware(h, func(r *http.Request) int64 {
+		switch {
+		case strings.HasPrefix(r.URL.Path, substrateLLMPrefix):
+			return substrateLLMMaxBody
+		case isOTLPEndpointPath(r.URL.Path):
+			return defaultSandboxOTLPMaxBodyBytes
+		}
+		return apiRequestBodyMaxBytes
+	})
+	// No browser CSRF gate (X-DefenseClaw-Client) here: an actor request
+	// is authenticated by the actor token egress injects, has no cookies
+	// and comes from no browser; the agent SDKs and the kit send no client
+	// tag (GAP-0037, lead ruling 11-12 21:05Z). The admin listener keeps it.
 	h = a.metricsMiddleware(h)
 	h = a.substrateActorScope(st, h)
 	h = a.substrateActorLimit(st, h)
 	h = CorrelationMiddleware(reg)(h)
 	h = sandboxRequestIDMiddleware(h)
 	h = inboundTraceContextMiddleware(h)
-	h = substrateEnvelopeMiddleware(h)
+	h = substrateEnvelopeMiddleware(st, h)
 	h = a.substrateActorAuthenticate(st, h)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		route, ok := a.classifySubstrateActorPath(r.URL.Path)
-		if !ok || r.URL.RawPath != "" {
+		if !ok || (r.URL.RawPath != "" && !substrateLLMRawPathOK(route, r.URL.RawPath)) {
 			writeSandboxIngressError(w, http.StatusNotFound, "not found")
 			return
 		}
@@ -470,15 +488,19 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 			if identity.Unavailable(err) {
 				status = http.StatusServiceUnavailable
 			}
+			// The message names the check, never token bytes (identity.Error).
+			st.logRefusal("actor token refused: %s (%v)", reason, err)
 			writeSubstrateRefusal(w, status, string(reason))
 			return
 		}
 		reg, ok, err := st.cfg.Registrations.Get(r.Context(), actor.Atespace, actor.UID)
 		switch {
 		case err != nil:
+			st.logRefusal("registration lookup failed for %s: %v", actor.Ref(), err)
 			writeSubstrateRefusal(w, http.StatusServiceUnavailable, "registration_unavailable")
 			return
 		case !ok || reg.Deleted:
+			st.logRefusal("actor %s (uid %s) is not registered", actor.Ref(), actor.UID)
 			writeSubstrateRefusal(w, http.StatusForbidden, "actor_not_registered")
 			return
 		}
@@ -491,9 +513,7 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 			writeSubstrateRefusal(w, http.StatusForbidden, "actor_not_registered")
 			return
 		}
-		ctx := withSubstrateActor(r.Context(), substrateActor{
-			Atespace: actor.Atespace, Name: actor.Name, UID: actor.UID, Subject: actor.Subject, RegistrationKey: key,
-		})
+		ctx := withSubstrateActor(r.Context(), verifiedSubstrateActor(actor.Atespace, actor.Name, actor.UID, actor.Subject, key))
 		ctx = context.WithValue(ctx, substrateRegistrationKey{}, reg)
 		w.Header().Set(substrateModeHeader, substrateMode(reg))
 		w.Header().Set(substrateFailModeHeader, substrateFailMode(st.cfg, reg))
@@ -583,6 +603,11 @@ func (a *APIServer) substrateActorScope(st *substrateState, next http.Handler) h
 		}
 		ctx = PromoteSessionIfAuthenticated(ctx)
 		ctx = contextWithSubstratePerson(ctx, reg)
+		if route.llm {
+			// The model call's verified caller for routing, usage and the
+			// profile (substrate_identity.go).
+			ctx = a.attachSubstrateSubject(ctx, reg)
+		}
 		if route.class != "" && route.class != sandboxauth.RouteOTLP {
 			ctx = a.withGuardrailProfileDecision(ctx, binding.Connector)
 		}
@@ -684,4 +709,27 @@ func substrateProfileSubject(ctx context.Context) (profileSubject, bool) {
 		Principal: reg.Person.Principal, UPN: reg.Person.Principal,
 		Groups: append([]string(nil), reg.Person.Groups...),
 	}, true
+}
+
+// logRefusal writes a rate-limited refusal line for operators.
+func (st *substrateState) logRefusal(format string, args ...any) {
+	if st == nil || st.refusals == nil || !st.refusals.Allow() {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[substrate] "+format+"\n", args...)
+}
+
+// substrateLLMMaxBody is the guardrail proxy's passthrough body cap, which
+// a model call through /llm gets too.
+const substrateLLMMaxBody = 10 << 20
+
+// substrateLLMRawPathOK admits an escaped /llm path: provider SDKs escape
+// the model ID (Bedrock "...-v1%3A0"). An escaped separator, backslash or
+// dot is still refused, so the decoded path is the one the route checks.
+func substrateLLMRawPathOK(route substrateActorRoute, raw string) bool {
+	if !route.llm {
+		return false
+	}
+	l := strings.ToLower(raw)
+	return !strings.Contains(l, "%2f") && !strings.Contains(l, "%5c") && !strings.Contains(l, "%2e")
 }

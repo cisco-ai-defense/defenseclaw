@@ -51,6 +51,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -4591,25 +4592,58 @@ type substrateActor struct {
 	// RegistrationKey is the actor's registration
 	// (sandboxreg.SubstrateKey(Atespace, UID)).
 	RegistrationKey string
+	// verified is set only by verifiedSubstrateActor, from an actor token
+	// the JWT verifier accepted and a registration the gateway found. A
+	// substrateActor built any other way is not an actor (the require-
+	// sandbox gate and the sandbox scope trust it).
+	verified *substrateVerification
+}
+
+// substrateVerification seals a substrateActor that came from the token
+// verifier; substrateVerified is its only instance.
+type substrateVerification struct{}
+
+var substrateVerified = &substrateVerification{}
+
+// verifiedSubstrateActor builds the actor of a verified token whose
+// registration the gateway found. Only the actor listener (after
+// identity.ActorVerifier accepted the token) and the callout route (after
+// the control API named the live UID and its registration) call it.
+func verifiedSubstrateActor(atespace, name, uid, subject, registrationKey string) substrateActor {
+	return substrateActor{Atespace: atespace, Name: name, UID: uid, Subject: subject,
+		RegistrationKey: registrationKey, verified: substrateVerified}
 }
 
 // substrateActorKey carries a substrateActor in a request context.
 type substrateActorKey struct{}
 
-// withSubstrateActor marks ctx as a request of the verified actor. The
-// actor listener calls it once the token verified; nothing else may.
+// withSubstrateActor puts actor on ctx. It counts as an actor request only
+// when actor is a verifiedSubstrateActor whose fields agree.
 func withSubstrateActor(ctx context.Context, actor substrateActor) context.Context {
 	return context.WithValue(ctx, substrateActorKey{}, actor)
 }
 
 // substrateActorFrom returns the verified actor of ctx, if it is an
-// actor-listener request.
+// actor-listener request. An actor the verifier path did not seal, or one
+// that is not whole (wellFormed), never counts: a listener that set it
+// before checking every claim gets a host
+// request, which the require-sandbox gate still judges.
 func substrateActorFrom(ctx context.Context) (substrateActor, bool) {
 	if ctx == nil {
 		return substrateActor{}, false
 	}
 	actor, ok := ctx.Value(substrateActorKey{}).(substrateActor)
-	return actor, ok && actor.UID != ""
+	return actor, ok && actor.verified == substrateVerified && actor.wellFormed()
+}
+
+// wellFormed reports an actor whose fields agree with each other the way a
+// verified actor token's do: a DNS-label atespace, a canonical UUID, the
+// subject actor/<atespace>/<name> and the registration key of that atespace
+// and UID.
+func (actor substrateActor) wellFormed() bool {
+	key, err := sandboxreg.SubstrateKey(actor.Atespace, actor.UID)
+	return err == nil && actor.Name != "" && !strings.ContainsAny(actor.Name, "/\x00") &&
+		actor.Subject == "actor/"+actor.Atespace+"/"+actor.Name && actor.RegistrationKey == key
 }
 
 // isSubstrateActorRequest reports a request of a verified Agent Substrate

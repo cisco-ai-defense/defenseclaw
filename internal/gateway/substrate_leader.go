@@ -18,7 +18,12 @@ package gateway
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
@@ -40,16 +45,62 @@ func (s *Sidecar) SetSubstrate(build SubstrateBuilder) {
 	s.substrateBuild = build
 }
 
-// substrateLLMProxy is the sidecar's live guardrail proxy, for /llm.
+// substrateLLMProxy is the guardrail proxy of /llm: the sidecar's live one
+// when a connector runs it, else one the Substrate gateway keeps for actors
+// alone. A cluster gateway has no host connector, so the sidecar's own
+// guardrail boot stays idle; the actor proxy is built from the same
+// guardrail config, rule pack, judge and stores, and binds no port (the
+// actor listener is its only entry).
 func (s *Sidecar) substrateLLMProxy() http.Handler {
+	var (
+		once  sync.Once
+		own   *GuardrailProxy
+		owner error
+	)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := s.proxySnapshot()
 		if p == nil {
+			once.Do(func() { own, owner = s.newSubstrateGuardrailProxy() })
+			p = own
+		}
+		if p == nil {
+			if owner != nil {
+				fmt.Fprintf(os.Stderr, "[substrate] guardrail proxy for actors: %v\n", owner)
+			}
 			writeSubstrateRefusal(w, http.StatusServiceUnavailable, "guardrail_proxy_unavailable")
 			return
 		}
 		p.SubstrateHandler().ServeHTTP(w, r)
 	})
+}
+
+func (s *Sidecar) newSubstrateGuardrailProxy() (*GuardrailProxy, error) {
+	cfg := s.currentConfig()
+	if cfg == nil {
+		return nil, errors.New("no configuration")
+	}
+	token := make([]byte, 32)
+	if _, err := rand.Read(token); err != nil {
+		return nil, err
+	}
+	// The token authenticates nothing here (actor calls are authenticated
+	// by the actor listener); the proxy refuses to start without one.
+	p, err := NewGuardrailProxy(&cfg.Guardrail, &cfg.CiscoAIDefense, s.logger, s.health, s.store, cfg.DataDir,
+		hex.EncodeToString(token), s.notify, s.activeRulePack(), cfg.ResolveLLM("guardrail.judge"), nil)
+	if err != nil {
+		return nil, err
+	}
+	p.SetSecureClientIntegration(cfg.SecureClientIntegration())
+	p.SetModelRouter(s.modelRouter)
+	p.SetDefaultPolicyID(cfg.Guardrail.Mode)
+	p.SetHILTApprovalManager(s.hilt)
+	if webhooks := s.webhooksSnapshot(); webhooks != nil {
+		p.SetWebhookDispatcher(webhooks)
+	}
+	if judge := s.sharedJudge(); judge != nil {
+		p.SetJudge(judge)
+	}
+	return p, nil
 }
 
 // runWithSubstrate runs serveAPI and the Substrate listeners together;

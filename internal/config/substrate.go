@@ -131,17 +131,90 @@ type SubstrateRateLimitsConfig struct {
 	PerAtespaceRPS float64 `mapstructure:"per_atespace_rps" yaml:"per_atespace_rps,omitempty"`
 }
 
-// SubstrateExtprocConfig is the egress callout (D9, D10).
+// SubstrateExtprocConfig is the egress callout (D9, D10), lane A4's
+// substrate-extproc. The chart renders its file from these keys plus the
+// profiles, secrets and services; the callout validates the same bounds
+// (extproc.Config).
 type SubstrateExtprocConfig struct {
 	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
-	// FailureMode is closed (default) or open; managed installs are
-	// always closed.
+	// FailureMode is closed (default) or open when the callout can't
+	// decide; managed installs are always closed.
 	FailureMode string `mapstructure:"failure_mode" yaml:"failure_mode,omitempty"`
-	// BodyInspection is auto (default: when the Substrate build supports
-	// it) or off.
-	BodyInspection string   `mapstructure:"body_inspection" yaml:"body_inspection,omitempty"`
-	BodyMaxBytes   int      `mapstructure:"body_max_bytes"  yaml:"body_max_bytes,omitempty"`
-	MCPHosts       []string `mapstructure:"mcp_hosts"       yaml:"mcp_hosts,omitempty"`
+	// BodyInspection is auto (default: when the egress filter allows the
+	// body override, detected at run time), on or off.
+	BodyInspection string `mapstructure:"body_inspection" yaml:"body_inspection,omitempty"`
+	BodyMaxBytes   int    `mapstructure:"body_max_bytes"  yaml:"body_max_bytes,omitempty"`
+	// MCPHosts are the remote MCP servers whose JSON-RPC bodies are
+	// inspected, "host" or "host=name" (the MCP server name tool rules
+	// see). They are also allowed in every actor's egress policy.
+	MCPHosts []string `mapstructure:"mcp_hosts" yaml:"mcp_hosts,omitempty"`
+	// BodyHosts are other admin-listed hosts whose bodies get the DLP scans.
+	BodyHosts []string `mapstructure:"body_hosts" yaml:"body_hosts,omitempty"`
+	// ClusterDomains are in-cluster name suffixes the intranet rule must not
+	// refuse (default svc.cluster.local).
+	ClusterDomains []string `mapstructure:"cluster_domains" yaml:"cluster_domains,omitempty"`
+	// ActorTrustDomain is the SPIFFE trust domain of actor identities and
+	// EgressPeers the SPIFFE IDs allowed to call the callout (defaults are
+	// the callout's).
+	ActorTrustDomain string   `mapstructure:"actor_trust_domain" yaml:"actor_trust_domain,omitempty"`
+	EgressPeers      []string `mapstructure:"egress_peers"       yaml:"egress_peers,omitempty"`
+	// RequestAccess is the contact refusals name.
+	RequestAccess string `mapstructure:"request_access" yaml:"request_access,omitempty"`
+	// LogHeaders adds the request headers, redacted, to every event;
+	// RedactHeaders are extra header names always redacted.
+	LogHeaders    bool     `mapstructure:"log_headers"    yaml:"log_headers,omitempty"`
+	RedactHeaders []string `mapstructure:"redact_headers" yaml:"redact_headers,omitempty"`
+	// BlocklistFiles replace the built-in egress feed.
+	BlocklistFiles []string `mapstructure:"blocklist_files" yaml:"blocklist_files,omitempty"`
+	// ActorSecretsDir holds the profiles' actor_secrets values, one file per
+	// name (a mounted Secret).
+	ActorSecretsDir string                      `mapstructure:"actor_secrets_dir" yaml:"actor_secrets_dir,omitempty"`
+	UID             SubstrateExtprocUIDConfig   `mapstructure:"uid"   yaml:"uid,omitempty"`
+	Chain           SubstrateExtprocChainConfig `mapstructure:"chain" yaml:"chain,omitempty"`
+	Ask             SubstrateExtprocAskConfig   `mapstructure:"ask"   yaml:"ask,omitempty"`
+	Judge           SubstrateExtprocJudgeConfig `mapstructure:"judge" yaml:"judge,omitempty"`
+	DLP             SubstrateExtprocDLPConfig   `mapstructure:"dlp"   yaml:"dlp,omitempty"`
+}
+
+// SubstrateExtprocUIDConfig is the live-UID cache (Go durations; defaults
+// 60s and 60s, at most 10m).
+type SubstrateExtprocUIDConfig struct {
+	CacheTTL string `mapstructure:"cache_ttl" yaml:"cache_ttl,omitempty"`
+	StaleMax string `mapstructure:"stale_max" yaml:"stale_max,omitempty"`
+}
+
+// SubstrateExtprocChainConfig bounds the egress chain check (default 20ms,
+// at most 500ms) and the observed_egress queue (default 4096).
+type SubstrateExtprocChainConfig struct {
+	CheckBudget string `mapstructure:"check_budget" yaml:"check_budget,omitempty"`
+	QueueSize   int    `mapstructure:"queue_size"   yaml:"queue_size,omitempty"`
+}
+
+// SubstrateExtprocAskConfig is how long a request waits for an ask
+// (default 1.5s; keep it under the egress filter's 2 s message timeout).
+type SubstrateExtprocAskConfig struct {
+	Hold string `mapstructure:"hold" yaml:"hold,omitempty"`
+}
+
+// SubstrateExtprocJudgeConfig is the gateway's callout verdict route.
+type SubstrateExtprocJudgeConfig struct {
+	URL       string `mapstructure:"url"        yaml:"url,omitempty"`
+	TokenFile string `mapstructure:"token_file" yaml:"token_file,omitempty"`
+	CAFile    string `mapstructure:"ca_file"    yaml:"ca_file,omitempty"`
+	Timeout   string `mapstructure:"timeout"    yaml:"timeout,omitempty"`
+}
+
+// SubstrateExtprocDLPConfig: CredentialHeaders is alert (default) or deny
+// for a secret-shaped credential header on a host no secret is bound to.
+type SubstrateExtprocDLPConfig struct {
+	CredentialHeaders string `mapstructure:"credential_headers" yaml:"credential_headers,omitempty"`
+}
+
+// MCPHostName is the host part of an extproc.mcp_hosts entry ("host" or
+// "host=name").
+func MCPHostName(entry string) string {
+	host, _, _ := strings.Cut(entry, "=")
+	return strings.TrimSpace(host)
 }
 
 // SubstrateLLMConfig is the model traffic of actors, always through the
@@ -194,13 +267,16 @@ const (
 	DefaultSubstrateAudience          = "defenseclaw"
 	DefaultSubstrateTokenLifetime     = 900
 	DefaultSubstrateActorCertOID      = "1.3.6.1.4.1.11129.2.12.2"
-	DefaultSubstrateActorService      = "defenseclaw-actor.defenseclaw-system.svc"
-	DefaultSubstrateAdminService      = "defenseclaw-admin.defenseclaw-system.svc"
-	DefaultSubstrateIdleSuspendAfter  = 30 * time.Minute
-	DefaultSubstrateAskTimeout        = 30 * time.Minute
-	DefaultSubstratePerActorRPS       = 20
-	DefaultSubstratePerAtespaceRPS    = 500
-	DefaultSubstrateBodyMaxBytes      = 1 << 20
+	// The Service defaults are fully qualified: the egress DNS relay answers
+	// only names an actor's policy lists, so the rule, the kit's URLs and
+	// the request Host must all be this one spelling (GAP-0023).
+	DefaultSubstrateActorService     = "defenseclaw-actor.defenseclaw-system.svc.cluster.local"
+	DefaultSubstrateAdminService     = "defenseclaw-admin.defenseclaw-system.svc.cluster.local"
+	DefaultSubstrateIdleSuspendAfter = 30 * time.Minute
+	DefaultSubstrateAskTimeout       = 30 * time.Minute
+	DefaultSubstratePerActorRPS      = 20
+	DefaultSubstratePerAtespaceRPS   = 500
+	DefaultSubstrateBodyMaxBytes     = 1 << 20
 
 	SubstrateSandboxGVisor  = "gvisor"
 	SubstrateSandboxMicroVM = "microvm"
@@ -209,6 +285,7 @@ const (
 	SubstrateFailClosed     = "closed"
 	SubstrateFailOpen       = "open"
 	SubstrateBodyAuto       = "auto"
+	SubstrateBodyOn         = "on"
 	SubstrateBodyOff        = "off"
 )
 
@@ -311,9 +388,10 @@ func sortedKeys[V any](m map[string]V) []string {
 }
 
 var (
-	substrateOIDRe         = regexp.MustCompile(`^[0-2](\.(0|[1-9][0-9]*))+$`)
-	substratePlaceholderRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
-	substrateProfileRe     = regexp.MustCompile(`^[A-Za-z0-9_.*?\[\]-]+$`)
+	substrateOIDRe          = regexp.MustCompile(`^[0-2](\.(0|[1-9][0-9]*))+$`)
+	substratePlaceholderRe  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	substrateProfileRe      = regexp.MustCompile(`^[A-Za-z0-9_.*?\[\]-]+$`)
+	substrateAtespaceGlobRe = regexp.MustCompile(`^[a-z0-9*?\[\]-]{1,63}$`)
 )
 
 // Validate checks substrate: whether or not it is enabled, so a typo fails
@@ -441,9 +519,9 @@ func (s *SubstrateConfig) Validate() error {
 		bad("extproc.failure_mode", "%q must be closed or open", s.Extproc.FailureMode)
 	}
 	switch strings.ToLower(orDefault(s.Extproc.BodyInspection, SubstrateBodyAuto)) {
-	case SubstrateBodyAuto, SubstrateBodyOff:
+	case SubstrateBodyAuto, SubstrateBodyOn, SubstrateBodyOff:
 	default:
-		bad("extproc.body_inspection", "%q must be auto or off", s.Extproc.BodyInspection)
+		bad("extproc.body_inspection", "%q must be auto, on or off", s.Extproc.BodyInspection)
 	}
 	if n := s.Extproc.BodyMaxBytes; n < 0 || n > DefaultSubstrateBodyMaxBytes {
 		bad("extproc.body_max_bytes", "%d is outside 0-%d (D9 caps bodies at 1 MiB)", n, DefaultSubstrateBodyMaxBytes)
@@ -455,7 +533,13 @@ func (s *SubstrateConfig) Validate() error {
 			}
 		}
 	}
-	checkPatterns("extproc.mcp_hosts", s.Extproc.MCPHosts)
+	for i, h := range s.Extproc.MCPHosts {
+		host, name, named := strings.Cut(h, "=")
+		if p, ok := egressspec.ParsePattern(host); !ok || p.Any || (named && strings.TrimSpace(name) == "") {
+			bad(fmt.Sprintf("extproc.mcp_hosts[%d]", i), `%q must be "host", "*.<host>" or "host=<mcp server name>"`, h)
+		}
+	}
+	s.validateExtproc(bad, checkPatterns)
 
 	for i, p := range s.LLM.Providers {
 		if strings.TrimSpace(p) == "" || strings.ContainsAny(p, " /:") {
@@ -535,6 +619,87 @@ func (s *SubstrateConfig) Validate() error {
 
 	if err := s.Admin.validateAs("admin"); err != nil {
 		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func (s *SubstrateConfig) validateExtproc(bad func(key, format string, a ...any), checkPatterns func(string, []string)) {
+	e := s.Extproc
+	checkPatterns("extproc.body_hosts", e.BodyHosts)
+	for i, d := range e.ClusterDomains {
+		if !egressspec.IsDNS1123Subdomain(strings.TrimPrefix(strings.ToLower(d), ".")) {
+			bad(fmt.Sprintf("extproc.cluster_domains[%d]", i), "%q is not a DNS suffix", d)
+		}
+	}
+	if td := e.ActorTrustDomain; td != "" && !egressspec.IsDNS1123Subdomain(td) {
+		bad("extproc.actor_trust_domain", "%q is not a SPIFFE trust domain", td)
+	}
+	for i, p := range e.EgressPeers {
+		if u, err := url.Parse(p); err != nil || u.Scheme != "spiffe" || u.Host == "" {
+			bad(fmt.Sprintf("extproc.egress_peers[%d]", i), "%q is not a SPIFFE ID", p)
+		}
+	}
+	for i, h := range e.RedactHeaders {
+		if !egressspec.ValidHeaderName(h) {
+			bad(fmt.Sprintf("extproc.redact_headers[%d]", i), "%q is not an HTTP header name", h)
+		}
+	}
+	for i, f := range e.BlocklistFiles {
+		if strings.TrimSpace(f) == "" {
+			bad(fmt.Sprintf("extproc.blocklist_files[%d]", i), "an entry is empty")
+		}
+	}
+	for _, d := range []struct {
+		key, v string
+		max    time.Duration
+	}{
+		{"extproc.uid.cache_ttl", e.UID.CacheTTL, 10 * time.Minute},
+		{"extproc.uid.stale_max", e.UID.StaleMax, 10 * time.Minute},
+		{"extproc.chain.check_budget", e.Chain.CheckBudget, 500 * time.Millisecond},
+		{"extproc.ask.hold", e.Ask.Hold, time.Hour},
+		{"extproc.judge.timeout", e.Judge.Timeout, time.Hour},
+	} {
+		if d.v == "" {
+			continue
+		}
+		if v, err := time.ParseDuration(strings.TrimSpace(d.v)); err != nil || v < 0 || v > d.max {
+			bad(d.key, "%q must be a Go duration from 0 to %s", d.v, d.max)
+		}
+	}
+	if q := e.Chain.QueueSize; q < 0 || q > 1<<20 {
+		bad("extproc.chain.queue_size", "%d is outside 0-%d", q, 1<<20)
+	}
+	if u := e.Judge.URL; u != "" && !httpsURL(u) {
+		bad("extproc.judge.url", "%q must be an https URL", u)
+	}
+	switch strings.ToLower(orDefault(e.DLP.CredentialHeaders, "alert")) {
+	case "alert", "deny":
+	default:
+		bad("extproc.dlp.credential_headers", "%q must be alert or deny", e.DLP.CredentialHeaders)
+	}
+}
+
+func (m *ProfileMatchSubstrate) validate(prefix string) error {
+	if m.Empty() {
+		return fmt.Errorf("%s: set atespaces, templates or workloads", prefix)
+	}
+	var errs []error
+	for _, ns := range m.Atespaces {
+		if _, err := path.Match(ns, ""); err != nil || !substrateAtespaceGlobRe.MatchString(ns) {
+			errs = append(errs, fmt.Errorf("%s.atespaces: %q is not an atespace name or glob", prefix, ns))
+		}
+	}
+	for _, t := range m.Templates {
+		ns, name, ok := strings.Cut(t, "/")
+		_, err := path.Match(t, "")
+		if !ok || err != nil || !substrateAtespaceGlobRe.MatchString(ns) || !substrateAtespaceGlobRe.MatchString(name) {
+			errs = append(errs, fmt.Errorf("%s.templates: %q must be <atespace>/<template>", prefix, t))
+		}
+	}
+	for _, w := range m.Workloads {
+		if strings.TrimSpace(w) == "" {
+			errs = append(errs, fmt.Errorf("%s.workloads: an entry is empty", prefix))
+		}
 	}
 	return errors.Join(errs...)
 }

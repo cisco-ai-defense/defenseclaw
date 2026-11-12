@@ -21,9 +21,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -36,6 +38,7 @@ var (
 	substrateControllerConfig string
 	substrateControllerOnce   bool
 	substrateControllerCheck  bool
+	substrateControllerUsage  string
 )
 
 var substrateControllerCmd = &cobra.Command{
@@ -60,6 +63,8 @@ func init() {
 	substrateControllerCmd.Flags().StringVar(&substrateControllerConfig, "config", "", "config.yaml (default: the DefenseClaw config path)")
 	substrateControllerCmd.Flags().BoolVar(&substrateControllerOnce, "once", false, "run one reconcile pass and exit")
 	substrateControllerCmd.Flags().BoolVar(&substrateControllerCheck, "check", false, "check access to ate-api-server and exit")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerUsage, "usage-listen", "",
+		"address for Substrate's per-actor usage records (OTLP/HTTP POST /v1/logs or ndjson), the CPU source of idle suspend; empty turns idle suspend off")
 	rootCmd.AddCommand(substrateControllerCmd)
 }
 
@@ -93,13 +98,26 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	if substrateControllerCheck {
 		return substrateControllerReport(ctx, cmd, client)
 	}
+	var cpu controller.CPUSource
+	idleAfter := sub.EffectiveIdleSuspendAfter()
+	if substrateControllerUsage != "" {
+		usage := controller.NewUsageCPU(nil)
+		mux := http.NewServeMux()
+		mux.Handle("/v1/logs", usage.Handler())
+		srv := &http.Server{Addr: substrateControllerUsage, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		go func() { _ = srv.ListenAndServe() }()
+		defer srv.Close()
+		cpu = usage
+	} else {
+		idleAfter = 0 // no CPU source: never suspend on silence alone (E4)
+	}
 	ctl, err := controller.New(controller.Options{
-		Client: client, Attestor: controller.NoAttestor{}, Activity: controller.NoActivity{},
+		Client: client, Attestor: controller.NoAttestor{}, Activity: controller.NoActivity{}, CPU: cpu,
 		Registry: controller.NewMemoryRegistry(), Resolver: &controller.ConfigResolver{Config: cfg},
 		Sink:     &controller.JSONSink{W: cmd.OutOrStdout()},
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
 		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(),
-		KitVersion: appVersion, IdleSuspendAfter: sub.EffectiveIdleSuspendAfter(),
+		KitVersion: appVersion, IdleSuspendAfter: idleAfter,
 	})
 	if err != nil {
 		return err

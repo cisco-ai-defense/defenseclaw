@@ -234,6 +234,12 @@
         },
         "affinity": {
           "type": "object"
+        },
+        "relaySessionSecret": {
+          "type": "string"
+        },
+        "llmCredentialsSecret": {
+          "type": "string"
         }
       }
     },
@@ -284,25 +290,6 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "replicas": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "leaseName": {
-          "$ref": "#/definitions/dnsLabel"
-        },
-        "pdb": {
-          "$ref": "#/definitions/pdb"
-        },
-        "ports": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "metrics": {
-              "$ref": "#/definitions/port"
-            }
-          }
-        },
         "args": {
           "$ref": "#/definitions/args"
         },

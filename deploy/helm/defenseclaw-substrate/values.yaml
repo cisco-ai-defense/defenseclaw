@@ -82,9 +82,18 @@ gateway:
   pdb:
     minAvailable: 1
   ports:
-    actor: 8443
+    # The actor listener, plain HTTP: atenet-egress reaches it on an http
+    # rule (an https rule cannot verify an in-cluster certificate; see
+    # README, Known limits). The NetworkPolicy admits only atenet-egress.
+    actor: 8080
     admin: 9443
     metrics: 9464
+  # Secrets the gateway and leader mount when they exist (optional): the
+  # relay session signing key (keys private.pem, public.pem), the provider
+  # keys for /llm (one file per provider), and the callout judge token
+  # (callout.judge.tokenSecret, shared with the callout).
+  relaySessionSecret: defenseclaw-relay-session
+  llmCredentialsSecret: defenseclaw-llm
   args: []
   resources:
     requests: {cpu: 250m, memory: 256Mi}
@@ -112,13 +121,7 @@ leader:
   affinity: {}
 
 controller:
-  # Two replicas, one active through the lease.
-  replicas: 2
-  leaseName: defenseclaw-controller
-  pdb:
-    minAvailable: 1
-  ports:
-    metrics: 9464
+  # One replica (no Lease client in the controller yet).
   args: []
   resources:
     requests: {cpu: 100m, memory: 128Mi}

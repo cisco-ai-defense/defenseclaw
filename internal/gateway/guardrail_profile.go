@@ -719,6 +719,10 @@ func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
 	// An Agent Substrate actor acts for the person the launcher verified
 	// and bound to it at create (its registration), never for the gateway.
 	if isSubstrateActorRequest(ctx) {
+		if s, ok := verifiedSubjectFromContext(ctx); ok && isSubstrateSubjectSource(s.Source) {
+			subject := profileSubjectFromVerified(s, identityLookupBlocking.Load())
+			return &subject, profileSubjectVerified
+		}
 		if subject, ok := substrateProfileSubject(ctx); ok {
 			return &subject, profileSubjectVerified
 		}
@@ -1177,7 +1181,9 @@ func (set *guardrailProfileSet) decision(name, reason, group, source string) pro
 }
 
 func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *subjectGroups, verified bool, connectorName, agent string) (reason, group string, ok bool) {
-	if m.Empty() {
+	// A substrate selector names actors only; a host subject has no
+	// atespace, so the AND of the keys never holds for it.
+	if m.Empty() || !m.Substrate.Empty() {
 		return "", "", false
 	}
 	if (len(m.Users) > 0 || len(m.Groups) > 0 || len(m.Agents) > 0) && !verified {

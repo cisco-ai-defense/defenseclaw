@@ -43,6 +43,10 @@ func SettingsFromConfig(cfg *config.Config) render.Settings {
 			providers = append(providers, u.Hostname())
 		}
 	}
+	mcp := make([]string, 0, len(s.Extproc.MCPHosts))
+	for _, h := range s.Extproc.MCPHosts {
+		mcp = append(mcp, config.MCPHostName(h))
+	}
 	return render.Settings{
 		ActorService:         s.EffectiveActorService(),
 		AdminService:         s.EffectiveAdminService(),
@@ -50,7 +54,7 @@ func SettingsFromConfig(cfg *config.Config) render.Settings {
 		TokenLifetimeSeconds: s.EffectiveTokenLifetime(),
 		AllowHosts:           s.Egress.Allow,
 		EcosystemPacks:       s.EffectiveEcosystemPacks(),
-		MCPHosts:             s.Extproc.MCPHosts,
+		MCPHosts:             mcp,
 		RegistryHosts:        s.Egress.Registries,
 		PassthroughFor:       s.AllowPassthroughFor,
 		ProviderHosts:        providers,
@@ -82,22 +86,15 @@ func LauncherSet(cfg *config.Config) map[string]bool {
 	return out
 }
 
-// AtespaceRule assigns a profile to atespaces outside the launcher ones.
-// An exact name always matches; a glob matches only atespaces DefenseClaw
-// created or lists (E3), and a glob that would match a foreign atespace
-// warns instead.
-type AtespaceRule struct {
-	Atespaces []string
-	Profile   string
-}
-
-// ConfigResolver resolves profiles from config: a launcher atespace takes
-// the profile it is listed under (or the registration's own profile), other
-// atespaces take the first matching AtespaceRule. Every profile's sandbox
-// section is tightened over substrate.admin (TightenOpenShellAdmin).
+// ConfigResolver resolves profiles from config. A launcher atespace takes
+// the registration's profile or the one it is listed under. Any other actor
+// takes every guardrail.profile_assignments entry whose match.substrate
+// selects it (atespaces with E3 matching, templates, workloads; entries with
+// host selectors never apply to actors): the first match names the profile
+// and every match's sandbox section tightens it, so the strictest
+// combination applies, as on hosts. Each is tightened over substrate.admin.
 type ConfigResolver struct {
 	Config *config.Config
-	Rules  []AtespaceRule
 
 	mu     sync.Mutex
 	warned map[string]bool
@@ -108,45 +105,95 @@ var _ ProfileResolver = (*ConfigResolver)(nil)
 // Resolve implements ProfileResolver.
 func (r *ConfigResolver) Resolve(reg Registration, launcher bool) (Resolution, error) {
 	sub := r.Config.Substrate
-	name := ""
-	var warnings []string
+	var names, warnings []string
 	if launcher {
-		name = reg.Profile
+		name := reg.Profile
 		if name == "" {
 			name, _ = sub.LauncherAtespace(reg.Atespace)
 		}
+		if name != "" {
+			names = []string{name}
+		}
 	} else {
 		owned := LauncherSet(r.Config)
-		for _, rule := range r.Rules {
-			if m, warn := MatchAtespace(rule.Atespaces, reg.Atespace, owned[reg.Atespace]); m {
-				name = rule.Profile
-				break
-			} else if warn != "" && r.warnOnce(reg.Atespace+"|"+warn) {
+		for _, a := range r.Config.Guardrail.ProfileAssignments {
+			m := a.Match.Substrate
+			if m.Empty() || !a.Match.Empty() {
+				continue
+			}
+			ok, warn := substrateMatches(m, reg, owned[reg.Atespace])
+			if warn != "" && r.warnOnce(reg.Atespace+"|"+warn) {
 				warnings = append(warnings, warn)
+			}
+			if ok && !slices.Contains(names, a.Profile) {
+				names = append(names, a.Profile)
 			}
 		}
 	}
-	if name == "" {
+	if len(names) == 0 {
 		return Resolution{Warnings: warnings}, nil
 	}
-	floor := sub.Admin
-	var overlay *config.OpenShellAdminConfig
-	if p, ok := r.Config.Guardrail.Profiles[name]; ok {
-		overlay = p.Sandbox
-	} else if name != "default" {
-		return Resolution{}, fmt.Errorf("profile %q is not defined in guardrail.profiles", name)
-	}
-	eff, err := config.TightenOpenShellAdmin(floor, overlay)
-	if err != nil {
-		return Resolution{}, fmt.Errorf("profile %q: %w", name, err)
+	eff := sub.Admin
+	for _, name := range names {
+		var overlay *config.OpenShellAdminConfig
+		if p, ok := r.Config.Guardrail.Profiles[name]; ok {
+			overlay = p.Sandbox
+		} else if name != "default" {
+			return Resolution{}, fmt.Errorf("profile %q is not defined in guardrail.profiles", name)
+		}
+		var err error
+		if eff, err = config.TightenOpenShellAdmin(eff, overlay); err != nil {
+			return Resolution{}, fmt.Errorf("profile %q: %w", name, err)
+		}
 	}
 	res := Resolution{Managed: true, Warnings: warnings, Profile: render.Profile{
-		Name: name, AllowOnly: eff.EgressAllowOnly, Block: eff.EgressBlock, AllowedCredentials: eff.AllowedCredentials,
+		Name: names[0], AllowOnly: eff.EgressAllowOnly, Block: eff.EgressBlock, AllowedCredentials: eff.AllowedCredentials,
 	}}
 	if eff.Allowed != nil && !*eff.Allowed {
-		res.Refuse = "profile " + name + " does not allow sandboxes"
+		res.Refuse = "profile " + strings.Join(names, "+") + " does not allow sandboxes"
 	}
 	return res, nil
+}
+
+// ManagedAtespaces are the atespaces this config manages by name: the
+// launcher ones and those listed exactly in a match.substrate.
+func (r *ConfigResolver) ManagedAtespaces() []string {
+	set := LauncherSet(r.Config)
+	for _, a := range r.Config.Guardrail.ProfileAssignments {
+		if m := a.Match.Substrate; !m.Empty() {
+			for _, ns := range m.Atespaces {
+				if !strings.ContainsAny(ns, "*?[") {
+					set[ns] = true
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for ns := range set {
+		out = append(out, ns)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func substrateMatches(m *config.ProfileMatchSubstrate, reg Registration, owned bool) (bool, string) {
+	warn := ""
+	if len(m.Atespaces) > 0 {
+		ok, w := MatchAtespace(m.Atespaces, reg.Atespace, owned)
+		if !ok {
+			return false, w
+		}
+	}
+	if len(m.Templates) > 0 && !slices.ContainsFunc(m.Templates, func(p string) bool {
+		ok, err := path.Match(p, reg.Template)
+		return err == nil && ok
+	}) {
+		return false, warn
+	}
+	if len(m.Workloads) > 0 && (reg.Workload == "" || !slices.Contains(m.Workloads, reg.Workload)) {
+		return false, warn
+	}
+	return true, ""
 }
 
 func (r *ConfigResolver) warnOnce(k string) bool {

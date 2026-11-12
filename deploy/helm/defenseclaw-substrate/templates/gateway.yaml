@@ -50,7 +50,9 @@ spec:
         - --actor-listen=:{{ .Values.gateway.ports.actor }}
         - --admin-listen=:{{ .Values.gateway.ports.admin }}
         - --metrics-listen=:{{ .Values.gateway.ports.metrics }}
-        - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc:{{ .Values.leader.port }}
+        - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.leader.port }}
+        - --leader-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
+        {{- include "dc.peerFlags" . | nindent 8 }}
         {{- end }}
         env:
         {{- include "dc.env" . | nindent 8 }}
@@ -74,11 +76,16 @@ spec:
           {{- toYaml .Values.containerSecurityContext | nindent 10 }}
         volumeMounts:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
+        {{- include "dc.gatewaySecretMounts" . | nindent 8 }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
+      {{- include "dc.gatewaySecretVolumes" . | nindent 6 }}
 ---
-# The actor Service: the only DefenseClaw host in rendered egress policies.
-# It exposes the actor listener and nothing else (D15).
+# The actor Service: the only DefenseClaw host in rendered egress policies,
+# as an http rule on port 80 to defenseclaw-actor.<ns>.svc.cluster.local
+# (GAP-0023: egress trusts only public CAs upstream, and actors resolve only
+# the exact names in their policy). It exposes the actor listener and nothing
+# else (D15); the actor JWT egress injects is the authentication.
 apiVersion: v1
 kind: Service
 metadata:
@@ -91,8 +98,8 @@ spec:
   selector:
     {{- include "dc.selector" $sel | nindent 4 }}
   ports:
-  - name: https
-    port: 443
+  - name: http
+    port: 80
     targetPort: actor
 ---
 # The admin Service: launcher, fleet and bundle APIs. Never in an egress

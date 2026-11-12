@@ -82,7 +82,7 @@ spec:
           readOnly: true
         {{- if .Values.callout.judge.tokenSecret }}
         - name: callout-judge
-          mountPath: /var/run/defenseclaw/callout-judge
+          mountPath: /var/run/secrets/defenseclaw-callout-judge
           readOnly: true
         {{- end }}
         {{- if .Values.callout.actorSecrets.secretName }}

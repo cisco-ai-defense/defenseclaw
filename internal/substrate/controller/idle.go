@@ -47,7 +47,10 @@ func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, 
 	if last.IsZero() || now.Sub(last) < after {
 		return nil
 	}
-	cores, at, ok := c.o.Activity.CPU(uid)
+	if c.o.CPU == nil {
+		return nil
+	}
+	cores, at, ok := c.o.CPU.CPU(uid)
 	if !ok || now.Sub(at) > c.o.CPUSampleMaxAge || cores >= c.o.IdleCPU {
 		return nil
 	}

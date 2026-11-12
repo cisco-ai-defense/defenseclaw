@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 // serve --substrate runs DefenseClaw in an Agent Substrate cluster
@@ -157,6 +158,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if !cfg.Substrate.Enabled {
 			return errors.New("serve: substrate.enabled is false in the configuration")
 		}
+		if err := seedSubstratePolicies(cfg.PolicyDir); err != nil {
+			return err
+		}
 		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
 		return runSidecar(cmd, args)
 	}
@@ -178,6 +182,35 @@ func serveSubstrateMetrics(reg *prometheus.Registry, ready *atomic.Bool) {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintf(os.Stderr, "[substrate] metrics listener: %v\n", err)
 	}
+}
+
+// seedSubstratePolicies writes the vendor policies (the rule packs, presets
+// and Rego the binary embeds) into policyDir. A container has no
+// `defenseclaw init`; its data directory starts empty on every pod start,
+// so the packs come from the binary that runs, never from an older copy.
+// Files are written read-only to the gateway account.
+func seedSubstratePolicies(policyDir string) error {
+	if strings.TrimSpace(policyDir) == "" {
+		return errors.New("serve: policy_dir is empty")
+	}
+	files, err := policyassets.Files()
+	if err != nil {
+		return fmt.Errorf("serve: embedded policies: %w", err)
+	}
+	for _, f := range files {
+		dst := filepath.Join(policyDir, filepath.FromSlash(f.Path))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return fmt.Errorf("serve: seed policies: %w", err)
+		}
+		_ = os.Remove(dst + ".tmp")
+		if err := os.WriteFile(dst+".tmp", f.Data, 0o400); err != nil {
+			return fmt.Errorf("serve: seed policies: %w", err)
+		}
+		if err := os.Rename(dst+".tmp", dst); err != nil {
+			return fmt.Errorf("serve: seed policies: %w", err)
+		}
+	}
+	return nil
 }
 
 // substratePeerClient is the gateway's mTLS client to the leader.

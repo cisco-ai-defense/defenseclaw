@@ -204,6 +204,10 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 			t.Errorf("%s: Service %s ports %v", name, svc, ports)
 		}
 	}
+	// GAP-0023: egress reaches the actor Service on an http rule, port 80.
+	if p := dig(byName["Service/defenseclaw-actor"].Spec, "ports").([]any)[0]; dig(p, "port") != 80 {
+		t.Errorf("%s: actor Service port %v, want 80", name, dig(p, "port"))
+	}
 	np, ok := byName["NetworkPolicy/defenseclaw-gateway"]
 	if !ok {
 		if name != "minimal" {
@@ -216,7 +220,7 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 		port := dig(rule, "ports").([]any)[0]
 		from, _ := yaml.Marshal(dig(rule, "from"))
 		switch dig(port, "port") {
-		case 8443:
+		case 8080:
 			if !strings.Contains(string(from), "atenet-egress") || strings.Count(string(from), "- ") != 1 {
 				t.Errorf("%s: actor port peers %s", name, from)
 			}
