@@ -119,6 +119,9 @@ func TestOpenClawPreflightRefusesForeignManagedPlugin(t *testing.T) {
 		t.Fatal(err)
 	}
 	managedDir := filepath.Join(filepath.Dir(configPath), "extensions", "defenseclaw")
+	if err := os.MkdirAll(managedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	prev := openClawPathOwnedForWrite
 	openClawPathOwnedForWrite = func(p string) error {
 		if p == managedDir {

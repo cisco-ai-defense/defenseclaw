@@ -129,7 +129,7 @@ func (c *Config) OpenClawOperatorAdmin() bool {
 // openClawGOOS is runtime.GOOS; tests replace it.
 var openClawGOOS = runtime.GOOS
 
-var openClawAccountPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.\\-]{0,63}$`)
+var openClawAccountPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`)
 
 // ValidateOpenClawConnector checks connectors.openclaw.
 func (c *Config) ValidateOpenClawConnector() error {

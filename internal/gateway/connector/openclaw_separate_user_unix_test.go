@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,7 +38,19 @@ func TestOpenClawSeparateUserLayout(t *testing.T) {
 	if err := os.MkdirAll(tokenDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	opts.OpenClawPluginAccount = "openclaw"
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grp, err := user.LookupGroupId(me.Gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevBroad := openClawBroadGroups
+	openClawBroadGroups = map[string]bool{}
+	t.Cleanup(func() { openClawBroadGroups = prevBroad })
+	opts.OpenClawPluginAccount = me.Username
+	opts.OpenClawPluginTokenGroup = grp.Name
 	opts.OpenClawPluginTokenFile = filepath.Join(tokenDir, "openclaw-plugin.token")
 	opts.HookAPIToken = strings.Repeat("a", 64)
 	opts.HookAPITokenScoped = true
@@ -46,7 +59,7 @@ func TestOpenClawSeparateUserLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := NewOpenClawConnector()
-	err := c.Setup(context.Background(), opts)
+	err = c.Setup(context.Background(), opts)
 	if err == nil || !strings.Contains(err.Error(), "merge this into it") || !strings.Contains(err.Error(), dir) {
 		t.Fatalf("Setup err = %v, want the block to merge", err)
 	}
@@ -91,8 +104,19 @@ func TestPublishOpenClawPluginTokenRefusesWritableFolder(t *testing.T) {
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	err := publishOpenClawPluginToken(filepath.Join(dir, "t"), "", strings.Repeat("b", 64))
+	err := publishOpenClawPluginToken(filepath.Join(dir, "t"), "dcplugin", "", strings.Repeat("b", 64))
 	if err == nil || !strings.Contains(err.Error(), "writable") {
 		t.Fatalf("err = %v, want a writable-folder refusal", err)
+	}
+}
+
+// The credential group must be named and must not be one every account is in.
+func TestPublishOpenClawPluginTokenRefusesMissingOrBroadGroup(t *testing.T) {
+	dir := t.TempDir()
+	for _, group := range []string{"", "staff", "users"} {
+		err := publishOpenClawPluginToken(filepath.Join(dir, "t"), group, "openclaw", strings.Repeat("c", 64))
+		if err == nil || !strings.Contains(err.Error(), "plugin_token_group") {
+			t.Errorf("group %q: err = %v, want a group refusal", group, err)
+		}
 	}
 }

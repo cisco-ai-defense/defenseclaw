@@ -42,6 +42,7 @@ func TestOpenClawPluginCredentialRouteTable(t *testing.T) {
 	api := instructionProtectionTestAPI(t, "openclaw", "action", "HIGH")
 	api.scannerCfg.DataDir = dataDir
 	api.scannerCfg.Gateway.Token = "master-token"
+	api.connectorRegistry = sharedDefaultRegistry()
 	reached := ""
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached = r.Method + " " + r.URL.Path

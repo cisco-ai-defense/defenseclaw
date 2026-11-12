@@ -43,6 +43,11 @@ func openClawSeparateUser(opts SetupOpts) bool {
 // when it cannot read the DefenseClaw data folder.
 func openClawSeparateUserEntry(opts SetupOpts) map[string]interface{} {
 	host, apiPort := splitOpenClawAddr(opts.APIAddr, 18970)
+	// The plugin talks only to loopback; a wildcard or LAN bind still
+	// answers there.
+	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		host = "127.0.0.1"
+	}
 	_, proxyPort := splitOpenClawAddr(opts.ProxyAddr, 4000)
 	entry := map[string]interface{}{
 		"tokenFile":     strings.TrimSpace(opts.OpenClawPluginTokenFile),
@@ -141,7 +146,7 @@ func (c *OpenClawConnector) registerSeparateUser(opts SetupOpts, paths openClawP
 		return fmt.Errorf("openclaw: the separate-user layout needs the connector-scoped plugin credential, which could not be issued in %s; run defenseclaw doctor", opts.DataDir)
 	}
 	if err := publishOpenClawPluginToken(strings.TrimSpace(opts.OpenClawPluginTokenFile),
-		strings.TrimSpace(opts.OpenClawPluginTokenGroup), token); err != nil {
+		strings.TrimSpace(opts.OpenClawPluginTokenGroup), strings.TrimSpace(opts.OpenClawPluginAccount), token); err != nil {
 		return fmt.Errorf("openclaw: publish the plugin credential to %s: %w", opts.OpenClawPluginTokenFile, err)
 	}
 	data, err := readConnectorStateFile(paths.config)

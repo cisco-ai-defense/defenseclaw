@@ -849,3 +849,22 @@ describe("plugin agent identity from api.pluginConfig", () => {
     }
   });
 });
+
+describe("slash commands echo only safe arguments", () => {
+  it("replaces a crafted name or type with a placeholder", async () => {
+    const commands: Record<string, { handler: (ctx: { args: Record<string, unknown> }) => Promise<{ text: string }> }> = {};
+    const api = {
+      config: {},
+      pluginConfig: {},
+      on: vi.fn(),
+      registerService: vi.fn(),
+      registerCommand: vi.fn((def: { name: string; handler: (ctx: { args: Record<string, unknown> }) => Promise<{ text: string }> }) => {
+        commands[def.name] = def;
+      }),
+    };
+    (pluginSetup as (api: unknown) => void)(api);
+    const out = await commands["allow"].handler({ args: { type: "skill; rm -rf ~", name: "x`$(id)`" } });
+    expect(out.text).toContain("defenseclaw <skill|mcp|plugin> allow <name>");
+    expect(out.text).not.toContain("$(");
+  });
+});
