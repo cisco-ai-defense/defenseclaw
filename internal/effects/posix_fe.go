@@ -14,7 +14,8 @@ import (
 // parsePOSIX lowers a POSIX/bash command string into the neutral IR using the
 // shared bounded parser (mvdan via shellparse). Any construct outside the
 // allowlist becomes an UnknownNode with a reason, never a crash and never
-// silence.
+// silence. Variable expansion is left to the walker (as word segments) so
+// in-call assignments take effect (review PX-2).
 func parsePOSIX(command string, o Options) *Script {
 	s := &Script{Dialect: DialectPOSIX}
 	file, ok := shellparse.Parse(command)
@@ -22,28 +23,19 @@ func parsePOSIX(command string, o Options) *Script {
 		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonInvalidSyntax})
 		return s
 	}
-	w := &posixWalker{out: s, env: o.Env}
+	w := &posixWalker{out: s}
 	for _, st := range file.Stmts {
 		w.stmt(st, false, false)
 	}
 	return s
 }
 
-type posixWalker struct {
-	out *Script
-	env map[string]string
-}
+type posixWalker struct{ out *Script }
 
 func (w *posixWalker) unknown(reason ReasonCode, node syntax.Node) {
-	var span [2]int
-	if node != nil {
-		span = [2]int{int(node.Pos().Offset()), int(node.End().Offset())}
-	}
-	w.out.Unknowns = append(w.out.Unknowns, UnknownNode{Reason: reason, Span: span})
+	w.out.Unknowns = append(w.out.Unknowns, UnknownNode{Reason: reason, Span: span(node)})
 }
 
-// stmt lowers one statement. cond carries conditional context; pipeIn marks a
-// pipeline-fed stage.
 func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 	if st == nil {
 		return
@@ -51,7 +43,6 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 	cond = cond || st.Negated
 	switch cmd := st.Cmd.(type) {
 	case nil:
-		// A redirect-only statement (e.g. `> file`): still a write effect.
 		w.emitCall(st, nil, cond, pipeIn)
 	case *syntax.CallExpr:
 		w.emitCall(st, cmd, cond, pipeIn)
@@ -61,12 +52,21 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 		for _, inner := range cmd.Stmts {
 			w.stmt(inner, cond, false)
 		}
+		w.compoundRedirs(st, cond)
 	case *syntax.Subshell:
+		// A subshell runs in a child; cd inside it does not escape. Lower it to
+		// one Cmd carrying a nested script so the walker can scope cwd/env.
+		sub := &Script{Dialect: DialectPOSIX}
+		nw := &posixWalker{out: sub}
 		for _, inner := range cmd.Stmts {
-			w.stmt(inner, cond, false)
+			nw.stmt(inner, cond, false)
 		}
+		c := &Cmd{Sub: sub, Cond: cond, Span: span(st)}
+		w.redirs(st, c)
+		w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond, Span: span(st)})
 	case *syntax.IfClause:
 		w.ifClause(cmd, cond)
+		w.compoundRedirs(st, cond)
 	case *syntax.WhileClause:
 		for _, inner := range cmd.Cond {
 			w.stmt(inner, cond, false)
@@ -74,18 +74,31 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 		for _, inner := range cmd.Do {
 			w.stmt(inner, true, false)
 		}
+		w.compoundRedirs(st, cond)
 	case *syntax.ForClause:
+		if cmd.Loop != nil {
+			if wl, ok := cmd.Loop.(*syntax.WordIter); ok {
+				for _, word := range wl.Items {
+					tmp := &Cmd{}
+					w.scanCmdSubsts(word, tmp)
+					for _, sub := range tmp.Nested {
+						w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{{Sub: sub, Cond: true}}, Cond: true})
+					}
+				}
+			}
+		}
 		for _, inner := range cmd.Do {
 			w.stmt(inner, true, false)
 		}
+		w.compoundRedirs(st, cond)
 	case *syntax.CaseClause:
 		for _, item := range cmd.Items {
 			for _, inner := range item.Stmts {
 				w.stmt(inner, true, false)
 			}
 		}
+		w.compoundRedirs(st, cond)
 	case *syntax.FuncDecl:
-		// A function body: its commands run only where the function is called.
 		if cmd.Name != nil {
 			w.out.Funcs = append(w.out.Funcs, cmd.Name.Value)
 		}
@@ -99,23 +112,34 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 			w.stmt(cmd.Stmt, cond, pipeIn)
 		}
 	default:
-		// ArithmCmd, LetClause, TestClause, CoprocClause and anything else are
-		// outside the modeled set.
 		w.unknown(ReasonUnparsedConstruct, st.Cmd)
+	}
+}
+
+// compoundRedirs applies redirections attached to a compound statement
+// (block/subshell/loop/if/case) as a redirect-only command (review PX-4).
+func (w *posixWalker) compoundRedirs(st *syntax.Stmt, cond bool) {
+	if len(st.Redirs) == 0 {
+		return
+	}
+	c := &Cmd{Cond: cond, Span: span(st)}
+	w.redirs(st, c)
+	if len(c.Redirs) > 0 {
+		w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond, Span: span(st)})
 	}
 }
 
 func (w *posixWalker) binary(st *syntax.Stmt, cmd *syntax.BinaryCmd, cond bool) {
 	switch cmd.Op {
-	case syntax.AndStmt: // &&
-		w.stmt(cmd.X, cond, false)
-		w.stmt(cmd.Y, true, false) // Y runs only if X succeeded
-	case syntax.OrStmt: // ||
+	case syntax.AndStmt:
 		w.stmt(cmd.X, cond, false)
 		w.stmt(cmd.Y, true, false)
-	case syntax.Pipe, syntax.PipeAll: // | |&
+	case syntax.OrStmt:
 		w.stmt(cmd.X, cond, false)
-		w.stmt(cmd.Y, cond, true) // Y's stdin is X's stdout
+		w.stmt(cmd.Y, true, false)
+	case syntax.Pipe, syntax.PipeAll:
+		w.stmt(cmd.X, cond, false)
+		w.stmt(cmd.Y, cond, true)
 	default:
 		w.unknown(ReasonUnparsedConstruct, cmd)
 	}
@@ -142,10 +166,10 @@ func (w *posixWalker) declClause(st *syntax.Stmt, cmd *syntax.DeclClause, cond, 
 		}
 		as := Assign{Name: a.Name.Value, Exported: exported}
 		if a.Value != nil {
-			v, static, _, _, reason := w.word(a.Value)
-			as.Value, as.Static, as.Reason = v, static, reason
+			as.ValueWord = w.word(a.Value)
+			w.scanCmdSubsts(a.Value, c)
 		} else {
-			as.Static = true
+			as.ValueWord = Word{Static: true}
 		}
 		c.Assigns = append(c.Assigns, as)
 	}
@@ -162,36 +186,39 @@ func (w *posixWalker) emitCall(st *syntax.Stmt, call *syntax.CallExpr, cond, pip
 			}
 			as := Assign{Name: a.Name.Value}
 			if a.Value != nil {
-				v, static, _, _, reason := w.word(a.Value)
-				as.Value, as.Static, as.Reason = v, static, reason
+				as.ValueWord = w.word(a.Value)
+				w.scanCmdSubsts(a.Value, c)
 			} else {
-				as.Static = true
+				as.ValueWord = Word{Static: true}
 			}
 			c.Assigns = append(c.Assigns, as)
 		}
 		for _, arg := range call.Args {
-			v, static, quoted, glob, reason := w.word(arg)
-			word := Word{Value: v, Static: static, Quoted: quoted, Glob: glob, Reason: reason, Span: span(arg)}
-			c.Words = append(c.Words, word)
-			w.nested(arg, c)
+			c.Words = append(c.Words, w.word(arg))
+			w.scanCmdSubsts(arg, c)
 		}
 	}
 	w.redirs(st, c)
 	w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond, Background: st.Background, Span: span(st)})
 }
 
-// nested walks command substitutions inside a word so their commands are seen.
-func (w *posixWalker) nested(arg *syntax.Word, c *Cmd) {
-	for _, part := range arg.Parts {
-		if cs, ok := part.(*syntax.CmdSubst); ok {
+// scanCmdSubsts recursively collects every command substitution anywhere in a
+// word (including inside double quotes) as a nested script (review PX-3).
+func (w *posixWalker) scanCmdSubsts(word *syntax.Word, c *Cmd) {
+	if word == nil {
+		return
+	}
+	syntax.Walk(word, func(n syntax.Node) bool {
+		if cs, ok := n.(*syntax.CmdSubst); ok {
 			sub := &Script{Dialect: DialectPOSIX}
-			nw := &posixWalker{out: sub, env: w.env}
+			nw := &posixWalker{out: sub}
 			for _, inner := range cs.Stmts {
 				nw.stmt(inner, true, false)
 			}
 			c.Nested = append(c.Nested, sub)
 		}
-	}
+		return true
+	})
 }
 
 func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
@@ -199,7 +226,7 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 		if r == nil {
 			continue
 		}
-		red := Redir{}
+		red := Redir{FD: -1}
 		if r.N != nil {
 			if n, ok := atoiSafe(r.N.Value); ok {
 				red.FD = n
@@ -208,8 +235,14 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 		switch r.Op {
 		case syntax.RdrOut:
 			red.Op = RedirWrite
+			if red.FD < 0 {
+				red.FD = 1
+			}
 		case syntax.AppOut:
 			red.Op = RedirAppend
+			if red.FD < 0 {
+				red.FD = 1
+			}
 		case syntax.RdrIn:
 			red.Op = RedirRead
 		case syntax.Hdoc, syntax.DashHdoc:
@@ -218,111 +251,116 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 			red.Op = RedirHereString
 		case syntax.ClbOut:
 			red.Op = RedirClobber
+			if red.FD < 0 {
+				red.FD = 1
+			}
 		case syntax.DplOut, syntax.DplIn:
 			red.Op = RedirDup
 		case syntax.RdrAll, syntax.AppAll:
 			red.Op = RedirWrite
+			red.FD = 1
 		default:
 			red.Op = RedirWrite
 		}
 		if r.Word != nil {
-			v, static, quoted, glob, reason := w.word(r.Word)
-			red.Target = Word{Value: v, Static: static, Quoted: quoted, Glob: glob, Reason: reason, Span: span(r.Word)}
+			red.Target = w.word(r.Word)
+			w.scanCmdSubsts(r.Word, c)
 		}
 		if r.Hdoc != nil {
-			body, bexp := heredocBody(r.Hdoc)
-			red.Body, red.BodyExpands = body, bexp
+			red.Body, red.BodyExpands = heredocBody(r.Hdoc)
 		}
 		c.Redirs = append(c.Redirs, red)
 	}
 }
 
-// word projects one mvdan word into (value, static, quoted, glob, reason). A
-// ParamExp whose name is a known Env value resolves statically.
-func (w *posixWalker) word(word *syntax.Word) (string, bool, bool, bool, ReasonCode) {
-	// returns value, static(bool), quoted(bool), glob as ReasonCode-sentinel? --
-	// simplify: glob encoded as reason too. We return glob via reason==glob.
+// word builds the neutral Word. A word of only literals and simple $VAR / ${VAR}
+// expansions gets Segs for the walker to resolve; anything with a command
+// substitution, arithmetic, process substitution or a complex parameter op is
+// dynamic (no Segs, a Reason).
+func (w *posixWalker) word(word *syntax.Word) Word {
 	if word == nil {
-		return "", false, false, false, ReasonDynamicExpansion
+		return Word{Reason: ReasonDynamicExpansion}
 	}
-	var b strings.Builder
-	static := true
-	quoted := false
-	unquoted := false
-	glob := false
-	var reason ReasonCode
+	out := Word{Span: span(word)}
+	var segs []WordSeg
+	addLit := func(s string, quoted bool) { segs = append(segs, WordSeg{Lit: s, Quoted: quoted}) }
+	dynamic := func(reason ReasonCode) {
+		out.Static = false
+		out.Segs = nil
+		out.Reason = reason
+	}
 	for _, part := range word.Parts {
+		if out.Reason != "" {
+			break
+		}
 		switch p := part.(type) {
 		case *syntax.Lit:
-			unquoted = true
-			b.WriteString(unescapePOSIX(p.Value))
-			if looksGlob(p.Value) {
-				glob = true
-			}
+			// An escaped metachar (\*) is a literal, not a glob: mark the
+			// segment quoted so resolveWord does not treat it as a pattern
+			// (review PX-6, Q5).
+			addLit(unescapePOSIX(p.Value, false), escapedMetaOnly(p.Value))
 		case *syntax.SglQuoted:
-			quoted = true
-			b.WriteString(p.Value)
+			addLit(p.Value, true)
+			out.Quoted = true
 		case *syntax.DblQuoted:
-			quoted = true
+			out.Quoted = true
 			for _, inner := range p.Parts {
 				switch ip := inner.(type) {
 				case *syntax.Lit:
-					b.WriteString(unescapePOSIX(ip.Value))
+					addLit(unescapePOSIX(ip.Value, true), true)
 				case *syntax.ParamExp:
-					if v, ok := w.lookupParam(ip); ok {
-						b.WriteString(v)
+					if name, ok := simpleParam(ip); ok {
+						segs = append(segs, WordSeg{Var: name, Quoted: true})
 					} else {
-						static = false
-						reason = ReasonDynamicExpansion
+						dynamic(ReasonDynamicExpansion)
 					}
 				default:
-					static = false
-					reason = ReasonDynamicExpansion
+					dynamic(ReasonDynamicExpansion)
 				}
 			}
 		case *syntax.ParamExp:
-			if v, ok := w.lookupParam(p); ok {
-				b.WriteString(v)
-				unquoted = true
+			if name, ok := simpleParam(p); ok {
+				segs = append(segs, WordSeg{Var: name})
 			} else {
-				static = false
-				reason = ReasonDynamicExpansion
+				dynamic(ReasonDynamicExpansion)
 			}
 		case *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ExtGlob:
-			static = false
-			reason = ReasonDynamicExpansion
+			dynamic(ReasonDynamicExpansion)
 		case *syntax.ProcSubst:
-			static = false
-			reason = ReasonUnparsedConstruct
+			dynamic(ReasonUnparsedConstruct)
 		default:
-			static = false
-			reason = ReasonDynamicExpansion
+			dynamic(ReasonDynamicExpansion)
 		}
 	}
-	_ = unquoted
-	if !static {
-		return "", false, quoted, false, reason
+	if out.Reason != "" {
+		return out
 	}
-	// Tilde is only an expansion when unquoted at the start (handled in placePath
-	// via Home); a quoted tilde is literal.
-	if glob && !quoted {
-		return b.String(), true, quoted, true, ""
+	out.Segs = segs
+	// A word is fully static (Value set) only when it has no variable segment.
+	hasVar := false
+	var b strings.Builder
+	for _, s := range segs {
+		if s.Var != "" {
+			hasVar = true
+			break
+		}
+		b.WriteString(s.Lit)
 	}
-	return b.String(), true, quoted, false, ""
+	if !hasVar {
+		out.Static = true
+		out.Value = b.String()
+	}
+	return out
 }
 
-// lookupParam resolves ${VAR} / $VAR against the trusted Env; a plain name with
-// no modifier only.
-func (w *posixWalker) lookupParam(p *syntax.ParamExp) (string, bool) {
-	if p == nil || p.Param == nil || p.Excl || p.Length || p.Width || p.Index != nil ||
-		p.Slice != nil || p.Repl != nil || p.Exp != nil || p.Names != 0 {
+// simpleParam returns the variable name for a plain $NAME / ${NAME} with no
+// modifier, index, slice, replacement or length operator.
+func simpleParam(p *syntax.ParamExp) (string, bool) {
+	if p == nil || p.Param == nil || p.Excl || p.Length || p.Width ||
+		p.Index != nil || p.Slice != nil || p.Repl != nil || p.Exp != nil || p.Names != 0 {
 		return "", false
 	}
-	if w.env == nil {
-		return "", false
-	}
-	v, ok := w.env[p.Param.Value]
-	return v, ok
+	return p.Param.Value, true
 }
 
 func span(n syntax.Node) [2]int {
@@ -351,17 +389,23 @@ func heredocBody(w *syntax.Word) (string, bool) {
 	return b.String(), expands
 }
 
-func unescapePOSIX(s string) string {
-	// mvdan keeps backslash escapes in Lit; a minimal unescape for the common
-	// cases so a quoted filename is the real name.
+// unescapePOSIX removes shell backslash escapes. Inside double quotes only a
+// few characters are escapable, so a backslash before any other byte is literal
+// (review PX-8b: `"/tmp/a\b"` keeps the backslash).
+func unescapePOSIX(s string, inDoubleQuote bool) string {
 	if !strings.Contains(s, `\`) {
 		return s
 	}
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\\' && i+1 < len(s) {
+			nxt := s[i+1]
+			if inDoubleQuote && nxt != '"' && nxt != '\\' && nxt != '$' && nxt != '`' {
+				b.WriteByte('\\')
+				continue
+			}
 			i++
-			b.WriteByte(s[i])
+			b.WriteByte(nxt)
 			continue
 		}
 		b.WriteByte(s[i])
@@ -370,10 +414,10 @@ func unescapePOSIX(s string) string {
 }
 
 func atoiSafe(s string) (int, bool) {
-	n := 0
 	if s == "" {
 		return 0, false
 	}
+	n := 0
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
 			return 0, false
@@ -381,4 +425,23 @@ func atoiSafe(s string) (int, bool) {
 		n = n*10 + int(s[i]-'0')
 	}
 	return n, true
+}
+
+// escapedMetaOnly reports that a raw literal contains a backslash-escaped glob
+// metacharacter and no unescaped one, so after unescaping it is a literal name.
+func escapedMetaOnly(raw string) bool {
+	escaped, unescaped := false, false
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '\\' && i+1 < len(raw) {
+			if strings.IndexByte("*?[{", raw[i+1]) >= 0 {
+				escaped = true
+			}
+			i++
+			continue
+		}
+		if strings.IndexByte("*?[", raw[i]) >= 0 {
+			unescaped = true
+		}
+	}
+	return escaped && !unescaped
 }

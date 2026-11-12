@@ -51,30 +51,49 @@ type Cmd struct {
 	// Nested holds command substitution / subshell bodies whose commands run
 	// but whose value is dynamic.
 	Nested []*Script
-	Cond   bool
-	Span   [2]int
+	// Sub, when set, is a subshell body `( ... )`: it runs in a child shell,
+	// so a cd inside it does not change the parent's cwd. The walker saves and
+	// restores cwd/env around it.
+	Sub  *Script
+	Cond bool
+	Span [2]int
 }
 
-// Word is one argv element.
+// WordSeg is one piece of a word: a literal run (Lit) or a simple variable
+// expansion (Var is the name). Exactly one of Lit/Var is set. Quoted marks a
+// literal that was inside quotes (so a metachar in it is not a glob). The
+// walker resolves Var against the running env, so in-call assignments take
+// effect (review PX-2).
+type WordSeg struct {
+	Lit    string
+	Var    string
+	Quoted bool
+}
+
+// Word is one argv element. The frontend fills Segs for a word built only of
+// literals and simple $VAR/${VAR} expansions; the walker resolves it. A word
+// with a command substitution, arithmetic or a complex parameter op has
+// Static=false, no Segs and a Reason.
 type Word struct {
 	Value string
-	// Static is true when the whole word resolves to a fixed string.
+	// Static is true when the whole word resolves to a fixed string with no
+	// variable expansion at all (a pure literal). A word needing env resolution
+	// has Static=false but non-nil Segs.
 	Static bool
 	Quoted bool
 	// Glob is true for an unquoted word that is a shell glob pattern.
 	Glob bool
 	// Reason, when set, is why the word is not static (dynamic_expansion, etc.).
 	Reason ReasonCode
+	Segs   []WordSeg
 	Span   [2]int
 }
 
 // Assign is a VAR=value prefix on a command (or an export/declare).
 type Assign struct {
-	Name     string
-	Value    string
-	Static   bool
-	Reason   ReasonCode
-	Exported bool
+	Name      string
+	ValueWord Word
+	Exported  bool
 }
 
 // RedirOp is the kind of a redirection.

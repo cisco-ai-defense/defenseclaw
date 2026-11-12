@@ -4,161 +4,226 @@
 
 package effects
 
-import "strings"
+import (
+	"strings"
 
-// parsePowerShell is an interim, conservative PowerShell frontend. It lowers
-// the clearly-static forms (simple pipelines of cmdlet calls with -Param value
-// and positional arguments, single/double-quoted strings) into the neutral IR
-// and marks anything it cannot place statically -- script blocks {...},
-// subexpressions $(...), variable-as-command (& $x), member access, here-
-// strings with expansion -- as an UnknownNode. When the full-grammar parser in
-// internal/psparse lands (lane s7-pwsh), its adapter replaces this file at the
-// IR seam; the extractor and program table are unchanged. It never bridges onto
-// actionfacts and never claims "known" for a dynamic construct.
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
+)
+
+// parsePowerShell lowers a PowerShell command into the neutral IR using the
+// full-grammar parser in internal/psparse (lane s7-pwsh). It replaces the
+// former hand tokenizer: the extractor and program table are unchanged; this
+// adapter maps psparse's AST onto IR Cmds/Words at the dialect seam
+// (EFFECTS.md "PowerShell AST"). Anything psparse could not resolve statically
+// is a diagnostic -> a structural unknown; a dynamic value is a dynamic Word;
+// a static nested script (-Command, iex 'lit', cmd /c) is expanded one level.
 func parsePowerShell(command string, o Options) *Script {
+	return lowerPSScript(command, o, true)
+}
+
+func lowerPSScript(command string, o Options, expandNested bool) *Script {
 	s := &Script{Dialect: DialectPowerShell}
-	for _, stmtText := range splitPSStatements(command) {
-		seg := strings.TrimSpace(stmtText)
-		if seg == "" {
-			continue
-		}
-		if psHasOpaqueConstruct(seg) {
-			s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonUnparsedConstruct})
-			continue
-		}
-		for pi, stage := range strings.Split(seg, "|") {
-			stage = strings.TrimSpace(stage)
-			if stage == "" {
+	sc, err := psparse.Parse(command, psparse.Options{})
+	if err != nil || sc == nil {
+		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonInvalidSyntax})
+		return s
+	}
+	for _, d := range sc.Diagnostics {
+		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: psReason(d.Reason)})
+	}
+	lw := &psLower{out: s, o: o}
+	lw.statements(sc.Statements, false)
+	if expandNested {
+		for _, ns := range psparse.ExtractNestedScripts(sc) {
+			if !ns.Static {
+				s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
 				continue
 			}
-			toks := tokenizePS(stage)
-			if len(toks) == 0 {
-				continue
+			var inner *Script
+			if ns.Dialect == "cmd" {
+				inner = parseCMD(ns.Text, o)
+			} else {
+				inner = lowerPSScript(ns.Text, o, false)
 			}
-			c := &Cmd{PipeIn: pi > 0}
-			for _, tk := range toks {
-				val, static, quoted := psTokenValue(tk, o)
-				c.Words = append(c.Words, Word{Value: val, Static: static, Quoted: quoted,
-					Glob: static && !quoted && looksGlob(val), Reason: psReason(static)})
+			for _, fn := range inner.Funcs {
+				s.Funcs = append(s.Funcs, fn)
 			}
-			s.Stmts = append(s.Stmts, &Stmt{Cmds: []*Cmd{c}})
+			s.Stmts = append(s.Stmts, inner.Stmts...)
+			s.Unknowns = append(s.Unknowns, inner.Unknowns...)
 		}
 	}
 	return s
 }
 
-func psReason(static bool) ReasonCode {
-	if static {
-		return ""
+func psReason(code string) ReasonCode {
+	switch code {
+	case psparse.ReasonDynamicName, psparse.ReasonDynamicMember, psparse.ReasonNonLiteral:
+		return ReasonDynamicExpansion
+	case psparse.ReasonStopParsing:
+		return ReasonOpaqueCode
+	case psparse.ReasonDepthLimit, psparse.ReasonTruncated:
+		return ReasonLimit
+	default:
+		return ReasonUnparsedConstruct
 	}
-	return ReasonDynamicExpansion
 }
 
-func splitPSStatements(command string) []string {
-	var out []string
-	var b strings.Builder
-	depth := 0
-	inS, inD := false, false
-	for i := 0; i < len(command); i++ {
-		ch := command[i]
-		switch {
-		case ch == '\'' && !inD:
-			inS = !inS
-		case ch == '"' && !inS:
-			inD = !inD
-		case (ch == '{' || ch == '(') && !inS && !inD:
-			depth++
-		case (ch == '}' || ch == ')') && !inS && !inD:
-			if depth > 0 {
-				depth--
-			}
-		case (ch == ';' || ch == '\n') && depth == 0 && !inS && !inD:
-			out = append(out, b.String())
-			b.Reset()
-			continue
-		}
-		b.WriteByte(ch)
+type psLower struct {
+	out *Script
+	o   Options
+}
+
+func (lw *psLower) statements(sts []psparse.Statement, cond bool) {
+	for _, st := range sts {
+		lw.statement(st, cond)
 	}
-	out = append(out, b.String())
+}
+
+func (lw *psLower) statement(st psparse.Statement, cond bool) {
+	switch v := st.(type) {
+	case *psparse.Pipeline:
+		lw.pipeline(v, cond)
+	case *psparse.Assignment:
+		lw.assignment(v, cond)
+	case *psparse.Block:
+		lw.statements(v.Conditions, cond)
+		for _, b := range v.Bodies {
+			if b != nil {
+				lw.statements(b.Statements, true)
+			}
+		}
+	case *psparse.ExprStatement:
+		// a bare expression: recurse for any nested commands via its sub-exprs.
+		lw.exprCommands(v.Expr, cond)
+	case *psparse.UnknownStatement:
+		lw.out.Unknowns = append(lw.out.Unknowns, UnknownNode{Reason: psReason(v.Reason)})
+	}
+}
+
+func (lw *psLower) pipeline(p *psparse.Pipeline, cond bool) {
+	first := true
+	for seg := p; seg != nil; seg = seg.ChainRHS {
+		segCond := cond || !first
+		var lastCmd *Cmd
+		stage := 0
+		for _, el := range seg.Elements {
+			switch e := el.(type) {
+			case *psparse.Command:
+				c := lw.command(e, segCond, stage > 0)
+				lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: segCond})
+				lastCmd = c
+				stage++
+			case *psparse.ExprStatement:
+				lw.exprCommands(e.Expr, segCond)
+			}
+		}
+		// pipeline redirections attach to the last stage's output.
+		if lastCmd != nil {
+			for _, r := range seg.Redirs {
+				lw.addRedir(lastCmd, r)
+			}
+		} else if len(seg.Redirs) > 0 {
+			c := &Cmd{Cond: segCond}
+			for _, r := range seg.Redirs {
+				lw.addRedir(c, r)
+			}
+			lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: segCond})
+		}
+		first = false
+	}
+}
+
+func (lw *psLower) assignment(a *psparse.Assignment, cond bool) {
+	// $env:NAME = value updates the running environment (review PS-7).
+	if v, ok := a.LHS.(*psparse.Variable); ok && strings.EqualFold(v.Scope, "env") {
+		c := &Cmd{Cond: cond, Assigns: []Assign{{Name: v.Name, ValueWord: lw.exprWord(rhsExpr(a.RHS))}}}
+		lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond})
+		return
+	}
+	// any command on the RHS still runs.
+	lw.statement(a.RHS, cond)
+}
+
+func (lw *psLower) command(c *psparse.Command, cond, pipeIn bool) *Cmd {
+	out := &Cmd{Cond: cond, PipeIn: pipeIn}
+	// program name
+	if name, ok := psparse.LiteralString(c.Name); ok && c.InvokeOp != "." {
+		out.Words = append(out.Words, Word{Value: name, Static: true, Segs: []WordSeg{{Lit: name}}})
+	} else {
+		out.Words = append(out.Words, Word{Reason: ReasonDynamicExpansion})
+	}
+	for _, el := range c.Elements {
+		switch e := el.(type) {
+		case *psparse.Parameter:
+			out.Words = append(out.Words, Word{Value: "-" + e.Name, Static: true, Segs: []WordSeg{{Lit: "-" + e.Name}}})
+			if e.HasColon && e.Colon != nil {
+				out.Words = append(out.Words, lw.exprWord(e.Colon))
+			}
+		case *psparse.Arg:
+			out.Words = append(out.Words, lw.exprWord(e.Value))
+		case psparse.Expr:
+			out.Words = append(out.Words, lw.exprWord(e))
+		}
+	}
+	for _, r := range c.Redirs {
+		lw.addRedir(out, r)
+	}
 	return out
 }
 
-func psHasOpaqueConstruct(seg string) bool {
-	// Script blocks, subexpressions and invocation of a dynamic command are not
-	// statically placeable here.
-	if strings.Contains(seg, "$(") || strings.Contains(seg, "@(") || strings.Contains(seg, "{") {
-		return true
+func (lw *psLower) addRedir(c *Cmd, r *psparse.Redirection) {
+	if r == nil || r.Merge != "" || r.Target == nil {
+		return // a stream merge (2>&1) is not a file write
 	}
-	trimmed := strings.TrimSpace(seg)
-	if strings.HasPrefix(trimmed, "&") || strings.HasPrefix(trimmed, ".") {
-		// & $cmd / . $script: dynamic invocation.
-		rest := strings.TrimSpace(trimmed[1:])
-		if strings.HasPrefix(rest, "$") || strings.HasPrefix(rest, "{") {
-			return true
-		}
+	red := Redir{FD: 1, Target: lw.exprWord(r.Target)}
+	switch r.Op {
+	case ">", "*>", "1>":
+		red.Op = RedirWrite
+	case ">>", "*>>", "1>>":
+		red.Op = RedirAppend
+	case "<":
+		red.Op = RedirRead
+	default:
+		red.Op = RedirWrite
 	}
-	return false
+	c.Redirs = append(c.Redirs, red)
 }
 
-func tokenizePS(stage string) []string {
-	var toks []string
-	var b strings.Builder
-	inS, inD := false, false
-	flush := func() {
-		if b.Len() > 0 {
-			toks = append(toks, b.String())
-			b.Reset()
-		}
+// exprWord lowers a PowerShell expression to a Word: a static literal, an
+// $env:VAR reference (resolved by the walker against the running env), else a
+// dynamic word (review PS-3: a parenthesised/operator expression is dynamic).
+func (lw *psLower) exprWord(e psparse.Expr) Word {
+	if e == nil {
+		return Word{Reason: ReasonDynamicExpansion}
 	}
-	for i := 0; i < len(stage); i++ {
-		ch := stage[i]
-		switch {
-		case ch == '\'' && !inD:
-			inS = !inS
-			b.WriteByte(ch)
-		case ch == '"' && !inS:
-			inD = !inD
-			b.WriteByte(ch)
-		case (ch == ' ' || ch == '\t') && !inS && !inD:
-			flush()
-		default:
-			b.WriteByte(ch)
-		}
+	if v, ok := e.(*psparse.Variable); ok && strings.EqualFold(v.Scope, "env") {
+		return Word{Segs: []WordSeg{{Var: v.Name}}}
 	}
-	flush()
-	return toks
+	if s, ok := psparse.LiteralString(e); ok {
+		return Word{Value: s, Static: true, Segs: []WordSeg{{Lit: s}}}
+	}
+	return Word{Reason: ReasonDynamicExpansion}
 }
 
-// psTokenValue returns the static value of a PowerShell token. A single-quoted
-// string is verbatim; a double-quoted string with a $ is expandable (dynamic);
-// a bare $var or $env: is dynamic unless the name is a trusted Env value.
-func psTokenValue(tk string, o Options) (string, bool, bool) {
-	if len(tk) >= 2 && tk[0] == '\'' && tk[len(tk)-1] == '\'' {
-		return tk[1 : len(tk)-1], true, true
-	}
-	if len(tk) >= 2 && tk[0] == '"' && tk[len(tk)-1] == '"' {
-		inner := tk[1 : len(tk)-1]
-		if strings.Contains(inner, "$") {
-			return "", false, true
-		}
-		return inner, true, true
-	}
-	if strings.HasPrefix(tk, "$env:") {
-		name := tk[len("$env:"):]
-		if o.Env != nil {
-			if v, ok := o.Env[name]; ok {
-				return v, true, false
+// exprCommands recurses into an expression for nested commands (script blocks,
+// sub-expressions) so their effects are seen.
+func (lw *psLower) exprCommands(e psparse.Expr, cond bool) {
+	psparse.WalkCommands(&psparse.Script{Statements: []psparse.Statement{&psparse.ExprStatement{Expr: e}}}, func(c *psparse.Command) {
+		cmd := lw.command(c, true, false)
+		lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{cmd}, Cond: true})
+	})
+}
+
+func rhsExpr(st psparse.Statement) psparse.Expr {
+	switch v := st.(type) {
+	case *psparse.ExprStatement:
+		return v.Expr
+	case *psparse.Pipeline:
+		if len(v.Elements) == 1 {
+			if es, ok := v.Elements[0].(*psparse.ExprStatement); ok {
+				return es.Expr
 			}
 		}
-		return "", false, false
 	}
-	if strings.HasPrefix(tk, "$") {
-		if o.Env != nil {
-			if v, ok := o.Env[strings.TrimPrefix(tk, "$")]; ok {
-				return v, true, false
-			}
-		}
-		return "", false, false
-	}
-	return tk, true, false
+	return nil
 }

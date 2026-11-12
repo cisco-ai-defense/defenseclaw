@@ -147,6 +147,10 @@ func normalizeWindows(p string, o Options) string {
 		}
 	}
 	for i := range out {
+		// the default-stream alias ::$DATA names the file itself (review WP2).
+		if idx := strings.Index(strings.ToUpper(out[i]), "::$DATA"); idx >= 0 {
+			out[i] = out[i][:idx]
+		}
 		out[i] = strings.TrimRight(out[i], " .")
 		if out[i] == "" {
 			out[i] = "_"
@@ -154,7 +158,12 @@ func normalizeWindows(p string, o Options) string {
 	}
 	res := prefix + unc + drive
 	if len(out) > 0 {
-		res += `\` + strings.Join(out, `\`)
+		joined := strings.Join(out, `\`)
+		if res == "" || strings.HasSuffix(res, `\`) {
+			res += joined
+		} else {
+			res += `\` + joined
+		}
 	} else if res == "" {
 		res = `\`
 	}
@@ -186,7 +195,17 @@ func (t Target) Key() string {
 	return v
 }
 
-// looksGlob reports whether an unquoted word is a POSIX-style glob pattern.
+// looksGlob reports whether an unquoted word is a shell glob or brace-list
+// pattern. A brace list ({a,b}) expands to several paths, so it is treated as a
+// pattern (unknown) rather than one literal file (review PX-6, Q2).
 func looksGlob(s string) bool {
-	return strings.ContainsAny(s, "*?[")
+	if strings.ContainsAny(s, "*?[") {
+		return true
+	}
+	if i := strings.IndexByte(s, '{'); i >= 0 {
+		if j := strings.IndexByte(s[i:], '}'); j > 0 && strings.Contains(s[i:i+j], ",") {
+			return true
+		}
+	}
+	return false
 }

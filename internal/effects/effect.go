@@ -130,6 +130,12 @@ func (r Result) FullyKnown() bool {
 	if len(r.Unknowns) > 0 {
 		return false
 	}
+	// A call that produced no effect at all is not "fully known": we modeled
+	// nothing about it (review HN-1). Every executable command emits at least a
+	// base exec, so this only excludes genuinely empty / dropped calls.
+	if len(r.Effects) == 0 {
+		return false
+	}
 	for _, e := range r.Effects {
 		if e.Kind == KindOpaque || e.TargetState != TargetStateKnown || e.RoleState != RoleStateKnown {
 			return false

@@ -6,6 +6,7 @@ package effects
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 )
 
@@ -42,9 +43,10 @@ func extractFileTool(call Call, o Options) Result {
 
 func fileToolKind(tool string) Kind {
 	switch strings.ToLower(tool) {
-	case "read", "view", "cat", "notebookread":
+	case "read", "view", "cat", "notebookread", "read_file", "fs_read", "open_file", "readfile":
 		return KindRead
-	case "write", "edit", "multiedit", "create", "str_replace", "notebookedit", "apply_diff":
+	case "write", "edit", "multiedit", "create", "create_file", "write_file", "writefile",
+		"str_replace", "str_replace_editor", "notebookedit", "apply_diff", "edit_file", "fs_write":
 		return KindWrite
 	}
 	return KindWrite
@@ -98,7 +100,13 @@ func parsePatchEnvelope(text string) ([]patchTarget, bool) {
 	var out []patchTarget
 	sawEnd := false
 	for _, line := range strings.Split(text, "\n") {
-		l := strings.TrimSpace(line)
+		// Match headers only at column 0: a "*** Delete File:" sitting in the
+		// diff body (a context/'+' line) is attacker text, not a real header
+		// (review SF-5).
+		l := strings.TrimRight(line, "\r")
+		if !strings.HasPrefix(l, "*** ") {
+			continue
+		}
 		switch {
 		case strings.HasPrefix(l, "*** Add File:"):
 			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Add File:"):]), kind: KindWrite})
@@ -138,16 +146,24 @@ func extractMCP(call Call, o Options) Result {
 	}
 	kindGuess := mcpKindFromTool(call.Tool)
 	nodes := 0
+	truncated := false
 	var walk func(key string, v any, depth int)
 	walk = func(key string, v any, depth int) {
 		if depth > maxMCPDepth || nodes > maxMCPNodes || len(res.Effects) >= o.maxEffects() {
+			truncated = true // a path/url arg below the cap would be dropped (review SF-6)
 			return
 		}
 		nodes++
 		switch t := v.(type) {
 		case map[string]any:
-			for k, vv := range t {
-				walk(k, vv, depth+1)
+			// Sort keys so the effect order is deterministic (review SF-7).
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				walk(k, t[k], depth+1)
 			}
 		case []any:
 			for _, vv := range t {
@@ -177,6 +193,9 @@ func extractMCP(call Call, o Options) Result {
 		}
 	}
 	walk("", root, 0)
+	if truncated {
+		res.addUnknown(ReasonLimit)
+	}
 	if len(res.Effects) == 0 {
 		e := Effect{Kind: KindOpaque, TargetState: TargetStateUnknown, RoleState: RoleStateUnknown,
 			Origin: Origin{Surface: SurfaceMCP, Command: 1, Program: call.Tool}}
