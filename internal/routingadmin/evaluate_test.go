@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -122,11 +123,19 @@ func TestEvaluateUnknownFacts(t *testing.T) {
 	}
 }
 
-func seededLedger(ids ...string) *Ledger {
+func testLedger() *Ledger {
 	l := NewLedger()
+	l.now = func() time.Time { return now }
+	return l
+}
+
+func seededLedger(ids ...string) *Ledger {
+	l := testLedger()
 	l.ApplySeed(ids, nil)
 	return l
 }
+
+func day(t time.Time) string { return t.UTC().Format(time.DateOnly) }
 
 func TestEvaluateBudgets(t *testing.T) {
 	budgets := []config.RoutingBudget{
@@ -135,7 +144,7 @@ func TestEvaluateBudgets(t *testing.T) {
 		{ID: "codex", Scope: "connector", Subject: "codex", Period: "week", LimitUSD: 5, OnExceed: "warn"},
 	}
 	req := Request{Caller: caller("eng1", "eng"), Connector: "codex"}
-	userKey, groupKey, connKey := "user:daily:*:"+shortHash("uid:eng1"), "group:eng:"+shortHash("eng"), "connector:codex:codex"
+	userKey, groupKey, connKey := "user:daily:*:uid:eng1", "group:eng:"+shortHash("eng"), "connector:codex:codex"
 	for _, managed := range []bool{false, true} {
 		p := Compile(nil, budgets, managed)
 		l := seededLedger(p.BudgetIDs()...)
@@ -187,10 +196,10 @@ func TestEvaluateDowngradeHonoursRules(t *testing.T) {
 func TestEvaluateBudgetSpendUnknown(t *testing.T) {
 	deny := []config.RoutingBudget{{ID: "d", Scope: "user", Subject: "*", Period: "day", LimitUSD: 1, OnExceed: "deny"}}
 	req := Request{Caller: caller("u"), Connector: "codex"}
-	if v := Compile(nil, deny, true).Evaluate(req, NewLedger(), now); denyCode(v) != "budget_unavailable:d" {
+	if v := Compile(nil, deny, true).Evaluate(req, testLedger(), now); denyCode(v) != "budget_unavailable:d" {
 		t.Fatalf("managed unseeded deny budget fails closed: %+v", v)
 	}
-	if v := Compile(nil, deny, false).Evaluate(req, NewLedger(), now); v.Deny != nil || !slices.Contains(v.Warnings, "budget_spend_unknown:d") {
+	if v := Compile(nil, deny, false).Evaluate(req, testLedger(), now); v.Deny != nil || !slices.Contains(v.Warnings, "budget_spend_unknown:d") {
 		t.Fatalf("oss unseeded: %+v", v)
 	}
 	if v := Compile(nil, deny, true).Evaluate(Request{Connector: "codex"}, seededLedger("d"), now); denyCode(v) != "identity_unconfirmed:unverified" {
@@ -200,7 +209,7 @@ func TestEvaluateBudgetSpendUnknown(t *testing.T) {
 
 func TestGate(t *testing.T) {
 	catalog := map[string]Target{"local": {Provider: "vllm", Model: "qwen"}, "fast": {Provider: "openai", Model: "gpt-mini"}}
-	bound := Verdict{Bind: true, Allowed: []string{"local"}, RuleIDs: []string{"secrets-local"}}
+	bound := Verdict{Bind: true, Allowed: []string{"local"}, BindRuleIDs: []string{"secrets-local"}}
 	if d, w := Gate(bound, Target{Provider: "VLLM", Model: "qwen"}, catalog, true); d != nil || w != "" {
 		t.Fatalf("original is an allowed entry: %v %q", d, w)
 	}
@@ -219,26 +228,80 @@ func TestGate(t *testing.T) {
 	}
 }
 
+func TestGateHoldsTheDowngrade(t *testing.T) {
+	catalog := map[string]Target{"fast": {Provider: "openai", Model: "gpt-mini"}}
+	v := Verdict{Force: []string{"fast"}, ForceBudget: "daily"}
+	if d, w := Gate(v, Target{Provider: "openai", Model: "gpt-mini"}, catalog, true); d != nil || w != "" {
+		t.Fatalf("downgraded target: %v %q", d, w)
+	}
+	if d, _ := Gate(v, Target{Provider: "anthropic", Model: "opus"}, catalog, true); d == nil || d.Code != "budget_downgrade_unavailable:daily" {
+		t.Fatalf("managed retry on the original upstream must be held to the downgrade: %v", d)
+	}
+	if d, w := Gate(v, Target{Provider: "anthropic", Model: "opus"}, catalog, false); d != nil || w != "budget_downgrade_not_enforced:daily" {
+		t.Fatalf("oss: %v %q", d, w)
+	}
+	empty := Verdict{Bind: true, Allowed: []string{}, BindRuleIDs: []string{"a", "b"}, RuleIDs: []string{"a", "x", "b"}}
+	if d, _ := Gate(empty, Target{Provider: "openai", Model: "gpt-mini"}, catalog, true); d == nil || !strings.Contains(d.Message, "rule a, b)") {
+		t.Fatalf("bind with nothing allowed names only the binding rules: %v", d)
+	}
+}
+
+func TestMaybeCallerIsNeverChargedToANamedBudget(t *testing.T) {
+	budgets := []config.RoutingBudget{
+		{ID: "alice", Scope: "user", Subject: "alice", Period: "day", LimitUSD: 5, OnExceed: "deny"},
+		{ID: "eng", Scope: "group", Subject: "eng", Period: "day", LimitUSD: 5, OnExceed: "downgrade:fast"},
+	}
+	p := Compile(nil, budgets, true)
+	l := seededLedger("alice", "eng")
+	unverified := Request{Connector: "codex"}
+	if v := p.Evaluate(unverified, l, now); v.Deny != nil || len(v.ChargeKeys) != 0 {
+		t.Fatalf("under the limits an unconfirmed caller passes uncharged: %+v", v)
+	}
+	if v := p.Evaluate(Request{Caller: caller("alice"), Connector: "codex"}, l, now); !slices.Equal(v.ChargeKeys, []string{"user:alice:=" + shortHash("alice")}) {
+		t.Fatalf("alice herself is charged: %+v", v)
+	}
+	l.Charge([]string{"group:eng:" + shortHash("eng")}, 6, now)
+	if v := p.Evaluate(Request{Caller: maybeCaller(), Connector: "codex"}, l, now); !slices.Equal(v.Force, []string{"fast"}) || len(v.ChargeKeys) != 0 {
+		t.Fatalf("an unconfirmed member is held to the reached group limit, uncharged: %+v", v)
+	}
+	l.Charge([]string{"user:alice:=" + shortHash("alice")}, 6, now)
+	if v := p.Evaluate(unverified, l, now); denyCode(v) != "identity_unconfirmed:unverified" {
+		t.Fatalf("a reached named deny budget refuses an unconfirmed caller: %+v", v)
+	}
+}
+
+func TestDefiniteDenyMessageWins(t *testing.T) {
+	rules := []config.RoutingAdminRule{
+		{ID: "maybe-deny", Match: config.RoutingAdminMatch{Groups: []string{"x"}}, Action: "deny"},
+		{ID: "codex-deny", Match: config.RoutingAdminMatch{Connectors: []string{"codex"}}, Action: "deny", Message: "No Codex here."},
+	}
+	v := Compile(rules, nil, true).Evaluate(Request{Caller: maybeCaller(), Connector: "codex"}, nil, now)
+	if denyCode(v) != "rule_deny:codex-deny" || v.Deny.Message != "No Codex here." {
+		t.Fatalf("got %+v", v.Deny)
+	}
+}
+
 func TestLedgerWindowsAndSeed(t *testing.T) {
-	l := NewLedger()
+	l := testLedger()
 	key := "user:m:*:abc"
 	if _, ok := l.Spend(key, "day", now); ok {
 		t.Fatal("unseeded budget must report not loaded")
 	}
 	l.Charge([]string{key}, 1, now) // a live charge before the seed is kept
 	l.ApplySeed([]string{"m"}, []SeedRow{
-		{Day: now, Key: key, USD: 2},
-		{Day: now.AddDate(0, 0, -2), Key: key, USD: 4},   // Monday
-		{Day: now.AddDate(0, 0, -3), Key: key, USD: 8},   // Sunday, last week
-		{Day: now.AddDate(0, 0, -18), Key: key, USD: 16}, // October
-		{Day: now, Key: "user:other:*:abc", USD: 100},    // budget not being seeded
+		{Day: day(now), Key: key, USD: 2},
+		{Day: day(now.AddDate(0, 0, -2)), Key: key, USD: 4},   // Monday
+		{Day: day(now.AddDate(0, 0, -3)), Key: key, USD: 8},   // Sunday, last week
+		{Day: day(now.AddDate(0, 0, -18)), Key: key, USD: 16}, // October
+		{Day: day(now), Key: "user:other:*:abc", USD: 100},    // budget not being seeded
+		{Day: "2026/11/18", Key: key, USD: 1000},              // not a UTC date: skipped
 	})
 	for period, want := range map[string]float64{"day": 3, "week": 7, "month": 15} {
 		if got, ok := l.Spend(key, period, now); !ok || got != want {
 			t.Fatalf("%s spend = %v %v, want %v", period, got, ok, want)
 		}
 	}
-	l.ApplySeed([]string{"m", "other"}, []SeedRow{{Day: now, Key: key, USD: 50}, {Day: now, Key: "user:other:*:abc", USD: 3}})
+	l.ApplySeed([]string{"m", "other"}, []SeedRow{{Day: day(now), Key: key, USD: 50}, {Day: day(now), Key: "user:other:*:abc", USD: 3}})
 	if got, _ := l.Spend(key, "day", now); got != 3 {
 		t.Fatalf("a budget is seeded once: %v", got)
 	}
@@ -250,14 +313,20 @@ func TestLedgerWindowsAndSeed(t *testing.T) {
 	if got, _ := l.Spend(key, "day", now); got != 3 {
 		t.Fatalf("non-positive charges are ignored: %v", got)
 	}
-	l.Charge([]string{key}, 1, now.AddDate(0, 0, 70)) // prunes everything older than 62 days
+	l.Charge([]string{key}, 1, now.AddDate(0, 0, 70)) // a clock step: counted today, prunes nothing
+	if got, _ := l.Spend(key, "day", now); got != 4 {
+		t.Fatalf("future-dated charge: %v", got)
+	}
+	later := now.AddDate(0, 0, 70)
+	l.now = func() time.Time { return later }
+	l.Charge([]string{key}, 1, later) // a new wall-clock day prunes days older than 62
 	if got, _ := l.Spend(key, "month", now); got != 0 {
 		t.Fatalf("pruned: %v", got)
 	}
 }
 
 func TestLedgerSeedLoopRetries(t *testing.T) {
-	l := NewLedger()
+	l := testLedger()
 	calls := 0
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -267,11 +336,17 @@ func TestLedgerSeedLoopRetries(t *testing.T) {
 			t.Errorf("since %v, want %v", since, want)
 		}
 		if calls == 1 {
+			if got := l.SeedState([]string{"m"}); got != "seeding" {
+				t.Errorf("state before the first answer: %q", got)
+			}
 			return nil, errors.New("store busy")
 		}
-		return []SeedRow{{Day: now, Key: "user:m:*:x", USD: 1}}, nil
+		if got := l.SeedState([]string{"m"}); got != "failed: store busy" {
+			t.Errorf("state after a failure: %q", got)
+		}
+		return []SeedRow{{Day: day(now), Key: "user:m:*:x", USD: 1}}, nil
 	})
-	if calls != 2 || !l.Seeded("m") {
+	if calls != 2 || !l.Seeded("m") || l.SeedState([]string{"m"}) != "seeded" {
 		t.Fatalf("calls %d seeded %v", calls, l.Seeded("m"))
 	}
 }

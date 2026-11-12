@@ -9,6 +9,7 @@ import (
 	"math"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
@@ -65,11 +66,15 @@ const RoutingBudgetSubjectAll = "*"
 const (
 	RoutingAdminMaxRules        = 256
 	RoutingAdminMaxBudgets      = 64
-	RoutingAdminMessageMaxBytes = 512
+	RoutingAdminMessageMaxChars = 512
 	RoutingBudgetMaxLimitUSD    = 1e7
 )
 
-var routingAdminIDPattern = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+var (
+	routingAdminIDPattern = lazyregexp.New(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	// routingBudgetConnectorPattern is the schema's connectorName form.
+	routingBudgetConnectorPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+)
 
 // RoutingAdminRule is one entry of routing.admin.rules. Every rule whose
 // Match selects the request applies: a deny wins, allow lists intersect,
@@ -88,7 +93,7 @@ type RoutingAdminRule struct {
 	// chosen. It must be in Allow when Allow is set.
 	Default string `mapstructure:"default" yaml:"default,omitempty"`
 	// Message is the refusal text of a deny rule (at most 512 printable
-	// bytes).
+	// characters on one line).
 	Message string `mapstructure:"message" yaml:"message,omitempty"`
 }
 
@@ -117,7 +122,7 @@ func (m RoutingAdminMatch) Identity() ProfileMatch {
 
 // Empty reports whether no selector key is set.
 func (m RoutingAdminMatch) Empty() bool {
-	return m.Identity().Empty() && len(m.Categories) == 0 && strings.TrimSpace(m.SeverityAtLeast) == ""
+	return m.Identity().Empty() && len(m.Categories) == 0 && m.SeverityAtLeast == ""
 }
 
 // NamesIdentity reports whether the match needs a verified caller.
@@ -127,7 +132,7 @@ func (m RoutingAdminMatch) NamesIdentity() bool {
 
 // IsDeny reports whether the rule refuses the requests it matches.
 func (r RoutingAdminRule) IsDeny() bool {
-	return strings.TrimSpace(r.Action) == RoutingRuleActionDeny
+	return r.Action == RoutingRuleActionDeny
 }
 
 // RoutingBudget is one entry of routing.admin.budgets. Spend is counted per
@@ -152,15 +157,10 @@ type RoutingBudget struct {
 // OnExceedAction returns warn, deny or downgrade and, for downgrade, the
 // aliases in order.
 func (b RoutingBudget) OnExceedAction() (string, []string) {
-	value := strings.TrimSpace(b.OnExceed)
-	if rest, ok := strings.CutPrefix(value, RoutingBudgetOnExceedDowngrade+":"); ok {
-		var aliases []string
-		for _, alias := range strings.Split(rest, ",") {
-			aliases = append(aliases, strings.TrimSpace(alias))
-		}
-		return RoutingBudgetOnExceedDowngrade, aliases
+	if rest, ok := strings.CutPrefix(b.OnExceed, RoutingBudgetOnExceedDowngrade+":"); ok {
+		return RoutingBudgetOnExceedDowngrade, strings.Split(rest, ",")
 	}
-	return value, nil
+	return b.OnExceed, nil
 }
 
 // RoutingVisibility is routing.admin.visibility.
@@ -172,10 +172,10 @@ type RoutingVisibility struct {
 
 // EffectiveUsersSee returns UsersSee with its default.
 func (v *RoutingVisibility) EffectiveUsersSee() string {
-	if v == nil || strings.TrimSpace(v.UsersSee) == "" {
+	if v == nil || v.UsersSee == "" {
 		return RoutingUsersSeeOwn
 	}
-	return strings.TrimSpace(v.UsersSee)
+	return v.UsersSee
 }
 
 // ValidateRoutingAdminRules checks routing.admin.rules, budgets and
@@ -210,7 +210,7 @@ func ValidateRoutingAdminRules(rules []RoutingAdminRule, budgets []RoutingBudget
 		seen[budget.ID] = struct{}{}
 	}
 	if visibility != nil {
-		switch strings.TrimSpace(visibility.UsersSee) {
+		switch visibility.UsersSee {
 		case "", RoutingUsersSeeOwn, RoutingUsersSeeNone:
 		default:
 			return settingErrorAt("routing.admin.visibility.users_see",
@@ -230,7 +230,7 @@ func validateRoutingAdminRule(at string, rule RoutingAdminRule, aliases map[stri
 	if err := validateRoutingAdminMessage(at+".message", rule.Message); err != nil {
 		return err
 	}
-	switch strings.TrimSpace(rule.Action) {
+	switch rule.Action {
 	case RoutingRuleActionDeny:
 		if rule.Allow != nil || rule.Default != "" {
 			return settingErrorAt(at, fmt.Errorf("%s is a deny rule; remove allow and default (a deny rule refuses the requests it matches)", at))
@@ -274,7 +274,10 @@ func validateRoutingAdminMatch(at string, m RoutingAdminMatch) error {
 	for _, selector := range []struct {
 		key    string
 		values []string
-	}{{"groups", m.Groups}, {"users", m.Users}, {"connectors", m.Connectors}} {
+	}{{"groups", m.Groups}, {"users", m.Users}, {"connectors", m.Connectors}, {"agents", m.Agents}, {"categories", m.Categories}} {
+		if selector.values != nil && len(selector.values) == 0 {
+			return settingErrorAt(at+"."+selector.key, fmt.Errorf("%s.%s is empty; leave the key out or name at least one", at, selector.key))
+		}
 		for _, value := range selector.values {
 			if strings.TrimSpace(value) == "" {
 				return settingErrorAt(at+"."+selector.key, fmt.Errorf("%s.%s: an entry is empty; name a %s or remove the entry", at, selector.key, strings.TrimSuffix(selector.key, "s")))
@@ -291,7 +294,7 @@ func validateRoutingAdminMatch(at string, m RoutingAdminMatch) error {
 			return settingErrorAt(at+".categories", fmt.Errorf("%s.categories: %q must be lowercase letters, digits, _, . or -, at most 64", at, category))
 		}
 	}
-	if s := m.SeverityAtLeast; strings.TrimSpace(s) != "" && canonicalGuardrailLevel(s) == "" {
+	if s := m.SeverityAtLeast; s != "" && (s != strings.TrimSpace(s) || canonicalGuardrailLevel(s) == "") {
 		return settingErrorAt(at+".severity_at_least", fmt.Errorf("%s.severity_at_least %q must be LOW, MEDIUM, HIGH or CRITICAL", at, s))
 	}
 	return nil
@@ -302,8 +305,8 @@ func validateRoutingAdminMatch(at string, m RoutingAdminMatch) error {
 var routingAdminCategoryPattern = lazyregexp.New(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 
 func validateRoutingAdminMessage(at, message string) error {
-	if len(message) > RoutingAdminMessageMaxBytes {
-		return settingErrorAt(at, fmt.Errorf("%s must not exceed %d bytes", at, RoutingAdminMessageMaxBytes))
+	if utf8.RuneCountInString(message) > RoutingAdminMessageMaxChars {
+		return settingErrorAt(at, fmt.Errorf("%s must not exceed %d characters", at, RoutingAdminMessageMaxChars))
 	}
 	for _, r := range message {
 		if !unicode.IsPrint(r) {
@@ -328,7 +331,7 @@ func validateRoutingBudget(at string, b RoutingBudget, aliases map[string]struct
 			return settingErrorAt(at+".subject", fmt.Errorf("%s.subject: a group budget names one group; use scope user with subject * for a limit per user", at))
 		}
 	case RoutingBudgetScopeConnector:
-		if subject != RoutingBudgetSubjectAll && NormalizeConnectorName(subject) != subject {
+		if subject != RoutingBudgetSubjectAll && !routingBudgetConnectorPattern.MatchString(subject) {
 			return settingErrorAt(at+".subject", fmt.Errorf("%s.subject %q must be a connector name such as codex or claudecode, or *", at, subject))
 		}
 	default:
@@ -358,6 +361,69 @@ func validateRoutingBudget(at string, b RoutingBudget, aliases map[string]struct
 		}
 	default:
 		return settingErrorAt(at+".on_exceed", errors.New(at+".on_exceed must be warn, deny or downgrade:<alias> (more aliases separated by commas)"))
+	}
+	return nil
+}
+
+// validateRoutingAdminRules checks routing.admin.rules, budgets and
+// visibility of a loaded config, and on a standalone managed device the
+// rules that keep a fail-closed admin policy usable.
+func (c *Config) validateRoutingAdminRules() error {
+	a := c.Routing.Admin
+	if a == nil {
+		return nil
+	}
+	aliases := make(map[string]struct{}, len(c.Routing.Models))
+	for _, m := range c.Routing.Models {
+		aliases[m.Name] = struct{}{}
+	}
+	if err := ValidateRoutingAdminRules(a.Rules, a.Budgets, a.Visibility, aliases); err != nil {
+		return err
+	}
+	if !c.StandaloneEnterprise() || (len(a.Rules) == 0 && len(a.Budgets) == 0) {
+		return nil
+	}
+	if !c.Routing.Enabled {
+		return settingErrorAt("routing.enabled", errors.New("routing.admin rules or budgets are set but routing.enabled is false: a managed device would apply none of them; set routing.enabled: true or remove them"))
+	}
+	return validateRoutingAdminFailClosed(a.Rules, a.AllowedAliases)
+}
+
+// validateRoutingAdminFailClosed refuses category rules that would deny
+// every call on a managed device while the classifier is down: there every
+// category rule applies at once, so their allow lists (and the floor's
+// allowed_aliases) must share an alias.
+func validateRoutingAdminFailClosed(rules []RoutingAdminRule, floor []string) error {
+	var allowed []string
+	var ids []string
+	limited := floor != nil
+	if limited {
+		allowed = append(allowed, floor...)
+	}
+	for _, rule := range rules {
+		if len(rule.Match.Categories) == 0 || rule.IsDeny() || len(rule.Allow) == 0 {
+			continue
+		}
+		ids = append(ids, rule.ID)
+		if !limited {
+			allowed, limited = append([]string(nil), rule.Allow...), true
+			continue
+		}
+		kept := allowed[:0]
+		for _, alias := range allowed {
+			for _, want := range rule.Allow {
+				if alias == want {
+					kept = append(kept, alias)
+					break
+				}
+			}
+		}
+		allowed = kept
+	}
+	if len(ids) > 0 && len(allowed) == 0 {
+		return settingErrorAt("routing.admin.rules", fmt.Errorf(
+			"routing.admin.rules %s: when the classifier is down a managed device applies every category rule at once, and their allow lists (with routing.admin.allowed_aliases) share no alias, so every call would be refused; add one alias to all of them",
+			strings.Join(ids, ", ")))
 	}
 	return nil
 }

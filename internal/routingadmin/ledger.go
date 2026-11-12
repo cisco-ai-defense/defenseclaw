@@ -28,21 +28,29 @@ type Ledger struct {
 	spend map[string]map[int32]float64
 	// seeded holds the budget ids whose store history has been added.
 	seeded    map[string]bool
+	seedErr   string
 	lastPrune int32
+	// now is the wall clock (a test seam).
+	now func() time.Time
 }
 
 // NewLedger returns an empty ledger.
 func NewLedger() *Ledger {
-	return &Ledger{spend: map[string]map[int32]float64{}, seeded: map[string]bool{}}
+	return &Ledger{spend: map[string]map[int32]float64{}, seeded: map[string]bool{}, now: time.Now}
 }
 
 // Charge adds usd to every key on the UTC day of at. Non-positive or
-// non-finite amounts are ignored (absent cost adds nothing).
+// non-finite amounts are ignored (absent cost adds nothing); a charge dated
+// in the future (a clock step) counts today.
 func (l *Ledger) Charge(keys []string, usd float64, at time.Time) {
 	if l == nil || len(keys) == 0 || !(usd > 0) || math.IsInf(usd, 0) {
 		return
 	}
+	today := dayNumber(l.now())
 	day := dayNumber(at)
+	if day > today {
+		day = today
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, key := range keys {
@@ -53,8 +61,8 @@ func (l *Ledger) Charge(keys []string, usd float64, at time.Time) {
 		}
 		days[day] += usd
 	}
-	if day != l.lastPrune {
-		l.pruneLocked(day)
+	if today != l.lastPrune {
+		l.pruneLocked(today)
 	}
 }
 
@@ -73,10 +81,9 @@ func (l *Ledger) Spend(key, period string, now time.Time) (float64, bool) {
 		return 0, false
 	}
 	var total float64
-	for day, usd := range l.spend[key] {
-		if day >= from && day <= today {
-			total += usd
-		}
+	days := l.spend[key]
+	for day := from; day <= today; day++ {
+		total += days[day] // in day order: the same total on every call
 	}
 	return total, true
 }
@@ -85,7 +92,7 @@ func (l *Ledger) Spend(key, period string, now time.Time) (float64, bool) {
 // gateway processes only (the store excludes this process's epoch, so the
 // live charges are never counted twice).
 type SeedRow struct {
-	Day time.Time
+	Day string // UTC date, YYYY-MM-DD
 	Key string
 	USD float64
 }
@@ -119,7 +126,8 @@ func (l *Ledger) ApplySeed(ids []string, rows []SeedRow) {
 		}
 	}
 	for _, row := range rows {
-		if !fresh[budgetIDOfKey(row.Key)] || !(row.USD > 0) || math.IsInf(row.USD, 0) {
+		date, err := time.Parse(time.DateOnly, row.Day)
+		if err != nil || !fresh[budgetIDOfKey(row.Key)] || !(row.USD > 0) || math.IsInf(row.USD, 0) {
 			continue
 		}
 		days := l.spend[row.Key]
@@ -127,11 +135,31 @@ func (l *Ledger) ApplySeed(ids []string, rows []SeedRow) {
 			days = map[int32]float64{}
 			l.spend[row.Key] = days
 		}
-		days[dayNumber(row.Day)] += row.USD
+		days[dayNumber(date)] += row.USD
 	}
 	for id := range fresh {
 		l.seeded[id] = true
 	}
+	l.seedErr = ""
+}
+
+// SeedState is seeded, seeding or failed: <error> for doctor and status
+// (seeded when every id is loaded).
+func (l *Ledger) SeedState(ids []string) string {
+	if l == nil {
+		return "seeding"
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, id := range ids {
+		if !l.seeded[id] {
+			if l.seedErr != "" {
+				return "failed: " + l.seedErr
+			}
+			return "seeding"
+		}
+	}
+	return "seeded"
 }
 
 // SeedLoop seeds ids from fetch, retrying with backoff (1 s doubling to
@@ -148,6 +176,9 @@ func (l *Ledger) SeedLoop(ctx context.Context, ids []string, now func() time.Tim
 			l.ApplySeed(ids, rows)
 			return
 		}
+		l.mu.Lock()
+		l.seedErr = err.Error()
+		l.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return

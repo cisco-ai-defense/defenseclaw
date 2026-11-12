@@ -200,7 +200,7 @@ func TestStandaloneEgressClientsGoThroughTheEnterpriseProxy(t *testing.T) {
 			}
 		}},
 		{"remote model router", "router.example.test", routerHealth, func(t *testing.T, host, port string) {
-			if !newRemoteRouterClient("http://"+host+":"+port, 1000, nil, "").Healthy(context.Background()) {
+			if !NewRemoteRouterClient("http://"+host+":"+port, 1000).Healthy(context.Background()) {
 				t.Fatal("the remote router must be reachable through the enterprise proxy")
 			}
 		}},

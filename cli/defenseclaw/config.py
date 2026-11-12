@@ -2970,6 +2970,9 @@ class GuardrailProfile:
     connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
     # Tightens openshell.admin for subjects of this profile; None adds nothing.
     sandbox: OpenShellAdminConfig | None = None
+    # Tightens routing.admin for subjects of this profile (Go
+    # RoutingPolicyConfig); kept as a mapping, None adds nothing.
+    routing: dict[str, Any] | None = None
     enabled: bool | None = None
     hook_fail_mode: str = ""
 
@@ -4104,15 +4107,28 @@ class RoutingConfig:
     port: int = 0
     algorithm: str = ""
     # Keep the nested routing graph as mappings/lists rather than duplicating
-    # the Go DTO hierarchy here: the gateway's config-v8 validate checks them
-    # on every write. They must still be part of the modeled v8 snapshot:
-    # otherwise saving a changed ``enabled`` replaces the entire routing block
-    # and silently drops the model catalog, signals, decisions and the
-    # organization policy in ``admin`` (rules, budgets, visibility).
+    # the rapidly evolving Go DTO hierarchy here.  Python setup commands only
+    # toggle the lifecycle fields above, but these values must still be part of
+    # the modeled v8 snapshot: otherwise changing ``enabled`` on a disabled
+    # config replaces the entire routing block and silently drops the model
+    # catalog, signals, and decisions.
     remote: dict[str, Any] = field(default_factory=dict)
     models: list[dict[str, Any]] = field(default_factory=list)
     signals: dict[str, Any] = field(default_factory=dict)
     decisions: list[dict[str, Any]] = field(default_factory=list)
+    # 1.0.10 keys (Go internal/config/routing_policy.go). Absent keeps the
+    # 1.0.9 meaning; validation is the v8 schema plus the Go gateway.
+    classifier: str = ""
+    min_confidence: float = 0.0
+    on_classifier_error: str = ""
+    default_alias: str = ""
+    categories: dict[str, Any] = field(default_factory=dict)
+    allow_user_override: bool = False
+    sensitive: dict[str, Any] = field(default_factory=dict)
+    systemone: dict[str, Any] = field(default_factory=dict)
+    route_only: dict[str, Any] = field(default_factory=dict)
+    # routing.admin: the floor keys (S1) plus rules / budgets / visibility
+    # (S11), kept as a mapping so every key round-trips.
     admin: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -4131,9 +4147,21 @@ class RoutingConfig:
             d["signals"] = copy.deepcopy(self.signals)
         if self.decisions:
             d["decisions"] = copy.deepcopy(self.decisions)
-        if self.admin:
-            d["admin"] = copy.deepcopy(self.admin)
+        for name in ("classifier", "on_classifier_error", "default_alias"):
+            if getattr(self, name):
+                d[name] = getattr(self, name)
+        if self.min_confidence:
+            d["min_confidence"] = self.min_confidence
+        if self.allow_user_override:
+            d["allow_user_override"] = True
+        for name in ROUTING_NESTED_1010_KEYS:
+            if getattr(self, name):
+                d[name] = copy.deepcopy(getattr(self, name))
         return d
+
+
+# Nested routing keys added in 1.0.10, kept as raw mappings.
+ROUTING_NESTED_1010_KEYS = ("categories", "sensitive", "systemone", "route_only", "admin")
 
 
 @dataclass
@@ -5713,7 +5741,7 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
                 continue
             _strip_empty_keys(
                 profile,
-                ("description", "mode", "block_message", "hilt", "enabled", "hook_fail_mode", "sandbox"),
+                ("description", "mode", "block_message", "hilt", "enabled", "hook_fail_mode", "sandbox", "routing"),
             )
             if isinstance(profile.get("sandbox"), dict):
                 _strip_unset_sandbox_keys(profile["sandbox"])
@@ -5772,7 +5800,7 @@ def _serialize_routing(d: dict[str, Any]) -> None:
         "models",
         "signals",
         "decisions",
-        "admin",
+        *ROUTING_NESTED_1010_KEYS,
     )
     has_value = any(
         (
@@ -5780,6 +5808,11 @@ def _serialize_routing(d: dict[str, Any]) -> None:
             routing.get("version"),
             routing.get("port"),
             routing.get("algorithm"),
+            routing.get("classifier"),
+            routing.get("min_confidence"),
+            routing.get("on_classifier_error"),
+            routing.get("default_alias"),
+            routing.get("allow_user_override"),
             *(routing.get(name) for name in nested_fields),
         )
     )
@@ -5792,6 +5825,9 @@ def _serialize_routing(d: dict[str, Any]) -> None:
         routing.pop("port", None)
     if not routing.get("algorithm"):
         routing.pop("algorithm", None)
+    for name in ("classifier", "min_confidence", "on_classifier_error", "default_alias", "allow_user_override"):
+        if not routing.get(name):
+            routing.pop(name, None)
     for name in nested_fields:
         if not routing.get(name):
             routing.pop(name, None)
@@ -6992,6 +7028,7 @@ def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
             block_message=str(entry.get("block_message", "") or ""),
             connectors=_merge_guardrail_connectors(entry.get("connectors"), profile=True),
             sandbox=_merge_openshell_admin(entry["sandbox"]) if isinstance(entry.get("sandbox"), dict) else None,
+            routing=copy.deepcopy(entry["routing"]) if isinstance(entry.get("routing"), dict) else None,
             enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
             hook_fail_mode=str(entry.get("hook_fail_mode", "") or ""),
         )
@@ -8686,6 +8723,15 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
         models=mapping_list("models"),
         signals=mapping("signals"),
         decisions=mapping_list("decisions"),
+        classifier=str(raw.get("classifier", "") or ""),
+        min_confidence=_optional_float(raw.get("min_confidence")) or 0.0,
+        on_classifier_error=str(raw.get("on_classifier_error", "") or ""),
+        default_alias=str(raw.get("default_alias", "") or ""),
+        categories=mapping("categories"),
+        allow_user_override=_coerce_bool(raw.get("allow_user_override", False)),
+        sensitive=mapping("sensitive"),
+        systemone=mapping("systemone"),
+        route_only=mapping("route_only"),
         admin=mapping("admin"),
     )
 

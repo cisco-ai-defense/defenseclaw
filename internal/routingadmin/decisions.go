@@ -73,7 +73,7 @@ func (d *Decisions) Recent(callerKey string, admin bool, limit int) []DecisionEn
 	for i := 0; i < d.n && len(out) < limit; i++ {
 		e := d.buf[(d.next-1-i+DecisionsSize)%DecisionsSize]
 		if admin || (callerKey != "" && e.CallerKey == callerKey) {
-			out = append(out, e)
+			out = append(out, e.copy())
 		}
 	}
 	return out
@@ -89,14 +89,16 @@ func (d *Decisions) Find(requestID, callerKey string, admin bool) (DecisionEntry
 	defer d.mu.Unlock()
 	for i := 0; i < d.n; i++ {
 		e := d.buf[(d.next-1-i+DecisionsSize)%DecisionsSize]
-		if e.RequestID == requestID {
-			if admin || (callerKey != "" && e.CallerKey == callerKey) {
-				return e, true
-			}
-			return DecisionEntry{}, false
+		if e.RequestID == requestID && (admin || (callerKey != "" && e.CallerKey == callerKey)) {
+			return e.copy(), true
 		}
 	}
 	return DecisionEntry{}, false
+}
+
+func (e DecisionEntry) copy() DecisionEntry {
+	e.Reasons, e.RuleIDs, e.Warnings = clone(e.Reasons), clone(e.RuleIDs), clone(e.Warnings)
+	return e
 }
 
 func clone(s []string) []string {

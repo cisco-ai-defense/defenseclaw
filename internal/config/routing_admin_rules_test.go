@@ -56,7 +56,7 @@ func TestValidateRoutingAdminRulesRefusals(t *testing.T) {
 		{"deny with allow", rule(func(r *RoutingAdminRule) { r.Action = "deny" }), nil, nil, "remove allow and default"},
 		{"message without deny", rule(func(r *RoutingAdminRule) { r.Message = "no" }), nil, nil, "only used by a deny rule"},
 		{"message not printable", rule(func(r *RoutingAdminRule) { r.Action, r.Allow, r.Message = "deny", nil, "a\nb" }), nil, nil, "printable"},
-		{"message too long", rule(func(r *RoutingAdminRule) { r.Action, r.Allow, r.Message = "deny", nil, strings.Repeat("x", 513) }), nil, nil, "512 bytes"},
+		{"message too long", rule(func(r *RoutingAdminRule) { r.Action, r.Allow, r.Message = "deny", nil, strings.Repeat("x", 513) }), nil, nil, "512 characters"},
 		{"empty allow", rule(func(r *RoutingAdminRule) { r.Allow = []string{} }), nil, nil, "allow is empty"},
 		{"no-op constrain", rule(func(r *RoutingAdminRule) { r.Allow = nil }), nil, nil, "changes nothing"},
 		{"unknown allow alias", rule(func(r *RoutingAdminRule) { r.Allow = []string{"gpt"} }), nil, nil, "allow[0] \"gpt\" is not an alias"},
@@ -66,6 +66,11 @@ func TestValidateRoutingAdminRulesRefusals(t *testing.T) {
 		{"budget scope", nil, budget(func(b *RoutingBudget) { b.Scope = "team" }), nil, "must be user, group or connector"},
 		{"group star", nil, budget(func(b *RoutingBudget) { b.Scope = "group" }), nil, "names one group"},
 		{"connector name", nil, budget(func(b *RoutingBudget) { b.Scope, b.Subject = "connector", "Claude Code" }), nil, "must be a connector name"},
+		{"spaced action", rule(func(r *RoutingAdminRule) { r.Action = " deny" }), nil, nil, "must be constrain or deny"},
+		{"spaced severity", rule(func(r *RoutingAdminRule) { r.Match.SeverityAtLeast = " high" }), nil, nil, "severity_at_least"},
+		{"empty group list", rule(func(r *RoutingAdminRule) { r.Match.Groups = []string{} }), nil, nil, "match.groups is empty"},
+		{"spaced downgrade", nil, budget(func(b *RoutingBudget) { b.OnExceed = "downgrade: fast" }), nil, "is not an alias"},
+		{"spaced visibility", nil, nil, &RoutingVisibility{UsersSee: " own"}, "own or none"},
 		{"subject spaces", nil, budget(func(b *RoutingBudget) { b.Subject = " *" }), nil, "without surrounding spaces"},
 		{"period", nil, budget(func(b *RoutingBudget) { b.Period = "year" }), nil, "day, week or month"},
 		{"limit zero", nil, budget(func(b *RoutingBudget) { b.LimitUSD = 0 }), nil, "limit_usd"},
@@ -96,9 +101,12 @@ func TestValidateRoutingAdminRulesRefusals(t *testing.T) {
 }
 
 func TestRoutingBudgetOnExceedAction(t *testing.T) {
-	action, aliases := RoutingBudget{OnExceed: "downgrade: fast , local"}.OnExceedAction()
+	action, aliases := RoutingBudget{OnExceed: "downgrade:fast,local"}.OnExceedAction()
 	if action != "downgrade" || len(aliases) != 2 || aliases[0] != "fast" || aliases[1] != "local" {
 		t.Fatalf("got %q %q", action, aliases)
+	}
+	if action, aliases := (RoutingBudget{OnExceed: "downgrade: fast"}).OnExceedAction(); action != "downgrade" || aliases[0] != " fast" {
+		t.Fatalf("on_exceed is exact: got %q %q", action, aliases)
 	}
 	if action, aliases := (RoutingBudget{OnExceed: "deny"}).OnExceedAction(); action != "deny" || aliases != nil {
 		t.Fatalf("got %q %q", action, aliases)
@@ -120,7 +128,27 @@ func TestRoutingAdminMatchSelectors(t *testing.T) {
 	if (RoutingAdminMatch{SeverityAtLeast: "HIGH"}).Empty() || (RoutingAdminMatch{Categories: []string{"x"}}).NamesIdentity() {
 		t.Fatal("severity/category only")
 	}
-	if !(RoutingAdminRule{Action: " deny "}).IsDeny() {
-		t.Fatal("IsDeny trims")
+	if (RoutingAdminRule{Action: " deny "}).IsDeny() || !(RoutingAdminRule{Action: "deny"}).IsDeny() {
+		t.Fatal("IsDeny is exact")
+	}
+}
+
+func TestValidateRoutingAdminFailClosed(t *testing.T) {
+	code := RoutingAdminRule{ID: "code", Match: RoutingAdminMatch{Categories: []string{"code"}}, Allow: []string{"coder", "fast"}}
+	chat := RoutingAdminRule{ID: "chat", Match: RoutingAdminMatch{Categories: []string{"chat"}}, Allow: []string{"fast"}}
+	if err := validateRoutingAdminFailClosed([]RoutingAdminRule{code, chat}, nil); err != nil {
+		t.Fatalf("shared alias fast: %v", err)
+	}
+	chat.Allow = []string{"local"}
+	err := validateRoutingAdminFailClosed([]RoutingAdminRule{code, chat}, nil)
+	if err == nil || !strings.Contains(err.Error(), "code, chat") {
+		t.Fatalf("disjoint category rules: %v", err)
+	}
+	if err := validateRoutingAdminFailClosed([]RoutingAdminRule{code}, []string{"local"}); err == nil {
+		t.Fatal("a category rule disjoint from the floor must be refused")
+	}
+	deny := RoutingAdminRule{ID: "d", Match: RoutingAdminMatch{Categories: []string{"x"}}, Action: "deny"}
+	if err := validateRoutingAdminFailClosed([]RoutingAdminRule{deny}, []string{"local"}); err != nil {
+		t.Fatalf("deny rules and the floor alone: %v", err)
 	}
 }
