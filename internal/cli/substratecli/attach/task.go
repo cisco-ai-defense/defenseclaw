@@ -59,7 +59,7 @@ func RunTask(ctx context.Context, o TaskOptions) (int, error) {
 	if strings.TrimSpace(o.Prompt) == "" {
 		return -1, errors.New("a task needs a prompt")
 	}
-	if err := o.Options.normalize(); err != nil {
+	if err := o.normalize(); err != nil {
 		return -1, err
 	}
 	l := newLink(o.Options)

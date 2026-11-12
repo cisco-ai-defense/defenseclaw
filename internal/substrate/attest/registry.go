@@ -201,7 +201,6 @@ type call struct {
 	bodyLen int64
 	push    bool
 	op      string
-	ok      []int
 }
 
 // do runs a request, answering one 401 challenge.

@@ -33,19 +33,35 @@ const chartKubeVersion = "1.34.0"
 // deploy/helm/defenseclaw-substrate/tests/values (empty for the defaults).
 var chartCases = []string{"default", "launcher", "minimal", "full"}
 
+// helmPinnedVersion is the helm release the goldens are rendered with and
+// that the CI job substrate-chart installs (keep it equal to HELM_VERSION in
+// .github/workflows/ci.yml). Other helm releases print the same objects with
+// different YAML, so a golden compare under them is not a test of the chart.
+const helmPinnedVersion = "v3.17.3"
+
 func helmBinary(t *testing.T) string {
 	t.Helper()
-	if h := os.Getenv("DEFENSECLAW_HELM"); h != "" {
-		return h
-	}
-	h, err := exec.LookPath("helm")
-	if err != nil {
-		// The CI job substrate-chart installs a pinned helm and sets this;
-		// the general Go shards have no helm and skip.
-		if os.Getenv("DEFENSECLAW_HELM_REQUIRED") != "" {
-			t.Fatal("helm is not installed; the chart goldens need it here")
+	required := os.Getenv("DEFENSECLAW_HELM_REQUIRED") != ""
+	h := os.Getenv("DEFENSECLAW_HELM")
+	if h == "" {
+		var err error
+		if h, err = exec.LookPath("helm"); err != nil {
+			// The CI job substrate-chart installs the pinned helm and sets
+			// DEFENSECLAW_HELM_REQUIRED; the general Go shards skip.
+			if required {
+				t.Fatal("helm is not installed; the chart goldens need it here")
+			}
+			t.Skip("helm is not installed (set DEFENSECLAW_HELM)")
 		}
-		t.Skip("helm is not installed (set DEFENSECLAW_HELM)")
+	}
+	// The hosted runners ship their own helm, which is not the pinned one:
+	// only the job that installs the pinned release compares the goldens.
+	out, err := exec.Command(h, "version", "--template", "{{.Version}}").Output()
+	if got := strings.TrimSpace(string(out)); err != nil || got != helmPinnedVersion {
+		if required {
+			t.Fatalf("helm %q is not the pinned %s the goldens are rendered with (%v)", got, helmPinnedVersion, err)
+		}
+		t.Skipf("helm %q is not the pinned %s (set DEFENSECLAW_HELM)", got, helmPinnedVersion)
 	}
 	return h
 }

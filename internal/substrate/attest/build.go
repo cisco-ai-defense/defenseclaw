@@ -210,7 +210,7 @@ func Build(ctx context.Context, o BuildOptions) (*BuildResult, error) {
 	var expected []ExpectedFile
 	paths := make([]string, 0, len(o.Kit.Files))
 	for _, f := range o.Kit.Files {
-		if !o.Kit.UserFiles[f.Path] && f.Symlink == "" && !(f.Dir && (f.UID != 0 || f.GID != 0)) {
+		if !o.Kit.UserFiles[f.Path] && f.Symlink == "" && (!f.Dir || (f.UID == 0 && f.GID == 0)) {
 			paths = append(paths, f.Path)
 		}
 	}

@@ -55,7 +55,7 @@ func parseToolCalls(body []byte) ([]toolCallReq, error) {
 			return nil, nil
 		}
 		if len(msgs) > maxBatchCalls {
-			return nil, fmt.Errorf("The JSON-RPC batch has more than %d requests.", maxBatchCalls)
+			return nil, fmt.Errorf("the JSON-RPC batch has more than %d requests", maxBatchCalls)
 		}
 	case '{':
 		msgs = []json.RawMessage{b}
@@ -67,7 +67,7 @@ func parseToolCalls(body []byte) ([]toolCallReq, error) {
 		obj, err := exactObject(m)
 		if err != nil {
 			if errors.Is(err, errDuplicateKey) {
-				return nil, errors.New("The JSON-RPC request repeats a key, so it is ambiguous.")
+				return nil, errors.New("the JSON-RPC request repeats a key, so it is ambiguous")
 			}
 			continue
 		}
@@ -78,7 +78,7 @@ func parseToolCalls(body []byte) ([]toolCallReq, error) {
 		params, err := exactObject(obj["params"])
 		if err != nil {
 			if errors.Is(err, errDuplicateKey) {
-				return nil, errors.New("The tools/call params repeat a key, so they are ambiguous.")
+				return nil, errors.New("the tools/call params repeat a key, so they are ambiguous")
 			}
 			return nil, errors.New("The tools/call request has no params object.")
 		}

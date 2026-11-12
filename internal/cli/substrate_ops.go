@@ -86,7 +86,7 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 		}
 	}
 	code, err := attach.FollowTask(fctx, o, id, emit)
-	if err != nil && !(errors.Is(err, context.Canceled) && !follow) {
+	if err != nil && (!errors.Is(err, context.Canceled) || follow) {
 		return substrateFail(err)
 	}
 	if err == nil && code != 0 && !asJSON {

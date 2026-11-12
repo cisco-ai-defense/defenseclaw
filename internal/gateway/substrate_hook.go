@@ -103,12 +103,6 @@ type SubstrateAttachedFile struct {
 type substrateFactsKey struct{}
 type substrateEnvelopeKey struct{}
 
-// substrateFactsFrom returns the kit's facts for a hook request.
-func substrateFactsFrom(ctx context.Context) (*SubstrateFacts, bool) {
-	f, ok := ctx.Value(substrateFactsKey{}).(*SubstrateFacts)
-	return f, ok && f != nil
-}
-
 func substrateEnvelopeFrom(ctx context.Context) (substrateEnvelope, bool) {
 	e, ok := ctx.Value(substrateEnvelopeKey{}).(substrateEnvelope)
 	return e, ok
