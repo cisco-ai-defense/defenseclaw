@@ -129,6 +129,7 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	if lifecycleResultHasError(result, "not_root") {
 		reportManagedCommandRefusal("enterprise "+platform+" "+action, "not_root")
 	}
+	attachSecureClientHealthReport(result, goos, time.Now())
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
@@ -332,6 +333,9 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		}
 		enterprisestatus.WriteDestinations(w, result.Destinations)
 		enterprisestatus.WriteAuditStore(w, result.AuditStore)
+	}
+	if line := result.HealthReport.Summary(); line != "" {
+		fmt.Fprintf(w, "  health report: %s\n", line)
 	}
 	// The policy the lifecycle left in place (absent under Secure Client):
 	// an administrator reading the text must see the generation and digest.

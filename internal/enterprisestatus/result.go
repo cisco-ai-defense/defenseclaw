@@ -255,8 +255,12 @@ type Result struct {
 	// elsewhere.
 	Cowork         *CoworkState         `json:"cowork,omitempty"`
 	CoworkVMSensor *CoworkVMSensorState `json:"cowork_vm_sensor,omitempty"`
-	LogPath        string               `json:"log_path,omitempty"`
-	ExitCode       int                  `json:"exit_code"`
+	// HealthReport summarizes the managed gateway's last endpoint health
+	// report (health_report.go), for status on a Secure Client host; nil
+	// (omitted) when there is no report.
+	HealthReport *HealthReportState `json:"health_report,omitempty"`
+	LogPath      string             `json:"log_path,omitempty"`
+	ExitCode     int                `json:"exit_code"`
 	// ConfigRefused marks a run that refused the submitted config before it
 	// changed anything: the policy, services and advisories it reports are
 	// the running deployment's. Text output only (GAP-0564).

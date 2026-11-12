@@ -125,6 +125,7 @@
     "account_join": { "$ref": "#/$defs/accountJoin", "description": "status and verify run as root or an administrator, standalone profile, from 1.0.7, only while enterprise.account_join is on: how many account join keys each generation has for the enrolled accounts the guardian saw in the last 30 days (at most 64), and reason codes. Never a key, an account name, an identifier or a secret: the keys are only in the output of enterprise account-keys. Optional." },
     "cowork": { "$ref": "#/$defs/coworkState", "description": "status and verify run as root or an administrator, standalone profile, from 1.0.8: Claude Cowork runs the Claude Code engine Claude Desktop bundles, which loads the Claude Code machine policy. Whether DefenseClaw's Claude Code machine policy hooks are in place for it, the managed_hooks_only lock, the gateway's Cowork events since it started, and each enrolled account's last Cowork event (account names: administrator views only). Optional." },
     "cowork_vm_sensor": { "$ref": "#/$defs/coworkVMSensor", "description": "Optional standalone host-delivery observation. host_ready checks the architecture package, detached signature, install arguments and their trust; settings_ready checks the two managed Claude Desktop settings. Neither field proves Claude accepted or ran the package inside its VM. Absent under Secure Client." },
+    "health_report": { "$ref": "#/$defs/healthReport", "description": "status on a Secure Client host: the managed gateway's last endpoint health report (<data_dir>/diagnostics/health_report_last.json). Codes, enums, counts and times only. Absent when there is no report. Never an error: a degraded, unhealthy or stale report adds at most one endpoint_health_degraded warning." },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },
@@ -256,6 +257,32 @@
         "higher_precedence": { "type": "array", "items": { "type": "string" } },
         "conflicts": { "type": "array", "items": { "type": "string" } },
         "live_verified_at": { "type": "string" }
+      }
+    },
+    "healthReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stale"],
+      "properties": {
+        "status": { "type": "string", "enum": ["healthy", "degraded", "unhealthy", "starting"] },
+        "observed_at": { "type": "string", "format": "date-time", "description": "When the gateway built the report." },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "trigger": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$", "description": "startup, scheduled or config_reload." },
+        "reason_codes": { "type": "array", "maxItems": 32, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" }, "description": "The report's distinct reason codes, such as HOOKS_PARTIAL." },
+        "built_at": { "type": "string", "format": "date-time" },
+        "delivery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["result"],
+          "properties": {
+            "result": { "type": "string", "enum": ["queued", "not_routed", "failed"] },
+            "at": { "type": "string", "format": "date-time" },
+            "failure_class": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$" },
+            "cloud_state": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$" }
+          }
+        },
+        "stale": { "type": "boolean", "description": "More than three report intervals have passed since observed_at." },
+        "error": { "type": "string", "enum": ["unreadable", "access_denied", "invalid"], "description": "The report file exists but could not be used; the other fields are then absent." }
       }
     },
     "auditStore": {
