@@ -660,8 +660,8 @@ func (s *SubstrateConfig) validateExtproc(bad func(key, format string, a ...any)
 		{"extproc.uid.cache_ttl", e.UID.CacheTTL, 10 * time.Minute},
 		{"extproc.uid.stale_max", e.UID.StaleMax, 10 * time.Minute},
 		{"extproc.chain.check_budget", e.Chain.CheckBudget, 500 * time.Millisecond},
-		{"extproc.ask.hold", e.Ask.Hold, time.Hour},
-		{"extproc.judge.timeout", e.Judge.Timeout, time.Hour},
+		{"extproc.ask.hold", e.Ask.Hold, 1800 * time.Millisecond},
+		{"extproc.judge.timeout", e.Judge.Timeout, 1800 * time.Millisecond},
 	} {
 		if d.v == "" {
 			continue

@@ -234,8 +234,10 @@ func (e *Engine) failure(v Verdict, category, reason string) Verdict {
 	return v
 }
 
-// DecideHeaders decides a request on its headers.
+// DecideHeaders decides a request on its headers, within MessageBudget.
 func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
+	ctx, cancel := context.WithTimeout(ctx, MessageBudget)
+	defer cancel()
 	defer func() {
 		if r := recover(); r != nil {
 			v = e.failure(Verdict{}, CategoryCalloutError, "The DefenseClaw egress callout hit an internal error.")
@@ -454,8 +456,11 @@ func (e *Engine) wantBody(req *Request) (bool, string) {
 }
 
 // DecideBody decides a request again on its buffered body; v is its headers
-// verdict.
+// verdict. Every tools/call of a batch is judged within one MessageBudget:
+// a batch that does not fit follows the failure mode.
 func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body []byte) (out Verdict) {
+	ctx, cancel := context.WithTimeout(ctx, MessageBudget)
+	defer cancel()
 	defer func() {
 		if r := recover(); r != nil {
 			out = e.failure(v, CategoryCalloutError, "The DefenseClaw egress callout hit an internal error.")

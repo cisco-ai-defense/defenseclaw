@@ -114,8 +114,8 @@ type ChainConfig struct {
 
 // AskConfig configures ask-required hosts.
 type AskConfig struct {
-	// Hold is how long a request waits for an ask's outcome. It must stay
-	// under the egress filter's message timeout (2 s on stock v1.0.0).
+	// Hold is how long a request waits for an ask's outcome, at most
+	// MessageBudget.
 	Hold time.Duration `yaml:"hold"`
 }
 
@@ -190,7 +190,12 @@ const (
 	defaultQueueSize    = 4096
 	defaultAskHold      = 1500 * time.Millisecond
 	defaultJudgeTimeout = 1500 * time.Millisecond
-	maxConfigBytes      = 4 << 20
+	// MessageBudget is the time the callout takes to answer one message
+	// (headers or body), under the egress filter's 2 s message timeout
+	// (atenet v1.0.0), so DefenseClaw's answer, not Envoy's failure
+	// mode, decides (GAP-0062). ask.hold and judge.timeout fit inside it.
+	MessageBudget  = 1800 * time.Millisecond
+	maxConfigBytes = 4 << 20
 )
 
 // Failure modes and body inspection settings.
@@ -305,8 +310,8 @@ func (c *Config) normalize() error {
 		{&c.UID.CacheTTL, defaultCacheTTL, 10 * time.Minute, "uid.cache_ttl"},
 		{&c.UID.StaleMax, defaultStaleMax, 10 * time.Minute, "uid.stale_max"},
 		{&c.Chain.CheckBudget, defaultCheckBudget, 500 * time.Millisecond, "chain.check_budget"},
-		{&c.Ask.Hold, defaultAskHold, time.Hour, "ask.hold"},
-		{&c.Judge.Timeout, defaultJudgeTimeout, time.Hour, "judge.timeout"},
+		{&c.Ask.Hold, defaultAskHold, MessageBudget, "ask.hold"},
+		{&c.Judge.Timeout, defaultJudgeTimeout, MessageBudget, "judge.timeout"},
 	} {
 		if err := setDur(d.p, d.def, d.name, d.max); err != nil {
 			return err
