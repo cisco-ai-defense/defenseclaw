@@ -5015,12 +5015,12 @@ attributes:
   stability: stable
   owner: defenseclaw
   field_class: identifier
-  sensitivity: internal
+  sensitivity: sensitive
   cardinality: high
   normalization:
     id: identifier-v1
     overrides: {max_utf8_bytes: 128}
-    notes: Atespace name; launcher atespaces are named from the person or the workload. Never a metric label
+    notes: Atespace name. Launcher atespaces are named from the person or the workload, so it can hold a person's name and is classed like the other person identifiers. Never a metric label
   introduced_in: telemetry-registry-v4
 - id: defenseclaw.sandbox.substrate.actor
   type: string
@@ -5133,20 +5133,6 @@ attributes:
     id: identifier-v1
     overrides: {max_utf8_bytes: 64}
     notes: The attribute name Substrate uses on its own spans and logs; equal to defenseclaw.sandbox.substrate.actor_uid, so DefenseClaw records join Substrate traces. Never a metric label
-  introduced_in: telemetry-registry-v4
-- id: defenseclaw.chain.scope
-  type: string
-  brief: Whether a tool-chain state belongs to a hook session or to an Agent Substrate actor
-  examples: [actor]
-  stability: stable
-  owner: defenseclaw
-  field_class: metadata
-  sensitivity: safe
-  cardinality: low
-  normalization:
-    id: enum-v1
-    overrides: {enum: [session, actor]}
-    notes: session is the host and OpenShell scope (one hook session); actor keeps the state across the suspend and resume of one Substrate actor. Never changes how a chain matches
   introduced_in: telemetry-registry-v4
 - id: defenseclaw.network.body_inspected
   type: boolean
@@ -13353,7 +13339,7 @@ groups:
     - local-observability-v1
 - id: metric.defenseclaw.substrate.hook_rtt
   type: metric
-  brief: Round trip of a hook call from the actor kit to the DefenseClaw gateway; no identity labels.
+  brief: Hook call time measured by the gateway, from request received to response written; recorded only by the gateway, never by the actor kit; no identity labels.
   stability: stable
   introduced_in: telemetry-registry-v4
   extends: []
@@ -13364,7 +13350,7 @@ groups:
     instrument_type: histogram
     value_type: double
     unit: 'ms'
-    description: Round trip of a hook call from the actor kit to the DefenseClaw gateway; no identity labels.
+    description: Hook call time measured by the gateway, from request received to response written; recorded only by the gateway, never by the actor kit; no identity labels.
     temporality: delta
     boundaries: []
     empty_labels_reason: No instrument attributes by design; Substrate actor, atespace and person identity are never metric labels.
@@ -13466,7 +13452,7 @@ groups:
     - local-observability-v1
 - id: metric.defenseclaw.substrate.rate_limited
   type: metric
-  brief: Calls refused by the fair-share rate limit per actor and atespace; no identity labels.
+  brief: Calls refused by the per-actor or per-atespace fair-share limit, counted in total; no identity labels.
   stability: stable
   introduced_in: telemetry-registry-v4
   extends: []
@@ -13477,7 +13463,7 @@ groups:
     instrument_type: counter
     value_type: int64
     unit: '{request}'
-    description: Calls refused by the fair-share rate limit per actor and atespace; no identity labels.
+    description: Calls refused by the per-actor or per-atespace fair-share limit, counted in total; no identity labels.
     temporality: delta
     empty_labels_reason: No instrument attributes by design; Substrate actor, atespace and person identity are never metric labels.
   x-defenseclaw:

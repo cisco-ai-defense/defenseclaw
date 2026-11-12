@@ -661,7 +661,7 @@ def _bundle_parity_errors() -> list[str]:
     return errors
 
 
-MANAGED_SANDBOX_METRIC_CONDITION = 'IsMatch(metric.name, "^defenseclaw[.]sandbox[.]managed[.]")'
+MANAGED_SANDBOX_METRIC_CONDITION = 'IsMatch(metric.name, "^defenseclaw[.](sandbox[.]managed|substrate)[.]")'
 EXPECTED_MANAGED_SANDBOX_OUT_FILTER = {
     "error_mode": "ignore",
     "metric_conditions": [MANAGED_SANDBOX_METRIC_CONDITION],
