@@ -63,9 +63,15 @@ func NewTransport(cfg Config) (*Transport, error) {
 		return nil, err
 	}
 	base, _ := url.Parse(strings.TrimRight(cfg.GatewayURL, "/"))
-	roots, err := trustPool(cfg.CAFiles)
-	if err != nil {
-		return nil, err
+	// Every hook is a new process: parsing a CA pool costs tens of
+	// milliseconds on a microVM, so it is built only for an https gateway
+	// (the actor listener is plain HTTP inside the cluster).
+	var roots *x509.CertPool
+	if base.Scheme == "https" {
+		var err error
+		if roots, err = trustPool(cfg.CAFiles); err != nil {
+			return nil, err
+		}
 	}
 	dialer := &net.Dialer{Timeout: cfg.connectTimeout(), KeepAlive: 30 * time.Second}
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -97,20 +103,25 @@ func NewTransport(cfg Config) (*Transport, error) {
 	return &Transport{cfg: cfg, base: base, client: &http.Client{Transport: tr}, newKey: randomKey}, nil
 }
 
+// trustPool is the projected Substrate bundle (egress MITM anchors and
+// system roots), or the system roots when no configured bundle can be read
+// (an https gateway behind the egress MITM then fails its handshake,
+// closed).
 func trustPool(files []string) (*x509.CertPool, error) {
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
-	}
+	pool := x509.NewCertPool()
+	loaded := false
 	for _, f := range files {
 		pem, err := os.ReadFile(f)
 		if err != nil {
-			// A projected bundle is mounted at actor start; a missing one
-			// leaves the system roots, and an https gateway behind the
-			// egress MITM then fails its handshake, closed.
 			continue
 		}
-		pool.AppendCertsFromPEM(pem)
+		loaded = pool.AppendCertsFromPEM(pem) || loaded
+	}
+	if loaded {
+		return pool, nil
+	}
+	if sys, err := x509.SystemCertPool(); err == nil && sys != nil {
+		return sys, nil
 	}
 	return pool, nil
 }
