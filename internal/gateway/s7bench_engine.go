@@ -49,7 +49,9 @@ func S7NewEngine(cfg *config.Config, connectorName string) (*S7Engine, error) {
 	if err := store.Init(); err != nil {
 		return nil, fmt.Errorf("audit store init: %w", err)
 	}
-	logger := audit.NewLogger(store)
+	// No audit logger: the hook answers without the v8 audit runtime
+	// (errHookAuditNotConfigured), so an audit fault never shapes a verdict.
+	var logger *audit.Logger
 	sc, err := NewSidecar(cfg, store, logger)
 	if err != nil {
 		return nil, err
