@@ -287,7 +287,7 @@ func (g *Registry) fetchToken(ctx context.Context, challenge, scope string) (str
 		return "", errors.New("no realm")
 	}
 	u, err := url.Parse(realm)
-	if err != nil || (u.Scheme != "https" && !(u.Scheme == "http" && g.scheme(u.Host) == "http")) {
+	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || g.scheme(u.Host) != "http")) {
 		return "", errors.New("bad realm")
 	}
 	q := u.Query()
@@ -540,7 +540,7 @@ func refuseUnsafeRedirect(req *http.Request, via []*http.Request) error {
 		return errors.New("registry: too many redirects")
 	}
 	first := via[0].URL
-	if req.URL.Scheme != "https" && !(req.URL.Host == first.Host && req.URL.Scheme == first.Scheme) {
+	if req.URL.Scheme != "https" && (req.URL.Host != first.Host || req.URL.Scheme != first.Scheme) {
 		return errors.New("registry: redirect to a non-https URL on another host")
 	}
 	if a, err := netip.ParseAddr(req.URL.Hostname()); err == nil && req.URL.Host != first.Host &&
