@@ -217,8 +217,8 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         long=(
             "Checks, from this computer, everything a run needs: the cluster is set up here, its admin address "
             "answers\n"
-            "over TLS, you are signed in and the cluster accepts it, the sign-in server matches, the agent "
-            "entrance answers over TLS and\n"
+            "over TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through "
+            "the gateway works and\n"
             "you have what it asks for, and your sign-in can be kept safely. Nothing needs to be installed here, "
             "and nothing in the\n"
             "cluster changes.\n"
@@ -227,6 +227,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "egress callout, router\n"
             "clients, routes, API access). They run by themselves when the cluster offers them; --cluster shows "
             "why when it does not.\n"
+            "With --install-file (the SubstrateInstall file you gave ate-setup) they are read with kubectl "
+            "instead, which needs no\n"
+            "sign-in to the gateway.\n"
             "\n"
             'The last line is "ready for agents" when no check failed. Otherwise it is "not ready" and each '
             "failed check says how to fix\n"
@@ -239,9 +242,21 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 "bool",
                 "also run the cluster checks (administrators); say why they were skipped when they were",
             ),
+            _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "install-file",
+                "string",
+                "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
+                metavar="FILE",
+            ),
             _Flag("json", "bool", "same as --output json"),
+            _Flag("kube-context", "string", "kubectl context to use"),
+            _Flag("kubeconfig", "string", "kubectl configuration file (default: kubectl's own)"),
+            _Flag("namespace", "string", "namespace DefenseClaw is installed in", default="defenseclaw-system"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag("substrate-namespace", "string", "namespace Agent Substrate runs in", default="ate-system"),
+            _Flag("timeout", "duration", "give up on the cluster after this long", default="30s", metavar="DURATION"),
         ),
     ),
     _Cmd(
@@ -270,10 +285,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             'addresses (your administrator has them); after that, "defenseclaw substrate login" alone renews the '
             "sign-in.\n"
             "\n"
+            "On a cluster that has no sign-in server (an open-source install), use --kube: you are then the "
+            "Kubernetes user of\n"
+            "your current kubeconfig, and nothing is stored.\n"
+            "\n"
             "In CI, use --workload (or set DEFENSECLAW_SUBSTRATE_WORKLOAD_TOKEN_FILE): the run is then "
             "attributed to the\n"
-            "pipeline's own identity, with a GitHub Actions or Kubernetes service-account token, and nothing is "
-            "stored."
+            "pipeline's own identity, with a GitHub Actions token or a projected Kubernetes token minted for the "
+            "cluster's workload audience, and nothing is stored."
         ),
         example=(
             "defenseclaw substrate login --admin-url https://admin.example.test:9443 --issuer "
@@ -300,6 +319,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 metavar="FILE",
             ),
             _Flag("json", "bool", "same as --output json"),
+            _Flag("kube", "bool", "sign in with your current kubeconfig identity (clusters without a sign-in server)"),
+            _Flag("kube-context", "string", "with --kube, the kubeconfig context (default: its current one)"),
+            _Flag("kubeconfig", "string", "with --kube, the kubeconfig file (default: kubectl's own rules)"),
             _Flag(
                 "name",
                 "string",
@@ -308,18 +330,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             ),
             _Flag("no-browser", "bool", "do not open a browser; print the address and code only"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
-            _Flag("relay-port", "int", "the port of the terminal relay inside an agent (default 8080)", default="0"),
-            _Flag("router-ca-file", "string", "certificate authority (PEM) of the agent entrance", metavar="FILE"),
-            _Flag(
-                "router-cert-file",
-                "string",
-                "client certificate (PEM) for the agent entrance, when your administrator issues one",
-                metavar="FILE",
-            ),
-            _Flag("router-key-file", "string", "private key (PEM) for --router-cert-file", metavar="FILE"),
-            _Flag("router-url", "string", "the cluster's agent entrance, https://HOST:PORT", metavar="URL"),
             _Flag("scope", "stringSlice", "sign-in scopes (default: openid profile email groups)", metavar="SCOPE"),
             _Flag("workload", "bool", "sign in as a CI workload with the pipeline's own token"),
+            _Flag(
+                "workload-audience", "string", "the audience a workload token must be minted for (default: defenseclaw)"
+            ),
             _Flag("workload-token-file", "string", "file holding the workload token (CI)", metavar="FILE"),
         ),
     ),
@@ -376,6 +391,25 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+        ),
+    ),
+    _Cmd(
+        ("policy", "reset"),
+        "Clear a policy conflict on an agent (administrators only)",
+        long=(
+            "For administrators. When something outside DefenseClaw keeps rewriting an agent's network policy,\n"
+            "the controller stops after three reverts in ten minutes and marks the agent policy_conflict. Once "
+            "the\n"
+            'other writer is stopped, "reset" clears that state so the controller writes the policy again. Name '
+            "the\n"
+            "agent as ATESPACE/NAME. The reset is recorded in the audit log under your own name."
+        ),
+        example='defenseclaw substrate policy reset eng-web/fix-tests-7f3a --reason "removed the GitOps rule"',
+        args=(_Arg("actor"),),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("reason", "string", "note recorded with the reset", metavar="TEXT"),
+            _Flag("yes", "bool", "do not ask", short="y"),
         ),
     ),
     _Cmd(
@@ -649,14 +683,42 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         long=(
             "Without a name, shows the cluster and account in use and how many agents you have.\n"
             "With a name, shows that agent: where it runs, which profile guards it and its batch.\n"
-            "With --batch, shows every agent of a batch run."
+            "With --batch, shows every agent of a batch run.\n"
+            "\n"
+            "For administrators, --cluster shows the health of the whole setup: gateway, leader, controller and "
+            "callout,\n"
+            "the agents in the cluster and the setup checks. It reads the cluster with kubectl (give "
+            "--install-file), or\n"
+            "with --api from the DefenseClaw gateway. Exit 75 means the cluster could not be reached; there is "
+            "no document."
         ),
         args=(_Arg("name", required=False),),
         flags=(
+            _Flag(
+                "api",
+                "bool",
+                (
+                    "read the document from the DefenseClaw gateway (needs an administrator sign-in) instead of with "
+                    "kubectl"
+                ),
+            ),
             _Flag("batch", "string", "show every agent of this batch", metavar="ID"),
+            _Flag("cluster", "bool", "administrators: show the health and setup checks of the whole cluster"),
+            _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "install-file",
+                "string",
+                "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
+                metavar="FILE",
+            ),
             _Flag("json", "bool", "same as --output json"),
+            _Flag("kube-context", "string", "kubectl context to use"),
+            _Flag("kubeconfig", "string", "kubectl configuration file (default: kubectl's own)"),
+            _Flag("namespace", "string", "namespace DefenseClaw is installed in", default="defenseclaw-system"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag("substrate-namespace", "string", "namespace Agent Substrate runs in", default="ate-system"),
+            _Flag("timeout", "duration", "give up on the cluster after this long", default="30s", metavar="DURATION"),
         ),
     ),
     _Cmd(
@@ -758,7 +820,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         long=(
             "Copies a verified image, and its attestation, to the registry the cluster pulls from. It verifies "
             "first and refuses an\n"
-            "image that would not be admitted.\n"
+            "image that would not be admitted. With --template it then creates the ActorTemplate that runs the "
+            "image, pinned by its\n"
+            'digest, so the image can be started with "defenseclaw substrate run --template NAME".\n'
             "\n"
             "Usage: defenseclaw substrate template publish SOURCE@DIGEST TARGET:TAG --anchors FILE [flags]\n"
             "\n"
@@ -766,6 +830,23 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --anchors FILE                  trust anchors (PEM bundle of public keys); required\n"
             "  --min-policy-generation N       refuse attestations scanned under an older policy generation "
             "(default 0)\n"
+            "  --dry-run                       verify the image and print what would be copied and created; "
+            "change nothing\n"
+            "  --template ATESPACE/NAME        create the ActorTemplate from the published image\n"
+            "  --class CLASS                   sandbox class: gvisor or microvm (default gvisor)\n"
+            "  --cpu CPU                       cpu limit, for example 1500m or 2 (default 1500m)\n"
+            "  --memory SIZE                   memory limit, for example 1536Mi or 2Gi (default 1536Mi)\n"
+            "  --workdir DIR                   the image decides its working directory (/work in the kit "
+            "images); only that value is accepted\n"
+            "  --env K=V                       non-secret environment variable for the container (repeatable)\n"
+            "  --worker-label K=V              label a worker pool must carry (repeatable; replaces the label "
+            "that --class selects)\n"
+            "  --api-address HOST:PORT         ate-api-server address (default substrate.api.address)\n"
+            "  --api-server-name NAME          TLS name of ate-api-server (default substrate.api.server_name)\n"
+            "  --api-ca-file FILE              CA bundle for ate-api-server's certificate (default "
+            "substrate.api.ca_file)\n"
+            "  --api-token-file FILE           bearer token file (default substrate.api.token_file)\n"
+            "  --api-auth MODE                 serviceaccount or mtls (default substrate.api.auth)\n"
             "\n"
             "Flags build, verify, scan and publish all take:\n"
             "  --json                          print JSON\n"
@@ -775,7 +856,18 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n"
             "  --platform OS/ARCH              image platform (default linux/amd64)\n"
             "\n"
-            "Exit code: 0 published, 1 not published, 2 usage error."
+            "The --template flags need --template. The --api-* flags override the substrate.api section of the "
+            "file given by --config.\n"
+            "\n"
+            "A template cannot be changed once created. If ATESPACE/NAME already has this image and these "
+            "settings, nothing happens\n"
+            '("already up to date"). If it has another image or other settings, a new template NAME-<first 8 hex '
+            "of the digest> is\n"
+            'created and its name is printed: give that name to "run --template". No template is ever deleted.\n'
+            "\n"
+            "Exit code: 0 published, 1 not published (or the API refused the template), 2 usage error, 75 the "
+            "Substrate API cannot be\n"
+            "reached (run the same command again)."
         ),
         example="defenseclaw substrate template publish SOURCE@sha256:DIGEST TARGET:TAG --anchors attestation.pub",
     ),
@@ -864,6 +956,51 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+        ),
+    ),
+    _Cmd(
+        ("verify",),
+        "Check the cluster setup: issuer, snapshot bucket, access grants, callout and version",
+        long=(
+            "For administrators. Checks that the cluster is set up as DefenseClaw needs it: Substrate's version "
+            "is\n"
+            "one DefenseClaw is tested on, the cluster has its own sign-in issuer, the snapshot bucket is "
+            "private and\n"
+            "encrypted, DefenseClaw holds the right access grants, the egress callout is registered and nobody "
+            "else\n"
+            "can reach agents through the router. By default it reads the cluster with kubectl; --api reads the "
+            "same\n"
+            "checks from the DefenseClaw gateway.\n"
+            "\n"
+            "Exit 0: every check passed or warned. Exit 1: a check failed. Exit 2: wrong arguments. Exit 75: the "
+            "cluster\n"
+            "could not be reached; there is no document, retry later. With --json it prints the verify document."
+        ),
+        example="defenseclaw substrate verify --install-file install.yaml\ndefenseclaw substrate verify --api --json",
+        flags=(
+            _Flag(
+                "api",
+                "bool",
+                (
+                    "read the document from the DefenseClaw gateway (needs an administrator sign-in) instead of with "
+                    "kubectl"
+                ),
+            ),
+            _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "install-file",
+                "string",
+                "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
+                metavar="FILE",
+            ),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("kube-context", "string", "kubectl context to use"),
+            _Flag("kubeconfig", "string", "kubectl configuration file (default: kubectl's own)"),
+            _Flag("namespace", "string", "namespace DefenseClaw is installed in", default="defenseclaw-system"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag("substrate-namespace", "string", "namespace Agent Substrate runs in", default="ate-system"),
+            _Flag("timeout", "duration", "give up on the cluster after this long", default="30s", metavar="DURATION"),
         ),
     ),
     _Cmd(

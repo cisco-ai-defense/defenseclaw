@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest/kitspec"
 )
@@ -43,6 +44,7 @@ type common struct {
 	json       bool
 	plain      multi
 	user       string
+	authHosts  multi
 	passFile   string
 	configPath string
 	platform   string
@@ -52,13 +54,14 @@ func (c *common) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&c.json, "json", false, "print JSON")
 	fs.Var(&c.plain, "insecure-registry", "registry host:port reached over plain HTTP (repeatable)")
 	fs.StringVar(&c.user, "registry-user", "", "registry user")
+	fs.Var(&c.authHosts, "registry-auth-host", "registry host that gets the credentials (repeatable; build adds the hosts of --from and --to)")
 	fs.StringVar(&c.passFile, "registry-password-file", "", "file with the registry password")
 	fs.StringVar(&c.configPath, "config", "", "DefenseClaw config.yaml (scanner and admission settings)")
 	fs.StringVar(&c.platform, "platform", "linux/amd64", "image platform")
 }
 
 func (c *common) registry() (*attest.Registry, error) {
-	o := attest.RegistryOptions{PlainHTTP: c.plain, Username: c.user}
+	o := attest.RegistryOptions{PlainHTTP: c.plain, Username: c.user, AuthHosts: c.authHosts}
 	if c.passFile != "" {
 		b, err := os.ReadFile(c.passFile)
 		if err != nil {
@@ -91,7 +94,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return ExitUsageError
 	}
 	var err error
-	code := ExitOK
+	var code int
 	switch args[0] {
 	case "build":
 		code, err = runBuild(ctx, args[1:], stdout)
@@ -126,7 +129,7 @@ func usage(w io.Writer) {
   build    --connector C --from IMAGE --to REPO:TAG --hook-binary F --relay-binary F --key F [--trusted-base sha256:...]
   verify   IMAGE --anchors F [--min-policy-generation N] [--max-age 720h]
   scan     IMAGE
-  publish  SOURCE@DIGEST TARGET:TAG --anchors F
+  publish  SOURCE@DIGEST TARGET:TAG --anchors F [--template ATESPACE/NAME [--class C] [--cpu N] [--memory N] [--env K=V] ...] [--dry-run]
   keygen   --out DIR
 
 Every command takes --json.
@@ -219,6 +222,11 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	if *from == "" || *to == "" || *hookBin == "" || *relayBin == "" || (*keyFile == "" && !*dry) {
 		return ExitUsageError, errors.New("build needs --from, --to, --hook-binary, --relay-binary and --key")
 	}
+	for _, img := range []string{*from, *to} {
+		if r, perr := attest.ParseRef(img); perr == nil {
+			c.authHosts = append(c.authHosts, r.Registry)
+		}
+	}
 	reg, err := c.registry()
 	if err != nil {
 		return ExitUsageError, err
@@ -284,7 +292,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 			return ExitUsageError, err
 		}
 		opts.BaseAttestor = attest.NewVerifier(reg, func() attest.Policy {
-			return attest.Policy{Anchors: ta, AllowUnverifiedBase: true}
+			return attest.Policy{Anchors: ta}
 		})
 	}
 	_ = harnessVersion
@@ -419,7 +427,7 @@ func runVerify(ctx context.Context, args []string, stdout io.Writer) (int, error
 		ta.Revoke(k)
 	}
 	v := attest.NewVerifier(reg, func() attest.Policy {
-		return attest.Policy{Anchors: ta, MinPolicyGeneration: *minGen, MaxAge: *maxAge, AllowUnverifiedBase: *allowUnv, RequireDigest: !*allowTag}
+		return attest.Policy{Anchors: ta, MinPolicyGeneration: *minGen, MaxAge: *maxAge, AllowUnverifiedBase: *allowUnv, AllowTags: *allowTag}
 	})
 	got, verr := v.Verify(ctx, image)
 	out := VerifyOutput{Image: image}
@@ -541,6 +549,8 @@ func runPublish(ctx context.Context, args []string, stdout io.Writer) (int, erro
 	c.bind(fs)
 	anchors := fs.String("anchors", "", "trust anchors (PEM bundle of public keys)")
 	minGen := fs.Int64("min-policy-generation", 0, "refuse attestations scanned under an older policy generation")
+	var tf templateFlags
+	tf.bind(fs)
 	var pos []string
 	rest := args
 	for len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
@@ -560,26 +570,122 @@ func runPublish(ctx context.Context, args []string, stdout io.Writer) (int, erro
 	if err != nil {
 		return ExitUsageError, err
 	}
-	v := attest.NewVerifier(reg, func() attest.Policy {
-		return attest.Policy{Anchors: ta, MinPolicyGeneration: *minGen, RequireDigest: true}
-	})
-	ref, err := attest.Publish(ctx, attest.PublishOptions{Registry: reg, Source: pos[0], Target: pos[1], Verifier: v})
+	cfg, err := c.config()
 	if err != nil {
-		var r *attest.Rejection
-		if errors.As(err, &r) {
-			if c.json {
-				_ = printJSON(stdout, map[string]any{"published": false, "code": r.Code, "reason": r.Detail})
-			} else {
-				fmt.Fprintf(stdout, "NOT PUBLISHED: %s: %s\n", r.Code, r.Detail)
-			}
-			return ExitNotAdmit, nil
+		return ExitUsageError, err
+	}
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	plan, err := tf.plan(cfg, given)
+	if err != nil {
+		return ExitUsageError, err
+	}
+	v := attest.NewVerifier(reg, func() attest.Policy {
+		return attest.Policy{Anchors: ta, MinPolicyGeneration: *minGen}
+	})
+	if tf.dryRun {
+		return runPublishDry(ctx, &c, v, plan, pos, stdout)
+	}
+	// With --template, find out first that the API answers: nothing is
+	// copied to a cluster whose template cannot then be created.
+	var api ateapi.Client
+	if plan != nil {
+		if api, err = dialAPI(plan.API); err != nil {
+			return ExitUsageError, fmt.Errorf("connect to the Substrate API: %w (set --api-address, --api-ca-file and --api-token-file, or --config with substrate.api)", err)
 		}
+		defer api.Close()
+		if _, err := getTemplate(ctx, api, plan.Atespace, plan.Name); err != nil {
+			return apiFailure(err)
+		}
+	}
+	ref, err := publishImage(ctx, attest.PublishOptions{Registry: reg, Source: pos[0], Target: pos[1], Verifier: v})
+	if err != nil {
+		return publishRejected(&c, stdout, err, "NOT PUBLISHED")
+	}
+	if plan == nil {
+		if c.json {
+			return ExitOK, printJSON(stdout, map[string]any{"published": true, "image": ref})
+		}
+		fmt.Fprintf(stdout, "published %s\n", ref)
+		return ExitOK, nil
+	}
+	res, err := applyTemplate(ctx, api, plan, ref)
+	if err != nil {
+		if c.json {
+			_ = printJSON(stdout, map[string]any{"published": true, "image": ref, "template_error": err.Error()})
+		} else {
+			fmt.Fprintf(stdout, "published %s\nthe template was not created; run the same command again once this is fixed\n", ref)
+		}
+		return apiFailure(err)
+	}
+	if c.json {
+		return ExitOK, printJSON(stdout, map[string]any{"published": true, "image": ref, "template": res})
+	}
+	fmt.Fprintf(stdout, "published %s\n", ref)
+	printResult(stdout, res)
+	return ExitOK, nil
+}
+
+// publishRejected prints a verification failure (exit 1) or returns any other
+// error as a usage error.
+func publishRejected(c *common, stdout io.Writer, err error, head string) (int, error) {
+	var r *attest.Rejection
+	if !errors.As(err, &r) {
 		return ExitUsageError, err
 	}
 	if c.json {
-		return ExitOK, printJSON(stdout, map[string]any{"published": true, "image": ref})
+		_ = printJSON(stdout, map[string]any{"published": false, "code": r.Code, "reason": r.Detail})
+	} else {
+		fmt.Fprintf(stdout, "%s: %s: %s\n", head, r.Code, r.Detail)
 	}
-	fmt.Fprintf(stdout, "published %s\n", ref)
+	return ExitNotAdmit, nil
+}
+
+// apiFailure maps an API error to its exit code: 75 when the API cannot be
+// reached, 1 for anything the API refused. The error text is returned to the
+// caller (the CLI prints it on stderr).
+func apiFailure(err error) (int, error) {
+	var un *templateUnavailable
+	if errors.As(err, &un) {
+		return ExitUnavailable, err
+	}
+	return ExitNotAdmit, err
+}
+
+// runPublishDry verifies the image and prints what publish would copy and
+// create. It copies nothing and does not contact the Substrate API.
+func runPublishDry(ctx context.Context, c *common, v *attest.Verifier, plan *templatePlan, pos []string, stdout io.Writer) (int, error) {
+	dst, err := attest.ParseRef(pos[1])
+	if err != nil {
+		return ExitUsageError, err
+	}
+	if dst.Tag == "" {
+		return ExitUsageError, errors.New("publish: the target needs a tag")
+	}
+	digest, err := verifyImage(ctx, v, pos[0])
+	if err != nil {
+		return publishRejected(c, stdout, err, "WOULD NOT PUBLISH")
+	}
+	image := dst.Name() + "@" + digest
+	if plan == nil {
+		if c.json {
+			return ExitOK, printJSON(stdout, map[string]any{"published": false, "dry_run": true, "image": image})
+		}
+		fmt.Fprintf(stdout, "dry run: would publish %s\n", image)
+		return ExitOK, nil
+	}
+	res, _, err := dryRunResult(plan, image)
+	if err != nil {
+		return ExitUsageError, err
+	}
+	if c.json {
+		return ExitOK, printJSON(stdout, map[string]any{"published": false, "dry_run": true, "image": image, "template": res})
+	}
+	fmt.Fprintf(stdout, "dry run: would publish %s and create the actor template %s/%s:\n---\n", image, res.Atespace, res.Name)
+	if err := printTemplateYAML(stdout, res.Template); err != nil {
+		return ExitUsageError, err
+	}
+	fmt.Fprintf(stdout, "---\nIf %s/%s exists with another image or settings, the new revision is named %s-<first 8 hex of the digest> instead.\n", res.Atespace, res.Name, res.Name)
 	return ExitOK, nil
 }
 

@@ -64,7 +64,7 @@ func TestToolChainStoresRouteActorsToTheLeader(t *testing.T) {
 		t.Fatalf("host session store %T", session)
 	}
 
-	ctx := withSubstrateActor(context.Background(), testSubstrateActor())
+	ctx := withSubstrateActor(context.Background(), chainTestActor())
 	if _, _, ok := a.toolChainStores(ctx, req); ok {
 		t.Fatal("an actor got chain state without a leader")
 	}
@@ -86,7 +86,8 @@ func TestToolChainStoresRouteActorsToTheLeader(t *testing.T) {
 func TestJudgeIntentIsSharedThroughTheLeader(t *testing.T) {
 	useSubstrateChains(newTestChainLeader(t))
 	t.Cleanup(func() { useSubstrateChains(nil) })
-	ctx := withSubstrateActor(ContextWithSessionID(context.Background(), "s1"), testSubstrateActor())
+	ctx := withSubstrateActor(ContextWithSessionID(context.Background(), "s1"),
+		chainTestActor())
 
 	replica1, replica2 := &LLMJudge{}, &LLMJudge{}
 	replica1.ObserveSessionPrompt(ctx, "deploy the web app")
@@ -124,4 +125,11 @@ func TestSetToolValueLineageKey(t *testing.T) {
 		string(activeToolValueLineageProcessKey.material[:]) != string(key) {
 		t.Fatalf("key not set: %v", err)
 	}
+}
+
+// chainTestActor is a sealed, whole actor, as the actor listener builds it
+// from a verified token: a bare substrateActor counts as a host call.
+func chainTestActor() substrateActor {
+	const uid = "25a1da0f-1c9b-4ef7-8248-c276138c7f77"
+	return verifiedSubstrateActor("eng-web", "alice-1", uid, "actor/eng-web/alice-1", "substrate:eng-web/"+uid)
 }

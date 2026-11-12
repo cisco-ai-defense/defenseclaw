@@ -34,6 +34,9 @@ import (
 )
 
 const (
+	// securityTool is the macOS Security command-line tool. It is always
+	// run by this absolute path, never looked up on PATH.
+	securityTool  = "/usr/bin/security"
 	macKeyAccount = "token-key"
 	macKeyLabel   = "defenseclaw-substrate-token-key"
 	macNotFound   = 44 // errSecItemNotFound as the security tool exits
@@ -41,24 +44,27 @@ const (
 )
 
 // macKeySealer seals sign-ins with AES-256-GCM under a random key kept as
-// a generic password in the macOS login keychain. The key is written by
-// "security -i" with the command on stdin, so it never appears in a
-// process list; the tokens themselves never pass through the security
-// tool. Limit: a locked keychain (an SSH session with no unlocked login
-// keychain) makes the security tool fail; the error says so.
+// a generic password in the default (normally the login) macOS keychain.
+// The key is written by "security -i" with the command on stdin, so it
+// never appears in a process list; the tokens themselves never pass
+// through the security tool. Limits: a locked keychain, or a session that
+// cannot show the keychain prompt (SSH with no screen), makes the security
+// tool fail; the error says so and names the file store.
 type macKeySealer struct {
-	run      cmdRunner
-	security string
+	run cmdRunner
 
 	mu  sync.Mutex
 	key []byte
 }
 
-func newMacStore(run cmdRunner, security, dir string) *sealedStore {
+func newMacStore(run cmdRunner, dir string) *sealedStore {
 	return &sealedStore{
-		dir:  dir,
-		s:    &macKeySealer{run: run, security: security},
-		desc: fmt.Sprintf("macOS Keychain (service %s) with sealed files in %s", keychainService, dir),
+		dir: dir,
+		s:   &macKeySealer{run: run},
+		desc: fmt.Sprintf("sealed files in %s (mode 0600), encrypted with a key kept in your macOS default keychain "+
+			"(item service %s, account %s); the item trusts no application, so macOS asks you before any program, "+
+			"DefenseClaw included, reads the key, unless you answered Always Allow, which lets any program you run read it with %s",
+			dir, keychainService, macKeyAccount, securityTool),
 	}
 }
 
@@ -67,12 +73,12 @@ func macError(what string, exit int, stderr string) error {
 	if l := firstLine(stderr); l != "" {
 		msg += ": " + l
 	}
-	msg += "); unlock it with: security unlock-keychain"
+	msg += "); unlock it with: security unlock-keychain, and allow DefenseClaw when macOS asks"
 	return noKeychain(msg)
 }
 
 func (m *macKeySealer) findKey(ctx context.Context) ([]byte, error) {
-	out, stderr, exit, err := m.run(ctx, nil, m.security, "find-generic-password", "-s", keychainService, "-a", macKeyAccount, "-w")
+	out, stderr, exit, err := m.run(ctx, nil, securityTool, "find-generic-password", "-s", keychainService, "-a", macKeyAccount, "-w")
 	if err != nil {
 		return nil, noKeychain("the macOS keychain cannot be used: " + err.Error())
 	}
@@ -88,6 +94,23 @@ func (m *macKeySealer) findKey(ctx context.Context) ([]byte, error) {
 	default:
 		return nil, macError("read the DefenseClaw key", exit, stderr)
 	}
+}
+
+// macAddKeyLine is the "security -i" command that stores the key.
+//
+// Trusted applications: security(1) documents "-T appPath" (an application
+// that may access the item; repeatable) and "-A" (any application, no
+// warning). With neither, the item trusts the application that creates
+// it, which here is /usr/bin/security itself, so any program running as
+// this user could read the key without a prompt with "security
+// find-generic-password -w". "-T" with an empty path gives an empty
+// trusted-application list: no application is trusted, and macOS asks the
+// user before any program, DefenseClaw included, reads the key (once per
+// launcher process; the key is then held in memory). Answering Always
+// Allow at that prompt trusts /usr/bin/security again; that is the
+// user's choice, and Describe says so.
+func macAddKeyLine(hexKey string) string {
+	return fmt.Sprintf("add-generic-password -U -s %s -a %s -l %s -T \"\" -w %s\n", keychainService, macKeyAccount, macKeyLabel, hexKey)
 }
 
 // getKey returns the key; create makes and stores one when it is missing.
@@ -108,8 +131,7 @@ func (m *macKeySealer) getKey(create bool) ([]byte, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
-	line := fmt.Sprintf("add-generic-password -U -s %s -a %s -l %s -w %s\n", keychainService, macKeyAccount, macKeyLabel, hex.EncodeToString(key))
-	_, stderr, exit, err := m.run(ctx, []byte(line), m.security, "-i")
+	_, stderr, exit, err := m.run(ctx, []byte(macAddKeyLine(hex.EncodeToString(key))), securityTool, "-i")
 	if err != nil {
 		return nil, noKeychain("the macOS keychain cannot be used: " + err.Error())
 	}

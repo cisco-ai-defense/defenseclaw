@@ -15,6 +15,8 @@ import (
 	"io"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 )
 
 const (
@@ -25,19 +27,19 @@ const (
 
 // bannerLines is the banner: at most 8 plain lines of at most 80 columns.
 func bannerLines(b Banner, t Target) []string {
-	name := clean(b.Name)
+	name := safetext.Line(b.Name)
 	if name == "" {
 		name = t.Name
 	}
 	head := "DefenseClaw agent " + name
-	if c := clean(b.Connector); c != "" {
+	if c := safetext.Line(b.Connector); c != "" {
 		head += " (" + c + ")"
 	}
 	head += " in actor " + t.String()
 	lines := []string{head}
 	var parts []string
 	for _, p := range [][2]string{{"profile", b.Profile}, {"model", b.Model}, {"route", b.Route}} {
-		if v := clean(p[1]); v != "" {
+		if v := safetext.Line(p[1]); v != "" {
 			parts = append(parts, p[0]+" "+v)
 		}
 	}
@@ -48,22 +50,22 @@ func bannerLines(b Banner, t Target) []string {
 	if l := allowLine(b.AllowList); l != "" {
 		lines = append(lines, l)
 	}
-	asks := clean(b.Asks)
+	asks := safetext.Line(b.Asks)
 	if asks == "" {
-		asks = "Asks appear on the bottom line: answer [o]nce, [a]lways or [d]eny."
+		asks = "Asks appear on the bottom line; press Ctrl-\\ to answer one."
 	}
 	lines = append(lines, asks)
 	for _, e := range b.Extra {
 		if len(lines) >= bannerMaxLines-1 {
 			break
 		}
-		if e = clean(e); e != "" {
+		if e = safetext.Line(e); e != "" {
 			lines = append(lines, e)
 		}
 	}
 	lines = append(lines, "Ctrl-] detaches; the agent keeps running.")
 	for i := range lines {
-		lines[i] = fit(lines[i], bannerWidth)
+		lines[i] = fitWidth(lines[i], bannerWidth)
 	}
 	return lines
 }
@@ -73,7 +75,7 @@ func bannerLines(b Banner, t Target) []string {
 func allowLine(list []string) string {
 	var items []string
 	for _, a := range list {
-		if a = clean(a); a != "" {
+		if a = safetext.Line(a); a != "" {
 			items = append(items, a)
 		}
 	}

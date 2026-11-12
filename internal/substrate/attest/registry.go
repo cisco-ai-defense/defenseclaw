@@ -12,7 +12,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -82,7 +84,7 @@ func ParseRef(s string) (Ref, error) {
 		r.Tag = r.Repo[i+1:]
 		r.Repo = r.Repo[:i]
 	}
-	if r.Repo == "" || strings.HasPrefix(r.Repo, "/") || strings.Contains(r.Repo, "//") || strings.Contains(r.Repo, "..") {
+	if !repoNameRE.MatchString(r.Repo) || (r.Tag != "" && !tagRE.MatchString(r.Tag)) {
 		return Ref{}, fmt.Errorf("image reference %q has a bad repository", s)
 	}
 	if r.Tag == "" && r.Digest == "" {
@@ -125,7 +127,11 @@ type RegistryOptions struct {
 	PlainHTTP []string
 	// Username and Password are sent as basic auth, or to a token service.
 	Username, Password string
-	HTTPClient         *http.Client
+	// AuthHosts are the only hosts (registries and token services) the
+	// credentials are ever sent to. An image reference names its own registry,
+	// so credentials are never sent to a host it chose.
+	AuthHosts  []string
+	HTTPClient *http.Client
 }
 
 // Registry is a client. It is safe for concurrent use.
@@ -141,6 +147,7 @@ func NewRegistry(o RegistryOptions) *Registry {
 	c := o.HTTPClient
 	if c == nil {
 		c = &http.Client{Timeout: 5 * time.Minute}
+		c.CheckRedirect = refuseUnsafeRedirect
 	}
 	return &Registry{opts: o, client: c, tokens: map[string]string{}}
 }
@@ -201,7 +208,6 @@ type call struct {
 	bodyLen int64
 	push    bool
 	op      string
-	ok      []int
 }
 
 // do runs a request, answering one 401 challenge.
@@ -240,7 +246,7 @@ func (g *Registry) do(ctx context.Context, c call) (*http.Response, error) {
 		switch {
 		case tok != "":
 			req.Header.Set("Authorization", "Bearer "+tok)
-		case g.opts.Username != "":
+		case g.mayAuth(c.host):
 			req.SetBasicAuth(g.opts.Username, g.opts.Password)
 		}
 		resp, err := g.client.Do(req)
@@ -281,7 +287,7 @@ func (g *Registry) fetchToken(ctx context.Context, challenge, scope string) (str
 		return "", errors.New("no realm")
 	}
 	u, err := url.Parse(realm)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || g.scheme(u.Host) != "http")) {
 		return "", errors.New("bad realm")
 	}
 	q := u.Query()
@@ -294,7 +300,7 @@ func (g *Registry) fetchToken(ctx context.Context, challenge, scope string) (str
 	if err != nil {
 		return "", err
 	}
-	if g.opts.Username != "" {
+	if g.mayAuth(u.Host) {
 		req.SetBasicAuth(g.opts.Username, g.opts.Password)
 	}
 	resp, err := g.client.Do(req)
@@ -318,10 +324,12 @@ func (g *Registry) fetchToken(ctx context.Context, challenge, scope string) (str
 	return out.AccessToken, nil
 }
 
+// failed reports the status only: a registry chosen by an untrusted image
+// reference must not get its response text into events and logs.
 func failed(op string, resp *http.Response) error {
-	detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	_ = resp.Body.Close()
-	return &RegistryError{Op: op, Status: resp.StatusCode, Detail: strings.TrimSpace(string(detail))}
+	return &RegistryError{Op: op, Status: resp.StatusCode}
 }
 
 var manifestAccept = []string{MediaOCIManifest, MediaOCIIndex, MediaDockerManifest, MediaDockerList}
@@ -503,4 +511,41 @@ func (g *Registry) Tags(ctx context.Context, host, repo string) ([]string, error
 		return nil, err
 	}
 	return out.Tags, nil
+}
+
+var (
+	// repoNameRE and tagRE are the OCI distribution name rules: lower case,
+	// no percent escapes, no dot segments.
+	repoNameRE = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$`)
+	tagRE      = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
+)
+
+func (g *Registry) mayAuth(host string) bool {
+	if g.opts.Username == "" {
+		return false
+	}
+	for _, h := range g.opts.AuthHosts {
+		if h == host {
+			return true
+		}
+	}
+	return false
+}
+
+// refuseUnsafeRedirect lets a registry send blobs to its storage over https
+// and nothing else: no downgrade to http, no private or loopback address
+// literal, at most 10 hops. Go drops Authorization on a change of host.
+func refuseUnsafeRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("registry: too many redirects")
+	}
+	first := via[0].URL
+	if req.URL.Scheme != "https" && (req.URL.Host != first.Host || req.URL.Scheme != first.Scheme) {
+		return errors.New("registry: redirect to a non-https URL on another host")
+	}
+	if a, err := netip.ParseAddr(req.URL.Hostname()); err == nil && req.URL.Host != first.Host &&
+		(a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsUnspecified()) {
+		return errors.New("registry: redirect to a private address")
+	}
+	return nil
 }

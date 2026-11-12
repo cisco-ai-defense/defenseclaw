@@ -23,8 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -42,27 +40,6 @@ func substrateCopyName(a api.Actor) string {
 	return "sub-" + hex.EncodeToString(sum[:])[:12]
 }
 
-// relayToken hands the workspace client a session token that stays valid.
-type relayToken struct {
-	mu     sync.Mutex
-	src    attach.SessionSource
-	target attach.Target
-	grant  attach.SessionGrant
-}
-
-func (r *relayToken) Token(ctx context.Context) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.grant.Token == "" || time.Until(r.grant.Expires) < time.Minute {
-		g, err := r.src.Session(ctx, r.target)
-		if err != nil {
-			return "", err
-		}
-		r.grant = g
-	}
-	return r.grant.Token, nil
-}
-
 // substrateRelay is a tunnel to one agent with a workspace client on it.
 type substrateRelay struct {
 	Tunnel *attach.Tunnel
@@ -74,20 +51,12 @@ func (r *substrateRelay) Close() { r.Tunnel.Close() }
 // substrateOpenRelay opens the tunnel to an agent for file and command
 // transfer (upload, pull, checkpoint).
 func substrateOpenRelay(ctx context.Context, s *substrateSession, a api.Actor) (*substrateRelay, error) {
-	router, err := substrateRouter(s)
-	if err != nil {
-		return nil, err
-	}
 	target := attach.Target{Atespace: a.Atespace, Name: a.Name}
-	tok := &relayToken{src: substrateSessions{s.Client}, target: target}
-	if _, err := tok.Token(ctx); err != nil {
-		return nil, substrateFail(err)
-	}
-	tun, err := attach.NewTunnel(ctx, router, tok.grant, target)
+	tun, err := attach.NewTunnel(ctx, attach.Gateway{BaseURL: s.Ctx.AdminURL, CAFile: s.Ctx.AdminCAFile}, s.Bearer, target)
 	if err != nil {
 		return nil, substrateFail(err)
 	}
-	return &substrateRelay{Tunnel: tun, Client: workspace.NewClient(tun.HTTPClient(), tun.BaseURL(), tok.Token)}, nil
+	return &substrateRelay{Tunnel: tun, Client: workspace.NewClient(tun.HTTPClient(), tun.BaseURL(), tun.Bearer)}, nil
 }
 
 // substrateUploadFolder copies the project into the agent (secret files held

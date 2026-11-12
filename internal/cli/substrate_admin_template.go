@@ -103,15 +103,36 @@ Flags:
 Exit code: 0 clean, 1 blocked, 2 usage error.`
 
 const templatePublishLong = `Copies a verified image, and its attestation, to the registry the cluster pulls from. It verifies first and refuses an
-image that would not be admitted.
+image that would not be admitted. With --template it then creates the ActorTemplate that runs the image, pinned by its
+digest, so the image can be started with "defenseclaw substrate run --template NAME".
 
 Usage: defenseclaw substrate template publish SOURCE@DIGEST TARGET:TAG --anchors FILE [flags]
 
 Flags:
   --anchors FILE                  trust anchors (PEM bundle of public keys); required
   --min-policy-generation N       refuse attestations scanned under an older policy generation (default 0)
+  --dry-run                       verify the image and print what would be copied and created; change nothing
+  --template ATESPACE/NAME        create the ActorTemplate from the published image
+  --class CLASS                   sandbox class: gvisor or microvm (default gvisor)
+  --cpu CPU                       cpu limit, for example 1500m or 2 (default 1500m)
+  --memory SIZE                   memory limit, for example 1536Mi or 2Gi (default 1536Mi)
+  --workdir DIR                   the image decides its working directory (/work in the kit images); only that value is accepted
+  --env K=V                       non-secret environment variable for the container (repeatable)
+  --worker-label K=V              label a worker pool must carry (repeatable; replaces the label that --class selects)
+  --api-address HOST:PORT         ate-api-server address (default substrate.api.address)
+  --api-server-name NAME          TLS name of ate-api-server (default substrate.api.server_name)
+  --api-ca-file FILE              CA bundle for ate-api-server's certificate (default substrate.api.ca_file)
+  --api-token-file FILE           bearer token file (default substrate.api.token_file)
+  --api-auth MODE                 serviceaccount or mtls (default substrate.api.auth)
 ` + templateCommonFlags + `
-Exit code: 0 published, 1 not published, 2 usage error.`
+The --template flags need --template. The --api-* flags override the substrate.api section of the file given by --config.
+
+A template cannot be changed once created. If ATESPACE/NAME already has this image and these settings, nothing happens
+("already up to date"). If it has another image or other settings, a new template NAME-<first 8 hex of the digest> is
+created and its name is printed: give that name to "run --template". No template is ever deleted.
+
+Exit code: 0 published, 1 not published (or the API refused the template), 2 usage error, 75 the Substrate API cannot be
+reached (run the same command again).`
 
 const templateKeygenLong = `Makes a signing key pair for attestations: attestation.key (private, mode 0600; keep it in the cluster Secret) and
 attestation.pub (the trust anchor).
