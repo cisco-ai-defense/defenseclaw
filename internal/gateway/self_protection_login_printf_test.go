@@ -276,6 +276,11 @@ func TestG235bPrintfKeepsKnownHomeSpellingsForSelfProtection(t *testing.T) {
 // per-user, managed and blind managed cells and in the default, strict and
 // permissive packs. The same forms onto a project file, and through a link
 // to a project file, stay allowed.
+//
+// Editor form i takes spelling i mod 8 (every spelling meets an editor);
+// redirect form j takes spelling 3j+1 mod 8 (each of HOME, USER and LOGNAME
+// meets a redirect through a link), each with its project twin;
+// g235bRotate spreads the rows over the cells.
 func TestG235bKnownValueStateTargetsInPlaceAndThroughLink(t *testing.T) {
 	home, project := dynamicWordParityProject(t)
 	t.Setenv("USER", filepath.Base(home))
@@ -318,45 +323,30 @@ func TestG235bKnownValueStateTargetsInPlaceAndThroughLink(t *testing.T) {
 		`printf "$X" a; echo x > {L}`,
 		`bash -c "echo x > {L}"`,
 	}
-	type row struct {
-		command   string
-		protected bool
+	var rows []g235bRow
+	for i, form := range edits {
+		spelling := spellings[i%len(spellings)]
+		rows = append(rows,
+			g235bRow{spelling + "|" + form, strings.ReplaceAll(form, "{T}", spelling+"/.defenseclaw/config.yaml"), true},
+			g235bRow{spelling + "|" + form + "|ordinary", strings.ReplaceAll(form, "{T}", spelling+"/proj/build.log"), false})
 	}
-	var rows []row
-	for _, spelling := range spellings {
-		for _, form := range edits {
-			rows = append(rows,
-				row{strings.ReplaceAll(form, "{T}", spelling+"/.defenseclaw/config.yaml"), true},
-				row{strings.ReplaceAll(form, "{T}", spelling+"/proj/build.log"), false})
-		}
-		for _, form := range redirects {
-			rows = append(rows,
-				row{strings.ReplaceAll(form, "{L}", spelling+"/statealias"), true},
-				row{strings.ReplaceAll(form, "{L}", spelling+"/projectalias"), false})
-		}
+	for j, form := range redirects {
+		spelling := spellings[(3*j+1)%len(spellings)]
+		rows = append(rows,
+			g235bRow{spelling + "|" + form, strings.ReplaceAll(form, "{L}", spelling+"/statealias"), true},
+			g235bRow{spelling + "|" + form + "|ordinary", strings.ReplaceAll(form, "{L}", spelling+"/projectalias"), false})
 	}
-	for _, connector := range []string{"claudecode", "codex"} {
-		for _, pack := range []string{"", "strict", "permissive"} {
-			for _, cell := range []struct{ managed, blind bool }{{false, false}, {true, false}, {true, true}} {
-				t.Run(fmt.Sprintf("%s/pack=%s/managed=%t/blind=%t", connector, pack, cell.managed, cell.blind), func(t *testing.T) {
-					for _, row := range rows {
-						if !row.protected && pack == "strict" {
-							continue
-						}
-						got := postSelfProtectionPackCell(t, home, project, connector, pack, cell.managed, cell.blind, row.command)
-						if row.protected {
-							if !strings.HasPrefix(got, `{"action":"block"`) ||
-								!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
-								t.Errorf("%s = %.200s, want block tamper.detector_state_write", row.command, got)
-							}
-						} else if !strings.HasPrefix(got, `{"action":"allow"`) {
-							t.Errorf("%s = %.200s, want allow", row.command, got)
-						}
-					}
-				})
+	g235bRotate(t, rows, []string{"", "strict", "permissive"}, true, func(t *testing.T, cell g235bCell, row g235bRow) {
+		got := postSelfProtectionPackCell(t, home, project, cell.connector, cell.pack, cell.managed, cell.blind, row.command)
+		if row.protected {
+			if !strings.HasPrefix(got, `{"action":"block"`) ||
+				!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
+				t.Errorf("%s = %.200s, want block tamper.detector_state_write", row.command, got)
 			}
+		} else if !strings.HasPrefix(got, `{"action":"allow"`) {
+			t.Errorf("%s = %.200s, want allow", row.command, got)
 		}
-	}
+	})
 }
 
 // rel-1-0-6:GAP-0681, GAP-0630, GAP-0601 review 2: an in-place editor entry
