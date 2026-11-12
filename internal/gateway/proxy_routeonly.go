@@ -13,6 +13,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"os"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
@@ -288,7 +290,11 @@ func routeOnlyAPIFamily(native string) string {
 	if f := passthroughAPIFamily(native); f != "" {
 		return f
 	}
-	if strings.HasSuffix(strings.TrimRight(native, "/"), "/chat/completions") {
+	p := strings.TrimRight(native, "/")
+	switch {
+	case p == "/responses":
+		return config.RoutingAPIResponses
+	case strings.HasSuffix(p, "/chat/completions"):
 		return config.RoutingAPIChat
 	}
 	return ""
@@ -768,4 +774,43 @@ func routeOnlySetupFor(cfg *config.Config, connectorName, apiAddr string) *conne
 		}
 	}
 	return route
+}
+
+// applyRouteOnlyRenders re-renders the route-only agent config of every
+// connector whose rendering differs between two configs (connector added or
+// removed, routing turned on or off, upstream or API address changed).
+// Managed hosts are skipped: the guardian owns agent files there.
+func (s *Sidecar) applyRouteOnlyRenders(oldCfg, newCfg *config.Config) {
+	if s == nil || oldCfg == nil || newCfg == nil || managed.IsManagedEnterprise(newCfg.DeploymentMode) {
+		return
+	}
+	names := map[string]bool{}
+	for _, c := range append(slices.Clone(oldCfg.Routing.RouteOnly.Connectors), newCfg.Routing.RouteOnly.Connectors...) {
+		names[c] = true
+	}
+	registry := connector.NewDefaultRegistry()
+	for name := range names {
+		before := routeOnlySetupFor(oldCfg, name, apiListenAddr(oldCfg))
+		after := routeOnlySetupFor(newCfg, name, apiListenAddr(newCfg))
+		if reflect.DeepEqual(before, after) {
+			continue
+		}
+		conn, ok := registry.Get(name)
+		if !ok {
+			continue
+		}
+		rc, ok := conn.(connector.RouteOnlyConnector)
+		if !ok {
+			continue
+		}
+		if err := rc.ApplyRouteOnly(connector.SetupOpts{DataDir: newCfg.DataDir}, after); err != nil {
+			fmt.Fprintf(os.Stderr, "[routing] route-only render for %s: %v\n", name, err)
+			continue
+		}
+		state := "removed"
+		if after != nil {
+			state = "written"
+		}
+		fmt.Fprintf(os.Stderr, "[routing] route-only config for %s %s; restart the agent to pick it up\n", name, state)
+	}
 }

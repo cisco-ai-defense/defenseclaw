@@ -38,6 +38,13 @@ func claudeCodeRouteEnv(route *RouteOnlySetup) map[string]string {
 // ApplyRouteOnly implements RouteOnlyConnector.
 func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySetup) error {
 	settingsPath := claudeCodeSettingsPath()
+	// Nothing rendered and nothing to render: touch no file (the lock would
+	// create the agent config directory).
+	if route == nil {
+		if b, err := loadRouteBackup(opts.DataDir, c.Name()); err == nil && len(b.Applied) == 0 {
+			return nil
+		}
+	}
 	return withFileLock(settingsPath, func() error {
 		backup, err := loadRouteBackup(opts.DataDir, c.Name())
 		if err != nil {

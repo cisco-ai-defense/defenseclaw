@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -308,5 +309,31 @@ func TestRouteTokenRotationAcceptsTheNextKey(t *testing.T) {
 	}
 	if other := newRouteTokenStore(dir, "1001"); other.Valid("codex", cur) {
 		t.Fatal("a token is bound to its owner")
+	}
+}
+
+func TestRouteOnlyHotReloadRendersAndRestores(t *testing.T) {
+	settings := filepath.Join(t.TempDir(), "settings.json")
+	original := "{\n  \"model\": \"sonnet\"\n}"
+	if err := os.WriteFile(settings, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := connector.ClaudeCodeSettingsPathOverride
+	connector.ClaudeCodeSettingsPathOverride = settings
+	t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = prev })
+
+	f := newRouteOnlyFixture(t)
+	off := cloneConfig(f.cfg)
+	off.Routing.RouteOnly = config.RoutingRouteOnlyConfig{}
+	off.Gateway.APIPort, f.cfg.Gateway.APIPort = 18970, 18970
+	s := &Sidecar{}
+	s.applyRouteOnlyRenders(off, f.cfg)
+	raw, _ := os.ReadFile(settings)
+	if !strings.Contains(string(raw), "/r/claudecode") || !strings.Contains(string(raw), "X-DC-Route-Auth: dcr1-") {
+		t.Fatalf("enable did not render: %s", raw)
+	}
+	s.applyRouteOnlyRenders(f.cfg, off)
+	if raw, _ := os.ReadFile(settings); string(raw) != original {
+		t.Fatalf("disable did not restore byte for byte: %q", raw)
 	}
 }

@@ -73,7 +73,9 @@ func codexRouteTable(route *RouteOnlySetup, w codexWrappedProvider) string {
 	b.WriteString(codexRouteMarker + "\n")
 	b.WriteString("[model_providers." + codexRouteProviderID + "]\n")
 	b.WriteString("name = \"DefenseClaw route-only\"\n")
-	b.WriteString("base_url = " + strconv.Quote(strings.TrimRight(route.BaseURL, "/")+"/v1") + "\n")
+	// No /v1: Codex appends /responses (or /chat/completions) and the
+	// gateway joins that to the wrapped provider base_url unchanged.
+	b.WriteString("base_url = " + strconv.Quote(strings.TrimRight(route.BaseURL, "/")) + "\n")
 	b.WriteString("wire_api = " + strconv.Quote(w.wireAPI) + "\n")
 	if w.envKey != "" {
 		b.WriteString("env_key = " + strconv.Quote(w.envKey) + "\n")
@@ -203,6 +205,13 @@ func renderCodexRoute(raw []byte, route *RouteOnlySetup, b *routeEnvBackup) ([]b
 // ApplyRouteOnly implements RouteOnlyConnector.
 func (c *CodexConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySetup) error {
 	path := codexConfigPath()
+	// Nothing rendered and nothing to render: touch no file (the lock would
+	// create the agent config directory).
+	if route == nil {
+		if b, err := loadRouteBackup(opts.DataDir, c.Name()); err == nil && len(b.Applied) == 0 {
+			return nil
+		}
+	}
 	return withFileLock(path, func() error {
 		backup, err := loadRouteBackup(opts.DataDir, c.Name())
 		if err != nil {

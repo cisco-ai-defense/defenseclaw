@@ -2466,6 +2466,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	)
 	s.publishGeneration(nextGen)
 	s.refreshHookGuardPolicies(oldHookCfg, appliedCfg)
+	// Route-only is hot (DESIGN 16.11): re-render the agent config of every
+	// connector whose route-only rendering changed.
+	s.applyRouteOnlyRenders(oldCfg, appliedCfg)
 	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
 		// Installed skills, plugins and MCP servers affected by a list
 		// change are readmitted now, without waiting for content drift

@@ -47,7 +47,7 @@ func TestCodexRouteOnlyRoundTripIsByteExact(t *testing.T) {
 				t.Fatalf("rendered:\n%s", raw)
 			}
 			prov := doc["model_providers"].(map[string]interface{})["defenseclaw_route"].(map[string]interface{})
-			if prov["base_url"] != "http://127.0.0.1:18970/r/codex/v1" || prov["supports_websockets"] != false {
+			if prov["base_url"] != "http://127.0.0.1:18970/r/codex" || prov["supports_websockets"] != false {
 				t.Fatalf("provider = %v", prov)
 			}
 			if strings.Contains(original, "AWS_BEARER") && (prov["env_key"] != "AWS_BEARER_TOKEN_BEDROCK" || prov["wire_api"] != "responses") {
