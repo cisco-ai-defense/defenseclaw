@@ -160,3 +160,23 @@ func TestEventRegistrationHeaders(t *testing.T) {
 		t.Error("codex sends the Copilot event header")
 	}
 }
+
+// Antigravity starts through the root-owned wrapper that restores hooks.json
+// (GAP-0117), interactively and headless.
+func TestAntigravityStartRestoresHooks(t *testing.T) {
+	ov := wave2Overlay(t, "antigravity")
+	w := string(file(ov, AntigravityStart))
+	for _, want := range []string{"canonical=/usr/local/lib/defenseclaw/antigravity/hooks.json", "cmp -s", "exec /usr/local/bin/agy"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("wrapper lacks %q", want)
+		}
+	}
+	for _, f := range ov.Files {
+		if f.Path == AntigravityStart && (f.User || f.Mode != 0o755) {
+			t.Errorf("wrapper must be root-owned 0755: %+v", f)
+		}
+	}
+	if InteractiveArgv["antigravity"][0] != AntigravityStart || HeadlessArgv["antigravity"][0] != AntigravityStart {
+		t.Error("antigravity does not start through the wrapper")
+	}
+}

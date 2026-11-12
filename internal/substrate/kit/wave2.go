@@ -93,7 +93,7 @@ var wave2Interactive = map[string][]string{
 	"copilot":     {"/usr/local/bin/copilot"},
 	"hermes":      {"/usr/local/bin/hermes", "--cli"},
 	"kiro":        {"/usr/local/bin/kiro-cli-chat", "chat", "--v2", "--agent", "defenseclaw"},
-	"antigravity": {"/usr/local/bin/agy"},
+	"antigravity": {AntigravityStart},
 }
 
 var wave2Headless = map[string][]string{
@@ -101,7 +101,7 @@ var wave2Headless = map[string][]string{
 	"copilot":     {"/usr/local/bin/copilot", "-p", "{prompt}", "--allow-all-tools"},
 	"hermes":      {"/usr/local/bin/hermes", "chat", "-q", "{prompt}", "-Q", "--yolo", "--accept-hooks"},
 	"kiro":        {"/usr/local/bin/kiro-cli-chat", "chat", "--v2", "--agent", "defenseclaw", "--no-interactive", "--trust-all-tools", "{prompt}"},
-	"antigravity": {"/usr/local/bin/agy", "-p", "{prompt}", "--dangerously-skip-permissions"},
+	"antigravity": {AntigravityStart, "-p", "{prompt}", "--dangerously-skip-permissions"},
 }
 
 // wave2RelayEnv is environment only the agent process (and its tools) gets.
@@ -229,15 +229,45 @@ func opencodeManagedConfig(data []byte, gw string, o OverlayOptions) ([]byte, er
 	return buf.Bytes(), nil
 }
 
+// AntigravityStart is the root-owned start wrapper of an Antigravity actor.
+// Antigravity reads its hooks from the agent user's ~/.gemini/config/hooks.json,
+// which the agent can write, so (as the OpenShell launcher does) every start
+// restores the file from the root-owned canonical copy and refuses to start
+// when it cannot (GAP-0117). The agent can still rewrite the file during a
+// session; the next start repairs it, and the gateway sees every tool call
+// that still reaches a hook. The same tier as OpenShell's.
+const AntigravityStart = LibDir + "/kit/agy-start"
+
+const antigravityStartScript = `#!/bin/sh
+# DefenseClaw Agent Substrate actor start for Antigravity (root-owned).
+# Restores ~/.gemini/config/hooks.json from the root-owned copy, then starts agy.
+home="${HOME:-/sandbox}"
+canonical=/usr/local/lib/defenseclaw/antigravity/hooks.json
+dir="$home/.gemini/config"
+dst="$dir/hooks.json"
+fail() { echo "defenseclaw: $1; refusing to start agy without DefenseClaw's hooks" >&2; exit 2; }
+[ -f "$canonical" ] || fail "the canonical hooks file $canonical is missing"
+if [ -L "$home/.gemini" ] || [ -L "$dir" ] || [ -L "$dst" ]; then fail "$dir is reached through a symbolic link"; fi
+if [ -e "$dst" ] && [ ! -f "$dst" ]; then fail "$dst is not a regular file"; fi
+mkdir -p "$dir" 2>/dev/null || fail "cannot create $dir"
+tmp="$(mktemp "$dir/hooks.json.XXXXXX" 2>/dev/null)" || fail "cannot write in $dir"
+if ! cat "$canonical" >"$tmp" 2>/dev/null || ! mv -f "$tmp" "$dst" 2>/dev/null || [ -L "$dst" ] || ! cmp -s "$canonical" "$dst"; then
+  rm -f "$tmp" 2>/dev/null
+  fail "cannot restore $dst"
+fi
+exec /usr/local/bin/agy "$@"
+`
+
 // wave2UserFiles are first-run state files the agent would otherwise stop
 // to ask about (folder trust), owned by the image USER under HOME.
 func wave2UserFiles(name string, o OverlayOptions) []ImageFile {
 	switch name {
 	case "antigravity":
+		start := ImageFile{Path: AntigravityStart, Mode: 0o755, Data: []byte(antigravityStartScript)}
 		// The launcher records the working directory here at each start;
 		// the kit has no launcher, so the image carries it.
 		doc := fmt.Sprintf("{\n  \"trustedWorkspaces\": [%q]\n}\n", o.Workdir)
-		return []ImageFile{{Path: path.Join(o.Home, ".gemini", "antigravity-cli", "settings.json"), Mode: 0o600, User: true, Data: []byte(doc)}}
+		return []ImageFile{start, {Path: path.Join(o.Home, ".gemini", "antigravity-cli", "settings.json"), Mode: 0o600, User: true, Data: []byte(doc)}}
 	}
 	return nil
 }
