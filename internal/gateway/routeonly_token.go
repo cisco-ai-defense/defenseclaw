@@ -12,77 +12,65 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // routeTokenHeader carries the route credential the connector setup renders
 // into the agent configuration (DESIGN 17.5). It never leaves the gateway.
 const routeTokenHeader = "X-DC-Route-Auth"
 
-const routeTokenKeyName = ".route-token.key"
+const (
+	routeTokenKeyName     = ".route-token.key"
+	routeTokenNextKeyName = ".route-token.key.next"
+)
+
+// routeOwner names the account a per-user gateway runs as: the uid on
+// Linux and macOS, the user SID on Windows (os/user reports both as Uid).
+func routeOwner() string {
+	if u, err := user.Current(); err == nil && u.Uid != "" {
+		return u.Uid
+	}
+	return fmt.Sprint(os.Getuid())
+}
 
 // routeTokenStore derives the per-connector route credential of an OSS
-// per-user gateway from a key under <dataDir>/hooks (0600, created on first
-// use). The credential is HMAC-SHA256(key, "defenseclaw.route.v1" 0
-// connector 0 owner), so a gateway token change does not break model calls.
+// per-user gateway from a private key under <dataDir>/hooks (safefile:
+// 0600 and a user-only DACL on Windows). The credential is HMAC-SHA256(key,
+// "defenseclaw.route.v1" 0 connector 0 owner), so a gateway token change
+// does not break model calls. A staged .next key is accepted too (rotation,
+// DESIGN 17.5); the keys are re-read when their files change.
 type routeTokenStore struct {
 	dir   string
 	owner string
 
-	mu  sync.Mutex
-	key []byte
+	mu      sync.Mutex
+	key     []byte
+	next    []byte
+	stamp   string
+	checked time.Time
 }
 
 func newRouteTokenStore(dataDir, owner string) *routeTokenStore {
 	return &routeTokenStore{dir: filepath.Join(dataDir, "hooks"), owner: owner}
 }
 
-func (s *routeTokenStore) loadKey() ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.key != nil {
-		return s.key, nil
-	}
-	path := filepath.Join(s.dir, routeTokenKeyName)
-	if key, err := readRouteTokenKey(path); err == nil {
-		s.key = key
-		return key, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
-		return nil, err
-	}
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		// Another process created it first: use that key.
-		key, rerr := readRouteTokenKey(path)
-		if rerr == nil {
-			s.key = key
-		}
-		return key, rerr
-	}
+func readRouteKeyFile(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
-	_, werr := f.WriteString(hex.EncodeToString(key) + "\n")
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("route token key %s is not a regular file", path)
 	}
-	if werr != nil {
-		return nil, werr
+	if err := safefile.ValidatePrivateFile(path); err != nil {
+		return nil, fmt.Errorf("route token key %s is not private: %w", path, err)
 	}
-	s.key = key
-	return key, nil
-}
-
-func readRouteTokenKey(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -94,25 +82,82 @@ func readRouteTokenKey(path string) ([]byte, error) {
 	return key, nil
 }
 
-// Token returns the route credential of connector.
+func fileStamp(path string) string {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d/%d", fi.Size(), fi.ModTime().UnixNano())
+}
+
+// keys returns the current key (created on first use) and the staged next
+// key (nil when none). The files are checked at most once a second.
+func (s *routeTokenStore) keys() ([]byte, []byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	main := filepath.Join(s.dir, routeTokenKeyName)
+	next := filepath.Join(s.dir, routeTokenNextKeyName)
+	if s.key != nil && time.Since(s.checked) < time.Second {
+		return s.key, s.next, nil
+	}
+	stamp := fileStamp(main) + "|" + fileStamp(next)
+	if s.key != nil && stamp == s.stamp {
+		s.checked = time.Now()
+		return s.key, s.next, nil
+	}
+	key, err := readRouteKeyFile(main)
+	if errors.Is(err, os.ErrNotExist) {
+		fresh := make([]byte, 32)
+		if _, rerr := rand.Read(fresh); rerr != nil {
+			return nil, nil, rerr
+		}
+		// safefile writes atomically (temp + rename), so a crash never
+		// leaves a truncated key.
+		if werr := safefile.WritePrivate(main, []byte(hex.EncodeToString(fresh)+"\n")); werr != nil {
+			return nil, nil, werr
+		}
+		key, err = readRouteKeyFile(main)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	nextKey, nerr := readRouteKeyFile(next)
+	if nerr != nil && !errors.Is(nerr, os.ErrNotExist) {
+		return nil, nil, nerr
+	}
+	s.key, s.next, s.stamp, s.checked = key, nextKey, fileStamp(main)+"|"+fileStamp(next), time.Now()
+	return s.key, s.next, nil
+}
+
+func (s *routeTokenStore) derive(key []byte, connector string) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte("defenseclaw.route.v1\x00" + connector + "\x00" + s.owner))
+	return "dcr1-" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// Token returns the route credential of connector (from the current key).
 func (s *routeTokenStore) Token(connector string) (string, error) {
-	key, err := s.loadKey()
+	key, _, err := s.keys()
 	if err != nil {
 		return "", err
 	}
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte("defenseclaw.route.v1\x00" + connector + "\x00" + s.owner))
-	return "dcr1-" + hex.EncodeToString(mac.Sum(nil)), nil
+	return s.derive(key, connector), nil
 }
 
-// Valid reports whether presented is the route credential of connector.
+// Valid reports whether presented is the route credential of connector
+// under the current or the staged next key.
 func (s *routeTokenStore) Valid(connector, presented string) bool {
 	if s == nil || presented == "" {
 		return false
 	}
-	want, err := s.Token(connector)
+	key, next, err := s.keys()
 	if err != nil {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(want), []byte(presented)) == 1
+	for _, k := range [][]byte{key, next} {
+		if k != nil && subtle.ConstantTimeCompare([]byte(s.derive(k, connector)), []byte(presented)) == 1 {
+			return true
+		}
+	}
+	return false
 }

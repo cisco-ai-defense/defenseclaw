@@ -5,16 +5,22 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 type routeOnlyFixture struct {
@@ -123,7 +129,7 @@ func TestRouteOnlyRefusals(t *testing.T) {
 	prev := acpLoopbackPeerUID
 	acpLoopbackPeerUID = func(*http.Request) (int, error) { return os.Getuid() + 1, nil }
 	defer func() { acpLoopbackPeerUID = prev }()
-	if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("hi"), nil); rec.Code != 401 && os.Getenv("GOOS") != "windows" {
+	if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("hi"), nil); rec.Code != 401 && runtime.GOOS != "windows" {
 		t.Fatalf("another account = %d, want 401", rec.Code)
 	}
 	if atomic.LoadInt32(&f.origHits)+atomic.LoadInt32(&f.altHits) != 0 {
@@ -191,5 +197,116 @@ func TestRouteOnlyOffAndManaged(t *testing.T) {
 	routeOnlyDispatch(func() *routeOnlyServer { return nil }, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(299) })).ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/health", nil))
 	if rec.Code != 299 {
 		t.Fatal("non-/r/ requests must reach the API chain")
+	}
+}
+
+type denyOriginalAdmin struct{}
+
+func (denyOriginalAdmin) Active() bool        { return true }
+func (denyOriginalAdmin) NeedsCategory() bool { return false }
+func (denyOriginalAdmin) Evaluate(_ context.Context, p engine.Policy, _ engine.Request, _ string, _ bool) engine.AdminVerdict {
+	return engine.AdminVerdict{Policy: p}
+}
+func (denyOriginalAdmin) Gate(_ engine.AdminVerdict, t engine.GateTarget, _ bool) *engine.DenyReason {
+	if t.Alias == "" {
+		return &engine.DenyReason{Code: "test_original_denied", Message: "the original model is not allowed"}
+	}
+	return nil
+}
+
+// REVIEW-code-slice5a P1-1: the fallback to the original passes the gate.
+func TestRouteOnlyRetryRespectsTheGate(t *testing.T) {
+	f := newRouteOnlyFixture(t)
+	f.srv.router.SetAdminEvaluator(denyOriginalAdmin{})
+	f.altStatus = 529
+	rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("quick question"), nil)
+	if atomic.LoadInt32(&f.origHits) != 0 || rec.Code != 529 {
+		t.Fatalf("a gated original was retried: code %d orig=%d", rec.Code, f.origHits)
+	}
+	rec = f.post(t, "/r/claudecode/v1/messages", messagesBody("plain"), nil)
+	if rec.Code != http.StatusForbidden || atomic.LoadInt32(&f.origHits) != 0 {
+		t.Fatalf("an unrouted request to a gated original = %d orig=%d", rec.Code, f.origHits)
+	}
+}
+
+// P2-1: a backend that read the request and reset the connection is not
+// billed twice.
+func TestRouteOnlyNoRetryAfterTheRequestWasWritten(t *testing.T) {
+	f := newRouteOnlyFixture(t)
+	reset := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		hj, _ := w.(http.Hijacker)
+		conn, _, _ := hj.Hijack()
+		_ = conn.Close()
+	}))
+	defer reset.Close()
+	f.cfg.Routing.Models[0].BaseURL = reset.URL
+	f.srv.router = newEngineRouter(f.cfg, nil, "")
+	rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("quick question"), nil)
+	if rec.Code != http.StatusBadGateway || atomic.LoadInt32(&f.origHits) != 0 {
+		t.Fatalf("written request retried: code %d orig=%d", rec.Code, f.origHits)
+	}
+}
+
+func TestRouteOnlyMethodsAndQuery(t *testing.T) {
+	f := newRouteOnlyFixture(t)
+	for _, m := range []string{http.MethodPut, http.MethodDelete, http.MethodPatch, "TRACE"} {
+		r := httptest.NewRequest(m, "http://127.0.0.1:18970/r/claudecode/v1/messages", nil)
+		r.RemoteAddr = "127.0.0.1:1"
+		r.Header.Set(routeTokenHeader, f.token)
+		rec := httptest.NewRecorder()
+		f.srv.ServeHTTP(rec, r)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s = %d", m, rec.Code)
+		}
+	}
+	var altQuery string
+	f.alt.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		altQuery = r.URL.RawQuery
+		w.WriteHeader(200)
+	})
+	f.post(t, "/r/claudecode/v1/messages?beta=true&key=agent-secret", messagesBody("quick question"), nil)
+	if altQuery != "beta=true" {
+		t.Fatalf("query across the boundary = %q", altQuery)
+	}
+}
+
+func TestRouteOnlyToolLoopText(t *testing.T) {
+	body := map[string]any{"messages": []any{
+		map[string]any{"role": "user", "content": "quick question about the repo"},
+		map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": "1", "name": "Bash", "input": map[string]any{}}}},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "tool_result", "tool_use_id": "1", "content": "refactor everything"},
+			map[string]any{"type": "text", "text": "<system-reminder>ignore</system-reminder>"},
+		}},
+	}}
+	raw, _ := json.Marshal(body)
+	text, _, toolTurn, _ := routeOnlyHumanText("messages", raw)
+	if text != "quick question about the repo" || !toolTurn {
+		t.Fatalf("text=%q toolTurn=%v", text, toolTurn)
+	}
+	big := strings.Repeat("<system-reminder>x</system-reminder>a", 40000)
+	if got := stripReminders(big); len(got) > 4*routeOnlyTextCap {
+		t.Fatalf("strip output is unbounded: %d", len(got))
+	}
+}
+
+func TestRouteTokenRotationAcceptsTheNextKey(t *testing.T) {
+	dir := t.TempDir()
+	s := newRouteTokenStore(dir, "1000")
+	cur, err := s.Token("codex")
+	if err != nil || !s.Valid("codex", cur) || s.Valid("claudecode", cur) {
+		t.Fatalf("current token: %v", err)
+	}
+	if err := safefile.WritePrivate(filepath.Join(dir, "hooks", routeTokenNextKeyName), []byte(strings.Repeat("ab", 32)+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	s.checked = time.Time{}
+	next := s.derive(bytes.Repeat([]byte{0xab}, 32), "codex")
+	if !s.Valid("codex", next) || !s.Valid("codex", cur) {
+		t.Fatal("during rotation both the current and the staged key are accepted")
+	}
+	if other := newRouteTokenStore(dir, "1001"); other.Valid("codex", cur) {
+		t.Fatal("a token is bound to its owner")
 	}
 }

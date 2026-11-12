@@ -1084,13 +1084,13 @@ func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
 	a.connectorRegistry = reg
 }
 
-// SetFleetAPI registers the Edge Connector fleet management API so its
-// routes are mounted when the HTTP server starts.
 // SetRouteOnly installs the route-only server for hook connectors.
 func (a *APIServer) SetRouteOnly(s *routeOnlyServer) {
 	a.routeOnly.Store(s)
 }
 
+// SetFleetAPI registers the Edge Connector fleet management API so its
+// routes are mounted when the HTTP server starts.
 func (a *APIServer) SetFleetAPI(api *fleet.API) {
 	if a == nil {
 		return
@@ -1563,6 +1563,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 		Handler:     handler,
 		BaseContext: apiRequestBaseContext(baseCtx),
 		ConnContext: acpPeerConnContext,
+		// Slow-header and idle-connection bounds (no WriteTimeout: model
+		// streams on /r/ and long hook answers stay open) (DESIGN 16.12).
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		// A standalone hook sends the asset facts of its request in a header
 		// (assetfacts.Header) that can pass the net/http default of 1 MiB.
 		MaxHeaderBytes: assetfacts.MaxRequestHeaderBytes,

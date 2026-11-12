@@ -18,7 +18,10 @@ const routeOnlyPrefix = "/r/"
 // path that starts with /r or /R followed by a separator, in raw or escaped
 // form. A claimed request never reaches the API mux.
 func routeOnlyClaim(r *http.Request) bool {
-	raw := r.URL.EscapedPath()
+	return routeOnlyClaimPath(r.URL.EscapedPath()) || routeOnlyClaimPath(r.URL.Path)
+}
+
+func routeOnlyClaimPath(raw string) bool {
 	if len(raw) < 2 || raw[0] != 0x2f {
 		return false
 	}

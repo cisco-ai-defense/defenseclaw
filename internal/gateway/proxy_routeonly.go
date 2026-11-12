@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"runtime"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
@@ -29,11 +31,13 @@ import (
 // intact; it does not scan the request (the hooks decide every tool call).
 
 const (
-	routeOnlyBodyCap        = 64 << 20
-	routeOnlyRetryBodyCap   = 8 << 20
-	routeOnlyPerSubjectMax  = 32
-	routeOnlyRetryWindow    = 10 * time.Second
-	routeOnlyHeldBodyBudget = 256 << 20
+	routeOnlyBodyCap       = 64 << 20
+	routeOnlyRetryBodyCap  = 8 << 20
+	routeOnlyPerSubjectMax = 32
+	routeOnlyRetryWindow   = 10 * time.Second
+	// routeOnlyBufferBudget bounds the request bodies buffered at once (for
+	// routing and retry); over it a request streams unrouted.
+	routeOnlyBufferBudget = 256 << 20
 )
 
 // routeOnlyServer serves /r/<connector>/... requests.
@@ -59,7 +63,7 @@ func newRouteOnlyServer(router *engineRouter, cfg func() *config.Config, dataDir
 		TLSHandshakeTimeout:   10 * time.Second,
 	}
 	return &routeOnlyServer{
-		router: router, config: cfg, tokens: newRouteTokenStore(dataDir, strconv.Itoa(os.Getuid())),
+		router: router, config: cfg, tokens: newRouteTokenStore(dataDir, routeOwner()),
 		ownerUID: os.Getuid(), inflight: map[string]int{},
 		client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
@@ -119,6 +123,11 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		routeOnlyError(w, http.StatusBadRequest, "invalid_request_error", "malformed route-only path")
 		return
 	}
+	cfg := s.config()
+	if cfg == nil || !cfg.Routing.Enabled || !slices.Contains(cfg.Routing.RouteOnly.Connectors, connector) {
+		http.NotFound(w, r)
+		return
+	}
 	if !isLoopbackRemote(r.RemoteAddr) {
 		routeOnlyError(w, http.StatusForbidden, "permission_error", "route-only answers loopback callers only")
 		return
@@ -132,9 +141,9 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		routeOnlyError(w, http.StatusUpgradeRequired, "invalid_request_error", "route-only does not upgrade connections; use HTTP")
 		return
 	}
-	cfg := s.config()
-	if cfg == nil || !cfg.Routing.Enabled || !slices.Contains(cfg.Routing.RouteOnly.Connectors, connector) {
-		http.NotFound(w, r)
+	isModels := strings.HasSuffix(strings.TrimRight(native, "/"), "/models") || strings.Contains(native, "/models/")
+	if r.Method != http.MethodPost && !((r.Method == http.MethodGet || r.Method == http.MethodHead) && isModels) {
+		routeOnlyError(w, http.StatusMethodNotAllowed, "invalid_request_error", "route-only accepts POST, and GET on the models path")
 		return
 	}
 	if cfg.StandaloneEnterprise() {
@@ -165,28 +174,42 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.release(subject)
 
-	family := routeOnlyAPIFamily(native)
+	original := routeOnlyAttempt{base: upstream.BaseURL, native: native, keepInbound: true}
 	if r.Method != http.MethodPost {
-		s.forward(w, r, routeOnlyAttempt{base: upstream.BaseURL, native: native, keepInbound: true}, nil, nil)
+		s.forward(w, r, original, nil, nil)
 		return
 	}
+	// Bodies are buffered under one global budget; a request that does not
+	// fit streams to the configured upstream unrouted (never refused).
+	if r.ContentLength > routeOnlyBodyCap || !s.holdBody(max(r.ContentLength, 0)) {
+		s.forward(w, r, original, nil, r.Body)
+		return
+	}
+	charged := max(r.ContentLength, 0)
+	defer func() { s.releaseBody(charged) }()
 	body, over, err := readRouteOnlyBody(r)
 	if err != nil {
 		routeOnlyError(w, http.StatusBadRequest, "invalid_request_error", "could not read the request body")
 		return
 	}
-	original := routeOnlyAttempt{base: upstream.BaseURL, native: native, keepInbound: true}
+	if extra := int64(len(body)) - charged; extra > 0 {
+		if !s.holdBody(extra) {
+			s.forward(w, r, original, body, over)
+			return
+		}
+		charged += extra
+	}
 	if over != nil {
-		// Too large to route: stream it to the configured upstream unchanged.
 		s.forward(w, r, original, body, over)
 		return
 	}
+	family := routeOnlyAPIFamily(native)
 	inClass := routeOnlyCredentialClass(r.Header, family)
 	if inClass == "sigv4" {
-		routeOnlyError(w, http.StatusBadRequest, "invalid_request_error", "a SigV4-signed Bedrock request cannot pass through the gateway; use a Bedrock API key or gateway signing")
+		routeOnlyError(w, http.StatusBadRequest, "invalid_request_error", "a SigV4-signed Bedrock request cannot pass through the gateway; configure the agent with a Bedrock API key")
 		return
 	}
-	attempt, routedOutcome := s.decide(r, cfg, connector, native, family, upstream, inClass, body)
+	attempt, routedOutcome, originalAllowed := s.decide(r, connector, native, family, upstream, inClass, body)
 	if routedOutcome.Result == SemanticRouteDenied {
 		routeOnlyError(w, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
 		return
@@ -196,8 +219,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var retry *routeOnlyAttempt
-	if len(body) <= routeOnlyRetryBodyCap && s.holdBody(int64(len(body))) {
-		defer s.releaseBody(int64(len(body)))
+	if originalAllowed && len(body) <= routeOnlyRetryBodyCap {
 		retry = &original
 	}
 	w.Header().Set("X-Semantic-Router", "routed")
@@ -225,7 +247,7 @@ func (s *routeOnlyServer) release(subject string) {
 func (s *routeOnlyServer) holdBody(n int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.heldBytes+n > routeOnlyHeldBodyBudget {
+	if s.heldBytes+n > routeOnlyBufferBudget {
 		return false
 	}
 	s.heldBytes += n
@@ -344,8 +366,8 @@ func routeOnlyHumanText(family string, body []byte) (text string, hasTools, tool
 			if it.Role == "user" && (it.Type == "" || it.Type == "message") {
 				t, img := contentText(it.Content)
 				images = images || img
-				if t != "" {
-					return capText(stripReminders(t)), hasTools, toolTurn, images
+				if t = capText(stripReminders(t)); t != "" {
+					return t, hasTools, toolTurn, images
 				}
 			}
 		}
@@ -353,13 +375,16 @@ func routeOnlyHumanText(family string, body []byte) (text string, hasTools, tool
 	}
 	for i := len(probe.Messages) - 1; i >= 0; i-- {
 		m := probe.Messages[i]
-		t, img := contentText(m.Content)
-		images = images || img
-		if i == len(probe.Messages)-1 && (m.Role == "tool" || (m.Role == "user" && t == "" && bytes.Contains(m.Content, []byte("tool_result")))) {
+		if i == len(probe.Messages)-1 && (m.Role == "tool" || bytes.Contains(m.Content, []byte("\"tool_result\""))) {
 			toolTurn = true
 		}
-		if m.Role == "user" && t != "" {
-			return capText(stripReminders(t)), hasTools, toolTurn, images
+		if m.Role != "user" {
+			continue
+		}
+		t, img := contentText(m.Content)
+		images = images || img
+		if t = capText(stripReminders(t)); t != "" {
+			return t, hasTools, toolTurn, images
 		}
 	}
 	return "", hasTools, toolTurn, images
@@ -394,18 +419,27 @@ func contentText(raw json.RawMessage) (string, bool) {
 	return strings.Join(parts, "\n"), images
 }
 
-func stripReminders(s string) string {
+// stripReminders removes <system-reminder> blocks in one pass. The input
+// is bounded first (four times the classifier cap), so a large paste costs
+// linear time on a bounded string.
+func stripReminders(in string) string {
+	in = truncateUTF8(in, 4*routeOnlyTextCap)
+	const open, closeTag = "<system-reminder>", "</system-reminder>"
+	var b strings.Builder
 	for {
-		i := strings.Index(s, "<system-reminder>")
+		i := strings.Index(in, open)
 		if i < 0 {
-			return strings.TrimSpace(s)
+			b.WriteString(in)
+			break
 		}
-		j := strings.Index(s[i:], "</system-reminder>")
+		b.WriteString(in[:i])
+		j := strings.Index(in[i:], closeTag)
 		if j < 0 {
-			return strings.TrimSpace(s[:i])
+			break
 		}
-		s = s[:i] + s[i+j+len("</system-reminder>"):]
+		in = in[i+j+len(closeTag):]
 	}
+	return strings.TrimSpace(b.String())
 }
 
 func capText(s string) string { return truncateUTF8(s, routeOnlyTextCap) }
@@ -421,11 +455,20 @@ func routeOnlyConversationID(h http.Header) string {
 	return ""
 }
 
-// decide asks the router and returns the routed attempt, or nil to send
-// the request unchanged.
-func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, body []byte) (*routeOnlyAttempt, SemanticRouteOutcome) {
-	if family == "" || s.router == nil {
-		return nil, SemanticRouteOutcome{}
+// decide asks the router and returns the routed attempt (nil: send the
+// original), the outcome, and whether the admin gate allows the original
+// request as a fallback target.
+func (s *routeOnlyServer) decide(r *http.Request, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, body []byte) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
+	if s.router == nil {
+		return nil, SemanticRouteOutcome{}, true
+	}
+	noRoute := false
+	if family == "" && strings.HasSuffix(strings.TrimRight(native, "/"), "/responses/compact") {
+		// Compact is forwarded unchanged but still passes the admin gate.
+		family, noRoute = config.RoutingAPIResponses, true
+	}
+	if family == "" {
+		return nil, SemanticRouteOutcome{}, true
 	}
 	text, hasTools, toolTurn, images := routeOnlyHumanText(family, body)
 	var probe struct {
@@ -448,27 +491,36 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 		in.Tools = []interface{}{true}
 	}
 	out := s.router.RouteDetailed(r.Context(), in)
-	if out.Route != nil {
-		target := engine.GateTarget{Provider: inProvider, Model: model}
-		if out.Result == SemanticRouteApplied && out.Route.Backend != nil {
-			b := out.Route.Backend
-			target = engine.GateTarget{Alias: b.Alias, Provider: b.Provider, Model: b.Model}
-		}
-		if deny := s.router.Gate(r.Context(), out, target); deny != nil {
+	originalTarget := engine.GateTarget{Provider: inProvider, Model: model}
+	originalAllowed := s.router.Gate(r.Context(), out, originalTarget) == nil
+	if noRoute || out.Result != SemanticRouteApplied {
+		if out.Result != SemanticRouteDenied && !originalAllowed {
+			deny := s.router.Gate(r.Context(), out, originalTarget)
 			out.Result, out.Deny, out.Decision = SemanticRouteDenied, deny, nil
+		}
+		return nil, out, originalAllowed
+	}
+	if out.Route != nil && out.Route.Backend != nil {
+		b := out.Route.Backend
+		if deny := s.router.Gate(r.Context(), out, engine.GateTarget{Alias: b.Alias, Provider: b.Provider, Model: b.Model}); deny != nil {
+			out.Result, out.Deny, out.Decision = SemanticRouteDenied, deny, nil
+			return nil, out, false
 		}
 	}
 	d := out.Decision
-	if out.Result != SemanticRouteApplied || d == nil {
-		return nil, out
+	fallback := func() (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
+		if !originalAllowed {
+			out.Result, out.Deny, out.Decision = SemanticRouteDenied, s.router.Gate(r.Context(), out, originalTarget), nil
+		}
+		return nil, out, originalAllowed
 	}
 	sameProvider := strings.EqualFold(d.Provider, inProvider)
 	if !sameProvider && (inClass == engine.CredentialOAuth || inClass == engine.CredentialBearer) && d.APIKey == "" {
 		// A login token or Bedrock bearer never crosses providers.
-		return nil, out
+		return fallback()
 	}
 	if probe.Previous != "" && !sameProvider {
-		return nil, out
+		return fallback()
 	}
 	origin := originOf(d.TargetURL)
 	base := strings.TrimRight(strings.TrimSpace(d.TargetURL), "/")
@@ -480,18 +532,18 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 		}
 	}
 	if origin == "" {
-		return nil, out
+		return fallback()
 	}
 	a := &routeOnlyAttempt{base: base, native: native, provider: d.Provider}
 	switch family {
 	case config.RoutingAPIConverse, config.RoutingAPIInvoke:
 		if !strings.EqualFold(d.Provider, "bedrock") {
-			return nil, out
+			return fallback()
 		}
 		u := &url.URL{Path: mustUnescape(native), RawPath: native}
 		a.native = swapBedrockPathModel(u, d.Model)
 		if a.native == "" {
-			return nil, out
+			return fallback()
 		}
 	default:
 		a.body = patchModelInBody(body, d.Model)
@@ -499,12 +551,12 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 	if d.APIKey == "" && sameProvider && strings.EqualFold(origin, originOf(upstream.BaseURL)) {
 		a.keepInbound = true
 	} else {
-		a.auth = d.APIKey
-		if inClass == engine.CredentialOAuth && d.APIKey == "" && !sameProvider {
-			return nil, out
+		if inClass == engine.CredentialOAuth && d.APIKey == "" {
+			return fallback()
 		}
+		a.auth = d.APIKey
 	}
-	return a, out
+	return a, out, originalAllowed
 }
 
 func mustUnescape(p string) string {
@@ -524,9 +576,25 @@ var routeOnlyDropHeaders = []string{
 // not the agent own provider and origin).
 var routeOnlyBoundaryHeaders = []string{"Content-Type", "Accept", "Accept-Encoding", "User-Agent", "Anthropic-Version", "Anthropic-Beta", "Openai-Beta"}
 
+func connectionNamed(h http.Header) map[string]bool {
+	out := map[string]bool{}
+	for _, v := range h.Values("Connection") {
+		for _, name := range strings.Split(v, ",") {
+			if n := strings.TrimSpace(name); n != "" {
+				out[http.CanonicalHeaderKey(n)] = true
+			}
+		}
+	}
+	return out
+}
+
 func routeOnlyForwardHeaders(dst, src http.Header, a routeOnlyAttempt) {
+	named := connectionNamed(src)
 	for k, vs := range src {
 		ck := http.CanonicalHeaderKey(k)
+		if named[ck] {
+			continue
+		}
 		if slices.Contains(routeOnlyDropHeaders, ck) || strings.HasPrefix(ck, "X-Dc-") || strings.HasPrefix(ck, "X-Defenseclaw-") || strings.HasPrefix(ck, "X-User-") {
 			continue
 		}
@@ -565,12 +633,15 @@ func retryableRouteStatus(status int, crossProvider bool) bool {
 
 // forwardWithRetry sends the routed attempt and, when it fails before any
 // response byte within the retry window, the original request once
-// (DESIGN 16.5, 17.3).
+// (DESIGN 16.5, 17.3). A transport error is retried only when the request
+// was never written, so a backend that read the request is never billed
+// twice; 500, 502 and 504 are never retried.
 func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Request, routed routeOnlyAttempt, original *routeOnlyAttempt, body []byte) {
 	started := time.Now()
-	resp, err := s.send(r, routed, body, nil)
+	resp, wrote, err := s.send(r, routed, body, nil)
 	cross := !strings.EqualFold(routed.provider, routeOnlyProvider(routeOnlyAPIFamily(routed.native)))
-	if original != nil && time.Since(started) < routeOnlyRetryWindow && (err != nil || retryableRouteStatus(resp.StatusCode, cross)) {
+	retryable := (err != nil && !wrote) || (err == nil && retryableRouteStatus(resp.StatusCode, cross))
+	if original != nil && retryable && r.Context().Err() == nil && time.Since(started) < routeOnlyRetryWindow {
 		if resp != nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
@@ -588,7 +659,7 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *routeOnlyServer) forward(w http.ResponseWriter, r *http.Request, a routeOnlyAttempt, body []byte, rest io.Reader) {
-	resp, err := s.send(r, a, body, rest)
+	resp, _, err := s.send(r, a, body, rest)
 	if err != nil {
 		routeOnlyError(w, http.StatusBadGateway, "api_error", "the model upstream is unreachable")
 		return
@@ -596,7 +667,11 @@ func (s *routeOnlyServer) forward(w http.ResponseWriter, r *http.Request, a rout
 	copyRouteOnlyResponse(w, resp)
 }
 
-func (s *routeOnlyServer) send(r *http.Request, a routeOnlyAttempt, body []byte, rest io.Reader) (*http.Response, error) {
+// routeOnlyBoundaryQuery are the query keys kept across a credential
+// boundary (Anthropic beta flags); others stay with the agent provider.
+var routeOnlyBoundaryQuery = []string{"beta", "api-version"}
+
+func (s *routeOnlyServer) send(r *http.Request, a routeOnlyAttempt, body []byte, rest io.Reader) (*http.Response, bool, error) {
 	payload := body
 	if a.body != nil {
 		payload = a.body
@@ -609,13 +684,28 @@ func (s *routeOnlyServer) send(r *http.Request, a routeOnlyAttempt, body []byte,
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		reader, length = nil, 0
 	}
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, a.url(r.URL.RawQuery), reader)
+	query := r.URL.RawQuery
+	if !a.keepInbound && query != "" {
+		kept := url.Values{}
+		for k, v := range r.URL.Query() {
+			if slices.Contains(routeOnlyBoundaryQuery, k) {
+				kept[k] = v
+			}
+		}
+		query = kept.Encode()
+	}
+	wrote := false
+	ctx := httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{
+		WroteHeaders: func() { wrote = true },
+	})
+	req, err := http.NewRequestWithContext(ctx, r.Method, a.url(query), reader)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.ContentLength = length
 	routeOnlyForwardHeaders(req.Header, r.Header, a)
-	return s.client.Do(req)
+	resp, err := s.client.Do(req)
+	return resp, wrote, err
 }
 
 // copyRouteOnlyResponse streams the upstream answer with a flush per read.
@@ -645,4 +735,37 @@ func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response) {
 			return
 		}
 	}
+}
+
+// routeOnlySetupFor is the route-only rendering of connector derived from
+// config.yaml, or nil when the connector is not routed (Setup then restores
+// an earlier render). Managed hosts get nil until the verified-caller slice
+// lands (DESIGN 17.2, 19).
+func routeOnlySetupFor(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
+	if cfg == nil || !cfg.Routing.Enabled || cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
+		return nil
+	}
+	if !slices.Contains(cfg.Routing.RouteOnly.Connectors, connectorName) || strings.TrimSpace(apiAddr) == "" {
+		return nil
+	}
+	up, ok := cfg.Routing.RouteOnly.Upstreams[connectorName]
+	if !ok {
+		return nil
+	}
+	token, err := newRouteTokenStore(cfg.DataDir, routeOwner()).Token(connectorName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[routing] route-only credential for %s unavailable: %v\n", connectorName, err)
+		return nil
+	}
+	route := &connector.RouteOnlySetup{BaseURL: "http://" + apiAddr + routeOnlyPrefix + connectorName, Token: token}
+	if up.API == config.RoutingAPIConverse || up.API == config.RoutingAPIInvoke {
+		route.Bedrock = true
+		if up.Bedrock != nil && up.Bedrock.Auth != "" && up.Bedrock.Auth != config.RoutingBedrockAuthPassthrough {
+			// Gateway SigV4 signing is a later S1 slice: do not point the
+			// agent at a listener that cannot sign yet.
+			fmt.Fprintf(os.Stderr, "[routing] route-only for %s needs gateway Bedrock signing (auth %s), which this build does not have; use a Bedrock API key (auth passthrough)\n", connectorName, up.Bedrock.Auth)
+			return nil
+		}
+	}
+	return route
 }
