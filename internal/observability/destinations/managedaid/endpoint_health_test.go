@@ -512,3 +512,72 @@ func endpointHealthNormalizeRequest(t *testing.T, raw []byte) []byte {
 	}
 	return out.Bytes()
 }
+
+// A report built while a reload clears the Cisco AI Defense endpoint can be
+// emitted on a managed plan that has no managed destination. That plan must
+// still keep the report off every operator destination, and reserving the
+// route twice must not add it twice.
+func TestEndpointHealthReportNeverReachesOperatorDestinationsWithoutEndpoint(t *testing.T) {
+	base, err := config.CompileObservabilityV8(&config.ObservabilityV8Source{
+		Destinations: []config.ObservabilityV8DestinationSource{{
+			Name: "operator-console", Kind: config.ObservabilityV8DestinationConsole,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := config.ObservabilityV8ManagedAIDOptions{DeploymentMode: "managed_enterprise"}
+	plan, err := config.WithObservabilityV8ManagedAIDDestination(base, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := config.WithObservabilityV8ManagedAIDDestination(plan, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, destination := range again.Snapshot().Destinations {
+		count := 0
+		for _, route := range destination.Routes {
+			if route.Name == "drop-managed-endpoint-health" {
+				count++
+			}
+		}
+		if destination.Name == "operator-console" && count != 1 {
+			t.Fatalf("operator-console holds %d endpoint health drop routes, want 1", count)
+		}
+	}
+
+	evaluator, err := router.New(again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := router.NewClassifiedLogMetadata(
+		observability.ProducerGatewayEvent,
+		observability.ProducerKey("endpoint_health"),
+		observability.ClassificationContext{
+			Bucket: observability.BucketPlatformHealth, EventName: "endpoint.health_reported", RawSeverity: "MEDIUM",
+		},
+		observability.SourceGateway, "", config.ObservabilityV8ManagedEndpointHealthAction,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder, err := observability.NewFamilyBuilder(
+		observability.ClockFunc(func() time.Time { return time.Date(2026, 7, 11, 0, 0, 1, 0, time.UTC) }),
+		observability.TimeOrderedOccurrenceIDs,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := evaluator.Evaluate(metadata, func(router.Admission) (observability.Record, error) {
+		return builder.BuildLogEndpointHealthReported(endpointHealthReportInput())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range result.Deliveries() {
+		if route.DestinationName == "operator-console" {
+			t.Fatalf("operator destination received the endpoint health report: %+v", result.Deliveries())
+		}
+	}
+}
