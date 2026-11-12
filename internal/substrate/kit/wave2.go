@@ -110,6 +110,8 @@ var wave2Headless = map[string][]string{
 // load) and the Node warning about env-proxy is silenced, as the OpenShell
 // launcher does.
 var wave2RelayEnv = map[string]map[string]string{
+	"amp":   {"XDG_CONFIG_HOME": XDGConfigHome},
+	"devin": {"XDG_CONFIG_HOME": XDGConfigHome},
 	"copilot": {
 		"LD_PRELOAD":   "/opt/defenseclaw-harness/copilot/lib/defenseclaw-pidfd.so",
 		"NODE_OPTIONS": "--disable-warning=UNDICI-EHPA",
@@ -277,51 +279,59 @@ func wave2Harden(ov *Overlay, name string, o OverlayOptions) {
 	}
 }
 
-// configHomeDirs are the folders other tools create under ~/.config; with
-// ~/.config root-owned (below) they stay the agent's.
-var configHomeDirs = []string{"git", "pip", "uv", "gh", "pnpm", "npm", "configstore"}
+// XDGConfigHome is the root-owned configuration home of the agents whose hook
+// registration lives in a user configuration folder (Amp, Devin). Both honour
+// XDG_CONFIG_HOME (measured on the pinned releases), so the registration sits
+// outside the agent-owned HOME and nothing above it can be renamed or
+// replaced (GAP-0136; Antigravity's ~/.gemini still has this gap, GAP-0120).
+const XDGConfigHome = LibDir + "/xdg"
 
-// rootOwnConfigHome makes ~/.config root-owned, so that neither the hook
-// registration's folder nor anything above it can be renamed or replaced
-// (GAP-0136; Antigravity's ~/.gemini still has this gap, GAP-0120), and keeps
-// the folders common tools write there the agent's.
-func rootOwnConfigHome(ov *Overlay, o OverlayOptions) {
-	cfg := path.Join(o.Home, ".config")
-	ov.RootDirs = append(ov.RootDirs, cfg)
-	for _, d := range configHomeDirs {
-		ov.UserDirs = append(ov.UserDirs, path.Join(cfg, d))
-	}
-}
+// xdgUserDirs are the folders common tools write under their configuration
+// home; they stay the agent's.
+var xdgUserDirs = []string{"git", "pip", "uv", "gh", "pnpm", "npm", "configstore"}
 
-// ampHarden makes Amp's plugin registration the image's: Amp loads plugins
-// only from ~/.config/amp/plugins (it has no system plugin location), so the
-// plugin, its folder, ~/.config/amp and ~/.config are root-owned. Amp writes
-// nothing there at start (measured); its settings file, which it writes on
-// `amp permissions add`, stays the agent's and is pre-created empty so an
-// in-place write works.
-func ampHarden(ov *Overlay, o OverlayOptions) {
-	plugin := path.Join(o.Home, ".config", "amp", "plugins", "defenseclaw.ts")
+// moveToXDG moves a rendered file from ~/.config/<rel> to XDGConfigHome/<rel>,
+// root-owned and read-only, and reports whether it found the file.
+func moveToXDG(ov *Overlay, o OverlayOptions, rel string) bool {
+	from := path.Join(o.Home, ".config", rel)
 	for i := range ov.Files {
-		if ov.Files[i].Path == plugin {
+		if ov.Files[i].Path == from {
+			ov.Files[i].Path = path.Join(XDGConfigHome, rel)
 			ov.Files[i].User, ov.Files[i].Mode = false, 0o644
+			return true
 		}
 	}
-	dir := path.Join(o.Home, ".config", "amp")
-	ov.RootDirs = append(ov.RootDirs, path.Join(dir, "plugins"), dir)
-	rootOwnConfigHome(ov, o)
-	ov.Files = append(ov.Files, ImageFile{Path: path.Join(dir, "settings.json"), Mode: 0o600, User: true, Data: []byte("{}\n")})
+	return false
 }
 
-// devinHarden makes Devin's hook registration the image's: Devin reads hooks
-// from ~/.config/devin/config.json, so the file, its folder and ~/.config
-// are root-owned. Devin rewrites the file at its first start only to add the
+func xdgEnv(ov *Overlay) {
+	for _, d := range xdgUserDirs {
+		ov.UserDirs = append(ov.UserDirs, path.Join(XDGConfigHome, d))
+	}
+}
+
+// ampHarden moves Amp's plugin registration out of the agent's HOME: Amp loads
+// plugins only from <config home>/amp/plugins (it has no system plugin
+// location), and the agent runs with XDG_CONFIG_HOME at the root-owned
+// XDGConfigHome. Amp writes nothing there at start (measured); its settings
+// file, written on `amp permissions add`, stays the agent's and is
+// pre-created empty so an in-place write works.
+func ampHarden(ov *Overlay, o OverlayOptions) {
+	moveToXDG(ov, o, "amp/plugins/defenseclaw.ts")
+	ov.Remove = append(ov.Remove, path.Join(o.Home, ".config", "amp"))
+	xdgEnv(ov)
+	ov.Files = append(ov.Files, ImageFile{Path: path.Join(XDGConfigHome, "amp", "settings.json"), Mode: 0o600, User: true, Data: []byte("{}\n")})
+}
+
+// devinHarden moves Devin's hook registration out of the agent's HOME the
+// same way. Devin rewrites the file at its first start only to add the
 // schema version, so the image carries it; credentials live in
-// ~/.local/share/devin and state in ~/.config/devin/cli, which stay the
-// agent's.
+// ~/.local/share/devin, which stays the agent's, and state in
+// <config home>/devin/cli, pre-created for it. The OpenShell launcher's
+// restore copy is dead in an actor and is dropped.
 func devinHarden(ov *Overlay, o OverlayOptions) {
-	cfgFile := path.Join(o.Home, ".config", "devin", "config.json")
 	for i := range ov.Files {
-		if ov.Files[i].Path != cfgFile && ov.Files[i].Path != devinCanonicalConfig {
+		if ov.Files[i].Path != path.Join(o.Home, ".config", "devin", "config.json") {
 			continue
 		}
 		var doc map[string]any
@@ -331,18 +341,19 @@ func devinHarden(ov *Overlay, o OverlayOptions) {
 				ov.Files[i].Data = append(b, '\n')
 			}
 		}
-		if ov.Files[i].Path == cfgFile {
-			ov.Files[i].User, ov.Files[i].Mode = false, 0o644
+	}
+	moveToXDG(ov, o, "devin/config.json")
+	kept := ov.Files[:0]
+	for _, f := range ov.Files {
+		if f.Path != "/usr/local/lib/defenseclaw/devin/config.json" {
+			kept = append(kept, f)
 		}
 	}
-	dir := path.Dir(cfgFile)
-	ov.RootDirs = append(ov.RootDirs, dir)
-	rootOwnConfigHome(ov, o)
-	ov.UserDirs = append(ov.UserDirs, path.Join(dir, "cli"))
+	ov.Files = kept
+	ov.Remove = append(ov.Remove, "/usr/local/lib/defenseclaw/devin/config.json", path.Join(o.Home, ".config", "devin"))
+	xdgEnv(ov)
+	ov.UserDirs = append(ov.UserDirs, path.Join(XDGConfigHome, "devin", "cli"))
 }
-
-// devinCanonicalConfig is the root-owned reference copy of Devin's hooks.
-const devinCanonicalConfig = LibDir + "/devin/config.json"
 
 func antigravityHarden(ov *Overlay, o OverlayOptions) {
 	hooks := path.Join(o.Home, ".gemini", "config", "hooks.json")

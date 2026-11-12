@@ -41,7 +41,7 @@ func TestWave3OverlaysCarryNoOpenShellReferences(t *testing.T) {
 func TestWave3HookCommandsRunTheActorHook(t *testing.T) {
 	want := map[string][2]string{
 		"cursor": {"/etc/cursor/hooks.json", `"command": "'` + HookBinary + `' --connector cursor"`},
-		"devin":  {"/usr/local/lib/defenseclaw/devin/config.json", `"command": "` + HookBinary + ` --connector devin"`},
+		"devin":  {XDGConfigHome + "/devin/config.json", `"command": "` + HookBinary + ` --connector devin"`},
 	}
 	for name, w := range want {
 		ov := wave2Overlay(t, name)
@@ -53,11 +53,6 @@ func TestWave3HookCommandsRunTheActorHook(t *testing.T) {
 			t.Errorf("%s: the hook command names an event, but the event is in the payload", name)
 		}
 	}
-	// Devin has a baked copy under HOME as well; both must agree.
-	ov := wave2Overlay(t, "devin")
-	if !bytes.Equal(file(ov, "/sandbox/.config/devin/config.json"), file(ov, "/usr/local/lib/defenseclaw/devin/config.json")) {
-		t.Error("devin: the baked and canonical config differ")
-	}
 }
 
 // Amp's plugin posts through the actor hook (hook-post): no token, no
@@ -65,7 +60,7 @@ func TestWave3HookCommandsRunTheActorHook(t *testing.T) {
 // allow-all settings; an interactive run does not.
 func TestAmpSubstratePluginAndHeadlessSettings(t *testing.T) {
 	ov := wave2Overlay(t, "amp")
-	plugin := file(ov, "/sandbox/.config/amp/plugins/defenseclaw.ts")
+	plugin := file(ov, XDGConfigHome+"/amp/plugins/defenseclaw.ts")
 	if len(plugin) == 0 {
 		t.Fatal("amp: no plugin in the overlay")
 	}
@@ -108,52 +103,47 @@ func TestSigninRefusalFromTheGateway(t *testing.T) {
 	}
 }
 
-// GAP-0136: the hook registration files of Amp and Devin, their folders and
-// ~/.config are root-owned, so the agent cannot rewrite, rename or delete them.
+// GAP-0136: the hook registration of Amp and Devin lives under the root-owned
+// XDGConfigHome (both agents run with XDG_CONFIG_HOME there), not in the
+// agent-owned HOME: the file, its folder and the tree above it are root-owned,
+// so the agent cannot rewrite, rename or delete them.
 func TestWave3HookRegistrationsAreRootOwned(t *testing.T) {
-	cases := map[string][]string{
-		"amp":   {"/sandbox/.config/amp/plugins/defenseclaw.ts"},
-		"devin": {"/sandbox/.config/devin/config.json", "/usr/local/lib/defenseclaw/devin/config.json"},
+	cases := map[string]string{
+		"amp":   XDGConfigHome + "/amp/plugins/defenseclaw.ts",
+		"devin": XDGConfigHome + "/devin/config.json",
 	}
-	for name, files := range cases {
+	for name, p := range cases {
 		ov := wave2Overlay(t, name)
-		for _, p := range files {
-			var found bool
-			for _, f := range ov.Files {
-				if f.Path != p {
-					continue
-				}
+		var found bool
+		for _, f := range ov.Files {
+			if f.Path == p {
 				found = true
 				if f.User || f.Mode != 0o644 {
 					t.Errorf("%s: %s is user-owned or writable (user=%v mode=%o)", name, p, f.User, f.Mode)
 				}
 			}
-			if !found {
-				t.Errorf("%s: %s not in the overlay", name, p)
+			if strings.HasPrefix(f.Path, "/sandbox/.config/"+name+"/") && name == "devin" {
+				t.Errorf("%s: %s is still a copy under HOME", name, f.Path)
 			}
 		}
-		roots := strings.Join(ov.RootDirs, " ")
-		for _, d := range []string{"/sandbox/.config"} {
-			if !strings.Contains(roots, d) {
-				t.Errorf("%s: %s is not root-owned (RootDirs %v)", name, d, ov.RootDirs)
-			}
+		if !found {
+			t.Errorf("%s: %s not in the overlay", name, p)
 		}
-	}
-	amp := wave2Overlay(t, "amp")
-	rootSet := map[string]bool{}
-	for _, d := range amp.RootDirs {
-		rootSet[d] = true
-	}
-	for _, d := range []string{"/sandbox/.config/amp/plugins", "/sandbox/.config/amp", "/sandbox/.config"} {
-		if !rootSet[d] {
-			t.Errorf("amp: %s is not root-owned (RootDirs %v)", d, amp.RootDirs)
+		if got := wave2RelayEnv[name]["XDG_CONFIG_HOME"]; got != XDGConfigHome {
+			t.Errorf("%s: the agent does not run with XDG_CONFIG_HOME=%s (%q)", name, XDGConfigHome, got)
+		}
+		for _, f := range ov.Files {
+			if strings.HasPrefix(f.Path, XDGConfigHome) && f.User && !strings.HasSuffix(f.Path, "/amp/settings.json") {
+				t.Errorf("%s: %s under the root-owned config home is the agent's", name, f.Path)
+			}
 		}
 	}
 	dv := wave2Overlay(t, "devin")
-	if !strings.Contains(string(file(dv, "/sandbox/.config/devin/config.json")), `"version": 1`) {
+	if !strings.Contains(string(file(dv, XDGConfigHome+"/devin/config.json")), `"version": 1`) {
 		t.Error("devin: the config does not carry the schema version Devin would otherwise write at its first start")
 	}
-	if !bytes.Equal(file(dv, "/sandbox/.config/devin/config.json"), file(dv, "/usr/local/lib/defenseclaw/devin/config.json")) {
-		t.Error("devin: the live and canonical config differ")
+	userDirs := strings.Join(dv.UserDirs, " ")
+	if !strings.Contains(userDirs, XDGConfigHome+"/devin/cli") {
+		t.Errorf("devin: no agent-owned state folder (UserDirs %v)", dv.UserDirs)
 	}
 }
