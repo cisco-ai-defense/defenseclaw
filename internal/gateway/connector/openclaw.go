@@ -307,6 +307,11 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 func (c *OpenClawConnector) registerPlugin(opts SetupOpts) error {
 	paths := c.pathsFor(opts)
 	configPath := paths.config
+	externalDir := paths.external
+	// Check every file setup is about to change before changing any.
+	if err := openClawPreflight(paths, externalDir); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return fmt.Errorf("openclaw extension install: %w", err)
 	}
@@ -322,7 +327,7 @@ func (c *OpenClawConnector) registerPlugin(opts SetupOpts) error {
 		}
 		observedVersion := openClawObservedVersion(opts)
 		dropRejectedApprovals := OpenClawLacksPluginApprovals(observedVersion)
-		if err := installOpenClawExtension(paths, opts.HILTEnabled, dropRejectedApprovals,
+		if err := installOpenClawExtension(paths, externalDir, opts.HILTEnabled, dropRejectedApprovals,
 			openClawConversationHooksSupported(observedVersion)); err != nil {
 			return fmt.Errorf("openclaw extension install: %w", err)
 		}
@@ -351,7 +356,7 @@ func (c *OpenClawConnector) IsBundledPlugin(dir string) bool {
 
 // BundledPluginDir is where Setup installs DefenseClaw's own OpenClaw plugin.
 func (c *OpenClawConnector) BundledPluginDir() string {
-	return c.currentPaths().managedPluginDir()
+	return c.currentPaths().pluginDir()
 }
 
 var errNotBundledFile = errors.New("not a bundled file")
@@ -512,15 +517,30 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 // <home>/extensions/defenseclaw and registers the plugin in the openclaw.json
 // of paths (claw.config_file, else <home>/openclaw.json). Idempotent: re-running leaves the config in the
 // same shape (single allow entry, single load path, enabled=true).
-func installOpenClawExtension(paths openClawPaths, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool) error {
+func installOpenClawExtension(paths openClawPaths, externalDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool) error {
 	extDir := paths.managedPluginDir()
 	parentDir := paths.extensionsDir()
 
-	if err := safeRemoveAll(extDir, parentDir); err != nil {
-		return fmt.Errorf("remove prior extension: %w", err)
-	}
-	if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir, 0o644, 0o755); err != nil {
-		return fmt.Errorf("write plugin files: %w", err)
+	if externalDir != "" {
+		// An administrator installed the plugin (verified by the
+		// preflight); DefenseClaw only registers it. A managed copy this
+		// account left from before the switch goes, so OpenClaw does not
+		// load two plugins with one id; anything else there stays.
+		if err := openClawPathOwnedForWrite(extDir); err == nil {
+			if err := safeRemoveAll(extDir, parentDir); err != nil {
+				return fmt.Errorf("remove the managed copy of the plugin: %w", err)
+			}
+		} else if _, statErr := os.Lstat(extDir); statErr == nil {
+			fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: left %s in place (%v); OpenClaw may load it next to %s\n", extDir, err, externalDir)
+		}
+		extDir = externalDir
+	} else {
+		if err := safeRemoveAll(extDir, parentDir); err != nil {
+			return fmt.Errorf("remove prior extension: %w", err)
+		}
+		if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir, 0o644, 0o755); err != nil {
+			return fmt.Errorf("write plugin files: %w", err)
+		}
 	}
 
 	configPath := paths.config

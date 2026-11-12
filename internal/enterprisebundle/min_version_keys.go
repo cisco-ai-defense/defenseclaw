@@ -25,6 +25,10 @@ func CheckKeyProductFloor(cfg *config.Config, minProductVersion string) error {
 		// enterprise.account_join: 1.0.7 and later.
 		keys, floor = append(keys, later...), config.AccountJoinMinProductVersion
 	}
+	if later := cfg.UsesMinProductVersion110Keys(); len(later) > 0 {
+		// connectors.openclaw: 1.0.10 and later.
+		keys, floor = append(keys, later...), config.OpenClawConnectorMinProductVersion
+	}
 	if len(keys) == 0 {
 		return nil
 	}

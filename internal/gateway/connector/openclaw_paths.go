@@ -30,6 +30,9 @@ import (
 type openClawPaths struct {
 	home   string
 	config string
+	// external is connectors.openclaw.plugin_dir when plugin_install is
+	// external, else "".
+	external string
 }
 
 // openClawPathsIn is the layout of one OpenClaw home with its default
@@ -45,6 +48,14 @@ func (p openClawPaths) managedPluginDir() string {
 	return filepath.Join(p.home, "extensions", "defenseclaw")
 }
 
+// pluginDir is the folder OpenClaw loads the DefenseClaw plugin from.
+func (p openClawPaths) pluginDir() string {
+	if p.external != "" {
+		return p.external
+	}
+	return p.managedPluginDir()
+}
+
 // defaultOpenClawPaths is the layout used when config.yaml names none:
 // ~/.openclaw of the process account.
 func defaultOpenClawPaths() openClawPaths {
@@ -54,9 +65,14 @@ func defaultOpenClawPaths() openClawPaths {
 // resolveOpenClawPaths turns the SetupOpts values into a layout. An empty
 // home is the default home; an empty config file is <home>/openclaw.json.
 // OpenClawHomeOverride (tests) wins over both.
-func resolveOpenClawPaths(home, config string) openClawPaths {
+func resolveOpenClawPaths(home, config, external string) openClawPaths {
+	if external = strings.TrimSpace(external); external != "" {
+		external = filepath.Clean(external)
+	}
 	if OpenClawHomeOverride != "" {
-		return openClawPathsIn(OpenClawHomeOverride)
+		p := openClawPathsIn(OpenClawHomeOverride)
+		p.external = external
+		return p
 	}
 	home, config = strings.TrimSpace(home), strings.TrimSpace(config)
 	p := defaultOpenClawPaths()
@@ -66,6 +82,7 @@ func resolveOpenClawPaths(home, config string) openClawPaths {
 	if config != "" {
 		p.config = filepath.Clean(config)
 	}
+	p.external = external
 	return p
 }
 
@@ -82,10 +99,11 @@ type openClawPathState struct {
 // or config file (callers outside the sidecar) use the remembered layout, so
 // they act on the same files as the last Setup; named paths are remembered.
 func (c *OpenClawConnector) pathsFor(opts SetupOpts) openClawPaths {
-	if strings.TrimSpace(opts.OpenClawHome) == "" && strings.TrimSpace(opts.OpenClawConfigPath) == "" {
+	if strings.TrimSpace(opts.OpenClawHome) == "" && strings.TrimSpace(opts.OpenClawConfigPath) == "" &&
+		strings.TrimSpace(opts.OpenClawPluginDir) == "" {
 		return c.currentPaths()
 	}
-	p := resolveOpenClawPaths(opts.OpenClawHome, opts.OpenClawConfigPath)
+	p := resolveOpenClawPaths(opts.OpenClawHome, opts.OpenClawConfigPath, opts.OpenClawPluginDir)
 	c.state.mu.Lock()
 	c.state.paths, c.state.set = p, true
 	c.state.mu.Unlock()
@@ -94,23 +112,21 @@ func (c *OpenClawConnector) pathsFor(opts SetupOpts) openClawPaths {
 
 // currentPaths is the remembered layout, else the default one.
 func (c *OpenClawConnector) currentPaths() openClawPaths {
-	if OpenClawHomeOverride != "" {
-		return openClawPathsIn(OpenClawHomeOverride)
-	}
 	c.state.mu.RLock()
 	p, set := c.state.paths, c.state.set
 	c.state.mu.RUnlock()
 	if set {
 		return p
 	}
-	return defaultOpenClawPaths()
+	return resolveOpenClawPaths("", "", "")
 }
 
-// SetOpenClawPaths records the OpenClaw home and openclaw.json named by
-// config.yaml (claw.home_dir, claw.config_file). The sidecar calls it on boot
-// and on every config reload, before the first Setup.
-func (c *OpenClawConnector) SetOpenClawPaths(home, config string) {
-	p := resolveOpenClawPaths(home, config)
+// SetOpenClawPaths records the OpenClaw home, openclaw.json and external
+// plugin folder named by config.yaml (claw.home_dir, claw.config_file,
+// connectors.openclaw.plugin_dir). The sidecar calls it before it wires the
+// plugin watcher.
+func (c *OpenClawConnector) SetOpenClawPaths(home, config, external string) {
+	p := resolveOpenClawPaths(home, config, external)
 	c.state.mu.Lock()
 	c.state.paths, c.state.set = p, true
 	c.state.mu.Unlock()

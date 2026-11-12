@@ -3320,6 +3320,12 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, err
 	}
+	if err := cfg.ValidateOpenClawConnector(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "connectors_invalid")
+		}
+		return nil, err
+	}
 	if err := cfg.Guardrail.ProtectedFiles.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")

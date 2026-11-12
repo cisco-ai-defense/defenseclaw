@@ -81,7 +81,7 @@ func TestResolveOpenClawPaths(t *testing.T) {
 		{"/srv/oc", "/etc/oc/main.json", filepath.Clean("/srv/oc"), filepath.Clean("/etc/oc/main.json")},
 	}
 	for _, tc := range cases {
-		p := resolveOpenClawPaths(tc.home, tc.config)
+		p := resolveOpenClawPaths(tc.home, tc.config, "")
 		if p.home != tc.wantHome || p.config != tc.wantConfig {
 			t.Errorf("resolveOpenClawPaths(%q, %q) = %+v, want %q %q", tc.home, tc.config, p, tc.wantHome, tc.wantConfig)
 		}

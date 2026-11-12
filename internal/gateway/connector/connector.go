@@ -88,6 +88,11 @@ type SetupOpts struct {
 	// layout it last saw, else ~/.openclaw of the process account.
 	OpenClawHome       string
 	OpenClawConfigPath string
+	// OpenClawPluginDir is connectors.openclaw.plugin_dir when plugin_install
+	// is external: an administrator-installed plugin the connector verifies
+	// and registers but never writes or deletes. Empty means the managed
+	// plugin under <OpenClawHome>/extensions/defenseclaw.
+	OpenClawPluginDir string
 	// HookAPIToken is the least-privilege credential written beside generated
 	// hook artifacts. Proxy connectors keep APIToken as the master credential
 	// for their in-process/plugin integration while their generic shell hooks
