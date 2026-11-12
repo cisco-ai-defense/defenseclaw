@@ -372,6 +372,27 @@ func (s *Store) List(_ context.Context, in ListRequest) ([]Ask, error) {
 	return out, nil
 }
 
+// CloseActor ends every pending ask of the actor UID (E16: a crashed or
+// deleted actor asks nothing any more) with state expired and reason, and
+// records one decision per ask. It returns how many it closed.
+func (s *Store) CloseActor(uid, reason string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	n := 0
+	for _, a := range s.asks {
+		if a.UID != uid || a.State != StatePending {
+			continue
+		}
+		a.State, a.DecidedAt, a.Note = StateExpired, now, truncate(reason, 512)
+		s.persist(a)
+		s.appendLocked(Decision{At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID, OwnerID: a.OwnerID,
+			Source: "ask", Tool: firstNonEmpty(a.Tool, a.Host), Verdict: StateExpired, Reason: a.Note})
+		n++
+	}
+	return n
+}
+
 // Pending lists the actor UIDs with an ask waiting (the idle check).
 func (s *Store) Pending() []string {
 	s.mu.Lock()

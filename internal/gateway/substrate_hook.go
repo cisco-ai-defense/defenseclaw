@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
 
@@ -42,8 +43,13 @@ import (
 // actor's file system) go into the context as claims (E19, E20). The mode
 // is the kit's view only: the registration decides it.
 
+// substrateEnvelopeVersion is the one envelope version, the kit's own
+// constant (kit.EnvelopeVersion): found live on E1, the kit moved to "1"
+// while the gateway accepted only "dcactor/1" and refused every hook
+// (GAP-0138). The old spelling is gone; no released kit sent it.
+const substrateEnvelopeVersion = kit.EnvelopeVersion
+
 const (
-	substrateEnvelopeVersion = "dcactor/1"
 	// substrateEnvelopeMaxBytes bounds a whole envelope: a payload of at
 	// most apiRequestBodyMaxBytes plus at most substrateAttachedMaxBytes of
 	// attached file content (base64 in JSON) and path facts.
@@ -67,9 +73,19 @@ type substrateEnvelope struct {
 // SubstrateFacts are the kit's observations of the actor's file system.
 // Every field is a claim made by code running as the agent's user.
 type SubstrateFacts struct {
-	Paths     []SubstratePathFact     `json:"paths,omitempty"`
-	Files     []SubstrateAttachedFile `json:"files,omitempty"`
-	Truncated bool                    `json:"truncated,omitempty"`
+	Paths []SubstratePathFact     `json:"paths,omitempty"`
+	Files []SubstrateAttachedFile `json:"files,omitempty"`
+	// Skills fingerprints every skill folder (A5's kit, GAP-0039).
+	Skills    []SubstrateSkillFingerprint `json:"skills,omitempty"`
+	Truncated bool                        `json:"truncated,omitempty"`
+}
+
+// SubstrateSkillFingerprint is one skill folder's lstat fingerprint;
+// Attached says its files are in Files (role skill_file) in this post.
+type SubstrateSkillFingerprint struct {
+	Path     string `json:"path"`
+	FP       string `json:"fp"`
+	Attached bool   `json:"attached,omitempty"`
 }
 
 // SubstratePathFact is one path argument as the actor resolves it.
@@ -175,7 +191,8 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 		}
 		if route.class == sandboxauth.RouteHook {
 			q := st.substrateScanSkills(ctx, env.Facts)
-			answer := withSubstrateAnswer(w, r, next, q)
+			unscanned := st.substrateUnscannedSkills(ctx, env.Facts)
+			answer := withSubstrateAnswer(w, r, next, q, unscanned)
 			if reg, ok := substrateRegistrationFrom(ctx); ok {
 				st.substrateRecordDecision(ctx, reg, env.Event, answer)
 			}
@@ -225,7 +242,13 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 	// administrator, and audits it (E2).
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	out := map[string]any{
 		"person": s.Person, "actor": s.ActorRef, "actor_uid": s.ActorUID, "jti": s.TokenID, "expires": s.Expires,
-	})
+	}
+	// A --task run's relay checks the task it runs is the one the
+	// launcher registered (GAP-0071): the digest, never the text.
+	if reg, ok := substrateRegistrationFrom(r.Context()); ok && reg.TaskDigest != "" {
+		out["task_digest"] = reg.TaskDigest
+	}
+	_ = json.NewEncoder(w).Encode(out)
 }

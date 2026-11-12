@@ -189,6 +189,11 @@ type substrateState struct {
 	// refused, not logged line by line.
 	refusals *rate.Limiter
 
+	// skillsSeen is the scanned skill fingerprint per actor UID and folder
+	// (substrate_skills.go).
+	skillsMu   sync.Mutex
+	skillsSeen map[string]string
+
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler
 	adminHandler         http.Handler

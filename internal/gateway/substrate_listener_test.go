@@ -19,6 +19,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -36,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
@@ -707,5 +709,82 @@ func TestSubstrateBatchesStayPerOwner(t *testing.T) {
 	}
 	if rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/batches/..%2Fx", "p-alice", ""); rec.Code == http.StatusOK {
 		t.Fatalf("bad batch id %d", rec.Code)
+	}
+}
+
+// GAP-0138: the gateway accepts exactly the envelope version the kit
+// writes (kit.EnvelopeVersion); the old spelling and anything else are
+// refused.
+func TestSubstrateEnvelopeVersionFollowsTheKit(t *testing.T) {
+	f := newSubstrateFixture(t)
+	ev := map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": "v1", "cwd": "/work", "prompt": "hi"}
+	p, _ := json.Marshal(ev)
+	for v, want := range map[string]int{kit.EnvelopeVersion: http.StatusOK, "dcactor/1": http.StatusBadRequest, "2": http.StatusBadRequest, "": http.StatusBadRequest} {
+		b, _ := json.Marshal(map[string]any{"v": v, "connector": "claudecode", "mode": "interactive", "kit_version": "0.1.0", "payload": json.RawMessage(p)})
+		if rec := f.do(t, f.actor, http.MethodPost, "/api/v1/substrate/hook/claudecode", "tok-alice", string(b)); rec.Code != want {
+			t.Errorf("envelope v=%q: %d, want %d", v, rec.Code, want)
+		}
+	}
+}
+
+// GAP-0071: the relay check of a --task actor carries the registered task
+// digest (never the text); an interactive actor's carries none.
+func TestSubstrateRelayVerifyCarriesTheTaskDigest(t *testing.T) {
+	f := newSubstrateFixture(t)
+	ctx := context.Background()
+	reg, _, _ := f.regs.Get(ctx, "eng-web", subUID2)
+	reg.TaskDigest = "3f0a9c2e8b7d6f5a4c3b2a1908f7e6d5c4b3a29180f7e6d5c4b3a2918f7e6d5c"
+	if err := f.regs.Put(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	verify := func(actorTok string, uid string, name string) map[string]any {
+		tok, _, err := f.sessions.Issue(bob.ID(), identity.SessionActor{Atespace: "eng-web", Name: name, UID: uid}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := f.do(t, f.actor, http.MethodPost, substrateRelayVerify, actorTok, `{"token":"`+tok+`"}`)
+		var out map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return out
+	}
+	if got := verify("tok-bob", subUID2, "bob-1"); got["task_digest"] != reg.TaskDigest {
+		t.Fatalf("task actor: %v", got)
+	}
+	if got := verify("tok-alice", subUID1, "alice-1"); got["task_digest"] != nil {
+		t.Fatalf("interactive actor carries a digest: %v", got)
+	}
+}
+
+// GAP-0138 contract test: the kit's own hook code (kit.RunHook, the
+// resident helper's transport replaced by a direct call) posts to the real
+// actor listener, and the listener answers the connector's verdict.
+func TestKitEnvelopeAgainstTheRealListener(t *testing.T) {
+	f := newSubstrateFixture(t)
+	var status int
+	send := func(_ context.Context, r kit.Request) (kit.Response, string, error) {
+		req := httptest.NewRequest(http.MethodPost, r.Path, bytes.NewReader(r.Body))
+		for k, v := range r.Header {
+			req.Header.Set(k, v)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(substrateActorHeader, "Bearer tok-alice") // what egress injects
+		rec := httptest.NewRecorder()
+		f.actor.ServeHTTP(rec, req)
+		status = rec.Code
+		return kit.Response{Status: rec.Code, Body: rec.Body.Bytes()}, "", nil
+	}
+	ev, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": "contract", "cwd": "/work",
+		"tool_name": "Bash", "tool_input": map[string]any{"command": "curl -s http://169.254.169.254/latest/meta-data/"}})
+	var out, errOut bytes.Buffer
+	code := kit.RunHook(context.Background(), kit.HookOptions{
+		Connector: "claudecode", Event: "PreToolUse", Config: kit.DefaultConfig(),
+		Stdin: bytes.NewReader(ev), Stdout: &out, Stderr: &errOut,
+		Getenv: func(string) string { return "" }, Send: send, Home: t.TempDir(),
+	})
+	if status != http.StatusOK {
+		t.Fatalf("listener answered %d to the kit's envelope (stderr %q)", status, errOut.String())
+	}
+	if !strings.Contains(out.String()+errOut.String(), "C2-METADATA") && code == 0 {
+		t.Fatalf("the kit did not relay the block: code %d out %q err %q", code, out.String(), errOut.String())
 	}
 }

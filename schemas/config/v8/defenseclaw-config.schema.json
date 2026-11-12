@@ -6715,6 +6715,14 @@
                   "maxLength": 2048
                 }
               }
+            },
+            "bedrock_models": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+              }
             }
           }
         },

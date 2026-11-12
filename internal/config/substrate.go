@@ -232,6 +232,12 @@ func MCPHostName(entry string) string {
 type SubstrateLLMConfig struct {
 	Providers  []string                     `mapstructure:"providers"  yaml:"providers,omitempty"`
 	Credential SubstrateLLMCredentialConfig `mapstructure:"credential" yaml:"credential,omitempty"`
+	// BedrockModels, when set, are the Bedrock model IDs actors may call
+	// through /llm/bedrock. A call naming another model (for example the
+	// opus and sonnet probes Claude Code sends at start, GAP-0008) goes to
+	// the first entry instead, through the same guardrails. Empty serves
+	// the model the call names.
+	BedrockModels []string `mapstructure:"bedrock_models" yaml:"bedrock_models,omitempty"`
 }
 
 // SubstrateLLMCredentialConfig is where the proxy reads provider keys.

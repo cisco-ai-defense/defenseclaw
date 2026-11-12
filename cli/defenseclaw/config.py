@@ -4279,6 +4279,8 @@ class SubstrateLLMCredentialConfig:
 class SubstrateLLMConfig:
     providers: list[str] = field(default_factory=list)
     credential: SubstrateLLMCredentialConfig = field(default_factory=SubstrateLLMCredentialConfig)
+    # Bedrock model IDs actors may call; another model goes to the first (GAP-0008).
+    bedrock_models: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -7622,6 +7624,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             credential=SubstrateLLMCredentialConfig(
                 provider_uri=str(_mapping(llm.get("credential")).get("provider_uri", "") or ""),
             ),
+            bedrock_models=_string_list(llm.get("bedrock_models")),
         ),
         egress=SubstrateEgressConfig(
             allow=_string_list(egress.get("allow")),

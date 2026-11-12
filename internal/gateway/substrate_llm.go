@@ -60,6 +60,10 @@ type SubstrateLLMProvider struct {
 // SubstrateLLMConfig configures /llm.
 type SubstrateLLMConfig struct {
 	Providers map[string]SubstrateLLMProvider
+	// BedrockModels are the Bedrock model IDs actors may call
+	// (substrate.llm.bedrock_models); a call for another model is sent to
+	// the first one. Empty serves the model the call names.
+	BedrockModels []string
 	// Proxy serves the call (GuardrailProxy.SubstrateHandler).
 	Proxy http.Handler
 }
@@ -178,6 +182,15 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		r2.Header.Set("Authorization", "Bearer "+secret)
 	}
+	if provider == "bedrock" {
+		if routed, ok := substrateBedrockRoute(upstream, s.cfg.BedrockModels); ok {
+			// Claude Code probes models the profile does not offer at start
+			// (GAP-0008): the call goes to the allowed model, through the
+			// same guardrails, never to the model it named.
+			r2.Header.Set("X-DefenseClaw-Model-Routed", "1")
+			upstream = routed
+		}
+	}
 	u := *r.URL
 	u.Path, u.RawPath = upstream, ""
 	r2.URL = &u
@@ -208,4 +221,26 @@ func substrateRouterAnswerNarrows(target string, d *ModelRouterDecision) bool {
 		return false
 	}
 	return strings.EqualFold(from.Scheme, to.Scheme) && strings.EqualFold(from.Host, to.Host)
+}
+
+// substrateBedrockRoute rewrites /model/<id>/<action> to the first allowed
+// model when <id> is not allowed. ok is false when nothing changes.
+func substrateBedrockRoute(upstream string, allowed []string) (string, bool) {
+	if len(allowed) == 0 {
+		return "", false
+	}
+	rest, found := strings.CutPrefix(upstream, "/model/")
+	if !found {
+		return "", false
+	}
+	id, action, found := strings.Cut(rest, "/")
+	if !found {
+		return "", false
+	}
+	for _, m := range allowed {
+		if strings.EqualFold(id, m) {
+			return "", false
+		}
+	}
+	return "/model/" + allowed[0] + "/" + action, true
 }
