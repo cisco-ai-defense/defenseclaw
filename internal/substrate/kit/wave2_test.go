@@ -183,7 +183,7 @@ func TestAntigravityStartRestoresHooks(t *testing.T) {
 			t.Errorf("hooks.json must be root-owned 0644: %+v", f)
 		}
 	}
-	if len(ov.RootDirs) != 1 || ov.RootDirs[0] != "/sandbox/.gemini/config" {
+	if len(ov.RootDirs) != 2 || ov.RootDirs[0] != "/sandbox/.gemini" || ov.RootDirs[1] != "/sandbox/.gemini/config" {
 		t.Errorf("RootDirs %v", ov.RootDirs)
 	}
 	if InteractiveArgv["antigravity"][0] != AntigravityStart || HeadlessArgv["antigravity"][0] != AntigravityStart {

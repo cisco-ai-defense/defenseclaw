@@ -232,7 +232,7 @@ func opencodeManagedConfig(data []byte, gw string, o OverlayOptions) ([]byte, er
 // AntigravityStart is the root-owned start wrapper of an Antigravity actor.
 // Antigravity 1.2.12 has no system or managed hooks tier: it reads
 // ~/.gemini/config/hooks.json (GAP-0117). The image therefore makes
-// ~/.gemini/config a root-owned directory (0755) holding a root-owned
+// ~/.gemini and ~/.gemini/config root-owned directories (0755), the latter holding a root-owned
 // hooks.json (0644), plus the user-owned entries agy writes there itself
 // (.migrated, mcp_config.json, projects/), so the agent can neither rewrite
 // nor delete nor replace the file. This wrapper refuses to start agy when
@@ -276,7 +276,10 @@ func wave2Harden(ov *Overlay, name string, o OverlayOptions) {
 		ImageFile{Path: path.Join(dir, ".migrated"), Mode: 0o644, User: true, Data: []byte{}},
 		ImageFile{Path: path.Join(dir, "mcp_config.json"), Mode: 0o644, User: true, Data: []byte{}})
 	ov.UserDirs = append(ov.UserDirs, path.Join(dir, "projects"))
-	ov.RootDirs = append(ov.RootDirs, dir)
+	// The parent is root-owned too: its owner could otherwise rename config
+	// away and make a new one. antigravity-cli stays the agent's (tokens,
+	// settings, cache).
+	ov.RootDirs = append(ov.RootDirs, path.Dir(dir), dir)
 }
 
 // wave2UserFiles are first-run state files the agent would otherwise stop
