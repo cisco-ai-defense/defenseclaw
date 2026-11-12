@@ -17,6 +17,7 @@
 package extproc
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"sync"
@@ -66,15 +67,19 @@ type JSONLogSink struct {
 // NewJSONLogSink writes to w.
 func NewJSONLogSink(w io.Writer) *JSONLogSink { return &JSONLogSink{w: w} }
 
-// EgressEvent implements EventSink.
+// EgressEvent implements EventSink. HTML escaping is off so a redaction
+// placeholder reads as <redacted ...> in the log, the form operators and
+// checks search for.
 func (s *JSONLogSink) EgressEvent(ev Event) {
-	b, err := json.Marshal(ev)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(ev); err != nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, _ = s.w.Write(append(b, '\n'))
+	_, _ = s.w.Write(buf.Bytes())
 }
 
 // Finish records a decided request: its event and, except for DefenseClaw's

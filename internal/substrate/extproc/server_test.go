@@ -450,6 +450,9 @@ func TestRedactionInLogsAndBodies(t *testing.T) {
 				t.Errorf("%s logged as %q", n, v)
 			}
 		}
+		if !strings.Contains(line, `"authorization":"<redacted len=`) && strings.Contains(line, `"authorization"`) {
+			t.Errorf("authorization not logged as a plain redaction placeholder: %s", line)
+		}
 		if strings.Contains(ev.Path, "?") {
 			t.Errorf("path logged with its query: %q", ev.Path)
 		}
