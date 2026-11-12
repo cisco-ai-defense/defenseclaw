@@ -18,7 +18,11 @@ package gateway
 
 import (
 	"net/http"
+	"os/user"
+	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // openClawPluginScope is the connector scope of the OpenClaw plugin
@@ -86,4 +90,70 @@ func (a *APIServer) handleOpenClawRuntime(w http.ResponseWriter, r *http.Request
 		"hilt_enabled":       cfg.EffectiveHILTForConnector(openClawPluginScope).Enabled,
 		"approval_timeout_s": timeout,
 	})
+}
+
+// refuseOpenClawPluginPath answers 403 when the OpenClaw plugin credential
+// asks to scan a path outside the OpenClaw account in the separate-user
+// layout: there the credential belongs to another OS account, and a scan
+// runs as the DefenseClaw account, so it must not read (or report on, or
+// send to the judge) files only DefenseClaw can read. Allowed roots: the
+// OpenClaw home, claw.workspace_dir and the home of plugin_account.
+func (a *APIServer) refuseOpenClawPluginPath(w http.ResponseWriter, r *http.Request, target string) bool {
+	if authenticatedInspectConnector(r.Context()) != openClawPluginScope {
+		return false
+	}
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil || !cfg.OpenClawSeparateUser() {
+		return false
+	}
+	if openClawPathUnderAny(target, openClawPluginRoots(cfg)) {
+		return false
+	}
+	a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "path is outside the OpenClaw account"})
+	return true
+}
+
+func openClawPluginRoots(cfg *config.Config) []string {
+	roots := []string{cfg.OpenClawHome()}
+	if ws := strings.TrimSpace(cfg.Claw.WorkspaceDir); ws != "" {
+		roots = append(roots, ws)
+	}
+	if u, err := user.Lookup(strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)); err == nil && u.HomeDir != "" {
+		roots = append(roots, u.HomeDir)
+	}
+	return roots
+}
+
+// openClawPathUnderAny resolves target (symlinks included) and reports
+// whether it is one of roots or inside one. A path that cannot be resolved
+// is refused.
+func openClawPathUnderAny(target string, roots []string) bool {
+	if strings.TrimSpace(target) == "" || !filepath.IsAbs(target) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return false
+	}
+	for _, root := range roots {
+		rr, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			continue
+		}
+		if resolved == rr || strings.HasPrefix(resolved, rr+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// openClawConnectorRegistered reports whether this gateway serves the
+// openclaw connector, so a credential left from an earlier openclaw setup
+// opens nothing after a switch to another connector.
+func (a *APIServer) openClawConnectorRegistered() bool {
+	if a.connectorRegistry == nil {
+		return false
+	}
+	_, ok := a.connectorRegistry.Get(openClawPluginScope)
+	return ok
 }

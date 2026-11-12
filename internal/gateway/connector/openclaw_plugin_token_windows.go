@@ -22,6 +22,6 @@ import "errors"
 
 // publishOpenClawPluginToken: the separate-user layout is Linux and macOS
 // only in 1.0.10 (config validation refuses plugin_account on Windows).
-func publishOpenClawPluginToken(string, string, string) error {
+func publishOpenClawPluginToken(string, string, string, string) error {
 	return errors.New("the OpenClaw separate-user layout is supported on Linux and macOS only")
 }

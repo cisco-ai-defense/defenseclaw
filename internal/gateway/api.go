@@ -3650,6 +3650,9 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if a.refuseOpenClawPluginPath(w, r, req.Target) {
+		return
+	}
 	if a.rejectWindowsGatewayPath(w, "plugin", req.Target, req.Target) {
 		return
 	}
@@ -4588,7 +4591,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// table in openclaw_plugin_scope.go, on loopback; everything else
 		// falls through to the master gateway token check below.
 		if token != "" && !userScoped && connector.IsLoopback(r) && openClawPluginRoute(r.Method, r.URL.Path) &&
-			a.hookAPITokenMatches(openClawPluginScope, token) {
+			a.openClawConnectorRegistered() && a.hookAPITokenMatches(openClawPluginScope, token) {
 			r = r.WithContext(withAuthenticatedInspectConnector(
 				a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
 				openClawPluginScope,
@@ -5156,6 +5159,9 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	codeScanner := scanner.ScanCode
 	if a.codeScanner != nil {
 		codeScanner = a.codeScanner
+	}
+	if a.refuseOpenClawPluginPath(w, r, req.Path) {
+		return
 	}
 	result, err := codeScanner(r.Context(), req.Path, rulesDir)
 	if err != nil {

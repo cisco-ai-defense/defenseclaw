@@ -738,8 +738,12 @@ export default function (api: DefenseClawPluginHost) {
         { name: "name", description: "Name of the target", required: true },
       ],
       handler: async ({ args }) => {
-        const targetType = (args.type as string | undefined) ?? "<skill|mcp|plugin>";
-        const target = (args.name as string | undefined) ?? "<name>";
+        // Anyone who can message the agent can type these arguments: only a
+        // known type and a plain name are echoed into the command to copy.
+        const rawType = args.type as string | undefined;
+        const rawName = args.name as string | undefined;
+        const targetType = rawType && ["skill", "mcp", "plugin"].includes(rawType) ? rawType : "<skill|mcp|plugin>";
+        const target = rawName && /^[A-Za-z0-9@._/:-]{1,128}$/.test(rawName) ? rawName : "<name>";
         return {
           text: `DefenseClaw changes block and allow lists only from a terminal: run \`defenseclaw ${targetType} ${name} ${target}\`.`,
         };

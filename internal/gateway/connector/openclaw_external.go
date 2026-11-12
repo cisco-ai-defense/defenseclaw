@@ -149,7 +149,7 @@ func openClawPreflight(paths openClawPaths, externalDir string) error {
 		if err := verifyExternalOpenClawPlugin(externalDir, paths); err != nil {
 			return fmt.Errorf("%w: %v", errOpenClawPreflight, err)
 		}
-	} else if err := openClawPathOwnedForWrite(paths.managedPluginDir()); err != nil {
+	} else if err := openClawTreeOwnedForWrite(paths.managedPluginDir()); err != nil {
 		return fmt.Errorf("%w: %s belongs to another account (%v): it looks like an administrator-installed plugin; "+
 			"set connectors.openclaw.plugin_install external and connectors.openclaw.plugin_dir to it, or remove it",
 			errOpenClawPreflight, paths.managedPluginDir(), err)
@@ -195,3 +195,21 @@ func ExportOpenClawPlugin(dir string) error {
 // openClawPathOwnedForWrite is the platform owner check
 // (openclaw_owner_*.go); tests replace it.
 var openClawPathOwnedForWrite = openClawPathOwnedForWriteOS
+
+// openClawTreeOwnedForWrite applies openClawPathOwnedForWrite to dir and
+// every entry beneath it, so a removal never stops half way on a file of
+// another account. A missing dir passes.
+func openClawTreeOwnedForWrite(dir string) error {
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return filepath.WalkDir(dir, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := openClawPathOwnedForWrite(p); err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+		return nil
+	})
+}

@@ -530,33 +530,62 @@ func installOpenClawExtension(paths openClawPaths, externalDir string, enablePlu
 	extDir := paths.managedPluginDir()
 	parentDir := paths.extensionsDir()
 
-	if externalDir != "" {
-		// An administrator installed the plugin (verified by the
-		// preflight); DefenseClaw only registers it. A managed copy this
-		// account left from before the switch goes, so OpenClaw does not
-		// load two plugins with one id; anything else there stays.
-		if err := openClawPathOwnedForWrite(extDir); err == nil {
-			if err := safeRemoveAll(extDir, parentDir); err != nil {
-				return fmt.Errorf("remove the managed copy of the plugin: %w", err)
-			}
-		} else if _, statErr := os.Lstat(extDir); statErr == nil {
-			fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: left %s in place (%v); OpenClaw may load it next to %s\n", extDir, err, externalDir)
-		}
-		extDir = externalDir
-	} else {
+	if externalDir == "" {
 		if err := safeRemoveAll(extDir, parentDir); err != nil {
 			return fmt.Errorf("remove prior extension: %w", err)
 		}
 		if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir, 0o644, 0o755); err != nil {
 			return fmt.Errorf("write plugin files: %w", err)
 		}
+	} else {
+		// An administrator installed the plugin (verified by the preflight);
+		// DefenseClaw only registers it.
+		extDir = externalDir
 	}
-
 	configPath := paths.config
 	if err := patchOpenClawConfig(configPath, extDir, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks); err != nil {
 		return fmt.Errorf("patch openclaw.json: %w", err)
 	}
+	if externalDir != "" {
+		removeManagedCopyAfterSwitch(paths, externalDir)
+	}
 	return nil
+}
+
+// removeManagedCopyAfterSwitch removes, once openclaw.json loads the
+// administrator copy, the DefenseClaw plugin an earlier managed setup left
+// under <home>/extensions/defenseclaw, so OpenClaw does not find two plugins
+// with one id. Only a DefenseClaw plugin (manifest id defenseclaw) that this
+// account owns throughout goes; anything else stays, with a notice.
+func removeManagedCopyAfterSwitch(paths openClawPaths, externalDir string) {
+	extDir := paths.managedPluginDir()
+	if _, err := os.Lstat(extDir); err != nil {
+		return
+	}
+	if !openClawDirIsDefenseClawPlugin(extDir) {
+		fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: left %s in place (not a DefenseClaw plugin); OpenClaw may load it next to %s\n", extDir, externalDir)
+		return
+	}
+	if err := openClawTreeOwnedForWrite(extDir); err != nil {
+		fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: left %s in place (%v); remove it so OpenClaw loads only %s\n", extDir, err, externalDir)
+		return
+	}
+	if err := safeRemoveAll(extDir, paths.extensionsDir()); err != nil {
+		fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: could not remove the managed copy %s: %v\n", extDir, err)
+	}
+}
+
+// openClawDirIsDefenseClawPlugin reports whether dir holds an OpenClaw
+// plugin manifest with id defenseclaw.
+func openClawDirIsDefenseClawPlugin(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "openclaw.plugin.json"))
+	if err != nil {
+		return false
+	}
+	var manifest struct {
+		ID string `json:"id"`
+	}
+	return json.Unmarshal(data, &manifest) == nil && manifest.ID == "defenseclaw"
 }
 
 // safeRemoveAll removes target only if it resolves to a path under parent.
@@ -924,8 +953,8 @@ func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 		}
 		paths.config = ""
 	}
-	// Check extension directory
-	if _, err := os.Stat(paths.managedPluginDir()); err == nil {
+	// Check extension directory (never created in the separate-user layout)
+	if _, err := os.Stat(paths.managedPluginDir()); err == nil && !openClawSeparateUser(opts) {
 		residual = append(residual, "extensions/defenseclaw still exists")
 	}
 
