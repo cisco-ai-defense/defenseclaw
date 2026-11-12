@@ -78,8 +78,9 @@ func (a *actor) client() *Client {
 }
 
 // sandboxFS maps the paths the copy-mode pipeline uses inside a sandbox
-// (/sandbox/work, /sandbox/.dc) to a temporary directory, so the real relay
-// and the real git can run the pipeline's scripts as an actor would.
+// (/sandbox/work and the state directory beside the project) to a
+// temporary directory, so the real relay and the real git can run the
+// pipeline's scripts as an actor would.
 type sandboxFS struct {
 	*Client
 	dir string

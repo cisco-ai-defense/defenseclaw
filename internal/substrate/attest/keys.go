@@ -293,3 +293,18 @@ func (t *TrustAnchors) has(keyID string) bool {
 	}
 	return false
 }
+
+// fingerprint summarizes the anchors for a cache key: key ids, validity
+// windows and revocations.
+func (t *TrustAnchors) fingerprint() string {
+	parts := make([]string, 0, len(t.anchors))
+	for _, a := range t.anchors {
+		s := a.KeyID + "@" + a.NotBefore.UTC().Format(time.RFC3339) + "/" + a.NotAfter.UTC().Format(time.RFC3339)
+		if t.revoked[a.KeyID] {
+			s += "!"
+		}
+		parts = append(parts, s)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ";")
+}

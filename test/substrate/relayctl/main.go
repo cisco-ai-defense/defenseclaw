@@ -25,10 +25,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -166,7 +164,7 @@ func attach(args []string) error {
 		}
 		defer term.Restore(fd, old)
 		sig := make(chan os.Signal, 4)
-		signal.Notify(sig, syscall.SIGWINCH)
+		notifyWindowResize(sig)
 		go func() {
 			for range sig {
 				if w, h, err := term.GetSize(fd); err == nil {

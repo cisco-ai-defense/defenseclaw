@@ -18,15 +18,13 @@
 
 package auth
 
-import "os/exec"
+import "os"
 
+// osStore uses the macOS Security tool by its absolute path only: a
+// "security" found earlier on PATH is never run.
 func osStore() (Store, error) {
-	bin, err := exec.LookPath("security")
-	if err != nil {
-		bin = "/usr/bin/security"
-		if _, serr := exec.LookPath(bin); serr != nil {
-			return nil, noKeychain("the macOS keychain cannot be used: the security tool is missing")
-		}
+	if fi, err := os.Stat(securityTool); err != nil || fi.IsDir() {
+		return nil, noKeychain("the macOS keychain cannot be used: " + securityTool + " is missing")
 	}
-	return newMacStore(execRunner, bin, tokenDir()), nil
+	return newMacStore(execRunner, tokenDir()), nil
 }

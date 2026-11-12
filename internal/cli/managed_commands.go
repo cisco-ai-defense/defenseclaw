@@ -142,9 +142,9 @@ var managedCommands = []managedCommand{
 	{
 		Command: "defenseclaw substrate setup",
 		Windows: managedOffered,
-		Probes:  [][]string{{"substrate", "setup"}, {"substrate", "bundle"}, {"substrate", "template"}},
+		Probes:  [][]string{{"substrate", "setup"}, {"substrate", "bundle"}, {"substrate", "template"}, {"substrate", "verify"}},
 		PerUser: perUserEverywhere, PerUserPath: []string{"substrate", "setup"},
-		Note: "Cluster administrator tools: setup, bundle and template. They read and write the files named on the command line and, for `bundle`, use the administrator's own sign-in, so they need no managed install. The Linux and macOS launcher does not offer them; an administrator runs them with `defenseclaw-gateway` or on their own computer.",
+		Note: "Cluster administrator tools: setup, bundle, template and verify. They read and write the files named on the command line and, for `bundle`, use the administrator's own sign-in, so they need no managed install. The Linux and macOS launcher does not offer them; an administrator runs them with `defenseclaw-gateway` or on their own computer.",
 	},
 	{
 		Command:  "defenseclaw guardrail profile explain",

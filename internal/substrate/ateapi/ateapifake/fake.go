@@ -506,6 +506,46 @@ func (f *Fake) GetActorTemplate(_ context.Context, ref *ateapi.ObjectRef) (*atea
 	return clone(t), nil
 }
 
+// CreateActorTemplate stores a new template the way ate-api-server admits one:
+// the atespace must exist, the name must be unused, there must be at least one
+// container, every container image must be pinned by digest, and the template
+// must set both a cpu and a memory limit. Server metadata is assigned and any
+// status is dropped.
+func (f *Fake) CreateActorTemplate(_ context.Context, t *ateapi.ActorTemplate) (*ateapi.ActorTemplate, error) {
+	ns, name := t.GetMetadata().GetAtespace(), t.GetMetadata().GetName()
+	if err := f.enter("CreateActorTemplate", ns+"/"+name); err != nil {
+		return nil, err
+	}
+	if ns == "" || name == "" {
+		return nil, status.Error(codes.InvalidArgument, "actor_template.metadata: atespace and name are required")
+	}
+	if len(t.GetContainers()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "actor_template.containers: at least one container is required")
+	}
+	for _, c := range t.GetContainers() {
+		if !strings.Contains(c.GetImage(), "@sha256:") {
+			return nil, status.Errorf(codes.InvalidArgument, "actor_template.containers[%s].image: must be pinned by digest", c.GetName())
+		}
+	}
+	if lim := t.GetResources().GetLimits(); lim.GetCpuMillicores() <= 0 || lim.GetMemoryBytes() <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "actor_template.resources: cpu and memory limits are both required")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.atespaces[ns]; !ok {
+		return nil, status.Errorf(codes.NotFound, "atespace %s not found", ns)
+	}
+	k := ns + "/" + name
+	if _, ok := f.templates[k]; ok {
+		return nil, status.Errorf(codes.AlreadyExists, "actor template %s already exists", k)
+	}
+	nt := clone(t)
+	nt.Metadata = f.newMeta(ns, name)
+	nt.Status = nil
+	f.templates[k] = nt
+	return clone(nt), nil
+}
+
 func (f *Fake) ListActorTemplates(_ context.Context, atespace string, opts ateapi.ListOptions) (ateapi.Page[*ateapi.ActorTemplate], error) {
 	if err := f.enter("ListActorTemplates", atespace); err != nil {
 		return ateapi.Page[*ateapi.ActorTemplate]{}, err

@@ -11,14 +11,11 @@
 package attach
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -26,74 +23,80 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-// actorHost is the authority inside the tunnel. The router routes on the
-// ate-target-actor header, not on this name, and .invalid never resolves,
-// so nothing can reach it by accident outside the tunnel.
-const actorHost = "actor.invalid"
+const handshakeTimeout = 45 * time.Second
 
-const (
-	connectTimeout   = 45 * time.Second
-	handshakeTimeout = 45 * time.Second
-)
-
-// Errors a TunnelError unwraps to.
+// Errors a RouteError unwraps to.
 var (
+	ErrNotSignedIn = errors.New("the cluster did not accept your sign-in")
+	ErrNotAllowed  = errors.New("not allowed to attach to this agent")
+	ErrNoActor     = errors.New("no such agent of yours")
 	ErrClusterFull = errors.New("the cluster is full")
-	ErrNotAllowed  = errors.New("the cluster refused this connection (not allowed to reach this actor)")
-	ErrNoActor     = errors.New("no such running actor")
-	ErrCertRefused = errors.New("the router refused the client certificate")
-	// ErrSessionRefused is what a SessionSource wraps when the person may
-	// not reach the actor.
-	ErrSessionRefused = errors.New("not allowed to reach this actor")
+	ErrStarting    = errors.New("the agent is starting")
+	ErrNotOffered  = errors.New("this cluster does not offer attach through the gateway yet")
 )
 
-// TunnelError is a refusal by the router, or by the cluster inside the
-// tunnel. Kind is one of ErrClusterFull, ErrNotAllowed, ErrNoActor,
-// ErrCertRefused or nil (another status).
-type TunnelError struct {
+// RouteError is an answer of the gateway's attach route that is not a
+// success. Kind is one of the errors above, or nil for another status.
+type RouteError struct {
 	Status     int
 	RetryAfter time.Duration
 	Target     Target
 	Kind       error
 }
 
-func (e *TunnelError) Error() string {
+func (e *RouteError) Error() string {
 	switch e.Kind {
+	case ErrNotSignedIn:
+		return "the cluster did not accept your sign-in (it may have expired); run: defenseclaw substrate login"
+	case ErrNotAllowed:
+		return "you are not allowed to attach to " + e.Target.String() + " (it belongs to someone else, or your administrator has not allowed it)"
+	case ErrNoActor:
+		return "no agent " + e.Target.String() + " of yours in this cluster; list yours with: defenseclaw substrate list"
 	case ErrClusterFull:
 		return fmt.Sprintf("the cluster is full (status %d)", e.Status)
-	case ErrNotAllowed:
-		return ErrNotAllowed.Error() + ": " + e.Target.String()
-	case ErrNoActor:
-		return ErrNoActor.Error() + ": " + e.Target.String()
-	case ErrCertRefused:
-		return ErrCertRefused.Error() + " (check the router certificate and key of this context, or sign in again)"
+	case ErrStarting:
+		return fmt.Sprintf("the agent %s is starting (status %d)", e.Target.Name, e.Status)
+	case ErrNotOffered:
+		return ErrNotOffered.Error() + "; ask your administrator to upgrade DefenseClaw"
 	}
-	return fmt.Sprintf("the router answered %d %s", e.Status, http.StatusText(e.Status))
+	return fmt.Sprintf("the gateway answered %d %s", e.Status, http.StatusText(e.Status))
 }
 
 // Unwrap returns Kind.
-func (e *TunnelError) Unwrap() error { return e.Kind }
+func (e *RouteError) Unwrap() error { return e.Kind }
 
-// transient: another server error from the router, worth a retry.
-func (e *TunnelError) transient() bool { return e.Kind == nil && e.Status >= 500 }
+// final: a refusal that a retry cannot change.
+func (e *RouteError) final() bool {
+	return e.Kind == ErrNotSignedIn || e.Kind == ErrNotAllowed || e.Kind == ErrNoActor || e.Kind == ErrNotOffered
+}
 
-func statusError(status int, h http.Header, t Target) *TunnelError {
-	e := &TunnelError{Status: status, Target: t}
+// waits: the cluster is full or the agent is starting; wait up to MaxWait.
+func (e *RouteError) waits() bool { return e.Kind == ErrClusterFull || e.Kind == ErrStarting }
+
+func routeError(status int, h http.Header, t Target) *RouteError {
+	e := &RouteError{Status: status, Target: t}
 	switch status {
-	case http.StatusServiceUnavailable, http.StatusTooManyRequests:
-		e.Kind = ErrClusterFull
-		if h != nil {
-			e.RetryAfter = parseRetryAfter(h.Get("Retry-After"), time.Now())
-		}
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized:
+		e.Kind = ErrNotSignedIn
+	case http.StatusForbidden:
 		e.Kind = ErrNotAllowed
 	case http.StatusNotFound:
 		e.Kind = ErrNoActor
+	case http.StatusNotImplemented:
+		e.Kind = ErrNotOffered
+	case http.StatusServiceUnavailable, http.StatusTooManyRequests:
+		e.Kind = ErrClusterFull
+	case http.StatusBadGateway, http.StatusGatewayTimeout:
+		e.Kind = ErrStarting
+	}
+	if h != nil && e.waits() {
+		e.RetryAfter = parseRetryAfter(h.Get("Retry-After"), time.Now())
 	}
 	return e
 }
@@ -118,16 +121,8 @@ func parseRetryAfter(v string, now time.Time) time.Duration {
 	return d
 }
 
-func retryAfterOf(err error) time.Duration {
-	var te *TunnelError
-	if errors.As(err, &te) {
-		return te.RetryAfter
-	}
-	return 0
-}
-
-// dialError is a failure to reach the router. A fatal one is a setting to
-// fix, not a network blip.
+// dialError is a failure to reach the admin listener. A fatal one is a
+// setting to fix, not a network blip.
 type dialError struct {
 	what  string
 	err   error
@@ -141,6 +136,24 @@ func (e *dialError) Error() string {
 	return e.what + ": " + e.err.Error()
 }
 func (e *dialError) Unwrap() error { return e.err }
+
+// bearerError is a failure of the BearerFunc. It carries the sign-in
+// error (which names no token) so callers can match it with errors.Is.
+type bearerError struct{ err error }
+
+func (e *bearerError) Error() string {
+	if e.transient() {
+		return "could not refresh your sign-in (" + e.err.Error() + ")"
+	}
+	return e.err.Error()
+}
+func (e *bearerError) Unwrap() error { return e.err }
+
+// transient: the issuer could not be reached; a later try may work.
+func (e *bearerError) transient() bool {
+	var ne net.Error
+	return errors.As(e.err, &ne)
+}
 
 // fatalError is never retried.
 type fatalError struct{ err error }
@@ -168,297 +181,209 @@ func isBadHandshake(err error) bool { return errors.Is(err, websocket.ErrBadHand
 
 type proxyFunc func(*http.Request) (*url.URL, error)
 
-// Tunnel reaches one actor's relay through the router: every connection it
-// dials is a new TLS connection to the router (TLS 1.3, mTLS when a client
-// certificate is configured) with a CONNECT to the actor.
-type Tunnel struct {
-	target     Target
-	routerURL  *url.URL
-	routerHost string
-	routerAddr string
-	port       int
-	tlsConf    *tls.Config
-	dialRaw    func(ctx context.Context, network, addr string) (net.Conn, error)
-	proxy      proxyFunc
-	tr         *http.Transport
-	client     *http.Client
-	ws         *websocket.Dialer
+// Gateway is the admin listener of the cluster's DefenseClaw gateway, the
+// only endpoint the launcher talks to.
+type Gateway struct {
+	// BaseURL is the admin origin, https://HOST:PORT (the context's
+	// admin_url).
+	BaseURL string
+	// CAFile, when set, is the only CA trusted for the admin listener's
+	// certificate; without it the system roots are used.
+	CAFile string
+
+	// dial and proxy replace the TCP dial and the proxy lookup (tests).
+	dial  func(ctx context.Context, network, addr string) (net.Conn, error)
+	proxy proxyFunc
 }
 
-// NewTunnel checks the router settings and the client certificate and
-// returns a Tunnel. It dials nothing: the first request does.
-func NewTunnel(ctx context.Context, r Router, g SessionGrant, t Target) (*Tunnel, error) {
-	_ = ctx
+// BearerFunc returns the person's current OIDC access token (or a CI
+// workload token). It is called for every request and every WebSocket
+// handshake, so it must cache and refresh by itself (auth.Source.Token
+// does). Its errors must not contain the token.
+type BearerFunc func(ctx context.Context) (string, error)
+
+// AttachPrefix is the URL under which the gateway serves one actor's relay:
+// every relay route (/dcrelay/1/ws, /poll, /task, /status, /exec, /files)
+// is reachable with its own path appended. This is the one place that
+// knows the route's shape.
+func AttachPrefix(adminURL string, t Target) (string, error) {
+	if err := t.validate(); err != nil {
+		return "", err
+	}
+	u, err := url.Parse(strings.TrimSpace(adminURL))
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("the admin URL of this context must look like https://HOST:PORT")
+	}
+	origin := u.Scheme + "://" + u.Host + strings.TrimRight(u.EscapedPath(), "/")
+	return origin + "/api/v1/substrate/actors/" + url.PathEscape(t.Atespace) + "/" + url.PathEscape(t.Name) + "/attach", nil
+}
+
+// validate refuses names the route cannot carry as one path segment.
+func (t Target) validate() error {
 	if t.Atespace == "" || t.Name == "" {
-		return nil, errors.New("no actor named: an actor is atespace/name")
+		return errors.New("no actor named: an actor is atespace/name")
 	}
-	if strings.ContainsAny(t.String(), "\r\n\t ") {
-		return nil, fmt.Errorf("actor name %q is not valid", t.String())
+	for _, s := range []string{t.Atespace, t.Name} {
+		if s == "." || s == ".." || strings.ContainsAny(s, "/\\") || strings.IndexFunc(s, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
+			return fmt.Errorf("actor name %q is not valid", t.String())
+		}
 	}
-	u, err := url.Parse(strings.TrimSpace(r.URL))
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
-		return nil, errors.New("the router URL of this context must look like https://HOST:PORT")
+	return nil
+}
+
+// Tunnel reaches one actor's relay through the gateway's attach route. It is
+// a plain HTTPS client of the admin listener (HTTPS_PROXY and NO_PROXY are
+// honoured) that adds the person's bearer to every request.
+type Tunnel struct {
+	target   Target
+	base     string
+	host     string
+	hostname string
+	bearer   BearerFunc
+	tr       *http.Transport
+	client   *http.Client
+	ws       *websocket.Dialer
+	// retryAfter is the Retry-After of the last full or starting answer
+	// (nanoseconds), taken by takeRetryAfter.
+	retryAfter atomic.Int64
+}
+
+// NewTunnel checks the gateway settings and returns a Tunnel. It dials
+// nothing: the first request does.
+func NewTunnel(ctx context.Context, g Gateway, bearer BearerFunc, t Target) (*Tunnel, error) {
+	_ = ctx
+	if bearer == nil {
+		return nil, errors.New("no sign-in configured for this cluster; run: defenseclaw substrate login")
 	}
-	port := u.Port()
-	if port == "" {
-		port = "443"
+	base, err := AttachPrefix(g.BaseURL, t)
+	if err != nil {
+		return nil, err
 	}
-	rp := r.RelayPort
-	if rp == 0 {
-		rp = 8080
-	}
-	if rp < 1 || rp > 65535 {
-		return nil, fmt.Errorf("relay port %d is not a TCP port", rp)
-	}
-	conf := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: u.Hostname(), NextProtos: []string{"http/1.1"}}
-	if r.CAFile != "" {
-		pem, err := os.ReadFile(r.CAFile)
+	u, _ := url.Parse(base)
+	conf := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname(), NextProtos: []string{"http/1.1"}}
+	if g.CAFile != "" {
+		pem, err := os.ReadFile(g.CAFile)
 		if err != nil {
-			return nil, fmt.Errorf("router CA file: %w", err)
+			return nil, fmt.Errorf("admin CA file: %w", err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("router CA file %s holds no certificate", r.CAFile)
+			return nil, fmt.Errorf("admin CA file %s holds no certificate", g.CAFile)
 		}
 		conf.RootCAs = pool
 	}
-	switch {
-	case len(g.ClientCertPEM) > 0 || len(g.ClientKeyPEM) > 0:
-		if len(g.ClientCertPEM) == 0 || len(g.ClientKeyPEM) == 0 {
-			return nil, errors.New("the session carries half a client certificate (certificate or key missing)")
-		}
-		c, err := tls.X509KeyPair(g.ClientCertPEM, g.ClientKeyPEM)
-		if err != nil {
-			return nil, errors.New("the session's client certificate is not usable (certificate and key do not parse or do not match)")
-		}
-		conf.Certificates = []tls.Certificate{c}
-	case r.CertFile != "" || r.KeyFile != "":
-		if r.CertFile == "" || r.KeyFile == "" {
-			return nil, errors.New("the router client certificate needs both a certificate file and a key file")
-		}
-		c, err := tls.LoadX509KeyPair(r.CertFile, r.KeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("router client certificate %s and key %s are not usable: %s", r.CertFile, r.KeyFile, safeTLSLoadErr(err))
-		}
-		conf.Certificates = []tls.Certificate{c}
+	dial := g.dial
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	}
-	tu := &Tunnel{target: t, routerURL: u, routerHost: u.Hostname(), routerAddr: net.JoinHostPort(u.Hostname(), port), port: rp, tlsConf: conf}
-	tu.dialRaw = r.dial
-	if tu.dialRaw == nil {
-		tu.dialRaw = (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	proxy := g.proxy
+	if proxy == nil {
+		proxy = http.ProxyFromEnvironment
 	}
-	tu.proxy = r.proxy
-	if tu.proxy == nil {
-		tu.proxy = http.ProxyFromEnvironment
-	}
+	tu := &Tunnel{target: t, base: base, host: u.Host, hostname: u.Hostname(), bearer: bearer}
 	tu.tr = &http.Transport{
-		DialContext:           tu.DialContext,
+		Proxy:                 proxy,
+		DialContext:           dial,
+		TLSClientConfig:       conf.Clone(),
+		TLSHandshakeTimeout:   15 * time.Second,
 		MaxIdleConns:          8,
 		MaxIdleConnsPerHost:   8,
 		IdleConnTimeout:       60 * time.Second,
 		ExpectContinueTimeout: time.Second,
 	}
-	tu.client = &http.Client{Transport: tu.tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	tu.ws = &websocket.Dialer{NetDialContext: tu.DialContext, HandshakeTimeout: handshakeTimeout, ReadBufferSize: 32 << 10, WriteBufferSize: 32 << 10}
+	tu.client = &http.Client{Transport: bearerTransport{tu}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	tu.ws = &websocket.Dialer{Proxy: proxy, NetDialContext: dial, TLSClientConfig: conf.Clone(),
+		HandshakeTimeout: handshakeTimeout, ReadBufferSize: 32 << 10, WriteBufferSize: 32 << 10}
 	return tu, nil
 }
 
-// safeTLSLoadErr keeps the reason of a key pair load error, which names a
-// file problem or a parse failure and never key material.
-func safeTLSLoadErr(err error) string {
-	var pe *os.PathError
-	if errors.As(err, &pe) {
-		return pe.Err.Error()
-	}
-	return err.Error()
-}
+// BaseURL is the actor's attach prefix (see AttachPrefix).
+func (tu *Tunnel) BaseURL() string { return tu.base }
 
-// BaseURL is the relay's origin inside the tunnel.
-func (tu *Tunnel) BaseURL() string { return "http://" + tu.actorAddr() }
-
-// HTTPClient sends requests through the tunnel. It never follows redirects.
+// HTTPClient sends requests to the admin listener with the person's bearer
+// on each (fetched again for every request). It never follows redirects
+// and refuses any other host.
 func (tu *Tunnel) HTTPClient() *http.Client { return tu.client }
 
-// Dialer dials WebSocket through the tunnel.
+// Dialer dials WebSocket to the admin listener. The bearer goes in the
+// handshake headers (relay.AttachOptions.Token).
 func (tu *Tunnel) Dialer() *websocket.Dialer { return tu.ws }
 
-// Close drops idle tunnel connections.
+// Bearer returns the person's current bearer. It suits token callbacks
+// such as the workspace client's.
+func (tu *Tunnel) Bearer(ctx context.Context) (string, error) {
+	tok, err := tu.bearer(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", &bearerError{err}
+	}
+	tok = strings.TrimSpace(tok)
+	if tok == "" || strings.ContainsAny(tok, "\r\n") {
+		return "", &bearerError{errors.New("the saved sign-in holds no usable token; run: defenseclaw substrate login")}
+	}
+	return tok, nil
+}
+
+// Close drops idle connections.
 func (tu *Tunnel) Close() { tu.tr.CloseIdleConnections() }
 
-func (tu *Tunnel) actorAddr() string { return net.JoinHostPort(actorHost, strconv.Itoa(tu.port)) }
+func (tu *Tunnel) takeRetryAfter() time.Duration { return time.Duration(tu.retryAfter.Swap(0)) }
 
-// DialContext opens a new tunnel to the actor. addr must be the actor
-// authority (BaseURL's host).
-func (tu *Tunnel) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	if addr != tu.actorAddr() {
-		return nil, fmt.Errorf("the tunnel reaches only the actor, not %s", addr)
-	}
-	return tu.dial(ctx)
-}
-
-// deadlineFor sets a deadline on c from ctx (or d) and makes ctx
-// cancellation interrupt it. The returned func clears both.
-func deadlineFor(ctx context.Context, c net.Conn, d time.Duration) func() bool {
-	dl := time.Now().Add(d)
-	if cd, ok := ctx.Deadline(); ok && cd.Before(dl) {
-		dl = cd
-	}
-	_ = c.SetDeadline(dl)
-	stop := context.AfterFunc(ctx, func() { _ = c.SetDeadline(time.Unix(1, 0)) })
-	return func() bool {
-		ok := stop()
-		_ = c.SetDeadline(time.Time{})
-		return ok
-	}
-}
-
-func (tu *Tunnel) dial(ctx context.Context) (net.Conn, error) {
-	raw, err := tu.dialRouter(ctx)
-	if err != nil {
-		return nil, err
-	}
-	tc := tls.Client(raw, tu.tlsConf)
-	release := deadlineFor(ctx, tc, connectTimeout)
-	fail := func(err error) (net.Conn, error) {
-		release()
-		tc.Close()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, err
-	}
-	if err := tc.HandshakeContext(ctx); err != nil {
-		return fail(tu.tlsError(err))
-	}
-	authority := tu.actorAddr()
-	req := "CONNECT " + authority + " HTTP/1.1\r\nHost: " + authority + "\r\nate-target-actor: " + tu.target.String() + "\r\n\r\n"
-	if _, err := io.WriteString(tc, req); err != nil {
-		return fail(tu.tlsError(err))
-	}
-	br := bufio.NewReader(tc)
-	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
-	if err != nil {
-		return fail(tu.tlsError(err))
-	}
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
-		return fail(statusError(resp.StatusCode, resp.Header, tu.target))
-	}
-	if !release() && ctx.Err() != nil {
-		tc.Close()
-		return nil, ctx.Err()
-	}
-	if br.Buffered() > 0 {
-		return &bufConn{Conn: tc, r: br}, nil
-	}
-	return tc, nil
-}
-
-// tlsError turns a TLS or CONNECT failure into what the person can act on.
+// netError turns a TLS or network failure into what the person can act on.
 // It never includes certificate or key material.
-func (tu *Tunnel) tlsError(err error) error {
-	if certRefused(err) {
-		return &TunnelError{Target: tu.target, Kind: ErrCertRefused}
+func (tu *Tunnel) netError(err error) error {
+	var be *bearerError
+	if errors.As(err, &be) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
 	var ua x509.UnknownAuthorityError
 	if errors.As(err, &ua) {
-		return &dialError{what: "the router's certificate is not trusted here (set the router CA file of this context)", fatal: true}
+		return &dialError{what: "the admin listener's certificate is not trusted here (set the admin CA file of this context)", fatal: true}
 	}
 	var he x509.HostnameError
 	if errors.As(err, &he) {
-		return &dialError{what: "the router's certificate does not name " + tu.routerHost, fatal: true}
+		return &dialError{what: "the admin listener's certificate does not name " + tu.hostname, fatal: true}
 	}
 	var ie x509.CertificateInvalidError
 	if errors.As(err, &ie) {
-		return &dialError{what: "the router's certificate is not valid", err: err, fatal: true}
+		return &dialError{what: "the admin listener's certificate is not valid", err: err, fatal: true}
 	}
-	return &dialError{what: "could not reach the router at " + tu.routerAddr, err: err}
+	var rh tls.RecordHeaderError
+	if errors.As(err, &rh) {
+		return &dialError{what: "the admin URL of this context does not answer with TLS (check the port)", fatal: true}
+	}
+	return &dialError{what: "could not reach the admin listener at " + tu.host, err: err}
 }
 
-// certRefused reports a TLS alert from the router about the client
-// certificate: missing, untrusted, expired or revoked.
-func certRefused(err error) bool {
-	s := err.Error()
-	if !strings.Contains(s, "remote error: tls:") {
-		return false
-	}
-	for _, a := range []string{"bad certificate", "certificate required", "unknown certificate authority",
-		"certificate revoked", "certificate expired", "unsupported certificate", "certificate unknown", "access denied"} {
-		if strings.Contains(s, a) {
-			return true
-		}
-	}
-	return false
-}
+// bearerTransport adds the bearer to every request to the admin listener.
+type bearerTransport struct{ tu *Tunnel }
 
-// dialRouter opens the TCP connection to the router, through an http://
-// proxy when the environment names one (HTTPS_PROXY, NO_PROXY).
-func (tu *Tunnel) dialRouter(ctx context.Context) (net.Conn, error) {
-	pu, err := tu.proxy(&http.Request{URL: tu.routerURL})
-	if err != nil {
-		return nil, &dialError{what: "the proxy setting (HTTPS_PROXY) is not valid", fatal: true}
-	}
-	if pu == nil {
-		c, err := tu.dialRaw(ctx, "tcp", tu.routerAddr)
-		if err != nil {
-			return nil, &dialError{what: "could not reach the router at " + tu.routerAddr, err: err}
+func (b bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tu := b.tu
+	if req.URL.Scheme != "https" || req.URL.Host != tu.host {
+		if req.Body != nil {
+			req.Body.Close()
 		}
-		return c, nil
+		return nil, fmt.Errorf("this connection reaches only the admin listener %s, not %s", tu.host, req.URL.Host)
 	}
-	if pu.Scheme != "http" {
-		return nil, &dialError{what: "only an http:// proxy is supported for the router connection (HTTPS_PROXY)", fatal: true}
-	}
-	paddr := pu.Host
-	if pu.Port() == "" {
-		paddr = net.JoinHostPort(pu.Hostname(), "80")
-	}
-	c, err := tu.dialRaw(ctx, "tcp", paddr)
+	tok, err := tu.Bearer(req.Context())
 	if err != nil {
-		return nil, &dialError{what: "could not reach the proxy " + pu.Hostname(), err: err}
-	}
-	release := deadlineFor(ctx, c, connectTimeout)
-	req := "CONNECT " + tu.routerAddr + " HTTP/1.1\r\nHost: " + tu.routerAddr + "\r\n"
-	if pu.User != nil {
-		pw, _ := pu.User.Password()
-		req += "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(pu.User.Username()+":"+pw)) + "\r\n"
-	}
-	req += "\r\n"
-	fail := func(e *dialError) (net.Conn, error) {
-		release()
-		c.Close()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if req.Body != nil {
+			req.Body.Close()
 		}
-		return nil, e
+		return nil, err
 	}
-	if _, err := io.WriteString(c, req); err != nil {
-		return fail(&dialError{what: "could not reach the router through the proxy", err: err})
-	}
-	br := bufio.NewReader(c)
-	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	r := req.Clone(req.Context())
+	r.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := tu.tr.RoundTrip(r)
 	if err != nil {
-		return fail(&dialError{what: "could not reach the router through the proxy", err: err})
+		return nil, tu.netError(err)
 	}
-	resp.Body.Close()
 	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusProxyAuthRequired:
-		return fail(&dialError{what: "the proxy needs credentials (HTTPS_PROXY)", fatal: true})
-	default:
-		return fail(&dialError{what: fmt.Sprintf("the proxy refused the connection to the router (status %d)", resp.StatusCode)})
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout:
+		tu.retryAfter.Store(int64(parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())))
 	}
-	release()
-	if br.Buffered() > 0 {
-		return &bufConn{Conn: c, r: br}, nil
-	}
-	return c, nil
+	return resp, nil
 }
-
-// bufConn is a connection whose first bytes were read into r.
-type bufConn struct {
-	net.Conn
-	r *bufio.Reader
-}
-
-func (c *bufConn) Read(p []byte) (int, error) { return c.r.Read(p) }

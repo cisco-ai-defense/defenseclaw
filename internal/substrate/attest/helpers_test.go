@@ -151,6 +151,8 @@ type tarFile struct {
 	uid, gid int
 	data     string
 	dir      bool
+	// link makes a hard link to that path, symlink a symbolic link.
+	link, symlink string
 }
 
 func gzipTar(t *testing.T, files []tarFile) (gz []byte, diffID string) {
@@ -159,15 +161,20 @@ func gzipTar(t *testing.T, files []tarFile) (gz []byte, diffID string) {
 	tw := tar.NewWriter(&raw)
 	for _, f := range files {
 		h := &tar.Header{Name: strings.TrimPrefix(f.path, "/"), Mode: f.mode, Uid: f.uid, Gid: f.gid, ModTime: time.Unix(0, 0)}
-		if f.dir {
+		switch {
+		case f.dir:
 			h.Typeflag, h.Name = tar.TypeDir, h.Name+"/"
-		} else {
+		case f.link != "":
+			h.Typeflag, h.Linkname = tar.TypeLink, strings.TrimPrefix(f.link, "/")
+		case f.symlink != "":
+			h.Typeflag, h.Linkname = tar.TypeSymlink, f.symlink
+		default:
 			h.Typeflag, h.Size = tar.TypeReg, int64(len(f.data))
 		}
 		if err := tw.WriteHeader(h); err != nil {
 			t.Fatal(err)
 		}
-		if !f.dir {
+		if h.Typeflag == tar.TypeReg {
 			if _, err := tw.Write([]byte(f.data)); err != nil {
 				t.Fatal(err)
 			}

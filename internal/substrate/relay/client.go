@@ -114,7 +114,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 		return conn.WriteMessage(websocket.BinaryMessage, frame)
 	}
 	var res AttachResult
-	var resMu sync.Mutex
+	var resMu sync.Mutex // the reader goroutine writes res while the paths below read it
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -208,7 +208,7 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	}
 	path := "/dcrelay/1/poll/" + open.ID
 	var res AttachResult
-	var resMu sync.Mutex
+	var resMu sync.Mutex // the follower goroutine writes res while the paths below read it
 	var outMu sync.Mutex
 	send := func(frame []byte) error {
 		r, err := do(ctx, http.MethodPost, path, AppendStream(nil, frame))

@@ -55,7 +55,8 @@ var subAdminTemplateFlags = map[string][]string{
 	"scan": {"json", "insecure-registry", "registry-user", "registry-password-file", "config", "platform",
 		"no-mcp-static", "mcp-analyzers", "block-at", "connector", "mcp-host"},
 	"publish": {"json", "insecure-registry", "registry-user", "registry-password-file", "config", "platform",
-		"anchors", "min-policy-generation"},
+		"anchors", "min-policy-generation", "dry-run", "template", "class", "cpu", "memory", "workdir", "env", "worker-label",
+		"api-address", "api-server-name", "api-ca-file", "api-token-file", "api-auth"},
 	"keygen": {"out", "json"},
 }
 
@@ -92,6 +93,7 @@ func TestSubstrate_Admin_TemplatePassesTheLineThrough(t *testing.T) {
 		{"verify", []string{"registry.example.test/actor@sha256:aa", "--anchors", "a.pub", "--max-age", "720h", "--json"}},
 		{"scan", []string{"registry.example.test/actor@sha256:aa", "--connector", "codex", "--block-at", "none"}},
 		{"publish", []string{"src@sha256:aa", "dst:1", "--anchors", "a.pub"}},
+		{"publish", []string{"src@sha256:aa", "dst:1", "--anchors", "a.pub", "--template", "team/kit", "--env", "A=1", "--env", "B=2", "--dry-run"}},
 		{"keygen", []string{"--out", "keys"}},
 		{"verify", nil},
 		{"build", []string{"-x", "--", "-h"}},
@@ -115,7 +117,7 @@ func TestSubstrate_Admin_TemplatePassesTheLineThrough(t *testing.T) {
 }
 
 func TestSubstrate_Admin_TemplateExitCodes(t *testing.T) {
-	for _, code := range []int{1, 2, 7} {
+	for _, code := range []int{1, 2, 7, 75} {
 		calls := subAdminTemplateStub(t, code, "NOT ADMITTED: x\n")
 		root := newSubstrateTemplateCmd()
 		out, errText, err := runSubAdmin(root, "verify", "img", "--anchors", "a.pub")
@@ -177,7 +179,7 @@ func TestSubstrate_Admin_TemplateHelpTextsStayWithTheirDefaults(t *testing.T) {
 		"build":   {"(default claudecode)", "(default dev)", "(default high)", "(default 1)", "(default yara)", "(default linux/amd64)"},
 		"verify":  {"(default 0)", "(default linux/amd64)"},
 		"scan":    {"(default yara)", "(default high)"},
-		"publish": {"(default 0)"},
+		"publish": {"(default 0)", "(default gvisor)", "(default 1500m)", "(default 1536Mi)", "75"},
 	}
 	g := newSubstrateTemplateCmd()
 	for name, parts := range want {

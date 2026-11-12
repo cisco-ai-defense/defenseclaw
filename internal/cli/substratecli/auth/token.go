@@ -135,10 +135,12 @@ func (r tokenResponse) toToken(now time.Time, prev *Token) *Token {
 	return t
 }
 
-// claims is the unverified JWT payload we display.
+// claims is the unverified JWT payload we display or check before
+// sending a workload token.
 type claims struct {
 	Iss               string          `json:"iss"`
 	Sub               string          `json:"sub"`
+	Aud               json.RawMessage `json:"aud"`
 	PreferredUsername string          `json:"preferred_username"`
 	Email             string          `json:"email"`
 	Exp               any             `json:"exp"`
@@ -148,22 +150,29 @@ type claims struct {
 // decodeClaims reads a JWT payload without verifying it. Failures give
 // zero claims.
 func decodeClaims(jwt string) claims {
+	c, _ := parseClaims(jwt)
+	return c
+}
+
+// parseClaims reads a JWT payload without verifying it; ok is false when
+// there is no payload or it is not base64url-encoded JSON.
+func parseClaims(jwt string) (claims, bool) {
 	var c claims
 	parts := strings.Split(jwt, ".")
 	if len(parts) < 2 {
-		return c
+		return c, false
 	}
 	p := strings.TrimRight(parts[1], "=")
 	raw, err := base64.RawURLEncoding.DecodeString(p)
 	if err != nil {
 		if raw, err = base64.RawStdEncoding.DecodeString(p); err != nil {
-			return c
+			return c, false
 		}
 	}
 	if json.Unmarshal(raw, &c) != nil {
-		return claims{}
+		return claims{}, false
 	}
-	return c
+	return c, true
 }
 
 func (c claims) expiry() time.Time {
@@ -186,19 +195,34 @@ func (c claims) expiry() time.Time {
 	return time.Unix(int64(sec), 0)
 }
 
-func (c claims) groups() []string {
-	if len(c.Groups) == 0 {
+// stringOrList reads a claim that is a string or a list of strings.
+func stringOrList(raw json.RawMessage) []string {
+	if len(raw) == 0 {
 		return nil
 	}
 	var list []string
-	if json.Unmarshal(c.Groups, &list) == nil {
+	if json.Unmarshal(raw, &list) == nil {
 		return list
 	}
 	var one string
-	if json.Unmarshal(c.Groups, &one) == nil && one != "" {
+	if json.Unmarshal(raw, &one) == nil && one != "" {
 		return []string{one}
 	}
 	return nil
+}
+
+func (c claims) groups() []string { return stringOrList(c.Groups) }
+
+// audiences is the aud claim (RFC 7519: a string or a list of strings),
+// without empty entries.
+func (c claims) audiences() []string {
+	var out []string
+	for _, a := range stringOrList(c.Aud) {
+		if a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func (c claims) principal() string {
