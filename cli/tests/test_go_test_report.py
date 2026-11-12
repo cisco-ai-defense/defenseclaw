@@ -113,7 +113,11 @@ def test_build_errors_in_json_are_printed(tmp_path: Path) -> None:
     out, timings = _run(
         [
             {"ImportPath": importpath, "Action": "build-output", "Output": "# github.com/example/pkg\n"},
-            {"ImportPath": importpath, "Action": "build-output", "Output": "./x_test.go:7:2: undefined: missingHelper\n"},
+            {
+                "ImportPath": importpath,
+                "Action": "build-output",
+                "Output": "./x_test.go:7:2: undefined: missingHelper\n",
+            },
             {"ImportPath": importpath, "Action": "build-fail"},
             _out(None, "FAIL\tp [build failed]\n"),
             {"Action": "fail", "Package": "p", "Elapsed": 0, "FailedBuild": importpath},
@@ -154,4 +158,41 @@ def test_a_test_of_parallel_subtests_weighs_its_wall_time(tmp_path: Path) -> Non
         {"Action": "pass", "Package": "p", "Test": "TestParent", "Elapsed": 21.5},
         {"Action": "pass", "Package": "p", "Test": "TestParallel", "Elapsed": 2.0},
         {"Action": "pass", "Package": "p", "Test": "TestNoTime", "Elapsed": 3.0},
+    ]
+
+
+def test_parallel_tests_that_run_side_by_side_split_the_time_they_share(tmp_path: Path) -> None:
+    # Run 43229287498: the t.Parallel tests of internal/actionfacts summed
+    # 653 s of wall spans in a package run of 165 s, so a split of such a
+    # package would have weighed it four times over. Two tests that run
+    # together split the seconds they share; the shares of the package add
+    # up to the time its tests ran (a serial test 10 s, then two parallel
+    # tests side by side for 20 s, one of them 10 s longer alone).
+    def at(seconds: float) -> str:
+        return f"2026-11-12T13:00:{seconds:09.6f}000Z"
+
+    _, timings = _run(
+        [
+            {"Action": "run", "Package": "p", "Test": "TestA", "Time": at(0)},
+            {"Action": "pause", "Package": "p", "Test": "TestA", "Time": at(0)},
+            {"Action": "run", "Package": "p", "Test": "TestB", "Time": at(0)},
+            {"Action": "pause", "Package": "p", "Test": "TestB", "Time": at(0)},
+            {"Action": "run", "Package": "p", "Test": "TestSerial", "Time": at(0)},
+            {"Action": "pass", "Package": "p", "Test": "TestSerial", "Elapsed": 10.0, "Time": at(10)},
+            {"Action": "cont", "Package": "p", "Test": "TestA", "Time": at(10)},
+            {"Action": "cont", "Package": "p", "Test": "TestB", "Time": at(10)},
+            {"Action": "run", "Package": "p", "Test": "TestA/case", "Time": at(11)},
+            {"Action": "pass", "Package": "p", "Test": "TestA/case", "Elapsed": 18.0, "Time": at(29)},
+            {"Action": "pass", "Package": "p", "Test": "TestA", "Elapsed": 20.0, "Time": at(30)},
+            {"Action": "pass", "Package": "p", "Test": "TestB", "Elapsed": 30.0, "Time": at(40)},
+            {"Action": "pass", "Package": "p", "Elapsed": 40.1, "Time": at(40.1)},
+        ],
+        tmp_path,
+    )
+
+    assert timings == [
+        {"Action": "pass", "Package": "p", "Test": "TestSerial", "Elapsed": 10.0},
+        {"Action": "pass", "Package": "p", "Test": "TestA", "Elapsed": 10.0},
+        {"Action": "pass", "Package": "p", "Test": "TestB", "Elapsed": 20.0},
+        {"Action": "pass", "Package": "p", "Elapsed": 40.1},
     ]

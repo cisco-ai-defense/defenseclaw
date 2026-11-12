@@ -10,6 +10,8 @@ from scripts.update_test_timings import (
     keep_unreached_go_tests,
     keep_unreached_windows_packages,
     merge_go_timings,
+    python_timings,
+    runs_of,
     windows_go_timings,
 )
 
@@ -221,3 +223,87 @@ def test_a_windows_refresh_keeps_the_time_of_a_package_its_timed_out_part_never_
     # the step timeout never reached keeps its old one, and a package that
     # no longer exists is dropped.
     assert data["packages"] == {f"{MODULE}/internal/reached": 18.0, f"{MODULE}/internal/unreached": 300.0}
+
+
+def _timed(seconds: float, action: str, package: str, test: str | None = None, elapsed: float = 0.0) -> str:
+    event = json.loads(_event(action, package, elapsed, test))
+    event["Time"] = f"2026-11-12T14:{int(seconds // 60):02d}:{seconds % 60:09.6f}1Z"
+    return "2026-11-12T14:00:00.0000000Z " + json.dumps(event)
+
+
+def test_a_windows_log_leaves_the_t_parallel_wait_out_of_a_test(tmp_path: Path) -> None:
+    # A Windows part log has the go test -json events with their Time. A
+    # t.Parallel test pauses until the serial tests of its package are done;
+    # the refresh timed it from its run event and so weighed that wait too
+    # (TestLater 60 s here, of which it ran 5). Its time is its share of the
+    # package run after its cont event.
+    log = tmp_path / "pk0.log"
+    log.write_text(
+        "\n".join(
+            [
+                _timed(0, "run", "internal/gateway", "TestLater"),
+                _timed(0, "pause", "internal/gateway", "TestLater"),
+                _timed(0, "run", "internal/gateway", "TestSerial"),
+                _timed(55, "pass", "internal/gateway", "TestSerial", 55.0),
+                _timed(55, "cont", "internal/gateway", "TestLater"),
+                _timed(60, "pass", "internal/gateway", "TestLater", 5.0),
+                _timed(60, "pass", "internal/gateway", None, 60.0),
+                "[go-package-time] github.com/example/internal/gateway pass 60.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    tests = windows_go_timings([log], MODULE)["tests"]["internal/gateway"]
+    assert tests["TestSerial"] == 55.0 and tests["TestLater"] == 5.0
+
+
+def test_a_refresh_from_several_runs_weighs_the_slowest_run(tmp_path: Path) -> None:
+    # A plan from fast runners must fit a slow one: each run directory is one
+    # run, and a package or test weighs the slowest run that timed it. The
+    # shards of one run still add up (pkg/a ran in two shards).
+    seconds = {"r1": (30.0, 70.0), "r2": (90.0, 130.0), "r3": (40.0, 80.0)}
+    for run, (slow, package) in seconds.items():
+        (tmp_path / run).mkdir()
+        (tmp_path / run / "shard-0.json").write_text(
+            _event("pass", "pkg/a", slow, "TestSlow") + "\n" + _event("pass", "pkg/a", package / 2) + "\n",
+            encoding="utf-8",
+        )
+        (tmp_path / run / "shard-1.json").write_text(_event("pass", "pkg/a", package / 2) + "\n", encoding="utf-8")
+    (tmp_path / "r2" / "extra.json").write_text(_event("pass", "pkg/b", 5.0) + "\n", encoding="utf-8")
+
+    runs = runs_of([tmp_path / "r1", tmp_path / "r2", tmp_path / "r3"])
+    data = go_timings([file for run in runs for file in run], MODULE, runs)
+
+    assert [len(run) for run in runs] == [2, 3, 2]
+    median = go_timings([file for run in runs for file in run], MODULE, runs, "median")
+    assert median["packages"] == {f"{MODULE}/pkg/a": 80.0, f"{MODULE}/pkg/b": 5.0}
+    assert median["tests"] == {"pkg/a": {"TestSlow": 40.0, "*": 0.1}}
+    assert data["packages"] == {f"{MODULE}/pkg/a": 130.0, f"{MODULE}/pkg/b": 5.0}
+    assert data["tests"] == {"pkg/a": {"TestSlow": 90.0, "*": 0.1}}
+
+
+def test_files_named_directly_are_one_run(tmp_path: Path) -> None:
+    # The documented single-run form (t/*/*.json) keeps summing the shards.
+    files = []
+    for shard in range(3):
+        path = tmp_path / f"s{shard}.json"
+        path.write_text(_event("pass", "pkg/a", 30.0) + "\n", encoding="utf-8")
+        files.append(path)
+
+    runs = runs_of(files)
+    assert runs == [files]
+    assert go_timings(files, MODULE, runs)["packages"] == {f"{MODULE}/pkg/a": 90.0}
+
+
+def test_python_timings_weigh_the_slowest_run(tmp_path: Path) -> None:
+    runs = []
+    for run, seconds in (("r1", 1.0), ("r2", 9.0), ("r3", 2.0)):
+        (tmp_path / run).mkdir()
+        (tmp_path / run / "py.xml").write_text(
+            f'<testsuite><testcase classname="cli.tests.test_go_test_report" name="t" time="{seconds}"/></testsuite>',
+            encoding="utf-8",
+        )
+        runs.append([tmp_path / run / "py.xml"])
+
+    assert python_timings([], runs) == {"files": {"cli/tests/test_go_test_report.py": 9.0}}

@@ -18,15 +18,21 @@ a "still running" line, so a hung shard names its test.
 --timings writes the pass and fail events of every package and top-level
 test, without output, in `go test -json` form: scripts/update_test_timings.py
 go reads these files to refresh scripts/test-timings/go-linux.json. A
-top-level test's Elapsed there is its wall time (from its run event, or its
-cont event once t.Parallel resumed it, to its pass or fail event) when that
-is longer: go test leaves the parallel subtests out of their parent's
-Elapsed, so a test of parallel subtests weighed almost nothing to the shard
-planner while it held its shard for minutes. A top-level test still running
-when the stream ends (the package -timeout killed it) is written as a fail
-with the wall time it had run until the last event: a refresh then weighs
+top-level test's Elapsed there is its share of its package's wall time
+(TopLevelShares): every second of the run is split evenly between the
+top-level tests running in it, from a run or cont event to the next pause,
+pass, fail or skip. A test of parallel subtests therefore weighs the wall
+time its subtests hold (go test leaves them out of their parent's Elapsed,
+so such a test weighed almost nothing to the shard planner while it held
+its shard for minutes), and t.Parallel top-level tests that run side by
+side weigh their part of that time, not each the whole of it (their wall
+spans overlap: internal/actionfacts summed 653 s of test time in a package
+run of 165 s, run 43229287498). The shares of a package add up to the time
+its tests ran, which is what a shard of them takes. A top-level test still
+running when the stream ends (the package -timeout killed it) is written as
+a fail with the share it had until the last event: a refresh then weighs
 the slowest test of a timed-out shard by at least that time, not as an
-unlisted test.
+unlisted test. An event without a Time keeps go test's Elapsed.
 
 --annotate TITLE prints a GitHub error annotation per failed top-level test
 (at most 20). The exit status is always 0; the caller keeps go test's.
@@ -54,6 +60,60 @@ def _time(event: dict) -> datetime | None:
         return None
 
 
+class TopLevelShares:
+    """Each top-level test's share of its package's wall time.
+
+    Feed every event in stream order (event()); seconds() is the share of a
+    test that ran with timed events, or None. Between two events of a
+    package, the time is split evenly between its top-level tests that are
+    running (a run or cont event, not yet followed by a pause, pass, fail
+    or skip); subtest events only move the clock. A package's end (its own
+    pass or fail) clears its clock, so the next shard or part of the same
+    package in one log starts afresh.
+    """
+
+    def __init__(self) -> None:
+        self._running: dict[str, set[str]] = {}
+        self._clock: dict[str, datetime] = {}
+        self._share: dict[tuple[str, str], float] = {}
+
+    def _advance(self, package: str, at: datetime) -> None:
+        clock = self._clock.get(package)
+        running = self._running.get(package)
+        if clock is not None and running and at > clock:
+            part = (at - clock).total_seconds() / len(running)
+            for test in running:
+                self._share[(package, test)] += part
+        if clock is None or at > clock or not running:
+            self._clock[package] = at
+
+    def event(self, package: str, test: str | None, action: str | None, at: datetime | None) -> None:
+        if at is None:
+            return
+        self._advance(package, at)
+        if test is None:
+            if action in ("pass", "fail"):
+                self._clock.pop(package, None)
+                self._running.pop(package, None)
+            return
+        if "/" in test:
+            return
+        if action in ("run", "cont"):
+            self._running.setdefault(package, set()).add(test)
+            self._share.setdefault((package, test), 0.0)
+        elif action in ("pause", "pass", "fail", "skip"):
+            self._running.get(package, set()).discard(test)
+
+    def finish(self, at: datetime) -> None:
+        """Charge the tests still running up to at (the last event)."""
+        for package in list(self._running):
+            self._advance(package, at)
+
+    def seconds(self, package: str, test: str) -> float | None:
+        share = self._share.get((package, test))
+        return None if share is None else round(share, 3)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--timings", help="write the pass/fail events (no output) to this file")
@@ -63,7 +123,8 @@ def main() -> int:
     out = sys.stdout
     timings = open(args.timings, "w", encoding="utf-8") if args.timings else None
     buffered: dict[tuple[str, str], list[str]] = {}
-    started: dict[tuple[str, str], datetime] = {}
+    started: set[tuple[str, str]] = set()
+    shares = TopLevelShares()
     last: datetime | None = None
     failed: list[str] = []
     package_failed = False
@@ -95,6 +156,7 @@ def main() -> int:
             at = _time(event)
             if at is not None:
                 last = at
+            shares.event(package, test, action, at)
             if test is None:
                 if action == "output":
                     out.write(event.get("Output", ""))
@@ -103,14 +165,16 @@ def main() -> int:
                     package_failed = package_failed or action == "fail"
                     if timings is None:
                         continue
-                    timings.write(json.dumps({"Action": action, "Package": package, "Elapsed": event.get("Elapsed", 0)}) + "\n")
+                    timings.write(
+                        json.dumps({"Action": action, "Package": package, "Elapsed": event.get("Elapsed", 0)}) + "\n"
+                    )
                 continue
             key = (package, test)
             if action in ("run", "cont") and "/" not in test and at is not None:
-                started[key] = at
+                started.add(key)
             elif action in ("pause", "skip"):
                 # A parallel test waits for its turn: that wait is not its time.
-                started.pop(key, None)
+                started.discard(key)
             if action == "output":
                 buffered.setdefault(key, []).append(event.get("Output", ""))
             elif action in ("pass", "skip"):
@@ -122,14 +186,16 @@ def main() -> int:
                     failed.append(test)
             if action in ("pass", "fail") and "/" not in test and timings is not None:
                 elapsed = event.get("Elapsed", 0)
-                start, end = started.pop(key, None), _time(event)
-                if start is not None and end is not None:
-                    elapsed = max(elapsed, round((end - start).total_seconds(), 3))
+                share = shares.seconds(package, test)
+                if key in started and at is not None and share is not None:
+                    elapsed = share
+                started.discard(key)
                 record = {"Action": action, "Package": package, "Test": test, "Elapsed": elapsed}
                 timings.write(json.dumps(record) + "\n")
         if timings is not None and last is not None:
-            for (package, test), start in started.items():
-                elapsed = round((last - start).total_seconds(), 3)
+            shares.finish(last)
+            for package, test in sorted(started):
+                elapsed = shares.seconds(package, test) or 0.0
                 record = {"Action": "fail", "Package": package, "Test": test, "Elapsed": elapsed}
                 timings.write(json.dumps(record) + "\n")
     finally:

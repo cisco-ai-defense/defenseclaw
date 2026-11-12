@@ -305,9 +305,11 @@ def test_linux_remaining_package_times_count_the_tests_of_the_shard_that_met_the
         ("internal/cli", "TestEnterpriseHookWorkerTimedOutInsideInstallKeepsTheRestore"): 11.2,
         ("internal/gateway/connector/hookexec", "TestSlowOwnerReadOfTheOwnFrozenGatewayStaysAnOutage"): 14.7,
     }
+    # A later refresh measures them again (within a tenth of what that run
+    # took); what must not happen is the fast-test mean.
     for (package, name), seconds in observed_seconds.items():
         recorded = timings[package]
-        assert float(recorded.get(name, recorded["*"])) >= seconds, (package, name)
+        assert float(recorded.get(name, recorded["*"])) >= 0.9 * seconds, (package, name)
 
 
 def test_connector_matrix_parts_balance_on_the_times_of_the_matrix_run() -> None:
