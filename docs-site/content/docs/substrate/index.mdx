@@ -1,0 +1,74 @@
+---
+title: Agents in the cloud with Agent Substrate
+description: How DefenseClaw protects coding agents that run as Agent Substrate actors on Kubernetes, interactive or unattended, and how that differs from OpenShell sandboxes on your own machine.
+keywords:
+  - Agent Substrate
+  - ate.dev
+  - cloud agent sandbox
+  - DefenseClaw substrate
+  - unattended coding agents
+---
+
+{/* TODO(substrate): Substrate support ships in DefenseClaw 1.0.10. Re-check every command, flag and output on this section against the merged code before the PR is marked ready (list in lanes/a7/PROGRESS.md). */}
+
+[Agent Substrate](https://ate.dev) is an open-source runtime, a CNCF sandbox project, for running agents on Kubernetes. Each agent is an **actor**: a container in its own gVisor sandbox or microVM. When an actor is idle, Substrate saves its memory and files and frees the machine. It brings the actor back in under a second on any machine in the cluster.
+
+DefenseClaw protects an agent in an actor the way it protects one in an [OpenShell sandbox](/docs/sandboxes): every tool call, every model request and every site the agent reaches is checked. The difference is **where the agent runs**.
+
+DefenseClaw 1.0.10 supports Agent Substrate `1.0.x` (tested range `>=1.0.0 <1.1.0`) on Kubernetes 1.34 or later.
+
+## OpenShell or Agent Substrate
+
+|  | OpenShell sandbox | Agent Substrate actor |
+|---|---|---|
+| **Where the agent runs** | On your laptop or server | In a Kubernetes cluster (your own, or your company's) |
+| **Your machine** | Linux, or a Mac with Apple silicon | Any: Windows, macOS or Linux. Only the launcher runs locally |
+| **Your project** | Mounted live (Linux) or copied (Mac) | Copied up or cloned from git. Changes come back with `pull` or a push |
+| **Close the laptop** | The sandbox stops with the machine | The agent keeps working, then suspends when idle. Resume from any machine |
+| **How many agents** | What one machine can run | What the cluster can run |
+| **Model traffic** | Goes to the provider directly. The sandbox holds a placeholder key | Always goes through the DefenseClaw guardrail proxy. The key stays in the cluster |
+| **Network** | DefenseClaw egress proxy, with asks | Denied by default. DefenseClaw writes each agent's allow list and checks each request, with asks |
+| **Unattended runs** | Not designed for it | `--task` and `--batch`, from a terminal or CI |
+| **Your local tools** | Host ports and your MCP servers come along | Only what's in the image or reachable over the network |
+| **Who sets it up** | You, once per machine | You for your own cluster (open source), or a platform team (enterprise) |
+
+**Pick OpenShell** when the agent needs your machine: a live folder, a local database, local MCP servers, or no cloud at all.
+**Pick Agent Substrate** when you want agents that keep running without your laptop, many agents at once, batch runs from CI, or a sandbox on a machine that OpenShell can't run on, such as Windows or an Intel Mac.
+
+You can use both. The same policy packs, profiles and guardrails apply to each.
+
+## What a session looks like
+
+```bash
+cd ~/code/myapp
+defenseclaw substrate run claude
+```
+
+You get Claude Code in your terminal, with a DefenseClaw banner first. What happens around it:
+
+<Flow direction="TB" caption="One Agent Substrate session. The agent runs in the cluster; your terminal is a window onto it. Leaving doesn't stop the agent.">
+  <Node id="run" kind="operator">{`Start the agent\ndefenseclaw substrate run claude`}</Node>
+  <Node id="up" kind="generic">{`Project copied up\nsecret files held back`}</Node>
+  <Node id="work" kind="agent">{`The agent works in the cluster\ntool calls, model and sites checked`}</Node>
+  <Node id="leave" kind="decision">{`Stay or leave?\nCtrl-] detaches`}</Node>
+  <Node id="sleep" kind="generic">{`Agent suspends when idle\nstate saved, machine freed`}</Node>
+  <Node id="back" kind="operator">{`Come back from any machine\nsubstrate connect, pull`}</Node>
+  <Edge from="run" to="up" />
+  <Edge from="up" to="work" />
+  <Edge from="work" to="leave" />
+  <Edge from="leave" to="sleep" label="detach" />
+  <Edge from="sleep" to="back" />
+</Flow>
+
+## Where to start
+
+- **[Open source](/docs/substrate/open-source).** You run Agent Substrate yourself, on a `kind` cluster, GKE or EKS, and add DefenseClaw with a Helm chart and `defenseclaw substrate setup`.
+- **[Managed enterprise](/docs/substrate/enterprise).** A platform team runs the cluster for everyone. Developers sign in with the company identity provider. Their group decides their policy, and they can't loosen it. Running the agent on a laptop can be refused with a pointer to the cloud sandbox.
+- **[Unattended runs](/docs/substrate/unattended).** Give an agent a task and walk away, or run a batch from CI.
+- **[Agents and features](/docs/substrate/agents)** says which agents run in an actor and how each feature compares with the host and OpenShell.
+- **[How it works](/docs/substrate/how-it-works)** has the architecture, and the [threat model](/docs/substrate/threat-model) says what is and isn't defended.
+- **[Reference](/docs/substrate/reference)** lists every command, key and exit code, and [Troubleshooting](/docs/substrate/troubleshooting) has fixes, including a section for agents.
+
+## Does every agent work
+
+Every agent DefenseClaw supports as a **command-line tool** can run in an actor, in three waves. Desktop and IDE apps can't, because an actor is a Linux container with no screen. Some features differ: no live folder, no host ports, no local MCP servers. Some are new: suspend and resume, any laptop OS, always-on model guardrails, unattended batches. See [Agents and features](/docs/substrate/agents).
