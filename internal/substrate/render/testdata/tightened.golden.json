@@ -2,7 +2,7 @@
   "policy": {
     "rules": [
       {
-        "https": {
+        "http": {
           "effects": {
             "replaceHeaders": [
               {
@@ -22,7 +22,7 @@
           ],
           "ports": {
             "numbers": [
-              443
+              80
             ]
           }
         }
