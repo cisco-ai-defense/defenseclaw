@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
@@ -144,8 +145,12 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	}
 	mux.HandleFunc("/api/v1/substrate/asks/{id}", substrateNotYet)
 	mux.HandleFunc("/api/v1/substrate/secrets/{name}", substrateNotYet)
-	callout := a.substrateCalloutVerdict(st)
-	people := a.substrateAdminAuthenticate(st, mux)
+	// The admin listener keeps the browser CSRF gate: people reach it from
+	// the launcher and possibly from a browser session, so a state-changing
+	// request must carry X-DefenseClaw-Client (the actor listener does not
+	// apply it, GAP-0037).
+	callout := a.apiCSRFProtect(a.substrateCalloutVerdict(st))
+	people := a.apiCSRFProtect(a.substrateAdminAuthenticate(st, mux))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -278,6 +283,14 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			fmt.Fprintf(os.Stderr, "[substrate] registration failed, actor removed: %v\n", err)
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "registration_failed")
 			return
+		}
+		if req.Task != "" && st.cfg.Chains != nil {
+			// The task text is the run's verified intent for the tool judge
+			// (registered before the actor runs). Without it the judge sees
+			// only the agent's own prompts; the create goes on.
+			if err := st.cfg.Chains.PutTask(r.Context(), chainstate.Actor{Atespace: reg.Atespace, UID: reg.UID}, req.Task); err != nil {
+				fmt.Fprintf(os.Stderr, "[substrate] warning: task intent not registered for %s/%s: %v\n", reg.Atespace, reg.Name, err)
+			}
 		}
 		if err := st.cfg.Actions.Resume(r.Context(), created.Atespace, created.Name); err != nil {
 			fmt.Fprintf(os.Stderr, "[substrate] resume failed: %v\n", err)

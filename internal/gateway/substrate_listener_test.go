@@ -187,6 +187,10 @@ func (f *substrateFixture) do(t *testing.T, h http.Handler, method, path, token,
 		}
 	}
 	for i := 0; i+1 < len(headers); i += 2 {
+		if headers[i+1] == "-" {
+			req.Header.Del(headers[i]) // "-" removes a header the helper sets
+			continue
+		}
 		req.Header.Set(headers[i], headers[i+1])
 	}
 	rec := httptest.NewRecorder()
@@ -196,7 +200,7 @@ func (f *substrateFixture) do(t *testing.T, h http.Handler, method, path, token,
 
 func envelope(connector string, payload map[string]any) string {
 	p, _ := json.Marshal(payload)
-	b, _ := json.Marshal(map[string]any{"v": "1", "connector": connector, "mode": "interactive", "kit_version": "0.1.0",
+	b, _ := json.Marshal(map[string]any{"v": substrateEnvelopeVersion, "connector": connector, "mode": "interactive", "kit_version": "0.1.0",
 		"payload": json.RawMessage(p)})
 	return string(b)
 }
@@ -327,10 +331,10 @@ func TestSubstrateEnvelopeChecks(t *testing.T) {
 	path := "/api/v1/substrate/hook/claudecode"
 	for name, body := range map[string]string{
 		"not json":         `nope`,
-		"no payload":       `{"v":"1","connector":"claudecode"}`,
+		"no payload":       `{"v":"dcactor/1","connector":"claudecode"}`,
 		"wrong version":    `{"v":"2","connector":"claudecode","payload":{}}`,
-		"other connector":  `{"v":"1","connector":"codex","payload":{}}`,
-		"attached too big": `{"v":"1","connector":"claudecode","payload":{},"facts":{"files":[{"role":"read_target","path":"/x","content":"` + strings.Repeat("A", (2<<20)) + `"}]}}`,
+		"other connector":  `{"v":"dcactor/1","connector":"codex","payload":{}}`,
+		"attached too big": `{"v":"dcactor/1","connector":"claudecode","payload":{},"facts":{"files":[{"role":"read_target","path":"/x","content":"` + strings.Repeat("A", (2<<20)) + `"}]}}`,
 	} {
 		rec := f.do(t, f.actor, http.MethodPost, path, "tok-alice", body)
 		if rec.Code != http.StatusBadRequest && rec.Code != http.StatusRequestEntityTooLarge {
@@ -570,4 +574,54 @@ func TestSubstrateSetValidation(t *testing.T) {
 		t.Fatal("shared address")
 	}
 	_ = sandboxauth.RouteHook
+}
+
+// GAP-0037: the actor listener applies no browser CSRF gate (the actor
+// token authenticates; agent SDKs and the kit send no client tag), and the
+// admin listener keeps it.
+func TestSubstrateCSRFOnlyOnTheAdminListener(t *testing.T) {
+	llm := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	f := newSubstrateFixture(t, func(c *SubstrateConfig) { c.LLM = llm })
+	noTag := []string{"X-DefenseClaw-Client", "-"}
+	hook := envelope("claudecode", map[string]any{"hook_event_name": "PreToolUse", "session_id": "csrf-1",
+		"tool_name": "Bash", "tool_input": map[string]any{"command": "ls"}, "cwd": "/work"})
+	for _, tc := range []struct{ path, body string }{
+		{"/api/v1/substrate/hook/claudecode", hook},
+		{"/api/v1/substrate/inspect/tool", `{"tool":"Bash","args":{"command":"ls"}}`},
+		{"/llm/bedrock/model/m/invoke", `{}`},
+	} {
+		rec := f.do(t, f.actor, http.MethodPost, tc.path, "tok-alice", tc.body, noTag...)
+		if rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
+			t.Errorf("actor %s without a client tag: %d %s", tc.path, rec.Code, rec.Body)
+		}
+		// A cross-site browser fetch header changes nothing either: the
+		// request still needs the actor token, which no page can set.
+		rec = f.do(t, f.actor, http.MethodPost, tc.path, "tok-alice", tc.body, append(noTag, "Sec-Fetch-Site", "cross-site")...)
+		if rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
+			t.Errorf("actor %s with Sec-Fetch-Site: %d", tc.path, rec.Code)
+		}
+		// Without the actor token: refused.
+		if rec := f.do(t, f.actor, http.MethodPost, tc.path, "", tc.body, noTag...); rec.Code != http.StatusUnauthorized {
+			t.Errorf("actor %s without a token: %d", tc.path, rec.Code)
+		}
+	}
+	// Admin: a state-changing request without the client tag is refused
+	// before authentication, and a cross-site one too.
+	cert := `{"atespace":"eng-web","name":"alice-1"}`
+	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/session-cert", "p-alice", cert, noTag...); rec.Code != http.StatusForbidden {
+		t.Fatalf("admin POST without a client tag: %d %s", rec.Code, rec.Body)
+	}
+	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/session-cert", "p-alice", cert, "Sec-Fetch-Site", "cross-site"); rec.Code != http.StatusForbidden {
+		t.Fatalf("admin cross-site POST: %d", rec.Code)
+	}
+	if rec := f.do(t, f.admin, http.MethodPost, substrateCalloutPath, subCallout, `{}`, noTag...); rec.Code != http.StatusForbidden {
+		t.Fatalf("callout POST without a client tag: %d", rec.Code)
+	}
+	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/session-cert", "p-alice", cert); rec.Code != http.StatusOK {
+		t.Fatalf("admin POST with the client tag: %d %s", rec.Code, rec.Body)
+	}
+	// Reads need no tag.
+	if rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/actors", "p-alice", "", noTag...); rec.Code != http.StatusOK {
+		t.Fatalf("admin GET without a client tag: %d", rec.Code)
+	}
 }

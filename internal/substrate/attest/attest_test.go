@@ -686,7 +686,7 @@ func TestCosignLayout(t *testing.T) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Layers) != 1 || m.Layers[0].MediaType != "application/vnd.dsse.envelope.v1+json" || m.Layers[0].Annotations["predicateType"] != PredicateType {
+	if len(m.Layers) != 1 || m.Layers[0].MediaType != "application/vnd.dsse.envelope.v1+json" || m.Layers[0].Annotations["predicateType"] != PredicateType || m.Layers[0].Annotations[CosignSignatureAnnotation] == "" {
 		t.Fatalf("layers: %+v", m.Layers)
 	}
 	raw, err := f.reg.SmallBlob(ctx, f.m.host(), "tmpl/claude", m.Layers[0].Digest, 1<<20)
@@ -756,7 +756,7 @@ func TestBuildLayerDeterministic(t *testing.T) {
 
 func TestParseRef(t *testing.T) {
 	cases := []struct{ in, reg, repo, tag, dig string }{
-		{"10.0.1.218:5000/a9/x:v1", "10.0.1.218:5000", "a9/x", "v1", ""},
+		{"registry.example.internal:5000/a9/x:v1", "registry.example.internal:5000", "a9/x", "v1", ""},
 		{"localhost:5000/x", "localhost:5000", "x", "latest", ""},
 		{"ghcr.io/org/img@sha256:" + strings.Repeat("a", 64), "ghcr.io", "org/img", "", "sha256:" + strings.Repeat("a", 64)},
 		{"ubuntu:24.04", "registry-1.docker.io", "library/ubuntu", "24.04", ""},

@@ -155,27 +155,6 @@ spec:
       app.kubernetes.io/instance: dc
       app.kubernetes.io/component: callout
 ---
-# Source: defenseclaw-substrate/templates/controller.yaml
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: defenseclaw-controller
-  labels:
-    app.kubernetes.io/name: defenseclaw-substrate
-    app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
-    app.kubernetes.io/component: controller
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: defenseclaw-substrate
-      app.kubernetes.io/instance: dc
-      app.kubernetes.io/component: controller
----
 # Source: defenseclaw-substrate/templates/gateway.yaml
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -275,7 +254,6 @@ metadata:
     app.kubernetes.io/component: callout
 data:
   callout.yaml: |
-    body_hosts: []
     body_inspection: auto
     body_max_bytes: 1048576
     defenseclaw_hosts:
@@ -286,7 +264,6 @@ data:
     egress_peers:
     - spiffe://cluster.local/ns/ate-system/sa/atenet-egress
     failure_mode: closed
-    mcp_hosts: []
     profiles:
     - atespaces:
       - data-ml
@@ -446,32 +423,6 @@ rules:
   resourceNames: [defenseclaw-store-state]
   verbs: [get, update, patch]
 ---
-# Source: defenseclaw-substrate/templates/rbac.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: defenseclaw-controller
-  labels:
-    app.kubernetes.io/name: defenseclaw-substrate
-    app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
-    app.kubernetes.io/component: controller
-rules:
-- apiGroups: [coordination.k8s.io]
-  resources: [leases]
-  verbs: [create]
-- apiGroups: [coordination.k8s.io]
-  resources: [leases]
-  resourceNames: ["defenseclaw-controller"]
-  verbs: [get, update]
-- apiGroups: [""]
-  resources: [configmaps]
-  resourceNames: [defenseclaw-store-state]
-  verbs: [get]
----
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -537,28 +488,6 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: defenseclaw-gateway
-  namespace: defenseclaw-system
----
-# Source: defenseclaw-substrate/templates/rbac.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: defenseclaw-controller
-  labels:
-    app.kubernetes.io/name: defenseclaw-substrate
-    app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
-    app.kubernetes.io/component: controller
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: defenseclaw-controller
-subjects:
-- kind: ServiceAccount
-  name: defenseclaw-controller
   namespace: defenseclaw-system
 ---
 # Source: defenseclaw-substrate/templates/callout.yaml
@@ -733,7 +662,7 @@ spec:
         app.kubernetes.io/component: callout
       annotations:
         checksum/config: 3b27dd4c23a18714a494ea49f5274c65c27d958f2f1b3f677481819d68b61f2d
-        checksum/callout: 863da6f3d6e3b003ef800917ae97b63e238c0beb3d1fc3ab8cfea6682b7abae3
+        checksum/callout: 2a2ef8ef1835ed886cc112ddeb8e898005e5843e3719128980e11702b0f07d3b
     spec:
       
       serviceAccountName: defenseclaw-callout
@@ -770,7 +699,7 @@ spec:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml
         - name: DEFENSECLAW_HOME
-          value: /tmp/defenseclaw
+          value: /var/lib/defenseclaw/run/home
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -809,6 +738,8 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
+        - name: run
+          mountPath: /var/lib/defenseclaw/run
         - name: ate
           mountPath: /var/run/ate
           readOnly: true
@@ -824,6 +755,13 @@ spec:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
+      # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
+      # sticky (3777), which the audit store's directory trust check accepts; a
+      # disk emptyDir (2777) or a PVC root (0777 or 2775) is refused.
+      - name: run
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
       - name: ate
         projected:
           sources:
@@ -865,8 +803,9 @@ spec:
           name: defenseclaw-callout
 ---
 # Source: defenseclaw-substrate/templates/controller.yaml
-# Two replicas, one active through the lease: policies, admission, idle
-# suspend, drift and inventory.
+# One replica, Recreate: policies, admission, idle suspend, drift and
+# inventory. The controller has no Lease client yet (A3), so two would both
+# act; when it gets one this becomes two replicas with a PDB.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -880,13 +819,10 @@ metadata:
     helm.sh/chart: defenseclaw-substrate-1.0.10
     app.kubernetes.io/component: controller
 spec:
-  replicas: 2
+  replicas: 1
   revisionHistoryLimit: 5
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: defenseclaw-substrate
@@ -918,13 +854,12 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - substrate-controller
-        - --lease=defenseclaw-controller
-        - --metrics-listen=:9464
+        - --config=/etc/defenseclaw/config.yaml
         env:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml
         - name: DEFENSECLAW_HOME
-          value: /tmp/defenseclaw
+          value: /var/lib/defenseclaw/run/home
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -933,16 +868,6 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        ports:
-        - name: metrics
-          containerPort: 9464
-        readinessProbe:
-          httpGet: {path: /readyz, port: metrics}
-          periodSeconds: 5
-        livenessProbe:
-          httpGet: {path: /healthz, port: metrics}
-          periodSeconds: 10
-          failureThreshold: 6
         resources:
           limits:
             memory: 512Mi
@@ -961,6 +886,8 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
+        - name: run
+          mountPath: /var/lib/defenseclaw/run
         - name: ate
           mountPath: /var/run/ate
           readOnly: true
@@ -970,6 +897,13 @@ spec:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
+      # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
+      # sticky (3777), which the audit store's directory trust check accepts; a
+      # disk emptyDir (2777) or a PVC root (0777 or 2775) is refused.
+      - name: run
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
       - name: ate
         projected:
           sources:
@@ -1059,12 +993,18 @@ spec:
         - --actor-listen=:8080
         - --admin-listen=:9443
         - --metrics-listen=:9464
-        - --leader-address=defenseclaw-leader.defenseclaw-system.svc:7443
+        - --leader-address=defenseclaw-leader.defenseclaw-system.svc.cluster.local:7443
+        - --leader-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        - --peer-bundle=/var/run/ate/credential-bundle.pem
+        - --peer-trust=/var/run/ate/podidentity-ca.crt
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
         env:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml
         - name: DEFENSECLAW_HOME
-          value: /tmp/defenseclaw
+          value: /var/lib/defenseclaw/run/home
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -1105,11 +1045,19 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
+        - name: run
+          mountPath: /var/lib/defenseclaw/run
         - name: ate
           mountPath: /var/run/ate
           readOnly: true
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
+          readOnly: true
+        - name: relay-session
+          mountPath: /var/run/secrets/defenseclaw-relay-session
+          readOnly: true
+        - name: llm-credentials
+          mountPath: /var/run/secrets/defenseclaw-llm
           readOnly: true
       volumes:
       - name: config
@@ -1117,6 +1065,13 @@ spec:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
+      # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
+      # sticky (3777), which the audit store's directory trust check accepts; a
+      # disk emptyDir (2777) or a PVC root (0777 or 2775) is refused.
+      - name: run
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
       - name: ate
         projected:
           sources:
@@ -1153,6 +1108,14 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: trust-bundle.pem
+      - name: relay-session
+        secret:
+          secretName: defenseclaw-relay-session
+          optional: true
+      - name: llm-credentials
+        secret:
+          secretName: defenseclaw-llm
+          optional: true
 ---
 # Source: defenseclaw-substrate/templates/leader.yaml
 # The gateway leader: one replica holding the lease and the RWO store. Recreate,
@@ -1213,11 +1176,16 @@ spec:
         - --lease=defenseclaw-gateway-leader
         - --store-dir=/var/lib/defenseclaw/store
         - --store-state-configmap=defenseclaw-store-state
+        - --peer-bundle=/var/run/ate/credential-bundle.pem
+        - --peer-trust=/var/run/ate/podidentity-ca.crt
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
         env:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml
         - name: DEFENSECLAW_HOME
-          value: /tmp/defenseclaw
+          value: /var/lib/defenseclaw/run/home
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -1256,20 +1224,40 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
+        - name: run
+          mountPath: /var/lib/defenseclaw/run
         - name: ate
           mountPath: /var/run/ate
           readOnly: true
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
           readOnly: true
+        - name: relay-session
+          mountPath: /var/run/secrets/defenseclaw-relay-session
+          readOnly: true
+        - name: llm-credentials
+          mountPath: /var/run/secrets/defenseclaw-llm
+          readOnly: true
         - name: store
           mountPath: /var/lib/defenseclaw/store
+        # The Kubernetes API token for the leader Lease and the store state
+        # ConfigMap (the gateway's automount stays off).
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
       volumes:
       - name: config
         configMap:
           name: defenseclaw-config
       - name: tmp
         emptyDir: {}
+      # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
+      # sticky (3777), which the audit store's directory trust check accepts; a
+      # disk emptyDir (2777) or a PVC root (0777 or 2775) is refused.
+      - name: run
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
       - name: ate
         projected:
           sources:
@@ -1306,6 +1294,28 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: trust-bundle.pem
+      - name: relay-session
+        secret:
+          secretName: defenseclaw-relay-session
+          optional: true
+      - name: llm-credentials
+        secret:
+          secretName: defenseclaw-llm
+          optional: true
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
       - name: store
         persistentVolumeClaim:
           claimName: defenseclaw-store

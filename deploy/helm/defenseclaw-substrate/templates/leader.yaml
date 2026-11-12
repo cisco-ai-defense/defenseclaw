@@ -43,6 +43,7 @@ spec:
         - --lease={{ .Values.leader.leaseName }}
         - --store-dir=/var/lib/defenseclaw/store
         - --store-state-configmap=defenseclaw-store-state
+        {{- include "dc.peerFlags" . | nindent 8 }}
         {{- end }}
         env:
         {{- include "dc.env" . | nindent 8 }}
@@ -64,10 +65,31 @@ spec:
           {{- toYaml .Values.containerSecurityContext | nindent 10 }}
         volumeMounts:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
+        {{- include "dc.gatewaySecretMounts" . | nindent 8 }}
         - name: store
           mountPath: /var/lib/defenseclaw/store
+        # The Kubernetes API token for the leader Lease and the store state
+        # ConfigMap (the gateway's automount stays off).
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
+      {{- include "dc.gatewaySecretVolumes" . | nindent 6 }}
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
       - name: store
         persistentVolumeClaim:
           claimName: defenseclaw-store

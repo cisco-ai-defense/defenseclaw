@@ -719,6 +719,10 @@ func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
 	// An Agent Substrate actor acts for the person the launcher verified
 	// and bound to it at create (its registration), never for the gateway.
 	if isSubstrateActorRequest(ctx) {
+		if s, ok := verifiedSubjectFromContext(ctx); ok && isSubstrateSubjectSource(s.Source) {
+			subject := profileSubjectFromVerified(s, identityLookupBlocking.Load())
+			return &subject, profileSubjectVerified
+		}
 		if subject, ok := substrateProfileSubject(ctx); ok {
 			return &subject, profileSubjectVerified
 		}

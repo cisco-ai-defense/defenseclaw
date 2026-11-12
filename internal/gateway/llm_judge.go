@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"sort"
@@ -133,6 +134,15 @@ type LLMJudge struct {
 	// shared one in its place.
 	intentsMu sync.Mutex
 	intents   intentstore.Store
+	// intentWarn* rate-limit the warning a failing intent store writes
+	// (warnIntentStore): at most one line per intentStoreWarnEvery, with
+	// the count of failures it held back. intentWarnOut and intentWarnNow
+	// replace stderr and the clock in tests.
+	intentWarnMu         sync.Mutex
+	intentWarnLast       time.Time
+	intentWarnSuppressed int
+	intentWarnOut        io.Writer
+	intentWarnNow        func() time.Time
 
 	telemetryMu sync.RWMutex
 	traceV8     judgeTraceV8Runtime
@@ -2217,7 +2227,9 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	})
 	if err != nil {
 		// A shared store that did not answer leaves the call judged on its
-		// own, like the first call of a session.
+		// own, like the first call of a session. The operator is told: the
+		// judge then sees neither the user's intent nor the earlier calls.
+		j.warnIntentStore("AppendToolCall", "the tool call is judged without its session intent and recent calls", err)
 		entry = intentstore.Snapshot{}
 	}
 	prior := entry.Prior
@@ -2248,13 +2260,46 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	return sample.String()
 }
 
+// judgeIntentStores, when set (a gateway replica on Agent Substrate), gives
+// each judge its session context store by role in place of a process-local
+// one, so every replica judges an actor's call with the same intent.
+var judgeIntentStores atomic.Pointer[func(role string) intentstore.Store]
+
+// Judge roles for judgeIntentStores: the guardrail judge and the hook lane's
+// decision-only judge keep separate contexts, as they do on a host.
+const (
+	judgeIntentRoleJudge    = "judge"
+	judgeIntentRoleDecision = "decision"
+)
+
+// setJudgeIntentStores sets (nil clears) the store of judges that have none
+// yet.
+func setJudgeIntentStores(stores func(role string) intentstore.Store) {
+	if stores == nil {
+		judgeIntentStores.Store(nil)
+		return
+	}
+	judgeIntentStores.Store(&stores)
+}
+
 // intentStore is the judge's session context store: the one SetIntentStore
-// gave it, else a process-local store made on first use (a judge built as a
-// struct literal works too).
+// gave it, else the shared one for its role (judgeIntentStores), else a
+// process-local store made on first use (a judge built as a struct literal
+// works too).
 func (j *LLMJudge) intentStore() intentstore.Store {
 	j.intentsMu.Lock()
 	defer j.intentsMu.Unlock()
 	if j.intents == nil {
+		if stores := judgeIntentStores.Load(); stores != nil {
+			role := judgeIntentRoleJudge
+			if j.decisionOnly {
+				role = judgeIntentRoleDecision
+			}
+			if store := (*stores)(role); store != nil {
+				j.intents = store
+				return j.intents
+			}
+		}
 		j.intents = intentstore.NewProcess(intentstore.Limits{
 			MaxSessions: maxToolJudgeContextSessions,
 			MaxPrior:    maxToolJudgePriorEvents,
@@ -2276,6 +2321,47 @@ func (j *LLMJudge) SetIntentStore(store intentstore.Store) {
 	j.intentsMu.Unlock()
 }
 
+// intentStoreWarnEvery is the shortest time between two intent-store
+// warnings of one judge.
+const intentStoreWarnEvery = time.Minute
+
+// warnIntentStore writes a rate-limited warning that the intent store
+// failed op. It names the operation, its consequence and a bounded error
+// text, never the session key or any recorded intent.
+func (j *LLMJudge) warnIntentStore(op, consequence string, err error) {
+	if j == nil || err == nil {
+		return
+	}
+	now := time.Now
+	if j.intentWarnNow != nil {
+		now = j.intentWarnNow
+	}
+	at := now()
+	j.intentWarnMu.Lock()
+	if !j.intentWarnLast.IsZero() && at.Sub(j.intentWarnLast) < intentStoreWarnEvery {
+		j.intentWarnSuppressed++
+		j.intentWarnMu.Unlock()
+		return
+	}
+	held := j.intentWarnSuppressed
+	j.intentWarnLast, j.intentWarnSuppressed = at, 0
+	out := j.intentWarnOut
+	j.intentWarnMu.Unlock()
+	if out == nil {
+		out = defaultLogWriter
+	}
+	msg := err.Error()
+	if len(msg) > 200 {
+		msg = msg[:200] + "..."
+	}
+	more := ""
+	if held > 0 {
+		more = fmt.Sprintf(" (%d more failures since the last warning)", held)
+	}
+	fmt.Fprintf(out, "[judge] warning: intent store %s failed%s: %s; %s\n",
+		op, more, strings.ToValidUTF8(msg, "?"), consequence)
+}
+
 // ObserveSessionPrompt records the latest bounded user task for an
 // authenticated connector session. A new user prompt starts a new tool chain,
 // so prior tool calls are cleared instead of contaminating the next turn.
@@ -2290,18 +2376,26 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 	if sessionID == "" || content == "" {
 		return
 	}
-	_ = j.intentStore().ObservePrompt(ctx, sessionID, toolJudgeUserIntentExcerpt(content))
+	if err := j.intentStore().ObservePrompt(ctx, sessionID, toolJudgeUserIntentExcerpt(content)); err != nil {
+		j.warnIntentStore("ObservePrompt", "the user's intent is not recorded for the session's next tool calls", err)
+	}
 }
 
 // ResetToolJudgeSession drops the session's bounded context when a connector
 // announces a new or ended session. The process-local store persists no tool
 // arguments.
-// sessionID is the state key (sandboxSessionStateKey), not the raw ID.
-func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
+// sessionID is the state key (sandboxSessionStateKey), not the raw ID; ctx
+// is the hook call's (a shared store finds the caller in it).
+func (j *LLMJudge) ResetToolJudgeSession(ctx context.Context, sessionID string) {
 	if j == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	_ = j.intentStore().Reset(context.Background(), sessionID)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := j.intentStore().Reset(ctx, sessionID); err != nil {
+		j.warnIntentStore("Reset", "the session's earlier intent and calls may still be shown to the judge", err)
+	}
 }
 
 // RunToolJudge runs injection detection on tool call arguments.

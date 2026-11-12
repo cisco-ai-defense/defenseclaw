@@ -344,18 +344,45 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 	}
 	patch := str("patch", "input")
 
-	// Skills written through a file tool.
-	if target != "" && skillRootRE.MatchString(path.Clean("/"+target)) {
-		m := skillRootRE.FindStringSubmatch(path.Clean("/" + target))
-		files := []AttachedFile{{Role: RoleSkillFile, Path: target, Content: []byte(content)}}
+	writeTool := map[string]bool{"Write": true, "Edit": true, "MultiEdit": true, "NotebookEdit": true, "apply_patch": true}[ev.ToolName]
+	readTool := map[string]bool{"Read": true, "View": true}[ev.ToolName]
+	attachedFor := func(name string) []AttachedFile {
+		var fs []AttachedFile
 		for _, f := range attached {
-			if f.Role == RoleSkillFile || f.Role == RoleRead {
-				if skillRootRE.MatchString(path.Clean("/" + f.Path)) {
-					files = append(files, f)
-				}
+			if f.Role != RoleSkillFile && f.Role != RoleRead {
+				continue
+			}
+			if m := skillRootRE.FindStringSubmatch(path.Clean("/" + f.Path)); m != nil && m[1] == name {
+				fs = append(fs, f)
 			}
 		}
+		return fs
+	}
+	// Skills written through a file tool, and skill files the agent reads:
+	// the gateway scans what is about to be written, or what is about to
+	// reach the model's context.
+	if target != "" && (writeTool || readTool) && skillRootRE.MatchString(path.Clean("/"+target)) {
+		m := skillRootRE.FindStringSubmatch(path.Clean("/" + target))
+		var files []AttachedFile
+		if writeTool {
+			files = append(files, AttachedFile{Role: RoleSkillFile, Path: target, Content: []byte(content)})
+		}
+		files = append(files, attachedFor(m[1])...)
 		out = append(out, RuntimeAsset{Kind: config.AdmissionTypeSkill, Name: m[1], Path: skillDirOf(target, m[1]), Files: files})
+	}
+	// The Skill tool: the agent is about to use a skill, however it got
+	// there (written, copied, cloned, installed). The kit attaches the skill
+	// folder; with nothing attached the asset has no files and Scan fails
+	// closed.
+	if ev.ToolName == "Skill" {
+		if name := str("skill", "name"); name != "" {
+			dir := ""
+			files := attachedFor(name)
+			if len(files) > 0 {
+				dir = skillDirOf(files[0].Path, name)
+			}
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeSkill, Name: name, Path: dir, Files: files})
+		}
 	}
 	// Skills written by a shell command or a patch: the command text is the
 	// content (heredoc bodies, echo, tee, python -c ...).

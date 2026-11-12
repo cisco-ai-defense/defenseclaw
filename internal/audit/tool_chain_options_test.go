@@ -4,13 +4,14 @@
 package audit
 
 import (
-	"context"
-	"database/sql"
 	"errors"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
@@ -29,25 +30,20 @@ func actorRepositoryForTest(t *testing.T, fixture *toolChainFixture, uid string,
 	return repo
 }
 
-// fixedHorizon keeps extra more than the wall-clock window (an actor that
-// was suspended for extra).
-type fixedHorizon struct{ extra time.Duration }
-
-func (h fixedHorizon) Cutoff(at time.Time, horizon time.Duration) time.Time {
-	return at.Add(-horizon - h.extra)
-}
-
 func TestToolChainRepositoryWithoutOptionsIsTheSessionRepository(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
 	repo, err := fixture.store.ToolChainRepositoryWith(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repo.Scope() != ToolChainScopeSession || repo.horizon != nil || repo.forkParent != nil {
+	if repo.Scope() != ToolChainScopeSession || repo.tables != toolChainSessionTables || repo.rootDigest != "" {
 		t.Fatalf("plain repository %+v", repo)
 	}
 	if _, err := fixture.store.ToolChainRepositoryWith(nil); err == nil { //nolint:staticcheck // a nil context is refused
 		t.Fatal("nil context accepted")
+	}
+	if _, err := fixture.store.ToolChainRepositoryWith(t.Context(), WithToolChainClock(nil)); err == nil {
+		t.Fatal("nil clock accepted")
 	}
 }
 
@@ -77,146 +73,237 @@ func TestToolChainActorScopeDigestIsUnambiguousAndScoped(t *testing.T) {
 	}
 }
 
+// The actor's connector instance is a canonical UUIDv7 the same everywhere,
+// one per actor; session digests separate connectors and sessions.
+func TestToolChainSubstrateKeys(t *testing.T) {
+	a, err := ToolChainSubstrateInstanceID("eng-web", testActorUIDA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateUUIDv7("instance", string(a)); err != nil {
+		t.Fatalf("%s: %v", a, err)
+	}
+	if parsed := uuid.MustParse(string(a)); parsed.Variant() != uuid.RFC4122 {
+		t.Fatalf("variant %v", parsed.Variant())
+	}
+	again, _ := ToolChainSubstrateInstanceID("eng-web", testActorUIDA)
+	other, _ := ToolChainSubstrateInstanceID("eng-web", testActorUIDB)
+	if again != a || other == a {
+		t.Fatalf("instance ids %s %s %s", a, again, other)
+	}
+	s1, _ := ToolChainSubstrateSessionDigest("claudecode", "s1")
+	s2, _ := ToolChainSubstrateSessionDigest("claudecode", "s2")
+	c1, _ := ToolChainSubstrateSessionDigest("codex", "s1")
+	if s1 == s2 || s1 == c1 || validateSHA256("d", s1, true) != nil {
+		t.Fatalf("session digests %s %s %s", s1, s2, c1)
+	}
+	if _, err := ToolChainSubstrateSessionDigest("claudecode", ""); err == nil {
+		t.Fatal("empty session accepted")
+	}
+}
+
+// substrateChain drives the leader's path: a join recorded at the actor's
+// running time, then the repository operation.
+type substrateChain struct {
+	store    *Store
+	instance ConnectorInstanceID
+	running  time.Time
+	ruleset  string
+}
+
+func newSubstrateChain(t *testing.T, store *Store, uid string) *substrateChain {
+	t.Helper()
+	instance, err := ToolChainSubstrateInstanceID("eng-web", uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureToolChainSubstrateInstance(t.Context(), instance); err != nil {
+		t.Fatal(err)
+	}
+	return &substrateChain{store: store, instance: instance,
+		running: time.Date(2026, 11, 12, 20, 0, 0, 0, time.UTC), ruleset: correlationDigest("ruleset-a")}
+}
+
+func (c *substrateChain) repo(t *testing.T, uid string, actor bool) *ToolChainRepository {
+	t.Helper()
+	opts := []ToolChainOption{WithToolChainClock(func() time.Time { return c.running })}
+	if actor {
+		opts = append(opts, WithToolChainActorScope("eng-web", uid))
+	}
+	repo, err := c.store.ToolChainRepositoryWith(t.Context(), opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repo
+}
+
+func (c *substrateChain) observe(t *testing.T, repo *ToolChainRepository, session string, projection guardrail.ToolChainProjection) ToolChainObserveResult {
+	t.Helper()
+	semantic, err := NewSemanticEventID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, _ := ToolChainSubstrateSessionDigest("claudecode", session)
+	fp := correlationDigest(string(semantic))
+	if err := c.store.RecordToolChainJoin(t.Context(), ToolChainJoin{ConnectorInstanceID: c.instance,
+		SemanticEventID: semantic, InputFingerprint: fp, ReceivedAt: c.running, SessionDigest: digest}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := repo.Observe(t.Context(), ToolChainObserveInput{SemanticEventID: semantic,
+		ConnectorInstanceID: c.instance, InputFingerprint: fp, RulesetFingerprint: c.ruleset,
+		Projection: projection, DenyEligible: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 // Every call of one actor lands in its window, whatever session it names;
 // another actor (a fork has a new UID) has its own window.
 func TestToolChainActorScopeFollowsTheActorAcrossSessions(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	actor := actorRepositoryForTest(t, fixture, testActorUIDA)
-	other := actorRepositoryForTest(t, fixture, testActorUIDB)
-	if actor.Scope() != ToolChainScopeRoot {
-		t.Fatalf("actor scope %s", actor.Scope())
-	}
+	a := newSubstrateChain(t, fixture.store, testActorUIDA)
+	b := newSubstrateChain(t, fixture.store, testActorUIDB)
 	chainID := guardrail.ToolChainStagedReverseShellPersistence
-	first := fixture.seed(t, "session-1", correlationDigest("actor-first"))
-	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
-	if _, err := actor.Observe(t.Context(), first); err != nil {
-		t.Fatal(err)
+	sessionA, actorA := a.repo(t, testActorUIDA, false), a.repo(t, testActorUIDA, true)
+	for _, repo := range []*ToolChainRepository{sessionA, actorA} {
+		a.observe(t, repo, "session-1", toolChainProjection(t, []string{chainID}, 1, true))
 	}
-	// One event belongs to one actor's window: the root events table keys on
-	// the event, so another actor never takes it.
-	if _, err := other.Observe(t.Context(), first); !errors.Is(err, ErrToolChainIntegrity) {
-		t.Fatalf("another actor took the same event: %v", err)
+	a.running = a.running.Add(time.Second)
+	step2 := toolChainProjection(t, []string{chainID}, 2, true)
+	if result := a.observe(t, sessionA, "session-2-rotated", step2); result.DetectedMask != 0 {
+		t.Fatalf("the session window completed a chain split across sessions: %+v", result)
 	}
-	fixture.now = fixture.now.Add(time.Second)
-	final := fixture.seed(t, "session-2-rotated", correlationDigest("actor-final"))
-	final.Projection = toolChainProjection(t, []string{chainID}, 2, true)
-	final.DenyEligible = true
-	if result, err := fixture.chain.Observe(t.Context(), final); err != nil || result.DetectedMask != 0 {
-		t.Fatalf("the session window completed a chain split across sessions: %+v err=%v", result, err)
+	if result := a.observe(t, actorA, "session-2-rotated", step2); !slices.Contains(result.DetectedChainIDs, chainID) {
+		t.Fatalf("actor window after a session rotation: %+v", result)
 	}
-	result, err := actor.Observe(t.Context(), final)
-	if err != nil || !slices.Contains(result.DetectedChainIDs, chainID) {
-		t.Fatalf("actor window result=%+v err=%v", result, err)
-	}
-
-	// Another actor (a fork's new UID) that never saw step one completes
-	// nothing.
-	fixture.now = fixture.now.Add(time.Second)
-	again := fixture.seed(t, "session-1", correlationDigest("actor-other"))
-	again.Projection = toolChainProjection(t, []string{chainID}, 2, true)
-	if result, err := other.Observe(t.Context(), again); err != nil || result.DetectedMask != 0 {
-		t.Fatalf("another actor's window completed the chain: %+v err=%v", result, err)
+	if result := b.observe(t, b.repo(t, testActorUIDB, true), "session-1", step2); result.DetectedMask != 0 {
+		t.Fatalf("another actor's window completed the chain: %+v", result)
 	}
 }
 
-// A running-time horizon keeps a predecessor the wall-clock window has
-// dropped; a horizon that would shrink the window is ignored.
-func TestToolChainHorizonKeepsRunningTime(t *testing.T) {
+// The window is in running time: a predecessor 40 minutes of wall time
+// back, of which 39 suspended, still joins; the same gap in running time
+// does not (the chain's 30 minute window).
+func TestToolChainRunningClockKeepsTheWindowAcrossASuspend(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	wall := actorRepositoryForTest(t, fixture, testActorUIDA)
-	running := actorRepositoryForTest(t, fixture, testActorUIDB, WithToolChainHorizon(fixedHorizon{extra: 10 * time.Minute}))
-	for _, repo := range []*ToolChainRepository{wall, running} {
-		repo.maxHorizon, repo.pendingTTL = time.Minute, time.Minute
-	}
+	c := newSubstrateChain(t, fixture.store, testActorUIDA)
 	chainID := guardrail.ToolChainStagedReverseShellPersistence
-	step := func(repo *ToolChainRepository, name string, n int) ToolChainObserveResult {
-		t.Helper()
-		input := fixture.seed(t, "s", correlationDigest(name))
-		input.Projection = toolChainProjection(t, []string{chainID}, n, true)
-		result, err := repo.Observe(t.Context(), input)
-		if err != nil {
+	repo := c.repo(t, testActorUIDA, true)
+	c.observe(t, repo, "s1", toolChainProjection(t, []string{chainID}, 1, true))
+	c.running = c.running.Add(time.Minute) // 40 min of wall time, 39 suspended
+	if result := c.observe(t, repo, "s1", toolChainProjection(t, []string{chainID}, 2, true)); !slices.Contains(result.DetectedChainIDs, chainID) {
+		t.Fatalf("running-time window lost the predecessor: %+v", result)
+	}
+	c.running = c.running.Add(40 * time.Minute) // 40 min running
+	c.observe(t, repo, "s2", toolChainProjection(t, []string{chainID}, 1, true))
+	c.running = c.running.Add(40 * time.Minute)
+	if result := c.observe(t, repo, "s2", toolChainProjection(t, []string{chainID}, 2, true)); slices.Contains(result.DetectedChainIDs, chainID) {
+		t.Fatalf("a 40 minute running gap still matched: %+v", result)
+	}
+}
+
+func TestRecordToolChainJoinIsOnceAndChecked(t *testing.T) {
+	fixture := newToolChainFixture(t, ":memory:")
+	c := newSubstrateChain(t, fixture.store, testActorUIDA)
+	semantic, _ := NewSemanticEventID()
+	s1, _ := ToolChainSubstrateSessionDigest("claudecode", "s1")
+	s2, _ := ToolChainSubstrateSessionDigest("claudecode", "s2")
+	join := ToolChainJoin{ConnectorInstanceID: c.instance, SemanticEventID: semantic,
+		InputFingerprint: correlationDigest("in"), ReceivedAt: c.running, SessionDigest: s1}
+	for range 2 {
+		if err := fixture.store.RecordToolChainJoin(t.Context(), join); err != nil {
 			t.Fatal(err)
 		}
-		return result
 	}
-	step(wall, "wall-first", 1)
-	step(running, "running-first", 1)
-	fixture.now = fixture.now.Add(2 * time.Minute)
-	if result := step(wall, "wall-final", 2); result.DetectedMask != 0 {
-		t.Fatalf("wall-clock window kept a step past its horizon: %+v", result)
+	for name, mutate := range map[string]func(*ToolChainJoin){
+		"fingerprint": func(j *ToolChainJoin) { j.InputFingerprint = correlationDigest("other") },
+		"session":     func(j *ToolChainJoin) { j.SessionDigest = s2 },
+	} {
+		bad := join
+		mutate(&bad)
+		if err := fixture.store.RecordToolChainJoin(t.Context(), bad); !errors.Is(err, ErrToolChainIntegrity) {
+			t.Fatalf("%s: %v", name, err)
+		}
 	}
-	if result := step(running, "running-final", 2); !slices.Contains(result.DetectedChainIDs, chainID) {
-		t.Fatalf("running-time window lost the step: %+v", result)
-	}
-
-	at := fixture.now
-	shrink := &ToolChainRepository{maxHorizon: time.Minute, horizon: fixedHorizon{extra: -30 * time.Second}}
-	if got := shrink.horizonCutoff(at); !got.Equal(at.Add(-time.Minute)) {
-		t.Fatalf("a shrinking horizon moved the cutoff to %v", got)
-	}
-	zero := &ToolChainRepository{maxHorizon: time.Minute, horizon: zeroHorizon{}}
-	if got := zero.horizonCutoff(at); !got.Equal(at.Add(-time.Minute)) {
-		t.Fatalf("a zero cutoff moved the cutoff to %v", got)
-	}
-	if _, err := fixture.store.ToolChainRepositoryWith(t.Context(), WithToolChainHorizon(nil)); err == nil {
-		t.Fatal("nil horizon accepted")
+	bad := join
+	bad.ReceivedAt = time.Time{}
+	if err := fixture.store.RecordToolChainJoin(t.Context(), bad); err == nil {
+		t.Fatal("zero time accepted")
 	}
 }
 
-type zeroHorizon struct{}
-
-func (zeroHorizon) Cutoff(time.Time, time.Duration) time.Time { return time.Time{} }
-
-// A fork's repository copies its parent's window when it first opens its
-// own, inside the same transaction, and refuses to start without the copy.
-func TestToolChainForkParentCopiesOnFirstActivation(t *testing.T) {
+// A fork starts from its parent's session and actor windows; the copy runs
+// once and leaves the parent as it was.
+func TestCopyToolChainForkCopiesBothScopesOnce(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	parentDigest, err := ToolChainActorScopeDigest("eng-web", testActorUIDA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parent := ToolChainPartition{ConnectorInstanceID: fixture.instance.ConnectorInstanceID, ScopeDigest: parentDigest}
-	child := actorRepositoryForTest(t, fixture, testActorUIDB, WithToolChainForkParent(parent))
-	input := fixture.seed(t, "s", correlationDigest("fork-first"))
-	input.Projection = toolChainProjection(t, []string{guardrail.ToolChainStagedReverseShellPersistence}, 1, true)
-	if _, err := child.Observe(t.Context(), input); !errors.Is(err, ErrToolChainForkCopyUnsupported) {
-		t.Fatalf("fork without copy support: %v", err)
-	}
-
-	var copies []ToolChainPartition
-	saved := toolChainCopyForkWindow
-	t.Cleanup(func() { toolChainCopyForkWindow = saved })
-	toolChainCopyForkWindow = func(_ context.Context, tx *sql.Tx, _ *ToolChainRepository, from, to ToolChainPartition, _ time.Time) error {
-		if tx == nil {
-			t.Error("copy outside the transaction")
-		}
-		copies = append(copies, from, to)
-		return nil
-	}
-	if _, err := child.Observe(t.Context(), input); err != nil {
-		t.Fatal(err)
-	}
-	fixture.now = fixture.now.Add(time.Second)
-	next := fixture.seed(t, "s", correlationDigest("fork-next"))
-	next.Projection = toolChainProjection(t, []string{guardrail.ToolChainStagedReverseShellPersistence}, 1, true)
-	if _, err := child.Observe(t.Context(), next); err != nil {
-		t.Fatal(err)
-	}
+	parent := newSubstrateChain(t, fixture.store, testActorUIDA)
+	child := newSubstrateChain(t, fixture.store, testActorUIDB)
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
+	step1, step2 := toolChainProjection(t, []string{chainID}, 1, true), toolChainProjection(t, []string{chainID}, 2, true)
+	parent.observe(t, parent.repo(t, testActorUIDA, false), "s1", step1)
+	parent.observe(t, parent.repo(t, testActorUIDA, true), "s1", step1)
+	parentDigest, _ := ToolChainActorScopeDigest("eng-web", testActorUIDA)
 	childDigest, _ := ToolChainActorScopeDigest("eng-web", testActorUIDB)
-	want := []ToolChainPartition{parent, {ConnectorInstanceID: fixture.instance.ConnectorInstanceID, ScopeDigest: childDigest}}
-	if !slices.Equal(copies, want) {
-		t.Fatalf("copies %+v, want one copy %+v", copies, want)
+	fork := ToolChainForkCopy{ParentInstance: parent.instance, ChildInstance: child.instance,
+		ParentActorDigest: parentDigest, ChildActorDigest: childDigest, At: parent.running}
+	copied, err := fixture.store.CopyToolChainFork(t.Context(), fork)
+	if err != nil || copied != 2 {
+		t.Fatalf("copied=%d err=%v", copied, err)
+	}
+	if _, err := fixture.store.CopyToolChainFork(t.Context(), fork); !errors.Is(err, ErrToolChainForkAlreadyStarted) {
+		t.Fatalf("second copy: %v", err)
+	}
+	child.running = parent.running.Add(time.Second)
+	if result := child.observe(t, child.repo(t, testActorUIDB, false), "s1", step2); !slices.Contains(result.DetectedChainIDs, chainID) {
+		t.Fatalf("child session window: %+v", result)
+	}
+	if result := child.observe(t, child.repo(t, testActorUIDB, true), "s9", step2); !slices.Contains(result.DetectedChainIDs, chainID) {
+		t.Fatalf("child actor window: %+v", result)
+	}
+	windows, err := fixture.store.ToolChainInstanceWindows(t.Context(), parent.instance)
+	if err != nil || len(windows) != 2 {
+		t.Fatalf("parent windows %+v err=%v", windows, err)
+	}
+	for _, bad := range []ToolChainForkCopy{
+		{ParentInstance: parent.instance, ChildInstance: parent.instance, ParentActorDigest: parentDigest, ChildActorDigest: childDigest, At: parent.running},
+		{ParentInstance: parent.instance, ChildInstance: child.instance, ParentActorDigest: parentDigest, ChildActorDigest: parentDigest, At: parent.running},
+		{ParentInstance: parent.instance, ChildInstance: child.instance, ParentActorDigest: parentDigest, ChildActorDigest: childDigest},
+	} {
+		if _, err := fixture.store.CopyToolChainFork(t.Context(), bad); err == nil || errors.Is(err, ErrToolChainForkAlreadyStarted) {
+			t.Fatalf("bad fork %+v: %v", bad, err)
+		}
+	}
+}
+
+// A revert's mutation barrier stops a same-artifact chain across it, and a
+// retired actor's windows go first under the partition cap.
+func TestToolChainBarrierAndRetire(t *testing.T) {
+	fixture := newToolChainFixture(t, ":memory:")
+	c := newSubstrateChain(t, fixture.store, testActorUIDA)
+	chainID := guardrail.ToolChainDownloadThenExecuteSameArtifact
+	repo := c.repo(t, testActorUIDA, true)
+	step1, step2 := toolChainProjection(t, []string{chainID}, 1, true), toolChainProjection(t, []string{chainID}, 2, true)
+	c.observe(t, repo, "s1", step1)
+	c.running = c.running.Add(time.Second)
+	if result := c.observe(t, repo, "s1", step2); !slices.Contains(result.DetectedChainIDs, chainID) {
+		t.Fatalf("control: no match without a barrier: %+v", result)
+	}
+	c.running = c.running.Add(time.Second)
+	c.observe(t, repo, "s1", step1)
+	c.running = c.running.Add(time.Second)
+	c.observe(t, repo, "s1", guardrail.ToolChainProjection{ParseStatus: actionfacts.StatusNotApplicable,
+		DetectionStepMask: guardrail.ToolChainArtifactMutationBarrier})
+	c.running = c.running.Add(time.Second)
+	if result := c.observe(t, repo, "s1", step2); slices.Contains(result.DetectedChainIDs, chainID) {
+		t.Fatalf("matched across a revert barrier: %+v", result)
 	}
 
-	for name, opts := range map[string][]ToolChainOption{
-		"no actor scope":  {WithToolChainForkParent(parent)},
-		"own parent":      {WithToolChainActorScope("eng-web", testActorUIDA), WithToolChainForkParent(parent)},
-		"bad digest":      {WithToolChainActorScope("eng-web", testActorUIDB), WithToolChainForkParent(ToolChainPartition{ConnectorInstanceID: parent.ConnectorInstanceID, ScopeDigest: "x"})},
-		"bad instance":    {WithToolChainActorScope("eng-web", testActorUIDB), WithToolChainForkParent(ToolChainPartition{ConnectorInstanceID: "x", ScopeDigest: parentDigest})},
-		"bad actor scope": {WithToolChainActorScope("", testActorUIDB)},
-	} {
-		if _, err := fixture.store.ToolChainRepositoryWith(t.Context(), opts...); err == nil {
-			t.Errorf("%s accepted", name)
-		}
+	if err := fixture.store.RetireToolChainInstance(t.Context(), c.instance); err != nil {
+		t.Fatal(err)
+	}
+	windows, err := fixture.store.ToolChainInstanceWindows(t.Context(), c.instance)
+	if err != nil || len(windows) != 1 || windows[0].UpdatedAtNanos != 1 || windows[0].Scope != ToolChainScopeRoot {
+		t.Fatalf("retired windows %+v err=%v", windows, err)
 	}
 }

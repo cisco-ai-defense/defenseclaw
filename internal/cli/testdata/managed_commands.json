@@ -32,6 +32,24 @@
       "note": "OpenShell sandboxes run on Linux and macOS only."
     },
     {
+      "command": "defenseclaw substrate ...",
+      "managed_linux": "Offered",
+      "managed_macos": "Offered",
+      "managed_windows": "Offered",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "substrate",
+      "note": "Runs your coding agents in your organization's Agent Substrate cluster, for the account that signed in to it. It talks only to that cluster, so it needs no managed install, daemon or sandbox on this computer."
+    },
+    {
+      "command": "defenseclaw substrate setup",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Offered",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "substrate setup",
+      "note": "Cluster administrator tools: setup, bundle and template. They read and write the files named on the command line and, for `bundle`, use the administrator's own sign-in, so they need no managed install. The Linux and macOS launcher does not offer them; an administrator runs them with `defenseclaw-gateway` or on their own computer."
+    },
+    {
       "command": "defenseclaw guardrail profile explain",
       "managed_linux": "Offered",
       "managed_macos": "Offered",

@@ -110,7 +110,7 @@ func TestCheckActorRoutes(t *testing.T) {
 	o.ActorRoutes = nil
 	expect(t, CheckActorListenerRoutes(o), Warn, "could not read")
 	for route, want := range map[string]bool{
-		"/api/v1/substrate/hook/claudecode": true, "/llm/bedrock/model/x": true, "/v1/traces": true,
+		"/api/v1/substrate/hook/claudecode": true, "/api/v1/substrate/relay/verify": true, "/llm/bedrock/model/x": true, "/v1/traces": true,
 		"/api/v1/substrate/hook/": false, "/api/v1/substrate/asks": false, "/api/v1/substrate/policy/explain": false,
 		"/v1/tracesx": false, "/llm/../api/v1/substrate/actors": false, "/fleet/status": false, "/": false,
 	} {
