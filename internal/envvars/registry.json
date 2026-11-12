@@ -8675,6 +8675,55 @@
       ],
       "since": "1.0.10",
       "security_note": "Names a credential file; the token itself is never read from the environment."
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_KUBE",
+      "category": "runtime_path",
+      "purpose": "Set to 1 (or true) to make the substrate context a Kubernetes-identity context for one run (CI): the commands sign in with the kubeconfig user's credentials instead of a stored sign-in. 0 or false turns it off.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "true",
+        "0",
+        "false",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/substratecli/auth/auth.go",
+          "description": "Go reader"
+        },
+        {
+          "location": "internal/cli/substratecli/auth/context.go",
+          "description": "Go reader"
+        }
+      ],
+      "since": "1.0.10",
+      "security_note": "Changes who the launcher signs in as; a managed computer ignores it."
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_WORKLOAD_AUDIENCE",
+      "category": "runtime_path",
+      "purpose": "The audience the substrate commands require in a workload identity token (`--workload`). Overrides the context's.",
+      "default": "(the context's audience)",
+      "accepted_values": [
+        "audience string",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/substratecli/auth/auth.go",
+          "description": "Go reader"
+        }
+      ],
+      "since": "1.0.10",
+      "security_note": "A token for another audience is refused; a managed computer ignores the override."
     }
   ]
 }
