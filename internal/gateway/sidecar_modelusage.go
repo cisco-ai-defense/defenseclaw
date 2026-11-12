@@ -43,6 +43,7 @@ func (s *Sidecar) modelUsage() *modelUsageRuntime {
 	)
 	rt := &modelUsageRuntime{engine: modelusage.NewEngine(sink, store), store: store}
 	if s.modelUsageRT.CompareAndSwap(nil, rt) {
+		processModelUsage.Store(rt.engine)
 		return rt
 	}
 	return s.modelUsageRT.Load()
@@ -73,6 +74,7 @@ func (s *Sidecar) stopModelUsage() {
 		return
 	}
 	if rt := s.modelUsageRT.Swap(nil); rt != nil {
+		processModelUsage.CompareAndSwap(rt.engine, nil)
 		rt.engine.Apply(config.TokenomicsConfig{}, config.PricingConfig{})
 		_ = rt.store.Configure(false, 0)
 	}

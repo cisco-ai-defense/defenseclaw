@@ -39,8 +39,6 @@ func check(t *testing.T, got Usage, w want) {
 	}
 }
 
-const all = HasInput | HasOutput | HasCacheRead | HasCacheCreation | HasReasoning
-
 func TestParseBodyFamilies(t *testing.T) {
 	cases := []struct {
 		name string

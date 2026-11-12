@@ -160,7 +160,7 @@ func (s *StreamParser) handleJSON(doc []byte) {
 			s.replace(u, c.Model)
 		}
 	case FamilyResponses:
-		if !(bytes.Contains(doc, []byte("response.completed")) || bytes.Contains(doc, []byte("response.incomplete")) || bytes.Contains(doc, []byte("response.failed"))) {
+		if !bytes.Contains(doc, []byte("response.completed")) && !bytes.Contains(doc, []byte("response.incomplete")) && !bytes.Contains(doc, []byte("response.failed")) {
 			return
 		}
 		var c struct {
@@ -190,7 +190,7 @@ func (s *StreamParser) handleJSON(doc []byte) {
 			s.replace(u, c.ModelVersion)
 		}
 	case FamilyOllama:
-		if !(bytes.Contains(doc, []byte(`"done":true`)) || bytes.Contains(doc, []byte(`"done": true`))) {
+		if !bytes.Contains(doc, []byte(`"done":true`)) && !bytes.Contains(doc, []byte(`"done": true`)) {
 			return
 		}
 		u := parseOllamaDoc(doc)
@@ -219,7 +219,7 @@ func (s *StreamParser) replace(u Usage, model string) {
 }
 
 func (s *StreamParser) handleAnthropic(doc []byte) {
-	if !(bytes.Contains(doc, []byte("message_start")) || bytes.Contains(doc, []byte("message_delta"))) {
+	if !bytes.Contains(doc, []byte("message_start")) && !bytes.Contains(doc, []byte("message_delta")) {
 		if bytes.Contains(doc, []byte("amazon-bedrock-invocationMetrics")) {
 			s.handleInvocationMetrics(doc)
 		}
@@ -388,9 +388,10 @@ func objectAfter(rest []byte) []byte {
 		case esc:
 			esc = false
 		case inStr:
-			if c == 0x5c {
+			switch c {
+			case 0x5c:
 				esc = true
-			} else if c == 0x22 {
+			case 0x22:
 				inStr = false
 			}
 		case c == 0x22:
@@ -458,11 +459,11 @@ func (s *StreamParser) handleBigLine() {
 	head := bytes.TrimSpace(s.head)
 	switch s.family {
 	case FamilyResponses:
-		if !(bytes.Contains(head, []byte("response.completed")) || bytes.Contains(head, []byte("response.incomplete")) || bytes.Contains(head, []byte("response.failed"))) {
+		if !bytes.Contains(head, []byte("response.completed")) && !bytes.Contains(head, []byte("response.incomplete")) && !bytes.Contains(head, []byte("response.failed")) {
 			return
 		}
 	case FamilyMessages, FamilyInvoke:
-		if !(bytes.Contains(head, []byte("message_delta")) || bytes.Contains(head, []byte("message_start"))) {
+		if !bytes.Contains(head, []byte("message_delta")) && !bytes.Contains(head, []byte("message_start")) {
 			return
 		}
 	case FamilyOllama:

@@ -115,3 +115,17 @@ func TestUsageEndpointRejectsNonGet(t *testing.T) {
 		t.Fatal(rec.Code)
 	}
 }
+
+func TestOwnUsageSummaryIsTheCallerOwnRowsOnly(t *testing.T) {
+	api, _ := usageAPI(t, true)
+	got := api.ownUsageSummary(context.Background(), "uid", "1001")
+	if got == nil || got["calls"].(int64) != 1 || got["cost_usd"].(float64) != 0.5 {
+		t.Fatalf("%v", got)
+	}
+	if api.ownUsageSummary(context.Background(), "uid", "4242") != nil {
+		t.Fatal("an account with no usage gets no usage block")
+	}
+	if (&APIServer{}).ownUsageSummary(context.Background(), "uid", "1001") != nil {
+		t.Fatal("no store, no usage block")
+	}
+}

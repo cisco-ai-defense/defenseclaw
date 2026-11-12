@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // SetModelUsage binds the local usage store the /usage endpoint reads.
@@ -102,4 +104,42 @@ func (a *APIServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 		"from": from.UTC().Format(time.RFC3339), "to": now.UTC().Format(time.RFC3339),
 		"rows": rows,
 	})
+}
+
+// ownUsageSummary is the last 24 hours of the verified caller own usage, for
+// the own-status answer. A standard account on a managed Windows host reaches
+// the gateway only through the own-status pipe, so this is how it sees what
+// it used; Linux and macOS accounts get the same field. nil when the usage
+// store is off or the caller has no recorded usage.
+func (a *APIServer) ownUsageSummary(ctx context.Context, idKey, self string) map[string]any {
+	store := a.modelUsage.Load()
+	if store == nil || !store.Enabled() {
+		return nil
+	}
+	kind := useridentity.KindPOSIXUID
+	if idKey == "sid" {
+		kind = useridentity.KindWindowsSID
+	}
+	owner := modelusage.OwnerID(modelusage.CallFacts{Subject: self, SubjectKind: kind, IdentityVerified: true})
+	now := time.Now()
+	rows, err := store.Run(ctx, modelusage.Query{By: "hour", Owner: owner, From: now.Add(-24 * time.Hour), To: now, Limit: 1000})
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+	var calls, in, out, costCalls int64
+	var cost float64
+	for _, r := range rows {
+		calls += r.Calls
+		in += r.Input
+		out += r.Output
+		costCalls += r.CostCalls
+		if r.CostUSD != nil {
+			cost += *r.CostUSD
+		}
+	}
+	summary := map[string]any{"window": "24h", "calls": calls, "input_tokens": in, "output_tokens": out, "cost_calls": costCalls}
+	if costCalls > 0 {
+		summary["cost_usd"] = cost
+	}
+	return summary
 }
