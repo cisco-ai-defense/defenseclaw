@@ -231,13 +231,32 @@ func (p *parser) parseCommandArg() CommandElement {
 			return nil
 		}
 		e = p.fuseAdjacent(e)
+		// If fusing consumed tokens up to a comma, continue the array literal so
+		// a native-exe argument like  csv:"...":44,34,76  is one argument, as the
+		// reference parser groups it.
+		if p.at(TokComma) {
+			arr := &ArrayLit{Elements: []Expr{e}}
+			for p.at(TokComma) {
+				p.advance()
+				p.skipNewlines()
+				arr.Elements = append(arr.Elements, p.fuseAdjacent(p.parseBinaryExpr()))
+			}
+			s0, _ := e.Span()
+			_, s1 := arr.Elements[len(arr.Elements)-1].Span()
+			arr.start, arr.end = s0, s1
+			e = arr
+		}
 		s0, s1 := e.Span()
 		return &Arg{span: span{s0, s1}, Value: e}
 	case TokOperator:
-		// a stray operator used as an argument value (e.g. a lone '-') — keep
-		// it as a bareword argument so it is not dropped.
+		// an operator character used as an argument value (a lone '-', or a
+		// glob lead like * in */*): keep it as a bareword and fuse any
+		// adjacent glob/path characters into one argument.
 		t := p.advance()
-		return &Arg{span: span{t.Start, t.End}, Value: &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}}
+		lead := &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
+		fused := p.fuseAdjacent(lead)
+		s0, s1 := fused.Span()
+		return &Arg{span: span{s0, s1}, Value: fused}
 	}
 	return nil
 }
@@ -247,37 +266,67 @@ func (p *parser) parseCommandArg() CommandElement {
 // whitespace between them, as PowerShell forms one expandable-string argument
 // (for example $env:TEMP\lsass.dmp or $(Get-Date).log). A space ends the arg.
 func (p *parser) fuseAdjacent(e Expr) Expr {
+	// Only a simple value lead fuses; compound leads (parens, arrays,
+	// hashtables, script blocks, member access) stay standalone arguments.
 	switch e.(type) {
-	case *Variable, *SubExpr:
+	case *Variable, *SubExpr, *StringLit, *Number:
 	default:
 		return e
 	}
 	s0, end := e.Span()
+	dynamic := isDynamicLead(e)
 	fused := false
 	for !p.at(TokEOF) {
 		t := p.cur()
-		if t.Start != end {
+		if t.Start != end { // a space or other gap ends the argument
 			break
 		}
-		switch t.Kind {
-		case TokGeneric, TokString, TokNumber, TokVariable, TokDollarParen:
-			p.advance()
-			end = t.End
-			fused = true
-		default:
-			return finishFuse(e, s0, end, fused)
+		if !adjacentFusable(t.Kind) {
+			break
 		}
+		if t.Kind == TokVariable || t.Kind == TokDollarParen ||
+			(t.Kind == TokString && (t.Str == StrDouble || t.Str == StrHereDouble)) {
+			dynamic = true
+		}
+		p.advance()
+		end = t.End
+		fused = true
 	}
-	return finishFuse(e, s0, end, fused)
+	return finishFuse(e, s0, end, fused, dynamic)
 }
 
-func finishFuse(e Expr, s0, end int, fused bool) Expr {
+func isDynamicLead(e Expr) bool {
+	switch v := e.(type) {
+	case *Variable, *SubExpr:
+		return true
+	case *StringLit:
+		return !v.Static
+	}
+	return false
+}
+
+// adjacentFusable reports whether a token with no preceding whitespace extends
+// the current command argument (PowerShell's generic-token concatenation).
+func adjacentFusable(k TokenKind) bool {
+	switch k {
+	case TokGeneric, TokNumber, TokVariable, TokString, TokDollarParen, TokOperator, TokDot:
+		return true
+	}
+	return false
+}
+
+func finishFuse(e Expr, s0, end int, fused, dynamic bool) Expr {
 	if !fused {
 		return e
 	}
-	// Preserve the leading dynamic part so the effects lane can still read it;
-	// the composite is an expandable string for projection purposes.
-	return &StringLit{span: span{s0, end}, Kind: StrDouble, Static: false, Parts: []StringPart{{Expr: e}}}
+	// The leading piece is kept in Parts so the effects lane can read it; the
+	// exact text is the source span [s0,end]. A dynamic piece makes the whole
+	// argument an expandable string, otherwise a literal bareword.
+	kind, static := StrBare, true
+	if dynamic {
+		kind, static = StrDouble, false
+	}
+	return &StringLit{span: span{s0, end}, Kind: kind, Static: static, Parts: []StringPart{{Expr: e}}}
 }
 
 func (p *parser) parseRedirection() *Redirection {

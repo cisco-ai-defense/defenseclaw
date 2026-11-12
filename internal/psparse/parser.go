@@ -25,6 +25,7 @@ type parser struct {
 	depth     int
 	topParams []*Variable
 	exprMode  bool // true inside (), $(), @{} values, [], method args
+	forHeader int  // >0 while inside a for/foreach header, so 'in' is a keyword
 }
 
 // Parse parses PowerShell source into a Script. It always returns a non-nil
@@ -182,6 +183,11 @@ func (p *parser) parseStatement(s stopSet) Statement {
 	}
 	if w, ok := p.bareword(); ok {
 		lw := strings.ToLower(w)
+		if lw == "in" && p.forHeader > 0 {
+			// the 'in' of a foreach header is a keyword, not a command
+			p.advance()
+			return nil
+		}
 		switch {
 		case lw == "param":
 			return p.parseParamBlock(s)
@@ -298,6 +304,10 @@ func (p *parser) parseNamedBlock(kw string) Statement {
 func (p *parser) parseControl(kw string) Statement {
 	start := p.cur().Start
 	p.advance()
+	if kw == "for" || kw == "foreach" {
+		p.forHeader++
+		defer func() { p.forHeader-- }()
+	}
 	blk := &Block{Keyword: kw}
 	guard := 0
 	for guard < 4096 {
