@@ -56,7 +56,7 @@ spec:
         {{- include "dc.selector" (dict "ctx" $ "component" "hooks") | nindent 8 }}
     spec:
       restartPolicy: Never
-      {{- include "dc.podSpecCommon" (dict "ctx" $ "sa" "hooks" "values" dict) | nindent 6 }}
+      {{- include "dc.podSpecCommon" (dict "ctx" $ "sa" (.sa | default "hooks") "values" dict) | nindent 6 }}
       containers:
       - name: {{ .step }}
         image: {{ include "dc.image" $ }}

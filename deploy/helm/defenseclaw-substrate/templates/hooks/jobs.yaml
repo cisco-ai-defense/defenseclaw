@@ -1,4 +1,4 @@
-{{ include "dc.hookJob" (dict "ctx" . "name" "chain-key" "hook" "pre-install,pre-upgrade" "weight" "-5" "step" "chain-key" "owner" false) }}
+{{ include "dc.hookJob" (dict "ctx" . "name" "chain-key" "hook" "pre-install,pre-upgrade" "weight" "-5" "step" "chain-key" "owner" false "sa" "chain-key") }}
 ---
 {{ include "dc.hookJob" (dict "ctx" . "name" "pre-upgrade" "hook" "pre-upgrade" "weight" "0" "step" "pre-upgrade" "owner" false) }}
 ---

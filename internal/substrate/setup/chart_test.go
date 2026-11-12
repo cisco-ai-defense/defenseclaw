@@ -262,6 +262,18 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	} else if strings.Contains(string(out), "substrate-datadir") {
 		t.Errorf("%s: a non-managed render runs the data dir init container", name)
 	}
+	// A pre-install hook Job cannot use a release ServiceAccount: install
+	// creates those after the pre-install hooks.
+	for _, o := range objs {
+		hook, _ := dig(o.Metadata, "annotations", "helm.sh/hook").(string)
+		if o.Kind != "Job" || !strings.Contains(hook, "pre-install") {
+			continue
+		}
+		sa, _ := dig(o.Spec, "template", "spec", "serviceAccountName").(string)
+		if s, ok := byName["ServiceAccount/"+sa]; !ok || !strings.Contains(fmt.Sprint(dig(s.Metadata, "annotations", "helm.sh/hook")), "pre-install") {
+			t.Errorf("%s: pre-install Job %v runs as %q, which is not a pre-install hook resource", name, o.Metadata["name"], sa)
+		}
+	}
 	// A13: the chain key is created by a hook (never rendered), mounted
 	// into the gateway and the leader; the callout reaches the leader.
 	if !strings.Contains(string(out), "- chain-key") || !strings.Contains(string(out), "secretName: defenseclaw-chain-key") {
@@ -340,7 +352,7 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	for _, o := range objs {
 		hook, _ := dig(o.Metadata, "annotations", "helm.sh/hook").(string)
 		del, _ := dig(o.Metadata, "annotations", "helm.sh/hook-delete-policy").(string)
-		if hook != "" && o.Kind != "Job" && ((o.Kind != "Role" && o.Kind != "RoleBinding") || !strings.Contains(del, "hook-succeeded")) {
+		if hook != "" && o.Kind != "Job" && ((o.Kind != "Role" && o.Kind != "RoleBinding" && o.Kind != "ServiceAccount") || !strings.Contains(del, "hook-succeeded")) {
 			t.Errorf("%s: hook resource %s %v outlives the release", name, o.Kind, o.Metadata["name"])
 		}
 		if (o.Kind == "Role" || o.Kind == "RoleBinding") && dig(o.Metadata, "namespace") == "ate-system" && hook == "" {

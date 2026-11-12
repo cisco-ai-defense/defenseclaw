@@ -1799,6 +1799,28 @@ spec:
         averageUtilization: 70
 ---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+# The chain-key hook runs before install creates the release's resources
+# (defenseclaw-hooks among them), so it has its own ServiceAccount, which
+# exists only while the hook runs.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: defenseclaw-chain-key
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+automountServiceAccountToken: false
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 # Only while the chain-key hook runs: create the shared chain key Secret
 # when it is absent (create cannot be limited to one name; get can).
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1902,7 +1924,7 @@ roleRef:
   name: defenseclaw-hooks-chain-key
 subjects:
 - kind: ServiceAccount
-  name: defenseclaw-hooks
+  name: defenseclaw-chain-key
   namespace: defenseclaw-system
 ---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
@@ -1988,7 +2010,7 @@ spec:
     spec:
       restartPolicy: Never
       
-      serviceAccountName: defenseclaw-hooks
+      serviceAccountName: defenseclaw-chain-key
       automountServiceAccountToken: false
       enableServiceLinks: false
       securityContext:
