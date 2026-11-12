@@ -304,6 +304,9 @@ func (s *Store) apply(ctx context.Context, archive []byte, stage string, atespac
 		if m, merr := eb.DecodeManifest(b.Manifest); merr == nil {
 			rc.BundleID, rc.Version = m.BundleID, m.Version
 		}
+		if sig, serr := eb.DecodeSignature(b.Signature); serr == nil {
+			rc.KeyID = sig.KeyID
+		}
 	}
 	if cur.Active != nil {
 		rc.Previous = cur.Active.ManifestSHA256

@@ -246,7 +246,11 @@ func printSubstrateBundleReceipt(cmd *cobra.Command, asJSON bool, rc *bundle.Rec
 		} else {
 			fmt.Fprintf(w, "%s %s stage %s: %s", rc.Action, rc.BundleID, rc.Stage, rc.Result)
 			if rc.Version > 0 {
-				fmt.Fprintf(w, " (version %d, key %s)", rc.Version, rc.KeyID)
+				fmt.Fprintf(w, " (version %d", rc.Version)
+				if rc.KeyID != "" {
+					fmt.Fprintf(w, ", key %s", rc.KeyID)
+				}
+				fmt.Fprint(w, ")")
 			}
 			fmt.Fprintln(w)
 			if len(rc.Atespaces) > 0 {

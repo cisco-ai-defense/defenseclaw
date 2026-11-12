@@ -298,6 +298,11 @@ func TestTamperIsRefusedAndReceipted(t *testing.T) {
 	if receipts[0].Result != ResultApplied || receipts[len(receipts)-1].Result != ResultRefused {
 		t.Fatalf("receipt order %+v", receipts)
 	}
+	for _, r := range receipts {
+		if r.Code == string(eb.CodeSignatureInvalid) && r.KeyID != "acme-2026a" {
+			t.Errorf("a refused receipt does not name the key: %+v", r)
+		}
+	}
 }
 
 func TestRollbackRestoresAndKeepsTheFloor(t *testing.T) {
