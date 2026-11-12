@@ -431,6 +431,10 @@ type Config struct {
 	// Connectors holds settings of connectors that install nothing into an
 	// agent, such as the agent-gateway hook route (trusted_connectors.go).
 	Connectors ConnectorsConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
+
+	// Substrate is substrate: (PLAN §7.1), DefenseClaw on Agent Substrate.
+	// Off by default and read only in the cluster.
+	Substrate SubstrateConfig `mapstructure:"substrate" yaml:"substrate,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -3351,6 +3355,12 @@ func loadConfigSourceCheckedWithLayout(
 			ReportConfigLoadError(context.Background(), "openshell_invalid")
 		}
 		return nil, fmt.Errorf("config: openshell: %w", settingErrorAt("openshell", err))
+	}
+	if err := cfg.Substrate.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "substrate_invalid")
+		}
+		return nil, fmt.Errorf("config: substrate: %w", settingErrorAt("substrate", err))
 	}
 
 	// Validate registry source kind/content shapes. The Python CLI

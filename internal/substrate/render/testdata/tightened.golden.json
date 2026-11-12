@@ -1,0 +1,225 @@
+{
+  "policy": {
+    "rules": [
+      {
+        "https": {
+          "effects": {
+            "replaceHeaders": [
+              {
+                "actorJwt": {
+                  "audiences": [
+                    "defenseclaw"
+                  ],
+                  "expirationSeconds": "900"
+                },
+                "header": "x-defenseclaw-actor",
+                "prefix": "Bearer "
+              }
+            ]
+          },
+          "hostnames": [
+            "defenseclaw-actor.defenseclaw-system.svc"
+          ],
+          "ports": {
+            "numbers": [
+              443
+            ]
+          }
+        }
+      },
+      {
+        "https": {
+          "effects": {
+            "replaceHeaders": [
+              {
+                "credentialUri": "ate-secret://k8s.io/default/dc-people/p-8def678da0d076709ba7-npm/token",
+                "header": "Authorization",
+                "prefix": "Bearer "
+              }
+            ]
+          },
+          "hostnames": [
+            "registry.npmjs.org"
+          ],
+          "ports": {
+            "numbers": [
+              443
+            ]
+          }
+        }
+      },
+      {
+        "https": {
+          "hostnames": [
+            "github.com",
+            "pypi.org"
+          ],
+          "ports": {
+            "numbers": [
+              443
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "dropped": [
+    {
+      "host": "pins.example.org",
+      "source": "passthrough",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "api.github.com",
+      "source": "allow",
+      "reason": "blocked",
+      "detail": "api.github.com"
+    },
+    {
+      "host": "*.githubusercontent.com",
+      "source": "allow",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "Docs.Example.com.",
+      "source": "allow",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "api.openai.com",
+      "source": "allow",
+      "reason": "provider_host",
+      "detail": "openai.com"
+    },
+    {
+      "host": "*",
+      "source": "allow",
+      "reason": "defenseclaw_internal",
+      "detail": "defenseclaw-actor.defenseclaw-system.svc"
+    },
+    {
+      "host": "10.0.0.1",
+      "source": "allow",
+      "reason": "invalid_pattern"
+    },
+    {
+      "host": "*.us-east-1.amazonaws.com",
+      "source": "allow",
+      "reason": "provider_host",
+      "detail": "^bedrock(-runtime|-agent|-agent-runtime)?(-fips)?\\.[a-z0-9-]+\\.amazonaws\\.com$"
+    },
+    {
+      "host": "defenseclaw-admin.defenseclaw-system.svc",
+      "source": "allow",
+      "reason": "defenseclaw_internal",
+      "detail": "defenseclaw-system.svc"
+    },
+    {
+      "host": "*.defenseclaw-system.svc",
+      "source": "allow",
+      "reason": "defenseclaw_internal",
+      "detail": "defenseclaw-actor.defenseclaw-system.svc"
+    },
+    {
+      "host": "pins.example.org",
+      "source": "allow",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "bad_host",
+      "source": "allow",
+      "reason": "invalid_pattern"
+    },
+    {
+      "host": "crates.io",
+      "source": "pack:crates",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "index.crates.io",
+      "source": "pack:crates",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "static.crates.io",
+      "source": "pack:crates",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "proxy.golang.org",
+      "source": "pack:go",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "sum.golang.org",
+      "source": "pack:go",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "registry.yarnpkg.com",
+      "source": "pack:npm",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "files.pythonhosted.org",
+      "source": "pack:pypi",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "mcp.internal.example.com",
+      "source": "mcp",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "registry.example.com",
+      "source": "registry",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "host": "ghcr.io",
+      "source": "registry",
+      "reason": "not_in_allow_only"
+    },
+    {
+      "secret": "bad-uri",
+      "source": "secret",
+      "reason": "secret_not_in_allowed_credentials"
+    },
+    {
+      "secret": "dup-header",
+      "source": "secret",
+      "reason": "secret_not_in_allowed_credentials"
+    },
+    {
+      "secret": "github-push",
+      "source": "secret",
+      "reason": "secret_not_in_allowed_credentials"
+    },
+    {
+      "secret": "no-profiles",
+      "source": "secret",
+      "reason": "secret_not_for_profile"
+    },
+    {
+      "secret": "pinned",
+      "source": "secret",
+      "reason": "secret_not_in_allowed_credentials"
+    },
+    {
+      "secret": "sales-only",
+      "source": "secret",
+      "reason": "secret_not_for_profile"
+    },
+    {
+      "secret": "to-provider",
+      "source": "secret",
+      "reason": "secret_not_in_allowed_credentials"
+    }
+  ],
+  "bindings": [
+    {
+      "secret": "mine-npm",
+      "host": "registry.npmjs.org"
+    }
+  ]
+}
