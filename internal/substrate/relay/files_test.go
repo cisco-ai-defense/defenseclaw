@@ -240,9 +240,14 @@ func TestExecOutputCap(t *testing.T) {
 	if r.status != 200 || r.code != ExitOutputLimit || len(r.stdout) != 1000 || !strings.Contains(string(r.stderr), "output limit") {
 		t.Fatalf("code %d, %d bytes, stderr %q", r.code, len(r.stdout), r.stderr)
 	}
-	// Both streams share the budget.
+	// Both streams share the budget. They are separate pipes read by
+	// separate goroutines, so which one the cut lands in depends on read
+	// order (600+400 or 400+600); the total never passes the budget.
 	r = e.exec(ExecRequest{Argv: []string{"sh", "-c", "head -c 600 /dev/zero; head -c 600 /dev/zero >&2"}, MaxOutputBytes: 1000})
-	if r.code != ExitOutputLimit || len(r.stdout) != 600 || len(r.stderr) < 400 {
+	msg := "output limit of 1000 bytes reached"
+	data := len(r.stderr) - len(msg)
+	if r.code != ExitOutputLimit || !strings.HasSuffix(string(r.stderr), msg) || len(r.stdout)+data != 1000 ||
+		(len(r.stdout) != 600 && len(r.stdout) != 400) {
 		t.Fatalf("code %d, %d + %d bytes", r.code, len(r.stdout), len(r.stderr))
 	}
 }
