@@ -308,3 +308,19 @@ func TestSpendReaderReplacesTheLocalTrackerForReads(t *testing.T) {
 		t.Fatalf("nil restores the local tracker: %v", v)
 	}
 }
+
+func TestChargeKeysAreTrackedAsBudgetSpend(t *testing.T) {
+	e := NewEngine()
+	now := time.Now()
+	cf := CallFacts{Connector: "codex", ChargeKeys: []string{"team-a", "team-a", "all"}}
+	e.spend.add(cf, 2, now)
+	if v, ok := e.Spend(ScopeBudget, "team-a", PeriodDay, now); !ok || v != 2 {
+		t.Fatalf("a repeated key is charged once: %v %v", v, ok)
+	}
+	if v, ok := e.Spend(ScopeBudget, "all", PeriodMonth, now); !ok || v != 2 {
+		t.Fatal(v, ok)
+	}
+	if _, ok := e.Spend(ScopeBudget, "team-b", PeriodDay, now); ok {
+		t.Fatal("an uncharged key is unknown")
+	}
+}

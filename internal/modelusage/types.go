@@ -68,6 +68,12 @@ type CallFacts struct {
 	IdentityVerified bool
 
 	StartedAt time.Time
+
+	// ChargeKeys are the budget keys the admin routing verdict says this call
+	// is charged to (S11 AdminVerdict.ChargeKeys). The record keeps them and the
+	// spend tracker adds the call cost to each, so a budget check reads Spend
+	// with ScopeBudget.
+	ChargeKeys []string
 }
 
 // ParsedUsage is usage the caller already parsed (the Bifrost chat path). It

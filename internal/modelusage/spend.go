@@ -14,6 +14,7 @@ const (
 	ScopeUser      = "user"
 	ScopeGroup     = "group"
 	ScopeConnector = "connector"
+	ScopeBudget    = "budget"
 
 	PeriodDay   = "day"
 	PeriodWeek  = "week"
@@ -67,6 +68,13 @@ func (s *spendTracker) add(f CallFacts, usd float64, now time.Time) {
 	}
 	if f.Connector != "" {
 		subjects = append(subjects, spendKey{scope: ScopeConnector, subject: dim(f.Connector)})
+	}
+	seenKey := map[string]bool{}
+	for _, key := range f.ChargeKeys {
+		if key = dim(key); !seenKey[key] {
+			seenKey[key] = true
+			subjects = append(subjects, spendKey{scope: ScopeBudget, subject: key})
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
