@@ -7,3 +7,4 @@ package relay
 
 func hardenProcess() error    { return nil }
 func dumpable() (bool, error) { return true, nil }
+func holdSignals() bool       { return false }

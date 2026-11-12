@@ -90,6 +90,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "defenseclaw-actor-relay: harden:", err)
 		return 1
 	}
+	if !holdSignals() {
+		fmt.Fprintln(stderr, "defenseclaw-actor-relay: warning: not PID 1, so a process of the agent's user can stop the relay; in an actor the relay is the entrypoint")
+	}
 	v, err := NewVerifier(cfg)
 	if err != nil {
 		fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
