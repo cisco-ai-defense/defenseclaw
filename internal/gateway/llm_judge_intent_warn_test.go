@@ -55,7 +55,7 @@ func TestLLMJudgeWarnsWhenItsIntentStoreFails(t *testing.T) {
 
 	judge.ObserveSessionPrompt(ctx, "rotate the production credentials")
 	sample := judge.toolJudgeContextSample(ctx, "Bash", `{"command":"ls"}`)
-	judge.ResetToolJudgeSession("session-secret-key")
+	judge.ResetToolJudgeSession(context.Background(), "session-secret-key")
 	if strings.Contains(sample, "SESSION_USER_INTENT") || !strings.Contains(sample, "ls") {
 		t.Fatalf("a failed store must leave the call judged on its own:\n%s", sample)
 	}
@@ -91,7 +91,7 @@ func TestLLMJudgeWarnsWhenItsIntentStoreFails(t *testing.T) {
 	healthy := &LLMJudge{intentWarnOut: &out}
 	healthy.ObserveSessionPrompt(ctx, "local intent")
 	healthy.toolJudgeContextSample(ctx, "Bash", "{}")
-	healthy.ResetToolJudgeSession("session-secret-key")
+	healthy.ResetToolJudgeSession(context.Background(), "session-secret-key")
 	if out.Len() != 0 {
 		t.Fatalf("a working store warned: %s", out.String())
 	}
