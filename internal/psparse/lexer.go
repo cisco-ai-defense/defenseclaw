@@ -472,14 +472,17 @@ func (l *lexer) lexNumber() {
 			}
 		}
 	}
-	// multiplier / type suffix (kb mb gb tb pb, l, d)
+	// multiplier / numeric type suffix (kb mb gb tb pb, l u y s n d ...)
+	letterStart := l.i
 	for l.i < len(l.runes) && isLetter(l.cur()) {
 		l.i++
 	}
 	raw := l.slice(a, l.i)
-	// A run with more than one dot (an IP or a version) is not a number: re-lex
-	// the whole token as a bareword string to match the reference parser.
-	if strings.Count(raw, ".") > 1 {
+	suffix := string(l.runes[letterStart:l.i])
+	// Not a number if it has more than one dot (an IP/version) or a trailing
+	// letter run that is not a valid numeric suffix (7z, 1.txt): re-lex as a
+	// bareword, which at statement start is a command (F14).
+	if strings.Count(raw, ".") > 1 || !validNumberSuffix(suffix) {
 		l.i = a
 		l.lexBareword()
 		return
@@ -705,6 +708,28 @@ func isNameChar(r rune) bool {
 	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 func isLetter(r rune) bool { return unicode.IsLetter(r) }
+
+// validNumberSuffix reports whether the trailing letters of a numeric literal
+// form a valid PowerShell multiplier and/or type suffix. Anything else means
+// the token is a bareword, not a number.
+func validNumberSuffix(s string) bool {
+	if s == "" {
+		return true
+	}
+	s = strings.ToLower(s)
+	for _, m := range []string{"kb", "mb", "gb", "tb", "pb"} {
+		if strings.HasPrefix(s, m) {
+			s = s[2:]
+			break
+		}
+	}
+	switch s {
+	case "", "l", "u", "ul", "lu", "y", "uy", "s", "us", "n", "d":
+		return true
+	}
+	return false
+}
+
 func isHex(r rune) bool {
 	return unicode.IsDigit(r) || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
 }

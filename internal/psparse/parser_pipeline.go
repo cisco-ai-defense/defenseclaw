@@ -171,6 +171,9 @@ func (p *parser) parseCommand(invokeOp string) *Command {
 			cmd.Redirs = append(cmd.Redirs, p.parseRedirection())
 		case TokParameter:
 			cmd.Elements = append(cmd.Elements, p.parseParameter())
+		case TokComment:
+			// a comment inside a command is whitespace; it does not end it (F13)
+			p.advance()
 		case TokComma:
 			// a comma in command args ties the previous arg into an array;
 			// consume and continue (arguments remain individually visible).
@@ -303,6 +306,10 @@ func (p *parser) parseArgAtom() Expr {
 		// a '.' at argument position is a bareword (Remove-Item . -Recurse).
 		t := p.advance()
 		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: ".", Static: true, Bare: true}
+	case TokLabel:
+		// a ':name' at argument position is a bareword (Remove-Item :x -Force).
+		t := p.advance()
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
 	}
 	return nil
 }
