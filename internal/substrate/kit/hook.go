@@ -29,7 +29,7 @@ func signinRefusal(status int, body []byte) (string, bool) {
 		Reason  string `json:"reason"`
 		Message string `json:"message"`
 	}
-	if json.Unmarshal(body, &v) != nil || v.Reason != signin.RefusedCode {
+	if json.Unmarshal(body, &v) != nil || !signin.IsRefusalCode(v.Reason) {
 		return "", false
 	}
 	if v.Message == "" {

@@ -110,7 +110,6 @@ var wave2Headless = map[string][]string{
 // load) and the Node warning about env-proxy is silenced, as the OpenShell
 // launcher does.
 var wave2RelayEnv = map[string]map[string]string{
-	"amp":   {"XDG_CONFIG_HOME": XDGConfigHome},
 	"devin": {"XDG_CONFIG_HOME": XDGConfigHome},
 	"copilot": {
 		"LD_PRELOAD":   "/opt/defenseclaw-harness/copilot/lib/defenseclaw-pidfd.so",
@@ -272,16 +271,14 @@ func wave2Harden(ov *Overlay, name string, o OverlayOptions) {
 	switch name {
 	case "antigravity":
 		antigravityHarden(ov, o)
-	case "amp":
-		ampHarden(ov, o)
 	case "devin":
 		devinHarden(ov, o)
 	}
 }
 
-// XDGConfigHome is the root-owned configuration home of the agents whose hook
-// registration lives in a user configuration folder (Amp, Devin). Both honour
-// XDG_CONFIG_HOME (measured on the pinned releases), so the registration sits
+// XDGConfigHome is the root-owned configuration home of Devin, whose hook
+// registration lives in a user configuration folder. Devin honours
+// XDG_CONFIG_HOME (measured on the pinned release), so the registration sits
 // outside the agent-owned HOME and nothing above it can be renamed or
 // replaced (GAP-0136; Antigravity's ~/.gemini still has this gap, GAP-0120).
 const XDGConfigHome = LibDir + "/xdg"
@@ -317,21 +314,15 @@ func xdgEnv(ov *Overlay, rel ...string) {
 	}
 }
 
-// ampHarden moves Amp's plugin registration out of the agent's HOME: Amp loads
-// plugins only from <config home>/amp/plugins (it has no system plugin
-// location), and the agent runs with XDG_CONFIG_HOME at the root-owned
-// XDGConfigHome. Amp writes nothing there at start (measured); its settings
-// file, written on `amp permissions add`, stays the agent's and is
-// pre-created empty so an in-place write works.
-func ampHarden(ov *Overlay, o OverlayOptions) {
-	moveToXDG(ov, o, "amp/plugins/defenseclaw.ts")
-	ov.Remove = append(ov.Remove, path.Join(o.Home, ".config", "amp"))
-	xdgEnv(ov, "amp", "amp/plugins")
-	ov.Files = append(ov.Files, ImageFile{Path: path.Join(XDGConfigHome, "amp", "settings.json"), Mode: 0o600, User: true, Data: []byte("{}\n")})
-}
+// Amp cannot get the same protection. It loads plugins only from
+// <config home>/amp/plugins and chmods <config home>/amp to 0700 at every
+// start; with that folder root-owned it dies with "Unexpected error inside
+// Amp CLI" (measured on E1: a root-owned amp folder fails, an agent-owned one
+// with root-owned plugins works), and with it agent-owned the agent can
+// rename the plugins folder away. Amp is therefore built but refused in
+// managed (package signin, HookInAgentFolder) and warned about in open source.
 
-// devinHarden moves Devin's hook registration out of the agent's HOME the
-// same way. Devin rewrites the file at its first start only to add the
+// devinHarden moves Devin's hook registration out of the agent's HOME. Devin rewrites the file at its first start only to add the
 // schema version, so the image carries it; credentials live in
 // ~/.local/share/devin, which stays the agent's, and state in
 // <config home>/devin/cli, pre-created for it. The OpenShell launcher's

@@ -90,7 +90,7 @@ func TestEvaluateOtherRoutesAreUntouched(t *testing.T) {
 				t.Errorf("%s managed=%v: %+v, want allowed with no message", c, managed, d)
 			}
 		}
-		for c, env := range map[string]string{"cursor": "CURSOR_API_KEY", "amp": "AMP_API_KEY", "kiro": "KIRO_API_KEY", "antigravity": "GEMINI_API_KEY"} {
+		for c, env := range map[string]string{"cursor": "CURSOR_API_KEY", "kiro": "KIRO_API_KEY", "antigravity": "GEMINI_API_KEY"} {
 			if d := Evaluate(c, managed, []string{env}); !d.Allowed || d.Warn || d.Message != "" || d.Route != RouteVendorKey {
 				t.Errorf("%s managed=%v with %s bound: %+v, want allowed on the vendor key", c, managed, env, d)
 			}
@@ -109,5 +109,26 @@ func TestKnownAndNames(t *testing.T) {
 	}
 	if Known("nope") || DisplayName("nope") != "nope" {
 		t.Error("an unknown connector must keep its own name")
+	}
+}
+
+// Amp must own the folder that holds its plugin (it chmods it at every
+// start), so the agent can remove DefenseClaw's hook: managed refuses it even
+// on a vendor key, open source warns.
+func TestAmpHookRegistrationRule(t *testing.T) {
+	d := Evaluate("amp", true, []string{"AMP_API_KEY"})
+	if d.Allowed || d.Code != TamperRefusedCode || d.Route != RouteVendorKey || !IsRefusalCode(d.Code) {
+		t.Fatalf("amp managed on a key: %+v, want a tamper refusal", d)
+	}
+	d = Evaluate("amp", false, []string{"AMP_API_KEY"})
+	if !d.Allowed || !d.Warn || !strings.Contains(d.Message, "remove the hook") || strings.Contains(d.Message, "snapshot") {
+		t.Fatalf("amp open source on a key: %+v, want a tamper warning only", d)
+	}
+	d = Evaluate("amp", false, nil)
+	if !d.Warn || !strings.Contains(d.Message, "snapshot") || !strings.Contains(d.Message, "remove the hook") {
+		t.Fatalf("amp open source without a key: %+v, want both warnings", d)
+	}
+	if !IsRefusalCode(RefusedCode) || IsRefusalCode("actor_not_registered") {
+		t.Error("IsRefusalCode")
 	}
 }

@@ -49,9 +49,18 @@ const (
 	RouteSubscription Route = "subscription"
 )
 
-// RefusedCode is the machine-readable reason of a refusal (HTTP 403 body and
-// the hook's block text both carry it).
+// RefusedCode is the machine-readable reason of a refusal for a sign-in held
+// in the actor (HTTP 403 body and the hook's block text both carry it).
 const RefusedCode = "subscription_signin_refused"
+
+// TamperRefusedCode is the reason of a refusal for an agent whose DefenseClaw
+// hook registration sits in a folder the agent must own (see HookInAgentFolder).
+const TamperRefusedCode = "agent_hook_tamper_refused"
+
+// IsRefusalCode reports whether code is one of the refusal reasons.
+func IsRefusalCode(code string) bool {
+	return code == RefusedCode || code == TamperRefusedCode
+}
 
 type spec struct {
 	// Name is the connector's display name.
@@ -63,6 +72,13 @@ type spec struct {
 	// (or its placeholder) for the connector; "" when the vendor offers no
 	// key route.
 	KeyEnv string
+	// HookInAgentFolder is true when the agent must own the folder that
+	// holds DefenseClaw's hook registration, so the agent can remove the
+	// registration however the image is built. Measured for Amp 0.0.1785334225
+	// on Linux: it loads plugins only from <config home>/amp/plugins and
+	// chmods <config home>/amp to 0700 at every start, which fails with EPERM
+	// when that folder is root-owned (lanes/a11/HANDOFF.md, GAP-0136).
+	HookInAgentFolder bool
 }
 
 var specs = map[string]spec{
@@ -74,7 +90,7 @@ var specs = map[string]spec{
 	// Measured on the pinned releases (lanes/a11/HANDOFF.md): each takes the
 	// key from this variable instead of a sign-in.
 	"cursor":      {Name: "Cursor Agent CLI", KeyEnv: "CURSOR_API_KEY"},
-	"amp":         {Name: "Amp", KeyEnv: "AMP_API_KEY"},
+	"amp":         {Name: "Amp", KeyEnv: "AMP_API_KEY", HookInAgentFolder: true},
 	"kiro":        {Name: "Kiro CLI", KeyEnv: "KIRO_API_KEY"},
 	"antigravity": {Name: "Antigravity CLI", KeyEnv: "GEMINI_API_KEY"},
 	// Devin CLI 3000.4.25 documents no API key: its only route is
@@ -140,31 +156,44 @@ type Decision struct {
 	Warn bool
 }
 
-// Evaluate applies E9: managed refuses a subscription sign-in, open source
-// allows it with a warning, and the other routes are untouched.
+// Evaluate applies E9: managed refuses a subscription sign-in and an agent
+// whose hook registration the agent itself owns; open source allows both
+// with a warning; the other routes are untouched.
 func Evaluate(connector string, managed bool, placeholders []string) Decision {
 	route := Classify(connector, placeholders)
-	if route != RouteSubscription {
-		return Decision{Route: route, Allowed: true}
-	}
+	s := specs[normalize(connector)]
 	name := DisplayName(connector)
 	keyEnv := KeyEnv(connector)
+	signinRoute := route == RouteSubscription
+	if !signinRoute && !s.HookInAgentFolder {
+		return Decision{Route: route, Allowed: true}
+	}
 	if managed {
-		hint := "Ask your administrator for an agent that runs through the DefenseClaw model route."
-		if keyEnv != "" {
-			hint = fmt.Sprintf("Ask your administrator to bind %s as a Substrate secret (egress adds the key, so the actor never holds it), or use an agent that runs through the DefenseClaw model route.", keyEnv)
+		if signinRoute {
+			hint := "Ask your administrator for an agent that runs through the DefenseClaw model route."
+			if keyEnv != "" {
+				hint = fmt.Sprintf("Ask your administrator to bind %s as a Substrate secret (egress adds the key, so the actor never holds it), or use an agent that runs through the DefenseClaw model route.", keyEnv)
+			}
+			return Decision{
+				Route: route, Code: RefusedCode,
+				Message: fmt.Sprintf("%s signs in with a vendor account, and a managed deployment does not allow that: the sign-in token would sit in the actor and in every snapshot of it. %s", name, hint),
+			}
 		}
 		return Decision{
-			Route: route, Code: RefusedCode,
-			Message: fmt.Sprintf("%s signs in with a vendor account, and a managed deployment does not allow that: the sign-in token would sit in the actor and in every snapshot of it. %s", name, hint),
+			Route: route, Code: TamperRefusedCode,
+			Message: fmt.Sprintf("%s keeps DefenseClaw's hook registration in a folder it must own, so the agent could remove the hook, and a managed deployment does not allow that. Use an agent that runs through the DefenseClaw model route.", name),
 		}
 	}
-	hint := fmt.Sprintf("%s has no API key route, so the token cannot be kept out of the actor.", name)
-	if keyEnv != "" {
-		hint = fmt.Sprintf("To keep the token out of the actor, bind %s as a Substrate secret instead.", keyEnv)
+	var parts []string
+	if signinRoute {
+		hint := fmt.Sprintf("%s has no API key route, so the token cannot be kept out of the actor.", name)
+		if keyEnv != "" {
+			hint = fmt.Sprintf("To keep the token out of the actor, bind %s as a Substrate secret instead.", keyEnv)
+		}
+		parts = append(parts, fmt.Sprintf("%s signs in with a vendor account. Its sign-in token is stored in this actor and kept in every snapshot of it (suspend, fork and revert); deleting the actor purges them. %s", name, hint))
 	}
-	return Decision{
-		Route: route, Allowed: true, Warn: true,
-		Message: fmt.Sprintf("%s signs in with a vendor account. Its sign-in token is stored in this actor and kept in every snapshot of it (suspend, fork and revert); deleting the actor purges them. %s", name, hint),
+	if s.HookInAgentFolder {
+		parts = append(parts, fmt.Sprintf("%s keeps DefenseClaw's hook registration in a folder it must own, so the agent can remove the hook; DefenseClaw's hook-silence detection and the egress policy still apply.", name))
 	}
+	return Decision{Route: route, Allowed: true, Warn: true, Message: strings.Join(parts, " ")}
 }

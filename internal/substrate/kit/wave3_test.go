@@ -61,7 +61,7 @@ func TestWave3HookCommandsRunTheActorHook(t *testing.T) {
 // allow-all settings; an interactive run does not.
 func TestAmpSubstratePluginAndHeadlessSettings(t *testing.T) {
 	ov := wave2Overlay(t, "amp")
-	plugin := file(ov, XDGConfigHome+"/amp/plugins/defenseclaw.ts")
+	plugin := file(ov, "/sandbox/.config/amp/plugins/defenseclaw.ts")
 	if len(plugin) == 0 {
 		t.Fatal("amp: no plugin in the overlay")
 	}
@@ -104,13 +104,12 @@ func TestSigninRefusalFromTheGateway(t *testing.T) {
 	}
 }
 
-// GAP-0136: the hook registration of Amp and Devin lives under the root-owned
+// GAP-0136: the hook registration of Devin lives under the root-owned
 // XDGConfigHome (both agents run with XDG_CONFIG_HOME there), not in the
 // agent-owned HOME: the file, its folder and the tree above it are root-owned,
 // so the agent cannot rewrite, rename or delete them.
 func TestWave3HookRegistrationsAreRootOwned(t *testing.T) {
 	cases := map[string]string{
-		"amp":   XDGConfigHome + "/amp/plugins/defenseclaw.ts",
 		"devin": XDGConfigHome + "/devin/config.json",
 	}
 	for name, p := range cases {
@@ -143,7 +142,7 @@ func TestWave3HookRegistrationsAreRootOwned(t *testing.T) {
 			t.Errorf("%s: the agent does not run with XDG_CONFIG_HOME=%s (%q)", name, XDGConfigHome, got)
 		}
 		for _, f := range ov.Files {
-			if strings.HasPrefix(f.Path, XDGConfigHome) && f.User && !strings.HasSuffix(f.Path, "/amp/settings.json") {
+			if strings.HasPrefix(f.Path, XDGConfigHome) && f.User {
 				t.Errorf("%s: %s under the root-owned config home is the agent's", name, f.Path)
 			}
 		}
@@ -155,5 +154,27 @@ func TestWave3HookRegistrationsAreRootOwned(t *testing.T) {
 	userDirs := strings.Join(dv.UserDirs, " ")
 	if !strings.Contains(userDirs, XDGConfigHome+"/devin/cli") {
 		t.Errorf("devin: no agent-owned state folder (UserDirs %v)", dv.UserDirs)
+	}
+}
+
+// Amp's plugin stays in the agent's HOME (it chmods its config folder at every
+// start, so the folder cannot be root-owned): the connector is refused in
+// managed instead (package signin), and the plugin is the agent's file.
+func TestAmpPluginStaysInHome(t *testing.T) {
+	ov := wave2Overlay(t, "amp")
+	var found bool
+	for _, f := range ov.Files {
+		if f.Path == "/sandbox/.config/amp/plugins/defenseclaw.ts" {
+			found = true
+			if !f.User {
+				t.Error("amp: the plugin is not the agent's file, but Amp cannot run with its folder root-owned")
+			}
+		}
+	}
+	if !found {
+		t.Error("amp: no plugin in the overlay")
+	}
+	if len(wave2RelayEnv["amp"]) != 0 {
+		t.Errorf("amp runs with a moved config home: %v", wave2RelayEnv["amp"])
 	}
 }

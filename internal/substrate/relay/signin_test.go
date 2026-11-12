@@ -49,7 +49,7 @@ func TestRelaySigninNotAskedOfOtherRoutes(t *testing.T) {
 			t.Errorf("%s managed: init %v banner %q, want none", c, err, s.agent.Banner)
 		}
 	}
-	for c, env := range map[string]string{"cursor": "CURSOR_API_KEY", "amp": "AMP_API_KEY", "kiro": "KIRO_API_KEY", "antigravity": "GEMINI_API_KEY"} {
+	for c, env := range map[string]string{"cursor": "CURSOR_API_KEY", "kiro": "KIRO_API_KEY", "antigravity": "GEMINI_API_KEY"} {
 		s := signinServer(c, true, map[string]string{env: "placeholder-not-a-secret"})
 		if err := s.init(); err != nil || s.agent.Banner != "" {
 			t.Errorf("%s managed with %s: init %v banner %q, want a clean start", c, env, err, s.agent.Banner)
@@ -69,5 +69,18 @@ func TestRelaySigninRefusalIsForbidden(t *testing.T) {
 	var refused *signinRefusal
 	if !errors.As(err, &refused) {
 		t.Fatalf("init error %T %v, want a signinRefusal", err, err)
+	}
+}
+
+// Amp on a vendor key is still refused in a managed image (its hook folder is
+// the agent's), and starts with a warning in an open-source one.
+func TestRelayAmpOnAKeyManagedRefusedOpenSourceWarned(t *testing.T) {
+	env := map[string]string{"AMP_API_KEY": "placeholder-not-a-secret"}
+	if err := signinServer("amp", true, env).init(); err == nil {
+		t.Error("amp managed on a key started")
+	}
+	o := signinServer("amp", false, env)
+	if err := o.init(); err != nil || !strings.Contains(o.agent.Banner, "remove the hook") {
+		t.Errorf("amp open source on a key: init %v banner %q", err, o.agent.Banner)
 	}
 }
