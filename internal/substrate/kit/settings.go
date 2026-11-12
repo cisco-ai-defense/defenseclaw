@@ -55,6 +55,13 @@ type Overlay struct {
 	Remove []string
 	// Env is the image environment (ENV), sorted by Dockerfile order.
 	Env map[string]string
+	// UserDirs are extra directories owned by the image USER (mode 0755),
+	// created before the files are copied.
+	UserDirs []string
+	// RootDirs are directories under HOME that end up root-owned 0755
+	// after the files are copied, so the agent can neither delete nor
+	// replace a root-owned file in them (Antigravity's hooks.json).
+	RootDirs []string
 }
 
 // OverlayOptions are the template-build inputs of an overlay.
@@ -192,6 +199,13 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 			// A connector shell hook (claude-code-hook.sh, codex-hook.sh,
 			// codex-notify.sh): the actor hook replaces it.
 			continue
+		case art.Connector == "hermes" && f.Path == "/etc/hermes/config.yaml":
+			data, err = hermesManagedConfig(data, o)
+		case art.Connector == "opencode" && f.Path == connector.OpenCodeSandboxManagedConfigPath:
+			data, err = opencodeManagedConfig(data, gw, o)
+		}
+		if err == nil && hookCommandRewrites[art.Connector] != nil {
+			data, _, err = rewriteHookCommands(art.Connector, data)
 		}
 		if err != nil {
 			return Overlay{}, err
@@ -227,6 +241,9 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 	if len(cfg.Relay.Headless) == 0 {
 		cfg.Relay.Headless = HeadlessArgv[art.Connector]
 	}
+	if len(cfg.Relay.Env) == 0 {
+		cfg.Relay.Env = wave2RelayEnv[art.Connector]
+	}
 	if cfg.LogDir == "" {
 		cfg.LogDir = path.Join(o.Home, ".defenseclaw")
 	}
@@ -244,6 +261,9 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 		ov.Files = append(ov.Files, ImageFile{Path: path.Join(o.Home, ".codex", "config.toml"), Mode: 0o600, User: true,
 			Data: []byte(fmt.Sprintf("# DefenseClaw actor image: the working directory is trusted (the TUI trusts exact paths).\n[projects.%q]\ntrust_level = \"trusted\"\n", o.Workdir))})
 	}
+
+	ov.Files = append(ov.Files, wave2UserFiles(art.Connector, o)...)
+	wave2Harden(&ov, art.Connector, o)
 
 	// The image environment.
 	for k, v := range art.Env {
@@ -375,6 +395,9 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 	case "codex":
 		env["OPENAI_API_KEY"] = "placeholder-not-a-secret"
 		env["CODEX_API_KEY"] = "placeholder-not-a-secret"
+	}
+	for k, v := range wave2ModelEnv(connectorName, gw, o) {
+		env[k] = v
 	}
 	return env
 }

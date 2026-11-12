@@ -124,7 +124,17 @@ func TestExplicitOpenShellIngressRendersTheSameBytes(t *testing.T) {
 func TestSubstrateRenderBakesTheActorIngress(t *testing.T) {
 	for _, tc := range sandboxGoldenTargets {
 		artifacts, err := tc.provider.SandboxArtifacts(SandboxRenderTarget{Ingress: substrateIngress(), AgentVersion: tc.version})
-		if _, shell := sandboxHookScriptsByConnector[tc.connector]; !shell {
+		if _, shell := sandboxHookScriptsByConnector[tc.connector]; !shell && substratePluginTransports[tc.connector] {
+			// Plugin connectors with a hook-post variant render for
+			// Substrate; TestSubstratePluginTransport reads the plugin.
+			if err != nil {
+				t.Fatalf("%s: %v", tc.connector, err)
+			}
+			if artifacts.Env[SandboxTokenEnv] != SandboxSubstrateTokenPlaceholder {
+				t.Fatalf("%s: env %s = %q", tc.connector, SandboxTokenEnv, artifacts.Env[SandboxTokenEnv])
+			}
+			continue
+		} else if !shell {
 			if err == nil || !strings.Contains(err.Error(), "no Agent Substrate transport") {
 				t.Fatalf("%s: plugin transport rendered for Substrate: %v", tc.connector, err)
 			}

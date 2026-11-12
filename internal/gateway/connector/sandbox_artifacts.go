@@ -388,6 +388,15 @@ var sandboxHookScriptsByConnector = map[string][]string{
 	"kiro":        {"kiro-hook.sh"},
 }
 
+// SandboxSubstrateHookBinary is the actor kit's hook command in an Agent
+// Substrate image (kit.HookBinary; a test pins the two together).
+const SandboxSubstrateHookBinary = SandboxHookDir + "/defenseclaw-actor-hook"
+
+// substratePluginTransports are the in-agent plugin connectors whose
+// Substrate variant execs "defenseclaw-actor-hook hook-post". Amp's plugin
+// has no such variant yet, so a Substrate render of it is refused.
+var substratePluginTransports = map[string]bool{"opencode": true}
+
 // sandboxHookHostOnlyMarkers must never survive into a rendered sandbox
 // script: each one is a host-only credential, fail-mode or data-dir input.
 var sandboxHookHostOnlyMarkers = []string{
@@ -418,10 +427,12 @@ func resolveSandboxTarget(connectorName string, target SandboxRenderTarget) (res
 	if err != nil {
 		return resolvedSandboxTarget{}, err
 	}
-	if _, shell := sandboxHookScriptsByConnector[normalizeConnectorName(connectorName)]; ingress.Substrate() && !shell {
-		// Only the shared shell transport (_sandbox.sh) sends the actor
-		// header; a plugin transport would send the bearer and no header,
-		// and Substrate would inject no token.
+	name := normalizeConnectorName(connectorName)
+	if _, shell := sandboxHookScriptsByConnector[name]; ingress.Substrate() && !shell && !substratePluginTransports[name] {
+		// The shared shell transport (_sandbox.sh) and the plugins that exec
+		// the actor kit's hook-post (substratePluginTransports) send the
+		// actor header; any other plugin transport would send the bearer and
+		// no header, and Substrate would inject no token.
 		return resolvedSandboxTarget{}, fmt.Errorf("%s has no Agent Substrate transport yet: its in-agent plugin does not send the %s header", connectorName, SandboxActorHeader)
 	}
 	version := strings.TrimSpace(target.AgentVersion)
