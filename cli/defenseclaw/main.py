@@ -76,6 +76,7 @@ from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_policy import policy
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 from defenseclaw.commands.cmd_registry import registry
+from defenseclaw.commands.cmd_routing import routing_cmd
 from defenseclaw.commands.cmd_sandbox import sandbox
 from defenseclaw.commands.cmd_settings import settings_cmd
 from defenseclaw.commands.cmd_setup import setup
@@ -89,6 +90,8 @@ from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
 
 SKIP_LOAD_COMMANDS = {
+    # routing loads config.yaml itself: a managed user cannot read it and gets the gateway's own view.
+    "routing",
     "agent",
     "config",
     "init",
@@ -604,6 +607,7 @@ cli.add_command(migrate_cmd, "migrate")
 cli.add_command(keys_cmd, "keys")
 cli.add_command(config_cmd, "config")
 cli.add_command(observability_cmd, "observability")
+cli.add_command(routing_cmd, "routing")
 cli.add_command(settings_cmd, "settings")
 cli.add_command(uninstall_cmd, "uninstall")
 cli.add_command(reset_cmd, "reset")
