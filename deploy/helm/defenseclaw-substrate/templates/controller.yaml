@@ -1,6 +1,7 @@
 {{- $sel := dict "ctx" . "component" "controller" "serving" false }}
-# Two replicas, one active through the lease: policies, admission, idle
-# suspend, drift and inventory.
+# One replica, Recreate: policies, admission, idle suspend, drift and
+# inventory. The controller has no Lease client yet (A3), so two would both
+# act; when it gets one this becomes two replicas with a PDB.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,13 +9,10 @@ metadata:
   labels:
     {{- include "dc.componentLabels" $sel | nindent 4 }}
 spec:
-  replicas: {{ .Values.controller.replicas }}
+  replicas: 1
   revisionHistoryLimit: 5
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+    type: Recreate
   selector:
     matchLabels:
       {{- include "dc.selector" $sel | nindent 6 }}
@@ -38,21 +36,10 @@ spec:
         {{- toYaml .Values.controller.args | nindent 8 }}
         {{- else }}
         - substrate-controller
-        - --lease={{ .Values.controller.leaseName }}
-        - --metrics-listen=:{{ .Values.controller.ports.metrics }}
+        - --config=/etc/defenseclaw/config.yaml
         {{- end }}
         env:
         {{- include "dc.env" . | nindent 8 }}
-        ports:
-        - name: metrics
-          containerPort: {{ .Values.controller.ports.metrics }}
-        readinessProbe:
-          httpGet: {path: /readyz, port: metrics}
-          periodSeconds: 5
-        livenessProbe:
-          httpGet: {path: /healthz, port: metrics}
-          periodSeconds: 10
-          failureThreshold: 6
         resources:
           {{- toYaml .Values.controller.resources | nindent 10 }}
         securityContext:
@@ -61,15 +48,3 @@ spec:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: defenseclaw-controller
-  labels:
-    {{- include "dc.componentLabels" $sel | nindent 4 }}
-spec:
-  minAvailable: {{ .Values.controller.pdb.minAvailable }}
-  selector:
-    matchLabels:
-      {{- include "dc.selector" $sel | nindent 6 }}

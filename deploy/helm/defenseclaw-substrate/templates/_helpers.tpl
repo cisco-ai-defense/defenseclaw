@@ -38,6 +38,9 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{/* The pod-identity SPIFFE ID of a component's ServiceAccount. */}}
+{{- define "dc.spiffe" -}}spiffe://cluster.local/ns/{{ .ctx.Release.Namespace }}/sa/defenseclaw-{{ .component }}{{- end -}}
+
 {{/* The ServiceAccount of a component and its ate-api principal. */}}
 {{- define "dc.sa" -}}defenseclaw-{{ . }}{{- end -}}
 {{- define "dc.principal" -}}system:serviceaccount:{{ .ctx.Release.Namespace }}:defenseclaw-{{ .component }}{{- end -}}
@@ -208,5 +211,47 @@ would never start.
 checksum/config: {{ include "dc.config" .ctx | sha256sum }}
 {{- with .ctx.Values.podAnnotations }}
 {{ toYaml . }}
+{{- end }}
+{{- end -}}
+
+{{/* Leader RPC mTLS: the pod-identity bundle and the SPIFFE IDs that may call the leader (A2 serve flags). */}}
+{{- define "dc.peerFlags" -}}
+- --peer-bundle=/var/run/ate/credential-bundle.pem
+- --peer-trust=/var/run/ate/podidentity-ca.crt
+- --peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
+- --peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "callout") }}
+- --peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "controller") }}
+{{- end -}}
+
+{{/* Optional Secrets of the gateway and leader (absent ones are skipped). */}}
+{{- define "dc.gatewaySecretMounts" -}}
+- name: relay-session
+  mountPath: /var/run/secrets/defenseclaw-relay-session
+  readOnly: true
+- name: llm-credentials
+  mountPath: /var/run/secrets/defenseclaw-llm
+  readOnly: true
+{{- if .Values.callout.judge.tokenSecret }}
+- name: callout-judge
+  mountPath: /var/run/secrets/defenseclaw-callout-judge
+  readOnly: true
+{{- end }}
+{{- end -}}
+
+{{- define "dc.gatewaySecretVolumes" -}}
+- name: relay-session
+  secret:
+    secretName: {{ .Values.gateway.relaySessionSecret }}
+    optional: true
+- name: llm-credentials
+  secret:
+    secretName: {{ .Values.gateway.llmCredentialsSecret }}
+    optional: true
+{{- with .Values.callout.judge.tokenSecret }}
+- name: callout-judge
+  secret:
+    secretName: {{ . }}
+    items:
+    - {key: token, path: token}
 {{- end }}
 {{- end -}}

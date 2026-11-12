@@ -50,7 +50,9 @@ spec:
         - --actor-listen=:{{ .Values.gateway.ports.actor }}
         - --admin-listen=:{{ .Values.gateway.ports.admin }}
         - --metrics-listen=:{{ .Values.gateway.ports.metrics }}
-        - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc:{{ .Values.leader.port }}
+        - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.leader.port }}
+        - --leader-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
+        {{- include "dc.peerFlags" . | nindent 8 }}
         {{- end }}
         env:
         {{- include "dc.env" . | nindent 8 }}
@@ -74,8 +76,10 @@ spec:
           {{- toYaml .Values.containerSecurityContext | nindent 10 }}
         volumeMounts:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
+        {{- include "dc.gatewaySecretMounts" . | nindent 8 }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
+      {{- include "dc.gatewaySecretVolumes" . | nindent 6 }}
 ---
 # The actor Service: the only DefenseClaw host in rendered egress policies,
 # as an http rule on port 80 to defenseclaw-actor.<ns>.svc.cluster.local
