@@ -37,6 +37,7 @@ type S7Engine struct {
 	hook      http.HandlerFunc
 	connector string
 	profile   string
+	judgeRec  *s7RecordingProvider
 }
 
 // S7NewEngine boots the sidecar generation for cfg and returns the
@@ -76,10 +77,14 @@ func S7NewEngine(cfg *config.Config, connectorName string) (*S7Engine, error) {
 	}, nil
 }
 
-// Hook answers one hook payload through the connector's handler.
-func (e *S7Engine) Hook(ctx context.Context, body []byte) (int, []byte) {
+// Hook answers one hook payload through the connector's handler. headers
+// (name, value pairs) are set on the request, e.g. the hook's answer wait.
+func (e *S7Engine) Hook(ctx context.Context, body []byte, headers ...string) (int, []byte) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+e.connector, bytes.NewReader(body)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
 	rec := httptest.NewRecorder()
 	e.hook(rec, req)
 	return rec.Code, rec.Body.Bytes()
