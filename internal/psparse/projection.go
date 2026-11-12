@@ -155,23 +155,14 @@ func argKind(e Expr) string {
 	case nil:
 		return "other"
 	case *StringLit:
-		switch v.Kind {
-		case StrSingle, StrHereSingle:
-			return "str"
-		case StrDouble, StrHereDouble:
-			if v.Static {
-				return "str"
-			}
-			return "expand"
-		case StrBare:
-			// a bareword containing an unescaped $ is an expandable string on
-			// the reference side.
-			if hasUnescapedDollar(v.Value) {
-				return "expand"
-			}
+		// Project straight from the AST's Static flag: a static string (single
+		// quoted, here-single, or a double/bareword with no expansion) is a
+		// StringConstant on the reference side; anything non-static is an
+		// ExpandableString. Never re-derive "expand" from the raw text.
+		if v.Kind == StrSingle || v.Kind == StrHereSingle || v.Static {
 			return "str"
 		}
-		return "str"
+		return "expand"
 	case *Variable:
 		if v.Splat {
 			return "splat"
@@ -203,22 +194,6 @@ func argKind(e Expr) string {
 		return "member"
 	}
 	return "other"
-}
-
-func hasUnescapedDollar(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '`' {
-			i++
-			continue
-		}
-		if s[i] == '$' && i+1 < len(s) {
-			n := s[i+1]
-			if n == '(' || n == '{' || n == '_' || (n >= 'a' && n <= 'z') || (n >= 'A' && n <= 'Z') {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // walkExpr recurses into an expression, projecting any commands nested inside
