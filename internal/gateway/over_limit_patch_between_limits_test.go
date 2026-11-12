@@ -40,7 +40,8 @@ func TestOverLimitPatchFillerLineKeepsContentRuleVerdict(t *testing.T) {
 	if err := os.Symlink("/etc/ld.so.preload", link); err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []struct {
+	usedSize, usedLayout, usedTwin := map[int]bool{}, map[[2]int]bool{}, map[[2]int]bool{}
+	for ci, c := range []struct {
 		name, target, attack, benign, rule string
 	}{
 		{"ld.so.preload", "/etc/ld.so.preload", "/usr/local/lib/liblogger.so", "# no libraries are preloaded", "persistence.global_ld_preload_install"},
@@ -49,46 +50,105 @@ func TestOverLimitPatchFillerLineKeepsContentRuleVerdict(t *testing.T) {
 		{"daemon.json", "/etc/docker/daemon.json", overLimitDockerHTTPRegistry, `{"log-level":"warn"}`, dockerInsecureHTTPRegistryRuleID},
 		{"pam.d", "/etc/pam.d/sshd", "auth sufficient pam_permit.so", "auth required pam_unix.so", "tamper.pam_permit_authentication_bypass"},
 	} {
-		for _, filler := range []int{0, 65536, 100000, 200000, 262000, 270000, 300000} {
-			for _, layout := range []string{"lead, filler, text", "filler, text", "text, filler"} {
-				lines := func(text string) []string {
-					pad := strings.Repeat(" ", filler)
-					switch layout {
-					case "filler, text":
-						return []string{pad, text}
-					case "text, filler":
-						return []string{text, pad}
-					}
-					// A JSON document takes no comment line.
-					if strings.HasSuffix(c.target, ".json") {
-						return []string{"", pad, text}
-					}
-					return []string{"# c", pad, text}
+		// The owner's test budget: no cross product of target x filler size x
+		// layout. Each target is judged at the sizes below 64 KiB (0 and
+		// 65536), at one size between 64 KiB and the argument limit (100000,
+		// 200000 or 262000 in turn) and at one above it (270000 or 300000 in
+		// turn), each in one layout, turning with the target and the size;
+		// the benign text and the attack in an ordinary file are judged at
+		// the target's two large sizes, one each, swapping from target to
+		// target. So every target is judged in every region, every size is
+		// judged, every layout is judged in every region, and both twins are
+		// judged in both large regions; the check at the end shows it.
+		between, above := []int{100000, 200000, 262000}, []int{270000, 300000}
+		fillers := []int{0, 65536, between[ci%len(between)], above[ci%len(above)]}
+		for si, filler := range fillers {
+			layout := fillerLayouts[(ci+si)%len(fillerLayouts)]
+			usedSize[filler] = true
+			usedLayout[[2]int{fillerRegion(filler), (ci + si) % len(fillerLayouts)}] = true
+			lines := func(text string) []string {
+				pad := strings.Repeat(" ", filler)
+				switch layout {
+				case "filler, text":
+					return []string{pad, text}
+				case "text, filler":
+					return []string{text, pad}
 				}
-				t.Run(fmt.Sprintf("%s/filler %d/%s", c.name, filler, layout), func(t *testing.T) {
-					got := overLimitPatchVerdict(t, home, project, betweenLimitsPatchCall(c.target, lines(c.attack)...))
-					if overLimitHookAction(t, got) != "block" || !strings.Contains(got, c.rule) {
-						t.Fatalf("not blocked by %s: %.600s", c.rule, got)
-					}
-					if strings.Contains(got, overLimitElidedContentTitle) {
-						t.Fatalf("padding takes the conservative finding, not the rule verdict: %.600s", got)
-					}
-					if filler != 100000 && filler != 270000 {
-						return
-					}
+				// A JSON document takes no comment line.
+				if strings.HasSuffix(c.target, ".json") {
+					return []string{"", pad, text}
+				}
+				return []string{"# c", pad, text}
+			}
+			benignAt, ordinaryAt := fillers[2], fillers[3]
+			if ci%2 == 1 {
+				benignAt, ordinaryAt = ordinaryAt, benignAt
+			}
+			if filler == benignAt {
+				usedTwin[[2]int{0, fillerRegion(filler)}] = true
+			}
+			if filler == ordinaryAt {
+				usedTwin[[2]int{1, fillerRegion(filler)}] = true
+			}
+			t.Run(fmt.Sprintf("%s/filler %d/%s", c.name, filler, layout), func(t *testing.T) {
+				got := overLimitPatchVerdict(t, home, project, betweenLimitsPatchCall(c.target, lines(c.attack)...))
+				if overLimitHookAction(t, got) != "block" || !strings.Contains(got, c.rule) {
+					t.Fatalf("not blocked by %s: %.600s", c.rule, got)
+				}
+				if strings.Contains(got, overLimitElidedContentTitle) {
+					t.Fatalf("padding takes the conservative finding, not the rule verdict: %.600s", got)
+				}
+				if filler == benignAt {
 					benign := overLimitPatchVerdict(t, home, project, betweenLimitsPatchCall(c.target, lines(c.benign)...))
 					if overLimitHookAction(t, benign) == "block" {
 						t.Fatalf("benign text of %s blocked: %.600s", c.target, benign)
 					}
+				}
+				if filler == ordinaryAt {
 					ordinary := overLimitPatchVerdict(t, home, project,
 						betweenLimitsPatchCall(filepath.Join(project, "notes.txt"), lines(c.attack)...))
 					if overLimitHookAction(t, ordinary) == "block" {
 						t.Fatalf("the same text in an ordinary file blocked: %.600s", ordinary)
 					}
-				})
+				}
+			})
+		}
+	}
+	for _, size := range []int{0, 65536, 100000, 200000, 262000, 270000, 300000} {
+		if !usedSize[size] {
+			t.Errorf("filler size %d never judged", size)
+		}
+	}
+	for region := range 3 {
+		for layout := range fillerLayouts {
+			if !usedLayout[[2]int{region, layout}] {
+				t.Errorf("layout %q never judged in size region %d", fillerLayouts[layout], region)
 			}
 		}
 	}
+	for twin := range 2 {
+		for region := 1; region < 3; region++ {
+			if !usedTwin[[2]int{twin, region}] {
+				t.Errorf("twin %d never judged in size region %d", twin, region)
+			}
+		}
+	}
+}
+
+// fillerLayouts are the places of the filler line in the patched file.
+var fillerLayouts = []string{"lead, filler, text", "filler, text", "text, filler"}
+
+// fillerRegion is 0 below 64 KiB, 1 between 64 KiB and the argument limit
+// (the sizes of TestOverLimitPatchFillerLineKeepsContentRuleVerdict) and 2
+// above it.
+func fillerRegion(filler int) int {
+	switch {
+	case filler < 65536:
+		return 0
+	case filler <= 262000:
+		return 1
+	}
+	return 2
 }
 
 // TestOverLimitPatchTextBetweenLimitsFailsClosedForItsTargetOnly pins that a
