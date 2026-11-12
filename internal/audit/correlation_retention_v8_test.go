@@ -155,3 +155,44 @@ func countCorrelationEvent(t *testing.T, store *Store, semantic SemanticEventID)
 	}
 	return count
 }
+
+// The size cap moves the run cutoff to about an hour ago. Open state (an
+// active cursor, an open tool call) counts as ended only after the day
+// window, so a session waiting on a prompt for two hours keeps both rows
+// (issue #1440 review: the cap must not delete live sessions).
+func TestCorrelationRetentionKeepsRecentOpenStateWhenTheSizeCapMovesTheCutoff(t *testing.T) {
+	store, repo := newCorrelationTestStore(t)
+	instance := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyDefenseClaw)
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	idle := now.Add(-2 * time.Hour)
+	seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: idle, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
+		if err := tx.PutCursor(t.Context(), CorrelationCursor{
+			ConnectorInstanceID: instance.ConnectorInstanceID, SessionID: "idle-session", AgentID: "idle-agent",
+			Phase: "active", Sequence: 2, LastSemanticEventID: event.SemanticEventID,
+			ProfileVersion: instance.ProfileVersion, Active: true, UpdatedAt: idle,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.PutPendingOperation(t.Context(), CorrelationPendingOperation{
+			ConnectorInstanceID: instance.ConnectorInstanceID, Namespace: "codex", Kind: CorrelationIdentifierTool,
+			OperationID: "idle-tool", Type: CorrelationOperationTool,
+			ScopeKind: CorrelationOperationScopeSession, ScopeID: "idle-session", SessionID: "idle-session",
+			StartSemanticEventID: event.SemanticEventID, StartedAt: idle,
+			Status: CorrelationOperationActive, UpdatedAt: idle,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	reaper := newRetentionReaperAt(t, store, nil, 7, now, RetentionOptions{}, retentionHooks{})
+	var result RetentionRunResult
+	result.RowsDeleted = newRetentionCounts()
+	sizeCutoff := now.Add(-time.Hour)
+	if err := reaper.drainCorrelationState(t.Context(), sizeCutoff, now.Add(-7*24*time.Hour), now, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"correlation_cursors", "correlation_pending_operations", "correlation_events"} {
+		if countRetentionRows(t, store.db, table) != 1 {
+			t.Fatalf("recent open state was reaped by the size-cap cutoff: %s", table)
+		}
+	}
+}

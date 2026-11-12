@@ -349,7 +349,7 @@ func TestToolChainRootRowsDoNotBlockOlderRetention(t *testing.T) {
 		{RetentionGuardrailChainEvents, []any{unixNano(future), guardrail.ToolChainMaxEvents, guardrail.ToolChainMaxEvents, batch}},
 		{RetentionGuardrailChainPartitions, []any{unixNano(future), batch}},
 		{RetentionCorrelationReceipts, []any{unixNano(future), batch}},
-		{RetentionCorrelationCursors, []any{unixNano(future), batch}},
+		{RetentionCorrelationCursors, []any{unixNano(future), unixNano(future), batch}},
 		{RetentionCorrelationPending, []any{unixNano(future), batch, unixNano(future), batch, batch}},
 		{RetentionCorrelationRelationships, []any{unixNano(future), unixNano(future), unixNano(future), batch}},
 		{RetentionCorrelationEvents, []any{unixNano(future), unixNano(future), batch}},

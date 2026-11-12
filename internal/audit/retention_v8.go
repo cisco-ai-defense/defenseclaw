@@ -636,6 +636,14 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 		}
 	}
 	result.Cutoff = cutoff
+	// Open state (an active cursor, an open tool call) counts as ended only
+	// after the whole day window, never after the shorter size-cap cutoff:
+	// a session waiting on a prompt for an hour is still live (issue #1440).
+	// Days 0 and Secure Client stores keep open state for good.
+	staleActive := time.Unix(0, 0).UTC()
+	if days > 0 && !reaper.secureClient {
+		staleActive = started.Add(-time.Duration(days) * 24 * time.Hour)
+	}
 	judgeSourceKey := ""
 	if runErr == nil {
 		if err := ctx.Err(); err != nil {
@@ -674,7 +682,7 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 		}
 	}
 	if runErr == nil {
-		if err := reaper.drainCorrelationState(ctx, cutoff, started, &result); err != nil {
+		if err := reaper.drainCorrelationState(ctx, cutoff, staleActive, started, &result); err != nil {
 			runErr = retentionRunFailure(RetentionFailureAuditStore, err)
 		}
 	}
@@ -933,6 +941,7 @@ func (reaper *RetentionReaper) drainAuditTable(
 func (reaper *RetentionReaper) drainCorrelationState(
 	ctx context.Context,
 	cutoff time.Time,
+	staleActive time.Time,
 	now time.Time,
 	result *RetentionRunResult,
 ) error {
@@ -967,8 +976,8 @@ func (reaper *RetentionReaper) drainCorrelationState(
 	}
 	stages = append(stages,
 		correlationStage{RetentionCorrelationReceipts, []any{unixNano(now)}, false},
-		correlationStage{RetentionCorrelationCursors, []any{unixNano(cutoff)}, false},
-		correlationStage{RetentionCorrelationPending, []any{unixNano(cutoff), reaper.batchSize(), unixNano(cutoff), reaper.batchSize()}, false},
+		correlationStage{RetentionCorrelationCursors, []any{unixNano(cutoff), unixNano(staleActive)}, false},
+		correlationStage{RetentionCorrelationPending, []any{unixNano(cutoff), reaper.batchSize(), unixNano(staleActive), reaper.batchSize()}, false},
 		correlationStage{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}, false},
 		correlationStage{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}, false},
 	)
@@ -1169,20 +1178,20 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 				fingerprint_sha256 LIMIT ?
 		)`, nil
 	case RetentionCorrelationCursors:
-		// A cursor still active after the whole retention window belongs to a
+		// A cursor still active after the whole day window belongs to a
 		// session that never ended (agent killed, no session end): it is
-		// dead and no longer pins the graph (issue #1440). IN (0, 1) keeps
-		// the (active, updated) index in use.
+		// dead and no longer pins the graph (issue #1440). The second
+		// argument is that stale-active cutoff; the size cap never moves it.
 		return `DELETE FROM correlation_cursors WHERE rowid IN (
 			SELECT rowid FROM correlation_cursors
-			WHERE active IN (0, 1) AND updated_time_unix_nano < ?
+			WHERE (active=0 AND updated_time_unix_nano < ?) OR (active=1 AND updated_time_unix_nano < ?)
 			ORDER BY updated_time_unix_nano, connector_instance_id, session_id, agent_id LIMIT ?
 		)`, nil
 	case RetentionCorrelationPending:
 		// Two bounded branches, each served by its own partial index
 		// (idx_correlation_pending_retention for ended operations,
 		// idx_correlation_pending_stale for open ones). An operation still
-		// open after the whole retention window is dead: its tool call never
+		// open after the whole day window (never the shorter size-cap cutoff) is dead: its tool call never
 		// reported an end (agent killed). It no longer pins the graph it
 		// points at (issue #1440).
 		return `DELETE FROM correlation_pending_operations WHERE rowid IN (
