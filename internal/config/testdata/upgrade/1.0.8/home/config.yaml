@@ -1,0 +1,13 @@
+config_version: 9
+data_dir: '@HOME@'
+# A 1.0.8 per-user config after 'defenseclaw config set' of the audit store
+# keys 1.0.6 added (#1384). 1.0.8 has no rejected-record store (#1442): this
+# release loads it unchanged, with the store off.
+guardrail:
+  mode: observe
+observability:
+  local:
+    retention_days: 14
+    max_store_mb: 256
+update:
+  check: false

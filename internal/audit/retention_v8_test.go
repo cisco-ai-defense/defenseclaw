@@ -1338,6 +1338,7 @@ func seedRetentionHistory(
 	for _, table := range []string{"activity_events", "network_egress_events", "sink_health"} {
 		seedSimpleRetentionBoundary(t, store, table, before, equal, after)
 	}
+	seedRejectedRecordRetentionBoundary(t, store, before, equal, after)
 	for _, fixture := range []struct {
 		id string
 		ts time.Time
@@ -1631,6 +1632,7 @@ func assertRetentionBoundaryRows(t *testing.T, store *Store, judge *JudgeBodySto
 	} {
 		assertRetentionSuffixes(t, store.db, table)
 	}
+	assertRejectedRecordRetentionBoundary(t, store)
 	assertRetentionSuffixes(t, judge.db, "judge_responses")
 	var baseline, projection int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM alert_acknowledgement_baselines

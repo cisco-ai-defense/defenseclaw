@@ -44,7 +44,7 @@ import (
 // config.yaml equal to config.golden.yaml, and the rollback must leave the
 // home exactly as it was. DEFENSECLAW_UPDATE_GOLDEN=1 rewrites the goldens.
 func TestUpgradeFixturesMigrateRollBackAndReUpgrade(t *testing.T) {
-	for _, release := range []string{"0.8.10-v8", "1.0.0", "1.0.1"} {
+	for _, release := range []string{"0.8.10-v8", "1.0.0", "1.0.1", "1.0.8", "1.0.9"} {
 		t.Run(release, func(t *testing.T) {
 			fixture, err := filepath.Abs(filepath.Join("testdata", "upgrade", release))
 			if err != nil {

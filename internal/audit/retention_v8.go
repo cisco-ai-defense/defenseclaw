@@ -86,6 +86,7 @@ const (
 	RetentionCorrelationPending       RetentionTableClass = "correlation_pending_operations"
 	RetentionCorrelationRelationships RetentionTableClass = "correlation_relationships"
 	RetentionCorrelationEvents        RetentionTableClass = "correlation_events"
+	RetentionRejectedRecords          RetentionTableClass = "rejected_records"
 )
 
 var retentionTableClasses = [...]RetentionTableClass{
@@ -106,6 +107,7 @@ var retentionTableClasses = [...]RetentionTableClass{
 	RetentionCorrelationPending,
 	RetentionCorrelationRelationships,
 	RetentionCorrelationEvents,
+	RetentionRejectedRecords,
 }
 
 // RetentionFailureClass is deliberately bounded and contains no driver error,
@@ -448,6 +450,10 @@ var retentionAuditRegistry = [...]retentionAuditTable{
 	{class: RetentionScanFindings, table: "scan_findings"},
 	{class: RetentionLegacyFindings, table: "findings"},
 	{class: RetentionScanResults, table: "scan_results"},
+	// Kept only while observability.local.keep_rejected_records is on
+	// (#1442); its timestamp column is written natively, so it needs no
+	// retentionTimestampRegistry trigger.
+	{class: RetentionRejectedRecords, table: "rejected_records"},
 }
 
 type retentionTimestampSpec struct {
@@ -494,7 +500,8 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"network_egress_events": retentionOwnedHistory, "sink_health": retentionOwnedHistory,
 	"scan_findings": retentionOwnedHistory, "findings": retentionOwnedHistory,
 	"scan_results": retentionOwnedHistory, "judge_responses": retentionOwnedHistory,
-	"actions": retentionOwnedProtected, "target_snapshots": retentionOwnedProtected,
+	"rejected_records": retentionOwnedHistory,
+	"actions":          retentionOwnedProtected, "target_snapshots": retentionOwnedProtected,
 	"finding_scopes": retentionOwnedProtected, "finding_states": retentionOwnedProtected,
 	"schema_version": retentionOwnedProtected, "observability_store_readiness": retentionOwnedProtected,
 	"alert_acknowledgement_projection": retentionOwnedProtected,
@@ -1394,6 +1401,12 @@ func retentionAuditDeleteStatement(class RetentionTableClass) (string, error) {
 			  ON finding.scan_id = scan.id
 			WHERE scan.retention_timestamp_unix_nano < ?
 			ORDER BY scan.retention_timestamp_unix_nano ASC, finding.id ASC LIMIT ?
+		)`, nil
+	case RetentionRejectedRecords:
+		return `DELETE FROM rejected_records WHERE id IN (
+			SELECT id FROM rejected_records INDEXED BY idx_rejected_records_retention
+			WHERE retention_timestamp_unix_nano < ?
+			ORDER BY retention_timestamp_unix_nano ASC, id ASC LIMIT ?
 		)`, nil
 	case RetentionScanResults:
 		return `DELETE FROM scan_results WHERE id IN (

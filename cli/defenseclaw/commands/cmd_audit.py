@@ -31,8 +31,11 @@ def audit() -> None:
         defenseclaw audit export [--connector X] [--since 1h]
     Report the current distinct skill/MCP/plugin/code scan findings (JSON):
         defenseclaw audit findings [--scanner NAME] [--since 30m]
-    'export' and 'findings' run 'defenseclaw-gateway audit <command>' with the
-    same options. Show the newest gateway or watchdog log lines:
+    List the records the v8 schema gate refused (JSONL; needs
+    observability.local.keep_rejected_records: true):
+        defenseclaw audit rejected [--since 1h] [--limit 100]
+    'export', 'findings' and 'rejected' run 'defenseclaw-gateway audit
+    <command>' with the same options. Show the newest gateway or watchdog log lines:
         defenseclaw audit logs [--source watchdog] [-n 50] [--grep TEXT]
 
     \b
@@ -106,6 +109,21 @@ def audit_findings(gateway_args: tuple[str, ...]) -> None:
     'defenseclaw audit findings --help' for its options.
     """
     run_gateway(("audit", "findings", *gateway_args))
+
+
+@audit.command(
+    "rejected",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    add_help_option=False,
+)
+@click.argument("gateway_args", nargs=-1, type=click.UNPROCESSED)
+def audit_rejected(gateway_args: tuple[str, ...]) -> None:
+    """List the records the v8 schema gate refused (runs 'defenseclaw-gateway audit rejected').
+
+    Every argument goes to 'defenseclaw-gateway audit rejected'; see
+    'defenseclaw audit rejected --help' for its options.
+    """
+    run_gateway(("audit", "rejected", *gateway_args))
 
 
 _LOG_FILES = {"gateway": "gateway.log", "watchdog": "watchdog.log"}
