@@ -21,11 +21,11 @@ import (
 func TestWindowsStandaloneStatusNamesExcludeEntriesThatMatchNoAccount(t *testing.T) {
 	current, err := user.Current()
 	if err != nil || current.Username == "" {
-		t.Skipf("no current account to use as the known entry: %v", err)
+		t.Fatalf("no current account to use as the known entry: %v", err)
 	}
 	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
 	cfg.Enterprise.Profile = "standalone"
-	cfg.Enterprise.Enrollment.ExcludeUsers = []string{`BUILTIN\Administrators`, "Administrator", "r106fxe8-nosuch-acct", `AzureAD\r106fxe8-nobody`}
+	cfg.Enterprise.Enrollment.ExcludeUsers = []string{`BUILTIN\Administrators`, current.Username, "r106fxe8-nosuch-acct", `AzureAD\r106fxe8-nobody`}
 	var got []string
 	for _, warning := range standaloneProfileWarnings(nil, cfg) {
 		if strings.Contains(warning, "exclude_users") {
