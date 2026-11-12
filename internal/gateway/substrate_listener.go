@@ -28,6 +28,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
@@ -155,6 +157,9 @@ const (
 
 type substrateState struct {
 	cfg SubstrateConfig
+	// refusals bounds refusal log lines: a flood of bad tokens is still
+	// refused, not logged line by line.
+	refusals *rate.Limiter
 
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler
@@ -190,7 +195,7 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 	if cfg.IsAdmin == nil {
 		cfg.IsAdmin = func(identity.Person) bool { return false }
 	}
-	st := &substrateState{cfg: cfg}
+	st := &substrateState{cfg: cfg, refusals: rate.NewLimiter(5, 20)}
 	a.substrateMu.Lock()
 	a.substrate = st
 	a.substrateMu.Unlock()
@@ -386,14 +391,14 @@ func (a *APIServer) newSubstrateActorHandler(st *substrateState) http.Handler {
 	}
 	var h http.Handler = http.HandlerFunc(a.serveSubstrateActorRoute)
 	h = apiBodyLimitMiddleware(h, apiRequestBodyMaxBytes, defaultSandboxOTLPMaxBodyBytes)
-	h = a.apiCSRFProtect(h)
+	h = substrateCSRF(a.apiCSRFProtect(h), h)
 	h = a.metricsMiddleware(h)
 	h = a.substrateActorScope(st, h)
 	h = a.substrateActorLimit(st, h)
 	h = CorrelationMiddleware(reg)(h)
 	h = sandboxRequestIDMiddleware(h)
 	h = inboundTraceContextMiddleware(h)
-	h = substrateEnvelopeMiddleware(h)
+	h = substrateEnvelopeMiddleware(st, h)
 	h = a.substrateActorAuthenticate(st, h)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		route, ok := a.classifySubstrateActorPath(r.URL.Path)
@@ -470,15 +475,19 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 			if identity.Unavailable(err) {
 				status = http.StatusServiceUnavailable
 			}
+			// The message names the check, never token bytes (identity.Error).
+			st.logRefusal("actor token refused: %s (%v)", reason, err)
 			writeSubstrateRefusal(w, status, string(reason))
 			return
 		}
 		reg, ok, err := st.cfg.Registrations.Get(r.Context(), actor.Atespace, actor.UID)
 		switch {
 		case err != nil:
+			st.logRefusal("registration lookup failed for %s: %v", actor.Ref(), err)
 			writeSubstrateRefusal(w, http.StatusServiceUnavailable, "registration_unavailable")
 			return
 		case !ok || reg.Deleted:
+			st.logRefusal("actor %s (uid %s) is not registered", actor.Ref(), actor.UID)
 			writeSubstrateRefusal(w, http.StatusForbidden, "actor_not_registered")
 			return
 		}
@@ -682,4 +691,26 @@ func substrateProfileSubject(ctx context.Context) (profileSubject, bool) {
 		Principal: reg.Person.Principal, UPN: reg.Person.Principal,
 		Groups: append([]string(nil), reg.Person.Groups...),
 	}, true
+}
+
+// logRefusal writes a rate-limited refusal line for operators.
+func (st *substrateState) logRefusal(format string, args ...any) {
+	if st == nil || st.refusals == nil || !st.refusals.Allow() {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[substrate] "+format+"\n", args...)
+}
+
+// substrateCSRF applies the API CSRF gate to the kit's routes. Model calls
+// come from the agent's own SDK, which sends no DefenseClaw client tag; a
+// browser cannot make them anyway, since they need the actor token egress
+// injects (a header no page can set across origins).
+func substrateCSRF(protected, model http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if substrateRouteFrom(r.Context()).llm {
+			model.ServeHTTP(w, r)
+			return
+		}
+		protected.ServeHTTP(w, r)
+	})
 }
