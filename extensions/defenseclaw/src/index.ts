@@ -73,7 +73,6 @@ import { scanMCPServer } from "./scanners/mcp-scanner.js";
 import type {
   ScanResult,
   Finding,
-  InstallType,
   OutboundSidecarRequestLog,
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
@@ -704,57 +703,27 @@ export default function (api: DefenseClawPluginHost) {
     },
   });
 
-  // ─── Slash command: /block ───
-
-  api.registerCommand({
-    name: "block",
-    description: "Block a skill, MCP server, or plugin",
-    args: [
-      { name: "type", description: "Target type: skill, mcp, plugin", required: true },
-      { name: "name", description: "Name of the target to block", required: true },
-      { name: "reason", description: "Reason for blocking", required: false },
-    ],
-    handler: async ({ args }) => {
-      const targetType = args.type as InstallType | undefined;
-      const name = args.name as string | undefined;
-      if (!targetType || !name) {
-        return { text: "Usage: /block <skill|mcp|plugin> <name> [reason]" };
-      }
-
-      const reason = (args.reason as string) || "Blocked via /block command";
-
-      await enforcer.block(targetType, name, reason);
-      return {
-        text: `Blocked ${targetType} **${name}**: ${reason}`,
-      };
-    },
-  });
-
-  // ─── Slash command: /allow ───
-
-  api.registerCommand({
-    name: "allow",
-    description: "Allow-list a skill, MCP server, or plugin",
-    args: [
-      { name: "type", description: "Target type: skill, mcp, plugin", required: true },
-      { name: "name", description: "Name of the target to allow", required: true },
-      { name: "reason", description: "Reason for allowing", required: false },
-    ],
-    handler: async ({ args }) => {
-      const targetType = args.type as InstallType | undefined;
-      const name = args.name as string | undefined;
-      if (!targetType || !name) {
-        return { text: "Usage: /allow <skill|mcp|plugin> <name> [reason]" };
-      }
-
-      const reason = (args.reason as string) || "Allowed via /allow command";
-
-      await enforcer.allow(targetType, name, reason);
-      return {
-        text: `Allow-listed ${targetType} **${name}**: ${reason}`,
-      };
-    },
-  });
+  // ─── Slash commands: /block, /allow ───
+  // Block and allow lists live in config.yaml and change only with the
+  // DefenseClaw CLI in a terminal. A chat command could be sent by anyone who
+  // can message the agent, and the plugin credential cannot write the lists.
+  for (const [name, verb] of [["block", "Block"], ["allow", "Allow-list"]] as const) {
+    api.registerCommand({
+      name,
+      description: `${verb} a skill, MCP server, or plugin (prints the DefenseClaw command to run in a terminal)`,
+      args: [
+        { name: "type", description: "Target type: skill, mcp, plugin", required: true },
+        { name: "name", description: "Name of the target", required: true },
+      ],
+      handler: async ({ args }) => {
+        const targetType = (args.type as string | undefined) ?? "<skill|mcp|plugin>";
+        const target = (args.name as string | undefined) ?? "<name>";
+        return {
+          text: `DefenseClaw changes block and allow lists only from a terminal: run \`defenseclaw ${targetType} ${name} ${target}\`.`,
+        };
+      },
+    });
+  }
 }
 
 // ─── Scan handlers ───

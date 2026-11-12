@@ -29,8 +29,6 @@ import type {
   ScanResult,
   BlockEntry,
   AllowEntry,
-  DaemonStatus,
-  AdmissionResult,
   CorrelationContext,
   OutboundSidecarRequestLog,
 } from "./types.js";
@@ -159,6 +157,9 @@ export class DaemonClient {
       outboundAgentInstanceId: outboundInstance,
     });
     h[HEADER_DEFENSECLAW_CLIENT] = "openclaw-plugin";
+    // The plugin credential is the openclaw connector-scoped token; the
+    // gateway accepts it on /api/v1/inspect/* only with this header.
+    h["X-DefenseClaw-Connector"] = "openclaw";
     const token = this.token;
     if (token) {
       // The listener proves it is this account's gateway before a caller
@@ -180,50 +181,8 @@ export class DaemonClient {
     };
   }
 
-  async status(): Promise<ApiResponse<DaemonStatus>> {
-    return this.get<DaemonStatus>("/status");
-  }
-
   async submitScanResult(result: ScanResult): Promise<ApiResponse<void>> {
     return this.post<void>("/scan/result", result);
-  }
-
-  async block(
-    targetType: string,
-    targetName: string,
-    reason: string,
-  ): Promise<ApiResponse<void>> {
-    return this.post<void>("/enforce/block", {
-      target_type: targetType,
-      target_name: targetName,
-      reason,
-    });
-  }
-
-  async allow(
-    targetType: string,
-    targetName: string,
-    reason: string,
-  ): Promise<ApiResponse<void>> {
-    return this.post<void>("/enforce/allow", {
-      target_type: targetType,
-      target_name: targetName,
-      reason,
-    });
-  }
-
-  async unblock(
-    targetType: string,
-    targetName: string,
-  ): Promise<ApiResponse<void>> {
-    return this.delete<void>("/enforce/block", {
-      target_type: targetType,
-      target_name: targetName,
-    });
-  }
-
-  async listAlerts(limit = 50): Promise<ApiResponse<AdmissionResult[]>> {
-    return this.get<AdmissionResult[]>(`/alerts?limit=${limit}`);
   }
 
   async listBlocked(): Promise<ApiResponse<BlockEntry[]>> {
@@ -254,10 +213,6 @@ export class DaemonClient {
 
   private post<T>(path: string, body: unknown): Promise<ApiResponse<T>> {
     return this.doRequest<T>("POST", path, body);
-  }
-
-  private delete<T>(path: string, body: unknown): Promise<ApiResponse<T>> {
-    return this.doRequest<T>("DELETE", path, body);
   }
 
   /**
@@ -322,6 +277,7 @@ export class DaemonClient {
         "Content-Type": "application/json",
         Accept: "application/json",
         [HEADER_DEFENSECLAW_CLIENT]: "openclaw-plugin",
+        "X-DefenseClaw-Connector": "openclaw",
         ...correlationHeaders,
       };
       if (token) {

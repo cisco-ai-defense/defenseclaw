@@ -767,65 +767,22 @@ describe("DefenseClaw OpenClaw Plugin", () => {
 
   // ─── Command: /block ───
 
-  describe("command: /block", () => {
-    it("blocks target via enforcer", async () => {
-      const result = await commands["block"].handler({
-        args: { type: "skill", name: "bad-skill", reason: "malicious content" },
+  describe.each(["block", "allow"])("command: /%s", (name) => {
+    it("prints the terminal command and changes nothing", async () => {
+      const result = await commands[name].handler({
+        args: { type: "skill", name: "some-skill", reason: "chat says so" },
       });
 
-      expect(mockEnforcer.block).toHaveBeenCalledWith("skill", "bad-skill", "malicious content");
-      expect(result.text).toContain("Blocked");
-      expect(result.text).toContain("bad-skill");
+      expect(mockEnforcer.block).not.toHaveBeenCalled();
+      expect(mockEnforcer.allow).not.toHaveBeenCalled();
+      expect(result.text).toContain(`defenseclaw skill ${name} some-skill`);
+      expect(result.text).toContain("terminal");
     });
 
-    it("uses default reason when not provided", async () => {
-      await commands["block"].handler({ args: { type: "mcp", name: "some-mcp" } });
+    it("fills placeholders when arguments are missing", async () => {
+      const result = await commands[name].handler({ args: {} });
 
-      expect(mockEnforcer.block).toHaveBeenCalledWith("mcp", "some-mcp", "Blocked via /block command");
-    });
-
-    it("returns usage when type is missing", async () => {
-      const result = await commands["block"].handler({ args: { name: "test" } });
-
-      expect(result.text).toContain("Usage");
-    });
-
-    it("returns usage when name is missing", async () => {
-      const result = await commands["block"].handler({ args: { type: "skill" } });
-
-      expect(result.text).toContain("Usage");
-    });
-  });
-
-  // ─── Command: /allow ───
-
-  describe("command: /allow", () => {
-    it("allow-lists target via enforcer", async () => {
-      const result = await commands["allow"].handler({
-        args: { type: "skill", name: "safe-skill", reason: "reviewed and approved" },
-      });
-
-      expect(mockEnforcer.allow).toHaveBeenCalledWith("skill", "safe-skill", "reviewed and approved");
-      expect(result.text).toContain("Allow-listed");
-      expect(result.text).toContain("safe-skill");
-    });
-
-    it("uses default reason when not provided", async () => {
-      await commands["allow"].handler({ args: { type: "plugin", name: "good-plugin" } });
-
-      expect(mockEnforcer.allow).toHaveBeenCalledWith("plugin", "good-plugin", "Allowed via /allow command");
-    });
-
-    it("returns usage when type is missing", async () => {
-      const result = await commands["allow"].handler({ args: { name: "test" } });
-
-      expect(result.text).toContain("Usage");
-    });
-
-    it("returns usage when name is missing", async () => {
-      const result = await commands["allow"].handler({ args: { type: "skill" } });
-
-      expect(result.text).toContain("Usage");
+      expect(result.text).toContain(`defenseclaw <skill|mcp|plugin> ${name} <name>`);
     });
   });
 });

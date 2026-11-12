@@ -152,28 +152,24 @@ describe("loadSidecarConfig", () => {
     );
   });
 
-  it("reads config and dotenv from an absolute DEFENSECLAW_HOME", () => {
+  it("reads config and the plugin credential from an absolute DEFENSECLAW_HOME", () => {
     process.env.DEFENSECLAW_HOME = "/isolated-defenseclaw";
     mockReadFileSync.mockImplementation((path) => {
       const selectedPath = String(path);
       if (selectedPath === join("/isolated-defenseclaw", "config.yaml")) {
-        return "gateway:\n  host: 10.0.0.8\n  token_env: E2E_GATEWAY_TOKEN\n";
+        return "gateway:\n  host: 10.0.0.8\n";
       }
-      if (selectedPath === join("/isolated-defenseclaw", ".env")) {
-        return "E2E_GATEWAY_TOKEN=isolated-token\n";
+      if (selectedPath === join("/isolated-defenseclaw", "hooks", ".hook-openclaw.token")) {
+        return "a".repeat(64) + "\n";
       }
       throw new Error(`unexpected path: ${selectedPath}`);
     });
 
     const cfg = loadSidecarConfig();
     expect(cfg.host).toBe("10.0.0.8");
-    expect(cfg.token).toBe("isolated-token");
+    expect(cfg.token).toBe("a".repeat(64));
     expect(mockReadFileSync).not.toHaveBeenCalledWith(
       join("/mock-home", ".defenseclaw", "config.yaml"),
-      "utf8"
-    );
-    expect(mockReadFileSync).not.toHaveBeenCalledWith(
-      join("/mock-home", ".defenseclaw", ".env"),
       "utf8"
     );
   });
@@ -325,124 +321,73 @@ describe("loadSidecarConfig", () => {
   // and the OpenClaw process had no token, which silently 401'd every
   // /api/v1/inspect/* request and let tool calls bypass inspection.
   // -------------------------------------------------------------------
-  describe("token resolution (first-boot regression)", () => {
-    const ENV_KEYS = [
-      "DEFENSECLAW_GATEWAY_TOKEN",
-      "OPENCLAW_GATEWAY_TOKEN",
-    ] as const;
+  describe("plugin credential", () => {
+    const TOKEN = "e".repeat(64);
     const savedEnv: Record<string, string | undefined> = {};
+    const ENV_KEYS = ["DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"] as const;
 
     beforeEach(() => {
-      for (const k of ENV_KEYS) {
-        savedEnv[k] = process.env[k];
-        delete process.env[k];
-      }
+      for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
     });
 
     afterEach(() => {
       for (const k of ENV_KEYS) {
-        if (savedEnv[k] === undefined) {
-          delete process.env[k];
-        } else {
-          process.env[k] = savedEnv[k];
-        }
+        if (savedEnv[k] === undefined) delete process.env[k];
+        else process.env[k] = savedEnv[k];
       }
     });
 
-    function mockEnvOnlyDotenv(dotenv: string) {
-      // Two readFileSync sites need to be served deterministically:
-      //   1. config.yaml -> return empty so all token resolution falls
-      //      back to env / dotenv lookups (the canonical-first-boot
-      //      scenario from the report).
-      //   2. ~/.defenseclaw/.env -> return the supplied dotenv blob.
+    function serve(files: Record<string, string>) {
       mockReadFileSync.mockImplementation((path) => {
         const p = String(path);
-        if (p.endsWith("config.yaml")) {
-          return "";
-        }
-        if (p.endsWith(".env")) {
-          return dotenv;
+        for (const [suffix, body] of Object.entries(files)) {
+          if (p.endsWith(suffix)) return body;
         }
         throw new Error("ENOENT: " + p);
       });
     }
 
-    it("reads DEFENSECLAW_GATEWAY_TOKEN from ~/.defenseclaw/.env when env is empty", () => {
-      mockEnvOnlyDotenv(
-        "DEFENSECLAW_GATEWAY_TOKEN=canonical-from-firstboot\n"
-      );
-      const cfg = loadSidecarConfig();
-      expect(cfg.token).toBe("canonical-from-firstboot");
+    it("reads the openclaw scoped token from hooks/.hook-openclaw.token", () => {
+      serve({ "config.yaml": "", ".hook-openclaw.token": TOKEN + "\n" });
+      expect(loadSidecarConfig().token).toBe(TOKEN);
     });
 
-    it("falls back to legacy OPENCLAW_GATEWAY_TOKEN in dotenv for old installs", () => {
-      mockEnvOnlyDotenv("OPENCLAW_GATEWAY_TOKEN=legacy-only-token\n");
-      const cfg = loadSidecarConfig();
-      expect(cfg.token).toBe("legacy-only-token");
-    });
-
-    it("prefers DEFENSECLAW_GATEWAY_TOKEN over the legacy name when both are present", () => {
-      mockEnvOnlyDotenv(
-        [
-          "DEFENSECLAW_GATEWAY_TOKEN=new-canonical",
-          "OPENCLAW_GATEWAY_TOKEN=legacy-shadow",
-          "",
-        ].join("\n")
-      );
-      const cfg = loadSidecarConfig();
-      expect(cfg.token).toBe("new-canonical");
-    });
-
-    it("returns empty token when neither env nor dotenv has the value", () => {
-      mockReadFileSync.mockImplementation((path) => {
-        const p = String(path);
-        if (p.endsWith("config.yaml")) return "";
-        throw new Error("ENOENT: " + p);
+    it("never uses the master gateway token or the OpenClaw gateway token", () => {
+      process.env.DEFENSECLAW_GATEWAY_TOKEN = "f".repeat(64);
+      process.env.OPENCLAW_GATEWAY_TOKEN = "f".repeat(64);
+      serve({
+        "config.yaml": "gateway:\n  token: literal-master\n  token_env: DEFENSECLAW_GATEWAY_TOKEN\n",
+        ".env": "DEFENSECLAW_GATEWAY_TOKEN=" + "f".repeat(64) + "\nOPENCLAW_GATEWAY_TOKEN=x\n",
       });
-      const cfg = loadSidecarConfig();
-      expect(cfg.token).toBe("");
+      expect(loadSidecarConfig().token).toBe("");
     });
 
-    it("picks up a token rewritten in .env without a restart (GAP-2286)", () => {
-      let dotenv = "DEFENSECLAW_GATEWAY_TOKEN=old-token\n";
-      let envMtime = 1000;
+    it("refuses a credential that is not a 64-character hex token", () => {
+      serve({ "config.yaml": "", ".hook-openclaw.token": "not-a-token\n" });
+      expect(loadSidecarConfig().token).toBe("");
+    });
+
+    it("picks up a rotated credential without a restart (GAP-2286)", () => {
+      let token = TOKEN;
+      let mtime = 1000;
+      serve({ "config.yaml": "gateway:\n  api_port: 18970\n" });
       mockReadFileSync.mockImplementation((path) => {
         const p = String(path);
         if (p.endsWith("config.yaml")) return "gateway:\n  api_port: 18970\n";
-        if (p.endsWith(".env")) return dotenv;
+        if (p.endsWith(".hook-openclaw.token")) return token;
         throw new Error("ENOENT: " + p);
       });
       mockStatSync.mockImplementation((path) => {
         const p = String(path);
-        const st = p.endsWith(".env")
-          ? { mtimeMs: envMtime, size: dotenv.length }
-          : { mtimeMs: 1, size: 25 };
-        return st as ReturnType<typeof statSync>;
+        return (p.endsWith(".hook-openclaw.token")
+          ? { mtimeMs: mtime, size: token.length }
+          : { mtimeMs: 1, size: 25 }) as ReturnType<typeof statSync>;
       });
-
-      expect(loadSidecarConfig().token).toBe("old-token");
-      expect(loadSidecarConfig().token).toBe("old-token");
-
-      // `setup openclaw` adopts the OpenClaw gateway token: same length,
-      // new mtime.
-      dotenv = "DEFENSECLAW_GATEWAY_TOKEN=new-token\n";
-      envMtime = 2000;
-      expect(loadSidecarConfig().token).toBe("new-token");
-    });
-
-    it("respects gateway.token_env override and reads that name from dotenv", () => {
-      mockReadFileSync.mockImplementation((path) => {
-        const p = String(path);
-        if (p.endsWith("config.yaml")) {
-          return "gateway:\n  token_env: CUSTOM_TOKEN_ENV\n";
-        }
-        if (p.endsWith(".env")) {
-          return "CUSTOM_TOKEN_ENV=via-token-env-override\n";
-        }
-        throw new Error("ENOENT: " + p);
-      });
-      const cfg = loadSidecarConfig();
-      expect(cfg.token).toBe("via-token-env-override");
+      expect(loadSidecarConfig().token).toBe(TOKEN);
+      expect(loadSidecarConfig().token).toBe(TOKEN);
+      token = "1".repeat(64);
+      mtime = 2000;
+      expect(loadSidecarConfig().token).toBe("1".repeat(64));
     });
   });
 });

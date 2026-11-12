@@ -24,12 +24,13 @@ import yaml from "js-yaml";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_API_PORT = 18970;
-// DEFENSECLAW_GATEWAY_TOKEN is the canonical env-var name written by
-// the Go sidecar's first-boot bootstrap path. OPENCLAW_GATEWAY_TOKEN
-// is preserved as a legacy fallback for installs that pre-date the
-// rename. Lookup order is consistent across process.env AND ~/.defenseclaw/.env.
-const DEFAULT_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN";
-const LEGACY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN";
+// The plugin credential: the connector-scoped hook token setup mints for
+// openclaw. It authenticates only the routes the plugin calls
+// (internal/gateway/openclaw_plugin_scope.go), never the management API.
+// Before 1.0.10 the plugin read the master gateway token from config.yaml,
+// .env or OPENCLAW_GATEWAY_TOKEN; it reads none of them now.
+const PLUGIN_TOKEN_FILE = join("hooks", ".hook-openclaw.token");
+const PLUGIN_TOKEN_RE = /^[0-9a-f]{64}$/;
 
 interface SidecarConfig {
   host: string;
@@ -71,14 +72,12 @@ function resolveDefenseClawHome(): string {
 }
 
 /**
- * Read gateway.host, gateway.api_port, and gateway token from
- * ~/.defenseclaw/config.yaml. Token resolution mirrors the Go sidecar:
- * env var (gateway.token_env, default OPENCLAW_GATEWAY_TOKEN) wins over
- * the direct gateway.token value. Falls back to defaults if the file is
- * missing or malformed. The result is cached until config.yaml or .env
- * changes: `defenseclaw setup openclaw` rewrites the token in .env while
- * OpenClaw keeps running, and a stale token fails every sidecar call with
- * an api-auth-failure security event (GAP-2286).
+ * Read gateway.host and gateway.api_port from ~/.defenseclaw/config.yaml
+ * and the plugin credential from hooks/.hook-openclaw.token. Falls back to
+ * defaults if config.yaml is missing or malformed. The result is cached
+ * until config.yaml or the credential file changes: setup and token
+ * rotation rewrite the credential while OpenClaw keeps running, and a
+ * stale one fails every sidecar call (GAP-2286).
  */
 export function loadSidecarConfig(): SidecarConfig {
   // Resolve outside the permissive config-file fallback below. An invalid
@@ -109,18 +108,6 @@ export function loadSidecarConfig(): SidecarConfig {
         if (typeof gw["approval_timeout_s"] === "number" && gw["approval_timeout_s"] > 0) {
           approvalTimeoutS = gw["approval_timeout_s"];
         }
-        if (typeof gw["token"] === "string" && gw["token"]) token = gw["token"];
-        const tokenEnv =
-          typeof gw["token_env"] === "string" && gw["token_env"]
-            ? gw["token_env"]
-            : DEFAULT_TOKEN_ENV;
-        // Mirror the Go resolver: try process.env first, then the
-        // sidecar-managed ~/.defenseclaw/.env. The .env path is the
-        // common case in production because the Go bootstrap writes
-        // DEFENSECLAW_GATEWAY_TOKEN there but does not export it
-        // into the Node process that loads this extension.
-        const envVal = process.env[tokenEnv] || readDotEnvToken(defenseClawHome, tokenEnv);
-        if (envVal) token = envVal;
       }
       const gr = raw["guardrail"] as Record<string, unknown> | undefined;
       if (gr && typeof gr === "object") {
@@ -144,24 +131,7 @@ export function loadSidecarConfig(): SidecarConfig {
     // Config missing or unreadable — use defaults
   }
 
-  // Last-resort fallbacks: try the canonical name, then the legacy
-  // OPENCLAW_GATEWAY_TOKEN. Both process.env and ~/.defenseclaw/.env
-  // are consulted for each name so the resolver works regardless of
-  // whether the operator exported the value into the shell or kept
-  // it solely in the sidecar-managed dotenv.
-  for (const name of [DEFAULT_TOKEN_ENV, LEGACY_TOKEN_ENV]) {
-    if (token) break;
-    const envVal = process.env[name];
-    if (envVal) {
-      token = envVal;
-      break;
-    }
-    const dotenvVal = readDotEnvToken(defenseClawHome, name);
-    if (dotenvVal) {
-      token = dotenvVal;
-      break;
-    }
-  }
+  token = readPluginToken(defenseClawHome);
 
   // The plugin keys its listener proof by host and connects to it: name the
   // address the gateway binds instead of a name that may resolve to ::1.
@@ -181,9 +151,9 @@ export function loadSidecarConfig(): SidecarConfig {
   return cached;
 }
 
-/** Path, mtime and size of config.yaml and .env, to notice when either changes. */
+/** Path, mtime and size of config.yaml and the credential file, to notice when either changes. */
 function configFilesKey(defenseClawHome: string): string {
-  return ["config.yaml", ".env"]
+  return ["config.yaml", PLUGIN_TOKEN_FILE]
     .map((name) => {
       const path = join(defenseClawHome, name);
       try {
@@ -197,27 +167,16 @@ function configFilesKey(defenseClawHome: string): string {
 }
 
 /**
- * Read a KEY=VALUE token from ~/.defenseclaw/.env.
- * The Go sidecar loads this file into its own process env, but the
- * OpenClaw Node.js process is separate and won't have it.
+ * The plugin credential at <DEFENSECLAW_HOME>/hooks/.hook-openclaw.token, or
+ * "" when it is missing or not a 64-character hex token.
  */
-function readDotEnvToken(defenseClawHome: string, key: string): string {
+function readPluginToken(defenseClawHome: string): string {
   try {
-    const envPath = join(defenseClawHome, ".env");
-    const content = readFileSync(envPath, "utf8");
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("#") || !trimmed.includes("=")) continue;
-      const eqIdx = trimmed.indexOf("=");
-      const k = trimmed.slice(0, eqIdx).trim();
-      if (k === key) {
-        return trimmed.slice(eqIdx + 1).trim();
-      }
-    }
+    const value = readFileSync(join(defenseClawHome, PLUGIN_TOKEN_FILE), "utf8").trim();
+    return PLUGIN_TOKEN_RE.test(value) ? value : "";
   } catch {
-    // .env missing or unreadable
+    return "";
   }
-  return "";
 }
 
 /** Clear cached config (for testing). */
