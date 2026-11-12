@@ -161,17 +161,24 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		if runtime.GOOS == "windows" {
 			input.DialectHint = agentHookWindowsShellDialect(input)
 		}
-		findings = mergeBoundedFindings(findings, dispatchTrustedAction(ctx, trustedActionRequest{
-			Input:                         input,
-			LegacyText:                    string(plain),
-			Connector:                     action.Connector,
-			EnforcementCapable:            action.EnforcementCapable,
-			ManagedHookOverflowHold:       action.ManagedHookOverflowHold,
-			DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
-			SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
-			ResolvedWriteTargets:          action.ResolvedWriteTargets,
-			SandboxGuestCWD:               action.SandboxGuestCWD,
-		}))
+		// A call already in the plain shape, in the same dialect, was
+		// judged so by its first reading: judging it again repeated every
+		// reader of that text, on Windows the script and folder-link walks
+		// too, and a writer behind 63 folder links answered at the Codex
+		// hook deadline (GAP-1079).
+		if !bytes.Equal(plain, action.Input.Args) || input.DialectHint != action.Input.DialectHint {
+			findings = mergeBoundedFindings(findings, dispatchTrustedAction(ctx, trustedActionRequest{
+				Input:                         input,
+				LegacyText:                    string(plain),
+				Connector:                     action.Connector,
+				EnforcementCapable:            action.EnforcementCapable,
+				ManagedHookOverflowHold:       action.ManagedHookOverflowHold,
+				DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
+				SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
+				ResolvedWriteTargets:          action.ResolvedWriteTargets,
+				SandboxGuestCWD:               action.SandboxGuestCWD,
+			}))
+		}
 	}
 	return mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict, findings)
 }
