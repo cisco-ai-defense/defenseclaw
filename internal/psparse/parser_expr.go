@@ -244,7 +244,7 @@ func (p *parser) parsePrimary() Expr {
 		return numberLit(t)
 	case TokGeneric:
 		p.advance()
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: decodeBareword(t.Raw), Static: true, Bare: true}
 	case TokLParen:
 		return p.parseParenExpr()
 	case TokDollarParen:

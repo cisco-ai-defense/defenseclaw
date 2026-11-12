@@ -649,6 +649,9 @@ func (l *lexer) lexBareword() {
 		if r == '>' || r == '<' {
 			break
 		}
+		if r == '$' && dollarStartsVar(l.peek(1)) {
+			break // a variable / $( ) starts here; the bareword ends
+		}
 		// a redirect stream number like 2> ends the word only at the digit+>
 		l.i++
 	}

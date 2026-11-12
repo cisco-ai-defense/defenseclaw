@@ -7,7 +7,7 @@ package psparse
 import (
 	"strconv"
 	"strings"
-	"unicode/utf8"
+	"unicode"
 )
 
 // stringLit builds a StringLit from a TokString token, resolving the literal
@@ -78,10 +78,25 @@ func (p *parser) expandable(s string, base int) (parts []StringPart, static bool
 	}
 	runes := []rune(s)
 	hasExpr := false
+	forceDyn := false
 	for i := 0; i < len(runes); {
 		r := runes[i]
 		switch {
 		case r == '`' && i+1 < len(runes):
+			if runes[i+1] == 'u' && i+2 < len(runes) && runes[i+2] == '{' {
+				j := i + 3
+				for j < len(runes) && runes[j] != '}' {
+					j++
+				}
+				if j < len(runes) {
+					if cp, err := strconv.ParseInt(string(runes[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
+						lit.WriteRune(rune(cp))
+						i = j + 1
+						continue
+					}
+				}
+				forceDyn = true // malformed `u{...}: cannot resolve statically
+			}
 			lit.WriteRune(backtickEscape(runes[i+1]))
 			i += 2
 		case r == '$' && i+1 < len(runes) && runes[i+1] == '(':
@@ -91,7 +106,7 @@ func (p *parser) expandable(s string, base int) (parts []StringPart, static bool
 			parts = append(parts, StringPart{Expr: &SubExpr{Statements: sub.Statements}})
 			hasExpr = true
 			i += 2 + consumed
-		case r == '$' && i+1 < len(runes) && (runes[i+1] == '{' || isNameStart(runes[i+1]) || runes[i+1] == '$' || runes[i+1] == '?' || runes[i+1] == '^'):
+		case r == '$' && i+1 < len(runes) && runes[i+1] != '(' && dollarStartsVar(runes[i+1]):
 			flush()
 			v, consumed := scanEmbeddedVar(runes[i:])
 			parts = append(parts, StringPart{Expr: v})
@@ -103,7 +118,7 @@ func (p *parser) expandable(s string, base int) (parts []StringPart, static bool
 		}
 	}
 	flush()
-	static = !hasExpr
+	static = !hasExpr && !forceDyn
 	for _, pt := range parts {
 		if pt.Expr == nil {
 			literal += pt.Lit
@@ -130,8 +145,51 @@ func backtickEscape(r rune) rune {
 		return 12
 	case 'v':
 		return 11
+	case 'e':
+		return 0x1b
 	}
 	return r
+}
+
+// dollarStartsVar reports whether a '$' followed by r begins a variable or a
+// $( ) sub-expression (so a bareword ends before it). Matches the tokenizer:
+// a name char, a digit, '_', '?', '^', '$', '{' or '('.
+func dollarStartsVar(r rune) bool {
+	return r == '(' || r == '{' || r == '$' || r == '?' || r == '^' || r == '_' ||
+		unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// decodeBareword resolves PowerShell 7 backtick escapes in a bareword / command
+// name (the raw keeps the escapes so spans stay exact; the value is decoded).
+// Handles `n `t `r `0 `a `b `f `v `e, `u{hex}, and `<char> (literal char).
+func decodeBareword(raw string) string {
+	if !strings.ContainsRune(raw, '`') {
+		return raw
+	}
+	rs := []rune(raw)
+	var b strings.Builder
+	for i := 0; i < len(rs); i++ {
+		if rs[i] == '`' && i+1 < len(rs) {
+			if rs[i+1] == 'u' && i+2 < len(rs) && rs[i+2] == '{' {
+				j := i + 3
+				for j < len(rs) && rs[j] != '}' {
+					j++
+				}
+				if j < len(rs) {
+					if cp, err := strconv.ParseInt(string(rs[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
+						b.WriteRune(rune(cp))
+						i = j
+						continue
+					}
+				}
+			}
+			b.WriteRune(backtickEscape(rs[i+1]))
+			i++
+			continue
+		}
+		b.WriteRune(rs[i])
+	}
+	return b.String()
 }
 
 // scanParenBody returns the text inside a $( ... ) starting just after the '(',
@@ -228,6 +286,3 @@ func numberLit(t Token) *Number {
 	}
 	return n
 }
-
-// ensure utf8 import is used (defensive against empty inputs)
-var _ = utf8.RuneLen

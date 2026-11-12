@@ -194,7 +194,7 @@ func (p *parser) parseCommandName() Expr {
 	switch p.kind() {
 	case TokGeneric:
 		t := p.advance()
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: decodeBareword(t.Raw), Static: true, Bare: true}
 	case TokString:
 		return p.stringLit(p.advance())
 	case TokVariable, TokLParen, TokDollarParen:
@@ -229,91 +229,119 @@ func (p *parser) parseParameter() CommandElement {
 	return par
 }
 
-// parseCommandArg parses one positional argument in command mode. It routes
-// through the expression parser so a comma list groups into one ArrayLit (as
-// the reference parser does), while binary/word operators stay disabled in
-// command mode so a following -Name is treated as a parameter, not an operator.
+// parseCommandArg parses one positional argument in command mode: a run of
+// no-whitespace-adjacent atoms fused into one value, optionally continued as a
+// comma array literal (a,b or csv:"...":44,34,76).
 func (p *parser) parseCommandArg() CommandElement {
+	e := p.parseFusedArg()
+	if e == nil {
+		return nil
+	}
+	if p.at(TokComma) {
+		arr := &ArrayLit{Elements: []Expr{e}}
+		for p.at(TokComma) {
+			p.advance()
+			p.skipNewlines()
+			if nxt := p.parseFusedArg(); nxt != nil {
+				arr.Elements = append(arr.Elements, nxt)
+			}
+		}
+		s0, _ := e.Span()
+		_, s1 := arr.Elements[len(arr.Elements)-1].Span()
+		arr.start, arr.end = s0, s1
+		e = arr
+	}
+	s0, s1 := e.Span()
+	return &Arg{span: span{s0, s1}, Value: e}
+}
+
+// parseFusedArg parses one argument value: a leading atom plus any immediately
+// following (no-whitespace) atoms composed into one string. PowerShell fuses a
+// bareword, variable or $( ) lead with trailing text, but a quoted-string lead
+// is not fused ('C:\x'\y is two arguments).
+func (p *parser) parseFusedArg() Expr {
+	lead := p.parseArgAtom()
+	if lead == nil {
+		return nil
+	}
+	if !fusableLead(lead) {
+		return lead
+	}
+	atoms := []Expr{lead}
+	_, end := lead.Span()
+	for !p.at(TokEOF) {
+		t := p.cur()
+		if t.Start != end || !adjacentFusable(t.Kind) {
+			break
+		}
+		a := p.parseArgAtom()
+		if a == nil {
+			break
+		}
+		atoms = append(atoms, a)
+		_, end = a.Span()
+	}
+	if len(atoms) == 1 {
+		return lead
+	}
+	s0, _ := lead.Span()
+	return composeAtoms(atoms, s0, end)
+}
+
+// parseArgAtom parses a single argument atom (no comma, no fusion).
+func (p *parser) parseArgAtom() Expr {
 	switch p.kind() {
 	case TokGeneric, TokString, TokNumber, TokVariable, TokLParen, TokDollarParen,
 		TokAtParen, TokAtBrace, TokLBrace, TokLBracket:
-		e := p.parseExpression()
-		if e == nil {
-			return nil
-		}
-		e = p.fuseAdjacent(e)
-		// If fusing consumed tokens up to a comma, continue the array literal so
-		// a native-exe argument like  csv:"...":44,34,76  is one argument, as the
-		// reference parser groups it.
-		if p.at(TokComma) {
-			arr := &ArrayLit{Elements: []Expr{e}}
-			for p.at(TokComma) {
-				p.advance()
-				p.skipNewlines()
-				arr.Elements = append(arr.Elements, p.fuseAdjacent(p.parseBinaryExpr()))
-			}
-			s0, _ := e.Span()
-			_, s1 := arr.Elements[len(arr.Elements)-1].Span()
-			arr.start, arr.end = s0, s1
-			e = arr
-		}
-		s0, s1 := e.Span()
-		return &Arg{span: span{s0, s1}, Value: e}
+		return p.parsePostfix(p.parsePrimary())
 	case TokOperator:
-		// an operator character used as an argument value (a lone '-', or a
-		// glob lead like * in */*): keep it as a bareword and fuse any
-		// adjacent glob/path characters into one argument.
+		// an operator character used as argument text (a lone '-', or a glob
+		// lead such as * in */*).
 		t := p.advance()
-		lead := &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
-		fused := p.fuseAdjacent(lead)
-		s0, s1 := fused.Span()
-		return &Arg{span: span{s0, s1}, Value: fused}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Value, Static: true, Bare: true}
+	case TokDot:
+		// a '.' at argument position is a bareword (Remove-Item . -Recurse).
+		t := p.advance()
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: ".", Static: true, Bare: true}
 	}
 	return nil
 }
 
-// fuseAdjacent joins a dynamic leading argument atom (a variable or $( )
-// sub-expression) with immediately following value tokens that have no
-// whitespace between them, as PowerShell forms one expandable-string argument
-// (for example $env:TEMP\lsass.dmp or $(Get-Date).log). A space ends the arg.
-func (p *parser) fuseAdjacent(e Expr) Expr {
-	// Only a simple value lead fuses; compound leads (parens, arrays,
-	// hashtables, script blocks, member access) stay standalone arguments.
-	switch e.(type) {
-	case *Variable, *SubExpr, *StringLit, *Number:
-	default:
-		return e
-	}
-	s0, end := e.Span()
-	dynamic := isDynamicLead(e)
-	fused := false
-	for !p.at(TokEOF) {
-		t := p.cur()
-		if t.Start != end { // a space or other gap ends the argument
-			break
-		}
-		if !adjacentFusable(t.Kind) {
-			break
-		}
-		if t.Kind == TokVariable || t.Kind == TokDollarParen ||
-			(t.Kind == TokString && (t.Str == StrDouble || t.Str == StrHereDouble)) {
-			dynamic = true
-		}
-		p.advance()
-		end = t.End
-		fused = true
-	}
-	return finishFuse(e, s0, end, fused, dynamic)
-}
-
-func isDynamicLead(e Expr) bool {
+// fusableLead reports whether an atom may begin a fused argument: a bareword, a
+// variable or a $( ) sub-expression (as PowerShell does).
+func fusableLead(e Expr) bool {
 	switch v := e.(type) {
 	case *Variable, *SubExpr:
 		return true
 	case *StringLit:
-		return !v.Static
+		return v.Bare
 	}
 	return false
+}
+
+// composeAtoms joins adjacent atoms into one value: a static bareword when
+// every atom resolves to a literal, otherwise an expandable string whose Parts
+// are the atoms (Static=false). It never returns a static value the pieces
+// disagree with.
+func composeAtoms(atoms []Expr, s0, end int) Expr {
+	var b strings.Builder
+	static := true
+	for _, a := range atoms {
+		if v, ok := LiteralString(a); ok {
+			b.WriteString(v)
+		} else {
+			static = false
+			break
+		}
+	}
+	if static {
+		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: b.String(), Static: true, Bare: true}
+	}
+	parts := make([]StringPart, 0, len(atoms))
+	for _, a := range atoms {
+		parts = append(parts, StringPart{Expr: a})
+	}
+	return &StringLit{span: span{s0, end}, Kind: StrDouble, Static: false, Parts: parts}
 }
 
 // adjacentFusable reports whether a token with no preceding whitespace extends
@@ -324,20 +352,6 @@ func adjacentFusable(k TokenKind) bool {
 		return true
 	}
 	return false
-}
-
-func finishFuse(e Expr, s0, end int, fused, dynamic bool) Expr {
-	if !fused {
-		return e
-	}
-	// The leading piece is kept in Parts so the effects lane can read it; the
-	// exact text is the source span [s0,end]. A dynamic piece makes the whole
-	// argument an expandable string, otherwise a literal bareword.
-	kind, static := StrBare, true
-	if dynamic {
-		kind, static = StrDouble, false
-	}
-	return &StringLit{span: span{s0, end}, Kind: kind, Static: static, Parts: []StringPart{{Expr: e}}}
 }
 
 func (p *parser) parseRedirection() *Redirection {
