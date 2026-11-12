@@ -113,8 +113,6 @@ const (
 	FailureTimeout        = "timeout"
 	FailureUpstreamStatus = "upstream_status"
 	FailureDecode         = "decode_failure"
-	FailureUnknownAlias   = "unknown_alias"
-	FailureCredential     = "credential_failure"
 	FailureConfig         = "configuration_failure"
 	FailureFiltered       = "filtered"
 	FailureBreakerOpen    = "breaker_open"

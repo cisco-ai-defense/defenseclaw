@@ -57,7 +57,6 @@ func NewRemoteRouterClient(endpoint string, timeoutMs int) *RemoteRouterClient {
 
 type classifyRequest struct {
 	Messages []classifyMessage `json:"messages"`
-	Text     string            `json:"text,omitempty"`
 	Options  *classifyOptions  `json:"options,omitempty"`
 }
 

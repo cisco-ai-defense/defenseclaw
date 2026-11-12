@@ -276,3 +276,59 @@ func TestDecideStickyPerConversation(t *testing.T) {
 		t.Fatalf("classifier calls = %d, want 4", calls)
 	}
 }
+
+// REVIEW-code-slice2 P1-1: a failed classifier sends the request unchanged
+// (the 1.0.9 meaning) even when a default or an unconditional decision exists.
+func TestDecideClassifierFailureSkipsDefaults(t *testing.T) {
+	cfg := testConfig() // keeps the unconditional decision
+	cfg.Routing.Classifier = "systemone"
+	cfg.Routing.DefaultAlias = "fast"
+	e := mustEngine(t, cfg, Options{Classifier: failingClassifier{code: FailureTimeout}})
+	if d := e.Decide(context.Background(), chat("hello")); d.Outcome != OutcomeFallback || d.FailureCode != FailureTimeout || d.Backend != nil {
+		t.Fatalf("failed classifier = %+v", d)
+	}
+	cfg.Routing.OnClassifierError = "rules"
+	e = mustEngine(t, cfg, Options{Classifier: failingClassifier{code: FailureTimeout}})
+	d := e.Decide(context.Background(), chat("refactor"))
+	if d.Outcome != OutcomeApplied || d.Source != SourceRules || len(d.Warnings) != 1 || d.Warnings[0] != "classifier_fallback:timeout" {
+		t.Fatalf("rules fallback = %+v", d)
+	}
+	if d := e.Decide(context.Background(), chat("hello")); d.Outcome != OutcomeApplied || d.Backend.Alias != "fast" {
+		t.Fatalf("rules fallback with no match uses the defaults: %+v", d)
+	}
+}
+
+func TestDecideCapabilityFilterIsOffForVLLMSR(t *testing.T) {
+	cfg := testConfig()
+	cfg.Routing.Models[1].Capabilities = []string{"chat", "vision"} // claude lacks tools
+	req := chat("refactor")
+	req.HasTools = true
+	e := mustEngine(t, cfg, Options{})
+	if d := e.Decide(context.Background(), req); d.Backend == nil || d.Backend.Alias != "fast" || d.FilteredBy != "capability" {
+		t.Fatalf("rules capability filter = %+v", d)
+	}
+	cfg.Routing.Classifier = ""
+	cfg.Routing.Decisions = cfg.Routing.Decisions[:2]
+	vllm := mustEngine(t, cfg, Options{Classifier: fixedClassifier{alias: "claude"}})
+	if d := vllm.Decide(context.Background(), req); d.Backend == nil || d.Backend.Alias != "claude" {
+		t.Fatalf("vllm_sr keeps its recommendation: %+v", d)
+	}
+}
+
+type fixedClassifier struct{ alias string }
+
+func (f fixedClassifier) Name() string { return "vllm_sr" }
+func (f fixedClassifier) Classify(context.Context, ClassifyInput) (ClassifyResult, error) {
+	return ClassifyResult{Aliases: []string{f.alias}, Confidence: -1}, nil
+}
+
+func TestDecideNoStickyForRules(t *testing.T) {
+	e := mustEngine(t, testConfig(), Options{})
+	req := chat("refactor")
+	req.ConversationID = "c1"
+	e.Decide(context.Background(), req)
+	req.Text = "hello"
+	if d := e.Decide(context.Background(), req); d.Source == SourceSticky || d.Backend.Alias != "local" {
+		t.Fatalf("rules decide per request: %+v", d)
+	}
+}

@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
@@ -29,9 +31,12 @@ type engineRouter struct {
 	classifier engine.Classifier // vllm_sr client, nil unless started
 	admin      engine.AdminEvaluator
 	dotenv     string
+	sticky     *engine.StickyCache
 
-	mu    sync.Mutex
-	cache *engineCacheEntry
+	mu sync.Mutex
+	// cache keeps the engines of the last two generations, so requests
+	// pinned to the previous generation during a swap do not rebuild.
+	cache [2]*engineCacheEntry
 }
 
 type engineCacheEntry struct {
@@ -41,7 +46,16 @@ type engineCacheEntry struct {
 }
 
 func newEngineRouter(boot *config.Config, classifier engine.Classifier, dotenv string) *engineRouter {
-	return &engineRouter{boot: boot, classifier: classifier, dotenv: dotenv}
+	return &engineRouter{boot: boot, classifier: classifier, dotenv: dotenv, sticky: engine.NewStickyCache()}
+}
+
+// SetAdminEvaluator installs the routing.admin rules and budgets evaluator
+// (S11); nil narrows nothing. Engines built after the call use it.
+func (r *engineRouter) SetAdminEvaluator(a engine.AdminEvaluator) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.admin = a
+	r.cache = [2]*engineCacheEntry{}
 }
 
 // engineFor returns the engine and config of the generation ctx pinned
@@ -58,21 +72,42 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if c := r.cache; c != nil && c.gen == gen && c.cfg == cfg {
-		return c.eng, c.cfg
+	for _, c := range r.cache {
+		if c != nil && c.gen == gen && c.cfg == cfg {
+			return c.eng, c.cfg
+		}
 	}
-	eng, err := engine.New(cfg, engine.Options{
-		Classifier:   r.classifierFor(cfg),
-		Admin:        r.admin,
-		Managed:      cfg != nil && cfg.StandaloneEnterprise(),
-		CredentialOK: func(b engine.Backend, _ engine.Request) bool { return r.backendCredentialOK(cfg, b) },
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[routing] policy build failed, routing off for this generation: %v\n", err)
-		eng = nil
+	var eng *engine.Engine
+	classifier := r.classifierFor(cfg)
+	if cfg != nil && cfg.Routing.Enabled && cfg.Routing.EffectiveClassifier() == config.RoutingClassifierVLLMSR && classifier == nil {
+		// The vLLM Semantic Router did not start: routing stays off, as in
+		// 1.0.9 (health already reports the failure).
+	} else {
+		var err error
+		eng, err = engine.New(cfg, engine.Options{
+			Classifier:   classifier,
+			Admin:        r.admin,
+			Managed:      cfg != nil && cfg.StandaloneEnterprise(),
+			Sticky:       r.sticky,
+			CredentialOK: func(b engine.Backend, _ engine.Request) bool { return r.backendCredentialOK(cfg, b) },
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[routing] policy build failed, routing off for this generation: %v\n", err)
+			eng = nil
+		}
 	}
-	r.cache = &engineCacheEntry{gen: gen, cfg: cfg, eng: eng}
+	r.cache[1], r.cache[0] = r.cache[0], &engineCacheEntry{gen: gen, cfg: cfg, eng: eng}
 	return eng, cfg
+}
+
+// Gate checks a forwarded exit against the admin verdict of the outcome
+// (S11 rules and budgets); nil when nothing refuses it.
+func (r *engineRouter) Gate(ctx context.Context, o SemanticRouteOutcome, target engine.GateTarget) *engine.DenyReason {
+	if o.Route == nil {
+		return nil
+	}
+	eng, _ := r.engineFor(ctx)
+	return eng.Gate(*o.Route, target)
 }
 
 // classifierFor returns the classifier of cfg: the sidecar vLLM client for
@@ -116,11 +151,7 @@ func (r *engineRouter) backendKey(cfg *config.Config, b engine.Backend) string {
 }
 
 func (r *engineRouter) backendCredentialOK(cfg *config.Config, b engine.Backend) bool {
-	needs := b.APIKeyEnv != "" || b.Credential != ""
-	if cfg != nil && cfg.StandaloneEnterprise() {
-		needs = b.Credential != "" || b.APIKeyEnv != ""
-	}
-	return !needs || r.backendKey(cfg, b) != ""
+	return (b.APIKeyEnv == "" && b.Credential == "") || r.backendKey(cfg, b) != ""
 }
 
 // Route implements ModelRouter.
@@ -188,6 +219,15 @@ func engineRequest(in *ModelRouterInput) engine.Request {
 		req.Listener = engine.ListenerGuardrail
 	}
 	text := in.Text
+	size := len(text)
+	for _, m := range in.Messages {
+		size += len(m.Content)
+		if !req.HasImages && bytes.Contains(m.RawContent, []byte("image")) {
+			req.HasImages = true
+		}
+	}
+	// About four bytes per token: more than 100k estimated input tokens.
+	req.LongContext = size > 400_000
 	if n := len(in.Messages); n > 0 {
 		req.ToolTurn = in.Messages[n-1].Role == "tool"
 		if text == "" {
@@ -223,6 +263,50 @@ var (
 // request generation (engineRouter); any other non-nil router is active.
 type routerActivity interface {
 	RouterActive(ctx context.Context) bool
+}
+
+// routerGate is implemented by routers with an admin gate (engineRouter).
+type routerGate interface {
+	Gate(ctx context.Context, o SemanticRouteOutcome, target engine.GateTarget) *engine.DenyReason
+}
+
+// routeGate checks one forwarded exit (DESIGN 15.1, S11 Gate): the routed
+// backend or the original request.
+func (p *GuardrailProxy) routeGate(ctx context.Context, o SemanticRouteOutcome, target engine.GateTarget) *engine.DenyReason {
+	if g, ok := p.modelRouter.(routerGate); ok {
+		return g.Gate(ctx, o, target)
+	}
+	return nil
+}
+
+// applyRouteGate runs the admin gate on the exit the outcome forwards to
+// (the routed backend, else the original request) and turns a refusal into
+// a denied outcome.
+func (p *GuardrailProxy) applyRouteGate(ctx context.Context, o *SemanticRouteOutcome, provider, model string) {
+	if o == nil || o.Result == SemanticRouteDenied {
+		return
+	}
+	target := engine.GateTarget{Provider: provider, Model: model}
+	if o.Result == SemanticRouteApplied && o.Route != nil && o.Route.Backend != nil {
+		b := o.Route.Backend
+		target = engine.GateTarget{Alias: b.Alias, Provider: b.Provider, Model: b.Model}
+	}
+	if deny := p.routeGate(ctx, *o, target); deny != nil {
+		o.Result, o.Deny, o.Decision = SemanticRouteDenied, deny, nil
+		o.FailureCode = SemanticRouteFailureFiltered
+	}
+}
+
+// recordRouteDeny writes the audit row of a managed routing refusal.
+func (p *GuardrailProxy) recordRouteDeny(ctx context.Context, path string, d *engine.DenyReason) {
+	if p == nil || p.logger == nil {
+		return
+	}
+	code := "routing_admin_denied"
+	if d != nil && d.Code != "" {
+		code = d.Code
+	}
+	_ = p.logger.LogActionCtx(ctx, string(audit.ActionInspectRequestBlock), "routing.admin", "routing refused the model request: "+boundedRouterLabel(code, 96)+" path="+boundedRouterLabel(path, 128))
 }
 
 // routerActive reports whether this request is routed at all.

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
@@ -97,6 +98,7 @@ func (p *GuardrailProxy) routePassthrough(r *http.Request, in passthroughRouteIn
 		input.Tools = []interface{}{true}
 	}
 	outcome = p.routeDetailed(r.Context(), input)
+	p.applyRouteGate(r.Context(), &outcome, in.Provider, model)
 	p.recordSemanticRoutingDecisionV8(r.Context(), outcome)
 	d := outcome.Decision
 	if outcome.Result != SemanticRouteApplied || d == nil {
@@ -185,4 +187,16 @@ func routeDenyMessage(o SemanticRouteOutcome) string {
 		return "[DefenseClaw] " + o.Deny.Message
 	}
 	return "[DefenseClaw] Your organization does not allow this model request."
+}
+
+// routeRequestedProvider is the provider of the upstream the request was
+// addressed to (resolved from its URL), else the provider the model name
+// suggests. The managed deny judges this, not a client-chosen model name.
+func routeRequestedProvider(targetURL, requestURI string, providers *configs.ProvidersConfig, fallback string) string {
+	if strings.TrimSpace(targetURL) != "" {
+		if inferred := inferProviderFromRegistry(rawForwardUpstreamURL(targetURL, requestURI), providers); inferred != "" {
+			return inferred
+		}
+	}
+	return fallback
 }

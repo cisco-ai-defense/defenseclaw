@@ -22,6 +22,9 @@ type Options struct {
 	// CredentialOK reports whether the gateway can authenticate a call to
 	// b for this request (inbound passthrough or a gateway-held key).
 	CredentialOK func(b Backend, r Request) bool
+	// Sticky is the conversation cache shared across generations (nil = a
+	// private one). It is used only with classifier systemone.
+	Sticky *StickyCache
 }
 
 // Engine is built once per config generation and is safe for concurrent
@@ -42,7 +45,10 @@ type Engine struct {
 	admin         AdminEvaluator
 	managed       bool
 	credentialOK  func(Backend, Request) bool
-	sticky        *stickyCache
+	sticky        *StickyCache
+	// capabilityFilter is off for vllm_sr, whose 1.0.9 configs used
+	// free-form capabilities.
+	capabilityFilter bool
 }
 
 // New builds the engine of a validated config. It returns nil when routing
@@ -71,8 +77,14 @@ func New(cfg *config.Config, opts Options) (*Engine, error) {
 		admin:         opts.Admin,
 		managed:       opts.Managed,
 		credentialOK:  opts.CredentialOK,
-		sticky:        newStickyCache(),
 	}
+	if r.EffectiveClassifier() == config.RoutingClassifierSystemOne {
+		e.sticky = opts.Sticky
+		if e.sticky == nil {
+			e.sticky = NewStickyCache()
+		}
+	}
+	e.capabilityFilter = r.EffectiveClassifier() != config.RoutingClassifierVLLMSR
 	for _, m := range r.Models {
 		e.backends[m.Name] = Backend{
 			Alias: m.Name, Provider: strings.TrimSpace(m.Provider), Model: m.Model,
@@ -104,7 +116,7 @@ func (e *Engine) Backend(alias string) (Backend, bool) {
 }
 
 func toPolicy(p config.RoutingPolicyConfig) Policy {
-	return Policy{AllowedAliases: p.AllowedAliases, DeniedProviders: p.DeniedProviders, DefaultAlias: p.DefaultAlias, Categories: p.Categories, AllowUserOverride: p.UserOverrideAllowed()}
+	return Policy{AllowedAliases: p.AllowedAliases, DeniedProviders: p.DeniedProviders, DefaultAlias: p.DefaultAlias, Categories: p.Categories, AllowUserOverride: p.UserOverrideAllowed()}.clone()
 }
 
 func fromPolicy(p Policy) config.RoutingPolicyConfig {
@@ -151,7 +163,7 @@ func (e *Engine) providerDenied(p Policy, provider string) bool {
 	return false
 }
 
-var capabilityWords = []string{"tools", "vision", "thinking", "long_context"}
+var capabilityWords = []string{"tools", "vision", "long_context"}
 
 // eligible reports whether alias can serve req and, when not, which filter
 // removed it.
@@ -166,7 +178,7 @@ func (e *Engine) eligible(p Policy, alias string, req Request) (Backend, string)
 	if req.APIFamily != config.RoutingAPIChat && !slices.Contains(b.APIs, req.APIFamily) {
 		return Backend{}, "api"
 	}
-	if slices.ContainsFunc(b.Capabilities, func(c string) bool { return slices.Contains(capabilityWords, c) }) {
+	if e.capabilityFilter && slices.ContainsFunc(b.Capabilities, func(c string) bool { return slices.Contains(capabilityWords, c) }) {
 		need := map[string]bool{"tools": req.HasTools, "vision": req.HasImages, "long_context": req.LongContext}
 		for c, needed := range need {
 			if needed && !slices.Contains(b.Capabilities, c) {

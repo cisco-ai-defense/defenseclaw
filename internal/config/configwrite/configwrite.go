@@ -640,7 +640,12 @@ var restartKeys = []string{
 	"guardrail.scanner_mode", "guardrail.retain_judge_bodies",
 	"guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
 	"guardrail.protected_files",
-	"claw", "agent", "routing.port", "routing.version", "routing.remote", "routing.algorithm", "plugin_dir",
+	// routing: the vLLM Semantic Router settings, plus the keys its container
+	// was started with under classifier vllm_sr. The writer cannot see the
+	// classifier of the running gateway, so it predicts conservatively; the
+	// gateway reloads the last five hot with an in-process classifier.
+	"claw", "agent", "routing.port", "routing.version", "routing.remote", "routing.algorithm",
+	"routing.enabled", "routing.classifier", "routing.models", "routing.signals", "routing.decisions", "plugin_dir",
 	"deployment_mode", "enterprise.profile", "enterprise.network", "enterprise.openshell", "enterprise.cowork_vm_sensor",
 	"environment", "tenant_id", "workspace_id", "discovery_source",
 	// Fleet keys that require a restart (MQTT connections, signing keys).
