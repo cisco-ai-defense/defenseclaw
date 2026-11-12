@@ -212,8 +212,15 @@ func (w *projector) walkExpr(e Expr) {
 			w.walkExpr(el)
 		}
 	case *Hashtable:
+		for _, k := range v.Keys {
+			w.walkExpr(k)
+		}
 		for _, val := range v.Values {
 			w.walkExpr(val)
+		}
+	case *TypeExpr:
+		for _, a := range v.Args {
+			w.walkExpr(a)
 		}
 	case *Paren:
 		w.walkStatement(v.Inner)

@@ -230,18 +230,44 @@ func (p *parser) parseParamBlock(s stopSet) Statement {
 	start := p.cur().Start
 	p.advance() // param
 	p.skipNewlines()
+	blk := &Block{Keyword: "param"}
 	var vars []*Variable
 	if p.at(TokLParen) {
 		p.advance()
 		depthSave := p.enter()
-		for !p.at(TokRParen) && !p.at(TokEOF) {
-			if p.at(TokVariable) {
+		guard := 0
+		for !p.at(TokRParen) && !p.at(TokEOF) && guard < 1<<16 {
+			guard++
+			p.skipSeparators()
+			switch {
+			case p.at(TokRParen):
+				goto doneParams
+			case p.at(TokLBracket):
+				// a [Type] or [Attribute(...)]: recurse into attribute args so
+				// nested commands / script blocks are found (F15).
+				blk.Conditions = append(blk.Conditions, p.exprStmt(p.parseBracketAttr()))
+			case p.at(TokVariable):
 				t := p.advance()
-				vars = append(vars, &Variable{span: span{t.Start, t.End}, Name: t.VarName, Scope: t.VarScope, Splat: t.Splat})
-				continue
+				v := &Variable{span: span{t.Start, t.End}, Name: t.VarName, Scope: t.VarScope, Splat: t.Splat}
+				vars = append(vars, v)
+				blk.Conditions = append(blk.Conditions, p.exprStmt(v))
+				p.skipNewlines()
+				if p.at(TokOperator) && p.cur().Value == "=" {
+					p.advance()
+					p.skipNewlines()
+					em := p.exprMode
+					p.exprMode = true
+					def := p.parseExpression()
+					p.exprMode = em
+					blk.Conditions = append(blk.Conditions, p.exprStmt(def))
+				}
+			case p.at(TokComma):
+				p.advance()
+			default:
+				p.advance()
 			}
-			p.advance()
 		}
+	doneParams:
 		if p.at(TokRParen) {
 			p.advance()
 		}
@@ -250,16 +276,44 @@ func (p *parser) parseParamBlock(s stopSet) Statement {
 	if p.topParams == nil {
 		p.topParams = vars
 	}
-	end := p.prevEnd()
-	return &Block{span: span{start, end}, Keyword: "param", Conditions: variableStmts(vars)}
+	blk.start, blk.end = start, p.prevEnd()
+	return blk
 }
 
-func variableStmts(vs []*Variable) []Statement {
-	out := make([]Statement, 0, len(vs))
-	for _, v := range vs {
-		out = append(out, &ExprStatement{span: v.span, Expr: v})
+// parseBracketAttr parses a [Type] or [Attribute(args)] leniently, recursing
+// into any ( ) argument list so nested commands and script blocks are walked.
+func (p *parser) parseBracketAttr() Expr {
+	start := p.cur().Start
+	p.advance() // [
+	var args []Expr
+	save := p.enter()
+	depth := 1
+	guard := 0
+	for !p.at(TokEOF) && depth > 0 && guard < 1<<16 {
+		guard++
+		switch p.kind() {
+		case TokLBracket:
+			depth++
+			p.advance()
+		case TokRBracket:
+			depth--
+			p.advance()
+		case TokLParen:
+			args = append(args, p.parseParenExpr())
+		default:
+			p.advance()
+		}
 	}
-	return out
+	p.leave(save)
+	return &TypeExpr{span: span{start, p.prevEnd()}, Name: "attr", Args: args}
+}
+
+func (p *parser) exprStmt(e Expr) Statement {
+	s0, s1 := 0, p.prevEnd()
+	if e != nil {
+		s0, s1 = e.Span()
+	}
+	return &ExprStatement{span: span{s0, s1}, Expr: e}
 }
 
 func (p *parser) parseFunction(kw string) Statement {
@@ -444,8 +498,11 @@ func (p *parser) parseScriptBlock() *ScriptBlockExpr {
 		if b, isBlk := st.(*Block); isBlk {
 			sb.Params = variablesFromStmts(b.Conditions)
 		}
+		// keep the param block as a statement so its default-value and
+		// attribute commands are walked (F15).
+		sb.Statements = append(sb.Statements, st)
 	}
-	sb.Statements = p.parseStatementList(stopBrace)
+	sb.Statements = append(sb.Statements, p.parseStatementList(stopBrace)...)
 	p.leave(save)
 	if p.at(TokRBrace) {
 		p.advance()

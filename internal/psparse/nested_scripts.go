@@ -107,8 +107,15 @@ func ExtractNestedScripts(sc *Script) []NestedScript {
 				walkExpr(el)
 			}
 		case *Hashtable:
+			for _, k := range v.Keys {
+				walkExpr(k)
+			}
 			for _, val := range v.Values {
 				walkExpr(val)
+			}
+		case *TypeExpr:
+			for _, a := range v.Args {
+				walkExpr(a)
 			}
 		case *Paren:
 			walkStmts([]Statement{v.Inner})

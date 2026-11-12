@@ -99,8 +99,15 @@ func walkCommandsExpr(e Expr, fn func(*Command)) {
 			walkCommandsExpr(el, fn)
 		}
 	case *Hashtable:
+		for _, k := range v.Keys {
+			walkCommandsExpr(k, fn)
+		}
 		for _, val := range v.Values {
 			walkCommandsExpr(val, fn)
+		}
+	case *TypeExpr:
+		for _, a := range v.Args {
+			walkCommandsExpr(a, fn)
 		}
 	case *Paren:
 		walkCommandsStmt(v.Inner, fn)
