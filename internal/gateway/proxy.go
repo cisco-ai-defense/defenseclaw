@@ -1425,6 +1425,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
 	// payload from these allowlists while the original prompt still flows
 	// upstream.
+	passthroughSeverity := ""
 	if userText != "" &&
 		!isHeartbeatMessage(userText, partial.Messages) &&
 		!isSessionStartupMessage(userText) {
@@ -1462,6 +1463,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
+		passthroughSeverity = verdict.Severity
 		overlay := p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, mode,
 			verdict.Action == "block" && mode == "action")
 		auditClosed := p.promptAuditFailedClosed(r.Context(), verdict, mode, overlay.evaluationLogErr)
@@ -1551,8 +1553,25 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// --- Semantic routing (same API: Messages, Responses, Bedrock bearer) ---
+	route, routed, routeOutcome := p.routePassthrough(r, passthroughRouteInput{
+		APIFamily: passthroughAPIFamily(r.URL.Path), Body: body, Text: userText, Model: partial.Model,
+		Severity: passthroughSeverity, InboundOrigin: originOf(targetOrigin), Provider: provider, Signed: signedBody,
+	})
+	if routeOutcome.Result == SemanticRouteDenied {
+		p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, routeDenyMessage(routeOutcome))
+		return
+	}
+	requestURI := r.URL.RequestURI()
+	credentialBoundary := false
+	if routed {
+		targetOrigin, body, provider, requestURI = route.Origin, route.Body, route.Provider, route.Path
+		credentialBoundary = !route.KeepInbound
+		w.Header().Set("X-Semantic-Router", "routed")
+	}
+
 	// Forward verbatim to real upstream: reassemble original URL.
-	upstreamURL := strings.TrimRight(targetOrigin, "/") + r.URL.RequestURI()
+	upstreamURL := strings.TrimRight(targetOrigin, "/") + requestURI
 	fmt.Fprintf(os.Stderr, "[guardrail] → intercepted %s → %s\n", label, scrubURLSecrets(upstreamURL))
 
 	// Resolve the key to use for the upstream provider.
@@ -1560,6 +1579,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// "Bearer <key>" regardless of the original header), (2) api-key (Azure),
 	// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
 	upstreamAuth := passthroughUpstreamAuth(r.Header)
+	if credentialBoundary {
+		// A routed backend is a new credential boundary: its gateway-held
+		// key (none for a local model) replaces the agent credential.
+		upstreamAuth = route.Auth
+	}
 	// Apply a timeout so the proxy doesn't hang indefinitely if the upstream
 	// provider stalls. Streaming responses may take longer, so use 5 minutes;
 	// non-streaming gets 2 minutes (matching typical provider timeouts).
@@ -1592,7 +1616,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// Authorization re-set below — useful for operators who want zero
 	// header leakage from the agent to the provider.
 	forwardedHeaderCount := 0
-	if p.cfg != nil && p.cfg.LLM.ForwardCustomHeadersEnabled() {
+	if p.cfg != nil && p.cfg.LLM.ForwardCustomHeadersEnabled() && !credentialBoundary {
 		n, herr := CopyForwardableHeaders(upstreamReq.Header, r.Header)
 		if herr != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: header forwarding rejected: %v\n", herr)
@@ -3173,11 +3197,11 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		p.recordSemanticRoutingDecisionV8(r.Context(), routeOutcome)
 		if routeOutcome.Result == SemanticRouteDenied {
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
-			msg := "[DefenseClaw] Your organization does not allow this model request."
-			if routeOutcome.Deny != nil && routeOutcome.Deny.Message != "" {
-				msg = "[DefenseClaw] " + routeOutcome.Deny.Message
+			if req.Stream {
+				p.writeBlockedStream(w, req.Model, routeDenyMessage(routeOutcome))
+			} else {
+				p.writeBlockedResponse(w, req.Model, routeDenyMessage(routeOutcome))
 			}
-			writeOpenAIError(w, http.StatusForbidden, msg)
 			return
 		}
 		if decision := routeOutcome.Decision; decision != nil {
