@@ -341,7 +341,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "metrics": {
+            "health": {
               "$ref": "#/definitions/port"
             }
           }
@@ -360,6 +360,24 @@
         },
         "affinity": {
           "type": "object"
+        },
+        "judge": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tokenSecret": {
+              "type": "string"
+            }
+          }
+        },
+        "actorSecrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "secretName": {
+              "type": "string"
+            }
+          }
         }
       }
     },

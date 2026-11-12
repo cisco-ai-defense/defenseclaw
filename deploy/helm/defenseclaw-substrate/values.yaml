@@ -139,7 +139,18 @@ callout:
     minAvailable: 1
   port: 9443
   ports:
-    metrics: 9464
+    # Plain HTTP /healthz and /readyz (with the detected body mode).
+    health: 9444
+  # The callout asks the gateway for MCP tools/call verdicts (the hook path's
+  # MCP asset policy and tool rules) on the admin Service. Name a Secret with
+  # the bearer token in key "token" to turn it on; without it the callout
+  # applies only its own MCP rules.
+  judge:
+    tokenSecret: ""
+  # A Secret whose keys are the exposed actor_secrets values (one file per
+  # name), for exact-value DLP on egress. Never mounted into actors.
+  actorSecrets:
+    secretName: ""
   args: []
   resources:
     requests: {cpu: 250m, memory: 128Mi}

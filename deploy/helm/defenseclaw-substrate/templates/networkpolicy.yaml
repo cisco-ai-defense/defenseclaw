@@ -79,7 +79,7 @@ spec:
     {{- toYaml . | nindent 4 }}
     ports:
     - protocol: TCP
-      port: {{ $.Values.callout.ports.metrics }}
+      port: {{ $.Values.callout.ports.health }}
   {{- end }}
 ---
 # Leader: only this release's pods (followers, controller, callout).

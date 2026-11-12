@@ -257,6 +257,34 @@ metadata:
     app.kubernetes.io/component: callout
 automountServiceAccountToken: false
 ---
+# Source: defenseclaw-substrate/templates/callout-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-callout
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: callout
+data:
+  callout.yaml: |
+    body_hosts: []
+    body_inspection: auto
+    body_max_bytes: 1048576
+    defenseclaw_hosts:
+    - defenseclaw-actor.defenseclaw-system.svc
+    - defenseclaw-actor.defenseclaw-system.svc.cluster.local
+    - defenseclaw-admin.defenseclaw-system.svc
+    - defenseclaw-admin.defenseclaw-system.svc.cluster.local
+    egress_peers:
+    - spiffe://cluster.local/ns/ate-system/sa/atenet-egress
+    failure_mode: closed
+    mcp_hosts: []
+---
 # Source: defenseclaw-substrate/templates/configmap.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -534,9 +562,9 @@ spec:
   - name: grpc
     port: 9443
     targetPort: extproc
-  - name: metrics
-    port: 9464
-    targetPort: metrics
+  - name: health
+    port: 9444
+    targetPort: health
 ---
 # Source: defenseclaw-substrate/templates/gateway.yaml
 # The actor Service: the only DefenseClaw host in rendered egress policies.
@@ -680,6 +708,7 @@ spec:
         app.kubernetes.io/component: callout
       annotations:
         checksum/config: 61e0dbdd2c906907f7adf8d028538a64f70b22b75e5d06c44d3b56cc57a69c9a
+        checksum/callout: d78beb5ea18c644e46c619d653a4cad7b82ad2bc5bdd847b0f5b3da92095f1aa
     spec:
       
       serviceAccountName: defenseclaw-callout
@@ -707,12 +736,11 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - substrate-extproc
+        - --config=/etc/defenseclaw-callout/callout.yaml
         - --listen=:9443
-        - --metrics-listen=:9464
-        - --tls-cert=/run/servicedns.podcert.ate.dev/credential-bundle.pem
+        - --health-listen=:9444
+        - --tls-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem
         - --client-ca=/var/run/ate/podidentity-ca.crt
-        - --client-spiffe-id=spiffe://cluster.local/ns/ate-system/sa/atenet-egress
-        - --leader-address=defenseclaw-leader.defenseclaw-system.svc:7443
         env:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml
@@ -729,13 +757,13 @@ spec:
         ports:
         - name: extproc
           containerPort: 9443
-        - name: metrics
-          containerPort: 9464
+        - name: health
+          containerPort: 9444
         readinessProbe:
-          httpGet: {path: /readyz, port: metrics}
+          httpGet: {path: /readyz, port: health}
           periodSeconds: 5
         livenessProbe:
-          httpGet: {path: /healthz, port: metrics}
+          httpGet: {path: /healthz, port: health}
           periodSeconds: 10
           failureThreshold: 6
         resources:
@@ -761,6 +789,9 @@ spec:
           readOnly: true
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev
+          readOnly: true
+        - name: callout-config
+          mountPath: /etc/defenseclaw-callout
           readOnly: true
       volumes:
       - name: config
@@ -804,6 +835,9 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: trust-bundle.pem
+      - name: callout-config
+        configMap:
+          name: defenseclaw-callout
 ---
 # Source: defenseclaw-substrate/templates/controller.yaml
 # Two replicas, one active through the lease: policies, admission, idle

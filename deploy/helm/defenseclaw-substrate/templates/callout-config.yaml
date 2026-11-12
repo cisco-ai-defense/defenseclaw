@@ -1,0 +1,60 @@
+{{- /*
+The callout reads only this file (internal/substrate/extproc Config, strict
+YAML: every key below must be one it knows). Everything comes from
+config.yaml (config.substrate) and the chart values, so config.yaml stays
+the single source.
+*/ -}}
+{{- define "dc.calloutConfig" -}}
+{{- $sub := .Values.config.substrate | default dict -}}
+{{- $xp := $sub.extproc | default dict -}}
+{{- $actor := include "dc.actorHost" . -}}
+{{- $admin := include "dc.adminHost" . -}}
+{{- $c := dict
+  "failure_mode" ($xp.failure_mode | default "closed")
+  "body_inspection" ($xp.body_inspection | default "auto")
+  "body_max_bytes" ($xp.body_max_bytes | default 1048576 | int)
+  "mcp_hosts" ($xp.mcp_hosts | default list)
+  "body_hosts" ($xp.body_hosts | default list)
+  "defenseclaw_hosts" (list $actor (printf "%s.cluster.local" $actor) $admin (printf "%s.cluster.local" $admin))
+  "egress_peers" (list .Values.substrate.egressSpiffeId)
+-}}
+{{- with $xp.request_access }}{{ $_ := set $c "request_access" . }}{{ end -}}
+{{- with $xp.dlp }}{{ $_ := set $c "dlp" . }}{{ end -}}
+{{- if .Values.callout.judge.tokenSecret -}}
+{{- $_ := set $c "judge" (dict "url" (printf "https://%s/api/v1/substrate/callout/mcp-verdict" $admin) "token_file" "/var/run/defenseclaw/callout-judge/token" "ca_file" "/var/run/ate/ca.crt") -}}
+{{- end -}}
+{{- $secrets := list -}}
+{{- range ($sub.secrets | default list) -}}
+{{- $s := dict "name" .name "hosts" (.inject.hosts | default list) "header" .inject.header -}}
+{{- with .inject.placeholder }}{{ $_ := set $s "placeholder" . }}{{ end -}}
+{{- $secrets = append $secrets $s -}}
+{{- end -}}
+{{- if $secrets }}{{ $_ := set $c "secrets" $secrets }}{{ end -}}
+{{- if .Values.callout.actorSecrets.secretName }}{{ $_ := set $c "actor_secrets_dir" "/run/defenseclaw/actor-secrets" }}{{ end -}}
+{{- /* Profiles: config.substrate.extproc.profiles when given (the callout's own
+shape); otherwise one per launcher profile, with its atespaces, the egress
+allow list and the unattended ask mode. */ -}}
+{{- if $xp.profiles -}}
+{{- $_ := set $c "profiles" $xp.profiles -}}
+{{- else -}}
+{{- $profiles := list -}}
+{{- $egress := $sub.egress | default dict -}}
+{{- $asks := ($sub.unattended | default dict).asks | default "deny" -}}
+{{- range $name, $spaces := ($sub.launcher_atespaces | default dict) -}}
+{{- $p := dict "name" $name "atespaces" $spaces "unattended_asks" $asks -}}
+{{- with $egress.allow }}{{ $_ := set $p "egress" (dict "allow" .) }}{{ end -}}
+{{- $profiles = append $profiles $p -}}
+{{- end -}}
+{{- if $profiles }}{{ $_ := set $c "profiles" $profiles }}{{ end -}}
+{{- end -}}
+{{- toYaml $c -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-callout
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "callout") | nindent 4 }}
+data:
+  callout.yaml: |
+    {{- include "dc.calloutConfig" . | nindent 4 }}

@@ -31,3 +31,19 @@ config:
       issuer: https://idp.cluster-a.example
     launcher_atespaces:
       engineering: [eng-web]
+      data: [data-ml]
+    egress:
+      allow: [github.com, pypi.org]
+    extproc:
+      mcp_hosts: [mcp.example.com]
+    secrets:
+    - name: github-push
+      source: ate-secret://k8s.io/default/defenseclaw-actor-secrets/github-app/token
+      inject: {hosts: [github.com, api.github.com], header: Authorization, prefix: "Bearer ", placeholder: DC_SECRET_GITHUB}
+      scope: shared
+      profiles: [engineering]
+callout:
+  judge:
+    tokenSecret: defenseclaw-callout-judge
+  actorSecrets:
+    secretName: defenseclaw-actor-secrets-dlp

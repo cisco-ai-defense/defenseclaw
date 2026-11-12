@@ -30,6 +30,7 @@ spec:
         {{- end }}
       annotations:
         {{- include "dc.podAnnotations" $sel | nindent 8 }}
+        checksum/callout: {{ include "dc.calloutConfig" . | sha256sum }}
     spec:
       {{- include "dc.podSpecCommon" (dict "ctx" . "sa" "callout" "values" .Values.callout) | nindent 6 }}
       topologySpreadConstraints:
@@ -48,25 +49,26 @@ spec:
         {{- toYaml .Values.callout.args | nindent 8 }}
         {{- else }}
         - substrate-extproc
+        - --config=/etc/defenseclaw-callout/callout.yaml
         - --listen=:{{ .Values.callout.port }}
-        - --metrics-listen=:{{ .Values.callout.ports.metrics }}
-        - --tls-cert=/run/servicedns.podcert.ate.dev/credential-bundle.pem
+        - --health-listen=:{{ .Values.callout.ports.health }}
+        {{- if .Values.podCertificates.enabled }}
+        - --tls-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem
         - --client-ca=/var/run/ate/podidentity-ca.crt
-        - --client-spiffe-id={{ .Values.substrate.egressSpiffeId }}
-        - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc:{{ .Values.leader.port }}
+        {{- end }}
         {{- end }}
         env:
         {{- include "dc.env" . | nindent 8 }}
         ports:
         - name: extproc
           containerPort: {{ .Values.callout.port }}
-        - name: metrics
-          containerPort: {{ .Values.callout.ports.metrics }}
+        - name: health
+          containerPort: {{ .Values.callout.ports.health }}
         readinessProbe:
-          httpGet: {path: /readyz, port: metrics}
+          httpGet: {path: /readyz, port: health}
           periodSeconds: 5
         livenessProbe:
-          httpGet: {path: /healthz, port: metrics}
+          httpGet: {path: /healthz, port: health}
           periodSeconds: 10
           failureThreshold: 6
         resources:
@@ -75,8 +77,37 @@ spec:
           {{- toYaml .Values.containerSecurityContext | nindent 10 }}
         volumeMounts:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
+        - name: callout-config
+          mountPath: /etc/defenseclaw-callout
+          readOnly: true
+        {{- if .Values.callout.judge.tokenSecret }}
+        - name: callout-judge
+          mountPath: /var/run/defenseclaw/callout-judge
+          readOnly: true
+        {{- end }}
+        {{- if .Values.callout.actorSecrets.secretName }}
+        - name: actor-secrets
+          mountPath: /run/defenseclaw/actor-secrets
+          readOnly: true
+        {{- end }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
+      - name: callout-config
+        configMap:
+          name: defenseclaw-callout
+      {{- with .Values.callout.judge.tokenSecret }}
+      - name: callout-judge
+        secret:
+          secretName: {{ . }}
+          items:
+          - {key: token, path: token}
+      {{- end }}
+      {{- with .Values.callout.actorSecrets.secretName }}
+      # Exposed actor_secrets values, for exact-value DLP only (D14).
+      - name: actor-secrets
+        secret:
+          secretName: {{ . }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -92,9 +123,9 @@ spec:
   - name: grpc
     port: {{ .Values.callout.port }}
     targetPort: extproc
-  - name: metrics
-    port: {{ .Values.callout.ports.metrics }}
-    targetPort: metrics
+  - name: health
+    port: {{ .Values.callout.ports.health }}
+    targetPort: health
 {{- if .Values.callout.hpa.enabled }}
 ---
 apiVersion: autoscaling/v2

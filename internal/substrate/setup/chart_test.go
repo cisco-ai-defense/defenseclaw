@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/extproc"
 )
 
 // chartDir is the chart, from this package's directory.
@@ -167,6 +169,31 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 		if strings.Contains(string(raw), "servicedns.podcert.ate.dev/identity\n            keyType") ||
 			strings.Contains(string(raw), "name: servicedns\n") {
 			t.Errorf("%s: the controller mounts a servicedns serving certificate but no Service selects it", name)
+		}
+	}
+	// The callout config parses as the callout reads it (strict), and names
+	// the DefenseClaw hosts it must never buffer and the egress peer.
+	cm, ok := byName["ConfigMap/defenseclaw-callout"]
+	if !ok {
+		t.Fatalf("%s: no callout ConfigMap", name)
+	}
+	cc, err := extproc.ParseConfig([]byte(cm.Data["callout.yaml"].(string)))
+	if err != nil {
+		t.Errorf("%s: callout.yaml: %v", name, err)
+	} else {
+		if !slices.Contains(cc.DefenseClawHosts, "defenseclaw-actor.defenseclaw-system.svc") ||
+			!slices.Contains(cc.DefenseClawHosts, "defenseclaw-admin.defenseclaw-system.svc") {
+			t.Errorf("%s: defenseclaw_hosts %v", name, cc.DefenseClawHosts)
+		}
+		if len(cc.EgressPeers) != 1 || !strings.HasSuffix(cc.EgressPeers[0], "/sa/atenet-egress") || cc.FailureMode != extproc.FailureClosed {
+			t.Errorf("%s: egress peers %v, failure mode %s", name, cc.EgressPeers, cc.FailureMode)
+		}
+		if name == "full" && (len(cc.Secrets) != 1 || cc.Secrets[0].Placeholder != "DC_SECRET_GITHUB" || len(cc.Profiles) != 2 ||
+			cc.Judge.URL == "" || cc.ActorSecretsDir == "" || len(cc.MCPHosts) != 1) {
+			t.Errorf("full: callout config %+v", cc)
+		}
+		if raw, _ := yaml.Marshal(cm.Data); strings.Contains(string(raw), "ate-secret://") {
+			t.Errorf("%s: the callout config carries a secret source", name)
 		}
 	}
 	// D15: the actor Service exposes only the actor listener; the admin
