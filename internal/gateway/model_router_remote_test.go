@@ -135,32 +135,6 @@ func TestConfiguredRemoteRouterRejectsUnknownAliasAndMissingCredential(t *testin
 	}
 }
 
-func TestConfiguredRemoteRouterUsesManagedTokenResolver(t *testing.T) {
-	oldResolver := tokenResolver
-	oldDisabled := localKeyResolutionDisabled
-	t.Cleanup(func() {
-		tokenResolver = oldResolver
-		localKeyResolutionDisabled = oldDisabled
-	})
-	DisableLocalKeyResolution()
-	SetTokenResolver(func(_ context.Context, provider string) (string, error) {
-		if provider != "openai" {
-			t.Fatalf("resolver provider = %q, want openai", provider)
-		}
-		return "managed-routing-token", nil
-	})
-
-	srv := routerResponseServer(t, "paid")
-	defer srv.Close()
-	client := NewConfiguredRemoteRouterClient(srv.URL, 100, []ModelRouterBackend{{
-		Name: "paid", Provider: "openai", Model: "gpt-4.1-mini", APIKeyEnv: "OPENAI_API_KEY",
-	}}, "")
-	decision := client.Route(context.Background(), &ModelRouterInput{})
-	if decision == nil || decision.APIKey != "managed-routing-token" || !decision.APIKeyOverride {
-		t.Fatalf("managed decision = %+v", decision)
-	}
-}
-
 func TestRemoteRouterClientDoesNotFollowRedirects(t *testing.T) {
 	redirectTargetCalled := false
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { redirectTargetCalled = true }))

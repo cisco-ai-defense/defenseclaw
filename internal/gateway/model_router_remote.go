@@ -257,17 +257,7 @@ func (c *RemoteRouterClient) RouteDetailed(ctx context.Context, input *ModelRout
 		// provider key rather than forwarding it to a different backend.
 		decision.APIKeyOverride = true
 		if backend.APIKeyEnv != "" {
-			if tokenResolver != nil {
-				resolved, err := tokenResolver(ctx, provider)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "[routing] managed credential resolution failed for provider %q: %v\n", provider, err)
-					outcome.FailureCode = SemanticRouteFailureCredential
-					return outcome
-				}
-				decision.APIKey = strings.TrimSpace(resolved)
-			} else {
-				decision.APIKey = ResolveAPIKey(backend.APIKeyEnv, c.dotenv)
-			}
+			decision.APIKey = ResolveAPIKey(backend.APIKeyEnv, c.dotenv)
 			if decision.APIKey == "" {
 				fmt.Fprintf(os.Stderr, "[routing] credential %q for model alias %q is unavailable: falling back to default provider\n", backend.APIKeyEnv, recommendedAlias)
 				outcome.FailureCode = SemanticRouteFailureCredential

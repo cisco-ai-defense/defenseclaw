@@ -803,9 +803,9 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 
 	addr := guardrailListenAddr(p.cfg.Port, p.cfg.EffectiveHost())
 	InstallSharedAgentRegistry("", strings.TrimSpace(p.defaultAgentName))
-	// Strip /c/<connector>/ prefix so connector-routed traffic
-	// (ANTHROPIC_BASE_URL=http://proxy/c/claudecode) hits the same
-	// handlers as fetch-interceptor traffic.
+	// Strip a /c/<connector>/ prefix (OpenClaw and ZeptoClaw routes) so
+	// connector-routed traffic hits the same handlers as fetch-interceptor
+	// traffic.
 	stripped := connectorPrefixStripper(openClawBlockNoticeMiddleware(mux, p.openClawNoticeAuthorized), p.registry)
 	scoped := p.thresholdScopeMiddleware(stripped)
 	limited := p.rateLimitMiddleware(scoped)
@@ -1164,18 +1164,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			cfgModel := p.cfg.Model
 			if cfgModel == "" {
 				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: llm.base_url set but no llm.model configured — cannot hydrate upstream auth\n")
-			} else if !localKeyResolutionDisabled || tokenResolver != nil {
-				resolvedKey, err := p.resolveDirectProviderUpstreamKey(r.Context(), cfgModel, "")
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: token resolver error for configured model %q: %v\n", cfgModel, err)
-				} else if resolvedKey != "" {
-					targetOrigin = base
-					connForwardKey = resolvedKey
-					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: direct-provider hydration model=%q base=%s\n",
-						cfgModel, scrubURLSecrets(base))
-				} else {
-					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: no API key available for configured model %q\n", cfgModel)
-				}
+			} else if resolvedKey := p.resolveDirectProviderUpstreamKey(""); resolvedKey != "" {
+				targetOrigin = base
+				connForwardKey = resolvedKey
+				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: direct-provider hydration model=%q base=%s\n",
+					cfgModel, scrubURLSecrets(base))
+			} else {
+				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: no API key available for configured model %q\n", cfgModel)
 			}
 		}
 	}
@@ -1564,25 +1559,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// "Bearer <key>" regardless of the original header), (2) api-key (Azure),
 	// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
 	upstreamAuth := passthroughUpstreamAuth(r.Header)
-	// Fallback: when the caller supplied X-DC-Target-URL but no credential
-	// headers (the "third_party_injected" mode used by ZeptoClaw/PulseClaw),
-	// consult the enterprise token resolver (secrets-sidecar hydrated key)
-	// so the proxy injects the upstream LLM credential on behalf of the
-	// caller. This mirrors the resolveConfiguredProvider path that
-	// handleChatCompletion already uses for direct-provider hydration.
-	if upstreamAuth == "" && tokenResolver != nil {
-		providerPrefix := provider
-		if providerPrefix == "" {
-			providerPrefix = inferProvider(partial.Model, "")
-		}
-		resolvedKey, err := tokenResolver(r.Context(), providerPrefix)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: token resolver error: %v\n", err)
-		} else if resolvedKey != "" {
-			upstreamAuth = "Bearer " + resolvedKey
-		}
-	}
-
 	// Apply a timeout so the proxy doesn't hang indefinitely if the upstream
 	// provider stalls. Streaming responses may take longer, so use 5 minutes;
 	// non-streaming gets 2 minutes (matching typical provider timeouts).
@@ -2569,11 +2545,7 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 		return nil
 	}
 
-	apiKey, err := p.resolveDirectProviderUpstreamKey(context.Background(), cfgModel, req.TargetAPIKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] external token resolver error for configured model %q: %v\n", cfgModel, err)
-		return nil
-	}
+	apiKey := p.resolveDirectProviderUpstreamKey(req.TargetAPIKey)
 	if apiKey == "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] no API key available for configured model %q\n", cfgModel)
 		return nil
@@ -2614,33 +2586,20 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 // API and chat completions behave identically against a custom
 // provider:
 //
-//  1. tokenResolver (the enterprise secrets-sidecar hook registered via
-//     SetTokenResolver). When set, this is the only source — failure
-//     short-circuits to an error so we don't accidentally fall back to
-//     a stale dotenv value when the sidecar is unreachable.
-//  2. inboundKey (typically req.TargetAPIKey from X-AI-Auth, only set
+//  1. inboundKey (typically req.TargetAPIKey from X-AI-Auth, only set
 //     on the chat/completions path). Empty on the passthrough path.
-//  3. p.cfg.APIKeyEnv + ~/.defenseclaw/.env dotenv lookup.
+//  2. p.cfg.APIKeyEnv + ~/.defenseclaw/.env dotenv lookup.
 //
-// Returns ("", nil) when none of the sources produced a key. Returns a
-// non-nil error only for tokenResolver failures (caller should fail
-// the request rather than fall back).
-func (p *GuardrailProxy) resolveDirectProviderUpstreamKey(ctx context.Context, cfgModel, inboundKey string) (string, error) {
-	if tokenResolver != nil {
-		providerPrefix, modelID := splitModel(cfgModel)
-		if providerPrefix == "" {
-			providerPrefix = inferProvider(modelID, "")
-		}
-		return tokenResolver(ctx, providerPrefix)
-	}
+// Returns "" when neither source produced a key.
+func (p *GuardrailProxy) resolveDirectProviderUpstreamKey(inboundKey string) string {
 	if inboundKey != "" {
-		return inboundKey, nil
+		return inboundKey
 	}
 	if p.cfg != nil && p.cfg.APIKeyEnv != "" {
 		dotenvPath := filepath.Join(p.dataDir, ".env")
-		return ResolveAPIKey(p.cfg.APIKeyEnv, dotenvPath), nil
+		return ResolveAPIKey(p.cfg.APIKeyEnv, dotenvPath)
 	}
-	return "", nil
+	return ""
 }
 
 // hydrateConnectorSignals lets a connector whose agent has no fetch
@@ -2686,17 +2645,6 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 	prefix := inferProviderFromRegistry(req.TargetURL+req.TargetPath, req.providers)
 	if prefix == "" {
 		return nil
-	}
-
-	// If an external token resolver is registered, use it to obtain the API key
-	// instead of relying on X-AI-Auth or local env resolution.
-	if tokenResolver != nil {
-		resolvedKey, err := tokenResolver(context.Background(), prefix)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] external token resolver error for %q: %v\n", prefix, err)
-			return nil
-		}
-		req.TargetAPIKey = resolvedKey
 	}
 
 	// Azure requires the specific resource endpoint as baseURL.
@@ -2938,11 +2886,8 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// X-AI-Auth carries the real provider API key, normalized to
 	// "Bearer <key>" by the fetch interceptor regardless of which header
 	// the provider SDK originally used (Authorization, x-api-key, api-key).
-	// Skip extraction when local key resolution is disabled (enterprise mode).
-	if !localKeyResolutionDisabled {
-		if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
-			req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
-		}
+	if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
+		req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
 	}
 
 	// Native-binary connectors (zeptoclaw) have no fetch interceptor, so the
@@ -2950,19 +2895,17 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// connector to resolve them from its captured config snapshot. Existing
 	// header values win — fetch-interceptor paths are unchanged.
 	chatConnExtraHeaders := map[string]string{}
-	if !localKeyResolutionDisabled {
-		if cs := hydrateConnectorSignalsFull(p.connector, r, body); cs != nil {
-			if cs.RawUpstream != "" {
-				if req.TargetURL == "" {
-					req.TargetURL = cs.RawUpstream
-				}
-				if req.TargetAPIKey == "" {
-					req.TargetAPIKey = cs.RawAPIKey
-				}
+	if cs := hydrateConnectorSignalsFull(p.connector, r, body); cs != nil {
+		if cs.RawUpstream != "" {
+			if req.TargetURL == "" {
+				req.TargetURL = cs.RawUpstream
 			}
-			if cs.ExtraHeaders != nil {
-				chatConnExtraHeaders = cs.ExtraHeaders
+			if req.TargetAPIKey == "" {
+				req.TargetAPIKey = cs.RawAPIKey
 			}
+		}
+		if cs.ExtraHeaders != nil {
+			chatConnExtraHeaders = cs.ExtraHeaders
 		}
 	}
 
