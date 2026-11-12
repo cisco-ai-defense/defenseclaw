@@ -13,6 +13,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	oteltrace "go.opentelemetry.io/otel/trace"
+	collectorlogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 )
 
 func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvider(t *testing.T) {
@@ -167,6 +168,53 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 	assertHookV8MetricPoint(t, dispatch, map[string]string{
 		"defenseclaw.connector.source": "codex",
 	}, 1)
+}
+
+func TestHookDecisionLogV8IncludesInspectedEventContent(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "TaskCreated"}
+	resp := agentHookResponse{
+		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
+		InspectedContent: "create task containing alice@example.com", InspectedContentPresent: true,
+	}
+
+	api.emitHookDecisionObservabilityV8(t.Context(), req, resp, HookAuditEnvelope{Result: "ok"}, false)
+
+	deadline := time.Now().Add(3 * time.Second)
+	var logs []*collectorlogspb.ExportLogsServiceRequest
+	for time.Now().Before(deadline) {
+		logs = capture.logSnapshot()
+		if len(hookModelV8CapturedLogs(logs)) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	records := hookModelV8CapturedLogs(logs)
+	if len(records) != 1 {
+		t.Fatalf("generated hook decision logs=%d want=1", len(records))
+	}
+	var wire struct {
+		Body map[string]interface{} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(records[0].Body.GetStringValue()), &wire); err != nil {
+		t.Fatalf("decode generated hook decision body: %v", err)
+	}
+	messages, ok := wire.Body["gen_ai.input.messages"].([]interface{})
+	if !ok || len(messages) != 1 {
+		t.Fatalf("gen_ai.input.messages=%v, want one message", wire.Body["gen_ai.input.messages"])
+	}
+	message, ok := messages[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("message=%T, want object", messages[0])
+	}
+	parts, ok := message["parts"].([]interface{})
+	if !ok || len(parts) != 1 {
+		t.Fatalf("parts=%v, want one part", message["parts"])
+	}
+	part, ok := parts[0].(map[string]interface{})
+	if !ok || part["content"] != resp.InspectedContent {
+		t.Fatalf("part=%v, want exact inspected content", parts[0])
+	}
 }
 
 func TestFinalizedBlockPersistsAuditAndActiveAlertBeforeNotification(t *testing.T) {

@@ -32,6 +32,14 @@ not a claim that all behavior is contained in one file.
   enforcement change.
 - Preserve correlation, redaction, audit, and generated-telemetry contracts;
   do not create an endpoint-local parallel schema.
+- When a hook inspects connector event content that has no canonical
+  prompt/tool companion event, project the normalized telemetry copy onto the
+  canonical hook decision only when the Cisco AI Defense hook lane submitted
+  it. For Claude Code `StopFailure`, normalize echoed block messages before
+  both submission and projection. Remove embedded bearer credentials from the
+  telemetry copy when the cloud returns no redaction directive. Preserve an
+  explicit absence when the event was handled only by local rules, the optional
+  judge, or local file/component scanning.
 - Update the published API or connector page when externally observable
   behavior changes.
 - Run the relevant Go package tests plus the schema/telemetry parity gates
