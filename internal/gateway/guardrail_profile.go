@@ -716,6 +716,14 @@ func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
 	if subject, ok := actingForProfileSubject(ctx); ok {
 		return &subject, profileSubjectVerifiedByConnector
 	}
+	// An Agent Substrate actor acts for the person the launcher verified
+	// and bound to it at create (its registration), never for the gateway.
+	if isSubstrateActorRequest(ctx) {
+		if subject, ok := substrateProfileSubject(ctx); ok {
+			return &subject, profileSubjectVerified
+		}
+		return nil, ""
+	}
 	// A sandbox bearer names a host user for attribution, but it does not
 	// authenticate the process calling the loopback ingress. Never inherit
 	// the gateway owner's verified subject for these requests. The one
