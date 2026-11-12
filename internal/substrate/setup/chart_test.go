@@ -262,6 +262,17 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	} else if strings.Contains(string(out), "substrate-datadir") {
 		t.Errorf("%s: a non-managed render runs the data dir init container", name)
 	}
+	// A13: the chain key is created by a hook (never rendered), mounted
+	// into the gateway and the leader; the callout reaches the leader.
+	if !strings.Contains(string(out), "- chain-key") || !strings.Contains(string(out), "secretName: defenseclaw-chain-key") {
+		t.Errorf("%s: no chain-key hook or Secret mount", name)
+	}
+	if c, ok := byName["Deployment/defenseclaw-callout"]; ok {
+		raw, _ := yaml.Marshal(c.Spec)
+		if name != "minimal" && !strings.Contains(string(raw), "--leader-address=defenseclaw-leader.") {
+			t.Errorf("%s: the callout has no leader address", name)
+		}
+	}
 	// GAP-0130: the launcher endpoint record names an https admin URL, and
 	// the only grant to every authenticated user is reading that record.
 	if cm, ok := byName["ConfigMap/defenseclaw-launcher-endpoint"]; !ok || !strings.HasPrefix(fmt.Sprint(cm.Data["admin_url"]), "https://") {

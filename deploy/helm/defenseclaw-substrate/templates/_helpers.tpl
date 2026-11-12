@@ -326,6 +326,10 @@ checksum/config: {{ include "dc.config" .ctx | sha256sum }}
 
 {{/* Optional Secrets of the gateway and leader (absent ones are skipped). */}}
 {{- define "dc.gatewaySecretMounts" -}}
+# The value-lineage key every replica shares (the chain-key hook creates it).
+- name: chain-key
+  mountPath: /var/run/secrets/defenseclaw-chain-key
+  readOnly: true
 - name: relay-session
   mountPath: /var/run/secrets/defenseclaw-relay-session
   readOnly: true
@@ -340,6 +344,13 @@ checksum/config: {{ include "dc.config" .ctx | sha256sum }}
 {{- end -}}
 
 {{- define "dc.gatewaySecretVolumes" -}}
+- name: chain-key
+  secret:
+    secretName: defenseclaw-chain-key
+    optional: true
+    defaultMode: 0440
+    items:
+    - {key: key, path: key}
 - name: relay-session
   secret:
     secretName: {{ .Values.gateway.relaySessionSecret }}

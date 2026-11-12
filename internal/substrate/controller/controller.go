@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 )
 
@@ -90,6 +91,9 @@ type Options struct {
 	LauncherAtespaces map[string]bool
 	// RequireAttestation gives no policy to an unattested template.
 	RequireAttestation bool
+	// Lifecycle, when set, gets every suspend, resume, fork, revert,
+	// crash and delete the controller observes (A13 chain clocks).
+	Lifecycle LifecycleSink
 	// Resets, when set, is read every pass for admin policy_conflict
 	// resets (ResetConfigMap in Namespace).
 	Resets    ResetStore
@@ -127,6 +131,8 @@ type Controller struct {
 	// actors are kept, not reported deleted. warnedList dedups warnings.
 	unlisted   map[string]bool
 	warnedList map[string]bool
+	// lifeRetry are deleted actors whose delete event is not delivered.
+	lifeRetry []*actorState
 	// uidByKey is the last UID seen per atespace/name (GAP-0133).
 	uidByKey map[string]string
 }
@@ -164,6 +170,9 @@ type actorState struct {
 	// lastForeign is the last foreign change seen while in conflict.
 	lastForeign time.Time
 	refused     string
+	// pendingLife are lifecycle events not yet delivered to the leader.
+	pendingLife []chainstate.LifecycleEvent
+	lifeWarned  bool
 	// forcedDeny is why the resolver gives the actor deny-only (D8).
 	forcedDeny string
 	recheckGen int32
@@ -239,6 +248,7 @@ func (c *Controller) Run(ctx context.Context) error {
 // so their policy lands before they reach the network.
 func (c *Controller) Reconcile(ctx context.Context) error {
 	c.applyResets(ctx)
+	c.retryLifecycle(ctx)
 	actors, err := c.listActors(ctx)
 	if err != nil {
 		return err
@@ -285,6 +295,14 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	for _, st := range gone {
 		ns, name, _ := strings.Cut(st.key, "/")
 		c.emit(Event{Type: EventDeleted, Severity: SeverityInfo, Atespace: ns, Actor: name, ActorUID: st.uid, Message: "actor deleted"})
+		st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: chainstate.Actor{Atespace: ns, UID: st.uid},
+			Event: chainstate.LifecycleDeleted, AtUnixNano: now.UnixNano()})
+		c.flushLifecycle(ctx, st, Event{Atespace: ns, Actor: name, ActorUID: st.uid})
+		if len(st.pendingLife) > 0 {
+			c.mu.Lock()
+			c.lifeRetry = append(c.lifeRetry, st)
+			c.mu.Unlock()
+		}
 	}
 	for _, r := range recreated {
 		// Egress caches the actor JWT by actor name: the new incarnation
@@ -476,13 +494,26 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 		st.runningAt = now
 	}
 	first := st.lastState == ateapi.ActorStateUnspecified
+	prev := st.lastState
 	st.lastState = state
 	base := Event{Atespace: md.GetAtespace(), Actor: md.GetName(), ActorUID: md.GetUid()}
+	self := chainstate.Actor{Atespace: md.GetAtespace(), UID: md.GetUid()}
+	if ev := lifecycleOf(prev, state); ev != "" && !first {
+		st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: ev, AtUnixNano: now.UnixNano()})
+	}
+	c.flushLifecycle(ctx, st, base)
 
 	_, launcher := c.o.LauncherAtespaces[md.GetAtespace()]
 	reg, refuse, err := c.attribution(ctx, a, st, launcher, base)
 	if err != nil {
 		return err
+	}
+	if first && reg.Source == SourceFork && reg.ParentUID != "" {
+		// The leader copies the parent's chain windows to the fork once
+		// (never its asks), keyed on the registration's ParentUID.
+		st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: chainstate.LifecycleForked,
+			Parent: &chainstate.Actor{Atespace: md.GetAtespace(), UID: reg.ParentUID}, AtUnixNano: now.UnixNano()})
+		c.flushLifecycle(ctx, st, base)
 	}
 	if first {
 		ev := base
@@ -999,4 +1030,75 @@ func imageRepo(image string) string {
 		return r.Name()
 	}
 	return image
+}
+
+// SetLifecycle sets the lifecycle sink before Run (the CLI wiring).
+func (c *Controller) SetLifecycle(l LifecycleSink) { c.o.Lifecycle = l }
+
+// maxPendingLifecycle bounds an actor's undelivered lifecycle events while
+// the leader is unreachable; the oldest go first (the leader orders by the
+// controller time it gets).
+const maxPendingLifecycle = 64
+
+// lifecycleOf is the lifecycle event of a state change, "" for none.
+func lifecycleOf(prev, cur ateapi.ActorState) string {
+	if prev == cur {
+		return ""
+	}
+	switch cur {
+	case ateapi.ActorStateSuspended:
+		if prev == ateapi.ActorStateRunning || prev == ateapi.ActorStateSuspending || prev == ateapi.ActorStateResuming {
+			return chainstate.LifecycleSuspended
+		}
+	case ateapi.ActorStateRunning:
+		if prev == ateapi.ActorStateSuspended || prev == ateapi.ActorStateResuming || prev == ateapi.ActorStateReverting {
+			return chainstate.LifecycleResumed
+		}
+	case ateapi.ActorStateReverting:
+		return chainstate.LifecycleReverted
+	case ateapi.ActorStateCrashed:
+		return chainstate.LifecycleCrashed
+	}
+	return ""
+}
+
+// flushLifecycle sends st's pending lifecycle events in order; the first
+// failure keeps it and the rest for the next pass (one warning).
+func (c *Controller) flushLifecycle(ctx context.Context, st *actorState, base Event) {
+	if c.o.Lifecycle == nil {
+		st.pendingLife = nil
+		return
+	}
+	for len(st.pendingLife) > 0 {
+		if _, err := c.o.Lifecycle.Lifecycle(ctx, st.pendingLife[0]); err != nil {
+			if len(st.pendingLife) > maxPendingLifecycle {
+				st.pendingLife = st.pendingLife[len(st.pendingLife)-maxPendingLifecycle:]
+			}
+			if !st.lifeWarned {
+				st.lifeWarned = true
+				ev := base
+				ev.Type, ev.Severity, ev.Message = EventWarning, SeverityWarn, "lifecycle event not delivered to the leader, retrying: "+err.Error()
+				c.emit(ev)
+			}
+			return
+		}
+		st.pendingLife = st.pendingLife[1:]
+		st.lifeWarned = false
+	}
+}
+
+func (c *Controller) retryLifecycle(ctx context.Context) {
+	c.mu.Lock()
+	retry := c.lifeRetry
+	c.lifeRetry = nil
+	c.mu.Unlock()
+	for _, st := range retry {
+		ns, name, _ := strings.Cut(st.key, "/")
+		c.flushLifecycle(ctx, st, Event{Atespace: ns, Actor: name, ActorUID: st.uid})
+		if len(st.pendingLife) > 0 {
+			c.mu.Lock()
+			c.lifeRetry = append(c.lifeRetry, st)
+			c.mu.Unlock()
+		}
+	}
 }

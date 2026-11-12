@@ -18,6 +18,8 @@ package controller_test
 
 import (
 	"context"
+	"errors"
+	"sync"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -31,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
@@ -555,5 +558,94 @@ func TestImageAllowListsWithoutAttestation(t *testing.T) {
 	r.pass()
 	if r.api.Policy(ateapi.RefOf(a.GetMetadata())) != nil {
 		t.Fatal("an image outside allowed_images got a policy with attestation off")
+	}
+}
+
+type lifeRec struct {
+	mu   sync.Mutex
+	evs  []chainstate.LifecycleEvent
+	down bool
+}
+
+func (l *lifeRec) Lifecycle(_ context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.down {
+		return chainstate.LifecycleResult{}, errors.New("leader unreachable")
+	}
+	l.evs = append(l.evs, ev)
+	return chainstate.LifecycleResult{}, nil
+}
+
+func (l *lifeRec) names() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, e := range l.evs {
+		n := e.Event
+		if e.Parent != nil {
+			n += "<" + e.Parent.UID
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// A13 wiring: the controller sends suspend, resume, fork (with ParentUID),
+// revert, crash and delete with its own time, and retries while the leader
+// is down.
+func TestLifecycleEventsToTheLeader(t *testing.T) {
+	life := &lifeRec{}
+	r := newRig(t, func(_ *config.Config, o *controller.Options) { o.Lifecycle = life })
+	a := r.actor("eng-web", "alice-1", ateapi.ActorStateRunning, "sub-alice")
+	ref := ateapi.RefOf(a.GetMetadata())
+	r.pass()
+	step := func(s ateapi.ActorState) {
+		r.clk.Add(time.Second)
+		if err := r.api.SetState(ref, s); err != nil {
+			t.Fatal(err)
+		}
+		r.pass()
+	}
+	step(ateapi.ActorStateSuspended)
+	step(ateapi.ActorStateRunning)
+	step(ateapi.ActorStateReverting)
+	step(ateapi.ActorStateCrashed)
+	step(ateapi.ActorStateSuspended) // a revert brings a crashed actor back
+	child, err := r.api.Fork(ref, "t1", "alice-1-fork")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.pass()
+	want := []string{"suspended", "resumed", "reverted", "crashed", "forked<" + a.GetMetadata().GetUid()}
+	if got := life.names(); !slices.Equal(got, want) {
+		t.Fatalf("lifecycle = %v, want %v", got, want)
+	}
+	for _, e := range life.evs {
+		if e.AtUnixNano == 0 || e.Actor.Atespace != "eng-web" {
+			t.Fatalf("event without controller time or actor: %+v", e)
+		}
+	}
+	if life.evs[4].Actor.UID != child.GetMetadata().GetUid() {
+		t.Fatal("the fork event names the wrong actor")
+	}
+	// Leader down: events wait and go out in order when it is back.
+	life.down = true
+	cref := ateapi.RefOf(child.GetMetadata())
+	r.clk.Add(time.Second)
+	_ = r.api.SetState(cref, ateapi.ActorStateRunning)
+	r.pass()
+	r.clk.Add(time.Second)
+	_ = r.api.SetState(cref, ateapi.ActorStateSuspended)
+	r.pass()
+	if _, err := r.api.DeleteActor(context.Background(), cref, nil); err != nil {
+		t.Fatal(err)
+	}
+	r.pass()
+	life.down = false
+	r.pass()
+	got := life.names()[5:]
+	if !slices.Equal(got, []string{"resumed", "suspended", "deleted"}) {
+		t.Fatalf("after the outage: %v", got)
 	}
 }

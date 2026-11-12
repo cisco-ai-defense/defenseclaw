@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 )
 
@@ -66,6 +67,14 @@ type ActivitySource interface {
 // (ate.actor.usage_sampled); controllerfake.Activity is the test fake.
 type CPUSource interface {
 	CPU(uid string) (cores float64, sampledAt time.Time, ok bool)
+}
+
+// LifecycleSink receives the actor lifecycle the controller observes, with
+// the controller's own time (the gateway leader's chain state runs each
+// actor's clock on it and copies a parent's windows to a fork, A13).
+// chainstate.Client implements it.
+type LifecycleSink interface {
+	Lifecycle(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error)
 }
 
 // Attribution sources of a Registration.

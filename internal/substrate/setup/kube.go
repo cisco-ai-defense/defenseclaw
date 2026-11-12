@@ -221,3 +221,24 @@ func (k *Kube) CreateConfigMap(ctx context.Context, cm *ConfigMap) error {
 	obj.Metadata.Name, obj.Metadata.Namespace = cm.Name, cm.Namespace
 	return k.do(ctx, http.MethodPost, "/api/v1/namespaces/"+url.PathEscape(cm.Namespace)+"/configmaps", "application/json", obj, nil)
 }
+
+// SecretExists implements SecretAPI (it reads no data).
+func (k *Kube) SecretExists(ctx context.Context, namespace, name string) (bool, error) {
+	path := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/secrets/" + url.PathEscape(name)
+	if err := k.do(ctx, http.MethodGet, path, "", nil, nil); err != nil {
+		if isNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// CreateSecret implements SecretAPI.
+func (k *Kube) CreateSecret(ctx context.Context, namespace, name string, data map[string][]byte) error {
+	obj := map[string]any{"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+		"metadata": map[string]any{"name": name, "namespace": namespace,
+			"labels": map[string]string{"app.kubernetes.io/part-of": "defenseclaw"}},
+		"data": data}
+	return k.do(ctx, http.MethodPost, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/secrets", "application/json", obj, nil)
+}

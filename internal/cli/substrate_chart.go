@@ -147,6 +147,14 @@ func init() {
 				}
 				return setup.PreRollback(ctx, plan, kube)
 			}),
+		substrateChartStep("chain-key", "Create the shared chain key Secret when it does not exist",
+			func(ctx context.Context, plan setup.ChartPlan) (setup.StepReport, error) {
+				kube, err := substrateChartKube()
+				if err != nil {
+					return setup.StepReport{Step: "chain-key"}, err
+				}
+				return setup.EnsureChainKey(ctx, plan, kube)
+			}),
 		substrateChartStep("pre-delete", "Remove DefenseClaw-written egress policies and grants before uninstall",
 			func(ctx context.Context, plan setup.ChartPlan) (setup.StepReport, error) {
 				kube, err := substrateChartKube()

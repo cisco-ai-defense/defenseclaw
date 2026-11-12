@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/activity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
@@ -190,6 +191,11 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	ctl, err := newSubstrateController(cfg, client, reg, act, cpu, sink, true, resets, ns, resolver)
+	if err == nil {
+		// The leader's chain state runs each actor's clock on the
+		// controller's lifecycle events (A13).
+		ctl.SetLifecycle(&chainstate.Client{Leader: toLeader})
+	}
 	if err != nil {
 		return err
 	}
