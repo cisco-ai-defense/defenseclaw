@@ -53,6 +53,28 @@ Every value is checked by `values.schema.json`. The main ones:
 | `adminIngress.*` | off | an Ingress for launchers to the admin Service |
 | `metrics.prometheusRule.enabled` | false | alert rules |
 | `observability.local.enabled` | false | a local OTel collector for trying the chart |
+| `bundles.enabled`, `bundles.anchorsSecret`, `bundles.inbox` | off, `defenseclaw-bundle-anchors`, `defenseclaw-bundle-inbox` | signed policy bundles; see below |
+
+## Signed policy bundles
+
+A bundle is signed with `defenseclaw-gateway enterprise bundle sign --platform linux --device-group <cluster group>` from a
+directory whose `config.yaml` holds only `guardrail.profiles` (description and `sandbox`) and `guardrail.profile_assignments`
+with `match.substrate`. It is applied to a stage: named atespaces, or `all` for every other atespace. The controller layers a
+stage's active bundle over `config.yaml` for its atespaces; `substrate.admin` still tightens every profile.
+
+1. Create the anchors Secret (key `bundle-anchors.json`, the enterprise anchors format) and give only administrators access to
+   it: `kubectl -n <ns> create secret generic defenseclaw-bundle-anchors --from-file=bundle-anchors.json`.
+2. Install with `--set bundles.enabled=true`.
+3. Apply: `defenseclaw substrate bundle apply v3.dcbundle --stage canary --atespaces team-a`, then the same bundle with
+   `--stage all`. Or write it to the inbox ConfigMap (`<stage>.dcbundle` binaryData, `<stage>.atespaces` data) from GitOps.
+4. `defenseclaw substrate bundle status` shows each stage's active and previous bundle and the receipts;
+   `defenseclaw substrate bundle rollback --stage canary` puts the previous bundle back after verifying it again.
+
+A bundle that does not verify is refused with a receipt (bad signature, unknown or revoked key, edited content, another
+tenant or device group, a version at or below the stage's floor). The controller re-verifies every stage on each refresh: when
+a key is revoked or the anchors' `min_version` passes a stage's bundle, that stage's atespaces fall back to `config.yaml` and an
+alert event is written. Inside the cluster, `defenseclaw-gateway substrate-bundle test --bundle v3.dcbundle --atespace team-a`
+shows the profile and egress an actor would get before you apply.
 
 ## Upgrade, rollback, uninstall
 

@@ -130,6 +130,16 @@ controller:
   tolerations: []
   affinity: {}
 
+# Signed policy bundles (substrate.bundles): profiles and match.substrate
+# assignments for a stage of atespaces, verified against trust anchors. An
+# administrator creates the anchors Secret (bundle-anchors.json) before
+# enabling this; the controller and the gateway mount it read-only.
+bundles:
+  enabled: false
+  anchorsSecret: defenseclaw-bundle-anchors
+  # The GitOps inbox ConfigMap: <stage>.dcbundle and <stage>.atespaces.
+  inbox: defenseclaw-bundle-inbox
+
 # The atenet-egress ext_proc callout.
 callout:
   hpa:

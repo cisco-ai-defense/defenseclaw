@@ -88,6 +88,9 @@ name this release's Services and the Substrate API filled in.
 {{- if not (hasKey $sub "api") -}}
 {{- $_ := set $sub "api" (dict "address" .Values.substrate.apiAddress "server_name" .Values.substrate.apiAudience "auth" "serviceaccount" "token_file" "/var/run/ate/token" "ca_file" "/var/run/ate/ca.crt") -}}
 {{- end -}}
+{{- if and .Values.bundles.enabled (not (hasKey $sub "bundles")) -}}
+{{- $_ := set $sub "bundles" (dict "enabled" true "anchors_file" "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json" "inbox" .Values.bundles.inbox) -}}
+{{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
 {{- toYaml $cfg -}}
 {{- end -}}
@@ -180,6 +183,12 @@ would never start.
             podcert.ate.dev/canarying: live
         path: trust-bundle.pem
 {{- end }}
+{{- if and .ctx.Values.bundles.enabled (has .component (list "controller" "gateway")) }}
+- name: bundle-anchors
+  secret:
+    secretName: {{ .ctx.Values.bundles.anchorsSecret }}
+    defaultMode: 0444
+{{- end }}
 {{- end -}}
 
 {{- define "dc.volumeMounts" -}}
@@ -196,6 +205,11 @@ would never start.
 {{- if and .ctx.Values.podCertificates.enabled .serving }}
 - name: servicedns
   mountPath: /run/servicedns.podcert.ate.dev
+  readOnly: true
+{{- end }}
+{{- if and .ctx.Values.bundles.enabled (has .component (list "controller" "gateway")) }}
+- name: bundle-anchors
+  mountPath: /etc/defenseclaw-substrate/bundle-anchors
   readOnly: true
 {{- end }}
 {{- end -}}
