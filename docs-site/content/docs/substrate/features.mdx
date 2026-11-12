@@ -39,7 +39,7 @@ Because every model call passes the proxy, the 1.0.10 routing and tokenomics fea
 | Admission (allow and block lists for skills, MCP servers, plugins) | Same | Same engine. Its data comes in the policy bundle, not from files on a machine |
 | Sandbox policy packs (balanced, strict) | Changed | DefenseClaw turns them into each agent's Substrate allow list, and the egress callout enforces the per-request parts |
 | Policy creator, recipes, cookbooks | Same | They write the same files |
-| Test a policy before rollout | Changed | `defenseclaw substrate policy test` runs a pack against the cluster's gateway without applying it |
+| Test a policy before rollout | Changed | `defenseclaw substrate policy test NAME --host H` asks the cluster whether a host, method or tool would be allowed for an agent, without changing anything |
 | Delivery | Changed | Signed policy bundles through Helm or GitOps instead of MDM. See [Delivery and fleet management](/docs/substrate/delivery) |
 
 ## Skill and MCP scanning

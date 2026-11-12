@@ -34,7 +34,7 @@ keywords:
 | — | OpenClaw, ZeptoClaw | No | No | Not in this release |
 | — | Claude desktop and Cowork, Cursor, Kiro and Antigravity editors, Copilot in VS Code | No | No | Desktop apps need a screen |
 
-A connector without a usable headless mode is interactive only, and `run --task` says so.
+A connector without a usable headless mode is interactive only, and `run --task` says so. `template build` builds images for `claudecode` and `codex` in this release; the other connectors need their kit image before they can run.
 
 **Vendor sign-in.** Substrate's egress gateway can add an API key or token to an agent's requests, so the agent never holds it. That covers API keys (Anthropic, OpenAI, Bedrock, `AMP_API_KEY`, `CURSOR_API_KEY`). Subscription sign-ins that open a browser and refresh their own tokens, such as a Claude or ChatGPT plan login or `devin auth login`, put tokens in the actor's snapshots. In a managed profile they are refused. In open source you get a warning. Wave 3 stays refused until a run with a real key passes.
 

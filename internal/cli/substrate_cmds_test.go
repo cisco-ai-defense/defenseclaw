@@ -81,7 +81,7 @@ func useFakeAdmin(t *testing.T, f *fakeAdmin) {
 	t.Helper()
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	claims, _ := json.Marshal(map[string]any{"sub": "user-1", "email": "dev@example.test", "exp": time.Now().Add(time.Hour).Unix(), "iss": "https://sso.example.test"})
+	claims, _ := json.Marshal(map[string]any{"sub": "user-1", "email": "dev@example.test", "exp": time.Now().Add(time.Hour).Unix(), "iss": "https://sso.example.test", "aud": []string{"defenseclaw"}})
 	jwt := "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".c2ln"
 	file := filepath.Join(t.TempDir(), "workload-token")
 	if err := os.WriteFile(file, []byte(jwt), 0o600); err != nil {

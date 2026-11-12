@@ -59,7 +59,8 @@ Commit the chart reference and `defenseclaw-values.yaml` to the repo Argo CD or 
 Policy goes out as a signed bundle with a generation number:
 
 ```bash
-defenseclaw substrate bundle apply oci://registry.example.test/defenseclaw/policy:2026-11-10 --atespaces 'eng-canary-*'
+defenseclaw substrate bundle apply policy-2026-11-10.json --dry-run
+defenseclaw substrate bundle apply policy-2026-11-10.json --atespaces 'eng-canary-*'
 defenseclaw substrate bundle status
 ```
 

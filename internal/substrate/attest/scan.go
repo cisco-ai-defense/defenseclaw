@@ -104,7 +104,9 @@ func (r *ScanReport) Blocked() []ScanItem {
 }
 
 // HooksOK reports whether the hook-file and switch checks passed.
-func (r *ScanReport) HooksOK() bool { return r.Hooks.RootOwned && r.Hooks.PhoneHomeOff }
+func (r *ScanReport) HooksOK() bool {
+	return r.Hooks.RootOwned && r.Hooks.PhoneHomeOff && r.Hooks.EnvClean
+}
 
 // ScanImage scans every skill, plugin and MCP server definition in the
 // image, and checks the hook files and the phone-home switches.
@@ -154,8 +156,7 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 		if path.Base(p) != "SKILL.md" {
 			continue
 		}
-		e, _ := fsys.Lookup(p)
-		if !e.IsRegular() {
+		if r, _, ok := fsys.Resolve(p); !ok || !r.IsRegular() {
 			continue
 		}
 		dir := path.Dir(p)
@@ -172,13 +173,19 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 	for _, dir := range skillDirs {
 		sum.Skills++
 		note(o.Skill.Name(), o.Skill.Version())
-		local, err := fsys.Materialize(dir, filepath.Join(work, "skills"))
+		local, skipped, err := fsys.Materialize(dir, filepath.Join(work, "skills"))
 		var res *scanner.ScanResult
 		if err == nil {
 			res, err = o.Skill.Scan(ctx, local)
 		}
 		if err != nil || res == nil {
 			res = failedScan(o.Skill.Name(), dir, err)
+		}
+		if len(skipped) > 0 {
+			// Content the scanner could not be given is a finding, never silence.
+			res.Findings = append(res.Findings, scanner.Finding{ID: "skill-unscannable-entries", RuleID: "skill-unscannable-entries",
+				Severity: scanner.SeverityMedium, Title: "Skill folder holds entries the scan could not read",
+				Description: strings.Join(skipped, "; "), Location: dir, Scanner: ConfigScannerName, Category: "skill-config"})
 		}
 		record(config.AdmissionTypeSkill, path.Base(dir), dir, o.Skill.Name(), res)
 	}
@@ -205,8 +212,7 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 		if !isMCPConfig(p) {
 			continue
 		}
-		e, _ := fsys.Lookup(p)
-		if !e.IsRegular() {
+		if r, _, ok := fsys.Resolve(p); !ok || !r.IsRegular() {
 			continue
 		}
 		data, err := fsys.Read(p)
@@ -348,6 +354,9 @@ func pluginHookFindings(fsys *ImageFS, dir string) []scanner.Finding {
 		}
 		data, err := fsys.Read(e.Path)
 		if err != nil {
+			out = append(out, scanner.Finding{ID: "plugin-hook-unreadable", RuleID: "plugin-hook-unreadable",
+				Severity: scanner.SeverityMedium, Title: "Plugin hook file could not be read",
+				Description: err.Error(), Location: e.Path, Scanner: ConfigScannerName, Category: "plugin-config"})
 			continue
 		}
 		if fetchAndExec.Match(data) {
@@ -415,7 +424,14 @@ func serverTools(fsys *ImageFS, s MCPServer) ([]ToolDef, string) {
 
 // checkHooks verifies ownership of the expected files and the switches.
 func checkHooks(fsys *ImageFS, env map[string]string, user string, o ScanOptions) HookChecks {
-	hc := HookChecks{RootOwned: true, PhoneHomeOff: true}
+	hc := HookChecks{RootOwned: true, PhoneHomeOff: true, EnvClean: true}
+	for k := range env {
+		if unsafeEnv[strings.ToUpper(k)] {
+			hc.EnvClean = false
+			hc.UnsafeEnv = append(hc.UnsafeEnv, k)
+		}
+	}
+	sort.Strings(hc.UnsafeEnv)
 	for _, ef := range o.Expected {
 		hf := HookFile{Path: ef.Path}
 		e, ok := fsys.Lookup(ef.Path)
@@ -435,7 +451,9 @@ func checkHooks(fsys *ImageFS, env map[string]string, user string, o ScanOptions
 			}
 		}
 		if hf.OK {
-			if bad := badAncestor(fsys, ef.Path); bad != "" {
+			if e.Path != path.Clean(ef.Path) {
+				hf.OK, hf.Note = false, "reached through a link, real path "+e.Path
+			} else if bad := badAncestor(fsys, e.Path); bad != "" {
 				hf.OK, hf.Note = false, "parent folder "+bad+" can be changed by a non-root user"
 			}
 		}
@@ -499,10 +517,7 @@ func badAncestor(fsys *ImageFS, p string) string {
 		if !ok {
 			continue // implicit parent: root, 0755
 		}
-		if e.IsSymlink() {
-			continue
-		}
-		if e.UID != 0 || e.Mode&0o022 != 0 {
+		if e.IsSymlink() || e.UID != 0 || e.Mode&0o022 != 0 {
 			return d
 		}
 	}
@@ -687,3 +702,11 @@ func sevRank(s scanner.Severity) int {
 
 // FloorNone turns the severity floor off.
 const FloorNone scanner.Severity = "none"
+
+// unsafeEnv are image environment variables that make every process load
+// code or settings the template did not scan.
+var unsafeEnv = map[string]bool{
+	"LD_PRELOAD": true, "LD_LIBRARY_PATH": true, "LD_AUDIT": true, "NODE_OPTIONS": true, "BASH_ENV": true, "ENV": true,
+	"PYTHONSTARTUP": true, "PYTHONPATH": true, "PYTHONHOME": true, "RUBYOPT": true, "RUBYLIB": true, "PERL5OPT": true, "PERL5LIB": true,
+	"JAVA_TOOL_OPTIONS": true, "_JAVA_OPTIONS": true, "JDK_JAVA_OPTIONS": true, "DOTNET_STARTUP_HOOKS": true, "GIT_CONFIG_GLOBAL": true,
+}

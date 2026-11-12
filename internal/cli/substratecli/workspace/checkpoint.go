@@ -58,10 +58,15 @@ type CheckpointOptions struct {
 	Exec osw.Execer
 	// Dir is the project folder in the actor (the copy's RemoteDir).
 	Dir string
-	// StateDir holds the checkpoint repository. By default it is
-	// .dc-checkpoint next to Dir (in /tmp when Dir is directly below /). It
-	// must not be inside Dir.
+	// StateDir holds the checkpoint repository. When empty and the copy
+	// Name has a private state directory (Start made one), it is that
+	// directory's checkpoint folder; otherwise .dc-checkpoint next to Dir
+	// (in /tmp when Dir is directly below /). It must not be inside Dir.
 	StateDir string
+	// DataDir and Name find the copy Start made, whose recorded state
+	// directory holds the checkpoints. Both empty is fine (no copy).
+	DataDir string
+	Name    string
 	// Label is a short note kept in the checkpoint's commit message.
 	Label   string
 	Timeout time.Duration
@@ -82,6 +87,9 @@ type UndoOptions struct {
 	Exec     osw.Execer
 	Dir      string
 	StateDir string
+	// DataDir and Name: see CheckpointOptions.
+	DataDir string
+	Name    string
 	// ID is a checkpoint number (or its tag); empty means the last one.
 	ID      string
 	Timeout time.Duration
@@ -103,7 +111,7 @@ g() { git --git-dir="$G" --work-tree="$dir" -c core.hooksPath=/dev/null -c core.
 last() { g tag -l 'dc-checkpoint-*' | sed 's/^dc-checkpoint-//' | sort -n | tail -n 1; }
 `
 
-const checkpointScript = gitPrelude + `mkdir -p "$state"
+const checkpointScript = gitPrelude + `( umask 077; mkdir -p "$state"; chmod 700 "$state" )
 [ -d "$G" ] || git --git-dir="$G" init -q
 cd "$dir"
 n=$(( $(last | grep . || echo 0) + 1 ))
@@ -128,7 +136,37 @@ printf 'restored=%s\ncommit=%s\n' "$id" "$(g rev-parse HEAD)"
 
 var idRE = regexp.MustCompile(`^(dc-checkpoint-)?[0-9]+$`)
 
-func checkpointPaths(dir, state string) (string, string, error) {
+// checkpointFolder is where the checkpoint repository lives inside a
+// copy's private state directory.
+const checkpointFolder = "checkpoint"
+
+// recordedState is the checkpoint folder inside the private state directory
+// of the copy name, "" when there is no copy or it has no private one (a
+// copy made before they existed).
+func recordedState(dataDir, name string) (string, error) {
+	if dataDir == "" || name == "" {
+		return "", nil
+	}
+	rec, err := osw.LoadCopy(dataDir, name)
+	if err != nil {
+		if errors.Is(err, osw.ErrCopyNotFound) {
+			return "", nil
+		}
+		return "", fmt.Errorf("workspace: read the copy %s: %w", name, err)
+	}
+	if rec.StateDir == "" {
+		return "", nil
+	}
+	return path.Join(rec.StateDir, checkpointFolder), nil
+}
+
+func checkpointPaths(dir, state, dataDir, name string) (string, string, error) {
+	if state == "" {
+		var err error
+		if state, err = recordedState(dataDir, name); err != nil {
+			return "", "", err
+		}
+	}
 	if !path.IsAbs(dir) || path.Clean(dir) == "/" {
 		return "", "", fmt.Errorf("workspace: the project folder %q must be an absolute path below /", dir)
 	}
@@ -190,7 +228,7 @@ func Checkpoint(ctx context.Context, opts CheckpointOptions) (*CheckpointInfo, e
 	if opts.Exec == nil {
 		return nil, errors.New("workspace: checkpoint needs a transport to the actor")
 	}
-	dir, state, err := checkpointPaths(opts.Dir, opts.StateDir)
+	dir, state, err := checkpointPaths(opts.Dir, opts.StateDir, opts.DataDir, opts.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +264,7 @@ func Undo(ctx context.Context, opts UndoOptions) (*UndoInfo, error) {
 	if opts.ID != "" && !idRE.MatchString(opts.ID) {
 		return nil, fmt.Errorf("workspace: %q is not a checkpoint number", opts.ID)
 	}
-	dir, state, err := checkpointPaths(opts.Dir, opts.StateDir)
+	dir, state, err := checkpointPaths(opts.Dir, opts.StateDir, opts.DataDir, opts.Name)
 	if err != nil {
 		return nil, err
 	}

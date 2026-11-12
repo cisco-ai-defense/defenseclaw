@@ -50,7 +50,7 @@ func substrateLLMFixture(t *testing.T) (*substrateFixture, *substrateLLMSeen) {
 	setIdentityFactsEnabled(true)
 	t.Cleanup(func() { setIdentityFactsEnabled(prev) })
 	dir := t.TempDir()
-	for _, p := range []string{"bedrock", "anthropic"} {
+	for _, p := range []string{"bedrock", "anthropic", "openai"} {
 		if err := os.WriteFile(filepath.Join(dir, p), []byte("real-"+p+"-key"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -155,5 +155,46 @@ func TestSubstrateLLMEscapedPathAndBodyCap(t *testing.T) {
 	}
 	if rec := f.do(t, f.actor, http.MethodPost, "/api/v1/substrate/hook/claudecode", "tok-alice", big); rec.Code < 400 {
 		t.Fatalf("3 MiB hook %d", rec.Code)
+	}
+}
+
+func TestSubstrateLLMServesOnlyModelPaths(t *testing.T) {
+	f, seen := substrateLLMFixture(t)
+	for _, p := range []string{
+		"/llm/bedrock" + substrateHaikuPath,
+		"/llm/bedrock/model/m/converse",
+		"/llm/anthropic/v1/messages",
+		"/llm/anthropic/v1/messages/count_tokens",
+		"/llm/openai/v1/chat/completions",
+		"/llm/openai/v1/responses",
+	} {
+		seen.path = ""
+		if rec := f.do(t, f.actor, http.MethodPost, p, "tok-alice", `{"model":"m"}`); rec.Code != http.StatusOK || seen.path == "" {
+			t.Fatalf("%s: %d (forwarded %q)", p, rec.Code, seen.path)
+		}
+	}
+	// The proxy's own routes and other provider paths never reach it (GAP-0041).
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/llm/openai/v1/config/providers"},
+		{http.MethodPost, "/llm/openai/v1/config/providers/reload"},
+		{http.MethodPost, "/llm/openai/v1/events/egress"},
+		{http.MethodGet, "/llm/openai/health"},
+		{http.MethodGet, "/llm/openai/v1/models"},
+		{http.MethodGet, "/llm/bedrock/inference-profiles"},
+		{http.MethodPost, "/llm/bedrock/model/m/invoke/extra"},
+		{http.MethodPost, "/llm/anthropic/v1/files"},
+		{http.MethodPost, "/llm/gemini/v1beta/models/g:generateContent"}, // no key: 503 after the path check
+	} {
+		seen.path = ""
+		rec := f.do(t, f.actor, c.method, c.path, "tok-alice", `{}`)
+		if c.path == "/llm/gemini/v1beta/models/g:generateContent" {
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s: %d", c.path, rec.Code)
+			}
+			continue
+		}
+		if rec.Code != http.StatusNotFound || seen.path != "" {
+			t.Fatalf("%s %s: %d (forwarded %q)", c.method, c.path, rec.Code, seen.path)
+		}
 	}
 }

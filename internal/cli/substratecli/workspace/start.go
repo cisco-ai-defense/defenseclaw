@@ -18,9 +18,13 @@ package workspace
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
+	"time"
 
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
@@ -44,6 +48,12 @@ type StartOptions struct {
 	// RemoteRoot is the actor directory the project is copied into; when
 	// empty, the Client's (detected from the relay) or DefaultRemoteRoot.
 	RemoteRoot string
+	// StateDir is the directory in the actor that holds this copy's pull
+	// bundle, upload receipts and checkpoints. When empty Start picks a new
+	// private one beside the project (see NewStateDir), so every session of
+	// an actor has its own and the agent's project folder never holds it.
+	// It is created with mode 0700 and recorded in the copy.
+	StateDir string
 	// GitDepth is the history depth of the copy (200 by default).
 	GitDepth int
 	// MaxBytes caps the copy (DefaultMaxBytes, 500 MiB).
@@ -134,9 +144,19 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxBytes
 	}
-	_, err := osw.Stage(ctx, osw.StageOptions{
+	stateDir := opts.StateDir
+	if stateDir == "" {
+		var err error
+		if stateDir, err = NewStateDir(root, opts.Name); err != nil {
+			return nil, cleanErr("copy the project", err)
+		}
+	}
+	// An earlier copy of this name that was uploaded leaves its own state
+	// directory in the actor; it is tidied once this one has arrived.
+	prev, _ := osw.LoadCopy(opts.DataDir, opts.Name)
+	rec, err := osw.Stage(ctx, osw.StageOptions{
 		Project: opts.Project, Name: opts.Name, DataDir: opts.DataDir, Home: opts.Home, Protected: opts.Protected,
-		RemoteRoot: root, GitDepth: opts.GitDepth, MaxBytes: maxBytes,
+		RemoteRoot: root, StateDir: stateDir, GitDepth: opts.GitDepth, MaxBytes: maxBytes,
 		Masks: opts.Masks, Unmask: opts.Unmask, UnmaskAsked: opts.UnmaskAsked,
 		Detector: opts.Detector, DisableContentScan: opts.DisableContentScan, Replace: opts.Replace,
 	})
@@ -147,14 +167,51 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 		}
 		return nil, cleanErr("copy the project", err)
 	}
-	if _, err = osw.Upload(ctx, opts.DataDir, opts.Name, t, t); err != nil {
+	if rec, err = osw.Upload(ctx, opts.DataDir, opts.Name, t, t); err != nil {
 		return nil, cleanErr("upload the project to the actor", err)
 	}
-	rec, err := osw.EstablishBaseline(ctx, opts.DataDir, opts.Name, t)
-	if err != nil {
+	if rec, err = osw.EstablishBaseline(ctx, opts.DataDir, opts.Name, t); err != nil {
 		return nil, cleanErr("record the copy's baseline in the actor", err)
 	}
+	removePrevState(ctx, t, prev, rec)
 	return &StartResult{CopyRecord: rec, KeptBack: rec.HeldBack, Unmasked: rec.Unmasked, Warnings: rec.Warnings}, nil
+}
+
+// StateDirPrefix starts the name of every state directory Start picks.
+const StateDirPrefix = ".dc-state-"
+
+// NewStateDir returns a state directory for a copy called name whose
+// project lands under root in the actor: a sibling of the project folder,
+// never inside it, named for the copy and a random suffix, so each Start
+// (each session) has its own. It does not create it; the copy pipeline does,
+// with mode 0700, before anything is written there.
+func NewStateDir(root, name string) (string, error) {
+	if !path.IsAbs(root) || path.Clean(root) == "/" {
+		return "", fmt.Errorf("workspace: remote root %q must be an absolute directory below /", root)
+	}
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("workspace: %w", err)
+	}
+	return path.Join(path.Clean(root), StateDirPrefix+name+"-"+hex.EncodeToString(b[:])), nil
+}
+
+// removePrevState removes the private state directory of the copy that
+// cur replaced, once cur is in the actor. It is best effort: what stays is
+// a few kilobytes of receipts and, at most, one result bundle. Only
+// directories Start named (StateDirPrefix) and that are not cur's own are
+// removed.
+func removePrevState(ctx context.Context, ex osw.Execer, prev, cur *osw.CopyRecord) {
+	if prev == nil || prev.UploadedAt == nil || prev.StateDir == "" || prev.StateDir == cur.StateDir {
+		return
+	}
+	d := prev.StateDir
+	if path.Clean(d) != d || !strings.HasPrefix(path.Base(d), StateDirPrefix) || path.Dir(d) == "/" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	_, _ = ex.Exec(ctx, cur.Name, osw.ExecRequest{Argv: []string{"rm", "-rf", "--", d}, Timeout: time.Minute, Idempotent: true})
 }
 
 // Error is a failure of a workspace step, in plain words; Unwrap gives the

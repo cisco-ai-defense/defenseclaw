@@ -7,7 +7,7 @@ keywords:
   - substrate CLI reference
 ---
 
-{/* TODO(substrate): this page is the contract from PLAN 6.5, 7.1 and lanes/a6/DESIGN.md. Replace it with output generated from the merged command tree (internal/cli/testdata/substrate_commands.json) and the config schema, and make sure the docs-claims test covers it. */}
+{/* Commands and flags below were checked against internal/cli/testdata/substrate_commands.json on sub/a6 (head 77468de3d5). TODO(substrate): generate this table from the golden once merged, and check the config keys against the merged config schema. */}
 
 `defenseclaw substrate` runs on your laptop or in CI. It needs no `config.yaml` on the laptop: every command except the admin ones reads a small context file.
 
@@ -15,27 +15,28 @@ keywords:
 
 | Command | What it does |
 |---|---|
-| `login`, `logout`, `whoami` | Sign in with your organization's OIDC provider (device flow), in CI with a workload identity. Tokens go in the operating system keychain |
-| `run <connector> [-- args]` | Start an agent in an actor and attach. `--task "..."` runs the connector's headless mode, `--detach` doesn't attach, `--batch tasks.yaml --parallel N` runs one actor per task, `--clone URL --branch B` clones inside the actor instead of uploading |
-| `connect <name>` | Attach to an actor, resuming it first if it is suspended |
-| `list` | Your actors with state, last activity, checks and asks |
-| `status [name]` | One actor, or the cluster and fleet view for admins. `--batch` for a batch |
-| `logs <name> [-f]` | The agent's output |
-| `pull <name>` | See the changed files, flagged for risk, then apply, branch or patch |
+| `login`, `logout`, `whoami` | Sign in with your organization's OIDC provider (device flow; `--no-browser` prints the code), or in CI with `--workload` and `--workload-token-file`. `login` saves a context: `--admin-url`, `--issuer`, `--client-id`, `--router-url`, the CA and certificate files, `--default-profile`, `--default-template`, `--name`. Tokens go in the operating system keychain |
+| `run <agent> [-- args]` | Start an agent in an actor and attach. `--task "..."` runs headless, `--detach` doesn't attach, `--batch FILE --parallel N` runs one actor per task, `--clone URL --ref REF` starts from a repository instead of a copy of the folder, `--unmask` and `--exclude` change what is uploaded, `--secret NAME`, `--profile`, `--template`, `--keep`, `--no-upload`, `--max-upload-mb` |
+| `connect <name>` | Attach to an actor, resuming it first if it is suspended. `--no-asks` leaves asks for `approvals`; `--transport` picks the relay transport |
+| `list` | Your actors with state, last activity, checks and asks. `--all` (admins), `--batch` |
+| `status [name]` | One actor, or a batch (`--batch`). `status --cluster` is the cluster and fleet document for admins (`--json`) |
+| `verify` | Checks the cluster side against the install file; `--json` follows the management contract |
+| `logs <name> [-f]` | The agent's output; `--task` picks a task |
+| `pull <name>` | See the changed files, flagged for risk (`--diff`), then `--apply`, `--branch NAME` or `--patch-out FILE` |
 | `checkpoint <name> [--every D]` | Save the whole actor, files and memory |
-| `undo <name>` | Return the actor to its last checkpoint |
-| `delete <name>...` | Delete actors, their allow lists and their snapshots |
+| `undo <name> [--to ID]` | Return the actor to its last checkpoint, or to a given one |
+| `delete <name>... \| --batch ID` | Delete actors, their allow lists and their snapshots |
 | `migrate <name>` | Move an actor with an old kit to a rebuilt template |
-| `approvals`, `approve <id>`, `reject <id>` | Answer asks, including for detached and unattended runs. `approvals --watch` follows them |
+| `approvals`, `approve <id> [--always]`, `reject <id> [--reason]` | Answer asks, including for detached and unattended runs |
 | `usage [--batch ID]` | Your own usage and cost. Admins can read the fleet |
-| `secrets list\|set\|rm\|test [--mine]` | Names of your secrets and their bindings. Values are never shown |
-| `policy explain\|show\|test` | Your own effective policy and where each value comes from; `test` runs a pack without applying it |
-| `doctor` | Checks the cluster side. Ends with `ready for agents` |
-| `setup [--remove] [--print-access-policies]` | Writes the Substrate install overlay, or prints the access policies |
-| `bundle apply\|status` | Apply or show signed policy bundles. `apply --atespaces PATTERN` stages by atespace |
-| `template build\|verify\|scan\|publish` | Build an agent image with the kit, check or scan it, publish it to an atespace |
+| `secrets list [--mine]`, `set NAME (--stdin \| --from-env VAR)`, `rm NAME`, `test NAME` | Names of your secrets and their bindings. Values are never shown |
+| `policy explain NAME`, `show`, `test NAME` | Your own effective policy and where each value comes from; `test` asks whether a host, method or tool would be allowed |
+| `doctor` | Checks the cluster side (`--cluster`, `--namespace`, `--kube-context`, `--install-file`). Ends with `ready for agents` |
+| `setup` | Writes the Substrate install overlay. `--plan` and `--dry-run` show it, `--remove` takes the callout out, `--print-access-policies` prints the access policies, `--capability` tells it what your Substrate supports |
+| `bundle apply FILE`, `bundle status` | Apply or show signed policy bundles. `apply --atespaces PATTERN` stages by atespace, `--dry-run` checks first |
+| `template build\|verify\|scan\|publish\|keygen` | Administrators: build an agent image with the kit and a signed attestation, check or scan it, publish it to the cluster's registry, make the signing key. These run on this computer and need no sign-in |
 
-Every read command has `--output text|json` and `--json`. Errors say what failed and how to fix it. `--yes` answers questions.
+Every read command has `--output text|json` and `--json`, and every command takes `--context` to pick a saved cluster. Errors say what failed and how to fix it. `--yes` answers questions.
 
 ### Exit codes
 
@@ -46,6 +47,7 @@ Every read command has `--output text|json` and `--json`. Errors say what failed
 | 2 | Usage error |
 | 3 | Unsupported or refused (a profile or setting forbids it) |
 | 4 | Not signed in; run `defenseclaw substrate login` |
+| 75 | The cluster is unreachable (`verify`, `status --cluster`) |
 
 ### Environment variables
 

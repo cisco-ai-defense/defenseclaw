@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
@@ -172,9 +173,9 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 		}
 		defer func() { _ = writeSubstrateJSON(w, doc) }()
 	} else {
-		fmt.Fprint(w, rev.Text)
+		fmt.Fprint(w, safetext.Clean(rev.Text))
 		if f.diff && len(rev.Diff) > 0 {
-			fmt.Fprintf(w, "\n%s", rev.Diff)
+			fmt.Fprintf(w, "\n%s", safetext.Visible(string(rev.Diff)))
 		}
 	}
 	if rev.Empty {
@@ -235,7 +236,7 @@ func substrateApply(cmd *cobra.Command, dataDir, name string, mode workspace.App
 		}
 		return err
 	}
-	fmt.Fprint(cmd.OutOrStdout(), strings.TrimRight(res.Text, "\n")+"\n")
+	fmt.Fprint(cmd.OutOrStdout(), strings.TrimRight(safetext.Clean(res.Text), "\n")+"\n")
 	return nil
 }
 
@@ -277,7 +278,7 @@ func runSubstrateCheckpoint(cmd *cobra.Command, out *substrateOutput, com *subst
 			return err
 		}
 		defer rel.Close()
-		info, err := workspace.Checkpoint(ctx, workspace.CheckpointOptions{Exec: rel.Client, Dir: dir})
+		info, err := workspace.Checkpoint(ctx, workspace.CheckpointOptions{Exec: rel.Client, Dir: dir, DataDir: auth.StateDir(), Name: substrateCopyName(a)})
 		if err != nil {
 			return err
 		}
@@ -341,7 +342,7 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 		return err
 	}
 	defer rel.Close()
-	info, err := workspace.Undo(ctx, workspace.UndoOptions{Exec: rel.Client, Dir: dir, ID: to})
+	info, err := workspace.Undo(ctx, workspace.UndoOptions{Exec: rel.Client, Dir: dir, ID: to, DataDir: auth.StateDir(), Name: substrateCopyName(a)})
 	if err != nil {
 		return err
 	}

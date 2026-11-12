@@ -25,26 +25,37 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
 // Context is one cluster the launcher talks to. It holds no secret.
+// Keys a context file holds that are not here (router_url,
+// router_ca_file, router_cert_file, router_key_file and relay_port from
+// earlier builds) are ignored on load and dropped on the next save.
 type Context struct {
-	AdminURL         string   `json:"admin_url"`
-	AdminCAFile      string   `json:"admin_ca_file,omitempty"`
-	Issuer           string   `json:"issuer,omitempty"`
-	IssuerCAFile     string   `json:"issuer_ca_file,omitempty"`
-	ClientID         string   `json:"client_id,omitempty"`
-	Scopes           []string `json:"scopes,omitempty"`
-	RouterURL        string   `json:"router_url,omitempty"`
-	RouterCAFile     string   `json:"router_ca_file,omitempty"`
-	RouterCertFile   string   `json:"router_cert_file,omitempty"`
-	RouterKeyFile    string   `json:"router_key_file,omitempty"`
-	RelayPort        int      `json:"relay_port,omitempty"`
-	WorkloadAudience string   `json:"workload_audience,omitempty"`
+	AdminURL     string   `json:"admin_url"`
+	AdminCAFile  string   `json:"admin_ca_file,omitempty"`
+	Issuer       string   `json:"issuer,omitempty"`
+	IssuerCAFile string   `json:"issuer_ca_file,omitempty"`
+	ClientID     string   `json:"client_id,omitempty"`
+	Scopes       []string `json:"scopes,omitempty"`
+	// WorkloadAudience is the audience a CI workload token must carry
+	// (default DefaultWorkloadAudience); GitHub Actions is asked for it.
+	WorkloadAudience string `json:"workload_audience,omitempty"`
 	// Profile and Template are what run uses when it is given none.
 	Profile  string `json:"profile,omitempty"`
 	Template string `json:"template,omitempty"`
+	// Kube selects the Kubernetes identity (an install without an OIDC
+	// provider): the bearer is the credential of a kubeconfig user and
+	// the gateway checks it with a TokenReview. The issuer fields are
+	// then ignored.
+	Kube bool `json:"kube,omitempty"`
+	// Kubeconfig is the kubeconfig file; empty follows the standard
+	// rules ($KUBECONFIG list, then ~/.kube/config).
+	Kubeconfig string `json:"kubeconfig,omitempty"`
+	// KubeContext is the kubeconfig context; empty is its current-context.
+	KubeContext string `json:"kube_context,omitempty"`
 }
 
 // ContextFile is <StateDir>/substrate/contexts.json.
@@ -98,9 +109,10 @@ func (f *ContextFile) Save() error {
 
 // ResolveContext picks the context: the flag, else
 // DEFENSECLAW_SUBSTRATE_CONTEXT, else the current one; then applies the
-// environment overrides for admin URL, issuer, client ID and router URL.
-// With no context file at all, DEFENSECLAW_SUBSTRATE_ADMIN_URL alone gives
-// a context named "default" (CI).
+// environment overrides for admin URL, issuer, client ID, workload
+// audience and DEFENSECLAW_SUBSTRATE_KUBE. With no context file at all,
+// DEFENSECLAW_SUBSTRATE_ADMIN_URL alone gives a context named "default"
+// (CI).
 func ResolveContext(flagName string) (string, Context, error) {
 	return resolveContext(flagName, os.Getenv)
 }
@@ -128,7 +140,7 @@ func resolveContext(flagName string, env func(string) string) (string, Context, 
 				name = "default"
 			}
 		case name == "":
-			return "", Context{}, fmt.Errorf("no substrate context is set up; %s --admin-url URL --issuer URL --client-id ID", loginHint)
+			return "", Context{}, fmt.Errorf("no substrate context is set up; %s --admin-url URL --issuer URL --client-id ID (or --admin-url URL --kube on a cluster without an OIDC provider)", loginHint)
 		default:
 			return "", Context{}, fmt.Errorf("substrate context %q (from %s) does not exist; %s --context %s --admin-url URL --issuer URL --client-id ID", name, from, loginHint, name)
 		}
@@ -139,10 +151,17 @@ func resolveContext(flagName string, env func(string) string) (string, Context, 
 	for _, o := range []struct {
 		env string
 		dst *string
-	}{{EnvAdminURL, &c.AdminURL}, {EnvIssuer, &c.Issuer}, {EnvClientID, &c.ClientID}, {EnvRouterURL, &c.RouterURL}} {
+	}{{EnvAdminURL, &c.AdminURL}, {EnvIssuer, &c.Issuer}, {EnvClientID, &c.ClientID}, {EnvWorkloadAudience, &c.WorkloadAudience}} {
 		if v := strings.TrimSpace(env(o.env)); v != "" {
 			*o.dst = v
 		}
+	}
+	if v := strings.TrimSpace(env(EnvKube)); v != "" {
+		on, err := strconv.ParseBool(v)
+		if err != nil {
+			return "", Context{}, fmt.Errorf("%s=%q is not valid; use 1 or 0", EnvKube, clean(v, 20))
+		}
+		c.Kube = on
 	}
 	if err := c.Validate(false); err != nil {
 		return "", Context{}, fmt.Errorf("substrate context %q: %w", name, err)
@@ -152,6 +171,7 @@ func resolveContext(flagName string, env func(string) string) (string, Context, 
 
 // Validate checks the context. needIssuer also requires the issuer and
 // client ID (a person sign-in needs both; a workload token needs neither).
+// A kube context needs only admin_url: its issuer fields are ignored.
 func (c Context) Validate(needIssuer bool) error {
 	var errs []string
 	add := func(err error) {
@@ -164,6 +184,18 @@ func (c Context) Validate(needIssuer bool) error {
 	} else {
 		add(checkURL("admin_url", c.AdminURL, false))
 	}
+	if strings.ContainsAny(c.Kubeconfig, "\r\n\x00") {
+		errs = append(errs, "kubeconfig must be one file path")
+	}
+	if k := c.KubeContext; k != "" && (strings.TrimSpace(k) != k || strings.ContainsAny(k, "\r\n\t\x00")) {
+		errs = append(errs, fmt.Sprintf("kube_context %q is not valid: use the context name as kubectl config get-contexts shows it", clean(k, 80)))
+	}
+	if c.Kube {
+		if len(errs) > 0 {
+			return errors.New(strings.Join(errs, "; "))
+		}
+		return nil
+	}
 	switch {
 	case strings.TrimSpace(c.Issuer) != "":
 		add(checkURL("issuer", c.Issuer, false))
@@ -173,14 +205,8 @@ func (c Context) Validate(needIssuer bool) error {
 	if needIssuer && strings.TrimSpace(c.ClientID) == "" {
 		errs = append(errs, "client_id is not set (use --client-id ID or "+EnvClientID+")")
 	}
-	if c.RouterURL != "" {
-		add(checkURL("router_url", c.RouterURL, false))
-	}
-	if c.RelayPort < 0 || c.RelayPort > 65535 {
-		errs = append(errs, fmt.Sprintf("relay_port %d is not a TCP port (1-65535)", c.RelayPort))
-	}
-	if (c.RouterCertFile == "") != (c.RouterKeyFile == "") {
-		errs = append(errs, "router_cert_file and router_key_file must be set together")
+	if a := c.WorkloadAudience; a != "" && (strings.TrimSpace(a) == "" || strings.ContainsAny(a, " \t\r\n")) {
+		errs = append(errs, fmt.Sprintf("workload_audience %q is not valid: use the one audience the cluster trusts for CI tokens, with no spaces", clean(a, 80)))
 	}
 	for _, s := range c.Scopes {
 		if s == "" || strings.ContainsAny(s, " \t\r\n") {

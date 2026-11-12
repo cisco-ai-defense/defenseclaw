@@ -87,7 +87,6 @@ type RuntimeScanner struct {
 	Admission AdmissionFunc
 	Compiled  map[string]policy.CompiledAdmission
 	BlockList []policy.ListEntry
-	AllowList []policy.ListEntry
 	// AllowedMCPHosts, when not empty, lists the remote MCP hosts allowed.
 	AllowedMCPHosts []string
 	// BlockAtOrAbove is an optional severity floor (see ScanOptions); the
@@ -165,7 +164,10 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 	}
 	defer os.RemoveAll(work)
 
-	so := ScanOptions{Admission: r.Admission, Compiled: r.Compiled, BlockList: r.BlockList, AllowList: r.AllowList, BlockAtOrAbove: r.BlockAtOrAbove, Now: r.now}
+	// The allow list is not used here: a name or a path from the actor is a
+	// claim, and a skill that names itself after an allow-listed one must still
+	// be scanned.
+	so := ScanOptions{Admission: r.Admission, Compiled: r.Compiled, BlockList: r.BlockList, BlockAtOrAbove: r.BlockAtOrAbove, Now: r.now}
 	if so.Admission == nil {
 		so.Admission = FallbackAdmission
 	}
@@ -250,6 +252,9 @@ func assetKey(a RuntimeAsset) string {
 	for _, f := range fs {
 		sum := sha256.Sum256(f.Content)
 		h.Write([]byte(f.Role + "\x00" + f.Path + "\x00"))
+		if f.Truncated {
+			h.Write([]byte("truncated\x00"))
+		}
 		h.Write(sum[:])
 	}
 	if a.Server != nil {
@@ -285,7 +290,7 @@ func writeAttached(dir string, files []AttachedFile) error {
 	return nil
 }
 
-var skillRootRE = regexp.MustCompile(`(?:^|/)(?:\.claude|\.codex|\.agents|\.config/[a-z]+)/skills/([^/]+)(?:/(.*))?$`)
+var skillRootRE = regexp.MustCompile(`(?:^|/)(?:(?:\.claude|\.codex|\.agents|\.config/[a-z]+)/skills|\.claude/plugins/.+?/skills|\.codex/plugins/.+?/skills)/([^/]+)(?:/(.*))?$`)
 
 // skillRelative returns the path of a skill file relative to its skill folder
 // ("SKILL.md", "scripts/run.sh").
@@ -302,8 +307,12 @@ func skillRelative(p string) string {
 
 var (
 	skillPathInCommand = regexp.MustCompile(`(\S*(?:\.claude|\.codex|\.agents)/skills/[A-Za-z0-9._\-]+)(?:/(\S*))?`)
-	mcpAddRE           = regexp.MustCompile(`\b(?:claude|codex)\s+mcp\s+add\b`)
-	mcpConfigWrite     = regexp.MustCompile(`(?:^|/)(?:\.mcp\.json|mcp\.json|\.claude\.json|settings\.json|settings\.local\.json|config\.toml)$`)
+	mcpAddJSONRE       = regexp.MustCompile(`\b(?:claude|codex)\s+mcp\s+add-json\b`)
+	mcpAddRE           = regexp.MustCompile(`\b(?:claude|codex)\s+mcp\s+add(?:\s|$)`)
+	// mcpOnlyFile are config files that exist for MCP servers only, so any
+	// partial edit of one may add a server.
+	mcpOnlyFile    = map[string]bool{".mcp.json": true, "mcp.json": true, "managed-mcp.json": true}
+	mcpConfigWrite = regexp.MustCompile(`(?:^|/)(?:\.mcp\.json|mcp\.json|\.claude\.json|settings\.json|settings\.local\.json|config\.toml)$`)
 )
 
 // HookAssets finds the skills and MCP servers a tool call is about to add.
@@ -343,6 +352,21 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 		command = strings.Join(parts, " ")
 	}
 	patch := str("patch", "input")
+	if edits, ok := in["edits"].([]any); ok {
+		// MultiEdit: every new_string is text the agent is about to write.
+		var sb strings.Builder
+		for _, e := range edits {
+			if m, ok := e.(map[string]any); ok {
+				if s, ok := m["new_string"].(string); ok {
+					sb.WriteString(s)
+					sb.WriteByte('\n')
+				}
+			}
+		}
+		if content == "" {
+			content = sb.String()
+		}
+	}
 
 	writeTool := map[string]bool{"Write": true, "Edit": true, "MultiEdit": true, "NotebookEdit": true, "apply_patch": true}[ev.ToolName]
 	readTool := map[string]bool{"Read": true, "View": true}[ev.ToolName]
@@ -403,29 +427,57 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 		}
 	}
 
-	// MCP servers added by file tool: parse the config being written.
-	if target != "" && mcpConfigWrite.MatchString(target) && content != "" {
-		if servers, err := ParseMCPConfig(target, []byte(content)); err == nil {
+	// MCP servers added by file tool: parse the config being written. A
+	// write that mentions servers but cannot be read as a whole (an Edit
+	// fragment, a patch, invalid text) becomes an asset with no definition,
+	// which Scan refuses: the caller's fail mode decides, never an allow.
+	if target != "" && mcpConfigWrite.MatchString(target) && (writeTool || patch != "") {
+		text := content
+		if text == "" {
+			text = patch
+		}
+		mentions := strings.Contains(text, "mcpServers") || strings.Contains(text, "mcp_servers")
+		wholeFile := ev.ToolName == "Write"
+		var servers []MCPServer
+		var perr error
+		if wholeFile && text != "" {
+			servers, perr = ParseMCPConfig(target, []byte(text))
+		}
+		switch {
+		case wholeFile && perr == nil:
 			for _, s := range servers {
 				s := s
 				out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: target, Server: &s, Files: serverFiles(attached)})
 			}
+		case mentions || perr != nil || (!wholeFile && mcpOnlyFile[path.Base(target)]):
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: path.Base(target), Path: target, Files: serverFiles(attached)})
 		}
 	}
-	// MCP servers added by "claude mcp add" / "codex mcp add".
-	if command != "" && mcpAddRE.MatchString(command) {
+	// MCP servers added by "claude mcp add" / "codex mcp add" (add-json too).
+	if command != "" && mcpAddJSONRE.MatchString(command) {
+		s := parseMCPAddJSON(command)
+		if s != nil {
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: "mcp add-json", Server: s, Files: serverFiles(attached)})
+		} else {
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: "mcp add-json", Path: "mcp add-json", Files: serverFiles(attached)})
+		}
+	} else if command != "" && mcpAddRE.MatchString(command) {
 		if s := parseMCPAddCommand(command); s != nil {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: "mcp add", Server: s, Files: serverFiles(attached)})
+		} else {
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: "mcp add", Path: "mcp add", Files: serverFiles(attached)})
 		}
 	}
 	// An MCP admission event: the kit attached the repository's MCP
-	// configuration and the server files (E20).
+	// configuration and the server files (E20). A configuration that does not
+	// parse, or was cut by the kit's cap, is not read as "no servers".
 	for _, f := range attached {
 		if f.Role != RoleMCPConfig {
 			continue
 		}
 		servers, err := ParseMCPConfig(f.Path, f.Content)
-		if err != nil {
+		if err != nil || f.Truncated {
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: path.Base(f.Path), Path: f.Path, Files: serverFiles(attached)})
 			continue
 		}
 		for _, s := range servers {
@@ -517,4 +569,30 @@ func parseMCPAddCommand(cmd string) *MCPServer {
 	}
 	s.Command, s.Args = rest[0], rest[1:]
 	return s
+}
+
+// parseMCPAddJSON reads "claude mcp add-json [flags] <name> '<json>'".
+func parseMCPAddJSON(cmd string) *MCPServer {
+	loc := mcpAddJSONRE.FindStringIndex(cmd)
+	rest := cmd[loc[1]:]
+	i, j := strings.Index(rest, "{"), strings.LastIndex(rest, "}")
+	if i < 0 || j < i {
+		return nil
+	}
+	var raw rawServer
+	if json.Unmarshal([]byte(rest[i:j+1]), &raw) != nil {
+		return nil
+	}
+	var name string
+	for _, f := range strings.Fields(rest[:i]) {
+		if !strings.HasPrefix(f, "-") {
+			name = f
+			break
+		}
+	}
+	if name == "" {
+		return nil
+	}
+	s := raw.server(name, "mcp add-json", "")
+	return &s
 }
