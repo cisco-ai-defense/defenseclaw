@@ -4142,6 +4142,133 @@ class RoutingConfig:
 
 
 @dataclass
+class SubstrateAPIConfig:
+    """``substrate.api``: how the cluster components reach ate-api-server."""
+
+    address: str = ""
+    server_name: str = ""
+    ca_file: str = ""
+    auth: str = ""
+    token_file: str = ""
+    credential_bundle: str = ""
+
+
+@dataclass
+class SubstrateOIDCConfig:
+    issuer: str = ""
+    client_id: str = ""
+    groups_claim: str = ""
+
+
+@dataclass
+class SubstrateWorkloadOIDCConfig:
+    issuer: str = ""
+    audience: str = ""
+
+
+@dataclass
+class SubstrateIdentityConfig:
+    issuer: str = ""
+    audience: str = ""
+    token_lifetime_seconds: int | None = None
+    actor_cert_oid: str = ""
+    oidc: SubstrateOIDCConfig = field(default_factory=SubstrateOIDCConfig)
+    workload_oidc: list[SubstrateWorkloadOIDCConfig] = field(default_factory=list)
+
+
+@dataclass
+class SubstrateServicesConfig:
+    actor: str = ""
+    admin: str = ""
+
+
+@dataclass
+class SubstrateUnattendedConfig:
+    asks: str = ""
+    ask_timeout: str = ""
+    telemetry_sampling: float | None = None
+
+
+@dataclass
+class SubstrateRateLimitsConfig:
+    per_actor_rps: float | None = None
+    per_atespace_rps: float | None = None
+
+
+@dataclass
+class SubstrateExtprocConfig:
+    enabled: bool | None = None
+    failure_mode: str = ""
+    body_inspection: str = ""
+    body_max_bytes: int | None = None
+    mcp_hosts: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SubstrateLLMCredentialConfig:
+    provider_uri: str = ""
+
+
+@dataclass
+class SubstrateLLMConfig:
+    providers: list[str] = field(default_factory=list)
+    credential: SubstrateLLMCredentialConfig = field(default_factory=SubstrateLLMCredentialConfig)
+
+
+@dataclass
+class SubstrateEgressConfig:
+    allow: list[str] = field(default_factory=list)
+    # None = every ecosystem pack (Go nil); [] = none.
+    ecosystem_packs: list[str] | None = None
+    registries: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SubstrateSecretInject:
+    hosts: list[str] = field(default_factory=list)
+    header: str = ""
+    prefix: str = ""
+    placeholder: str = ""
+
+
+@dataclass
+class SubstrateSecret:
+    """One ``substrate.secrets`` entry: a reference, never a value."""
+
+    name: str = ""
+    source: str = ""
+    inject: SubstrateSecretInject = field(default_factory=SubstrateSecretInject)
+    scope: str = ""
+    profiles: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SubstrateConfig:
+    """``substrate:``, DefenseClaw on Agent Substrate (mirrors Go
+    ``SubstrateConfig``). Off by default and read only in the cluster; the
+    gateway validates it (``config.SubstrateConfig.Validate``). An untouched
+    block is not written, as Go's ``omitempty``."""
+
+    enabled: bool = False
+    api: SubstrateAPIConfig = field(default_factory=SubstrateAPIConfig)
+    supported_versions: str = ""
+    identity: SubstrateIdentityConfig = field(default_factory=SubstrateIdentityConfig)
+    services: SubstrateServicesConfig = field(default_factory=SubstrateServicesConfig)
+    launcher_atespaces: dict[str, list[str]] = field(default_factory=dict)
+    require_attested_templates: bool | None = None
+    default_sandbox_class: str = ""
+    idle_suspend_after: str = ""
+    unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
+    rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
+    extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
+    llm: SubstrateLLMConfig = field(default_factory=SubstrateLLMConfig)
+    egress: SubstrateEgressConfig = field(default_factory=SubstrateEgressConfig)
+    secrets: list[SubstrateSecret] = field(default_factory=list)
+    allow_passthrough_for: list[str] = field(default_factory=list)
+    admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
+
+
+@dataclass
 class FleetConfig:
     """Edge Connector fleet management configuration.
 
@@ -4652,6 +4779,8 @@ class Config:
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
     routing: RoutingConfig = field(default_factory=RoutingConfig)
     fleet: FleetConfig = field(default_factory=FleetConfig)
+    # substrate: (DefenseClaw on Agent Substrate); off by default.
+    substrate: SubstrateConfig = field(default_factory=SubstrateConfig)
     llm_providers: LLMProvidersConfig = field(default_factory=LLMProvidersConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     # The unified decision model (decision_model:); off by default.
@@ -5575,6 +5704,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         if not sources:
             d.pop("registries", None)
     _serialize_openshell(d)
+    _serialize_substrate(cfg, d)
     _serialize_routing(d)
     return d
 
@@ -7296,6 +7426,152 @@ def _merge_llm_providers(raw: Any) -> LLMProvidersConfig:
     return LLMProvidersConfig(custom=custom, ollama_ports=ports)
 
 
+def _optional_number(raw: Any, kind: type) -> Any:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return kind(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _duration_text(raw: Any) -> str:
+    """A ``duration`` value as written: a Go duration string, or integer
+    seconds kept as their text."""
+    if raw is None or isinstance(raw, bool):
+        return ""
+    return str(raw).strip()
+
+
+def _merge_substrate(raw: Any) -> SubstrateConfig:
+    """Build :class:`SubstrateConfig` from the YAML ``substrate:`` block.
+    Load only: validation is the gateway's."""
+    raw = _mapping(raw)
+    api = _mapping(raw.get("api"))
+    ident = _mapping(raw.get("identity"))
+    oidc = _mapping(ident.get("oidc"))
+    services = _mapping(raw.get("services"))
+    unattended = _mapping(raw.get("unattended"))
+    limits = _mapping(raw.get("rate_limits"))
+    extproc = _mapping(raw.get("extproc"))
+    llm = _mapping(raw.get("llm"))
+    egress = _mapping(raw.get("egress"))
+    launchers: dict[str, list[str]] = {}
+    for profile, spaces in _mapping(raw.get("launcher_atespaces")).items():
+        launchers[str(profile)] = _string_list(spaces)
+    secrets = []
+    for item in raw.get("secrets") or []:
+        item = _mapping(item)
+        inject = _mapping(item.get("inject"))
+        secrets.append(
+            SubstrateSecret(
+                name=str(item.get("name", "") or ""),
+                source=str(item.get("source", "") or ""),
+                inject=SubstrateSecretInject(
+                    hosts=_string_list(inject.get("hosts")),
+                    header=str(inject.get("header", "") or ""),
+                    prefix=str(inject.get("prefix", "") or ""),
+                    placeholder=str(inject.get("placeholder", "") or ""),
+                ),
+                scope=str(item.get("scope", "") or ""),
+                profiles=_string_list(item.get("profiles")),
+            )
+        )
+    packs = egress.get("ecosystem_packs")
+    return SubstrateConfig(
+        enabled=raw.get("enabled") is True,
+        api=SubstrateAPIConfig(
+            address=str(api.get("address", "") or ""),
+            server_name=str(api.get("server_name", "") or ""),
+            ca_file=str(api.get("ca_file", "") or ""),
+            auth=str(api.get("auth", "") or ""),
+            token_file=str(api.get("token_file", "") or ""),
+            credential_bundle=str(api.get("credential_bundle", "") or ""),
+        ),
+        supported_versions=str(raw.get("supported_versions", "") or ""),
+        identity=SubstrateIdentityConfig(
+            issuer=str(ident.get("issuer", "") or ""),
+            audience=str(ident.get("audience", "") or ""),
+            token_lifetime_seconds=_optional_number(ident.get("token_lifetime_seconds"), int),
+            actor_cert_oid=str(ident.get("actor_cert_oid", "") or ""),
+            oidc=SubstrateOIDCConfig(
+                issuer=str(oidc.get("issuer", "") or ""),
+                client_id=str(oidc.get("client_id", "") or ""),
+                groups_claim=str(oidc.get("groups_claim", "") or ""),
+            ),
+            workload_oidc=[
+                SubstrateWorkloadOIDCConfig(
+                    issuer=str(_mapping(w).get("issuer", "") or ""),
+                    audience=str(_mapping(w).get("audience", "") or ""),
+                )
+                for w in ident.get("workload_oidc") or []
+            ],
+        ),
+        services=SubstrateServicesConfig(
+            actor=str(services.get("actor", "") or ""),
+            admin=str(services.get("admin", "") or ""),
+        ),
+        launcher_atespaces=launchers,
+        require_attested_templates=_optional_bool(raw.get("require_attested_templates")),
+        default_sandbox_class=str(raw.get("default_sandbox_class", "") or ""),
+        idle_suspend_after=_duration_text(raw.get("idle_suspend_after")),
+        unattended=SubstrateUnattendedConfig(
+            asks=str(unattended.get("asks", "") or ""),
+            ask_timeout=_duration_text(unattended.get("ask_timeout")),
+            telemetry_sampling=_optional_number(unattended.get("telemetry_sampling"), float),
+        ),
+        rate_limits=SubstrateRateLimitsConfig(
+            per_actor_rps=_optional_number(limits.get("per_actor_rps"), float),
+            per_atespace_rps=_optional_number(limits.get("per_atespace_rps"), float),
+        ),
+        extproc=SubstrateExtprocConfig(
+            enabled=_optional_bool(extproc.get("enabled")),
+            failure_mode=str(extproc.get("failure_mode", "") or ""),
+            body_inspection=str(extproc.get("body_inspection", "") or ""),
+            body_max_bytes=_optional_number(extproc.get("body_max_bytes"), int),
+            mcp_hosts=_string_list(extproc.get("mcp_hosts")),
+        ),
+        llm=SubstrateLLMConfig(
+            providers=_string_list(llm.get("providers")),
+            credential=SubstrateLLMCredentialConfig(
+                provider_uri=str(_mapping(llm.get("credential")).get("provider_uri", "") or ""),
+            ),
+        ),
+        egress=SubstrateEgressConfig(
+            allow=_string_list(egress.get("allow")),
+            ecosystem_packs=None if packs is None else _string_list(packs),
+            registries=_string_list(egress.get("registries")),
+        ),
+        secrets=secrets,
+        allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
+        admin=_merge_openshell_admin(raw.get("admin")),
+    )
+
+
+def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
+    """Mirror Go's ``yaml:"substrate,omitempty"``: an untouched block is not
+    written. Otherwise unset keys are dropped (``enabled`` stays, as Go
+    writes it), an explicit empty ``egress.ecosystem_packs`` (no packs)
+    stays, and ``admin`` keeps only the keys that are set."""
+    if cfg.substrate == SubstrateConfig():
+        d.pop("substrate", None)
+        return
+    block = d.get("substrate")
+    if not isinstance(block, dict):
+        return
+    admin = block.get("admin")
+    if isinstance(admin, dict):
+        _strip_unset_sandbox_keys(admin)
+    packs = (block.get("egress") or {}).get("ecosystem_packs")
+    pruned = _prune_unset(block)
+    if pruned is _V8_MISSING:
+        pruned = {}
+    pruned["enabled"] = cfg.substrate.enabled
+    if packs == []:
+        pruned.setdefault("egress", {})["ecosystem_packs"] = []
+    d["substrate"] = pruned
+
+
 def _merge_update(raw: Any) -> UpdateConfig:
     raw = _mapping(raw)
     return UpdateConfig(
@@ -8347,6 +8623,7 @@ def load(
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
         routing=_merge_routing(raw.get("routing")),
+        substrate=_merge_substrate(raw.get("substrate")),
         fleet=_merge_fleet(raw.get("fleet")),
         admission=_merge_admission(raw.get("admission")),
         llm_providers=_merge_llm_providers(raw.get("llm_providers")),
