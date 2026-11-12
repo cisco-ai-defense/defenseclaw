@@ -105,6 +105,11 @@ type ChainConfig struct {
 	CheckBudget time.Duration `yaml:"check_budget"`
 	// QueueSize bounds the observed_egress queue; a full queue drops.
 	QueueSize int `yaml:"queue_size"`
+	// FailureMode decides a request whose chain check could not answer (an
+	// error, the budget, the actor's in-flight cap): auto (default) refuses
+	// for unattended actors and alerts for the rest, closed always refuses
+	// (managed installs), open always alerts.
+	FailureMode string `yaml:"failure_mode"`
 }
 
 // AskConfig configures ask-required hosts.
@@ -193,6 +198,7 @@ const (
 	FailureClosed = "closed"
 	FailureOpen   = "open"
 	BodyAuto      = "auto"
+	ChainAuto     = "auto"
 	BodyOn        = "on"
 	BodyOff       = "off"
 	dlpAlert      = "alert"
@@ -305,6 +311,13 @@ func (c *Config) normalize() error {
 		if err := setDur(d.p, d.def, d.name, d.max); err != nil {
 			return err
 		}
+	}
+	switch c.Chain.FailureMode = strings.ToLower(strings.TrimSpace(c.Chain.FailureMode)); c.Chain.FailureMode {
+	case "":
+		c.Chain.FailureMode = ChainAuto
+	case ChainAuto, FailureClosed, FailureOpen:
+	default:
+		return bad("chain.failure_mode %q (want auto, closed or open)", c.Chain.FailureMode)
 	}
 	if c.Chain.QueueSize == 0 {
 		c.Chain.QueueSize = defaultQueueSize

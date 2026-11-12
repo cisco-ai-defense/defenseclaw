@@ -184,10 +184,14 @@ type SubstrateExtprocUIDConfig struct {
 }
 
 // SubstrateExtprocChainConfig bounds the egress chain check (default 20ms,
-// at most 500ms) and the observed_egress queue (default 4096).
+// at most 500ms) and the observed_egress queue (default 4096). FailureMode
+// decides a request whose check could not answer: auto (default) refuses
+// for unattended actors and alerts for the rest, closed always refuses
+// (managed installs), open always alerts.
 type SubstrateExtprocChainConfig struct {
 	CheckBudget string `mapstructure:"check_budget" yaml:"check_budget,omitempty"`
 	QueueSize   int    `mapstructure:"queue_size"   yaml:"queue_size,omitempty"`
+	FailureMode string `mapstructure:"failure_mode" yaml:"failure_mode,omitempty"`
 }
 
 // SubstrateExtprocAskConfig is how long a request waits for an ask
@@ -665,6 +669,11 @@ func (s *SubstrateConfig) validateExtproc(bad func(key, format string, a ...any)
 		if v, err := time.ParseDuration(strings.TrimSpace(d.v)); err != nil || v < 0 || v > d.max {
 			bad(d.key, "%q must be a Go duration from 0 to %s", d.v, d.max)
 		}
+	}
+	switch strings.ToLower(strings.TrimSpace(e.Chain.FailureMode)) {
+	case "", "auto", SubstrateFailClosed, SubstrateFailOpen:
+	default:
+		bad("extproc.chain.failure_mode", "%q must be auto, closed or open", e.Chain.FailureMode)
 	}
 	if q := e.Chain.QueueSize; q < 0 || q > 1<<20 {
 		bad("extproc.chain.queue_size", "%d is outside 0-%d", q, 1<<20)

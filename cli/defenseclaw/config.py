@@ -4218,6 +4218,7 @@ class SubstrateExtprocUIDConfig:
 class SubstrateExtprocChainConfig:
     check_budget: str = ""
     queue_size: int | None = None
+    failure_mode: str = ""
 
 
 @dataclass
@@ -7645,6 +7646,7 @@ def _merge_substrate_extproc(extproc: dict[str, Any]) -> SubstrateExtprocConfig:
         chain=SubstrateExtprocChainConfig(
             check_budget=_duration_text(chain.get("check_budget")),
             queue_size=_optional_number(chain.get("queue_size"), int),
+            failure_mode=str(chain.get("failure_mode", "") or ""),
         ),
         ask=SubstrateExtprocAskConfig(hold=_duration_text(_mapping(extproc.get("ask")).get("hold"))),
         judge=SubstrateExtprocJudgeConfig(

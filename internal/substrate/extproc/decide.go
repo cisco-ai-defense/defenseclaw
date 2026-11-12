@@ -36,6 +36,7 @@ const (
 	CategoryURLRule         = "url_rule"
 	CategoryPathAmbiguous   = "path_ambiguous"
 	CategoryChainEgress     = "chain_egress"
+	CategoryChainUnchecked  = "chain_unchecked"
 	CategoryAskDenied       = "ask_denied"
 	CategoryAskPending      = "ask_pending"
 	CategoryMCPToolBlocked  = "mcp_tool_blocked"
@@ -135,23 +136,24 @@ type Options struct {
 
 // Engine decides requests. It is safe for concurrent use.
 type Engine struct {
-	cfg       *Config
-	policies  PolicySource
-	uids      *UIDCache
-	asks      AskSink
-	chain     *chainQueue
-	checker   ChainChecker
-	judge     ToolJudge
-	events    EventSink
-	red       *Redactor
-	secrets   *secretValues
-	dcHosts   *hostMatcher
-	mcpHosts  *hostMatcher
-	bodyHosts *hostMatcher
-	mcpNames  map[string]string
-	bindings  []binding
-	body      *bodyMode
-	now       func() time.Time
+	cfg        *Config
+	policies   PolicySource
+	uids       *UIDCache
+	asks       AskSink
+	chain      *chainQueue
+	checker    ChainChecker
+	judge      ToolJudge
+	events     EventSink
+	red        *Redactor
+	secrets    *secretValues
+	dcHosts    *hostMatcher
+	mcpHosts   *hostMatcher
+	bodyHosts  *hostMatcher
+	mcpNames   map[string]string
+	bindings   []binding
+	body       *bodyMode
+	chainLimit chainLimiter
+	now        func() time.Time
 }
 
 // NewEngine builds an Engine and starts its chain worker; Close stops it.
@@ -311,13 +313,25 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		v.Findings = append(v.Findings, f.String())
 	}
 
-	if cv, hit := e.checkChain(ctx, ChainStep{Kind: StepObservedEgress, Actor: req.Actor, Host: req.Host,
-		Method: req.Method, Allowed: true, Time: e.now()}); hit {
+	switch cv, outcome, why := e.checkChain(ctx, ChainStep{Kind: StepObservedEgress, Actor: req.Actor, Host: req.Host,
+		Method: req.Method, Allowed: true, Time: e.now()}); outcome {
+	case chainHit:
 		reason := cv.Reason
 		if reason == "" {
 			reason = "Earlier in this session the actor read a secret; DefenseClaw blocks sending data off the cluster after that."
 		}
 		return deny(v, CategoryChainEgress, sourceChain, cv.Rule, clip(reason, 320))
+	case chainUnchecked:
+		// The step still reaches the window through the observed_egress
+		// queue (Finish); only this request's check is missing.
+		if e.chainFailClosed(pol) {
+			v = deny(v, CategoryChainUnchecked, sourceChain, why,
+				"DefenseClaw could not check this request against the actor's earlier tool calls in time, and this actor's policy refuses unchecked egress.")
+			v.Retryable = true
+			return v
+		}
+		v.Alert = true
+		v.Findings = append(v.Findings, "chain_unchecked:"+why)
 	}
 
 	if askRule == "" {

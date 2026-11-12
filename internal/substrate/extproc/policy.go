@@ -31,10 +31,13 @@ import (
 type Policy struct {
 	Name           string
 	UnattendedAsks string
-	decider        *egress.Decider
-	urlRules       []urlRule
-	askHosts       *hostMatcher
-	actorSecrets   []string
+	// Unattended is set by a registration-backed PolicySource for an
+	// unattended actor; StaticPolicies cannot know and leaves it false.
+	Unattended   bool
+	decider      *egress.Decider
+	urlRules     []urlRule
+	askHosts     *hostMatcher
+	actorSecrets []string
 }
 
 type urlRule struct {

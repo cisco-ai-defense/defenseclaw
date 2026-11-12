@@ -53,7 +53,7 @@ _FULL = {
                 "egress_peers": ["spiffe://cluster.local/ns/ate-system/sa/atenet-egress"],
                 "request_access": "security@example.com", "log_headers": True, "redact_headers": ["X-Team-Token"],
                 "blocklist_files": ["/etc/defenseclaw/feeds/egress.yaml"], "actor_secrets_dir": "/var/run/dc/actor-secrets",
-                "uid": {"cache_ttl": "60s", "stale_max": "60s"}, "chain": {"check_budget": "20ms", "queue_size": 4096},
+                "uid": {"cache_ttl": "60s", "stale_max": "60s"}, "chain": {"check_budget": "20ms", "queue_size": 4096, "failure_mode": "closed"},
                 "ask": {"hold": "1500ms"},
                 "judge": {"url": "https://defenseclaw-leader.defenseclaw-system.svc/api/v1/substrate/callout/verdict",
                           "token_file": "/var/run/dc/judge-token", "ca_file": "/var/run/dc/ca.crt", "timeout": "1500ms"},
