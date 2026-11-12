@@ -94,7 +94,7 @@ func (f *fixture) build(t *testing.T, mut func(*BuildOptions)) (*BuildResult, er
 
 func (f *fixture) policy(mut func(*Policy)) func() Policy {
 	return func() Policy {
-		p := Policy{Anchors: f.anchors, RequireDigest: true}
+		p := Policy{Anchors: f.anchors}
 		if mut != nil {
 			mut(&p)
 		}
@@ -170,7 +170,7 @@ func TestVerifyTagRequiresDigest(t *testing.T) {
 	mustBuild(t, f)
 	_, err := f.verifier(nil).Verify(context.Background(), f.m.host()+"/tmpl/claude:v1")
 	wantCode(t, err, CodeUnpinned)
-	v, err := f.verifier(func(p *Policy) { p.RequireDigest = false }).Verify(context.Background(), f.m.host()+"/tmpl/claude:v1")
+	v, err := f.verifier(func(p *Policy) { p.AllowTags = true }).Verify(context.Background(), f.m.host()+"/tmpl/claude:v1")
 	if err != nil || v.Pinned {
 		t.Fatalf("tag verify: %v %+v", err, v)
 	}
@@ -280,7 +280,7 @@ func TestForgery(t *testing.T) {
 		a := NewTrustAnchors()
 		_ = a.AddSigner(f.signer, "k")
 		a.Revoke(f.signer.KeyID())
-		v := NewVerifier(f.reg, func() Policy { return Policy{Anchors: a, RequireDigest: true} })
+		v := NewVerifier(f.reg, func() Policy { return Policy{Anchors: a} })
 		v.SuccessTTL, v.FailureTTL = 0, 0
 		_, err := v.Verify(ctx, ref)
 		wantCode(t, err, CodeKeyRevoked)
@@ -288,7 +288,7 @@ func TestForgery(t *testing.T) {
 	t.Run("expired key", func(t *testing.T) {
 		a := NewTrustAnchors()
 		_ = a.Add(&Anchor{Public: &f.signer.key.PublicKey, Name: "old", NotAfter: time.Now().Add(-time.Hour)})
-		v := NewVerifier(f.reg, func() Policy { return Policy{Anchors: a, RequireDigest: true} })
+		v := NewVerifier(f.reg, func() Policy { return Policy{Anchors: a} })
 		v.SuccessTTL, v.FailureTTL = 0, 0
 		_, err := v.Verify(ctx, ref)
 		wantCode(t, err, CodeKeyExpired)
@@ -298,7 +298,7 @@ func TestForgery(t *testing.T) {
 		a := NewTrustAnchors()
 		_ = a.AddSigner(next, "new")
 		_ = a.AddSigner(f.signer, "old")
-		v := NewVerifier(f.reg, func() Policy { return Policy{Anchors: a, RequireDigest: true} })
+		v := NewVerifier(f.reg, func() Policy { return Policy{Anchors: a} })
 		v.SuccessTTL, v.FailureTTL = 0, 0
 		got, err := v.Verify(ctx, ref)
 		if err != nil || got.KeyName != "old" {
@@ -306,7 +306,7 @@ func TestForgery(t *testing.T) {
 		}
 	})
 	t.Run("no anchors configured", func(t *testing.T) {
-		v := NewVerifier(f.reg, func() Policy { return Policy{RequireDigest: true} })
+		v := NewVerifier(f.reg, func() Policy { return Policy{} })
 		_, err := v.Verify(ctx, ref)
 		wantCode(t, err, CodeUntrustedKey)
 	})
@@ -372,7 +372,7 @@ func TestReplacedKitLayer(t *testing.T) {
 	if _, err := f.reg.AppendLayer(ctx, base, layer, Ref{Registry: f.m.host(), Repo: "tmpl/claude", Tag: "v1"}, "attacker", nil); err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.verifier(func(p *Policy) { p.RequireDigest = false }).Verify(ctx, f.m.host()+"/tmpl/claude:v1")
+	_, err = f.verifier(func(p *Policy) { p.AllowTags = true }).Verify(ctx, f.m.host()+"/tmpl/claude:v1")
 	wantCode(t, err, CodeNoAttestation)
 	// The original digest still verifies.
 	if _, err := f.verifier(nil).Verify(ctx, f.m.host()+"/tmpl/claude@"+res.Digest); err != nil {
@@ -422,14 +422,29 @@ func TestUnsignedBase(t *testing.T) {
 	attested.Base = f.m.host() + "/tmpl/claude@" + baseRes.Digest
 	attested.Target = f.m.host() + "/tmpl/second:v1"
 	attested.TrustedBases = nil
+	// A base that was itself built on an unverified base stays unverified, even
+	// if a lenient verifier accepts its attestation: trust is not laundered.
 	attested.BaseAttestor = f.verifier(func(p *Policy) { p.AllowUnverifiedBase = true })
-	// The kit paths already exist in the base: layering again is fine.
 	res2, err := Build(ctx, attested)
+	if err == nil || !errors.Is(err, ErrBaseUnverified) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res2.Statement.Predicate.Base.Trust != BaseTrustUnverified {
+			t.Fatalf("laundered: %+v", res2.Statement.Predicate.Base)
+		}
+	}
+	// A base with a good attestation of its own (built on the allow-listed base) counts.
+	good := mustBuild(t, f)
+	g := f.opts()
+	g.Base, g.Target, g.TrustedBases = f.m.host()+"/tmpl/claude@"+good.Digest, f.m.host()+"/tmpl/third:v1", nil
+	g.BaseAttestor = f.verifier(nil)
+	res3, err := Build(ctx, g)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res2.Statement.Predicate.Base.Trust != BaseTrustAttested || res2.Statement.Predicate.Base.AttestedBy != f.signer.KeyID() {
-		t.Fatalf("base: %+v", res2.Statement.Predicate.Base)
+	if res3.Statement.Predicate.Base.Trust != BaseTrustAttested || res3.Statement.Predicate.Base.AttestedBy != f.signer.KeyID() {
+		t.Fatalf("base: %+v", res3.Statement.Predicate.Base)
 	}
 }
 

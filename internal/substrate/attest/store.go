@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // CosignSignatureAnnotation is the layer annotation cosign reads the signature from.
@@ -137,9 +136,4 @@ func (g *Registry) GetAttestations(ctx context.Context, image Ref, digest string
 		out = append(out, env)
 	}
 	return out, nil
-}
-
-// isAttestationTag reports whether a tag is a cosign attestation tag.
-func isAttestationTag(tag string) bool {
-	return strings.HasPrefix(tag, "sha256-") && strings.HasSuffix(tag, ".att")
 }
