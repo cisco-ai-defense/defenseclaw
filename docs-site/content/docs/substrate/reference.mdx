@@ -15,7 +15,7 @@ keywords:
 
 | Command | What it does |
 |---|---|
-| `login`, `logout`, `whoami` | Sign in with your organization's OIDC provider (device flow; `--no-browser` prints the code), or in CI with `--workload` and `--workload-token-file`. `login` saves a context: `--admin-url`, `--issuer`, `--client-id`, `--router-url`, the CA and certificate files, `--default-profile`, `--default-template`, `--name`. Tokens go in the operating system keychain |
+| `login`, `logout`, `whoami` | Sign in with your organization's OIDC provider (device flow; `--no-browser` prints the code), or in CI with `--workload` and `--workload-token-file`. `login` saves a context: `--admin-url`, `--issuer`, `--client-id`, the CA files, `--kube`, `--default-profile`, `--default-template`, `--name`. Tokens go in the operating system keychain |
 | `run <agent> [-- args]` | Start an agent in an actor and attach. `--task "..."` runs headless, `--detach` doesn't attach, `--batch FILE --parallel N` runs one actor per task, `--clone URL --ref REF` starts from a repository instead of a copy of the folder, `--unmask` and `--exclude` change what is uploaded, `--secret NAME`, `--profile`, `--template`, `--keep`, `--no-upload`, `--max-upload-mb` |
 | `connect <name>` | Attach to an actor, resuming it first if it is suspended. `--no-asks` leaves asks for `approvals`; `--transport` picks the relay transport |
 | `list` | Your actors with state, last activity, checks and asks. `--all` (admins), `--batch` |
