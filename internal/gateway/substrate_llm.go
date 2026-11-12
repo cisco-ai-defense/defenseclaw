@@ -155,7 +155,7 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	key, err := os.ReadFile(p.CredentialFile)
 	if err != nil || strings.TrimSpace(string(key)) == "" {
-		fmt.Fprintf(os.Stderr, "[substrate] llm: provider %s has no readable credential\n", route.Provider)
+		fmt.Fprintf(os.Stderr, "[substrate] llm: provider %s has no readable credential (%s)\n", route.Provider, p.CredentialFile)
 		writeSubstrateRefusal(w, http.StatusServiceUnavailable, "provider_credential_unavailable")
 		return
 	}

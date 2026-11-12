@@ -43,7 +43,7 @@ import (
 // is the kit's view only: the registration decides it.
 
 const (
-	substrateEnvelopeVersion = "1"
+	substrateEnvelopeVersion = "dcactor/1"
 	// substrateEnvelopeMaxBytes bounds a whole envelope: a payload of at
 	// most apiRequestBodyMaxBytes plus at most substrateAttachedMaxBytes of
 	// attached file content (base64 in JSON) and path facts.
@@ -127,7 +127,7 @@ func substrateHookContract(ctx context.Context, reg registry.Registration) strin
 }
 
 // substrateEnvelopeMiddleware unwraps a hook or notify post's envelope.
-func substrateEnvelopeMiddleware(next http.Handler) http.Handler {
+func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		route := substrateRouteFrom(r.Context())
 		if r.Method != http.MethodPost || (route.class != sandboxauth.RouteHook && route.class != sandboxauth.RouteNotify) {
@@ -147,6 +147,7 @@ func substrateEnvelopeMiddleware(next http.Handler) http.Handler {
 		var env substrateEnvelope
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		if err := dec.Decode(&env); err != nil || env.V != substrateEnvelopeVersion || len(env.Payload) == 0 {
+			st.logRefusal("hook envelope refused (version %q, %d payload bytes)", env.V, len(env.Payload))
 			writeSubstrateRefusal(w, http.StatusBadRequest, "envelope_invalid")
 			return
 		}

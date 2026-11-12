@@ -196,7 +196,7 @@ func (f *substrateFixture) do(t *testing.T, h http.Handler, method, path, token,
 
 func envelope(connector string, payload map[string]any) string {
 	p, _ := json.Marshal(payload)
-	b, _ := json.Marshal(map[string]any{"v": "1", "connector": connector, "mode": "interactive", "kit_version": "0.1.0",
+	b, _ := json.Marshal(map[string]any{"v": substrateEnvelopeVersion, "connector": connector, "mode": "interactive", "kit_version": "0.1.0",
 		"payload": json.RawMessage(p)})
 	return string(b)
 }
@@ -327,10 +327,10 @@ func TestSubstrateEnvelopeChecks(t *testing.T) {
 	path := "/api/v1/substrate/hook/claudecode"
 	for name, body := range map[string]string{
 		"not json":         `nope`,
-		"no payload":       `{"v":"1","connector":"claudecode"}`,
+		"no payload":       `{"v":"dcactor/1","connector":"claudecode"}`,
 		"wrong version":    `{"v":"2","connector":"claudecode","payload":{}}`,
-		"other connector":  `{"v":"1","connector":"codex","payload":{}}`,
-		"attached too big": `{"v":"1","connector":"claudecode","payload":{},"facts":{"files":[{"role":"read_target","path":"/x","content":"` + strings.Repeat("A", (2<<20)) + `"}]}}`,
+		"other connector":  `{"v":"dcactor/1","connector":"codex","payload":{}}`,
+		"attached too big": `{"v":"dcactor/1","connector":"claudecode","payload":{},"facts":{"files":[{"role":"read_target","path":"/x","content":"` + strings.Repeat("A", (2<<20)) + `"}]}}`,
 	} {
 		rec := f.do(t, f.actor, http.MethodPost, path, "tok-alice", body)
 		if rec.Code != http.StatusBadRequest && rec.Code != http.StatusRequestEntityTooLarge {
