@@ -26,6 +26,10 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 // Rule-pack selection for one connector: which pack (guardrail.rule_pack, a
@@ -113,7 +117,10 @@ func (g *GuardrailConfig) EffectiveRulePackRef(connector string) RulePackRef {
 // stale pin, which stays the pack the gateway then refuses. On the Linux and
 // macOS standalone layout a built-in name whose policy_dir folder does not exist is the
 // shipped vendor pack, as the implicit default pack is
-// (standaloneRulePackDefault). An unknown name resolves to "" (the
+// (standaloneRulePackDefault). On a managed Windows standalone install strict
+// and permissive with no policy_dir, or with a policy_dir that has no folder
+// for them, are the folder Setup ships them in (WindowsShippedRulePackDir,
+// #1445); default stays embedded there. An unknown name resolves to "" (the
 // gateway's generation build rejects it before anything loads). A copy set
 // up with UseOfflineVendorPolicies loads a shipped pack from its private
 // copy instead.
@@ -131,9 +138,16 @@ func (c *Config) resolveRulePackDir(ref RulePackRef) string {
 	if custom, ok := c.UsableCustomRulePack(ref.Name); ok {
 		return customPackPathIn(c.customPackBase(), custom)
 	}
-	if name := c.BuiltinRulePackFor(ref.Name); name != "" && strings.TrimSpace(c.PolicyDir) != "" {
+	if name := c.BuiltinRulePackFor(ref.Name); name != "" {
+		if strings.TrimSpace(c.PolicyDir) == "" {
+			return c.WindowsShippedRulePackDir(name)
+		}
 		dir := filepath.Join(c.PolicyDir, "guardrail", name)
-		if vendor := c.vendorRulePackDir(name); vendor != "" {
+		vendor := c.vendorRulePackDir(name)
+		if vendor == "" {
+			vendor = c.WindowsShippedRulePackDir(name)
+		}
+		if vendor != "" {
 			if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
 				return vendor
 			}
@@ -174,36 +188,130 @@ func (c *Config) offlineVendorPath(dir string) string {
 
 // EmbeddedRulePack reports whether ref selects the rule packs embedded in
 // the gateway: the built-in default pack with no policy_dir. A Windows
-// standalone install has none (standalonePolicyDirDefault: its Setup ships no
-// policy folder), and there the implicit default pack and an empty v8
-// rule_pack_dir are the embedded packs too. The documented v9 spelling
+// standalone install has no policy_dir by default (standalonePolicyDirDefault:
+// its Setup ships no default pack folder, only strict and permissive in
+// WindowsShippedRulePackDir), and there the implicit default pack and an
+// empty v8 rule_pack_dir are the embedded packs too. The documented v9 spelling
 // "rule_pack: default" was refused there with "policy_dir is not set", and
 // Setup /ensure exited 1639.
 func (c *Config) EmbeddedRulePack(ref RulePackRef) bool {
 	return c != nil && c.BuiltinRulePackFor(ref.Name) == "default" && strings.TrimSpace(c.PolicyDir) == ""
 }
 
-// WindowsBuiltinRulePackAdvice is what to do when a managed Windows
-// standalone install selects the strict or permissive rule pack and has no
-// pack folder ("" for default and for any other install). The Windows Setup is a signed,
-// fixed set of files with no policy folder, so strict and permissive have no
-// files there to default to (Linux and macOS ship them in the vendor folder).
-// The administrator brings the pack: a policy_dir with guardrail\<name>, or a
-// custom pack. The refusal names both properties (GAP-1041).
-func (c *Config) WindowsBuiltinRulePackAdvice(name string) string {
-	if c == nil || !c.StandaloneEnterprise() || (name != "strict" && name != "permissive") {
+// The shipped rule packs of a managed Windows standalone install (#1445).
+// Setup writes the strict and permissive packs this binary embeds to
+// <ProgramData>\Cisco\DefenseClaw-RulePacks\<digest16>, one folder per
+// release, administrator-only. Each binary resolves only its own folder, so
+// a rolled-back release reads the copy it wrote, and the gateway refuses a
+// folder whose files are not this binary's (guardrail.ShippedRulePackFilesDigest).
+// Before 1.0.10 the Setup shipped no pack folder and strict without a
+// policy_dir was refused (GAP-1041).
+
+var (
+	windowsShippedRulePacksRootMu       sync.Mutex
+	windowsShippedRulePacksRootResolved string
+	windowsShippedRulePacksRootOverride *string
+)
+
+// windowsShippedRulePacksRoot is managed.StandaloneWindowsShippedRulePacksDir,
+// read once from the protected registration; "" where it cannot be read
+// (off Windows).
+func windowsShippedRulePacksRoot() string {
+	windowsShippedRulePacksRootMu.Lock()
+	defer windowsShippedRulePacksRootMu.Unlock()
+	if windowsShippedRulePacksRootOverride != nil {
+		return *windowsShippedRulePacksRootOverride
+	}
+	if windowsShippedRulePacksRootResolved == "" {
+		if dir, err := managed.StandaloneWindowsShippedRulePacksDir(); err == nil {
+			windowsShippedRulePacksRootResolved = dir
+		}
+	}
+	return windowsShippedRulePacksRootResolved
+}
+
+// SetWindowsShippedRulePacksRootForTest makes every config resolve the
+// shipped rule packs of a managed Windows install under root ("" for none)
+// until the returned function runs. For tests only.
+func SetWindowsShippedRulePacksRootForTest(root string) func() {
+	windowsShippedRulePacksRootMu.Lock()
+	previous := windowsShippedRulePacksRootOverride
+	windowsShippedRulePacksRootOverride = &root
+	windowsShippedRulePacksRootMu.Unlock()
+	return func() {
+		windowsShippedRulePacksRootMu.Lock()
+		windowsShippedRulePacksRootOverride = previous
+		windowsShippedRulePacksRootMu.Unlock()
+	}
+}
+
+// WindowsShippedRulePacksFolder is the folder that holds this binary's copy
+// of the shipped packs, <root>\<digest16>; "" where the root cannot be read.
+func WindowsShippedRulePacksFolder() string {
+	root := windowsShippedRulePacksRoot()
+	name, err := policyassets.ShippedRulePackFolderName()
+	if root == "" || err != nil {
 		return ""
+	}
+	return filepath.Join(root, name)
+}
+
+// WindowsShippedRulePackDir is the folder a managed Windows standalone
+// install reads the built-in pack name from when policy_dir has no
+// guardrail\<name> folder: <WindowsShippedRulePacksFolder>\<name>. It is ""
+// for default (embedded in every binary), for any other name, on any other
+// install (Linux and macOS, per-user, Secure Client) and where the trusted
+// ProgramData cannot be read.
+func (c *Config) WindowsShippedRulePackDir(name string) string {
+	if c == nil || !policyassets.IsShippedRulePack(name) || !c.windowsStandaloneConfig() {
+		return ""
+	}
+	folder := WindowsShippedRulePacksFolder()
+	if folder == "" {
+		return ""
+	}
+	return filepath.Join(folder, name)
+}
+
+// WindowsShippedRulePackName is the shipped pack (strict or permissive) dir
+// is the folder of, "" when dir is not one of c's shipped pack folders.
+func (c *Config) WindowsShippedRulePackName(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if c == nil || dir == "" {
+		return ""
+	}
+	for _, name := range policyassets.ShippedRulePackNames {
+		if shipped := c.WindowsShippedRulePackDir(name); shipped != "" && strings.EqualFold(filepath.Clean(dir), filepath.Clean(shipped)) {
+			return name
+		}
+	}
+	return ""
+}
+
+// WindowsShippedRulePackAdvice is what to do when the shipped pack folder
+// dir is missing or holds other files: Setup writes it, and its repair
+// writes it again. "" for any other folder.
+func (c *Config) WindowsShippedRulePackAdvice(dir string) string {
+	name := c.WindowsShippedRulePackName(dir)
+	if name == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s holds the %s rule pack this release ships, which DefenseClaw Setup writes; "+
+		"run %s as LocalSystem or from an elevated PowerShell prompt to write it again (%s)",
+		dir, name, managed.WindowsSetupCommand("/repair"), managed.WindowsSetupSource)
+}
+
+// windowsStandaloneConfig reports a managed standalone config read from a
+// Windows path (or from no path), not from the Linux or macOS layout.
+func (c *Config) windowsStandaloneConfig() bool {
+	if !c.StandaloneEnterprise() {
+		return false
 	}
 	if _, onUnixLayout := standaloneUnixLayoutForConfig(c.ConfigFilePath); onUnixLayout {
-		return ""
+		return false
 	}
-	if path := strings.TrimSpace(c.ConfigFilePath); path != "" && !strings.Contains(path, `:\`) && !strings.HasPrefix(path, `\\`) {
-		return ""
-	}
-	return fmt.Sprintf("the Windows Setup ships only the default rule pack, so %[1]s has no files here. "+
-		"Use rule_pack: default; or set policy_dir to an administrator-owned folder that holds guardrail\\%[1]s "+
-		"(copy policies\\guardrail\\%[1]s from the release); or select your own copy with guardrail.rule_pack and "+
-		"guardrail.custom_packs.<name>.path and .digest (Custom rule packs in the Windows enterprise guide)", name)
+	path := strings.TrimSpace(c.ConfigFilePath)
+	return path == "" || strings.Contains(path, `:\`) || strings.HasPrefix(path, `\\`)
 }
 
 // vendorRulePackDir is the shipped built-in pack name of the Linux or macOS
