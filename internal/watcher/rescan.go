@@ -1174,8 +1174,9 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	}
 
 	// Any other MCP baseline that holds no completed scan and records an
-	// admission (an allow without a scan, a failed scan, a server kept
-	// unverified) is admitted again, never drift-scanned. The drift scan
+	// admission without one (a failed scan, a refused launcher, a server
+	// kept unverified, a policy refusal; an allow without a scan is decided
+	// above) is admitted again, never drift-scanned. The drift scan
 	// below failed on a loopback server ("rescan could not scan it") and
 	// wrote the baseline again without its mark, which the hook read as a
 	// decided admission, so a server whose allow was gone or whose block
@@ -1184,7 +1185,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	// admission fails closed, kept with a warning in the OSS default and
 	// permissive tiers. A plain baseline without a scan is the record of a
 	// server configured before the upgrade (GAP-1227) and stays one.
-	if evt.Type == InstallMCP && !w.secureClientActive() && baseline.ScanID == "" && mcpFingerprintMarked(baseline.ScannerFingerprint) {
+	if evt.Type == InstallMCP && !w.secureClientActive() && baseline.ScanID == "" && mcpFingerprintFailed(baseline.ScannerFingerprint) {
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
 	}
 
@@ -1397,8 +1398,21 @@ func (w *InstallWatcher) admissionFingerprint(res AdmissionResult, fingerprint s
 		}
 		return fingerprint + mcpScanFailedMark
 	}
+	if res.Event.Type == InstallMCP && res.ScanID == "" && (res.Verdict == VerdictBlocked || res.Verdict == VerdictRejected) {
+		// Refused by the admission policy before any scan (an
+		// asset_policy.mcp deny). Recorded plain, the baseline read as a
+		// decided admission once the deny was gone, so a server never
+		// allowed and never scanned ran (the GAP-0088 review M1).
+		return fingerprint + mcpPolicyRefusedMark
+	}
 	return fingerprint
 }
+
+// mcpPolicyRefusedMark ends the fingerprint of an MCP server baseline that
+// the admission policy refused before any scan. The server counts as failed
+// (refused) until admission runs again: at the discovery poll once the
+// policy no longer refuses it (mcpPolicyRefusalLapsed), and at the rescan.
+const mcpPolicyRefusedMark = "|mcp-policy-refused"
 
 // mcpScanFailureBlocked reports an MCP admission that blocked the server
 // because its scan failed (fail closed).

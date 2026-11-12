@@ -1043,10 +1043,11 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 		} else if evt := (InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector}); w.mcpFailureAllowed(evt, baseline) {
 			// An allow written after the failure admits it now.
 			added = append(added, server.Name)
-		} else if w.mcpBaselineLapsed(evt, baseline) {
-			// The allow that admitted it without a scan is gone: admitted
-			// again now, not at the next call or the hourly rescan, so its
-			// block is back within the poll (gas-ux-r2:GAP-0088).
+		} else if w.mcpBaselineLapsed(evt, baseline) || w.mcpPolicyRefusalLapsed(evt, baseline) {
+			// The allow that admitted it without a scan, or the deny that
+			// refused it, is gone: admitted again now, not at the next call
+			// or the hourly rescan, so its block is back (or its scan runs)
+			// within the poll (gas-ux-r2:GAP-0088).
 			added = append(added, server.Name)
 		}
 	}

@@ -92,3 +92,25 @@ func TestGAP0088StandingAllowAdmitsAFailedMCPBaseline(t *testing.T) {
 		t.Fatalf("with the rule standing: %+v blocked=%v, want it admitted", status, f.blocked())
 	}
 }
+
+// A deny decided without a scan was recorded as a plain baseline, which the
+// hook reads as a decided admission: once the deny was removed, a managed
+// server never allowed and never scanned ran (the GAP-0088 review M1). The
+// refusal is recorded as one and admission runs again after the deny goes.
+func TestGAP0088RemovedDenyDoesNotAdmitAnUnscannedMCPServer(t *testing.T) {
+	f := newManagedAllowRemovalFixture(t)
+	f.managedAdmittedThenRuleRemoved(false)
+	f.cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: f.server.Name, URL: f.server.URL}}
+	f.w.discoverAddedMCPServers()
+	f.admitQueued()
+	if status := f.status(); !status.Failed && !status.Pending {
+		t.Fatalf("while denied: %+v, want a refused server", status)
+	}
+	f.cfg.AssetPolicy.MCP.Denied = nil
+	f.w.runRescanCycle(context.Background())
+	f.w.discoverAddedMCPServers()
+	f.admitQueued()
+	if status := f.status(); !status.Failed && !status.Pending {
+		t.Fatalf("after the deny was removed: %+v, want the unscannable server refused (never allowed, never scanned)", status)
+	}
+}
