@@ -56,12 +56,17 @@ const (
 	MethodAskOpen           = "AskOpen"
 	MethodAskResolve        = "AskResolve"
 	MethodRegistrationWrite = "RegistrationWrite"
+	// MethodRegistrationGet and MethodRegistrationList are the reads
+	// followers make of the registrations the leader keeps.
+	MethodRegistrationGet  = "RegistrationGet"
+	MethodRegistrationList = "RegistrationList"
 )
 
 // Methods lists every method a leader serves.
 var Methods = []string{
 	MethodChainObserve, MethodIntentGet, MethodIntentPut,
 	MethodAskOpen, MethodAskResolve, MethodRegistrationWrite,
+	MethodRegistrationGet, MethodRegistrationList,
 }
 
 // Error codes.
