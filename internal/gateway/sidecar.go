@@ -7452,6 +7452,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		AgentVersion:             agentVersion,
 		AgentExecutable:          agentExecutable,
 		HookContractID:           contractResolution.Contract.ContractID,
+		RouteOnly:                routeOnlySetupFor(cfg, conn.Name(), apiAddr),
 	}, nil
 }
 
