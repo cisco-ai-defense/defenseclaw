@@ -76,6 +76,7 @@ type Fake struct {
 	actors    map[string]*ateapi.Actor
 	policies  map[string]*ateapi.EgressPolicy
 	tags      map[string]*ateapi.Tag
+	access    map[string]*ateapi.AccessPolicy // by atespace, "" global
 	calls     map[string]int
 	writes    []PolicyWrite
 	closed    bool
@@ -91,6 +92,7 @@ func New() *Fake {
 		actors:    map[string]*ateapi.Actor{},
 		policies:  map[string]*ateapi.EgressPolicy{},
 		tags:      map[string]*ateapi.Tag{},
+		access:    map[string]*ateapi.AccessPolicy{},
 		calls:     map[string]int{},
 	}
 }
@@ -513,6 +515,69 @@ func (f *Fake) ListActorTemplates(_ context.Context, atespace string, opts ateap
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return page(f.templates, atespace, opts, f.pageSize())
+}
+
+func (f *Fake) CreateAtespace(_ context.Context, name string) (*ateapi.Atespace, error) {
+	if err := f.enter("CreateAtespace", name); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.atespaces[name]; ok {
+		return nil, status.Errorf(codes.AlreadyExists, "atespace %s exists", name)
+	}
+	a := &ateapi.Atespace{Metadata: f.newMeta("", name)}
+	f.atespaces[name] = a
+	return clone(a), nil
+}
+
+func (f *Fake) GetAccessPolicy(_ context.Context, atespace string) (*ateapi.AccessPolicy, error) {
+	if err := f.enter("GetAccessPolicy", atespace); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.access[atespace]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "access policy of %q not found", atespace)
+	}
+	return clone(p), nil
+}
+
+func (f *Fake) CreateAccessPolicy(_ context.Context, atespace string, p *ateapi.AccessPolicy) (*ateapi.AccessPolicy, error) {
+	if err := f.enter("CreateAccessPolicy", atespace); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.access[atespace]; ok {
+		return nil, status.Errorf(codes.AlreadyExists, "access policy of %q exists", atespace)
+	}
+	if p.GetMetadata().GetAtespace() != "" {
+		return nil, status.Error(codes.InvalidArgument, "access policy metadata must not name an atespace")
+	}
+	np := clone(p)
+	np.Metadata = f.newMeta("", ateapi.AccessPolicyName)
+	f.access[atespace] = np
+	return clone(np), nil
+}
+
+func (f *Fake) UpdateAccessPolicy(_ context.Context, atespace string, p *ateapi.AccessPolicy) (*ateapi.AccessPolicy, error) {
+	if err := f.enter("UpdateAccessPolicy", atespace); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur, ok := f.access[atespace]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "access policy of %q not found", atespace)
+	}
+	if p.GetMetadata().GetUid() != cur.Metadata.Uid || p.GetMetadata().GetVersion() != cur.Metadata.Version {
+		return nil, status.Errorf(codes.Aborted, "access policy of %q changed", atespace)
+	}
+	cur.Bindings = clone(p).Bindings
+	f.bump(cur.Metadata)
+	return clone(cur), nil
 }
 
 func (f *Fake) GetAtespace(_ context.Context, name string) (*ateapi.Atespace, error) {

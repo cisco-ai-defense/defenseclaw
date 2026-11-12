@@ -53,6 +53,8 @@ type (
 	Volume               = pb.Volume
 	ImageVolumeSource    = pb.ImageVolumeSource
 	Atespace             = pb.Atespace
+	AccessPolicy         = pb.AccessPolicy
+	Binding              = pb.Binding
 	Tag                  = pb.Tag
 	TagScope             = pb.TagScope
 	TagStatus            = pb.TagStatus
@@ -185,9 +187,21 @@ type Client interface {
 
 	GetAtespace(ctx context.Context, name string) (*Atespace, error)
 	ListAtespaces(ctx context.Context, opts ListOptions) (Page[*Atespace], error)
+	// CreateAtespace needs a global owner (the chart bootstrap).
+	CreateAtespace(ctx context.Context, name string) (*Atespace, error)
+
+	// Access policies (OpenFGA bindings), named AccessPolicyName: atespace
+	// "" is the global policy. Create and update need an owner; update
+	// carries the uid and version last read (ABORTED otherwise).
+	GetAccessPolicy(ctx context.Context, atespace string) (*AccessPolicy, error)
+	CreateAccessPolicy(ctx context.Context, atespace string, p *AccessPolicy) (*AccessPolicy, error)
+	UpdateAccessPolicy(ctx context.Context, atespace string, p *AccessPolicy) (*AccessPolicy, error)
 
 	Close() error
 }
+
+// AccessPolicyName is the name of every access policy.
+const AccessPolicyName = "default"
 
 // Options configures New.
 type Options struct {
@@ -432,6 +446,39 @@ func (c *GRPCClient) ListActorTemplates(ctx context.Context, atespace string, op
 
 func (c *GRPCClient) GetAtespace(ctx context.Context, name string) (*Atespace, error) {
 	return c.ctl.GetAtespace(ctx, &pb.GetAtespaceRequest{Atespace: &pb.ObjectRef{Name: name}})
+}
+
+func (c *GRPCClient) CreateAtespace(ctx context.Context, name string) (*Atespace, error) {
+	return c.ctl.CreateAtespace(ctx, &pb.CreateAtespaceRequest{Atespace: &pb.Atespace{Metadata: &pb.ResourceMetadata{Name: name}}})
+}
+
+// accessPolicyMsg names the policy only: ate-api-server refuses an access
+// policy whose metadata names an atespace (the reference carries it).
+func accessPolicyMsg(p *AccessPolicy) *AccessPolicy {
+	out := &pb.AccessPolicy{Metadata: &pb.ResourceMetadata{Name: AccessPolicyName, Uid: p.GetMetadata().GetUid(), Version: p.GetMetadata().GetVersion()},
+		Bindings: p.GetBindings()}
+	return out
+}
+
+func (c *GRPCClient) GetAccessPolicy(ctx context.Context, atespace string) (*AccessPolicy, error) {
+	if atespace == "" {
+		return c.ctl.GetGlobalAccessPolicy(ctx, &pb.GetGlobalAccessPolicyRequest{Name: AccessPolicyName})
+	}
+	return c.ctl.GetAtespaceAccessPolicy(ctx, &pb.GetAtespaceAccessPolicyRequest{Atespace: &pb.ObjectRef{Name: atespace}, Name: AccessPolicyName})
+}
+
+func (c *GRPCClient) CreateAccessPolicy(ctx context.Context, atespace string, p *AccessPolicy) (*AccessPolicy, error) {
+	if atespace == "" {
+		return c.ctl.CreateGlobalAccessPolicy(ctx, &pb.CreateGlobalAccessPolicyRequest{AccessPolicy: accessPolicyMsg(p)})
+	}
+	return c.ctl.CreateAtespaceAccessPolicy(ctx, &pb.CreateAtespaceAccessPolicyRequest{Atespace: &pb.ObjectRef{Name: atespace}, AccessPolicy: accessPolicyMsg(p)})
+}
+
+func (c *GRPCClient) UpdateAccessPolicy(ctx context.Context, atespace string, p *AccessPolicy) (*AccessPolicy, error) {
+	if atespace == "" {
+		return c.ctl.UpdateGlobalAccessPolicy(ctx, &pb.UpdateGlobalAccessPolicyRequest{AccessPolicy: accessPolicyMsg(p)})
+	}
+	return c.ctl.UpdateAtespaceAccessPolicy(ctx, &pb.UpdateAtespaceAccessPolicyRequest{Atespace: &pb.ObjectRef{Name: atespace}, AccessPolicy: accessPolicyMsg(p)})
 }
 
 func (c *GRPCClient) ListAtespaces(ctx context.Context, opts ListOptions) (Page[*Atespace], error) {
