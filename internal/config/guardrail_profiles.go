@@ -65,8 +65,8 @@ type GuardrailProfile struct {
 	Connectors map[string]PerConnectorGuardrailConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
 	// Sandbox tightens openshell.admin for subjects of this profile (only
 	// request_access overrides); nil adds nothing. See
-	// TightenOpenShellAdmin.
-	Sandbox *OpenShellAdminConfig `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
+	// TightenSandboxAdmin.
+	Sandbox *SandboxAdminConfig `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
 
 	// Enabled and HookFailMode are NOT allowed in a profile: both are baked
 	// into the hooks installed on the machine, so they cannot vary by
@@ -343,7 +343,7 @@ type DerivedGuardrailProfile struct {
 	// Sandbox is the profile's sandbox floor F: openshell.admin tightened
 	// by the profile's sandbox section. SandboxDigest is "sha256:..." of
 	// F's canonical JSON and the content of every pack it references.
-	Sandbox             OpenShellAdminConfig
+	Sandbox             SandboxAdminConfig
 	SandboxDigest       string
 	policySandboxDigest string
 }

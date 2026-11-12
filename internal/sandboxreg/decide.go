@@ -62,7 +62,7 @@ const openShellHostAlias = "host.openshell.internal"
 // decision for this computer (the OpenShell host alias) is a host-port
 // ask's answer: allow_host_ports decides it, for the session only, and the
 // egress lists, which never name this computer, do not.
-func CheckDecision(f config.OpenShellAdminConfig, d sandboxrelay.DecisionRequest) error {
+func CheckDecision(f config.SandboxAdminConfig, d sandboxrelay.DecisionRequest) error {
 	kind := strings.TrimSpace(d.Kind)
 	scope := strings.TrimSpace(d.Scope)
 	switch kind {
@@ -110,7 +110,7 @@ func CheckDecision(f config.OpenShellAdminConfig, d sandboxrelay.DecisionRequest
 // and scope at all, whatever its host. The sandbox daemon asks it before
 // it raises or answers an ask, so a refused one never reaches the user as
 // something to approve.
-func CheckApprovals(f config.OpenShellAdminConfig, kind, scope string) error {
+func CheckApprovals(f config.SandboxAdminConfig, kind, scope string) error {
 	if kind == sandboxrelay.DecisionEgressBlock {
 		return nil
 	}
@@ -142,7 +142,7 @@ func CheckApprovals(f config.OpenShellAdminConfig, kind, scope string) error {
 
 // StrictFloor reports a floor whose min_profile is strict: every sandbox
 // under it runs the strict profile, with no web proxy.
-func StrictFloor(f config.OpenShellAdminConfig) bool {
+func StrictFloor(f config.SandboxAdminConfig) bool {
 	return strings.ToLower(strings.TrimSpace(f.MinProfile)) == config.OpenShellProfileStrict
 }
 
