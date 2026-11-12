@@ -76,6 +76,12 @@ type Config struct {
 	// blocklist (policies/sandbox/egress/blocklist.yaml); empty uses it.
 	BlocklistFiles []string `yaml:"blocklist_files"`
 
+	// Managed is a managed enterprise install (deployment_mode
+	// managed_enterprise; the chart renders it). The callout then never
+	// fails open: chain.failure_mode auto means closed and open is refused
+	// (D8, GAP-0090).
+	Managed bool `yaml:"managed"`
+
 	UID   UIDConfig   `yaml:"uid"`
 	Chain ChainConfig `yaml:"chain"`
 	Ask   AskConfig   `yaml:"ask"`
@@ -334,6 +340,9 @@ func (c *Config) normalize() error {
 	case ChainAuto, FailureClosed, FailureOpen:
 	default:
 		return bad("chain.failure_mode %q (want auto, closed or open)", c.Chain.FailureMode)
+	}
+	if c.Managed && c.Chain.FailureMode == FailureOpen {
+		return bad("chain.failure_mode open is not allowed on a managed install (D8): use auto or closed")
 	}
 	if c.Chain.QueueSize == 0 {
 		c.Chain.QueueSize = defaultQueueSize

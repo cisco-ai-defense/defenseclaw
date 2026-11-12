@@ -399,6 +399,20 @@ var (
 	substrateAtespaceGlobRe = regexp.MustCompile(`^[a-z0-9*?\[\]-]{1,63}$`)
 )
 
+// ValidateManaged applies the managed-install rules (D8): a managed
+// enterprise install never fails open, so extproc.chain.failure_mode open is
+// refused there (auto already means closed). It matches the chart's rule for
+// extproc.failure_mode (GAP-0063, GAP-0090).
+func (s *SubstrateConfig) ValidateManaged(managedInstall bool) error {
+	if s == nil || !managedInstall {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(s.Extproc.Chain.FailureMode), SubstrateFailOpen) {
+		return errors.New("extproc.chain.failure_mode: open is not allowed with deployment_mode managed_enterprise: the callout fails closed there (use auto or closed)")
+	}
+	return nil
+}
+
 // Validate checks substrate: whether or not it is enabled, so a typo fails
 // at load and not when the controller starts. Errors name the key.
 func (s *SubstrateConfig) Validate() error {
