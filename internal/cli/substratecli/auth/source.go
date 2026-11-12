@@ -29,8 +29,13 @@ import (
 
 // SourceOptions tunes a Source. Workload != nil selects workload mode:
 // the token is read fresh on every call and the store is not used.
+// Kube != nil (and Workload nil) selects kube mode: the bearer comes from
+// the kubeconfig user, is kept until refreshSkew before its expiry (5
+// minutes when it states none; a tokenFile is read on every call), and
+// the store is not used.
 type SourceOptions struct {
 	Workload   *WorkloadOptions
+	Kube       *KubeOptions
 	HTTPClient *http.Client
 	Now        func() time.Time
 }
@@ -48,6 +53,9 @@ type Source struct {
 	tok  *Token
 	disc *discovery
 	hc   *http.Client
+
+	kube      *Token
+	kubeUntil time.Time
 }
 
 // NewSource returns the token source of context name.
@@ -71,6 +79,13 @@ func (s *Source) Token(ctx context.Context) (string, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.opts.Kube != nil {
+		t, err := s.kubeLocked(ctx)
+		if err != nil {
+			return "", err
+		}
+		return t.AccessToken, nil
+	}
 	t, err := s.personLocked(ctx)
 	if err != nil {
 		return "", err
@@ -91,7 +106,11 @@ func (s *Source) Current(ctx context.Context) (*Token, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.personLocked(ctx)
+	get := s.personLocked
+	if s.opts.Kube != nil {
+		get = s.kubeLocked
+	}
+	t, err := get(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +125,34 @@ func (s *Source) workload(ctx context.Context) (string, error) {
 		o.HTTPClient = s.opts.HTTPClient
 	}
 	return readWorkload(ctx, s.ctx, o, s.now())
+}
+
+// kubeLocked returns the kube bearer, read again when the kept one is
+// within refreshSkew of its expiry, older than kubeNoExpiryKeep when it
+// states no expiry, or came from a tokenFile.
+func (s *Source) kubeLocked(ctx context.Context) (*Token, error) {
+	now := s.now()
+	if s.kube != nil && now.Before(s.kubeUntil) {
+		return s.kube, nil
+	}
+	o := *s.opts.Kube
+	if o.Now == nil {
+		o.Now = s.now
+	}
+	t, fromFile, err := kubeResolve(ctx, o)
+	if err != nil {
+		s.kube = nil
+		return nil, err
+	}
+	s.kube, s.kubeUntil = t, time.Time{}
+	switch {
+	case fromFile:
+	case t.Expiry.IsZero():
+		s.kubeUntil = now.Add(kubeNoExpiryKeep)
+	default:
+		s.kubeUntil = t.Expiry.Add(-refreshSkew)
+	}
+	return t, nil
 }
 
 func (s *Source) personLocked(ctx context.Context) (*Token, error) {

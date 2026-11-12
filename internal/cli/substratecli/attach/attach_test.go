@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +30,19 @@ import (
 )
 
 const detachLine = "Detached. The agent keeps running. Come back with: defenseclaw substrate connect cc-1"
+
+// distinctBearers fails unless every request carried a person bearer of its
+// own (a fresh one from the source each time).
+func distinctBearers(t *testing.T, reqs []seen) {
+	t.Helper()
+	got := map[string]bool{}
+	for _, s := range reqs {
+		if !strings.HasPrefix(s.bearer, bearerPrefix) || got[s.bearer] {
+			t.Fatalf("request %s %s: bearer reused or missing (%d requests)", s.method, s.path, len(reqs))
+		}
+		got[s.bearer] = true
+	}
+}
 
 func TestAttachTransports(t *testing.T) {
 	for _, tc := range []struct {
@@ -93,205 +107,199 @@ func TestAttachTransports(t *testing.T) {
 					t.Fatalf("exit: %+v", got.res)
 				}
 			}
-			r.router.mu.Lock()
-			for _, tg := range r.router.targets {
-				if tg != "a6-test/cc-1" {
-					t.Errorf("ate-target-actor %q", tg)
-				}
+			reqs := r.admin.seen()
+			if tc.transport == TransportLongPoll && len(reqs) < 3 {
+				t.Fatalf("long-poll made %d requests", len(reqs))
 			}
-			r.router.mu.Unlock()
-			if n := r.sess.count(); n != 1 {
-				t.Fatalf("session calls %d", n)
+			if tc.transport != TransportLongPoll && r.admin.count(isWS) != 1 {
+				t.Fatalf("%d WebSocket handshakes", r.admin.count(isWS))
 			}
+			distinctBearers(t, reqs)
 			noSecrets(t, "stderr", errs)
 		})
 	}
 }
 
-func TestCertificateSources(t *testing.T) {
-	r := newRig(t, nil)
-	other := newPKI(t, "other-ca")
-	badCert, badKey := other.issue(t, "intruder", false)
-	goodCert, goodKey := r.sess.cert, r.sess.key
-	dir := t.TempDir()
-	write := func(name string, b []byte) string {
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, b, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return p
-	}
-	goodCertF, goodKeyF := write("good.pem", goodCert), write("good.key", goodKey)
-	badCertF, badKeyF := write("bad.pem", badCert), write("bad.key", badKey)
+func TestRouteRefusals(t *testing.T) {
 	for _, tc := range []struct {
-		name               string
-		grantCert, grantKy []byte
-		certF, keyF        string
-		wantErr            string
+		status int
+		kind   error
+		want   string
 	}{
-		{name: "grant", grantCert: goodCert, grantKy: goodKey},
-		{name: "files", certF: goodCertF, keyF: goodKeyF},
-		{name: "grant wins over files", grantCert: goodCert, grantKy: goodKey, certF: badCertF, keyF: badKeyF},
-		{name: "wrong CA", grantCert: badCert, grantKy: badKey, wantErr: "the router refused the client certificate"},
-		{name: "wrong CA files", certF: badCertF, keyF: badKeyF, wantErr: "the router refused the client certificate"},
-		{name: "no certificate", wantErr: "the router refused the client certificate"},
-		{name: "half a grant", grantCert: goodCert, wantErr: "half a client certificate"},
-		{name: "half the files", certF: goodCertF, wantErr: "both a certificate file and a key file"},
+		{401, ErrNotSignedIn, "run: defenseclaw substrate login"},
+		{403, ErrNotAllowed, "you are not allowed to attach to a6-test/cc-1"},
+		{404, ErrNoActor, "no agent a6-test/cc-1 of yours in this cluster"},
+		{501, ErrNotOffered, "this cluster does not offer attach through the gateway yet; ask your administrator to upgrade DefenseClaw"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r.sess.cert, r.sess.key = tc.grantCert, tc.grantKy
-			o := r.options()
-			o.Router.CertFile, o.Router.KeyFile = tc.certF, tc.keyF
-			m, err := Status(context.Background(), o)
-			if tc.wantErr == "" {
-				if err != nil || m["version"] != relay.Version {
-					t.Fatalf("status %v %v", m, err)
+		for _, transport := range []string{TransportAuto, TransportWebSocket, TransportLongPoll} {
+			t.Run(fmt.Sprint(tc.status, "/", transport), func(t *testing.T) {
+				r := newRig(t, nil)
+				r.admin.setAnswer(func(*http.Request) (int, http.Header) { return tc.status, nil })
+				o := r.options()
+				o.Transport = transport
+				got := r.wait(r.start(o))
+				if got.err == nil || !strings.Contains(got.err.Error(), tc.want) || !errors.Is(got.err, tc.kind) {
+					t.Fatalf("error %v, want %q", got.err, tc.want)
 				}
-				return
+				// One try: the handshake and the probe that reads the
+				// gateway's answer, or the long-poll open.
+				want := 2
+				if transport == TransportLongPoll {
+					want = 1
+				}
+				if n := r.admin.count(nil); n != want {
+					t.Fatalf("a refusal was retried: %d requests", n)
+				}
+				noSecrets(t, "error", got.err.Error())
+				noSecrets(t, "stderr", r.errb.String())
+			})
+		}
+	}
+}
+
+func TestNotSignedInBearer(t *testing.T) {
+	// The bearer was refused by the gateway because it is not one.
+	r := newRig(t, nil)
+	o := r.options()
+	o.Bearer = func(context.Context) (string, error) { return "not-a-bearer", nil }
+	got := r.wait(r.start(o))
+	if got.err == nil || !errors.Is(got.err, ErrNotSignedIn) {
+		t.Fatalf("error %v", got.err)
+	}
+	// The source cannot give a sign-in: final, nothing sent, the source's
+	// error kept for errors.Is.
+	sentinel := errors.New("you are not signed in; run: defenseclaw substrate login")
+	r = newRig(t, nil)
+	r.bearer.err = fmt.Errorf("the sign-in expired: %w", sentinel)
+	got = r.wait(r.start(r.options()))
+	if got.err == nil || !errors.Is(got.err, sentinel) || r.admin.count(nil) != 0 || r.bearer.count() != 1 {
+		t.Fatalf("error %v, %d requests, %d bearer calls", got.err, r.admin.count(nil), r.bearer.count())
+	}
+	if _, err := Status(context.Background(), r.options()); err == nil || !errors.Is(err, sentinel) {
+		t.Fatalf("status: %v", err)
+	}
+	// An issuer that cannot be reached is retried.
+	r = newRig(t, nil)
+	r.bearer.err = &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	o = r.options()
+	o.Backoff.MaxAttempts = 3
+	got = r.wait(r.start(o))
+	if got.err == nil || !strings.Contains(got.err.Error(), "after 3 tries") || !strings.Contains(got.err.Error(), "could not refresh your sign-in") {
+		t.Fatalf("error %v", got.err)
+	}
+}
+
+// failFirst answers status (with hdr on the first) to the first n
+// WebSocket handshakes and to the probes that follow them.
+func failFirst(n, status int, first http.Header) func(*http.Request) (int, http.Header) {
+	var mu sync.Mutex
+	ws := 0
+	return func(r *http.Request) (int, http.Header) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/dcrelay/1/ws") {
+			ws++
+		}
+		switch {
+		case ws == 1:
+			return status, first
+		case ws <= n:
+			return status, nil
+		}
+		return 0, nil
+	}
+}
+
+func TestWaitThenUp(t *testing.T) {
+	for _, tc := range []struct {
+		status    int
+		msg, gone string
+	}{
+		{503, fullMsg, startingMsg},
+		{429, fullMsg, startingMsg},
+		{502, startingMsg, fullMsg},
+		{504, startingMsg, fullMsg},
+	} {
+		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			r := newRig(t, nil)
+			r.admin.setAnswer(failFirst(2, tc.status, http.Header{"Retry-After": {"3"}}))
+			run := r.start(r.options())
+			waitFor(t, "screen", func() bool { return strings.Contains(r.out.String(), "screen:1") })
+			r.typ("\x1d")
+			got := r.wait(run)
+			if got.err != nil || !got.res.Detached || got.res.Transport != TransportWebSocket {
+				t.Fatalf("%+v %v", got.res, got.err)
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("error %v, want %q", err, tc.wantErr)
+			errs := r.errb.String()
+			if strings.Count(errs, tc.msg) != 1 || strings.Contains(errs, tc.gone) {
+				t.Fatalf("messages: %q", errs)
 			}
-			noSecrets(t, "error", err.Error())
+			sl := r.clock.slept()
+			if len(sl) != 2 || sl[0] < 3*time.Second {
+				t.Fatalf("sleeps %v (Retry-After 3 not honoured)", sl)
+			}
 		})
 	}
 }
 
-func TestRouterRefusals(t *testing.T) {
+func TestWaitGivesUpAfterMaxWait(t *testing.T) {
 	for _, tc := range []struct {
-		status int
-		want   string
+		status    int
+		transport string
+		want      string
 	}{
-		{403, "the cluster refused this connection (not allowed to reach this actor)"},
-		{401, "not allowed to reach this actor"},
-		{404, "no such running actor: a6-test/cc-1"},
-		{418, "the router answered 418"},
-		{502, "the router answered 502"},
+		{503, TransportAuto, "no room in the cluster after 5s; try again later or ask your administrator to raise the pool"},
+		{503, TransportLongPoll, "no room in the cluster after 5s; try again later or ask your administrator to raise the pool"},
+		{502, TransportAuto, "the agent cc-1 did not start within 5s; check it with: defenseclaw substrate status cc-1"},
+		{504, TransportLongPoll, "the agent cc-1 did not start within 5s; check it with: defenseclaw substrate status cc-1"},
 	} {
-		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+		t.Run(fmt.Sprint(tc.status, "/", tc.transport), func(t *testing.T) {
 			r := newRig(t, nil)
-			r.router.statusFor = func(int) (int, http.Header) { return tc.status, nil }
-			got := r.wait(r.start(r.options()))
-			if tc.status == 502 {
-				// A server error is retried, then reported.
-				if got.err == nil || !strings.Contains(got.err.Error(), tc.want) || !strings.Contains(got.err.Error(), "defenseclaw substrate connect cc-1") {
-					t.Fatalf("error %v", got.err)
-				}
-				return
+			r.admin.setAnswer(func(*http.Request) (int, http.Header) { return tc.status, nil })
+			o := r.options()
+			o.Transport = tc.transport
+			o.Now = r.clock.now
+			o.MaxWait = 5 * time.Second
+			o.Backoff = Backoff{Initial: time.Second, Max: 2 * time.Second, Jitter: -1}
+			got := r.wait(r.start(o))
+			if got.err == nil || got.err.Error() != tc.want {
+				t.Fatalf("error %v", got.err)
 			}
-			if got.err == nil || !strings.Contains(got.err.Error(), tc.want) {
-				t.Fatalf("error %v, want %q", got.err, tc.want)
+			var total time.Duration
+			for _, d := range r.clock.slept() {
+				total += d
 			}
-			if n := r.router.count(); n != 1 {
-				t.Fatalf("a refusal was retried: %d CONNECTs", n)
+			if total != 5*time.Second {
+				t.Fatalf("waited %v", total)
 			}
 			noSecrets(t, "error", got.err.Error())
 		})
 	}
-}
-
-func TestParkingThenRoom(t *testing.T) {
-	r := newRig(t, nil)
-	r.router.statusFor = func(n int) (int, http.Header) {
-		switch n {
-		case 1:
-			return 503, http.Header{"Retry-After": {"3"}}
-		case 2:
-			return 503, nil
-		}
-		return 200, nil
-	}
-	run := r.start(r.options())
-	waitFor(t, "screen", func() bool { return strings.Contains(r.out.String(), "screen:1") })
-	r.typ("\x1d")
-	got := r.wait(run)
-	if got.err != nil || !got.res.Detached {
-		t.Fatalf("%+v %v", got.res, got.err)
-	}
-	if n := strings.Count(r.errb.String(), fullMsg); n != 1 {
-		t.Fatalf("cluster-full message %d times: %q", n, r.errb.String())
-	}
-	sl := r.clock.slept()
-	if len(sl) != 2 || sl[0] < 3*time.Second {
-		t.Fatalf("sleeps %v (Retry-After 3 not honoured)", sl)
-	}
-}
-
-func TestParkingGivesUpAfterMaxWait(t *testing.T) {
-	r := newRig(t, nil)
-	r.router.statusFor = func(int) (int, http.Header) { return 503, nil }
-	o := r.options()
-	o.Now = r.clock.now
-	o.MaxWait = 5 * time.Second
-	o.Backoff = Backoff{Initial: time.Second, Max: 2 * time.Second, Jitter: -1}
-	got := r.wait(r.start(o))
-	want := "no room in the cluster after 5s; try again later or ask your administrator to raise the pool"
-	if got.err == nil || got.err.Error() != want {
-		t.Fatalf("error %v", got.err)
-	}
-	var total time.Duration
-	for _, d := range r.clock.slept() {
-		total += d
-	}
-	if total != 5*time.Second {
-		t.Fatalf("waited %v", total)
-	}
 	if fmtDur(10*time.Minute) != "10m" {
 		t.Fatalf("default MaxWait shows as %q", fmtDur(10*time.Minute))
-	}
-	noSecrets(t, "error", got.err.Error())
-}
-
-func TestParkingInsideTunnel(t *testing.T) {
-	// The relay (or the router's ingress inside the tunnel) answering 503 is
-	// the same wait.
-	r := newRig(t, nil)
-	r.relay.blockWS = 503
-	o := r.options()
-	o.Transport = TransportWebSocket
-	run := r.start(o)
-	waitFor(t, "full message", func() bool { return strings.Contains(r.errb.String(), fullMsg) })
-	r.relay.mu.Lock()
-	r.relay.blockWS = 0
-	r.relay.mu.Unlock()
-	waitFor(t, "screen", func() bool { return strings.Contains(r.out.String(), "screen:1") })
-	r.typ("\x1d")
-	if got := r.wait(run); got.err != nil || !got.res.Detached {
-		t.Fatalf("%+v %v", got.res, got.err)
 	}
 }
 
 func TestReconnectAfterDrop(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		life  time.Duration
-		calls int
-	}{
-		{"token valid", 10 * time.Minute, 1},
-		{"token near expiry", 30 * time.Second, 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := newRig(t, nil)
-			r.sess.life = tc.life
-			run := r.start(r.options())
-			waitFor(t, "screen 1", func() bool { return strings.Contains(r.out.String(), "screen:1") })
-			r.typ("DROP\r")
-			waitFor(t, "screen 2", func() bool { return strings.Contains(r.out.String(), "screen:2") })
-			r.typ("after\r")
-			waitFor(t, "echo on the new connection", func() bool { return strings.Contains(r.out.String(), "echo:after") })
-			r.typ("\x1d")
-			got := r.wait(run)
-			if got.err != nil || !got.res.Detached || got.res.Reconnects != 1 || got.res.Session != "sess-1" {
-				t.Fatalf("%+v %v", got.res, got.err)
-			}
-			if !strings.Contains(r.errb.String(), lostMsg) {
-				t.Fatalf("no reconnect message: %q", r.errb.String())
-			}
-			if n := r.sess.count(); n != tc.calls {
-				t.Fatalf("session calls %d, want %d", n, tc.calls)
-			}
-		})
+	r := newRig(t, nil)
+	run := r.start(r.options())
+	waitFor(t, "screen 1", func() bool { return strings.Contains(r.out.String(), "screen:1") })
+	r.typ("DROP\r")
+	waitFor(t, "screen 2", func() bool { return strings.Contains(r.out.String(), "screen:2") })
+	r.typ("after\r")
+	waitFor(t, "echo on the new connection", func() bool { return strings.Contains(r.out.String(), "echo:after") })
+	r.typ("\x1d")
+	got := r.wait(run)
+	if got.err != nil || !got.res.Detached || got.res.Reconnects != 1 || got.res.Session != "sess-1" {
+		t.Fatalf("%+v %v", got.res, got.err)
 	}
+	if !strings.Contains(r.errb.String(), lostMsg) {
+		t.Fatalf("no reconnect message: %q", r.errb.String())
+	}
+	if n := r.admin.count(isWS); n != 2 {
+		t.Fatalf("%d handshakes", n)
+	}
+	distinctBearers(t, r.admin.seen())
 }
 
 func TestGiveUpAfterMaxAttempts(t *testing.T) {
@@ -312,7 +320,9 @@ func TestGiveUpAfterMaxAttempts(t *testing.T) {
 }
 
 func TestLongPollFallback(t *testing.T) {
-	for _, status := range []int{426, 400, 403, 502} {
+	// Something between the launcher and the relay refuses the upgrade while
+	// plain requests get through.
+	for _, status := range []int{426, 400, 403, 502, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			r := newRig(t, nil)
 			r.relay.blockWS = status
@@ -328,30 +338,11 @@ func TestLongPollFallback(t *testing.T) {
 			if n := strings.Count(r.errb.String(), fallbackMsg); n != 1 {
 				t.Fatalf("fallback message %d times: %q", n, r.errb.String())
 			}
+			if strings.Contains(r.errb.String(), fullMsg) || strings.Contains(r.errb.String(), startingMsg) {
+				t.Fatalf("a refused upgrade was taken for the gateway's answer: %q", r.errb.String())
+			}
 		})
 	}
-}
-
-func TestSessionRefusedIsNotRetried(t *testing.T) {
-	r := newRig(t, nil)
-	r.sess.err = fmt.Errorf("admin listener: %w", ErrSessionRefused)
-	got := r.wait(r.start(r.options()))
-	if got.err == nil || !strings.Contains(got.err.Error(), "not allowed") || r.sess.count() != 1 || r.router.count() != 0 {
-		t.Fatalf("err %v calls %d connects %d", got.err, r.sess.count(), r.router.count())
-	}
-}
-
-func TestRelayRefusesTokenTwice(t *testing.T) {
-	r := newRig(t, nil)
-	r.relay.tokens = map[string]bool{}
-	got := r.wait(r.start(r.options()))
-	if got.err == nil || !strings.Contains(got.err.Error(), "refused the session token") {
-		t.Fatalf("error %v", got.err)
-	}
-	if n := r.sess.count(); n != 2 {
-		t.Fatalf("a refused token was not renewed once: %d session calls", n)
-	}
-	noSecrets(t, "error", got.err.Error())
 }
 
 func TestInputEndDetaches(t *testing.T) {
@@ -362,31 +353,6 @@ func TestInputEndDetaches(t *testing.T) {
 	got := r.wait(run)
 	if got.err != nil || !got.res.Detached {
 		t.Fatalf("%+v %v", got.res, got.err)
-	}
-}
-
-func TestSessionCacheRefresh(t *testing.T) {
-	clock := newFakeClock()
-	src := &fakeSessions{now: clock.now, life: 2 * time.Minute}
-	c := &sessionCache{src: src, t: testTarget, now: clock.now}
-	ctx := context.Background()
-	for i, step := range []struct {
-		advance time.Duration
-		force   bool
-		calls   int
-	}{
-		{0, false, 1},                // none yet
-		{30 * time.Second, false, 1}, // 90 s left
-		{31 * time.Second, false, 2}, // 59 s left: renewed
-		{0, true, 3},                 // forced
-	} {
-		clock.sleep(ctx, step.advance)
-		if _, err := c.get(ctx, step.force); err != nil {
-			t.Fatal(err)
-		}
-		if src.count() != step.calls {
-			t.Fatalf("step %d: %d calls, want %d", i, src.count(), step.calls)
-		}
 	}
 }
 
@@ -412,49 +378,102 @@ func TestBackoffDefaultsAndBounds(t *testing.T) {
 	}
 }
 
+func TestAttachPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		admin string
+		tg    Target
+		want  string
+	}{
+		{"https://" + testAdminAddr, testTarget, "https://" + testAdminAddr + testPrefixPath},
+		{"https://" + testAdminAddr + "/", testTarget, "https://" + testAdminAddr + testPrefixPath},
+		{" https://" + testAdminHost + "/gw/ ", testTarget, "https://" + testAdminHost + "/gw" + testPrefixPath},
+		{"https://" + testAdminAddr, Target{Atespace: "a%b", Name: "c?d"}, "https://" + testAdminAddr + "/api/v1/substrate/actors/a%25b/c%3Fd/attach"},
+	} {
+		got, err := AttachPrefix(tc.admin, tc.tg)
+		if err != nil || got != tc.want {
+			t.Errorf("AttachPrefix(%q, %v) = %q, %v; want %q", tc.admin, tc.tg, got, err, tc.want)
+		}
+	}
+}
+
 func TestTunnelSettings(t *testing.T) {
+	bearer := (&fakeBearer{}).token
 	for _, tc := range []struct {
 		name string
-		r    Router
+		g    Gateway
+		b    BearerFunc
 		tg   Target
 		want string
 	}{
-		{"http URL", Router{URL: "http://" + testRouterAddr}, testTarget, "https://HOST:PORT"},
-		{"no host", Router{URL: "https://"}, testTarget, "https://HOST:PORT"},
-		{"bad port", Router{URL: "https://" + testRouterAddr, RelayPort: 70000}, testTarget, "not a TCP port"},
-		{"header injection", Router{URL: "https://" + testRouterAddr}, Target{Atespace: "a", Name: "b\r\nx: y"}, "not valid"},
-		{"missing CA", Router{URL: "https://" + testRouterAddr, CAFile: "/nonexistent/ca.pem"}, testTarget, "router CA file"},
+		{"http URL", Gateway{BaseURL: "http://" + testAdminAddr}, bearer, testTarget, "https://HOST:PORT"},
+		{"no host", Gateway{BaseURL: "https://"}, bearer, testTarget, "https://HOST:PORT"},
+		{"query", Gateway{BaseURL: "https://" + testAdminAddr + "?x=1"}, bearer, testTarget, "https://HOST:PORT"},
+		{"user info", Gateway{BaseURL: "https://u:p@" + testAdminAddr}, bearer, testTarget, "https://HOST:PORT"},
+		{"slash in name", Gateway{BaseURL: "https://" + testAdminAddr}, bearer, Target{Atespace: "a", Name: "b/c"}, "not valid"},
+		{"dot dot", Gateway{BaseURL: "https://" + testAdminAddr}, bearer, Target{Atespace: "..", Name: "b"}, "not valid"},
+		{"header injection", Gateway{BaseURL: "https://" + testAdminAddr}, bearer, Target{Atespace: "a", Name: "b\r\nx: y"}, "not valid"},
+		{"no actor", Gateway{BaseURL: "https://" + testAdminAddr}, bearer, Target{Name: "b"}, "atespace/name"},
+		{"missing CA", Gateway{BaseURL: "https://" + testAdminAddr, CAFile: "/nonexistent/ca.pem"}, bearer, testTarget, "admin CA file"},
+		{"no bearer", Gateway{BaseURL: "https://" + testAdminAddr}, nil, testTarget, "defenseclaw substrate login"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewTunnel(context.Background(), tc.r, SessionGrant{Token: testToken}, tc.tg)
+			_, err := NewTunnel(context.Background(), tc.g, tc.b, tc.tg)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error %v, want %q", err, tc.want)
 			}
 			noSecrets(t, "error", err.Error())
 		})
 	}
-	tu, err := NewTunnel(context.Background(), Router{URL: "https://" + testRouterAddr}, SessionGrant{}, testTarget)
+	tu, err := NewTunnel(context.Background(), Gateway{BaseURL: "https://" + testAdminAddr}, bearer, testTarget)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tu.Close()
-	if tu.BaseURL() != "http://actor.invalid:8080" || tu.HTTPClient() == nil || tu.Dialer() == nil {
+	if tu.BaseURL() != "https://"+testAdminAddr+testPrefixPath || tu.HTTPClient() == nil || tu.Dialer() == nil {
 		t.Fatalf("tunnel %q", tu.BaseURL())
 	}
-	if _, err := tu.DialContext(context.Background(), "tcp", "example.test:80"); err == nil {
-		t.Fatal("the tunnel dialed somewhere other than the actor")
+	// The bearer never goes to another host.
+	for _, u := range []string{"https://example.test/x", "http://" + testAdminAddr + "/x"} {
+		if _, err := tu.HTTPClient().Get(u); err == nil || !strings.Contains(err.Error(), "reaches only the admin listener") {
+			t.Fatalf("%s: %v", u, err)
+		}
 	}
 }
 
-func TestTunnelThroughProxy(t *testing.T) {
+func TestUntrustedCertificate(t *testing.T) {
 	r := newRig(t, nil)
-	routerAddr := r.router.ln.Addr().String()
+	other := newPKI(t, "other-ca")
+	otherFile := filepath.Join(t.TempDir(), "other.pem")
+	if err := os.WriteFile(otherFile, other.pem, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := r.options()
+	o.Gateway.CAFile = otherFile
+	if _, err := Status(context.Background(), o); err == nil || !strings.Contains(err.Error(), "not trusted here") {
+		t.Fatalf("status: %v", err)
+	}
+	for _, transport := range []string{TransportAuto, TransportLongPoll} {
+		o.Transport = transport
+		got := r.wait(r.start(o))
+		if got.err == nil || !strings.Contains(got.err.Error(), "the admin listener's certificate is not trusted here (set the admin CA file of this context)") {
+			t.Fatalf("%s: %v", transport, got.err)
+		}
+		noSecrets(t, "error", got.err.Error())
+	}
+	if n := len(r.clock.slept()); n != 0 {
+		t.Fatalf("an untrusted certificate was retried (%d sleeps)", n)
+	}
+}
+
+func TestThroughProxy(t *testing.T) {
+	r := newRig(t, nil)
+	adminAddr := r.admin.srv.Listener.Addr().String()
 	pl, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pl.Close()
-	seen := make(chan string, 4)
+	seenCh := make(chan string, 8)
 	go func() {
 		for {
 			c, err := pl.Accept()
@@ -467,8 +486,8 @@ func TestTunnelThroughProxy(t *testing.T) {
 				if err != nil {
 					return
 				}
-				seen <- req.Method + " " + req.Host + " auth=" + fmt.Sprint(req.Header.Get("Proxy-Authorization") != "")
-				up, err := net.Dial("tcp", routerAddr)
+				seenCh <- req.Method + " " + req.Host + " auth=" + fmt.Sprint(req.Header.Get("Proxy-Authorization") != "")
+				up, err := net.Dial("tcp", adminAddr)
 				if err != nil {
 					return
 				}
@@ -480,10 +499,10 @@ func TestTunnelThroughProxy(t *testing.T) {
 		}
 	}()
 	o := r.options()
-	o.Router.proxy = func(*http.Request) (*url.URL, error) {
+	o.Gateway.proxy = func(*http.Request) (*url.URL, error) {
 		return &url.URL{Scheme: "http", Host: "proxy.example.test:3128", User: url.UserPassword("u", "p")}, nil
 	}
-	o.Router.dial = func(ctx context.Context, network, a string) (net.Conn, error) {
+	o.Gateway.dial = func(ctx context.Context, network, a string) (net.Conn, error) {
 		if a != "proxy.example.test:3128" {
 			return nil, fmt.Errorf("dialed %s, not the proxy", a)
 		}
@@ -494,18 +513,30 @@ func TestTunnelThroughProxy(t *testing.T) {
 	if err != nil || m["version"] != relay.Version {
 		t.Fatalf("status through the proxy: %v %v", m, err)
 	}
-	if s := <-seen; s != "CONNECT "+testRouterAddr+" auth=true" {
+	if s := <-seenCh; s != "CONNECT "+testAdminAddr+" auth=true" {
+		t.Fatalf("proxy saw %q", s)
+	}
+	// The WebSocket goes through the proxy too.
+	o.Transport = TransportWebSocket
+	run := r.start(o)
+	waitFor(t, "screen", func() bool { return strings.Contains(r.out.String(), "screen:1") })
+	r.typ("\x1d")
+	if got := r.wait(run); got.err != nil || !got.res.Detached {
+		t.Fatalf("%+v %v", got.res, got.err)
+	}
+	if s := <-seenCh; s != "CONNECT "+testAdminAddr+" auth=true" {
 		t.Fatalf("proxy saw %q", s)
 	}
 }
 
 func TestErrorsNameNoSecrets(t *testing.T) {
 	// Every refusal path above checks its own text; this checks the
-	// wrapped forms too.
+	// remaining forms.
 	for _, err := range []error{
-		&TunnelError{Status: 503, Kind: ErrClusterFull},
-		&TunnelError{Kind: ErrCertRefused},
-		tokenRefused(testTarget),
+		&RouteError{Status: 503, Kind: ErrClusterFull},
+		&RouteError{Status: 502, Kind: ErrStarting, Target: testTarget},
+		&RouteError{Status: 418, Target: testTarget},
+		&bearerError{errors.New("you are not signed in")},
 		giveUp(testTarget, true, 12, errors.New("relay refused the attachment (status 502)")),
 	} {
 		noSecrets(t, "error", err.Error())

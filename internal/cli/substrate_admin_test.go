@@ -19,17 +19,12 @@ package cli
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
-	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -59,6 +54,7 @@ type subAdminFake struct {
 	sessionCert  api.SessionCert
 	bundleStatus int
 	statusStatus int
+	attachStatus int
 	statusBody   string
 
 	bundleBody  []byte
@@ -70,7 +66,7 @@ type subAdminFake struct {
 
 func newSubAdminFake(t *testing.T) *subAdminFake {
 	t.Helper()
-	f := &subAdminFake{actorsStatus: 200, verifyStatus: 200, bundleStatus: 200, statusStatus: 200,
+	f := &subAdminFake{attachStatus: 200, actorsStatus: 200, verifyStatus: 200, bundleStatus: 200, statusStatus: 200,
 		verifyDoc: fleet.VerifyDocument{SchemaVersion: 1, Command: "verify", OK: true, Checks: []fleet.Check{
 			{ID: fleet.CheckIssuer, Status: fleet.Pass, Message: "the issuer is unique"},
 			{ID: fleet.CheckCallout, Status: fleet.Pass, Message: "the callout is registered"},
@@ -98,6 +94,13 @@ func newSubAdminFake(t *testing.T) *subAdminFake {
 		}
 		b, _ := json.Marshal(f.verifyDoc)
 		writeJSONStatus(w, 200, string(b))
+	})
+	mux.HandleFunc("/api/v1/substrate/actors/a1/n1/attach/dcrelay/1/status", func(w http.ResponseWriter, r *http.Request) {
+		if f.attachStatus != 200 {
+			writeJSONStatus(w, f.attachStatus, `{"error":"x","reason":"attach"}`)
+			return
+		}
+		writeJSONStatus(w, 200, `{"version":"dcrelay/1","tasks":{}}`)
 	})
 	mux.HandleFunc("/api/v1/substrate/session-cert", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := json.Marshal(f.sessionCert)
@@ -137,7 +140,6 @@ func (f *subAdminFake) context() auth.Context {
 	return auth.Context{
 		AdminURL: f.srv.URL, AdminCAFile: f.caFile,
 		Issuer: f.srv.URL + "/realms/x", IssuerCAFile: f.caFile, ClientID: "launcher",
-		RouterURL: f.srv.URL, RouterCAFile: f.caFile,
 	}
 }
 
@@ -147,7 +149,7 @@ func (f *subAdminFake) session(t *testing.T, c auth.Context) *substrateSession {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &substrateSession{Name: "test", Ctx: c, Client: cl}
+	return &substrateSession{Name: "test", Ctx: c, Client: cl, Bearer: func(context.Context) (string, error) { return "test-bearer", nil }}
 }
 
 // subAdminSeams replaces what the admin commands take from the machine.
@@ -191,7 +193,6 @@ func closedAddress(t *testing.T) string {
 }
 
 func TestSubstrate_Admin_Doctor(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "missing.pem")
 	cases := []struct {
 		name     string
 		mutate   func(f *subAdminFake, c *auth.Context)
@@ -204,7 +205,7 @@ func TestSubstrate_Admin_Doctor(t *testing.T) {
 	}{
 		{
 			name:    "green",
-			want:    []string{"ok    context", "ok    token_store", "the test store", "ok    admin_address", "ok    sign_in", "ok    sign_in_server", "ok    agent_entrance", "issues your client certificate"},
+			want:    []string{"ok    context", "ok    token_store", "the test store", "ok    admin_address", "ok    sign_in", "ok    sign_in_server", "ok    attach", "attach through the gateway works"},
 			notWant: []string{"not ready"},
 		},
 		{
@@ -219,8 +220,8 @@ func TestSubstrate_Admin_Doctor(t *testing.T) {
 		},
 		{
 			name:   "warnings do not block",
-			mutate: func(f *subAdminFake, c *auth.Context) { f.sessionCert = api.SessionCert{Token: "t"} },
-			want:   []string{"warn  agent_entrance", "does not issue one", "to fix:", "ready for agents"},
+			mutate: func(f *subAdminFake, c *auth.Context) { f.attachStatus = 501 },
+			want:   []string{"warn  attach", "does not offer attach", "to fix:", "ready for agents"},
 		},
 		{
 			name:     "not signed in to the cluster",
@@ -254,28 +255,21 @@ func TestSubstrate_Admin_Doctor(t *testing.T) {
 			want:     []string{"fail  admin_address", "is not trusted", "--admin-ca-file FILE"},
 		},
 		{
-			name:     "no agent entrance in the context",
-			mutate:   func(f *subAdminFake, c *auth.Context) { c.RouterURL = "" },
+			name:     "attach is refused for the sign-in",
+			mutate:   func(f *subAdminFake, c *auth.Context) { f.attachStatus = 401 },
 			wantExit: 1,
-			want:     []string{"fail  agent_entrance", "no agent entrance is set", "--router-url"},
+			want:     []string{"fail  attach", "did not accept your sign-in for attach", "attach: defenseclaw substrate login"},
 		},
 		{
-			name:     "agent entrance refuses the connection",
-			mutate:   func(f *subAdminFake, c *auth.Context) { c.RouterURL = "https://" + closedAddress(t) },
+			name:     "attach fails inside the cluster",
+			mutate:   func(f *subAdminFake, c *auth.Context) { f.attachStatus = 500 },
 			wantExit: 1,
-			want:     []string{"fail  agent_entrance", "the agent entrance: cannot connect to"},
+			want:     []string{"fail  attach", "attach through the gateway failed"},
 		},
 		{
-			name:     "client certificate cannot be read",
-			mutate:   func(f *subAdminFake, c *auth.Context) { c.RouterCertFile, c.RouterKeyFile = missing, missing },
-			wantExit: 1,
-			want:     []string{"fail  agent_entrance", "client certificate for the agent entrance cannot be read"},
-		},
-		{
-			name:     "only half of the client certificate",
-			mutate:   func(f *subAdminFake, c *auth.Context) { c.RouterCertFile = missing },
-			wantExit: 1,
-			want:     []string{"fail  agent_entrance", "set both the client certificate and its key"},
+			name:   "attach is not allowed for that agent",
+			mutate: func(f *subAdminFake, c *auth.Context) { f.attachStatus = 403 },
+			want:   []string{"warn  attach", "would not let you reach a1/n1", "ready for agents"},
 		},
 		{
 			name:     "token store unusable",
@@ -399,80 +393,6 @@ func TestSubstrate_Admin_DoctorBadOutputFlag(t *testing.T) {
 	if _, _, err := runSubAdmin(newSubstrateDoctorCmd(), "--output", "yaml"); err == nil {
 		t.Fatal("--output yaml is accepted")
 	}
-}
-
-// A refused client certificate shows after the handshake in TLS 1.3.
-func TestSubstrate_Admin_DoctorClientCertificateRefused(t *testing.T) {
-	dir := t.TempDir()
-	certFile, keyFile := writeSelfSignedPair(t, dir)
-
-	entrance := httptest.NewUnstartedServer(http.NotFoundHandler())
-	entrance.TLS = &tls.Config{MinVersion: tls.VersionTLS13, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: x509.NewCertPool()}
-	entrance.StartTLS()
-	t.Cleanup(entrance.Close)
-	entranceCA := filepath.Join(dir, "entrance-ca.pem")
-	if err := os.WriteFile(entranceCA, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: entrance.Certificate().Raw}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, tc := range []struct {
-		name     string
-		cert     bool
-		wantExit int
-		want     []string
-	}{
-		{"certificate refused", true, 1, []string{"fail  agent_entrance", "refused your client certificate", "ask your administrator for a new client certificate"}},
-		{"entrance wants a certificate and none is set", false, 0, []string{"warn  agent_entrance", "ready for agents"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newSubAdminFake(t)
-			f.sessionCert = api.SessionCert{Token: "t"}
-			c := f.context()
-			c.RouterURL, c.RouterCAFile = entrance.URL, entranceCA
-			if tc.cert {
-				c.RouterCertFile, c.RouterKeyFile = certFile, keyFile
-			}
-			subAdminSeams(t, func() (*substrateSession, error) { return f.session(t, c), nil }, nil)
-			out, _, err := runSubAdmin(newSubstrateDoctorCmd())
-			if (err == nil) != (tc.wantExit == 0) || (err != nil && commandExitCode(err) != tc.wantExit) {
-				t.Fatalf("exit %d (%v), want %d\n%s", commandExitCode(err), err, tc.wantExit, out)
-			}
-			for _, w := range tc.want {
-				if !strings.Contains(out, w) {
-					t.Errorf("output lacks %q:\n%s", w, out)
-				}
-			}
-		})
-	}
-}
-
-func writeSelfSignedPair(t *testing.T, dir string) (certFile, keyFile string) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tpl := &x509.Certificate{
-		SerialNumber: big.NewInt(7), Subject: pkix.Name{CommonName: "launcher.example.test"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	certFile, keyFile = filepath.Join(dir, "client.pem"), filepath.Join(dir, "client.key")
-	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return certFile, keyFile
 }
 
 func TestSubstrate_Admin_ClassifyProbe(t *testing.T) {

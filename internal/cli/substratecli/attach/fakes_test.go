@@ -11,7 +11,6 @@
 package attach
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -27,6 +26,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -42,9 +42,13 @@ import (
 )
 
 const (
-	testRouterHost = "router.example.test"
-	testRouterAddr = testRouterHost + ":8444"
-	testToken      = "tok-SECRET-0123456789"
+	testAdminHost = "admin.example.test"
+	testAdminAddr = testAdminHost + ":9443"
+	// testToken is the relay session token: only the fake gateway has it.
+	testToken = "relay-SECRET-0123456789"
+	// bearerPrefix starts every person bearer the fake source hands out.
+	bearerPrefix   = "oidc-SECRET-"
+	testPrefixPath = "/api/v1/substrate/actors/a6-test/cc-1/attach"
 )
 
 var testTarget = Target{Atespace: "a6-test", Name: "cc-1"}
@@ -101,152 +105,137 @@ func (p *pki) issue(t *testing.T, cn string, server bool) ([]byte, []byte) {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kb})
 }
 
-// chanListener hands tunneled connections to an http.Server.
-type chanListener struct {
-	ch   chan net.Conn
-	done chan struct{}
-	once sync.Once
+// fakeBearer hands out a new bearer on every call, like a token source
+// that refreshes before each request.
+type fakeBearer struct {
+	mu  sync.Mutex
+	n   int
+	err error
 }
 
-func (l *chanListener) Accept() (net.Conn, error) {
-	select {
-	case c := <-l.ch:
-		return c, nil
-	case <-l.done:
-		return nil, net.ErrClosed
+func (b *fakeBearer) token(ctx context.Context) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-}
-func (l *chanListener) Close() error   { l.once.Do(func() { close(l.done) }); return nil }
-func (l *chanListener) Addr() net.Addr { return fakeAddr{} }
-
-type fakeAddr struct{}
-
-func (fakeAddr) Network() string { return "tcp" }
-func (fakeAddr) String() string  { return "actor.invalid:8080" }
-
-// fakeRouter is the router's CONNECT-TLS port: TLS 1.3 with a required
-// client certificate from its CA, a CONNECT with ate-target-actor, then the
-// tunnel to an http.Handler (the relay).
-type fakeRouter struct {
-	t     *testing.T
-	ln    net.Listener
-	inner *chanListener
-	srv   *http.Server
-
-	mu        sync.Mutex
-	connects  int
-	targets   []string
-	hosts     []string
-	tunnels   []net.Conn
-	statusFor func(n int) (int, http.Header)
+	b.n++
+	if b.err != nil {
+		return "", b.err
+	}
+	return bearerPrefix + strconv.Itoa(b.n), nil
 }
 
-func newFakeRouter(t *testing.T, ca *pki, h http.Handler) *fakeRouter {
+func (b *fakeBearer) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.n
+}
+
+// seen is one request the fake admin listener got.
+type seen struct {
+	method, path, bearer string
+	ws                   bool
+}
+
+// fakeAdmin is the gateway's admin listener with the attach route: TLS, a
+// bearer on every request, the attach prefix of testTarget. It answers with
+// answer's status when that is not 0; otherwise it strips the prefix, puts
+// the relay session token on the request (the launcher never has it) and
+// hands it to the relay.
+type fakeAdmin struct {
+	srv   *httptest.Server
+	relay http.Handler
+
+	mu     sync.Mutex
+	reqs   []seen
+	answer func(r *http.Request) (int, http.Header)
+}
+
+func newFakeAdmin(t *testing.T, ca *pki, h http.Handler) *fakeAdmin {
 	t.Helper()
-	certPEM, keyPEM := ca.issue(t, testRouterHost, true)
+	certPEM, keyPEM := ca.issue(t, testAdminHost, true)
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pool := x509.NewCertPool()
-	pool.AddCert(ca.cert)
-	conf := &tls.Config{Certificates: []tls.Certificate{cert}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool, MinVersion: tls.VersionTLS13}
-	ln, err := tls.Listen("tcp", "localhost:0", conf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := &fakeRouter{t: t, ln: ln, inner: &chanListener{ch: make(chan net.Conn), done: make(chan struct{})}, srv: &http.Server{Handler: h}}
-	go r.srv.Serve(r.inner)
-	go r.accept()
-	t.Cleanup(func() {
-		ln.Close()
-		r.srv.Close()
-		r.dropTunnels()
-	})
-	return r
+	f := &fakeAdmin{relay: h}
+	f.srv = httptest.NewUnstartedServer(f)
+	f.srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	f.srv.StartTLS()
+	t.Cleanup(f.srv.Close)
+	return f
 }
 
-func (r *fakeRouter) accept() {
-	for {
-		c, err := r.ln.Accept()
-		if err != nil {
-			return
+func routeRefusal(w http.ResponseWriter, status int, reason string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": http.StatusText(status), "reason": reason})
+}
+
+func (f *fakeAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	bearer, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	f.mu.Lock()
+	f.reqs = append(f.reqs, seen{method: r.Method, path: r.URL.EscapedPath(), bearer: bearer, ws: websocket.IsWebSocketUpgrade(r)})
+	status, hdr := 0, http.Header(nil)
+	if f.answer != nil {
+		status, hdr = f.answer(r)
+	}
+	f.mu.Unlock()
+	if !strings.HasPrefix(bearer, bearerPrefix) {
+		routeRefusal(w, http.StatusUnauthorized, "not_signed_in")
+		return
+	}
+	if !strings.HasPrefix(r.URL.EscapedPath(), testPrefixPath+"/") {
+		routeRefusal(w, http.StatusNotFound, "no_actor")
+		return
+	}
+	if status != 0 {
+		for k, v := range hdr {
+			w.Header()[k] = v
 		}
-		go r.handle(c)
+		routeRefusal(w, status, "test")
+		return
 	}
+	in := r.Clone(r.Context())
+	in.URL.Path = strings.TrimPrefix(r.URL.Path, testPrefixPath)
+	in.URL.RawPath = ""
+	in.Header.Set("Authorization", "Bearer "+testToken)
+	f.relay.ServeHTTP(w, in)
 }
 
-func (r *fakeRouter) handle(c net.Conn) {
-	tc := c.(*tls.Conn)
-	_ = tc.SetDeadline(time.Now().Add(5 * time.Second))
-	if err := tc.Handshake(); err != nil {
-		tc.Close()
-		return
-	}
-	br := bufio.NewReader(tc)
-	req, err := http.ReadRequest(br)
-	if err != nil {
-		tc.Close()
-		return
-	}
-	r.mu.Lock()
-	r.connects++
-	n := r.connects
-	r.targets = append(r.targets, req.Header.Get("ate-target-actor"))
-	r.hosts = append(r.hosts, req.Host)
-	sf := r.statusFor
-	r.mu.Unlock()
-	if req.Method != http.MethodConnect || req.Host != "actor.invalid:8080" || req.Header.Get("ate-target-actor") == "" {
-		io.WriteString(tc, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
-		tc.Close()
-		return
-	}
-	status, hdr := http.StatusOK, http.Header(nil)
-	if sf != nil {
-		status, hdr = sf(n)
-	}
-	if status != http.StatusOK {
-		fmt.Fprintf(tc, "HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
-		if hdr != nil {
-			hdr.Write(tc)
+func (f *fakeAdmin) setAnswer(a func(r *http.Request) (int, http.Header)) {
+	f.mu.Lock()
+	f.answer = a
+	f.mu.Unlock()
+}
+
+func (f *fakeAdmin) seen() []seen {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]seen(nil), f.reqs...)
+}
+
+func (f *fakeAdmin) count(match func(seen) bool) int {
+	n := 0
+	for _, s := range f.seen() {
+		if match == nil || match(s) {
+			n++
 		}
-		io.WriteString(tc, "Content-Length: 0\r\n\r\n")
-		tc.Close()
-		return
 	}
-	io.WriteString(tc, "HTTP/1.1 200 Connection established\r\n\r\n")
-	_ = tc.SetDeadline(time.Time{})
-	r.mu.Lock()
-	r.tunnels = append(r.tunnels, tc)
-	r.mu.Unlock()
-	select {
-	case r.inner.ch <- &bufConn{Conn: tc, r: br}:
-	case <-r.inner.done:
-		tc.Close()
-	}
+	return n
 }
 
-func (r *fakeRouter) dropTunnels() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, c := range r.tunnels {
-		c.Close()
-	}
-	r.tunnels = nil
-}
+func isWS(s seen) bool { return s.ws }
 
-func (r *fakeRouter) count() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.connects
-}
+func isTaskRoute(s seen) bool { return strings.Contains(s.path, "/dcrelay/1/task") }
 
-// router returns the client side settings that reach this router.
-func (r *fakeRouter) router(caFile string) Router {
-	addr := r.ln.Addr().String()
-	return Router{URL: "https://" + testRouterAddr, CAFile: caFile,
+// gateway returns the launcher settings that reach this listener.
+func (f *fakeAdmin) gateway(caFile string) Gateway {
+	addr := f.srv.Listener.Addr().String()
+	return Gateway{BaseURL: "https://" + testAdminAddr, CAFile: caFile,
 		dial: func(ctx context.Context, network, a string) (net.Conn, error) {
-			if a != testRouterAddr {
+			if a != testAdminAddr {
 				return nil, fmt.Errorf("test dial to unexpected %s", a)
 			}
 			var d net.Dialer
@@ -500,43 +489,6 @@ func (f *fakeRelay) pollRoute(w http.ResponseWriter, r *http.Request, id string)
 	}
 }
 
-// fakeSessions issues grants.
-type fakeSessions struct {
-	mu      sync.Mutex
-	calls   int
-	now     func() time.Time
-	life    time.Duration
-	cert    []byte
-	key     []byte
-	err     error
-	targets []Target
-}
-
-func (s *fakeSessions) Session(ctx context.Context, t Target) (SessionGrant, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls++
-	s.targets = append(s.targets, t)
-	if s.err != nil {
-		return SessionGrant{}, s.err
-	}
-	now := time.Now
-	if s.now != nil {
-		now = s.now
-	}
-	life := s.life
-	if life == 0 {
-		life = 5 * time.Minute
-	}
-	return SessionGrant{Token: testToken, Expires: now().Add(life), ClientCertPEM: s.cert, ClientKeyPEM: s.key}, nil
-}
-
-func (s *fakeSessions) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.calls
-}
-
 // syncBuf is a goroutine-safe buffer.
 type syncBuf struct {
 	mu sync.Mutex
@@ -596,14 +548,14 @@ func (c *fakeClock) slept() []time.Duration {
 	return append([]time.Duration(nil), c.sleeps...)
 }
 
-// rig is one launcher against a fake router and relay.
+// rig is one launcher against a fake admin listener and relay.
 type rig struct {
 	t      *testing.T
 	ca     *pki
 	caFile string
-	router *fakeRouter
+	admin  *fakeAdmin
 	relay  *fakeRelay
-	sess   *fakeSessions
+	bearer *fakeBearer
 	out    *syncBuf
 	errb   *syncBuf
 	inR    *os.File
@@ -614,7 +566,7 @@ type rig struct {
 
 func newRig(t *testing.T, h http.Handler) *rig {
 	t.Helper()
-	ca := newPKI(t, "router-ca")
+	ca := newPKI(t, "admin-ca")
 	dir := t.TempDir()
 	caFile := filepath.Join(dir, "ca.pem")
 	if err := os.WriteFile(caFile, ca.pem, 0o600); err != nil {
@@ -624,19 +576,18 @@ func newRig(t *testing.T, h http.Handler) *rig {
 	if h == nil {
 		h = fr
 	}
-	cert, key := ca.issue(t, "launcher", false)
 	inR, inW, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { inR.Close(); inW.Close() })
-	return &rig{t: t, ca: ca, caFile: caFile, router: newFakeRouter(t, ca, h), relay: fr,
-		sess: &fakeSessions{cert: cert, key: key}, out: &syncBuf{}, errb: &syncBuf{}, inR: inR, inW: inW,
+	return &rig{t: t, ca: ca, caFile: caFile, admin: newFakeAdmin(t, ca, h), relay: fr,
+		bearer: &fakeBearer{}, out: &syncBuf{}, errb: &syncBuf{}, inR: inR, inW: inW,
 		clock: newFakeClock(), sizes: make(chan relay.Resize, 4)}
 }
 
 func (r *rig) options() Options {
-	return Options{Target: testTarget, Router: r.router.router(r.caFile), Sessions: r.sess,
+	return Options{Target: testTarget, Gateway: r.admin.gateway(r.caFile), Bearer: r.bearer.token,
 		Banner: Banner{Connector: "claudecode", Profile: "default"},
 		In:     r.inR, Out: r.out, Err: r.errb,
 		Backoff: Backoff{Initial: time.Millisecond, Max: 2 * time.Millisecond, Jitter: -1, MaxAttempts: 4},
@@ -677,10 +628,10 @@ func (r *rig) typ(s string) {
 	}
 }
 
-// noSecrets fails when s carries the session token or PEM material.
+// noSecrets fails when s carries a token or PEM material.
 func noSecrets(t *testing.T, what, s string) {
 	t.Helper()
-	for _, bad := range []string{testToken, "PRIVATE KEY", "BEGIN CERTIFICATE", "Bearer"} {
+	for _, bad := range []string{testToken, bearerPrefix, "SECRET", "PRIVATE KEY", "BEGIN CERTIFICATE", "Bearer"} {
 		if strings.Contains(s, bad) {
 			t.Fatalf("%s leaks %q: %q", what, bad, s)
 		}

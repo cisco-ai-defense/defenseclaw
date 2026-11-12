@@ -39,11 +39,10 @@ type substrateLoginFlags struct {
 	issuerCA     string
 	clientID     string
 	scopes       []string
-	routerURL    string
-	routerCA     string
-	routerCert   string
-	routerKey    string
-	relayPort    int
+	workloadAud  string
+	kube         bool
+	kubeconfig   string
+	kubeContext  string
 	noBrowser    bool
 	workload     bool
 	workloadFile string
@@ -61,8 +60,11 @@ address and a short code; open the address in any browser, enter the code and ap
 sign-in is kept in the system keychain, never in a file you can read. The first time, give the cluster's
 addresses (your administrator has them); after that, "defenseclaw substrate login" alone renews the sign-in.
 
+On a cluster that has no sign-in server (an open-source install), use --kube: you are then the Kubernetes user of
+your current kubeconfig, and nothing is stored.
+
 In CI, use --workload (or set DEFENSECLAW_SUBSTRATE_WORKLOAD_TOKEN_FILE): the run is then attributed to the
-pipeline's own identity, with a GitHub Actions or Kubernetes service-account token, and nothing is stored.`,
+pipeline's own identity, with a GitHub Actions token or a projected Kubernetes token minted for the cluster's workload audience, and nothing is stored.`,
 		Example: "defenseclaw substrate login --admin-url https://admin.example.test:9443 --issuer https://sso.example.test/realms/corp --client-id defenseclaw-launcher\n" +
 			"defenseclaw substrate login\n" +
 			"defenseclaw substrate login --workload --workload-token-file /var/run/secrets/ci/token",
@@ -78,11 +80,10 @@ pipeline's own identity, with a GitHub Actions or Kubernetes service-account tok
 	fl.StringVar(&f.issuerCA, "issuer-ca-file", "", "certificate authority (PEM) that signed the sign-in server's certificate")
 	fl.StringVar(&f.clientID, "client-id", "", "the sign-in application id for this launcher")
 	fl.StringSliceVar(&f.scopes, "scope", nil, "sign-in scopes (default: openid profile email groups)")
-	fl.StringVar(&f.routerURL, "router-url", "", "the cluster's agent entrance, https://HOST:PORT")
-	fl.StringVar(&f.routerCA, "router-ca-file", "", "certificate authority (PEM) of the agent entrance")
-	fl.StringVar(&f.routerCert, "router-cert-file", "", "client certificate (PEM) for the agent entrance, when your administrator issues one")
-	fl.StringVar(&f.routerKey, "router-key-file", "", "private key (PEM) for --router-cert-file")
-	fl.IntVar(&f.relayPort, "relay-port", 0, "the port of the terminal relay inside an agent (default 8080)")
+	fl.StringVar(&f.workloadAud, "workload-audience", "", "the audience a workload token must be minted for (default: defenseclaw)")
+	fl.BoolVar(&f.kube, "kube", false, "sign in with your current kubeconfig identity (clusters without a sign-in server)")
+	fl.StringVar(&f.kubeconfig, "kubeconfig", "", "with --kube, the kubeconfig file (default: kubectl's own rules)")
+	fl.StringVar(&f.kubeContext, "kube-context", "", "with --kube, the kubeconfig context (default: its current one)")
 	fl.BoolVar(&f.noBrowser, "no-browser", false, "do not open a browser; print the address and code only")
 	fl.BoolVar(&f.workload, "workload", false, "sign in as a CI workload with the pipeline's own token")
 	fl.StringVar(&f.workloadFile, "workload-token-file", "", "file holding the workload token (CI)")
@@ -121,34 +122,43 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	set("issuer", &c.Issuer, f.issuer)
 	set("issuer-ca-file", &c.IssuerCAFile, f.issuerCA)
 	set("client-id", &c.ClientID, f.clientID)
-	set("router-url", &c.RouterURL, f.routerURL)
-	set("router-ca-file", &c.RouterCAFile, f.routerCA)
-	set("router-cert-file", &c.RouterCertFile, f.routerCert)
-	set("router-key-file", &c.RouterKeyFile, f.routerKey)
 	set("default-profile", &c.Profile, f.profile)
 	set("default-template", &c.Template, f.template)
 	if fl.Changed("scope") {
 		c.Scopes = f.scopes
 	}
-	if fl.Changed("relay-port") {
-		c.RelayPort = f.relayPort
+	set("workload-audience", &c.WorkloadAudience, f.workloadAud)
+	if f.kube {
+		c.Kube = true
 	}
-	workload := f.workload || substrateWorkloadFromEnv(cmd) != nil
+	set("kubeconfig", &c.Kubeconfig, f.kubeconfig)
+	set("kube-context", &c.KubeContext, f.kubeContext)
+	if c.Kube && (f.workload || f.noBrowser || fl.Changed("issuer") || fl.Changed("client-id")) {
+		return withExitCode(errors.New("--kube signs in with your kubeconfig; leave --workload, --issuer, --client-id and --no-browser out"), 2)
+	}
+	kube := c.Kube
+	workload := !kube && (f.workload || substrateWorkloadFromEnv(cmd) != nil)
 	if c.AdminURL == "" {
 		return withExitCode(errors.New("give the cluster's address the first time: defenseclaw substrate login --admin-url https://HOST:PORT --issuer URL --client-id ID (your administrator has these)"), 2)
 	}
-	if err := c.Validate(!workload); err != nil {
+	if err := c.Validate(!workload && !kube); err != nil {
 		return withExitCode(err, substrateExitRefused)
 	}
-	if !workload && (c.Issuer == "" || c.ClientID == "") {
+	if !workload && !kube && (c.Issuer == "" || c.ClientID == "") {
 		return withExitCode(errors.New("signing in needs --issuer and --client-id the first time (your administrator has them)"), 2)
 	}
-	store, err := auth.OpenStore()
-	if err != nil {
-		return err
+	persist := !workload && !kube
+	var store auth.Store
+	if persist {
+		var err error
+		if store, err = auth.OpenStore(); err != nil {
+			return err
+		}
 	}
 	var tok *auth.Token
-	if workload {
+	if kube {
+		tok, err = auth.KubeLogin(ctx, c.KubeOptions())
+	} else if workload {
 		tok, err = auth.WorkloadLogin(ctx, c, auth.WorkloadOptions{TokenFile: f.workloadFile})
 	} else {
 		interactive := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
@@ -159,7 +169,7 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	if err != nil {
 		return substrateFail(err)
 	}
-	if !workload {
+	if persist {
 		if err := store.Save(name, tok); err != nil {
 			return err
 		}
@@ -174,7 +184,12 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	// Check that the cluster takes this sign-in, so a wrong issuer shows now
 	// and not at the first run.
 	note := ""
-	if cl, err := api.New(api.Options{Base: c.AdminURL, CAFile: c.AdminCAFile, Token: auth.NewSource(name, c, store, auth.SourceOptions{}).Token}); err == nil && !workload {
+	probe := auth.SourceOptions{}
+	if kube {
+		ko := c.KubeOptions()
+		probe.Kube = &ko
+	}
+	if cl, err := api.New(api.Options{Base: c.AdminURL, CAFile: c.AdminCAFile, Token: auth.NewSource(name, c, store, probe).Token}); err == nil && !workload {
 		if _, err := cl.List(ctx, api.ListOptions{}); err != nil {
 			if e, ok := api.AsError(err); ok && !e.NotImplemented() {
 				note = "You are signed in, but the cluster did not accept it yet: " + substrateAPIMessage(e)

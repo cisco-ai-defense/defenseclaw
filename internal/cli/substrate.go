@@ -32,7 +32,9 @@ import (
 	"golang.org/x/term"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 )
 
 // Exit codes of the substrate commands, besides 0 (done) and 1 (failed):
@@ -119,6 +121,8 @@ type substrateSession struct {
 	Name   string
 	Ctx    auth.Context
 	Source *auth.Source
+	// Bearer is the sign-in token for one request (Source.Token, or a fake in tests).
+	Bearer func(ctx context.Context) (string, error)
 	Client *api.Client
 }
 
@@ -132,20 +136,27 @@ var substrateOpen = func(cmd *cobra.Command, c *substrateCommon) (*substrateSess
 	if err := actx.Validate(false); err != nil {
 		return nil, withExitCode(err, substrateExitRefused)
 	}
-	store, err := auth.OpenStore()
-	if err != nil {
-		return nil, err
-	}
+	// A kube context signs in with the kubeconfig, a workload with the
+	// pipeline's token: neither keeps a secret, so neither needs a keychain.
 	opts := auth.SourceOptions{}
-	if w := substrateWorkloadFromEnv(cmd); w != nil {
+	var store auth.Store
+	switch w := substrateWorkloadFromEnv(cmd); {
+	case actx.Kube:
+		ko := actx.KubeOptions()
+		opts.Kube = &ko
+	case w != nil:
 		opts.Workload = w
+	default:
+		if store, err = auth.OpenStore(); err != nil {
+			return nil, err
+		}
 	}
 	src := auth.NewSource(name, actx, store, opts)
 	cl, err := api.New(api.Options{Base: actx.AdminURL, CAFile: actx.AdminCAFile, Token: src.Token})
 	if err != nil {
 		return nil, withExitCode(err, substrateExitRefused)
 	}
-	return &substrateSession{Name: name, Ctx: actx, Source: src, Client: cl}, nil
+	return &substrateSession{Name: name, Ctx: actx, Source: src, Bearer: src.Token, Client: cl}, nil
 }
 
 // substrateWorkloadFromEnv selects workload identity (CI) when the command
@@ -180,8 +191,13 @@ func substrateFail(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, auth.ErrNotSignedIn) {
+	if errors.Is(err, auth.ErrNotSignedIn) || errors.Is(err, attach.ErrNotSignedIn) {
 		return withExitCode(err, substrateExitSignedOut)
+	}
+	for _, refused := range []error{attach.ErrNotAllowed, attach.ErrNoActor, attach.ErrNotOffered} {
+		if errors.Is(err, refused) {
+			return withExitCode(err, substrateExitRefused)
+		}
 	}
 	if e, ok := api.AsError(err); ok {
 		return withExitCode(errors.New(substrateAPIMessage(e)), substrateAPIExit(e))
@@ -226,7 +242,7 @@ func substrateAPIMessage(e *api.Error) string {
 }
 
 func orWord(v, def string) string {
-	if v == "" {
+	if v = safetext.Line(v); v == "" {
 		return def
 	}
 	return strings.ReplaceAll(v, "_", " ")
@@ -243,7 +259,12 @@ func substrateTable(w io.Writer, header []string, rows [][]string) {
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, strings.Join(header, "\t"))
 	for _, r := range rows {
-		fmt.Fprintln(tw, strings.Join(r, "\t"))
+		// Cells can hold text an agent or the cluster chose.
+		cells := make([]string, len(r))
+		for i, c := range r {
+			cells[i] = safetext.Line(c)
+		}
+		fmt.Fprintln(tw, strings.Join(cells, "\t"))
 	}
 	_ = tw.Flush()
 }
@@ -256,7 +277,7 @@ func init() {
 		newSubstrateDeleteCmd(), newSubstrateMigrateCmd(),
 		newSubstrateApprovalsCmd(), newSubstrateApproveCmd(), newSubstrateRejectCmd(), newSubstrateUsageCmd(),
 		newSubstrateSecretsCmd(), newSubstratePolicyCmd(),
-		newSubstrateDoctorCmd(), newSubstrateSetupCmd(), newSubstrateBundleCmd(), newSubstrateTemplateCmd(),
+		newSubstrateDoctorCmd(), newSubstrateVerifyCmd(), newSubstrateSetupCmd(), newSubstrateBundleCmd(), newSubstrateTemplateCmd(),
 	)
 	rootCmd.AddCommand(substrateCmd)
 }
