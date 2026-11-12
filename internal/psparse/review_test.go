@@ -129,7 +129,7 @@ func TestRevWrongStatic(t *testing.T) {
 func TestRevCommandNameStatic(t *testing.T) {
 	cases := []struct{ name, src, want string }{
 		{"name_backtick", bq(`Re§move-Item C:\x`), "remove-item"},
-		{"name_backtick_iex", bq(`i§ex 'whoami'`), "iex"},
+		{"name_backtick_iex", bq(`i§ex 'whoami'`), "i\x1bx"}, // pwsh 7.7: `e is ESC even in a name
 		{"name_smart_quote", `& “Remove-Item” C:\x`, "remove-item"},
 	}
 	for _, c := range cases {

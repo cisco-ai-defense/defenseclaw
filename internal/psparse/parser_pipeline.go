@@ -119,13 +119,17 @@ func (p *parser) parsePipelineElement() PipelineElement {
 			return p.parseCommand(".")
 		}
 	}
-	if w, ok := p.bareword(); ok {
-		_ = w
+	if _, ok := p.bareword(); ok {
 		return p.parseCommand("")
 	}
 	// % (ForEach-Object) and ? (Where-Object) are command aliases when they
 	// appear in command position.
 	if p.at(TokOperator) && (p.cur().Value == "%" || p.cur().Value == "?") {
+		return p.parseCommand("")
+	}
+	// a statement that starts with a -Parameter is a command in PowerShell
+	// (-Value $x runs a command named -Value), not a stray parameter.
+	if p.at(TokParameter) {
 		return p.parseCommand("")
 	}
 	// expression element (command-expression): parse in expression mode so
@@ -193,11 +197,99 @@ done:
 
 // parseCommandName reads the command name: a bareword, a quoted string, a
 // variable, or a parenthesised / $() expression (for & (..) / & $var).
+// parseNameRun builds a command name as one greedy generic token: it swallows
+// any adjacent $var, $( ), ( ), [ ], number, . or quoted string with no
+// whitespace between them (a command name is literal — $(...) is not expanded),
+// and yields one static value (C:\Tools\$env:NAME.exe and even bash-shaped
+// k=$(cat x) are the literal strings PowerShell sees).
+func (p *parser) parseNameRun(first Token) Expr {
+	s0, end := first.Start, first.End
+	for !p.at(TokEOF) {
+		t := p.cur()
+		if t.Start != end {
+			break
+		}
+		switch t.Kind {
+		case TokGeneric, TokVariable, TokNumber, TokDot, TokString, TokOperator:
+			end = t.End
+			p.advance()
+		case TokDollarParen, TokLParen, TokAtParen, TokLBracket, TokAtBrace, TokLBrace:
+			end = p.consumeBalancedEnd()
+		default:
+			goto doneName
+		}
+	}
+doneName:
+	raw := ""
+	if s0 >= 0 && end <= len(p.src) && end >= s0 {
+		raw = p.src[s0:end]
+	}
+	return &StringLit{span: span{s0, end}, Kind: StrBare, Bare: true, Static: true, Value: nameValue(raw)}
+}
+
+// consumeBalancedEnd consumes a balanced ( ), [ ] or { } group (the current
+// token is its opener) and returns the byte offset just past the matching
+// close token.
+func (p *parser) consumeBalancedEnd() int {
+	closerFor := func(k TokenKind) TokenKind {
+		switch k {
+		case TokDollarParen, TokLParen, TokAtParen:
+			return TokRParen
+		case TokLBracket:
+			return TokRBracket
+		default:
+			return TokRBrace
+		}
+	}
+	var stack []TokenKind
+	end := p.cur().End
+	guard := 0
+	for !p.at(TokEOF) && guard < 1<<18 {
+		guard++
+		t := p.cur()
+		end = t.End
+		switch t.Kind {
+		case TokDollarParen, TokLParen, TokAtParen, TokLBracket, TokAtBrace, TokLBrace:
+			stack = append(stack, closerFor(t.Kind))
+			p.advance()
+		case TokRParen, TokRBracket, TokRBrace:
+			p.advance()
+			if n := len(stack); n > 0 && stack[n-1] == t.Kind {
+				stack = stack[:n-1]
+				if len(stack) == 0 {
+					return end
+				}
+			}
+		default:
+			p.advance()
+		}
+	}
+	return end
+}
+
+// nameValue resolves a command-name generic token: backtick escapes are
+// decoded, unescaped quote delimiters are dropped, and $(...) is kept literal.
+func nameValue(raw string) string {
+	rs := []rune(raw)
+	var b strings.Builder
+	for i := 0; i < len(rs); i++ {
+		if rs[i] == '`' && i+1 < len(rs) {
+			b.WriteRune(backtickEscape(rs[i+1]))
+			i++
+			continue
+		}
+		if isSingleQuote(rs[i]) || isDoubleQuote(rs[i]) {
+			continue
+		}
+		b.WriteRune(rs[i])
+	}
+	return b.String()
+}
+
 func (p *parser) parseCommandName() Expr {
 	switch p.kind() {
 	case TokGeneric:
-		t := p.advance()
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: decodeBareword(t.Raw), Static: true, Bare: true}
+		return p.parseNameRun(p.advance())
 	case TokString:
 		return p.stringLit(p.advance())
 	case TokVariable, TokLParen, TokDollarParen:
@@ -211,6 +303,13 @@ func (p *parser) parseCommandName() Expr {
 			t := p.advance()
 			return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
 		}
+	case TokParameter:
+		t := p.advance()
+		name := "-" + t.Value
+		if t.HasColon {
+			name += ":"
+		}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: name, Static: true, Bare: true}
 	}
 	// no recognisable name
 	t := p.cur()
@@ -291,10 +390,22 @@ func (p *parser) parseFusedArg() Expr {
 	return composeAtoms(atoms, s0, end)
 }
 
+// barewordExpr builds an argument bareword as an expandable string: it decodes
+// backtick escapes and marks the value non-static when it contains a $var or
+// $( ) (PowerShell parses such an argument as an ExpandableString).
+func (p *parser) barewordExpr(t Token) Expr {
+	parts, static, lit := p.expandable(t.Raw, t.Start)
+	return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Bare: true, Static: static, Value: lit, Parts: parts}
+}
+
 // parseArgAtom parses a single argument atom (no comma, no fusion).
 func (p *parser) parseArgAtom() Expr {
 	switch p.kind() {
-	case TokGeneric, TokString, TokNumber, TokVariable, TokLParen, TokDollarParen,
+	case TokGeneric:
+		// a bareword argument is an expandable string: a $var / $( ) inside it
+		// makes it non-static (unlike a command name, which stays literal).
+		return p.barewordExpr(p.advance())
+	case TokString, TokNumber, TokVariable, TokLParen, TokDollarParen,
 		TokAtParen, TokAtBrace, TokLBrace, TokLBracket:
 		return p.parsePostfix(p.parsePrimary())
 	case TokOperator:

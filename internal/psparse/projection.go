@@ -90,10 +90,6 @@ func (w *projector) emitCommand(c *Command) {
 				pm += ":"
 			}
 			inv.Params = append(inv.Params, pm)
-			if e.Colon != nil {
-				// the -Name:value argument stays attached to the parameter,
-				// matching CommandParameterAst.Argument on the reference side.
-			}
 		case *Arg:
 			inv.Args = append(inv.Args, argKind(e.Value))
 		case *StringLit:

@@ -17,14 +17,14 @@ func (p *parser) stringLit(t Token) *StringLit {
 	switch t.Str {
 	case StrSingle:
 		inner := trimRuneDelims(t.Raw)
-		sl.Value = collapseDoubled(inner, isSingleQuote, '\'')
+		sl.Value = collapseDoubled(inner, isSingleQuote)
 		sl.Static = true
 	case StrHereSingle:
 		sl.Value = hereBody(t.Raw)
 		sl.Static = true
 	case StrDouble:
 		inner := trimRuneDelims(t.Raw)
-		inner = collapseDoubled(inner, isDoubleQuote, '"')
+		inner = collapseDoubled(inner, isDoubleQuote)
 		parts, static, lit := p.expandable(inner, t.Start+1)
 		sl.Parts, sl.Static, sl.Value = parts, static, lit
 	case StrHereDouble:
@@ -50,12 +50,12 @@ func trimRuneDelims(s string) string {
 
 // collapseDoubled replaces each doubled quote-class pair (the quote-escape
 // form) with one repl rune.
-func collapseDoubled(s string, isClass func(rune) bool, repl rune) string {
+func collapseDoubled(s string, isClass func(rune) bool) string {
 	rs := []rune(s)
 	var b strings.Builder
 	for i := 0; i < len(rs); i++ {
 		if isClass(rs[i]) && i+1 < len(rs) && isClass(rs[i+1]) {
-			b.WriteRune(repl)
+			b.WriteRune(rs[i]) // a doubled quote collapses to that same quote char
 			i++
 			continue
 		}
@@ -75,7 +75,7 @@ func hereBody(raw string) string {
 	body := raw[nl+1:]
 	// strip the terminator: last line is  "@  or  '@
 	if i := strings.LastIndexByte(body, '\n'); i >= 0 {
-		return body[:i]
+		return strings.TrimSuffix(body[:i], "\r")
 	}
 	// no trailing newline before terminator: drop the final 2 delimiter bytes
 	if len(body) >= 2 {
@@ -175,7 +175,7 @@ func backtickEscape(r rune) rune {
 // $( ) sub-expression (so a bareword ends before it). Matches the tokenizer:
 // a name char, a digit, '_', '?', '^', '$', '{' or '('.
 func dollarStartsVar(r rune) bool {
-	return r == '(' || r == '{' || r == '$' || r == '?' || r == '^' || r == '_' ||
+	return r == '(' || r == '{' || r == '$' || r == '?' || r == '^' || r == '_' || r == ':' ||
 		unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
@@ -277,12 +277,14 @@ func scanEmbeddedVar(runes []rune) (Expr, int) {
 	return &Variable{Name: name, Scope: scope}, i
 }
 
+var numberMultipliers = map[string]float64{"kb": 1 << 10, "mb": 1 << 20, "gb": 1 << 30, "tb": 1 << 40, "pb": 1 << 50}
+
 func numberLit(t Token) *Number {
 	n := &Number{span: span{t.Start, t.End}, Text: t.Raw}
 	txt := strings.TrimRight(t.Raw, "lLdD")
 	mult := 1.0
 	lower := strings.ToLower(txt)
-	for suf, m := range map[string]float64{"kb": 1 << 10, "mb": 1 << 20, "gb": 1 << 30, "tb": 1 << 40, "pb": 1 << 50} {
+	for suf, m := range numberMultipliers {
 		if strings.HasSuffix(lower, suf) {
 			mult = m
 			txt = txt[:len(txt)-2]

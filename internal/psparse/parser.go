@@ -24,9 +24,10 @@ type parser struct {
 	dialect   Dialect
 	depth     int
 	topParams []*Variable
-	exprMode  bool // true inside (), $(), @{} values, [], method args
-	forHeader int  // >0 while inside a for/foreach header, so 'in' is a keyword
-	budget    *int // shared remaining work budget for nested string re-parses (F12)
+	exprMode  bool   // true inside (), $(), @{} values, [], method args
+	forHeader int    // >0 while inside a for/foreach header, so 'in' is a keyword
+	budget    *int   // shared remaining work budget for nested string re-parses (F12)
+	src       string // source text, for slicing greedy command-name spans
 }
 
 // Parse parses PowerShell source into a Script. It always returns a non-nil
@@ -34,7 +35,7 @@ type parser struct {
 func Parse(src string, opts Options) (*Script, error) {
 	l := newLexer(src)
 	toks := l.lex()
-	p := &parser{toks: toks, dialect: opts.Dialect}
+	p := &parser{toks: toks, dialect: opts.Dialect, src: src}
 	budget := 8*len(src) + 4096
 	p.budget = &budget
 	sc := &Script{Dialect: opts.Dialect}
@@ -60,7 +61,7 @@ func (p *parser) subParse(src string) ([]Statement, []Diagnostic) {
 	}
 	*p.budget -= len(src)
 	l := newLexer(src)
-	sub := &parser{toks: l.lex(), dialect: p.dialect, depth: p.depth + 1, budget: p.budget}
+	sub := &parser{toks: l.lex(), dialect: p.dialect, depth: p.depth + 1, budget: p.budget, src: src}
 	sts := sub.parseStatementList(stopTop)
 	return sts, sub.diags
 }
@@ -143,12 +144,6 @@ func (p *parser) atStop(s stopSet) bool {
 	}
 	return false
 }
-
-// topParams is a field used only for the outermost param() block.
-// Declared here to keep Parse tidy.
-//
-//nolint:unused
-func (p *parser) setTopParams(v []*Variable) { p.topParams = v }
 
 // parseStatementList parses statements until the stop token or EOF.
 func (p *parser) parseStatementList(s stopSet) []Statement {
@@ -391,6 +386,9 @@ func (p *parser) parseControl(kw string) Statement {
 			blk.Conditions = append(blk.Conditions, p.parseParenExprStatement())
 		case p.at(TokLBrace):
 			blk.Bodies = append(blk.Bodies, p.parseScriptBlock())
+		case p.at(TokParameter):
+			// a control option such as switch -regex / -wildcard / -file
+			p.advance()
 		case p.isSubKeyword():
 			p.advance() // consume elseif/else/catch/finally/until/while/in etc
 		case p.at(TokLBracket):

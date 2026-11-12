@@ -130,7 +130,7 @@ func (l *lexer) lex() []Token {
 			l.emit(TokNewline, a, l.i)
 		case r == '#' && l.atStart:
 			l.lexLineComment()
-		case r == '<' && l.peek(1) == '#':
+		case r == '<' && l.peek(1) == '#' && l.atStart:
 			l.lexBlockComment()
 		case isSingleQuote(r):
 			l.lexSingleString()
@@ -152,11 +152,11 @@ func (l *lexer) lex() []Token {
 			l.lexDollar()
 		case isDash(r):
 			l.lexDash()
-		case r == '*' && l.peek(1) == '>':
+		case r == '*' && l.peek(1) == '>' && l.atStart:
 			a := l.i
 			l.i++ // consume *
 			l.scanRedirectFromHere(a, "*")
-		case r >= '1' && r <= '6' && l.peek(1) == '>':
+		case r >= '1' && r <= '6' && l.peek(1) == '>' && l.atStart:
 			a := l.i
 			l.i++ // consume the stream digit
 			l.scanRedirectFromHere(a, string(r))
@@ -607,7 +607,12 @@ func (l *lexer) lexSymbolOperator() {
 		l.lexBareword()
 		return
 	}
-	// redirections: > >> 2> *> n> n>> n>&m  and input <
+	// redirections (> >> 2> *> n> n>&m, input <) are operators only at a token
+	// boundary; glued to a word (a2>x, a<<b) they are part of the bareword.
+	if (r == '>' || r == '<') && !l.atStart {
+		l.lexBareword()
+		return
+	}
 	if r == '>' {
 		l.scanRedirectFromHere(a, "")
 		return
@@ -680,11 +685,8 @@ func (l *lexer) lexBareword() {
 		if strings.ContainsRune(";,|&(){}[]'\"", r) {
 			break
 		}
-		if r == '>' || r == '<' {
-			break
-		}
 		if r == '$' && dollarStartsVar(l.peek(1)) {
-			break // a variable / $( ) starts here; the bareword ends
+			break // a variable / ${ } / $( ) starts here; the bareword ends
 		}
 		// a redirect stream number like 2> ends the word only at the digit+>
 		l.i++
