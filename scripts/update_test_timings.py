@@ -294,6 +294,35 @@ def merge_go_timings(old: dict, new: dict, module: str) -> dict:
     return {"packages": dict(sorted(packages.items())), "tests": dict(sorted(tests.items()))}
 
 
+def prune_retired(data: dict, module: str, root: Path = ROOT) -> dict:
+    """data without the packages this tree no longer has (no .go file in
+    their folder) and without the tests a package no longer defines. A
+    refresh that read a run of another branch, or kept an old entry with
+    --update, would otherwise weigh code that is not here."""
+
+    def defined(rel: str) -> set[str] | None:
+        folder = root / rel
+        if not any(folder.glob("*.go")):
+            return None
+        names: set[str] = set()
+        for path in folder.glob("*_test.go"):
+            names.update(TEST_FUNCTION_RE.findall(path.read_text(encoding="utf-8")))
+        return names
+
+    packages = {
+        package: seconds
+        for package, seconds in data.get("packages", {}).items()
+        if defined(_rel(package, module)) is not None
+    }
+    tests: dict[str, dict[str, float]] = {}
+    for rel, names in data.get("tests", {}).items():
+        known = defined(rel)
+        if known is None:
+            continue
+        tests[rel] = {name: seconds for name, seconds in names.items() if name == "*" or name in known}
+    return {**data, "packages": dict(sorted(packages.items())), "tests": dict(sorted(tests.items()))}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("kind", choices=("go", "python", "windows-go"))
@@ -328,6 +357,8 @@ def main() -> int:
             data = keep_unreached_windows_packages(old, data, module)
         if args.update:
             data = merge_go_timings(old, data, module)
+    if args.kind != "python":
+        data = prune_retired(data, module)
     _write(out, data)
     return 0
 

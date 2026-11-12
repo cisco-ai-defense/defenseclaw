@@ -71,13 +71,18 @@ func TestGAP0677NestedShellBodiesAreDecidedWithinTheHookWindow(t *testing.T) {
 		}
 		command := gap0677Nested(levels, "rm -rf "+target)
 		findings, took := decide(command)
-		// The 1.5 s bound is wall-clock time of the decision, held in every
-		// build without -race (the Windows suite and local runs). A race
-		// build measures the detector: 1.96 s on a hosted Linux race shard
-		// (CI run 43160446126 at ba7ec633dd), while the bug this guards took
-		// 3 to 8.5 s without it. The verdict below is checked in every build.
-		if !hookAnswerRaceBuild && took > 1500*time.Millisecond {
-			t.Errorf("%s: %d nested bodies (%d bytes) to %s decided in %s", connector, levels, len(command), target, took)
+		// The decision has to fit the hook answer window. Without -race (the
+		// Windows suite and local runs) it is held to 1.5 s. A race build
+		// measures the detector as well (1.96 s on a hosted Linux race shard,
+		// CI run 43160446126 at ba7ec633dd), so there it is held to the
+		// 3.5 s window itself, which the bug this guards (3 to 8.5 s without
+		// -race) is far past. The verdict below is checked in every build.
+		bound := 1500 * time.Millisecond
+		if hookAnswerRaceBuild {
+			bound = 3500 * time.Millisecond
+		}
+		if took > bound {
+			t.Errorf("%s: %d nested bodies (%d bytes) to %s decided in %s (bound %s)", connector, levels, len(command), target, took, bound)
 		}
 		if ids := findingIDs(findings); len(ids) != 1 || ids[0] != "ACTION-COMPOUND-LIMIT" ||
 			buildVerdict(findings, "tool_call").Action != guardrailActionBlock {

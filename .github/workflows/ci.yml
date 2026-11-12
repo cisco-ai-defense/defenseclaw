@@ -330,17 +330,19 @@ jobs:
           # The connector hook tests run the real gateway binary
           # (installNativeGatewayForHookTest). Built inside the test, the
           # first hook test of every connector part paid about 150 s for it,
-          # inside the -timeout and the recorded test times (run 43229287498:
-          # 12 connector parts, 12 builds). Built here in the background, it
-          # overlaps the whole-package run, and the connector run waits for
-          # it. Linked to read an empty account home of its own, never the
-          # runner account's ~/.defenseclaw (rel-1-0-6:GAP-0345), as in the
-          # darwin connector step.
+          # inside the -timeout and the recorded test times of whichever test
+          # came first (run 43229287498). Built here in the background (at a
+          # lower priority than the race run beside it), it overlaps the
+          # whole-package run of the shard and stays out of the -timeout and
+          # of the test times; the connector run waits for it. Linked to read
+          # an empty account home of its own, never the runner account's
+          # ~/.defenseclaw (rel-1-0-6:GAP-0345), as in the darwin connector
+          # step.
           connector=github.com/defenseclaw/defenseclaw/internal/gateway/connector
           native_build=""
           if grep -qE "^${connector}(\$|"$'\t'")" "$RUNNER_TEMP/go-shard.txt"; then
             mkdir -p "$RUNNER_TEMP/dc-test-gateway/account-home"
-            go build -ldflags "-X github.com/defenseclaw/defenseclaw/internal/cli.outageAccountHomeBake=$RUNNER_TEMP/dc-test-gateway/account-home" \
+            nice -n 10 go build -ldflags "-X github.com/defenseclaw/defenseclaw/internal/cli.outageAccountHomeBake=$RUNNER_TEMP/dc-test-gateway/account-home" \
               -o "$RUNNER_TEMP/dc-test-gateway/defenseclaw" ./cmd/defenseclaw > "$RUNNER_TEMP/dc-test-gateway/build.log" 2>&1 &
             native_build=$!
           fi
@@ -387,7 +389,9 @@ jobs:
             return "$go_status"
           }
           if (( ${#packages[@]} > 0 )); then
-            if printf '%s\n' "${packages[@]}" | grep -qx "$connector"; then native_gateway || status=1; fi
+            for package in "${packages[@]}"; do
+              if [ "$package" = "$connector" ]; then native_gateway || status=1; fi
+            done
             run_go packages -coverprofile="$RUNNER_TEMP/cover-packages.out" "${packages[@]}" || status=1
             profiles+=("$RUNNER_TEMP/cover-packages.out")
           fi

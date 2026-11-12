@@ -196,3 +196,30 @@ def test_parallel_tests_that_run_side_by_side_split_the_time_they_share(tmp_path
         {"Action": "pass", "Package": "p", "Test": "TestB", "Elapsed": 20.0},
         {"Action": "pass", "Package": "p", "Elapsed": 40.1},
     ]
+
+
+def test_a_rerun_or_a_restarted_package_starts_its_shares_again(tmp_path: Path) -> None:
+    # A test run again weighs its last run (5 s, not 15), and a package that
+    # starts again in the same log (a job killed mid-package, then rerun)
+    # does not charge the gap to the test the first job left running.
+    def at(seconds: float) -> str:
+        return f"2026-11-12T13:{int(seconds // 60):02d}:{seconds % 60:09.6f}000Z"
+
+    _, timings = _run(
+        [
+            {"Action": "start", "Package": "p", "Time": at(0)},
+            {"Action": "run", "Package": "p", "Test": "TestTwice", "Time": at(0)},
+            {"Action": "pass", "Package": "p", "Test": "TestTwice", "Elapsed": 10.0, "Time": at(10)},
+            {"Action": "run", "Package": "p", "Test": "TestTwice", "Time": at(10)},
+            {"Action": "pass", "Package": "p", "Test": "TestTwice", "Elapsed": 5.0, "Time": at(15)},
+            {"Action": "run", "Package": "p", "Test": "TestKilled", "Time": at(15)},
+            {"Action": "start", "Package": "p", "Time": at(120)},
+            {"Action": "run", "Package": "p", "Test": "TestKilled", "Time": at(120)},
+            {"Action": "pass", "Package": "p", "Test": "TestKilled", "Elapsed": 3.0, "Time": at(123)},
+            {"Action": "pass", "Package": "p", "Elapsed": 3.1, "Time": at(123.1)},
+        ],
+        tmp_path,
+    )
+
+    tests = {t["Test"]: t["Elapsed"] for t in timings if "Test" in t}
+    assert tests == {"TestTwice": 5.0, "TestKilled": 3.0}

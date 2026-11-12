@@ -10,6 +10,7 @@ from scripts.update_test_timings import (
     keep_unreached_go_tests,
     keep_unreached_windows_packages,
     merge_go_timings,
+    prune_retired,
     python_timings,
     runs_of,
     windows_go_timings,
@@ -307,3 +308,20 @@ def test_python_timings_weigh_the_slowest_run(tmp_path: Path) -> None:
         runs.append([tmp_path / run / "py.xml"])
 
     assert python_timings([], runs) == {"files": {"cli/tests/test_go_test_report.py": 9.0}}
+
+
+def test_a_refresh_drops_packages_and_tests_this_tree_does_not_have(tmp_path: Path) -> None:
+    # Runs of another branch (feat/endpoint-health-report) put
+    # internal/diagnostics and a gateway test that rel/1.0.10 lacks in the
+    # timing files.
+    (tmp_path / "pkg" / "a").mkdir(parents=True)
+    (tmp_path / "pkg" / "a" / "a_test.go").write_text("package a\n\nfunc TestKept(t *testing.T) {}\n", encoding="utf-8")
+    data = {
+        "packages": {f"{MODULE}/pkg/a": 70.0, f"{MODULE}/pkg/gone": 30.0},
+        "tests": {"pkg/a": {"TestKept": 9.0, "TestOtherBranch": 8.0, "*": 0.1}, "pkg/gone": {"TestX": 5.0, "*": 0.1}},
+    }
+
+    assert prune_retired(data, MODULE, tmp_path) == {
+        "packages": {f"{MODULE}/pkg/a": 70.0},
+        "tests": {"pkg/a": {"TestKept": 9.0, "*": 0.1}},
+    }

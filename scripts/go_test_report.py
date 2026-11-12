@@ -92,12 +92,17 @@ class TopLevelShares:
             return
         self._advance(package, at)
         if test is None:
-            if action in ("pass", "fail"):
+            # A package's start (a job that ran it again in the same log) and
+            # its end both leave no test of it running.
+            if action in ("start", "pass", "fail"):
                 self._clock.pop(package, None)
                 self._running.pop(package, None)
             return
         if "/" in test:
             return
+        if action == "run":
+            # A test run again (-count, a retry) weighs its last run.
+            self._share[(package, test)] = 0.0
         if action in ("run", "cont"):
             self._running.setdefault(package, set()).add(test)
             self._share.setdefault((package, test), 0.0)

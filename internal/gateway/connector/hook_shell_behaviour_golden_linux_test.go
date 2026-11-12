@@ -791,7 +791,7 @@ var hookGoldenRenderMu sync.Mutex
 
 // startWrittenHook starts the command newCmd builds for a hook script the
 // case has just rendered, and returns it with the time it started. The cases
-// run on 32 workers: a fork in another worker that lands while this case's
+// run on parallel workers: a fork in another worker that lands while this case's
 // script is still open for writing keeps a copy of that descriptor until
 // its child execs, and an exec of the script fails with ETXTBSY ("text file
 // busy", golang/go#22315) meanwhile. That failed TestShellHookLoweredBodyCapOnlyTightens
