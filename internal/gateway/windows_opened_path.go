@@ -106,7 +106,7 @@ func windowsOpenedPath(spelling string, verbatim bool) (string, bool, error) {
 	opened := root + "/" + strings.Join(names, "/")
 	var err error
 	if actionfacts.DriveLetterPath(opened) {
-		opened, err = expandWindowsShortNames(opened, verbatim)
+		opened, err = expandShortNamesInEvaluation(opened, verbatim)
 	}
 	return opened, true, err
 }

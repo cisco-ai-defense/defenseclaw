@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -146,7 +147,45 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
 		SandboxGuestCWD:               action.SandboxGuestCWD,
 	})
+	if plain, ok := codexPlainShellCommand(a.decisionConfig(ctx), connectorName, req, action, commandTool); ok {
+		// Codex runs the command in PowerShell here, but the text may be
+		// one that PowerShell reads no path of (touch ~/.netrc): judged as
+		// PowerShell alone, a credential write in an exec_command call,
+		// whose arguments leave the parse partial, only alerted, while the
+		// same text in the Bash shape was blocked (GAP-1076). The command
+		// alone is also judged as the call tool, in the dialect the text
+		// infers, as the Bash shape is; this reading only adds findings.
+		input := action.Input
+		input.Args = plain
+		input.DialectHint = ""
+		if runtime.GOOS == "windows" {
+			input.DialectHint = agentHookWindowsShellDialect(input)
+		}
+		findings = mergeBoundedFindings(findings, dispatchTrustedAction(ctx, trustedActionRequest{
+			Input:                         input,
+			LegacyText:                    string(plain),
+			Connector:                     action.Connector,
+			EnforcementCapable:            action.EnforcementCapable,
+			ManagedHookOverflowHold:       action.ManagedHookOverflowHold,
+			DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
+			SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
+			ResolvedWriteTargets:          action.ResolvedWriteTargets,
+			SandboxGuestCWD:               action.SandboxGuestCWD,
+		}))
+	}
 	return mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict, findings)
+}
+
+// codexPlainShellCommand is the command of a Codex shell call in the plain
+// shell shape, to judge as the call tool next to its PowerShell reading
+// (codexPowerShellCommand): for a call whose tool names no PowerShell, on a
+// host outside Secure Client.
+func codexPlainShellCommand(cfg *config.Config, connectorName string, req *ToolInspectRequest, action trustedActionRequest, commandTool string) (json.RawMessage, bool) {
+	if req == nil || commandTool != "powershell" || !strings.EqualFold(strings.TrimSpace(connectorName), "codex") ||
+		trustedPowerShellExecutionTool(action.Input.Tool) || cfg != nil && cfg.SecureClientIntegration() {
+		return nil, false
+	}
+	return connector.ShellCommandArgs("codex", req.Tool, action.Input.Args)
 }
 
 const (
