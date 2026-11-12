@@ -24,6 +24,7 @@ type parser struct {
 	dialect   Dialect
 	depth     int
 	topParams []*Variable
+	exprMode  bool // true inside (), $(), @{} values, [], method args
 }
 
 // Parse parses PowerShell source into a Script. It always returns a non-nil

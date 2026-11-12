@@ -356,8 +356,13 @@ func (l *lexer) lexDash() {
 		l.emit(TokStopParse, a, l.i)
 		return
 	}
-	// -- operator
+	// '--name' is a double-dash bareword argument in PowerShell, not an
+	// operator; only a bare '--' (decrement / no following name) is the operator.
 	if l.peek(1) == '-' {
+		if isNameStart(l.peek(2)) || l.peek(2) == '/' {
+			l.lexBareword()
+			return
+		}
 		a := l.i
 		l.i += 2
 		t := Token{Kind: TokOperator, Raw: l.slice(a, l.i), Start: l.byteAt(a), End: l.byteAt(l.i)}
@@ -425,7 +430,15 @@ func (l *lexer) lexNumber() {
 	for l.i < len(l.runes) && isLetter(l.cur()) {
 		l.i++
 	}
-	t := Token{Kind: TokNumber, Raw: l.slice(a, l.i), Start: l.byteAt(a), End: l.byteAt(l.i)}
+	raw := l.slice(a, l.i)
+	// A run with more than one dot (an IP or a version) is not a number: re-lex
+	// the whole token as a bareword string to match the reference parser.
+	if strings.Count(raw, ".") > 1 {
+		l.i = a
+		l.lexBareword()
+		return
+	}
+	t := Token{Kind: TokNumber, Raw: raw, Start: l.byteAt(a), End: l.byteAt(l.i)}
 	t.Value = t.Raw
 	l.push(t)
 }
@@ -529,6 +542,14 @@ func (l *lexer) lexOperatorOrWord() {
 func (l *lexer) lexSymbolOperator() {
 	a := l.i
 	r := l.cur()
+	// A leading '/' followed by a letter or another '/' starts a bareword
+	// (a command switch like /ve, or a POSIX path), not a division operator.
+	if r == '/' {
+		if n := l.peek(1); isLetter(n) || n == '/' {
+			l.lexBareword()
+			return
+		}
+	}
 	// redirections: > >> 2> *> n> n>> n>&m  and input <
 	if r == '>' {
 		l.scanRedirectFromHere(a, "")

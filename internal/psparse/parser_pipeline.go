@@ -112,8 +112,12 @@ func (p *parser) parsePipelineElement() PipelineElement {
 		_ = w
 		return p.parseCommand("")
 	}
-	// expression element (command-expression)
+	// expression element (command-expression): parse in expression mode so
+	// operators like -eq / + bind here (unlike command arguments).
+	em := p.exprMode
+	p.exprMode = true
 	e := p.parseExpression()
+	p.exprMode = em
 	est := &ExprStatement{Expr: e}
 	if e != nil {
 		s0, s1 := e.Span()
@@ -204,22 +208,14 @@ func (p *parser) parseParameter() CommandElement {
 	return par
 }
 
-// parseCommandArg parses one positional argument expression in command mode.
-// Barewords become string literals; expressions ($(), @(), (), $var, numbers,
-// strings) are parsed structurally.
+// parseCommandArg parses one positional argument in command mode. It routes
+// through the expression parser so a comma list groups into one ArrayLit (as
+// the reference parser does), while binary/word operators stay disabled in
+// command mode so a following -Name is treated as a parameter, not an operator.
 func (p *parser) parseCommandArg() CommandElement {
 	switch p.kind() {
-	case TokGeneric:
-		t := p.advance()
-		return &Arg{span: span{t.Start, t.End}, Value: &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}}
-	case TokString:
-		s := p.stringLit(p.advance())
-		s0, s1 := s.Span()
-		return &Arg{span: span{s0, s1}, Value: s}
-	case TokNumber:
-		t := p.advance()
-		return &Arg{span: span{t.Start, t.End}, Value: numberLit(t)}
-	case TokVariable, TokLParen, TokDollarParen, TokAtParen, TokAtBrace, TokLBrace, TokLBracket:
+	case TokGeneric, TokString, TokNumber, TokVariable, TokLParen, TokDollarParen,
+		TokAtParen, TokAtBrace, TokLBrace, TokLBracket:
 		e := p.parseExpression()
 		if e == nil {
 			return nil
@@ -227,8 +223,8 @@ func (p *parser) parseCommandArg() CommandElement {
 		s0, s1 := e.Span()
 		return &Arg{span: span{s0, s1}, Value: e}
 	case TokOperator:
-		// a stray operator used as an argument value (e.g. a lone '-') — treat
-		// as a bareword argument so it is not dropped.
+		// a stray operator used as an argument value (e.g. a lone '-') — keep
+		// it as a bareword argument so it is not dropped.
 		t := p.advance()
 		return &Arg{span: span{t.Start, t.End}, Value: &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}}
 	}

@@ -47,6 +47,9 @@ func (p *parser) parseArrayLiteral() Expr {
 }
 
 func (p *parser) isBinaryOp() bool {
+	if !p.exprMode {
+		return false
+	}
 	switch p.kind() {
 	case TokOperator:
 		switch p.cur().Value {
@@ -76,7 +79,7 @@ func (p *parser) parseBinaryExpr() Expr {
 
 func (p *parser) parseUnary() Expr {
 	t := p.cur()
-	if t.Kind == TokOperator {
+	if t.Kind == TokOperator && p.exprMode {
 		switch t.Value {
 		case "-", "+", "!", "++", "--":
 			p.advance()
@@ -89,7 +92,7 @@ func (p *parser) parseUnary() Expr {
 			return &Unary{span: span{s0, s1}, Op: t.Value, Operand: operand}
 		}
 	}
-	if t.Kind == TokParameter && unaryWordOps[strings.ToLower(t.Value)] {
+	if t.Kind == TokParameter && p.exprMode && unaryWordOps[strings.ToLower(t.Value)] {
 		// Only treat as unary when not obviously a parameter in command mode;
 		// in expression context (where parseUnary runs) this is an operator.
 		p.advance()
@@ -104,6 +107,13 @@ func (p *parser) parseUnary() Expr {
 }
 
 func (p *parser) parsePostfix(e Expr) Expr {
+	if !p.exprMode {
+		if sl, ok := e.(*StringLit); ok && sl.Bare {
+			// a bareword command argument does not take . or [ ] postfixes;
+			// those characters are literal in command mode.
+			return e
+		}
+	}
 	guard := 0
 	for guard < 1<<16 {
 		guard++
@@ -173,6 +183,9 @@ func (p *parser) parseMember(target Expr, static bool) Expr {
 func (p *parser) parseInvokeArgs() []Expr {
 	p.advance() // (
 	save := p.enter()
+	em := p.exprMode
+	p.exprMode = true
+	defer func() { p.exprMode = em }()
 	var args []Expr
 	p.skipNewlines()
 	for !p.at(TokRParen) && !p.at(TokEOF) {
@@ -197,7 +210,10 @@ func (p *parser) parseInvokeArgs() []Expr {
 func (p *parser) parseIndex(target Expr) Expr {
 	p.advance() // [
 	save := p.enter()
+	em := p.exprMode
+	p.exprMode = true
 	idx := p.parseExpression()
+	p.exprMode = em
 	p.leave(save)
 	s0 := 0
 	if target != nil {
@@ -360,7 +376,10 @@ func (p *parser) parseHashValue() Expr {
 	if p.at(TokLBrace) {
 		return p.parseScriptBlock()
 	}
+	em := p.exprMode
+	p.exprMode = true
 	e := p.parseExpression()
+	p.exprMode = em
 	return e
 }
 
