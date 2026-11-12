@@ -91,6 +91,13 @@ try {
             [IO.File]::Delete($layout.LifecycleLockPath)
             Test-Take 'a new lock in the folder the uninstall left' $true
 
+            # Inheritance beside another fault stays refused: a Users write
+            # entry on an inheriting lock Administrators own.
+            Set-TestLock $script:AdministratorsSID
+            $out = & icacls.exe $layout.LifecycleLockPath /grant '*S-1-5-32-545:(M)' 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "fixture: icacls /grant: $out" }
+            Test-Take 'an inheriting lock with a Users write entry' $false
+
             $user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
             if ($user -notin @($script:SystemSID, $script:AdministratorsSID)) {
                 Set-TestLock $user

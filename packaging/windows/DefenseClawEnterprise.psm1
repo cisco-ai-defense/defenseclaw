@@ -9020,6 +9020,7 @@ function Enter-DefenseClawLifecycleLock {
             -RequiredBase $script:ProgramData
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
+        $createdHere = $false
         try {
             $created = [IO.File]::Open(
                 $path,
@@ -9028,6 +9029,21 @@ function Enter-DefenseClawLifecycleLock {
                 [IO.FileShare]::None
             )
             $created.Dispose()
+            $createdHere = $true
+        }
+        catch [IO.IOException] {
+            # Another run created it first; it is checked below.
+            if (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $path `
+                -PathType Leaf)) {
+                throw
+            }
+        }
+        if ($createdHere) {
+            # Outside the catch above: a failed stamp of the lock this run
+            # created is reported, never mistaken for a lock another run
+            # created (a lock left between creation and this stamp inherits
+            # its folder, rel-1-0-10:GAP-0028).
             $security = [Security.AccessControl.FileSecurity]::new()
             $security.SetSecurityDescriptorSddlForm(
                 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)',
@@ -9036,13 +9052,6 @@ function Enter-DefenseClawLifecycleLock {
             Microsoft.PowerShell.Security\Set-Acl `
                 -LiteralPath $path `
                 -AclObject $security
-        }
-        catch [IO.IOException] {
-            if (-not (Microsoft.PowerShell.Management\Test-Path `
-                -LiteralPath $path `
-                -PathType Leaf)) {
-                throw
-            }
         }
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -9057,49 +9066,66 @@ function Enter-DefenseClawLifecycleLock {
     # ReadOnly, Hidden or System; the ReadWrite open below would then fail with
     # access denied that no retry can fix. Clear them on the exact leaf.
     [void](Clear-DefenseClawRestrictiveFileAttributes -Path $path)
-    # A Programs and Features uninstall, a restored folder access list or an
-    # icacls /reset can leave the lock with a descriptor that inherits from
-    # its folder, and the standalone verdict below never re-stamps a lost
-    # protected flag, so every later Setup /ensure ended 1603 until an
-    # administrator fixed the lock by hand (rel-1-0-10:GAP-0028). The lock
-    # holds no data (its length is 0, checked above), so when SYSTEM,
-    # Administrators or TrustedInstaller own it, as for every lock a
-    # DefenseClaw lifecycle created, the canonical protected descriptor is
-    # written back here. A lock another account owns is not re-stamped and
-    # stays refused below (the ownership rule of the Setup mutexes).
-    $lockAcl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path
-    if (-not $lockAcl.AreAccessRulesProtected -and
-        [string](Get-DefenseClawAclOwnerSID -Acl $lockAcl) -in @(
-            $script:SystemSID,
-            $script:AdministratorsSID,
-            $script:TrustedInstallerSID
-        )) {
-        Write-DefenseClawAclSelfHealAdvisory `
-            -Path $path `
-            -Reason 're-stamping the canonical AdminFile ACL of the lifecycle lock after: managed DACL inherits from an ancestor'
-        Set-DefenseClawPathAcl `
-            -Path $path `
-            -Kind AdminFile `
-            -GatewayServiceSID $script:AdministratorsSID
-    }
-    # The lock holds no data, so repair runs before the verdict: an inherited,
-    # re-owned or extra-entry descriptor (a crash between creation and the
-    # first stamp, an icacls reset, a takeown) is re-stamped to the canonical
-    # protected admin-file descriptor in place. The identity persists, which
-    # keeps cross-run serialization intact.
+    $lockWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
     $adminRights = New-DefenseClawRequiredRights -Kind Admin
+    # A lock left between its creation and its stamp, a Programs and Features
+    # uninstall, a restored folder access list or an icacls /reset leaves the
+    # lock inheriting from its folder. The standalone verdict below never
+    # re-stamps a lost protected flag, so every later Setup /ensure ended 1603
+    # until an administrator fixed the lock by hand (rel-1-0-10:GAP-0028).
+    # The lock holds no data (its length is 0, checked above), so when the
+    # inheritance is its only fault (SYSTEM, Administrators or TrustedInstaller
+    # own it, and every entry it carries is one the verdict accepts), the
+    # canonical protected descriptor is written back here. Any other fault (a
+    # foreign owner, a foreign writer, a deny entry) stays refused below, as
+    # the standalone contract wants (GAP-0603 review M1). Secure Client keeps
+    # its re-stamp in the verdict.
+    if (Test-DefenseClawStandaloneProfile) {
+        $lockVerdicts = @(Get-DefenseClawPathAclVerdicts `
+            -Path $path `
+            -AllowedWriterSIDs $lockWriters `
+            -AllowedReaderSIDs $lockWriters `
+            -RequiredRights $adminRights `
+            -AllowedOwnerSIDs $lockWriters `
+            -RejectUntrustedRead)
+        $onlyInheritance = $lockVerdicts.Count -gt 0 -and @(
+            $lockVerdicts | Microsoft.PowerShell.Core\Where-Object {
+                -not ($_.Kind -eq 'Access' -and $_.Severity -eq 'Inheritance')
+            }).Count -eq 0
+        if ($onlyInheritance) {
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $path `
+                -Reason 're-stamping the canonical AdminFile ACL of the lifecycle lock after: managed DACL inherits from an ancestor'
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+                path   = $path
+                kind   = 'AdminFile'
+                reason = 'managed DACL inherits from an ancestor'
+            }
+            try {
+                Set-DefenseClawPathAcl `
+                    -Path $path `
+                    -Kind AdminFile `
+                    -GatewayServiceSID $script:AdministratorsSID
+            }
+            catch {
+                # A lock another program holds open is refused by name, as
+                # every in-place re-stamp is (GAP-0763).
+                $held = Get-DefenseClawHeldFileRefusal -ErrorRecord $_
+                if ($null -ne $held) {
+                    throw $held
+                }
+                throw
+            }
+        }
+    }
+    # The verdict repairs in place what the profile allows: on Secure Client
+    # an inherited, re-owned or extra-entry descriptor; on standalone only
+    # Contract and Rights faults (an inheriting lock is repaired above). The
+    # identity persists, which keeps cross-run serialization intact.
     Assert-DefenseClawPathAcl `
         -Path $path `
-        -AllowedWriterSIDs @(
-            $script:SystemSID,
-            $script:AdministratorsSID,
-            $script:TrustedInstallerSID
-        ) `
-        -AllowedReaderSIDs @(
-            $script:SystemSID,
-            $script:AdministratorsSID,
-            $script:TrustedInstallerSID
-        ) `
+        -AllowedWriterSIDs $lockWriters `
+        -AllowedReaderSIDs $lockWriters `
         -RequiredRights $adminRights `
         -RejectUntrustedRead `
         -SelfHealKind AdminFile `
