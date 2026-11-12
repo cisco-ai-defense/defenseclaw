@@ -91,6 +91,7 @@ func init() {
 	apply := &substrateBundleFlags{}
 	applyCmd := &cobra.Command{
 		Use: "apply", Short: "Verify a bundle and make it a stage's active bundle", Args: cobra.NoArgs, SilenceUsage: true,
+		Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := apply.store()
 			if err != nil {
@@ -114,6 +115,7 @@ func init() {
 	rb := &substrateBundleFlags{}
 	rollbackCmd := &cobra.Command{
 		Use: "rollback", Short: "Re-activate a stage's previous bundle", Args: cobra.NoArgs, SilenceUsage: true,
+		Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := rb.store()
 			if err != nil {
@@ -130,6 +132,7 @@ func init() {
 	st := &substrateBundleFlags{}
 	statusCmd := &cobra.Command{
 		Use: "status", Short: "Show stages, bundles, problems and receipts", Args: cobra.NoArgs, SilenceUsage: true,
+		Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := st.store()
 			if err != nil {
@@ -152,7 +155,8 @@ func init() {
 	tf := &substrateBundleFlags{}
 	testCmd := &cobra.Command{
 		Use: "test", Short: "Verify a bundle offline and show the profile and egress an actor would get", Args: cobra.NoArgs, SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, _ []string) error { return runSubstrateBundleTest(cmd, tf) },
+		Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+		RunE:        func(cmd *cobra.Command, _ []string) error { return runSubstrateBundleTest(cmd, tf) },
 	}
 	tf.common(testCmd)
 	testCmd.Flags().StringVar(&tf.bundle, "bundle", "", "the signed .dcbundle file (- for stdin)")
