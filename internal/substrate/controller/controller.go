@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,6 +64,8 @@ type Options struct {
 	Client   ateapi.Client
 	Attestor Attestor
 	Activity ActivitySource
+	// CPU is the CPU source of idle suspend; without one nothing is idle.
+	CPU      CPUSource
 	Registry Registry
 	Resolver ProfileResolver
 	Sink     Sink
@@ -100,6 +103,7 @@ type Controller struct {
 	actors    map[string]*actorState // by actor UID
 	templates map[string]cachedTemplate
 	fastUntil time.Time
+	scoped    bool
 }
 
 type cachedTemplate struct {
@@ -187,9 +191,9 @@ func (c *Controller) Run(ctx context.Context) error {
 // Reconcile is one pass over every actor. New and resuming actors go first
 // so their policy lands before they reach the network.
 func (c *Controller) Reconcile(ctx context.Context) error {
-	actors, err := ateapi.AllActors(ctx, c.o.Client, "", c.o.PageSize)
+	actors, err := c.listActors(ctx)
 	if err != nil {
-		return fmt.Errorf("list actors: %w", err)
+		return err
 	}
 	now := c.o.Now()
 	seen := make(map[string]bool, len(actors))
@@ -198,10 +202,9 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	for _, a := range actors {
 		uid := a.GetMetadata().GetUid()
 		seen[uid] = true
-		st, known := c.actors[uid]
+		_, known := c.actors[uid]
 		if !known {
-			st = &actorState{uid: uid, key: ateapi.Key(ateapi.RefOf(a.GetMetadata())), firstSeen: now}
-			c.actors[uid] = st
+			c.actors[uid] = &actorState{uid: uid, key: ateapi.Key(ateapi.RefOf(a.GetMetadata())), firstSeen: now}
 		}
 		if !known || a.GetStatus().GetState() == ateapi.ActorStateResuming {
 			urgent = append(urgent, a)
@@ -237,6 +240,53 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("%d actors failed, first: %w", len(errs), errs[0])
 	}
 	return nil
+}
+
+// listActors lists every actor, or, when the controller's principal is not a
+// global viewer, the actors of the atespaces it manages by name (launcher
+// atespaces and exact match.substrate names). Inventory and shadow AI then
+// cover only those, which one warning says.
+func (c *Controller) listActors(ctx context.Context) ([]*ateapi.Actor, error) {
+	c.mu.Lock()
+	scoped := c.scoped
+	c.mu.Unlock()
+	if !scoped {
+		actors, err := ateapi.AllActors(ctx, c.o.Client, "", c.o.PageSize)
+		if err == nil || status.Code(err) != codes.PermissionDenied {
+			if err != nil {
+				return nil, fmt.Errorf("list actors: %w", err)
+			}
+			return actors, nil
+		}
+		c.mu.Lock()
+		c.scoped = true
+		c.mu.Unlock()
+		c.emit(Event{Type: EventWarning, Severity: SeverityWarn,
+			Message: "no global viewer role on ate-api-server: listing only the managed atespaces; inventory and shadow AI cover only those"})
+	}
+	set := map[string]bool{}
+	for ns := range c.o.LauncherAtespaces {
+		set[ns] = true
+	}
+	if l, ok := c.o.Resolver.(AtespaceLister); ok {
+		for _, ns := range l.ManagedAtespaces() {
+			set[ns] = true
+		}
+	}
+	names := make([]string, 0, len(set))
+	for ns := range set {
+		names = append(names, ns)
+	}
+	sort.Strings(names)
+	var out []*ateapi.Actor
+	for _, ns := range names {
+		actors, err := ateapi.AllActors(ctx, c.o.Client, ns, c.o.PageSize)
+		if err != nil {
+			return nil, fmt.Errorf("list actors in %s: %w", ns, err)
+		}
+		out = append(out, actors...)
+	}
+	return out, nil
 }
 
 func (c *Controller) parallel(actors []*ateapi.Actor, fn func(*ateapi.Actor)) {
@@ -340,9 +390,8 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 			return nil // inventory only
 		}
 		if res.Refuse != "" {
-			refuse = res.Refuse
 			c.refuseOnce(st, base, EventProfileRefused, res.Refuse, "", "")
-		} else if refuse = c.admit(ctx, a, st, base); refuse == "" {
+		} else if c.admit(ctx, a, st, base) == "" {
 			if err := c.apply(ctx, a, st, reg, res.Profile, base); err != nil {
 				return err
 			}
@@ -357,6 +406,7 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 // refuse means the actor gets no policy.
 func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actorState, launcher bool, base Event) (Registration, string, error) {
 	if st.regOK {
+		st.reg.Template = ateapi.Key(a.GetActorTemplate())
 		return st.reg, "", nil
 	}
 	md := a.GetMetadata()
@@ -401,6 +451,7 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 			return Registration{}, "", fmt.Errorf("%s: registry: %w", st.key, err)
 		}
 	}
+	reg.Template = ateapi.Key(a.GetActorTemplate())
 	st.reg, st.regOK = reg, true
 	return reg, "", nil
 }
@@ -547,8 +598,11 @@ func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState,
 	}
 	m := cur.GetMetadata()
 	if render.Equal(cur, want) {
+		// Our own last write matching is no news. A conflict clears only
+		// when another writer brings the policy back to DefenseClaw's.
+		ours := m.GetUid() == st.ourUID && m.GetVersion() == st.ourVersion
 		st.ourUID, st.ourVersion, st.written = m.GetUid(), m.GetVersion(), true
-		if st.conflict {
+		if st.conflict && !ours {
 			st.conflict, st.reverts = false, nil
 			ev := base
 			ev.Type, ev.Severity, ev.Message = EventConflictCleared, SeverityInfo, "the actor's policy matches DefenseClaw's again"

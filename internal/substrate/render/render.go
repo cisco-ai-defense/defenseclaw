@@ -216,12 +216,20 @@ func EgressPolicy(in Input) (Result, error) {
 	if life < 300 || life > 3600 {
 		return Result{}, fmt.Errorf("render: token lifetime %d s is outside 300-3600", life)
 	}
-	internal := []hostClass{{suffix: svc.Name}}
-	if ns := parent(svc.Name); strings.Contains(ns, ".") {
-		internal = append(internal, hostClass{suffix: ns})
+	// DefenseClaw's own namespace domain and the admin Service are never
+	// reachable (D15), in both the short (<svc>.<ns>.svc) and the fully
+	// qualified (.svc.cluster.local) spelling.
+	var internal []hostClass
+	for _, name := range spellings(svc.Name) {
+		internal = append(internal, hostClass{suffix: name})
+		if ns := parent(name); strings.Contains(ns, ".") {
+			internal = append(internal, hostClass{suffix: ns})
+		}
 	}
 	if a, ok := parsePattern(s.AdminService); ok && !a.Any {
-		internal = append(internal, hostClass{suffix: a.Name})
+		for _, name := range spellings(a.Name) {
+			internal = append(internal, hostClass{suffix: name})
+		}
 	}
 	providers := append(slices.Clone(providerHosts), blockClasses(s.ProviderHosts)...)
 	blocks := blockClasses(in.Profile.Block)
@@ -402,6 +410,19 @@ func bindSecrets(in Input, admit func(raw, source, secret string) (pattern, bool
 		}
 	}
 	return effects
+}
+
+// spellings returns a Service name in both its short (.svc) and fully
+// qualified (.svc.cluster.local) form; other names unchanged.
+func spellings(name string) []string {
+	const fq = ".svc.cluster.local"
+	switch {
+	case strings.HasSuffix(name, fq):
+		return []string{name, strings.TrimSuffix(name, ".cluster.local")}
+	case strings.HasSuffix(name, ".svc"):
+		return []string{name, name + ".cluster.local"}
+	}
+	return []string{name}
 }
 
 func hasHeader(hs []*ateapi.CredentialHeader, h string) bool {
