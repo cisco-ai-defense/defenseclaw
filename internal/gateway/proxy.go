@@ -55,6 +55,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
 // guardrailListenAddr returns the TCP listen address for the guardrail HTTP server.
@@ -3072,7 +3073,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		// managed_enterprise the ordering and redaction behavior are
 		// byte-for-byte unchanged (directive is always nil there anyway).
 		deferManagedPrompt := managedEnterpriseActive.Load()
-		deferRoutedPrompt := p.modelRouter != nil
+		deferRoutedPrompt := p.routerActive(r.Context())
 		if !deferManagedPrompt && !deferRoutedPrompt {
 			promptID = p.emitLLMPromptEventV8(r.Context(), meta, inspectText, req.RawBody)
 		}
@@ -3137,7 +3138,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// This runs AFTER guardrails (reuses their signals) and BEFORE the
 	// upstream forward. A nil return gracefully falls through.
 	var routedDecision *ModelRouterDecision
-	if p.modelRouter != nil {
+	if p.routerActive(r.Context()) {
 		routerMeta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		var routerTools []interface{}
 		if len(req.Tools) > 0 {
@@ -3146,22 +3147,21 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			// rather than failing an otherwise valid guarded request.
 			_ = json.Unmarshal(req.Tools, &routerTools)
 		}
-		routerMetadata := map[string]interface{}{
-			"defenseclaw.connector": p.connectorName(),
-		}
-		if preCallSeverity != "" {
-			routerMetadata["defenseclaw.guardrail.severity"] = preCallSeverity
-		}
+		routeCaller, routeProfiles := routeCallerFromContext(r.Context())
 		routerInput := &ModelRouterInput{
-			Model:          req.Model,
-			RequestModel:   req.Model,
-			Messages:       req.Messages,
-			Tools:          routerTools,
-			Stream:         req.Stream,
-			SessionID:      routerMeta.SessionID,
-			ConversationID: routerMeta.SessionID,
-			UserID:         routerMeta.UserID,
-			Metadata:       routerMetadata,
+			Model:             req.Model,
+			RequestModel:      req.Model,
+			Messages:          req.Messages,
+			Tools:             routerTools,
+			Stream:            req.Stream,
+			APIFamily:         config.RoutingAPIChat,
+			Connector:         p.connectorName(),
+			Listener:          engine.ListenerGuardrail,
+			Severity:          preCallSeverity,
+			RequestedProvider: promptProviderName,
+			ConversationID:    routerMeta.SessionID,
+			Caller:            routeCaller,
+			Profiles:          routeProfiles,
 		}
 		var routeOutcome SemanticRouteOutcome
 		startedRoute := time.Now()
@@ -3171,6 +3171,15 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			routeOutcome = outcomeFromDecision(routerInput, p.modelRouter.Route(r.Context(), routerInput), time.Since(startedRoute))
 		}
 		p.recordSemanticRoutingDecisionV8(r.Context(), routeOutcome)
+		if routeOutcome.Result == SemanticRouteDenied {
+			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
+			msg := "[DefenseClaw] Your organization does not allow this model request."
+			if routeOutcome.Deny != nil && routeOutcome.Deny.Message != "" {
+				msg = "[DefenseClaw] " + routeOutcome.Deny.Message
+			}
+			writeOpenAIError(w, http.StatusForbidden, msg)
+			return
+		}
 		if decision := routeOutcome.Decision; decision != nil {
 			routedDecision = decision
 			if decision.TargetURLOverride || decision.APIKeyOverride {

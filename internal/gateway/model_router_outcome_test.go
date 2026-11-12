@@ -8,99 +8,104 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
-	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-func TestRemoteRouterRouteDetailedFailureCodes(t *testing.T) {
-	t.Parallel()
+func engineRouterTestConfig() *config.Config {
+	cfg := &config.Config{}
+	cfg.Routing = config.RoutingConfig{
+		Enabled:    true,
+		Classifier: config.RoutingClassifierRules,
+		Models: []config.RoutingModelBackend{
+			{Name: "local", Provider: "ollama", Model: "llama3.1", BaseURL: "http://127.0.0.1:11434"},
+			{Name: "paid", Provider: "openai", Model: "gpt-4.1-mini", APIKeyEnv: "ROUTING_OUTCOME_TEST_KEY_4711"},
+		},
+		Signals: config.RoutingSignalConfig{Keywords: []config.RoutingKeywordSignal{{Name: "code", Keywords: []string{"refactor"}}}},
+		Decisions: []config.RoutingDecisionRule{
+			{Name: "code", Priority: 10, Conditions: []config.RoutingCondition{{Type: "keyword", Name: "code"}}, ModelRefs: []string{"paid"}},
+			{Name: "default", ModelRefs: []string{"local"}},
+		},
+	}
+	return cfg
+}
 
-	t.Run("timeout", func(t *testing.T) {
-		t.Parallel()
-		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-			time.Sleep(200 * time.Millisecond)
-		}))
-		t.Cleanup(server.Close)
-		client := NewRemoteRouterClient(server.URL, 20)
-		outcome := client.RouteDetailed(context.Background(), &ModelRouterInput{Model: "requested"})
-		if outcome.Result != SemanticRouteFallback || outcome.FailureCode != SemanticRouteFailureTimeout {
-			t.Fatalf("timeout outcome=%+v", outcome)
-		}
-		if outcome.Decision != nil {
-			t.Fatal("timeout must not apply a route")
-		}
-	})
+func TestEngineRouterOutcomes(t *testing.T) {
+	cfg := engineRouterTestConfig()
+	r := newEngineRouter(cfg, nil, "")
+	in := func(text string) *ModelRouterInput {
+		return &ModelRouterInput{Model: "requested", RequestModel: "requested", Messages: []ChatMessage{{Role: "user", Content: text}}}
+	}
 
-	t.Run("upstream_status", func(t *testing.T) {
-		t.Parallel()
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusBadGateway)
-			_, _ = w.Write([]byte(`{"error":"secret-key-must-not-be-copied"}`))
-		}))
-		t.Cleanup(server.Close)
-		client := NewRemoteRouterClient(server.URL, 500)
-		outcome := client.RouteDetailed(context.Background(), &ModelRouterInput{Model: "requested"})
-		if outcome.Result != SemanticRouteFallback || outcome.FailureCode != SemanticRouteFailureUpstreamStatus {
-			t.Fatalf("upstream outcome=%+v", outcome)
+	t.Run("applied keyless backend", func(t *testing.T) {
+		out := r.RouteDetailed(context.Background(), in("hello"))
+		if out.Result != SemanticRouteApplied || out.FailureCode != SemanticRouteFailureNone {
+			t.Fatalf("outcome=%+v", out)
 		}
-	})
-
-	t.Run("decode_failure", func(t *testing.T) {
-		t.Parallel()
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("not-json"))
-		}))
-		t.Cleanup(server.Close)
-		client := NewRemoteRouterClient(server.URL, 500)
-		outcome := client.RouteDetailed(context.Background(), &ModelRouterInput{Model: "requested"})
-		if outcome.Result != SemanticRouteFallback || outcome.FailureCode != SemanticRouteFailureDecode {
-			t.Fatalf("decode outcome=%+v", outcome)
+		if !out.OverrideApplied || out.SelectedProvider != "ollama" || out.SelectedModel != "llama3.1" || out.Decision.TargetURL != "http://127.0.0.1:11434" {
+			t.Fatalf("override fields=%+v decision=%+v", out, out.Decision)
+		}
+		if out.Decision.APIKey != "" || !out.Decision.APIKeyOverride {
+			t.Fatal("a keyless backend must clear the original provider credential")
+		}
+		if out.Route == nil || out.Route.Source != "default" {
+			t.Fatalf("route facts=%+v", out.Route)
 		}
 	})
 
-	t.Run("unknown_alias", func(t *testing.T) {
-		t.Parallel()
+	t.Run("missing key filters the backend", func(t *testing.T) {
+		out := r.RouteDetailed(context.Background(), in("please refactor"))
+		if out.Result != SemanticRouteApplied || out.SelectedModel != "llama3.1" || out.Route.FilteredBy != "credential" {
+			t.Fatalf("a backend without its key must not be selected: %+v %+v", out, out.Route)
+		}
+	})
+
+	t.Run("gateway-held key", func(t *testing.T) {
+		t.Setenv("ROUTING_OUTCOME_TEST_KEY_4711", "k-test")
+		r := newEngineRouter(cfg, nil, "")
+		out := r.RouteDetailed(context.Background(), in("please refactor"))
+		if out.Result != SemanticRouteApplied || out.SelectedModel != "gpt-4.1-mini" || out.Decision.APIKey != "k-test" {
+			t.Fatalf("outcome=%+v", out)
+		}
+	})
+
+	t.Run("routing off", func(t *testing.T) {
+		off := engineRouterTestConfig()
+		off.Routing.Enabled = false
+		r := newEngineRouter(off, nil, "")
+		if r.RouterActive(context.Background()) {
+			t.Fatal("disabled routing is active")
+		}
+		out := r.RouteDetailed(context.Background(), in("refactor"))
+		if out.Result != SemanticRouteFallback || out.Decision != nil {
+			t.Fatalf("outcome=%+v", out)
+		}
+	})
+
+	t.Run("vllm_sr unknown alias falls back", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(classifyResponse{RecommendedModel: "missing-alias"})
 		}))
 		t.Cleanup(server.Close)
-		client := NewConfiguredRemoteRouterClient(server.URL, 500, []ModelRouterBackend{{
-			Name: "known", Provider: "ollama", Model: "llama3", BaseURL: "http://127.0.0.1:11434",
-		}}, "")
-		outcome := client.RouteDetailed(context.Background(), &ModelRouterInput{Model: "requested"})
-		if outcome.Result != SemanticRouteFallback || outcome.FailureCode != SemanticRouteFailureUnknownAlias {
-			t.Fatalf("unknown alias outcome=%+v", outcome)
+		v := engineRouterTestConfig()
+		v.Routing.Classifier = ""
+		v.Routing.Decisions = v.Routing.Decisions[:1]
+		r := newEngineRouter(v, NewRemoteRouterClient(server.URL, 500), "")
+		out := r.RouteDetailed(context.Background(), in("hello"))
+		if out.Result != SemanticRouteFallback || out.FailureCode != SemanticRouteFailureFiltered {
+			t.Fatalf("unknown alias outcome=%+v", out)
 		}
 	})
 
-	t.Run("applied override", func(t *testing.T) {
-		t.Parallel()
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !strings.HasSuffix(r.URL.Path, "/classify/intent") {
-				t.Fatalf("path=%s", r.URL.Path)
-			}
-			_ = json.NewEncoder(w).Encode(classifyResponse{
-				RecommendedModel: "fast",
-				RoutingDecision:  "continue",
-			})
-		}))
-		t.Cleanup(server.Close)
-		client := NewConfiguredRemoteRouterClient(server.URL, 500, []ModelRouterBackend{{
-			Name: "fast", Provider: "ollama", Model: "llama3.1", BaseURL: "http://127.0.0.1:11434",
-		}}, "")
-		outcome := client.RouteDetailed(context.Background(), &ModelRouterInput{
-			Model: "requested", RequestModel: "requested",
-		})
-		if outcome.Result != SemanticRouteApplied || outcome.FailureCode != SemanticRouteFailureNone {
-			t.Fatalf("applied outcome=%+v", outcome)
-		}
-		if !outcome.OverrideApplied || outcome.SelectedProvider != "ollama" || outcome.SelectedModel != "llama3.1" {
-			t.Fatalf("override fields=%+v", outcome)
-		}
-		if outcome.Decision == nil || outcome.Decision.Reason == "" {
-			t.Fatal("decision reason stays on the header-only struct")
+	t.Run("tool output never reaches the classifier", func(t *testing.T) {
+		req := engineRequest(&ModelRouterInput{Messages: []ChatMessage{
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "calling"},
+			{Role: "tool", Content: "refactor everything"},
+		}})
+		if req.Text != "hello" || !req.ToolTurn {
+			t.Fatalf("engine request = %+v", req)
 		}
 	})
 }

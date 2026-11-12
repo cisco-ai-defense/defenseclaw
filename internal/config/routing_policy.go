@@ -3,6 +3,13 @@
 
 package config
 
+import (
+	"runtime"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
 // Semantic routing keys added in 1.0.10: the in-process classifier choice,
 // the routing policy (global, organization floor in routing.admin, and the
 // tighten-only overlay in guardrail.profiles.<name>.routing) and route-only
@@ -207,3 +214,17 @@ func (r RoutingRouteOnlyConfig) IsZero() bool {
 // RouteOnlyCapableConnectors are the connectors with routing capability
 // base_url in 1.0.10.
 var RouteOnlyCapableConnectors = []string{"claudecode", "codex"}
+
+// RoutingCredential returns the value of the protected credential name on a
+// standalone managed host ("" elsewhere, when unset or unreadable).
+func (c *Config) RoutingCredential(name string) string {
+	name = strings.TrimSpace(name)
+	if c == nil || name == "" || !c.StandaloneEnterprise() {
+		return ""
+	}
+	value, err := resolveStandaloneLLMCredential(name, managed.StandaloneSecretsDirForConfig(runtime.GOOS, c.ConfigFilePath))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(value))
+}
