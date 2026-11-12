@@ -134,10 +134,11 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 		if r, ok := t.(interface {
 			Root(context.Context) (string, error)
 		}); ok {
-			var err error
-			if root, err = r.Root(ctx); err != nil {
+			detected, err := r.Root(ctx)
+			if err != nil {
 				return nil, fmt.Errorf("workspace: ask the actor for its working directory: %w", err)
 			}
+			root = detected
 		}
 	}
 	maxBytes := opts.MaxBytes
@@ -146,10 +147,11 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 	}
 	stateDir := opts.StateDir
 	if stateDir == "" {
-		var err error
-		if stateDir, err = NewStateDir(root, opts.Name); err != nil {
+		dir, err := NewStateDir(root, opts.Name)
+		if err != nil {
 			return nil, cleanErr("copy the project", err)
 		}
+		stateDir = dir
 	}
 	// An earlier copy of this name that was uploaded leaves its own state
 	// directory in the actor; it is tidied once this one has arrived.

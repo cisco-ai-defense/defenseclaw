@@ -14,7 +14,6 @@ import (
 	"io"
 	"os"
 	"sync"
-	"time"
 
 	"golang.org/x/term"
 
@@ -140,31 +139,4 @@ func (t *terminal) size() (relay.Resize, bool) {
 		return relay.Resize{}, false
 	}
 	return relay.Resize{Cols: uint16(min(c, 1000)), Rows: uint16(min(r, 1000))}, true
-}
-
-// pollSize signals on the returned channel when the size changes, checking
-// every interval (Windows has no SIGWINCH).
-func (t *terminal) pollSize(stop <-chan struct{}, every time.Duration) <-chan struct{} {
-	ch := make(chan struct{}, 1)
-	go func() {
-		defer t.guard()
-		tick := time.NewTicker(every)
-		defer tick.Stop()
-		last, _ := t.size()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-tick.C:
-			}
-			if sz, ok := t.size(); ok && sz != last {
-				last = sz
-				select {
-				case ch <- struct{}{}:
-				default:
-				}
-			}
-		}
-	}()
-	return ch
 }
