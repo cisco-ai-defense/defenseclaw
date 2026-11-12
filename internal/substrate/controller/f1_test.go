@@ -324,3 +324,21 @@ func TestAnchorFileReload(t *testing.T) {
 		t.Fatal("a removed anchors file must fail closed")
 	}
 }
+
+// GAP-0105: new UIDs are swept and capped, not only on a rate update.
+func TestUsageCPUSweepsOnInsert(t *testing.T) {
+	now := time.Date(2026, 11, 12, 22, 0, 0, 0, time.UTC)
+	clk := &clock{t: now}
+	u := controller.NewUsageCPU(clk.Now)
+	for i := range 500 {
+		u.Ingest(controller.UsageSample{UID: "flood-" + strings.Repeat("x", i%7) + string(rune('a'+i%26)) + time.Duration(i).String(), Epoch: 1, CPUTime: 1, At: now})
+	}
+	if u.Len() != 500 {
+		t.Fatalf("tracked %d", u.Len())
+	}
+	clk.Add(11 * time.Minute)
+	u.Ingest(controller.UsageSample{UID: "fresh", Epoch: 1, CPUTime: 1, At: clk.Now()})
+	if u.Len() != 1 {
+		t.Fatalf("stale actors not swept on insert: %d", u.Len())
+	}
+}

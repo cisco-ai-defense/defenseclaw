@@ -41,6 +41,10 @@ const (
 	// usageMaxBody bounds one POST to the usage receiver.
 	usageMaxBody = 8 << 20
 	usageForget  = 10 * time.Minute
+	// usageMaxActors caps the tracked actors; past it new actors are not
+	// tracked (no CPU sample means never idle, the safe side).
+	usageMaxActors  = 100000
+	usageSweepEvery = time.Minute
 )
 
 // UsageSample is one usage record: CPU seconds since the activation
@@ -59,9 +63,10 @@ type UsageSample struct {
 // activation starts over, and a final record forgets the actor. It
 // implements CPUSource.
 type UsageCPU struct {
-	mu  sync.Mutex
-	m   map[string]*usageState
-	now func() time.Time
+	mu        sync.Mutex
+	m         map[string]*usageState
+	now       func() time.Time
+	lastSweep time.Time
 }
 
 type usageState struct {
@@ -92,8 +97,22 @@ func (u *UsageCPU) Ingest(s UsageSample) {
 		delete(u.m, s.UID)
 		return
 	}
+	// Forget stale actors on every kind of insert, not only on a rate
+	// update: a flood of new UIDs must not grow the map (GAP-0105).
+	if now := u.now(); now.Sub(u.lastSweep) >= usageSweepEvery || len(u.m) >= usageMaxActors {
+		u.lastSweep = now
+		cut := now.Add(-usageForget)
+		for uid, other := range u.m {
+			if other.at.Before(cut) {
+				delete(u.m, uid)
+			}
+		}
+	}
 	st, ok := u.m[s.UID]
 	if !ok || st.epoch != s.Epoch {
+		if !ok && len(u.m) >= usageMaxActors {
+			return
+		}
 		u.m[s.UID] = &usageState{epoch: s.Epoch, cpu: s.CPUTime, at: s.At}
 		return
 	}
@@ -103,12 +122,13 @@ func (u *UsageCPU) Ingest(s UsageSample) {
 	st.rate = (s.CPUTime - st.cpu) / s.At.Sub(st.at).Seconds()
 	st.rateAt, st.haveRate = s.At, true
 	st.cpu, st.at = s.CPUTime, s.At
-	cut := u.now().Add(-usageForget)
-	for uid, other := range u.m {
-		if other.at.Before(cut) {
-			delete(u.m, uid)
-		}
-	}
+}
+
+// Len is the number of tracked actors (tests, metrics).
+func (u *UsageCPU) Len() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return len(u.m)
 }
 
 // CPU implements CPUSource: the actor's CPU use in cores, dated by the
@@ -127,7 +147,8 @@ func (u *UsageCPU) CPU(uid string) (float64, time.Time, bool) {
 // or JSON) from the cluster's collector, and the ateworker stdout form
 // (application/x-ndjson, one record per line). Other records in a batch
 // are ignored. It answers OTLP requests with an empty export response.
-// Only the collector may reach it (NetworkPolicy); actors can't, as no
+// It is served on loopback (a collector sidecar) or over mutual TLS (see
+// the controller's --usage-listen flags); actors can't reach it, as no
 // egress rule names the controller.
 func (u *UsageCPU) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

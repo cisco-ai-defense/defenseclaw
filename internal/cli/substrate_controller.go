@@ -18,9 +18,12 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,6 +42,8 @@ var (
 	substrateControllerOnce   bool
 	substrateControllerCheck  bool
 	substrateControllerUsage  string
+	// mTLS for a non-loopback usage listener (GAP-0105).
+	substrateControllerUsageCert, substrateControllerUsageKey, substrateControllerUsageCA string
 )
 
 var substrateControllerCmd = &cobra.Command{
@@ -65,7 +70,11 @@ func init() {
 	substrateControllerCmd.Flags().BoolVar(&substrateControllerOnce, "once", false, "run one reconcile pass and exit")
 	substrateControllerCmd.Flags().BoolVar(&substrateControllerCheck, "check", false, "check access to ate-api-server and exit")
 	substrateControllerCmd.Flags().StringVar(&substrateControllerUsage, "usage-listen", "",
-		"address for Substrate's per-actor usage records (OTLP/HTTP POST /v1/logs or ndjson), the CPU source of idle suspend; empty turns idle suspend off")
+		"address for Substrate's per-actor usage records (OTLP/HTTP POST /v1/logs or ndjson), the CPU source of idle suspend; empty turns idle suspend off. "+
+			"Loopback only, unless --usage-tls-cert, --usage-tls-key and --usage-client-ca make it mutual TLS")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerUsageCert, "usage-tls-cert", "", "usage listener certificate (PEM)")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerUsageKey, "usage-tls-key", "", "usage listener key (PEM)")
+	substrateControllerCmd.Flags().StringVar(&substrateControllerUsageCA, "usage-client-ca", "", "CA bundle the usage clients' certificates must chain to")
 	rootCmd.AddCommand(substrateControllerCmd)
 }
 
@@ -116,7 +125,18 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 		mux := http.NewServeMux()
 		mux.Handle("/v1/logs", usage.Handler())
 		srv := &http.Server{Addr: substrateControllerUsage, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-		go func() { _ = srv.ListenAndServe() }()
+		tlsCfg, err := substrateUsageTLS(substrateControllerUsage, substrateControllerUsageCert, substrateControllerUsageKey, substrateControllerUsageCA)
+		if err != nil {
+			return err
+		}
+		srv.TLSConfig = tlsCfg
+		go func() {
+			if tlsCfg != nil {
+				_ = srv.ListenAndServeTLS("", "")
+			} else {
+				_ = srv.ListenAndServe()
+			}
+		}()
 		defer srv.Close()
 		cpu = usage
 	} else {
@@ -156,6 +176,40 @@ func substrateControllerReport(ctx context.Context, cmd *cobra.Command, client a
 		names = append(names, s.GetMetadata().GetName())
 	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"atespaces": names, "actors": len(actors)})
+}
+
+// substrateUsageTLS decides how the usage listener is protected: forged
+// usage records would keep a busy actor from idle suspend or suspend a
+// working one (GAP-0105). A loopback address (a collector sidecar) needs
+// nothing; any other address needs mutual TLS with a client CA.
+func substrateUsageTLS(addr, cert, key, clientCA string) (*tls.Config, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("--usage-listen %q: %w", addr, err)
+	}
+	if cert == "" && key == "" && clientCA == "" {
+		if ip := net.ParseIP(host); host == "localhost" || (ip != nil && ip.IsLoopback()) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("--usage-listen %q is not loopback: set --usage-tls-cert, --usage-tls-key and --usage-client-ca (mutual TLS), or listen on 127.0.0.1 for a collector sidecar", addr)
+	}
+	if cert == "" || key == "" || clientCA == "" {
+		return nil, errors.New("--usage-tls-cert, --usage-tls-key and --usage-client-ca go together")
+	}
+	pair, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		return nil, fmt.Errorf("usage listener key pair: %w", err)
+	}
+	pem, err := os.ReadFile(clientCA)
+	if err != nil {
+		return nil, fmt.Errorf("usage client CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, errors.New("usage client CA: no certificate")
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{pair},
+		ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool}, nil
 }
 
 func orDefaultString(v, def string) string {
