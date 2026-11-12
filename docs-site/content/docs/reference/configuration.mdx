@@ -16,11 +16,11 @@ The current schema is `config_version: 9`. `defenseclaw config reference --forma
 A refusal of an enumerated key lists only the values you can type: `guardrail.hook_fail_mode` lists `open` and `closed`, not an empty entry. `guardrail.connector` and `claw.mode` take the spellings `claude-code` and `claude_code`, in any letter case, and are read as `claudecode`. Words in the OpenShell settings (for example `enterprise.openshell.install`) mean the same in any letter case. On a managed standalone Linux or macOS host, `defenseclaw-gateway config validate` refuses a required sandbox pack that `ensure` refuses.
 
 <Callout title="Windows layouts depend on the installer">
-The Windows Setup package uses an embedded runtime and `defenseclaw-hook.exe`, without a `.venv`. The supported per-user `install.ps1` route manages a private `.venv` and generates hook scripts under the data home. See [Windows paths](/docs/get-started/windows/paths-troubleshooting) before locating or editing Windows state.
+The Windows Enterprise Setup package uses an embedded runtime and `defenseclaw-hook.exe`, without a `.venv`. The supported per-user `install.ps1` route manages a private `.venv` and generates hook scripts under the data home. See [Windows paths](/docs/get-started/windows/paths-troubleshooting) before locating or editing Windows state.
 </Callout>
 
 <Callout title="Managed computers">
-On a Linux or macOS computer with the standalone enterprise package, `defenseclaw` offers users only `sandbox` commands, `help` and `--version` (every other command exits 2), and `defenseclaw-gateway` is not on their `PATH`. On Windows, `defenseclaw.exe` is the administrator's command. The `defenseclaw` and `defenseclaw-gateway` examples on this page are for a per-user install. The administrator edits the managed config and runs the packaged binary as root: `/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS, and `defenseclaw.exe enterprise ...` from an elevated PowerShell on Windows. Apply a change with `enterprise <os> ensure`, check it with `enterprise <os> verify`, and use `policy digest` and `policy reload` on the gateway binary. See [Change the config](/docs/enterprise/lifecycle#change-the-config) and [Enterprise settings](#enterprise-settings-enterprise).
+On a Linux or macOS computer with the standalone enterprise package, `defenseclaw` offers users only the commands in [Managed command availability](/docs/enterprise/managed-commands) (every other command exits 2), and `defenseclaw-gateway` is not on their `PATH`. On Windows, `defenseclaw.exe` is the administrator's command. The `defenseclaw` and `defenseclaw-gateway` examples on this page are for a per-user install. The administrator edits the managed config and runs the packaged binary as root: `/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS, and `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise ...` from an elevated PowerShell prompt on Windows. Apply a change with `enterprise <os> ensure`, check it with `enterprise <os> verify`, and use `policy digest` and `policy reload` on the gateway binary. See [Change the config](/docs/enterprise/lifecycle#change-the-config) and [Enterprise settings](#enterprise-settings-enterprise).
 </Callout>
 
 ## On-disk layout
@@ -37,7 +37,7 @@ Where each file lives on macOS and Linux is under [What the install creates](#wh
 
 ### What the install creates
 
-The trees below describe the per-user shell installers, including native Windows `install.ps1`, which manages a private `.venv` and generated hook scripts. The Windows Setup package uses an embedded runtime and `defenseclaw-hook.exe` instead; it creates no `.venv`. See [Windows installation](/docs/get-started/windows) for the package layout.
+The trees below describe the per-user shell installers, including native Windows `install.ps1`, which manages a private `.venv` and generated hook scripts. The Windows Enterprise Setup package uses an embedded runtime and `defenseclaw-hook.exe` instead; it creates no `.venv`. See [Windows installation](/docs/get-started/windows) for the package layout.
 
 <Files>
   <Folder name="~/.defenseclaw" defaultOpen>
@@ -477,7 +477,7 @@ Defaults from the loader. Omitted keys take these values.
 | `notifications.dedup_window`, `.max_per_minute` | 30 seconds, `12` | Duplicate suppression and rate cap. |
 | `guardrail.stream_buffer_bytes` | `1024` | Buffer for streamed proxy responses. |
 | `guardrail.judge.timeout`, `.adjudication_timeout` | `30`, `5` | Seconds for a judge call, and for adjudication. |
-| `guardrail.judge.max_parallel` | `0` | Most judge calls sent to the judge model at once; `0` is no limit. With a limit, tool-call judging goes first. See [A judge on a local model](/docs/guardrail#let-tool-calls-go-first). |
+| `guardrail.judge.max_parallel` | Automatic | Most judge calls sent to the judge model at once. Unset uses `1` for loopback/private endpoints and no limit for public endpoints; explicit `0` means no limit. With a limit, tool-call judging goes first. See [A judge on a local model](/docs/guardrail#let-tool-calls-go-first). |
 | `guardrail.judge.extra_body` | empty | Additional JSON fields for a judge using an OpenAI-compatible endpoint. Judge-owned request fields and authentication keys are refused when the config loads. See [Lemonade and Gemma 4](/docs/guardrail#lemonade-and-gemma-4). |
 | `guardrail.judge.injection`, `.pii`, `.pii_prompt`, `.pii_completion`, `.tool_injection`, `.exfil` | `true` | Which judge categories run when the judge is enabled. |
 | `guardrail.judge_sweep` | `true` | Run the full judge on content the regex triage found no signal in. |

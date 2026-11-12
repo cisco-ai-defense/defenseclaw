@@ -69,9 +69,14 @@ func init() {
 // before the gateway starts; a seam for tests.
 var sidecarScannerRuntimeStartProblem = scanner.StandaloneRuntimeStartProblem
 
+// sidecarRaisePriority is sidecarAnswerAtHookPriority; the package's tests
+// replace it, so a test that runs the sidecar does not raise the class of the
+// test binary, and of every test after it (GAP-0079).
+var sidecarRaisePriority = sidecarAnswerAtHookPriority
+
 func runSidecar(cmd *cobra.Command, _ []string) error {
 	// A Windows gateway answers at its hooks' priority class (GAP-0050).
-	sidecarAnswerAtHookPriority()
+	sidecarRaisePriority()
 	// A detached gateway's gateway.log lines carry a time (GAP-1319). The
 	// root pre-run usually started the stamper already (GAP-2109).
 	startDaemonLogStamp()

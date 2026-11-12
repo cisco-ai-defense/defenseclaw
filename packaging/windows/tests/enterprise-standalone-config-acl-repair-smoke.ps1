@@ -53,11 +53,778 @@ try {
                 -RedactionKeyClass trusted_drift)
         }
         catch {
-            $refused = $_.Exception.Message -match 'untrusted managed config path'
+            $refused = $_.Exception.Message -match 'untrusted managed config path' -and
+                $_.Exception.Message -match "/ensure '?CONFIG="
         }
         if (-not $refused -or $script:repairCalls -ne 0) {
-            throw 'ACL repair accepted a user-writable config or changed ACLs before refusing it'
+            throw 'ACL repair accepted a user-writable config, changed ACLs before refusing it, or named no recovery'
         }
+
+        # GAP-0590: the transaction asks the same question read-only before
+        # it stops any service; the answer is the same refusal, with nothing
+        # changed.
+        $checkRefused = $false
+        try {
+            [void](Repair-DefenseClawDeploymentAclDrift `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -RedactionKeyClass trusted_drift -CheckOnly)
+        }
+        catch {
+            $checkRefused = $_.Exception.Message -match 'untrusted managed config path'
+        }
+        if (-not $checkRefused -or $script:repairCalls -ne 0) {
+            throw 'the read-only drift check did not refuse a user-writable config, or changed ACLs'
+        }
+
+        # GAP-0590: the content gate an install-like lifecycle runs before any
+        # service stops refuses every managed content path another account can
+        # change, names it and its recovery, and changes nothing. It runs only
+        # on the standalone profile, whose verdicts it uses.
+        function Test-DefenseClawStandaloneProfile { return $true }
+        function Get-DefenseClawServiceSIDForRecovery { return $sid }
+        $manifest = [IO.Path]::Combine($State, 'targets.yaml')
+        $metadata = [IO.Path]::Combine($State, 'deployment.json')
+        foreach ($file in @($manifest, $metadata)) {
+            [IO.File]::WriteAllText($file, '{}')
+            Set-DefenseClawPathAcl -Path $file -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        }
+        $gateLayout = @{
+            StateRoot = $State
+            ConfigDirectory = $ConfigDirectory
+            ConfigPath = $Config
+            ManifestPath = $manifest
+            MetadataPath = $metadata
+            CodexTargetEnabled = $false
+        }
+        function Assert-GateRefuses([string]$Path, [string]$Recovery) {
+            $message = ''
+            try {
+                Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+            }
+            catch {
+                $message = $_.Exception.Message
+            }
+            if (-not $message.Contains($Path) -or -not $message.Contains($Recovery) -or
+                -not $message.StartsWith('refusing to change the deployment, and nothing was changed')) {
+                throw "content gate on ${Path}: '$message'"
+            }
+        }
+        function Add-UsersWrite([string]$Path, [string]$Rights = 'Write') {
+            $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+            [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
+                [Security.AccessControl.FileSystemRights]$Rights,
+                [Security.AccessControl.AccessControlType]::Allow))
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $acl
+        }
+        Assert-GateRefuses -Path $Config -Recovery 'CONFIG=<the approved administrator-only config>'
+        if (-not @((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Config).Access | Microsoft.PowerShell.Core\Where-Object {
+            (ConvertTo-DefenseClawSID -Identity $_.IdentityReference) -eq $script:UsersSID
+        }).Count) {
+            throw 'the content gate changed the config ACL'
+        }
+        Set-DefenseClawPathAcl -Path $Config -Kind ConfigFile -GatewayServiceSID $sid
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+        Add-UsersWrite -Path $manifest
+        Assert-GateRefuses -Path $manifest -Recovery 'Setup writes a new targets.yaml enumerated from it'
+        Set-DefenseClawPathAcl -Path $manifest -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        Add-UsersWrite -Path $metadata
+        Assert-GateRefuses -Path $metadata -Recovery 'remove that entry, or give the file back to Administrators'
+        Set-DefenseClawPathAcl -Path $metadata -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        # Modify, as icacls /grant (M) plants it, and an entry that only adds
+        # children, which could plant a file the lifecycle reads.
+        foreach ($rights in 'Modify', 'Write') {
+            Add-UsersWrite -Path $ConfigDirectory -Rights $rights
+            Assert-GateRefuses -Path $ConfigDirectory -Recovery 'remove that entry, or give the folder back to Administrators'
+            Set-DefenseClawPathAcl -Path $ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $sid
+        }
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+        if ($script:repairCalls -ne 0) {
+            throw 'the content gate repaired ACLs'
+        }
+
+        # GAP-0603: every Setup-owned record kind and both content files,
+        # each with an untrusted owner and a canonical ACL, an untrusted entry
+        # and an administrator owner, and both: refused before the stop and
+        # named, nothing changed. The standalone self-heal leaves an
+        # untrusted owner and a missing DACL as they are; Secure Client still
+        # repairs, and Setup's own account as owner is still repaired.
+        $users = $script:UsersSID
+        function Get-OwnerSID([string]$Path) {
+            return Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path)
+        }
+        function Set-TestOwner([string]$Path, [string]$SID) {
+            $out = & icacls.exe $Path /setowner "*$SID" 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "icacls /setowner $SID ${Path}: $out" }
+        }
+        foreach ($name in @(
+            'deployment.json', 'agent-application-control-attestation.json', 'codex-requirements-ownership.json',
+            'codex-requirements-acl-backup.json', 'managed-hooks-lifecycle.json', 'managed-hooks-teardown.json'
+        )) {
+            $file = [IO.Path]::Combine($State, $name)
+            [IO.File]::WriteAllText($file, '{}')
+            Set-DefenseClawPathAcl -Path $file -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        }
+        $kinds = [ordered]@{
+            MetadataPath = 'deployment.json'
+            AgentApplicationControlAttestationPath = 'agent-application-control-attestation.json'
+            CodexRequirementsOwnershipPath = 'codex-requirements-ownership.json'
+            CodexRequirementsAclBackupPath = 'codex-requirements-acl-backup.json'
+            ManagedHooksLifecycleJournalPath = 'managed-hooks-lifecycle.json'
+            ManagedHooksTeardownJournalPath = 'managed-hooks-teardown.json'
+        }
+        foreach ($key in $kinds.Keys) {
+            $gateLayout[$key] = [IO.Path]::Combine($State, $kinds[$key])
+        }
+        $variants = @(
+            @{ Name = 'owner'; Owner = $true; Entry = $false },
+            @{ Name = 'entry'; Owner = $false; Entry = $true },
+            @{ Name = 'both'; Owner = $true; Entry = $true }
+        )
+        foreach ($key in @($kinds.Keys) + @('ConfigPath', 'ManifestPath')) {
+            $path = [string]$gateLayout[$key]
+            $kind = if ($key -eq 'ConfigPath') { 'ConfigFile' } else { 'AdminFile' }
+            $gatewaySID = if ($key -eq 'ConfigPath') { $sid } else { $script:AdministratorsSID }
+            $recovery = switch ($key) {
+                'ConfigPath' { 'CONFIG=<the approved administrator-only config>' }
+                'ManifestPath' { 'Setup writes a new targets.yaml enumerated from it' }
+                default { 'remove that entry, or give the file back to Administrators' }
+            }
+            foreach ($variant in $variants) {
+                if ($variant.Owner) { Set-TestOwner -Path $path -SID $users }
+                if ($variant.Entry) { Add-UsersWrite -Path $path -Rights Modify }
+                $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl
+                Assert-GateRefuses -Path $path -Recovery $recovery
+                if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl -cne $before) {
+                    throw "the content gate changed $key ($($variant.Name))"
+                }
+                Set-TestOwner -Path $path -SID $script:AdministratorsSID
+                Set-DefenseClawPathAcl -Path $path -Kind $kind -GatewayServiceSID $gatewaySID
+            }
+        }
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+
+        # GAP-0590 review M2: every other path Set-DefenseClawManagedAcls and
+        # Set-DefenseClawStandaloneSecretsAcls re-stamp is judged as well,
+        # each with its own writers: the credential store and a credential,
+        # the guardian authorization folder, protected_targets.json and
+        # activation.json, the broker state, the runtime folder and its .env,
+        # the IPC folder, the bundle tree and an install folder. A standard
+        # user's write entry on any of them is refused before anything
+        # changes; the gateway's own Modify on the runtime and IPC folders is
+        # not drift.
+        $secrets = [IO.Path]::Combine($State, 'secrets')
+        $credential = [IO.Path]::Combine($secrets, 'ai-defense-api-key')
+        $authorization = [IO.Path]::Combine($State, 'hook-guardian-state')
+        $protectedTargets = [IO.Path]::Combine($authorization, 'protected_targets.json')
+        $activation = [IO.Path]::Combine($authorization, 'activation.json')
+        $broker = [IO.Path]::Combine($State, 'broker')
+        $runtime = [IO.Path]::Combine($State, 'runtime')
+        $runtimeEnv = [IO.Path]::Combine($runtime, '.env')
+        $ipc = [IO.Path]::Combine($State, 'ipc')
+        $installState = [IO.Path]::Combine($State, 'install')
+        $trust = [IO.Path]::Combine($ConfigDirectory, 'trust')
+        $anchors = [IO.Path]::Combine($trust, 'bundle-anchors.json')
+        $bin = [IO.Path]::Combine($State, 'program', 'bin')
+        foreach ($directory in @($secrets, $authorization, $broker, $runtime, $ipc, $installState, $trust, $bin)) {
+            [void][IO.Directory]::CreateDirectory($directory)
+        }
+        foreach ($file in @($credential, $protectedTargets, $activation, $runtimeEnv, $anchors)) {
+            [IO.File]::WriteAllText($file, 'x')
+        }
+        $canonical = [ordered]@{
+            $secrets = { Set-DefenseClawStandaloneSecretSddl -Path $secrets -IsDirectory $true -Sddl (Get-DefenseClawStandaloneSecretsDirectorySddl -GatewayServiceSID $sid) }
+            $credential = { Set-DefenseClawStandaloneSecretSddl -Path $credential -IsDirectory $false -Sddl (Get-DefenseClawStandaloneSecretFileSddl -GatewayServiceSID $sid -Name 'ai-defense-api-key') }
+            $authorization = { Set-DefenseClawPathAcl -Path $authorization -Kind AuthorizationDirectory -GatewayServiceSID $sid }
+            $protectedTargets = { Set-DefenseClawPathAcl -Path $protectedTargets -Kind AuthorizationFile -GatewayServiceSID $sid }
+            $activation = { Set-DefenseClawPathAcl -Path $activation -Kind AuthorizationFile -GatewayServiceSID $sid }
+            $broker = { Set-DefenseClawPathAcl -Path $broker -Kind AuthorizationDirectory -GatewayServiceSID $sid }
+            $runtime = { Set-DefenseClawPathAcl -Path $runtime -Kind RuntimeDirectory -GatewayServiceSID $sid }
+            $runtimeEnv = { Set-DefenseClawPathAcl -Path $runtimeEnv -Kind RuntimeFile -GatewayServiceSID $sid }
+            $ipc = { Set-DefenseClawPathAcl -Path $ipc -Kind ManagedIPCDirectory -GatewayServiceSID $sid }
+            $installState = { Set-DefenseClawPathAcl -Path $installState -Kind AdminDirectory -GatewayServiceSID $sid }
+            $trust = { Set-DefenseClawPathAcl -Path $trust -Kind AdminDirectory -GatewayServiceSID $sid }
+            $anchors = { Set-DefenseClawPathAcl -Path $anchors -Kind AdminFile -GatewayServiceSID $sid }
+            $bin = { Set-DefenseClawPathAcl -Path $bin -Kind ServiceInstallDirectory -GatewayServiceSID $sid }
+        }
+        foreach ($path in @($canonical.Keys)) { & $canonical[$path] }
+        $gateLayout.AuthorizationDirectory = $authorization
+        $gateLayout.AuthorizationLedgerPath = $protectedTargets
+        $gateLayout.BrokerStateDirectory = $broker
+        $gateLayout.RuntimeDirectory = $runtime
+        $gateLayout.ManagedIPCDirectory = $ipc
+        $gateLayout.InstallStateDirectory = $installState
+        $gateLayout.BinDirectory = $bin
+        # The canonical layout passes, the gateway's own entries included.
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+        $recoveries = @{
+            $secrets = 'set the credential again (defenseclaw-gateway enterprise secret set)'
+            $credential = 'set the credential again (defenseclaw-gateway enterprise secret set)'
+            $authorization = 'remove that entry, or give the folder back to Administrators'
+            $protectedTargets = 'remove that entry, or give the file back to Administrators'
+            $activation = 'remove that entry, or give the file back to Administrators'
+            $broker = 'remove that entry, or give it back to Administrators'
+            $runtime = 'remove that entry, or give it back to Administrators'
+            $runtimeEnv = 'remove that entry, or give it back to Administrators'
+            $ipc = 'remove that entry, or give it back to Administrators'
+            $installState = 'remove that entry, or give the folder back to Administrators'
+            $trust = 'remove that entry, or give it back to Administrators'
+            $anchors = 'remove that entry, or give it back to Administrators'
+            $bin = 'remove that entry, or give the folder back to Administrators'
+        }
+        foreach ($path in @($canonical.Keys)) {
+            Add-UsersWrite -Path $path -Rights Modify
+            $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl
+            Assert-GateRefuses -Path $path -Recovery $recoveries[$path]
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl -cne $before) {
+                throw "the content gate changed $path"
+            }
+            & $canonical[$path]
+        }
+        # A file in the credential store that is not named like a credential
+        # (a temporary file) is not re-stamped, so it is not judged either.
+        $temporary = [IO.Path]::Combine($secrets, '.ai-defense-api-key.tmp')
+        [IO.File]::WriteAllText($temporary, 'x')
+        Add-UsersWrite -Path $temporary -Rights Modify
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+        [IO.File]::Delete($temporary)
+
+        function Get-GateRefusal([string]$Scope = 'Lifecycle', [string[]]$Except = @()) {
+            try {
+                Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway `
+                    -Scope $Scope -Except $Except
+            }
+            catch {
+                return $_.Exception.Message
+            }
+            return ''
+        }
+        function Get-TestSddl([string]$Path) { return (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path).Sddl }
+
+        # g582 review 2 S5: Setup's approved copies are judged before any
+        # re-stamp; a run that writes config.yaml new from CONFIG= publishes
+        # a fresh copy with it, so that copy is skipped with its file.
+        $approvedCopy = [IO.Path]::Combine($installState, 'approved-config.yaml')
+        [IO.File]::WriteAllText($approvedCopy, 'x')
+        Set-DefenseClawPathAcl -Path $approvedCopy -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+        Add-UsersWrite -Path $approvedCopy -Rights Modify
+        $before = Get-TestSddl $approvedCopy
+        Assert-GateRefuses -Path $approvedCopy -Recovery 'Setup publishes a fresh copy of the approved source'
+        if ((Get-TestSddl $approvedCopy) -cne $before) { throw 'the content gate re-stamped an approved copy' }
+        if ((Get-GateRefusal -Except @('ConfigPath')) -ne '') {
+            throw 'the content gate refused the approved copy a CONFIG= run publishes fresh'
+        }
+        Set-DefenseClawPathAcl -Path $approvedCopy -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+
+        # g582 review 2 S2: the walking re-stamps are judged. A runtime child
+        # the runtime adoption gives back to the gateway (every scope but
+        # Purge), and a state-root descendant a non-purge uninstall re-stamps
+        # administrator-only (Retain). A log stays out of class.
+        $runtimeFolder = [IO.Path]::Combine($runtime, 'state')
+        $runtimeChild = [IO.Path]::Combine($runtimeFolder, 'cache.db')
+        [void][IO.Directory]::CreateDirectory($runtimeFolder)
+        [IO.File]::WriteAllText($runtimeChild, 'x')
+        Set-DefenseClawPathAcl -Path $runtimeFolder -Kind RuntimeDirectory -GatewayServiceSID $sid
+        Set-DefenseClawPathAcl -Path $runtimeChild -Kind RuntimeFile -GatewayServiceSID $sid
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+        Add-UsersWrite -Path $runtimeChild -Rights Modify
+        $before = Get-TestSddl $runtimeChild
+        Assert-GateRefuses -Path $runtimeChild -Recovery 'remove that entry, or give it back to Administrators'
+        $retained = Get-GateRefusal -Scope Retain
+        if (-not $retained.Contains($runtimeChild) -or (Get-TestSddl $runtimeChild) -cne $before) {
+            throw "the runtime walk did not judge a runtime child: '$retained'"
+        }
+        if ((Get-GateRefusal -Scope Purge) -ne '') { throw 'a purge was refused for a runtime child it deletes' }
+        Set-DefenseClawPathAcl -Path $runtimeChild -Kind RuntimeFile -GatewayServiceSID $sid
+        $generation = [IO.Path]::Combine($ConfigDirectory, 'config.generation.json')
+        [IO.File]::WriteAllText($generation, '{}')
+        Set-DefenseClawPathAcl -Path $generation -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        $logs = [IO.Path]::Combine($State, 'logs')
+        $logFile = [IO.Path]::Combine($logs, 'gateway.log')
+        [void][IO.Directory]::CreateDirectory($logs)
+        [IO.File]::WriteAllText($logFile, 'x')
+        $gateLayout.LogDirectory = $logs
+        Add-UsersWrite -Path $logFile -Rights Modify
+        if ((Get-GateRefusal -Scope Retain) -ne '') { throw 'a log was judged as content' }
+        Add-UsersWrite -Path $generation -Rights Modify
+        if ((Get-GateRefusal) -ne '') { throw 'the Lifecycle gate judged config.generation.json, which it does not re-stamp' }
+        $retained = Get-GateRefusal -Scope Retain
+        if (-not $retained.StartsWith('refusing to change the deployment') -or -not $retained.Contains($generation) -or
+            -not $retained.Contains('PURGE=1') -or $retained.Contains($logFile)) {
+            throw "a non-purge uninstall did not judge config.generation.json before it re-stamps it: '$retained'"
+        }
+        Set-DefenseClawPathAcl -Path $generation -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        [IO.File]::Delete($logFile)
+        [IO.Directory]::Delete($logs)
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway -Scope Retain
+
+        # g582 review 2 S3: every refused path is named in one refusal.
+        Add-UsersWrite -Path $metadata -Rights Modify
+        Add-UsersWrite -Path $credential -Rights Modify
+        $both = Get-GateRefusal
+        if (-not $both.StartsWith('refusing to change the deployment') -or -not $both.Contains($metadata) -or
+            -not $both.Contains($credential) -or -not $both.Contains('(1 more)')) {
+            throw "the gate did not name every refused path in one run: '$both'"
+        }
+        Set-DefenseClawPathAcl -Path $metadata -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        & $canonical[$credential]
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+
+        # GAP-0590 review M3: the ACL drift repair, which every transaction
+        # runs (uninstall included), judges what it would re-stamp before it
+        # answers the read-only check and before any re-stamp.
+        Add-UsersWrite -Path $credential -Rights Modify
+        foreach ($checkOnly in @($true, $false)) {
+            $driftError = ''
+            try {
+                [void](Repair-DefenseClawDeploymentAclDrift `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -RedactionKeyClass trusted_drift -CheckOnly:$checkOnly)
+            }
+            catch {
+                $driftError = $_.Exception.Message
+            }
+            if (-not $driftError.StartsWith('refusing to change the deployment') -or
+                -not $driftError.Contains($credential) -or $script:repairCalls -ne 0) {
+                throw "the ACL drift repair (CheckOnly $checkOnly) re-stamped a user-writable credential: '$driftError'"
+            }
+        }
+        # g582 review 2 S1: the uninstall's transaction runs the drift repair
+        # with the uninstall's own scope. A purge deletes the credential store
+        # unread, so it is not refused for it; a non-purge uninstall keeps it
+        # and is refused, naming PURGE=1.
+        $purgeError = ''
+        try {
+            if (-not (Repair-DefenseClawDeploymentAclDrift `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -RedactionKeyClass trusted_drift -ContentGateScope Purge -CheckOnly)) {
+                $purgeError = 'the purge drift check did not report the drift'
+            }
+        }
+        catch {
+            $purgeError = $_.Exception.Message
+        }
+        if ($purgeError -ne '' -or $script:repairCalls -ne 0) {
+            throw "the purge's ACL drift check refused a credential the purge deletes: '$purgeError'"
+        }
+        $retainError = ''
+        try {
+            [void](Repair-DefenseClawDeploymentAclDrift `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -RedactionKeyClass trusted_drift -ContentGateScope Retain -CheckOnly)
+        }
+        catch {
+            $retainError = $_.Exception.Message
+        }
+        if (-not $retainError.Contains($credential) -or -not $retainError.Contains('PURGE=1')) {
+            throw "a non-purge uninstall's ACL drift check kept a user-writable credential or named no PURGE=1: '$retainError'"
+        }
+        & $canonical[$credential]
+
+        # g582 review 3 M4: PURGE=1 with gateway-access drift and a
+        # user-writable runtime .env. The read-only check before the stop
+        # keeps the purge's scope and passes. The re-stamp after the stop
+        # gives the gateway back every runtime child, so it is judged with
+        # Lifecycle: it refuses, and the uninstall skips it without throwing,
+        # leaving .env's descriptor as it was and handing the refusal back.
+        # Every other caller (Lifecycle) is still refused.
+        Add-UsersWrite -Path $runtimeEnv -Rights Modify
+        $envBefore = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $runtimeEnv).Sddl
+        if (-not (Repair-DefenseClawDeploymentAclDrift `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -RedactionKeyClass trusted_drift -ContentGateScope Purge -CheckOnly)) {
+            throw "the purge's read-only drift check did not report the drift"
+        }
+        foreach ($scope in @('Purge', 'Retain')) {
+            $skipped = ''
+            $answer = Repair-DefenseClawDeploymentAclDrift `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -RedactionKeyClass trusted_drift -ContentGateScope $scope -GateRefusal ([ref]$skipped)
+            if ($answer -or -not $skipped.Contains($runtimeEnv) -or $script:repairCalls -ne 0 -or
+                (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $runtimeEnv).Sddl -cne $envBefore) {
+                throw "the $scope uninstall's drift repair re-stamped a user-writable .env or did not hand the refusal back: answer=$answer refusal='$skipped' calls=$($script:repairCalls)"
+            }
+        }
+        $lifecycleError = ''
+        try {
+            [void](Repair-DefenseClawDeploymentAclDrift `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -RedactionKeyClass trusted_drift)
+        }
+        catch {
+            $lifecycleError = $_.Exception.Message
+        }
+        if (-not $lifecycleError.Contains($runtimeEnv) -or $script:repairCalls -ne 0) {
+            throw "the lifecycle drift repair did not refuse a user-writable .env: '$lifecycleError'"
+        }
+
+        # The same with a forced snapshot failure in the uninstall's
+        # transaction: the gateway is not started on the unjudged .env. The
+        # services stay stopped, the quiescing intent stays pending, and the
+        # refusal names .env.
+        & {
+            $txLayout = @{}
+            foreach ($key in $layout.Keys) { $txLayout[$key] = $layout[$key] }
+            $txLayout.TransactionsDirectory = [IO.Path]::Combine($State, 'transactions')
+            $txLayout.PendingPath = [IO.Path]::Combine($State, 'pending-g582r4.json')
+            $txLayout.InstallRoot = [IO.Path]::Combine($State, 'program')
+            $txLayout.HookPath = [IO.Path]::Combine($State, 'program', 'bin', 'defenseclaw-hook.exe')
+            $txLayout.RedactionCorrelationKeyPath = [IO.Path]::Combine($State, 'runtime', 'redaction.key')
+            $txLayout.ProviderLibraryPath = ''
+            $txLayout.CertificationCodexHome = ''
+            $txLayout.CoreHardeningCertification = $false
+            foreach ($key in @('BrokerPath', 'GatewayPath', 'ACPPath', 'SensorHelperPath', 'CLIPath', 'ManifestPath',
+                    'InstallerPath', 'ModulePath', 'BrokerAuthKeyPath', 'MetadataPath',
+                    'AgentApplicationControlAttestationPath', 'ManagedHooksLifecycleJournalPath')) {
+                if (-not $txLayout.ContainsKey($key)) { $txLayout[$key] = '' }
+            }
+            [void][IO.Directory]::CreateDirectory($txLayout.TransactionsDirectory)
+            $script:started = 0
+            $script:snapshotFailures = 0
+            function Assert-DefenseClawGatewayServiceAccess { throw 'the gateway lost its access to runtime' }
+            function Get-DefenseClawServiceChecked { return $null }
+            function Test-DefenseClawServiceExists { return $true }
+            function Set-DefenseClawServiceStartMode { }
+            function Stop-DefenseClawService { }
+            function Wait-DefenseClawServiceProcessExit { }
+            function Get-DefenseClawServiceProcessIdentity { return $null }
+            function Test-DefenseClawServiceRanThroughBarrier { return $true }
+            function Test-DefenseClawServiceStoppedCleanly { return $true }
+            function Remove-DefenseClawStaleReplacementBackups { }
+            function Publish-DefenseClawEarlyHook { return '' }
+            function Restore-DefenseClawEarlyHook { }
+            function Hold-DefenseClawEarlyHookGuard { }
+            function Write-DefenseClawLifecyclePhase { }
+            function Set-DefenseClawServiceActivationPhase { }
+            function Get-DefenseClawTransactionRedactionKeyGatewaySID { return $sid }
+            function Get-DefenseClawApprovedPolicyPath {
+                $script:snapshotFailures++
+                throw 'forced transaction snapshot failure'
+            }
+            function Start-DefenseClawTransactionServices { $script:started++ }
+            $transactionError = ''
+            try {
+                [void](New-DefenseClawTransaction `
+                    -Layout $txLayout `
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -GuardianServiceName 'DefenseClawHookGuardian' `
+                    -PriorDeploymentActive `
+                    -SkipRedactionKeySnapshot `
+                    -ContentGateScope Purge)
+            }
+            catch {
+                $transactionError = $_.Exception.Message
+            }
+            if ($script:snapshotFailures -ne 1 -or -not $transactionError.Contains('forced transaction snapshot failure')) {
+                throw "the transaction did not reach the forced snapshot failure: '$transactionError'"
+            }
+            if ($script:started -ne 0 -or $script:repairCalls -ne 0 -or
+                -not $transactionError.Contains('not restarting the services on paths the content gate refused') -or
+                -not $transactionError.Contains($runtimeEnv) -or
+                -not [IO.File]::Exists($txLayout.PendingPath) -or
+                (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $runtimeEnv).Sddl -cne $envBefore) {
+                throw "a failed purge transaction restarted on or re-stamped an unjudged .env: starts=$($script:started) calls=$($script:repairCalls) '$transactionError'"
+            }
+            [IO.File]::Delete($txLayout.PendingPath)
+        }
+        & $canonical[$runtimeEnv]
+
+        # g582 review 3 S4: a state-root folder Setup cannot list is refused
+        # by name (the non-purge uninstall's re-stamp would adopt its
+        # children unjudged), not skipped.
+        # An elevated SSH or SYSTEM token has backup and restore enabled and
+        # lists any folder; an elevated prompt has them disabled. The row
+        # disables them while the gate runs, as Setup's token has them.
+        Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class G582SmokePrivilege {
+    [StructLayout(LayoutKind.Sequential)] struct LUID { public uint Low; public int High; }
+    [StructLayout(LayoutKind.Sequential)] struct TOKEN_PRIVILEGES { public uint Count; public LUID Luid; public uint Attributes; }
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool LookupPrivilegeValue(string system, string name, out LUID luid);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TOKEN_PRIVILEGES state, uint length, IntPtr previous, IntPtr returned);
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    public static void Set(string name, bool enable) {
+        IntPtr token;
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) { throw new System.ComponentModel.Win32Exception(); }
+        try {
+            LUID luid;
+            if (!LookupPrivilegeValue(null, name, out luid)) { throw new System.ComponentModel.Win32Exception(); }
+            TOKEN_PRIVILEGES state = new TOKEN_PRIVILEGES { Count = 1, Luid = luid, Attributes = enable ? 2u : 0u };
+            if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero)) { throw new System.ComponentModel.Win32Exception(); }
+        } finally { CloseHandle(token); }
+    }
+}
+'@
+        $unlistable = [IO.Path]::Combine($State, 'unlistable-g582r4')
+        [void][IO.Directory]::CreateDirectory($unlistable)
+        [IO.File]::WriteAllText([IO.Path]::Combine($unlistable, 'child'), 'x')
+        Set-DefenseClawPathAcl -Path $unlistable -Kind AdminDirectory -GatewayServiceSID $sid
+        $denied = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $unlistable
+        [void]$denied.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new('S-1-1-0'),
+            [Security.AccessControl.FileSystemRights]::ListDirectory,
+            [Security.AccessControl.AccessControlType]::Deny))
+        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $unlistable -AclObject $denied
+        try {
+            foreach ($privilege in @('SeBackupPrivilege', 'SeRestorePrivilege')) { [G582SmokePrivilege]::Set($privilege, $false) }
+            $unlistedRefusal = Get-GateRefusal -Scope Retain
+        }
+        finally {
+            foreach ($privilege in @('SeBackupPrivilege', 'SeRestorePrivilege')) { [G582SmokePrivilege]::Set($privilege, $true) }
+            Set-DefenseClawPathAcl -Path $unlistable -Kind AdminDirectory -GatewayServiceSID $sid
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $unlistable -Recurse -Force
+        }
+        if (-not $unlistedRefusal.StartsWith('refusing to change the deployment') -or
+            -not $unlistedRefusal.Contains("Setup cannot list the managed folder $unlistable")) {
+            throw "the Retain gate skipped a state-root folder it cannot list: '$unlistedRefusal'"
+        }
+
+        # GAP-0590 review M3: Repair, a reinstall over an uninstall's
+        # tombstone and the uninstall itself reach the gate before they
+        # consume a record or change anything. The lifecycle steps after the
+        # gate are replaced by a marker, so reaching one means the gate passed.
+        & {
+            $script:metadataInstalled = $true
+            function Get-DefenseClawDeploymentMetadata { param($Layout, [switch]$Required)
+                return [pscustomobject]@{ installed = $script:metadataInstalled; managed_hooks_activation = [pscustomobject]@{} } }
+            function Test-DefenseClawMetadataInstalled { param($Metadata) return [bool]$Metadata.installed }
+            function Assert-DefenseClawMetadataIdentity { }
+            function Test-DefenseClawLayoutBrokerEnabled { return $false }
+            function Assert-DefenseClawManagedHooksActivationRecord { return [pscustomobject]@{} }
+            function Assert-DefenseClawManagedServiceConfigurations { }
+            function Assert-DefenseClawStandaloneInstallTreeNotInUse { }
+            function Assert-DefenseClawStandaloneInstallRootNotHeld { }
+            function Assert-DefenseClawStandaloneStateFilesNotInUse { }
+            function Remove-DefenseClawCommittedManagedHooksTeardownJournal { throw 'past the gate' }
+            function Remove-DefenseClawStandaloneInstallTreeReplacementBackups { throw 'past the gate' }
+            function Assert-DefenseClawOwnedServiceOrAbsent { }
+            function Assert-DefenseClawRecordedArtifactHashes { }
+            # Repair restores config.yaml from Setup's approved copy (GAP-0568)
+            # between its two gates; the Codex preflight comes after both.
+            $script:recoveryRestores = $false
+            function Invoke-DefenseClawRepairApprovedPolicyRecovery {
+                if ($script:recoveryRestores) { Set-DefenseClawPathAcl -Path $Config -Kind ConfigFile -GatewayServiceSID $sid }
+            }
+            function Assert-DefenseClawCodexMachinePolicyFilePreflight { throw 'past the gate' }
+            $lifecycleLayout = $gateLayout.Clone()
+            $lifecycleLayout.GatewayPath = [IO.Path]::Combine($State, 'program', 'bin', 'defenseclaw-gateway.exe')
+            $lifecycleLayout.ProviderLibraryPath = ''
+            function Invoke-TestLifecycle([string]$Action, [bool]$Installed, [switch]$Purge, [hashtable]$Sources = @{}) {
+                $script:metadataInstalled = $Installed
+                try {
+                    if ($Action -eq 'Uninstall') {
+                        Invoke-DefenseClawUninstallLifecycle -Layout $lifecycleLayout `
+                            -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian -Purge:$Purge
+                    }
+                    else {
+                        [void](Invoke-DefenseClawInstallLikeLifecycle -Action $Action -Layout $lifecycleLayout -Sources $Sources `
+                            -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian)
+                    }
+                }
+                catch {
+                    return $_.Exception.Message
+                }
+                return 'returned'
+            }
+            $teardownJournal = [string]$lifecycleLayout.ManagedHooksTeardownJournalPath
+            $cells = @(
+                # The credential-file scenario: a standard user's write entry,
+                # then /repair.
+                @('Repair', $true, $false, $credential, 'set the credential again', 'run the same command again'),
+                # A reinstall over a tombstone with a retained drifted credential
+                # or a leftover teardown journal.
+                @('Install', $false, $false, $credential, 'set the credential again', 'run the same command again'),
+                @('Install', $false, $false, $teardownJournal, 'remove that entry, or give the file back to Administrators', 'run the same command again'),
+                # A non-purge uninstall keeps the credential; PURGE=1 deletes it.
+                @('Uninstall', $true, $false, $credential, 'PURGE=1 (Setup is not installed on this computer: use the copy in your MDM package or the release download), which deletes it', 'run the uninstall again'),
+                # A purge still refuses a drifted Codex record before it restores it.
+                @('Uninstall', $true, $true, [string]$lifecycleLayout.CodexRequirementsOwnershipPath, 'remove that entry, or give the file back to Administrators', 'run the uninstall again')
+            )
+            foreach ($cell in $cells) {
+                $path = [string]$cell[3]
+                Add-UsersWrite -Path $path -Rights Modify
+                $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl
+                $message = Invoke-TestLifecycle -Action $cell[0] -Installed $cell[1] -Purge:$cell[2]
+                if (-not $message.StartsWith('refusing to change the deployment, and nothing was changed') -or
+                    -not $message.Contains($path) -or -not $message.Contains([string]$cell[4]) -or
+                    -not $message.Contains([string]$cell[5]) -or
+                    (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl -cne $before) {
+                    throw "$($cell[0]) (installed $($cell[1]), purge $($cell[2])) did not refuse $path at the gate: '$message'"
+                }
+                if ($path -ceq $credential) {
+                    & $canonical[$credential]
+                }
+                else {
+                    Set-DefenseClawPathAcl -Path $path -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+                }
+            }
+            # A purge deletes the credential store unread, so a drifted
+            # credential does not stop it.
+            Add-UsersWrite -Path $credential -Rights Modify
+            $message = Invoke-TestLifecycle -Action Uninstall -Installed $true -Purge
+            if ($message -cne 'past the gate') {
+                throw "a purge refused a credential it deletes: '$message'"
+            }
+            & $canonical[$credential]
+            # config.yaml written new from an approved source is judged after
+            # that write: Repair's restore from Setup's approved copy, and an
+            # Install that supplies CONFIG=. A Repair whose restore leaves the
+            # drift is refused by the gate after it.
+            foreach ($restores in @($true, $false)) {
+                Add-UsersWrite -Path $Config -Rights Modify
+                $script:recoveryRestores = $restores
+                $message = Invoke-TestLifecycle -Action Repair -Installed $true
+                $want = if ($restores) { 'past the gate' } else { 'refusing to change the deployment, and nothing was changed' }
+                if (-not $message.StartsWith($want) -or
+                    (-not $restores -and -not $message.Contains('CONFIG=<the approved administrator-only config>'))) {
+                    throw "Repair with a drifted config.yaml (restored $restores): '$message'"
+                }
+                Set-DefenseClawPathAcl -Path $Config -Kind ConfigFile -GatewayServiceSID $sid
+            }
+            $script:recoveryRestores = $false
+            Add-UsersWrite -Path $Config -Rights Modify
+            $message = Invoke-TestLifecycle -Action Install -Installed $false -Sources @{ config = @{} }
+            if ($message -cne 'past the gate') {
+                throw "an Install that writes config.yaml from CONFIG= refused the drifted one it replaces: '$message'"
+            }
+            $message = Invoke-TestLifecycle -Action Install -Installed $false
+            if (-not $message.StartsWith('refusing to change the deployment') -or -not $message.Contains($Config)) {
+                throw "an Install without CONFIG= took a drifted retained config.yaml: '$message'"
+            }
+            Set-DefenseClawPathAcl -Path $Config -Kind ConfigFile -GatewayServiceSID $sid
+            # Benign twins: a canonical layout reaches the next step.
+            foreach ($cell in @(@('Repair', $true, $false), @('Install', $false, $false), @('Uninstall', $true, $false), @('Uninstall', $true, $true))) {
+                $message = Invoke-TestLifecycle -Action $cell[0] -Installed $cell[1] -Purge:$cell[2]
+                if ($message -cne 'past the gate') {
+                    throw "$($cell[0]) (purge $($cell[2])) on a canonical layout stopped at the gate: '$message'"
+                }
+            }
+        }
+
+        # The self-heal path itself (Verify, the attestation, the journals and
+        # the Codex records read through it).
+        $healed = [IO.Path]::Combine($State, 'self-heal.json')
+        [IO.File]::WriteAllText($healed, '{}')
+        Set-DefenseClawPathAcl -Path $healed -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        $writers = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+        Set-TestOwner -Path $healed -SID $users
+        $healError = ''
+        try {
+            Assert-DefenseClawPathAcl -Path $healed -AllowedWriterSIDs $writers `
+                -SelfHealKind AdminFile -SelfHealGatewayServiceSID $script:AdministratorsSID
+        }
+        catch {
+            $healError = $_.Exception.Message
+        }
+        if ($healError -notmatch [regex]::Escape("untrusted owner $users on managed path: $healed") -or
+            (Get-OwnerSID -Path $healed) -ne $users) {
+            throw "standalone self-heal re-stamped an untrusted owner in place: '$healError', owner $(Get-OwnerSID -Path $healed)"
+        }
+        Add-UsersWrite -Path $healed -Rights Modify
+        $healError = ''
+        try {
+            Assert-DefenseClawPathAcl -Path $healed -AllowedWriterSIDs $writers `
+                -SelfHealKind AdminFile -SelfHealGatewayServiceSID $script:AdministratorsSID
+        }
+        catch {
+            $healError = $_.Exception.Message
+        }
+        if (-not $healError -or (Get-OwnerSID -Path $healed) -ne $users) {
+            throw "standalone self-heal re-stamped an untrusted owner and entry in place: '$healError'"
+        }
+        # Secure Client keeps repairing a foreign owner (unchanged there).
+        function Test-DefenseClawStandaloneProfile { return $false }
+        Assert-DefenseClawPathAcl -Path $healed -AllowedWriterSIDs $writers `
+            -SelfHealKind AdminFile -SelfHealGatewayServiceSID $script:AdministratorsSID
+        if ((Get-OwnerSID -Path $healed) -ne $script:AdministratorsSID) {
+            throw 'Secure Client self-heal no longer repairs a foreign owner'
+        }
+        function Test-DefenseClawStandaloneProfile { return $true }
+        # Setup's own account as owner is still repaired on standalone.
+        $self = Get-DefenseClawCurrentProcessUserSID
+        if ($self -notin $writers) {
+            Set-TestOwner -Path $healed -SID $self
+            Assert-DefenseClawPathAcl -Path $healed -AllowedWriterSIDs $writers `
+                -SelfHealKind AdminFile -SelfHealGatewayServiceSID $script:AdministratorsSID
+            if ((Get-OwnerSID -Path $healed) -ne $script:AdministratorsSID) {
+                throw "standalone self-heal refused Setup's own account as owner"
+            }
+        }
+        # GAP-0603 review M1: an untrusted owner or writer beside a verdict
+        # the re-stamp may repair (a deny entry the owner's WRITE_DAC planted,
+        # SYSTEM's or the gateway's rights removed) is refused, with the owner
+        # and the access list as they were. Before, the re-stamp healed both
+        # and the second reading accepted the file.
+        $required = New-DefenseClawRequiredRights -Kind Config -GatewayServiceSID $sid
+        function Remove-TestEntry([string]$Path, [string]$SID) {
+            $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+            foreach ($rule in @($acl.Access)) {
+                if ((ConvertTo-DefenseClawSID -Identity $rule.IdentityReference) -eq $SID) {
+                    [void]$acl.RemoveAccessRuleSpecific($rule)
+                }
+            }
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $acl
+        }
+        function Add-TestDeny([string]$Path) {
+            $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+            [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
+                [Security.AccessControl.FileSystemRights]::Write,
+                [Security.AccessControl.AccessControlType]::Deny))
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $acl
+        }
+        function Invoke-TestHeal {
+            Assert-DefenseClawPathAcl -Path $healed -AllowedWriterSIDs $writers -RequiredRights $required `
+                -SelfHealKind ConfigFile -SelfHealGatewayServiceSID $sid
+        }
+        $mixed = [ordered]@{
+            'an untrusted owner and a deny entry' = { Set-TestOwner -Path $healed -SID $users; Add-TestDeny -Path $healed }
+            "an untrusted owner without SYSTEM's rights" = {
+                Set-TestOwner -Path $healed -SID $users; Remove-TestEntry -Path $healed -SID $script:SystemSID
+            }
+            "an untrusted owner without the gateway's rights" = {
+                Set-TestOwner -Path $healed -SID $users; Remove-TestEntry -Path $healed -SID $sid
+            }
+            'an untrusted writer and a missing right' = {
+                Add-UsersWrite -Path $healed -Rights Modify; Remove-TestEntry -Path $healed -SID $sid
+            }
+        }
+        foreach ($name in @($mixed.Keys)) {
+            Set-DefenseClawPathAcl -Path $healed -Kind ConfigFile -GatewayServiceSID $sid
+            & $mixed[$name]
+            $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $healed).Sddl
+            $healError = ''
+            try { Invoke-TestHeal } catch { $healError = $_.Exception.Message }
+            if (-not $healError.StartsWith('refusing to re-stamp a managed path in place') -or
+                -not $healError.Contains($healed) -or
+                (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $healed).Sddl -cne $before) {
+                throw "standalone self-heal re-stamped $name in place: '$healError'"
+            }
+        }
+        # Twins: a trusted owner with a deny entry is still repaired, and so
+        # is Setup's own account as owner; Secure Client still repairs the
+        # untrusted owner with a deny entry.
+        $twins = @(, @($script:AdministratorsSID, $true))
+        if ($self -notin $writers) { $twins += , @($self, $true) }
+        $twins += , @($users, $false)
+        foreach ($twin in $twins) {
+            Set-DefenseClawPathAcl -Path $healed -Kind ConfigFile -GatewayServiceSID $sid
+            Set-TestOwner -Path $healed -SID $twin[0]
+            Add-TestDeny -Path $healed
+            if (-not $twin[1]) { function Test-DefenseClawStandaloneProfile { return $false } }
+            Invoke-TestHeal
+            function Test-DefenseClawStandaloneProfile { return $true }
+            if ((Get-OwnerSID -Path $healed) -ne $script:AdministratorsSID -or
+                @((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $healed).Access | Microsoft.PowerShell.Core\Where-Object {
+                    $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny
+                }).Count) {
+                throw "self-heal did not repair a deny entry with owner $($twin[0]) (standalone $($twin[1]))"
+            }
+        }
+        Add-UsersWrite -Path $Config
         $after = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Config
         if (-not @($after.Access | Microsoft.PowerShell.Core\Where-Object {
             (ConvertTo-DefenseClawSID -Identity $_.IdentityReference) -eq $script:UsersSID -and
@@ -124,6 +891,13 @@ try {
         $trusted = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Config
         $trusted.SetAccessRuleProtection($false, $false)
         Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Config -AclObject $trusted
+        # Trusted-only drift passes the content gate for the repair to put back.
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+        if (-not (Repair-DefenseClawDeploymentAclDrift `
+            -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+            -RedactionKeyClass trusted_drift -CheckOnly) -or $script:repairCalls -ne 0) {
+            throw 'the read-only drift check refused trusted ACL drift or repaired it'
+        }
         if (-not (Repair-DefenseClawDeploymentAclDrift `
             -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
             -RedactionKeyClass trusted_drift) -or $script:repairCalls -ne 2) {

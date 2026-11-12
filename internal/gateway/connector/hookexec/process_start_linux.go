@@ -41,9 +41,31 @@ func procStatStartTime(path string, now time.Time) (time.Time, bool) {
 	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &boot); err != nil {
 		return time.Time{}, false
 	}
-	sinceBoot := time.Duration(boot.Nano())
-	startedSinceBoot := time.Duration(ticks) * time.Second / linuxClockTicks
-	return now.Add(-(sinceBoot - startedSinceBoot)), true
+	age, ok := procStartAge(ticks, time.Duration(boot.Nano()))
+	if !ok {
+		return time.Time{}, false
+	}
+	return now.Add(-age), true
+}
+
+// procStartAge is the age of a process that started ticks clock ticks after
+// boot, sinceBoot after boot. The ticks are split into whole seconds and the
+// remainder before they are scaled: ticks * time.Second overflowed int64
+// past about 1067 days of uptime and placed every hook start years in the
+// past, so each bounded call was blocked at once (rel-1-0-6 GAP-0648
+// review). A start this clock cannot place (after the boot clock's now) is
+// not known: ProcessStartTime then uses the package's initialization.
+func procStartAge(ticks uint64, sinceBoot time.Duration) (time.Duration, bool) {
+	seconds := ticks / linuxClockTicks
+	if sinceBoot < 0 || seconds > uint64(sinceBoot/time.Second) {
+		return 0, false
+	}
+	startedSinceBoot := time.Duration(seconds)*time.Second +
+		time.Duration(ticks%linuxClockTicks)*(time.Second/linuxClockTicks)
+	if startedSinceBoot < 0 || startedSinceBoot > sinceBoot {
+		return 0, false
+	}
+	return sinceBoot - startedSinceBoot, true
 }
 
 // parseProcStatStartTicks returns field 22 (starttime) of a /proc/<pid>/stat

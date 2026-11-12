@@ -139,6 +139,7 @@ func TestEgressEndsAndCredentialRefusals(t *testing.T) {
 	// A tunnel the proxy cut (here the large-upload block) did not complete.
 	e.m.egressEvent(ctx, egress.Event{Kind: egress.EventClosed, Time: now, BindingID: id, SandboxName: "endbox", Method: "CONNECT",
 		Host: "drop.example.org", Port: 443, BytesUp: 1 << 20, Duration: time.Second, Terminated: true}, 0)
+	e.m.sink.flushProxyAudit(ctx, now.Add(proxyOpenWindow), false)
 	recs := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.End != "" })
 	if len(recs) != 3 {
 		t.Fatalf("ended = %+v", recs)

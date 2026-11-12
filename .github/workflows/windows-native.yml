@@ -1,14 +1,15 @@
-# Deterministic, fork-safe native Windows x64 acceptance regression suite.
-# A green synthetic/contract job is not connector certification evidence.
+# Deterministic, fork-safe native Windows x64 regression suite: the Go and
+# Python suites, the telemetry registry suites, the PowerShell harness
+# validation, and the connector contract and install lifecycle on an
+# install.ps1 -Local install of this tree's release-shaped assets (the way
+# users install DefenseClaw on Windows). A green contract cell is not
+# connector certification.
 #
 # Branch protection must require the exact aggregate check name:
 #   Windows Native Required
 #
 # Real provider-secret Codex/Claude tests remain in connector-live-e2e.yml and
 # are workflow_dispatch-only. They are regression radar, not a merge gate.
-# Hermes setup is supported and included in the required deterministic
-# connector-contract matrix. Packaged and official-client evidence is tracked
-# separately; a green synthetic contract cell does not manufacture that evidence.
 
 name: Windows Native CI
 
@@ -40,7 +41,7 @@ jobs:
     outputs:
       windows_go: ${{ steps.classify.outputs.windows_go }}
       windows_python: ${{ steps.classify.outputs.windows_python }}
-      windows_pkg: ${{ steps.classify.outputs.windows_pkg }}
+      windows_contract: ${{ steps.classify.outputs.windows_contract }}
       pwsh: ${{ steps.classify.outputs.pwsh }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -62,8 +63,8 @@ jobs:
     # Each part has its own runner: gwN runs shard N of 16 of the gateway
     # package and shard N of 16 of the connector package, both balanced on
     # recorded Windows test times (scripts/test-timings/go-windows.json);
-    # pkN one of six timing-balanced parts of the remaining packages and hxN
-    # one of five test-level parts of hookexec (still -p=1 within each part).
+    # pkN one of fourteen timing-balanced parts of the remaining packages and hxN
+    # one of six test-level parts of hookexec (still -p=1 within each part).
     # The checks part runs DACL, redaction, isolated connector tests, vet, and
     # builds; stress runs the single-flight and executable
     # lifecycle stress loops; and tm0-tm2 repeat 20 times the Windows timing
@@ -96,11 +97,20 @@ jobs:
           - { shard: pk3, kind: packages, index: 3 }
           - { shard: pk4, kind: packages, index: 4 }
           - { shard: pk5, kind: packages, index: 5 }
+          - { shard: pk6, kind: packages, index: 6 }
+          - { shard: pk7, kind: packages, index: 7 }
+          - { shard: pk8, kind: packages, index: 8 }
+          - { shard: pk9, kind: packages, index: 9 }
+          - { shard: pk10, kind: packages, index: 10 }
+          - { shard: pk11, kind: packages, index: 11 }
+          - { shard: pk12, kind: packages, index: 12 }
+          - { shard: pk13, kind: packages, index: 13 }
           - { shard: hx0, kind: hookexec, index: 0 }
           - { shard: hx1, kind: hookexec, index: 1 }
           - { shard: hx2, kind: hookexec, index: 2 }
           - { shard: hx3, kind: hookexec, index: 3 }
           - { shard: hx4, kind: hookexec, index: 4 }
+          - { shard: hx5, kind: hookexec, index: 5 }
           - { shard: checks, kind: checks, index: 0 }
           - { shard: stress, kind: stress, index: 0 }
           - { shard: tm0, kind: timing, index: 0 }
@@ -199,8 +209,8 @@ jobs:
           # named-mutex holders release on it (rel-1-0-6:GAP-0238, GAP-0254).
           Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-v', '-count=20',
-            '-run', '^(TestSetupLock|TestReleaseFromAnotherOSThread|TestTryAcquireIsBusy|TestOneHolderAtATime|TestWindowsUserRuntimeTransactionUnlockFromAnotherOSThread)',
-            './cmd/defenseclaw-setup', './internal/winmutex', './internal/enterprisehooks'
+            '-run', '^(TestReleaseFromAnotherOSThread|TestTryAcquireIsBusy|TestOneHolderAtATime|TestWindowsUserRuntimeTransactionUnlockFromAnotherOSThread)',
+            './internal/winmutex', './internal/enterprisehooks'
           ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-named-mutex-stress.log') | Out-Null
       - name: Repeat Windows timing tests that flaked on hosted runners
         if: ${{ matrix.kind == 'timing' }}
@@ -255,8 +265,8 @@ jobs:
           $suiteKind = [string]$env:GO_SUITE_KIND
           $matrixShard = [int]$env:GO_SUITE_INDEX
           $nativeTestShardCount = 16
-          $remainingPackageShardCount = 6
-          $hookexecTestShardCount = 5
+          $remainingPackageShardCount = 14
+          $hookexecTestShardCount = 6
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
           $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
           if ($suiteKind -notin @('gateway', 'packages', 'hookexec', 'checks')) {
@@ -313,23 +323,60 @@ jobs:
               '--shard-count', [string]$remainingPackageShardCount,
               '--shard-index', [string]$matrixShard
             ) -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-package-shard.log')
-            $remainingPackages = @(
+            # A line is a package to test whole, or "<package><TAB><-run regex>"
+            # for one part of a package too slow for one shard (internal/hookpaths,
+            # GAP-0749; internal/cli and internal/enterprisehooks, which have no
+            # recorded test times, split by test-file size, GAP-1066). A part
+            # whose regex would not fit one command line comes as several
+            # lines of this shard. The script fails unless every package, and
+            # every test of a split package, is in exactly one shard.
+            $selectedLines = @(
               [regex]::Split([string]$selection.StdOut, '\r?\n') |
                 ForEach-Object { $_.Trim() } |
                 Where-Object { $_ -match '^github\.com/defenseclaw/defenseclaw/' }
             )
-            if (-not $remainingPackages) {
+            $remainingPackages = @($selectedLines | Where-Object { $_ -notmatch "`t" })
+            $packageParts = @($selectedLines | Where-Object { $_ -match "`t" })
+            if (-not $remainingPackages -and -not $packageParts) {
               throw 'native Go package discovery selected no non-gateway packages'
             }
-            Write-Host "Native Windows remaining-package part $matrixShard of $remainingPackageShardCount runs $($remainingPackages.Count) packages."
+            Write-Host "Native Windows remaining-package part $matrixShard of $remainingPackageShardCount runs $($remainingPackages.Count) packages and $($packageParts.Count) parts of packages."
             # The remaining packages retain their 14m timeout below the
             # step's 1020 s and the job's 20 minutes (rel-1-0-6:GAP-0477).
-            $remainingArguments = @(
-              'test', '-vet=off', '-json', '-count=1', '-timeout=14m', '-p=1',
-              '-skip', $windowsInapplicable
-            ) + $remainingPackages
-            Invoke-WindowsNativeProcess $go $remainingArguments -TimeoutSeconds 1020 `
-              -LogPath $goTestLog -GoTestFailureSummaryPath $goFailureSummary -GoTestTimingSummary | Out-Null
+            # Every run is made even when an earlier one fails, so one red
+            # package does not hide the parts behind it; the step fails after.
+            $packageRunFailures = @()
+            if ($remainingPackages) {
+              $remainingArguments = @(
+                'test', '-vet=off', '-json', '-count=1', '-timeout=14m', '-p=1',
+                '-skip', $windowsInapplicable
+              ) + $remainingPackages
+              try {
+                Invoke-WindowsNativeProcess $go $remainingArguments -TimeoutSeconds 1020 `
+                  -LogPath $goTestLog -GoTestFailureSummaryPath $goFailureSummary -GoTestTimingSummary | Out-Null
+              } catch {
+                $packageRunFailures += "packages: $($_.Exception.Message)"
+              }
+            }
+            $partIndex = 0
+            foreach ($packagePart in $packageParts) {
+              $partPackage, $partPattern = $packagePart -split "`t", 2
+              Write-Host "Native Windows Go part $($partIndex + 1) of $($packageParts.Count): $partPackage"
+              try {
+                Invoke-WindowsNativeProcess $go @(
+                  'test', '-vet=off', '-json', '-count=1', '-timeout=14m', '-p=1',
+                  '-skip', $windowsInapplicable, '-run', $partPattern, $partPackage
+                ) -TimeoutSeconds 1020 `
+                  -LogPath (Join-Path $env:DC_STATE_ROOT ("go-package-part-$partIndex.log")) `
+                  -GoTestFailureSummaryPath $goFailureSummary -GoTestTimingSummary | Out-Null
+              } catch {
+                $packageRunFailures += "$($partPackage) part $($partIndex + 1): $($_.Exception.Message)"
+              }
+              $partIndex++
+            }
+            if ($packageRunFailures) {
+              throw "native Windows Go shard $matrixShard failed: $($packageRunFailures -join '; ')"
+            }
             return
           }
           if ($suiteKind -eq 'gateway' -and ($matrixShard -lt 0 -or $matrixShard -ge $nativeTestShardCount)) {
@@ -396,19 +443,10 @@ jobs:
           Invoke-WindowsNativeProcess $go @('build', '-o', (Join-Path $bin 'defenseclaw-gateway.exe'), './cmd/defenseclaw') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-gateway.log') | Out-Null
           Invoke-WindowsNativeProcess $go @('build', '-o', (Join-Path $bin 'defenseclaw-acp.exe'), './cmd/defenseclaw-acp') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-acp.log') | Out-Null
           Invoke-WindowsNativeProcess $go @('build', '-ldflags', '-H=windowsgui', '-o', (Join-Path $bin 'defenseclaw-hook.exe'), './cmd/defenseclaw-hook') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-hook.log') | Out-Null
-          $hookLauncher = Join-Path $bin 'defenseclaw-hook-launcher.exe'
-          Invoke-WindowsNativeProcess $go @(
-            'build', '-trimpath', '-buildvcs=false', '-ldflags', '-s -w -H=windowsgui',
-            '-o', $hookLauncher, './cmd/defenseclaw-hook-launcher'
-          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-hook-launcher.log') | Out-Null
           $packageVersion = Get-WorkspacePackageVersion
           Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-gateway.exe') -Component 'gateway' -Version $packageVersion -Apply
           Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-acp.exe') -Component 'acp-guard' -Version $packageVersion -Apply
           Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-hook.exe') -Component 'hook' -Version $packageVersion -Apply
-          Assert-WindowsExecutableResource -Path $hookLauncher -Component 'hook' -Version $packageVersion -Apply
-          if ((Get-Item -LiteralPath $hookLauncher -Force).Length -gt 8MB) {
-            throw 'HookRuntime launcher exceeds the unsigned 8 MiB size ceiling'
-          }
       - uses: ./.github/actions/go-cache-save
         if: ${{ matrix.shard == 'gw0' }}
         with:
@@ -442,8 +480,7 @@ jobs:
       fail-fast: false
       matrix:
         # Twelve shards balanced on Windows module times
-        # (scripts/test-timings/python-windows.json) finish in about the time
-        # of the packaged Setup lifecycle part.
+        # (scripts/test-timings/python-windows.json).
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -711,12 +748,29 @@ jobs:
       - name: Standalone native OTLP user-file rollback
         if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-standalone-native-otlp-rollback-smoke.ps1
-      - name: Native Setup bootstrap delegation and offline contract
+      - name: install.ps1 bootstrap and offline contract
         if: ${{ !cancelled() }}
         run: uv run --frozen python -m pytest cli/tests/test_install_ps1.py -q
-      - name: Parser, mock timeout, redaction, isolation, and workflow contracts
+      - name: Native CI harness self-test
         if: ${{ !cancelled() }}
-        run: ./scripts/live-connector-e2e/test-windows.ps1
+        timeout-minutes: 5
+        run: |
+          # The self-test builds its own isolated profile below this state
+          # root and rebinds the native base itself, so the base this job
+          # published must not leak into it.
+          Remove-Item Env:DC_WINDOWS_NATIVE_BASE_ROOT -ErrorAction SilentlyContinue
+          $selfTestRoot = Join-Path $env:RUNNER_TEMP 'dc-native-self-test'
+          try {
+            ./scripts/windows-native-ci.ps1 -Operation self-test -StateRoot $selfTestRoot
+          } finally {
+            ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $selfTestRoot
+          }
+      - name: Connector contract hook-command parser self-test
+        if: ${{ !cancelled() }}
+        # Every form setup renders (the direct and guard-sibling Codex
+        # commands, the old and the answering PowerShell bridge) is read, and
+        # a lookalike is not, before any contract cell trusts the parsers.
+        run: ./scripts/live-connector-e2e/run-windows-install.ps1 -Operation self-test
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
@@ -732,38 +786,28 @@ jobs:
         if: ${{ always() }}
         run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
 
-  package-artifact:
-    name: Windows packaged artifact build
+  contract-assets:
+    # This tree's release-shaped Windows assets: the release zip's binaries,
+    # the wheel, the requirements, install.ps1 and checksums.txt, built the
+    # way ci.yml's install smoke builds them. The connector contract and the
+    # install lifecycle install them with install.ps1 -Local.
+    name: Windows install assets of this tree
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.windows_pkg != 'false' }}
-    runs-on: windows-latest
-    timeout-minutes: 20
+    if: ${{ !cancelled() && needs.changes.outputs.windows_contract != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
-      DC_EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      # "|" falls back to direct on any proxy error.
+      GOPROXY: https://proxy.golang.org|direct
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Verify exact package source checkout
-        run: |
-          $expected = [string]$env:DC_EXPECTED_SOURCE_COMMIT
-          if ($expected -cnotmatch '^[0-9a-f]{40}$') {
-            throw "Expected package source commit is invalid: $expected"
-          }
-          $actual = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
-          if ($LASTEXITCODE -ne 0 -or $actual -cne $expected) {
-            throw "Package checkout does not match the expected source commit: $actual != $expected"
-          }
-      - name: Initialize isolated paths
-        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist
       - uses: ./.github/actions/setup-go
-        id: go
         with:
-          # The release build (-trimpath, CGO off) shares no cache entries with
-          # the test jobs: its own entry, keyed on its build script too.
-          cache-name: windows-package
-          cache-files: scripts/windows-native-ci.ps1
+          # ci.yml's install smoke saves this entry on main; this job only restores it.
+          cache-name: release-assets
+          cache-files: scripts/build-release-assets.sh
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
@@ -771,232 +815,125 @@ jobs:
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build the Windows assets
+        shell: bash
+        run: scripts/build-release-assets.sh 9.9.9 "$RUNNER_TEMP/assets" windows/amd64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-contract-assets
+          path: ${{ runner.temp }}/assets/
+          if-no-files-found: error
+          retention-days: 3
+
+  connector-contract:
+    # scripts/live-connector-e2e/run-windows-install.ps1: observe setup and
+    # the Windows checks of what it wrote (hook commands, adapters, plugins,
+    # Doctor), then contract-smoke.sh's golden allow and block payloads
+    # through the installed hook, the gateway evidence, the observability v8
+    # records, and teardown restoring the vendor config. No vendor agent runs.
+    # cli/tests/test_windows_connector_contract.py pins the matrix.
+    name: Windows x64 connector contract / ${{ matrix.connector }}${{ matrix.leaf != 'contract' && ' (launcher path with parentheses)' || '' }}
+    needs: [changes, contract-assets]
+    if: ${{ !cancelled() && needs.contract-assets.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        connector: [codex, claudecode, amp, copilot, cursor, devin, hermes, antigravity, opencode]
+        # The state root folder. Codex runs once more under a folder with a
+        # parenthesis, which cmd.exe cannot be handed bare, so setup writes the
+        # PowerShell bridge form of the hook command (review g088r S1). The
+        # include overwrites the `leaf` value, so it is a new cell and not an
+        # extra key on the existing codex cell.
+        leaf: [contract]
+        include:
+          - connector: codex
+            leaf: 'contract (bridge)'
+    env:
+      CONNECTOR: ${{ matrix.connector }}
+      CONTRACT_LEAF: ${{ matrix.leaf }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('ct-' + $env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-contract-' + $env:CONNECTOR)
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
           # Only main writes the uv cache; other refs restore it.
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - name: Build release-shaped Windows x64 zip and Python wheel
-        run: ./scripts/windows-native-ci.ps1 -Operation build-artifacts -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
-      - name: Build unsigned native Windows setup executable
-        run: ./scripts/windows-native-ci.ps1 -Operation build-installer -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
-      - name: Verify the checkout did not change during the build
-        run: |
-          $expected = [string]$env:DC_EXPECTED_SOURCE_COMMIT
-          $actual = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
-          if ($LASTEXITCODE -ne 0 -or $actual -cne $expected) {
-            throw "Package checkout changed during the build: $actual != $expected"
-          }
-      - name: Upload packaged artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-native-package
-          path: ${{ env.DC_ARTIFACT_ROOT }}\*
-          if-no-files-found: error
-          retention-days: 3
-      - uses: ./.github/actions/go-cache-save
-        with:
-          cache-name: windows-package
-          cache-files: scripts/windows-native-ci.ps1
-          cache-hit: ${{ steps.go.outputs.cache-hit }}
-      - name: Capture bounded diagnostics
-        if: ${{ failure() || cancelled() }}
-        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
-      - name: Upload diagnostics on failure
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-native-package-diagnostics
-          path: ${{ env.DC_DIAGNOSTICS }}\**
-          if-no-files-found: ignore
-          retention-days: 5
-      # The build starts no long-lived process, and a hosted runner is
-      # discarded after the job, so a passing build skips the 1-2 minute tree
-      # removal that every packaged job would otherwise wait for.
-      - name: Clean isolated processes, listeners, and temp state after a failure
-        if: ${{ failure() || cancelled() }}
-        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
-
-  package-verify:
-    # The source-identity check and the wizard smoke read only the uploaded
-    # package. They run here, beside the acceptance parts and the connector
-    # contracts, instead of holding every packaged job behind them.
-    name: Windows packaged artifact identity and wizard smoke
-    needs: package-artifact
-    runs-on: windows-latest
-    timeout-minutes: 15
-    env:
-      DC_EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Initialize isolated paths
-        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf pkv -DiagnosticsLeaf windows-native-diagnostics-package-verify -ArtifactLeaf windows-native-dist
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: windows-native-package
-          path: ${{ env.DC_ARTIFACT_ROOT }}
-      - name: Verify exact package source identity
-        run: |
-          . ./scripts/windows-native-ci.ps1 -NoRun
-          $expected = [string]$env:DC_EXPECTED_SOURCE_COMMIT
-          if ($expected -cnotmatch '^[0-9a-f]{40}$') {
-            throw "Expected package source commit is invalid: $expected"
-          }
-          $actual = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
-          if ($LASTEXITCODE -ne 0 -or $actual -cne $expected) {
-            throw "Package checkout changed during the build: $actual != $expected"
-          }
-
-          $provenancePath = Join-Path $env:DC_ARTIFACT_ROOT 'DefenseClawSetup-x64.exe.provenance.json'
-          $sbomPath = Join-Path $env:DC_ARTIFACT_ROOT 'DefenseClawSetup-x64.exe.sbom.json'
-          foreach ($metadataPath in @($provenancePath, $sbomPath)) {
-            if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
-              throw "Package source-identity metadata is missing: $metadataPath"
-            }
-          }
-          $provenance = Get-Content -LiteralPath $provenancePath -Raw -Encoding UTF8 |
-            ConvertFrom-Json
-          if ([string]$provenance.source_commit -cne $expected) {
-            throw "Package provenance source commit does not match the expected head: $($provenance.source_commit) != $expected"
-          }
-          $sbom = Get-Content -LiteralPath $sbomPath -Raw -Encoding UTF8 | ConvertFrom-Json
-          if ([string]$sbom.comment -cne "DefenseClaw source commit: $expected") {
-            throw 'Package SBOM source commit does not match the expected head'
-          }
-
-          $wheelName = [string]$provenance.inputs.wheel
-          $archiveName = [string]$provenance.inputs.gateway_archive
-          foreach ($inputName in @($wheelName, $archiveName)) {
-            if ([IO.Path]::GetFileName($inputName) -cne $inputName) {
-              throw "Package provenance contains a non-canonical input name: $inputName"
-            }
-          }
-          $wheelPath = Join-Path $env:DC_ARTIFACT_ROOT $wheelName
-          $archivePath = Join-Path $env:DC_ARTIFACT_ROOT $archiveName
-          $wheelHash = (Get-FileHash -LiteralPath $wheelPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($wheelHash -cne [string]$provenance.inputs.wheel_sha256) {
-            throw 'Packaged CLI wheel digest does not match exact-head provenance'
-          }
-          $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($archiveHash -cne [string]$provenance.inputs.gateway_archive_sha256) {
-            throw 'Packaged gateway archive digest does not match exact-head provenance'
-          }
-
-          $verificationRoot = Join-Path $env:DC_STATE_ROOT (
-            'package-source-identity-' + [guid]::NewGuid().ToString('N')
-          )
-          [IO.Directory]::CreateDirectory($verificationRoot) | Out-Null
-          Expand-Archive -LiteralPath $archivePath -DestinationPath $verificationRoot
-          foreach ($binary in @(
-            @{ File = 'defenseclaw-gateway.exe'; Name = 'defenseclaw-gateway' },
-            @{ File = 'defenseclaw-hook.exe'; Name = 'defenseclaw-hook' }
-          )) {
-            $path = Join-Path $verificationRoot $binary.File
-            $result = Invoke-WindowsNativeProcess $path @('--version-json') -TimeoutSeconds 30
-            $report = [string]$result.StdOut | ConvertFrom-Json
-            if ([int]$report.schema_version -ne 1 -or
-                [string]$report.name -cne [string]$binary.Name -or
-                [string]$report.version -cne [string]$provenance.version -or
-                [string]$report.commit -cne $expected) {
-              throw "Packaged $($binary.Name) identity does not match exact-head provenance"
-            }
-          }
-      - name: Verify native setup wizard responsiveness
-        run: >-
-          ./scripts/invoke-windows-setup-standard-user-ci.ps1
-          -Mode wizard-smoke
-          -ArtifactRoot $env:DC_ARTIFACT_ROOT
-          -StateRoot (Join-Path $env:DC_STATE_ROOT 'wizard-standard-user')
-          -DiagnosticsRoot $env:DC_DIAGNOSTICS
-          -TimeoutSeconds 600
-      - name: Capture bounded diagnostics
-        if: ${{ failure() || cancelled() }}
-        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
-      - name: Upload diagnostics on failure
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-native-package-verify-diagnostics
-          path: ${{ env.DC_DIAGNOSTICS }}\**
-          if-no-files-found: ignore
-          retention-days: 5
-      - name: Always clean isolated processes, listeners, and temp state
-        if: ${{ always() }}
-        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
-
-  packaged-acceptance:
-    # The wizard connector cells and the installed lifecycle each start from
-    # and return to a clean profile; they ran back to back for ~25 minutes on
-    # one runner and now run as four parts on four runners.
-    name: Windows native Setup install and lifecycle acceptance (${{ matrix.part }})
-    needs: package-artifact
-    runs-on: windows-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        part: [wizard-1, wizard-2, wizard-3, lifecycle]
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - name: Initialize isolated paths
-        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: windows-native-package
-          path: ${{ env.DC_ARTIFACT_ROOT }}
-      - name: Native Setup EXE install, CLI/TUI smoke, repair, and uninstall
-        run: >-
-          ./scripts/invoke-windows-setup-standard-user-ci.ps1
-          -Mode setup-acceptance
-          -SetupAcceptancePart ${{ matrix.part }}
-          -StateRoot $env:DC_STATE_ROOT
-          -ArtifactRoot $env:DC_ARTIFACT_ROOT
-          -DiagnosticsRoot $env:DC_DIAGNOSTICS
-          -TimeoutSeconds 960
-      - name: Capture bounded redacted diagnostics
-        if: ${{ failure() || cancelled() }}
-        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
-      - name: Upload diagnostics on failure
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-native-acceptance-diagnostics-${{ matrix.part }}
-          path: ${{ env.DC_DIAGNOSTICS }}\**
-          if-no-files-found: ignore
-          retention-days: 5
-      - name: Always clean isolated processes, listeners, and temp state
-        if: ${{ always() }}
-        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
-
-  connector-contract:
-    name: Windows x64 connector contract / ${{ matrix.connector }}
-    needs: [powershell-static, package-artifact]
-    runs-on: windows-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        # The hash-pinned Devin distribution satisfies normal fixed-path Setup
-        # admission only; this deterministic lane infers no auth/live evidence.
-        connector: [codex, claudecode, amp, copilot, cursor, devin, hermes, antigravity, opencode]
-    env:
-      CONNECTOR: ${{ matrix.connector }}
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - name: Initialize isolated paths
-        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('ct-' + $env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + $env:CONNECTOR) -ArtifactLeaf windows-native-dist
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         if: ${{ matrix.connector == 'opencode' }}
         with:
-          go-version-file: go.mod
-          cache: false
+          node-version: "24"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-contract-assets
+          path: ${{ runner.temp }}\contract-assets
+      - name: Connector contract on an install.ps1 install
+        run: ./scripts/live-connector-e2e/run-windows-install.ps1 -Operation contract -Connector $env:CONNECTOR -Assets (Join-Path $env:RUNNER_TEMP 'contract-assets') -StateRoot (Join-Path $env:DC_STATE_ROOT $env:CONTRACT_LEAF)
+      - name: Upload contract results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-contract-results-${{ matrix.connector }}${{ matrix.leaf != 'contract' && '-bridge' || '' }}
+          path: ${{ env.DC_STATE_ROOT }}\${{ matrix.leaf }}\results.jsonl
+          if-no-files-found: warn
+          retention-days: 5
+      - name: Capture bounded diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-contract-diagnostics-${{ matrix.connector }}${{ matrix.leaf != 'contract' && '-bridge' || '' }}
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  install-lifecycle:
+    # The per-user install lifecycle on this tree's assets, one cell each:
+    # uninstall = install, version, status, doctor, the TUI at 80x24, a
+    # repair re-run and a full uninstall that leaves nothing behind
+    # (run-windows-install.ps1); fresh and files-in-use =
+    # test-install-lifecycle.ps1's lanes of those names.
+    name: Windows x64 install lifecycle / ${{ matrix.cell }}
+    needs: [changes, contract-assets]
+    if: ${{ !cancelled() && needs.contract-assets.result == 'success' }}
+    runs-on: windows-latest
+    # The budget of the job, not a test timeout. The two lanes also run on
+    # windows-latest in ci.yml (Install and Upgrade Smoke), with the same
+    # checkout, uv and asset-download setup; 22 successful runs, whole-job time:
+    # fresh 4.2-6.7 min (longest run 42293860826), files-in-use 10.1-14.8 min
+    # (median 12.4, longest run 42195438647). The uninstall cell has no hosted
+    # run yet; the 179 successful connector-contract cells, which do the same
+    # install.ps1 install and cleanup, took 2.7-6.5 min (longest run
+    # 42293860785), and the cell adds doctor, the TUI, a repair re-run and an
+    # uninstall. Every cell fits 20 minutes with a margin of 5 or more.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: [uninstall, fresh, files-in-use]
+    env:
+      CELL: ${{ matrix.cell }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('lc-' + $env:CELL) -DiagnosticsLeaf ('windows-native-diagnostics-lifecycle-' + $env:CELL)
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           # Only main writes the uv cache; other refs restore it.
@@ -1006,57 +943,26 @@ jobs:
           cache-dependency-glob: uv.lock
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: windows-native-package
-          path: ${{ env.DC_ARTIFACT_ROOT }}
-      - name: Stage pinned Devin CLI admission input
-        if: ${{ matrix.connector == 'devin' }}
+          name: windows-contract-assets
+          path: ${{ runner.temp }}\contract-assets
+      - name: Install, check, repair and uninstall
+        if: ${{ matrix.cell == 'uninstall' }}
+        run: ./scripts/live-connector-e2e/run-windows-install.ps1 -Operation lifecycle -PersistPath -Assets (Join-Path $env:RUNNER_TEMP 'contract-assets') -StateRoot (Join-Path $env:DC_STATE_ROOT 'lifecycle')
+      - name: Lifecycle lane ${{ matrix.cell }}
+        if: ${{ matrix.cell != 'uninstall' }}
         run: |
-          $archive = Join-Path $env:DC_ARTIFACT_ROOT 'devin-3000.4.25-x86_64-pc-windows.zip'
-          curl.exe --fail --location --retry 5 --retry-all-errors --output $archive https://static.devin.ai/cli/3000.4.25/devin-3000.4.25-x86_64-pc-windows.zip
-          if ($LASTEXITCODE -ne 0) { throw "pinned Devin CLI download failed with exit $LASTEXITCODE" }
-          $expected = '926EF4C2139D593BE564B93382D5A80F8AF0EE8AD7201CD35D50EEC9CD289808'
-          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -cne $expected) {
-            throw 'pinned Devin CLI archive digest mismatch'
-          }
-      - name: Required connector contract
-        run: |
-          $nativeHarness = (Resolve-Path './scripts/windows-native-ci.ps1').Path
-          $standardUserHarness = (Resolve-Path './scripts/invoke-windows-setup-standard-user-ci.ps1').Path
-          . $nativeHarness -NoRun
-          $contractStateRoot = [IO.Path]::GetFullPath($env:DC_STATE_ROOT)
-          $artifactRoot = [IO.Path]::GetFullPath($env:DC_ARTIFACT_ROOT)
-          $diagnosticsRoot = [IO.Path]::GetFullPath($env:DC_DIAGNOSTICS)
-          $contractDiagnostics = Join-Path $diagnosticsRoot 'contract-child'
-          $pwsh = Join-Path $PSHOME 'pwsh.exe'
-          # The wrapper creates a GUID-named user/profile/sandbox and returns
-          # only after it exits and its output drains.
-          $contract = Invoke-WindowsNativeProcess -FilePath $pwsh -ArgumentList @(
-            '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $standardUserHarness,
-            '-Mode', 'contract', '-Connector', $env:CONNECTOR,
-            '-StateRoot', $contractStateRoot, '-ArtifactRoot', $artifactRoot,
-            '-DiagnosticsRoot', $contractDiagnostics, '-TimeoutSeconds', '900'
-          ) -AllowedExitCodes @(0, 1) -TimeoutSeconds 960 -LogPath (
-            Join-Path $diagnosticsRoot 'contract-wrapper.log'
-          )
-          if ($contract.ExitCode -ne 0) {
-            throw 'packaged connector contract failed'
-          }
-      - name: Upload deterministic contract results
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-native-contract-results-${{ matrix.connector }}
-          path: ${{ env.DC_STATE_ROOT }}\results.jsonl
-          if-no-files-found: warn
-          retention-days: 5
-      - name: Capture bounded redacted diagnostics
+          # The lanes make their own profiles below the user temp folder, as
+          # in release.yaml's install gate.
+          ./scripts/test-install-lifecycle.ps1 -Assets (Join-Path $env:RUNNER_TEMP 'contract-assets') -Lanes $env:CELL
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
       - name: Upload diagnostics on failure
         if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: windows-native-contract-diagnostics-${{ matrix.connector }}
+          name: windows-native-lifecycle-diagnostics-${{ matrix.cell }}
           path: ${{ env.DC_DIAGNOSTICS }}\**
           if-no-files-found: ignore
           retention-days: 5
@@ -1073,10 +979,9 @@ jobs:
       - windows-python
       - windows-telemetry-registry
       - powershell-static
-      - package-artifact
-      - package-verify
-      - packaged-acceptance
+      - contract-assets
       - connector-contract
+      - install-lifecycle
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -1095,4 +1000,4 @@ jobs:
             $summary = $failed | ForEach-Object { "$($_.Name)=$($_.Value.result)" }
             throw "Required Windows validation did not succeed: $($summary -join ', ')"
           }
-          Write-Host 'Every required deterministic native Windows x64 validation job succeeded; this does not certify preview connectors.'
+          Write-Host 'Every required deterministic native Windows x64 validation job succeeded; a green connector contract does not certify a connector.'

@@ -28,6 +28,13 @@ const MaxNestingDepth = 512
 // their over-limit path and never hand such a command to a recursive parser
 // or an expander.
 func TooDeep(command string) bool {
+	if len(command) >= largeCommandMin && len(command) <= largeCommandMax {
+		return tooDeepLarge(command)
+	}
+	return tooDeepScan(command)
+}
+
+func tooDeepScan(command string) bool {
 	depth, braces := 0, false
 	for i := 0; i < len(command); i++ {
 		switch command[i] {
@@ -79,6 +86,19 @@ func ParseWithComments(command string) (*syntax.File, bool) {
 }
 
 func parse(command string, comments bool) (*syntax.File, bool) {
+	if len(command) < largeCommandMin || len(command) > largeCommandMax {
+		return parseCommand(command, comments)
+	}
+	key := parseCacheKey{command, comments}
+	if file, ok, hit := cachedParse(key); hit {
+		return file, ok
+	}
+	file, ok := parseCommand(command, comments)
+	storeParse(key, file, ok)
+	return file, ok
+}
+
+func parseCommand(command string, comments bool) (*syntax.File, bool) {
 	if TooDeep(command) {
 		return nil, false
 	}

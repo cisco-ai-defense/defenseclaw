@@ -206,3 +206,83 @@ func TestGatewayConfigLoadErrorNamesTheWrongValueType(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0825: a start or restart refused for a writable audit folder ends with the
+// repair and the restart step, not with the generic gateway-log pointer, and a
+// cause without a repair keeps that pointer.
+func TestGatewayReadinessFailureEndsWithTheRepairStep(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "gateway.log")
+	offset := gatewayLogSize(logPath)
+	folder := "/home/u"
+	repair := "audit: database directory " + folder + " is group- or other-writable; as the account that owns it, " +
+		"run: chmod go-w \x27" + folder + "\x27, then run: defenseclaw-gateway restart"
+	probe := fmt.Errorf("%w (last health probe: dial tcp: connection refused)", errGatewayExitedBeforeReadiness)
+	for _, tc := range []struct {
+		name, logged string
+		wantRepair   bool
+	}{
+		{"repair", "Error: failed to open audit store: " + repair + "\n", true},
+		{"long repair", "Error: failed to open audit store: " + strings.Repeat("x", 300) + " " + repair + "\n", true},
+		{"locked database", "Error: failed to open audit store: audit: refresh baselines: database is locked (5)\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(logPath, []byte("[gateway] starting\n"+tc.logged), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, prefix := range []string{"start daemon readiness", "restart daemon readiness"} {
+				cause := gatewayExitedBeforeReadinessError(probe, logPath, offset)
+				msg := gatewayReadinessFailure(prefix, cause, logPath).Error()
+				if tc.wantRepair {
+					if !strings.HasSuffix(msg, "then run: defenseclaw-gateway restart") {
+						t.Errorf("%q does not end with the restart step", msg)
+					}
+					if strings.Contains(msg, "for errors)") {
+						t.Errorf("%q still carries the generic gateway-log pointer", msg)
+					}
+					if !strings.Contains(msg, "chmod go-w \x27"+folder+"\x27") {
+						t.Errorf("%q lost the repair command", msg)
+					}
+				} else if !strings.HasSuffix(msg, "for errors)") || !strings.Contains(msg, logPath) {
+					t.Errorf("%q lost the gateway-log pointer", msg)
+				}
+			}
+		})
+	}
+}
+
+// A valid audit folder with a long name makes the whole refusal longer than the
+// 400 bytes other causes are cut to. The final error keeps the complete folder, the
+// chmod go-w repair and the restart step, up to the longest path the system allows.
+func TestGatewayReadinessFailureKeepsTheCompleteRepairForALongFolder(t *testing.T) {
+	probe := fmt.Errorf("%w (last health probe: dial tcp: connection refused)", errGatewayExitedBeforeReadiness)
+	long := "/home/u"
+	for len(long) < 3000 {
+		long += "/" + strings.Repeat("b", 200)
+	}
+	// Components made of apostrophes: the shell-quoted copy of the folder in the
+	// repair command is about four times as long as the folder.
+	quoted := "/home/u"
+	for len(quoted) < 3300 {
+		quoted += "/" + strings.Repeat("\x27", 200)
+	}
+	for _, folder := range []string{"/home/u/" + strings.Repeat("a", 180), long, quoted} {
+		logPath := filepath.Join(t.TempDir(), "gateway.log")
+		command := "\x27" + strings.ReplaceAll(folder, "\x27", "\x27\\\x27\x27") + "\x27"
+		repair := "audit: database directory " + folder + " is group- or other-writable; as the account that owns it, " +
+			"run: chmod go-w " + command + ", then run: defenseclaw-gateway restart"
+		if err := os.WriteFile(logPath, []byte("Error: failed to open audit store: "+repair+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cause := gatewayExitedBeforeReadinessError(probe, logPath, 0)
+		for _, prefix := range []string{"start daemon readiness", "restart daemon readiness"} {
+			msg := gatewayReadinessFailure(prefix, cause, logPath).Error()
+			if !strings.Contains(msg, "database directory "+folder+" is group- or other-writable") ||
+				!strings.Contains(msg, "chmod go-w "+command) {
+				t.Errorf("%d-byte folder: %s lost the folder or the chmod repair", len(folder), prefix)
+			}
+			if !strings.HasSuffix(msg, "then run: defenseclaw-gateway restart") {
+				t.Errorf("%d-byte folder: %s lost its final step", len(folder), prefix)
+			}
+		}
+	}
+}

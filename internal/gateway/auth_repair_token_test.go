@@ -38,7 +38,7 @@ func newAuthRepairedClient(t *testing.T) *Client {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	client.tryAuthRepair(errors.New("AUTH_TOKEN_MISMATCH"))
+	client.handleConnectRejection(errors.New("AUTH_TOKEN_MISMATCH"))
 	if got := client.RefreshedToken(); got != "rotated-token" {
 		t.Fatalf("RefreshedToken = %q, want rotated-token", got)
 	}

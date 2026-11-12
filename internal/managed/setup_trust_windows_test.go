@@ -105,13 +105,33 @@ func TestValidateSetupPathKeepsLeafStrict(t *testing.T) {
 		!strings.Contains(err.Error(), "untrusted Windows principal") {
 		t.Fatalf("leaf untrusted writer error = %v", err)
 	}
-	if windowsAdminEquivalentOwner(user) {
-		return // an administrator-owned leaf is accepted and logged by design
-	}
 	setTestFileDACL(t, leaf, testDACL(t, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;"+user.String()+")"), true)
+	if windowsAdminEquivalentOwner(user) || IsWindowsTrustedAdminOwner(user) {
+		// The test account owns the leaf, and an administrator or SYSTEM is a
+		// trusted owner by design (as SYSTEM this assertion failed: GAP-0672
+		// sweep). Hand the leaf to a principal that is not, so the leaf owner
+		// rule is proven under every identity.
+		setSetupTestOwner(t, leaf, windows.WinBuiltinUsersSid)
+	}
 	if err := ValidateSetupPath(leaf, "setup test", SetupPathFile); err == nil ||
 		!strings.Contains(err.Error(), "owner") {
 		t.Fatalf("leaf owned by a non-administrator without a pinned writer = %v", err)
+	}
+}
+
+// setSetupTestOwner makes the well-known principal kind the owner of path.
+// An owner other than the caller needs SeRestorePrivilege, which an elevated
+// administrator and SYSTEM hold.
+func setSetupTestOwner(t *testing.T, path string, kind windows.WELL_KNOWN_SID_TYPE) {
+	t.Helper()
+	owner, err := windows.CreateWellKnownSid(kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RunWithWindowsRepairPrivileges(func() error {
+		return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil)
+	}); err != nil {
+		t.Fatalf("make %s the owner of %s: %v", owner.String(), path, err)
 	}
 }
 

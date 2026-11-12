@@ -23,7 +23,9 @@ import (
 // whether it is a user account (SidTypeUser).
 type windowsAccount struct {
 	SID, Name string
-	User      bool
+	// Domain is the LSA domain of the account, as LookupAccountSid gave it.
+	Domain string
+	User   bool
 }
 
 // entraAccountDomain is the domain the LSA puts Entra ID accounts in.

@@ -70,11 +70,14 @@ type ConnectorSignals struct {
 
 // SetupOpts is passed to Setup/Teardown during `defenseclaw setup`.
 type SetupOpts struct {
-	DataDir              string // ~/.defenseclaw/
-	CodexOtelEnvironment string // connector-local tag shared with the live sidecar
-	ProxyAddr            string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
-	APIAddr              string // 127.0.0.1:18970 (API server — inspection endpoints)
-	APIToken             string // gateway bearer token; written to the hook token file, never into a script
+	DataDir string // ~/.defenseclaw/
+	// pendingHookScriptDigests is scoped to one install read-back. It is never
+	// persisted or accepted by ordinary verification and gateway readers.
+	pendingHookScriptDigests map[string]string
+	CodexOtelEnvironment     string // connector-local tag shared with the live sidecar
+	ProxyAddr                string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
+	APIAddr                  string // 127.0.0.1:18970 (API server — inspection endpoints)
+	APIToken                 string // gateway bearer token; written to the hook token file, never into a script
 	// ConfigHome is the exact installer-validated user configuration root used
 	// by hidden native-maintenance commands. Ordinary setup leaves it empty and
 	// uses each vendor's documented discovery rules.
@@ -281,6 +284,14 @@ type SetupOpts struct {
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
 
+	// AcceptPriorReleaseRender makes a read-only verification accept the render
+	// an earlier release wrote of a Windows awaited hook bridge (the
+	// Constrained Language fallback end of legacyWindowsAwaitedHookCommand) as
+	// the current one, where a connector's registration is compared with its
+	// render. Only the Windows enterprise guardian sets it, to prove that a
+	// signed-out account's only difference from this release is the render of
+	// an earlier one (GAP-0980). It never reaches a write.
+	AcceptPriorReleaseRender bool
 	// ManagedTargetSID is set only by the Windows enterprise guardian when it
 	// sets up or verifies one per-user target: the target account's SID.
 	// Custody checks then trust that account the way they trust the current

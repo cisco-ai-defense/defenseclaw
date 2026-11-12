@@ -528,6 +528,7 @@ func rejectV9RemovedKeys(source string, root *yaml.Node) error {
 		{"skill_actions", "admission.skill.actions"},
 		{"mcp_actions", "admission.mcp.actions"},
 		{"plugin_actions", "admission.plugin.actions"},
+		{"update_check", "update.check"},
 	} {
 		if node := v8YAMLMapValue(root, removed.key); node != nil {
 			return v9RemovedKeyError(source, v8YAMLChildPath("$", removed.key), node, removed.target)
@@ -636,49 +637,68 @@ func rejectV9ConnectorRulePackDirs(source string, scope *yaml.Node, path string)
 	return nil
 }
 
-func rejectV8YAMLLegacyKeys(source string, root *yaml.Node) error {
-	for _, legacy := range []struct{ key, target string }{
-		{"otel", "observability resource, policies, and destinations"},
-		{"audit_sinks", "observability.destinations"},
-		{"audit_db", "observability.local.path"},
-		{"judge_bodies_db", "observability.local.judge_bodies_path"},
-	} {
-		if node := v8YAMLMapValue(root, legacy.key); node != nil {
-			return v8YAMLLegacyError(source, v8YAMLChildPath("$", legacy.key), node, legacy.target)
-		}
-	}
-	if privacy := v8YAMLMapValue(root, "privacy"); privacy != nil && privacy.Kind == yaml.MappingNode {
-		if node := v8YAMLMapValue(privacy, "disable_redaction"); node != nil {
-			return v8YAMLLegacyError(source, "$.privacy.disable_redaction", node,
-				"observability defaults, bucket policies, and destination routes")
-		}
-	}
-	if discovery := v8YAMLMapValue(root, "ai_discovery"); discovery != nil && discovery.Kind == yaml.MappingNode {
-		if node := v8YAMLMapValue(discovery, "emit_otel"); node != nil {
-			return v8YAMLLegacyError(source, "$.ai_discovery.emit_otel", node,
-				"the ai.discovery bucket and destination routing policy")
-		}
-	}
-	if node := v8YAMLMapValue(root, "splunk"); node != nil {
-		return v8YAMLLegacyError(source, "$.splunk", node, "an observability destination with kind: splunk_hec")
-	}
+// legacyV7RetiredKeys is the v7-to-v8 migration's key list. The Secure Client
+// source check and the schema diagnostic for later sources share these paths
+// and replacements so a retired name never gets a spelling suggestion.
+var legacyV7RetiredKeys = []struct {
+	path   []string
+	target string
+}{
+	{[]string{"otel"}, "observability resource, policies, and destinations"},
+	{[]string{"audit_sinks"}, "observability.destinations"},
+	{[]string{"audit_db"}, "observability.local.path"},
+	{[]string{"judge_bodies_db"}, "observability.local.judge_bodies_path"},
+	{[]string{"privacy", "disable_redaction"}, "observability defaults, bucket policies, and destination routes"},
+	{[]string{"ai_discovery", "emit_otel"}, "the ai.discovery bucket and destination routing policy"},
+	{[]string{"splunk"}, "an observability destination with kind: splunk_hec"},
+	{[]string{"observability", "connectors", "*", "audit_sinks"}, "observability destinations with connector selectors"},
+}
 
-	observability := v8YAMLMapValue(root, "observability")
-	if observability == nil || observability.Kind != yaml.MappingNode {
-		return nil
-	}
-	connectors := v8YAMLMapValue(observability, "connectors")
-	if connectors == nil || connectors.Kind != yaml.MappingNode {
-		return nil
-	}
-	for index := 0; index+1 < len(connectors.Content); index += 2 {
-		name, connector := connectors.Content[index], connectors.Content[index+1]
-		if name.Kind != yaml.ScalarNode || connector.Kind != yaml.MappingNode {
+func legacyV7RetiredReplacement(path []string) string {
+	for _, key := range legacyV7RetiredKeys {
+		if len(path) != len(key.path) {
 			continue
 		}
-		if node := v8YAMLMapValue(connector, "audit_sinks"); node != nil {
-			path := v8YAMLChildPath("$.observability.connectors", name.Value) + ".audit_sinks"
-			return v8YAMLLegacyError(source, path, node, "observability destinations with connector selectors")
+		matches := true
+		for index, part := range path {
+			if key.path[index] != "*" && key.path[index] != part {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return key.target
+		}
+	}
+	return ""
+}
+
+func findLegacyV7Key(root *yaml.Node, parts []string, path string) (*yaml.Node, string) {
+	if len(parts) == 0 {
+		return root, path
+	}
+	if root == nil || root.Kind != yaml.MappingNode {
+		return nil, ""
+	}
+	if parts[0] == "*" {
+		for index := 0; index+1 < len(root.Content); index += 2 {
+			name := root.Content[index]
+			if name.Kind != yaml.ScalarNode {
+				continue
+			}
+			if node, found := findLegacyV7Key(root.Content[index+1], parts[1:], v8YAMLChildPath(path, name.Value)); node != nil {
+				return node, found
+			}
+		}
+		return nil, ""
+	}
+	return findLegacyV7Key(v8YAMLMapValue(root, parts[0]), parts[1:], v8YAMLChildPath(path, parts[0]))
+}
+
+func rejectV8YAMLLegacyKeys(source string, root *yaml.Node) error {
+	for _, key := range legacyV7RetiredKeys {
+		if node, path := findLegacyV7Key(root, key.path, "$"); node != nil {
+			return v8YAMLLegacyError(source, path, node, key.target)
 		}
 	}
 	return nil

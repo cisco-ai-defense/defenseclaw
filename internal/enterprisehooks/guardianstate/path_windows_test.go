@@ -11,8 +11,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -30,6 +33,48 @@ func installedStateFixture(t *testing.T) (string, string, string) {
 	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawCertGateway_ReadinessFixture`)
 	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authorizationDir)
 	return runtimeDir, authorizationDir, PathForStateRoot(guardianDir)
+}
+
+func TestReadStateRetriesTransientPathTrustFailure(t *testing.T) {
+	_, _, path := installedStateFixture(t)
+	if err := WriteState(path, StateReady); err != nil {
+		t.Fatal(err)
+	}
+	previous := readStateReparseCheck
+	checks := 0
+	readStateReparseCheck = func(checked string) error {
+		checks++
+		if checks == 1 {
+			return windows.ERROR_SHARING_VIOLATION
+		}
+		return winpath.RejectReparseChain(checked)
+	}
+	t.Cleanup(func() { readStateReparseCheck = previous })
+	if got := ReadState(path); got != StateReady || checks < 2 {
+		t.Fatalf("state = %q, path checks = %d; want ready after retry", got, checks)
+	}
+}
+
+func TestReadStateSurvivesTransientNameBurst(t *testing.T) {
+	_, _, path := installedStateFixture(t)
+	if err := WriteState(path, StateReady); err != nil {
+		t.Fatal(err)
+	}
+	previous := readStateReparseCheck
+	const transientChecks = 40
+	t.Cleanup(safefile.SetTransientRetrySleepForTest(func(time.Duration) {}))
+	checks := 0
+	readStateReparseCheck = func(checked string) error {
+		checks++
+		if checks <= transientChecks {
+			return windows.ERROR_FILE_NOT_FOUND
+		}
+		return winpath.RejectReparseChain(checked)
+	}
+	t.Cleanup(func() { readStateReparseCheck = previous })
+	if got := ReadState(path); got != StateReady || checks != transientChecks+1 {
+		t.Fatalf("state=%q checks=%d; want ready after %d transient checks", got, checks, transientChecks)
+	}
 }
 
 func TestPathForDataDirWindowsInstalledGuardianTransitions(t *testing.T) {

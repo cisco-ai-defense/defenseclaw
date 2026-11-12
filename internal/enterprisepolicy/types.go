@@ -27,6 +27,7 @@ package enterprisepolicy
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -145,6 +146,42 @@ type Options struct {
 	CursorFailOpen bool
 	// SkipTrustChecks disables ancestor ownership checks; only tests set it.
 	SkipTrustChecks bool
+
+	// keptLinks are the policy paths on which RemoveWindowsGoOwned kept a link
+	// (lower-cased): the removal of the target skips those paths alone and
+	// still removes DefenseClaw's entry at its other paths (GAP-0758). Set
+	// only by RemoveWindowsGoOwned.
+	keptLinks map[string]bool
+	// unprotected are the vendor folders a removal found that do not protect
+	// the file DefenseClaw recorded in them (Windows, case c); the removal
+	// strips DefenseClaw's entry there only from a file it can still trust.
+	unprotected []unprotectedVendorFolder
+	// removing marks an uninstall's removal (removingFrom): a recorded file
+	// another account can change is then kept and warned about, not an error.
+	removing bool
+}
+
+// removingFrom is opts for a removal that found the unprotected folders.
+func (o Options) removingFrom(unprotected []unprotectedVendorFolder) Options {
+	o.unprotected = unprotected
+	o.removing = true
+	return o
+}
+
+// unprotectedFolderOf returns the unprotected folder path lies in, at any
+// depth.
+func (o Options) unprotectedFolderOf(path string) (unprotectedVendorFolder, bool) {
+	if path == "" {
+		return unprotectedVendorFolder{}, false
+	}
+	clean := strings.ToLower(filepath.Clean(platformPath(o, path)))
+	for _, folder := range o.unprotected {
+		dir := strings.ToLower(strings.TrimRight(filepath.Clean(folder.dir), `\/`))
+		if strings.HasPrefix(clean, dir+string(filepath.Separator)) {
+			return folder, true
+		}
+	}
+	return unprotectedVendorFolder{}, false
 }
 
 func runtimeGOOS() string { return runtime.GOOS }
@@ -223,8 +260,15 @@ type State struct {
 	Conflicts        []string `json:"conflicts,omitempty"`
 	Pending          []string `json:"pending,omitempty"`
 	Details          []string `json:"details,omitempty"`
-	Changed          bool     `json:"changed"`
-	Covered          bool     `json:"covered"`
+	// Warnings are what the administrator must act on although the pass
+	// went on, for example a vendor folder an uninstall left unprotected.
+	Warnings []string `json:"warnings,omitempty"`
+	// Reprotected lists the vendor folders this pass put back to
+	// DefenseClaw's protected form (E3 case c, safe transaction); the caller
+	// writes one audit row for each.
+	Reprotected []ReprotectedFolder `json:"reprotected,omitempty"`
+	Changed     bool                `json:"changed"`
+	Covered     bool                `json:"covered"`
 	// Drift marks DefenseClaw entries that are in place but differ from
 	// what the next publish writes (a policy file mode agents cannot read
 	// through, a Claude Code floor drop-in it must withdraw). A conflict
@@ -281,6 +325,10 @@ func (s *State) entryConflict(format string, args ...any) {
 
 func (s *State) detail(format string, args ...any) {
 	s.Details = append(s.Details, fmt.Sprintf(format, args...))
+}
+
+func (s *State) warn(format string, args ...any) {
+	s.Warnings = append(s.Warnings, fmt.Sprintf(format, args...))
 }
 
 func (s *State) finish() {

@@ -324,6 +324,10 @@ func TestRescanCycleUngatedScansEveryCycle(t *testing.T) {
 }
 
 func TestMCPFingerprintChangesWithRulePackFile(t *testing.T) {
+	// A custom pack is read only once the loader has accepted it (GAP-0632):
+	// a valid folder, pinned by its files digest. The loader records that
+	// verdict once per load, so the fingerprint must follow the folder
+	// content after it.
 	dir := t.TempDir()
 	original, err := os.ReadFile(filepath.Join("..", "..", "policies", "guardrail", "default", "suppressions.yaml"))
 	if err != nil {
@@ -333,9 +337,17 @@ func TestMCPFingerprintChangesWithRulePackFile(t *testing.T) {
 	if err := os.WriteFile(file, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	pin, err := guardrail.RulePackDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{}
 	cfg.Guardrail.RulePack = "local"
-	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"local": {Path: dir}}
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"local": {Path: dir, Digest: "sha256:" + pin}}
+	cfg.CheckCustomRulePacks()
+	if err := cfg.Guardrail.CustomRulePackError("local"); err != nil {
+		t.Fatalf("fixture pack refused: %v", err)
+	}
 	w := New(cfg, nil, nil, nil, nil, nil, nil)
 	evt := InstallEvent{Type: InstallMCP, Connector: "codex"}
 	before := w.scannerFingerprint(evt)
@@ -344,6 +356,53 @@ func TestMCPFingerprintChangesWithRulePackFile(t *testing.T) {
 	}
 	if after := w.scannerFingerprint(evt); after == before {
 		t.Fatal("MCP fingerprint did not change with the rule-pack file")
+	}
+}
+
+// A custom pack the loader refuses and whose selection falls back to a
+// built-in pack (here: a pin of the empty file set) is not read by any scan,
+// so its folder is not a fingerprint input. A stale or missing pin is an
+// integrity refusal instead (GAP-0632): the entry stays the selected pack, so
+// an edit to its folder still changes the fingerprint.
+func TestMCPFingerprintFollowsOnlyTheFolderOfASelectedRulePack(t *testing.T) {
+	for _, tc := range []struct {
+		name, pin string
+		follows   bool
+	}{
+		{"missing pin is a stale pin", "", true},
+		{"wrong pin is a stale pin", "sha256:" + strings.Repeat("0", 64), true},
+		{"empty file set pin falls back", config.EmptyRulePackFilesDigest, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			original, err := os.ReadFile(filepath.Join("..", "..", "policies", "guardrail", "default", "suppressions.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(dir, "suppressions.yaml")
+			if err := os.WriteFile(file, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.Config{}
+			cfg.Guardrail.RulePack = "local"
+			cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"local": {Path: dir, Digest: tc.pin}}
+			cfg.CheckCustomRulePacks()
+			if cfg.Guardrail.CustomRulePackError("local") == nil {
+				t.Fatal("the entry must have a config error")
+			}
+			if stale := config.IsStalePinError(cfg.Guardrail.CustomRulePackError("local")); stale != tc.follows {
+				t.Fatalf("stale pin = %v, want %v", stale, tc.follows)
+			}
+			w := New(cfg, nil, nil, nil, nil, nil, nil)
+			evt := InstallEvent{Type: InstallMCP, Connector: "codex"}
+			before := w.scannerFingerprint(evt)
+			if err := os.WriteFile(file, append(original, 0x0a), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if after := w.scannerFingerprint(evt); (after != before) != tc.follows {
+				t.Fatalf("fingerprint changed = %v after a folder edit, want %v", after != before, tc.follows)
+			}
+		})
 	}
 }
 

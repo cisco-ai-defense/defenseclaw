@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/productlayout"
 	"github.com/defenseclaw/defenseclaw/internal/sensitivequery"
 )
 
@@ -603,14 +604,84 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 	indices := entropyRE.FindAllStringIndex(input, -1)
 	result := make([]candidate, 0, len(indices))
 	for _, index := range indices {
-		value := input[index[0]:index[1]]
-		accepted := entropyBoundary(input, index[0], index[1]) && validHighEntropy(value, fieldClass)
-		if overlapsCredentialClaim(index[0], index[1], prior) {
-			accepted = false
+		boundary := entropyBoundary(input, index[0], index[1])
+		span := input[index[0]:index[1]]
+		parts, folderFound := splitAtProductFolders(span)
+		// A product folder component is neutral. A span without one is judged
+		// exactly as before. A span with one is a secret only when the detector
+		// redacts it as written AND still redacts the path that remains with the
+		// folder components taken out (the same rule applied to the whole
+		// remaining path, never to pieces of it); then every remaining range is
+		// redacted and the folder names stay readable. A span the detector leaves
+		// alone as written (a hyphenated folder name inside a slash-form path
+		// fails the alphabet check) is never newly redacted, so the result is
+		// never more than the unchanged detector gives.
+		accepted := boundary && validHighEntropy(span, fieldClass)
+		if !folderFound {
+			if overlapsCredentialClaim(index[0], index[1], prior) {
+				accepted = false
+			}
+			result = append(result, candidate{start: index[0], end: index[1], accepted: accepted})
+			continue
 		}
-		result = append(result, candidate{start: index[0], end: index[1], accepted: accepted})
+		accepted = accepted && validHighEntropy(joinRanges(span, parts), fieldClass)
+		for i, part := range parts {
+			start, end := index[0]+part[0], index[0]+part[1]
+			result = append(result, candidate{start: start, end: end, accepted: accepted && !overlapsCredentialClaim(start, end, prior), continues: i > 0})
+		}
 	}
 	return result
+}
+
+// joinRanges rebuilds span with the product folder components taken out: the
+// ranges in order, one slash where a folder stood.
+func joinRanges(span string, parts [][2]int) string {
+	var builder strings.Builder
+	for i, part := range parts {
+		if i > 0 {
+			builder.WriteByte(byte(0x2f))
+		}
+		builder.WriteString(span[part[0]:part[1]])
+	}
+	return builder.String()
+}
+
+// splitAtProductFolders returns the byte ranges of span that remain candidates
+// once product folder names are taken out. A product folder name
+// (DefenseClaw-HookRuntime, DefenseClaw, ...) is a public layout constant, not
+// key material, and the entropy alphabet includes the slash, so a POSIX-form
+// path reaches the detector as one span with the folder inside it. A folder
+// name is recognized only as a whole path component; a secret that merely
+// contains or extends one stays in the surrounding range and is judged as
+// before. A span without a product folder component is returned whole, with
+// found false.
+func splitAtProductFolders(span string) (parts [][2]int, found bool) {
+	parts = make([][2]int, 0, 1)
+	runStart, runEnd := -1, 0
+	flush := func() {
+		if runStart >= 0 && runEnd > runStart {
+			parts = append(parts, [2]int{runStart, runEnd})
+		}
+		runStart = -1
+	}
+	for componentStart := 0; componentStart <= len(span); {
+		componentEnd := componentStart + strings.IndexByte(span[componentStart:], byte(0x2f))
+		if componentEnd < componentStart {
+			componentEnd = len(span)
+		}
+		if productlayout.IsFolderName(span[componentStart:componentEnd]) {
+			found = true
+			flush()
+		} else {
+			if runStart < 0 {
+				runStart = componentStart
+			}
+			runEnd = componentEnd
+		}
+		componentStart = componentEnd + 1
+	}
+	flush()
+	return parts, found
 }
 
 func validHighEntropy(value string, fieldClass observability.FieldClass) bool {

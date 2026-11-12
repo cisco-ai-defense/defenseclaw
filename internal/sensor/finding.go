@@ -320,6 +320,13 @@ type Snapshot struct {
 	// (hook_subtree_unexpected). They are forwarded and scored like any
 	// other process; this only counts them.
 	HostPlaneHookUnexpected int64
+	// HostPlaneClientExecs counts, since the plane started, the attributed
+	// exec events of Claude release images by the image digest state they
+	// came with ("read", "pending", "failed", "unstated" from a helper that
+	// predates it), the ones recorded ("<state>_reported"), and the
+	// pending ones a later digest dropped ("pending_dropped"); nil while
+	// all are zero (cowork-1-0-8 GAP-0067).
+	HostPlaneClientExecs map[string]int64
 	// KernelEvents are the kernel control outcomes since the previous poll,
 	// at most maxKernelEventsPerPoll; KernelEventsDropped counts the rest.
 	KernelEvents        []KernelEvent

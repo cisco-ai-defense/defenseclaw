@@ -144,7 +144,7 @@ func enterpriseWindowsEnumerateRunningAgents(stderr io.Writer, connectors []stri
 				unknownSeen[key+"\x00"+connector] = true
 				reason := fmt.Sprintf("%s runs for this account, but its account SID could not be resolved this cycle (the lookup failed or did not answer in time), so DefenseClaw cannot tell whether a row enrolls it; it counts as unprotected until the lookup answers", label)
 				if user == "" {
-					user = "(unknown account)"
+					user = enterprisehooks.UnprotectedUnknownAccount
 					reason = fmt.Sprintf("%s runs, but the account behind the process could not be identified this cycle, so DefenseClaw cannot tell whether a row enrolls it; it counts as unprotected until the account is known", label)
 				}
 				unknown = append(unknown, enterprisehooks.UnprotectedAgent{

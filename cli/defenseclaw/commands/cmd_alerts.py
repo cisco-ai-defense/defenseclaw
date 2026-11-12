@@ -36,7 +36,7 @@ import click
 import requests
 
 from defenseclaw import ux
-from defenseclaw.alert_semantics import copilot_hook_target
+from defenseclaw.alert_semantics import copilot_hook_target, cowork_hook_target, known_surface, surface_label
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient, alert_disposition_timeout_seconds
 from defenseclaw.logger import _gateway_api_host
@@ -212,6 +212,59 @@ def _event_connector(event) -> str:
     return _kv(event.details or "").get("connector", "").lower()
 
 
+def _structured_surface(structured) -> str | None:
+    """The agent surface a row's structured payload records: the hook
+    decision's ``defenseclaw.agent.surface``, or the hook audit envelope's
+    ``surface`` or ``extra.surface``. None when it records none."""
+    if not isinstance(structured, dict):
+        return None
+    extra = structured.get("extra")
+    for value in (
+        structured.get("defenseclaw.agent.surface"),
+        structured.get("surface"),
+        extra.get("surface") if isinstance(extra, dict) else None,
+    ):
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _event_surface(event, hook_details: dict[str, list[str]] | None = None) -> str:
+    """The agent surface of an alert: ``cowork`` for a Claude Cowork call.
+
+    The row's structured surface decides when it records one. Only a
+    legacy row with no structured payload reads the ``surface=`` detail
+    before ``details_json``: the details of a row with one hold free text
+    (an unquoted ``reason=``, a ``raw_payload=``), so a terminal call that
+    only mentions ``surface=cowork`` is not Cowork (cowork audit review 2
+    N1). A finding takes it from the hook rows of the same request, their
+    structured surface included, so a redaction profile that drops the
+    details does not change it (cowork audit S1); hook_details_for_alerts
+    drops the detail of those rows that have a payload. "" for every other
+    call: only a known agent surface counts, not the asset policy's
+    ``surface=hook`` (cowork audit M2).
+    internal/audit/cowork_alert_target.go selects the same rows."""
+    payload = getattr(event, "structured", None)
+    structured = _structured_surface(payload)
+    if structured is not None:
+        return known_surface(structured)
+    if not (isinstance(payload, dict) and payload) and (
+        surface := known_surface(_kv(_strip_details_json(event.details or "")).get("surface", ""))
+    ):
+        return surface
+    for raw in (hook_details or {}).get(getattr(event, "id", ""), []):
+        if surface := known_surface(_kv(_strip_details_json(raw)).get("surface", "")):
+            return surface
+    return ""
+
+
+def _event_target(event, hook_details: dict[str, list[str]] | None = None) -> str:
+    """The Target an alert row shows: one Copilot spelling (GAP-2619), and
+    ``cowork:*`` for a Claude Cowork call (GAP-0047), as the TUI shows it."""
+    target = copilot_hook_target(event.target or "", _event_connector(event))
+    return cowork_hook_target(target, _event_surface(event, hook_details)) if target else target
+
+
 def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
     """Decision of the connector-hook rows recorded for the same request.
 
@@ -220,6 +273,7 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
     (GAP-1303)."""
     from defenseclaw.hook_metrics import (  # noqa: PLC0415
         POST_TOOL_DECISION,
+        allowed_finding_hook_label,
         detection_only_hook_label,
         would_block_hook_label,
     )
@@ -239,6 +293,8 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
             # the connector's mode (GAP-1303, GAP-1531); a Hermes or Amp prompt
             # in action mode got a notice instead (GAP-0898).
             decision = would_block_hook_label(hook_event, kv.get("mode", ""))
+        elif not decision and action == "allow":
+            decision = allowed_finding_hook_label(hook_event, kv.get("mode", "")) or "allow"
         elif not decision and action:
             decision = action
     return decision
@@ -390,7 +446,11 @@ def _finding_facts(
         }
     target = copilot_hook_target(target)
     facts = {
-        "target": target,
+        # A Cowork finding reads cowork:PreToolUse; the decision and the
+        # location still compare against the stored claudecode target.
+        "target": cowork_hook_target(target, _event_surface(e, hook_details)),
+        # alerts --json keeps the stored spelling and adds "surface" (cowork audit S2).
+        "stored_target": target,
         "decision": _hook_decision(hook_details.get(e.id, []), target),
         "connector": _event_connector(e),
         "rule": f"{rule_id}: {title}" if title else rule_id,
@@ -606,7 +666,7 @@ def _render_table(alert_list: list, store, connector: str | None = None, *, secu
         sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
         ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
         action = _trunc(e.action or "", _W_ACTION)
-        hook_target = copilot_hook_target(e.target or "", _event_connector(e))
+        hook_target = _event_target(e)
         shown_target = _short_hook_target(hook_target, _event_connector(e)) if secure_client else hook_target
         target = _trunc_path(shown_target, w_target)
         kv_map = _kv(e.details or "")
@@ -754,16 +814,20 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
             "timestamp": e.timestamp.isoformat() if e.timestamp else "",
             "severity": e.severity,
             "action": e.action,
+            # The stored target, as before 1.0.9, so scripts that join on it
+            # keep working; "surface" says Cowork (cowork audit S2). The
+            # table and --show print cowork:* (GAP-0047).
             "target": e.target,
             "actor": e.actor,
             "connector": _event_connector(e),
+            "surface": _event_surface(e, hook_details),
             "details": e.details,
         }
         # The same facts the table and --show print: a finding row's own
         # target and details are empty or only "finding.observed" (GAP-1615).
         facts = _finding_facts(e, hook_details, targets) or _quarantine_facts(e, targets) or {}
         if facts.get("target"):
-            row["target"] = facts["target"]
+            row["target"] = facts.get("stored_target") or facts["target"]
         for key in (
             "decision", "route", "rule", "scanner", "location",
             "sandbox", "path", "moved_to", "description", "next_step",
@@ -849,7 +913,8 @@ def _alerts_default(
             return ux._style(f"{name}:".ljust(10), fg="bright_black", bold=True)
 
         targets = _alert_targets_for(app.store, [e])
-        facts = _finding_facts(e, _hook_details_for(app.store, [e]), targets)
+        hook_details = _hook_details_for(app.store, [e])
+        facts = _finding_facts(e, hook_details, targets)
         quarantined = _quarantine_facts(e, targets)
         click.echo(f"{ux.bold(f'Alert #{show_idx}')}")
         if e.id:
@@ -859,9 +924,11 @@ def _alerts_default(
         ts = e.timestamp.strftime("%Y-%m-%d %H:%M:%S") if e.timestamp else ""
         click.echo(f"  {label('Timestamp')} {ts}")
         click.echo(f"  {label('Action')} {e.action}")
-        target = facts["target"] if facts else (quarantined["target"] if quarantined else e.target)
+        target = facts["target"] if facts else (quarantined["target"] if quarantined else _event_target(e))
         if target:
             click.echo(f"  {label('Target')} {target}")
+        if surface := _event_surface(e, hook_details):
+            click.echo(f"  {label('Surface')} {surface_label(surface)}")
         if facts:
             for key, name in (("decision", "Decision"), ("route", "Route"), ("connector", "Connector"),
                               ("rule", "Rule"), ("scanner", "Scanner"), ("location", "Location"),

@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
+import scripts.go_test_shards as go_test_shards
 from scripts.go_test_shards import (
+    bounded_regexes,
     check_exact_cover,
     discover_test_files,
     match_test_files,
@@ -16,6 +19,7 @@ from scripts.go_test_shards import (
     partition_test_files,
     regex_names,
     run_shards,
+    shard_regex,
 )
 
 
@@ -158,6 +162,81 @@ def test_package_mode_splits_a_slow_package_and_covers_every_package_once(tmp_pa
     ]
 
 
+def test_package_mode_splits_a_slow_package_without_test_times_by_file_size(tmp_path: Path) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/m\n", encoding="utf-8")
+    _write_package(tmp_path)
+    packages = ["example.com/m/pkg"] + [f"example.com/m/p{index}" for index in range(4)]
+    # A package with no recorded test times that outweighs 60% of a shard
+    # (internal/cli on Windows, GAP-1066) runs in parts by test-file size.
+    heavy = {"packages": {"example.com/m/pkg": 200.0, **{f"example.com/m/p{index}": 10.0 for index in range(4)}}}
+
+    shards = partition_packages(packages, 3, heavy, root=tmp_path)
+
+    whole = sorted(package for shard in shards for package, regex in shard if not regex)
+    parts = [regex_names(regex) for shard in shards for package, regex in shard if regex]
+    assert whole == [f"example.com/m/p{index}" for index in range(4)]
+    assert len(parts) >= 2
+    tests = sorted(name for _, names in discover_test_files(tmp_path / "pkg") for name in names)
+    assert check_exact_cover(parts, tests) == []
+    # The benign twin: inside 60% of a shard the package still runs whole.
+    light = {"packages": {"example.com/m/pkg": 5.0, **{f"example.com/m/p{index}": 10.0 for index in range(4)}}}
+    assert all(not regex for shard in partition_packages(packages, 3, light, root=tmp_path) for _, regex in shard)
+
+
+def test_package_parts_run_in_patterns_that_fit_one_command_line(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/m\n", encoding="utf-8")
+    _write_package(tmp_path)
+    packages = ["example.com/m/pkg"] + [f"example.com/m/p{index}" for index in range(4)]
+    heavy = {"packages": {"example.com/m/pkg": 200.0, **{f"example.com/m/p{index}": 10.0 for index in range(4)}}}
+    tests = sorted(name for _, names in discover_test_files(tmp_path / "pkg") for name in names)
+    whole_plan = partition_packages(packages, 3, heavy, root=tmp_path)
+    # A part longer than the bound runs as several patterns, each inside it,
+    # on the shard of its part, and every test still runs exactly once.
+    monkeypatch.setattr(go_test_shards, "MAX_RUN_PATTERN_CHARS", max(len(shard_regex([name])) for name in tests))
+    shards = partition_packages(packages, 3, heavy, root=tmp_path)
+    patterns = [regex for shard in shards for _, regex in shard if regex]
+    assert len(patterns) > sum(1 for shard in whole_plan for _, regex in shard if regex)
+    assert all(len(regex) <= go_test_shards.MAX_RUN_PATTERN_CHARS for regex in patterns), patterns
+    assert check_exact_cover([regex_names(regex) for regex in patterns], tests) == []
+    for planned, bounded in zip(whole_plan, shards):
+        assert {name for _, regex in planned for name in regex_names(regex)} == {
+            name for _, regex in bounded for name in regex_names(regex)
+        }
+    # The benign twin: parts inside the real bound stay one pattern each.
+    monkeypatch.undo()
+    assert bounded_regexes(tests) == [shard_regex(tests)]
+    assert partition_packages(packages, 3, heavy, root=tmp_path) == whole_plan
+
+
+def test_windows_remaining_package_parts_fit_one_command_line() -> None:
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))
+    prefix = "github.com/defenseclaw/defenseclaw/"
+    excluded = {
+        prefix + path
+        for path in ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")
+    }
+    packages = sorted(set(timings["packages"]) - excluded)
+    workflow = (root / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
+    shard_count = int(re.search(r"\$remainingPackageShardCount = (\d+)", workflow).group(1))
+    shards = partition_packages(packages, shard_count, timings, root=root)
+    # Windows Native CI run 42974860632 (rel/1.0.9 a2ac2452a2): pk5, pk6 and
+    # pk7 could not start their internal/cli part, a -run regex of about
+    # 57,000 characters, past the 32,767 a Windows command line holds. Each
+    # pattern keeps under half of that, which leaves room for go.exe, its
+    # other flags and the test binary it starts.
+    patterns = {package: [] for shard in shards for package, regex in shard if regex}
+    for shard in shards:
+        for package, regex in shard:
+            if regex:
+                assert len(regex) <= 32_767 // 2, (package, len(regex))
+                patterns[package].append(regex_names(regex))
+    assert prefix + "internal/cli" in patterns
+    for package, parts in patterns.items():
+        tests = sorted(name for _, names in discover_test_files(root / package.removeprefix(prefix)) for name in names)
+        assert check_exact_cover(parts, tests) == [], package
+
+
 def test_linux_connector_parts_separate_the_ci_timeout_cluster() -> None:
     root = Path(__file__).resolve().parents[2]
     timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))
@@ -205,8 +284,30 @@ def test_linux_remaining_package_shards_plan_inside_the_shared_deadline() -> Non
     # building its race test binaries, which the recorded times leave out (402
     # s of package time took 540 s), so a shard plans at most 600 of the 960
     # seconds of the shared deadline.
+    # Run 43080425819 (rel/1.0.9 b3638ee613): shard 5, planned at 574 s,
+    # held six internal/cli runs and a hookexec part that took about 760 s of tests
+    # and 300 s of builds, so hookexec met the deadline at 3m44s. Its slowest
+    # new tests weighed as fast tests. The recorded times are now the larger
+    # of the times of three rel/1.0.9 runs, in 19 shards.
     loads = [sum(planned(package, regex) for package, regex in shard) for shard in shards]
     assert max(loads) <= 600, loads
+
+
+def test_linux_remaining_package_times_count_the_tests_of_the_shard_that_met_the_deadline() -> None:
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))["tests"]
+    # Seconds measured in shard 5 of run 43080425819. With no recorded time
+    # each weighed the fast-test mean ("*", under 0.2 s) of its package.
+    observed_seconds = {
+        ("internal/cli", "TestWorkerRestoresTheScriptAndTheEntryDamagedInOneChange"): 40.7,
+        ("internal/cli", "TestWorkerRechecksARepairedTargetAndKeepsBothRestores"): 17.6,
+        ("internal/cli", "TestWorkerNamesNoChangeForAnElementFileTooLargeToRead"): 13.2,
+        ("internal/cli", "TestEnterpriseHookWorkerTimedOutInsideInstallKeepsTheRestore"): 11.2,
+        ("internal/gateway/connector/hookexec", "TestSlowOwnerReadOfTheOwnFrozenGatewayStaysAnOutage"): 14.7,
+    }
+    for (package, name), seconds in observed_seconds.items():
+        recorded = timings[package]
+        assert float(recorded.get(name, recorded["*"])) >= seconds, (package, name)
 
 
 def test_connector_matrix_parts_balance_on_the_times_of_the_matrix_run() -> None:
@@ -238,7 +339,7 @@ def test_linux_gateway_shards_separate_the_ci_timeout_cluster() -> None:
     timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))
     seconds = timings["tests"]["internal/gateway"]
     files = discover_test_files(root / "internal/gateway")
-    shards = partition_test_files(files, 36, seconds)
+    shards = partition_test_files(files, 40, seconds)
 
     # These are top-level elapsed seconds from the red shard 20 CI artifact.
     # Unrecorded tests used to weigh 0.22 seconds and all landed with an
@@ -257,29 +358,29 @@ def test_linux_gateway_shards_separate_the_ci_timeout_cluster() -> None:
         assert projected * 1.3 < 660, (index, projected)
 
 
-def test_linux_gateway_cowork_corpus_replay_has_a_shard_of_its_own() -> None:
+def test_linux_gateway_cowork_corpus_replay_shard_stays_inside_the_budget() -> None:
     root = Path(__file__).resolve().parents[2]
     seconds = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))["tests"][
         "internal/gateway"
     ]
     files = discover_test_files(root / "internal/gateway")
-    shards = partition_test_files(files, 36, seconds)
+    shards = partition_test_files(files, 40, seconds)
 
-    # The slowest top-level elapsed seconds from the rel/1.0.8 CI artifacts
-    # after the Cowork merge (runs 41940219567 to 41962459501). Unrecorded,
-    # the corpus replay weighed 0.21 seconds and joined a full shard 15,
-    # which then ran 657 and 660 seconds into the 11-minute Go test budget.
+    # Unrecorded, the corpus replay weighed 0.21 seconds and joined a full
+    # shard 15, which then ran 657 and 660 seconds into the 11-minute Go test
+    # budget (rel/1.0.8 after the Cowork merge, when it ran 401.5 seconds).
+    # On the rel/1.0.9 runs 42876219880 to 42915503355 it ran 158.7 to 255.0
+    # seconds: weighed with its slowest time there, its shard keeps the
+    # hosted-runner spread inside the budget.
     observed = {
-        "TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts": 401.5,
-        "TestRecoveredHookFailModeByDeployment": 94.9,
-        "TestStrictInstallWindowGatesEveryRefusableInspectedCall": 43.7,
-        "TestStrictTierBlocksAnsweredCallsDuringTheInstallWindow": 43.2,
-        "TestGAP0563HookJudgeFallbackPersistsAfterEarlyTelemetry": 16.5,
+        "TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts": 255.0,
+        "TestRecoveredHookFailModeByDeployment": 97.4,
     }
     assert all(name in seconds for name in observed)
     corpus = next(shard for shard in shards if "TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts" in shard)
-    assert corpus == ["TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts"]
-    assert observed["TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts"] * 1.3 < 660
+    projected = sum(observed.get(name, float(seconds.get(name, seconds["*"]))) for name in corpus)
+    assert projected * 1.3 < 660, projected
+    assert "TestRecoveredHookFailModeByDeployment" not in corpus
 
 
 def test_linux_gateway_shards_keep_ordinary_tests_covered() -> None:
@@ -288,7 +389,7 @@ def test_linux_gateway_shards_keep_ordinary_tests_covered() -> None:
         "internal/gateway"
     ]
     files = discover_test_files(root / "internal/gateway")
-    shards = partition_test_files(files, 36, seconds)
+    shards = partition_test_files(files, 40, seconds)
     names = [name for _, file_names in files for name in file_names]
     assert check_exact_cover(shards, names) == []
     assert sum("TestAgentHookDispatch_BlockFiresOnBlock" in shard for shard in shards) == 1
@@ -364,7 +465,7 @@ def test_windows_hookexec_matrix_covers_each_test_once_with_time_headroom() -> N
     job = workflow["jobs"]["windows-go"]
     entries = job["strategy"]["matrix"]["include"]
     hookexec_parts = [(part["shard"], part["index"]) for part in entries if part["kind"] == "hookexec"]
-    assert hookexec_parts == [(f"hx{index}", index) for index in range(5)]
+    assert hookexec_parts == [(f"hx{index}", index) for index in range(6)]
 
     uv_step = next(step for step in job["steps"] if step.get("uses", "").startswith("astral-sh/setup-uv@"))
     assert "matrix.kind == 'hookexec'" in uv_step["if"]
@@ -373,7 +474,7 @@ def test_windows_hookexec_matrix_covers_each_test_once_with_time_headroom() -> N
     )
     hookexec = run.split("if ($suiteKind -eq 'hookexec') {", 1)[1].split("if ($suiteKind -eq 'packages') {", 1)[0]
     packages = run.split("if ($suiteKind -eq 'packages') {", 1)[1].split("if ($suiteKind -eq 'gateway'", 1)[0]
-    assert "$hookexecTestShardCount = 5" in run
+    assert "$hookexecTestShardCount = 6" in run
     assert "'--package-dir', 'internal/gateway/connector/hookexec'" in hookexec
     assert "'--split-tests'" in hookexec
     assert "'--timings', 'scripts/test-timings/go-windows.json'" in hookexec
@@ -405,6 +506,92 @@ def test_windows_remaining_package_control_stays_covered() -> None:
         for path in ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")
     }
     packages = sorted(set(timings["packages"]) - excluded)
-    shards = partition_packages(packages, 6, timings, root=root)
+    # The workflow runs the remaining packages in this many parts, one runner each.
+    workflow = (root / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
+    shard_count = int(re.search(r"\$remainingPackageShardCount = (\d+)", workflow).group(1))
+    for index in range(shard_count):
+        assert f"{{ shard: pk{index}, kind: packages, index: {index} }}" in workflow
+    assert f"shard: pk{shard_count}," not in workflow
+    shards = partition_packages(packages, shard_count, timings, root=root)
     control = prefix + "internal/hookpaths"
-    assert sum(package == control for shard in shards for package, _ in shard) == 1
+    # GAP-0749: the hookpaths program sweep (every form through Resolve on
+    # native Windows, sixteen tests) and its archive table take about 20 minutes
+    # on a hosted runner, more than one shard step. The package runs in parts:
+    # every one of its tests is in exactly one part, no part is a whole
+    # package, and no part is estimated past half the 14 minute go test timeout.
+    parts = [regex for shard in shards for package, regex in shard if package == control]
+    assert len(parts) >= 2 and all(parts), parts
+    tests = sorted({name for _, names in discover_test_files(root / "internal/hookpaths") for name in names})
+    assert check_exact_cover([regex_names(regex) for regex in parts], tests) == []
+    seconds = timings["tests"]["internal/hookpaths"]
+    for regex in parts:
+        estimated = sum(float(seconds.get(name, seconds["*"])) for name in regex_names(regex))
+        assert estimated <= 0.5 * 14 * 60, (regex, estimated)
+
+
+def test_windows_remaining_package_shards_leave_room_in_their_step() -> None:
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))
+    prefix = "github.com/defenseclaw/defenseclaw/"
+    excluded = {
+        prefix + path
+        for path in ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")
+    }
+    packages = sorted(set(timings["packages"]) - excluded)
+    workflow = (root / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
+    shard_count = int(re.search(r"\$remainingPackageShardCount = (\d+)", workflow).group(1))
+    shards = partition_packages(packages, shard_count, timings, root=root)
+
+    def planned(package: str, regex: str) -> float:
+        if not regex:
+            return float(timings["packages"][package])
+        seconds = timings["tests"].get(package.removeprefix(prefix))
+        if seconds:
+            return sum(float(seconds.get(name, seconds["*"])) for name in regex_names(regex))
+        files = discover_test_files(root / package.removeprefix(prefix))
+        names = set(regex_names(regex))
+        size = sum(path.stat().st_size for path, _ in files)
+        part = sum(path.stat().st_size * len(names & set(found)) / len(found) for path, found in files)
+        return float(timings["packages"][package]) * part / size
+
+    # Windows Native CI run 42961488619 (rel/1.0.9 6f0e44c10d): pk0 was planned
+    # at 726 s with internal/cli at its recorded 391 s; the package took 681 s
+    # and the go test run of the part met its 1020 s step limit. internal/cli
+    # runs in parts now, no package or part plans past half the step.
+    # Windows Native CI run 43019588811 (rel/1.0.9 3b4c39b0a5): pk7, planned
+    # at 621 s in nine shards, was cancelled at the 20 minute job timeout. A
+    # job spends about 150 s before its go test step, and the step builds the
+    # whole packages (about 95 s) and, for a shard with an internal/cli part,
+    # that test binary (about 130 s), none of which the plan counts. No shard
+    # plans past 465 s, so the job ends in about 14 minutes.
+    cli = [regex for shard in shards for package, regex in shard if package == prefix + "internal/cli"]
+    assert len(cli) >= 2 and all(cli), cli
+    loads = [[planned(package, regex) for package, regex in shard] for shard in shards]
+    assert max(max(load) for load in loads) <= 0.5 * 1020, loads
+    assert max(sum(load) for load in loads) <= 465, [round(sum(load)) for load in loads]
+
+
+def test_linux_remaining_package_hookpaths_runs_in_parts_under_the_race_timeout() -> None:
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))
+    prefix = "github.com/defenseclaw/defenseclaw/"
+    excluded = {prefix + path for path in ("internal/audit", "internal/gateway")}
+    packages = sorted(set(timings["packages"]) - excluded)
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    shard_count = len(workflow["jobs"]["go-test-other"]["strategy"]["matrix"]["shard"])
+    shards = partition_packages(packages, shard_count, timings, root=root)
+    control = prefix + "internal/hookpaths"
+    # The hookpaths program sweep and archive table take 7 to 8 minutes in the
+    # race run of a hosted runner and hit the 11 minute go test timeout of the
+    # remaining-package shard when the package ran whole (it was recorded at
+    # 6 seconds). The package runs in parts: every one of its tests is in
+    # exactly one part, no part is a whole package, and no part is estimated
+    # past half the 11 minute go test timeout.
+    parts = [regex for shard in shards for package, regex in shard if package == control]
+    assert len(parts) >= 2 and all(parts), parts
+    tests = sorted({name for _, names in discover_test_files(root / "internal/hookpaths") for name in names})
+    assert check_exact_cover([regex_names(regex) for regex in parts], tests) == []
+    seconds = timings["tests"]["internal/hookpaths"]
+    for regex in parts:
+        estimated = sum(float(seconds.get(name, seconds["*"])) for name in regex_names(regex))
+        assert estimated <= 0.5 * 11 * 60, (regex, estimated)

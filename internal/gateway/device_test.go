@@ -1,8 +1,8 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,209 +11,105 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // readOpenClawGatewayToken and isAuthError are in client.go — tests go here
-// because they relate to the device/auth repair flow.
+// because they relate to the connect-rejection flow.
 
-func TestRepairPairing(t *testing.T) {
-	device, err := LoadOrCreateIdentity(filepath.Join(testenv.PrivateTempDir(t), "device.key"))
-	if err != nil {
-		t.Fatalf("create identity: %v", err)
-	}
-
-	sandboxHome := t.TempDir()
-
-	t.Run("creates paired.json from scratch", func(t *testing.T) {
-		home := t.TempDir()
-		if err := device.RepairPairing(home); err != nil {
-			t.Fatalf("repair pairing: %v", err)
-		}
-
-		pairedPath := filepath.Join(home, ".openclaw", "devices", "paired.json")
-		data, err := os.ReadFile(pairedPath)
-		if err != nil {
-			t.Fatalf("read paired.json: %v", err)
-		}
-
-		var paired map[string]interface{}
-		if err := json.Unmarshal(data, &paired); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-
-		entry, ok := paired[device.DeviceID].(map[string]interface{})
-		if !ok {
-			t.Fatalf("device entry not found for id=%s", device.DeviceID)
-		}
-		if entry["clientId"] != "gateway-client" {
-			t.Errorf("clientId = %v, want gateway-client", entry["clientId"])
-		}
-		if entry["displayName"] != "defenseclaw-sidecar" {
-			t.Errorf("displayName = %v, want defenseclaw-sidecar", entry["displayName"])
-		}
-		if entry["publicKey"] != device.PublicKeyBase64URL() {
-			t.Errorf("publicKey mismatch")
-		}
-	})
-
-	t.Run("platform matches runtime.GOOS so OpenClaw doesn't flag metadata-upgrade", func(t *testing.T) {
-		// Regression: device.go used to hard-code platform="linux"
-		// in the paired.json entry, but the connect handshake
-		// (client.go) always reports runtime.GOOS — so on macOS the
-		// two disagreed and OpenClaw rejected every connect with
-		// `pairing required: device identity changed and must be
-		// re-approved (NOT_PAIRED)`, leaving the gateway link stuck
-		// in RECONNECTING forever even with auto-repair active.
-		// If you ever change the platform field, update the
-		// handshake too — the two MUST agree byte-for-byte.
-		home := t.TempDir()
-		if err := device.RepairPairing(home); err != nil {
-			t.Fatalf("repair pairing: %v", err)
-		}
-		data, err := os.ReadFile(filepath.Join(home, ".openclaw", "devices", "paired.json"))
-		if err != nil {
-			t.Fatalf("read paired.json: %v", err)
-		}
-		var paired map[string]map[string]interface{}
-		if err := json.Unmarshal(data, &paired); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		entry, ok := paired[device.DeviceID]
-		if !ok {
-			t.Fatalf("device entry missing for id=%s", device.DeviceID)
-		}
-		got, _ := entry["platform"].(string)
-		if got != runtime.GOOS {
-			t.Errorf("platform = %q, want runtime.GOOS = %q\n\nThis is the metadata-upgrade regression: hardcoding the platform makes paired.json disagree with the connect handshake on every non-Linux host, causing an infinite NOT_PAIRED loop.", got, runtime.GOOS)
-		}
-		if got == "linux" && runtime.GOOS != "linux" {
-			t.Fatalf("platform was hardcoded to %q on a non-linux host (runtime.GOOS=%q) — this is the exact regression that caused the gateway RECONNECTING bug; do not revert", got, runtime.GOOS)
-		}
-	})
-
-	t.Run("preserves existing devices", func(t *testing.T) {
-		devicesDir := filepath.Join(sandboxHome, ".openclaw", "devices")
-		os.MkdirAll(devicesDir, 0o755)
-		existing := map[string]interface{}{
-			"other-device": map[string]interface{}{
-				"deviceId":    "other-device",
-				"displayName": "ui-client",
-			},
-		}
-		data, _ := json.MarshalIndent(existing, "", "  ")
-		os.WriteFile(filepath.Join(devicesDir, "paired.json"), data, 0o644)
-
-		if err := device.RepairPairing(sandboxHome); err != nil {
-			t.Fatalf("repair pairing: %v", err)
-		}
-
-		data, _ = os.ReadFile(filepath.Join(devicesDir, "paired.json"))
-		var paired map[string]interface{}
-		json.Unmarshal(data, &paired)
-
-		if _, ok := paired["other-device"]; !ok {
-			t.Error("existing device entry was lost")
-		}
-		if _, ok := paired[device.DeviceID]; !ok {
-			t.Error("sidecar device entry not added")
-		}
-	})
-}
-
-// TestRepairPairing_FailsClosedOnCorruptPairedJSON is the regression
-// for S3.HIGH_BUG ("RepairPairing can erase unrelated paired
-// devices"). Before the fix, json.Unmarshal errors on paired.json were
-// silently swallowed, the in-memory map was treated as empty, and the
-// subsequent rewrite ERASED every other paired device. The hardened
-// version refuses to overwrite, snapshots the corrupt bytes for
-// forensics, and returns an error to the caller.
-func TestRepairPairing_FailsClosedOnCorruptPairedJSON(t *testing.T) {
-	device, err := LoadOrCreateIdentity(filepath.Join(testenv.PrivateTempDir(t), "device.key"))
-	if err != nil {
-		t.Fatalf("create identity: %v", err)
-	}
-
+// GAP-0592: a pairing or token rejection never writes OpenClaw's pairing
+// state. The sidecar used to rewrite <home>/.openclaw/devices/paired.json
+// and grant itself operator.read, write, admin and approvals.
+func TestConnectRejectionNeverWritesOpenClawPairingState(t *testing.T) {
 	home := t.TempDir()
+	dataDir := testenv.PrivateTempDir(t)
 	devicesDir := filepath.Join(home, ".openclaw", "devices")
-	if err := os.MkdirAll(devicesDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	if err := os.MkdirAll(devicesDir, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	pairedPath := filepath.Join(devicesDir, "paired.json")
-	original := []byte(`{"paired-but-truncated`)
+	original := []byte(`{"other-device":{"deviceId":"other-device","scopes":["operator.read"]}}` + "\n")
 	if err := os.WriteFile(pairedPath, original, 0o600); err != nil {
-		t.Fatalf("seed corrupt paired.json: %v", err)
+		t.Fatal(err)
 	}
-
-	if err := device.RepairPairing(home); err == nil {
-		t.Fatal("RepairPairing must fail closed on unparseable paired.json ()")
+	client, err := NewClient(&config.GatewayConfig{
+		Token:         "boot-token",
+		ClawHome:      home,
+		DeviceKeyFile: filepath.Join(dataDir, "device.key"),
+	}, dataDir)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
 	}
-
-	// The original bytes MUST remain intact -- the previous code path
-	// would have wiped the file. The byte-for-byte preservation is
-	// what protects existing pairings from being silently destroyed.
+	for _, rejection := range []error{
+		errors.New("gateway: connect handshake: pairing required: device pairing required (NOT_PAIRED)"),
+		errors.New("gateway: connect handshake: pairing required: device identity changed and must be re-approved (NOT_PAIRED)"),
+		errors.New("gateway: connect handshake: pairing required: device is asking for more scopes than currently approved (NOT_PAIRED)"),
+		errors.New("connect rejected (token_missing)"),
+	} {
+		if hint := client.handleConnectRejection(rejection); hint == "" {
+			t.Errorf("handleConnectRejection(%v) gave no operator step", rejection)
+		}
+	}
 	got, err := os.ReadFile(pairedPath)
 	if err != nil {
-		t.Fatalf("read paired.json: %v", err)
+		t.Fatal(err)
 	}
-	if string(got) != string(original) {
-		t.Fatalf("paired.json contents changed after fail-closed RepairPairing\noriginal: %s\ngot:      %s",
-			original, got)
+	if !bytes.Equal(got, original) {
+		t.Fatalf("paired.json changed after connect rejections:\n got: %s\nwant: %s", got, original)
 	}
-
-	// A snapshot of the corrupt bytes MUST exist beside the original
-	// so the operator can recover or post-mortem.
 	entries, err := os.ReadDir(devicesDir)
 	if err != nil {
-		t.Fatalf("readdir: %v", err)
+		t.Fatal(err)
 	}
-	foundBackup := false
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		// paired.json.corrupt.<unix-nanos>
-		if strings.HasPrefix(e.Name(), "paired.json.corrupt.") {
-			foundBackup = true
-			b, err := os.ReadFile(filepath.Join(devicesDir, e.Name()))
-			if err != nil {
-				t.Fatalf("read backup: %v", err)
-			}
-			if string(b) != string(original) {
-				t.Fatalf("backup contents differ from original\nwant: %s\ngot:  %s", original, b)
-			}
-			testenv.AssertPrivateFile(t, filepath.Join(devicesDir, e.Name()))
-		}
+	if len(entries) != 1 {
+		t.Fatalf("devices directory holds %d entries, want only paired.json", len(entries))
 	}
-	if !foundBackup {
-		t.Fatal("expected a paired.json.corrupt.<ts> backup to be present (forensics)")
+
+	fresh := t.TempDir()
+	client.cfg.ClawHome = fresh
+	client.handleConnectRejection(errors.New("gateway: connect handshake: pairing required: device pairing required (NOT_PAIRED)"))
+	if _, err := os.Stat(filepath.Join(fresh, ".openclaw")); !os.IsNotExist(err) {
+		t.Fatalf("a pairing rejection created OpenClaw state in a fresh home: %v", err)
 	}
 }
 
-// TestRepairPairing_AtomicWriteAndPerms covers the second half of the
-// recommendation: writes go through a same-directory temp +
-// rename so a crash cannot leave a half-written file, and the final
-// file is 0600 (no longer world-readable 0644).
-func TestRepairPairing_AtomicWriteAndPerms(t *testing.T) {
-	device, err := LoadOrCreateIdentity(filepath.Join(testenv.PrivateTempDir(t), "device.key"))
+// GAP-0592: a pairing rejection names OpenClaw's own approval step and the
+// device to approve; a token rejection names the token step; any other
+// failure has no operator step.
+func TestConnectRejectionOperatorStep(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	client, err := NewClient(&config.GatewayConfig{
+		Token:         "boot-token",
+		DeviceKeyFile: filepath.Join(dataDir, "device.key"),
+	}, dataDir)
 	if err != nil {
-		t.Fatalf("create identity: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
-	home := t.TempDir()
-
-	if err := device.RepairPairing(home); err != nil {
-		t.Fatalf("repair pairing: %v", err)
+	for _, rejection := range []string{
+		"gateway: connect handshake: pairing required: device pairing required (NOT_PAIRED)",
+		"gateway: connect handshake: pairing required: device is asking for a higher role than currently approved (NOT_PAIRED)",
+		"gateway: connect handshake: pairing required: device is asking for more scopes than currently approved (NOT_PAIRED)",
+		"websocket: close 1008 (policy violation): pairing required: device identity changed and must be re-approved (requestId: eabe39af-7a72-4331-8271-03e16e635db2)",
+		"device token does not cover the requested scopes (AUTH_SCOPE_MISMATCH)",
+	} {
+		hint := client.handleConnectRejection(errors.New(rejection))
+		for _, want := range []string{"openclaw devices list", "openclaw devices approve <requestId>", client.device.DeviceID, "keeps retrying"} {
+			if !strings.Contains(hint, want) {
+				t.Errorf("%s: hint %q does not contain %q", rejection, hint, want)
+			}
+		}
 	}
-	pairedPath := filepath.Join(home, ".openclaw", "devices", "paired.json")
-	testenv.AssertPrivateFile(t, pairedPath)
-
-	// No temp-file remnants beside the destination.
-	entries, _ := os.ReadDir(filepath.Dir(pairedPath))
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".paired.json.tmp-") {
-			t.Errorf("leftover temp file %s -- atomic write did not clean up", e.Name())
+	for _, rejection := range []string{"connect rejected (token_missing)", "unauthorized: gateway token mismatch (provide gateway auth token) (INVALID_REQUEST)"} {
+		if hint := client.handleConnectRejection(errors.New(rejection)); hint != openClawTokenRejectedHint {
+			t.Errorf("%s: hint = %q, want the token step", rejection, hint)
+		}
+	}
+	for _, failure := range []string{"connection refused", "timeout"} {
+		if hint := client.handleConnectRejection(errors.New(failure)); hint != "" {
+			t.Errorf("%s: hint = %q, want none", failure, hint)
 		}
 	}
 }
@@ -223,8 +119,7 @@ func TestIsAuthError(t *testing.T) {
 	// (see node_modules/openclaw/dist/connect-error-details-*.js Ee
 	// and Se). Past regression: isAuthError used to look for
 	// "pairing_required" (underscore) and "not paired" (lowercased
-	// phrase), neither of which match these messages, so the
-	// auto-repair code path went dead. Keep these literals — they
+	// phrase), neither of which match these messages. Keep these literals — they
 	// are copy-paste from production gateway.log.
 	tests := []struct {
 		err  error
@@ -238,13 +133,9 @@ func TestIsAuthError(t *testing.T) {
 		{fmt.Errorf("Pairing_Required"), true},
 		{fmt.Errorf("device not paired with gateway"), true},
 
-		// Real OpenClaw NOT_PAIRED messages — only the transport
-		// sub-reasons (not-paired, metadata-upgrade) trigger
-		// auto-repair. explicitly require
-		// role-upgrade and scope-upgrade rejections to surface to the
-		// operator instead, because RepairPairing hard-codes
-		// operator.admin / operator.approvals into the pairing
-		// record and would otherwise self-elevate.
+		// Real OpenClaw NOT_PAIRED messages. Role-upgrade and
+		// scope-upgrade rejections are not token failures: they need an
+		// OpenClaw approval (openClawPairingApprovalNeeded).
 		{fmt.Errorf("gateway: connect handshake: pairing required: device pairing required (NOT_PAIRED)"), true},
 		{fmt.Errorf("gateway: connect handshake: pairing required: device identity changed and must be re-approved (NOT_PAIRED)"), true},
 		{fmt.Errorf("gateway: connect handshake: pairing required: device is asking for a higher role than currently approved (NOT_PAIRED)"), false},

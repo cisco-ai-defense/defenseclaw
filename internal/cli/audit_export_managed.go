@@ -38,7 +38,7 @@ var (
 // choice and is left alone, as is every host without a managed deployment.
 func prepareManagedAuditExportEnvironment() error {
 	return pinManagedAdministratorEnvironment("audit export", func() string {
-		return windowsManagedStandardUserViewAnswer("the audit log", "audit export -o <file>")
+		return windowsManagedStandardUserViewAnswer("the audit log", "audit", "export", "-o", "<file>")
 	})
 }
 

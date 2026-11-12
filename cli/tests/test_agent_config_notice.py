@@ -73,6 +73,39 @@ def test_the_restart_step_reports_a_put_back_when_it_does_not_wait_for_the_runti
     assert len(warned) == 1 and "put its hooks back" in warned[0] and "settings" not in warned[0], warned
 
 
+def test_setup_reports_only_the_selected_connectors_restore_notice(tmp_path: Path, monkeypatch) -> None:
+    """GAP-0659: an Amp setup does not report an old Devin workspace notice."""
+    from defenseclaw.commands import cmd_setup
+
+    project_file = tmp_path / "removed-project" / ".devin" / "hooks.v1.json"
+    _notice(tmp_path, "devin", "config", path=str(project_file), source="hooks_only", settings_lost=True)
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *a, **k: True)
+    warned: list[str] = []
+    monkeypatch.setattr(cmd_setup.ux, "warn", lambda text, *a, **k: warned.append(str(text)))
+
+    cmd_setup._restart_services(
+        str(tmp_path), connector="amp", connectors=["amp", "devin"], notice_connectors=["amp"]
+    )
+    assert warned == []
+    assert not project_file.exists()
+    assert not (tmp_path / "connector_backups" / "devin" / "config.restore-notice-seen").exists()
+
+    cmd_setup._restart_services(str(tmp_path), connector="devin", connectors=["amp", "devin"])
+    assert len(warned) == 1 and "Devin config" in warned[0]
+
+
+def test_global_setup_reports_active_peer_restore_notice(tmp_path: Path, monkeypatch) -> None:
+    from defenseclaw.commands import cmd_setup
+
+    _notice(tmp_path, "devin", "config", path=str(tmp_path / "devin.json"), source="hooks_only")
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *a, **k: True)
+    warned: list[str] = []
+    monkeypatch.setattr(cmd_setup.ux, "warn", lambda text, *a, **k: warned.append(str(text)))
+
+    cmd_setup._restart_services(str(tmp_path), connector="amp", connectors=["amp", "devin"])
+    assert len(warned) == 1 and "Devin config" in warned[0]
+
+
 def test_setup_waits_for_a_put_back_the_gateway_has_not_made_yet(tmp_path: Path) -> None:
     """GAP-0333: the put-back finished after the restart step had read the notices."""
     config = tmp_path / "home" / "config.yaml"

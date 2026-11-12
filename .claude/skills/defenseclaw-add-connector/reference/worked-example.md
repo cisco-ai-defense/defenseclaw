@@ -104,10 +104,10 @@ Record these, with the source for each, in the contract `Notes` and in the corre
 ## 5. CLI, TUI and installers
 
 1. **Setup.** `cli/defenseclaw/commands/cmd_setup.py`: `_CONNECTOR_NAMES_FALLBACK`, `_CONNECTOR_META`, `_CONNECTOR_CHANGE_SURFACES`, `_HOOK_ENFORCED_CONNECTORS`, and the observability setup loop. `defenseclaw setup copilot` comes from the shared factory.
-2. **Onboarding.** `cmd_init.py` (the `--connector` choice plus the hidden `--native-setup-copilot`), `cmd_quickstart.py` and `bootstrap.py`.
+2. **Onboarding.** `cmd_init.py` (the `--connector` choice), `cmd_quickstart.py` and `bootstrap.py`.
 3. **Doctor.** `cmd_doctor.py`: labels, markers, hook health, residue. `doctor_hooks.py`: `_EXPECTED_CONTRACTS`, `_COPILOT_CONTRACT_EVENTS`, and the exact Windows argv checks.
 4. **Fail mode.** `fail_mode.py`: Copilot is in `_UPSTREAM_FAIL_OPEN_CONNECTORS` and `_EXPECTED_CONTRACTS`. `cmd_guardrail.py` has the labels. `credentials.py` has `_HOOK_POLICY_ONLY_CONNECTORS`.
-5. **Uninstall.** `cmd_uninstall.py` `_CONNECTOR_BACKUP_MARKERS` (`connector_backups/copilot/config.json`) and `windows_native_uninstall.py`.
+5. **Uninstall.** `cmd_uninstall.py` `_CONNECTOR_BACKUP_MARKERS` (`connector_backups/copilot/config.json`).
 6. **Platform support.** `platform_support.py` `WINDOWS_CONNECTOR_SUPPORT["copilot"]`.
 7. **Registries.** `registries/manifest.py` `KNOWN_CONNECTORS`.
 8. **TUI:**
@@ -116,15 +116,10 @@ Record these, with the source for each, in the contract `Notes` and in the corre
    - `tui/registry.py` and `tui/registry_data.py` (`GO_PARITY_REGISTRY` row `setup copilot`);
    - `tui/panels/setup.py`, `tui/panels/first_run.py`;
    - `tui/services/overview_state.py`, `tui/services/catalog_state.py`.
-9. **Go CLI.** `internal/cli/connector_cmd.go` (reconcile allowlist, `bindConnectorLifecycleConfigHome` for `COPILOT_HOME`) and `connector_deferred_verify.go`.
+9. **Go CLI.** `internal/cli/connector_cmd.go` (reconcile allowlist, `bindConnectorLifecycleConfigHome` for `COPILOT_HOME`).
 10. **Installers:**
     - `scripts/install.sh` `CONNECTOR_CHOICES`;
-    - `scripts/install.ps1` `$ConnectorChoices`;
-    - `cmd/defenseclaw-setup/main.go`: `nativeLifecycleConnectorNames`, `normalizeConnector` (accepts `githubcopilot`, `github-copilot`), and the backup detection for `connector_backups/copilot/config.json`;
-    - `cmd/defenseclaw-setup/wizard_windows.go` `wizardConnectorChoices` ("GitHub Copilot CLI");
-    - `cmd/defenseclaw-setup/transaction.go` (`resolvePreviousConnectorHome` for the Copilot home);
-    - `cmd/defenseclaw-setup/connector_reconciliation.go`;
-    - `internal/nativeinstallstate/state.go` (`CopilotHome` / `COPILOT_HOME`).
+    - `scripts/install.ps1` `$ConnectorChoices`.
 11. **Env vars.** Add any `DEFENSECLAW_*` variables to `internal/envvars/registry.json`.
 
 ## 6. Enterprise managed mode
@@ -178,23 +173,22 @@ Record these, with the source for each, in the contract `Notes` and in the corre
    - `internal/enterprisepolicy/cursor_copilot_test.go`, `guard_test.go`, `guard_env_test.go`, `guard_session_test.go`, `fsio_windows_test.go`;
    - `internal/enterprisehooks/peruser_managed_windows_test.go`, `peruser_removal_windows_test.go`;
    - `internal/cli/hook_foreign_guard_env_unix_test.go`, `connector_cmd_test.go`.
-4. **Windows native Setup:** `cmd/defenseclaw-setup/main_test.go`, `transaction_test.go`, `connector_lifecycle_home_test.go`.
-5. **Python:**
+4. **Python:**
    - `cli/tests/test_cmd_doctor_windows_copilot.py`, `test_connector_paths.py`, `test_claw_inventory.py`, `test_cmd_plugin.py`, `test_agent_discovery.py`;
    - `test_cmd_init.py`, `test_cmd_setup_connector_readiness.py`, `test_connector_contracts.py`, `test_skill_discovery.py`;
    - `test_connector_live_e2e_path_policy.py` (`test_copilot_contract_normalizes_fixture_event_to_native_registration`).
-6. **e2e:** the `test/e2e/connectormatrix.go` row and `test/e2e/testdata/v7/golden/copilot/verdict-blocked.golden.json`.
-7. **Live E2E harness:**
-   - `scripts/live-connector-e2e/golden/copilot/pre_tool_allow.json`, `pre_tool_block.json`, `pre_tool_block_windows.json`;
+5. **e2e:** the `test/e2e/connectormatrix.go` row and `test/e2e/testdata/v7/golden/copilot/verdict-blocked.golden.json`.
+6. **Live E2E harness:**
+   - `scripts/live-connector-e2e/golden/copilot/pre_tool_allow.json`, `pre_tool_block.json`;
    - `drivers/copilot.sh`;
    - `lib/setup.sh`, where `dc_connector_config_file` gives `~/.copilot/hooks/defenseclaw.json`;
-   - `run.sh` `ALL_CONNECTORS`;
-   - `run-copilot-local.ps1`, `test-copilot-local.ps1`, `run-windows.ps1`, `test-windows.ps1`.
-8. **CI:**
+   - `run.sh` `ALL_CONNECTORS`.
+7. **CI:**
    - `.github/workflows/connector-live-e2e.yml` (dispatch options, the `full=` matrix, the `COPILOT_GITHUB_TOKEN` scoping);
-   - `.github/workflows/windows-native.yml` (native matrix);
-   - `scripts/windows-native-ci.ps1` `ValidateSet`;
-   - `scripts/invoke-windows-setup-standard-user-ci.ps1`, `scripts/test-windows-setup-wizard.ps1`, `scripts/prepare-windows-contract-v8.py`.
+   - `.github/workflows/windows-native.yml` `connector-contract` matrix (the required Windows contract on an `install.ps1 -Local` install);
+   - `scripts/live-connector-e2e/run-windows-install.ps1` `ValidateSet` and its per-connector registration check (`Assert-CopilotRegistration` for Copilot);
+   - `scripts/live-connector-e2e/golden/copilot/pre_tool_block_windows.json`, the Windows block command;
+   - `cli/tests/test_windows_connector_contract.py`, which pins the matrix to the Windows connector set.
 
 ## What Copilot teaches
 

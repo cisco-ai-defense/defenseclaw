@@ -80,7 +80,10 @@ func TestGAP0540VerifyAfterVersionWorkerStops(t *testing.T) {
 	}
 	pidFile := filepath.Join(home, "version.pid")
 	command := filepath.Join(bin, "hermes")
-	program := fmt.Sprintf("#!%s\nimport os, time\nopen(%q, 'w').write(str(os.getpid()))\ntime.sleep(60)\n", python, pidFile)
+	// Publish a complete marker: the reader may run between file creation
+	// and the write when the build host is busy.
+	program := fmt.Sprintf("#!%s\nimport os, time\nwith open(%q, 'w') as marker:\n marker.write(str(os.getpid()))\nos.replace(%q, %q)\ntime.sleep(60)\n",
+		python, pidFile+".tmp", pidFile+".tmp", pidFile)
 	if err := os.WriteFile(command, []byte(program), 0o700); err != nil {
 		t.Fatal(err)
 	}

@@ -19,6 +19,13 @@ func TestStandaloneGatewayHealthWarnings(t *testing.T) {
 		!strings.Contains(result.Warnings[1].Message, "otlp: timeout") {
 		t.Fatalf("warnings = %+v", result.Warnings)
 	}
+	// Setup puts no DefenseClaw command on PATH, so the hint names the
+	// gateway by its full path, not a bare `defenseclaw-gateway status`
+	// (cowork-1-0-8 GAP-0081).
+	if hint := result.Warnings[1].Message; !strings.Contains(hint, "inspect `& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe' status` or") ||
+		strings.Contains(hint, "`defenseclaw-gateway status`") {
+		t.Fatalf("optional destination hint = %q", hint)
+	}
 	// Without the gateway credential only their number shows (GAP-1268).
 	result = enterprisestatus.New("status", "standalone", "windows", "test")
 	appendStandaloneGatewayWarnings(result, []byte(`{"profile_assignment_warning_count":1,"profile_warning_count":2}`), nil)

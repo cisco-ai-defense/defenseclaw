@@ -12,6 +12,7 @@ package agentprocess
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,4 +172,23 @@ func TestIdentityNamesTheRealAgentProcess(t *testing.T) {
 
 func quoteArg(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+// A walk that starts from a process the caller names, without its table
+// entry, finds the same agent as one that reads the entry, and still refuses
+// an ancestor that started after the one below it.
+func TestAgentAboveWalksFromANamedChild(t *testing.T) {
+	processes := chain("defenseclaw-hook", "sh", "claude", "zsh")
+	full, _ := agentFrom(processes.lookup, 100)
+	named, ok := agentAbove(processes.lookup, Process{PID: 100, Parent: 101, Start: math.MaxInt64})
+	if !ok || named != full || named.PID != 102 {
+		t.Errorf("agentAbove = %+v, %v; want %+v", named, ok, full)
+	}
+	reused := chain("defenseclaw-hook", "sh", "claude", "zsh")
+	moved := reused[102]
+	moved.Start = 5000
+	reused[102] = moved
+	if got, ok := agentAbove(reused.lookup, Process{PID: 100, Parent: 101, Start: math.MaxInt64}); ok {
+		t.Errorf("accepted an ancestor that started after its child: %+v", got)
+	}
 }

@@ -224,8 +224,14 @@ func runHelper(
 	// else. Without it the service registers, fails to answer SCM, and is
 	// killed with error 1053 -- a helper that can never start, on the one
 	// platform whose gateway most needs it.
+	// The Cowork VM helper (unmanaged Linux) also serves the gateway's AI
+	// Discovery read of the homes it watches; managed helpers do not.
+	var discovery func(context.Context) (any, error)
+	if !managedEnterprise {
+		discovery = discoveryReader(homes, logger)
+	}
 	return runUnderServiceManager(ctx, func(ctx context.Context) error {
-		return serve(ctx, path, uids, socketGID, homes, tetragonConfig, logger)
+		return serve(ctx, path, uids, socketGID, homes, tetragonConfig, discovery, logger)
 	})
 }
 
@@ -256,6 +262,7 @@ func serve(
 	socketGID int,
 	homeDirs []string,
 	tetragonConfig *acquire.TetragonConfig,
+	discovery func(context.Context) (any, error),
 	logger *slog.Logger,
 ) error {
 
@@ -285,6 +292,7 @@ func serve(
 		AllowedUIDs: uids,
 		Logger:      logger,
 		Tetragon:    tetragonConfig,
+		Discovery:   discovery,
 	})
 
 	logger.Info("sensor helper listening",

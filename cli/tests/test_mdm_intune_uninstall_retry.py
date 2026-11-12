@@ -170,6 +170,24 @@ def test_launcher_waits_while_the_named_process_runs(tmp_path):
     assert setup["sleeps"] == 20
 
 
+def test_a_refusal_that_names_no_pid_backs_off_for_the_full_interval(tmp_path):
+    # GAP-0878: a SYSTEM program holding a SYSTEM-only file has no pid, so there
+    # is no process to wait for; each refused attempt sleeps once (the stub
+    # counts calls) instead of retrying at once.
+    no_pid = _result(
+        "uninstall_in_use",
+        1603,
+        "uninstall_in_use: a program has hook-guardian\\opencode-service-ports.json open (it is probably running as "
+        "SYSTEM, which this account cannot query; to find it, open Resource Monitor (resmon.exe), CPU tab, "
+        "Associated Handles, and search for the file name) in C:\\ProgramData\\Cisco\\DefenseClaw",
+    )
+    result, document, setup = _launch(tmp_path, [no_pid], "-Uninstall")
+    assert result.returncode == _exit(1618), result.stdout + result.stderr
+    assert setup["calls"] == ["/uninstall JSON=1"] * 6
+    assert setup["sleeps"] == 5
+    assert document["errors"][0]["code"] == "uninstall_in_use"
+
+
 @pytest.mark.parametrize(
     ("response", "expected"),
     [

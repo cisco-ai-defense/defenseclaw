@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -48,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
 )
 
 // InstallType distinguishes between skill and MCP install events.
@@ -77,6 +79,24 @@ type InstallEvent struct {
 	// readmitReason names why the rescan admits a known target again; the
 	// watcher-block row carries it.
 	readmitReason string
+	// definitionHash is, for an MCP server, the hash of the definition the
+	// caller snapshotted for this admission (mcpDefinitionHash). Admission
+	// decides and enforces only while the server still has that definition.
+	definitionHash string
+	// remembered is, for an MCP server the agent config no longer lists, the
+	// definition it had when it was last listed (mcpAdmissionDeparted), so
+	// an admission rule pinned to its URL or launcher is judged on it.
+	remembered *config.MCPServerEntry
+}
+
+// admittingSnapshot binds an MCP admission to the definition snap hashed, so
+// the verdict, the block and the release it makes are for that definition and
+// no other. Other types, and a nil snapshot, are returned unchanged.
+func (evt InstallEvent) admittingSnapshot(snap *TargetSnapshot) InstallEvent {
+	if evt.Type == InstallMCP && snap != nil {
+		evt.definitionHash = snap.ContentHash
+	}
+	return evt
 }
 
 // Verdict is the outcome of running the admission gate on an install.
@@ -104,8 +124,10 @@ type AdmissionResult struct {
 	// ScanID is the scan_results row admission recorded, or "" when no
 	// scan was logged. It becomes the rescan baseline's scan (GAP-2507).
 	ScanID string
-	// Interrupted is a scan the watcher's own stop cut off: nothing was
-	// decided, no baseline is kept, and the next start admits the asset.
+	// Interrupted is a scan the watcher's own stop cut off, or an MCP
+	// admission whose server no longer has the definition it was started
+	// for: nothing was decided or enforced, no baseline is kept, and the
+	// next start or cycle admits the asset it finds.
 	Interrupted bool
 	// Unenforced is a rejection decided while take_action was off for the
 	// type, so nothing was blocked or quarantined. Its rescan baseline keeps
@@ -127,9 +149,19 @@ type WebhookDispatcher interface {
 }
 
 type InstallWatcher struct {
-	cfg        *config.Config
-	skillDirs  []string
-	pluginDirs []string
+	cfg            *config.Config
+	skillDirs      []string
+	pluginDirs     []string
+	rootCoverageMu sync.RWMutex
+	rootNotifyMu   sync.Mutex
+	rootCoverage   map[string]RootCoverageIssue
+	onRootCoverage func([]RootCoverageIssue)
+	// rootWarnings are admitted roots watched closely (RootWarning); the
+	// notify mutex orders the handler calls.
+	rootWarnMu       sync.RWMutex
+	rootWarnNotifyMu sync.Mutex
+	rootWarnings     map[string]RootWarning
+	onRootWarning    func([]RootWarning)
 	// managedArtifacts are exact connector-owned plugin files. They remain
 	// visible to connector lifecycle/Doctor, but ordinary plugin scanners must
 	// not inspect or quarantine DefenseClaw's own bridge artifact.
@@ -164,6 +196,15 @@ type InstallWatcher struct {
 	// audited, so a scanner that stays down writes one row per target.
 	rescanFailureMu     sync.Mutex
 	rescanFailureLogged map[string]bool
+	// hermesVendorNoted holds the shipped Hermes plugins already reported as
+	// vendor content in this process, so a rescan cycle reports each once.
+	hermesVendorNoted sync.Map
+	// hermesManifests reads shipped Hermes plugin manifests through the
+	// plugin scanner (manifestLoader); a test may set it.
+	hermesManifests    hermesManifestLoader
+	hermesManifestOnce sync.Once
+	// hermesManifestPolicy applies the outage policy to the scanner's answers.
+	hermesManifestPolicy *hermesManifestPolicy
 	// markedWatchRoots caches the root markers written by this process
 	// (rescan goroutine only).
 	markedWatchRoots map[string]bool
@@ -217,6 +258,11 @@ type InstallWatcher struct {
 	// shelling out to the real scanner binaries.
 	scannerFactory func(InstallEvent) scanner.Scanner
 
+	// rootRoute judges the link route of a root. Nil means
+	// skillrootsafe.ResolveWithWarnings; tests set it before Run and never
+	// change it afterwards.
+	rootRoute func(string, func(string) (string, error)) (string, []string, error)
+
 	// rulePackSource returns the guardrail rule pack the install-time scan of
 	// a connector's skills applies on top of the skill scanner, or nil when
 	// that connector's scope selects none. Nil applies no overlay.
@@ -228,6 +274,10 @@ type InstallWatcher struct {
 	// that holds it (GAP-0132). Empty means every root belongs to
 	// watcherConnectorName.
 	rootConnectors []rootConnector
+	// rootConsumers retains every connector that loads a watched root. The
+	// event owner above stays singular, while root coverage applies to all
+	// consumers of a shared skill or plugin folder.
+	rootConsumers map[string][]string
 	// assetOwners names the account of each enrolled home, longest home
 	// first (SetAssetOwners).
 	assetOwners []AssetOwner
@@ -235,6 +285,37 @@ type InstallWatcher struct {
 	// mcpServers lists the MCP servers admission and the rescan see. Nil
 	// reads the connector config in the gateway's own home.
 	mcpServers func() ([]config.MCPServerEntry, error)
+	// mcpAdmissionKnown is the last successfully listed definition identity
+	// for each server. A later list error can still preserve a completed
+	// failed-scan decision for that definition.
+	mcpAdmissionMu     sync.RWMutex
+	mcpAdmissionKnown  []mcpKnownDefinition
+	mcpAdmissionListed bool
+	// mcpAdmissionDeparted holds, by definition (mcpDepartedKey), the servers
+	// an earlier listing had and a later one did not, or had under another
+	// definition: an agent that dropped or edited the entry can keep the live
+	// connection. An admission the policy gave them stays revocable through
+	// it (GAP-0920). Bounded; a listing that has the definition again drops
+	// it. Only servers admitted before any scan are held. Guarded by
+	// mcpAdmissionMu.
+	mcpAdmissionDeparted map[string]mcpKnownDefinition
+	// mcpAdmissionLost notes, per connector and account, the departed servers
+	// that did not fit (mcpLostScope). mcpAdmissionLostKeys counts the
+	// definitions noted across scopes. Guarded by mcpAdmissionMu.
+	mcpAdmissionLost     map[string]*mcpLostScope
+	mcpAdmissionLostKeys int
+	// A slower older list read must not replace a newer completed listing.
+	mcpAdmissionReadSeq  atomic.Uint64
+	mcpAdmissionKnownSeq uint64 // guarded by mcpAdmissionMu
+	// mcpOutcomes keeps, per server key, the latest admission outcome this
+	// process completed for a definition (its hash and whether it was a scan
+	// failure), from the moment the verdict is decided until the baseline
+	// that records it is written. The hook reads it with the stored baseline,
+	// so a completed verdict is visible before (or without) the baseline
+	// write: a failure is never read as pending, and an allow that replaces
+	// a failure is not held back by the old failed baseline (GAP-0775,
+	// GAP-0778). Guarded by mcpAdmissionMu.
+	mcpOutcomes map[string]mcpAdmissionOutcome
 	// admitNewMCP runs install admission for an MCP server that appears
 	// after the first rescan cycle (set with SetMCPServerSource): a managed
 	// computer has no `mcp set`, so a user adding a server to their agent is
@@ -243,6 +324,9 @@ type InstallWatcher struct {
 
 	// rescanNow asks the rescan loop for a cycle before its interval ends.
 	rescanNow chan struct{}
+	// warnedRescanNow asks for a rescan of the roots watched closely when
+	// periodic rescan is off (GAP-0905); rescanNow has no receiver then.
+	warnedRescanNow chan struct{}
 	// runtimeNotReady says a scan of this rescan cycle found the managed
 	// scanner runtime not ready; runtimeRetries counts the cycles in a row
 	// that did (nextRescanDelay, GAP-0975).
@@ -259,7 +343,7 @@ type InstallWatcher struct {
 	// server is admitted once and its admission never waits for the scan of
 	// another server (GAP-0254).
 	mcpClaimMu sync.Mutex
-	mcpClaims  map[string]bool
+	mcpClaims  map[string]time.Time
 	// mcpStartup are the MCP servers the first rescan cycle listed: that
 	// cycle records their baselines, so discovery skips them until it ends
 	// and admits every other server at once (GAP-0254).
@@ -300,6 +384,201 @@ type InstallWatcher struct {
 	// first rescan cycle ended (mcpStartup applies until then).
 	pollMCP        bool
 	firstCycleDone atomic.Bool
+}
+
+// RootCoverageIssue is a configured asset root whose admission scan is off.
+// Health exposes counts, connector names and, when another account can write a
+// folder of the link route, that folder (Ancestor); the gateway log names the
+// root paths.
+type RootCoverageIssue struct {
+	Kind, Path, Connector, Reason string
+	// Ancestor is the folder of the root's link route that another account
+	// can write (skillrootsafe.WritableAncestorError), else empty.
+	Ancestor   string
+	Connectors []string
+}
+
+// RootConsumer names a connector that loads a watched skill or plugin root.
+type RootConsumer struct {
+	Kind, Path, Connector string
+}
+
+// SetRootCoverageHandler publishes changes to the gateway's watcher health.
+// Call before Run starts.
+func (w *InstallWatcher) SetRootCoverageHandler(handler func([]RootCoverageIssue)) {
+	w.onRootCoverage = handler
+}
+
+// RootCoverageIssues returns a snapshot for runtime admission checks.
+func (w *InstallWatcher) RootCoverageIssues() []RootCoverageIssue {
+	w.rootCoverageMu.RLock()
+	defer w.rootCoverageMu.RUnlock()
+	issues := make([]RootCoverageIssue, 0, len(w.rootCoverage))
+	for _, issue := range w.rootCoverage {
+		issue.Connectors = append([]string(nil), issue.Connectors...)
+		issues = append(issues, issue)
+	}
+	sort.Slice(issues, func(i, j int) bool { return issues[i].Path < issues[j].Path })
+	return issues
+}
+
+// RootWarning is a configured asset root that is admitted and scanned, but
+// whose link route passes group-writable folders that only a private group made
+// acceptable, on a host where pam_group is loaded and can add an account to that
+// group at login (GAP-0905). The watcher scans the root again on every change
+// under it. Folders are the folders to run chmod g-w on.
+type RootWarning struct {
+	Kind, Path string
+	Connectors []string
+	Folders    []string
+}
+
+// SetRootWarningHandler publishes changes of the root warnings to the
+// gateway watcher health. Call before Run starts.
+func (w *InstallWatcher) SetRootWarningHandler(handler func([]RootWarning)) {
+	w.onRootWarning = handler
+}
+
+// RootWarnings returns a snapshot of the roots watched closely.
+func (w *InstallWatcher) RootWarnings() []RootWarning {
+	w.rootWarnMu.RLock()
+	defer w.rootWarnMu.RUnlock()
+	warnings := make([]RootWarning, 0, len(w.rootWarnings))
+	for _, warning := range w.rootWarnings {
+		warning.Connectors = append([]string(nil), warning.Connectors...)
+		warning.Folders = append([]string(nil), warning.Folders...)
+		warnings = append(warnings, warning)
+	}
+	sort.Slice(warnings, func(i, j int) bool { return warnings[i].Path < warnings[j].Path })
+	return warnings
+}
+
+// rootWarned reports whether path is at or below a root watched closely: the
+// event loop asks a rescan for every change there.
+func (w *InstallWatcher) rootWarned(path string) bool {
+	w.rootWarnMu.RLock()
+	defer w.rootWarnMu.RUnlock()
+	for _, warning := range w.rootWarnings {
+		if watcherPathAtOrBelow(path, warning.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshRootWarning judges the link route of an admitted root again.
+func (w *InstallWatcher) refreshRootWarning(kind, path string) {
+	route := w.rootRoute
+	if route == nil {
+		route = skillrootsafe.ResolveWithWarnings
+	}
+	_, folders, err := route(path, watcherEvalSymlinks)
+	if err != nil {
+		folders = nil
+	}
+	w.setRootWarning(kind, path, folders)
+}
+
+// setRootWarning records the folders of a root watched closely, or clears the
+// record when there are none.
+func (w *InstallWatcher) setRootWarning(kind, path string, folders []string) {
+	w.rootWarnNotifyMu.Lock()
+	defer w.rootWarnNotifyMu.Unlock()
+	key := kind + "\x00" + filepath.Clean(path)
+	w.rootWarnMu.Lock()
+	previous, hadPrevious := w.rootWarnings[key]
+	if len(folders) == 0 {
+		delete(w.rootWarnings, key)
+	} else {
+		if w.rootWarnings == nil {
+			w.rootWarnings = make(map[string]RootWarning)
+		}
+		connectors := w.rootConsumers[kind+"\x00"+w.rootCoveragePath(path)]
+		if len(connectors) == 0 {
+			if connector := w.connectorForPath(path); connector != "" {
+				connectors = []string{connector}
+			}
+		}
+		w.rootWarnings[key] = RootWarning{Kind: kind, Path: filepath.Clean(path),
+			Connectors: append([]string(nil), connectors...), Folders: slices.Clone(folders)}
+	}
+	current, has := w.rootWarnings[key]
+	w.rootWarnMu.Unlock()
+	if hadPrevious == has && slices.Equal(previous.Folders, current.Folders) && slices.Equal(previous.Connectors, current.Connectors) {
+		return
+	}
+	if has {
+		fmt.Fprintf(os.Stderr, "[watch] warning: %s root %s is reached through group-writable folders (%s) and pam_group is loaded; it is admitted and every change under it is scanned again; run chmod g-w on the folders\n",
+			kind, path, strings.Join(current.Folders, ", "))
+	} else {
+		fmt.Fprintf(os.Stderr, "[watch] %s root %s is no longer reached through group-writable folders\n", kind, path)
+	}
+	if w.onRootWarning != nil {
+		w.onRootWarning(w.RootWarnings())
+	}
+}
+
+func (w *InstallWatcher) setRootCoverage(kind, path string, cause error) {
+	if w == nil || w.secureClientActive() {
+		return
+	}
+	// An admitted root is judged for the warning on every call; a root that
+	// is not admitted has none.
+	if cause == nil {
+		w.refreshRootWarning(kind, path)
+	} else {
+		w.setRootWarning(kind, path, nil)
+	}
+	w.rootNotifyMu.Lock()
+	defer w.rootNotifyMu.Unlock()
+	key := kind + "\x00" + filepath.Clean(path)
+	w.rootCoverageMu.Lock()
+	previous, hadPrevious := w.rootCoverage[key]
+	if cause == nil {
+		if hadPrevious {
+			delete(w.rootCoverage, key)
+		}
+	} else {
+		if w.rootCoverage == nil {
+			w.rootCoverage = make(map[string]RootCoverageIssue)
+		}
+		connectors := w.rootConsumers[kind+"\x00"+w.rootCoveragePath(path)]
+		if len(connectors) == 0 {
+			connector := w.connectorForPath(path)
+			if connector == "" && w.cfg != nil {
+				connector = w.cfg.Guardrail.Connector
+			}
+			if connector != "" {
+				connectors = []string{connector}
+			}
+		}
+		connector := ""
+		if len(connectors) > 0 {
+			connector = connectors[0]
+		}
+		ancestor := ""
+		var writable *skillrootsafe.WritableAncestorError
+		if errors.As(cause, &writable) {
+			ancestor = writable.Ancestor
+		}
+		w.rootCoverage[key] = RootCoverageIssue{Kind: kind, Path: path, Connector: connector, Connectors: append([]string(nil), connectors...), Reason: cause.Error(), Ancestor: ancestor}
+	}
+	current := w.rootCoverage[key]
+	changed := hadPrevious != (cause != nil) || (cause != nil &&
+		(previous.Kind != current.Kind || previous.Path != current.Path || previous.Connector != current.Connector ||
+			previous.Reason != current.Reason || !slices.Equal(previous.Connectors, current.Connectors)))
+	w.rootCoverageMu.Unlock()
+	if !changed {
+		return
+	}
+	if cause != nil {
+		fmt.Fprintf(os.Stderr, "[watch] warning: %s admission scanning is off for connectors %s root %s: %v\n", kind, strings.Join(current.Connectors, ", "), path, cause)
+	} else {
+		fmt.Fprintf(os.Stderr, "[watch] %s admission scanning resumed for root %s\n", kind, path)
+	}
+	if w.onRootCoverage != nil {
+		w.onRootCoverage(w.RootCoverageIssues())
+	}
 }
 
 type rootConnector struct {
@@ -409,6 +688,8 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		pending:    make(map[string]time.Time),
 		rescanNow:  make(chan struct{}, 1),
 
+		warnedRescanNow: make(chan struct{}, 1),
+
 		admitMCPNow: make(chan struct{}, 1),
 
 		state:        newAdmissionState(cfg.DataDir, addressable),
@@ -434,11 +715,48 @@ func (w *InstallWatcher) SetRootConnectors(roots map[string]string) {
 	})
 }
 
+// SetRootConsumers records all connectors that load each watched root. Call
+// before Run, alongside SetRootConnectors for the event owner.
+func (w *InstallWatcher) SetRootConsumers(consumers []RootConsumer) {
+	w.rootConsumers = make(map[string][]string)
+	for _, consumer := range consumers {
+		connector := strings.ToLower(strings.TrimSpace(consumer.Connector))
+		if connector == "" || strings.TrimSpace(consumer.Path) == "" {
+			continue
+		}
+		key := consumer.Kind + "\x00" + w.rootCoveragePath(consumer.Path)
+		if !slices.Contains(w.rootConsumers[key], connector) {
+			w.rootConsumers[key] = append(w.rootConsumers[key], connector)
+		}
+	}
+}
+
+func (w *InstallWatcher) rootCoveragePath(path string) string {
+	cleaned, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		cleaned = filepath.Clean(path)
+	}
+	if runtime.GOOS == "windows" {
+		cleaned = strings.ToLower(cleaned)
+	}
+	return cleaned
+}
+
 // SetMCPServerSource replaces where admission and the rescan read the MCP
 // servers (a managed gateway reads every enrolled user's). Call it before Run.
 func (w *InstallWatcher) SetMCPServerSource(source func() ([]config.MCPServerEntry, error)) {
 	w.mcpServers = source
 	w.admitNewMCP = source != nil
+	w.mcpAdmissionMu.RLock()
+	prev := w.mcpAdmissionKnown
+	w.mcpAdmissionMu.RUnlock()
+	settled := w.settledDepartingMCP(prev, nil)
+	w.mcpAdmissionMu.Lock()
+	w.rememberDepartedMCP(w.mcpAdmissionKnown, nil, settled)
+	w.mcpAdmissionKnown = nil
+	w.mcpAdmissionListed = false
+	w.mcpAdmissionKnownSeq = w.mcpAdmissionReadSeq.Add(1)
+	w.mcpAdmissionMu.Unlock()
 }
 
 // RequestRescan runs a rescan cycle soon, without waiting for the interval.
@@ -517,7 +835,7 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 }
 
 func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEvent) {
-	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	baseline, err := w.mcpSnapshotForEvent(evt)
 	if err == nil {
 		w.readmitChangedMCPServer(ctx, evt, baseline)
 		return // admitted or baselined already
@@ -539,7 +857,8 @@ func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEve
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; running install admission\n", evt.Name)
-	res := w.runAdmission(ctx, evt)
+	res := w.runAdmission(ctx, evt.admittingSnapshot(snap))
+	w.noteMCPAdmissionOutcome(evt, snap, res)
 	w.notifyAdmission(res)
 	if !res.Interrupted {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, w.cachedFingerprint(evt, nil)))
@@ -558,7 +877,8 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 		return
 	}
 	snap, err := w.snapshotForEvent(evt)
-	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline)) {
+	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline) &&
+		!w.mcpBaselineLapsed(evt, baseline) && !w.mcpFailureAllowed(evt, baseline)) {
 		return
 	}
 	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil), "watch")
@@ -588,14 +908,24 @@ func (w *InstallWatcher) queueAddedMCP(name string) {
 func (w *InstallWatcher) claimMCP(path string) bool {
 	w.mcpClaimMu.Lock()
 	defer w.mcpClaimMu.Unlock()
-	if w.mcpClaims[path] {
+	if _, claimed := w.mcpClaims[path]; claimed {
 		return false
 	}
 	if w.mcpClaims == nil {
-		w.mcpClaims = map[string]bool{}
+		w.mcpClaims = map[string]time.Time{}
 	}
-	w.mcpClaims[path] = true
+	w.mcpClaims[path] = time.Now()
 	return true
+}
+
+func (w *InstallWatcher) mcpRetryAfter(path string) time.Duration {
+	w.mcpClaimMu.Lock()
+	started, claimed := w.mcpClaims[path]
+	w.mcpClaimMu.Unlock()
+	if !claimed {
+		return defaultScanTimeout
+	}
+	return max(time.Second, defaultScanTimeout-time.Since(started))
 }
 
 func (w *InstallWatcher) releaseMCP(path string) {
@@ -696,7 +1026,7 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 		if firstCycle && w.listedAtStartup(path) {
 			continue
 		}
-		baseline, err := w.store.GetTargetSnapshot(string(InstallMCP), path)
+		baseline, err := mcpSnapshotForServer(w.store, server)
 		if err != nil {
 			// A read error other than no rows is retried by admission,
 			// which says so.
@@ -710,6 +1040,9 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 			// Its scan failed: tried again with backoff, not every poll
 			// (rel-1-0-6:GAP-0258).
 			added = append(added, server.Name)
+		} else if w.mcpFailureAllowed(InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector}, baseline) {
+			// An allow written after the failure admits it now.
+			added = append(added, server.Name)
 		}
 	}
 	w.AdmitAddedMCPServers(added)
@@ -717,10 +1050,51 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 
 // readMCPServers is the MCP server list admission and the rescan use.
 func (w *InstallWatcher) readMCPServers() ([]config.MCPServerEntry, error) {
-	if w.mcpServers != nil {
-		return w.mcpServers()
+	if !w.admitNewMCP {
+		if w.mcpServers != nil {
+			return w.mcpServers()
+		}
+		return w.cfg.ReadMCPServers()
 	}
-	return w.cfg.ReadMCPServers()
+	readSeq := w.mcpAdmissionReadSeq.Add(1)
+	var servers []config.MCPServerEntry
+	var err error
+	if w.mcpServers != nil {
+		servers, err = w.mcpServers()
+	} else {
+		servers, err = w.cfg.ReadMCPServers()
+	}
+	if err == nil {
+		known := make([]mcpKnownDefinition, 0, len(servers))
+		for _, server := range servers {
+			hash, hashErr := mcpDefinitionHash(server)
+			if hashErr != nil {
+				continue
+			}
+			known = append(known, mcpKnownDefinition{
+				server: config.MCPServerEntry{Name: server.Name, Connector: server.Connector,
+					Home: server.Home, Project: server.Project, Bundled: server.Bundled,
+					URL: server.URL, Command: server.Command, Args: append([]string(nil), server.Args...),
+					Transport: server.Transport},
+				hash:  hash,
+				path:  MCPEventPath(server),
+				issue: mcpScanIssue(server),
+			})
+		}
+		w.mcpAdmissionMu.RLock()
+		prev := w.mcpAdmissionKnown
+		w.mcpAdmissionMu.RUnlock()
+		settled := w.settledDepartingMCP(prev, known)
+		w.mcpAdmissionMu.Lock()
+		if readSeq > w.mcpAdmissionKnownSeq {
+			w.rememberDepartedMCP(w.mcpAdmissionKnown, known, settled)
+			w.mcpAdmissionKnown = known
+			w.mcpAdmissionListed = true
+			w.mcpAdmissionKnownSeq = readSeq
+		}
+		w.mcpAdmissionMu.Unlock()
+	}
+	return servers, err
 }
 
 // connectorForPath is the connector that owns path: the tagged watched root
@@ -956,13 +1330,25 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	watchWake := make(chan struct{}, 1)
 	var nestedMu sync.Mutex
 	watchAsync := false
-	w.addWatch = func(dir string) { addDirWatches(fsw, dir, 0, watchedDirs) }
+	w.addWatch = func(dir string) {
+		if w.secureClientActive() {
+			addDirWatchesLegacy(fsw, dir, 0, watchedDirs)
+		} else {
+			for _, root := range w.pluginDirs {
+				if watcherPathAtOrBelow(dir, root) && !sameWatcherPath(dir, root) &&
+					unlinkedSkillTreePath(root, dir) != nil {
+					return
+				}
+			}
+			addDirWatches(fsw, dir, 0, watchedDirs)
+		}
+	}
 	w.addContentWatch = func(dir string) {
 		if !w.secureClientActive() {
 			for _, root := range w.skillDirs {
 				if watcherPathAtOrBelow(dir, root) {
 					if err := unlinkedSkillTreePath(root, dir); err != nil {
-						fmt.Fprintf(os.Stderr, "[watch] skill content directory %s: %v\n", dir, err)
+						w.setRootCoverage("skill", root, err)
 						return
 					}
 				}
@@ -1007,7 +1393,36 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			return
 		}
 		if info, statErr := pathidentity.StatPinned(dir); statErr == nil {
-			roots[key] = watchedRoot{dir: dir, absolute: absolute, kind: kind, info: info}
+			kinds := []string{kind}
+			if previous, ok := roots[key]; ok {
+				kinds = previous.kinds
+				if !slices.Contains(kinds, kind) {
+					kinds = append(slices.Clone(kinds), kind)
+				}
+			}
+			roots[key] = watchedRoot{dir: dir, absolute: absolute, kinds: kinds, info: info, checked: time.Now()}
+		}
+	}
+	// shareRoot adds a kind that is configured at a path already watched, so
+	// the root is judged and admitted for every kind. The watch can come from
+	// another root kind or from a content watch (a plugin cache nested under
+	// a skill root); a configured root with no record yet gets one, so its
+	// unsafe-route lifecycle is tracked whoever installed the watch.
+	shareRoot := func(key, dir, absolute, kind string) {
+		root, ok := roots[key]
+		if !ok {
+			rememberRoot(key, dir, absolute, kind)
+			return
+		}
+		if !slices.Contains(root.kinds, kind) {
+			root.kinds = append(slices.Clone(root.kinds), kind)
+			roots[key] = root
+		}
+	}
+	// setCoverage sets the coverage record of every kind the root serves.
+	setCoverage := func(root watchedRoot, cause error) {
+		for _, kind := range root.kinds {
+			w.setRootCoverage(kind, root.dir, cause)
 		}
 	}
 	// rewatchRoot watches a root again once the folder at its path is not
@@ -1015,39 +1430,66 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	rewatchRoot := func(key string, root watchedRoot) {
 		info, statErr := os.Stat(root.dir)
 		if statErr != nil || !info.IsDir() {
+			if statErr == nil {
+				statErr = fmt.Errorf("watched root is not a directory: %s", root.dir)
+			}
+			root.failed, root.checked = true, time.Now()
+			roots[key] = root
+			setCoverage(root, statErr)
 			return
 		}
 		_, watching := watchedDirs[key]
-		if os.SameFile(info, root.info) && (watching || root.failed) {
+		same := os.SameFile(info, root.info)
+		if same && watching && !root.failed && time.Since(root.checked) < time.Second {
+			return
+		}
+		if !w.secureClientActive() {
+			if err := unlinkedSkillTreePath(root.dir, root.dir); err != nil {
+				nestedMu.Lock()
+				forgetDirWatches(fsw, root.absolute, watchedDirs)
+				forgetNestedWatchKeys(root.absolute, nestedWatches)
+				nestedMu.Unlock()
+				root.info, root.failed, root.checked = info, true, time.Now()
+				roots[key] = root
+				setCoverage(root, err)
+				return
+			}
+		}
+		root.checked = time.Now()
+		if same && watching && !root.failed {
+			roots[key] = root
+			setCoverage(root, nil)
 			return
 		}
 		nestedMu.Lock()
 		forgetDirWatches(fsw, root.absolute, watchedDirs)
 		forgetNestedWatchKeys(root.absolute, nestedWatches)
 		nestedMu.Unlock()
-		if root.kind == "skill" {
-			if err := unlinkedSkillTreePath(root.dir, root.dir); err != nil {
-				root.info, root.failed = info, true
-				roots[key] = root
-				fmt.Fprintf(os.Stderr, "[watch] replaced skill root %s: %v (skipping)\n", root.dir, err)
-				return
-			}
-		}
 		root.info, root.failed = info, false
 		if addErr := fsw.Add(root.dir); addErr != nil {
 			root.failed = true
 			roots[key] = root
-			fmt.Fprintf(os.Stderr, "[watch] %s dir %s was replaced; watch it again: %v\n", root.kind, root.dir, addErr)
+			setCoverage(root, addErr)
 			return
 		}
+		setCoverage(root, nil)
 		roots[key] = root
 		watchedDirs[key] = struct{}{}
-		fmt.Printf("[watch] %s dir %s was replaced; watching it again and admitting what it holds\n", root.kind, root.dir)
-		w.admitReplacedRoot(ctx, fsw, root.dir, root.kind, watchedDirs)
+		for _, kind := range root.kinds {
+			fmt.Printf("[watch] %s dir %s was replaced; watching it again and admitting what it holds\n", kind, root.dir)
+			w.admitReplacedRoot(ctx, fsw, root.dir, kind, watchedDirs)
+		}
 	}
 	watchOnce := func(dir, kind string) bool {
 		key, absolute := watchKey(dir)
 		if _, exists := watchedDirs[key]; exists {
+			// Another kind registered this path; this kind is covered by
+			// that watch, so its own record ends too, unless that watch is
+			// not usable right now.
+			shareRoot(key, dir, absolute, kind)
+			if !roots[key].failed {
+				w.setRootCoverage(kind, dir, nil)
+			}
 			return true
 		}
 		if createsAgentOwnedDir(dir) {
@@ -1064,7 +1506,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			return false
 		}
 		watchRoot := ensureAndWatchLegacy
-		if kind == "skill" && !w.secureClientActive() {
+		if !w.secureClientActive() {
 			watchRoot = ensureAndWatch
 		}
 		created, err := watchRoot(fsw, dir)
@@ -1076,19 +1518,18 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 		}
 		if err != nil {
+			w.setRootCoverage(kind, dir, err)
 			if errors.Is(err, errWatchDirNotCreated) {
 				missingDirs = append(missingDirs, [2]string{dir, kind})
-				fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (watching it once it exists)\n", kind, dir, err)
 				return false
 			}
-			if kind == "skill" && !w.secureClientActive() {
+			if !w.secureClientActive() {
 				missingDirs = append(missingDirs, [2]string{dir, kind})
-				fmt.Fprintf(os.Stderr, "[watch] skill dir %s: %v (retrying when safe)\n", dir, err)
 				return false
 			}
-			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
 			return false
 		}
+		w.setRootCoverage(kind, dir, nil)
 		watchedDirs[key] = struct{}{}
 		rememberRoot(key, dir, absolute, kind)
 		watched++
@@ -1103,8 +1544,13 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			// (skills/synced/<account>/<skill>); watch those folders too so
 			// a newly synced skill is scanned on arrival (GAP-1409).
 			synced := filepath.Join(dir, "synced")
-			if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 {
-				addDirWatches(fsw, synced, 1, watchedDirs)
+			if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 &&
+				(w.secureClientActive() || unlinkedSkillTreePath(dir, synced) == nil) {
+				if w.secureClientActive() {
+					addDirWatchesLegacy(fsw, synced, 1, watchedDirs)
+				} else {
+					addDirWatches(fsw, synced, 1, watchedDirs)
+				}
 			}
 		}
 	}
@@ -1115,7 +1561,11 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		w.watchExistingPluginFolders(dir)
 		if w.cacheLayoutPlugins(dir) &&
 			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
-			addClaudeCacheWatches(fsw, dir, watchedDirs)
+			if w.secureClientActive() {
+				addDirWatchesLegacy(fsw, dir, 2, watchedDirs)
+			} else {
+				addClaudeCacheWatches(fsw, dir, watchedDirs)
+			}
 		}
 	}
 
@@ -1177,6 +1627,8 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	}
 	if w.cfg.Watch.RescanEnabled {
 		startLoop(w.rescanLoop)
+	} else {
+		startLoop(w.warnedRescanLoop)
 	}
 	if w.admitNewMCP {
 		startLoop(w.addedMCPLoop)
@@ -1210,6 +1662,12 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 			if w.onReadEvent != nil {
 				w.onReadEvent(event)
+			}
+			if w.rootWarned(event.Name) {
+				// A root reached through group-writable folders of a private
+				// group while pam_group is loaded: scan the root again for
+				// every change under it (GAP-0905).
+				w.requestWarnedRescan()
 			}
 			if event.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
 				nestedMu.Lock()
@@ -1254,9 +1712,13 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 						continue
 					}
 					copyRoot, copied := w.cachePluginCopyRoot(event.Name)
-					if info, statErr := os.Stat(event.Name); statErr == nil &&
+					if info, statErr := os.Lstat(event.Name); statErr == nil &&
 						info.IsDir() && depth < 3 {
-						addClaudeCacheWatches(fsw, event.Name, watchedDirs)
+						if w.secureClientActive() {
+							addDirWatchesLegacy(fsw, event.Name, 2, watchedDirs)
+						} else {
+							addClaudeCacheWatches(fsw, event.Name, watchedDirs)
+						}
 						if !copied {
 							w.queueExistingClaudePlugins(ctx, event.Name, depth)
 						}
@@ -1299,11 +1761,19 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 				case 0:
 					// The synced folder itself: watch it and its account
 					// folders; the event below expands it into its skills.
-					addDirWatches(fsw, event.Name, 1, watchedDirs)
+					if w.secureClientActive() {
+						addDirWatchesLegacy(fsw, event.Name, 1, watchedDirs)
+					} else {
+						addDirWatches(fsw, event.Name, 1, watchedDirs)
+					}
 				case 1:
 					// A new account folder: watch it and queue the skills
 					// already inside (they can land before the watch).
-					addDirWatches(fsw, event.Name, 0, watchedDirs)
+					if w.secureClientActive() {
+						addDirWatchesLegacy(fsw, event.Name, 0, watchedDirs)
+					} else {
+						addDirWatches(fsw, event.Name, 0, watchedDirs)
+					}
 					children, _ := os.ReadDir(event.Name)
 					for _, child := range children {
 						if child.IsDir() && !strings.HasPrefix(child.Name(), ".") {
@@ -1365,8 +1835,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 						missingDirs = append(missingDirs, entry)
 						continue
 					}
-					if entry[1] == "skill" && !w.secureClientActive() {
+					if !w.secureClientActive() {
 						if err := unlinkedSkillTreePath(entry[0], entry[0]); err != nil {
+							w.setRootCoverage(entry[1], entry[0], err)
 							missingDirs = append(missingDirs, entry)
 							continue
 						}
@@ -1377,8 +1848,59 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 				}
 			}
+			// A root Run does not hold a usable watch on keeps its record:
+			// rewatchRoot and the retry loops above end it when they have
+			// watched the root again and admitted what it holds.
+			w.reconcileWritableRouteIssues(func(path string) bool {
+				key, _ := watchKey(path)
+				_, watching := watchedDirs[key]
+				return !watching || roots[key].failed
+			})
 			w.queueDueIssues()
 			w.processPending(ctx)
+		}
+	}
+}
+
+// reconcileWritableRouteIssues judges again every root recorded as unavailable
+// because a folder on its link route is writable by another account. The
+// record keeps the folder named when it was made, and a root that does not
+// exist yet is never watched again until it does, so without this status,
+// doctor and the watcher health kept naming a folder after chmod repaired it
+// (GAP-0965). A route that is still writable stays recorded, with the folder
+// now found. A root that is not created yet is not watched after the repair
+// either, so its record changes to say so and stays until the root is
+// registered (the retry loop above ends it); only an existing root with a
+// safe route is cleared here. notWatched reports a root Run holds no usable
+// watch on: its record is left for the code that watches it again, so the
+// record never ends before the root has been watched and admitted.
+func (w *InstallWatcher) reconcileWritableRouteIssues(notWatched func(path string) bool) {
+	if w.secureClientActive() {
+		return
+	}
+	for _, issue := range w.RootCoverageIssues() {
+		if issue.Ancestor == "" {
+			continue
+		}
+		exists := false
+		var err error
+		if _, statErr := os.Lstat(issue.Path); statErr == nil {
+			exists = true
+			err = unlinkedSkillTreePath(issue.Path, issue.Path)
+		} else {
+			err = checkRootLinkRoute(issue.Path)
+		}
+		var writable *skillrootsafe.WritableAncestorError
+		switch {
+		case err == nil && exists:
+			if notWatched(issue.Path) {
+				continue
+			}
+			w.setRootCoverage(issue.Kind, issue.Path, nil)
+		case err == nil:
+			w.setRootCoverage(issue.Kind, issue.Path, fmt.Errorf("%w: %s root %s does not exist yet; watching it once it is created", errWatchDirNotCreated, issue.Kind, issue.Path))
+		case errors.As(err, &writable):
+			w.setRootCoverage(issue.Kind, issue.Path, err)
 		}
 	}
 }
@@ -1408,16 +1930,46 @@ func (w *InstallWatcher) queueDueIssues() {
 		if !slices.ContainsFunc(roots, func(root string) bool { return watcherPathAtOrBelow(issue.Path, root) }) {
 			continue
 		}
+		if issue.Kind == AdmissionNotQuarantined && w.blockedPluginDecisionUnchanged(issue) {
+			continue
+		}
 		w.queuePending(issue.Path)
 	}
+}
+
+// An unchanged, disabled plugin already has a final admission decision. A
+// failed physical move remains visible, while a changed copy is admitted again.
+func (w *InstallWatcher) blockedPluginDecisionUnchanged(issue AdmissionIssue) bool {
+	if issue.Type != string(InstallPlugin) || w.secureClientActive() || w.store == nil {
+		return false
+	}
+	evt := InstallEvent{Type: InstallPlugin, Name: issue.Name, Path: issue.Path, Connector: issue.Connector}
+	entry, err := w.store.GetActionForConnector("plugin", evt.Name, w.journalScope(w.eventConnector(evt)))
+	if err != nil || entry == nil || entry.Actions.Install != "block" || entry.Actions.Runtime != "disable" ||
+		!sameWatcherPath(entry.SourcePath, evt.Path) {
+		return false
+	}
+	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	if err != nil || baseline == nil || baseline.ScanID == "" ||
+		baseline.ScannerFingerprint != w.scannerFingerprint(evt) {
+		return false
+	}
+	current, err := w.snapshotForEvent(evt)
+	return err == nil && current != nil && current.ContentHash == baseline.ContentHash
 }
 
 // watchedRoot is a skill or plugin root Run watches and the folder it was
 // when the watch was added.
 type watchedRoot struct {
-	dir, absolute, kind string
-	info                os.FileInfo
-	failed              bool // the folder now there could not be watched
+	dir, absolute string
+	// kinds are all the kinds configured at this path. One path can be both
+	// a skill root and a plugin root; they share the one watch, so they share
+	// its lifecycle: each kind is unavailable while the watch is unsafe or
+	// lost and is admitted again before that ends.
+	kinds   []string
+	info    os.FileInfo
+	failed  bool // the folder now there could not be watched
+	checked time.Time
 }
 
 // admitReplacedRoot watches the folders of a skill or plugin root that was
@@ -1428,7 +1980,8 @@ func (w *InstallWatcher) admitReplacedRoot(ctx context.Context, fsw *fsnotify.Wa
 		w.watchIncompleteSkillFolders(root)
 		w.watchSkillContents(root)
 		synced := filepath.Join(root, "synced")
-		if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 {
+		if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 &&
+			unlinkedSkillTreePath(root, synced) == nil {
 			addDirWatches(fsw, synced, 1, watched)
 		}
 	} else {
@@ -1591,6 +2144,12 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 				}
 				w.state.set(evt, AdmissionScanning)
 				snap := w.admissionSnapshot(evt)
+				if snap == nil && evt.Type == InstallPlugin && !w.cfg.Watch.RescanEnabled &&
+					!w.secureClientActive() && w.store != nil {
+					// Keep the pre-scan identity for a blocked plugin even when
+					// periodic rescan is disabled.
+					snap, _ = w.snapshotForEvent(evt)
+				}
 				result := w.runAdmission(ctx, evt)
 				if result.Interrupted {
 					w.markInterruptedAdmission(evt, snap, w.scannerFingerprint(evt))
@@ -1671,7 +2230,7 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 		return nil
 	}
 	for _, root := range w.skillDirs {
-		discover, _ := hermesSkillsDiscover(root)
+		discover, _ := hermesSkillsDiscover(root, !w.secureClientActive())
 		if discover == nil || !watcherPathAtOrBelow(path, root) {
 			continue
 		}
@@ -1769,7 +2328,7 @@ func (w *InstallWatcher) watchIncompleteSkillFolders(root string) {
 	if _, _, recursive := w.recursiveSkillRoot(root); recursive {
 		return
 	}
-	if discover, _ := hermesSkillsDiscover(root); discover != nil {
+	if discover, _ := hermesSkillsDiscover(root, !w.secureClientActive()); discover != nil {
 		return
 	}
 	entries, err := os.ReadDir(root)
@@ -1832,7 +2391,7 @@ func (w *InstallWatcher) changedSkillFolder(path string) (string, bool) {
 			return "", false
 		}
 		skill := filepath.Join(rootAbs, parts[0])
-		discover, _ := hermesSkillsDiscover(root)
+		discover, _ := hermesSkillsDiscover(root, !w.secureClientActive())
 		if (recursive && sameWatcherPath(root, recursiveRoot)) ||
 			discover != nil {
 			// Recursive roots resolve the nearest marked skill, not the
@@ -2020,7 +2579,10 @@ func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
 // Rego policy; otherwise it falls back to the built-in Go logic.
 func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (res AdmissionResult) {
 	w.admissionNotes.Delete(evt.Path)
-	defer func() { w.settleAdmissionIssue(evt, res) }()
+	defer func() {
+		w.settleAdmissionIssue(evt, res)
+		w.releaseHeldOnAdmission(evt, res)
+	}()
 	if evt.Type == InstallPlugin && w.isManagedArtifact(evt.Path) {
 		return AdmissionResult{
 			Event:   evt,
@@ -2050,6 +2612,17 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	if res, refused := w.refuseForeignLink(ctx, evt, targetType); refused {
 		return res
 	}
+	// Every effect of this admission (a block, a disable, a release of an
+	// earlier block) belongs to one definition: the one the caller
+	// snapshotted, or the one found now when it did not snapshot. Each
+	// decision is checked against it right before it is enforced or returned:
+	// after the policy evaluation, which reads the live policy and the
+	// definition on its own, and after the scan, which can run long.
+	if evt.Type == InstallMCP && !w.secureClientActive() && evt.definitionHash == "" {
+		if hash, err := w.mcpDefinitionHashOf(evt); err == nil {
+			evt.definitionHash = hash
+		}
+	}
 	policyID := enforce.PolicyStableID(w.cfg.PolicyDir)
 	decisionPolicy := w.admissionPolicySnapshot()
 	ctx, admissionTrace := w.startAdmissionTraceV8(ctx, evt, targetType, policyID, decisionPolicy)
@@ -2071,31 +2644,27 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	cfg := decisionPolicy.Config
 	connector := w.eventConnector(evt)
-	assetDecision := cfg.EvaluateAssetPolicy(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
-		TargetType:     targetType,
-		Name:           evt.Name,
-		DeclaredNames:  declaredAssetNames(cfg, evt),
-		Connector:      connector,
-		SourcePath:     evt.Path,
-		RuntimeSurface: "watcher",
-	}))
+	// A root several connectors load applies each one scoped asset rules.
+	assetDecision, assetConnector, assetDenying := w.rootAssetPolicy(cfg, evt, connector)
 	if assetDecision.Enabled && assetDecision.RawAction == "block" {
 		if assetDecision.Action == "block" {
+			if w.mcpDefinitionMoved(evt) {
+				return w.mcpMovedAdmission(evt)
+			}
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s", targetType, assetDecision.Reason, assetDecision.Source))
-			if err := w.enforceBlockWith(ctx, evt, true, ""); err != nil && !w.secureClientActive() {
-				// skill list and skill info say the quarantine of a
-				// denied asset failed, as they do for a scan verdict;
-				// they said quarantined (GAP-0133).
-				w.journalFailedQuarantine(evt, targetType, err)
-			}
+			// skill list and skill info say the quarantine of a denied
+			// asset failed, as they do for a scan verdict; they said
+			// quarantined (GAP-0133). An asset that stays in its folder,
+			// because the move failed or an operator-restored copy is
+			// kept, is held for the connector whose rule denied it too.
+			w.journalPolicyDenied(cfg, evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), assetDenying)
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
 			return res
 		}
-		w.logAssetPolicyWouldBlock(ctx, evt, targetType, connector, assetDecision)
+		w.logAssetPolicyWouldBlock(ctx, evt, targetType, assetConnector, assetDecision)
 	}
-
 	if res, done := w.legacyAllowPathMismatch(ctx, cfg, evt, targetType); done {
 		return res
 	}
@@ -2105,6 +2674,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// transfers to another on-disk asset with the same name (F-2867).
 	input := w.admissionInputFor(cfg, evt, targetType, connector)
 	out := w.evaluateAdmissionSnapshot(ctx, input, decisionPolicy)
+	if w.mcpDefinitionMoved(evt) {
+		return w.mcpMovedAdmission(evt)
+	}
 	switch out.Verdict {
 	case "blocked":
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
@@ -2134,6 +2706,15 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return res
 	}
 	// verdict == "scan" → proceed to scanning below
+
+	// A Hermes shipped plugin whose bytes match their pinned digest is not
+	// scanned: the block, deny and allow decisions above still apply.
+	if w.hermesVendorPlugin(evt) {
+		w.logHermesVendorPlugin(evt, targetType)
+		w.recordAdmission(ctx, "allowed", targetType)
+		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: hermesVendorPluginReason}
+		return res
+	}
 
 	// Phase 2: Scan.
 	s := w.newScanner(evt)
@@ -2166,6 +2747,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			err = fmt.Errorf("%s: %w", unreadable, err)
 		}
 	}
+	if w.mcpDefinitionMoved(evt) {
+		// The scan read the server by name when it ran: its verdict is for
+		// whatever definition it found, so it is neither enforced nor kept.
+		return w.mcpMovedAdmission(evt)
+	}
 	if err != nil && ctx.Err() != nil && !w.secureClientActive() {
 		// The watcher itself is stopping (a config reload restarts it, or
 		// the gateway stops), not the scanner failing: the scan was cut off
@@ -2187,6 +2773,10 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		w.recordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
 		w.logFailedMCPScan(ctx, evt, s.Name(), target, result, err)
 		if w.keepsUnverifiedMCPServer(evt, targetType, connector, result, err) {
+			// That decision read the live policy and the definition again.
+			if w.mcpDefinitionMoved(evt) {
+				return w.mcpMovedAdmission(evt)
+			}
 			return w.keepUnverifiedMCPServer(ctx, evt, targetType, s.Name(), err)
 		}
 		if assetPathGone(evt) && !w.secureClientActive() {
@@ -2242,7 +2832,12 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 		return res
 	}
-	w.releaseScanFailureBlock(evt, targetType, "its scan succeeded (the verdict decides)")
+	// The block an earlier failed scan left is released below, only once the
+	// definition this scan was started for has passed every read of the
+	// policy and of the server that follows: until then the block stands.
+	releaseEarlierFailure := func() {
+		w.releaseScanFailureBlock(evt, targetType, "its scan succeeded (the verdict decides)")
+	}
 
 	// Phase 3: post-scan evaluation. Re-read the live config so a block or
 	// allow added while the scan was running wins.
@@ -2259,26 +2854,34 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// A default deny or registry_required that a reload switched on while
 	// the scan ran applies as the pre-scan check applies it; the lists
 	// alone missed it (GAP-1155).
+	var postDecision config.AssetPolicyDecision
+	var postDenying []string
 	if post := decisionPolicy.Config; post != nil {
-		if decision := post.EvaluateAssetPolicy(w.withMCPDefinition(post, evt, config.AssetPolicyInput{
-			TargetType: targetType, Name: evt.Name, DeclaredNames: declaredAssetNames(post, evt),
-			Connector: connector, SourcePath: evt.Path, RuntimeSurface: "watcher",
-		})); decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
-			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
-				fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
-			scanID := w.logScanID(ctx, evt, result, "blocked")
-			w.enforceBlock(ctx, evt)
-			w.recordAdmission(ctx, "blocked", targetType)
-			res = AdmissionResult{
-				ScanID: scanID,
-				Event:  evt, Verdict: VerdictBlocked, Reason: decision.Reason,
-				MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
-				InstallAction: "block",
-			}
-			return res
+		postDecision, _, postDenying = w.rootAssetPolicy(post, evt, connector)
+	}
+	// The policy read above and the input built from it read the definition
+	// again, after the scan. Every decision below comes from those reads, so
+	// none is published or enforced for a definition the snapshot did not name.
+	if w.mcpDefinitionMoved(evt) {
+		return w.mcpMovedAdmission(evt)
+	}
+	if decision := postDecision; decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
+		releaseEarlierFailure()
+		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
+			fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
+		scanID := w.logScanID(ctx, evt, result, "blocked")
+		w.journalPolicyDenied(decisionPolicy.Config, evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), postDenying)
+		w.recordAdmission(ctx, "blocked", targetType)
+		res = AdmissionResult{
+			ScanID: scanID,
+			Event:  evt, Verdict: VerdictBlocked, Reason: decision.Reason,
+			MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
+			InstallAction: "block",
 		}
+		return res
 	}
 	if input.BlockListed() {
+		releaseEarlierFailure()
 		reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s reason=blocked-post-scan", targetType))
@@ -2294,6 +2897,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return res
 	}
 	if input.AllowListed() {
+		releaseEarlierFailure()
 		reason := fmt.Sprintf("scan found findings but %s %q is allow-listed — skipping enforcement", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=allow-listed-post-scan", targetType))
@@ -2310,6 +2914,10 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	policy.WarnJudgeOnlyPluginHigh(decisionPolicy.Config, connector, &input)
 	out = w.evaluateAdmissionSnapshot(ctx, input, decisionPolicy)
+	if w.mcpDefinitionMoved(evt) {
+		return w.mcpMovedAdmission(evt)
+	}
+	releaseEarlierFailure()
 	w.applyPostScanEnforcement(ctx, out, evt, targetType, result, s.Name())
 	scanID := w.logScanID(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
@@ -2390,9 +2998,17 @@ func (w *InstallWatcher) withMCPDefinition(cfg *config.Config, evt InstallEvent,
 	if evt.Type != InstallMCP || cfg == nil || cfg.SecureClientIntegration() {
 		return in
 	}
-	if entry, err := w.lookupMCPServer(evt); err == nil {
-		in.URL, in.Command, in.Args, in.Transport = entry.URL, entry.Command, entry.Args, entry.Transport
+	// A remembered definition is the one the event asks about, even when the
+	// agent config lists another definition under the same name.
+	entry := evt.remembered
+	if entry == nil {
+		var err error
+		if entry, err = w.lookupMCPServer(evt); err != nil {
+			return in
+		}
 	}
+	in.URL, in.Command, in.Args, in.Transport = entry.URL, entry.Command, entry.Args, entry.Transport
+	in.ArgsCut = entry.ArgsCut
 	return in
 }
 
@@ -2492,11 +3108,12 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 			runtimeAction := coalesce(out.RuntimeAction, "allow")
 			fileAction := coalesce(out.FileAction, "none")
 			scope := w.journalScope(w.eventConnector(evt))
+			rowType, rowName := journalTarget(evt, targetType)
 
 			if installAction == "block" {
-				_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", blockReason)
+				_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "install", "block", blockReason)
 			}
-			_ = w.store.SetSourcePathForConnector(targetType, journalName(evt), scope, evt.Path)
+			_ = w.store.SetSourcePathForConnector(rowType, rowName, scope, evt.Path)
 
 			enforcement := map[string]string{
 				"source_path": evt.Path,
@@ -2507,10 +3124,10 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 
 			secureClient := w.secureClientActive()
 			if fileAction == "quarantine" && !retainRestored && secureClient {
-				_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "file", "quarantine", blockReason)
+				_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "file", "quarantine", blockReason)
 			}
 			if runtimeAction == "block" {
-				_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "runtime", "disable", blockReason)
+				_ = w.store.SetRuntimeDisableForConnector(rowType, rowName, scope, evt.Path, blockReason)
 			}
 
 			_ = w.logger.LogActionWithEnforcement(string(audit.ActionWatcherBlock), evt.Name,
@@ -2526,7 +3143,7 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 					// in quarantine storage; a failed move says so, plainly,
 					// and the block and runtime disable stay (GAP-0394).
 					if err == nil {
-						_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "file", "quarantine", blockReason)
+						_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "file", "quarantine", blockReason)
 					} else {
 						w.journalFailedQuarantine(evt, targetType, err)
 					}
@@ -2618,10 +3235,23 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 		plugin := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
 		plugin.Connector = w.eventConnector(evt)
 		plugin.LLM = cfg.ResolveLLM("scanners.plugin")
+		plugin.Policy = pluginScannerPolicy(cfg, plugin.Connector)
+		plugin.DisableVendorIdentity = cfg.SecureClientIntegration()
 		return plugin
 	default:
 		return nil
 	}
+}
+
+// pluginScannerPolicy carries the effective strict tier to the plugin scanner.
+func pluginScannerPolicy(cfg *config.Config, connector string) string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return ""
+	}
+	if cfg.HookPolicyTierForConnector(connector) == "strict" {
+		return "strict"
+	}
+	return ""
 }
 
 // defaultScanTimeout bounds a plugin or MCP scan, which have no timeout key.
@@ -2808,7 +3438,8 @@ func (w *InstallWatcher) hasRecoverableMCPBlock(evt InstallEvent) bool {
 	if evt.Type != InstallMCP || w.store == nil {
 		return false
 	}
-	entry, err := w.store.GetActionForConnector(string(InstallMCP), journalName(evt), w.journalScope(w.eventConnector(evt)))
+	rowType, rowName := journalTarget(evt, string(InstallMCP))
+	entry, err := w.store.GetActionForConnector(rowType, rowName, w.journalScope(w.eventConnector(evt)))
 	return err == nil && entry != nil && (entry.Actions.Runtime == "disable" || entry.Actions.Install == "block") &&
 		(strings.HasPrefix(entry.Reason, autoBlockReasonPrefix) || strings.HasPrefix(entry.Reason, scanFailureReason)) &&
 		(entry.SourcePath == "" || sameWatcherPath(entry.SourcePath, evt.Path))
@@ -2842,9 +3473,9 @@ func (w *InstallWatcher) releaseSupersededRejection(evt InstallEvent, targetType
 	if w.store == nil || w.secureClientActive() {
 		return
 	}
-	name := journalName(evt)
+	rowType, name := journalTarget(evt, targetType)
 	scope := w.journalScope(w.eventConnector(evt))
-	entry, err := w.store.GetActionForConnector(targetType, name, scope)
+	entry, err := w.store.GetActionForConnector(rowType, name, scope)
 	if err != nil || entry == nil || entry.Actions.IsEmpty() || !strings.HasPrefix(entry.Reason, autoBlockReasonPrefix) ||
 		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
 		return
@@ -2861,7 +3492,7 @@ func (w *InstallWatcher) releaseSupersededRejection(evt InstallEvent, targetType
 		if field.value == "" {
 			continue
 		}
-		if err := w.store.ClearActionFieldForConnector(targetType, name, scope, field.name); err == nil {
+		if err := w.store.ClearActionFieldForConnector(rowType, name, scope, field.name); err == nil {
 			cleared = append(cleared, field.name+"="+field.value)
 		}
 	}
@@ -2900,17 +3531,24 @@ func (w *InstallWatcher) mcpNameSharedByAnotherServer(evt InstallEvent) bool {
 // keepsUnverifiedMCPServer reports an MCP server whose scan ended without a
 // verdict and that scanners.mcp_scanner.unverified_server warn keeps, as mcp
 // set adds it (GAP-1195): the scan did not finish (a timeout, a launcher or
-// scanner that exited, an unreachable server) and reported no finding, the
-// scanner did not refuse the server's definition, and the live policy
-// neither refuses unverified servers (explicit block) nor blocks this server. Secure Client keeps its
-// fail-closed admission.
+// scanner that exited, an unreachable server) or the scanner refused the
+// definition in a tier that fails open (GAP-0775), no finding was reported,
+// and the live policy neither refuses unverified servers (explicit block) nor
+// blocks this server. Secure Client keeps its fail-closed admission.
 func (w *InstallWatcher) keepsUnverifiedMCPServer(evt InstallEvent, targetType, connector string, result *scanner.ScanResult, err error) bool {
-	if evt.Type != InstallMCP || w.secureClientActive() || scanner.MCPScanRefused(err) ||
-		(result != nil && len(result.Findings) > 0) {
+	if evt.Type != InstallMCP || w.secureClientActive() || (result != nil && len(result.Findings) > 0) {
 		return false
 	}
 	cfg := w.admissionPolicySnapshot().Config
 	if cfg == nil || cfg.MCPUnverifiedServerBlocks() {
+		return false
+	}
+	// A definition the scanner refuses (a launcher or address it never
+	// starts or dials) is a server DefenseClaw cannot scan, not a malicious
+	// one: the OSS default and permissive tiers keep it with a warning, and
+	// the strict tier and every managed profile still refuse it (fail
+	// closed). A completed scan that finds something never reaches here.
+	if scanner.MCPScanRefused(err) && cfg.MCPAdmissionFailsClosed(connector) {
 		return false
 	}
 	decision := cfg.EvaluateAssetPolicy(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
@@ -2959,12 +3597,28 @@ func (w *InstallWatcher) logFailedMCPScan(ctx context.Context, evt InstallEvent,
 // unverifiedMCPReason leads the reason of an MCP server kept unverified.
 const unverifiedMCPReason = "scan did not finish, kept unverified (scanners.mcp_scanner.unverified_server: warn): "
 
+// unscannableMCPReason leads the reason of an MCP server the scanner refuses
+// (a launcher or address it never starts or dials) that a fail-open tier
+// keeps with a warning. Strict and managed profiles block it instead.
+const unscannableMCPReason = "cannot be scanned, kept with a warning (fail-closed only in the strict tier and managed profiles): "
+
+// keptUnscannedMCPReason reports the reason of an MCP server kept after a
+// scan that did not finish or that the scanner refused.
+func keptUnscannedMCPReason(reason string) bool {
+	return strings.HasPrefix(reason, unverifiedMCPReason) || strings.HasPrefix(reason, unscannableMCPReason)
+}
+
 // keepUnverifiedMCPServer keeps an MCP server whose scan did not finish: a
 // MEDIUM audit row says so, a block an earlier failed scan left is released,
 // and its marked baseline makes the rescan retry admission until a scan decides.
 func (w *InstallWatcher) keepUnverifiedMCPServer(ctx context.Context, evt InstallEvent, targetType, scannerName string, err error) AdmissionResult {
 	reason := unverifiedMCPReason + err.Error()
-	w.releaseScanFailureBlock(evt, targetType, "kept unverified (scanners.mcp_scanner.unverified_server: warn)")
+	cause := "kept unverified (scanners.mcp_scanner.unverified_server: warn)"
+	if scanner.MCPScanRefused(err) {
+		reason = unscannableMCPReason + err.Error()
+		cause = "kept with a warning: the server cannot be scanned and this profile fails open"
+	}
+	w.releaseScanFailureBlock(evt, targetType, cause)
 	_ = w.logger.LogEventCtx(ctx, audit.Event{
 		Action:   string(audit.ActionInstallAllowed),
 		Target:   evt.Path,
@@ -2982,9 +3636,11 @@ func (w *InstallWatcher) recordScanFailureBlock(evt InstallEvent, targetType, re
 		return
 	}
 	scope := w.journalScope(w.eventConnector(evt))
-	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", reason)
-	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "runtime", "disable", reason)
-	_ = w.store.SetSourcePathForConnector(targetType, journalName(evt), scope, evt.Path)
+	rowType, rowName := journalTarget(evt, targetType)
+	_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "install", "block", reason)
+	// One statement records the runtime disable, the source path and the
+	// path that decided it (the provenance an account row is read by).
+	_ = w.store.SetRuntimeDisableForConnector(rowType, rowName, scope, evt.Path, reason)
 }
 
 // releaseScanFailureBlock clears the block and runtime disable a failed scan
@@ -2997,7 +3653,8 @@ func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType, c
 		return
 	}
 	scope := w.journalScope(w.eventConnector(evt))
-	entry, err := w.store.GetActionForConnector(targetType, journalName(evt), scope)
+	rowType, rowName := journalTarget(evt, targetType)
+	entry, err := w.store.GetActionForConnector(rowType, rowName, scope)
 	if err != nil || entry == nil || !strings.HasPrefix(entry.Reason, scanFailureReason) ||
 		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path) && !blockedPathGone(entry.SourcePath)) {
 		return
@@ -3009,7 +3666,7 @@ func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType, c
 		if field.value == "" {
 			continue
 		}
-		if err := w.store.ClearActionFieldForConnector(targetType, journalName(evt), scope, field.name); err == nil {
+		if err := w.store.ClearActionFieldForConnector(rowType, rowName, scope, field.name); err == nil {
 			cleared = append(cleared, field.name+"="+field.value)
 		}
 	}
@@ -3033,7 +3690,11 @@ func blockedPathGone(path string) bool {
 // journalFailedQuarantine records on the journal that the quarantine of a
 // blocked asset failed (err), or that its link was removed: install block,
 // with the reason skill list and skill info show.
-func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType string, err error) {
+//
+// A root several connectors load is journaled for the owner and for each
+// connector in also (the one whose rule denied the asset), so the denying
+// connector is never left without the action.
+func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType string, err error, also ...string) {
 	if w.store == nil {
 		return
 	}
@@ -3041,8 +3702,392 @@ func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType st
 	if errors.Is(err, errLinkRemoved) {
 		reason = err.Error()
 	}
-	scope := w.journalScope(w.eventConnector(evt))
-	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", reason)
+	rowType, rowName := journalTarget(evt, targetType)
+	scopes := []string{w.journalScope(w.eventConnector(evt))}
+	for _, connector := range also {
+		if scope := w.journalScope(connector); !slices.Contains(scopes, scope) {
+			scopes = append(scopes, scope)
+		}
+	}
+	for _, scope := range scopes {
+		_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "install", "block", reason)
+	}
+}
+
+// policyDenialMarkPrefix opens the tag that ends the journal reason of a hold
+// journalPolicyDenied wrote. The tag lists the fields of the row the hold
+// set and the copies of the asset it was written for, so releasePolicyHolds
+// lifts those fields, and only once the last of those copies is allowed; an
+// install block or runtime disable that was on the row for another reason is
+// not in the list and stays. A journal row is keyed by the asset's name, not
+// by its path, so the copies are recorded in the tag: the row's source path
+// belongs to an earlier block, or to whichever copy was judged last.
+const policyDenialMarkPrefix = " [asset policy: "
+
+// policyHeldCopiesMark separates, in the tag, the held fields from the copies.
+const policyHeldCopiesMark = " copies="
+
+// policyDenialSep follows, in the reason of a row the hold shares with an
+// earlier runtime disable, the reason of that earlier block; releasing the
+// hold puts it back.
+const policyDenialSep = " | asset policy hold: "
+
+// retainedPolicyReason leads the reason of a hold on an operator-restored
+// copy that stays in its folder although a connector rule denies it.
+const retainedPolicyReason = "a restored copy stays in its folder while an asset policy rule denies it"
+
+func policyDenialMark(fields, copies []string) string {
+	return policyDenialMarkPrefix + strings.Join(fields, ",") + policyHeldCopiesMark + strings.Join(copies, ",") + "]"
+}
+
+// parsePolicyHold returns the fields and the copies a journal reason records
+// as held by a policy hold, or nil when the reason carries no tag.
+func parsePolicyHold(reason string) (fields, copies []string) {
+	i := strings.LastIndex(reason, policyDenialMarkPrefix)
+	if i < 0 || !strings.HasSuffix(reason, "]") {
+		return nil, nil
+	}
+	body, list, found := strings.Cut(strings.TrimSuffix(reason[i+len(policyDenialMarkPrefix):], "]"), policyHeldCopiesMark)
+	if found && list != "" {
+		copies = strings.Split(list, ",")
+	}
+	return strings.Split(body, ","), copies
+}
+
+// policyCopyKey names one copy of an asset in a hold tag: its absolute,
+// cleaned path in the spelling it was written with, encoded so that no path
+// can end or split the tag. The spelling is kept because the path is shown to
+// the operator; copies are matched with samePolicyCopy, which folds case on
+// Windows, as sameWatcherPath does.
+func policyCopyKey(path string) string {
+	abs, err := filepath.Abs(strings.TrimSpace(path))
+	if err != nil {
+		abs = strings.TrimSpace(path)
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(filepath.Clean(abs)))
+}
+
+// samePolicyCopy reports whether two tag keys name the same copy. Windows
+// paths differ only by case when they name one folder, and a tag written by an
+// earlier build holds the folded spelling.
+func samePolicyCopy(a, b string) bool {
+	return policyCopyKeysEqual(a, b, runtime.GOOS == "windows")
+}
+
+func policyCopyKeysEqual(a, b string, foldCase bool) bool {
+	if a == b {
+		return true
+	}
+	rawA, errA := base64.RawURLEncoding.DecodeString(a)
+	rawB, errB := base64.RawURLEncoding.DecodeString(b)
+	return foldCase && errA == nil && errB == nil && strings.EqualFold(string(rawA), string(rawB))
+}
+
+func hasPolicyCopy(keys []string, key string) bool {
+	return slices.ContainsFunc(keys, func(other string) bool { return samePolicyCopy(other, key) })
+}
+
+// livePolicyCopies are the copies of a tag other than skip whose folder is
+// not absent; a copy that is gone leaves nothing to run and holds nothing. A
+// copy this process cannot look at (a private parent folder) is present,
+// unknown, and stays.
+func livePolicyCopies(copies []string, skip string) []string {
+	var live []string
+	for _, key := range copies {
+		raw, err := base64.RawURLEncoding.DecodeString(key)
+		if err == nil && !samePolicyCopy(key, skip) && !policyCopyGone(string(raw)) && !hasPolicyCopy(live, key) {
+			live = append(live, key)
+		}
+	}
+	return live
+}
+
+// policyPriorReason is the reason of the block a hold shares its row with
+// (policyDenialSep), or "".
+func policyPriorReason(reason string) string {
+	if i := strings.Index(reason, policyDenialSep); i >= 0 {
+		return reason[:i]
+	}
+	return ""
+}
+
+func actionFieldValue(entry *audit.ActionEntry, field string) string {
+	if entry == nil {
+		return ""
+	}
+	switch field {
+	case "install":
+		return entry.Actions.Install
+	case "runtime":
+		return entry.Actions.Runtime
+	case "file":
+		return entry.Actions.File
+	}
+	return ""
+}
+
+// policyRuntimeScope is the journal row that carries a connector's runtime
+// disable from a policy hold: the connector's own row. OpenClaw's install
+// journal is the global row (journalScope), which every other connector's
+// runtime check falls back to, so a runtime disable written there would block
+// an unrelated connector's skill of the same name.
+func policyRuntimeScope(connector string) string {
+	return strings.ToLower(strings.TrimSpace(connector))
+}
+
+// policyHoldScopes are the journal rows a policy hold of evt may sit in: the
+// install row and the runtime row of the owner and of every consumer.
+func (w *InstallWatcher) policyHoldScopes(evt InstallEvent) []string {
+	var scopes []string
+	for _, connector := range w.rootConsumersOf(evt, w.eventConnector(evt)) {
+		for _, scope := range []string{w.journalScope(connector), policyRuntimeScope(connector)} {
+			if !slices.Contains(scopes, scope) {
+				scopes = append(scopes, scope)
+			}
+		}
+	}
+	return scopes
+}
+
+// journalPolicyDenied records, after enforceBlockWith (err is its result) on
+// an asset an asset_policy rule denied (cfg is the policy generation that
+// decided the denial, so the tier that holds the root owner is the one that
+// denied, not the config the process started with), that the asset is still in its
+// folder: because the quarantine failed (err), or because the files of an
+// operator restore are kept while the install block stands. Every connector
+// in denying (each one whose rule denied the copy, as each loads it) gets the
+// install block and, on its own row, the runtime disable. A root owner whose
+// own rules allow the copy is not held for another connector denial in the
+// balanced and permissive tiers, where it runs the ordinary skill; the strict
+// tier and a managed deployment hold it too.
+// Without the runtime disable a denial by the
+// default (default_action deny) rule, which the hook evaluates only when
+// runtime_detection is on, left the surviving skill callable. A block already
+// on a row for another reason (install, runtime or file) is left as it is: not
+// claimed, not re-pinned to this copy, not lifted with the hold. A runtime
+// enable is no block and the hold replaces it. releasePolicyHolds lifts what the hold set when the denial goes; an
+// operator enable clears it too. A removed link, or an asset that is gone,
+// leaves nothing to run and no runtime disable.
+func (w *InstallWatcher) journalPolicyDenied(cfg *config.Config, evt InstallEvent, targetType string, err error, denying []string) {
+	if w.store == nil || w.secureClientActive() {
+		return
+	}
+	var reason string
+	switch {
+	case errors.Is(err, errLinkRemoved):
+		w.journalFailedQuarantine(evt, targetType, err, denying...)
+		return
+	case err != nil:
+		reason = quarantineFailedReason + err.Error()
+	case (evt.Type == InstallSkill || evt.Type == InstallPlugin) && assetStillThere(evt.Path):
+		reason = retainedPolicyReason
+	default:
+		return
+	}
+	type holdRow struct {
+		scope  string
+		fields []string
+	}
+	var rows []holdRow
+	add := func(scope, field string) {
+		for i := range rows {
+			if rows[i].scope == scope {
+				rows[i].fields = append(rows[i].fields, field)
+				return
+			}
+		}
+		rows = append(rows, holdRow{scope, []string{field}})
+	}
+	owner := w.eventConnector(evt)
+	var connectors []string
+	if len(denying) == 0 || PolicyHoldStrict(cfg, owner) {
+		connectors = []string{owner}
+	}
+	for _, connector := range denying {
+		if connector != "" && !containsFold(connectors, connector) {
+			connectors = append(connectors, connector)
+		}
+	}
+	var installScopes []string
+	for _, connector := range connectors {
+		if scope := w.journalScope(connector); !slices.Contains(installScopes, scope) {
+			installScopes = append(installScopes, scope)
+			add(scope, "install")
+		}
+	}
+	for _, connector := range connectors {
+		if scope := policyRuntimeScope(connector); scope != "" {
+			add(scope, "runtime")
+		}
+	}
+	name := evt.Name
+	for _, row := range rows {
+		prev, _ := w.store.GetActionForConnector(targetType, name, row.scope)
+		owned, prevCopies := parsePolicyHold(reasonOf(prev))
+		copies := append(livePolicyCopies(prevCopies, policyCopyKey(evt.Path)), policyCopyKey(evt.Path))
+		// A field already at its protective value that no hold of ours set is an
+		// earlier block (an operator, a scan verdict, a failed quarantine). The
+		// hold does not claim it, rebind its source path or lift it later. Any
+		// other value, a runtime enable among them, is not a block and the hold
+		// replaces it.
+		independent := func(field string) bool {
+			value := actionFieldValue(prev, field)
+			return value != "" && value == policyProtectiveValue(field) && !slices.Contains(owned, field)
+		}
+		earlier := false
+		for _, field := range []string{"install", "runtime", "file"} {
+			earlier = earlier || independent(field)
+		}
+		// An earlier block pinned to another copy keeps that path, since an
+		// allow rule for this copy would otherwise lift it. The row then holds
+		// only the runtime disable (it covers every copy of the name), and holds
+		// nothing when that disable is the earlier block.
+		pinnedElsewhere := earlier && prev.SourcePath != "" && !sameWatcherPath(prev.SourcePath, evt.Path)
+		var claim []string
+		for _, field := range row.fields {
+			if !independent(field) && (!pinnedElsewhere || field == "runtime") {
+				claim = append(claim, field)
+			}
+		}
+		for _, field := range owned {
+			if !slices.Contains(claim, field) && actionFieldValue(prev, field) != "" {
+				claim = append(claim, field)
+			}
+		}
+		if len(claim) == 0 {
+			continue
+		}
+		rowReason := reason + policyDenialMark(claim, copies)
+		if prior := policyPriorReason(reasonOf(prev)); prior != "" {
+			rowReason = prior + policyDenialSep + rowReason
+		} else if earlier && owned == nil && reasonOf(prev) != "" {
+			rowReason = prev.Reason + policyDenialSep + rowReason
+		}
+		for _, field := range claim {
+			value := "block"
+			if field == "runtime" {
+				value = "disable"
+			}
+			_ = w.store.SetActionFieldForConnector(targetType, name, row.scope, field, value, rowReason)
+		}
+		if !pinnedElsewhere {
+			_ = w.store.SetSourcePathForConnector(targetType, name, row.scope, evt.Path)
+		}
+	}
+}
+
+// policyProtectiveValue is the value of a journal action field that blocks
+// the asset, or empty for a field that holds no block.
+func policyProtectiveValue(field string) string {
+	switch field {
+	case "install":
+		return "block"
+	case "runtime":
+		return "disable"
+	case "file":
+		return "quarantine"
+	}
+	return ""
+}
+
+func reasonOf(entry *audit.ActionEntry) string {
+	if entry == nil {
+		return ""
+	}
+	return entry.Reason
+}
+
+func assetStillThere(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+// policyCopyGone reports a held copy whose folder is absent, as opposed to
+// one this process cannot look at.
+func policyCopyGone(path string) bool {
+	_, err := os.Lstat(path)
+	return pathAbsent(err)
+}
+
+// policyHeldScopes are the journal rows of the owner and of every consumer of
+// the root holding evt that hold something a journalPolicyDenied wrote for
+// this copy. A row pinned to another copy by an earlier block still counts:
+// the hold is the copy's own.
+func (w *InstallWatcher) policyHeldScopes(evt InstallEvent) []string {
+	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
+		return nil
+	}
+	var scopes []string
+	for _, scope := range w.policyHoldScopes(evt) {
+		entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope)
+		if err != nil || entry == nil {
+			continue
+		}
+		fields, copies := parsePolicyHold(entry.Reason)
+		if !hasPolicyCopy(copies, policyCopyKey(evt.Path)) {
+			continue
+		}
+		for _, field := range fields {
+			if actionFieldValue(entry, field) != "" {
+				scopes = append(scopes, scope)
+				break
+			}
+		}
+	}
+	return scopes
+}
+
+// releasePolicyHolds lifts, from the owner and from every consumer, what a
+// policy denial set on an asset that stayed in its folder, once no connector
+// rule denies it: an allow rule for it (a global one or one scoped to the
+// denying connector) or a policy that no longer denies. Without it an allow
+// rule cleared only the owner row and the allowed skill stayed blocked for
+// the denying connector. A block or disable that was on a row before the
+// hold stays, and so does the hold itself while another copy of the same name
+// is still denied.
+func (w *InstallWatcher) releasePolicyHolds(evt InstallEvent) {
+	for _, scope := range w.policyHeldScopes(evt) {
+		entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope)
+		if err != nil || entry == nil {
+			continue
+		}
+		fields, copies := parsePolicyHold(entry.Reason)
+		if others := livePolicyCopies(copies, policyCopyKey(evt.Path)); len(others) > 0 {
+			// Another copy of the name is still denied: its hold stays whole,
+			// and only this copy leaves the tag.
+			reason := entry.Reason[:strings.LastIndex(entry.Reason, policyDenialMarkPrefix)] + policyDenialMark(fields, others)
+			for _, field := range fields {
+				if value := actionFieldValue(entry, field); value != "" {
+					_ = w.store.SetActionFieldForConnector(string(evt.Type), evt.Name, scope, field, value, reason)
+				}
+			}
+			continue
+		}
+		var cleared []string
+		for _, field := range fields {
+			if actionFieldValue(entry, field) == "" {
+				continue
+			}
+			if err := w.store.ClearActionFieldForConnector(string(evt.Type), evt.Name, scope, field); err == nil {
+				cleared = append(cleared, field)
+			}
+		}
+		if len(cleared) == 0 {
+			continue
+		}
+		if rest, _ := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope); rest != nil {
+			if prior := policyPriorReason(entry.Reason); prior != "" {
+				for _, field := range []string{"runtime", "install", "file"} {
+					if value := actionFieldValue(rest, field); value != "" {
+						_ = w.store.SetActionFieldForConnector(string(evt.Type), evt.Name, scope, field, value, prior)
+						break
+					}
+				}
+			}
+		}
+		_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
+			fmt.Sprintf("type=%s released: no asset policy rule denies it; cleared %s connector=%s", evt.Type, strings.Join(cleared, " "), scope))
+	}
 }
 
 // quarantineFailedReason and errLinkRemoved lead the journal reason of a
@@ -3205,13 +4250,8 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 // cannot have the gateway move another account's files.
 func (w *InstallWatcher) resolvedLinkedRoot(path string, roots []string) (string, []string) {
 	for _, root := range roots {
-		resolved, err := filepath.EvalSymlinks(root)
-		if err != nil || sameWatcherPath(resolved, root) {
-			continue
-		}
-		linkOwner, linkOwned := w.ownerOf(root)
-		targetOwner, targetOwned := w.ownerOf(resolved)
-		if linkOwned != targetOwned || linkOwner.Home != targetOwner.Home {
+		resolved, ok := w.resolvedRootOf(root)
+		if !ok {
 			continue
 		}
 		withResolved := append(append([]string(nil), roots...), resolved)
@@ -3228,6 +4268,26 @@ func (w *InstallWatcher) resolvedLinkedRoot(path string, roots []string) (string
 		return filepath.Join(resolved, rel), withResolved
 	}
 	return path, roots
+}
+
+// resolvedRootOf is the physical folder behind a watched root that is reached
+// through a link, when that folder is in the home of the account that owns
+// the root. False for a plain root, an unsafe link or another account's
+// folder.
+func (w *InstallWatcher) resolvedRootOf(root string) (string, bool) {
+	resolved, err := filepath.EvalSymlinks(root)
+	if !w.secureClientActive() {
+		resolved, err = skillrootsafe.Resolve(root, watcherEvalSymlinks)
+	}
+	if err != nil || sameWatcherPath(resolved, root) {
+		return "", false
+	}
+	linkOwner, linkOwned := w.ownerOf(root)
+	targetOwner, targetOwned := w.ownerOf(resolved)
+	if linkOwned != targetOwned || linkOwner.Home != targetOwner.Home {
+		return "", false
+	}
+	return resolved, true
 }
 
 // forgetMovedAsset drops the rescan baseline of an asset that admission
@@ -3266,8 +4326,11 @@ func (w *InstallWatcher) releaseAllowListed(evt InstallEvent, reason string) {
 		return
 	}
 	var cleared []string
+	held, _ := parsePolicyHold(entry.Reason)
 	for field, value := range map[string]string{"runtime": entry.Actions.Runtime, "install": entry.Actions.Install} {
-		if value == "" {
+		// A field a policy hold set is lifted by releasePolicyHolds, which
+		// keeps it while another copy of the name is still denied.
+		if value == "" || slices.Contains(held, field) {
 			continue
 		}
 		if err := w.store.ClearActionFieldForConnector(string(evt.Type), evt.Name, scope, field); err == nil {
@@ -3297,6 +4360,39 @@ func (w *InstallWatcher) allowRuleReleases(ctx context.Context, evt InstallEvent
 	cfg := w.liveConfig()
 	out := w.evaluateAdmission(ctx, w.admissionInputFor(cfg, evt, string(evt.Type), connector))
 	return out != nil && out.Verdict == "allowed" && w.allowedAuditReason(out.Reason) == "allow-listed"
+}
+
+// policyDenies reports whether a connector rule that loads evt's root denies
+// it under the live config.
+func (w *InstallWatcher) policyDenies(evt InstallEvent) bool {
+	decision, _, _ := w.rootAssetPolicy(w.liveConfig(), evt, w.eventConnector(evt))
+	return decision.Enabled && decision.RawAction == "block" && decision.Action == "block"
+}
+
+// policyHoldReleases reports a skill or plugin whose owner or consumer row
+// still holds it after an asset-policy denial although no connector rule
+// denies it now, so the rescan admits it again and lifts the hold.
+func (w *InstallWatcher) policyHoldReleases(evt InstallEvent) bool {
+	return len(w.policyHeldScopes(evt)) > 0 && !w.policyDenies(evt)
+}
+
+// releaseHeldOnAdmission lifts a policy hold once admission has reached a
+// verdict that lets the asset run: a scan that has not finished, one that was
+// interrupted, and a block all keep it, since until then nothing but the hold
+// stops a skill that stayed in its folder (the hook evaluates the default
+// skill rules only with runtime_detection on).
+func (w *InstallWatcher) releaseHeldOnAdmission(evt InstallEvent, res AdmissionResult) {
+	if res.Interrupted {
+		return
+	}
+	switch res.Verdict {
+	case VerdictAllowed, VerdictClean, VerdictWarning:
+	default:
+		return
+	}
+	if len(w.policyHeldScopes(evt)) > 0 && !w.policyDenies(evt) {
+		w.releasePolicyHolds(evt)
+	}
 }
 
 // quarantinedCopyIsBack reports a skill or plugin at a path that holds an
@@ -3367,7 +4463,18 @@ func (w *InstallWatcher) linkedAssetScanTarget(evt InstallEvent) (string, error)
 	if linkOwned != targetOwned || linkOwner.Home != targetOwner.Home {
 		return "", errLinkedAssetOutsideRoots
 	}
-	for _, root := range w.sourceRootsFor(evt.Type) {
+	roots := w.sourceRootsFor(evt.Type)
+	if !w.secureClientActive() {
+		// The link target is a physical path; a watched root reached
+		// through a link (~/.claude -> dotfiles) holds it at its resolved
+		// folder, as a plain root does (GAP-0906).
+		for _, root := range roots {
+			if resolved, ok := w.resolvedRootOf(root); ok {
+				roots = append(slices.Clone(roots), resolved)
+			}
+		}
+	}
+	for _, root := range roots {
 		if watcherPathAtOrBelow(target, root) {
 			return target, nil
 		}
@@ -3428,7 +4535,11 @@ func (w *InstallWatcher) refuseForeignLink(ctx context.Context, evt InstallEvent
 // points to is never touched (GAP-0394). Before, quarantine refused the link
 // and only gateway.log said so, while the skill read as quarantined.
 func (w *InstallWatcher) removeLinkedAsset(ctx context.Context, evt InstallEvent) error {
-	target, err := enforce.RemoveLinkedAsset(w.sourceRootsFor(evt.Type), evt.Type.String(), evt.Path)
+	// The link is removed itself, never followed; a root reached through a
+	// link is addressed by its resolved folder, because the removal refuses a
+	// linked ancestor (GAP-0906).
+	linkPath, roots := w.resolvedLinkedRoot(evt.Path, w.sourceRootsFor(evt.Type))
+	target, err := enforce.RemoveLinkedAsset(roots, evt.Type.String(), linkPath)
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt, err)
 		return err
@@ -3912,13 +5023,25 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 	if w != nil && !w.secureClientActive() && !errors.Is(err, enforce.ErrQuarantineRemovalDeferred) {
 		w.admissionNotes.Store(evt.Path, AdmissionIssue{Kind: AdmissionNotQuarantined, Detail: err.Error()})
 	}
+	// A rejected asset with a link inside is not moved, because quarantine does
+	// not follow links, and its files stay where they are. The runtime disable
+	// is applied by the gateway after admission, so the watcher cannot say it
+	// was applied: the alert names the reason and keeps the HIGH severity of a
+	// failed quarantine until the disable is confirmed elsewhere (GAP-0826).
+	// Secure Client keeps the failed-quarantine record unchanged.
+	alertTitle := "Quarantine failed; inspect the source and quarantine copy"
+	auditDetail := fmt.Sprintf("type=%s quarantine failed; inspect the source and quarantine copy: %v", evt.Type, err)
+	if errors.Is(err, enforce.ErrLinkedAssetContent) && w != nil && !w.secureClientActive() {
+		alertTitle = "Rejected " + evt.Type.String() + " is not quarantined: its files contain a link, which quarantine does not follow; the files stay in place, confirm the asset is disabled in its runtime"
+		auditDetail = fmt.Sprintf("type=%s not quarantined, its files contain a link and stay in place; confirm the asset is disabled in its runtime: %v", evt.Type, err)
+	}
 	if w != nil && w.logger != nil {
 		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_in", "error")
 		if !w.secureClientActive() {
 			envelope := audit.EnvelopeFromContext(ctx)
 			envelope.Connector = w.eventConnector(evt)
 			alertCtx := audit.ContextWithEnvelope(ctx, envelope)
-			_ = w.logger.LogAlertCtx(alertCtx, "watcher", "HIGH", "Quarantine failed; inspect the source and quarantine copy", map[string]any{
+			_ = w.logger.LogAlertCtx(alertCtx, "watcher", "HIGH", alertTitle, map[string]any{
 				"asset_type": evt.Type.String(), "asset_name": evt.Name,
 				"path": evt.Path, "error": err.Error(), "connector": w.eventConnector(evt),
 			})
@@ -3927,7 +5050,7 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 			Action:   string(audit.ActionWatcherBlock),
 			Target:   evt.Path,
 			Actor:    "defenseclaw",
-			Details:  fmt.Sprintf("type=%s quarantine failed; inspect the source and quarantine copy: %v", evt.Type, err),
+			Details:  auditDetail,
 			Severity: "HIGH",
 		})
 	}
@@ -4247,16 +5370,35 @@ func underVendorSystemRoot(absolute string) bool {
 // missing root (for example under a parent only an administrator may write).
 var errWatchDirNotCreated = errors.New("create dir")
 
-// ensureAndWatch creates and watches a skill root only when its existing
-// ancestors and the final root have no links. It returns folders it created.
+// ensureAndWatch creates and watches an asset root after validating any
+// account-owned links in its existing path. It returns folders it created.
 func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 	return ensureAndWatchWithCheck(fsw, dir, true)
 }
 
-// ensureAndWatchLegacy retains the existing watch behavior for plugins and
-// Secure Client. Skill roots outside Secure Client use ensureAndWatch.
+// ensureAndWatchLegacy retains the existing Secure Client watch behavior.
 func ensureAndWatchLegacy(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 	return ensureAndWatchWithCheck(fsw, dir, false)
+}
+
+// checkRootLinkRoute judges the link route of a watch root through its
+// nearest existing component, so a root that is not created yet is refused
+// while a folder above it is writable by another account.
+func checkRootLinkRoute(dir string) error {
+	for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			if _, resolveErr := skillrootsafe.Resolve(current, watcherEvalSymlinks); resolveErr != nil {
+				return linkedRootRefusal(dir, resolveErr)
+			}
+			return nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: inspect skill root %s: %v", errWatchDirNotCreated, dir, err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return fmt.Errorf("unavailable skill root: %s", dir)
+		}
+	}
 }
 
 func ensureAndWatchWithCheck(fsw *fsnotify.Watcher, dir string, checkLinks bool) ([]string, error) {
@@ -4265,20 +5407,8 @@ func ensureAndWatchWithCheck(fsw *fsnotify.Watcher, dir string, checkLinks bool)
 		return nil, errAbsentVendorSystemDir
 	}
 	if checkLinks {
-		for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
-			if _, err := os.Lstat(current); err == nil {
-				resolved, resolveErr := filepath.EvalSymlinks(current)
-				if resolveErr != nil || !sameWatcherPath(canonicalSkillSystemPath(current), resolved) {
-					return nil, fmt.Errorf("linked or unavailable skill root: %s", dir)
-				}
-				break
-			} else if !errors.Is(err, fs.ErrNotExist) {
-				return nil, fmt.Errorf("%w: inspect skill root %s: %v", errWatchDirNotCreated, dir, err)
-			}
-			parent := filepath.Dir(current)
-			if parent == current {
-				return nil, fmt.Errorf("unavailable skill root: %s", dir)
-			}
+		if err := checkRootLinkRoute(dir); err != nil {
+			return nil, err
 		}
 	}
 	if current, err := filepath.Abs(dir); err == nil {
@@ -4395,10 +5525,38 @@ func addDirWatches(
 	maxDepth int,
 	watched map[string]struct{},
 ) {
+	addDirWatchesWithRootLink(fsw, root, maxDepth, watched, true)
+}
+
+// Secure Client retains the plain WalkDir behavior for a linked final root.
+func addDirWatchesLegacy(
+	fsw *fsnotify.Watcher,
+	root string,
+	maxDepth int,
+	watched map[string]struct{},
+) {
+	addDirWatchesWithRootLink(fsw, root, maxDepth, watched, false)
+}
+
+func addDirWatchesWithRootLink(
+	fsw *fsnotify.Watcher,
+	root string,
+	maxDepth int,
+	watched map[string]struct{},
+	allowRootLink bool,
+) {
 	root = filepath.Clean(root)
-	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	walkRoot := root
+	if allowRootLink {
+		var err error
+		walkRoot, err = trustedWalkRoot(root)
 		if err != nil {
-			if path == root {
+			return
+		}
+	}
+	_ = filepath.WalkDir(walkRoot, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if path == walkRoot {
 				return fs.SkipAll
 			}
 			return fs.SkipDir
@@ -4409,7 +5567,7 @@ func addDirWatches(
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fs.SkipDir
 		}
-		relative, relErr := filepath.Rel(root, path)
+		relative, relErr := filepath.Rel(walkRoot, path)
 		if relErr != nil || relative == ".." ||
 			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			return fs.SkipDir
@@ -4423,9 +5581,13 @@ func addDirWatches(
 		if depth > maxDepth {
 			return fs.SkipDir
 		}
-		key := strings.ToLower(filepath.Clean(path))
+		logical, mapErr := logicalWalkPath(root, walkRoot, path)
+		if mapErr != nil {
+			return fs.SkipDir
+		}
+		key := strings.ToLower(filepath.Clean(logical))
 		if _, exists := watched[key]; !exists {
-			if addErr := fsw.Add(path); addErr == nil {
+			if addErr := fsw.Add(logical); addErr == nil {
 				watched[key] = struct{}{}
 			}
 		}

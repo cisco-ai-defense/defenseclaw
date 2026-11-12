@@ -204,6 +204,7 @@ def test_antigravity_binary_digest_is_bounded_and_matches_stable_bytes(monkeypat
 def windows_host_no_path(monkeypatch) -> None:
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
     monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    _windows_change_times_from_stat(monkeypatch)
 
 
 @pytest.fixture
@@ -459,25 +460,58 @@ def test_restricted_setup_scan_probes_every_form_of_an_active_peer(monkeypatch, 
     assert result.agents["claudecode"].version == "2.1.286 (Claude Code)"
 
 
-@pytest.mark.parametrize("old_schema", (3, 6))
+def _windows_change_times_from_stat(monkeypatch) -> None:
+    """On a host that is not Windows, the change time Windows gives is the one this
+    system keeps (``st_ctime``), so a test of Windows rules sees a readable change
+    time that moves with every write. On Windows itself the real read is used."""
+    if os.name == "nt":
+        return
+    monkeypatch.setattr(
+        ad,
+        "_windows_change_time",
+        lambda path: os.lstat(path).st_ctime_ns // 100 + ad._WINDOWS_TICKS_AT_UNIX_EPOCH,
+    )
+
+
+@pytest.mark.parametrize(
+    ("schema", "identified"),
+    [(3, False), (6, False), (ad.CACHE_SCHEMA_VERSION, False), (ad.CACHE_SCHEMA_VERSION, True)],
+    ids=("0.8.10", "1.0.0-1.0.3", "before-identities", "identified"),
+)
 @pytest.mark.parametrize("windows_semantics", (False, True))
-def test_release_cache_keeps_unchanged_peer_version_during_schema_upgrade(
-    monkeypatch, tmp_path, old_schema, windows_semantics
+def test_release_cache_keeps_a_peer_version_only_for_an_entry_that_names_its_executable(
+    monkeypatch, tmp_path, schema, identified, windows_semantics
 ):
+    """A cache from a release before executable identities (schema 3, 6, or
+    an earlier 7) says nothing about which file answered, so it is never
+    trusted: the slow peer is read again. An entry that names its executable
+    is kept while that file is the one there."""
     if os.name == "nt":
         set_known_windows_directory_acl(tmp_path)
-    binary = tmp_path / "claude"
+    # The executable is not inside the data folder: writing the cache re-applies
+    # that folder access list to everything below it on Windows, which moves the
+    # change time of a file there (nothing of an agent install lives in it).
+    data = tmp_path / "data"
+    data.mkdir()
+    (tmp_path / "bin").mkdir()
+    binary = tmp_path / "bin" / "claude"
     binary.write_text("agent binary", encoding="utf-8")
     old = os.stat(binary).st_mtime - 600
     os.utime(binary, (old, old))
+    time.sleep(0.05)
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: windows_semantics)
+    if windows_semantics:
+        _windows_change_times_from_stat(monkeypatch)
     cached = _discovery("claudecode")
     cached.scanned_at = ad._format_rfc3339(ad._now_utc())
     cached.agents["claudecode"].binary_path = str(binary)
     cached.agents["claudecode"].version = "2.1.286 (Claude Code)"
-    assert ad._write_cache(cached, data_dir=tmp_path)
-    path = tmp_path / ad.CACHE_FILENAME
+    if identified:
+        cached.agents["claudecode"].identity = ad._executable_identity(str(binary))
+    assert ad._write_cache(cached, data_dir=data)
+    path = data / ad.CACHE_FILENAME
     payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["version"] = old_schema
+    payload["version"] = schema
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     def scan(name, **kwargs):
@@ -487,16 +521,16 @@ def test_release_cache_keeps_unchanged_peer_version_during_schema_upgrade(
             signal.error = ad.VERSION_NOT_PROBED
         return signal
 
-    monkeypatch.setattr(ad, "_is_windows_host", lambda: windows_semantics)
     monkeypatch.setattr(ad, "_windows_configured_package_manager_bin_prefixes", lambda: ())
     monkeypatch.setattr(ad, "_scan_agent", scan)
-    result = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path)
+    result = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=data)
 
-    assert result.agents["claudecode"].version == "2.1.286 (Claude Code)"
-    assert ad._read_cache(data_dir=tmp_path).agents["claudecode"].version == "2.1.286 (Claude Code)"
+    kept = "2.1.286 (Claude Code)" if identified else ""
+    assert result.agents["claudecode"].version == kept
+    assert ad._read_cache(data_dir=data).agents["claudecode"].version == kept
 
     os.utime(binary, None)
-    assert ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path).agents["claudecode"].version == ""
+    assert ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=data).agents["claudecode"].version == ""
 
 
 def test_empty_connector_home_does_not_detect_opencode(monkeypatch, tmp_path):
@@ -2905,10 +2939,14 @@ def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path
     """RHEL-U3-13: one slow --version on a busy host erased a peer's version,
     so the gateway refused that peer in action mode and setup of another
     connector did not converge."""
-    binary = tmp_path / "amp"
+    data = tmp_path / "data"  # the executable is outside it (see the release-cache test)
+    data.mkdir()
+    (tmp_path / "bin").mkdir()
+    binary = tmp_path / "bin" / "amp"
     binary.write_text("#!/bin/sh\n", encoding="utf-8")
     old = os.stat(binary).st_mtime - 600
     os.utime(binary, (old, old))
+    time.sleep(0.05)  # the scan is newer than the file and its folder (their change time cannot be set back)
 
     def scan(version: str, error: str):
         def fake(name: str, **_kwargs) -> ad.AgentSignal:
@@ -2916,21 +2954,23 @@ def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path
                 return _signal(name)
             return ad.AgentSignal(
                 name=name, installed=True, config_path="", binary_path=str(binary),
-                version=version, error=error,
+                version=version, error=error, identity=ad._executable_identity(str(binary)),
             )
         return fake
 
     monkeypatch.setattr(ad, "_is_windows_host", lambda: windows)
+    if windows:
+        _windows_change_times_from_stat(monkeypatch)
     monkeypatch.setattr(ad, "_scan_agent", scan("amp 0.0.1", ""))
-    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
 
     monkeypatch.setattr(ad, "_scan_agent", scan("", f"{binary}: {ad.VERSION_PROBE_TIMED_OUT}"))
-    slow = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    slow = ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
     assert (slow.agents["amp"].version, slow.agents["amp"].error) == ("amp 0.0.1", "")
-    assert ad._read_cache(data_dir=tmp_path).agents["amp"].version == "amp 0.0.1"
+    assert ad._read_cache(data_dir=data).agents["amp"].version == "amp 0.0.1"
 
     os.utime(binary, None)  # replaced after the earlier scan: no stale version
-    changed = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    changed = ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
     assert changed.agents["amp"].version == ""
 
 
@@ -2938,10 +2978,12 @@ def test_a_refresh_that_cannot_find_an_unchanged_binary_keeps_its_version(monkey
     """GAP-0231: the upgrade's discovery refresh ran with a PATH that lacked
     the agents' folder, found no binary and erased the versions the gateway
     needs, so every action-mode connector was skipped after the upgrade."""
-    binary = tmp_path / "claude"
+    (tmp_path / "bin").mkdir()
+    binary = tmp_path / "bin" / "claude"
     binary.write_text("#!/bin/sh\n", encoding="utf-8")
     old = os.stat(binary).st_mtime - 600
     os.utime(binary, (old, old))
+    time.sleep(0.05)  # the scan is newer than the file and its folder (their change time cannot be set back)
 
     def scan(found: bool):
         def fake(name: str, **_kwargs) -> ad.AgentSignal:
@@ -2951,7 +2993,7 @@ def test_a_refresh_that_cannot_find_an_unchanged_binary_keeps_its_version(monkey
                 return ad.AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
             return ad.AgentSignal(
                 name=name, installed=True, config_path="", binary_path=str(binary),
-                version="2.1.286 (Claude Code)", error="",
+                version="2.1.286 (Claude Code)", error="", identity=ad._executable_identity(str(binary)),
             )
         return fake
 
@@ -2971,6 +3013,7 @@ def test_a_refresh_that_cannot_find_an_unchanged_binary_keeps_its_version(monkey
 
     # Removed: not installed.
     os.utime(binary, (old, old))
+    time.sleep(0.05)
     monkeypatch.setattr(ad, "_scan_agent", scan(True))
     ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
     binary.unlink()
@@ -2983,11 +3026,13 @@ def test_an_unprobed_agent_keeps_the_version_of_the_candidate_last_probed(monkey
     """GAP-0002: setup of one connector probes only it. A peer whose first
     binary candidate is not the one the last scan probed lost its version,
     and the restarted gateway stopped enforcing it."""
-    first, probed = tmp_path / "cursor", tmp_path / "agent"
+    (tmp_path / "bin").mkdir()
+    first, probed = tmp_path / "bin" / "cursor", tmp_path / "bin" / "agent"
     for binary in (first, probed):
         binary.write_text("#!/bin/sh\n", encoding="utf-8")
         old = os.stat(binary).st_mtime - 600
         os.utime(binary, (old, old))
+    time.sleep(1.1)  # a passed-over candidate counts as changed unless the scan is newer than its ctime
 
     def scan(probe: bool):
         def fake(name: str, **_kwargs) -> ad.AgentSignal:
@@ -3001,6 +3046,7 @@ def test_an_unprobed_agent_keeps_the_version_of_the_candidate_last_probed(monkey
             return ad.AgentSignal(
                 name=name, installed=True, config_path="", binary_path=str(probed),
                 version="2026.10.01-14929f9", error="", skipped_binaries=(str(first),),
+                identity=ad._executable_identity(str(probed)),
             )
         return fake
 
@@ -3032,6 +3078,7 @@ def _cursor_scans(probed, skipped):
             return ad.AgentSignal(
                 name=name, installed=True, config_path="", binary_path=str(probed),
                 version="2026.10.01-14929f9", error="", skipped_binaries=skipped,
+                identity=ad._executable_identity(str(probed)),
             )
         return fake
     return scan
@@ -3063,8 +3110,10 @@ def test_an_unprobed_agent_does_not_keep_a_version_across_a_newly_preferred_bina
 
 
 def test_an_unprobed_agent_does_not_keep_a_version_when_a_passed_over_binary_changed(monkeypatch, tmp_path):
-    first, probed = tmp_path / "cursor", tmp_path / "agent"
+    (tmp_path / "bin").mkdir()
+    first, probed = tmp_path / "bin" / "cursor", tmp_path / "bin" / "agent"
     _old_binaries(first, probed)
+    time.sleep(1.1)  # the scan must be newer than the files' ctime
     scan = _cursor_scans(probed, (str(first),))
     monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
     monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(first), str(probed)))
@@ -3078,8 +3127,10 @@ def test_an_unprobed_agent_does_not_keep_a_version_when_a_passed_over_binary_cha
 
 
 def test_an_unprobed_agent_does_not_keep_the_version_of_an_untrusted_binary(monkeypatch, tmp_path):
-    first, probed = tmp_path / "cursor", tmp_path / "agent"
+    (tmp_path / "bin").mkdir()
+    first, probed = tmp_path / "bin" / "cursor", tmp_path / "bin" / "agent"
     _old_binaries(first, probed)
+    time.sleep(1.1)  # the scan must be newer than the files' ctime
     monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
     monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(first), str(probed)))
     monkeypatch.setattr(ad, "_scan_agent", _cursor_scans(probed, (str(first),))(True))
@@ -3252,23 +3303,33 @@ def test_a_setup_preflight_probes_peer_when_binary_disappears_during_metadata_ch
     probed.clear()
     monkeypatch.setattr(ad, "_now_utc", lambda: later + timedelta(minutes=5))
     monkeypatch.delenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", raising=False)
-    original_lstat = os.lstat
+    original_lstat, original_stat = os.lstat, os.stat
     peer_reads = 0
+    peer_vanished = False
 
     def lstat_with_peer_race(path, *args, **kwargs):
         nonlocal peer_reads
         if os.fspath(path) == str(bins / "codex"):
             peer_reads += 1
-            if peer_reads == 3:
+            if peer_reads == 1:
                 raise FileNotFoundError("peer replaced during metadata check")
         return original_lstat(path, *args, **kwargs)
 
+    def stat_with_peer_race(path, *args, **kwargs):
+        # The same race seen by the read that follows the failed link lookup.
+        nonlocal peer_vanished
+        if peer_reads and not peer_vanished and os.fspath(path) == str(bins / "codex"):
+            peer_vanished = True
+            raise FileNotFoundError("peer replaced during metadata check")
+        return original_stat(path, *args, **kwargs)
+
     monkeypatch.setattr(ad.os, "lstat", lstat_with_peer_race)
+    monkeypatch.setattr(ad.os, "stat", stat_with_peer_race)
     result = cmd_setup._check_connector_version_supported_for_setup(
         "claudecode", mode=mode, emit=False, data_dir=data_dir, _allow_prompt=False
     )
 
-    assert peer_reads >= 3
+    assert peer_reads >= 1 and peer_vanished
     assert sorted(probed) == ["claudecode", "codex"]
     assert result is admitted
     assert ad._read_cache(data_dir=data_dir).agents["codex"].version == "codex-cli 0.161.0"
@@ -3293,11 +3354,11 @@ def test_a_setup_scan_probes_a_peer_whose_link_now_names_another_version(monkeyp
     ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
     scanned_at = ad._parse_rfc3339(ad._read_cache(data_dir=data_dir).scanned_at).timestamp()
     assert os.stat(tmp_path / "pkg" / "v2" / "bin" / "codex").st_mtime < scanned_at
-    assert ad._resolves_unchanged_since(str(bins / "codex"), scanned_at)
+    assert ad._resolves_unchanged_since(str(bins / "codex"), scanned_at, data_dir)
     time.sleep(1.1)  # the scan time has whole seconds
     (tmp_path / "pkg" / "current").unlink()
     (tmp_path / "pkg" / "current").symlink_to("v2")
-    assert not ad._resolves_unchanged_since(str(bins / "codex"), scanned_at)
+    assert not ad._resolves_unchanged_since(str(bins / "codex"), scanned_at, data_dir)
     versions["codex"] = "codex-cli 0.161.0"
     probed.clear()
     disc = ad.discover_with_probes(["claudecode"], use_cache=False, refresh=True, data_dir=data_dir)

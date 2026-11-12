@@ -18,8 +18,8 @@ import (
 // passed to the explain route as caller_facts. The managed gateway runs as
 // a service account that cannot ask SSSD whether its domains are online or
 // read sssd.conf, so its own lookup of a fresh local account stopped at
-// default_lookup_failed (GAP-0500). Explain uses these facts first and its
-// own lookup as the fallback. They decide only the explain answer: they
+// default_lookup_failed (GAP-0500). Explain uses these facts when its own
+// gateway lookup cannot complete. They decide only the explain answer: they
 // never reach the identity cache the hooks read, and the route takes them
 // only with the gateway token, on loopback.
 type ProfileExplainCallerFacts struct {

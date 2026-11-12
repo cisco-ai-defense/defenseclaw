@@ -39,7 +39,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 func init() {
@@ -114,7 +116,12 @@ func newHookCmd() *cobra.Command {
 				// have no platform record to send them to.
 				hookexec.InstallManagedHookDiagnosticSinks()
 			}
-			startedAt := hookInvocationStart()
+			// Read once per call, and used for the start, the watchdog and the
+			// options alike (also on the Cursor --input-file path): it looks
+			// at the machine's install and service, and two reads could
+			// disagree during a Secure Client install (GAP-0648 review 3 L1).
+			secureClient := enterpriseManaged && secureClientHost()
+			startedAt := hookInvocationStart(secureClient)
 			// At the answer deadline of a tool call the hook writes its
 			// fail-closed answer and ends, even while its own work is held
 			// up (GAP-0155).
@@ -124,7 +131,7 @@ func newHookCmd() *cobra.Command {
 			var stdin io.Reader
 			var watchdog *hookexec.AnswerWatchdog
 			if inputFile == "" {
-				stdin, watchdog = armHookAnswerWatchdog(connector, event, failMode, hookSurface, enterpriseManaged, startedAt, exit)
+				stdin, watchdog = armHookAnswerWatchdog(connector, event, failMode, hookSurface, enterpriseManaged, secureClient, startedAt, exit)
 			}
 			if enterpriseManaged && prepareEnterpriseManagedHookRuntime(connector) {
 				endHookBeforeRun(watchdog)
@@ -134,7 +141,7 @@ func newHookCmd() *cobra.Command {
 				endHookBeforeRun(watchdog)
 				return nil
 			}
-			opts := buildHookOptionsForRuntime(connector, event, apiAddr, failMode, enterpriseManaged)
+			opts := buildHookOptionsForCall(connector, event, apiAddr, failMode, enterpriseManaged, secureClient)
 			opts.StartedAt = startedAt
 			opts.Exit = exit
 			opts.AnswerWatchdog = watchdog
@@ -242,7 +249,7 @@ func newHookSessionFactsCmd() *cobra.Command {
 // descriptor, account and sidecar reads before Run count against the call's
 // budget too (GAP-0155). It returns the hook's stdin, the payload read
 // followed by the rest, so Run reads exactly what the agent wrote.
-func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
+func armHookAnswerWatchdog(connectorName, event, failMode, surface string, managed, secureClient bool, startedAt time.Time, exit func(int)) (io.Reader, *hookexec.AnswerWatchdog) {
 	payload, _ := io.ReadAll(io.LimitReader(os.Stdin, hookexec.DefaultMaxBody+1))
 	// A Windows PowerShell wrapper can put a UTF-8 byte order mark ahead of
 	// the JSON (GAP-2449): every reader after this one sees the payload
@@ -255,7 +262,7 @@ func armHookAnswerWatchdog(connectorName, event, failMode, surface string, manag
 		FailMode:          failMode,
 		HookSurface:       strings.TrimSpace(surface),
 		ManagedEnterprise: managed,
-		SecureClient:      managed && secureClientHost(),
+		SecureClient:      managed && secureClient,
 		StartedAt:         startedAt,
 		Exit:              exit,
 	}
@@ -291,10 +298,15 @@ func endHookBeforeRun(watchdog *hookexec.AnswerWatchdog) {
 // hookInvocationStart is when this hook call began, which its time budgets
 // count from. A process the agent launched for the call (its first argument
 // is `hook`) began when the system created it: the launch and the runtime
-// resolution before Run can take seconds on a busy host (GAP-0155). Any
-// other caller (a test running the command in process) began now.
-func hookInvocationStart() time.Time {
+// resolution before Run can take seconds on a busy host (GAP-0155). A
+// Secure Client hook keeps the 1.0.8 start until the Secure Client round
+// (hookexec.SecureClientProcessStartTime). Any other caller (a test running
+// the command in process) began now.
+func hookInvocationStart(secureClient bool) time.Time {
 	if len(os.Args) > 1 && os.Args[1] == "hook" {
+		if secureClient {
+			return hookexec.SecureClientProcessStartTime()
+		}
 		return hookexec.ProcessStartTime()
 	}
 	return time.Now()
@@ -526,7 +538,15 @@ func failureLogHomeIn(profileDir func() (string, error)) string {
 	return filepath.Join(home, config.DefaultDataDirName)
 }
 
-func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseManaged bool) hookexec.Options {
+func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, enterpriseManaged bool) hookexec.Options {
+	return buildHookOptionsForCall(connector, event, apiAddr, failMode, enterpriseManaged, enterpriseManaged && secureClientHost())
+}
+
+// buildHookOptionsForCall is buildHookOptionsForRuntime for a hook call that
+// has read the Secure Client state of its machine already (secureClient,
+// managed calls only): the options use that reading.
+func buildHookOptionsForCall(connector, event, apiAddr, _ string, enterpriseManaged, secureClient bool) hookexec.Options {
+	secureClient = enterpriseManaged && secureClient
 	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
 		// The administrator-owned runtime failed trust validation. Do not read its
 		// sidecar/token or contact any endpoint derived from those files; hand an
@@ -537,12 +557,13 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 			FailMode:              "closed",
 			StrictAvailability:    true,
 			ManagedEnterprise:     true,
-			SecureClient:          secureClientHost(),
+			SecureClient:          secureClient,
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
 		if failMode, strict, ok := secureClientRuntimeFailureDelivery(opts.SecureClient, opts.ManagedRuntimeFailure); ok {
 			opts.FailMode, opts.StrictAvailability = failMode, strict
 		}
+		opts.ManagedEnrolledPending = enterpriseManagedHookRuntimeEnrolledPending(opts.ManagedRuntimeFailure)
 		opts.FailureLogHome = managedHookFailureLogHome
 		// Marks a failed Unix standalone runtime as the standalone profile's
 		// (no transport is selected); a no-op elsewhere.
@@ -646,7 +667,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		AuthenticatedManagedToken: authenticatedManagedToken,
 		StrictAvailability:        hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")),
 		ManagedEnterprise:         enterpriseManaged,
-		SecureClient:              enterpriseManaged && secureClientHost(),
+		SecureClient:              secureClient,
 		ManagedGatewayServiceName: managedGatewayService,
 		TraceParent: hookFirstNonEmpty(
 			envvars.Getenv("DEFENSECLAW_TRACEPARENT"),
@@ -678,6 +699,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
 		}
 		opts.ManagedRuntimeFailure = managedRuntimeFailure
+		opts.ManagedEnrolledPending = enterpriseManagedHookRuntimeEnrolledPending(managedRuntimeFailure)
 		// A managed hook takes its fail mode from administrator-owned runtime
 		// state, never from the command line: the authenticated Windows
 		// runtime generation, or the root-owned Unix runtime descriptor. Each
@@ -723,13 +745,48 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 // exception. Malformed JSON is never retried as KEY=value lines.
 func readHookSidecar(path string) map[string]string {
 	out := map[string]string{}
-	// A link, another file type or a file past the writers' bound
-	// (gwconnector.HookSidecarMaxBytes) supplies no address.
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > gwconnector.HookSidecarMaxBytes {
-		return out
-	}
-	data, err := os.ReadFile(path)
+	var data []byte
+	err := safefile.RetryTransientRead(func() error {
+		data = nil
+		// A link, another file type or a file past the writers' bound
+		// (gwconnector.HookSidecarMaxBytes) supplies no address.
+		info, err := pathidentity.LstatPinned(path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() > gwconnector.HookSidecarMaxBytes {
+			data = nil
+			return nil
+		}
+		file, err := winpath.OpenReadShared(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		opened, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(info, opened) {
+			return safefile.ErrReadIdentityChanged
+		}
+		data, err = io.ReadAll(io.LimitReader(file, gwconnector.HookSidecarMaxBytes+1))
+		if err != nil {
+			return err
+		}
+		current, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if !current.Mode().IsRegular() {
+			data = nil
+			return nil
+		}
+		if !os.SameFile(opened, current) {
+			return safefile.ErrReadIdentityChanged
+		}
+		return nil
+	})
 	if err != nil || len(data) > gwconnector.HookSidecarMaxBytes {
 		return out
 	}

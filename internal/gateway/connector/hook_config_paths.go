@@ -181,6 +181,20 @@ func OwnedHooksPresent(conn Connector, opts SetupOpts) (bool, error) {
 	return OwnedHooksPresentContext(context.Background(), conn, opts)
 }
 
+// OwnedHooksPresentForPendingInstall checks the registration against the
+// runtime digests rendered by this install transaction before publishing its
+// contract lock. Ordinary readers continue to require the persisted lock.
+func OwnedHooksPresentForPendingInstall(conn Connector, opts SetupOpts, pending HookContractLockEntry) (bool, error) {
+	if conn == nil || normalizeConnectorName(pending.Connector) != normalizeConnectorName(conn.Name()) {
+		return false, errors.New("pending hook contract names a different connector")
+	}
+	opts.pendingHookScriptDigests = make(map[string]string, len(pending.HookScriptDigests))
+	for name, digest := range pending.HookScriptDigests {
+		opts.pendingHookScriptDigests[name] = digest
+	}
+	return OwnedHooksPresent(conn, opts)
+}
+
 // OwnedHooksPresentContext is the cancellable form used by managed guardians
 // when a connector's effective policy check may perform bounded external work.
 // A registration that still holds an edited DefenseClaw entry next to the
@@ -191,6 +205,29 @@ func OwnedHooksPresentContext(ctx context.Context, conn Connector, opts SetupOpt
 		return present, err
 	}
 	return !ownedHookConfigHoldsEditedEntry(conn, opts), nil
+}
+
+// OwnedHookEntriesPresent judges the hook entries of conn in the agent config
+// alone, without running or hashing the hook runtime, so a hook entry that was
+// damaged together with a runtime file is told apart from the file (GAP-0754).
+// judged is false for a connector whose registration is proved only together
+// with its runtime (a plugin file, an effective-policy check): the caller then
+// leaves the entry unjudged. Like OwnedHooksPresentContext, an edited
+// DefenseClaw entry next to the working set is not present.
+func OwnedHookEntriesPresent(conn Connector, opts SetupOpts) (judged, present bool, err error) {
+	hookOnly, ok := conn.(*hookOnlyConnector)
+	if !ok || hookOnly.pluginArtifact {
+		return false, false, nil
+	}
+	switch hookOnly.name {
+	case "cursor", "devin", "opencode":
+		return false, false, nil
+	}
+	present, err = hookOnly.ownedHookEntriesPresent(opts)
+	if err != nil || !present {
+		return true, false, err
+	}
+	return true, !ownedHookConfigHoldsEditedEntry(conn, opts), nil
 }
 
 func ownedHookRegistrationPresent(ctx context.Context, conn Connector, opts SetupOpts) (bool, error) {
@@ -271,8 +308,12 @@ func ownedHooksPresentInConfig(conn Connector, opts SetupOpts) (bool, error) {
 	if len(needles) == 0 {
 		return false, fmt.Errorf("%s hooks not verified: no owned hook command resolved", conn.Name())
 	}
+	match := hookCommandMatches
+	if opts.AcceptPriorReleaseRender {
+		match = hookCommandMatchesPriorRelease
+	}
 	for _, path := range paths {
-		present, err := configFileReferencesHook(path, needles)
+		present, err := configFileReferencesHookWith(path, needles, match)
 		if err != nil {
 			return false, err
 		}
@@ -455,11 +496,17 @@ func OwnedHookConfigReferences(conn Connector, opts SetupOpts) ([]string, error)
 // the guard re-installs. Any other read error is surfaced so the guard can log
 // and skip rather than heal on incomplete information.
 func configFileReferencesHook(path string, needles []string) (bool, error) {
+	return configFileReferencesHookWith(path, needles, hookCommandMatches)
+}
+
+// configFileReferencesHookWith is configFileReferencesHook with match as the
+// command comparison.
+func configFileReferencesHookWith(path string, needles []string, match func(command, needle string) bool) (bool, error) {
 	decoded, err := decodeHookConfigFile(path)
 	if err != nil || decoded == nil {
 		return false, err
 	}
-	return structuredHookCommandReferences(decoded, needles), nil
+	return structuredHookCommandReferencesWith(decoded, needles, match), nil
 }
 
 // decodeHookConfigFile parses the JSON, YAML or TOML hook config at path. A
@@ -529,8 +576,7 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 			want[spec.event] = hermesHookEntry(command, spec.event, spec.matcher, opts)
 		}
 		return hookEventEntriesMatch(hooks, want, func(_ string, entry interface{}) bool {
-			command, _ := hermesHookEntryCommand(entry)
-			return hermesReplaceableHookCommand(command, recognized)
+			return hermesHookEntryOwned(entry, hookCommand, recognized)
 		})
 	case "copilot":
 		events := c.copilotHookEvents(opts)
@@ -553,14 +599,46 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 		})
 	case "antigravity":
 		// Setup rewrites each DefenseClaw-owned outer key whole.
-		for key, rendered := range antigravityOwnedHookKeys(runtime.GOOS, hookCommand) {
-			if !sameHookJSON(document[key], rendered) {
-				return false
+		for key, rendered := range antigravityOwnedHookKeys(runtime.GOOS, hookCommand, opts.ManagedEnterprise) {
+			if sameHookJSON(document[key], rendered) {
+				continue
 			}
+			if opts.AcceptPriorReleaseRender && sameHookJSON(document[key], priorReleaseHookRender(rendered)) {
+				continue
+			}
+			return false
 		}
 		return true
 	}
 	return false
+}
+
+// priorReleaseHookRender is rendered, a hook document Setup renders, as
+// releases up to 1.0.6 rendered it: each Windows awaited hook bridge command
+// with the Constrained Language fallback end of
+// legacyWindowsAwaitedHookCommand (it exited 0 when the launcher never
+// started). Every other value is kept as it is.
+func priorReleaseHookRender(rendered interface{}) interface{} {
+	switch value := rendered.(type) {
+	case string:
+		if legacy, ok := legacyWindowsAwaitedHookCommand(value); ok {
+			return legacy
+		}
+		return value
+	case []interface{}:
+		out := make([]interface{}, len(value))
+		for i, item := range value {
+			out[i] = priorReleaseHookRender(item)
+		}
+		return out
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(value))
+		for key, item := range value {
+			out[key] = priorReleaseHookRender(item)
+		}
+		return out
+	}
+	return rendered
 }
 
 // HookRegistrationLacksOnlyFailClosed reports a Hermes registration that
@@ -606,8 +684,7 @@ func HookRegistrationLacksOnlyFailClosed(conn Connector, opts SetupOpts) (bool, 
 		}
 		hooks, _ := document["hooks"].(map[string]interface{})
 		if !hookEventEntriesMatch(hooks, want, func(_ string, entry interface{}) bool {
-			command, _ := hermesHookEntryCommand(entry)
-			return hermesReplaceableHookCommand(command, recognized)
+			return hermesHookEntryOwned(entry, hookOnly.hookCommand(opts), recognized)
 		}) {
 			return false, nil
 		}
@@ -753,10 +830,16 @@ func hookCommandStrings(raw interface{}) []string {
 }
 
 func structuredHookCommandReferences(raw interface{}, needles []string) bool {
+	return structuredHookCommandReferencesWith(raw, needles, hookCommandMatches)
+}
+
+// structuredHookCommandReferencesWith is structuredHookCommandReferences with
+// match as the command comparison.
+func structuredHookCommandReferencesWith(raw interface{}, needles []string, match func(command, needle string) bool) bool {
 	switch value := raw.(type) {
 	case []interface{}:
 		for _, item := range value {
-			if structuredHookCommandReferences(item, needles) {
+			if structuredHookCommandReferencesWith(item, needles, match) {
 				return true
 			}
 		}
@@ -769,12 +852,12 @@ func structuredHookCommandReferences(raw interface{}, needles []string) bool {
 				command := strings.TrimSpace(stringValue(item))
 				for _, needle := range needles {
 					needle = strings.TrimSpace(needle)
-					if needle != "" && hookCommandMatches(command, needle) {
+					if needle != "" && match(command, needle) {
 						return true
 					}
 				}
 			}
-			if structuredHookCommandReferences(item, needles) {
+			if structuredHookCommandReferencesWith(item, needles, match) {
 				return true
 			}
 		}
@@ -822,6 +905,27 @@ func structuredNativeExecHookReferences(entry map[string]interface{}, needles []
 func stringValue(value interface{}) string {
 	text, _ := value.(string)
 	return text
+}
+
+// hookCommandMatchesPriorRelease is hookCommandMatches for a verification that
+// accepts the render of releases up to 1.0.6 (SetupOpts.AcceptPriorReleaseRender):
+// the native bridge command also matches with the Constrained Language
+// fallback end of legacyWindowsAwaitedHookCommand. Nothing else matches that
+// the exact comparison would not.
+func hookCommandMatchesPriorRelease(command, needle string) bool {
+	if hookCommandMatches(command, needle) {
+		return true
+	}
+	if strings.HasPrefix(needle, nativeHookFlag) {
+		connectorName := strings.TrimSpace(strings.TrimPrefix(needle, nativeHookFlag))
+		if connectorName == "" {
+			return false
+		}
+		if legacy, ok := legacyWindowsAwaitedHookCommand(hookInvocationCommandFor("windows", connectorName, "")); ok {
+			return command == legacy
+		}
+	}
+	return false
 }
 
 func hookCommandMatches(command, needle string) bool {

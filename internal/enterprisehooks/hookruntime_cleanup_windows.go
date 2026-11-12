@@ -68,12 +68,30 @@ func RemoveWindowsStandaloneHookRuntimeDirectories() ([]string, error) {
 			errs = append(errs, fmt.Errorf("enterprise hooks: %s runtime directory %s is outside %s", name, directory, root))
 			continue
 		}
+		// A link at the connector folder is kept and named: nothing behind it is
+		// read, listed or removed, and it does not fail the uninstall that has
+		// already committed.
+		if linked, err := windowsManagedPolicyLinkKept(directory); err != nil {
+			errs = append(errs, err)
+			kept = append(kept, directory)
+			continue
+		} else if linked {
+			kept = append(kept, directory)
+			continue
+		}
 		removed, err := removeWindowsHookRuntimeConnectorDirectory(directory)
 		if err != nil {
 			errs = append(errs, err)
 		}
 		if !removed {
 			kept = append(kept, directory)
+		}
+	}
+	// The off-roster markers (connector_off_roster_windows.go) are the
+	// guardian's own and mean nothing once the deployment is gone.
+	for _, name := range []string{"claudecode", "codex"} {
+		if err := os.Remove(windowsConnectorOffRosterPath(managed.StandaloneLayout{HookRuntimeDir: root}, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("enterprise hooks: remove the %s off-roster marker: %w", name, err))
 		}
 	}
 	// A failed hot-config undo leaves a durable, closed hook marker. Only a
@@ -147,6 +165,12 @@ func RemoveWindowsStandaloneDeletedAccountSelectorTargets() error {
 			errs = append(errs, err)
 			continue
 		}
+		if kept, err := windowsManagedPolicyLinkKept(filepath.Dir(path)); err != nil {
+			errs = append(errs, fmt.Errorf("enterprise hooks: inspect %s: %w", filepath.Dir(path), err))
+			continue
+		} else if kept {
+			continue
+		}
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
@@ -156,7 +180,7 @@ func RemoveWindowsStandaloneDeletedAccountSelectorTargets() error {
 		if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
 			return err
 		}
-		err = withWindowsManagedRuntimeSelectorTransaction(name, func() error {
+		err = withWindowsManagedRuntimeSelectorTeardownTransaction(name, func() error {
 			selector, _, exists, err := readWindowsManagedRuntimeSelector(name, true)
 			if err != nil || !exists {
 				return err
@@ -202,6 +226,12 @@ func RemoveWindowsStandaloneMachinePolicySelectorLocks() error {
 			continue
 		} else if !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, fmt.Errorf("enterprise hooks: inspect %s: %w", selector, err))
+			continue
+		}
+		if kept, err := windowsManagedPolicyLinkKept(filepath.Dir(selector)); err != nil {
+			errs = append(errs, fmt.Errorf("enterprise hooks: inspect %s: %w", filepath.Dir(selector), err))
+			continue
+		} else if kept {
 			continue
 		}
 		lock := filepath.Join(filepath.Dir(selector), windowsManagedRuntimeSelectorLockFile)

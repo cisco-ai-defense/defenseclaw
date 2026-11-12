@@ -72,7 +72,7 @@ Run the hook setup for the agent you want to add. Setup first asks the new agent
      OK codex mode=observe
    ```
 
-   Add is the default, also with `--yes`. The new agent starts in observe mode. Add `--mode action` to block from the start. The picker's "never block" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`; the permissive pack only reports it).
+   Add is the default, also with `--yes`. The new agent starts in observe mode. Add `--mode action` to block from the start. The picker's "never block" covers policy findings. Observe still blocks an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`, with every rule pack).
 
 2. Check both agents.
 
@@ -130,7 +130,7 @@ defenseclaw guardrail enable  --connector codex
 
 `guardrail hilt`, `fail-mode`, `block-message`, `enable` and `disable` print what they will change and ask `Proceed? [Y/n]`; Enter applies it, and `--yes` skips the question in scripts. `mode`, `block-at` and `use-pack` apply at once.
 
-`--connector X` writes only that connector's override. `fail-mode --connector X` then refreshes and verifies that connector's hook registration (every hook connector, Kiro included); for the proxy-backed OpenClaw and ZeptoClaw, which have no hooks, it saves and installs the mode of their PATH shims (`curl`, `wget`, `ssh`, `nc`, `pip`, `npm`). The [capability matrix](/docs/connectors/capability-matrix#gateway-outage) says what each connector does while the gateway is down. Unscoped writes are the broad path: `fail-mode`, `hilt` and `block-message` also reconcile active connector posture so an old override does not keep the old value. On a single-connector install `--connector` is rejected.
+On a multi-connector install, `--connector X` writes only that connector's override. `fail-mode --connector X` then refreshes and verifies that connector's hook registration (every hook connector, Kiro included); for the proxy-backed OpenClaw and ZeptoClaw, which have no hooks, it saves and installs the mode of their PATH shims (`curl`, `wget`, `ssh`, `nc`, `pip`, `npm`). The [capability matrix](/docs/connectors/capability-matrix#gateway-outage) says what each connector does while the gateway is down. Unscoped writes are the broad path: `fail-mode`, `hilt` and `block-message` also reconcile active connector posture so an old override does not keep the old value. On a single-connector install, `--connector` may name the active connector; `enable`, `disable`, `fail-mode`, `hilt` and `block-message` then use their global setting. A name that is not installed is refused.
 
 ### CLI contract: read vs write
 

@@ -343,7 +343,7 @@ func launderGeminiHistory(raw json.RawMessage) (json.RawMessage, int, error) {
 					break
 				}
 			}
-			if strings.HasPrefix(firstText, defenseClawBlockBanner) {
+			if isDefenseClawBlockTurn(firstText) {
 				stripped++
 				continue
 			}

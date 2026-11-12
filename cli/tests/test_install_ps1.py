@@ -31,11 +31,12 @@ from defenseclaw import upgrade_shim
 from defenseclaw.commands import cmd_uninstall, windows_uninstall_helper
 from defenseclaw.platform_support import ACP_ONLY_CONNECTORS, UNSUPPORTED, WINDOWS_CONNECTOR_SUPPORT
 
+from tests.helpers import POWERSHELL, run_powershell
+
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
 LIFECYCLE_PS1 = ROOT / "scripts" / "test-install-lifecycle.ps1"
 TOKEN = "__DEFENSECLAW_VERSION__"
-POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
 
 
 @pytest.fixture(autouse=True)
@@ -692,8 +693,8 @@ exit $LASTEXITCODE
         "APPDATA": str(tmp_path / "AppData" / "Roaming"),
         "DEFENSECLAW_HOME": str(tmp_path / "home"),
     }
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -722,8 +723,8 @@ def test_an_unknown_argument_stops_with_exit_2(tmp_path: Path, argument: str, me
         "APPDATA": str(tmp_path / "AppData" / "Roaming"),
         "DEFENSECLAW_HOME": str(tmp_path / "home"),
     }
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), argument],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), argument],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1002,8 +1003,8 @@ foreach ($legacySetup in @($false, $true)) {
 """,
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-File", str(script), "-Root", str(tmp_path)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-File", str(script), "-Root", str(tmp_path)],
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
@@ -1057,7 +1058,7 @@ def test_windows_agent_scan_audits_owner_denial_and_refuses_the_same_account() -
         "catch { if ($_.Exception.Message -notlike 'Close OpenCode and Amp*') { throw } }\n"
         "'same-account-refused'\n"
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    result = run_powershell(["-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "audit: process owner unreadable" in result.stdout
     assert "owner-denied-audited" in result.stdout
@@ -1081,7 +1082,7 @@ function Move-Path([string]$Source, [string]$Destination) {{ Move-Item -LiteralP
 function Start-SetupGateway {{ throw 'the gateway was never stopped' }}
 Restore-SetupInstall -KeepStopped
 """
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
+    result = run_powershell(["-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert restored.read_text(encoding="ascii") == "enforcing"
     assert not staged.exists()
@@ -1113,8 +1114,8 @@ def test_test_guardrail_off_reads_the_kept_config(tmp_path: Path, name: str) -> 
     (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
     script = f"$DataDir = '{tmp_path}'\n{_ps1_function('Test-GuardrailOff')}\nif (Test-GuardrailOff) {{ 'off' }} else {{ 'on' }}\n"
     env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_CONFIG"}
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
         text=True,
         timeout=60,
@@ -1136,8 +1137,8 @@ def test_the_agent_prompt_with_no_console_picks_no_agent() -> None:
         "function Write-Warn { param($m) Write-Output $m }\nfunction Stop-Usage { param($m) throw $m }\n"
         f"{choices}{_ps1_function('Select-Connector')}Select-Connector\n"
     )
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
         text=True,
         timeout=60,
@@ -1286,6 +1287,114 @@ def test_a_room_refusal_runs_before_the_uv_folder_or_uv_is_created() -> None:
     assert room < install.index("Protect-UvDirectory -Create") < install.index("$Uv = if ($Run.UnprovenReplacement)")
 
 
+def test_the_uv_build_path_check_runs_before_the_uv_folder_is_created() -> None:
+    # GAP-0865: uv builds win-unicode-console from source in its cache folder,
+    # and a profile path of about 98 characters stopped there with WinError 206.
+    # The refusal names the path and changes nothing, so it comes after the
+    # cache folder is known and before Protect-UvDirectory -Create makes it.
+    install = _ps1_function("Invoke-Install")
+    known = install.index('$env:UV_CACHE_DIR = Join-Path $DataDir ".uv\\cache"')
+    resolve = install.index("$env:UV_CACHE_DIR = Resolve-UvCacheDir $env:UV_CACHE_DIR")
+    check = install.index("Assert-UvBuildPathFits $env:UV_CACHE_DIR")
+    assert known < resolve < check < install.index("Protect-UvDirectory -Create")
+
+
+def test_the_lock_has_one_source_only_package_and_the_build_path_reserve_is_its_own() -> None:
+    # The reserve in Assert-UvBuildPathFits is the longest path of the
+    # win-unicode-console build below uv's cache folder. A second package
+    # without a wheel would build somewhere the reserve was never measured.
+    import tomllib
+
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    source_only = sorted(p["name"] for p in lock["package"] if p.get("sdist") and not p.get("wheels"))
+    assert source_only == ["win-unicode-console"]
+    longest = (
+        "sdists-v9\\pypi\\win-unicode-console\\0.5\\" + "x" * 16 + "\\src\\"
+        "build\\bdist.win-amd64\\wheel\\.\\win_unicode_console-0.5-py3.12.egg-info\\dependency_links.txt"
+    )
+    assert re.search(rf"^\$UvBuildPathReserve = {len(longest) + 1}$", _text(), re.M)
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    ("length", "long_paths", "refused"),
+    [
+        (78, False, False),  # a 56-character profile: the install that worked
+        (108, False, False),  # the longest cache folder whose build still fits
+        (109, False, True),
+        (120, False, True),  # a 98-character profile with the default layout
+        (200, True, False),  # Windows long paths enabled
+    ],
+)
+def test_a_uv_cache_folder_too_deep_for_the_source_build_is_refused_by_length(
+    length: int, long_paths: bool, refused: bool,
+) -> None:
+    text = _text()
+    constants = "\n".join(re.search(rf"^\${name} = .*$", text, re.M).group(0) for name in ("UvBuildPathReserve", "WindowsPathLimit"))
+    script = f"""
+$ErrorActionPreference = 'Stop'
+function Die([string]$Message) {{ throw $Message }}
+{constants}
+{_ps1_function('Test-LongPathsEnabled')}
+if ((Test-LongPathsEnabled) -isnot [bool]) {{ throw 'Test-LongPathsEnabled must answer true or false' }}
+function Test-LongPathsEnabled {{ return ${str(long_paths).lower()} }}
+{_ps1_function('Assert-UvBuildPathFits')}
+$root = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\\', '/')
+$path = $root + [IO.Path]::DirectorySeparatorChar + ('a' * ({length} - $root.Length - 1))
+if ($path.Length -ne {length}) {{ throw "test path is $($path.Length) characters" }}
+try {{ Assert-UvBuildPathFits $path; 'ALLOWED' }} catch {{ 'REFUSED ' + $_.Exception.Message }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout.strip()
+    assert result.returncode == 0, out + result.stderr
+    if not refused:
+        assert out == "ALLOWED", out
+        return
+    assert out.startswith("REFUSED"), out
+    assert f"is {length} characters long" in out
+    assert "win-unicode-console" in out and "WinError 206" in out
+    assert "UV_CACHE_DIR" in out and "Nothing was changed" in out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(("ps_location_deep", "refused"), [(True, True), (False, False)])
+def test_a_relative_uv_cache_folder_is_measured_where_uv_will_use_it(
+    tmp_path: Path, ps_location_deep: bool, refused: bool,
+) -> None:
+    # GAP-0865: uv starts in PowerShell's location, which Set-Location moves
+    # without moving the process folder GetFullPath reads. A relative
+    # UV_CACHE_DIR is measured (and handed to uv) from the PowerShell location,
+    # so a deep one is refused and a short one is not, whatever the process
+    # folder is. The limit is sized from the short cache folder, so the answer
+    # does not depend on how long the runner's temp folder already is; the real
+    # limit and reserve are held by the length cases above.
+    deep = tmp_path.joinpath(*["d" * 50] * 3)
+    shallow = tmp_path / "s"
+    deep.mkdir(parents=True)
+    shallow.mkdir()
+    ps_dir, process_dir = (deep, shallow) if ps_location_deep else (shallow, deep)
+    text = _text()
+    reserve = re.search(r"^\$UvBuildPathReserve = .*$", text, re.M).group(0)
+    script = f"""
+$ErrorActionPreference = 'Stop'
+function Die([string]$Message) {{ throw $Message }}
+{reserve}
+$WindowsPathLimit = [IO.Path]::GetFullPath((Join-Path '{shallow}' 'cache')).Length + $UvBuildPathReserve
+function Test-LongPathsEnabled {{ return $false }}
+{_ps1_function('Resolve-UvCacheDir')}
+{_ps1_function('Assert-UvBuildPathFits')}
+Set-Location -LiteralPath '{ps_dir}'
+[Environment]::CurrentDirectory = '{process_dir}'
+$resolved = Resolve-UvCacheDir 'cache'
+if ($resolved -ne (Join-Path '{ps_dir}' 'cache')) {{ throw "resolved to $resolved" }}
+try {{ Assert-UvBuildPathFits $resolved; 'ALLOWED' }} catch {{ 'REFUSED ' + $_.Exception.Message }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout.strip()
+    assert result.returncode == 0, out + result.stderr
+    assert out.startswith("REFUSED") == refused, out
+
+
 def _bin_dir_functions() -> str:
     text = _text()
     out = []
@@ -1332,8 +1441,8 @@ New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 Set-Content -LiteralPath (Join-Path $BinDir 'defenseclaw-gateway.exe') -Value 'new'
 Restore-BinDir '{slot}'
 """
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
         text=True,
         timeout=60,
@@ -1367,8 +1476,8 @@ $DataDir = '{source.parent}'
 Copy-Kept '{source}' '{slot}'
 try {{ Copy-Kept '{source}' '{tmp_path / "missing"}' }} catch {{ Write-Output $_.Exception.Message }}
 """
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
         text=True,
         timeout=60,
@@ -1408,8 +1517,8 @@ function Get-CimInstance {{
 {_ps1_function("Copy-Kept")}
 try {{ Copy-Kept '{source}' '{tmp_path / "slot"}' }} catch {{ Write-Output $_.Exception.Message }}
 """
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
         text=True,
         timeout=60,
@@ -1629,8 +1738,8 @@ def test_write_kept_uv_cache_runs_under_strict_mode(tmp_path: Path, cache: str) 
         f"$DataDir = '{tmp_path}'\nfunction Write-Info([string]$m) {{ 'info: ' + $m }}\n"
         f"{tree}\n{_ps1_function('Write-KeptUvCache')}\nWrite-KeptUvCache\n'done'\n"
     )
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
         text=True,
         timeout=60,
@@ -1770,8 +1879,8 @@ def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:
         path = Path(case) / "case.ps1"
         path.write_text(script, encoding="utf-8-sig")
         command = f". ([scriptblock]::Create([IO.File]::ReadAllText('{path}')))"
-        return subprocess.run(
-            [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command],
+        return run_powershell(
+            ["-NoProfile", "-NonInteractive", "-Command", command],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -2223,8 +2332,8 @@ Write-Output "LAST_WARNING=$(if ($script:warnings.Count) {{ $script:warnings[-1]
     # A file, not -Command: the script is longer than a Windows command line.
     path = tmp_path / "refusal.ps1"
     path.write_text(script, encoding="utf-8-sig")
-    completed = subprocess.run(
-        [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-File", str(path)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-File", str(path)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
     )
     out = completed.stdout + completed.stderr
@@ -2813,8 +2922,8 @@ if (Start-HookFailModeHold 'checked-gateway.exe' 123 -Closed) {
 }
 'OK'
 """
-    result = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+    result = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
@@ -3932,13 +4041,57 @@ def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configu
     ]
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("with_backups", [False, True])
+def test_rollback_prunes_with_every_available_connector_reader(tmp_path: Path, with_backups: bool) -> None:
+    calls = tmp_path / "calls.txt"
+    gateways = []
+    for name in ("older", "newer"):
+        path = tmp_path / f"{name}.ps1"
+        flag = " --rollback-backups-dir" if with_backups and name == "newer" else ""
+        path.write_text(
+            f"param()\nAdd-Content -LiteralPath '{calls}' -Value ('{name} ' + ($args -join ' '))\n"
+            f"if ($args -contains '--help') {{ Write-Output 'Usage:'; Write-Output '  defenseclaw-gateway connector prune-orphans [flags]{flag}' }}\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        gateways.append(path)
+    data_dir = tmp_path / "dc"
+    backup_dir = tmp_path / "saved-data"
+    backup_arg = f" '{backup_dir}'" if with_backups else ""
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\nfunction Write-Warn([string]$m) {{ 'warn: ' + $m }}\n"
+        f"{_ps1_function('Invoke-Native')}\n{_ps1_function('Get-NativeOutput')}\n"
+        f"{_ps1_function('Invoke-PruneOrphanedHooks')}\n"
+        f"Invoke-PruneOrphanedHooks @('{gateways[0]}', '{gateways[1]}'){backup_arg}\n"
+    )
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    expected = [
+        "older connector prune-orphans --help",
+        "newer connector prune-orphans --help",
+    ]
+    if with_backups:
+        expected += [
+            f"newer connector prune-orphans --data-dir {data_dir} --rollback-backups-dir {backup_dir}",
+            f"older connector prune-orphans --data-dir {data_dir}",
+        ]
+    else:
+        expected += [
+            f"older connector prune-orphans --data-dir {data_dir}",
+            f"newer connector prune-orphans --data-dir {data_dir}",
+        ]
+    assert calls.read_text(encoding="utf-8").splitlines() == expected
+
+
 def test_windows_rollback_and_upgrade_run_the_hook_entry_prune() -> None:
     # rel-1-0-1:GAP-0009: after the swap of a 1.x rollback (live gateway, then
     # the one just left in previous\bin), and in the upgrade after the migration.
     rollback = _ps1_function("Invoke-Rollback")
     prune = (
         'Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"), '
-        '(Join-Path $Previous "bin\\defenseclaw-gateway.exe"))'
+        '(Join-Path $Previous "bin\\defenseclaw-gateway.exe")) (Join-Path $Previous "data")'
     )
     assert rollback.index("Switch-WithPrevious $current") < rollback.index(prune)
     assert "if (-not $toLegacy) {\n        " + prune in rollback
@@ -3975,8 +4128,8 @@ def test_an_empty_local_stops_with_exit_2(tmp_path: Path, arguments: list[str]) 
         "APPDATA": str(tmp_path / "AppData" / "Roaming"),
         "DEFENSECLAW_HOME": str(tmp_path / "home"),
     }
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), *arguments],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), *arguments],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -4009,8 +4162,8 @@ def test_an_empty_or_malformed_version_stops_with_exit_2(tmp_path: Path, argumen
         "APPDATA": str(tmp_path / "AppData" / "Roaming"),
         "DEFENSECLAW_HOME": str(tmp_path / "home"),
     }
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), *arguments],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), *arguments],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -4058,8 +4211,9 @@ def _run_audit_store_case(shell: str, tmp_path: Path, call: str, fail: str = "",
         + f"try {{ $r = {call}; Write-Host \"result: $r\" }} catch {{ Write-Host \"thrown: $($_.Exception.Message)\" }}\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -4592,8 +4746,9 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
         + "Write-Host \"end=$(if (Test-Path -LiteralPath $SetupHookState) { 'enabled' } else { 'disabled' })\"\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -4755,8 +4910,9 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         + "\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -4895,8 +5051,9 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
         "Write-Host \"final hook: $(Get-Content -Raw -LiteralPath (Join-Path $BinDir 'defenseclaw-hook.exe'))\"\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -5037,8 +5194,9 @@ def test_a_step_that_throws_after_the_hook_swap_restores_the_old_install(
         "Write-Host \"hook: $(Get-Content -Raw -LiteralPath (Join-Path $BinDir 'defenseclaw-hook.exe'))\"\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -5122,8 +5280,9 @@ def test_a_new_gateway_start_that_throws_restores_the_previous_install(tmp_path:
         "Write-Host \"restored: $script:restored\"\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -5980,8 +6139,8 @@ def _restore_case(tmp_path: Path, body: str) -> str:
         + "\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -6614,8 +6773,8 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
         + body,
         encoding="utf-8",
     )
-    return subprocess.run(
-        [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-File", str(script)],
+    return run_powershell(
+        ["-NoProfile", "-NonInteractive", "-File", str(script)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
     )
 
@@ -6979,8 +7138,8 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
         + "\n$rc = Invoke-Rollback\nWrite-Host \"rc: $rc undone: $script:undone removed: $script:removed\"\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-File", str(script)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
     )
     out = completed.stdout + completed.stderr
@@ -7040,8 +7199,8 @@ def test_a_codex_update_refuses_only_a_rollback_whose_gateway_would_not_start(tm
         + "Write-Host \"rc: $rc stops: $script:stops removed: $script:removed\"\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-File", str(script)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
     )
     out = completed.stdout + completed.stderr
@@ -7214,8 +7373,9 @@ def test_setup_launcher_delegates_to_this_releases_hook(tmp_path: Path, shell: s
         + "\nforeach ($p in $protected) { Write-Host \"protected $p\" }\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
     )
     kept = staging / "hook-runtime-state.json"
@@ -7619,7 +7779,7 @@ def test_a_windows_agent_is_told_only_by_its_recorded_entry() -> None:
     )
     script = ("Set-StrictMode -Version Latest\n" + resolver + _ps1_function("Get-LoadedPluginAgent")
               + _ps1_function("Split-CommandLine") + installed + rows)
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    result = run_powershell(["-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     got = [line for line in result.stdout.splitlines() if line.startswith("[")]
     assert got == [f"[{agent}]" for _, _, agent in _WINDOWS_AGENT_ROWS], list(zip(_WINDOWS_AGENT_ROWS, got))
@@ -7640,7 +7800,7 @@ def test_windows_agent_scan_with_no_installed_entry_skips_process_rows() -> None
         + _ps1_function("Assert-NoLoadedPluginAgents")
         + "Assert-NoLoadedPluginAgents\n'scan-passed'\n"
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    result = run_powershell(["-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "scan-passed", result.stdout
 
@@ -7656,7 +7816,7 @@ def test_windows_unrelated_executable_needs_no_path_resolution() -> None:
         + "$p = [pscustomobject]@{ ProcessId = 1; ExecutablePath = 'C:\\Windows\\notepad.exe'; CommandLine = 'notepad.exe' }\n"
         + "'[' + (Get-LoadedPluginAgent $p) + ']'\n"
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    result = run_powershell(["-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "[]", result.stdout
 
@@ -7695,7 +7855,7 @@ def test_windows_node_adjacent_npm_entry_counts_without_appdata(
         + f"$script:InstalledAgentPrograms.ContainsKey((Resolve-AgentPath '{entry}').ToLowerInvariant())\n"
         + ("'[' + (Get-LoadedPluginAgent $p) + ']'\n" if os.name == "nt" else "")
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    result = run_powershell(["-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     expected = [str(bool(want))] + ([f"[{want}]"] if os.name == "nt" else [])
     assert result.stdout.strip().splitlines() == expected, (result.stdout, result.stderr)
@@ -7725,7 +7885,7 @@ def test_windows_installed_entries_are_exact_files(tmp_path: Path) -> None:
         + f"$env:USERPROFILE = '{profile}'\n$env:APPDATA = '{roaming}'\n$env:LOCALAPPDATA = '{local}'\n$env:PATH = '{on_path.parent}'\n$DataDir = '{data}'\n"
         + "$i = Get-InstalledAgentPrograms\nforeach ($k in @($i.Keys | Sort-Object)) { '{0}={1}' -f $k, $i[$k] }\n"
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    result = run_powershell(["-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     lines = sorted(line for line in result.stdout.splitlines() if "=" in line)
     assert lines == sorted([f"{str(native).lower()}=amp", f"{str(entry).lower()}=opencode"]), result.stdout
@@ -7757,7 +7917,7 @@ def test_windows_hook_lock_entry_requires_an_absolute_path(tmp_path: Path, selec
         + f"$env:LOCALAPPDATA = '{tmp_path / 'local'}'\n"
         + "(Get-InstalledAgentPrograms).Count\n"
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script],
+    result = run_powershell(["-NoProfile", "-Command", script],
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0 and result.stdout.strip() == want, (result.stdout, result.stderr)
 
@@ -7776,7 +7936,7 @@ def test_windows_entry_resolution_follows_a_parent_link(tmp_path: Path) -> None:
         pytest.skip("directory links require a Windows developer token")
     script = (_ps1_function("Resolve-AgentPath")
               + f"Resolve-AgentPath '{alias / 'bin' / 'opencode'}'")
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    result = run_powershell(["-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().lower() == str(entry.resolve()).lower(), result.stdout
 
@@ -7805,7 +7965,7 @@ def test_windows_npm_opencode_exe_that_is_a_hard_link_is_the_recorded_entry(tmp_
         + f"'resolved=' + (Resolve-AgentPath '{native}')\n"
         + "$i = Get-InstalledAgentPrograms\nforeach ($k in @($i.Keys | Sort-Object)) { '{0}={1}' -f $k, $i[$k] }\n"
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    result = run_powershell(["-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert "link=HardLink" in result.stdout, result.stdout
     assert f"resolved={native}".lower() in result.stdout.lower(), result.stdout
@@ -7828,7 +7988,7 @@ def test_windows_relative_node_entry_does_not_use_the_installers_cwd(tmp_path: P
         + f"$p = [pscustomobject]@{{ ProcessId = 1; ExecutablePath = '{node}'; CommandLine = 'node node_modules\\opencode-ai\\bin\\opencode' }}\n"
         + "'[' + (Get-LoadedPluginAgent $p) + ']'\n"
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], cwd=tmp_path,
+    result = run_powershell(["-NoProfile", "-Command", script], cwd=tmp_path,
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert "[]" in result.stdout and "audit: relative Node script cwd unreadable" in result.stdout
@@ -7852,7 +8012,7 @@ def test_windows_vanished_agent_process_is_audited_without_refusal() -> None:
         + _ps1_function("Assert-NoLoadedPluginAgents")
         + "Assert-NoLoadedPluginAgents\n'scan-passed'\n"
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script],
+    result = run_powershell(["-NoProfile", "-Command", script],
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert "audit: process vanished or changed during lookup" in result.stdout
@@ -7877,7 +8037,7 @@ def test_a_windows_command_line_splits_as_node_reads_it() -> None:
     script = "Set-StrictMode -Version Latest\n" + _ps1_function("Split-CommandLine") + "\n".join(
         "ConvertTo-Json -Compress -InputObject @(Split-CommandLine '{}')".format(line.replace("'", "''")) for line, _ in rows
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    result = run_powershell(["-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert [json.loads(line) for line in result.stdout.splitlines() if line.strip()] == [words for _, words in rows]
 
@@ -7888,7 +8048,7 @@ def test_windows_process_rows_carry_the_executable_the_agent_check_reads() -> No
     # Get-LoadedPluginAgent reads Win32_Process.ExecutablePath: this
     # account's own processes carry it.
     script = "(Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\").ExecutablePath"
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    result = run_powershell(["-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().lower().endswith(".exe"), result.stdout
 
@@ -8803,7 +8963,9 @@ def test_an_install_keeps_a_recorded_hook_guard_copy_an_older_roll_forward_canno
     body = _ps1_function("Save-HelperRecoveryCopy")
     assert 'Install-File $guard (Join-Path $InstallerDir "defenseclaw-hook-guard.exe")' in body
     assert 'Join-Path $InstallerDir "binaries.sha256"' in body
-    assert '@("defenseclaw-gateway.exe", "defenseclaw-hook-guard.exe")' in body
+    # The launcher's digest is recorded with them so doctor and status can tell
+    # the installed launcher from another program under its name (GAP-0810).
+    assert '@("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-hook-guard.exe")' in body
     assert "Publish-File" in body and "catch" in body
     install_new = _ps1_function("Install-New")
     loop = install_new.index("foreach ($name in $ManagedBinaries)")

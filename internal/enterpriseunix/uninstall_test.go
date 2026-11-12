@@ -671,15 +671,19 @@ func TestPurgeAfterKeepStateUninstallPurgesTheAccounts(t *testing.T) {
 	var calls []string
 	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(args string) (CommandResult, error) {
 		calls = append(calls, args)
-		return CommandResult{Stdout: []byte(`{"ok":true,"purged":["alice"],"purged_detail":{"alice":{"data":true}}}`)}, nil
+		return CommandResult{Stdout: []byte(`{"ok":true,"purged":["alice"],"purged_detail":{"alice":{"data":true,"kept_entries":["personal.txt"]}}}`)}, nil
 	}}
 	purge := h.run(Options{Action: ActionUninstall, Purge: true})
 	requireOK(t, purge)
 	if len(calls) != 1 || !strings.HasSuffix(calls[0], " --purge") {
 		t.Fatalf("the purge did not purge the enrolled accounts: %v", calls)
 	}
-	if !strings.Contains(strings.Join(purge.Changes, "\n"), "per-user data of user alice") {
+	if !strings.Contains(strings.Join(purge.Changes, "\n"), "per-user entries of user alice") {
 		t.Fatalf("the purge does not name the account it purged: %v", purge.Changes)
+	}
+	if !strings.Contains(strings.Join(purge.Changes, "\n"), "personal.txt") ||
+		!strings.Contains(messagesOf(purge.Warnings, codePerUserState), "personal.txt") {
+		t.Fatalf("the purge did not name the retained account file: changes %v, warnings %v", purge.Changes, purge.Warnings)
 	}
 }
 

@@ -78,6 +78,9 @@ def test_windows_cmd_shim_refusal_names_native_install_not_trusted_paths(tmp_pat
     shim.write_text("@echo off\n", encoding="utf-8")
     monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(shim),))
     monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        agent_selection, "setup_binary_trust_problem", lambda *_args, **_kwargs: "it is a script wrapper, not a native .exe"
+    )
     monkeypatch.setattr(agent_selection, "os", os_view("nt"))
 
     with pytest.raises(OSError, match="claude.cmd is a script wrapper") as raised:

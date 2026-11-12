@@ -64,7 +64,7 @@ def _ran(helper: str) -> list[str]:
 
 @pytest.fixture
 def per_user_host(tmp_path, monkeypatch):
-    """A per-user host with no gateway in ~/.local/bin, on no PATH."""
+    """A per-user host with no gateway in ~/.local/bin or on the PATH."""
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
     monkeypatch.delenv("DEFENSECLAW_GATEWAY_BIN", raising=False)

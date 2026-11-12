@@ -197,6 +197,27 @@ Missing registration, an open runtime, another owner, extra write permission,
 a link, or other untrusted state still refuses the upgrade. Correct the state,
 have the account sign in, and run Setup `/ensure JSON=1` again.
 
+An account with no active Windows session (signed out or disconnected) does not fail a
+managed Windows upgrade because the hooks of an earlier release (up to 1.0.6) still sit in its
+agent configuration. The guardian installs the new hooks only in the account's own session, so
+when an earlier release's hook lock names the target and a read-only check shows that the only
+difference from this release is the earlier render of the hook command, the connector is
+pending until the account signs in: `status` and `verify` show it as pending, and the previous
+release's DefenseClaw hook keeps running for that account until it signs in and the guardian
+updates it. That hook runs the same hook binary and arguments, so the gateway still decides its
+calls; it differs only when PowerShell runs in Constrained Language mode and the launcher never
+starts, where it allows the call (this release's hook refuses it). Any other difference (a
+deleted or replaced hook file, a link, another owner, a drifted runtime), a lock this release
+wrote, and an account with an active session whose repair fails still fail the upgrade. With the
+administrator's hook fail mode open, a signed-out Claude Code or Codex account whose machine
+registration is proven waits as well. For these two the machine hook is this release's own, so
+`status` and `verify` say that the machine hook is in place and the account's registration
+finishes when it signs in (the previous release's hook is what keeps running only for Copilot,
+Antigravity and Kiro); with fail mode closed they keep the closed-registration proof described
+above. When one account has connectors of several kinds, its reason names each group, for example
+`devin: not guarded until this account signs in; copilot: the previous release's DefenseClaw hook
+keeps running until this account signs in and the guardian updates it`.
+
 ## Roll back
 
 With bundle trust anchors, DefenseClaw refuses to install a release below the
@@ -218,8 +239,13 @@ A failed action rolls itself back. You only need the steps below to go back to a
 release on purpose. Try the rollback on one test host before the fleet. Every lifecycle
 refuses an older release unless you ask for the rollback. Windows Setup stops with exit `1603`
 and the code `downgrade_refused`, and the macOS package records `downgrade_refused` in
-`last-package-result.json`. The Debian and RHEL packages print "refusing to downgrade ...
-Nothing was changed.", exit with `1` and record nothing. For an
+`last-package-result.json`. The Debian and RHEL packages start every refusal with its code
+(`defenseclaw-enterprise: downgrade_refused: ... refusing to downgrade to <version>. Nothing was changed.`)
+and exit with `1`; `rpm`, `dnf` and `apt` show that text only, and `last-package-result.json`
+keeps the result of the package that is applied. `rpm` and `dnf` run the older package's own
+preinstall, so a package before 1.0.9 prints the same refusal without the code; the apt hook of
+the installed package names it for any older package. `dpkg -i` skips the apt hook, so `dpkg -i` of a
+package before 1.0.9 prints the refusal without the code. For an
 Intune Win32 deployment, remove the superseding **Required** assignment before assigning
 the older app; otherwise Intune can reapply the newer release.
 
@@ -347,8 +373,8 @@ ellipsis omits the older installer's rollback instruction:
 
 | Installer | Refusal excerpt and result |
 | --- | --- |
-| RPM `%prein` (also Debian `preinst`) | `defenseclaw-enterprise: refusing to install 1.0.5: the signed policy bundle needs DefenseClaw 1.0.8 or later, and this is 1.0.5; … Nothing was changed.` RPM exits `1`. The preinstall text does not name `product_floor_refused` or update `/var/lib/defenseclaw-enterprise/last-package-result.json`. |
-| macOS pkg `preinstall` | `installer` reports an error running package scripts. `/var/log/install.log` contains `Refusing to install DefenseClaw 1.0.5: the signed policy bundle needs DefenseClaw 1.0.8 or later, and this is 1.0.5; … Nothing was changed.` The pkg records `product_floor_refused` in `errors[].code` at `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`. |
+| RPM `%prein` (also Debian `preinst` and the apt hook) | `defenseclaw-enterprise: product_floor_refused: refusing to install 1.0.5: the signed policy bundle needs DefenseClaw 1.0.8 or later, and this is 1.0.5; … Nothing was changed.` RPM exits `1`. Packages before 1.0.9 print the same text without `product_floor_refused:`. The preinstall does not update `/var/lib/defenseclaw-enterprise/last-package-result.json`. |
+| macOS pkg `preinstall` | `installer` reports an error running package scripts. `/var/log/install.log` contains `product_floor_refused: Refusing to install DefenseClaw 1.0.5: the signed policy bundle needs DefenseClaw 1.0.8 or later, and this is 1.0.5; … Nothing was changed.` The pkg records `product_floor_refused` in `errors[].code` at `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`. |
 | Windows Setup 1.0.7 | Setup returns `1603`; with `JSON=1`, `errors[].code` is `product_floor_refused` and `errors[].message` begins `product_floor_refused: the signed policy bundle needs DefenseClaw 1.0.8 or later, and this is 1.0.7; …; nothing was changed`. Windows Setup reports this in its result, not in a `last-package-result.json` file. |
 
 The 1.0.8 pkg and RPM reinstall at the confirmed 1.0.8 floor complete; the
@@ -488,7 +514,7 @@ the same way. In order, on Linux and macOS:
    every protected credential the file names. A failure is `config_invalid` and the
    installed config stays.
 2. **Migrate a version 8 config.** A `config_version: 8` config is migrated to version 9 in
-   memory by the same library as `defenseclaw-gateway config migrate`, validated again, and
+   memory by the same library as the gateway's `config migrate`, validated again, and
    installed in place of the version 8 bytes. No `defenseclaw` CLI is needed on the host. If
    your configuration management puts the same version 8 file back, `ensure` leaves its
    bytes in place and the gateway migrates it in memory.
@@ -580,10 +606,10 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
 ```
 
 ```powershell title="Windows"
-& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair JSON=1
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair --profile standalone
 ```
 
-`repair` stops and restarts every DefenseClaw service for a few seconds and lists what it changed (`nothing to repair` on a healthy deployment); `ensure` leaves a healthy deployment running. It also removes the guardian targets of deleted accounts. For Linux package installs, reinstall the package to restore binaries. On Windows use the Setup of the installed release.
+`repair` stops and restarts every DefenseClaw service for a few seconds and lists what it changed (`nothing to repair` on a healthy deployment); `ensure` leaves a healthy deployment running. It also removes the guardian targets of deleted accounts. For Linux package installs, reinstall the package to restore binaries. On Windows the installed CLI repairs the deployment without a payload, so it cannot put back a file that went missing. For that, run the Setup of the installed release with `/repair JSON=1` from an elevated PowerShell prompt, as `& .\DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1` in the folder that holds it. Setup is not installed on the computer: use the copy in your MDM package or the release download.
 
 To re-run the guardian now, and repair DefenseClaw's machine-policy entries, without
 re-applying the deployment files, use `reconcile`:
@@ -629,7 +655,8 @@ On Windows, `reconcile` restarts the guardian and waits for a fresh reconcile:
   accounts that no longer exist. Otherwise they stay 10 to 15 minutes, with the warning
   `guardian_target_account_removed`. See
   [New, changed and removed users](/docs/enterprise/enrollment#new-changed-and-removed-users).
-- **Windows.** Use the Setup of the release that is installed. `/ensure` also repairs a
+- **Windows.** Use the installed CLI's `repair` (above), or the Setup of the release that is
+  installed when a file must be restored from the payload. `/ensure` also repairs a
   deployment whose `verify` fails.
 - **Claude Code attestation (Windows).** After you confirm that a real Claude Code session
   runs DefenseClaw's managed hooks, record it with `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1 JSON=1`
@@ -646,7 +673,7 @@ commands below to restart the managed gateway.
 | --- | --- | --- |
 | Linux | `sudo systemctl restart defenseclaw-gateway.service` | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux repair --json` |
 | macOS | `sudo launchctl kickstart -k system/com.cisco.defenseclaw.gateway` | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --json` |
-| Windows | Run the installed release's Setup with `/repair JSON=1` | The same |
+| Windows | From an elevated PowerShell prompt: `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair --profile standalone` | The same |
 
 To stop the managed gateway, for example to see what your users get while it is down, and to start it again:
 
@@ -735,6 +762,13 @@ key runs it too: `gateway.*`, `guardrail.hook_self_heal`, `enterprise.network`, 
 `enterprise` keys and the keys that [Source of truth](/docs/reference/source-of-truth) lists. The
 other `enterprise` keys include `enterprise.machine_policy` (for example `managed_hooks_only`):
 the gateway reads them only at start, so they need a restart.
+A change whose only such keys are `enterprise.machine_policy.default.managed_hooks_only` or
+`enterprise.machine_policy.connectors.claudecode.managed_hooks_only` restarts only the hook guardian and
+then the gateway. The other services keep running. `ensure` waits until every enrolled target
+verifies with the new setting before it restarts the gateway, and the setting is machine wide, so an
+enrolled account that is signed out does not block it. On the 1.0.8 test VM this took about 65 seconds.
+If the guardian or the gateway does not prove the change, the previous config goes back, and the
+lifecycle transaction below applies the change instead.
 The transaction is the one an upgrade runs, with the installed release's own payload: it stops
 every service, puts the same release back in place, starts the services and verifies the
 deployment. On the 1.0.8 test VM the `ensure` took about 110 seconds, against about a minute for a
@@ -768,7 +802,7 @@ A standalone uninstall also removes the config, credentials, most machine state 
 | Debian and Ubuntu package | `sudo apt remove defenseclaw-enterprise` | Run the lifecycle `uninstall --purge --json` first, then `sudo apt purge defenseclaw-enterprise` |
 | RHEL package | `sudo dnf remove defenseclaw-enterprise` | Run the lifecycle `uninstall --purge --json` first, then `sudo dnf remove defenseclaw-enterprise` |
 | macOS | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --json` | Add `--purge` |
-| Windows | Setup `/uninstall JSON=1`, or `defenseclaw.exe enterprise windows uninstall --profile standalone --json` | Setup `/uninstall JSON=1 PURGE=1`, or add `--purge` |
+| Windows | Setup `/uninstall JSON=1`, or `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows uninstall --profile standalone --json` from an elevated PowerShell prompt | Setup `/uninstall JSON=1 PURGE=1`, or add `--purge` |
 
 Removing a Linux package runs the lifecycle `uninstall` first, without purge; run `uninstall --purge --json` before removing the package to remove per-user data too.
 
@@ -794,7 +828,8 @@ install: the rollback replaces the release in place and the hooks stay registere
 
 On a standalone deployment it also removes the config, credentials, most machine state and
 logs, with the kept-sandbox exception below. Each user's `~/.defenseclaw` and per-user binaries
-stay. A purge removes everything, each enrolled user's folder and per-user binaries included.
+stay. A purge removes DefenseClaw-owned per-user entries and binaries; an account's other files
+inside `~/.defenseclaw` stay, and the folder goes only when empty.
 The Secure Client profile keeps its machine state unless you purge.
 
 On Linux and macOS, the default uninstall removes the deployment, config, credentials, logs,
@@ -862,21 +897,21 @@ machine state for a reinstall instead.
   the way reconcile does. When a row does not resolve (the account does not exist, or the directory
   does not answer), uninstall refuses before it stops any service or removes any policy and names
   the row with `per_user_hooks_remaining`. Fix or remove that row and run the uninstall again.
-- **Per-user state (Linux and macOS).** `--purge` also removes everything DefenseClaw put in each
+- **Per-user state (Linux and macOS).** `--purge` removes known DefenseClaw-owned entries in each
   enrolled user's home, as that user. It first stops the user's per-user gateway and watchdog, if
-  one runs, and restores the files of any agent that DefenseClaw changed and still has backups for.
-  It then removes all of `~/.defenseclaw` (hook scripts, hook credentials and
-  `~/.defenseclaw/foreign-hooks-backup` included) and, from `~/.local/bin`, `defenseclaw-gateway`,
-  `defenseclaw-acp`, the hook helpers (`defenseclaw-hook-post`, `defenseclaw-hook-user`
-  and, on Linux, `defenseclaw-sensor-helper`), the launcher links, the `uv` the per-user installer added (when unchanged) and
-  its bookkeeping. A user enrolled only for machine-policy connectors loses `~/.defenseclaw` the same
-  way when it holds no own install (only the session cache `~/.defenseclaw/session-facts.json` and
-  what DefenseClaw wrote there, an earlier failed install's hook files and backups included). It follows no symlink there and removes only a file the user owns; the
-  user's own tools in `~/.local/bin` stay. The result names each user whose data it removed and
-  each enrolled user it left alone, with the reason (a home that is not trusted or not available, a
-  hook removal that failed, a gateway that could not be stopped). Fix the cause and run the same
-  uninstall again. Back up `~/.defenseclaw/foreign-hooks-backup` first if a user wants their own
-  moved-aside hooks back.
+  one runs, and restores files that DefenseClaw changed and still has backups for. It then removes
+  managed hook scripts, hook credentials, the session cache and other known files inside
+  `~/.defenseclaw`. From `~/.local/bin`, it removes `defenseclaw-gateway`, `defenseclaw-acp`, the
+  hook helpers (`defenseclaw-hook-post`, `defenseclaw-hook-user` and, on Linux,
+  `defenseclaw-sensor-helper`), launcher links, the `uv` the per-user installer added when unchanged,
+  and its bookkeeping. For an account enrolled only for machine-policy connectors, it removes the
+  same known entries, including `~/.defenseclaw/session-facts.json`. The same rule applies to an
+  eligible account without per-user hook enrollment. Unrelated account files and saved originals
+  in `foreign-hooks-backup` stay, and `~/.defenseclaw` is removed only when empty. The purge follows
+  no symlink and leaves the user's own tools in `~/.local/bin`. The result names retained entries
+  and each account whose state it removed or left alone, with the reason (a home that is not trusted
+  or not available, a hook removal that failed, or a gateway that could not be stopped). Fix the
+  cause and run the same uninstall again.
 - **A user's own install from before the enrollment (Linux and macOS).** If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db`, `previous/`, or the program the per-user installer puts there, `.venv/` or `installer/`, also when the account never ran `defenseclaw init`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. No `~/.defenseclaw-backup-*` folder is made. The enrollment shares that folder: the uninstall, with or without `--purge`, puts back the install's hook scripts and hook settings, connector backups, hook contract lock and session cache as they were before the enrollment, and each agent config those backups name when the uninstall left it as it was before the own install (an agent config changed while the computer was managed stays as it is and is named in a `per_user_state_remaining` warning). The Claude Code hook script the enrollment replaced with a blocker comes back too.
 - **A user whose home is gone (Linux and macOS).** When an enrolled user's home folder was
   deleted and its parent folder still holds other entries, the hooks and `~/.defenseclaw` went with
@@ -920,14 +955,16 @@ machine state for a reinstall instead.
   out, or whose session is disconnected, keep theirs. The result
   lists them in the `user_registrations_pending` and `user_registrations_failed` warnings. What
   stays is inert; see [Windows: Remove](/docs/enterprise/windows#remove).
-- **Per-user state (Windows).** `PURGE=1` or `--purge`, run as LocalSystem, also removes all of each
-  enrolled account's `%USERPROFILE%\.defenseclaw` (hook scripts and `foreign-hooks-backup`
-  included), whether or not the account is signed in, plus the DefenseClaw files of a per-user
-  install from `%USERPROFILE%\.local\bin` and, once that folder is empty, the folder and its entry
-  in the account's user `Path`. A signed-out account's `Path` cannot be changed, so it keeps that
-  entry. An account whose agent registrations stay (it had no active, connected session) keeps
-  its `.defenseclaw`, whose `connector_backups` restore them; the purge still finishes. The
-  `per_user_state_remaining` warning names each folder it could not remove, with the reason.
+- **Per-user state (Windows).** `PURGE=1` or `--purge`, run as LocalSystem, removes known
+  DefenseClaw-owned entries in each enrolled account's `%USERPROFILE%\.defenseclaw`, whether or
+  not the account is signed in. Unrelated account files and saved originals in
+  `foreign-hooks-backup` stay; the folder is removed only when empty. The purge also removes the
+  DefenseClaw files of a per-user install from `%USERPROFILE%\.local\bin` and, once that folder is
+  empty, the folder and its entry in the account's user `Path`. A signed-out account's `Path` cannot
+  be changed, so it keeps that entry. An account whose agent registrations stay (it had no active,
+  connected session) keeps its `.defenseclaw`, whose `connector_backups` restore them; the purge
+  still finishes. The `per_user_state_remaining` warning names retained account entries and each
+  folder it could not remove, with the reason.
 
 ### After an uninstall
 
@@ -952,8 +989,8 @@ deployment was activated, with the `agent_sessions_restart_required` warning.
    the Windows Application event log and `%WINDIR%\Logs\DefenseClaw` are not removed. See
    [Logs and events](/docs/enterprise/operations#logs-and-events). To review a retained audit
    database after purge, keep its `audit.db` and companion `audit.db-wal` and `audit.db-shm` files
-   together, then run `defenseclaw-gateway audit export --db <copied-audit.db>` as root on Linux or
-   from an elevated Administrator prompt on Windows. The export opens the copy read-only and does
+   together, then run `/opt/defenseclaw/bin/defenseclaw-gateway audit export --db <copied-audit.db>` as root on Linux (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS) or
+   `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' audit export --db <copied-audit.db>` from an elevated Administrator prompt on Windows. The export opens the copy read-only and does
    not need the former deployment's config.
 3. **Uninstall with purge**, as in [Uninstall](#uninstall).
 4. **Confirm that nothing remains:**
@@ -981,7 +1018,7 @@ deployment was activated, with the `agent_sessions_restart_required` warning.
   [Review the audit log](/docs/enterprise/windows#review-the-audit-log)).
 - **Check the machine policy after removal.** On managed Windows, Claude Code, Codex and Cursor must
   refuse the cut-off account even with zero enrolled users for that agent. Run
-  `defenseclaw-gateway enterprise policy verify --json` and review each enabled agent. If its policy
+  `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy verify --json` and review each enabled agent. If its policy
   is missing, keep the account disabled, stop that agent with application control, and repair the
   deployment before allowing agent use. On Linux and macOS the policy stays machine-wide; use
   `unenrolled_users: deny` when enrollment alone must refuse a call.

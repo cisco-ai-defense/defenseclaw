@@ -137,10 +137,14 @@ describe("https.request interception (smithy NodeHttpHandler shape)", () => {
     );
     expect(captured).toHaveLength(1);
     const opts = captured[0].opts as Record<string, unknown>;
-    // `agent: false` tells Node to pick a fresh default http.Agent for the
-    // proxy hop — anything else (undefined, or the original https.Agent)
-    // would let Node fall back to global/https state and reject the request.
-    expect(opts.agent).toBe(false);
+    // The caller's https.Agent must not reach the plain-http proxy hop, or
+    // Node rejects the request. The hop opens its own proven connection
+    // (GAP-0594: createConnection, which node:http uses only with no agent),
+    // so no agent object is passed at all, neither the original https.Agent
+    // nor global/https state.
+    expect(opts.agent).not.toBe(smithyHttpsAgent);
+    expect(opts.agent ?? false).toBe(false);
+    expect(typeof opts.createConnection).toBe("function");
     // TLS-only options must not leak into the plain-http request we emit to
     // the proxy; they have no meaning over http and may re-trigger protocol
     // checks in downstream Node versions.

@@ -28,7 +28,9 @@ policy metadata for callers to reject unattended or experimental changes.
 
 from __future__ import annotations
 
+import dataclasses
 import re
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -37,6 +39,7 @@ from typing import Any
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
     KIRO_CLI_HOOK_FLOOR,
+    KIRO_FORM_CLI,
     KIRO_FORM_IDE,
     KIRO_IDE_GLOBAL_HOOKS_FLOOR,
     PROXY_CONNECTORS,
@@ -46,8 +49,12 @@ from defenseclaw.connector_contracts import (
     STATUS_UNVERSIONED,
     ConnectorContract,
     KiroFormVerdict,
+    assess_kiro,
     assess_kiro_signal,
+    judge_kiro_form,
+    kiro_cli_below_hook_floor,
     kiro_cli_below_hook_floor_reason,
+    kiro_ide_below_hook_floor,
     known_broken_entry,
     known_warning_entry,
     normalize_agent_version,
@@ -304,10 +311,389 @@ def _discovery_from_hook_contract_lock(data_dir: str) -> _LockDiscovery | None:
             continue
         version = entry.get("raw_agent_version")
         if isinstance(version, str) and version.strip():
+            executable = entry.get("agent_executable")
             agents[name] = AgentSignal(
-                name=name, installed=True, config_path="", binary_path="", version=version, error=""
+                name=name,
+                installed=True,
+                config_path="",
+                binary_path=executable if isinstance(executable, str) else "",
+                version=version,
+                error="",
             )
     return _LockDiscovery(agents=agents) if agents else None
+
+
+@dataclass(frozen=True)
+class InstalledVersionCheck:
+    """Discovery evidence with each agent version re-read now.
+
+    ``changed`` maps a connector to the semver the evidence recorded, when
+    the agent reports another one today (empty when the recorded text held no
+    plain version: probe-style evidence never reaches a row). ``unchecked``
+    maps a connector to why its recorded version could not be re-read; its
+    row must call the value recorded, not installed (GAP-0723).
+    """
+
+    discovery: Any | None
+    changed: Mapping[str, str]
+    unchecked: Mapping[str, str]
+
+
+#: One answer is shared by everything one Doctor run judges: the connector
+#: safety gate, the repair planner and the compatibility row. That covers both
+#: which executables an agent can launch from (the candidate list is built
+#: once, newly discovered paths first, the recorded one last) and what each one
+#: answers (every candidate is probed once), so the gate and the row can never
+#: judge two different installs, however long the run takes. Doctor opens the
+#: run scope and closes it when the command ends; outside a run an answer is
+#: kept for this long only.
+_PROBE_SHARE_SECONDS = 120.0
+_probe_answers: dict[tuple[str, str, str], tuple[float, str, str]] = {}
+_candidate_lists: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
+#: The discovery evidence the run judges (it names the recorded executable and
+#: version every candidate list is ordered against). It is read once per run:
+#: a cache or lock update halfway through must not hand the gate one recorded
+#: path and the row another. Only a run shares it; there is no time bound.
+_run_evidence: dict[str, Any] = {}
+_probe_run_scoped = False
+
+
+def begin_installed_version_run() -> None:
+    """Open a Doctor run: candidates and probe answers are shared until it ends."""
+
+    global _probe_run_scoped
+    reset_installed_version_probes()
+    _probe_run_scoped = True
+
+
+def end_installed_version_run() -> None:
+    """Close the Doctor run (answers are forgotten, the time bound applies again)."""
+
+    global _probe_run_scoped
+    reset_installed_version_probes()
+    _probe_run_scoped = False
+
+
+def reset_installed_version_probes() -> None:
+    """Forget every shared candidate list and probe answer (Doctor calls it
+    after an attended discovery refresh, which just re-read every version)."""
+
+    _probe_answers.clear()
+    _candidate_lists.clear()
+    _run_evidence.clear()
+
+
+def read_run_discovery(data_dir: str) -> Any | None:
+    """:func:`read_cached_discovery`, read once for the whole Doctor run.
+
+    The gate, the planner and the row all start from this one evidence object,
+    so they pick the same recorded path and compare the same recorded version.
+    Outside a run every call reads the cache again.
+    """
+
+    if not _probe_run_scoped:
+        return read_cached_discovery(data_dir)
+    if data_dir not in _run_evidence:
+        _run_evidence[data_dir] = read_cached_discovery(data_dir)
+    return _run_evidence[data_dir]
+
+
+def _fresh(stamp: float) -> bool:
+    return _probe_run_scoped or time.monotonic() - stamp < _PROBE_SHARE_SECONDS
+
+
+def _probe_agent_version(name: str, path: str, data_dir: str) -> tuple[str, str]:
+    from defenseclaw.inventory import agent_discovery
+
+    key = (name, path, data_dir)
+    hit = _probe_answers.get(key)
+    if hit is not None and _fresh(hit[0]):
+        return hit[1], hit[2]
+    spec = agent_discovery._SPECS.get(name)
+    version_args = spec.version_args if spec is not None else ("--version",)
+    found, error = agent_discovery._version_for_agent_binary(name, path, version_args, data_dir=data_dir or None)
+    _probe_answers[key] = (time.monotonic(), found, error)
+    return found, error
+
+
+def _launch_candidates(name: str, data_dir: str) -> tuple[str, ...]:
+    """The executables the agent launches from now, in discovery order.
+
+    Listed once per Doctor run (and once per share bound outside one): an
+    install that appears while the run goes on joins the next run, not the
+    gate or the row halfway through this one.
+    """
+
+    from defenseclaw.inventory import agent_discovery
+
+    key = (name, data_dir)
+    hit = _candidate_lists.get(key)
+    if hit is not None and _fresh(hit[0]):
+        return hit[1]
+    spec = agent_discovery._SPECS.get(name)
+    try:
+        listed = agent_discovery._binary_candidates_for_agent(name, spec) if spec is not None else ()
+    except Exception:  # noqa: BLE001 - candidate listing is best effort; the recorded path still counts.
+        listed = ()
+    paths: list[str] = []
+    seen: set[str] = set()
+    for candidate in listed:
+        if candidate and agent_discovery._path_key(candidate) not in seen:
+            seen.add(agent_discovery._path_key(candidate))
+            paths.append(candidate)
+    _candidate_lists[key] = (time.monotonic(), tuple(paths))
+    return _candidate_lists[key][1]
+
+
+def _current_executable(name: str, recorded_path: str, data_dir: str) -> tuple[str, str, str]:
+    """Find the executable the agent launches from now and read its version.
+
+    Discovery walks its launch candidates in order and keeps the first that
+    reports a version; an update can put a new executable ahead of the one the
+    evidence recorded (another package manager, another install root), so the
+    recorded path alone can name an agent that is no longer the one launched.
+    Walk the same candidates, the recorded path last (and only if it still
+    answers), and return ``(path, version, error)`` of the first that answers;
+    ``error`` is the first probe failure when none does.
+    """
+
+    from defenseclaw.inventory import agent_discovery
+
+    candidates = list(_launch_candidates(name, data_dir))
+    if recorded_path.strip() and agent_discovery._path_key(recorded_path) not in {
+        agent_discovery._path_key(c) for c in candidates
+    }:
+        candidates.append(recorded_path)
+    first_error = ""
+    for candidate in candidates:
+        found, error = _probe_agent_version(name, candidate, data_dir)
+        if found.strip() and not error:
+            return candidate, found, ""
+        first_error = first_error or error or "no version"
+    return "", "", first_error
+
+
+def _probe_failure_reason(error: str) -> str:
+    from defenseclaw.inventory import agent_discovery
+
+    if error == agent_discovery.UNTRUSTED_PREFIX_ERROR:
+        return "its executable is not in a trusted install location"
+    if error == agent_discovery.VERSION_PROBE_TIMED_OUT:
+        return "the version probe timed out"
+    return "the version probe did not return a version"
+
+
+def _recheck_kiro(signal: Any, data_dir: str) -> tuple[Any, bool, str]:
+    """Re-read every Kiro install the evidence names and re-judge the forms.
+
+    Kiro is judged form by form (assess_kiro_signal), from ``kiro_forms`` and
+    not from ``AgentSignal.version``, so every form is probed on the path the
+    evidence recorded for it. Evidence that names a version without the path
+    of each form it covers cannot be re-read and stays recorded. A form that
+    cannot be read now stays as recorded and the connector is ``unchecked``.
+    Returns ``(signal, changed, unchecked_reason)``.
+    """
+
+    from defenseclaw.inventory import agent_discovery
+
+    recorded_forms = getattr(signal, "kiro_forms", None)
+    if isinstance(recorded_forms, (list, tuple)) and recorded_forms:
+        forms = [{k: str(v or "") for k, v in f.items()} for f in recorded_forms if isinstance(f, dict)]
+        if not forms or any(not f.get("path", "").strip() for f in forms):
+            return signal, False, "an install it recorded has no executable path"
+    else:
+        path = getattr(signal, "binary_path", "")
+        version = getattr(signal, "version", "")
+        if getattr(signal, "kiro_cli_version", "") and getattr(signal, "kiro_ide_version", ""):
+            return signal, False, "the paths of its installs are not recorded"
+        if not isinstance(path, str) or not path.strip():
+            return signal, False, "no executable path is recorded"
+        forms = [{"kind": "", "version": version if isinstance(version, str) else "", "unread": "", "path": path}]
+
+    # Fresh discovery judges the launch candidates in launch order, so the
+    # forms are rebuilt the same way: every current candidate first (a new
+    # install ahead of the recorded one is selected before it), then a
+    # recorded install the candidates no longer name only if it still
+    # answers. One that does not is retired: it is no longer an install, and
+    # judging it would turn stale evidence into a verdict (a PASS for a copy
+    # that is gone, a failure for one that was replaced). A current install
+    # that cannot answer keeps the form recorded for it and is labelled
+    # recorded=; one that was never recorded is not invented.
+    recorded_by_path = {agent_discovery._path_key(f["path"]): f for f in forms}
+    current = _launch_candidates("kiro", data_dir)
+    current_keys = {agent_discovery._path_key(c) for c in current}
+    order = [(c, recorded_by_path.get(agent_discovery._path_key(c))) for c in current]
+    order += [(f["path"], f) for f in forms if agent_discovery._path_key(f["path"]) not in current_keys]
+
+    reason = gone = ""
+    updated: list[dict[str, str]] = []
+    for path, held in order[: agent_discovery._KIRO_FORMS_MAX]:
+        retired = agent_discovery._path_key(path) not in current_keys
+        found, error = _probe_agent_version("kiro", path, data_dir)
+        normalized = normalize_agent_version(found) if found.strip() and not error else ""
+        surface = agent_discovery._kiro_binary_surface(path, found) if normalized else ""
+        if not normalized or not surface:
+            if retired:
+                gone = gone or _probe_failure_reason(error)
+                continue
+            why = _probe_failure_reason(error)
+            reason = reason or why
+            if held is not None:
+                # An install that cannot answer now is unread, as fresh
+                # discovery records it: the version it had when recorded is
+                # kept out of the judgment, so it neither protects (a stale
+                # PASS) nor makes a below-floor install that did answer an
+                # auxiliary finding.
+                held_version = held.get("version", "")
+                ide = bool(held_version) and not held_version.startswith("kiro-cli")
+                updated.append(
+                    {
+                        "kind": held.get("kind", "") or (KIRO_FORM_IDE if ide else KIRO_FORM_CLI),
+                        "version": "",
+                        "unread": f"{path} is installed, but its version could not be read ({why})",
+                        "path": path,
+                    }
+                )
+            continue
+        read = f"kiro-cli {normalized}" if surface == KIRO_FORM_CLI else normalized
+        updated.append({"kind": surface, "version": read, "unread": "", "path": path})
+    if not any(form["version"] for form in updated):
+        # Nothing answered: there is no positive evidence either way, so the
+        # recorded evidence stays and the row calls it recorded.
+        return signal, False, reason or gone or "none of the installs it recorded answers now"
+
+    def same(a: dict[str, str], b: dict[str, str]) -> bool:
+        return (
+            agent_discovery._path_key(a["path"]) == agent_discovery._path_key(b["path"])
+            and normalize_agent_version(a["version"]) == normalize_agent_version(b["version"])
+            and (not b.get("kind", "") or a["kind"] == b["kind"])
+            and bool(a.get("unread", "")) == bool(b.get("unread", ""))
+        )
+
+    changed = len(updated) != len(forms) or not all(same(u, f) for u, f in zip(updated, forms, strict=True))
+    if not changed:
+        return signal, False, reason
+
+    per_surface: dict[str, tuple[str, str]] = {}
+    for form in updated:
+        if not form["version"] or form["unread"]:
+            continue
+        below = kiro_cli_below_hook_floor if form["kind"] == KIRO_FORM_CLI else kiro_ide_below_hook_floor
+        held = per_surface.get(form["kind"])
+        if held is None or (below(held[1]) and not below(form["version"])):
+            per_surface[form["kind"]] = (form["path"], form["version"])
+    selected = assess_kiro(
+        [judge_kiro_form(f["kind"], f["version"], unread=f["unread"], path=f["path"]) for f in updated]
+    ).selected
+    binary_path = getattr(signal, "binary_path", "")
+    version = getattr(signal, "version", "")
+    if selected is not None and selected.path:
+        binary_path, version = selected.path, selected.version
+    elif per_surface:
+        binary_path, version = per_surface.get(KIRO_FORM_CLI) or per_surface[KIRO_FORM_IDE]
+    return (
+        dataclasses.replace(
+            signal,
+            binary_path=binary_path,
+            version=version,
+            error="",
+            kiro_cli_version=per_surface.get(KIRO_FORM_CLI, ("", ""))[1],
+            kiro_ide_version=per_surface.get(KIRO_FORM_IDE, ("", ""))[1],
+            kiro_forms=updated,
+        ),
+        True,
+        # At least one install was read now; an install that did not answer is
+        # its own unread finding, not a "recorded" label on the versions read.
+        "",
+    )
+
+
+def recheck_installed_versions(
+    discovery: Any | None,
+    connectors: Iterable[str],
+    data_dir: str,
+) -> InstalledVersionCheck:
+    """Re-read the version of each active connector's agent.
+
+    The discovery cache lives a day and the gateway hook contract lock
+    keeps the version setup selected the contract from, so after the agent
+    updated both still name the old version. Doctor judged compatibility on
+    it and printed it as ``installed``. This runs the same bounded,
+    trusted-path-only ``--version`` probe discovery uses (never a scan, a
+    write or a terminal) on the executable the evidence names, for every
+    connector row that states a version (hook, proxy and Kiro forms alike),
+    and returns the evidence with the version found now. A probe that cannot
+    run leaves the recorded version in place and says why in ``unchecked``.
+    One probe answer is shared by every caller of a Doctor run
+    (:func:`reset_installed_version_probes`).
+
+    An installed agent whose evidence holds no version at all (the scan that
+    wrote it ran before the connector was set up, or an update followed the
+    scan) is read the same way: the row would otherwise warn that the version
+    was not observed until `agent discover --refresh` (GAP-0752). Only active
+    connectors are probed, so an agent nobody set up is never run.
+    """
+
+    agents = getattr(discovery, "agents", None)
+    if not isinstance(agents, Mapping) or not dataclasses.is_dataclass(discovery):
+        return InstalledVersionCheck(discovery, {}, {})
+    from defenseclaw.inventory import agent_discovery
+
+    wanted = set(_normalized_active_connectors(connectors))
+    updated = dict(agents)
+    replaced = False
+    changed: dict[str, str] = {}
+    unchecked: dict[str, str] = {}
+    for raw_name, signal in agents.items():
+        name = normalize_connector(raw_name) if isinstance(raw_name, str) and len(raw_name) <= 128 else ""
+        recorded = getattr(signal, "version", "")
+        if (
+            name not in wanted
+            or not dataclasses.is_dataclass(signal)
+            or not getattr(signal, "installed", False)
+            or not isinstance(recorded, str)
+        ):
+            continue
+        if name == "kiro":
+            before = _kiro_installed_token(signal)
+            fresh, did_change, why = _recheck_kiro(signal, data_dir)
+            if why:
+                unchecked[name] = why
+            if did_change:
+                changed[name] = before
+                updated[raw_name] = fresh
+                replaced = True
+            continue
+        if name not in agent_discovery._SPECS:
+            unchecked[name] = "no version probe is defined for it"
+            continue
+        recorded_path = getattr(signal, "binary_path", "")
+        recorded_path = recorded_path if isinstance(recorded_path, str) else ""
+        path, found, error = _current_executable(name, recorded_path, data_dir)
+        if not found:
+            unchecked[name] = _probe_failure_reason(error) if error else "no executable path is recorded"
+            continue
+        version_changed = found.strip() != recorded.strip()
+        moved = agent_discovery._path_key(path) != agent_discovery._path_key(recorded_path) if recorded_path else True
+        if version_changed and recorded.strip():
+            changed[name] = _safe_semver_from_agent(recorded)
+        if version_changed or moved:
+            updated[raw_name] = dataclasses.replace(
+                signal,
+                binary_path=path,
+                version=found,
+                error="",
+                source=agent_discovery._agent_source(name, path),
+            )
+            replaced = True
+    if not replaced:
+        return InstalledVersionCheck(discovery, {}, unchecked)
+    return InstalledVersionCheck(dataclasses.replace(discovery, agents=updated), changed, unchecked)
+
+
+def _kiro_installed_token(signal: Any) -> str:
+    selected = assess_kiro_signal(signal).selected
+    return _safe_semver_from_agent(selected.normalized) if selected is not None else ""
 
 
 def assess_component_health(
@@ -1076,7 +1462,7 @@ def _known_broken_connector_remediations(connector: str, broken: dict[str, Any])
 def supported_range_text(ranges: Iterable[VersionRange]) -> str:
     """Render supported agent ranges, joining contracts that continue each other.
 
-    claudecode-hooks-v1 (>=2.1.154 <2.1.219) and claudecode-hooks-v2
+    claudecode-hooks-v1 (>=2.1.154 and <2.1.219) and claudecode-hooks-v2
     (>=2.1.219) read as ">=2.1.154", not as two overlapping-looking ranges.
     """
 
@@ -1091,16 +1477,17 @@ def supported_range_text(ranges: Iterable[VersionRange]) -> str:
             )
         else:
             merged.append(item)
-    return ", ".join(_range_label(item) for item in merged)
+    return ", ".join(version_range_label(item.min_inclusive, item.max_exclusive) or item.contract_id for item in merged)
 
 
-def _range_label(value: VersionRange) -> str:
-    parts: list[str] = []
-    if value.min_inclusive:
-        parts.append(f">={value.min_inclusive}")
-    if value.max_exclusive:
-        parts.append(f"<{value.max_exclusive}")
-    return " ".join(parts) or value.contract_id
+def version_range_label(minimum: str, maximum: str) -> str:
+    """Render one version range as setup and doctor name it: ">=a and <b"."""
+
+    if minimum and maximum:
+        return f">={minimum} and <{maximum}"
+    if minimum:
+        return f">={minimum}"
+    return f"<{maximum}" if maximum else ""
 
 
 def _remediation_dict(choice: RemediationChoice) -> dict[str, Any]:

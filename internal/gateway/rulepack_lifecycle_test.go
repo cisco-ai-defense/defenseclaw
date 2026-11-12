@@ -100,13 +100,19 @@ func TestDisabledGuardrailKeepsConfiguredGlobalPack(t *testing.T) {
 		t.Fatalf("configured pack digest = %s, want %s", got, digest)
 	}
 
-	// A missing configured pack still reports its load error.
+	// A missing configured pack is a config error (GAP-0632 lead ruling): it
+	// names the entry, and the selection loads the built-in default pack.
 	cfg.Guardrail.CustomPacks["operator"] = config.CustomRulePack{
 		Path: filepath.Join(t.TempDir(), "missing"), Digest: "sha256:" + digest,
 	}
-	if _, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "global"); err == nil ||
-		!strings.Contains(err.Error(), "directory_not_found") {
-		t.Fatalf("missing configured pack: error=%v", err)
+	if errs := cfg.CustomRulePackErrors(); len(errs) != 1 || !strings.Contains(errs[0].Error(), "guardrail.custom_packs.operator.path") {
+		t.Fatalf("missing configured pack: config errors=%v", errs)
+	}
+	if err := CheckRulePacks(cfg); err == nil || !strings.Contains(err.Error(), "guardrail.custom_packs.operator.path") {
+		t.Fatalf("missing configured pack: writer check=%v", err)
+	}
+	if pack, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "global"); err != nil || pack.FilesDigest() == digest {
+		t.Fatalf("missing configured pack: error=%v, want the built-in pack", err)
 	}
 }
 

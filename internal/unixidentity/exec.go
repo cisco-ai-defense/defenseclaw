@@ -115,6 +115,12 @@ func runTrustedCommand(ctx context.Context, path string, args []string, filters 
 // runTrustedCommandLimit is runTrustedCommand with a stdout bound of limit
 // bytes, for a tool whose answer is known to be larger than the default.
 func runTrustedCommandLimit(ctx context.Context, path string, args []string, limit int, filters ...outputFilter) (commandResult, error) {
+	return runTrustedCommandInput(ctx, path, args, nil, limit, filters...)
+}
+
+// runTrustedCommandInput is runTrustedCommandLimit with stdin as the tool's
+// standard input; nil means none.
+func runTrustedCommandInput(ctx context.Context, path string, args []string, stdin []byte, limit int, filters ...outputFilter) (commandResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -131,7 +137,9 @@ func runTrustedCommandLimit(ctx context.Context, path string, args []string, lim
 	}
 	cmd.Stdout = out
 	cmd.Stderr = stderr
-	cmd.Stdin = nil
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
 	// The timeout above is this process's: a managed hook ends with os.Exit

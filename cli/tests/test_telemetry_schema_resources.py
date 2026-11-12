@@ -24,6 +24,7 @@ import pytest
 from defenseclaw.observability import schema_resources
 
 from scripts.telemetry_runtime_assets import read_logical_asset
+from tests.helpers import registered_audit_action_count
 
 ROOT = Path(__file__).resolve().parents[2]
 STAGED_DIR = ROOT / "cli" / "defenseclaw" / "_data" / "telemetry" / "v8"
@@ -196,7 +197,7 @@ from defenseclaw.observability.v8_compatibility import load_packaged_v7_compatib
 raw = v7_exporter_selection_bytes()
 selection = load_packaged_v7_compatibility_selection()
 audit_selector = next(selector for selector in selection.exporter_selectors('audit_sink', 'logs') if selector.actions)
-assert len(audit_selector.actions) == 239
+assert len(audit_selector.actions) == {registered_audit_action_count()}
 assert 'fleet.device.credential_provision_authorized' in audit_selector.actions
 assert 'fleet.device.decommission_authorized' in audit_selector.actions
 assert 'setup-redaction-policy' in audit_selector.actions

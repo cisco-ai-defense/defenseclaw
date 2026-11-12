@@ -1469,3 +1469,120 @@ func TestWindowsManagedRuntimeGCOpenRetryIsBounded(t *testing.T) {
 		t.Fatalf("access denied: err = %v, opens = %d; want one attempt", err, opens)
 	}
 }
+
+// GAP-0773: the uninstall finalize collects a target's runtime generations
+// after the selectors no longer name it (Retired). A link at the selector
+// folder is not read, so no selector names the target there either: the
+// bundles are collected, nothing behind the link is read or changed, and a
+// collection that is not the uninstall's still leaves them alone.
+func TestWindowsManagedRuntimeGenerationRetiredCollectionGoesOnBehindAKeptSelectorLink(t *testing.T) {
+	base := t.TempDir()
+	dataDir := filepath.Join(base, ".defenseclaw")
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := currentWindowsTestSID(t)
+	for _, path := range []string{dataDir, hookDir} {
+		// An elevated administrator token owns what it creates as the
+		// Administrators group; the fixture is owned by the target account.
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION, target, nil, nil, nil); err != nil {
+			t.Fatalf("own target directory %s: %v", path, err)
+		}
+		if err := setWindowsUserPathProtection(path, target, true); err != nil {
+			t.Fatalf("protect target directory %s: %v", path, err)
+		}
+	}
+	selectorPath := filepath.Join(base, windowsManagedRuntimeSelectorFile)
+	originalPath := windowsManagedRuntimeSelectorPathResolver
+	originalOwner := windowsManagedPolicyOwnerSID
+	originalDirTrust := windowsManagedPolicyDirTrustCheck
+	originalAncestorTrust := windowsManagedPolicyAncestorTrustCheck
+	originalFileTrust := windowsManagedPolicyFileTrustCheck
+	originalMutation := windowsManagedRuntimeSelectorMutationAuthorize
+	originalVerifyAuthorize := windowsManagedRuntimeSelectorVerifyAuthorize
+	originalHookTrust := windowsEnterpriseHookTrustCheck
+	originalStandalone, originalProbe := windowsEnterpriseStandaloneProcess, windowsReparseChainProbe
+	windowsManagedRuntimeSelectorPathResolver = func(string) (string, error) { return selectorPath, nil }
+	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return target, nil }
+	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyAncestorTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	windowsManagedRuntimeSelectorMutationAuthorize = func() error { return nil }
+	windowsManagedRuntimeSelectorVerifyAuthorize = func() error { return nil }
+	windowsEnterpriseHookTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		windowsManagedRuntimeSelectorPathResolver = originalPath
+		windowsManagedPolicyOwnerSID = originalOwner
+		windowsManagedPolicyDirTrustCheck = originalDirTrust
+		windowsManagedPolicyAncestorTrustCheck = originalAncestorTrust
+		windowsManagedPolicyFileTrustCheck = originalFileTrust
+		windowsManagedRuntimeSelectorMutationAuthorize = originalMutation
+		windowsManagedRuntimeSelectorVerifyAuthorize = originalVerifyAuthorize
+		windowsEnterpriseHookTrustCheck = originalHookTrust
+		windowsEnterpriseStandaloneProcess, windowsReparseChainProbe = originalStandalone, originalProbe
+		windowsManagedPolicyKept.Lock()
+		windowsManagedPolicyKept.paths = map[string]string{}
+		windowsManagedPolicyKept.Unlock()
+	})
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	desired := WindowsManagedRuntimeGenerationDesired{
+		Connector:                  "codex",
+		TargetSID:                  target.String(),
+		DataDir:                    dataDir,
+		HookExecutable:             filepath.Join(base, "defenseclaw-hook.exe"),
+		GatewayAddr:                "127.0.0.1:18970",
+		GatewayServiceName:         "DefenseClawGateway",
+		ScopedToken:                "scoped-test-token",
+		HookContractID:             "codex-hooks-v1",
+		HookContractLockUpdatedAt:  now,
+		HookContractEntryUpdatedAt: now,
+	}
+	selected, err := PrepareWindowsManagedRuntimeGeneration(desired)
+	if err != nil {
+		t.Fatalf("prepare the selected generation: %v", err)
+	}
+	if _, err := CommitWindowsManagedRuntimeGeneration(selected); err != nil {
+		t.Fatalf("commit the selected generation: %v", err)
+	}
+	other := desired
+	other.GatewayAddr = "127.0.0.1:18973"
+	other.ScopedToken = "other-scoped-test-token"
+	orphan, err := PrepareWindowsManagedRuntimeGeneration(other)
+	if err != nil {
+		t.Fatalf("prepare the unselected generation: %v", err)
+	}
+	selectorBefore, err := os.ReadFile(selectorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	windowsReparseChainProbe = linkProbe(base)
+	gc := WindowsManagedRuntimeGenerationGCOptions{
+		Connector: desired.Connector, TargetSID: desired.TargetSID, DataDir: desired.DataDir, HookExecutable: desired.HookExecutable,
+	}
+	// A collection that is not the uninstall's does not know what the link hides, so it leaves every bundle.
+	if removed, err := GarbageCollectWindowsManagedRuntimeGenerations(gc); err != nil || removed != 0 {
+		t.Fatalf("collection over a kept selector link: removed=%d err=%v, want it skipped", removed, err)
+	}
+	for _, bundle := range []string{selected.BundlePath(), orphan.BundlePath()} {
+		mustExist(t, bundle)
+	}
+	// The uninstall's collection runs after the selectors stopped naming the
+	// target, and a link's selector is not read: every bundle of the target goes.
+	gc.Retired = true
+	if removed, err := GarbageCollectWindowsManagedRuntimeGenerations(gc); err != nil || removed != 2 {
+		t.Fatalf("retired collection over a kept selector link: removed=%d err=%v, want 2", removed, err)
+	}
+	for _, bundle := range []string{selected.BundlePath(), orphan.BundlePath()} {
+		if _, err := os.Lstat(bundle); !os.IsNotExist(err) {
+			t.Fatalf("bundle %s survived the retired collection: %v", bundle, err)
+		}
+	}
+	selectorAfter, err := os.ReadFile(selectorPath)
+	if err != nil || !bytes.Equal(selectorBefore, selectorAfter) {
+		t.Fatalf("the selector behind the link was read or changed: err=%v", err)
+	}
+}

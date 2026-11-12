@@ -165,6 +165,7 @@ func TestProxyRefusedHarnessFetchIsQuiet(t *testing.T) {
 			Category: egress.CategoryNotAllowlisted, Unblockable: true}, 0)
 	}
 	refuse("ocbox")
+	e.m.sink.flushProxyAudit(t.Context(), e.m.now().Add(proxyOpenWindow), false)
 	audited := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == "models.opencode.ai" && r.Blocked })
 	d, err := e.m.Destinations(t.Context(), "ocbox")
 	if len(audited) != 1 || audited[0].DecisionCode != audit.SandboxEgressCodeHarnessFetch || audited[0].Severity != "INFO" ||

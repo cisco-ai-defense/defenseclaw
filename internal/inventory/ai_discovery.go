@@ -80,16 +80,10 @@ const (
 	maxPersistedLocalModelAPISignals = 2 * maxLocalModelAPIItems
 )
 
-// managedEnterpriseScanInterval is the minimum full-scan cadence in
-// managed_enterprise mode. Every full-scan tick still fans out through
-// managedInventoryEmit, so this is the MAXIMUM AI Defense publish rate — not
-// the publish cadence itself. The gateway emitter change-gates the actual
-// publish on a content fingerprint (see managedInventoryPublishState in
-// internal/gateway), so a steady-state endpoint ships nothing on most ticks and
-// a complete bundle at least once every managedInventoryFullBundleInterval.
-// The value is also the floor applied to ProcessIntervalSec in the same
-// mode so the two tickers never diverge onto a faster wall-clock.
-const managedEnterpriseScanInterval = 30 * time.Minute
+// secureClientScanInterval retains the existing Secure Client fleet cadence.
+// Standalone managed discovery uses its configured interval so local inventory
+// consumers see each full scan, including IDE extensions, on that cadence.
+const secureClientScanInterval = 30 * time.Minute
 
 // aiDiscoveryStateVersion is the schema version of the on-disk state file
 // (`ai_discovery_state.json`). v2 introduced per-signal `evidence_hash`,
@@ -905,26 +899,19 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	if opts.ProcessInterval <= 0 {
 		opts.ProcessInterval = 60 * time.Second
 	}
-	// In managed_enterprise every scan tick (full or process-only) fans
-	// out through managedInventoryEmit, so a 60s process interval becomes
-	// a 60s connector/MCP snapshot push to AI Defense. Push volume, not
-	// process-detection cost, dominates the operational spend on managed
-	// installs — align the process cadence with the full-scan cadence so
-	// the two tickers produce one push per full-scan cycle instead of
-	// several. The full-scan cadence is itself lifted to 30 min in
-	// managed_enterprise; the process-interval floor tracks it so both
-	// tickers fire on the same 30-min beat. Operators can still configure
-	// a longer interval; the floor only lifts values below the managed
-	// default.
-	if opts.ManagedEnterprise && opts.ScanInterval < managedEnterpriseScanInterval {
-		opts.ScanInterval = managedEnterpriseScanInterval
+	// Secure Client keeps its fleet scan cadence. The standalone managed
+	// profile serves its IDE inventory locally, so raising its full-scan
+	// interval here would make scan_interval_min ineffective for every
+	// inventory consumer. Process-only scans do not refresh that inventory.
+	if opts.ManagedEnterprise && opts.SecureClient && opts.ScanInterval < secureClientScanInterval {
+		opts.ScanInterval = secureClientScanInterval
 	}
-	if opts.ManagedEnterprise && opts.ProcessInterval < managedEnterpriseScanInterval {
-		opts.ProcessInterval = managedEnterpriseScanInterval
+	if opts.ManagedEnterprise && opts.SecureClient && opts.ProcessInterval < secureClientScanInterval {
+		opts.ProcessInterval = secureClientScanInterval
 	}
 	// Default the fleet-wide publish jitter to 10 % of the full-scan
-	// cadence in managed_enterprise. At the 30-min managed default this
-	// is a 3-min window; each endpoint's startup scan and each scheduled
+	// cadence in managed_enterprise. At the 30-min Secure Client default
+	// this is a 3-min window; each endpoint's startup scan and each scheduled
 	// tick land at a uniformly random offset inside that window, so a
 	// synchronized fleet event (reboot, config reload, AI Defense outage
 	// recovery) does not translate into a synchronized ingest spike.
@@ -1602,6 +1589,10 @@ type scanStats struct {
 	ModelFileAttempted  map[string]bool
 	ModelFileDeferred   map[string]bool
 	TCCSkipped          bool
+	// BrokeredHomesUnavailable is a sensor helper read that failed: the
+	// helper's earlier signals are carried forward, since a helper that is
+	// restarting proves nothing about the homes it reads.
+	BrokeredHomesUnavailable bool
 }
 
 func (s *ContinuousDiscoveryService) scanSignals(
@@ -1698,6 +1689,21 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	}
 	measure("rule", func() ([]AISignal, int, error) { return s.detectRules(), 0, nil })
 	measure("plugin", func() ([]AISignal, int, error) { return s.detectPlugins(), 0, nil })
+	if reader := brokeredHomeReaderSnapshot(); reader != nil && s.brokeredHomesApply() {
+		measure(brokeredHomeDetector, func() ([]AISignal, int, error) {
+			out, files, note, err := s.detectBrokeredHomes(ctx, reader)
+			if note != "" {
+				if stats.DetectorNotes == nil {
+					stats.DetectorNotes = map[string]string{}
+				}
+				stats.DetectorNotes[brokeredHomeDetector] = note
+			}
+			if err != nil {
+				stats.BrokeredHomesUnavailable = true
+			}
+			return out, files, err
+		})
+	}
 	if s.opts.IncludeNetworkDomains {
 		measure("local_endpoint", func() ([]AISignal, int, error) { return s.detectLocalEndpoints(), 0, nil })
 		measure("local_model_api", func() ([]AISignal, int, error) {
@@ -2017,6 +2023,13 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 				}
 				continue
 			}
+			if stats.BrokeredHomesUnavailable && old.Source == AISourceSensorHelper {
+				// The sensor helper did not answer this scan; absence is not
+				// proof of removal (cowork-1-0-8 GAP-0008).
+				budget := 1
+				carry.persist(fp, old, &budget)
+				continue
+			}
 			if carry.handleModelAPICarryForward(fp, old, stats, &apiCarryRemaining) {
 				continue
 			}
@@ -2326,11 +2339,6 @@ func declaresMCPServer(signal AISignal) bool {
 // signal so a malformed config never suppresses the "endpoint has
 // MCP configured" signal itself.
 func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, path string) AISignal {
-	base := AIEvidence{Type: "mcp", Basename: filepath.Base(path), PathHash: hashPath(path)}
-	if s.keepEvidencePath() {
-		base.RawPath = path
-	}
-	evidence := []AIEvidence{base}
 	// Coverage state: two independent early-exit paths (parse failure
 	// vs. per-signal evidence cap). Both must surface as partial=true
 	// so managed remediation can distinguish "31 servers is really
@@ -2348,16 +2356,35 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 	} else {
 		names, parseErr = readMCPServerNamesWithErr(path, sig.SupportedConnector)
 	}
-	var partial bool
-	var coverageReason string
+	failure := ""
 	if parseErr != nil {
 		// Parse failure — the base "mcp" evidence row remains so the
 		// operator sees the endpoint has MCP configured, but no
 		// server-name rows will follow. Marking partial signals the
 		// gap.
-		partial = true
-		coverageReason = CoverageReasonParseError
+		failure = CoverageReasonParseError
 	}
+	out := s.mcpSignalFromNames(sig, path, names, failure)
+	if st, err := os.Stat(path); err == nil {
+		mt := st.ModTime().UTC()
+		out.LastActiveAt = &mt
+	}
+	return out
+}
+
+// mcpSignalFromNames builds the SignalMCPServer signal of the MCP config at
+// path from the server names it declares. failure is the coverage reason of
+// a read that could not name every server ("" when it did). The direct read
+// above and the sensor helper's brokered read (brokeredHomeSignals) share it,
+// so both give a config the same evidence and fingerprint.
+func (s *ContinuousDiscoveryService) mcpSignalFromNames(sig AISignature, path string, names []string, failure string) AISignal {
+	base := AIEvidence{Type: "mcp", Basename: filepath.Base(path), PathHash: hashPath(path)}
+	if s.keepEvidencePath() {
+		base.RawPath = path
+	}
+	evidence := []AIEvidence{base}
+	partial := failure != ""
+	coverageReason := failure
 	// Reserve one slot for the parent row (evidence[0]) by capping
 	// server-name rows at maxEvidencePerSignal - 1. Explicit constant
 	// so the intent is grep-able — the previous behaviour just fell
@@ -2387,10 +2414,6 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 	s.stampHomeOwner(&out, path)
 	out.Partial = partial
 	out.CoverageReason = coverageReason
-	if st, err := os.Stat(path); err == nil {
-		mt := st.ModTime().UTC()
-		out.LastActiveAt = &mt
-	}
 	return out
 }
 
@@ -2431,40 +2454,94 @@ func isBlankFile(path string) bool {
 // detector so future signature-catalog additions (new MCP config shapes) can
 // extend the switch in one place without changing the caller.
 func parseMCPConfigForNames(path, connector string) ([]config.MCPServerEntry, error) {
+	switch mcpConfigShape(path, connector) {
+	case mcpShapeAmp:
+		return config.ReadMCPFromAmpSettings(path)
+	case mcpShapeCodexTOML:
+		return config.ReadMCPFromCodexConfigTOML(path)
+	case mcpShapeHermesYAML:
+		return config.ReadMCPFromYAMLPath(path, hermesMCPKeyPaths...)
+	case mcpShapeClaudeJSON:
+		return config.ReadMCPFromClaudeJSONBothScopes(path)
+	case mcpShapeSettings:
+		return config.ReadMCPFromJSONCPaths(path, settingsMCPKeyPaths...)
+	case mcpShapeOpenCode:
+		return config.ReadMCPFromOpenCodeConfig(path)
+	case mcpShapeClaudeDesktop:
+		return config.ReadMCPFromJSONCPaths(path, []string{"mcpServers"})
+	case mcpShapeOpenClaw:
+		return config.ReadMCPFromOpenClawConfig(path)
+	case mcpShapeNestedServers:
+		return config.ReadMCPFromJSONCPaths(path, []string{"mcp", "servers"})
+	default:
+		return config.ReadMCPFromDotMCPJSON(path)
+	}
+}
+
+// The MCP config shapes AI discovery parses: which reader a file needs.
+const (
+	mcpShapeAmp           = "amp"
+	mcpShapeCodexTOML     = "codex_toml"
+	mcpShapeHermesYAML    = "hermes_yaml"
+	mcpShapeClaudeJSON    = "claude_json"
+	mcpShapeSettings      = "settings_jsonc"
+	mcpShapeOpenCode      = "opencode"
+	mcpShapeClaudeDesktop = "claude_desktop"
+	mcpShapeNestedServers = "mcp_servers_nested"
+	mcpShapeOpenClaw      = "openclaw" // openclaw.json is JSON5 (GAP-0907)
+	mcpShapeDotMCP        = "dot_mcp"
+	// mcpShapeClaudeState is ~/.claude.json read by readClaudeDiscoveryState
+	// (every profile but Secure Client).
+	mcpShapeClaudeState = "claude_state"
+)
+
+var (
+	// Hermes keeps its servers under top-level mcp_servers (GAP-1845).
+	hermesMCPKeyPaths = [][]string{{"mcp_servers"}, {"mcp", "servers"}, {"mcpServers"}}
+	// Claude Code and Qwen keep their servers under mcpServers; Amp
+	// (amp mcp add) under amp.mcpServers, in JSONC (GAP-1062).
+	settingsMCPKeyPaths = [][]string{{"mcpServers"}, {"amp.mcpServers"}}
+)
+
+// mcpConfigShape names the reader the MCP config at path needs. connector is
+// the signature's supported connector: an Amp settings file shares its name
+// with Claude Code's but keeps its servers under amp.mcpServers. Kept
+// alongside the detector so future signature-catalog additions (new MCP
+// config shapes) can extend the switch in one place.
+func mcpConfigShape(path, connector string) string {
 	lower := strings.ToLower(path)
 	base := strings.ToLower(filepath.Base(path))
 	switch {
 	case normalizeAIID(connector) == "amp" && (strings.HasSuffix(lower, ".json") || strings.HasSuffix(lower, ".jsonc")):
-		return config.ReadMCPFromAmpSettings(path)
+		return mcpShapeAmp
 	case strings.HasSuffix(lower, ".toml"):
-		return config.ReadMCPFromCodexConfigTOML(path)
+		return mcpShapeCodexTOML
 	case strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml"):
-		// Hermes keeps its servers under top-level mcp_servers (GAP-1845).
-		return config.ReadMCPFromYAMLPath(path, []string{"mcp_servers"}, []string{"mcp", "servers"}, []string{"mcpServers"})
+		return mcpShapeHermesYAML
 	case base == ".claude.json":
 		// ~/.claude.json holds user-scope (top-level `mcpServers`) *and*
 		// per-project local-scope (`projects.<path>.mcpServers`) entries.
 		// Prefer the union reader so we only decode the (often multi-MB)
 		// conversation-state file once and basenames covers both scopes.
-		return config.ReadMCPFromClaudeJSONBothScopes(path)
+		return mcpShapeClaudeJSON
 	case base == "settings.json" || base == "settings.local.json" || base == "settings.jsonc" ||
 		base == "managed-settings.json":
-		// Claude Code and Qwen keep their servers under mcpServers; Amp
-		// (amp mcp add) under amp.mcpServers, in JSONC (GAP-1062).
-		return config.ReadMCPFromJSONCPaths(path, []string{"mcpServers"}, []string{"amp.mcpServers"})
+		return mcpShapeSettings
 	case base == "opencode.json" || base == "opencode.jsonc":
-		return config.ReadMCPFromOpenCodeConfig(path)
+		return mcpShapeOpenCode
 	case base == "claude_desktop_config.json":
 		// Claude Desktop (first- and third-party) keeps its servers under
 		// mcpServers, next to preferences and, in third-party mode,
 		// deploymentMode and coworkUserFilesPath. Read as a bare map, each of
 		// those keys was listed as a server (cowork-1-0-8 GAP-0026).
-		return config.ReadMCPFromJSONCPaths(path, []string{"mcpServers"})
-	case base == "openclaw.json" || (base == "config.json" && filepath.Base(filepath.Dir(path)) == ".zeptoclaw"):
+		return mcpShapeClaudeDesktop
+	case base == "openclaw.json":
+		return mcpShapeOpenClaw
+	case base == "config.json" && filepath.Base(filepath.Dir(path)) == ".zeptoclaw":
 		// Read as a bare map, every top-level key was listed as a server.
-		return config.ReadMCPFromJSONCPaths(path, []string{"mcp", "servers"})
+		return mcpShapeNestedServers
 	default:
-		return config.ReadMCPFromDotMCPJSON(path)
+		return mcpShapeDotMCP
 	}
 }
 
@@ -2651,23 +2728,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 					}
 					continue
 				}
-				child := filepath.Join(path, entry.Name())
-				ev := AIEvidence{
-					Type:     detector + "_entry",
-					Basename: name,
-					PathHash: hashPath(child),
-				}
-				if detector == "skill" {
-					// Explicit user origin so mutation surfaces can
-					// tell "walker classified this as user-installed"
-					// apart from "walker didn't stamp an origin"
-					// (latter must fail-safe).
-					ev.Origin = "user"
-				}
-				if s.keepEvidencePath() {
-					ev.RawPath = child
-				}
-				evidence = append(evidence, ev)
+				evidence = append(evidence, s.directoryChildEvidence(detector, path, entry.Name(), name))
 			}
 		}
 	}
@@ -2680,6 +2741,28 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 		out.LastActiveAt = &mt
 	}
 	return out
+}
+
+// directoryChildEvidence is the evidence row of the child entry (named name
+// once sanitized) of the skills / rules / plugins folder at parent.
+func (s *ContinuousDiscoveryService) directoryChildEvidence(detector, parent, entry, name string) AIEvidence {
+	child := filepath.Join(parent, entry)
+	ev := AIEvidence{
+		Type:     detector + "_entry",
+		Basename: name,
+		PathHash: hashPath(child),
+	}
+	if detector == "skill" {
+		// Explicit user origin so mutation surfaces can
+		// tell "walker classified this as user-installed"
+		// apart from "walker didn't stamp an origin"
+		// (latter must fail-safe).
+		ev.Origin = "user"
+	}
+	if s.keepEvidencePath() {
+		ev.RawPath = child
+	}
+	return ev
 }
 
 // appendHermesSkillChildren expands Hermes's category hierarchy into actual

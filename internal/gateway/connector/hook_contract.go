@@ -612,6 +612,7 @@ var builtinHookContracts = map[string][]HookContract{
 			"Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
 			"PostToolUse and PostToolBatch findings are advisory because their payloads are returned bytes, not typed action requests; command/path enforcement stays on PreToolUse.",
 			"ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions.",
+			"Claude Desktop's bundled Claude Code engine is a hook host too: Claude Cowork runs the Claude Code hooks of managed settings and of account plugins as children of that engine. The DefenseClaw Cowork plugin registers ten of this contract's events (CoworkPluginHookEvents: SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, PostToolUseFailure, SubagentStart, SubagentStop, Stop, SessionEnd), measured on Claude Desktop 4.4212.0 (engine 2.1.309) and 4.16336.0 (engine 2.1.317).",
 		},
 	}},
 	"hermes": {

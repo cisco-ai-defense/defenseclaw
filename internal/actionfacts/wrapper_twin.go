@@ -118,14 +118,14 @@ func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 				nested(typed.Args[body])
 			}
 			if run.Dir == "" && shell {
-				replace(typed.Args[0].Pos(), typed.Args[text].Pos(), "sh -c ")
+				replace(typed.Args[0].Pos(), typed.Args[text].Pos(), wrapperUserBindings(command, typed.Args, text, run.Index)+"sh -c ")
 				return true
 			}
 			if run.Index == 0 {
 				return true
 			}
 			if run.Dir == "" {
-				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), "")
+				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), wrapperUserBindings(command, typed.Args, run.Index, run.Index))
 				return true
 			}
 			// A=1 env -C dir cp ... is ( cd dir && A=1 cp ... ): the
@@ -135,9 +135,9 @@ func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 			if len(typed.Assigns) > 0 {
 				open = typed.Assigns[0].Pos()
 				replace(open, open, "( cd "+wrapperDirWord(run.Dir)+" && ")
-				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), "")
+				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), wrapperUserBindings(command, typed.Args, run.Index, run.Index))
 			} else {
-				replace(open, typed.Args[run.Index].Pos(), "( cd "+wrapperDirWord(run.Dir)+" && ")
+				replace(open, typed.Args[run.Index].Pos(), "( cd "+wrapperDirWord(run.Dir)+" && "+wrapperUserBindings(command, typed.Args, run.Index, run.Index))
 			}
 			if shell {
 				replace(typed.Args[run.Index].Pos(), typed.Args[text].Pos(), "sh -c ")
@@ -162,6 +162,81 @@ func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 	}
 	out.WriteString(command[last:])
 	return out.String(), true
+}
+
+// wrapperUserBindings returns, as prefix assignments, what the env words
+// before the wrapped program at index program (args[:upto] hold them) do to
+// USER and LOGNAME: a NAME=value word stays, and an env -u NAME or -i leaves
+// the name empty, as a bash or sh child reads it. The twin keeps them so
+// the wrapped shell reads the values the call hands over (rel-1-0-6:GAP-0630
+// review 3 and 4). A zsh child sets an unset name to the login name again,
+// so env -u leaves it unbound there and the twin reads the active value.
+func wrapperUserBindings(command string, args []*syntax.Word, upto, program int) string {
+	if len(args) == 0 {
+		return ""
+	}
+	static := func(at int) (string, bool) {
+		if at >= len(args) {
+			return "", false
+		}
+		word := projectPOSIXWord(args[at])
+		return word.Value, !word.Expands
+	}
+	first, ok := static(0)
+	env := ok && wrapperProgramName(first) == "env"
+	name, ok := static(program)
+	zsh := ok && wrapperProgramName(name) == "zsh"
+	bindings := make(map[string]string, len(simpleUserNames))
+	unset := func(name string) {
+		if !slices.Contains(simpleUserNames, name) {
+			return
+		}
+		if zsh {
+			delete(bindings, name)
+		} else {
+			bindings[name] = name + "="
+		}
+	}
+	for at := 1; at < min(upto, program); at++ {
+		value, ok := static(at)
+		if !ok {
+			continue
+		}
+		if env {
+			switch {
+			case value == "-i" || value == "--ignore-environment" || value == "-":
+				for _, name := range simpleUserNames {
+					unset(name)
+				}
+				continue
+			case value == "-u" || value == "--unset":
+				at++
+				if name, ok := static(at); ok && at < min(upto, program) {
+					unset(name)
+				}
+				continue
+			case strings.HasPrefix(value, "--unset="):
+				unset(strings.TrimPrefix(value, "--unset="))
+				continue
+			case strings.HasPrefix(value, "-u") && !strings.HasPrefix(value, "--") && len(value) > 2:
+				unset(value[2:])
+				continue
+			}
+		}
+		if name, _, cut := strings.Cut(value, "="); cut && slices.Contains(simpleUserNames, name) {
+			start, end := int(args[at].Pos().Offset()), int(args[at].End().Offset())
+			if start >= 0 && end >= start && end <= len(command) {
+				bindings[name] = command[start:end]
+			}
+		}
+	}
+	var kept strings.Builder
+	for _, name := range simpleUserNames {
+		if text, ok := bindings[name]; ok {
+			kept.WriteString(text + " ")
+		}
+	}
+	return kept.String()
 }
 
 // homeDirSentinel starts a wrapper directory spelled from the active home

@@ -54,13 +54,12 @@ def _homes(tmp_path, monkeypatch, codex: str, claude_env: dict) -> tuple[str, st
 
 
 def _run_uninstall(monkeypatch) -> str:
-    plan = SimpleNamespace(connectors=(), data_dir="")
-    monkeypatch.setattr(cmd_uninstall, "_dispatch_native_windows_uninstall", lambda **_: False)
+    plan = SimpleNamespace(connectors=(), data_dir="", legacy_setup=None)
     monkeypatch.setattr(cmd_uninstall, "_build_plan", lambda **_: plan)
     monkeypatch.setattr(cmd_uninstall, "_with_listed_sandboxes", lambda p, _stop: p)
     monkeypatch.setattr(cmd_uninstall, "_render_plan", lambda *_a, **_k: None)
     monkeypatch.setattr(cmd_uninstall, "_refuse_running_sandboxes", lambda _p: None)
-    monkeypatch.setattr(cmd_uninstall, "_execute_plan", lambda _p: None)
+    monkeypatch.setattr(cmd_uninstall, "_execute_plan", lambda _p: cmd_uninstall.ExecutionResult(()))
     monkeypatch.setattr(cmd_uninstall, "_render_kept_and_next_steps", lambda _p: None)
     result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
     assert result.exit_code == 0, result.output

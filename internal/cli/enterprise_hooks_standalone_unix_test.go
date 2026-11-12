@@ -113,9 +113,96 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 			HookContractID: os.Getenv(enterprisehooks.TrustedBinPrefixesEnv),
 		}
 	}
+	restoresScript := mode == "hang-after-write" || mode == "exit-after-write" || mode == "fail-after-write"
+	// A partial install puts the script back, then stops: the target's
+	// configuration stays broken (GAP-0754).
+	partialInstall := mode == "exit-after-partial-write" || mode == "fail-after-partial-write"
+	// The protected elements of the Hermes target, as the worker probes them
+	// (GAP-0754): the hook runtime files are back once the script holds the
+	// restored render, the hook entry once the agent config holds the marker.
+	// The agent config also holds a setting the agent writes for itself, so
+	// a write there says nothing about the entry. The other modes leave the
+	// entry as it should be, and entry-restore leaves the runtime files so.
+	unrelatedWrite := mode == "unrelated-write-exit" || mode == "unrelated-write-fail"
+	entryBroken := partialInstall || unrelatedWrite || mode == "entry-restore" || mode == "both-restore"
+	runtimeIntact := mode == "entry-restore"
+	hermesConfig := func(home string) string { return filepath.Join(home, ".hermes", "config.yaml") }
+	hermesScript := func(home string) string { return filepath.Join(home, ".defenseclaw", "hooks", "hermes-hook.sh") }
+	holds := func(path, marker string) bool {
+		body, err := os.ReadFile(path)
+		return err == nil && bytes.Contains(body, []byte(marker))
+	}
+	writeFile := func(path, body string) error {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte(body), 0o700)
+	}
+	enterpriseHookWorkerProber = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.HookElements, error) {
+		elements := enterprisehooks.HookElements{Entry: !entryBroken || holds(hermesConfig(opts.UserHome), "defenseclaw-hook")}
+		if !runtimeIntact && !holds(hermesScript(opts.UserHome), "restored") {
+			elements.BrokenRuntime = []string{enterprisehooks.HookElementRuntime}
+		}
+		return elements, nil
+	}
 	enterpriseHookWorkerInstaller = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
 		if mode == "fail" {
 			return enterprisehooks.InstallResult{}, errors.New("install refused")
+		}
+		if mode == "exit-before-write" {
+			os.Exit(17) // the install ends before it writes anything
+		}
+		if unrelatedWrite {
+			// Only the setting the agent writes for itself changes: nothing
+			// of the hook is put back (GAP-0754).
+			if err := writeFile(hermesConfig(opts.UserHome), "model: another\n"); err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
+			if mode == "unrelated-write-exit" {
+				os.Exit(17)
+			}
+			return enterprisehooks.InstallResult{}, errors.New("install failed after the agent setting changed")
+		}
+		if mode == "entry-restore" || mode == "both-restore" {
+			if err := writeFile(hermesConfig(opts.UserHome), "model: another\nhooks: defenseclaw-hook\n"); err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
+			if mode == "both-restore" {
+				if err := writeFile(hermesScript(opts.UserHome), "#!/bin/sh\n# restored\n"); err != nil {
+					return enterprisehooks.InstallResult{}, err
+				}
+			}
+			return result(opts), nil
+		}
+		if restoresScript || partialInstall {
+			// The install puts the Hermes script back, then does not return
+			// normally (GAP-0754): it outlives the worker, exits abruptly or
+			// fails after it published.
+			if err := writeFile(hermesScript(opts.UserHome), "#!/bin/sh\n# restored\n"); err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
+			switch mode {
+			case "exit-after-write", "exit-after-partial-write":
+				os.Exit(17)
+			case "fail-after-write":
+				return enterprisehooks.InstallResult{}, errors.New("install failed after it published")
+			case "fail-after-partial-write":
+				return enterprisehooks.InstallResult{}, errors.New("install failed after it wrote the script")
+			}
+			time.Sleep(time.Minute)
+		}
+		if mode == "slow-repair" {
+			// The repair is under way: say so, then take a while to answer.
+			if err := os.WriteFile(filepath.Join(opts.UserHome, "repair-started"), nil, 0o600); err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
+			time.Sleep(700 * time.Millisecond)
+		}
+		if mode == "slow-repair" || (mode == "slow-second" && opts.ConnectorName == "hermes") {
+			// The repair puts the script back.
+			if err := writeFile(hermesScript(opts.UserHome), "#!/bin/sh\n# restored\n"); err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
 		}
 		return result(opts), nil
 	}
@@ -129,22 +216,48 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 			}
 			return enterprisehooks.InstallResult{Connector: opts.ConnectorName, AgentVersion: value}, nil
 		}
-		if mode == "drift" || mode == "fail" {
+		if mode == "slow-verify" || (mode == "slow-second" && opts.ConnectorName == "claudecode") {
+			// A check that takes a while, nothing under repair: say so, then
+			// answer late.
+			if err := os.WriteFile(filepath.Join(opts.UserHome, "verify-started"), nil, 0o600); err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
+			time.Sleep(3 * time.Second)
+			return result(opts), nil
+		}
+		if restoresScript {
+			// Broken until the install has put the script back.
+			if _, err := os.Stat(filepath.Join(opts.UserHome, ".defenseclaw", "hooks", "hermes-hook.sh")); err != nil {
+				return enterprisehooks.InstallResult{}, errors.New("hook script missing")
+			}
+			return result(opts), nil
+		}
+		if entryBroken || runtimeIntact {
+			// Broken until the install has put every element back.
+			if elements, _ := enterpriseHookWorkerProber(context.Background(), opts); len(elements.Broken()) > 0 {
+				return enterprisehooks.InstallResult{}, errors.New("hook config drifted")
+			}
+			return result(opts), nil
+		}
+		if holds(hermesScript(opts.UserHome), "restored") && (mode == "slow-repair" || mode == "slow-second") {
+			return result(opts), nil
+		}
+		if mode == "drift" || mode == "fail" || mode == "slow-repair" || partialInstall || mode == "exit-before-write" || (mode == "slow-second" && opts.ConnectorName == "hermes") {
 			return enterprisehooks.InstallResult{}, errors.New("hook config drifted")
 		}
 		return result(opts), nil
 	}
-	enterpriseHookWorkerDiscoverVersion = func(_ context.Context, home, connector string, allowExec bool) (string, string) {
+	enterpriseHookWorkerDiscoverVersion = func(_ context.Context, home, connector string, allowExec bool) (string, string, string) {
 		if connector == "codex" && allowExec {
-			return "0.142.0", ""
+			return "0.142.0", "", ""
 		}
-		return "", "not installed"
+		return "", "not installed", ""
 	}
-	enterpriseHookWorkerDiscoverVersionInAccountHome = func(_ context.Context, _, connector string) (string, string) {
+	enterpriseHookWorkerDiscoverVersionInAccountHome = func(_ context.Context, _, connector string) (string, string, string) {
 		if connector == "hermes" {
-			return "0.21.5", ""
+			return "0.21.5", "", ""
 		}
-		return "", "not installed"
+		return "", "not installed", ""
 	}
 	enterpriseHookWorkerDiscoverStaticVersion = func(_ context.Context, home, connector string) (string, string) {
 		if connector == "hermes" {
@@ -171,14 +284,14 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 	if mode == "blocked-private" || mode == "blocked-version" {
 		// A file system call that never returns and never observes the
 		// context (GAP-1413: macOS held an open() in the home walk).
-		enterpriseHookWorkerDiscoverVersion = func(_ context.Context, _, connector string, _ bool) (string, string) {
+		enterpriseHookWorkerDiscoverVersion = func(_ context.Context, _, connector string, _ bool) (string, string, string) {
 			switch {
 			case connector == "hermes":
-				return "0.21.5", ""
+				return "0.21.5", "", ""
 			case connector == "codex" && mode == "blocked-version":
 				select {}
 			}
-			return "", "not installed"
+			return "", "not installed", ""
 		}
 		enterpriseHookWorkerDiscoverSurfaces = func(context.Context, string, string, bool) ([]connector.AgentSurface, bool) {
 			return nil, true
@@ -653,6 +766,23 @@ type standaloneFixture struct {
 	requests                                []enterpriseHookWorkerRequest
 }
 
+// stubNoFreshAccountProof makes every fresh account-database proof say "not
+// gone" for the test. The fixture accounts exist only in its resolver; the
+// real fresh read (dscl on macOS) has no record of alice or bob on the test
+// machine, and would retire their pending cleanups (r105 GAP-2323) and
+// confirm their targets removed (GAP-0693). No fixture account is gone
+// unless a test installs its own proof after this call.
+func stubNoFreshAccountProof(t *testing.T) {
+	t.Helper()
+	previousCleanup, previousName, previousUID := enterpriseHookCleanupAccountGone, enterpriseHookGuardianFreshAccountGone, enterpriseHookRecordedAccountGone
+	t.Cleanup(func() {
+		enterpriseHookCleanupAccountGone, enterpriseHookGuardianFreshAccountGone, enterpriseHookRecordedAccountGone = previousCleanup, previousName, previousUID
+	})
+	enterpriseHookCleanupAccountGone = func(context.Context, string) bool { return false }
+	enterpriseHookGuardianFreshAccountGone = func(context.Context, string) bool { return false }
+	enterpriseHookRecordedAccountGone = func(context.Context, string, int) bool { return false }
+}
+
 // newStandaloneFixture puts the CLI into the standalone Unix profile with
 // the root-only trust checks stubbed so the reconcile logic can run as an
 // unprivileged user.
@@ -677,14 +807,14 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 	origOwner, origDirTrust, origFileTrust, origStateTrust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck
 	origToken, origOTLP, origRunner, origLog := enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog
 	origUserToken, origUserTokenLoader, origTransport := enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport
-	origCheckHome, origAccountGone := enterpriseHookCheckHome, enterpriseHookCleanupAccountGone
+	origCheckHome := enterpriseHookCheckHome
 	t.Cleanup(func() {
 		cfg, enterpriseHookManifest = origCfg, origManifest
 		enterpriseHooksMutationIdentityPreflight, enterpriseHookManifestFileTrustCheck, enterpriseHookStandaloneRuntimeCheck = origPreflight, origManifestTrust, origRuntime
 		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck = origOwner, origDirTrust, origFileTrust, origStateTrust
 		enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog = origToken, origOTLP, origRunner, origLog
 		enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport = origUserToken, origUserTokenLoader, origTransport
-		enterpriseHookCheckHome, enterpriseHookCleanupAccountGone = origCheckHome, origAccountGone
+		enterpriseHookCheckHome = origCheckHome
 		enterprisehooks.SetStandaloneUnix(false)
 		enterprisehooks.SetStandaloneResolver(nil)
 	})
@@ -715,12 +845,7 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 		return "/run/defenseclaw-hook/hook.sock", 995, nil
 	}
 	enterpriseHookWorkerLog = io.Discard
-	// The fixture's accounts exist only in its resolver. The real fresh
-	// directory read (dscl on macOS) has no record of alice or bob on the
-	// test machine and would retire their pending cleanups (r105
-	// GAP-2323), so no fixture account is confirmed gone unless a test
-	// says so.
-	enterpriseHookCleanupAccountGone = func(context.Context, string) bool { return false }
+	stubNoFreshAccountProof(t)
 	enterprisehooks.SetStandaloneUnix(true)
 	enterprisehooks.SetStandaloneResolver(resolver)
 	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
@@ -2041,6 +2166,7 @@ func TestStandaloneUnixRemovedAccountRowIsExcused(t *testing.T) {
 		enterpriseHooksEnumerateLocalAccounts, enterpriseHooksEnumerateDirectoryConfigured = previousLocal, previousDirectory
 		enterprisehooks.SetStandaloneResolver(nil)
 	})
+	stubNoFreshAccountProof(t)
 	cfg = &config.Config{
 		DeploymentMode: managed.DeploymentModeManagedEnterprise,
 		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},

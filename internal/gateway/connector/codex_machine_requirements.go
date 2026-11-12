@@ -31,8 +31,20 @@ const (
 	windowsCodexMachineOwnershipLimit            = 4 << 20
 	windowsCodexManagedStateLimit                = 1 << 20
 	windowsCodexManagedStateFile                 = ".defenseclaw-managed-hooks.state"
-	windowsCodexManagedLockFile                  = ".defenseclaw-managed-hooks.lock"
+	// windowsCodexManagedLegacyLockFile is the transaction lock of 1.0.8 and
+	// earlier. Standard users could read it, so one of them could hold it and
+	// time out every Codex policy transaction (GAP-0650). Writers no longer
+	// take it; the hook reads under it only while no writer lock exists yet
+	// (an upgrade from 1.0.8 or earlier, until the first transaction of this
+	// release removes it). Keep it while upgrades from 1.0.8 are supported.
+	windowsCodexManagedLegacyLockFile = ".defenseclaw-managed-hooks.lock"
 )
+
+// WindowsCodexManagedWriterLockFile is the Codex machine-policy transaction
+// lock in the Codex policy folder. Only Administrators and SYSTEM can open it
+// for data; BUILTIN\Users can read its attributes, its size being the
+// transaction counter the hook-side reader checks (GAP-0650).
+const WindowsCodexManagedWriterLockFile = ".defenseclaw-managed-hooks.writer.lock"
 
 const (
 	// WindowsClaudeEffectivePolicyUnverifiedReason is returned because
@@ -49,6 +61,16 @@ const (
 // from Windows Known Folders, the running installed gateway, and protected
 // deployment metadata; none of them are accepted as public CLI flags.
 type WindowsCodexMachineRequirementsOptions struct {
+	// RenderBase, when RenderBaseSet, is the document a reconcile merges the
+	// managed policy into instead of the requirements file on disk (GAP-1001):
+	// the recovery of a hand-edited file renders from the recorded preimage
+	// off to the side, and only the validated, hook-bearing result is swapped
+	// in. The file on disk is read for the compare-and-swap, never used as
+	// the base, and stays as it is when the render or its check fails. An
+	// empty RenderBase renders the managed policy alone.
+	RenderBase    []byte
+	RenderBaseSet bool
+
 	RequirementsPath   string
 	ManagedDir         string
 	HookBinary         string
@@ -91,7 +113,11 @@ type WindowsCodexManagedRuntimeTarget struct {
 }
 
 type WindowsCodexManagedRuntimeRegistry struct {
-	Active             bool
+	Active bool
+	// Kept is set only by the teardown read: the link (or non-folder) at the
+	// Codex machine-policy folder, which is not read through. The registry is
+	// then empty and says nothing about what is behind the link (GAP-0773).
+	Kept               string
 	GatewayAddr        string
 	GatewayServiceName string
 	Targets            []WindowsCodexManagedRuntimeTarget
@@ -105,6 +131,10 @@ type WindowsCodexManagedRuntimeRegistry struct {
 // the installer and guardian. Disposition distinguishes exact preimage restore
 // from surgical removal that preserves later unrelated administrator edits.
 type WindowsCodexMachineRequirementsReport struct {
+	// ErrorCode is a stable code for the failures a caller acts on without
+	// reading text: writer_lock_busy when a Codex writer holds the writer lock
+	// (GAP-1001).
+	ErrorCode                           string `json:"error_code,omitempty"`
 	SchemaVersion                       int    `json:"schema_version"`
 	Action                              string `json:"action"`
 	OK                                  bool   `json:"ok"`
@@ -140,10 +170,21 @@ type WindowsCodexMachineRequirementsReport struct {
 	ManagedEvents                 []string `json:"managed_events"`
 	Details                       []string `json:"details,omitempty"`
 	Error                         string   `json:"error,omitempty"`
+	// RequirementsHeldBy names the processes (Restart Manager, "<app> (PID
+	// <n>)") that held requirements.toml open so that it could not be
+	// written (Windows); the enforced policy stayed in place. Empty when
+	// Windows could not tell or the file was not held.
+	RequirementsHeldBy string `json:"requirements_held_by,omitempty"`
 	// PinMismatch reports that a content-hash pin no longer matches the live
 	// requirements bytes. It is advisory: verification still succeeds and the
 	// next privileged reconcile refreshes the pin.
 	PinMismatch bool `json:"pin_mismatch,omitempty"`
+	// LinkKept is set only by the teardown removal when a link sits at the
+	// Codex machine-policy folder: the link is kept, nothing behind it was
+	// read, and so nothing in the report says what it holds (GAP-0773). The
+	// report then attests neither SafeToRemoveBinary nor
+	// ManagedStateRemovedOrAbsent.
+	LinkKept string `json:"link_kept,omitempty"`
 	// CodexRequirementsConflict names the administrator setting in the
 	// machine requirements that turns DefenseClaw's managed Codex hooks off.
 	// Set only on Secure Client, where reconcile and verify then report ok
@@ -511,8 +552,8 @@ func windowsCodexRenderedHookCommand(command, hookBinary string) (event, contrac
 		return "", "", false
 	}
 	for _, match := range windowsCodexBoundArgumentsPattern.FindAllStringSubmatch(script, -1) {
-		event := strings.ReplaceAll(match[1], "''", "'")
-		contract := strings.ReplaceAll(match[2], "''", "'")
+		event := powershellLiteralValue(match[1])
+		contract := powershellLiteralValue(match[2])
 		if command == bridgeWindowsCodexBoundManagedHookCommand(hookBinary, event, contract) ||
 			command == legacyStartProcessWindowsCodexBoundManagedHookCommand(hookBinary, event, contract) {
 			return event, contract, true
@@ -1599,4 +1640,18 @@ func windowsCodexAdoptPreimageBaseline(preimage []byte) ([]byte, error) {
 		return nil, fmt.Errorf("marshal Codex adopt baseline: %w", err)
 	}
 	return rendered, nil
+}
+
+// ErrWindowsCodexWriterLockBusy is what a failure of the Codex writer lock
+// matches when another program holds it (a sharing violation on the open, a
+// lock violation or a pending lock that the bound ran out on). The error text
+// is unchanged; callers read the class with errors.Is (GAP-1001).
+var ErrWindowsCodexWriterLockBusy = errors.New("a Codex writer holds the writer lock")
+
+type windowsCodexWriterLockBusyError struct{ err error }
+
+func (e windowsCodexWriterLockBusyError) Error() string { return e.err.Error() }
+func (e windowsCodexWriterLockBusyError) Unwrap() error { return e.err }
+func (e windowsCodexWriterLockBusyError) Is(target error) bool {
+	return target == ErrWindowsCodexWriterLockBusy
 }

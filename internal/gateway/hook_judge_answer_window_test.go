@@ -55,9 +55,8 @@ func boundedHookContext(start time.Time) context.Context {
 		&hookProgressWriter{ResponseWriter: httptest.NewRecorder(), start: start})
 }
 
-// GAP-2625: a bounded hook fails closed when its answer is late, so the
-// answer of a prompt must not wait on a slow LLM judge. In observe mode it
-// does not wait at all; the judge still runs and records its verdict.
+// GAP-2625: a bounded hook does not hold an observe answer for a slow judge.
+// GAP-0564: the detached request ends within the hook answer window.
 func TestHookJudgeDoesNotHoldAnObserveAnswer(t *testing.T) {
 	a, p := newAnswerWindowJudgeServer("observe", 2*time.Second)
 	t0 := time.Now()
@@ -68,16 +67,39 @@ func TestHookJudgeDoesNotHoldAnObserveAnswer(t *testing.T) {
 	select {
 	case err := <-p.finished:
 		if err != nil {
-			t.Fatalf("the judge after the observe answer was cancelled: %v", err)
+			t.Fatalf("observe judge failed inside its answer window: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the judge never ran after the observe answer")
+	case <-time.After(hookJudgeAnswerWindow):
+		t.Fatal("observe judge did not finish inside the hook answer window")
+	}
+	deadline := t0.Add(hookJudgeAnswerWindow)
+	for len(a.hookJudgeSem) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("observe judge kept a model slot after the hook answer window")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestGAP0564ObserveJudgeEndsAtAnswerWindow(t *testing.T) {
+	a, p := newAnswerWindowJudgeServer("observe", 5*time.Second)
+	t0 := time.Now()
+	got := a.runHookJudge(boundedHookContext(t0), "prompt", "prompt", "codex", "please list the files in this folder", "", nil)
+	if got != nil || time.Since(t0) > 500*time.Millisecond {
+		t.Fatalf("observe answer waited for the judge: %v", got)
+	}
+	select {
+	case err := <-p.finished:
+		if err != context.DeadlineExceeded {
+			t.Fatalf("observe judge ended with %v, want its answer-window deadline", err)
+		}
+	case <-time.After(hookJudgeAnswerWindow + time.Second):
+		t.Fatal("observe judge outlived its answer window")
 	}
 }
 
 // GAP-2625: in action mode the answer waits for the judge only inside the
-// hook answer window, then keeps the rule verdict; the judge call is not
-// cancelled, so its verdict is still recorded when it arrives.
+// hook answer window, then keeps the rule verdict and cancels the model call.
 func TestHookJudgeHoldsAnActionAnswerOnlyInsideTheWindow(t *testing.T) {
 	a, p := newAnswerWindowJudgeServer("action", 2*time.Second)
 	t0 := time.Now()
@@ -88,8 +110,8 @@ func TestHookJudgeHoldsAnActionAnswerOnlyInsideTheWindow(t *testing.T) {
 	}
 	select {
 	case err := <-p.finished:
-		if err != nil {
-			t.Fatalf("the late judge was cancelled with the answer: %v", err)
+		if err != context.Canceled {
+			t.Fatalf("late judge finished with %v, want cancellation", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the late judge never finished")

@@ -40,10 +40,11 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -59,6 +60,7 @@ from defenseclaw import (
     codex_toml,
     connector_paths,
     envvars,
+    gateway_token_adoption,
     openclaw_presence,
     platform_support,
     removed_connectors,
@@ -82,6 +84,7 @@ from defenseclaw.bundle_refresh import (
     is_compose_project_running,
     refresh_splunk_bridge,
 )
+from defenseclaw.cause_text import single_line
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.config import (
     CONFIG_PATH_ENV,
@@ -91,6 +94,7 @@ from defenseclaw.config import (
     config_path_for_data_dir,
     enable_all_runtime_planes,
     enable_user_runtime_planes,
+    gateway_home_for_data_dir,
     gateway_pid_path,
     locked_config_yaml,
     locked_file_update,
@@ -120,11 +124,13 @@ from defenseclaw.connector_contracts import (
     openclaw_bedrock_plugin_missing,
     openclaw_lacks_plugin_approvals,
     openclaw_needs_interception_advisory,
+    openclaw_tui_shows_approvals,
     opencode_requires_v2_upgrade,
     resolve_connector_contract,
     stable_agent_version,
 )
 from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, SETUP_SECRET_CHANGED_META_KEY, AppContext, pass_ctx
+from defenseclaw.doctor_health import VersionRange, supported_range_text, version_range_label
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     UnsafePathError,
@@ -133,14 +139,17 @@ from defenseclaw.file_permissions import (
     darwin_acl_write_error,
     delete_file_durable,
     dotenv_key_is_valid,
+    dotenv_line_ending,
     open_regular_file_no_follow,
     read_regular_file_no_follow,
     reject_reparse_path,
     root_owned_private_regular_file,
+    serialize_dotenv,
     trusted_runtime_owner,
     windows_acl_custody_confidentiality_error,
     windows_acl_custody_write_error,
     windows_acl_write_error,
+    windows_untrusted_writer_sid,
 )
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import (
@@ -2767,8 +2776,12 @@ def _write_dotenv_locked(path: str, entries: dict[str, str]) -> None:
     creation. Tighten the open descriptor before writing so repeat runs also
     converge on POSIX 0600 or the equivalent protected Windows DACL.
     """
-    body = "".join(f"{key}={sanitize_dotenv_value(value, key=key)}\n" for key, value in sorted(entries.items()))
-    atomic_write_private_bytes(path, body.encode("utf-8"))
+    lines = [f"{key}={sanitize_dotenv_value(value, key=key)}".encode() for key, value in sorted(entries.items())]
+    # A symlink or special file is refused by the write below, not read here.
+    existing = None
+    if os.path.isfile(path) and not os.path.islink(path):
+        existing, _mode = _snapshot_dotenv(path)
+    atomic_write_private_bytes(path, serialize_dotenv(lines, existing))
 
 
 def _load_config_for_data_dir(data_dir: str):
@@ -2834,8 +2847,10 @@ def _add_trusted_bin_prefix(prefix: str, data_dir: str, cfg=None) -> bool:
 # ---------------------------------------------------------------------------
 # `defenseclaw setup trusted-paths` — manage the binary-discovery allow-list.
 #
-# Built-in defaults come from agent_discovery._builtin_trusted_bin_prefixes and
-# are read-only here. New operator additions persist to config.yaml under
+# Built-in defaults are the prefixes setup itself admits
+# (agent_selection._builtin_setup_trusted_prefixes, resolved from the account's
+# own token) and are read-only here; a passive-discovery default setup does not
+# admit is listed apart and can still be added (GAP-0866). New operator additions persist to config.yaml under
 # ai_discovery.trusted_binary_prefixes. Legacy .env / process env entries are
 # still listed and honored for backward compatibility.
 # ---------------------------------------------------------------------------
@@ -2855,10 +2870,17 @@ def _trusted_prefix_status(resolved: str) -> str:
     return "ok"
 
 
+def _setup_default_prefixes() -> tuple[str, ...]:
+    """The built-in prefixes setup admits, which is what "trusted by default" means."""
+    from defenseclaw.agent_selection import _builtin_setup_trusted_prefixes
+
+    return _builtin_setup_trusted_prefixes()
+
+
 def _default_resolved_prefixes() -> set[str]:
     """Resolved absolute paths of the built-in (non-removable) defaults."""
     out: set[str] = set()
-    for raw in agent_discovery._builtin_trusted_bin_prefixes():
+    for raw in _setup_default_prefixes():
         resolved, _ = agent_discovery.validate_trusted_prefix(raw)
         if resolved:
             out.add(resolved)
@@ -2910,8 +2932,10 @@ def _collect_trusted_prefixes(data_dir: str, cfg=None) -> list[dict[str, object]
     # Keeping the config row visible also keeps the explicit entry removable.
     for raw in config_file:
         _push(raw, "config", True)
-    for raw in agent_discovery._builtin_trusted_bin_prefixes():
+    for raw in _setup_default_prefixes():
         _push(raw, "default", False)
+    for raw in agent_discovery._builtin_trusted_bin_prefixes():
+        _push(raw, "discovery default", False)
     for raw in env_file:
         _push(raw, "legacy .env", True)
     for raw in env_only:
@@ -3002,6 +3026,16 @@ def trusted_paths_add(app: AppContext, directory: str, force: bool, as_json: boo
         agent_discovery._path_key(path) for path in _default_resolved_prefixes()
     }
     if resolved_key in default_keys and not explicitly_configured:
+        if err:
+            # Setup refuses this folder whatever the list says, so "already
+            # trusted" would send the person back to the same refusal.
+            _emit_trusted_path_result(
+                as_json,
+                ok=False,
+                path=resolved,
+                message=f"a built-in prefix, but setup will not trust it until this is fixed: {err}",
+            )
+            click.get_current_context().exit(1)
         _emit_trusted_path_result(as_json, ok=True, path=resolved, message="already trusted by default; nothing to do")
         return
     if err and not force:
@@ -3545,9 +3579,10 @@ class _GuardrailSecretRollbackStatus:
 class _GuardrailSecretFailure(click.ClickException):
     """Public-safe sentinel with no retained secret-bearing exception."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
-        super().__init__(f"guardrail secret transaction failed safely ({code})")
+        message = f"guardrail secret transaction failed safely ({code})"
+        super().__init__(f"{message}: {detail}" if detail else message)
 
 
 def _clear_pending_guardrail_secrets(pending_secrets: list[_PendingGuardrailSecret]) -> None:
@@ -3627,7 +3662,7 @@ def _dotenv_restore_raw_key_render(
             restored = True
     body = b"".join(lines)
     if existed and not restored:
-        newline = b"\r\n" if b"\r\n" in snapshot.body else b"\n"
+        newline = dotenv_line_ending(snapshot.body)
         if body and not body.endswith((b"\r", b"\n")):
             body += newline
         body += key_bytes + b"=" + (value or b"") + newline
@@ -3640,12 +3675,14 @@ def _set_guardrail_secret_process_value(env_name: str, value: str) -> None:
 
 def _restore_guardrail_secret_transaction(
     transaction: _GuardrailSecretTransaction,
+    *,
+    dotenv_lock_held: bool = False,
 ) -> _GuardrailSecretRollbackStatus:
     """Compare-before-restore only state still owned by this transaction."""
 
     status_codes: list[str] = []
     try:
-        with locked_file_update(transaction.dotenv_path):
+        with nullcontext() if dotenv_lock_held else locked_file_update(transaction.dotenv_path):
             current = _rotate_token_snapshot_locked(transaction.dotenv_path)
             if transaction.dotenv_after_authoritative and _guardrail_dotenv_snapshot_matches(
                 current,
@@ -3706,6 +3743,8 @@ def _restore_guardrail_secret_transaction(
 def _publish_pending_guardrail_secrets(
     pending_secrets: list[_PendingGuardrailSecret],
     data_dir: str,
+    *,
+    dotenv_lock_held: bool = False,
 ) -> _GuardrailSecretTransaction | None:
     """Atomically publish deferred judge secrets and return rollback custody."""
 
@@ -3726,7 +3765,7 @@ def _publish_pending_guardrail_secrets(
             )
             for pending in pending_secrets
         )
-        with locked_file_update(dotenv_path):
+        with nullcontext() if dotenv_lock_held else locked_file_update(dotenv_path):
             dotenv_before = _rotate_token_snapshot_locked(dotenv_path)
             for env_name, value in updates:
                 before_existed, before_value = _dotenv_snapshot_raw_key_state(
@@ -3750,6 +3789,8 @@ def _publish_pending_guardrail_secrets(
                     dotenv_before,
                     updates,
                 )
+            except _DotenvSizeError:
+                raise
             except BaseException:
                 publication_failed = True
             try:
@@ -3757,11 +3798,14 @@ def _publish_pending_guardrail_secrets(
                 dotenv_after_authoritative = True
             except BaseException:
                 publication_failed = True
+    except _DotenvSizeError as error:
+        _clear_pending_guardrail_secrets(pending_secrets)
+        raise _GuardrailSecretFailure("publication-dotenv-size-limit", str(error)) from None
     except BaseException:
         publication_failed = True
     if publication_failed and dotenv_before is not None and dotenv_after is None:
         try:
-            with locked_file_update(dotenv_path):
+            with nullcontext() if dotenv_lock_held else locked_file_update(dotenv_path):
                 dotenv_after = _rotate_token_snapshot_locked(dotenv_path)
         except BaseException:
             dotenv_after = None
@@ -3808,7 +3852,9 @@ def _publish_pending_guardrail_secrets(
         rollback_status = _guardrail_secret_rollback_status("publication-custody-unavailable")
         if transaction is not None:
             try:
-                rollback_status = _restore_guardrail_secret_transaction(transaction)
+                rollback_status = _restore_guardrail_secret_transaction(
+                    transaction, dotenv_lock_held=dotenv_lock_held
+                )
             except BaseException:
                 rollback_status = _guardrail_secret_rollback_status("publication-rollback-error")
         _clear_pending_guardrail_secrets(pending_secrets)
@@ -3818,6 +3864,26 @@ def _publish_pending_guardrail_secrets(
         raise _GuardrailSecretFailure(failure_code) from None
     _clear_pending_guardrail_secrets(pending_secrets)
     return transaction
+
+
+def _preflight_pending_guardrail_secret_size(
+    pending_secrets: list[_PendingGuardrailSecret],
+    data_dir: str,
+) -> None:
+    """Check the complete judge-secret update before setup publishes authority."""
+
+    if not pending_secrets:
+        return
+    dotenv_path = os.path.join(data_dir, ".env")
+    # The interactive caller holds the file lock through final publication,
+    # so this size decision stays stable while selection authority changes.
+    snapshot = _rotate_token_snapshot_locked(dotenv_path)
+    updates = tuple(
+        (pending.env_name, sanitize_dotenv_value(pending.value, key=pending.env_name))
+        for pending in pending_secrets
+    )
+    rendered = _render_secrets_to_dotenv(snapshot, updates)
+    _check_dotenv_size(dotenv_path, rendered)
 
 
 @dataclass(frozen=True)
@@ -4442,18 +4508,37 @@ def _dotenv_upsert_render(
         if separator and compared_key == requested_key:
             if replaced:
                 continue
-            terminator = line[len(line.rstrip(b"\r\n")) :]
-            lines.append(key_bytes + b"=" + safe_value + terminator)
+            lines.append(key_bytes + b"=" + safe_value)
             replaced = True
             continue
         lines.append(line)
-    body = b"".join(lines)
-    newline = b"\r\n" if b"\r\n" in snapshot.body else b"\n"
     if not replaced:
-        if body and not body.endswith((b"\r", b"\n")):
-            body += newline
-        body += key_bytes + b"=" + safe_value + newline
-    return body
+        lines.append(key_bytes + b"=" + safe_value)
+    return serialize_dotenv(lines, snapshot.body)
+
+
+class _DotenvSizeError(click.ClickException):
+    """A secret-free refusal that callers can handle before other changes."""
+
+
+def _check_dotenv_size(dotenv_path: str, body: bytes) -> None:
+    if len(body) > MAX_DOTENV_BYTES:
+        raise _DotenvSizeError(
+            f"{dotenv_path} would be {len(body)} bytes, over the {MAX_DOTENV_BYTES}-byte limit "
+            "every reader accepts; it was left unchanged. Remove entries you no longer need and retry."
+        )
+
+
+def _publish_dotenv_locked(dotenv_path: str, body: bytes) -> None:
+    """Publish a complete new dotenv once, or change nothing.
+
+    Every reader rejects a dotenv over ``MAX_DOTENV_BYTES`` whole, so the new file
+    is built in memory and checked against that limit before it is written. A file
+    over it is refused with the cause; the current file stays as it is.
+    """
+
+    _check_dotenv_size(dotenv_path, body)
+    atomic_write_private_bytes(dotenv_path, body)
 
 
 def _save_secrets_to_dotenv_locked(
@@ -4463,6 +4548,17 @@ def _save_secrets_to_dotenv_locked(
 ) -> None:
     """Publish a validated dotenv batch once while the caller owns its lock."""
 
+    body = _render_secrets_to_dotenv(snapshot, updates)
+    if not snapshot.existed or body != snapshot.body:
+        _publish_dotenv_locked(dotenv_path, body)
+
+
+def _render_secrets_to_dotenv(
+    snapshot: _RotateTokenDotenvSnapshot,
+    updates: tuple[tuple[str, str], ...],
+) -> bytes:
+    """Render all secret updates with the same rules for preflight and commit."""
+
     rendered = snapshot
     for key, value in updates:
         rendered = _RotateTokenDotenvSnapshot(
@@ -4470,8 +4566,7 @@ def _save_secrets_to_dotenv_locked(
             body=_dotenv_upsert_render(rendered, key, value),
             mode=rendered.mode,
         )
-    if not snapshot.existed or rendered.body != snapshot.body:
-        atomic_write_private_bytes(dotenv_path, rendered.body)
+    return rendered.body
 
 
 def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -> bytes:
@@ -4504,11 +4599,7 @@ def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -
         return key in token_keys
 
     lines = [line for line in snapshot.body.splitlines(keepends=True) if not is_token_line(line)]
-    body = b"".join(lines)
-    newline = b"\r\n" if b"\r\n" in snapshot.body else b"\n"
-    if body and not body.endswith((b"\r", b"\n")):
-        body += newline
-    return body + token_prefix + safe_token + newline
+    return serialize_dotenv([*lines, token_prefix + safe_token], snapshot.body)
 
 
 def _rotate_token_restore_locked(
@@ -4540,7 +4631,7 @@ def _rotate_token_atomic_write_locked(dotenv_path: str, new_token: str) -> None:
     preserving the existing file's unrelated byte shape.
     """
     snapshot = _rotate_token_snapshot_locked(dotenv_path)
-    atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
+    _publish_dotenv_locked(dotenv_path, _rotate_token_render(snapshot, new_token))
 
 
 def _restore_rotate_token_environment(snapshot: dict[str, str | None]) -> None:
@@ -4886,6 +4977,8 @@ def _rotate_token_transaction(
         snapshot = _rotate_token_snapshot_locked(dotenv_path)
         hook_snapshots = [_rotate_token_hook_snapshot_locked(data_dir, connector) for connector in tracked_scopes]
         old_token = _rotate_token_previous_value(app, snapshot)
+        rendered_dotenv = _rotate_token_render(snapshot, new_token)
+        _check_dotenv_size(dotenv_path, rendered_dotenv)
         pid_file = gateway_pid_path(data_dir)
         was_running = _is_pid_alive(pid_file)
         if was_running and any(
@@ -4909,9 +5002,21 @@ def _rotate_token_transaction(
             hook_snapshot.connector: hook_snapshot.windows_security for hook_snapshot in hook_snapshots
         }
         connector_state_a = _rotate_token_connector_state(authoritative_cfg, old_hook_fingerprints)
+        new_hook_values = _rotate_token_new_hook_values(
+            [*requested_scopes, *live_orphan_scopes],
+            new_token,
+            {**old_hook_fingerprints, **old_orphan_fingerprints},
+        )
+        new_hook_fingerprints = {
+            connector: _rotate_token_hook_fingerprint(value) for connector, value in new_hook_values.items()
+        }
+        connector_state_b = _rotate_token_connector_state(
+            authoritative_cfg,
+            {name: value for name, value in new_hook_fingerprints.items() if name in requested_scopes},
+            {name: value for name, value in new_hook_fingerprints.items() if name in live_orphan_scopes},
+        )
         old_stopped = False
         mutation_attempted = False
-        new_hook_values: dict[str, str] = {}
         try:
             try:
                 _run_rotate_token_lifecycle(data_dir, "stop", token=old_token, config_file=config_file)
@@ -4938,21 +5043,8 @@ def _rotate_token_transaction(
                 raise
             old_stopped = True
 
-            new_hook_values = _rotate_token_new_hook_values(
-                [*requested_scopes, *live_orphan_scopes],
-                new_token,
-                {**old_hook_fingerprints, **old_orphan_fingerprints},
-            )
-            new_hook_fingerprints = {
-                connector: _rotate_token_hook_fingerprint(value) for connector, value in new_hook_values.items()
-            }
-            connector_state_b = _rotate_token_connector_state(
-                authoritative_cfg,
-                {name: value for name, value in new_hook_fingerprints.items() if name in requested_scopes},
-                {name: value for name, value in new_hook_fingerprints.items() if name in live_orphan_scopes},
-            )
             mutation_attempted = True
-            atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
+            _publish_dotenv_locked(dotenv_path, rendered_dotenv)
             for connector, value in sorted(new_hook_values.items()):
                 atomic_write_private_bytes(
                     _rotate_token_hook_path(data_dir, connector),
@@ -5315,6 +5407,13 @@ def setup_gateway(
             gw.port = port
         if api_port is not None:
             gw.api_port = api_port
+        if api_port is not None or port is not None:
+            from defenseclaw.bootstrap import port_layout_conflict
+
+            if conflict := port_layout_conflict(
+                gw.api_port, int(app.cfg.guardrail.port or 0), gw.port if uses_openclaw else 0
+            ):
+                raise click.UsageError(conflict)
         if token is not None:
             _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, data_dir)
             gw.token = ""
@@ -6140,8 +6239,16 @@ def _connector_contract_upgrade_guidance(
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
     if key == "opencode":
+        # V1 (opencode-ai) and V2 install the same `opencode` command, so npm
+        # refuses V2 beside an npm-installed V1 (GAP-0053).
+        remove_v1 = (
+            "Remove OpenCode V1 first: 'npm uninstall -g opencode-ai' (with the same --prefix if you gave one). "
+            if normalized_version.split(".", 1)[0] == "1"
+            else ""
+        )
         return (
-            f"Install OpenCode V2 with 'npm install -g @opencode/cli@2' (where you cannot write npm's global "
+            f"{remove_v1}Install OpenCode V2 with 'npm install -g @opencode/cli@2' "
+            "(where you cannot write npm's global "
             "prefix, for your account: 'npm install -g --prefix ~/.npm-global @opencode/cli@2', with "
             f"~/.npm-global/bin first on PATH), then run: {rerun}."
         )
@@ -6158,53 +6265,21 @@ def _connector_contract_upgrade_guidance(
         return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
 
     contract = contracts[0]
-    if len(contracts) > 1 and normalized_version:
+    ranged = _ranged_contracts(contracts)
+    if len(contracts) > 1 and normalized_version and ranged:
         # A connector may carry consecutive reviewed contracts. For a version
         # below or above the entire covered span, point at the nearest exact
         # contract so remediation names a useful boundary instead of falling
-        # back to a generic "covered version" message.
-        ranged = [
-            candidate
-            for candidate in contracts
-            if candidate.min_agent_version or candidate.max_agent_version
-        ]
-        if ranged:
-            first = ranged[0]
-            last = ranged[0]
-            for candidate in ranged[1:]:
-                if candidate.min_agent_version and (
-                    not first.min_agent_version
-                    or compare_agent_versions(
-                        candidate.min_agent_version,
-                        first.min_agent_version,
-                    )
-                    < 0
-                ):
-                    first = candidate
-                if candidate.max_agent_version and (
-                    not last.max_agent_version
-                    or compare_agent_versions(
-                        candidate.max_agent_version,
-                        last.max_agent_version,
-                    )
-                    > 0
-                ):
-                    last = candidate
-            if first.min_agent_version and compare_agent_versions(
-                normalized_version,
-                first.min_agent_version,
-            ) < 0:
-                contract = first
-            elif last.max_agent_version and compare_agent_versions(
-                normalized_version,
-                last.max_agent_version,
-            ) >= 0:
-                contract = last
-            else:
-                return (
-                    f"Use a {label} version covered by a DefenseClaw hook contract, "
-                    f"then run: {rerun}."
-                )
+        # back to a generic "covered version" message. The latest contract is
+        # the one that starts last: without an upper bound, nothing is above
+        # the span (a capped older contract was taken for the last one).
+        first, last = ranged[0], ranged[-1]
+        if first.min_agent_version and compare_agent_versions(normalized_version, first.min_agent_version) < 0:
+            contract = first
+        elif last.max_agent_version and compare_agent_versions(normalized_version, last.max_agent_version) >= 0:
+            contract = last
+        else:
+            return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
     requirement_parts: list[str] = []
     pins = contract.exact_agent_versions
     if normalized_version:
@@ -6220,21 +6295,37 @@ def _connector_contract_upgrade_guidance(
         )
     if pins:
         requirement_parts.append("one of " + ", ".join(pins))
-    range_requirement = ""
-    if contract.min_agent_version and contract.max_agent_version:
-        range_requirement = f">={contract.min_agent_version} and <{contract.max_agent_version}"
-    elif contract.min_agent_version:
-        range_requirement = f">={contract.min_agent_version}"
-    elif contract.max_agent_version:
-        range_requirement = f"<{contract.max_agent_version}"
+    range_requirement = version_range_label(contract.min_agent_version, contract.max_agent_version)
     if range_requirement:
         requirement_parts.append(range_requirement)
     requirement = " or ".join(requirement_parts) if requirement_parts else "an explicitly supported version"
+    # With consecutive contracts, the nearest one alone reads as if newer
+    # releases were unsupported (GAP-0049: "claudecode-hooks-v1 requires
+    # >=2.1.154 and <2.1.219" for Claude Code 2.1.121, though
+    # claudecode-hooks-v2 covers >=2.1.219). Name the whole supported range.
+    supported = (
+        supported_range_text(
+            VersionRange(
+                contract_id=c.contract_id,
+                min_inclusive=c.min_agent_version,
+                max_exclusive=c.max_agent_version,
+            )
+            for c in ranged
+        )
+        if len(contracts) > 1
+        else ""
+    )
     if normalized_version and range_requirement:
         if contract.min_agent_version and compare_agent_versions(
             normalized_version,
             contract.min_agent_version,
         ) < 0:
+            if supported:
+                return (
+                    f"Upgrade {label}; installed version {normalized_version} is older than the validated "
+                    f"minimum. DefenseClaw supports {label} {supported}; {contract.contract_id} covers "
+                    f"{requirement}. Then run: {rerun}."
+                )
             return (
                 f"Upgrade {label}; installed version {normalized_version} is older than the validated "
                 f"minimum. {contract.contract_id} requires {requirement}. Then run: {rerun}."
@@ -6245,12 +6336,20 @@ def _connector_contract_upgrade_guidance(
         ) >= 0:
             return (
                 f"{label} {normalized_version} is newer than DefenseClaw's validated range "
-                f"({requirement}). Use a validated version, or update DefenseClaw when a matching "
-                f"hook contract is available; then run: {rerun}."
+                f"({supported or requirement}). Use a validated version, or update DefenseClaw when a "
+                f"matching hook contract is available; then run: {rerun}."
             )
     return (
         f"{label} {normalized_version or 'version'} is outside the validated hook contract; "
         f"{contract.contract_id} requires {requirement}. Use a covered version, then run: {rerun}."
+    )
+
+
+def _ranged_contracts(contracts: tuple[Any, ...]) -> list[Any]:
+    """The contracts that bound a version range, oldest first."""
+    return sorted(
+        (c for c in contracts if c.min_agent_version or c.max_agent_version),
+        key=cmp_to_key(lambda a, b: compare_agent_versions(a.min_agent_version or "0", b.min_agent_version or "0")),
     )
 
 
@@ -6297,15 +6396,35 @@ def _version_scan_persists(connector: str) -> bool:
 
     Native Windows OpenCode/Amp setup immediately records a protected,
     connector-scoped executable selection, so its admission scan does not
-    need to republish the process-wide discovery cache. Leaving that cache
-    untouched prevents an unrelated connector whose CLI is temporarily
-    undiscoverable from losing already-sealed version and contract status
-    when the gateway restarts every active connector.
+    republish the process-wide discovery cache: a whole-scan write would let
+    an unrelated connector whose CLI is temporarily undiscoverable lose
+    already-sealed version and contract status when the gateway restarts
+    every active connector. The version setup read is still recorded for
+    this connector alone, by :func:`_publish_agent_signal`, so doctor and
+    ``agent discover`` do not report a fresh setup as not installed until
+    ``agent discover --refresh`` (GAP-0882).
     """
     connector = normalize_connector(connector)
     return connector != "codex" and not (
         connector in {"opencode", "amp"} and platform_support.host_os() == "windows"
     )
+
+
+def _version_probe_did_not_answer(signal: Any) -> bool:
+    """Whether the probe ran the agent and got no version: it timed out or failed.
+
+    A cold first start of an agent (its first run on the account, an antivirus
+    scan of a new install) can fail one probe that the next one passes, so the
+    version gate reads such an agent once more before it refuses (GAP-1077).
+    An agent the probe never reached (not found, outside the trusted prefixes)
+    has another cause that a second reading does not change.
+    """
+    from defenseclaw.agent_selection import probe_error_means_agent_did_not_run
+
+    if signal is None or getattr(signal, "version", "") or not getattr(signal, "binary_path", ""):
+        return False
+    error = getattr(signal, "error", "") or ""
+    return agent_discovery.VERSION_PROBE_TIMED_OUT in error or probe_error_means_agent_did_not_run(error)
 
 
 def _check_connector_version_supported_for_setup(
@@ -6350,6 +6469,15 @@ def _check_connector_version_supported_for_setup(
             persist_cache=_version_scan_persists(connector),
         )
         signal = disc.agents.get(connector)
+        if _discovery is None and _version_probe_did_not_answer(signal):
+            disc = agent_discovery.discover_with_probes([connector],
+                use_cache=False,
+                refresh=True,
+                data_dir=data_dir,
+                persist_cache=_version_scan_persists(connector),
+                reuse_shared=False,
+            )
+            signal = disc.agents.get(connector)
     except Exception as exc:
         compatibility = resolve_connector_contract(connector, "")
         if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:
@@ -6377,12 +6505,28 @@ def _check_connector_version_supported_for_setup(
                 ux.err(problem)
             _refuse_in_every_mode(_refusal_scope, problem)
             return False
-        if _discovery is None and platform_support.host_os() != "windows":
+        if _discovery is None and platform_support.host_os() == "windows":
+            # Windows never takes Codex authority from this cache (the gateway
+            # reads the protected setup selection), so a write that fails
+            # changes no admission. The version setup just accepted is still
+            # published where doctor and `agent discover` read it, or both
+            # report it as not observed until `agent discover --refresh`.
+            # This connector and every peer the scan read replace their
+            # entries; a peer the scan missed keeps its evidence (GAP-0752).
+            agent_discovery._publish_agent_signal(disc, connector, data_dir=data_dir)
+        elif _discovery is None:
             if not agent_discovery._write_cache(disc, data_dir=data_dir):
                 if emit:
                     ux.err("Codex version evidence could not be saved for gateway restart; no setup change was made.")
                 _refuse_in_every_mode(_refusal_scope, "Codex version evidence could not be saved for gateway restart")
                 return False
+    elif installed and _discovery is None and not _version_scan_persists(connector):
+        # Native Windows OpenCode/Amp: the scan above wrote nothing, and the
+        # protected selection is not what doctor reads, so the executable and
+        # version setup just verified are published here, for this connector
+        # only; every peer entry stays as the cache holds it (GAP-0882). A
+        # failed write changes no admission, which comes from the selection.
+        agent_discovery._publish_agent_signal(disc, connector, data_dir=data_dir)
 
     compatibility = resolve_connector_contract(connector, raw_version)
     if connector == "kiro":
@@ -6684,7 +6828,12 @@ def _refuse_opencode_v1_before_questions(app: AppContext) -> None:
     raw = (getattr(signal, "version", "") or "").strip() if signal is not None else ""
     if signal is None or not signal.installed or not raw or not opencode_requires_v2_upgrade(raw):
         return
-    ux.err(_opencode_v2_required(raw.rstrip("."), _connector_contract_upgrade_guidance("opencode", "OpenCode")))
+    ux.err(
+        _opencode_v2_required(
+            raw.rstrip("."),
+            _connector_contract_upgrade_guidance("opencode", "OpenCode", normalize_agent_version(raw)),
+        )
+    )
     raise click.ClickException("OpenCode setup stopped before any change; nothing was changed")
 
 
@@ -6875,7 +7024,7 @@ def _record_windows_setup_agent_selections(
         except OSError as exc:
             raise click.ClickException(f"could not protect explicit agent executable selection: {exc}") from exc
     try:
-        return _validate_setup_agent_selection_receipt(
+        verified = _validate_setup_agent_selection_receipt(
             target_dir,
             selected,
             selections,
@@ -6885,6 +7034,36 @@ def _record_windows_setup_agent_selections(
         raise click.ClickException(
             f"could not bind selected agent executables to the protected receipt: {exc}"
         ) from exc
+    _publish_verified_selection_discovery(target_dir, selections)
+    return verified
+
+
+def _publish_verified_selection_discovery(
+    data_dir: str | os.PathLike[str],
+    selections: dict[str, Any],
+) -> None:
+    """Leave doctor the executable and version setup verified (GAP-0882).
+
+    Native-Windows OpenCode setup skips the generic version check, so no scan
+    wrote the discovery cache doctor reads and a healthy fresh setup failed
+    Connector compatibility until `agent discover --refresh`. Every route
+    reaches this through the one place that verifies the executables.
+    Only the entry of that one connector is written; admission comes from the protected
+    selection, so a write that fails changes nothing but this notice.
+    """
+    for name, selection in selections.items():
+        if not _windows_opencode_requires_exact_selection(name):
+            continue
+        if not agent_discovery.publish_verified_agent(
+            name,
+            binary_path=selection.executable,
+            version=selection.raw_version,
+            data_dir=data_dir,
+        ):
+            ux.warn(
+                f"could not record the verified {name} install for doctor; "
+                "run: defenseclaw agent discover --refresh"
+            )
 
 
 def _guardrail_effective_mode(gc, connector: str) -> str:
@@ -7016,16 +7195,22 @@ def _check_guardrail_setup_connector_versions(
 def _warn_openclaw_setup_advisories(
     raw_version: str | None, human_approval: bool, openclaw_config_file: str | None
 ) -> None:
-    """Name where OpenClaw shows approvals (GAP-1958) and a missing Bedrock
-    provider plugin (GAP-1959). Both only warn; setup goes on."""
+    """Name where OpenClaw shows approvals (GAP-1958, GAP-0597) and a missing
+    Bedrock provider plugin (GAP-1959). Setup goes on either way. The approval
+    note is a warning only for an OpenClaw whose openclaw tui does not show
+    the requests (or whose version is unknown)."""
     label = f"OpenClaw {normalize_agent_version(raw_version or '') or ''}".strip()
     if human_approval:
-        ux.warn(f"{OPENCLAW_APPROVAL_SURFACES}.")
+        if openclaw_tui_shows_approvals(raw_version):
+            ux.subhead(f"{OPENCLAW_APPROVAL_SURFACES}.")
+        else:
+            ux.warn(f"{OPENCLAW_APPROVAL_SURFACES}.")
     if not openclaw_config_file:
         return
+    from defenseclaw.openclaw_json5 import load_file as _load_openclaw_json5
+
     try:
-        with open(os.path.expanduser(openclaw_config_file), encoding="utf-8") as fh:
-            openclaw_config = _json.load(fh)
+        openclaw_config = _load_openclaw_json5(os.path.expanduser(openclaw_config_file))
     except (OSError, ValueError):
         return
     if openclaw_bedrock_plugin_missing(raw_version, openclaw_config):
@@ -7034,10 +7219,21 @@ def _warn_openclaw_setup_advisories(
             "and openclaw.json names a Bedrock model without it, so OpenClaw model calls fail with "
             '"No API provider registered for api: bedrock-converse-stream".'
         )
-        ux.subhead(
-            f"Run: openclaw plugins install {OPENCLAW_BEDROCK_PLUGIN_PACKAGE} "
-            "(it adds amazon-bedrock to plugins.allow), then openclaw gateway restart."
-        )
+        ux.subhead(f"Run: openclaw plugins install {OPENCLAW_BEDROCK_PLUGIN_PACKAGE}")
+        ux.subhead("Then: openclaw plugins enable amazon-bedrock")
+        plugins = openclaw_config.get("plugins") if isinstance(openclaw_config, dict) else None
+        if isinstance(plugins, dict):
+            allowed = plugins.get("allow")
+            if isinstance(allowed, list) and "amazon-bedrock" not in allowed:
+                value = _json.dumps([*allowed, "amazon-bedrock"], separators=(",", ":"))
+                ux.subhead(f"Then: openclaw config set plugins.allow {shlex.quote(value)} --strict-json")
+            denied = plugins.get("deny")
+            if isinstance(denied, list) and "amazon-bedrock" in denied:
+                value = _json.dumps(
+                    [name for name in denied if name != "amazon-bedrock"], separators=(",", ":"),
+                )
+                ux.subhead(f"Then: openclaw config set plugins.deny {shlex.quote(value)} --strict-json")
+        ux.subhead("Then: openclaw gateway restart")
 
 
 def _hilt_support_note(connector: str) -> str:
@@ -7610,9 +7806,8 @@ def setup_guardrail(
             app.cfg, capture_runtime=_windows_runtime_rollback(restart)
         )
     except OSError as exc:
-        raise click.ClickException(
-            f"cannot establish guardrail setup rollback point: {exc}\n{_SETUP_ROLLBACK_POINT_NEXT_STEP}"
-        ) from exc
+        reason, next_step = _setup_rollback_point_failure(exc)
+        raise click.ClickException(f"cannot establish guardrail setup rollback point: {reason}\n{next_step}") from exc
 
     protected_selection: _VerifiedSetupAgentSelections | None = None
     selection_attempted = False
@@ -7662,6 +7857,7 @@ def setup_guardrail(
         """Restore transaction-owned exact authority after an interactive no-op."""
 
         if protected_selection is None:
+            _restore_setup_config_in_memory(app, setup_snapshot)
             return
         rollback_errors: list[str] = []
         for label, restore in (
@@ -7712,6 +7908,58 @@ def setup_guardrail(
             status_codes.append("setup-rollback-error")
         status_codes.extend(restore_guardrail_secret_publication().codes)
         return _guardrail_secret_rollback_status(*status_codes)
+
+    def publish_guardrail_secrets(*, dotenv_lock_held: bool = False) -> _GuardrailSecretTransaction | None:
+        """Publish pending secrets and preserve the setup rollback contract."""
+
+        secret_publication_expected = bool(pending_guardrail_secrets)
+        secret_publication_failed = False
+        secret_publication_rollback_incomplete = False
+        size_refusal: _GuardrailSecretFailure | None = None
+        try:
+            transaction = _publish_pending_guardrail_secrets(
+                pending_guardrail_secrets,
+                app.cfg.data_dir,
+                dotenv_lock_held=dotenv_lock_held,
+            )
+        except _GuardrailSecretFailure as publication_failure:
+            if not secret_publication_expected:
+                raise
+            secret_publication_rollback_incomplete = (
+                publication_failure.code == "publication-failed-rollback-incomplete"
+            )
+            if publication_failure.code == "publication-dotenv-size-limit":
+                size_refusal = publication_failure
+            secret_publication_failed = True
+        except BaseException:
+            if not secret_publication_expected:
+                raise
+            secret_publication_failed = True
+        if secret_publication_failed:
+            if size_refusal is not None and not selection_attempted:
+                # The bounded writer has changed no file or process value. Restore
+                # only the in-memory setup draft; republishing the snapshot would
+                # change file identity on a refusal that needs no rollback.
+                _restore_setup_config_in_memory(app, setup_snapshot)
+                raise size_refusal from None
+            setup_rollback_failed = False
+            try:
+                _restore_setup_config_snapshot(app, setup_snapshot)
+            except BaseException:
+                setup_rollback_failed = True
+            if setup_rollback_failed and secret_publication_rollback_incomplete:
+                failure_code = "publication-failed-setup-and-secret-rollback-incomplete"
+            elif secret_publication_rollback_incomplete:
+                failure_code = "publication-failed-secret-rollback-incomplete"
+            elif setup_rollback_failed:
+                failure_code = "publication-failed-setup-rollback-incomplete"
+            else:
+                failure_code = "publication-failed-setup-restored"
+            if size_refusal is not None and not setup_rollback_failed:
+                raise size_refusal from None
+            raise _GuardrailSecretFailure(failure_code) from None
+
+        return transaction
 
     aid = app.cfg.cisco_ai_defense
 
@@ -7786,6 +8034,15 @@ def setup_guardrail(
         if cisco_timeout_ms is not None:
             aid.timeout_ms = cisco_timeout_ms
         gc.port = guard_port or gc.port or 4000
+        if guard_port:
+            from defenseclaw.bootstrap import port_layout_conflict
+
+            if conflict := port_layout_conflict(
+                int(app.cfg.gateway.api_port or 0),
+                gc.port,
+                app.cfg.gateway.port if "openclaw" in app.cfg.active_connectors() else 0,
+            ):
+                raise click.UsageError(conflict)
         if block_message is not None and per_connector_target:
             gc.connectors[target_connector].block_message = block_message
         elif block_message is not None:
@@ -7994,6 +8251,7 @@ def setup_guardrail(
                 ux.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
         secret_collection_failure_code: str | None = None
+        interactive_targets: list[tuple[str, ...]] = []
         if guard_mode or human_approval is not None or hilt_min_severity:
             click.echo("  The prompts below default to the flags you passed; add --yes to skip them.")
         try:
@@ -8004,7 +8262,7 @@ def setup_guardrail(
                 default_mode=guard_mode,
                 human_approval=human_approval,
                 hilt_min_severity=hilt_min_severity,
-                _pre_mutation_selection=preselect_guardrail_targets,
+                _pre_mutation_selection=lambda targets: interactive_targets.append(tuple(targets)),
                 _pending_secrets=pending_guardrail_secrets,
             )
             if not interactive_completed:
@@ -8012,13 +8270,28 @@ def setup_guardrail(
                 restore_precommit_guardrail_selection()
                 click.echo("  Guardrail not enabled. Run again without declining to configure.")
                 return
-            _apply_guardrail_extra_options(
-                gc,
-                rule_pack=rule_pack,
-                connector=explicit_connector,
-                human_approval=human_approval,
-                hilt_min_severity=hilt_min_severity,
-            )
+            # Keep the complete-size decision stable while selection authority
+            # changes and the pending secrets are published.
+            pending_secret_lock_held = bool(pending_guardrail_secrets)
+            dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+            with locked_file_update(dotenv_path) if pending_secret_lock_held else nullcontext():
+                _preflight_pending_guardrail_secret_size(pending_guardrail_secrets, app.cfg.data_dir)
+                for targets in interactive_targets:
+                    preselect_guardrail_targets(targets)
+                _apply_guardrail_extra_options(
+                    gc,
+                    rule_pack=rule_pack,
+                    connector=explicit_connector,
+                    human_approval=human_approval,
+                    hilt_min_severity=hilt_min_severity,
+                )
+                guardrail_secret_transaction = publish_guardrail_secrets(
+                    dotenv_lock_held=pending_secret_lock_held
+                )
+        except _DotenvSizeError as error:
+            _clear_pending_guardrail_secrets(pending_guardrail_secrets)
+            restore_precommit_guardrail_selection()
+            raise _GuardrailSecretFailure("publication-dotenv-size-limit", str(error)) from None
         except click.Abort:
             secret_was_collected = bool(pending_guardrail_secrets)
             _clear_pending_guardrail_secrets(pending_guardrail_secrets)
@@ -8036,8 +8309,11 @@ def setup_guardrail(
             secret_collection_failure_code = (
                 "collection-aborted-rollback-incomplete" if selection_rollback_failed else "collection-aborted-restored"
             )
+        except _GuardrailSecretFailure:
+            raise
         except BaseException:
             if not pending_guardrail_secrets:
+                restore_precommit_guardrail_selection()
                 raise
             _clear_pending_guardrail_secrets(pending_guardrail_secrets)
             selection_rollback_failed = False
@@ -8051,38 +8327,8 @@ def setup_guardrail(
         if secret_collection_failure_code is not None:
             raise _GuardrailSecretFailure(secret_collection_failure_code) from None
 
-    secret_publication_expected = bool(pending_guardrail_secrets)
-    secret_publication_failed = False
-    secret_publication_rollback_incomplete = False
-    try:
-        guardrail_secret_transaction = _publish_pending_guardrail_secrets(
-            pending_guardrail_secrets,
-            app.cfg.data_dir,
-        )
-    except _GuardrailSecretFailure as publication_failure:
-        if not secret_publication_expected:
-            raise
-        secret_publication_rollback_incomplete = publication_failure.code == "publication-failed-rollback-incomplete"
-        secret_publication_failed = True
-    except BaseException:
-        if not secret_publication_expected:
-            raise
-        secret_publication_failed = True
-    if secret_publication_failed:
-        setup_rollback_failed = False
-        try:
-            _restore_setup_config_snapshot(app, setup_snapshot)
-        except BaseException:
-            setup_rollback_failed = True
-        if setup_rollback_failed and secret_publication_rollback_incomplete:
-            failure_code = "publication-failed-setup-and-secret-rollback-incomplete"
-        elif secret_publication_rollback_incomplete:
-            failure_code = "publication-failed-secret-rollback-incomplete"
-        elif setup_rollback_failed:
-            failure_code = "publication-failed-setup-rollback-incomplete"
-        else:
-            failure_code = "publication-failed-setup-restored"
-        raise _GuardrailSecretFailure(failure_code) from None
+    if non_interactive:
+        guardrail_secret_transaction = publish_guardrail_secrets()
 
     if not gc.enabled:
         if guardrail_secret_transaction is not None:
@@ -8403,6 +8649,63 @@ def _windows_runtime_rollback(restart: bool) -> bool:
     return restart and platform_support.host_os() == "windows"
 
 
+def _windows_hook_launcher_setup_refusal(cfg, *, restart: bool, connectors: Iterable[str]) -> str:
+    """Refuse a per-user restart that must publish a native hook launcher."""
+
+    if (
+        not restart
+        or platform_support.host_os() != "windows"
+        or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+        or not any(
+            normalized in _HOOK_ENFORCED_CONNECTORS and normalized not in {"amp", "opencode"}
+            for name in connectors
+            if (normalized := normalize_connector(name))
+        )
+    ):
+        return ""
+    # The per-user gateway registers the installer's stable ~/.local/bin
+    # launcher, even when the gateway executable came from a different PATH.
+    from defenseclaw.gateway import canonical_install_path
+
+    launcher = os.path.join(os.path.dirname(canonical_install_path()), "defenseclaw-hook.exe")
+    try:
+        info = os.lstat(launcher)
+        usable = (
+            stat.S_ISREG(info.st_mode)
+            and info.st_size > 0
+            and not (getattr(info, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT_ATTRIBUTE)
+        )
+        if usable:
+            # Both the installed hook and the stable launcher expose this
+            # bounded identity mode without starting a hook or changing state.
+            probe = subprocess.run(  # noqa: S603 - fixed identity argument and selected installed path.
+                [launcher, "--version-json"],
+                input=b"",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            identity = _json.loads(probe.stdout) if probe.returncode == 0 and len(probe.stdout) <= 4096 else None
+            usable = (
+                isinstance(identity, dict)
+                and type(identity.get("schema_version")) is int
+                and identity["schema_version"] == 1
+                and identity.get("name") in {"defenseclaw-hook", "defenseclaw-hook-launcher"}
+            )
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        usable = False
+    if usable:
+        return ""
+    from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
+
+    return (
+        "The DefenseClaw hook launcher (defenseclaw-hook.exe) is missing or unusable. "
+        f"No changes made; {LAUNCHER_REINSTALL_STEP}."
+    )
+
+
 _SETUP_SELECTION_PROOF_SEAL = object()
 
 
@@ -8457,6 +8760,67 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
 
 
 @dataclass(frozen=True)
+class _OpenClawConfigMark:
+    """What one openclaw.json held before setup, as a digest.
+
+    A failed setup never rewrites openclaw.json: nothing on disk, and nothing a
+    gateway reports, says who wrote the bytes that are there at the end, so any
+    automatic put-back can overwrite a save made by OpenClaw or the operator
+    (GAP-0973). The mark only lets the failure message say whether setup
+    changed the file.
+    """
+
+    path: str
+    digest: str
+
+
+def _openclaw_config_digest(path: str) -> str:
+    """SHA-256 of the file, "missing" when absent, "unreadable" when it cannot be read."""
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unreadable"
+    return digest.hexdigest()
+
+
+def _openclaw_config_marks(config_file: str | None) -> tuple[_OpenClawConfigMark, ...]:
+    """The configured openclaw.json, and the one in the account's OpenClaw home that the registration writes."""
+    paths: list[str] = []
+    for raw in (config_file, os.path.join("~", ".openclaw", "openclaw.json")):
+        if not raw:
+            continue
+        path = os.path.realpath(os.path.expanduser(raw))
+        if os.path.normcase(path) not in {os.path.normcase(known) for known in paths}:
+            paths.append(path)
+    return tuple(_OpenClawConfigMark(path, _openclaw_config_digest(path)) for path in paths)
+
+
+def _with_openclaw_config_marks(snapshot: _SetupConfigSnapshot, config_file: str | None) -> _SetupConfigSnapshot:
+    return replace(snapshot, openclaw_config=_openclaw_config_marks(config_file))
+
+
+# What a failed setup says about an openclaw.json that differs from before setup. Nothing on disk says who
+# wrote those bytes, so the text claims no writer: the file changed during setup and may still hold DefenseClaw
+# entries. The teardown removes them from the OpenClaw home file whatever the rollback left configured (it
+# does not depend on the connector set) and leaves a copy at any other path alone (GAP-0973).
+_OPENCLAW_SETUP_LEFT_FILE_NOTICE = (
+    "{paths} changed during setup and may still contain DefenseClaw entries; run "
+    "`defenseclaw-gateway connector teardown --connector openclaw` to remove them. The command works on "
+    "the OpenClaw home file (~/.openclaw/openclaw.json), keeps everything else in it, and leaves a copy at "
+    "any other path as it is."
+)
+
+
+def _openclaw_config_changed_by_setup(marks: tuple[_OpenClawConfigMark, ...]) -> list[str]:
+    return [mark.path for mark in marks if _openclaw_config_digest(mark.path) != mark.digest]
+
+
+@dataclass(frozen=True)
 class _SetupConfigSnapshot:
     """Exact rollback point for desired config and setup authority receipts."""
 
@@ -8478,6 +8842,7 @@ class _SetupConfigSnapshot:
     hook_contract_lock_generation: tuple[int, int, int, int] | None
     applied_runtime: _SetupAppliedRuntimeEvidence | None
     codex_rollback: _SetupCodexRollbackPoint | None = None
+    openclaw_config: tuple[_OpenClawConfigMark, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -8753,6 +9118,66 @@ class _SetupAppliedRuntimeEvidence:
     registration_locations: tuple[_SetupRegistrationLocationEvidence, ...] = ()
 
 
+class RollbackSourceRefusedError(OSError):
+    """A rollback source DefenseClaw did not write: refused, with the way out.
+
+    The refusal stays: a file another account could change is never read as
+    a rollback point, and DefenseClaw never moves or deletes it for the user.
+    ``str()`` names the file by its label only, like every rollback-source
+    error, because setup commands wrap and record these messages.
+    :meth:`for_user` names the full path for the account's own first run
+    (``defenseclaw init``), so the user knows which file to move
+    (cowork-1-0-8 GAP-0074).
+    """
+
+    def __init__(self, label: str, path: str, problem: str, kind: str, detail: str | None = None) -> None:
+        self.label = label
+        self.path = path
+        self.problem = problem
+        self.kind = kind
+        self.detail = detail
+        self._account: tuple[str, str] | None = None
+        super().__init__(self._render("the file", "run the command again"))
+
+    def _render(self, file: str, rerun: str) -> str:
+        head = f"{self.label} rollback source is {self.problem}: "
+        if self.kind == "shared":
+            chmod = f"chmod 600 {shlex.quote(self.path)}" if file == self.path else "chmod 600"
+            return f"{head}other accounts can read or change {file}; make it owner-only ({chmod}) and {rerun}"
+        return (
+            f"{head}{file} is not protected the way DefenseClaw writes its files. "
+            f"Move it out of the folder, or delete it if you did not create it, then {rerun}"
+        )
+
+    def for_user(self, command: str) -> str:
+        """The message with the full path, for the account that owns the file."""
+        return self._render(self.path, f"run {command} again")
+
+    def writer(self) -> tuple[str, str] | None:
+        """The account that can write the file, as (name for a sentence, icacls argument), on Windows."""
+        if (sid := windows_untrusted_writer_sid(self.detail)) is None:
+            return None
+        if self._account is None:
+            try:
+                from defenseclaw.inventory.claw_inventory import _windows_account_name_for_sid
+
+                name = _windows_account_name_for_sid(sid)
+            except Exception:  # noqa: BLE001 - an unresolved account is named by its SID, which icacls takes after *.
+                name = ""
+            self._account = (name, f'"{name}"') if name else (sid, f"*{sid}")
+        return self._account
+
+    def repair(self, path: str | None = None) -> tuple[str, str]:
+        """The one way out as (sentence, command) for the full path; the command is empty when only a person acts."""
+        shown = path or self.path
+        if (writer := self.writer()) is not None:
+            command = f'icacls "{shown}" /remove:g {writer[1]}'
+            return "Remove that account's access to it, then run the command again:", command
+        if self.kind == "shared":
+            return "Make it owner-only, then run the command again:", f"chmod 600 {shlex.quote(shown)}"
+        return "Move it out of the folder, or delete it if you did not create it, then run the command again.", ""
+
+
 def _capture_protected_setup_file(
     path: str,
     maximum: int,
@@ -8800,12 +9225,12 @@ def _capture_protected_setup_file(
             if acl_error is not None:
                 if skip_if_untrusted:
                     return False, b"", None
-                raise OSError(f"{label} rollback source is not protected")
+                raise RollbackSourceRefusedError(label, path, "not protected", "foreign", acl_error)
         else:
             if not trusted_runtime_owner(info.st_uid):
                 if skip_if_untrusted:
                     return False, b"", None
-                raise OSError(f"{label} rollback source is not owned by a trusted principal")
+                raise RollbackSourceRefusedError(label, path, "not owned by a trusted principal", "foreign")
             extra_bits = stat.S_IMODE(info.st_mode) & 0o077
             if extra_bits:
                 can_repair = (
@@ -8820,10 +9245,7 @@ def _capture_protected_setup_file(
                 if extra_bits:
                     if skip_if_untrusted:
                         return False, b"", None
-                    raise OSError(
-                        f"{label} rollback source is not private; "
-                        "make it owner-only (chmod 600) and run the command again"
-                    )
+                    raise RollbackSourceRefusedError(label, path, "not private", "shared")
         body = bytearray()
         size = 0
         while size <= maximum:
@@ -8869,6 +9291,39 @@ def _setup_runtime_subject(name: object) -> str:
     return f"id-{_setup_runtime_ref(raw)}"
 
 
+class _SetupRuntimeCustodyRefusedError(OSError):
+    """A file read for the rollback point can be changed by another account.
+
+    Not a transient read failure: setup stays refused and nothing is written,
+    and the account gets the file, who can change it and the one repair.
+    ``str()`` names no path, like every recorded rollback-point error;
+    :meth:`reason` and :meth:`next_step` name it for the account's own terminal.
+    """
+
+    def __init__(self, role: str, identity: str, path: str, refusal: RollbackSourceRefusedError) -> None:
+        self.role = role
+        self.path = path
+        self.refusal = refusal
+        refusal.writer()  # resolve the account now, while the capture still sees the host as it was
+        super().__init__(f"{role} evidence {identity[:12]} is not protected")
+
+    def reason(self) -> str:
+        if (writer := self.refusal.writer()) is not None:
+            return f"{self.role} file {self.path} can be changed by {writer[0]}"
+        return f"{self.role} file {self.path} is not protected the way DefenseClaw writes its files"
+
+    def next_step(self) -> str:
+        sentence, command = self.refusal.repair(self.path)
+        return f"Nothing was changed. {sentence}" + (f"\n      {command}" if command else "")
+
+
+def _setup_rollback_point_failure(exc: OSError) -> tuple[str, str]:
+    """The reason and next step to print for a rollback point setup could not take."""
+    if isinstance(exc, _SetupRuntimeCustodyRefusedError):
+        return exc.reason(), exc.next_step()
+    return str(exc), _SETUP_ROLLBACK_POINT_NEXT_STEP
+
+
 def _capture_setup_runtime_location(path: object, role: str) -> tuple[str, str, str]:
     raw = os.fspath(path) if isinstance(path, str | os.PathLike) else ""
     if not raw or not os.path.isabs(raw) or "\x00" in raw:
@@ -8888,6 +9343,10 @@ def _capture_setup_runtime_location(path: object, role: str) -> tuple[str, str, 
             # gateway's custody rule (#1026) applies here as well.
             trust_windows_administrators=True,
         )
+    except RollbackSourceRefusedError as exc:
+        # The refusal stays; the account is told which file and the repair
+        # instead of a bounded-retry reference (rel-1-0-6 GAP-0804).
+        raise _SetupRuntimeCustodyRefusedError(role, identity, os.path.normpath(os.path.abspath(raw)), exc) from None
     except Exception:
         raise OSError(f"{role} evidence {identity[:12]} is unavailable") from None
     if not existed or generation is None:
@@ -9366,6 +9825,7 @@ def _capture_setup_applied_runtime(
     last_error: Exception | None = None
     last_error_site: str | None = None
     last_difference: str | None = None
+    refusal: _SetupRuntimeCustodyRefusedError | None = None
     started = time.monotonic()
     for attempt in range(_SETUP_RUNTIME_SNAPSHOT_ATTEMPTS):
         try:
@@ -9378,7 +9838,12 @@ def _capture_setup_applied_runtime(
             # bounded loop still fails closed without two equal successes.
             last_error = exc
             last_error_site = _setup_runtime_error_site(exc)
+            # A custody refusal is deterministic: when the last attempt ends in
+            # one, it is reported with its file and repair even after an
+            # earlier complete sample.
+            refusal = exc if isinstance(exc, _SetupRuntimeCustodyRefusedError) else None
         else:
+            refusal = None
             if previous == current:
                 return current
             if previous is not None:
@@ -9388,6 +9853,8 @@ def _capture_setup_applied_runtime(
             time.sleep(_SETUP_RUNTIME_SNAPSHOT_RETRY_SECONDS)
     if last_difference is None and isinstance(last_error, _SetupGatewayNoAnswerError):
         raise _SetupGatewayNoAnswerError(last_error.pid, time.monotonic() - started) from None
+    if refusal is not None:
+        raise refusal from None
     if last_difference is not None:
         reference = f"diff={last_difference}"
     elif last_error is not None:
@@ -10829,6 +11296,8 @@ def _rollback_failed_connector_application(
     elif exact_runtime:
         rollback_errors.append("runtime reconciliation was skipped because restored authority was not exact")
 
+    openclaw_files_changed = _openclaw_config_changed_by_setup(snapshot.openclaw_config)
+
     rollback_errors.extend(_verify_restored_codex_root(app.cfg, snapshot))
 
     left_changed: list[str] = []
@@ -10941,6 +11410,9 @@ def _rollback_failed_connector_application(
             f"connector setup did not converge {cause_text}; {outcome}. "
             "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
         )
+    if openclaw_files_changed:
+        left_file_notice = _OPENCLAW_SETUP_LEFT_FILE_NOTICE.format(paths=", ".join(openclaw_files_changed))
+        failure = click.ClickException(f"{failure.format_message()} {left_file_notice}")
     if openclaw_gateway_down:
         failure = click.ClickException(
             f"{failure.format_message()} Note: the OpenClaw gateway is not running; start it with "
@@ -11344,6 +11816,15 @@ def _apply_hook_connector_setup(
     if connector == "opencode":
         _preflight_opencode_plugin_folder()
 
+    desired = (
+        (*app.cfg.active_connectors(), connector)
+        if write_mode == "add" and hasattr(app.cfg, "active_connectors")
+        else (connector,)
+    )
+    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart, connectors=desired):
+        ux.echo(f"  ✗ {refusal}", err=True)
+        return False
+
     if refusal := _agent_settings_refusal(
         app.cfg, connector, workspace_dir=_setup_workspace_for_check(app.cfg, workspace_dir), will_restart=restart
     ):
@@ -11416,9 +11897,9 @@ def _apply_hook_connector_setup(
         return False
     except OSError as exc:
         restore_preflight_discovery()
+        reason, next_step = _setup_rollback_point_failure(exc)
         ux.echo(
-            f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
-            f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",
+            f"  ✗ Cannot establish connector setup rollback point: {reason}\n    {next_step}",
             err=True,
         )
         return False
@@ -11735,6 +12216,7 @@ def _apply_hook_connector_setup(
                     connector=connector,
                     connectors=_guarded_connectors(cfg, _actives),
                     wait_for_connector_ready=True,
+                    notice_connectors=[connector],
                 )
         except Exception as exc:  # noqa: BLE001 — readiness failure triggers transaction rollback.
             with _temporary_codex_setup_marker(None) if connector == "codex" else nullcontext():
@@ -12957,6 +13439,10 @@ def _apply_setup_batch(
     rather than per connector.
     """
     default_mode = "action" if (mode or "").strip().lower() == "action" else "observe"
+    desired = (*app.cfg.active_connectors(), *connectors) if preserve_global_settings else connectors
+    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart, connectors=desired):
+        raise click.ClickException(refusal)
+
     setup_snapshot = _prior_snapshot or _capture_setup_config_snapshot(
         app.cfg,
         capture_runtime=_windows_runtime_rollback(restart),
@@ -13277,6 +13763,10 @@ def _dispatch_bare_setup(
         if not targets:
             ux.echo("  Aborted — no connectors selected.")
             return
+
+    desired = (*app.cfg.active_connectors(), *targets) if add_detected else targets
+    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart, connectors=desired):
+        raise click.ClickException(refusal)
 
     setup_snapshot = _capture_setup_config_snapshot(
         app.cfg,
@@ -13825,7 +14315,7 @@ def _agent_settings_refusal(
     if not executable:
         return ""
     data_dir = str(cfg.data_dir)
-    env = {**os.environ, "DEFENSECLAW_HOME": data_dir}
+    env = {**os.environ, "DEFENSECLAW_HOME": gateway_home_for_data_dir(data_dir)}
     if connector == "codex":
         selected_root = _selected_codex_setup_root()
         env["CODEX_HOME"] = selected_root
@@ -13979,8 +14469,8 @@ def _prune_orphaned_connector_hooks(cfg, connector: str) -> tuple[list[str], str
     if not executable:
         return [], "no verified defenseclaw-gateway executable is installed"
     data_dir = str(cfg.data_dir)
-    # The gateway reads config.yaml of this data directory, not of $HOME.
-    env = {**os.environ, "DEFENSECLAW_HOME": data_dir}
+    # The gateway reads the install-home config.yaml that names this data directory.
+    env = {**os.environ, "DEFENSECLAW_HOME": gateway_home_for_data_dir(data_dir)}
     try:
         result = run_pinned_executable(
             [executable, "connector", "prune-orphans", "--connector", connector, "--data-dir", data_dir, "--json"],
@@ -14289,6 +14779,17 @@ def _remove_connector(
                 "  --no-restart: config updated, but the removed connector's hooks are "
                 "still installed until you restart defenseclaw-gateway."
             )
+
+    if normalize_connector(match) == "claudecode":
+        from defenseclaw import cowork
+
+        # The Cowork plugin runs this connector's hook, which the teardown
+        # retires, and only the user can remove an account plugin. Printed
+        # after the restart: on Windows a failed restart rolls the removal
+        # back, and Cowork is then still protected (cowork audit S5).
+        if os.path.exists(cowork.state_path(str(cfg.data_dir))):
+            click.echo()
+            ux.warn("Cowork is no longer protected; remove the DefenseClaw plugin in Claude (Customize > Plugins)")
 
     remaining_label = ",".join(sorted(remaining)) if remaining else "(none)"
     _log_setup_action(
@@ -14704,6 +15205,9 @@ def _setup_guardrail_connector_alias(
             ux.echo("  Aborted — no changes made.")
             return
 
+    if connector == "openclaw" and restart:
+        _require_openclaw_gateway_before_setup(app)
+
     # Take the rollback point before switching the connector below: a
     # snapshot taken afterwards restores the requested connector in memory
     # and its picked_connector hint, so a failed setup's rollback restarted
@@ -14711,9 +15215,10 @@ def _setup_guardrail_connector_alias(
     try:
         prior_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except OSError as exc:
-        raise click.ClickException(
-            f"cannot establish guardrail setup rollback point: {exc}\n{_SETUP_ROLLBACK_POINT_NEXT_STEP}"
-        ) from exc
+        reason, next_step = _setup_rollback_point_failure(exc)
+        raise click.ClickException(f"cannot establish guardrail setup rollback point: {reason}\n{next_step}") from exc
+    if connector == "openclaw":
+        prior_snapshot = _with_openclaw_config_marks(prior_snapshot, app.cfg.claw.config_file)
     if replaced:
         app.cfg.guardrail.connectors = {}
     if connector == "openclaw":
@@ -14968,15 +15473,19 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
     if not detected or detected == previous:
         return
     data_dir = app.cfg.data_dir
-    stopped = restart and _stop_gateway_before_token_swap(data_dir)
-    if not stopped:
-        # --no-restart: the running gateway keeps the old token (GAP-0464).
-        keep_running_gateway_token(app.logger, data_dir, previous, detected)
+    stopped = False
+
+    def before_publish() -> None:
+        nonlocal stopped
+        stopped = restart and _stop_gateway_before_token_swap(data_dir)
+        if not stopped:
+            # --no-restart: the running gateway keeps the old token (GAP-0464).
+            keep_running_gateway_token(app.logger, data_dir, previous, detected)
+
     keys = ["DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"]
     if gw.token_env and gw.token_env not in keys:
         keys.append(gw.token_env)
-    for key in keys:
-        _save_secret_to_dotenv(key, detected, data_dir)
+    _save_adopted_gateway_token(keys, detected, data_dir, before_publish=before_publish)
     click.echo("  Using the OpenClaw gateway token from openclaw.json for DefenseClaw (the two differed).")
     if stopped:
         ctx = click.get_current_context(silent=True)
@@ -15045,6 +15554,44 @@ def _adopt_openclaw_gateway_port(app: AppContext) -> None:
         return
     click.echo(f"  Using the OpenClaw gateway port from openclaw.json: {port} (was {gw.port}).")
     gw.port = port
+
+
+_OPENCLAW_PRESETUP_WAIT_SECONDS = 30
+
+
+def _require_openclaw_gateway_before_setup(app: AppContext) -> None:
+    """Fail before any write when OpenClaw's own gateway is not running (GAP-0973).
+
+    Setup registers the plugin and then needs OpenClaw's gateway to load it.
+    With that gateway down the run could only fail after openclaw.json carried
+    DefenseClaw's entries, and the rollback restarts DefenseClaw's gateway on
+    the restored configuration, which writes them again when that
+    configuration already names OpenClaw. A stopped gateway that has a service
+    is started here (the restart the setup would do anyway); a gateway that
+    still does not answer leaves every file as it was.
+    """
+    gw = app.cfg.gateway
+    host = gw.host or "127.0.0.1"
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return
+    port = _openclaw_json_gateway_port(app.cfg.claw.config_file) or gw.port
+    if _openclaw_gateway_healthy(host, port):
+        return
+    import time
+
+    _restart_openclaw_gateway()
+    deadline = time.monotonic() + _OPENCLAW_PRESETUP_WAIT_SECONDS
+    while not _openclaw_gateway_healthy(host, port):
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(1)
+    else:
+        return
+    raise click.ClickException(
+        f"The OpenClaw gateway is not running (nothing answers at {host}:{port}). Start it with "
+        "`openclaw gateway run` (or `openclaw gateway restart`), then run the same setup command again. "
+        "No changes made."
+    )
 
 
 def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
@@ -15662,7 +16209,9 @@ def _guardrail_summary_hook_fail_mode(cfg, connector: str) -> str:
     if not (gc.enabled and gc.effective_enabled(connector)):
         return "disabled (no hooks)"
     if normalize_connector(connector) in PROXY_CONNECTORS:
-        return "closed (proxy-backed, no hooks: blocked while the gateway is down)"
+        from defenseclaw.fail_mode import proxy_model_outage_mode, proxy_outage_summary
+
+        return proxy_outage_summary(proxy_model_outage_mode(cfg, connector))
     mode = gc.effective_hook_outage_fail_mode(connector)
     entry = (gc.connectors or {}).get(connector)
     saved = bool(entry is not None and str(entry.hook_fail_mode or "").strip()) or bool(
@@ -16330,12 +16879,17 @@ def _gateway_runtime_generation_before_restart(data_dir: str) -> _GatewayRuntime
 
 def _preflight_opencode_plugin_folder() -> None:
     """Reject an unsafe OpenCode plugin folder before setup writes config."""
-    from defenseclaw.connector_paths import connector_config_files, opencode_writable_plugin_folder
+    from defenseclaw.connector_paths import (
+        connector_config_files,
+        opencode_custody_text,
+        opencode_unsafe_plugin_paths,
+    )
 
-    if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):
+    if unsafe := opencode_unsafe_plugin_paths(connector_config_files("opencode")[:1]):
+        advice = opencode_custody_text(unsafe)
+        kind = "folder" if os.path.isdir(unsafe[0]) else "file"
         raise click.ClickException(
-            f"OpenCode plugin folder {loose} is group/other writable; "
-            f"run `chmod go-w {shlex.quote(loose)}` and retry setup. No changes made."
+            f"OpenCode plugin {kind} {advice.named} {advice.why}; {advice.action} and retry setup. No changes made."
         )
 
 
@@ -16351,6 +16905,7 @@ def _restart_services(
     summary_exclude: frozenset[str] = frozenset(),
     teardown: bool = False,
     required_connectors: frozenset[str] = frozenset(),
+    notice_connectors: list[str] | None = None,
 ) -> None:
     """Restart defenseclaw-gateway and, when OpenClaw is the selected
     connector, restart the OpenClaw gateway too so it picks up the
@@ -16377,7 +16932,9 @@ def _restart_services(
     ``summary_exclude`` names connectors left out of the closing roster line
     because they stay disabled (GAP-1809); the restart itself is unchanged.
     ``teardown`` marks a ``guardrail disable`` restart: the closing line says
-    the hooks were removed instead of announcing enforcement (GAP-1985)."""
+    the hooks were removed instead of announcing enforcement (GAP-1985).
+    ``notice_connectors`` limits restore notices to connectors selected by
+    this setup; a global setup reports notices for every active connector."""
     ux.section(title)
     ctx = click.get_current_context(silent=True)
     if ctx is not None:
@@ -16385,6 +16942,9 @@ def _restart_services(
 
     # Names of services whose restart failed; non-empty ⇒ fail the command.
     failed: list[str] = []
+    # OpenClaw restart failed but its gateway answers (GAP-0744); the note that
+    # the config is kept is printed at the end, only if nothing else failed.
+    kept_note_pending = False
 
     hook_targets = sorted(
         {
@@ -16437,8 +16997,13 @@ def _restart_services(
         # wait, so that wait sees the plugin the restarted server loads.
         from defenseclaw import opencode_service
 
+        opencode_binary = opencode_service.account_binary(data_dir)
+        if not teardown:
+            # Its default port is shared by every account on a computer
+            # (GAP-0053); set before the restart so the server moves now.
+            opencode_service.report_port(opencode_service.ensure_account_port())
         opencode_service.report(
-            opencode_service.restart_if_running(opencode_service.account_binary(data_dir)),
+            opencode_service.restart_if_running(opencode_binary),
             what="runs the plugin as it is now",
         )
 
@@ -16516,9 +17081,25 @@ def _restart_services(
     # time, also when the step did not wait for the connector runtime (a
     # `setup hermes` run said nothing then, GAP-0333).
     if hook_targets and not teardown:
-        agent_config_notice.wait_for_put_back(data_dir, hook_targets)
-        for note in agent_config_notice.put_back_notes(data_dir, hook_targets):
+        # A connector setup restarts the shared gateway, but its result is
+        # about the selected connector. A peer's earlier restore notice is
+        # reported when that peer is set up (or by a global setup).
+        notice_targets = (
+            sorted({normalize_connector(name) for name in notice_connectors} & set(hook_targets))
+            if notice_connectors is not None
+            else hook_targets
+        )
+        agent_config_notice.wait_for_put_back(data_dir, notice_targets)
+        for note in agent_config_notice.put_back_notes(data_dir, notice_targets):
             ux.warn(note)
+        if notice_connectors is not None and "hermes" in notice_targets:
+            # Hook entries a Hermes setup kept: the gateway words this in its own log, which this command does
+            # not show. A global change that bounces the gateway does not repeat it.
+            from defenseclaw.doctor_hooks import hermes_kept_hook_note
+
+            kept_note = hermes_kept_hook_note(data_dir, connector_paths.hermes_config_path())
+            if kept_note:
+                ux.warn(kept_note)
 
     # Multi-connector global change: every active hook connector is affected
     # by the gateway bounce, so enumerate them rather than naming the primary.
@@ -16565,10 +17146,17 @@ def _restart_services(
         return
 
     if connector == "openclaw":
-        if not _restart_openclaw_gateway():
+        # GAP-0744: whether OpenClaw is running is decided by the health probe
+        # that follows, not by the exit status of `openclaw gateway restart`.
+        # That command needs a service manager (launchd GUI domain, systemd
+        # --user, a Windows service) and fails on an account that has none
+        # while the gateway, run in a terminal, keeps answering. Only a gateway
+        # that does not answer fails the step (and rolls the setup back).
+        restart_ok = _restart_openclaw_gateway()
+        if not _check_openclaw_gateway(oc_host, oc_port):
             failed.append("openclaw-gateway")
-        if not _check_openclaw_gateway(oc_host, oc_port) and "openclaw-gateway" not in failed:
-            failed.append("openclaw-gateway")
+        elif not restart_ok:
+            kept_note_pending = True
     elif connector in _PROXY_BACKED_CONNECTORS:
         # OpenClaw is the only proxy-backed connector that owns its own
         # gateway process; others (ZeptoClaw today) get the proxy
@@ -16600,6 +17188,24 @@ def _restart_services(
             )
 
     click.echo()
+    if kept_note_pending and not failed:
+        # Said only when nothing else failed: with a failed defenseclaw-gateway
+        # restart the setup rolls back, and the config is not kept.
+        # A rollback restart runs on the restored configuration: the attempted
+        # new one is not kept there.
+        outcome = (
+            "the previous configuration stays in place"
+            if title == _ROLLBACK_RESTART_TITLE
+            else "the new configuration is kept"
+        )
+        click.echo(
+            "  OpenClaw could not restart its gateway through a service manager here, but the "
+            f"gateway answers at {oc_host}:{oc_port}, so {outcome}."
+        )
+        click.echo(
+            "    OpenClaw reloads openclaw.json on its own; if it does not load the DefenseClaw "
+            "plugin, restart the gateway where it runs (for example `openclaw gateway run` in its terminal)."
+        )
     _fail_if_restart_failed(failed)
 
 
@@ -16989,7 +17595,7 @@ _GATEWAY_REASON_MAX_CHARS = 1200
 
 
 def _bounded_gateway_reason(reason: str) -> str:
-    reason = " ".join(reason.split())
+    reason = single_line(reason)
     if len(reason) > _GATEWAY_REASON_MAX_CHARS:
         reason = reason[:_GATEWAY_REASON_MAX_CHARS] + " ... (gateway.log has the rest)"
     return reason
@@ -17018,8 +17624,9 @@ def _agent_not_on_path_hint(connector: str) -> str:
     )
 
 
-def _connector_not_started_detail(connector: str, reason: str) -> str:
-    detail = f"the gateway did not start it: {_bounded_gateway_reason(reason)}"
+def _connector_not_started_detail(connector: str, reason: str, repair: str = "") -> str:
+    # The repair arrives apart from the reason and is shown as recorded (GAP-0731).
+    detail = f"the gateway did not start it: {_bounded_gateway_reason(reason)}{repair}"
     if missing := _agent_not_on_path_hint(connector):
         detail = f"{missing}; {detail}"
     return detail
@@ -17263,10 +17870,15 @@ def _wait_for_connector_runtime(
     last_failure = _ConnectorRuntimeReadiness(False, invariant="snapshot", detail="runtime files are not ready")
     agent_settings_refused: dict[str, str] = {}
     not_started_reasons: dict[str, str] = {}
-    from defenseclaw.commands.cmd_status import _connectors_not_started_reasons, _connectors_refused_by_agent_settings
+    not_started_repairs: dict[str, str] = {}
+    from defenseclaw.commands.cmd_status import (
+        _connectors_not_started_reasons,
+        _connectors_not_started_repairs,
+        _connectors_refused_by_agent_settings,
+    )
 
     def gateway_ready(deadline: float) -> tuple[bool, str | None, _ConnectorRuntimeReadiness]:
-        nonlocal gateway_generation, agent_settings_refused, not_started_reasons
+        nonlocal gateway_generation, agent_settings_refused, not_started_reasons, not_started_repairs
         if not require_gateway_health and gateway_generation is None:
             return True, gateway_generation, _ConnectorRuntimeReadiness(True)
         remaining = deadline - time.monotonic()
@@ -17308,6 +17920,7 @@ def _wait_for_connector_runtime(
         guardrail = health.get("guardrail")
         agent_settings_refused = _connectors_refused_by_agent_settings(health)
         not_started_reasons = _connectors_not_started_reasons(health)
+        not_started_repairs = _connectors_not_started_repairs(health)
         state = guardrail.get("state") if isinstance(guardrail, dict) else None
         if isinstance(state, str) and state.strip().lower() in {"error", "stopped"}:
             detail = f"restarted gateway guardrail is {state.strip().lower()}"
@@ -17468,7 +18081,8 @@ def _wait_for_connector_runtime(
         if not_started:
             name = not_started[0]
             return _ConnectorRuntimeReadiness(
-                False, name, "not-started", _connector_not_started_detail(name, not_started_reasons[name])
+                False, name, "not-started",
+                _connector_not_started_detail(name, not_started_reasons[name], not_started_repairs.get(name, "")),
             )
         if settings_refused:
             for name in sorted(settings_refused):
@@ -17515,9 +18129,10 @@ def _wait_for_connector_runtime(
                         ux.warn(f"skipping {name}: {_lock_contract_failure_detail(name, None, 'roster')}")
                     else:
                         reason = not_started_reasons.get(name)
+                        repair = not_started_repairs.get(name, "")
                         ux.warn(
                             f"skipping {name}: the restarted gateway did not activate it "
-                            + (f"({_connector_not_started_detail(name, reason)})" if reason
+                            + (f"({_connector_not_started_detail(name, reason, repair)})" if reason
                                else "(gateway.log names the reason)")
                             + ", so it is not guarded now"
                         )
@@ -17554,10 +18169,10 @@ def _wait_for_connector_runtime(
                     tolerated=tolerated,
                 )
             if snapshot_ready:
-                # The Windows native setup launcher publishes the complete roster
-                # before this sequential passive-Doctor pass. Do not make that
-                # roster share the residual publication no-progress window; the
-                # existing count-aware absolute deadline is its transaction bound.
+                # On Windows the complete roster is published before this
+                # sequential passive-Doctor pass. Do not make that roster share
+                # the residual publication no-progress window; the existing
+                # count-aware absolute deadline is its transaction bound.
                 # Preserve the established non-Windows timing contract in this
                 # Windows-parity change.
                 deadline = (
@@ -17637,7 +18252,7 @@ def _restart_openclaw_gateway() -> bool:
     effect.
 
     Returns True when the restart succeeded, False on any failure
-    (missing CLI, timeout, or non-zero exit). Avarice F-0143: this used
+    (missing or unrunnable CLI, timeout, or non-zero exit). Avarice F-0143: this used
     to swallow every failure and return ``None`` so the caller could not
     tell the OpenClaw gateway never came back — setup then reported
     success while traffic kept flowing past a down (fail-open) gateway."""
@@ -17646,7 +18261,10 @@ def _restart_openclaw_gateway() -> bool:
         result = subprocess.run(
             ["openclaw", "gateway", "restart"],
             capture_output=True,
-            text=True,
+            # Output is only shown to the operator: bytes that do not decode
+            # must not turn into an exception that skips the health probe.
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
         output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
@@ -17667,8 +18285,9 @@ def _restart_openclaw_gateway() -> bool:
             # the gateway answers, and it reloads openclaw.json on its own.
             click.echo(" - (no OpenClaw gateway service to restart)")
             click.echo(
-                "    If OpenClaw runs in a terminal (openclaw gateway run), restart it there if it does not "
-                "load the DefenseClaw plugin."
+                "    Restart required: a gateway that was already running in a terminal (openclaw gateway run) "
+                "must be stopped and started again there so it loads the DefenseClaw plugin at startup; "
+                "do not rely on its config hot reload."
             )
             return True
         if result.returncode == 0:
@@ -17686,10 +18305,18 @@ def _restart_openclaw_gateway() -> bool:
         return False
     except subprocess.TimeoutExpired:
         # OpenClaw owns this lifecycle and exposes no DefenseClaw pid/data-dir
-        # state that we can safely reconcile here.  A timeout is therefore a
-        # fail-closed restart failure; the native DefenseClaw gateway helper
-        # below performs its own identity-aware timeout reconciliation.
+        # state that we can safely reconcile here.  A timeout is reported as a
+        # failed restart; the caller then decides from the gateway health probe
+        # (GAP-0744), and the native DefenseClaw gateway helper below performs
+        # its own identity-aware timeout reconciliation.
         ux.echo(" ✗ (timed out)")
+        return False
+    except OSError as exc:
+        # Any other failure to start the command (not executable, wrong
+        # executable format, no permission) is a failed restart like a missing
+        # CLI; the caller decides from the health probe (GAP-0744).
+        ux.echo(f" ✗ (could not run the openclaw CLI: {exc.strerror or type(exc).__name__})")
+        click.echo("    Fix the openclaw CLI or restart its gateway manually.")
         return False
 
 
@@ -17714,6 +18341,16 @@ def _gateway_lifecycle_executable(
     native: bool = False,
     search_path: str | None = None,
 ) -> str | None:
+    """Return the selected gateway only when its executable custody is trusted."""
+    candidate = _gateway_lifecycle_candidate(native=native, search_path=search_path)
+    return _trusted_gateway_lifecycle_executable(candidate) if candidate else None
+
+
+def _gateway_lifecycle_candidate(
+    *,
+    native: bool = False,
+    search_path: str | None = None,
+) -> str | None:
     """Resolve one stable executable for a complete gateway lifecycle call.
 
     A packaged Windows CLI must use the gateway beside its verified embedded
@@ -17726,6 +18363,7 @@ def _gateway_lifecycle_executable(
 
     from defenseclaw.gateway import (
         GATEWAY_BIN_NAME,
+        _launcher_sibling_gateway,
         canonical_install_path,
         packaged_windows_gateway_path,
         packaged_windows_install_root,
@@ -17734,7 +18372,8 @@ def _gateway_lifecycle_executable(
     if packaged_windows_install_root():
         # A corroborated package with a missing sibling is broken; fail closed
         # instead of allowing PATH/current-directory executable shadowing.
-        return packaged_windows_gateway_path()
+        packaged = packaged_windows_gateway_path()
+        return str(Path(packaged).resolve()) if packaged else None
     raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
     current_directory = os.path.normcase(os.path.realpath(os.curdir))
     search_directories: list[str] = []
@@ -17751,20 +18390,24 @@ def _gateway_lifecycle_executable(
             continue
         seen_directories.add(normalized_directory)
         search_directories.append(absolute_directory)
-    sanitized_search_path = os.pathsep.join(search_directories)
     # Lifecycle mutations deliberately ignore DEFENSECLAW_GATEWAY_BIN. The
     # config loader accepts credential names from .env, so an attacker who
     # could previously write that file could otherwise plant an executable
     # override and have Doctor run it after merely tightening permissions.
-    executable = shutil.which(GATEWAY_BIN_NAME, path=sanitized_search_path)
-    if executable:
-        # Older Python runtimes on Windows can prepend the current directory
-        # even when an explicit PATH is supplied. Accept only a concrete result
-        # whose parent was one of the sanitized search directories.
-        executable_parent = os.path.normcase(os.path.abspath(os.path.dirname(executable)))
-        allowed_parents = {os.path.normcase(directory) for directory in search_directories}
-        if not os.path.isabs(executable) or executable_parent not in allowed_parents:
-            executable = None
+    # This install's own gateway comes before PATH: a DefenseClaw Setup 0.8.x
+    # folder listed first would otherwise run the lifecycle call (GAP-0100).
+    own_gateway = _launcher_sibling_gateway() if search_path is None else None
+    # Look in each folder by its full name. A bare name with path= makes
+    # shutil.which search the current directory first on Windows, so a stray
+    # gateway there (a build left in the checkout) hid the one on the search path.
+    executable = own_gateway or next(
+        (
+            found
+            for directory in search_directories
+            if (found := shutil.which(os.path.join(directory, GATEWAY_BIN_NAME))) and os.path.isabs(found)
+        ),
+        None,
+    )
     if not executable:
         canonical = canonical_install_path()
         if os.path.isfile(canonical) and os.access(canonical, os.X_OK):
@@ -17774,79 +18417,63 @@ def _gateway_lifecycle_executable(
     resolved = Path(executable).expanduser().resolve()
     if native and os.name == "nt" and resolved.suffix.lower() != ".exe":
         return None
-    return _trusted_gateway_lifecycle_executable(str(resolved))
+    return str(resolved)
+
+
+def _gateway_lifecycle_resolution(
+    *,
+    native: bool = False,
+    search_path: str | None = None,
+) -> tuple[str | None, str]:
+    """Select once and retain the custody result for a lifecycle message."""
+    candidate = _gateway_lifecycle_candidate(native=native, search_path=search_path)
+    return _trusted_gateway_lifecycle_resolution(candidate) if candidate else (None, "")
 
 
 def _trusted_gateway_lifecycle_executable(executable: str) -> str | None:
     """Return a custody-checked concrete executable for lifecycle mutation."""
+    return _trusted_gateway_lifecycle_resolution(executable)[0]
+
+
+def _trusted_gateway_lifecycle_resolution(executable: str) -> tuple[str | None, str]:
+    """Return the trusted path or the reason the selected path was refused."""
     if not executable or not os.path.isabs(executable):
-        return None
+        return None, ""
     resolved = str(Path(executable).resolve())
-    if os.name != "nt":
-        from defenseclaw.file_permissions import trusted_posix_executable_path
-
-        try:
-            return trusted_posix_executable_path(resolved)
-        except OSError:
-            return None
-
-    from defenseclaw.file_permissions import windows_acl_write_error
-    from defenseclaw.gateway import packaged_windows_gateway_path
-
-    packaged = packaged_windows_gateway_path()
-    if packaged:
-        try:
-            if os.path.samefile(resolved, packaged):
-                return resolved
-        except OSError:
-            pass
-    for candidate in (resolved, os.path.dirname(resolved)):
-        if windows_acl_write_error(candidate, trust_administrators=True) is not None:
-            return None
-    return resolved
-
-
-def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
-    """Name an installed gateway the lifecycle custody check refused, or "".
-
-    The lifecycle reported such a binary as "binary not found" with a build
-    hint, although the gateway was installed and only its ACL or mode was
-    refused.
-    """
-    from defenseclaw.gateway import GATEWAY_BIN_NAME, canonical_install_path, packaged_windows_install_root
-
-    if os.name == "nt" and packaged_windows_install_root():
-        return ""
-    raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
-    found = shutil.which(GATEWAY_BIN_NAME, path=raw_search_path)
-    if (not found or not os.path.isabs(found)) and os.name == "nt":
-        # The per-user installer's folder, which the lifecycle also falls
-        # back to.
-        canonical = canonical_install_path()
-        found = canonical if os.path.isfile(canonical) else ""
-    if not found or not os.path.isabs(found):
-        return ""
-    found = str(Path(found).resolve())
     if os.name != "nt":
         from defenseclaw.file_permissions import UnsafePathError, trusted_posix_executable_path, unsafe_gateway_remedy
 
         try:
-            trusted_posix_executable_path(found)
+            return trusted_posix_executable_path(resolved), ""
         except UnsafePathError as exc:
-            return f"refusing to run {found}: {unsafe_gateway_remedy(exc)}"
-        return ""
-    from defenseclaw.file_permissions import windows_acl_write_error
+            return None, f"refusing to run {resolved}: {unsafe_gateway_remedy(exc)}"
+        except OSError:
+            return None, ""
 
-    for candidate in (found, os.path.dirname(found)):
-        problem = windows_acl_write_error(candidate, trust_administrators=True)
+    custody_problem = _windows_gateway_lifecycle_custody_problem(resolved)
+    if custody_problem is not None:
+        candidate, problem = custody_problem
+        return None, (
+            f"refusing to run {resolved}: {candidate}: {problem}. Restore ownership and write access "
+            "to this account or a trusted Windows system controller (SYSTEM, BUILTIN Administrators, "
+            "TrustedInstaller), then retry. For an installed gateway, rerun the DefenseClaw installer "
+            "to restore its permissions"
+        )
+    return resolved, ""
+
+
+def _windows_gateway_lifecycle_custody_problem(executable: str) -> tuple[str, str] | None:
+    """Check the executable and its folder against the shared Windows custody set."""
+    for candidate in (executable, os.path.dirname(executable)):
+        problem = windows_acl_custody_write_error(candidate, allow_current_user=True)
         if problem is not None:
-            return (
-                f"refusing to run {found}: {candidate}: {problem}; only this account, SYSTEM and "
-                "Administrators may write the gateway and its folder. Run the DefenseClaw installer "
-                "again, which restricts "
-                "the folder, or remove the other accounts' write access"
-            )
-    return ""
+            return candidate, problem
+    return None
+
+
+def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
+    """Name the custody reason for the gateway selected by the lifecycle."""
+    return _gateway_lifecycle_resolution(search_path=search_path)[1]
 
 
 # A lifecycle command's own 30 s progress lines go to its captured output, so
@@ -18457,6 +19084,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
                     wait_for_connector_ready=True,
                     start_if_stopped=True,
                     required_connectors=frozenset(focus),
+                    notice_connectors=focus,
                 )
             for connector, audit_mode in batch_audits:
                 _log_setup_action(
@@ -21140,7 +21768,7 @@ def _drop_secret_ref_gateway_tokens_at(dotenv_path: str) -> str:
                 continue
             kept.append(line)
         if removed:
-            atomic_write_private_bytes(dotenv_path, b"".join(kept))
+            atomic_write_private_bytes(dotenv_path, serialize_dotenv(kept, snapshot.body))
     return _SECRET_REF_TOKEN_DROPPED if removed else ""
 
 
@@ -21162,6 +21790,36 @@ def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:
             ((key, value),),
         )
     os.environ[key] = value
+
+
+def _save_adopted_gateway_token(
+    keys: list[str], token: str, data_dir: str, *, before_publish: Callable[[], None] | None = None
+) -> None:
+    """Copy *token*, adopted from openclaw.json, under every name in *keys*.
+
+    The new .env is built whole in memory with the adopted-token marker and
+    published once, so a failure leaves neither name changed. A later edit of one
+    gateway-token spelling then wins over the copy under the other (GAP-0847); see
+    ``defenseclaw.gateway_token_adoption``.
+    """
+    dotenv_path = os.path.join(data_dir, ".env")
+    with locked_file_update(dotenv_path):
+        snapshot = _rotate_token_snapshot_locked(dotenv_path)
+        rendered = snapshot
+        for key in keys:
+            rendered = _RotateTokenDotenvSnapshot(
+                existed=True,
+                body=_dotenv_upsert_render(rendered, key, token),
+                mode=rendered.mode,
+            )
+        body = gateway_token_adoption.with_adopted_marker(rendered.body, token)
+        _check_dotenv_size(dotenv_path, body)
+        if before_publish is not None:
+            before_publish()
+        if not snapshot.existed or body != snapshot.body:
+            _publish_dotenv_locked(dotenv_path, body)
+    for key in keys:
+        os.environ[key] = token
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,9 @@ package connector
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -103,9 +106,11 @@ func newImpostorListener(t *testing.T, recorder *listenerProofRecorder) *httptes
 }
 
 const openCodeListenerProofHarness = `
+import { unlink } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 const loaded = await import(pathToFileURL(process.argv[1]).href);
 const plugin = await fixtureBridge(loaded, { directory: "" });
+if (process.argv[2]) await unlink(process.argv[2]);
 try {
   await plugin["tool.execute.before"](
     { tool: "Bash", sessionID: "S", messageID: "M", callID: "C" },
@@ -160,11 +165,23 @@ func runListenerProofPlugin(t *testing.T, asset, addr, tokenPath string, proof b
 		FailMode:        "closed",
 		Managed:         true,
 	}
+	args := []string{}
+	if name == "opencode-plugin.mjs" {
+		// Setup skips the diagnostic load heartbeat while the lifecycle marker
+		// exists. The harness removes it before the tool call, so the listener
+		// must prove that call independently of load-time scheduling.
+		marker := filepath.Join(testenv.PrivateTempDir(t), "lifecycle-marker")
+		if err := os.WriteFile(marker, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		data.LifecycleMarkerJS = javaScriptStringContent(marker)
+		args = append(args, marker)
+	}
 	path := filepath.Join(testenv.PrivateTempDir(t), name)
 	if err := os.WriteFile(path, []byte(renderPluginAssetForTest(t, asset, data)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return strings.Join(runNodeHarness(t, harness, path), "\n")
+	return strings.Join(runNodeHarness(t, harness, append([]string{path}, args...)...), "\n")
 }
 
 // A Windows standalone plugin reaches the gateway over loopback TCP. A local
@@ -202,12 +219,8 @@ func TestPluginListenerProofKeepsTheCredentialFromAnImpostor(t *testing.T) {
 				t.Fatalf("impostor listener: verdict %q, want a fail-closed block", verdict)
 			}
 			requests := impostorSeen.snapshot()
-			wantChallenges := 1
-			if tc.connector == "opencode" {
-				wantChallenges = 2 // V2 setup heartbeat, then the tool probe.
-			}
-			if len(requests) != wantChallenges {
-				t.Fatalf("impostor proof requests = %d, want %d", len(requests), wantChallenges)
+			if len(requests) != 1 {
+				t.Fatalf("impostor tool proof requests = %d, want 1", len(requests))
 			}
 			for _, request := range requests {
 				if request.path != UserScopedListenerProofPath || request.method != http.MethodGet ||
@@ -226,6 +239,42 @@ func TestPluginListenerProofKeepsTheCredentialFromAnImpostor(t *testing.T) {
 			}
 
 		})
+	}
+}
+
+func TestOpenCodeListenerProofAllowsProvenListener(t *testing.T) {
+	nodeForTest(t)
+	key := strings.Repeat("a", 64)
+	credential, err := UserScopedHookAPIToken(key, "opencode", "S-1-5-21-1111-2222-3333-1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := testenv.PrivateTempDir(t)
+	tokenPath := filepath.Join(root, ".hook-opencode.token")
+	if err := os.WriteFile(tokenPath, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder := &listenerProofRecorder{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		recorder.record(req)
+		if req.URL.Path == UserScopedListenerProofPath {
+			proof := hmac.New(sha256.New, []byte(credential))
+			_, _ = proof.Write([]byte("defenseclaw.listener-proof.v1\x00opencode\x00" + req.Header.Get("X-DefenseClaw-Listener-Nonce")))
+			w.Header().Set(UserScopedListenerProofHeader, hex.EncodeToString(proof.Sum(nil)))
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_, _ = io.WriteString(w, `{"action":"allow","hook_output":{"decision":"allow"}}`)
+	}))
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "http://")
+	if verdict := runListenerProofPlugin(t, "opencode-plugin.js", addr, tokenPath, true); verdict != "allow" {
+		t.Fatalf("proven listener verdict = %q, want allow", verdict)
+	}
+	requests := recorder.snapshot()
+	if len(requests) != 2 || requests[0].path != UserScopedListenerProofPath || requests[0].authorization != "" ||
+		requests[1].path != "/api/v1/opencode/hook" || requests[1].authorization != "Bearer "+credential {
+		t.Fatalf("proven listener request sequence invalid: count=%d", len(requests))
 	}
 }
 

@@ -131,7 +131,7 @@ func TestReconcileEnterpriseHookUserCleanupsForSignedOutUsers(t *testing.T) {
 		t.Helper()
 		attempts = nil
 		var log bytes.Buffer
-		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, attempt, now); err != nil {
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, nil, attempt, now); err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
 		now = now.Add(time.Minute)
@@ -189,7 +189,7 @@ func TestReconcileEnterpriseHookUserCleanupsForSignedOutUsers(t *testing.T) {
 		}
 		var log bytes.Buffer
 		now := time.Now()
-		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, attempt, now); err != nil {
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, nil, attempt, now); err != nil {
 			t.Fatalf("first reconcile: %v", err)
 		}
 		pending, err := loadEnterpriseHookUserCleanups(dataDir)
@@ -207,7 +207,7 @@ func TestReconcileEnterpriseHookUserCleanupsForSignedOutUsers(t *testing.T) {
 		path := enterpriseHookUserCleanupPath(dataDir)
 		before, _ := os.ReadFile(path)
 		log.Reset()
-		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, attempt, now.Add(time.Minute)); err != nil {
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, nil, attempt, now.Add(time.Minute)); err != nil {
 			t.Fatalf("second reconcile: %v", err)
 		}
 		after, _ := os.ReadFile(path)
@@ -216,7 +216,7 @@ func TestReconcileEnterpriseHookUserCleanupsForSignedOutUsers(t *testing.T) {
 		}
 
 		signedIn = true
-		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, attempt, now.Add(2*time.Minute)); err != nil {
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, nil, attempt, now.Add(2*time.Minute)); err != nil {
 			t.Fatalf("sign-in reconcile: %v", err)
 		}
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
@@ -326,5 +326,132 @@ func TestLoadEnterpriseHookUserCleanupsRejectsIncompleteEntries(t *testing.T) {
 		if _, err := loadEnterpriseHookUserCleanups(dataDir); err == nil {
 			t.Fatalf("accepted ledger %s", body)
 		}
+	}
+}
+
+// GAP-0964: the cleanups found in the accounts' own folders run like the ones
+// planned from the protected rows: an account the guardian never recorded as
+// protected is cleaned, an entry for a connector the manifest still admits for
+// the account is not, one entry is attempted once however often it is listed,
+// and a failure is recorded and retried like any other.
+func TestReconcileEnterpriseHookUserCleanupsRunsDiscoveredEntries(t *testing.T) {
+	dataDir := useUserCleanupStateDir(t)
+	homeA, homeB := filepath.Join(t.TempDir(), "alice"), filepath.Join(t.TempDir(), "bob")
+	writeUserCleanupAuthorization(t, dataDir) // no protected row for anyone
+	discovered := []enterpriseHookUserCleanup{
+		{Connector: "cursor", SID: userCleanupSIDA, UserHome: homeA, RecordedAt: "2026-11-09T09:00:00Z"},
+		{Connector: "cursor", SID: userCleanupSIDA, UserHome: homeA, RecordedAt: "2026-11-09T09:00:01Z"},
+		{Connector: "cursor", SID: userCleanupSIDB, UserHome: homeB, RecordedAt: "2026-11-09T09:00:00Z"},
+	}
+	manifest := userCleanupManifest([2]string{"cursor", userCleanupSIDB})
+	var attempts []string
+	outcome := enterpriseHookUserCleanupFailed
+	attempt := func(_ context.Context, entry enterpriseHookUserCleanup) (enterpriseHookUserCleanupOutcome, error) {
+		attempts = append(attempts, enterpriseHookUserCleanupLabel(entry))
+		if outcome == enterpriseHookUserCleanupFailed {
+			return outcome, errors.New("a file is held")
+		}
+		return outcome, nil
+	}
+	now := time.Now()
+	run := func(offset time.Duration, found []enterpriseHookUserCleanup) {
+		t.Helper()
+		attempts = nil
+		var log bytes.Buffer
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, found, nil, attempt, now.Add(offset)); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+
+	run(0, discovered)
+	if strings.Join(attempts, ",") != "cursor/"+userCleanupSIDA {
+		t.Fatalf("attempts = %v, want the one account the manifest does not admit, once", attempts)
+	}
+	pending, err := loadEnterpriseHookUserCleanups(dataDir)
+	if err != nil || len(pending) != 1 || pending[0].SID != userCleanupSIDA || pending[0].LastError == "" || pending[0].Attempts != 1 {
+		t.Fatalf("a failed cleanup was not recorded for retry: %+v %v", pending, err)
+	}
+
+	// Inside the retry interval nothing runs again; after it the recorded
+	// entry runs although nothing is discovered any more (the files may be half
+	// gone), and its success ends the record.
+	run(time.Minute, discovered)
+	if len(attempts) != 0 {
+		t.Fatalf("a failed entry was retried inside the interval: %v", attempts)
+	}
+	outcome = enterpriseHookUserCleanupDone
+	run(enterpriseHookUserCleanupRetryInterval+time.Minute, nil)
+	if strings.Join(attempts, ",") != "cursor/"+userCleanupSIDA {
+		t.Fatalf("recorded entry not retried: %v", attempts)
+	}
+	if _, err := os.Lstat(enterpriseHookUserCleanupPath(dataDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("completed cleanup ledger remains: %v", err)
+	}
+}
+
+// GAP-0964 S-G1/S-G2: an entry held because the connector is published again
+// is carried while the account may still be admitted, ends after the
+// guardian has waited the bounded number of passes, and the count starts again
+// when the manifest admits the account or the hold goes.
+func TestReconcileEnterpriseHookUserCleanupsDropsAHeldEntryAfterTheBoundedPasses(t *testing.T) {
+	dataDir := useUserCleanupStateDir(t)
+	home := filepath.Join(t.TempDir(), "alice")
+	writeUserCleanupAuthorization(t, dataDir)
+	discovered := []enterpriseHookUserCleanup{{Connector: "cursor", SID: userCleanupSIDA, UserHome: home, RecordedAt: "2026-11-09T09:00:00Z"}}
+	key := enterpriseHookUserCleanupKey("cursor", userCleanupSIDA)
+	t.Cleanup(func() { resetEnterpriseHookUserCleanupHeldPasses(key) })
+	resetEnterpriseHookUserCleanupHeldPasses(key)
+	attempts := 0
+	attempt := func(context.Context, enterpriseHookUserCleanup) (enterpriseHookUserCleanupOutcome, error) {
+		attempts++
+		return enterpriseHookUserCleanupDone, nil
+	}
+	holding := true
+	hold := func(string, string) bool { return holding }
+	now := time.Now()
+	var log bytes.Buffer
+	run := func(found []enterpriseHookUserCleanup, manifest enterprisehooks.Manifest) []enterpriseHookUserCleanup {
+		t.Helper()
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, found, hold, attempt, now); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Minute)
+		pending, err := loadEnterpriseHookUserCleanups(dataDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pending
+	}
+	for pass := 1; pass < enterpriseHookUserCleanupHeldMaxPasses; pass++ {
+		if pending := run(discovered, enterprisehooks.Manifest{Version: 1}); len(pending) != 1 || attempts != 0 {
+			t.Fatalf("pass %d: pending=%+v attempts=%d, want the entry held and not run", pass, pending, attempts)
+		}
+		discovered = nil // the ledger carries it from here
+	}
+	if pending := run(nil, enterprisehooks.Manifest{Version: 1}); len(pending) != 0 || attempts != 0 {
+		t.Fatalf("after %d held passes: pending=%+v attempts=%d, want the entry dropped, nothing removed", enterpriseHookUserCleanupHeldMaxPasses, pending, attempts)
+	}
+	if !strings.Contains(log.String(), "dropped the held cleanup cursor/"+userCleanupSIDA) {
+		t.Fatalf("the drop was not logged: %q", log.String())
+	}
+
+	// A manifest row ends the wait and starts the count again.
+	log.Reset()
+	discovered = []enterpriseHookUserCleanup{{Connector: "cursor", SID: userCleanupSIDA, UserHome: home, RecordedAt: "2026-11-09T09:00:00Z"}}
+	for pass := 1; pass < enterpriseHookUserCleanupHeldMaxPasses; pass++ {
+		run(discovered, enterprisehooks.Manifest{Version: 1})
+		discovered = nil
+	}
+	admitted := userCleanupManifest([2]string{"cursor", userCleanupSIDA})
+	if pending := run(nil, admitted); len(pending) != 1 {
+		t.Fatalf("an admitted account's entry was dropped: %+v", pending)
+	}
+	if pending := run(nil, enterprisehooks.Manifest{Version: 1}); len(pending) != 1 {
+		t.Fatalf("the count did not start again after the manifest admitted the account: %+v", pending)
+	}
+	// Without the hold the entry runs.
+	holding = false
+	if pending := run(nil, enterprisehooks.Manifest{Version: 1}); len(pending) != 0 || attempts != 1 {
+		t.Fatalf("hold gone: pending=%+v attempts=%d, want the entry run once", pending, attempts)
 	}
 }

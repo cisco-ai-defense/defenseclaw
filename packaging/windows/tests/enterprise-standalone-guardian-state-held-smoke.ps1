@@ -1,0 +1,363 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+#Requires -Version 5.1
+
+# GAP-0977: a program that holds one of the hook guardian's state files open
+# without delete sharing keeps the guardian from publishing, so the fresh
+# coverage the transaction waits for can never come. The standalone profile
+# finds the holder before anything is stopped (guardian_state_held, retryable,
+# nothing changed), a rollback that meets it leaves the file as it is and
+# defers the guardian's coverage proof (so the restored services start), and
+# Secure Client sees nothing of it. Same account, one process, scratch folders.
+
+[CmdletBinding()]
+param([string]$ScratchRoot = [IO.Path]::GetTempPath())
+
+Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$module = Microsoft.PowerShell.Core\Import-Module `
+    -Name ([IO.Path]::GetFullPath((Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1'))) `
+    -Force -PassThru -ErrorAction Stop
+$scratch = [IO.Path]::Combine($ScratchRoot, ('dc-guardian-held-' + [Guid]::NewGuid().ToString('N')))
+[void][IO.Directory]::CreateDirectory($scratch)
+
+try {
+    & $module {
+        param($Scratch)
+        $authorization = [IO.Path]::Combine($Scratch, 'hook-guardian-state')
+        $runtime = [IO.Path]::Combine($Scratch, 'runtime')
+        $enumerator = [IO.Path]::Combine($Scratch, 'hook-guardian')
+        $markers = [IO.Path]::Combine($Scratch, 'hook-runtime')
+        foreach ($directory in @($authorization, $runtime, $enumerator, $markers)) { [void][IO.Directory]::CreateDirectory($directory) }
+        $layout = @{
+            AuthorizationDirectory = $authorization
+            RuntimeDirectory       = $runtime
+            ManifestPath           = [IO.Path]::Combine($enumerator, 'targets.yaml')
+            GuardianLogPath        = [IO.Path]::Combine($Scratch, 'guardian.log')
+        }
+        $class = @(
+            [IO.Path]::Combine($authorization, 'protected_targets.json'),
+            [IO.Path]::Combine($authorization, 'activation.json'),
+            [IO.Path]::Combine($authorization, 'user-cleanup.json'),
+            [IO.Path]::Combine($runtime, 'hook_guardian_state.json')
+        )
+        # Published too, but a hold on them did not stop a repair, or a standard
+        # account can open them: not gated.
+        $notGated = @(
+            [IO.Path]::Combine($authorization, 'removed-connectors.json'),
+            [IO.Path]::Combine($authorization, 'unprotected-agents.json'),
+            [IO.Path]::Combine($runtime, 'hook_guardian_startup.json'),
+            [IO.Path]::Combine($runtime, 'hook_guardian_notices.json'),
+            [IO.Path]::Combine($runtime, 'hook_guardian_restores.json'),
+            [IO.Path]::Combine($enumerator, 'targets.yaml'),
+            [IO.Path]::Combine($enumerator, 'unprotected-agents.json'),
+            [IO.Path]::Combine($enumerator, '.enrollment-groups.json'),
+            [IO.Path]::Combine($markers, '.defenseclaw-connector-off-roster-claudecode')
+        )
+        foreach ($path in @($class + $notGated)) { [IO.File]::WriteAllText($path, '{}') }
+        # Held open on purpose, and not the guardian: audit data in the runtime folder.
+        [IO.File]::WriteAllText([IO.Path]::Combine($enumerator, 'opencode-service-ports.lock'), 'x')
+        [IO.File]::WriteAllText([IO.Path]::Combine($runtime, 'audit.db'), 'x')
+        # What the guardian publishes is for administrators; the scratch folder
+        # inherits the profile access list, so make it so. Only SYSTEM and
+        # Administrators (the smoke runs elevated): no named user, or the files
+        # would not be gated (N2).
+        foreach ($path in @($class + $notGated)) {
+            & icacls.exe $path /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+        }
+
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            $listed = @(Get-DefenseClawGuardianStateFiles -Layout $layout | Microsoft.PowerShell.Core\ForEach-Object { [IO.Path]::GetFileName($_) } | Microsoft.PowerShell.Utility\Sort-Object)
+            $expected = @($class | Microsoft.PowerShell.Core\ForEach-Object { [IO.Path]::GetFileName($_) } | Microsoft.PowerShell.Utility\Sort-Object)
+            if (($listed -join '|') -ne ($expected -join '|')) {
+                throw "the class is '$($listed -join ', ')', want '$($expected -join ', ')'"
+            }
+            if ($null -ne (Get-DefenseClawGuardianStateHold -Layout $layout -Probes 2)) { throw 'nothing is held but a hold was reported' }
+
+            foreach ($path in $class) {
+                $name = [IO.Path]::GetFileName($path)
+                # A reader that shares delete is not a hold.
+                $sharing = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                try { if ($null -ne (Get-DefenseClawGuardianStateHold -Layout $layout -Probes 2)) { throw "a reader that shares delete counted as a hold on $name" } }
+                finally { $sharing.Dispose() }
+                # A holder that does not share delete is.
+                $holder = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                try {
+                    $held = Get-DefenseClawGuardianStateHold -Layout $layout -Probes 2
+                    if ($held -ne $path) { throw "a Read holder on $name was reported as '$held'" }
+                    # The pre-stop gate refuses with the stable code first, retryably, naming the file.
+                    $gate = ''
+                    try { Assert-DefenseClawGuardianStateNotHeld -Layout $layout -TimeoutSeconds 1 } catch { $gate = $_.Exception.Message }
+                    if (-not $gate.StartsWith('guardian_state_held: ') -or -not $gate.Contains($path) -or -not $gate.Contains('changed nothing')) {
+                        throw "the gate on $name said '$gate'"
+                    }
+                    if (-not (Test-DefenseClawRollbackHeldMessage -Message $gate)) { throw 'the held code is not a rollback-held message' }
+                    # A rollback defers the guardian proof and ends held, pending.
+                    Clear-DefenseClawRollbackDeferredHolds
+                    Set-DefenseClawRollbackGuardianStateDeferral -Layout $layout
+                    if (-not (Test-DefenseClawRollbackCoverageDeferred)) { throw "a rollback on $name did not defer the guardian proof" }
+                    $ended = ''
+                    try { Assert-DefenseClawRollbackHoldsResolved } catch { $ended = $_.Exception.Message }
+                    if (-not $ended.StartsWith('guardian_state_held: ') -or -not $ended.Contains($path) -or -not $ended.Contains('still pending')) {
+                        throw "the rollback on $name ended '$ended'"
+                    }
+                    if (Test-DefenseClawRollbackCoverageDeferred) { throw 'the deferral outlived the rollback' }
+                }
+                finally { $holder.Dispose() }
+                $gate = ''
+                try { Assert-DefenseClawGuardianStateNotHeld -Layout $layout -TimeoutSeconds 1 } catch { $gate = $_.Exception.Message }
+                if ($gate -ne '') { throw "the gate refused after $name was released: $gate" }
+                Clear-DefenseClawRollbackDeferredHolds
+                Set-DefenseClawRollbackGuardianStateDeferral -Layout $layout
+                if (Test-DefenseClawRollbackCoverageDeferred) { throw "a rollback deferred with nothing held (after $name)" }
+            }
+            # A published file that is not critical is not gated, held or not.
+            foreach ($path in $notGated) {
+                $other = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                try { if ($null -ne (Get-DefenseClawGuardianStateHold -Layout $layout -Probes 2)) { throw "a hold on the non-critical $([IO.Path]::GetFileName($path)) was gated" } }
+                finally { $other.Dispose() }
+            }
+            # N2: a critical file a standard account can read is not gated either:
+            # that account could hold it and block every ensure and repair.
+            $ledger = $class[0]
+            & icacls.exe $ledger /grant '*S-1-5-32-545:R' | Out-Null
+            $reader = [IO.FileStream]::new($ledger, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            try {
+                if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -contains $ledger) { throw 'a user-readable ledger stayed in the class' }
+                if ($null -ne (Get-DefenseClawGuardianStateHold -Layout $layout -Probes 2)) { throw 'a user-readable file held by a reader was reported as a hold' }
+                $gate = ''
+                try { Assert-DefenseClawGuardianStateNotHeld -Layout $layout -TimeoutSeconds 1 } catch { $gate = $_.Exception.Message }
+                if ($gate -ne '') { throw "the gate refused over a user-readable file: $gate" }
+            }
+            finally { $reader.Dispose(); & icacls.exe $ledger /remove:g '*S-1-5-32-545' | Out-Null }
+            # N2 tighten: any access for any other principal, not only read: a
+            # write-only Users entry, and a user SID named directly.
+            $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $openers = [ordered]@{ 'a write-only Users entry' = '*S-1-5-32-545:W' }
+            if ($currentUser -ne 'S-1-5-18') { $openers['a named user SID'] = "*${currentUser}:R" }
+            foreach ($label in $openers.Keys) {
+                $grant = $openers[$label]
+                & icacls.exe $ledger /grant $grant | Out-Null
+                try {
+                    if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -contains $ledger) { throw "$label stayed in the class" }
+                }
+                finally { & icacls.exe $ledger /remove:g ($grant -replace ':.*$', '') | Out-Null }
+                if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -notcontains $ledger) { throw "the ledger stayed out of the class after $label was removed" }
+            }
+            # GAP-0989: an inherit-only Users entry applies to what a folder holds, not to
+            # the file that carries it, so it does not make the file openable; the same
+            # entry without the flag does. Access lists are built in memory.
+            $sddlRows = [ordered]@{
+                'SYSTEM and Administrators only'                = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)', $false)
+                'an inherit-only Users entry'                   = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICIIO;GR;;;BU)', $false)
+                'an inherit-only Users entry on objects'        = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OIIO;GR;;;BU)', $false)
+                'a Users entry on the file itself'              = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;BU)', $true)
+                'a Users entry inherited by the file'           = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICI;GR;;;BU)', $true)
+                'an inherit-only Users entry and Everyone'      = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICIIO;GR;;;BU)(A;;GR;;;WD)', $true)
+            }
+            foreach ($label in $sddlRows.Keys) {
+                $memory = [Security.AccessControl.FileSecurity]::new()
+                $memory.SetSecurityDescriptorSddlForm($sddlRows[$label][0])
+                $openable = [bool](Test-DefenseClawGuardianStateFileUserOpenable -AccessControl $memory)
+                if ($openable -ne $sddlRows[$label][1]) { throw "$label : openable=$openable, want $($sddlRows[$label][1])" }
+            }
+            # S-I1: a hold that fails after it stopped the guardian starts it again
+            # and puts its start mode back; the services a held run left Running
+            # are Running at the end. The service calls are replaced in the module.
+            Add-Type -AssemblyName System.ServiceProcess
+            $replaced = @('Test-DefenseClawServiceExists', 'Get-DefenseClawServiceStartMode', 'Get-DefenseClawServiceDelayedAutoStart', 'Set-DefenseClawServiceDelayedAutoStart', 'Get-DefenseClawServiceChecked', 'Set-DefenseClawServiceStartMode', 'Stop-DefenseClawService', 'Start-DefenseClawService', 'Install-DefenseClawFileAtomic')
+            $original = @{}
+            foreach ($name in $replaced) { $original[$name] = (Get-Item -LiteralPath "function:$name").ScriptBlock }
+            $transaction = [IO.Path]::Combine($scratch, 'txn')
+            [void][IO.Directory]::CreateDirectory($transaction)
+            $guardPath = [IO.Path]::Combine($transaction, 'early-hook-closed.exe')
+            [IO.File]::WriteAllText($guardPath, 'closed hook guard')
+            $guardSha = (Get-FileHash -LiteralPath $guardPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $holdLayout = @{ HookPath = [IO.Path]::Combine($scratch, 'defenseclaw-hook.exe') }
+            $script:SmokeServiceCalls = [Collections.Generic.List[string]]::new()
+            $script:SmokeInstallFails = $true
+            $script:SmokeStartFails = $false
+            $script:SmokeModeRestoreFails = $false
+            $script:SmokeDelayedFails = $false
+            $script:SmokeInstallError = $null
+            # GAP-0989: the guardian's delayed-auto flag. SmokeDelayed is the flag the
+            # mocked service holds; SmokeModeClearsDelayed models a mode change that
+            # takes the flag with it (the real service answers natively, in the lane).
+            $script:SmokeDelayed = $false
+            $script:SmokeModeClearsDelayed = $false
+            try {
+                Set-Item -LiteralPath 'function:script:Test-DefenseClawServiceExists' -Value { $true }
+                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceStartMode' -Value { 2 }
+                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceChecked' -Value { [pscustomobject]@{ Status = [ServiceProcess.ServiceControllerStatus]::Running } }
+                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeDelayed }
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeServiceCalls.Add("delayed $($args[3])"); if ($script:SmokeDelayedFails) { throw 'delayed refused' }; $script:SmokeDelayed = [bool]$args[3] }
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceStartMode' -Value { $script:SmokeServiceCalls.Add("mode $($args[3])"); if ($script:SmokeModeRestoreFails -and $args[3] -eq 2) { throw 'mode refused' }; if ($script:SmokeModeClearsDelayed) { $script:SmokeDelayed = $false } }
+                Set-Item -LiteralPath 'function:script:Stop-DefenseClawService' -Value { $script:SmokeServiceCalls.Add('stop') }
+                Set-Item -LiteralPath 'function:script:Start-DefenseClawService' -Value { if ($script:SmokeStartFails) { throw 'start refused' }; $script:SmokeServiceCalls.Add('start') }
+                Set-Item -LiteralPath 'function:script:Install-DefenseClawFileAtomic' -Value { if ($script:SmokeInstallFails) { if ($null -ne $script:SmokeInstallError) { throw $script:SmokeInstallError }; throw 'injected failure after the stop' }; Copy-Item -LiteralPath $guardPath -Destination $holdLayout.HookPath -Force }
+                $hold = { param($Failure) Hold-DefenseClawEarlyHookGuard -Layout $holdLayout -TransactionDirectory $transaction -GuardCopy $guardPath -GuardSHA256 $guardSha -GuardianServiceName 'DcSmokeGuardian' }
+                $caught = ''
+                try { [void](& $hold) } catch { $caught = $_.Exception.Message }
+                if ($caught -ne 'injected failure after the stop') { throw "the failed hold said '$caught'" }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|start') { throw "a failed hold left '$($script:SmokeServiceCalls -join '|')', want the guardian stopped, then its start mode and start restored" }
+                # GAP-0989: a delayed-auto guardian comes back delayed-auto, whether the mode
+                # change took the flag with it (it is set again) or left it (no extra call), and
+                # a plain automatic guardian is not made delayed.
+                $script:SmokeServiceCalls.Clear(); $script:SmokeDelayed = $true; $script:SmokeModeClearsDelayed = $true; $caught = ''
+                try { [void](& $hold) } catch { $caught = $_.Exception.Message }
+                if ($caught -ne 'injected failure after the stop') { throw "the delayed-auto hold said '$caught'" }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|delayed True|start') { throw "a failed hold of a delayed-auto guardian left '$($script:SmokeServiceCalls -join '|')', want the mode, then the delayed flag, then start" }
+                if (-not $script:SmokeDelayed) { throw 'the delayed-auto guardian came back plain automatic' }
+                $script:SmokeServiceCalls.Clear(); $script:SmokeDelayed = $true; $script:SmokeModeClearsDelayed = $false; $caught = ''
+                try { [void](& $hold) } catch { $caught = $_.Exception.Message }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|start') { throw "a failed hold that kept the delayed flag left '$($script:SmokeServiceCalls -join '|')'" }
+                $script:SmokeServiceCalls.Clear(); $script:SmokeDelayed = $false; $script:SmokeModeClearsDelayed = $false; $caught = ''
+                try { [void](& $hold) } catch { $caught = $_.Exception.Message }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|start' -or $script:SmokeDelayed) { throw "a failed hold of a plain automatic guardian left '$($script:SmokeServiceCalls -join '|')' delayed=$($script:SmokeDelayed)" }
+                # S1/S2: a delayed flag that cannot be put back is cosmetic (the guardian is started,
+                # the original error is the failure, no restart note); a start mode that cannot be
+                # put back is named and the guardian is still started again.
+                $script:SmokeServiceCalls.Clear(); $script:SmokeDelayed = $true; $script:SmokeModeClearsDelayed = $true; $script:SmokeDelayedFails = $true; $typed = $null
+                try { [void](& $hold) } catch { $typed = $_.Exception }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|delayed True|start' -or $typed.Message -ne 'injected failure after the stop' -or $typed.Data.Contains('DefenseClaw.GuardianRestartFailure')) { throw "a refused delayed flag left '$($script:SmokeServiceCalls -join '|')' message '$($typed.Message)'" }
+                $script:SmokeDelayedFails = $false
+                $script:SmokeServiceCalls.Clear(); $script:SmokeModeRestoreFails = $true; $typed = $null
+                try { [void](& $hold) } catch { $typed = $_.Exception }
+                $note = [string]$typed.Data['DefenseClaw.GuardianRestartFailure']
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|start' -or -not $note.Contains('start mode could not be put back') -or $note.Contains('could not be started again') -or $typed.Message -ne 'injected failure after the stop') { throw "a refused start mode left '$($script:SmokeServiceCalls -join '|')' note '$note'" }
+                $script:SmokeModeRestoreFails = $false; $script:SmokeModeClearsDelayed = $false; $script:SmokeDelayed = $false
+                # The guardian cannot be started again: the failure says so, with the first cause.
+                $script:SmokeServiceCalls.Clear()
+                $script:SmokeServiceCalls.Clear(); $script:SmokeStartFails = $true; $caught = ''
+                try { [void](& $hold) } catch { $caught = $_.Exception.Message }
+                # GAP-0989: the original error is what is rethrown (same message, same type, so a
+                # message-prefix code still matches); the restart failure rides on its Data.
+                $script:SmokeInstallError = [IO.IOException]::new('guardian_state_held: x has y open without delete sharing')
+                $typed = $null
+                try { [void](& $hold) } catch { $typed = $_.Exception }
+                if ($null -eq $typed -or $typed -isnot [IO.IOException] -or -not [object]::ReferenceEquals($typed, $script:SmokeInstallError)) { throw "the failed restart did not rethrow the original typed exception: '$typed'" }
+                if (-not $typed.Message.StartsWith('guardian_state_held: ') -or $typed.Message.Contains('could not be started again')) { throw "the rethrown message was changed: '$($typed.Message)'" }
+                $note = [string]$typed.Data['DefenseClaw.GuardianRestartFailure']
+                if (-not $note.Contains('could not be started again') -or -not $note.Contains('start refused')) { throw "the restart failure was not attached: '$note'" }
+                $script:SmokeInstallError = $null
+                # A hold that works leaves the guardian stopped for the rollback that follows.
+                $script:SmokeServiceCalls.Clear(); $script:SmokeStartFails = $false; $script:SmokeInstallFails = $false
+                if ((& $hold) -ne $guardSha) { throw 'a working hold did not return the guard digest' }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop') { throw "a working hold left '$($script:SmokeServiceCalls -join '|')'" }
+            }
+            finally { foreach ($name in $replaced) { Set-Item -LiteralPath "function:script:$name" -Value $original[$name] } }
+            # GAP-0989: the transaction journal carries the delayed-start flag beside
+            # start_mode, so a recovery in a later process brings back delayed-auto.
+            # An older journal has no field (not delayed); a malformed one is refused;
+            # Secure Client restores the plain mode only. Service calls are replaced.
+            $replacedJournal = @('Set-DefenseClawServiceStartMode', 'Get-DefenseClawServiceDelayedAutoStart', 'Set-DefenseClawServiceDelayedAutoStart', 'Test-DefenseClawLayoutBrokerEnabled')
+            $originalJournal = @{}
+            foreach ($name in $replacedJournal) { $originalJournal[$name] = (Get-Item -LiteralPath "function:$name").ScriptBlock }
+            $script:SmokeJCalls = [Collections.Generic.List[string]]::new()
+            $script:SmokeJDelayed = @{}
+            try {
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceStartMode' -Value { $script:SmokeJCalls.Add("mode $($args[1]) $($args[3])"); $script:SmokeJDelayed[[string]$args[1]] = $false }
+                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceDelayedAutoStart' -Value { [bool]$script:SmokeJDelayed[[string]$args[1]] }
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeJCalls.Add("delayed $($args[1]) $($args[3])"); $script:SmokeJDelayed[[string]$args[1]] = [bool]$args[3] }
+                $gwName = 'DefenseClawGateway'; $gdName = 'DefenseClawHookGuardian'
+                $journal = {
+                    param($GuardianRecord, $GatewayRecord)
+                    $states = Get-DefenseClawTransactionServiceStates -Services @($GatewayRecord, $GuardianRecord) -GatewayServiceName $gwName -GuardianServiceName $gdName
+                    $script:SmokeJCalls.Clear()
+                    Restore-DefenseClawTransactionServiceStartModes -Services @($GatewayRecord, $GuardianRecord) -GatewayServiceName $gwName -GuardianServiceName $gdName
+                    ,@($states, ($script:SmokeJCalls -join '|'))
+                }
+                $gateway = [pscustomobject]@{ name = $gwName; existed = $true; running = $true; start_mode = 2; account = 'LocalSystem' }
+                $delayedGuardian = [pscustomobject]@{ name = $gdName; existed = $true; running = $true; start_mode = 2; account = 'LocalSystem'; delayed_auto_start = $true }
+                $plainGuardian = [pscustomobject]@{ name = $gdName; existed = $true; running = $true; start_mode = 2; account = 'LocalSystem'; delayed_auto_start = $false }
+                $oldGuardian = [pscustomobject]@{ name = $gdName; existed = $true; running = $true; start_mode = 2; account = 'LocalSystem' }
+                $result = & $journal $delayedGuardian $gateway
+                if (-not [bool]$result[0][$gdName].delayed_auto_start -or [bool]$result[0][$gwName].delayed_auto_start) { throw 'the journal flag was not read per service' }
+                if ($result[1] -ne "mode $gdName 2|delayed $gdName True|mode $gwName 2") { throw "a delayed-auto guardian journal restored '$($result[1])'" }
+                $result = & $journal $plainGuardian $gateway
+                if ($result[1] -ne "mode $gdName 2|mode $gwName 2") { throw "a plain automatic journal restored '$($result[1])'" }
+                # An older journal (no delayed_auto_start field): not delayed, as before.
+                $result = & $journal $oldGuardian $gateway
+                if ([bool]$result[0][$gdName].delayed_auto_start -or $result[1] -ne "mode $gdName 2|mode $gwName 2") { throw "a journal without the field restored '$($result[1])'" }
+                foreach ($bad in @(
+                    @{ Label = 'a non-boolean flag'; Record = [pscustomobject]@{ name = $gdName; existed = $true; running = $true; start_mode = 2; delayed_auto_start = 'yes' } },
+                    @{ Label = 'a delayed flag on a demand-start service'; Record = [pscustomobject]@{ name = $gdName; existed = $true; running = $true; start_mode = 3; delayed_auto_start = $true } }
+                )) {
+                    $refused = ''
+                    try { [void](Get-DefenseClawTransactionServiceStates -Services @($gateway, $bad.Record) -GatewayServiceName $gwName -GuardianServiceName $gdName) } catch { $refused = $_.Exception.Message }
+                    if ($refused -eq '') { throw "$($bad.Label) was accepted" }
+                }
+                # S2: a flag that cannot be set back never aborts a recovery (the modes are all restored).
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeJCalls.Add("delayed $($args[1]) $($args[3])"); throw 'delayed refused' }
+                $aborted = ''
+                try { $result = & $journal $delayedGuardian $gateway } catch { $aborted = $_.Exception.Message }
+                if ($aborted -ne '' -or $result[1] -ne "mode $gdName 2|delayed $gdName True|mode $gwName 2") { throw "a refused delayed flag aborted the recovery or skipped a mode: '$aborted' '$($result[1])'" }
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeJCalls.Add("delayed $($args[1]) $($args[3])"); $script:SmokeJDelayed[[string]$args[1]] = [bool]$args[3] }
+                # S3: the forward promotion of a completed install, upgrade or repair is plain
+                # automatic from a delayed start and from a plain one, and never sets the flag.
+                $script:SmokeBroker = $false
+                Set-Item -LiteralPath 'function:script:Test-DefenseClawLayoutBrokerEnabled' -Value { $script:SmokeBroker }
+                $promotionLayout = @{ BrokerServiceName = 'DefenseClawCMIDBroker'; SensorHelperServiceName = 'DefenseClawSensorHelper' }
+                $enName = 'DefenseClawHookEnumerator'
+                foreach ($row in @(@{ Label = 'delayed'; Delayed = $true; Broker = $false }, @{ Label = 'plain'; Delayed = $false; Broker = $false }, @{ Label = 'delayed with a broker'; Delayed = $true; Broker = $true })) {
+                    $script:SmokeBroker = $row.Broker
+                    $script:SmokeJCalls.Clear(); $script:SmokeJDelayed[$gdName] = $row.Delayed; $script:SmokeJDelayed[$gwName] = $row.Delayed
+                    Set-DefenseClawVerifiedServiceBootPolicy -Layout $promotionLayout -GatewayServiceName $gwName -GuardianServiceName $gdName -EnumeratorServiceName $enName
+                    $brokerCall = if ($row.Broker) { 'mode DefenseClawCMIDBroker 2|' } else { '' }
+                    $want = "mode $gdName 2|${brokerCall}mode DefenseClawSensorHelper 2|mode $gwName 2|mode $enName 2"
+                    if (($script:SmokeJCalls -join '|') -ne $want) { throw "the $($row.Label) promotion made '$($script:SmokeJCalls -join '|')', want '$want'" }
+                    if ($script:SmokeJDelayed[$gdName] -or $script:SmokeJDelayed[$gwName]) { throw "the $($row.Label) promotion left a delayed start" }
+                }
+                # Secure Client: the plain mode only, the flag is never read or set.
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+                try { $result = & $journal $delayedGuardian $gateway }
+                finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone }
+                if ($result[1] -ne "mode $gdName 2|mode $gwName 2") { throw "Secure Client restored '$($result[1])'" }
+            }
+            finally { foreach ($name in $replacedJournal) { Set-Item -LiteralPath "function:script:$name" -Value $originalJournal[$name] } }
+            # S-H3: a holder that arrives during the rollback proof (after the check
+            # before it) is resolved: the proof is deferred and the run continues.
+            $late = [IO.FileStream]::new($class[1], [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            try {
+                Clear-DefenseClawRollbackDeferredHolds
+                $failure = $null
+                try { throw ('guardian_state_held: x has ' + $class[1] + ' open without delete sharing, so the hook guardian could not publish fresh required coverage') } catch { $failure = $_ }
+                # The service name does not exist: the best-effort start fails and is logged, as on a guardian that does not stay up.
+                if (-not (Resolve-DefenseClawRollbackLateGuardianHold -Layout $layout -Failure $failure -GuardianServiceName 'DcSmokeNoSuchGuardian')) { throw 'a late holder was not resolved' }
+                if (-not (Test-DefenseClawRollbackCoverageDeferred)) { throw 'the late holder did not defer the proof' }
+                $ended = ''
+                try { Assert-DefenseClawRollbackHoldsResolved } catch { $ended = $_.Exception.Message }
+                if (-not $ended.StartsWith('guardian_state_held: ') -or -not $ended.Contains($class[1])) { throw "the late holder ended '$ended'" }
+                # Another failure is not resolved, and neither is a holder that has gone.
+                $other = $null
+                try { throw 'some other failure' } catch { $other = $_ }
+                if (Resolve-DefenseClawRollbackLateGuardianHold -Layout $layout -Failure $other -GuardianServiceName 'DcSmokeNoSuchGuardian') { throw 'another failure was resolved as a late holder' }
+            }
+            finally { $late.Dispose() }
+            Clear-DefenseClawRollbackDeferredHolds
+            if (Resolve-DefenseClawRollbackLateGuardianHold -Layout $layout -Failure $failure -GuardianServiceName 'DcSmokeNoSuchGuardian') { throw 'a holder that has gone was resolved' }
+            # Files outside the class do not count; a lock the enumerator holds on purpose neither.
+            $auditHold = [IO.FileStream]::new([IO.Path]::Combine($runtime, 'audit.db'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+            $lockHold = [IO.FileStream]::new([IO.Path]::Combine($enumerator, 'opencode-service-ports.lock'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+            try { if ($null -ne (Get-DefenseClawGuardianStateHold -Layout $layout -Probes 2)) { throw 'a file outside the class, or a lock, counted as a hold' } }
+            finally { $auditHold.Dispose(); $lockHold.Dispose() }
+        }
+        finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient }
+
+        # Secure Client: no hold is looked for, nothing is deferred.
+        $secureHolder = [IO.FileStream]::new($class[0], [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            if ($null -ne (Get-DefenseClawGuardianStateHold -Layout $layout -Probes 2)) { throw 'Secure Client looked for a guardian state hold' }
+            Clear-DefenseClawRollbackDeferredHolds
+            Set-DefenseClawRollbackGuardianStateDeferral -Layout $layout
+            if ((Test-DefenseClawRollbackCoverageDeferred) -or $script:DefenseClawRollbackDeferredHolds.Count -ne 0) { throw 'Secure Client deferred over a guardian state hold' }
+        }
+        finally { $secureHolder.Dispose() }
+    } $scratch
+    'enterprise-standalone-guardian-state-held-smoke: OK'
+}
+finally {
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+}

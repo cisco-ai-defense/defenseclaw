@@ -209,7 +209,7 @@ func TestRescanAdmitsAllowPinnedMCPServerWhoseScanFailed(t *testing.T) {
 	if issues, _ := ReadAdmissionIssues(cfg.DataDir); len(issues) != 0 {
 		t.Fatalf("issues after the pinned server was admitted: %+v", issues)
 	}
-	if entry, err := store.GetActionForConnector("mcp", MCPJournalName(server), "codex"); err != nil || (entry != nil && !entry.Actions.IsEmpty()) {
+	if entry, err := store.GetActionForConnector(MCPJournalType(server), MCPJournalName(server), "codex"); err != nil || (entry != nil && !entry.Actions.IsEmpty()) {
 		t.Fatalf("journal %+v (err %v), want the scan failure block released", entry, err)
 	}
 	newRows := strings.Join(rows()[rowsBefore:], "\n")
@@ -486,6 +486,7 @@ func (s *asUserRefusalScanner) Scan(context.Context, string) (*scanner.ScanResul
 // the project folder never stands in for the refused cwd.
 func TestAsUserServerWithARefusedFolderIsBlockedNotAllowed(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.RulePack = "strict"
 	server := config.MCPServerEntry{Name: "notes", Command: "npx", Args: []string{"-y", "."}, CWD: "server",
 		Project: `C:\Users\dcw-std1\proj`, Connector: "claudecode", Home: `C:\Users\dcw-std1`, RunAsSID: "S-1-5-21-1-2-3-1001"}
 	rows := auditRows(t, logger)
@@ -501,7 +502,7 @@ func TestAsUserServerWithARefusedFolderIsBlockedNotAllowed(t *testing.T) {
 	if issues, _ := ReadAdmissionIssues(cfg.DataDir); len(issues) != 1 || issues[0].Kind != AdmissionUnscanned {
 		t.Fatalf("issues: %+v, want the server not scanned", issues)
 	}
-	entry, err := store.GetActionForConnector("mcp", MCPJournalName(server), "claudecode")
+	entry, err := store.GetActionForConnector(MCPJournalType(server), MCPJournalName(server), "claudecode")
 	if err != nil || entry == nil || entry.Actions.Install != "block" {
 		t.Fatalf("journal %+v (err %v), want an install block", entry, err)
 	}

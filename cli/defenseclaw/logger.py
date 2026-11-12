@@ -269,31 +269,41 @@ def _running_gateway_address(data_dir: str) -> tuple[str, int] | None:
     return None
 
 
-def _running_gateway_record(data_dir: str, name: str) -> dict | None:
-    """A runtime descriptor is evidence of a live PID, never saved configuration."""
+def _running_gateway_record(data_dir: str, name: str, *, expected_pid: int | None = None) -> dict | None:
+    """Read a private runtime descriptor bound to a live, known PID.
+
+    Ordinary callers obtain that PID from ``gateway.pid``. Status may supply
+    an independently verified listener PID for a foreground gateway that has
+    no daemon PID file.
+    """
     if not data_dir:
         return None
     from defenseclaw.file_permissions import (
         darwin_acl_confidentiality_error,
         read_regular_file_no_follow,
+        trusted_runtime_owner,
         windows_acl_custody_confidentiality_error,
     )
     from defenseclaw.process_liveness import pid_alive, read_pid_file
 
-    pid = read_pid_file(_gateway_pid_path(data_dir))
-    if pid is None or not pid_alive(pid):
+    pid = read_pid_file(_gateway_pid_path(data_dir)) if expected_pid is None else expected_pid
+    if type(pid) is not int or pid <= 0 or not pid_alive(pid):
         return None
     path = os.path.join(data_dir, name)
     try:
         info = os.stat(path, follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077):
             return None
+        # Written by this account's gateway or by root (an administrator's
+        # gateway for this home), as read_pid_record requires of gateway.pid.
+        if os.name != "nt" and not trusted_runtime_owner(info.st_uid):
+            return None
         if darwin_acl_confidentiality_error(path) or windows_acl_custody_confidentiality_error(path):
             return None
         record = json.loads(read_regular_file_no_follow(path, max_bytes=4096))
     except (OSError, ValueError, TypeError):
         return None
-    if not isinstance(record, dict) or record.get("pid") != pid:
+    if not isinstance(record, dict) or type(record.get("pid")) is not int or record["pid"] != pid:
         return None
     return record
 

@@ -50,6 +50,24 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 	authorization, exists, authorizationErr := records.Authorization, records.AuthorizationExists, records.AuthorizationErr
 	activation, activationExists, activationErr := records.Activation, records.ActivationExists, records.ActivationErr
 	guardianState, guardianStateExists, guardianStateErr := records.State, records.StateExists, records.StateErr
+	recorded := make(map[string]enterpriseHookReconcileRow)
+	priorUIDs := map[string][]int{}
+	recordExcused := 0
+	if guardianStateErr == nil && guardianStateExists {
+		removed, awaiting, linked := enterpriseHookExcusedFailures(guardianState)
+		recordExcused = removed + awaiting + linked
+		for _, row := range guardianState.Results {
+			key := enterpriseHookProtectedTargetKey(row)
+			recorded[key] = row
+			priorUIDs[key] = append(priorUIDs[key], row.UID)
+		}
+	}
+	if authorizationErr == nil && exists {
+		for _, row := range authorization.ProtectedTargets {
+			key := enterpriseHookProtectedTargetKey(row)
+			priorUIDs[key] = append(priorUIDs[key], row.UID)
+		}
+	}
 	freshnessErr := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now())
 	// Unix registration readiness can inspect each target even when another
 	// target failed the guardian pass. The protected records must still have
@@ -62,7 +80,8 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 	case !exists:
 		run.AuthorizationErr = errors.New("protected hook guardian authorization is missing")
 	case (!authorization.OK || authorization.FailureCount != 0 ||
-		authorization.SuccessCount+authorization.PendingCount != authorization.TargetCount) && !partialRegistration:
+		authorization.SuccessCount+authorization.PendingCount != authorization.TargetCount) &&
+		!partialRegistration && (recordExcused == 0 || authorization.FailureCount != recordExcused):
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is incomplete (%d succeeded, %d pending, %d total)", authorization.SuccessCount, authorization.PendingCount, authorization.TargetCount)
 	case freshnessErr != nil:
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is not fresh: %w", freshnessErr)
@@ -70,7 +89,8 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 		run.AuthorizationErr = activationErr
 	case !activationExists:
 		run.AuthorizationErr = errors.New("protected hook guardian activation is missing")
-	case (!activation.OK && !partialRegistration) || activation.UpdatedAt != authorization.UpdatedAt || activation.ManifestSHA256 != manifestSHA256:
+	case (!activation.OK && !partialRegistration && (recordExcused == 0 || activation.FailureCount != recordExcused)) ||
+		activation.UpdatedAt != authorization.UpdatedAt || activation.ManifestSHA256 != manifestSHA256:
 		run.AuthorizationErr = errors.New("protected hook guardian activation does not cover the current manifest bytes")
 	}
 	authenticatedPending := map[string]struct{}{}
@@ -81,8 +101,8 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 		case !guardianStateExists:
 			run.AuthorizationErr = errors.New("hook guardian state is missing for pending verification")
 		default:
-			excused := 0
-			if partialRegistration {
+			excused := recordExcused
+			if partialRegistration && excused == 0 {
 				excused = authorization.FailureCount
 			}
 			authenticatedPending, err = enterpriseHookStandaloneAuthenticatedPending(manifest, guardianState, authorization, activation, enterpriseHookManifest, manifestSHA256, excused)
@@ -110,11 +130,27 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 			UserHome:  strings.TrimSpace(target.UserHome),
 			Connector: strings.TrimSpace(target.Connector),
 		}
+		proofRow := row
+		if target.UID == nil {
+			proofRow.UID = enterpriseHookGuardianPriorUID(priorUIDs[enterpriseHookProtectedTargetKey(row)]...)
+		}
 		fail := func(err error) {
 			row.Error = err.Error()
 			run.Rows = append(run.Rows, row)
 		}
 		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
+		if enterpriseHookGuardianTargetRemoved(ctx, target, proofRow, err) {
+			row.Removed = true
+			if target.UID == nil {
+				row.UID = proofRow.UID
+			}
+			row.Error = fmt.Sprintf("enterprise hooks: target account %q does not exist: %s", row.User, errEnterpriseHookTargetNotFound)
+			run.Rows = append(run.Rows, row)
+			if prior, ok := recorded[enterpriseHookProtectedTargetKey(row)]; ok && enterpriseHookRemovedAccountRow(prior) {
+				run.Excused = append(run.Excused, row)
+			}
+			continue
+		}
 		if reason := enterpriseHookTargetNoHomeReason(err); reason != "" {
 			pendingReason, err = reason, nil
 		}

@@ -39,7 +39,7 @@ func TestStandardUserExplainsOwnGuardrailProfile(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
-	if code := executeLauncher(context.Background(), root, []string{"guardrail", "profile", "explain", "--connector", "codex"}); code != 0 {
+	if code := executeLauncherInTest(t, root, []string{"guardrail", "profile", "explain", "--connector", "codex"}); code != 0 {
 		t.Fatalf("launcher explain exit %d, stderr %q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), `"profile": "engineering"`) || len(asked) != 1 || asked[0] != "/run/defenseclaw/hook.sock||codex" {

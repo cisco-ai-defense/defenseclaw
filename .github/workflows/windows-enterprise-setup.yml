@@ -40,7 +40,6 @@ jobs:
         run: >-
           go test -count=1
           ./cmd/defenseclaw-enterprise-setup
-          ./cmd/defenseclaw-setup
           ./internal/windowsresources
           ./internal/tools/windowsresources
 
@@ -48,7 +47,6 @@ jobs:
         run: >-
           go vet
           ./cmd/defenseclaw-enterprise-setup
-          ./cmd/defenseclaw-setup
           ./internal/windowsresources
           ./internal/tools/windowsresources
 

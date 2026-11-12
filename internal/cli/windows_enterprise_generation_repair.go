@@ -16,7 +16,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // windowsEnterpriseConfigGenerationRepair is
@@ -51,7 +50,7 @@ func repairWindowsEnterpriseConfigGeneration(ctx context.Context, opts *windowsE
 	if err != nil {
 		return false, nil
 	} // The ordinary source preflight reports it.
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return false, err
 	}
@@ -78,7 +77,7 @@ func repairWindowsEnterpriseConfigGeneration(ctx context.Context, opts *windowsE
 		return false, err
 	}
 	if err := managed.ValidateTrustedFilePath(layout.ConfigPath, "installed config for generation recovery"); err != nil {
-		return false, fmt.Errorf("refuse generation recovery from an untrusted installed config: %w; restore its administrator-only write ACL, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", err)
+		return false, fmt.Errorf("refuse generation recovery from an untrusted installed config: %w; restore its administrator-only write ACL, then run %s.%s", err, windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1"), windowsEnterpriseSetupSourceNote)
 	}
 	out, _ := windowsEnterprisePolicyDigest(ctx)
 	var report policyDigestReport
@@ -87,7 +86,7 @@ func repairWindowsEnterpriseConfigGeneration(ctx context.Context, opts *windowsE
 	if report.GatewayReportedDigest != "" {
 		floor = max(floor, report.GatewayReportedConfigGeneration)
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return false, err
 	}

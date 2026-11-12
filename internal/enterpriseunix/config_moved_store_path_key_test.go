@@ -41,7 +41,7 @@ func TestManagedEnsureNamesTheKeyAMovedStorePathKeyBecame(t *testing.T) {
 				r := h.run(Options{Action: ActionEnsure, ConfigFile: path})
 				requireError(t, r, codeConfig)
 				got := r.Errors[0].Message
-				if !strings.HasPrefix(got, path) || !strings.Contains(got, key+" is an unknown setting; it moved to "+home+".") ||
+				if !strings.HasPrefix(got, path) || !strings.Contains(got, key+" was retired in config_version 8; use "+home+".") ||
 					!strings.Contains(got, "The settings reference") {
 					t.Fatalf("%s: ensure refusal = %q, want it to name %s", key, got, home)
 				}

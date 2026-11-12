@@ -1312,6 +1312,11 @@ type egressSink struct {
 	mu       sync.Mutex
 	recent   map[refusalKey]*refusal
 	overflow []egress.Event
+	// pendingAudit waits for the bounded OpenShell proxy-open matching window.
+	pendingAudit []pendingProxyAudit
+	// tunnelActors retains the first audit event's process, including an
+	// unknown process, for later records from that same tunnel.
+	tunnelActors map[proxyTunnelKey]proxyTunnelActor
 	// heldAt is when flush last reported what the pacing held back.
 	heldAt time.Time
 	// openshell folds OpenShell's own refusals like recent folds the
@@ -1466,6 +1471,137 @@ type refusal struct {
 
 const egressSinkBuffer = 4096
 
+// pendingProxyAudit keeps a proxy record until OpenShell has had the same
+// matching window as the destinations view to report its process. A full
+// queue still records the oldest event, without making up an actor.
+type pendingProxyAudit struct {
+	box      *box
+	event    audit.SandboxEgressEvent
+	queued   time.Time
+	tunnelID string
+	kind     egress.EventKind
+}
+
+const maxPendingProxyAudit = egressSinkBuffer
+
+type proxyTunnelKey struct {
+	box *box
+	id  string
+}
+
+type proxyTunnelActor struct {
+	binary string
+	pid    int
+}
+
+type proxyAuditSource struct {
+	tunnelID string
+	kind     egress.EventKind
+}
+
+// The proxy limits active tunnels per binding. This additional bound also
+// limits retained actors if a close event is lost; eviction leaves the actor
+// of an older tunnel unknown.
+const maxProxyTunnelActors = egressSinkBuffer
+
+func (s *egressSink) recordProxyAudit(ctx context.Context, b *box, ev audit.SandboxEgressEvent, source ...proxyAuditSource) {
+	pending := pendingProxyAudit{box: b, event: ev, queued: s.m.now()}
+	if len(source) != 0 {
+		pending.tunnelID, pending.kind = source[0].tunnelID, source[0].kind
+	}
+	s.mu.Lock()
+	s.pendingAudit = append(s.pendingAudit, pending)
+	var oldest pendingProxyAudit
+	full := len(s.pendingAudit) > maxPendingProxyAudit
+	if full {
+		oldest = s.pendingAudit[0]
+		s.pendingAudit = s.pendingAudit[1:]
+	}
+	s.mu.Unlock()
+	if full {
+		// The matching window has not ended, so an early eviction cannot
+		// safely name a process that might be contradicted by a later open.
+		s.emitProxyAudit(ctx, oldest, false)
+	}
+}
+
+func (s *egressSink) emitProxyAudit(ctx context.Context, pending pendingProxyAudit, matchComplete bool) {
+	var key proxyTunnelKey
+	var actor proxyTunnelActor
+	if pending.tunnelID != "" {
+		key = proxyTunnelKey{box: pending.box, id: pending.tunnelID}
+		s.mu.Lock()
+		retained, seen := s.tunnelActors[key]
+		if seen && pending.kind == egress.EventClosed {
+			delete(s.tunnelActors, key)
+		}
+		s.mu.Unlock()
+		if seen {
+			// A later record keeps its opening actor, even when it was
+			// unknown and another program has since opened the proxy.
+			pending.event.Executable, pending.event.PID = retained.binary, retained.pid
+			s.m.tel.RecordSandboxEgress(ctx, pending.event)
+			return
+		}
+	}
+	if matchComplete {
+		s.m.mu.Lock()
+		opens := slices.Clone(pending.box.proxyOpens)
+		s.m.mu.Unlock()
+		at := pending.event.Timestamp
+		if at.IsZero() {
+			at = pending.queued
+		}
+		if binary, pid, _, ok := proxyActor(opens, at); ok {
+			actor = proxyTunnelActor{binary: binary, pid: pid}
+		}
+	}
+	if pending.tunnelID != "" {
+		s.mu.Lock()
+		if retained, seen := s.tunnelActors[key]; seen {
+			actor = retained
+			if pending.kind == egress.EventClosed {
+				delete(s.tunnelActors, key)
+			}
+		} else if pending.kind != egress.EventClosed {
+			if s.tunnelActors == nil {
+				s.tunnelActors = make(map[proxyTunnelKey]proxyTunnelActor)
+			}
+			if len(s.tunnelActors) >= maxProxyTunnelActors {
+				for oldest := range s.tunnelActors {
+					delete(s.tunnelActors, oldest)
+					break
+				}
+			}
+			s.tunnelActors[key] = actor
+		}
+		s.mu.Unlock()
+	}
+	pending.event.Executable, pending.event.PID = actor.binary, actor.pid
+	s.m.tel.RecordSandboxEgress(ctx, pending.event)
+}
+
+func (s *egressSink) flushProxyAudit(ctx context.Context, now time.Time, all bool) {
+	s.mu.Lock()
+	ready := make([]pendingProxyAudit, 0)
+	kept := s.pendingAudit[:0]
+	for _, pending := range s.pendingAudit {
+		if all || !now.Before(pending.queued.Add(proxyOpenWindow)) {
+			ready = append(ready, pending)
+		} else {
+			kept = append(kept, pending)
+		}
+	}
+	clear(s.pendingAudit[len(kept):])
+	s.pendingAudit = kept
+	s.mu.Unlock()
+	for _, pending := range ready {
+		// Shutdown cannot wait for a late OpenShell record. An already
+		// resolved tunnel actor is still safe to use for its later records.
+		s.emitProxyAudit(ctx, pending, !now.Before(pending.queued.Add(proxyOpenWindow)))
+	}
+}
+
 func newEgressSink(m *Manager) *egressSink {
 	return &egressSink{m: m, ch: make(chan sinkItem, egressSinkBuffer), wake: make(chan struct{}, 1),
 		blocked: newRateGate(blockedBurst, blockedRate), recent: map[refusalKey]*refusal{}}
@@ -1555,6 +1691,7 @@ func (s *egressSink) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			s.flushProxyAudit(context.WithoutCancel(ctx), s.m.now(), true)
 			return
 		case it := <-s.ch:
 			s.m.egressEvent(ctx, it.ev, it.repeats)
@@ -1583,6 +1720,7 @@ func (s *egressSink) drainOverflow(ctx context.Context) {
 // reports the refusals and feed events each sandbox's pacing held back.
 func (s *egressSink) flush(ctx context.Context) {
 	now := s.m.now()
+	s.flushProxyAudit(ctx, now, false)
 	s.m.reportAuthFailures(ctx, now)
 	s.flushOpenShell(ctx, now)
 	var folded []sinkItem
@@ -1722,7 +1860,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			// audited, but no alert.
 			ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeHarnessFetch, "INFO"
 		}
-		m.tel.RecordSandboxEgress(ctx, ev)
+		m.sink.recordProxyAudit(ctx, b, ev, proxyAuditSource{tunnelID: e.TunnelID, kind: e.Kind})
 		if fetch {
 			return
 		}
@@ -1772,7 +1910,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 		m.egressEnded(ctx, b, ident, e)
 	case egress.EventLargeUpload:
 		if e.Terminated {
-			m.largeUploadBlocked(ctx, ident, e)
+			m.largeUploadBlocked(ctx, b, ident, e)
 			return
 		}
 		remediation := "Review what the agent uploaded; block the destination if it is not expected " +
@@ -1831,7 +1969,7 @@ func (m *Manager) egressEnded(ctx context.Context, b *box, ident audit.SandboxId
 		ev.DecisionCode = "SANDBOX_EGRESS_UPSTREAM_FAILED"
 		ev.Reason = truncate(firstNonEmpty(e.Error, e.Reason), 512)
 	}
-	m.tel.RecordSandboxEgress(ctx, ev)
+	m.sink.recordProxyAudit(ctx, b, ev, proxyAuditSource{tunnelID: e.TunnelID, kind: e.Kind})
 	if ev.DecisionCode != "SANDBOX_EGRESS_UPSTREAM_FAILED" {
 		// The counter counted it: the destinations view keeps its totals.
 		m.touchDestinations(e.SandboxName)
@@ -1925,7 +2063,7 @@ func (m *Manager) reportAuthFailures(ctx context.Context, now time.Time) {
 // and a ✗ in the feed that names the threshold and, when an unblock lifts
 // the block, offers it. The proxy refuses the sandbox's later tunnels to
 // the destination with the same category, each an ordinary blocked event.
-func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIdentity, e egress.Event) {
+func (m *Manager) largeUploadBlocked(ctx context.Context, b *box, ident audit.SandboxIdentity, e egress.Event) {
 	threshold := egress.FormatThreshold(e.Threshold)
 	remediation := "Review what the agent tried to upload. If the destination is expected, unblock it for the sandbox: " +
 		"defenseclaw sandbox unblock " + e.Host + " --sandbox " + e.SandboxName + "."
@@ -1941,12 +2079,12 @@ func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIde
 			e.SandboxName, threshold, e.Host, e.BytesUp),
 		Evidence: truncate(e.Reason, 512), TargetRef: e.Host, Remediation: remediation, Timestamp: e.Time,
 	})
-	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+	m.sink.recordProxyAudit(ctx, b, audit.SandboxEgressEvent{
 		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: e.Host, Port: e.Port,
 		Scheme: egressScheme(e), ResolvedIP: remoteIP(e.RemoteAddr), Blocked: true,
 		DecisionCode: decisionCode(e), Reason: truncate(e.Reason, 512),
 		PolicyOutcome: policyOutcome(e), Severity: "HIGH", Timestamp: e.Time,
-	})
+	}, proxyAuditSource{tunnelID: e.TunnelID, kind: e.Kind})
 	m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: e.SandboxName,
 		Host: e.Host, Port: e.Port, Method: e.Method, Source: sandboxapi.SourceProxy, Category: sandboxapi.CategoryLargeUpload,
 		Unblockable: e.Unblockable, BytesUp: e.BytesUp, Severity: "HIGH", Reason: truncate(e.Reason, 300),

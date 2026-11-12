@@ -177,6 +177,12 @@ func TestRefreshMakesReleasedHooksBlockWhileTheGatewayIsDown(t *testing.T) {
 								t.Fatalf("%s %s bakes no gateway address", release, name)
 							}
 							body = bytes.ReplaceAll(body, []byte(`API_ADDR="127.0.0.1:9"`), []byte(`API_ADDR="`+addr+`"`))
+							// The 1.0.0 and 1.0.3 scripts walk the host socket
+							// table in Bash before they send; a private table keeps
+							// a busy host from ending them at their CPU bound.
+							if release != "0.8.10" {
+								body = hookWithPrivateListenerTable(t, body, filepath.Join(home, "proc-net"))
+							}
 						}
 						if err := os.WriteFile(filepath.Join(hookDir, name), body, 0o700); err != nil {
 							t.Fatal(err)

@@ -70,7 +70,7 @@ func copyBraceWordFields(args []*syntax.Word, static []bool, env expand.Environ)
 			}
 		} else {
 			var err error
-			expanded, err = expand.Fields(&expand.Config{Env: env}, arg)
+			expanded, err = shellparse.Fields(&expand.Config{Env: env}, arg)
 			if err != nil {
 				return nil
 			}
@@ -190,7 +190,7 @@ func actionPaddedBraceFields(word *syntax.Word, env expand.Environ) ([]string, b
 			return true
 		}
 		visited++
-		values, err := expand.Fields(&expand.Config{Env: env}, &syntax.Word{Parts: parts})
+		values, err := shellparse.Fields(&expand.Config{Env: env}, &syntax.Word{Parts: parts})
 		if err != nil || len(fields)+len(values) > maxCopyBraceWords {
 			return false
 		}

@@ -95,6 +95,10 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 	} else if lockWait := applyTriggerLockWait(cmd, action, opts); lockWait > 0 {
 		env.LockTimeout = lockWait
 	}
+	// A change that waits for a service says so, so the wait is not mistaken
+	// for a hang; the result stays on stdout.
+	progress := cmd.ErrOrStderr()
+	env.Progress = func(line string) { fmt.Fprintln(progress, line) }
 	ctx := cmd.Context()
 	var interrupted <-chan struct{}
 	switch action {

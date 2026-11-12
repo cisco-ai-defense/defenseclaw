@@ -18,6 +18,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HealthMonitor } from "../health-monitor.js";
+import { ListenerProofError } from "../listener-proof.js";
 
 const statusUrl = "http://127.0.0.1:9999/defenseclaw/status";
 
@@ -99,6 +100,7 @@ describe("HealthMonitor", () => {
     expect(m.isUnprotected).toBe(true);
     await triggerCheck(m);
     expect(m.isUnprotected).toBe(false);
+    expect(m.isGatewayDown).toBe(false);
   });
 
   it("getWarningMessage returns message when unprotected", async () => {
@@ -111,17 +113,26 @@ describe("HealthMonitor", () => {
     expect(msg).toContain("DEFENSECLAW WARNING");
   });
 
-  it("says model calls are blocked, not unscanned, when the gateway is down", async () => {
+  it("says model calls are blocked in the saved closed mode when the gateway is down", async () => {
     // GAP-2428: with the gateway down every call through its proxy is
     // refused, so "NOT being scanned" was wrong.
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("down"));
-    const m = new HealthMonitor({ statusUrl });
+    const m = new HealthMonitor({ statusUrl, getOutageMode: () => "closed" });
     await triggerCheck(m);
     const warning = String(warnSpy.mock.calls[0]?.[0]);
     expect(warning).toContain("model calls are blocked (fail-closed)");
     expect(warning).toContain("defenseclaw-gateway start");
     expect(warning).not.toContain("NOT being scanned");
+  });
+
+  it("describes continuation for an installed open outage mode", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("down"));
+    const m = new HealthMonitor({ statusUrl, getOutageMode: () => "open" });
+    await triggerCheck(m);
+    expect(m.isGatewayDown).toBe(true);
+    expect(String(warnSpy.mock.calls[0]?.[0])).toContain("continue without inspection");
   });
 
   it("marks unprotected when gateway state is not running", async () => {
@@ -196,5 +207,38 @@ describe("HealthMonitor", () => {
         }),
       }),
     );
+  });
+
+  // GAP-0580 with GAP-0594: only a gateway that did not answer is an outage
+  // the saved open mode continues through.
+  it("does not announce an open continuation for a listener that fails the proof", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    globalThis.fetch = vi.fn().mockResolvedValue(healthyResponse());
+    const m = new HealthMonitor({
+      statusUrl,
+      getOutageMode: () => "open",
+      buildSidecarHeaders: async () => {
+        throw new ListenerProofError("the listener did not prove it is the DefenseClaw gateway");
+      },
+    });
+    await triggerCheck(m);
+    expect(m.isUnprotected).toBe(true);
+    expect(m.isGatewayDown).toBe(false);
+    expect(m.getWarningMessage()).toContain("blocked (fail-closed)");
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("announces the open continuation when the proof finds nothing listening", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const m = new HealthMonitor({
+      statusUrl,
+      getOutageMode: () => "open",
+      buildSidecarHeaders: async () => {
+        throw new ListenerProofError("connect ECONNREFUSED", true);
+      },
+    });
+    await triggerCheck(m);
+    expect(m.isGatewayDown).toBe(true);
+    expect(m.getWarningMessage()).toContain("continue without inspection");
   });
 });

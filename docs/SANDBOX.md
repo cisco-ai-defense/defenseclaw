@@ -354,9 +354,15 @@ The harness spec builds the environment passed to `openshell sandbox create
 - `DEFENSECLAW_EGRESS_URL` is
   `http://<user>:<secret>@host.openshell.internal:<egress_port>`, and
   `DEFENSECLAW_EGRESS_BYPASS` lists `host.openshell.internal` plus the
-  provider hosts of the harness's credential profile, so hooks reach the
-  ingress directly and LLM calls stay on OpenShell's provider rules. The
-  strict profile sets no proxy. `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`
+  provider hosts of the harness's credential profile and sandbox-local
+  loopback addresses (`localhost`, `127.0.0.1`, `127.0.0.0/8`, `::1`).
+  In proxy-enabled profiles, the workload's proxy endpoint is a listener on
+  the sandbox's own `127.0.0.1`. It connects loopback requests inside that
+  sandbox and relays other requests to the authenticated egress proxy. This
+  also covers clients that do not understand the CIDR or IPv6 exclusions.
+  The host egress guard still refuses loopback requests sent to it. The strict
+  profile sets no proxy or local listener.
+  `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`
   (and their lowercase forms) and `NODE_USE_ENV_PROXY=1` are passed too, but
   OpenShell 0.1.1 drops them at create, so the workload gets them from the
   shell fragment below. `NODE_NO_WARNINGS=1` goes with the proxy (see the
@@ -596,7 +602,8 @@ Each request passes these steps in order:
    uploads in `x-defenseclaw-source`, which defaults to the binding's
    connector. A mismatch answers 403.
 4. **Limit.** Per binding, hook, notify and inspect calls share a bucket of
-   25 requests a second with a burst of 100 and at most 32 in flight. OTLP
+   25 requests a second with a burst of 100 and at most 475 in flight (the
+   burst plus the rate over the 15 s a request can stay open). OTLP
    has its own bucket (10 a second, burst 50), at most 4 uploads in flight per
    binding and 16 across all bindings, and a 4 MiB body cap. Over a limit the
    answer is 429 with `Retry-After: 1`.
@@ -2868,7 +2875,11 @@ The daemon calls the hook-socket routes of the managed gateway
 socket mux, never on the TCP API). Every route runs the peer decision first,
 refuses uid 0, applies its own budget key per peer uid (`<uid>|sandbox-hook`,
 `|sandbox-policy`, `|sandbox-events`; the host hook budget `<uid>` is separate),
-and answers `sandbox_*` reasons. A resolve creates a pending registration
+and answers `sandbox_*` reasons. The relayed hook and receipt classes each
+have 40 calls a second with a burst of 100 per user, shared by all of the
+user's sandboxes: the rate the gateway answers inside the hook's 3.5 s window.
+A call past it is refused at once with a 429 whose message names the budget.
+A resolve creates a pending registration
 (`internal/sandboxreg`, `<DataDir>/sandbox/registrations/<uid>.json`, 0600,
 service-owned) that the daemon binds to the sandbox; a registration holds the
 `subject_key` (an HMAC of `v1|uid|account|sid`, so directory facts never turn a
@@ -2975,6 +2986,15 @@ the lifecycle's prerequisite record carries the fallback's readiness under
 `fallback`. The driver and the reason are on the sandbox record, the banner,
 `status`, `policy explain`, `doctor` (`managed-driver`) and the telemetry
 (`defenseclaw.sandbox.driver_reason`).
+
+With OpenShell 0.1.6, a selected MicroVM on Linux with KVM is refused after
+create because the account owns the guest root folder and DefenseClaw cannot
+trust the guest's `localhost` resolver. This affects per-user and managed
+gateways. `driver_fallback: docker` does not cover this refusal: it is chosen
+before create when KVM or the driver is unavailable. Until a fixed OpenShell
+release is supported, a managed administrator sets
+`enterprise.openshell.driver: docker` and runs `ensure`. On a per-user install,
+run `defenseclaw sandbox setup` and answer no to MicroVMs.
 
 The enterprise packages install
 `defenseclaw` as a root-owned link to `defenseclaw-gateway`, which under that

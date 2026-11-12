@@ -24,37 +24,46 @@ var nativeGatewayForHookTests struct {
 	err         error
 }
 
-var nativeHookPostForHookTests struct {
+// hookPostBuild is a hook-post binary built once per test run.
+type hookPostBuild struct {
 	sync.Once
 	dir  string
 	path string
 	err  error
 }
 
+var nativeHookPostForHookTests hookPostBuild
+
 func installNativeHookPostForHookTest(t *testing.T, home string) {
 	t.Helper()
-	nativeHookPostForHookTests.Do(func() {
+	installHookPostBuild(t, home, &nativeHookPostForHookTests)
+}
+
+func installHookPostBuild(t *testing.T, home string, build *hookPostBuild, buildFlags ...string) {
+	t.Helper()
+	build.Do(func() {
 		var err error
-		nativeHookPostForHookTests.dir, err = os.MkdirTemp("", "defenseclaw-hook-post-test-")
+		build.dir, err = os.MkdirTemp("", "defenseclaw-hook-post-test-")
 		if err != nil {
-			nativeHookPostForHookTests.err = err
+			build.err = err
 			return
 		}
-		nativeHookPostForHookTests.path = filepath.Join(nativeHookPostForHookTests.dir, "defenseclaw-hook-post")
-		cmd := exec.Command("go", "build", "-o", nativeHookPostForHookTests.path, "./cmd/defenseclaw-hook-post")
+		build.path = filepath.Join(build.dir, "defenseclaw-hook-post")
+		args := append([]string{"build"}, buildFlags...)
+		cmd := exec.Command("go", append(args, "-o", build.path, "./cmd/defenseclaw-hook-post")...)
 		cmd.Dir = filepath.Join("..", "..", "..")
 		if output, buildErr := cmd.CombinedOutput(); buildErr != nil {
-			nativeHookPostForHookTests.err = fmt.Errorf("build hook-post for test: %w: %s", buildErr, output)
+			build.err = fmt.Errorf("build hook-post for test: %w: %s", buildErr, output)
 		}
 	})
-	if nativeHookPostForHookTests.err != nil {
-		t.Fatal(nativeHookPostForHookTests.err)
+	if build.err != nil {
+		t.Fatal(build.err)
 	}
 	binDir := filepath.Join(home, ".local", "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Link(nativeHookPostForHookTests.path, filepath.Join(binDir, "defenseclaw-hook-post")); err != nil {
+	if err := os.Link(build.path, filepath.Join(binDir, "defenseclaw-hook-post")); err != nil {
 		t.Fatal(err)
 	}
 }

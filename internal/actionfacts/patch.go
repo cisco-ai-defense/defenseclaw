@@ -17,8 +17,9 @@
 package actionfacts
 
 import (
-	pathpkg "path"
+	"os"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -30,10 +31,15 @@ type patchPathChange struct {
 }
 
 type patchEnvelopeResult struct {
-	changes []patchPathChange
-	hasMove bool
-	status  ParseStatus
-	issue   IssueCode
+	// canonical is the envelope as the patch tool reads it: without the white
+	// space around the patch and around a file header, and with LF line ends.
+	// The content proofs read the files text from it, so they judge what the
+	// tool applies.
+	canonical string
+	changes   []patchPathChange
+	hasMove   bool
+	status    ParseStatus
+	issue     IssueCode
 }
 
 func isApplyPatchTool(tool string) bool {
@@ -64,7 +70,24 @@ func isPatchInputField(field string) bool {
 // value keeps the nested reading.
 func isPatchEnvelopeField(field string, value any) bool {
 	text, ok := value.(string)
-	return ok && field == "input" && strings.HasPrefix(text, "*** Begin Patch")
+	return ok && field == "input" && strings.HasPrefix(strings.TrimSpace(text), patchBeginLine)
+}
+
+const (
+	patchBeginLine = "*** Begin Patch"
+	patchEndLine   = "*** End Patch"
+)
+
+// patchFileHeaderPrefixes start the header line of a file of a patch.
+var patchFileHeaderPrefixes = []string{"*** Add File: ", "*** Update File: ", "*** Delete File: "}
+
+func isPatchFileHeader(line string) bool {
+	for _, prefix := range patchFileHeaderPrefixes {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // isAcceptedPatchPath reports a patch target with one stable meaning: a path
@@ -74,17 +97,99 @@ func isPatchEnvelopeField(field string, value any) bool {
 // Copilot CLI apply such a target as given, so it is a write fact like a
 // relative one and every path rule judges it (rel-1-0-6:GAP-0361,
 // GAP-0398). Home forms (~) stay unread because the tool does not expand
-// them, and so do UNC shares (\\host) and drive-relative paths (C:x), which
-// name another host or the current directory of another drive.
+// them, and so do shares of another host (\\host\share) and drive-relative
+// paths (C:x), which name another host or the current directory of another
+// drive. A spelling of a local file is read: the extended-length and device
+// forms of a drive path (\\?\C:\x, \\.\C:\x) and the admin share of this
+// machine (\\localhost\C$\x, \\127.0.0.1\C$\x, \\<this host>\C$\x, also
+// below \\?\UNC\). Each opens the file of its drive path, so it is a write
+// fact like that path and the path rules judge what Windows opens, never the
+// spelling (rel-1-0-6:GAP-1004).
 func isAcceptedPatchPath(value string) bool {
+	if strings.HasPrefix(value, `\\`) {
+		return isLocalWindowsPatchTarget(value)
+	}
 	if value == "" || value == "~" || strings.HasPrefix(value, "~/") ||
-		strings.HasPrefix(value, `~\`) || strings.HasPrefix(value, `\\`) {
+		strings.HasPrefix(value, `~\`) {
 		return false
 	}
 	if len(value) >= 2 && isASCIILetter(value[0]) && value[1] == ':' {
 		return len(value) >= 3 && (value[2] == '/' || value[2] == '\\')
 	}
 	return true
+}
+
+// patchLocalHostname is the name of this machine, which names its own admin
+// shares like localhost does. A variable so a test can name the machine.
+var patchLocalHostname = os.Hostname
+
+// isLocalWindowsPatchTarget reports a patch target that begins with two
+// backslashes and opens a file of this machine: the extended-length or device
+// prefix before a drive path, or the admin share (X$) of a local server name,
+// bare or below \\?\UNC\. Any other share, device or namespace names a file
+// the rules cannot read as a local path and stays unread.
+func isLocalWindowsPatchTarget(value string) bool {
+	text := strings.TrimPrefix(strings.ReplaceAll(value, "/", `\`), `\\`)
+	if strings.HasPrefix(text, `?\`) || strings.HasPrefix(text, `.\`) {
+		text = text[2:]
+		if len(text) >= 3 && isASCIILetter(text[0]) && text[1] == ':' && text[2] == '\\' {
+			return true
+		}
+		if len(text) < 4 || !strings.EqualFold(text[:4], `unc\`) {
+			return false
+		}
+		text = text[4:]
+	}
+	parts := strings.SplitN(text, `\`, 3)
+	return len(parts) == 3 && parts[2] != "" && len(parts[1]) == 2 &&
+		isASCIILetter(parts[1][0]) && parts[1][1] == '$' &&
+		WindowsLocalHost(parts[0], patchLocalHostname)
+}
+
+// patchDirectives are the directive lines of an apply_patch envelope that name
+// a file, with the operation each one gives.
+var patchDirectives = []struct {
+	prefix string
+	kind   string
+}{
+	{prefix: "*** Add File: ", kind: "add"},
+	{prefix: "*** Update File: ", kind: "update"},
+	{prefix: "*** Delete File: ", kind: "delete"},
+	{prefix: "*** Move to: ", kind: "move"},
+}
+
+// isPatchDirectiveLine reports a line that names a file of the envelope.
+func isPatchDirectiveLine(line string) bool {
+	for _, directive := range patchDirectives {
+		if strings.HasPrefix(line, directive.prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// PatchTargetName is the name an apply_patch tool opens for the text a
+// directive line gives after its prefix. The tools take that text without any
+// tab or carriage return, wherever it stands, and without the white space that
+// ends it; a Windows name then also drops trailing dots. A spelling with such
+// characters therefore names the plain file, so every reader of an envelope
+// judges this name and none reads the spelling or treats it as an unreadable
+// envelope. White space that begins the name is part of the file name.
+func PatchTargetName(text string) string {
+	if strings.ContainsAny(text, "\t\r") {
+		text = strings.Map(func(r rune) rune {
+			if r == '\t' || r == '\r' {
+				return -1
+			}
+			return r
+		}, text)
+	}
+	return strings.TrimRightFunc(text, unicode.IsSpace)
+}
+
+// patchDirectivePath is the name a directive line gives its file.
+func patchDirectivePath(line, prefix string) string {
+	return PatchTargetName(strings.TrimPrefix(line, prefix))
 }
 
 func appendExtractedPatch(out *extractedInput, text string) {
@@ -114,19 +219,29 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		return fail(StatusLimitExceeded, IssueInputLimit)
 	}
 
-	normalized := strings.ReplaceAll(text, "\r\n", "\n")
-	if strings.ContainsRune(normalized, '\r') {
-		return fail(StatusInvalid, IssueInvalidSyntax)
-	}
-	normalized = strings.TrimSuffix(normalized, "\n")
+	// The patch tool trims the white space around the patch text, and around
+	// its first and last line, before it checks the Begin and End markers, and
+	// reads CRLF as LF. The white space it trims is every Unicode space (the
+	// ASCII ones, a lone carriage return, U+0085, U+00A0, U+1680, U+2000 to
+	// U+200A, U+2028, U+2029, U+202F, U+205F and U+3000), the set that
+	// strings.TrimSpace takes, so the envelope is judged in that form: the same
+	// text with any padding or line end style is the same patch. A carriage
+	// return that does not end a line and lies between the markers is not
+	// padding: one beside a directive keeps the envelope unread.
+	normalized := strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
 	lines := strings.Split(normalized, "\n")
-	if len(lines) < 3 || lines[0] != "*** Begin Patch" ||
-		lines[len(lines)-1] != "*** End Patch" {
+	if len(lines) < 3 {
 		return fail(StatusInvalid, IssueInvalidSyntax)
 	}
+	lines[0] = strings.TrimSpace(lines[0])
+	lines[len(lines)-1] = strings.TrimSpace(lines[len(lines)-1])
+	if lines[0] != patchBeginLine || lines[len(lines)-1] != patchEndLine {
+		return fail(StatusInvalid, IssueInvalidSyntax)
+	}
+	canonical := make([]string, 0, len(lines))
+	canonical = append(canonical, lines[0])
 
 	changes := make([]patchPathChange, 0, 8)
-	seenPaths := make(map[string]struct{})
 	directives := 0
 	pendingUpdate := -1
 	activeDirective := ""
@@ -135,6 +250,12 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 	updateContent := false
 	hasMove := false
 	for _, line := range lines[1 : len(lines)-1] {
+		// A carriage return that does not end a line is read only in a
+		// directive name, which the tools take without it.
+		if strings.ContainsRune(line, '\r') && !isPatchDirectiveLine(line) {
+			return fail(StatusInvalid, IssueInvalidSyntax)
+		}
+		canonical = append(canonical, line)
 		if line == "*** End of File" {
 			if activeDirective != "update" || !updateHunk || !updateContent {
 				return fail(StatusInvalid, IssueInvalidSyntax)
@@ -158,6 +279,12 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 				contentAfterDirective = true
 				continue
 			}
+			// The tool reads an empty line of an update as an empty line of
+			// its text.
+			if updateHunk && line == "" {
+				contentAfterDirective = true
+				continue
+			}
 			if updateHunk && (strings.HasPrefix(line, "+") ||
 				strings.HasPrefix(line, "-") || strings.HasPrefix(line, " ")) {
 				contentAfterDirective = true
@@ -165,34 +292,34 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 				continue
 			}
 		}
+		// The tool reads the header of a file without the white space around
+		// it. A line that starts with a space inside an update is a line of
+		// its text, not a header.
+		if header := strings.TrimSpace(line); header != line &&
+			isPatchFileHeader(header) && (activeDirective != "update" || line[0] != ' ') {
+			line = header
+			canonical[len(canonical)-1] = header
+		}
 		if line == "" || strings.HasPrefix(line, "+") ||
 			strings.HasPrefix(line, "-") || strings.HasPrefix(line, " ") ||
 			strings.HasPrefix(line, "@@") {
 			return fail(StatusInvalid, IssueInvalidSyntax)
 		}
-		if line == "*** Begin Patch" || line == "*** End Patch" {
+		if line == patchBeginLine || line == patchEndLine {
 			return fail(StatusInvalid, IssueInvalidSyntax)
 		}
 
 		kind := ""
 		pathValue := ""
-		for _, directive := range []struct {
-			prefix string
-			kind   string
-		}{
-			{prefix: "*** Add File: ", kind: "add"},
-			{prefix: "*** Update File: ", kind: "update"},
-			{prefix: "*** Delete File: ", kind: "delete"},
-			{prefix: "*** Move to: ", kind: "move"},
-		} {
+		for _, directive := range patchDirectives {
 			if strings.HasPrefix(line, directive.prefix) {
 				kind = directive.kind
-				pathValue = strings.TrimPrefix(line, directive.prefix)
+				pathValue = patchDirectivePath(line, directive.prefix)
 				break
 			}
 		}
 		if kind == "" || pathValue == "" ||
-			strings.TrimSpace(pathValue) != pathValue ||
+			strings.TrimLeftFunc(pathValue, unicode.IsSpace) != pathValue ||
 			len(pathValue) > maxScalarBytes ||
 			strings.IndexByte(pathValue, 0) >= 0 ||
 			!isAcceptedPatchPath(pathValue) {
@@ -211,18 +338,11 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		if directives > maxPatchDirectives {
 			return fail(StatusLimitExceeded, IssueFactLimit)
 		}
-		// The envelope can spell the same effective target through dot
-		// segments or either separator style. Key duplicate detection by that
-		// conservative lexical identity so conflicting access facts cannot regain
-		// authority after path normalization.
-		pathKey := pathpkg.Clean(strings.ReplaceAll(pathValue, `\`, "/"))
-		if _, duplicate := seenPaths[pathKey]; duplicate {
-			return fail(StatusAmbiguous, IssueConflictingSources)
-		}
-
+		// A file the envelope names in more than one block is changed by each
+		// block in order, so every block is a change of its own: each is judged
+		// by the path rules, and nativePatchEnvelopeWrites by the content rules.
 		switch kind {
 		case "add", "update":
-			seenPaths[pathKey] = struct{}{}
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessWrite,
 			})
@@ -235,7 +355,6 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 			updateHunk = false
 			updateContent = false
 		case "delete":
-			seenPaths[pathKey] = struct{}{}
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessDelete,
 			})
@@ -249,7 +368,6 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 				contentAfterDirective {
 				return fail(StatusInvalid, IssueInvalidSyntax)
 			}
-			seenPaths[pathKey] = struct{}{}
 			changes[pendingUpdate].access = PathAccessDelete
 			changes = append(changes, patchPathChange{
 				path: pathValue, access: PathAccessWrite,
@@ -269,23 +387,50 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		return fail(StatusInvalid, IssueInvalidSyntax)
 	}
 	return patchEnvelopeResult{
-		changes: changes,
-		hasMove: hasMove,
-		status:  StatusComplete,
+		canonical: strings.Join(append(canonical, patchEndLine), "\n"),
+		changes:   changes,
+		hasMove:   hasMove,
+		status:    StatusComplete,
 	}
 }
 
-// classifyPOSIXApplyPatchStdin gives a shell-fed, literal patch the same
-// path operations as the native apply_patch tool. A quoted heredoc preserves
-// the envelope bytes; other stdin forms have no authoritative patch text.
-func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
+// applyPatchStdinText is the envelope text of a POSIX apply_patch command
+// fed by a here-document, in every delimiter spelling: the document itself
+// when no shell expansion touches it, and for a document the shell expands,
+// the text it shows (LiteralStdinView) when no file directive of it holds an
+// expansion or a backslash. The expansions are then unknown content of the
+// lines that hold them; the files the patch names are as the text names them.
+// A document that is not read yields no text.
+func applyPatchStdinText(command CommandFact) (string, bool) {
 	if command.Dialect != DialectPOSIX || command.Executable != "apply_patch" ||
-		!command.ArgvComplete || len(command.Argv) != 1 ||
-		!command.LiteralStdinComplete || command.LiteralStdinAmbiguous {
+		!command.ArgvComplete || len(command.Argv) != 1 {
+		return "", false
+	}
+	if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
+		return command.LiteralStdin, true
+	}
+	if command.LiteralStdinComplete || command.LiteralStdinView == "" {
+		return "", false
+	}
+	for _, line := range strings.Split(command.LiteralStdinView, "\n") {
+		if strings.HasPrefix(line, "*** ") && strings.ContainsAny(line, "$\\") {
+			return "", false
+		}
+	}
+	return command.LiteralStdinView, true
+}
+
+// classifyPOSIXApplyPatchStdin gives a shell-fed, literal patch the same
+// path operations as the native apply_patch tool. A here-document keeps the
+// envelope bytes (applyPatchStdinText); other stdin forms have no
+// authoritative patch text.
+func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
+	text, ok := applyPatchStdinText(*command)
+	if !ok {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
-	patch := parsePatchEnvelope(command.LiteralStdin)
+	patch := parsePatchEnvelope(text)
 	if patch.status != StatusComplete {
 		if patch.status == StatusLimitExceeded {
 			out.markLimit(patch.issue)

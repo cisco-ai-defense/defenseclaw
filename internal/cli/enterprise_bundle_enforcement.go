@@ -55,11 +55,32 @@ func (e bundleEnforcement) ConfigReplaced() bool {
 		!bytes.Equal(e.CurrentConfig, e.InstalledConfig)
 }
 
+// bundleHandEditRecorded reports a config.generation.json that calls the
+// config at configPath a hand edit. A restore by hand, byte for byte, leaves
+// the guardian record naming the bundle bytes as an edit: managed startup
+// refuses them and verify fails until a lifecycle writer records them again.
+func bundleHandEditRecorded(configPath string) bool {
+	state, err := configwrite.ReadGenerationState(configPath)
+	return err == nil && configwrite.IsHandEditActor(state.Actor)
+}
+
+// needsRestore is whether ensure and repair must write the confirmed bundle
+// config: the installed bytes are not it, or they are exactly it but the
+// generation record calls them a hand edit (handEditRecorded).
+func (e bundleEnforcement) needsRestore(handEditRecorded bool) bool {
+	return e.ConfigReplaced() ||
+		(handEditRecorded && e.InstalledConfig != nil && e.Current != nil && e.CurrentErr == nil && e.CurrentConfig != nil)
+}
+
 // bundleConfigRestore is how ensure and repair put the confirmed bundle's
 // config back over the installed config.yaml.
 type bundleConfigRestore struct {
-	// Write is set when config.yaml is not the bundle config.
+	// Write is set when config.yaml is not the bundle config, or is the
+	// bundle config recorded as a hand edit.
 	Write bool
+	// Rerecord is set for the second case: the bytes are already right, and
+	// the write records the bundle generation over the hand-edit record.
+	Rerecord bool
 	// Missing is set when there is no config.yaml: nothing is kept as
 	// rejected-config.yaml and the write expects no file.
 	Missing bool
@@ -72,7 +93,7 @@ type bundleConfigRestore struct {
 // under lifecycle.lock (installed, readErr). A deleted config.yaml is the
 // same tamper as an edited one and is restored too (GAP-0114); any other
 // read error is returned, and the restore fails.
-func (e bundleEnforcement) planRestore(installed []byte, readErr error) (bundleConfigRestore, error) {
+func (e bundleEnforcement) planRestore(installed []byte, readErr error, handEditRecorded bool) (bundleConfigRestore, error) {
 	renderable := e.Current != nil && e.CurrentErr == nil && e.CurrentConfig != nil
 	if readErr != nil {
 		if !errors.Is(readErr, fs.ErrNotExist) {
@@ -82,6 +103,9 @@ func (e bundleEnforcement) planRestore(installed []byte, readErr error) (bundleC
 	}
 	e.InstalledConfig = installed
 	if !e.ConfigReplaced() {
+		if e.needsRestore(handEditRecorded) {
+			return bundleConfigRestore{Write: true, Rerecord: true, ExpectSHA256: configwrite.SHA256Hex(installed)}, nil
+		}
 		return bundleConfigRestore{}, nil
 	}
 	return bundleConfigRestore{Write: true, ExpectSHA256: configwrite.SHA256Hex(installed)}, nil

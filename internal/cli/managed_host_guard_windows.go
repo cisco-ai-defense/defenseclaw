@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -52,14 +53,46 @@ import (
 // (install\pending.json) stands in for it, so the target enumeration and the
 // helpers the install runs apply the Secure Client rules, as they already do
 // for Repair and Upgrade.
+func init() {
+	managed.SecureClientHostVerified = func() bool { return secureClientHost() }
+	managed.SecureClientProcessPathVerified = secureClientManagedProcessPath
+}
+
+// secureClientManagedProcessPath binds the managed trust exceptions to the
+// installed gateway service or hook executable and the installation's exact
+// state tree. Neither the process home nor its deployment-mode environment
+// pin selects these paths.
+func secureClientManagedProcessPath(path string) bool {
+	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	if err != nil {
+		return false
+	}
+	executable, err := os.Executable()
+	if err != nil || !secureClientManagedLayoutMatches(roots, executable, path, managed.WindowsCurrentProcessIsGatewayService()) {
+		return false
+	}
+	return managed.ValidateTrustedSecureClientHostFile(executable, "Secure Client process executable") == nil
+}
+
+func secureClientManagedLayoutMatches(roots winpath.EnterpriseRoots, executable, path string, gatewayService bool) bool {
+	bin := filepath.Join(roots.InstallRoot, "bin")
+	installed := (gatewayService && strings.EqualFold(filepath.Clean(executable), filepath.Join(bin, "defenseclaw-gateway.exe"))) ||
+		strings.EqualFold(filepath.Clean(executable), filepath.Join(bin, "defenseclaw-hook.exe"))
+	if !installed {
+		return false
+	}
+	state := strings.ToLower(filepath.Clean(roots.StateRoot)) + string(filepath.Separator)
+	return strings.HasPrefix(strings.ToLower(filepath.Clean(path)), state)
+}
+
 var secureClientHost = func() bool {
 	return classifySecureClientHost(secureClientClassificationChecks{
 		roots:              winpath.TrustedEnterpriseRoots,
 		deployment:         winpath.InspectEnterpriseDeploymentAt,
-		trustedDir:         managed.ValidateTrustedRuntimeDir,
+		trustedDir:         managed.ValidateTrustedSecureClientHostDir,
 		trustedMarker:      managed.ValidateTrustedInstallMarkerDir,
-		trustedFile:        managed.ValidateTrustedFilePath,
-		trustedTransaction: managed.ValidateTrustedFilePath,
+		trustedFile:        managed.ValidateTrustedSecureClientHostFile,
+		trustedTransaction: managed.ValidateTrustedSecureClientHostFile,
 		serviceImage:       windowsServiceImagePath,
 	})
 }
@@ -281,7 +314,7 @@ var managedHostRecordTrusted = func(path string) error {
 // The Secure Client profile registers the same service name with its own
 // executable; the image path tells them apart. A seam for tests.
 var managedHostStandaloneService = func() (string, error) {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return "", err
 	}

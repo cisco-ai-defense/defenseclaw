@@ -64,6 +64,21 @@ def _powershell_engines_or_fail() -> list[str]:
     return []
 
 
+def _assert_store_ensures_public_receipt_events_with_exact_acl(go: str) -> None:
+    """The bundle store creates receipt-events with the public exact ACL.
+
+    Production wires the store hook through the package seam
+    windowsBundleEnsurePublicReceiptEventsDirectory (GAP-0079, g079 review
+    F4), whose one and only assignment in the product source is the
+    exact-ACL helper ensureWindowsBundlePublicReceiptEventsDirectory. Tests
+    replace the seam; the product never does.
+    """
+    assert "store.EnsurePublicReceiptEventsDirectory = windowsBundleEnsurePublicReceiptEventsDirectory" in go
+    assignments = re.findall(r"\bwindowsBundleEnsurePublicReceiptEventsDirectory\s*=\s*(\w+)", go)
+    assert assignments == ["ensureWindowsBundlePublicReceiptEventsDirectory"], assignments
+    assert "func ensureWindowsBundlePublicReceiptEventsDirectory(path string) error {" in go
+
+
 def _extract_function_body(source: str, function_name: str, terminator: str) -> str:
     """Return the slice of source between two anchors, or raise AssertionError.
 
@@ -378,7 +393,7 @@ def test_public_bundle_receipt_acl_does_not_expose_private_paths() -> None:
     assert "Assert-DefenseClawCanonicalPathAcl -Path $item.Path -Expected $expected" in contract
     go = WINDOWS_BUNDLE.read_text(encoding="utf-8")
     store = GO_STORE.read_text(encoding="utf-8")
-    assert "store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory" in go
+    _assert_store_ensures_public_receipt_events_with_exact_acl(go)
     assert "return createWindowsBundleDirectory(path, windowsBundleDirectorySDDL(service.String()))" in go
     assert "ensureErr = s.EnsurePublicReceiptEventsDirectory(eventsDir)" in store
     assert "ensureErr = os.MkdirAll(eventsDir, 0o755)" in store
@@ -460,6 +475,7 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
         "BundleVersionFile": creator_sddl("windowsBundleVersionSDDL"),
         "AdminDirectory": creator_sddl("windowsBundlePrivateSDDL"),
         "AdminFile": creator_sddl("windowsBundleAdminFileSDDL"),
+        "ConfigFile": creator_sddl("windowsConfigFileSDDL"),
     }
     assert 'inherit = "OICI"' in go_acl.split("func windowsBundleVersionSDDL(", 1)[1].split("\n}", 1)[0]
     for kind, actual in creators.items():
@@ -547,7 +563,7 @@ def test_public_receipt_event_paths_select_public_exact_acl() -> None:
     go = WINDOWS_BUNDLE.read_text(encoding="utf-8")
     go_acl = WINDOWS_BUNDLE_ACL.read_text(encoding="utf-8")
     store = GO_STORE.read_text(encoding="utf-8")
-    assert "store.EnsurePublicReceiptEventsDirectory = ensureWindowsBundlePublicReceiptEventsDirectory" in go
+    _assert_store_ensures_public_receipt_events_with_exact_acl(go)
     assert "ensureErr = s.EnsurePublicReceiptEventsDirectory(eventsDir)" in store
     public_dir = go_acl.split("func windowsBundleDirectorySDDL(", 1)[1].split("\n}", 1)[0]
     public_file = go_acl.split("func windowsBundleReceiptSDDL(", 1)[1].split("\n}", 1)[0]

@@ -21,7 +21,7 @@
 # names (what `realm join` sets) that is group@realm in lower case, as below. On macOS
 # use the names `dscl` shows for the AD groups, for example CORP\Contractors. To check
 # a match before anyone signs in:
-#   sudo defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector claudecode
+#   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector claudecode
 # The output includes effective.sandbox, with the source of each value.
 #
 # How the sandbox part works:

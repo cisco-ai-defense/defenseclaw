@@ -39,8 +39,9 @@ This command surfaces the common policy levers directly:
 
 All of these accept ``--connector X`` to scope the change to one
 configured peer on a multi-connector install (one gateway enforces N
-hook connectors). Without ``--connector`` the change applies globally
-(legacy single-connector behaviour, unchanged). They resolve the active
+hook connectors). On a single-connector install, naming the active connector
+uses the global path. Without ``--connector`` the change applies globally.
+They resolve the active
 connector(s) from ``Config.active_connector(s)()`` and delegate the
 actual config-patch work to the Go sidecar's ``Connector.Setup`` /
 ``Connector.Teardown`` (running at sidecar boot when the relevant flag
@@ -75,6 +76,10 @@ from defenseclaw.enforce import asset_lists
 from defenseclaw.fail_mode import (
     FileSnapshot,
     fail_mode_transaction_lock,
+    proxy_model_outage_mode,
+    proxy_outage_source,
+    proxy_outage_summary,
+    proxy_requests_note,
     reconcile_connector_registration,
     registration_integrity_drift,
     resolve_connector_fail_mode,
@@ -260,6 +265,24 @@ def _resolve_member_connector(app, requested: str) -> str | None:
     return None
 
 
+def _single_connector_uses_global_scope(app: AppContext, requested: str) -> bool:
+    """Use the existing global path when a single install names its active connector."""
+    if getattr(app.cfg.guardrail, "connectors", {}) or {}:
+        return False
+    active = _resolve_active_connector(app.cfg)
+    if _secure_client_fail_mode(app):
+        ux.err("--connector is only valid on multi-connector installs.", indent="  ")
+        raise SystemExit(1)
+    if active and normalize_connector(requested) == normalize_connector(active):
+        return True
+    ux.err("--connector is only valid on multi-connector installs or for the installed connector.", indent="  ")
+    ux.subhead(
+        f"Installed connector: {active or 'none'}; {requested!r} is not installed.",
+        indent="    ",
+    )
+    raise SystemExit(1)
+
+
 def _active_connector_keys(app: AppContext) -> list[str]:
     """Resolve active names to existing map keys before a bare policy write."""
     return [
@@ -360,6 +383,23 @@ def _warn_setup_refuses_reenable(app: AppContext, names: list[str]) -> None:
         )
 
 
+def _save_enabling(app: AppContext) -> None:
+    """Save a config that turns protection on, judged like ``config set``.
+
+    The gateway cannot boot a proxy connector beside other listed entries, so
+    the final file passes the same roster check ``config set`` applies; a
+    refusal leaves config.yaml unchanged (GAP-0588).
+    """
+    from defenseclaw import config_writer
+    from defenseclaw.guardrail_roster import check_guardrail_connector_roster
+
+    try:
+        app.cfg.save(check_candidate=check_guardrail_connector_roster)
+    except config_writer.ConfigWriteError as exc:
+        ux.err(f"{exc} Nothing was changed.", indent="  ")
+        raise SystemExit(1)
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -372,22 +412,10 @@ def _toggle_connector_guardrail(
     policy fields (mode/hilt/rule_pack) are retained so re-enable
     restores it with no re-prompt.
 
-    ``--connector`` is a multi-connector feature: on a single-connector
-    install (no ``guardrail.connectors`` map) it points the operator at the
-    global switch rather than silently creating a one-entry map.
+    A single-connector install uses the global path before entering here.
     """
     conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
     verb = "enable" if enable else "disable"
-
-    if not conns:
-        ux.err("--connector is only valid on multi-connector installs.", indent="  ")
-        ux.subhead(
-            f"This is a single-connector install; use 'defenseclaw guardrail {verb}' "
-            "(no --connector).",
-            indent="    ",
-        )
-        raise SystemExit(1)
-
     key = _resolve_member_connector(app, requested)
     if key is None:
         ux.err(f"Connector {requested!r} is not configured.", indent="  ")
@@ -486,7 +514,10 @@ def _toggle_connector_guardrail(
         conns[key] = entry
     entry.enabled = bool(enable)
     try:
-        app.cfg.save()
+        if enable:
+            _save_enabling(app)
+        else:
+            app.cfg.save()
         ux.ok(
             f"Config saved (guardrail.connectors.{key}.enabled = {str(enable).lower()})",
             indent="  ",
@@ -1002,10 +1033,9 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         cfm = configured_cfm
         fail_drift = ""
         if _is_proxy_connector(name):
-            # A proxy-backed connector has no hooks: its model calls fail
-            # while the gateway is down, as `guardrail fail-mode` shows
-            # (GAP-1963 R6-F1). The hook outage mode does not apply.
-            cfm = "closed"
+            # A proxy-backed connector has no hooks: its model calls follow the
+            # outage mode `guardrail fail-mode` shows (GAP-0824).
+            cfm = proxy_model_outage_mode(app.cfg, name)
         elif normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS:
             runtime_state = resolve_connector_fail_mode(app.cfg, name)
             if runtime_state.runtime is not None:
@@ -1037,12 +1067,6 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
             if cfm == "closed":
                 runtime_limit_rows.append(f"{_connector_label(name)} ({name}) is closed: {runtime_state.limit}")
-        if _is_proxy_connector(name):
-            # A proxy connector has no hooks: its proxy refuses every call
-            # while the gateway is down, whatever hook_fail_mode says. Show
-            # what `guardrail fail-mode` shows (GAP-1646), so neither the
-            # Fail column nor a hooks-allow warning over-states the risk.
-            cfm = "closed"
         # Per-connector on/off: a connector turned off via
         # `guardrail disable --connector X` is reported as disabled so the
         # roster never implies it is enforcing when its hooks have been torn
@@ -1075,7 +1099,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                     f"{_connector_label(name)} ({name}) is not guarded: {unrunnable}. Fail mode does not apply "
                     f"to a hook the agent does not run; repair: {repair_command(name, unrunnable)}"
                 )
-            elif cfm == "open" and not upstream_fail_open(app.cfg, name) and (
+            elif cfm == "open" and not _is_proxy_connector(name) and not upstream_fail_open(app.cfg, name) and (
                 (cmode or "") == "action" or _action_profiles_for(gc, name)
             ):
                 # An upgrade keeps the fail mode an older setup chose, while a
@@ -1222,7 +1246,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     "--connector",
     "connector_flag",
     default=None,
-    help="Scope the disable to a single connector (multi-connector installs only). "
+    help="Scope the disable to a connector; the active connector is accepted on a single-connector install. "
     "Omit to disable the whole guardrail.",
 )
 @pass_ctx
@@ -1241,7 +1265,7 @@ def disable_cmd(
     (the others keep running). X's policy is retained so a later
     ``guardrail enable --connector X`` restores it with no re-prompt.
     """
-    if connector_flag:
+    if connector_flag and not _single_connector_uses_global_scope(app, connector_flag):
         _toggle_connector_guardrail(
             app, connector_flag, enable=False, restart=restart, yes=yes
         )
@@ -1361,7 +1385,7 @@ def disable_cmd(
     "--connector",
     "connector_flag",
     default=None,
-    help="Scope the enable to a single connector (multi-connector installs only). "
+    help="Scope the enable to a connector; the active connector is accepted on a single-connector install. "
     "Omit to enable the whole guardrail.",
 )
 @pass_ctx
@@ -1380,7 +1404,7 @@ def enable_cmd(
     connector: the boot loop runs X's ``Setup`` again while the others are
     untouched.
     """
-    if connector_flag:
+    if connector_flag and not _single_connector_uses_global_scope(app, connector_flag):
         _toggle_connector_guardrail(
             app, connector_flag, enable=True, restart=restart, yes=yes
         )
@@ -1448,7 +1472,7 @@ def enable_cmd(
 
     gc.enabled = True
     try:
-        app.cfg.save()
+        _save_enabling(app)
         ux.ok("Config saved (guardrail.enabled = true)", indent="  ")
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")
@@ -1560,8 +1584,14 @@ def _apply_scoped_fail_mode_transaction(
             # back, rel-1-0-6 GAP-0576). Its PATH shims read the saved mode
             # when they run; refresh-fail-modes rewrites the mode installed
             # in them for when the gateway program cannot run.
-            _refresh_hook_outage_modes(app)
-            ux.ok(f"{label} PATH shims now use fail={mode} while no gateway answers.", indent="  ")
+            if _refresh_hook_outage_modes(app):
+                ux.ok(f"{label} PATH shims now use fail={mode} while no gateway answers.", indent="  ")
+            else:
+                ux.subhead(
+                    f"{label}'s saved fail={mode} applies when the PATH shims run; "
+                    "their installed fallback was not refreshed.",
+                    indent="  ",
+                )
             click.echo()
         elif restart and gc.enabled:
             try:
@@ -1625,20 +1655,9 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     boot loop regenerates that connector's hook with the new ``FAIL_MODE``;
     the others are untouched.
 
-    ``--connector`` is a multi-connector feature: on a single-connector
-    install (no ``guardrail.connectors`` map) it points the operator at the
-    global command rather than silently creating a one-entry map.
+    A single-connector install uses the global path before entering here.
     """
     conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
-    if not conns:
-        ux.err("--connector is only valid on multi-connector installs.", indent="  ")
-        ux.subhead(
-            "This is a single-connector install; use 'defenseclaw guardrail fail-mode' "
-            "(no --connector) to set the global fail mode.",
-            indent="    ",
-        )
-        raise SystemExit(1)
-
     key = _resolve_member_connector(app, requested)
     if key is None:
         ux.err(f"Connector {requested!r} is not configured.", indent="  ")
@@ -1666,7 +1685,13 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     # whether it is an override or inherited from the global default.
     if mode is None:
         click.echo()
-        if upstream_fail_open(app.cfg, key):
+        # The same on/off rule as the unscoped view: a disabled connector has
+        # no hooks, so it has no fail mode and no hook drift (GAP-0824, GAP-1648).
+        enforcing = gc.enabled and (gc.effective_enabled(key) if hasattr(gc, "effective_enabled") else True)
+        proxy = _is_proxy_connector(key)
+        if not enforcing:
+            runtime_value = "disabled (no hooks)"
+        elif upstream_fail_open(app.cfg, key):
             # Copilot CLI, Antigravity and (under Secure Client) Hermes fail
             # open upstream whatever is saved, as the unscoped view, status and
             # doctor say (GAP-0336).
@@ -1674,6 +1699,10 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
                 f"open ({label} upstream; failures cannot be made fail-closed;"
                 f" configured provenance: {configured_mode})"
             )
+        elif proxy:
+            # No hooks: the model requests follow the outage mode the unscoped
+            # view and status print, resolved by the one shared helper (GAP-0824).
+            runtime_value = proxy_outage_summary(proxy_model_outage_mode(app.cfg, key))
         elif runtime_state.limit:
             runtime_value = runtime_state.effective
             if runtime_value == "closed":
@@ -1686,15 +1715,24 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         else:
             runtime_value = runtime_state.runtime or "unknown"
         click.echo(f"  {ux.bold(f'{label} ({key}) hook_fail_mode:')} {ux.accent(runtime_value)}")
-        if has_override:
+        if proxy:
+            # The source follows the order the outage resolver applies, so the line never
+            # contradicts the value above it (GAP-0824).
+            ux.subhead(proxy_outage_source(app.cfg, key), indent="  ")
+        elif has_override:
             ux.subhead(f"per-connector override (global default: {global_fm}).", indent="  ")
         else:
             ux.subhead(f"inherited from global default ({global_fm}).", indent="  ")
-        if runtime_state.drift:
-            ux.warn(
-                f"Runtime drift (desired {runtime_state.desired}): " + ", ".join(runtime_state.drift),
-                indent="  ",
-            )
+        if proxy:
+            # Hooks do not exist for a proxy-backed connector: only a foreign or
+            # unguarded registration is drift, as the unscoped report says.
+            drift = list(registration_integrity_drift(app.cfg, key)) if enforcing else []
+            desired = proxy_model_outage_mode(app.cfg, key)
+        else:
+            drift = list(runtime_state.drift) if enforcing else []
+            desired = runtime_state.desired
+        if drift:
+            ux.warn(f"Runtime drift (desired {desired}): " + ", ".join(drift), indent="  ")
         click.echo()
         return
 
@@ -1727,7 +1765,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         # mode of their PATH shims, which ask the gateway program for it each
         # time they run (rel-1-0-6 GAP-0576).
         ux.subhead(_proxy_shim_fail_mode_note(label, mode), indent="  ")
-        ux.subhead(_PROXY_REQUESTS_NOTE, indent="    ")
+        ux.subhead(proxy_requests_note(app.cfg, key, saved=mode), indent="    ")
     elif outage_only and mode == "closed":
         ux.warn(f"A gateway outage will now BLOCK supported {label} calls.", indent="  ")
         ux.subhead("Other delivery and response failures remain closed.", indent="    ")
@@ -1815,6 +1853,7 @@ def _apply_global_fail_mode_transaction(
     fail_mode_targets: list[str],
     single_connector: str,
     single_runtime: bool,
+    proxy_single_scope: bool,
     target_modes: dict[str, str] | None = None,
 ) -> None:
     """Persist global/fan-out fail mode and atomically refresh registrations.
@@ -1884,7 +1923,26 @@ def _apply_global_fail_mode_transaction(
             )
             raise SystemExit(1) from exc
 
-        if restart and gc.enabled:
+        proxy_single = (
+            proxy_single_scope
+            and not fail_mode_targets
+            and not _secure_client_fail_mode(app)
+            and _is_proxy_connector(single_connector)
+        )
+        if restart and gc.enabled and proxy_single:
+            if _refresh_hook_outage_modes(app):
+                ux.ok(
+                    f"{_connector_label(single_connector)} PATH shims now use fail={mode} while no gateway answers.",
+                    indent="  ",
+                )
+            else:
+                ux.subhead(
+                    f"{_connector_label(single_connector)}'s saved fail={mode} applies when the PATH shims run; "
+                    "their installed fallback was not refreshed.",
+                    indent="  ",
+                )
+            click.echo()
+        elif restart and gc.enabled:
             used_full_restart = False
             gateway_stopped = False
             try:
@@ -1967,6 +2025,13 @@ def _apply_global_fail_mode_transaction(
             else:
                 ux.ok("Selected connector runtime registrations refreshed and verified.", indent="  ")
             click.echo()
+        elif not restart and proxy_single:
+            ux.subhead(
+                f"--no-restart saved the value. {_connector_label(single_connector)}'s PATH shims "
+                "read it when they run; "
+                "their installed fallback is refreshed when the gateway next reloads or starts.",
+                indent="  ",
+            )
         elif not restart:
             ux.warn(
                 "--no-restart saved desired values, but runtime registrations were not refreshed; "
@@ -2034,7 +2099,9 @@ def _outage_open_note(app: AppContext, calls: str) -> str:
 
 
 _PER_USER_OUTAGE_RULE = (
-    "On a per-user install an explicit saved mode wins. When unset, the gateway-outage mode follows the "
+    "On a per-user install an explicit saved mode wins (except OpenClaw under the strict policy and "
+    "ZeptoClaw model requests, which stay closed); a managed computer or Secure Client uses the "
+    "administrator mode. When unset, the gateway-outage mode follows the "
     "policy tier: the default (balanced) and permissive rule packs let a call run with a warning while "
     "the gateway is not running, strict blocks it. "
     "Every other failure (an error or unusable gateway answer, a missing token, an install or upgrade) blocks."
@@ -2054,7 +2121,8 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
         if not enforcing:
             shown = "disabled (no hooks)"
         elif _is_proxy_connector(name):
-            shown = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
+            shown = proxy_outage_summary(proxy_model_outage_mode(app.cfg, name))
+            shown += " (" + proxy_outage_source(app.cfg, name).rstrip(".") + ")"
         else:
             tier = gc.hook_policy_tier(name) if hasattr(gc, "hook_policy_tier") else "default"
             resolver = getattr(gc, "effective_hook_fail_mode", None)
@@ -2095,7 +2163,7 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
     "--connector",
     "connector_flag",
     default=None,
-    help="Scope the fail mode to a single connector (multi-connector installs only). "
+    help="Scope the fail mode to a connector; the active connector is accepted on a single-connector install. "
     "Omit to show/set the global default.",
 )
 @pass_ctx
@@ -2136,17 +2204,21 @@ def fail_mode_cmd(
     desired value without refreshing runtime registrations; check
     ``guardrail status`` for drift until reconciliation succeeds.
 
-    With ``--connector X`` it scopes the fail mode to a single connector
-    (multi-connector installs only), writing a per-connector override
-    while the global default and the other connectors are left untouched.
+    With ``--connector X`` it scopes the fail mode to a single connector.
+    On a multi-connector install it writes a per-connector override while
+    the global default and the other connectors are left untouched. On a
+    single-connector install, naming its active connector uses the global path.
     """
     managed_host = str(getattr(app.cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
     secure_client = _secure_client_fail_mode(app)
+    single_explicit = False
     if connector_flag:
-        _set_connector_fail_mode(
-            app, connector_flag, mode, restart=restart, yes=yes
-        )
-        return
+        if not _single_connector_uses_global_scope(app, connector_flag):
+            _set_connector_fail_mode(
+                app, connector_flag, mode, restart=restart, yes=yes
+            )
+            return
+        single_explicit = True
 
     gc = app.cfg.guardrail
     # A bare write sets the global value every unlisted connector inherits
@@ -2201,7 +2273,7 @@ def fail_mode_cmd(
                 elif _state.note:
                     _eff += f" ({_state.note})"
             elif _is_proxy_connector(_name):
-                _eff = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
+                _eff = proxy_outage_summary(proxy_model_outage_mode(app.cfg, _name))
             if _enforcing and normalize_connector(_name) not in _RUNTIME_FAIL_MODE_CONNECTORS:
                 # A hook entry the agent skips, or one that does not run
                 # DefenseClaw's current hook, leaves calls unchecked whatever
@@ -2300,6 +2372,7 @@ def fail_mode_cmd(
     if (
         not fail_mode_targets
         and saved_global == mode
+        and not (single_explicit and _is_proxy_connector(single_connector))
         and (single_state is None or (single_state.desired == mode and single_state.current))
         and not registration_integrity_drift(app.cfg, single_connector)
     ):
@@ -2376,10 +2449,17 @@ def fail_mode_cmd(
     )
     outage_only = not secure_client
     if outage_only and all(_is_proxy_connector(name) for name in active_names):
-        ux.subhead(
-            "No active hooks use this setting; proxy-backed connectors still block while the gateway is down. "
-            "The choice is saved for hook connectors added later.", indent="  ",
-        )
+        if single_explicit:
+            for name in active_names:
+                ux.subhead(_proxy_shim_fail_mode_note(_connector_label(name), mode), indent="  ")
+                ux.subhead(proxy_requests_note(app.cfg, name, saved=mode), indent="    ")
+        else:
+            ux.subhead(
+                "No active hooks use this setting. The choice is saved for hook connectors added later.", indent="  "
+            )
+            for name in active_names:
+                note = proxy_requests_note(app.cfg, name, saved=mode)
+                ux.subhead(f"{_connector_label(name)}: {note}", indent="    ")
     elif outage_only and mode == "closed":
         ux.warn("A gateway outage will now BLOCK supported calls. Other failures remain closed.", indent="  ")
     elif outage_only:
@@ -2447,6 +2527,7 @@ def fail_mode_cmd(
         fail_mode_targets=fail_mode_targets,
         single_connector=single_connector,
         single_runtime=single_state is not None,
+        proxy_single_scope=single_explicit,
         target_modes=desired_modes,
     )
 
@@ -2467,9 +2548,6 @@ def _is_proxy_connector(name: str) -> bool:
     return normalize_connector(name) in PROXY_CONNECTORS
 
 
-_PROXY_REQUESTS_NOTE = "Its proxied model requests are blocked while the gateway is down, whatever this value says."
-
-
 def _proxy_shim_fail_mode_note(label: str, mode: str) -> str:
     """What a scoped fail mode changes for a proxy-backed connector: its PATH shims."""
     shims = f"{label}'s PATH shims (curl, wget, ssh, nc, pip, npm)"
@@ -2477,7 +2555,8 @@ def _proxy_shim_fail_mode_note(label: str, mode: str) -> str:
         return f"While no gateway answers, {shims} will refuse the tool."
     return (
         f"While no gateway answers, {shims} will run the real tool with one warning and a "
-        "~/.defenseclaw/logs/hook-failures.jsonl record."
+        "~/.defenseclaw/logs/hook-failures.jsonl record. Managed hosts, install or upgrade "
+        "windows, and strict availability still use closed."
     )
 
 
@@ -2691,20 +2770,9 @@ def _set_connector_hilt(
     hook decision path reads it via ``EffectiveHILT(connector)``; a present
     block fully replaces the global one, an absent block inherits it.
 
-    ``--connector`` is a multi-connector feature: on a single-connector
-    install it points the operator at the global command instead of
-    silently creating a one-entry map.
+    A single-connector install uses the global path before entering here.
     """
     conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
-    if not conns:
-        ux.err("--connector is only valid on multi-connector installs.", indent="  ")
-        ux.subhead(
-            "This is a single-connector install; use 'defenseclaw guardrail hilt' "
-            "(no --connector) to set the global HILT policy.",
-            indent="    ",
-        )
-        raise SystemExit(1)
-
     key = _resolve_member_connector(app, requested)
     if key is None:
         ux.err(f"Connector {requested!r} is not configured.", indent="  ")
@@ -2845,7 +2913,7 @@ def _log_hilt(app: AppContext, details: str) -> None:
     "--connector",
     "connector_flag",
     default=None,
-    help="Scope HILT to a single connector (multi-connector installs only). "
+    help="Scope HILT to a connector; the active connector is accepted on a single-connector install. "
     "Omit to show/set the global default.",
 )
 @click.option(
@@ -2880,10 +2948,11 @@ def hilt_cmd(
     Without an argument this prints the current value. ``on``/``off``
     toggles it and ``--min-severity`` sets the threshold; either may be
     given alone (the other field is preserved). With ``--connector X`` it
-    writes a per-connector override (multi-connector installs only) while
-    the global default and the other connectors are left untouched.
+    writes a per-connector override on a multi-connector install while
+    the global default and the other connectors are left untouched. On a
+    single-connector install, naming its active connector uses the global path.
     """
-    if connector_flag:
+    if connector_flag and not _single_connector_uses_global_scope(app, connector_flag):
         _set_connector_hilt(
             app, connector_flag, state, min_severity, restart=restart, yes=yes
         )
@@ -3066,20 +3135,9 @@ def _set_connector_block_message(
     wins over the global one, and an empty value inherits the global / the
     built-in default.
 
-    ``--connector`` is a multi-connector feature: on a single-connector
-    install it points the operator at the global command instead of
-    silently creating a one-entry map.
+    A single-connector install uses the global path before entering here.
     """
     conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
-    if not conns:
-        ux.err("--connector is only valid on multi-connector installs.", indent="  ")
-        ux.subhead(
-            "This is a single-connector install; use 'defenseclaw guardrail "
-            "block-message' (no --connector) to set the global message.",
-            indent="    ",
-        )
-        raise SystemExit(1)
-
     key = _resolve_member_connector(app, requested)
     if key is None:
         ux.err(f"Connector {requested!r} is not configured.", indent="  ")
@@ -3183,7 +3241,7 @@ def _set_connector_block_message(
     "--connector",
     "connector_flag",
     default=None,
-    help="Scope the message to a single connector (multi-connector installs only). "
+    help="Scope the message to a connector; the active connector is accepted on a single-connector install. "
     "Omit to show/set the global default.",
 )
 @click.option(
@@ -3216,15 +3274,16 @@ def block_message_cmd(
       defenseclaw guardrail block-message --clear
       defenseclaw guardrail block-message "Codex policy" --connector codex
 
-    With ``--connector X`` it writes a per-connector override (multi-connector
-    installs only) while the global default and the other connectors are
-    left untouched.
+    With ``--connector X`` it writes a per-connector override on a
+    multi-connector install while the global default and the other connectors
+    are left untouched. On a single-connector install, naming its active
+    connector uses the global path.
     """
     if message is not None and clear:
         ux.err("Pass a message or --clear, not both.", indent="  ")
         raise click.Abort()
 
-    if connector_flag:
+    if connector_flag and not _single_connector_uses_global_scope(app, connector_flag):
         _set_connector_block_message(
             app, connector_flag, message, clear=clear, restart=restart, yes=yes
         )
@@ -4407,7 +4466,7 @@ def _registered_pack_names(gc: object) -> str:
     )
 
 
-def _refresh_hook_outage_modes(app: AppContext) -> None:
+def _refresh_hook_outage_modes(app: AppContext) -> bool:
     """Rewrite the installed per-user hooks' outage records from the saved config.
 
     A per-user hook's outage mode follows its connector's rule pack. The
@@ -4424,12 +4483,12 @@ def _refresh_hook_outage_modes(app: AppContext) -> None:
 
     data_dir = str(getattr(app.cfg, "data_dir", "") or "")
     if not data_dir or not os.path.isdir(os.path.join(data_dir, "hooks")):
-        return
+        return False
     binary = resolve_gateway_binary()
     if not binary:
-        return
+        return False
     try:
-        subprocess.run(
+        result = subprocess.run(
             [binary, "connector", "refresh-fail-modes", "--data-dir", data_dir],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -4437,8 +4496,9 @@ def _refresh_hook_outage_modes(app: AppContext) -> None:
             timeout=30,
             check=False,
         )
+        return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
-        return
+        return False
 
 
 def _applied_note(app: AppContext, result: object) -> str:

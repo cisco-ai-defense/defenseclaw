@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/proofclock/proofclocktest"
 )
 
 // shortAnswerFloor lets a short test budget leave the gateway its answer
@@ -28,6 +30,57 @@ func shortAnswerFloor(t *testing.T) {
 func standaloneOpenCodex(opts *Options) {
 	managedWindowsStandalone(opts)
 	opts.FailMode = "open"
+}
+
+// heldWatchdogBounds puts the two bounded looks of the watchdog at its
+// deadline (the wait for its hook-failures row, answerWatchdogLogWait, and
+// the look at the install, installLockCheckWait) on a proof clock that
+// never spends them: both keep their production value, the test asserts
+// the bound the product asked for (askedBounds), and each look ends with
+// its real result instead of with how fast a loaded machine schedules a
+// file append or a lifecycle look. The bounds have their own tests (a
+// stalled open, a stalled lock read).
+func heldWatchdogBounds(t *testing.T) *proofclocktest.Clock {
+	t.Helper()
+	return proofclocktest.Install(t)
+}
+
+// askedBounds fails unless the watchdog bounded its wait for the row by the
+// production answerWatchdogLogWait, which keeps these tests about that
+// bound scenario and not about a bound a test widened.
+func askedBounds(t *testing.T, clock *proofclocktest.Clock) {
+	t.Helper()
+	for _, asked := range clock.Requested() {
+		if asked == answerWatchdogLogWait {
+			return
+		}
+	}
+	t.Fatalf("the watchdog asked for the bounds %v, want its %s log wait among them", clock.Requested(), answerWatchdogLogWait)
+}
+
+// answerLookupProbe is the agent-side output of a call that counts how many
+// account lookups had started when the first byte of the answer was written.
+// A lookup the watchdog started when it was armed is counted by then; a
+// lookup made only when the row is written after the answer is not.
+type answerLookupProbe struct {
+	firstWriteRecorder
+	lookups  *atomic.Int32
+	once     sync.Once
+	atAnswer atomic.Int32
+}
+
+func (p *answerLookupProbe) Write(b []byte) (int, error) {
+	if len(b) > 0 {
+		p.once.Do(func() { p.atAnswer.Store(p.lookups.Load() + 1) })
+	}
+	return p.firstWriteRecorder.Write(b)
+}
+
+// lookupsAtAnswer is the number of account lookups started before the
+// answer was written, and false when no answer byte was written.
+func (p *answerLookupProbe) lookupsAtAnswer() (int32, bool) {
+	n := p.atAnswer.Load()
+	return n - 1, n != 0
 }
 
 // G-small loop 2, finding 1: a managed hook whose administrator chose fail
@@ -152,6 +205,7 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			shortAnswerBudget(t, 800*time.Millisecond)
 			shortAnswerFloor(t)
+			clock := heldWatchdogBounds(t)
 			logHome := t.TempDir()
 			var lookups atomic.Int32
 			resolve := func() string {
@@ -159,6 +213,7 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 				time.Sleep(lookup)
 				return logHome
 			}
+			stdout := &answerLookupProbe{lookups: &lookups}
 			hung := make(chan struct{})
 			rowAtExit := make(chan string, 1)
 			exit := func(int) {
@@ -178,6 +233,7 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 					o.FailMode = tc.failMode
 					o.StartedAt = started
 					o.HTTPClient = &http.Client{Transport: ignoringContextRT{release: hung}}
+					o.Stdout = stdout
 					o.FailureLogHome = resolve
 					if !tc.prearm {
 						o.Exit = exit
@@ -185,7 +241,7 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 					}
 					watchdog := ArmAnswerWatchdog(Options{
 						Connector: "codex", Event: tc.event, ManagedEnterprise: true,
-						StartedAt: started, Exit: exit, Stdout: &strings.Builder{}, Stderr: &strings.Builder{},
+						StartedAt: started, Exit: exit, Stdout: stdout, Stderr: &strings.Builder{},
 						FailureLogHome: resolve,
 					}, []byte(`{"hook_event_name":"`+tc.event+`"}`))
 					if watchdog == nil {
@@ -197,6 +253,10 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 			}()
 			select {
 			case row := <-rowAtExit:
+				askedBounds(t, clock)
+				if n, ok := stdout.lookupsAtAnswer(); !ok || n != 1 {
+					t.Fatalf("account lookups started when the answer was written = %d (answer written: %t), want the one lookup of the armed watchdog", n, ok)
+				}
 				if strings.Count(row, "\n") != 1 || !strings.Contains(row, managedGatewayNoAnswerReason) {
 					t.Fatalf("hook-failures.jsonl when the process ended = %q, want one %s row", row, managedGatewayNoAnswerReason)
 				}
@@ -211,6 +271,85 @@ func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 				t.Fatalf("the call looked the account up %d times, want once", n)
 			}
 		})
+	}
+}
+
+// The watchdog waits for its hook-failures row for answerWatchdogLogWait on
+// the proof clock (waitForLog): while the row cannot be written, the
+// process ends when that bound is spent and not before, and with the
+// production bound (GAP-0859).
+func TestWatchdogLogWaitIsSpentOnTheProofClock(t *testing.T) {
+	shortAnswerBudget(t, 400*time.Millisecond)
+	shortAnswerFloor(t)
+	clock := heldWatchdogBounds(t)
+	logHome := t.TempDir()
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	hung := make(chan struct{})
+	stdout := &firstWriteRecorder{}
+	exited := make(chan int, 1)
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		run(t, "codex", nil, func(o *Options) {
+			managedWindowsStandalone(o)
+			o.StartedAt = time.Now()
+			o.HTTPClient = &http.Client{Transport: ignoringContextRT{release: hung}}
+			o.Stdout = stdout
+			o.Exit = func(code int) { exited <- code }
+			o.FailureLogHome = func() string {
+				<-release
+				return logHome
+			}
+		})
+	}()
+	// Run ends before the lookup and the transport are released, and the
+	// released lookup writes its row before the directory goes: the watchdog
+	// writes it on a goroutine the process end does not wait for.
+	t.Cleanup(func() {
+		unblock()
+		close(hung)
+		<-returned
+		rowWritten := time.After(10 * time.Second)
+		for {
+			if row, _ := os.ReadFile(filepath.Join(logHome, "logs", "hook-failures.jsonl")); strings.HasSuffix(string(row), "\n") {
+				return
+			}
+			select {
+			case <-rowWritten:
+				t.Error("the released lookup never wrote its row")
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	})
+	giveUp := time.After(10 * time.Second)
+	for bounded := false; !bounded; {
+		for _, asked := range clock.Requested() {
+			bounded = bounded || asked == answerWatchdogLogWait
+		}
+		select {
+		case <-exited:
+			t.Fatal("the process ended before the log wait was spent")
+		case <-giveUp:
+			t.Fatalf("the watchdog never asked for its %s log wait (asked %v)", answerWatchdogLogWait, clock.Requested())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	select {
+	case <-exited:
+		t.Fatal("the process ended before the log wait was spent")
+	default:
+	}
+	if out, _ := stdout.read(); out == "" {
+		t.Fatal("the watchdog waited for its row before it answered")
+	}
+	clock.Advance(answerWatchdogLogWait)
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the process did not end once the log wait was spent")
 	}
 }
 
@@ -241,6 +380,7 @@ func TestWatchdogArmedBeforeRunLogsItsAnswer(t *testing.T) {
 			}
 			shortAnswerBudget(t, budget)
 			shortAnswerFloor(t)
+			clock := heldWatchdogBounds(t)
 			logHome := t.TempDir()
 			rows := filepath.Join(logHome, "logs", "hook-failures.jsonl")
 			var lookups atomic.Int32
@@ -249,7 +389,7 @@ func TestWatchdogArmedBeforeRunLogsItsAnswer(t *testing.T) {
 				row  string
 			}
 			done := make(chan exited, 1)
-			stdout := &firstWriteRecorder{}
+			stdout := &answerLookupProbe{lookups: &lookups}
 			watchdog := ArmAnswerWatchdog(Options{
 				Connector: "codex", Event: "PreToolUse", FailMode: tc.failMode, ManagedEnterprise: true,
 				StartedAt: time.Now(), Stdout: stdout, Stderr: &strings.Builder{},
@@ -282,6 +422,10 @@ func TestWatchdogArmedBeforeRunLogsItsAnswer(t *testing.T) {
 			}
 			select {
 			case got := <-done:
+				askedBounds(t, clock)
+				if n, ok := stdout.lookupsAtAnswer(); !ok || n != 1 {
+					t.Fatalf("account lookups started when the answer was written = %d (answer written: %t), want the one lookup of the armed watchdog", n, ok)
+				}
 				out, _ := stdout.read()
 				if !blocked(runResult{code: got.code, stdout: out}) {
 					t.Fatalf("the armed watchdog answered exit %d stdout %q, want the managed closed answer", got.code, out)

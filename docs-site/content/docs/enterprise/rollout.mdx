@@ -51,7 +51,7 @@ variable changes it.
   files, unchanged, and the tools need cosign 2.0 or later.
 - The checksum-only fallback exists only for the official source.
 - Managed hosts do not update themselves: `defenseclaw upgrade` and
-  `defenseclaw rollback` refuse. Your MDM delivers each release, pinned by its
+  `defenseclaw rollback` refuse ([Managed command availability](/docs/enterprise/managed-commands)). Your MDM delivers each release, pinned by its
   SHA-256 from a `checksums.txt` that you verified once
   ([hash-pinned trust](/docs/enterprise/mdm#what-you-deliver)).
 
@@ -128,7 +128,7 @@ some IT staff, and deploy with `guardrail.mode: observe`.
 ## Step 4: Handle existing per-user installs
 
 On a managed computer the per-user installer, `defenseclaw upgrade` and the per-user
-gateway refuse to run. Nothing migrates a per-user install. Remove them before the
+gateway refuse to run (see [Managed command availability](/docs/enterprise/managed-commands)). Nothing migrates a per-user install. Remove them before the
 managed install reaches a computer:
 
 1. Find them: `~/.defenseclaw` (`%USERPROFILE%\.defenseclaw` on Windows), programs in

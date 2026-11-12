@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -56,25 +55,34 @@ func (s *Store) SyncCommittedWrites(ctx context.Context) error {
 		return err
 	}
 	defer release()
-	db, err := s.durableConn()
-	if err != nil {
-		return err
-	}
-	result, err := db.ExecContext(ctx, `
-		UPDATE observability_store_readiness
-		SET verification_generation = verification_generation + 1,
-			last_verified_at = ?
-		WHERE id = 1`, time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return fmt.Errorf("audit: flush committed audit writes to disk: %w", err)
-	}
-	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+	// Concurrent callers share one commit, and so one flush (durableGrouped):
+	// the flush of a commit covers every write committed before it.
+	invalid := false
+	err = s.durableGrouped(ctx, true, func(ctx context.Context, tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			UPDATE observability_store_readiness
+			SET verification_generation = verification_generation + 1,
+				last_verified_at = ?
+			WHERE id = 1`, time.Now().UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			invalid = true
+			return errors.New("the readiness state is invalid")
+		}
+		return nil
+	})
+	var dirErr *durableDirSyncError
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &dirErr):
+		return fmt.Errorf("audit: %w", err)
+	case invalid:
 		return errors.New("audit: flush committed audit writes to disk: the readiness state is invalid")
 	}
-	if err := syncAuditDBDir(filepath.Dir(s.dbPath)); err != nil {
-		return fmt.Errorf("audit: flush the audit database folder: %w", err)
-	}
-	return nil
+	return fmt.Errorf("audit: flush committed audit writes to disk: %w", err)
 }
 
 // durableConn returns the store's synchronous=FULL connection, opened on

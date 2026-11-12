@@ -44,7 +44,7 @@ func TestMigrateManagedStandaloneConfigRecordsStagedBundle(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	saved := managedStandaloneBundleGeneration
@@ -58,7 +58,7 @@ func TestMigrateManagedStandaloneConfigRecordsStagedBundle(t *testing.T) {
 			Reason: configwrite.BundleReason(id, 3, "guardrail pack update"),
 			Bundle: configwrite.BundleRef{ID: id, Version: 3, SignerKeyID: "k1"}}, true, nil
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	got, ok := observabilityruntime.ReadBundleAttribution(path)
@@ -78,7 +78,7 @@ func TestMigrateManagedStandaloneConfig(t *testing.T) {
 	if err := os.WriteFile(path, v8, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	raw, _ := os.ReadFile(path)
@@ -92,7 +92,7 @@ func TestMigrateManagedStandaloneConfig(t *testing.T) {
 	if err != nil || state.Actor != configwrite.ActorLifecycle || state.ConfigSHA256 != configwrite.SHA256Hex(raw) {
 		t.Fatalf("generation = %+v (%v)", state, err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	if again, _ := configwrite.ReadGenerationState(path); again.Generation != state.Generation {
@@ -114,7 +114,7 @@ func TestMigrateManagedStandaloneConfigRestoresMigratedCursorFailMode(t *testing
 	if err := os.WriteFile(path, open, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	if raw, _ := os.ReadFile(path); string(raw) != string(open) {
@@ -129,7 +129,7 @@ func TestMigrateManagedStandaloneConfigRestoresMigratedCursorFailMode(t *testing
 	if err := config.WriteMigrationRecord(path, record); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	repaired, _ := os.ReadFile(path)
@@ -140,7 +140,7 @@ func TestMigrateManagedStandaloneConfigRestoresMigratedCursorFailMode(t *testing
 	if err != nil || state.Actor != configwrite.ActorLifecycle || state.ConfigSHA256 != configwrite.SHA256Hex(repaired) {
 		t.Fatalf("generation = %+v (%v)", state, err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	if again, _ := configwrite.ReadGenerationState(path); again.Generation != state.Generation {
@@ -150,7 +150,7 @@ func TestMigrateManagedStandaloneConfigRestoresMigratedCursorFailMode(t *testing
 	if err := os.WriteFile(path, []byte(adminOpen), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	if raw, _ := os.ReadFile(path); string(raw) != adminOpen {
@@ -172,7 +172,7 @@ func TestRecordRestoredManagedStandaloneConfig(t *testing.T) {
 	if _, err := os.Stat(configwrite.GenerationPath(path)); !os.IsNotExist(err) {
 		t.Fatalf("a restored config with no record got one: %v", err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	installed, _ := configwrite.ReadGenerationState(path)
@@ -462,7 +462,7 @@ func TestMigrateManagedStandaloneConfigNeverRepairsABundleConfig(t *testing.T) {
 	if err := os.WriteFile(configwrite.GenerationPath(path), []byte(generation), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	if raw, _ := os.ReadFile(path); string(raw) != string(open) {
@@ -476,7 +476,7 @@ func TestMigrateManagedStandaloneConfigNeverRepairsABundleConfig(t *testing.T) {
 	previous := managedStandaloneBundleCurrent
 	t.Cleanup(func() { managedStandaloneBundleCurrent = previous })
 	managedStandaloneBundleCurrent = func() (bool, error) { return true, nil }
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	if raw, _ := os.ReadFile(path); string(raw) != string(open) {
@@ -488,7 +488,7 @@ func TestMigrateManagedStandaloneConfigNeverRepairsABundleConfig(t *testing.T) {
 	if err := os.Remove(configwrite.GenerationPath(path)); err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	if err := migrateManagedStandaloneConfig(context.Background(), path); err != nil {
+	if err := migrateManagedStandaloneConfig(context.Background(), path, ""); err != nil {
 		t.Fatal(err)
 	}
 	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), "hook_fail_mode: closed") {
@@ -526,7 +526,7 @@ func TestMigrateManagedStandaloneConfigRefusesAMigrationRecordItCannotRead(t *te
 			if err := tc.place(config.MigrationRecordPath(path)); err != nil {
 				t.Fatal(err)
 			}
-			err := migrateManagedStandaloneConfig(context.Background(), path)
+			err := migrateManagedStandaloneConfig(context.Background(), path, "")
 			if err == nil || !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
 				t.Fatalf("config step = %v, want an error naming %s", err, config.MigrationV9RecordFile)
 			}
@@ -614,7 +614,7 @@ func TestMigrateManagedStandaloneConfigRefusesALinkedMigrationRecord(t *testing.
 			}
 		}
 		symlinkOrSkip(t, target, config.MigrationRecordPath(path))
-		err := migrateManagedStandaloneConfig(context.Background(), path)
+		err := migrateManagedStandaloneConfig(context.Background(), path, "")
 		if err == nil || !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
 			t.Fatalf("live=%v: config step = %v, want an error naming %s", live, err, config.MigrationV9RecordFile)
 		}
@@ -646,7 +646,7 @@ func TestMigrateManagedStandaloneConfigRefusesAnUnrecoverableGeneration(t *testi
 	if err := os.WriteFile(configwrite.GenerationPath(path), record, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := migrateManagedStandaloneConfig(context.Background(), path)
+	err := migrateManagedStandaloneConfig(context.Background(), path, "")
 	after, _ := os.ReadFile(configwrite.GenerationPath(path))
 	if err == nil || !strings.Contains(err.Error(), "restore") || string(after) != string(record) {
 		t.Fatalf("unrecoverable record: error=%v, bytes=%q", err, after)
@@ -726,7 +726,7 @@ func TestMigrateManagedStandaloneConfigRefusesBundleBindingOverUnreadableGenerat
 					Reason: configwrite.BundleReason(id, 1, "codex target"),
 					Bundle: configwrite.BundleRef{ID: id, Version: 1, SignerKeyID: "k1"}}, true, nil
 			}
-			err := migrateManagedStandaloneConfig(context.Background(), path)
+			err := migrateManagedStandaloneConfig(context.Background(), path, "")
 			if !tc.staged {
 				// fix/r104-windows: an unreadable record is never reset to a
 				// fresh lifecycle record; the step refuses and names the
@@ -874,5 +874,83 @@ func TestConfigMigrateTagsTheUntaggedRulesOfACustomPack(t *testing.T) {
 				t.Errorf("the operator's %s changed (%v)", tc.file, err)
 			}
 		})
+	}
+}
+
+// GAP-0646: a hand-edit record of exactly the bytes this run installed from
+// its approved source (CONFIG=) is the hook guardian's claim on the
+// lifecycle's own write, so the config step records them as the lifecycle's
+// generation; the gateway starts only on that. Without an approved source, or
+// with another one, a hand edit stays a hand edit.
+func TestMigrateManagedStandaloneConfigRecordsTheApprovedSourceOverAHandEditRecord(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	sum := configwrite.SHA256Hex(raw)
+	for _, tc := range []struct {
+		name, approved string
+		lifecycle      bool
+	}{
+		{name: "approved source", approved: sum, lifecycle: true},
+		{name: "no approved source"},
+		{name: "another approved source", approved: configwrite.SHA256Hex([]byte("config_version: 9\n"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if recorded, err := configwrite.RecordUnrecorded(context.Background(), path, raw, configwrite.Options{
+				Actor: configwrite.ActorUnattributedHandEdit, Reason: "config.yaml edited outside the lifecycle",
+			}); err != nil || !recorded {
+				t.Fatalf("hand-edit record = %t, %v", recorded, err)
+			}
+			if err := migrateManagedStandaloneConfig(context.Background(), path, tc.approved); err != nil {
+				t.Fatal(err)
+			}
+			state, err := configwrite.ReadGenerationState(path)
+			if err != nil || state.ConfigSHA256 != sum {
+				t.Fatalf("record = %+v, %v", state, err)
+			}
+			if tc.lifecycle && (state.Generation != 2 || state.Actor != configwrite.ActorLifecycle) {
+				t.Fatalf("record = %+v, want generation 2 by the lifecycle", state)
+			}
+			if !tc.lifecycle && (state.Generation != 1 || !configwrite.IsHandEditActor(state.Actor)) {
+				t.Fatalf("record = %+v, want the hand edit kept", state)
+			}
+		})
+	}
+}
+
+// GAP-0646 review 4: the takeover records only the approved bytes it
+// compared. A config.yaml that changes after that check is a conflict: no
+// new generation, and the hand-edit record stays.
+func TestMigrateManagedStandaloneConfigTakeoverRefusesBytesChangedAfterTheCheck(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	raw := []byte("config_version: 9\nobservability: {}\n")
+	sum := configwrite.SHA256Hex(raw)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := configwrite.RecordUnrecorded(context.Background(), path, raw, configwrite.Options{
+		Actor: configwrite.ActorUnattributedHandEdit, Reason: "config.yaml edited outside the lifecycle",
+	}); err != nil || !recorded {
+		t.Fatalf("hand-edit record = %t, %v", recorded, err)
+	}
+	saved := managedStandaloneConfigBeforeRecord
+	t.Cleanup(func() { managedStandaloneConfigBeforeRecord = saved })
+	managedStandaloneConfigBeforeRecord = func(path string) {
+		if err := os.WriteFile(path, []byte("config_version: 9\nobservability: {}\n# changed after the check\n"), 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := migrateManagedStandaloneConfig(context.Background(), path, sum); !errors.Is(err, configwrite.ErrConflict) {
+		t.Fatalf("migrate over bytes changed after the check = %v, want configwrite.ErrConflict", err)
+	}
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || state.Generation != 1 || !configwrite.IsHandEditActor(state.Actor) || state.ConfigSHA256 != sum {
+		t.Fatalf("record = %+v, %v; want the hand-edit record of the checked bytes kept", state, err)
 	}
 }

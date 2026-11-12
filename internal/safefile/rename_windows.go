@@ -8,6 +8,11 @@ package safefile
 import (
 	"errors"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -17,8 +22,10 @@ import (
 )
 
 var (
-	replaceFileKernel32 = windows.NewLazySystemDLL("kernel32.dll")
-	procReplaceFileW    = replaceFileKernel32.NewProc("ReplaceFileW")
+	replaceFileKernel32  = windows.NewLazySystemDLL("kernel32.dll")
+	procReplaceFileW     = replaceFileKernel32.NewProc("ReplaceFileW")
+	procCopyFileW        = replaceFileKernel32.NewProc("CopyFileW")
+	classicRenameWarning sync.Once
 )
 
 const (
@@ -49,18 +56,127 @@ func replaceFileOnce(source, destination string) error {
 		return err
 	}
 	return replaceFileOnceWith(
-		func() error { return replaceExistingWindowsFile(to, from) },
+		func() error { return replaceExistingThroughPublishedStage(destination, from, to) },
 		func() error {
 			return windows.MoveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH)
 		},
 	)
 }
 
-// replaceFileOnceWith uses ReplaceFileW when the destination exists. Unlike a
-// replacement MoveFileEx, ReplaceFileW merges the destination's DACL, EFS and
-// compression state, creation metadata, and non-conflicting named streams into
-// the newly staged data file. A missing destination still needs a first-create
-// move; if another writer wins that race, retry ReplaceFileW against it.
+// Prepare the replacement's metadata under a temporary name. ReplaceFileW
+// merges named streams and file protection there, while the published name
+// continues to identify the old file. Only the final rename changes it.
+func replaceExistingThroughPublishedStage(destination string, from, to *uint16) error {
+	stage, err := os.CreateTemp(filepath.Dir(destination), ".safefile-metadata-*")
+	if err != nil {
+		return err
+	}
+	stagePath := stage.Name()
+	if err := stage.Close(); err != nil {
+		_ = os.Remove(stagePath)
+		return err
+	}
+	if err := os.Remove(stagePath); err != nil {
+		return err
+	}
+	defer os.Remove(stagePath)
+	stageName, err := winpath.UTF16Ptr(stagePath)
+	if err != nil {
+		return err
+	}
+	if err := copyExistingWindowsFile(to, stageName); err != nil {
+		return err
+	}
+	// CopyFileW copies the body and streams, but the staged file can inherit a
+	// different DACL. ReplaceFileW merges the staged file's DACL into the new
+	// body, so restore the original protection before that merge.
+	if err := copyExistingWindowsDACL(destination, stagePath); err != nil {
+		return err
+	}
+	if err := replaceExistingWindowsFile(stageName, from); err != nil {
+		return err
+	}
+	if err := ReplaceFileAtomically(stagePath, destination); err != nil {
+		// ReplaceFileW consumed source. The caller can regenerate it, but
+		// retrying this operation with the old source name cannot succeed.
+		return &replacementStageError{err: err}
+	}
+	return nil
+}
+
+type replacementStageError struct{ err error }
+
+func (e *replacementStageError) Error() string { return e.err.Error() }
+func (e *replacementStageError) Unwrap() error { return e.err }
+
+func copyExistingWindowsFile(source, destination *uint16) error {
+	r, _, callErr := procCopyFileW.Call(
+		uintptr(unsafe.Pointer(source)), uintptr(unsafe.Pointer(destination)), 1,
+	)
+	if r != 0 {
+		return nil
+	}
+	if callErr == nil || callErr == syscall.Errno(0) {
+		return syscall.EINVAL
+	}
+	return callErr
+}
+
+func copyExistingWindowsDACL(source, destination string) error {
+	from, err := winpath.UTF16Ptr(source)
+	if err != nil {
+		return err
+	}
+	current, err := windows.CreateFile(from, windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(current)
+	descriptor, err := windows.GetSecurityInfo(current, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	if descriptor == nil {
+		return fmt.Errorf("safefile: original file has no security descriptor")
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	if dacl == nil {
+		return fmt.Errorf("safefile: original file has no DACL")
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return err
+	}
+	to, err := winpath.UTF16Ptr(destination)
+	if err != nil {
+		return err
+	}
+	stage, err := windows.CreateFile(to, windows.READ_CONTROL|windows.WRITE_DAC,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(stage)
+	information := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION)
+	if control&windows.SE_DACL_PROTECTED != 0 {
+		information |= windows.PROTECTED_DACL_SECURITY_INFORMATION
+	} else {
+		information |= windows.UNPROTECTED_DACL_SECURITY_INFORMATION
+	}
+	err = windows.SetSecurityInfo(stage, windows.SE_FILE_OBJECT, information, nil, nil, dacl, nil)
+	runtime.KeepAlive(descriptor)
+	return err
+}
+
+// replaceFileOnceWith prepares metadata when the destination exists. A missing
+// destination still needs a first-create move; if another writer wins that
+// race, prepare a replacement against the newly published destination.
 func replaceFileOnceWith(replaceExisting, moveNew func() error) error {
 	err := replaceExisting()
 	if err == nil {
@@ -121,6 +237,10 @@ func retryBusyRename(
 		if err == nil {
 			return nil
 		}
+		var staged *replacementStageError
+		if errors.As(err, &staged) {
+			return err
+		}
 		if !errors.Is(err, windows.ERROR_ACCESS_DENIED) &&
 			!errors.Is(err, windows.ERROR_SHARING_VIOLATION) &&
 			!errors.Is(err, windows.ERROR_LOCK_VIOLATION) &&
@@ -135,14 +255,12 @@ func retryBusyRename(
 	return err
 }
 
-// ReplaceFileAtomically renames source over destination in one step, so a
-// reader that opens destination meanwhile finds the old file or the new one,
-// never no file. ReplaceFile (ReplaceFileW) moves an existing destination
-// aside while it merges metadata, and for that moment the name is missing: a
-// policy file another file names (Cursor's hooks.json names the machine
-// adapter) must not go missing (GAP-2572). The rename uses POSIX semantics,
-// so readers that share deletion (Cursor, Codex) keep reading; the new file
-// keeps its own access list, so a caller sets the protection of source first.
+// ReplaceFileAtomically renames source over destination in one step. Windows
+// can briefly report a missing name to a concurrent opener during a rename,
+// so callers should avoid replacing identical content and retry owned reads
+// when the file is expected. POSIX semantics let readers that share deletion
+// keep an already-open handle. The new file keeps its own access list, so a
+// caller sets the protection of source first.
 //
 // Where the POSIX-semantics rename is refused (a volume without it, or a
 // filter driver that refuses FileRenameInfoEx), a FileRenameInfo replacement
@@ -156,18 +274,28 @@ func ReplaceFileAtomically(source, destination string) error {
 	refused := false
 	err := retryBusyRename(source, destination, func(source, destination string) error {
 		err := atomicRenameReplace(source, destination)
-		if !errors.Is(err, windows.ERROR_INVALID_PARAMETER) &&
-			!errors.Is(err, windows.ERROR_NOT_SUPPORTED) &&
-			!errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
+		if !posixRenameUnsupported(err) {
 			return err
 		}
 		refused = true
+		warnClassicRenameFallback()
 		return renameReplace(source, destination, windows.FileRenameInfo, fileRenameReplaceIfExists)
 	}, time.Sleep, atomicReplaceMaxAttempts, atomicReplaceRetryDelay)
 	if err != nil && refused {
 		return fmt.Errorf("%w (the volume refuses the POSIX-semantics rename; %s is unchanged)", err, destination)
 	}
 	return err
+}
+
+func posixRenameUnsupported(err error) bool {
+	return errors.Is(err, windows.ERROR_INVALID_PARAMETER) ||
+		errors.Is(err, windows.ERROR_NOT_SUPPORTED)
+}
+
+func warnClassicRenameFallback() {
+	classicRenameWarning.Do(func() {
+		log.Printf("defenseclaw: WARNING: this volume does not support POSIX file replacement; concurrent readers may need to retry")
+	})
 }
 
 // atomicRenameReplace is the POSIX-semantics rename.

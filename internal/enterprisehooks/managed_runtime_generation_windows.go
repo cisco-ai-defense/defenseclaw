@@ -500,7 +500,7 @@ func removeWindowsManagedRuntimeGenerationEnrollmentPlatform(
 	if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
 		return receipt, err
 	}
-	err = withWindowsManagedRuntimeSelectorTransaction(opts.Connector, func() error {
+	err = withWindowsManagedRuntimeSelectorTeardownTransaction(opts.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(opts.Connector, true)
 		if err != nil {
 			return err
@@ -654,7 +654,7 @@ func captureWindowsManagedRuntimeSelectorTargetPlatform(
 		TargetSID:     opts.TargetSID,
 		CAS:           WindowsManagedRuntimeSelectorTargetCAS{},
 	}
-	err = withWindowsManagedRuntimeSelectorTransaction(opts.Connector, func() error {
+	err = withWindowsManagedRuntimeSelectorTeardownTransaction(opts.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(opts.Connector, true)
 		if err != nil {
 			return err
@@ -891,7 +891,7 @@ func restoreWindowsManagedRuntimeSelectorTargetCASPlatform(
 	if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
 		return err
 	}
-	return withWindowsManagedRuntimeSelectorTransaction(snapshot.Connector, func() error {
+	return windowsManagedRuntimeSelectorTransactionFor(restoredTarget == nil)(snapshot.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(snapshot.Connector, true)
 		if err != nil {
 			return err
@@ -947,7 +947,7 @@ func captureWindowsManagedRuntimeSelectorPlatform(
 		Connector:     connectorName,
 		CAS:           WindowsManagedRuntimeSelectorCAS{},
 	}
-	err = withWindowsManagedRuntimeSelectorTransaction(connectorName, func() error {
+	err = withWindowsManagedRuntimeSelectorTeardownTransaction(connectorName, func() error {
 		_, data, exists, err := readWindowsManagedRuntimeSelector(connectorName, true)
 		if err != nil {
 			return err
@@ -1005,7 +1005,7 @@ func restoreWindowsManagedRuntimeSelectorCASPlatform(
 	if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
 		return published, err
 	}
-	err = withWindowsManagedRuntimeSelectorTransaction(snapshot.Connector, func() error {
+	err = windowsManagedRuntimeSelectorTransactionFor(restored == nil)(snapshot.Connector, func() error {
 		_, currentData, currentExists, err := readWindowsManagedRuntimeSelector(
 			snapshot.Connector,
 			true,
@@ -1249,10 +1249,35 @@ func collectWindowsManagedRuntimeGenerations(
 			return 0, fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
 	}
-	err = withWindowsManagedRuntimeSelectorTransaction(validated.Connector, func() error {
-		selector, _, exists, err := readWindowsManagedRuntimeSelector(validated.Connector, true)
+	// The uninstall finalize runs after the selectors stopped naming the target
+	// (Retired). A link kept at the selector folder is not read, so no selector
+	// names the target there either: the collection goes on without reading or
+	// locking anything behind the link, and removes the target's bundles. Every
+	// other collection leaves them alone, as the teardown transaction does
+	// (GAP-0773).
+	collection := withWindowsManagedRuntimeSelectorTeardownTransaction
+	selectorKept := false
+	if opts.Retired && !classifyOnly {
+		selectorPath, err := windowsManagedRuntimeSelectorPath(validated.Connector)
 		if err != nil {
-			return err
+			return 0, err
+		}
+		if selectorKept, err = windowsManagedPolicyLinkKept(filepath.Dir(selectorPath)); err != nil {
+			return 0, fmt.Errorf("enterprise hooks: inspect managed runtime selector directory: %w", err)
+		}
+		if selectorKept {
+			collection = func(_ string, fn func() error) error { return fn() }
+		}
+	}
+	err = collection(validated.Connector, func() error {
+		var selector windowsManagedRuntimeSelector
+		exists := false
+		if !selectorKept {
+			var err error
+			selector, _, exists, err = readWindowsManagedRuntimeSelector(validated.Connector, true)
+			if err != nil {
+				return err
+			}
 		}
 		selected := false
 		selectedGenerationID := ""
@@ -2501,7 +2526,9 @@ func readWindowsManagedRuntimeSelector(
 // re-stamped when the caller holds the privileges to do so, and otherwise
 // accepted and logged as long as no untrusted principal can write the file.
 // The next selector transaction re-stamps it under the lock. Structure and an
-// untrusted writer stay fatal.
+// untrusted writer stay fatal. On standalone a selector an untrusted account
+// can write or owns is not re-stamped, and the read returns that refusal
+// (GAP-0633, g582 review 3 M1).
 func validateWindowsManagedRuntimeSelectorForRead(path string) error {
 	exactErr := validateWindowsManagedRuntimeMachineFileProtection(path, true)
 	if exactErr == nil {
@@ -2510,8 +2537,13 @@ func validateWindowsManagedRuntimeSelectorForRead(path string) error {
 	if err := rejectWindowsReparseChain(path); err != nil {
 		return err
 	}
-	if repaired, err := repairWindowsManagedRuntimeMachineFile(path, true); err == nil && repaired {
+	repaired, repairErr := repairWindowsManagedRuntimeMachineFile(path, true)
+	if repairErr == nil && repaired {
 		return nil
+	}
+	var refused *managed.StandaloneContentDriftError
+	if errors.As(repairErr, &refused) {
+		return repairErr
 	}
 	if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
 		return errors.Join(exactErr, err)
@@ -2865,6 +2897,46 @@ func publishOrRemoveWindowsManagedRuntimeSelector(
 	return nil
 }
 
+// withWindowsManagedRuntimeSelectorTeardownTransaction is the selector
+// transaction of a removal, a snapshot and a collection (GAP-0758). It creates
+// no machine-policy folder: an absent folder holds no selector, so fn runs
+// without a lock and finds none; a link kept at the folder (a stale vendor
+// path a user later made a junction) is not followed, and fn is skipped, which
+// is what a missing selector gives each caller. A real folder takes the usual
+// transaction, and so does Secure Client.
+func withWindowsManagedRuntimeSelectorTeardownTransaction(
+	connectorName string,
+	fn func() error,
+) error {
+	path, err := windowsManagedRuntimeSelectorPath(connectorName)
+	if err != nil {
+		return err
+	}
+	state, err := windowsManagedPolicyTeardownState(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect managed runtime selector directory: %w", err)
+	}
+	switch state {
+	case windowsManagedPolicyDirKept:
+		return nil
+	case windowsManagedPolicyDirAbsent:
+		return fn()
+	}
+	return withWindowsManagedRuntimeSelectorTransaction(connectorName, fn)
+}
+
+// windowsManagedRuntimeSelectorTransactionFor picks the transaction that
+// restores a selector snapshot: one that held no selector puts nothing back,
+// so it must not create or take over the folder, or refuse a link at it (a
+// capture over a kept link read as empty); one that held a selector writes it
+// and keeps the refusing, creating transaction (GAP-0758).
+func windowsManagedRuntimeSelectorTransactionFor(snapshotAbsent bool) func(string, func() error) error {
+	if snapshotAbsent {
+		return withWindowsManagedRuntimeSelectorTeardownTransaction
+	}
+	return withWindowsManagedRuntimeSelectorTransaction
+}
+
 func withWindowsManagedRuntimeSelectorTransaction(
 	connectorName string,
 	fn func() error,
@@ -2888,7 +2960,9 @@ func withWindowsManagedRuntimeSelectorTransaction(
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("enterprise hooks: managed runtime selector lock is not a regular file")
 		}
-		if _, err := repairWindowsManagedRuntimeMachineFile(lockPath, false); err != nil {
+		if _, err := repairWindowsManagedLockFile(lockPath, false, func(path string) error {
+			return validateWindowsManagedRuntimeMachineFileProtection(path, false)
+		}); err != nil {
 			return fmt.Errorf("enterprise hooks: managed runtime selector lock is untrusted: %w", err)
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -2936,8 +3010,8 @@ func withWindowsManagedRuntimeSelectorTransaction(
 }
 
 // repairWindowsManagedRuntimeMachineFile re-stamps the canonical protection
-// on a selector or selector lock whose owner or DACL drifted, under the owner
-// and structure rules of repairWindowsManagedMachineFile. It reports whether a
+// on a selector whose owner or DACL drifted, under the owner, structure and
+// standalone rules of repairWindowsManagedMachineFile. It reports whether a
 // repair was made. Only elevated callers reach it.
 func repairWindowsManagedRuntimeMachineFile(path string, userReadable bool) (bool, error) {
 	return repairWindowsManagedMachineFile(path, userReadable, func(path string) error {
@@ -2946,18 +3020,47 @@ func repairWindowsManagedRuntimeMachineFile(path string, userReadable bool) (boo
 }
 
 // repairWindowsManagedMachineFile re-stamps the canonical machine-policy
-// protection on one administrator-owned file (a selector, a selector lock, a
-// Claude or Cursor transaction lock) when validate rejects it. Structure stays
-// fatal: a reparse point anywhere on the path or a hard-linked file is never
-// adopted. The owner must be SYSTEM, Administrators, TrustedInstaller or an
-// administrator principal the trust walk already accepts as drift (the
-// built-in Administrator, Domain or Enterprise Admins, a local Administrators
-// member, which an elevated takeown or manual edit leaves behind); a
-// standard-user owner is never adopted. It reports whether a repair was made.
-// Only elevated callers reach it.
+// protection on one administrator-owned DefenseClaw file (a runtime selector,
+// a Claude Code, Codex or Cursor state record, the Cursor rollback receipt)
+// when validate rejects it. Structure stays fatal: a reparse point anywhere on
+// the path or a hard-linked file is never adopted. The owner must be SYSTEM,
+// Administrators, TrustedInstaller or an administrator principal the trust
+// walk already accepts as drift (the built-in Administrator, Domain or
+// Enterprise Admins, a local Administrators member, which an elevated takeown
+// or manual edit leaves behind); a standard-user owner is never adopted. It
+// reports whether a repair was made. Only elevated callers reach it.
+//
+// On standalone a file an untrusted account can write or owns is never
+// re-stamped in place, by any caller (GAP-0633, g582 review 3 M1): that
+// account may have changed it or may still hold a handle to it, so a re-stamp
+// would make every reader trust bytes it chose. The refusal
+// (windowsManagedPolicySelfHealRefusal) is returned with the drift and
+// nothing is written. Transaction locks carry no content and go through
+// repairWindowsManagedLockFile instead.
 func repairWindowsManagedMachineFile(
 	path string,
 	userReadable bool,
+	validate func(string) error,
+) (bool, error) {
+	return restampWindowsManagedMachineFile(path, userReadable, false, validate)
+}
+
+// repairWindowsManagedLockFile is repairWindowsManagedMachineFile for a
+// transaction lock file. A lock carries no content anything reads, and a
+// replacement planted by another account is owned by it and refused by the
+// owner check, so a lock keeps the in-place repair in every profile.
+func repairWindowsManagedLockFile(
+	path string,
+	userReadable bool,
+	validate func(string) error,
+) (bool, error) {
+	return restampWindowsManagedMachineFile(path, userReadable, true, validate)
+}
+
+func restampWindowsManagedMachineFile(
+	path string,
+	userReadable bool,
+	lock bool,
 	validate func(string) error,
 ) (bool, error) {
 	drift := validate(path)
@@ -2966,6 +3069,16 @@ func repairWindowsManagedMachineFile(
 	}
 	if err := rejectWindowsReparseChain(path); err != nil {
 		return false, err
+	}
+	if !lock {
+		// The refusal also runs the trust walk every reader of the file runs
+		// (fail closed on a descriptor it cannot read), as the self-heal
+		// does, so no file a reader refuses is re-stamped (g582 review 4 F1).
+		if refused := windowsManagedPolicySelfHealRefusal(
+			path, managed.ObjectInstallFile, windowsManagedPolicyFileTrustCheck,
+		); refused != nil {
+			return false, errors.Join(drift, refused)
+		}
 	}
 	// Type, link count and owner are judged on the same no-follow handle
 	// that carries the re-stamp, so nothing is resolved by path in between.

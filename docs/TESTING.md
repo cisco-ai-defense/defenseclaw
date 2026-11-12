@@ -234,6 +234,14 @@ fails when a tracked file whose path looks managed is in no section. When
 you add a managed file, or add a managed branch to a shared file, add it to
 the manifest.
 
+Run `packaging/windows/tests/enterprise-bootstrap-smoke.ps1` by hand as a
+standard user, or from an elevated PowerShell 5.1 or 7 session (elevated SSH
+works). The elevated run needs a medium-integrity non-admin worker. It uses the
+UAC-linked limited token when it can. Otherwise it creates a throwaway local
+standard user and a one-shot scheduled task and removes both afterwards, so that
+session must be allowed to create local users and scheduled tasks. If Windows
+still holds that user's profile, the next run removes it.
+
 ## CI Workflows
 
 Ordinary PRs stay fast, while the release dispatch tests the final signed

@@ -8,6 +8,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // appendWindowsEnterpriseLLMModelWarning warns, in status, verify and
@@ -27,6 +28,6 @@ func appendWindowsEnterpriseLLMModelWarning(result *enterprisestatus.Result) {
 		return
 	}
 	if message := document.LLM.ModelIDProblem("llm.model"); message != "" {
-		result.AddWarning(enterprisestatus.CodeLLMModelUnroutable, message+"; then run Setup /ensure with the corrected config")
+		result.AddWarning(enterprisestatus.CodeLLMModelUnroutable, message+"; then run "+windowsEnterpriseSetupCommand("/ensure", "CONFIG=<corrected config path>")+" from an elevated PowerShell prompt with the corrected config ("+managed.WindowsSetupSource+")")
 	}
 }

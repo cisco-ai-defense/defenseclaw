@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
@@ -78,5 +79,56 @@ func TestAdmissionIssueWarningsNameASignedOutAccount(t *testing.T) {
 		!strings.Contains(result.Warnings[0].Message, `DCLAB\dcw-std2 is not signed in`) ||
 		strings.Contains(result.Warnings[0].Message, "SYSTEM") {
 		t.Fatalf("warnings %+v", result.Warnings)
+	}
+}
+
+func TestAdmissionIssueWarningsNameSkippedClaudeProjectWithoutBlockingLocalServers(t *testing.T) {
+	guardian := t.TempDir()
+	spool := enterprisehooks.ClaudeMCPSpoolDir(guardian)
+	if err := os.MkdirAll(spool, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "S-1-5-21-1-1001"
+	local := filepath.Join(t.TempDir(), "local")
+	record, err := enterprisehooks.MarshalClaudeMCPSpoolRecord(sid, []config.MCPServerEntry{{Name: "w1-local-mcp", Command: "x", Project: local}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spool, sid+".json"), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const remote = `\\server\share\project`
+	note, err := json.Marshal(enterprisehooks.ClaudeMCPProjectSkips{
+		Key: sid, Home: "local-account", Projects: []enterprisehooks.ClaudeMCPProjectSkip{{Project: remote, Reason: "project path is not local"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spool, sid+".skipped"), note, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	servers, unreadable, err := enterprisehooks.ReadClaudeMCPSpool(spool, sid, nil)
+	if err != nil || unreadable != nil || len(servers) != 1 || servers[0].Name != "w1-local-mcp" {
+		t.Fatalf("spool servers=%v unreadable=%+v err=%v", servers, unreadable, err)
+	}
+	result := &enterprisestatus.Result{}
+	appendAdmissionIssueWarnings(result, t.TempDir(), guardian)
+	if len(result.Warnings) != 1 || result.Warnings[0].Code != "claude_project_skipped" ||
+		!strings.Contains(result.Warnings[0].Message, remote) || strings.Contains(result.Warnings[0].Message, "are blocked") {
+		t.Fatalf("warnings %+v", result.Warnings)
+	}
+	unreadableRecord, err := enterprisehooks.MarshalClaudeMCPSpoolUnreadable(sid, enterprisehooks.ClaudeStateUnreadable{
+		Home: "local-account", Path: "local-account/.claude.json", Reason: "state file unreadable",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spool, sid+".json"), unreadableRecord, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result = &enterprisestatus.Result{}
+	appendAdmissionIssueWarnings(result, t.TempDir(), guardian)
+	if len(result.Warnings) != 1 || result.Warnings[0].Code != "claude_state_unreadable" {
+		t.Fatalf("unreadable record with stale project note: warnings %+v", result.Warnings)
 	}
 }

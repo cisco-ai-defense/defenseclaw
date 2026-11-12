@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -780,7 +781,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "cmd", "cmd.exe",
 		"echo", "printf", "pwd", "cd", "true", "false", "sleep", "date",
 		"whoami", "id", "uname", "test", "[", "expr", "read", "export",
-		"setenv", "which", "command", "exec", "eval",
+		"setenv", "which", "command", "builtin", "exec", "eval",
 		"write-output", "write-host":
 		// Known command grammar; the parser or wrapper analysis owns any nested
 		// command source.
@@ -937,6 +938,10 @@ func commandProgram(executable string) string {
 	}
 	if strings.Contains(executable, "/") && !trustedExecutablePath(executable) {
 		return ""
+	}
+	if executable == "." {
+		// The dot builtin reads a file into the current shell like source.
+		return "."
 	}
 	executable = path.Base(executable)
 	if executable == "." || executable == "/" {
@@ -3811,12 +3816,13 @@ func classifyRsync(out *parseOutput, command *CommandFact) {
 }
 
 // rsyncRemoteOperand reports host:path, host::module and rsync:// operands.
+// A Windows drive path (C:\dir, C:/dir) is local on a Windows host.
 func rsyncRemoteOperand(operand string) bool {
 	if strings.HasPrefix(operand, "rsync://") {
 		return true
 	}
 	colon := strings.IndexByte(operand, ':')
-	return colon > 0 && !strings.Contains(operand[:colon], "/")
+	return colon > 0 && !strings.Contains(operand[:colon], "/") && filepath.VolumeName(operand) == ""
 }
 
 func dangerousInstallMode(mode string) bool {

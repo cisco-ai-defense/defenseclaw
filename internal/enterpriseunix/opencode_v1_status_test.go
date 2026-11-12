@@ -30,7 +30,7 @@ func TestOpenCodeV1MakesManagedStatusVerifyAndEnsureIncomplete(t *testing.T) {
 			install := "/opt/dc-agents/lib/node_modules/opencode-ai"
 			// As the enumerator writes it: the separate-copy scan names the V1
 			// package with the generic contract reason.
-			data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+			data, err := h.marshalCompletedScan([]enterprisehooks.UnprotectedAgent{{
 				User: "alice", UID: &uid, Connector: "opencode", Version: "1.18.34", InstallPath: install,
 				Code:   enterprisehooks.UnprotectedCodeHookContractUnverified,
 				Reason: "version 1.18.34 is not verified against a known hook contract",
@@ -74,7 +74,7 @@ func TestOpenCodeV1MakesManagedStatusVerifyAndEnsureIncomplete(t *testing.T) {
 
 			// OpenCode V2 installed and V1 removed: the next scan publishes an
 			// empty record, and coverage is complete again for OpenCode.
-			empty, _ := enterprisehooks.MarshalUnprotectedAgents(nil)
+			empty, _ := h.marshalCompletedScan(nil)
 			if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), empty, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -104,7 +104,7 @@ func TestMachineWideOpenCodeV1IsOneWarningWithTheUserCount(t *testing.T) {
 	agents = append(agents, enterprisehooks.UnprotectedAgent{User: "gina", UID: &uid, Connector: "opencode", Version: "1.18.34",
 		InstallPath: "/home/gina/.npm-global/lib/node_modules/opencode-ai",
 		Code:        enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "version 1.18.34 is not verified against a known hook contract"})
-	data, err := enterprisehooks.MarshalUnprotectedAgents(agents)
+	data, err := h.marshalCompletedScan(agents)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestMachineWideOpenCodeV1CountsAccountsWithoutAnInstallPath(t *testing.T) {
 		agents = append(agents, enterprisehooks.UnprotectedAgent{User: user, UID: &uid, Connector: "opencode", Version: "1.18.34", InstallPath: path,
 			Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "version 1.18.34 is not verified against a known hook contract"})
 	}
-	data, err := enterprisehooks.MarshalUnprotectedAgents(agents)
+	data, err := h.marshalCompletedScan(agents)
 	if err != nil {
 		t.Fatal(err)
 	}

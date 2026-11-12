@@ -546,21 +546,37 @@ actor CLIRunner {
     private var runStates: [UUID: RunState] = [:]
     private var installationContext: InstallationContext
 
-    private let administratorEnabled: @Sendable () -> Bool
-    private let administratorExecutor: @Sendable (GatewayAdminAction, InstallationContext, GatewayAdministratorOperation) async -> CLIResult
+    /// The gateway lifecycle commands. They always run as this login account.
+    static let gatewayLifecycleActions: Set<String> = ["start", "stop", "restart"]
+
+    /// The root-owned gateway state an exact lifecycle command must repair
+    /// before it runs as this account; empty for every other command.
+    nonisolated static func rootStateToRepair(
+        binary: String, arguments: [String], home: URL, rootOwnedState: (URL) -> [GatewayRootState.Marker]
+    ) -> [GatewayRootState.Marker] {
+        guard binary == "defenseclaw-gateway", arguments.count == 1,
+              gatewayLifecycleActions.contains(arguments[0]) else { return [] }
+        return rootOwnedState(home)
+    }
+
+    private let rootOwnedState: @Sendable (URL) -> [GatewayRootState.Marker]
+    private let administratorRepair: @Sendable (InstallationContext, GatewayAdministratorOperation) async -> CLIResult
+    private let repairMemory: GatewayRepairMemory
 
     init(
         context: InstallationContext = .resolve(),
-        administratorEnabled: @escaping @Sendable () -> Bool = {
-            UserDefaults.standard.bool(forKey: GatewayAdministratorClient.preferenceKey)
+        rootOwnedState: @escaping @Sendable (URL) -> [GatewayRootState.Marker] = {
+            GatewayRootState.rootOwnedMarkers(home: $0)
         },
-        administratorExecutor: @escaping @Sendable (GatewayAdminAction, InstallationContext, GatewayAdministratorOperation) async -> CLIResult = {
-            await GatewayAdministratorClient.run(action: $0, context: $1, operation: $2)
-        }
+        administratorRepair: @escaping @Sendable (InstallationContext, GatewayAdministratorOperation) async -> CLIResult = {
+            await GatewayAdministratorClient.repair(context: $0, operation: $1)
+        },
+        repairMemory: GatewayRepairMemory = .standard
     ) {
         self.installationContext = context
-        self.administratorEnabled = administratorEnabled
-        self.administratorExecutor = administratorExecutor
+        self.rootOwnedState = rootOwnedState
+        self.administratorRepair = administratorRepair
+        self.repairMemory = repairMemory
     }
 
     func rebind(to context: InstallationContext) {
@@ -985,48 +1001,61 @@ actor CLIRunner {
             let reason = installationContext.accessMode.reason ?? "This installation is read only."
             return CLIResult(exitCode: 77, output: "Operation refused by the Mac app: \(reason)")
         }
-        if binaryName == "defenseclaw-gateway", administratorEnabled(),
-           let first = arguments.first, GatewayAdminAction(rawValue: first) != nil {
-            // Keep the privileged allowlist exact; never silently fall back to
-            // ordinary execution for an invalid privileged lifecycle request.
-            guard let action = GatewayAdministratorClient.selectedAction(
-                binary: binaryName, arguments: arguments, enabled: true
-            ), standardInput == nil, environment.isEmpty else {
-                return CLIResult(exitCode: 64, output: "Administrator gateway control accepts only Start, Stop, or Restart without extra arguments or environment overrides.\n")
-            }
+        let rootOwned = Self.rootStateToRepair(binary: binaryName, arguments: arguments,
+                                               home: installationContext.homeRoot, rootOwnedState: rootOwnedState)
+        if !rootOwned.isEmpty {
+            // A gateway run as root for this per-user home (the administrator
+            // switch of app versions up to 1.0.8, or sudo) is moved back to
+            // this account first: the administrator helper stops the root
+            // gateway it started and returns the root-owned files. The
+            // command itself then runs as this account below; Stop is done.
             guard installationContext.permitsMutation else {
-                return CLIResult(exitCode: 77, output: "Administrator gateway control is unavailable for a read-only installation.\n")
+                return CLIResult(exitCode: 77, output: "Gateway repair is unavailable for a read-only installation.\n")
             }
             guard !runStates.values.contains(where: {
                 if case .administrator = $0 { return true }
                 return false
             }) else {
-                return CLIResult(exitCode: 125, output: "Another administrator gateway action is still running. Wait for its result in Activity before retrying.\n")
+                return CLIResult(exitCode: 125, output: "Another gateway repair is still running. Wait for its result in Activity before retrying.\n")
+            }
+            let home = installationContext.homeRoot
+            if repairMemory.load() == GatewayRootState.fingerprint(rootOwned) {
+                // A repair already ran and could not clear exactly these.
+                return CLIResult(exitCode: 77, output: GatewayRootState.unresolvedMessage(rootOwned, home: home))
             }
             let context = installationContext
             let operation = GatewayAdministratorOperation()
             runStates[executionID] = .administrator(operation)
-            if let onLine { await onLine("Requesting macOS administrator authorization for gateway \(action.rawValue)…") }
-            let result = await withTaskCancellationHandler {
-                await administratorExecutor(action, context, operation)
+            if let onLine {
+                await onLine("This installation's gateway ran as root (root-owned: \(rootOwned.map(\.name).joined(separator: ", "))). "
+                    + "Requesting macOS administrator authorization to stop it and return these files to your account, "
+                    + "so the gateway runs as you…")
+            }
+            let repaired = await withTaskCancellationHandler {
+                await administratorRepair(context, operation)
             } onCancel: {
                 _ = operation.cancel()
             }
             runStates[executionID] = nil
             if let onLine {
-                for line in result.output.split(separator: "\n", omittingEmptySubsequences: false) {
+                for line in repaired.output.split(separator: "\n", omittingEmptySubsequences: false) {
                     await onLine(String(line))
                 }
             }
-            return result
-        }
-        if binaryName == "defenseclaw-gateway", arguments.count == 1,
-           GatewayAdminAction(rawValue: arguments[0]) != nil {
-            let protectedState = installationContext.homeRoot.appendingPathComponent("hook_contract_lock.json").path
-            var metadata = stat()
-            if lstat(protectedState, &metadata) == 0, metadata.st_uid == 0,
-               access(protectedState, R_OK) != 0 {
-                return CLIResult(exitCode: 77, output: "This installation has gateway state owned by root. Enable Run gateway as administrator in Overview or Settings → Connection, then retry this action.\n")
+            // The helper ran (not cancelled, authorization not refused): remember
+            // what it could not clear so the prompt does not come back for it.
+            if !repaired.cancelled, [0, 1, 75].contains(repaired.exitCode) {
+                let remaining = rootOwnedState(home)
+                repairMemory.save(remaining.isEmpty ? nil : GatewayRootState.fingerprint(remaining))
+                if !remaining.isEmpty, repaired.succeeded {
+                    let message = GatewayRootState.unresolvedMessage(remaining, home: home)
+                    if let onLine { await onLine(message) }
+                    return CLIResult(exitCode: 1, output: repaired.output + message)
+                }
+            }
+            guard repaired.succeeded, arguments[0] != "stop" else { return repaired }
+            if Task.isCancelled {
+                return CLIResult(exitCode: 130, output: repaired.output + "Gateway \(arguments[0]) cancelled after the repair.\n", cancelled: true)
             }
         }
         guard let binary = locateBinary(named: binaryName) else {

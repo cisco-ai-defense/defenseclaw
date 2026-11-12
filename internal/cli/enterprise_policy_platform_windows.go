@@ -58,7 +58,7 @@ func accountGroupNames(uid int) ([]string, error) {
 func pinStandaloneManagedEnv() error {
 	return pinManagedAdministratorEnvironment("enterprise policy", func() string {
 		return windowsManagedStandardUserViewAnswer("the machine policy",
-			"enterprise policy show --user "+managedHostCurrentAccountName())
+			"enterprise", "policy", "show", "--user", managedHostCurrentAccountName())
 	})
 }
 
@@ -79,6 +79,13 @@ func standaloneClaudeMachineHookContract(layout managed.StandaloneLayout) string
 	if _, err := os.Lstat(path); err != nil {
 		return ""
 	}
+	// This is a read, and it runs in Setup's own process on every ensure,
+	// status and verify. That process carries no standalone trust scope, so the
+	// manifest gate took its Secure Client branch: it re-stamped targets.yaml's
+	// owner and access list in place and went on to read the bytes an untrusted
+	// account had written. The guardian's own scope makes the gate refuse
+	// instead (GAP-1048).
+	defer pinWindowsStandaloneTrustScope()()
 	if err := enterpriseHookManifestFileTrustCheck(path); err != nil {
 		return ""
 	}
@@ -157,8 +164,8 @@ func enterprisePolicyLiveAvailable() error {
 		return nil
 	}
 	return errors.New("enterprise policy verify --live is not available on a managed Windows host: Windows cannot start the client as another account, and a standard account cannot read the managed configuration. " +
-		"Run `defenseclaw enterprise policy verify` from an elevated Administrator prompt for the static check; to see the hooks run, make a tool call in the client from the user's own session, " +
-		"then read its record from the elevated prompt with `defenseclaw audit export --connector <connector> -o <file>`")
+		"Run " + managedWindowsCommand("enterprise", "policy", "verify") + " from an elevated PowerShell prompt for the static check; to see the hooks run, make a tool call in the client from the user's own session, " +
+		"then read its record from the elevated PowerShell prompt with " + managedWindowsCommand("audit", "export", "--connector", "<connector>", "-o", "<file>"))
 }
 
 // enterprisePolicyLiveCredential: Windows has no setuid; the agent must be

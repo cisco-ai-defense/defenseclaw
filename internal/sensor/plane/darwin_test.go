@@ -343,3 +343,36 @@ func TestExecCarriesTheRealParentPID(t *testing.T) {
 		t.Errorf("Name = %q, want the exec target", event.Name)
 	}
 }
+
+// bufferedSources are the host sensor sources macOS builds, each with the
+// buffer its Coverage counts (TestEverySourceNamesItsBufferDropsInCoverage).
+func bufferedSources() map[string]func() (Source, *Buffer) {
+	return map[string]func() (Source, *Buffer){
+		"eslogger": func() (Source, *Buffer) {
+			source := NewSource(nil).(*darwinSource)
+			source.coverage = Coverage{Mechanism: "Endpoint Security", Limitations: []string{"start limitation"}}
+			return source, source.buffer
+		},
+	}
+}
+
+// cowork-1-0-8 GAP-0072: an event the macOS source's own buffer drops after
+// eslogger delivered it is named in the coverage, as on Linux (GAP-0071).
+func TestDarwinBufferDropsAreReportedInCoverage(t *testing.T) {
+	source := NewSource(nil).(*darwinSource)
+	source.coverage.Limitations = []string{"start limitation"}
+	if limits := strings.Join(source.Coverage().Limitations, "; "); strings.Contains(limits, "dropped") {
+		t.Fatalf("limitations before any drop = %q", limits)
+	}
+	for index := 0; index <= eventBuffer; index++ {
+		source.buffer.Push(Event{Kind: KindFileRead, PID: index})
+	}
+	limits := source.Coverage().Limitations
+	if joined := strings.Join(limits, "; "); !strings.Contains(joined, "start limitation") ||
+		!strings.Contains(joined, "1 events were dropped from the sensor's event buffer") {
+		t.Fatalf("limitations = %q, want the start limitation and the buffer drop", joined)
+	}
+	if len(source.coverage.Limitations) != 1 || len(source.Coverage().Limitations) != 2 {
+		t.Fatalf("Coverage changed the coverage Start recorded: %q", source.coverage.Limitations)
+	}
+}

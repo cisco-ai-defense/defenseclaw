@@ -174,6 +174,36 @@ defenseclaw doctor
 
 </Accordion>
 
+<Accordion title="The installer stops before staging: the uv cache folder is too deep">
+
+The installer builds one package, `win-unicode-console`, from source inside uv's cache folder (`<profile>\.defenseclaw\.uv\cache` by default), and that build needs 151 more characters than the folder's own path. With a profile path longer than about 85 characters, and Windows long paths off, Windows' 260-character limit would stop the build with `WinError 206`. The installer now checks this first, names the folder and its length, and stops with nothing changed.
+
+**Fix.** Pick a short folder that only your account can write to, set it for the session and run the installer again: `$env:UV_CACHE_DIR = 'C:\dcuv'`. The installer keeps its Python in the data folder as before. Or turn on Windows long path support (`LongPathsEnabled`, set by an administrator). Delete the short folder yourself when you uninstall; `defenseclaw uninstall --all` removes only what is under the data folder.
+
+**Check.** `install.ps1` passes the staging step and prints `DefenseClaw <version> is staged and checked`.
+
+</Accordion>
+
+<Accordion title="init says the configuration version is newer than the supported v8 contract">
+
+A DefenseClaw Setup 0.8.x install is still on your user `PATH` and its `defenseclaw-gateway.exe` judged the 1.x `config.yaml`. 1.x runs the gateway that sits with its own `defenseclaw`, so this appears only when something else picks the gateway; the error then names the gateway that ran, its version and its path.
+
+**Fix.** Run `defenseclaw uninstall` to remove the 0.8.x Setup install (it keeps that install's data folder), open a new terminal, and run `defenseclaw init` again. Or put `%USERPROFILE%\.local\bin` first on your user `PATH`, or set `DEFENSECLAW_GATEWAY_BIN` to the gateway in that folder.
+
+**Check.** `where.exe defenseclaw-gateway` lists `%USERPROFILE%\.local\bin` first and `defenseclaw init` finishes.
+
+</Accordion>
+
+<Accordion title="init says a DefenseClaw Setup 0.8.x install still has hooks">
+
+`defenseclaw init` stops before it changes anything when a DefenseClaw Setup 0.8.x install of your account still has hooks in an agent's settings. The 1.x hooks would sit beside them and the two disagree. The message names the Setup install and the settings file.
+
+**Fix.** No command removes only the 0.8.x install. `defenseclaw uninstall` removes it (and keeps its data folder), and it also stops this release's gateway and removes the hooks of the connectors it has configured. Run it, then run `defenseclaw init` again to set them up.
+
+**Check.** `defenseclaw init` finishes and `defenseclaw doctor` shows the agent as guarded.
+
+</Accordion>
+
 <Accordion title="defenseclaw-hook --version prints after the prompt, or > file captures nothing">
 
 `defenseclaw-hook.exe` is a no-console program. PowerShell does not wait for it as the last command of a pipeline, so the prompt returns first and `$LASTEXITCODE` is not the hook's exit code.
@@ -191,6 +221,16 @@ cmd.exe asks this whenever Ctrl+C reaches a batch file. This happens when you ru
 **Fix.** The command has already stopped; answer `Y` or `N`. Run the installer or `defenseclaw upgrade` to add `defenseclaw.exe`.
 
 **Check.** Ctrl+C prints `Aborted!` and returns to the prompt.
+
+</Accordion>
+
+<Accordion title="init stops: a rollback source is not protected">
+
+Before it changes anything, `defenseclaw init` reads the files it may have to put back. It refuses one in `%USERPROFILE%\.defenseclaw` that another account could change, such as a `hook_contract_lock.json` you copied there or made by hand, and names it: `hook_contract_lock.json rollback source is not protected: <path> is not protected the way DefenseClaw writes its files`. It does not move or delete the file for you.
+
+**Fix.** Move the named file out of the folder, or delete it if you did not create it, then run `defenseclaw init` again. Files a removed managed install left are moved aside on the first run, to `%USERPROFILE%\.defenseclaw-managed-leftovers-<UTC time>`.
+
+**Check.** `defenseclaw init` finishes and `defenseclaw doctor` shows no failures.
 
 </Accordion>
 

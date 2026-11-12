@@ -179,8 +179,10 @@ func TestPerUserGatewayPostClassifiesOnlyAnUnsentCall(t *testing.T) {
 		// hook-post 9: sent to the verified own listener, no status. The
 		// gateway took the call: final, no table read, even when the port is
 		// free by then (review of rel-1-0-6 GAP-0295).
-		{"helper no answer 9, now free: final", "127.0.0.1:18960", "defenseclaw-hook-post", "9", "2", "0", "rc=9", true, false},
-		{"helper no answer 9, own: final", "127.0.0.1:18960", "defenseclaw-hook-post", "9", "1", "0", "rc=9", true, false},
+		// Exit 9 prints the restart-proof token for hook-failures.jsonl
+		// (GAP-0295); a helper that printed none reads proof_unavailable.
+		{"helper no answer 9, now free: final", "127.0.0.1:18960", "defenseclaw-hook-post", "9", "2", "0", "DCPOSTPROOF1:proof_unavailablerc=9", true, false},
+		{"helper no answer 9, own: final", "127.0.0.1:18960", "defenseclaw-hook-post", "9", "1", "0", "DCPOSTPROOF1:proof_unavailablerc=9", true, false},
 		// hook-post 10: no status during a proven restart of this account's
 		// gateway: the restart outage, no table read.
 		{"helper restart no answer 10: outage", "127.0.0.1:18960", "defenseclaw-hook-post", "10", "1", "0", "rc=7", true, false},

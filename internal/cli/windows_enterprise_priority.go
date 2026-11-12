@@ -30,3 +30,8 @@ func windowsLifecycleYieldToHooks() {
 	}
 	_ = windows.SetPriorityClass(process, windows.BELOW_NORMAL_PRIORITY_CLASS)
 }
+
+// windowsEnterpriseLifecycleYield is windowsLifecycleYieldToHooks; the
+// package's tests replace it, so a lifecycle test does not lower the class
+// of the test binary, and of every test and program after it (GAP-0079).
+var windowsEnterpriseLifecycleYield = windowsLifecycleYieldToHooks

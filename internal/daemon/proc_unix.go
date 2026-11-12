@@ -19,6 +19,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +29,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 )
 
 func daemonStartDir(_ string, dataDir string) string { return dataDir }
@@ -66,8 +69,13 @@ func processExists(pid int) bool {
 	if err != nil {
 		return false
 	}
+	// kill(2) with signal 0 answers ESRCH for a process that is gone and
+	// EPERM for one this account may not signal: that process exists. The
+	// gateway an administrator started for this home (the macOS app's
+	// privileged helper runs it as root) is such a process; reading EPERM
+	// as "gone" made status remove its PID record and report no gateway.
 	err = proc.Signal(syscall.Signal(0))
-	if err != nil {
+	if err != nil && !errors.Is(err, syscall.EPERM) {
 		return false
 	}
 	if runtime.GOOS == "linux" {
@@ -82,6 +90,17 @@ func processExists(pid int) bool {
 		}
 	}
 	return true
+}
+
+// processSignalable reports whether this account may signal pid. It is false
+// only for a live process of another account (EPERM); a process that is gone
+// stands in nobody's way.
+func processSignalable(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return true
+	}
+	return !errors.Is(proc.Signal(syscall.Signal(0)), syscall.EPERM)
 }
 
 func waitForProcessExit(_ *os.Process, pid int, timeout time.Duration) bool {
@@ -115,32 +134,21 @@ func waitForProcessExit(_ *os.Process, pid int, timeout time.Duration) bool {
 //     boot). Stable for the lifetime of the process; resets after PID reuse.
 //   - Darwin: native kern.proc start time with microsecond precision.
 //
+// Both are read by procidentity.Recorded.
+//
 // Returns ("", nil) on platforms where we can't read a stable identity (e.g.
 // FreeBSD); callers should treat that as "skip the start-time check" rather
 // than "process is dead".
 func processStartIdentity(pid int) (string, error) {
 	switch runtime.GOOS {
-	case "linux":
-		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-		if err != nil {
-			return "", err
+	case "linux", "darwin":
+		// The one place that spells the identity, shared with every reader of
+		// gateway.pid (the per-user hook compares it too).
+		identity, ok := procidentity.Recorded(pid)
+		if !ok {
+			return "", fmt.Errorf("daemon: no start identity for pid %d", pid)
 		}
-		// /proc/<pid>/stat fields are space-separated, but field 2 (the
-		// process command) can contain spaces and is wrapped in
-		// parentheses. Find the LAST `)` and split the tail. Field 22 is
-		// the starttime; tail field index = 22 - 2 = 20.
-		idx := strings.LastIndex(string(data), ")")
-		if idx < 0 || idx+2 > len(data) {
-			return "", fmt.Errorf("daemon: malformed /proc/%d/stat", pid)
-		}
-		tail := strings.Fields(string(data[idx+2:]))
-		// Index 19 == field 22 of the original (we have skipped pid + comm).
-		if len(tail) < 20 {
-			return "", fmt.Errorf("daemon: /proc/%d/stat has only %d tail fields", pid, len(tail))
-		}
-		return tail[19], nil
-	case "darwin":
-		return darwinProcessStartIdentity(pid)
+		return identity, nil
 	default:
 		return "", nil
 	}

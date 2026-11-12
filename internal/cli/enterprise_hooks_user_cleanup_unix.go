@@ -226,7 +226,9 @@ func reconcileEnterpriseHookStandaloneUnixCleanups(
 		}
 	}
 	for _, label := range result.Pending {
-		if !known[label] {
+		if ctx.Err() != nil {
+			fmt.Fprintf(log, "[hook-guardian] %s: no longer enrolled; the pass ended before the cleanup finished, so it resumes on the next pass\n", label)
+		} else if !known[label] {
 			fmt.Fprintf(log, "[hook-guardian] %s: no longer enrolled; the home is not available, so removing DefenseClaw's registration is recorded and retried\n", label)
 		}
 	}
@@ -694,6 +696,7 @@ func runEnterpriseHookStandaloneUnixCleanupPlan(
 // recorded home) names the recorded home as the previous one, so receipts
 // copied from it act on this home's copies only.
 func runEnterpriseHookStandaloneCleanupWorker(ctx context.Context, entry enterpriseHookUserCleanup, account enterpriseHookWorkerAccount, dataDir string) (enterpriseHookUserCleanupOutcome, enterpriseHookWorkerTargetResult, error) {
+	holdEnterpriseHookCleanupTarget(ctx, entry, account)
 	previousHome := ""
 	if recorded := filepath.Clean(strings.TrimSpace(entry.UserHome)); filepath.IsAbs(recorded) && recorded != filepath.Clean(account.Home) {
 		previousHome = recorded
@@ -736,6 +739,29 @@ func runEnterpriseHookStandaloneCleanupWorker(ctx context.Context, entry enterpr
 		return enterpriseHookUserCleanupFailed, enterpriseHookWorkerTargetResult{}, errors.New(boundedString(response.Error, 256))
 	}
 	return enterpriseHookUserCleanupFailed, enterpriseHookWorkerTargetResult{}, errEnterpriseHookWorkerNoResult
+}
+
+// holdEnterpriseHookCleanupTarget tells the watch pump, for the rest of the
+// pass, that the files of the target being cleaned are written by a worker of
+// this pass. The cleanup removes files the previous run owned; without
+// this the pump reads each removal as a change by someone else and cancels
+// the pass, which kills the worker and leaves the cleanup to a later pass.
+// Nothing releases the hold: the registry lives for one pass, and the target
+// is no longer enrolled, so no change to its files needs a prompt repair.
+func holdEnterpriseHookCleanupTarget(ctx context.Context, entry enterpriseHookUserCleanup, account enterpriseHookWorkerAccount) {
+	active, _ := ctx.Value(enterpriseHookWatchActiveWorkersKey{}).(*enterpriseHookWatchActiveWorkers)
+	if active == nil {
+		return
+	}
+	connectorName := strings.ToLower(strings.TrimSpace(entry.Connector))
+	userName := firstNonEmpty(account.User, strings.TrimSpace(entry.User))
+	var keys []string
+	for _, home := range []string{entry.UserHome, account.Home} {
+		if key := active.targetKey(home, userName, connectorName); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	active.start(keys)
 }
 
 func enterpriseHookRehomedCleanupError(changed *enterpriseHookTargetHomeChangedError, reason string) error {

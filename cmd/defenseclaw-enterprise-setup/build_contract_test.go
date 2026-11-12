@@ -58,13 +58,6 @@ func TestEnterpriseAssemblerProducesOnlyTheMachineWideBootstrap(t *testing.T) {
 			t.Errorf("assembler is missing %q", required)
 		}
 	}
-	// The AVC-driven flow does not touch the per-user Setup — that
-	// path stays under scripts/build-windows-installer.ps1 with its
-	// own ValidateSet('oss') gate. Assert the assembler cannot
-	// accidentally target it.
-	if strings.Contains(assembler, "./cmd/defenseclaw-setup") {
-		t.Fatal("assembler must not target the per-user Setup command")
-	}
 }
 
 // #1281: the standalone build links the payload binding of the payload it
@@ -173,7 +166,7 @@ func TestStandaloneFleetCompilerSourceIsOptInBeforeMutation(t *testing.T) {
 	supplied := strings.Index(lifecycle, "if (-not [string]::IsNullOrWhiteSpace($PolicyCompiler)) {")
 	add := strings.Index(lifecycle, "Add-DefenseClawStandaloneFleetCompilerSource `")
 	kept := strings.Index(lifecycle, "elseif ([string]::IsNullOrEmpty((Get-DefenseClawRecordedStandaloneCompilerPath -Layout $layout))) {")
-	refusal := strings.Index(lifecycle, "throw 'Fleet-enabled standalone Setup carries no Fleet policy compiler and this host has no recorded one to keep; turn Fleet off in the config, then run Setup again'")
+	refusal := strings.Index(lifecycle, "throw ('Fleet-enabled standalone Setup carries no Fleet policy compiler and this host has no recorded one to keep; turn Fleet off in the config, then ' + (Format-DefenseClawRerunStep) + ' with that config')")
 	mutation := strings.Index(lifecycle, "Initialize-DefenseClawManagedRoot `")
 	if deferredGuard < 0 || inspect < deferredGuard || gate < inspect || supplied < gate || add < supplied || kept < add || refusal < kept || mutation < refusal {
 		t.Fatalf("Fleet-on without a recorded compiler must be refused before managed-root mutation (deferred guard %d, inspect %d, gate %d, supplied %d, add %d, kept %d, refusal %d, mutation %d)", deferredGuard, inspect, gate, supplied, add, kept, refusal, mutation)
@@ -234,16 +227,6 @@ func TestStandaloneFleetUpgradeKeepsTheRecordedCompiler(t *testing.T) {
 		if strings.Contains(helper, forbidden) {
 			t.Errorf("the recorded-compiler check changes the compiler: %q", forbidden)
 		}
-	}
-}
-
-func TestOrdinarySetupBuilderCannotBeRelabeledAsEnterprise(t *testing.T) {
-	builder := readEnterpriseSetupContractFile(t, "scripts/build-windows-installer.ps1")
-	if !strings.Contains(builder, "[ValidateSet('oss')]") {
-		t.Fatal("ordinary Setup builder is not restricted to the oss distribution flavor")
-	}
-	if strings.Contains(builder, "[ValidateSet('oss', 'managed-enterprise')]") {
-		t.Fatal("ordinary Setup builder still accepts the managed-enterprise label")
 	}
 }
 

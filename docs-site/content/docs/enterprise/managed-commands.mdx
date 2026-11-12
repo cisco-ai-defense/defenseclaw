@@ -1,0 +1,57 @@
+---
+title: Managed command availability
+description: Which defenseclaw commands a standard user can run on a managed Linux, macOS or Windows computer, and which are refused, against a per-user install.
+keywords:
+  - DefenseClaw managed commands
+  - managed launcher
+  - command availability
+  - defenseclaw status
+---
+
+{/* AUTOGEN: scripts/gen_managed_commands_docs.py from internal/cli/testdata/managed_commands.json. Do not edit by hand. */}
+
+This table says which `defenseclaw` commands a standard user gets on a computer your organization manages. It is generated from the table the managed launcher reads to decide what it runs, so other pages link here instead of repeating it.
+
+- **Managed Linux and macOS.** The standard user `defenseclaw` is a launcher. It runs the commands marked Offered and answers every other command with the refusal below. An administrator uses `defenseclaw-gateway` as root.
+- **Managed Windows.** There is no launcher: `defenseclaw.exe` is the administrator command. A standard account gets the answer in the table for each command.
+- **Per-user install.** The per-user CLI is not part of a managed install.
+
+| Cell | Meaning |
+| --- | --- |
+| Offered | The command runs for the user. |
+| Refused | The command answers with a message that names the managed alternative, and exits non-zero. |
+| Administrators only | The command runs from an elevated prompt; a standard account is told so. |
+| Not supported | The platform cannot run the command. |
+
+| Command | Managed Linux | Managed macOS | Managed Windows | Per-user install | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `defenseclaw --help, --version, help` | Offered | Offered | Offered | Linux, macOS, Windows | The launcher shows its own help; `help` explains the sandbox and status commands. |
+| `defenseclaw status` | Offered | Offered | Offered | Linux, macOS, Windows | Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`; the reason says whether the machine policy still inspects its calls. An administrator's run shows the deployment. |
+| `defenseclaw sandbox ...` | Offered | Offered | Not supported | Linux, macOS | OpenShell sandboxes run on Linux and macOS only. |
+| `defenseclaw guardrail profile explain` | Offered | Offered | Refused | Linux, macOS, Windows | Shows the guardrail profile that applies to your agents. On Windows the answer points to the administrator's policy view. |
+| `defenseclaw guardrail` | Refused | Refused | Refused | Linux, macOS, Windows | Every guardrail command except `profile explain`, which the row above offers. The guardrail is set in the administrator's config. |
+| `defenseclaw doctor` | Refused | Refused | Refused | Linux, macOS, Windows | An administrator reads the deployment with the enterprise status and verify commands. |
+| `defenseclaw alerts` | Refused | Refused | Refused | Linux, macOS, Windows | The per-user alerts view is not part of a managed install; an administrator reads the deployment with the enterprise status command. |
+| `defenseclaw tui` | Refused | Refused | Refused | Linux, macOS, Windows | The terminal UI is part of the per-user install. |
+| `defenseclaw upgrade` | Refused | Refused | Refused | Linux, macOS, Windows | The administrator's lifecycle applies updates. |
+| `defenseclaw rollback` | Refused | Refused | Refused | Linux, macOS, Windows | The administrator's lifecycle applies rollbacks. |
+| `defenseclaw setup ...` | Refused | Refused | Refused | Linux, macOS, Windows | Setup belongs to the per-user install. |
+| `defenseclaw config set` | Refused | Refused | Refused | Linux, macOS, Windows | The configuration is changed in the administrator's config. |
+| `defenseclaw config unset` | Refused | Refused | Refused | Linux, macOS, Windows | The configuration is changed in the administrator's config. |
+| `defenseclaw skill ...` | Refused | Refused | Refused | Linux, macOS, Windows | The admission policy is set in the administrator's config; an administrator scans an asset from an elevated prompt. |
+| `defenseclaw mcp ...` | Refused | Refused | Refused | Linux, macOS, Windows | Same as `skill`. |
+| `defenseclaw plugin ...` | Refused | Refused | Refused | Linux, macOS, Windows | Same as `skill`. |
+| `defenseclaw tool ...` | Refused | Refused | Refused | Linux, macOS, Windows | Same as `skill`. |
+| `defenseclaw <other per-user command>` | Refused | Refused | Refused | Linux, macOS, Windows | Every other per-user command (acp, agent, aibom, codeguard, edge-connector, init, keys, migrate, observability, quickstart, registry, reset, settings, uninstall, version) belongs to the per-user install; each answers with the managed message and changes nothing. |
+| `defenseclaw policy show` | Refused | Refused | Administrators only | Linux, macOS, Windows | A standard account is told to use an elevated prompt. |
+| `defenseclaw audit export` | Refused | Refused | Administrators only | Linux, macOS, Windows | The managed audit log is administrator-only. |
+
+## The launcher refusal
+
+On managed Linux, every command the table does not mark Offered prints:
+
+> This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. For administrator views, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status`, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify`, or `sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.
+
+On managed macOS it prints:
+
+> This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. For administrator views, run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status`, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify`, or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.

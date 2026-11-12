@@ -24,6 +24,10 @@ import (
 // floor never races their 90-defenseclaw.json writes. Tests replace it.
 var windowsClaudeFloorTransaction claudeFloorTransaction = enterprisehooks.WithWindowsClaudeManagedPolicyTransaction
 
+// windowsClaudeFloorFolderKept reports a link kept at the managed-settings
+// folder. Tests replace it.
+var windowsClaudeFloorFolderKept = enterprisehooks.WindowsClaudeManagedPolicyFolderKept
+
 // PublishWindowsClaudeVersionFloor keeps DefenseClaw's Claude Code version
 // floor drop-in in line with the standalone config on Windows: written while
 // claudecode is published through machine policy, version_floor is enforce
@@ -50,6 +54,19 @@ func RemoveWindowsClaudeVersionFloor(opts Options) (State, error) {
 	if opts.goos() != "windows" {
 		return state, errors.New("RemoveWindowsClaudeVersionFloor applies only to Windows")
 	}
+	if kept, err := windowsClaudeFloorFolderKept(); err != nil || kept {
+		if err != nil {
+			return state, err
+		}
+		// A link sits at the managed-settings folder: nothing of DefenseClaw
+		// is behind it to restore or remove, and the link is not followed.
+		// Only DefenseClaw's own record of the floor goes (GAP-0758). That
+		// record lives under the state root, which the purge removes, so
+		// dropping it does not hide the kept folder: the created-folder record
+		// of the folder stays and a later purge looks again.
+		state.detail("Claude Code version floor: a link sits at the managed-settings folder, so it is kept and the floor drop-in is not looked for behind it")
+		return state, deleteRecord(opts, claudeVersionFloorRecord)
+	}
 	err := removeClaudeVersionFloorWith(opts, windowsClaudeFloorTransaction, &state)
 	return state, err
 }
@@ -60,6 +77,9 @@ func RemoveWindowsClaudeVersionFloor(opts Options) (State, error) {
 func PurgeWindowsUnrecordedClaudeVersionFloor(opts Options) (bool, error) {
 	if opts.goos() != "windows" {
 		return false, errors.New("PurgeWindowsUnrecordedClaudeVersionFloor applies only to Windows")
+	}
+	if kept, err := windowsClaudeFloorFolderKept(); err != nil || kept {
+		return false, err
 	}
 	return purgeUnrecordedClaudeVersionFloor(opts, windowsClaudeFloorTransaction)
 }

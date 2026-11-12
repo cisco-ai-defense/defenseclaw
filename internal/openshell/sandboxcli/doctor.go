@@ -151,6 +151,10 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		// The uid the daemon reports (an older one reports none, and the
 		// check then has nothing to compare).
 		d.DaemonUID = st.daemonUID
+		if st.status != nil {
+			d.DaemonPID = st.status.DaemonPID
+		}
+		d.ResponderPID = st.responderPID
 		managed = managed || st.managed != nil
 	}
 	// On a managed computer the host checks are of this account's own
@@ -332,6 +336,9 @@ func managedRenderedDoctorDriver(paths *openshell.RenderedPaths) (openshell.Comp
 
 type statusProbe struct {
 	status *sandboxapi.Status
+	// responderPID is verified against the Unix status response by the
+	// kernel; a PID supplied only in status JSON is not port ownership proof.
+	responderPID int
 	// A configured port is not proof the daemon holds it.
 	ingressListening, egressListening bool
 	// listenersProven: the daemon's status names only the ports it holds
@@ -789,7 +796,15 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 	p := &statusProbe{}
 	api, err := a.api()
 	if err == nil {
-		st, serr := api.Status(ctx)
+		var st *sandboxapi.Status
+		var serr error
+		if verified, ok := api.(interface {
+			StatusWithPeer(context.Context) (*sandboxapi.Status, int, error)
+		}); ok {
+			st, p.responderPID, serr = verified.StatusWithPeer(ctx)
+		} else {
+			st, serr = api.Status(ctx)
+		}
 		if serr == nil {
 			p.status = st
 			p.daemonUID = st.DaemonUID

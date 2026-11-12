@@ -13,9 +13,8 @@
 #
 # Primary output: ${DIST_DIR}/windows-enterprise-buildkit-${VERSION}/.
 #
-# Also emits the release-shaped defenseclaw-${VERSION}-windows-amd64.zip +
-# gateway-source-commit.txt that scripts/build-windows-installer.ps1
-# consumes.
+# Also emits the release-shaped defenseclaw-${VERSION}-windows-amd64.zip and
+# a gateway-source-commit.txt sidecar that names the commit it was built from.
 #
 # What the script does:
 #   1. Clone github.com/cisco-aispg/ai-common at ${REF} (SSH first, HTTPS

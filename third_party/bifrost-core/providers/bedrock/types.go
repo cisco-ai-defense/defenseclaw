@@ -1,0 +1,1324 @@
+package bedrock
+
+import (
+	"bytes"
+	"encoding/json"
+
+	"github.com/bytedance/sonic"
+	"github.com/maximhq/bifrost/core/schemas"
+)
+
+// DefaultBedrockRegion is the default region for Bedrock
+const DefaultBedrockRegion = "us-east-1"
+
+// bedrockSigningService is the SigV4 service name for the standard Bedrock endpoints
+// (bedrock-runtime, bedrock-agent-runtime).
+const bedrockSigningService = "bedrock"
+
+// bedrockMantleSigningService is the SigV4 service name for the Bedrock Mantle endpoint
+// (bedrock-mantle.{region}.api.aws). AWS requires a distinct service name in the
+// credential scope; using "bedrock" will cause signature verification failures.
+const bedrockMantleSigningService = "bedrock-mantle"
+
+const MinimumReasoningMaxTokens = 1
+const DefaultCompletionMaxTokens = 4096 // Only used for relative reasoning max token calculation - not passed in body by default
+
+// ==================== REQUEST TYPES ====================
+
+// BedrockTextCompletionRequest represents a Bedrock text completion request
+// Combines both Anthropic-style and standard completion parameters
+type BedrockTextCompletionRequest struct {
+	ModelID string `json:"-"` // Model ID (sent in URL path, not body)
+
+	// Required field
+	Prompt string `json:"prompt"` // The text prompt to complete
+
+	// Token control parameters (both naming conventions supported)
+	MaxTokens         *int `json:"max_tokens,omitempty"`           // Maximum number of tokens to generate (standard format)
+	MaxTokensToSample *int `json:"max_tokens_to_sample,omitempty"` // Maximum number of tokens to generate (Anthropic format)
+
+	// Sampling parameters
+	Temperature *float64 `json:"temperature,omitempty"` // Controls randomness in generation (0.0-1.0)
+	TopP        *float64 `json:"top_p,omitempty"`       // Nucleus sampling parameter (0.0-1.0)
+	TopK        *int     `json:"top_k,omitempty"`       // Top-k sampling parameter
+
+	// Stop sequences (both naming conventions supported)
+	Stop          []string `json:"stop,omitempty"`           // Stop sequences (standard format)
+	StopSequences []string `json:"stop_sequences,omitempty"` // Stop sequences (Anthropic format)
+
+	// Messages API parameters (Anthropic Claude 3)
+	Messages         []BedrockMessage       `json:"messages,omitempty"`
+	System           interface{}            `json:"system,omitempty"`
+	AnthropicVersion string                 `json:"anthropic_version,omitempty"`
+	Stream           bool                   `json:"-"` // Whether streaming is requested (internal)
+	ExtraParams      map[string]interface{} `json:"-"`
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (r *BedrockTextCompletionRequest) GetExtraParams() map[string]interface{} {
+	return r.ExtraParams
+}
+
+// IsStreamingRequested implements the StreamingRequest interface
+func (r *BedrockTextCompletionRequest) IsStreamingRequested() bool {
+	return r.Stream
+}
+
+// BedrockServiceTierType represents the processing tier for a Bedrock request.
+// See https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ServiceTier.html
+type BedrockServiceTierType string
+
+const (
+	BedrockServiceTierTypePriority BedrockServiceTierType = "priority"
+	BedrockServiceTierTypeDefault  BedrockServiceTierType = "default"
+	BedrockServiceTierTypeFlex     BedrockServiceTierType = "flex"
+	BedrockServiceTierTypeReserved BedrockServiceTierType = "reserved"
+)
+
+type BedrockServiceTier struct {
+	Type BedrockServiceTierType `json:"type"`
+}
+
+// BedrockConverseRequest represents a Bedrock Converse API request
+type BedrockConverseRequest struct {
+	ModelID                           string                           `json:"-"`                                           // Model ID (sent in URL path, not body)
+	Messages                          []BedrockMessage                 `json:"messages,omitempty"`                          // Array of messages for the conversation
+	System                            []BedrockSystemMessage           `json:"system,omitempty"`                            // System messages/prompts
+	InferenceConfig                   *BedrockInferenceConfig          `json:"inferenceConfig,omitempty"`                   // Inference parameters
+	ToolConfig                        *BedrockToolConfig               `json:"toolConfig,omitempty"`                        // Tool configuration
+	GuardrailConfig                   *BedrockGuardrailConfig          `json:"guardrailConfig,omitempty"`                   // Guardrail configuration
+	AdditionalModelRequestFields      *schemas.OrderedMap              `json:"additionalModelRequestFields,omitempty"`      // Model-specific parameters (untyped)
+	AdditionalModelResponseFieldPaths []string                         `json:"additionalModelResponseFieldPaths,omitempty"` // Additional response field paths
+	PerformanceConfig                 *BedrockPerformanceConfig        `json:"performanceConfig,omitempty"`                 // Performance configuration
+	PromptVariables                   map[string]BedrockPromptVariable `json:"promptVariables,omitempty"`                   // Prompt variables for prompt management
+	RequestMetadata                   map[string]string                `json:"requestMetadata,omitempty"`                   // Request metadata
+	ServiceTier                       *BedrockServiceTier              `json:"serviceTier,omitempty"`                       // Service tier configuration (note: camelCase in both request and response)
+	Stream                            bool                             `json:"-"`                                           // Whether streaming is requested (internal, not in JSON)
+
+	// Extra params for advanced use cases
+	ExtraParams map[string]interface{} `json:"-"`
+
+	// Bifrost specific field (only parsed when converting from Provider -> Bifrost request)
+	Fallbacks []string `json:"fallbacks,omitempty"`
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (r *BedrockConverseRequest) GetExtraParams() map[string]interface{} {
+	return r.ExtraParams
+}
+
+// IsStreamingRequested implements the StreamingRequest interface
+func (r *BedrockConverseRequest) IsStreamingRequested() bool {
+	return r.Stream
+}
+
+// Known fields for BedrockConverseRequest
+var bedrockConverseRequestKnownFields = map[string]bool{
+	"messages":                          true,
+	"system":                            true,
+	"inferenceConfig":                   true,
+	"toolConfig":                        true,
+	"guardrailConfig":                   true,
+	"additionalModelRequestFields":      true,
+	"additionalModelResponseFieldPaths": true,
+	"performanceConfig":                 true,
+	"promptVariables":                   true,
+	"requestMetadata":                   true,
+	"serviceTier":                       true,
+	"stream":                            true,
+	"extra_params":                      true,
+	"fallbacks":                         true,
+}
+
+// UnmarshalJSON implements custom JSON unmarshalling for BedrockConverseRequest.
+// This captures all unregistered fields into ExtraParams.
+func (r *BedrockConverseRequest) UnmarshalJSON(data []byte) error {
+	// Create an alias type to avoid infinite recursion
+	type Alias BedrockConverseRequest
+
+	// First, unmarshal into the alias to populate all known fields
+	aux := &struct {
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+
+	if err := sonic.Unmarshal(data, aux); err != nil {
+		return err
+	}
+
+	// Parse JSON to extract unknown fields
+	var rawData map[string]json.RawMessage
+	if err := sonic.Unmarshal(data, &rawData); err != nil {
+		return err
+	}
+
+	// Initialize ExtraParams if not already initialized
+	if r.ExtraParams == nil {
+		r.ExtraParams = make(map[string]interface{})
+	}
+
+	// Extract unknown fields, preserving nested key ordering for prompt caching.
+	for key, value := range rawData {
+		if !bedrockConverseRequestKnownFields[key] {
+			var buf bytes.Buffer
+			if err := json.Compact(&buf, value); err == nil {
+				r.ExtraParams[key] = json.RawMessage(buf.Bytes())
+			} else {
+				r.ExtraParams[key] = json.RawMessage(value)
+			}
+		}
+	}
+
+	return nil
+}
+
+type BedrockMessageRole string
+
+const (
+	BedrockMessageRoleUser      BedrockMessageRole = "user"
+	BedrockMessageRoleAssistant BedrockMessageRole = "assistant"
+)
+
+// BedrockMessage represents a message in the conversation
+type BedrockMessage struct {
+	Role    BedrockMessageRole    `json:"role"`    // Required: "user" or "assistant"
+	Content []BedrockContentBlock `json:"content"` // Required: Array of content blocks
+}
+
+// BedrockSystemMessage represents a system message
+type BedrockSystemMessage struct {
+	Text         *string              `json:"text,omitempty"`         // Text system message
+	GuardContent *BedrockGuardContent `json:"guardContent,omitempty"` // Guard content for guardrails
+	CachePoint   *BedrockCachePoint   `json:"cachePoint,omitempty"`   // Cache point for the system message
+}
+
+// BedrockContentBlock represents a content block that can be text, image, document, toolUse, or toolResult
+type BedrockContentBlock struct {
+	// Text content
+	Text *string `json:"text,omitempty"`
+
+	// Image content
+	Image *BedrockImageSource `json:"image,omitempty"`
+
+	// Video content
+	Video *BedrockVideoBlock `json:"video,omitempty"`
+
+	// Document content
+	Document *BedrockDocumentSource `json:"document,omitempty"`
+
+	// Tool use content
+	ToolUse *BedrockToolUse `json:"toolUse,omitempty"`
+
+	// Tool result content
+	ToolResult *BedrockToolResult `json:"toolResult,omitempty"`
+
+	// Guard content (for guardrails)
+	GuardContent *BedrockGuardContent `json:"guardContent,omitempty"`
+
+	// Reasoning content
+	ReasoningContent *BedrockReasoningContent `json:"reasoningContent,omitempty"`
+
+	// For Tool Call Result content
+	JSON json.RawMessage `json:"json,omitempty"`
+
+	// Search result content (only valid inside toolResult.content per AWS Converse API)
+	SearchResult *BedrockSearchResultBlock `json:"searchResult,omitempty"`
+
+	// Cache point for the content block
+	CachePoint *BedrockCachePoint `json:"cachePoint,omitempty"`
+
+	// Citations from nova_grounding — co-located with a text block in the same content block
+	CitationsContent *BedrockCitationsContent `json:"citationsContent,omitempty"`
+}
+
+type BedrockCachePointType string
+
+const (
+	BedrockCachePointTypeDefault BedrockCachePointType = "default"
+)
+
+// BedrockCachePoint represents a cache point for the content block
+type BedrockCachePoint struct {
+	Type BedrockCachePointType `json:"type"`
+	TTL  *string               `json:"ttl,omitempty"` // "5m" | "1h"; omitted = Bedrock default (5m)
+}
+
+// BedrockImageSource represents image content
+type BedrockImageSource struct {
+	Format string                 `json:"format"` // Required: Image format (png, jpeg, gif, webp)
+	Source BedrockImageSourceData `json:"source"` // Required: Image source data
+}
+
+// BedrockImageSourceData represents the source of image data
+type BedrockImageSourceData struct {
+	Bytes *string `json:"bytes,omitempty"` // Base64-encoded image bytes
+}
+
+// BedrockDocumentSource represents document content
+type BedrockDocumentSource struct {
+	Format string                     `json:"format"` // Required: Document format (pdf, csv, doc, docx, xls, xlsx, html, txt, md)
+	Name   string                     `json:"name"`   // Required: Document name
+	Source *BedrockDocumentSourceData `json:"source"` // Required: Document source data
+}
+
+// BedrockDocumentSourceData represents the source of document data
+type BedrockDocumentSourceData struct {
+	Bytes *string `json:"bytes,omitempty"` // Base64-encoded document bytes
+	Text  *string `json:"text,omitempty"`  // Plain text content
+}
+
+// BedrockVideoBlock represents a video content block.
+// See: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_VideoBlock.html
+type BedrockVideoBlock struct {
+	Format string             `json:"format"` // Required: mkv|mov|mp4|webm|flv|mpeg|mpg|wmv|three_gp
+	Source BedrockVideoSource `json:"source"` // Required: video source (bytes or s3Location, union)
+}
+
+// BedrockVideoSource is the source for a BedrockVideoBlock.
+// This is a tagged union — exactly one of Bytes or S3Location should be set.
+// See: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_VideoSource.html
+type BedrockVideoSource struct {
+	Bytes      *string            `json:"bytes,omitempty"`      // Optional: base64-encoded video bytes (<25MB)
+	S3Location *BedrockS3Location `json:"s3Location,omitempty"` // Optional: S3 location
+}
+
+// BedrockS3Location represents a storage location in an Amazon S3 bucket.
+// See: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_S3Location.html
+type BedrockS3Location struct {
+	URI         string  `json:"uri"`                   // Required: object URI starting with s3://
+	BucketOwner *string `json:"bucketOwner,omitempty"` // Optional: 12-digit AWS account ID if cross-account
+}
+
+// BedrockToolUse represents a tool use request
+type BedrockToolUse struct {
+	ToolUseID string          `json:"toolUseId"`      // Required: Unique identifier for this tool use
+	Name      string          `json:"name"`           // Required: Name of the tool to use
+	Input     json.RawMessage `json:"input"`          // Required: Input parameters for the tool (json.RawMessage preserves key ordering for prompt caching)
+	Type      string          `json:"type,omitempty"` // Optional: "server_tool_use" for Nova system tools
+}
+
+// BedrockToolResult represents the result of a tool use
+type BedrockToolResult struct {
+	ToolUseID string                `json:"toolUseId"`        // Required: ID of the tool use this result corresponds to
+	Content   []BedrockContentBlock `json:"content"`          // Required: Content of the tool result
+	Status    *string               `json:"status,omitempty"` // Optional: Status of tool execution ("success" or "error")
+	Type      *string               `json:"type,omitempty"`   // Optional: result type e.g. "nova_code_interpreter_result"
+}
+
+// BedrockSearchResultBlock represents a search result tool-result content block.
+// See: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_SearchResultBlock.html
+type BedrockSearchResultBlock struct {
+	Source    string                       `json:"source"`              // Required: source URL or identifier
+	Title     string                       `json:"title"`               // Required: descriptive title
+	Content   []BedrockSearchResultContent `json:"content"`             // Required: search result content blocks
+	Citations *BedrockCitationsConfig      `json:"citations,omitempty"` // Optional: citations config
+}
+
+// BedrockSearchResultContent represents a single content block inside a SearchResult.
+// See: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_SearchResultContentBlock.html
+type BedrockSearchResultContent struct {
+	Text string `json:"text"` // Required: actual text content
+}
+
+// BedrockCitationsConfig represents citations configuration for a search result.
+// See: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CitationsConfig.html
+type BedrockCitationsConfig struct {
+	Enabled bool `json:"enabled"` // Required: whether citations are enabled
+}
+
+// BedrockGuardContent represents guard content for guardrails
+type BedrockGuardContent struct {
+	Text *BedrockGuardContentText `json:"text,omitempty"`
+}
+
+type BedrockReasoningContent struct {
+	ReasoningText *BedrockReasoningContentText `json:"reasoningText,omitempty"`
+}
+
+type BedrockReasoningContentText struct {
+	Text      *string `json:"text,omitempty"`
+	Signature *string `json:"signature,omitempty"`
+}
+
+// BedrockGuardContentText represents text content for guardrails
+type BedrockGuardContentText struct {
+	Text       string                    `json:"text"`                 // Required: Text content
+	Qualifiers []BedrockContentQualifier `json:"qualifiers,omitempty"` // Optional: Content qualifiers
+}
+
+// BedrockContentQualifier represents qualifiers for guard content
+type BedrockContentQualifier string
+
+const (
+	ContentQualifierGrounding    BedrockContentQualifier = "grounding_source"
+	ContentQualifierSearchResult BedrockContentQualifier = "search_result"
+	ContentQualifierQuery        BedrockContentQualifier = "query"
+)
+
+// BedrockInferenceConfig represents inference configuration parameters
+type BedrockInferenceConfig struct {
+	MaxTokens     *int     `json:"maxTokens,omitempty"`     // Maximum number of tokens to generate
+	StopSequences []string `json:"stopSequences,omitempty"` // Sequences that will stop generation
+	Temperature   *float64 `json:"temperature,omitempty"`   // Sampling temperature (0.0 to 1.0)
+	TopP          *float64 `json:"topP,omitempty"`          // Top-p sampling parameter (0.0 to 1.0)
+}
+
+// BedrockToolConfig represents tool configuration
+type BedrockToolConfig struct {
+	Tools      []BedrockTool      `json:"tools,omitempty"`      // Available tools
+	ToolChoice *BedrockToolChoice `json:"toolChoice,omitempty"` // Tool choice strategy
+}
+
+// BedrockTool represents a tool definition
+type BedrockTool struct {
+	ToolSpec   *BedrockToolSpec   `json:"toolSpec,omitempty"`   // Tool specification
+	CachePoint *BedrockCachePoint `json:"cachePoint,omitempty"` // Cache point for the tool
+	SystemTool *BedrockSystemTool `json:"systemTool,omitempty"` // Nova system tool (nova_grounding, nova_code_interpreter)
+}
+
+type BedrockSystemToolType string
+
+const (
+	BedrockSystemToolNovaGrounding       BedrockSystemToolType = "nova_grounding"
+	BedrockSystemToolNovaCodeInterpreter BedrockSystemToolType = "nova_code_interpreter"
+)
+
+const BedrockNovaCodeInterpreterResultType = "nova_code_interpreter_result"
+const BedrockNovaGroundingResultType = "nova_grounding_result"
+
+// BedrockSystemTool represents a Nova-managed system tool
+type BedrockSystemTool struct {
+	Name BedrockSystemToolType `json:"name"` // "nova_grounding" | "nova_code_interpreter"
+}
+
+// BedrockToolSpec represents the specification of a tool
+type BedrockToolSpec struct {
+	Name        string                 `json:"name"`                  // Required: Tool name
+	Description *string                `json:"description,omitempty"` // Optional: Tool description
+	InputSchema BedrockToolInputSchema `json:"inputSchema"`           // Required: JSON schema for tool input
+}
+
+// BedrockToolInputSchema represents the input schema for a tool (union type)
+type BedrockToolInputSchema struct {
+	JSON json.RawMessage `json:"json,omitempty"` // The JSON schema for the tool
+}
+
+// BedrockToolChoice represents tool choice configuration
+type BedrockToolChoice struct {
+	// Union type - only one should be set
+	Auto *BedrockToolChoiceAuto `json:"auto,omitempty"`
+	Any  *BedrockToolChoiceAny  `json:"any,omitempty"`
+	Tool *BedrockToolChoiceTool `json:"tool,omitempty"`
+}
+
+// BedrockToolChoiceAuto represents automatic tool choice
+type BedrockToolChoiceAuto struct{}
+
+// BedrockToolChoiceAny represents any tool choice
+type BedrockToolChoiceAny struct{}
+
+// BedrockToolChoiceTool represents specific tool choice
+type BedrockToolChoiceTool struct {
+	Name string `json:"name"` // Required: Name of the specific tool to use
+}
+
+// BedrockGuardrailConfig represents guardrail configuration
+type BedrockGuardrailConfig struct {
+	GuardrailIdentifier  string  `json:"guardrailIdentifier"`            // Required: Guardrail identifier
+	GuardrailVersion     string  `json:"guardrailVersion"`               // Required: Guardrail version
+	Trace                *string `json:"trace,omitempty"`                // Optional: Trace level ("enabled" or "disabled")
+	StreamProcessingMode *string `json:"streamProcessingMode,omitempty"` // Optional: Stream processing mode ("sync" or "async")
+}
+
+// BedrockPerformanceConfig represents performance configuration
+type BedrockPerformanceConfig struct {
+	Latency *string `json:"latency,omitempty"` // Latency optimization ("standard" or "optimized")
+}
+
+// BedrockPromptVariable represents a prompt variable
+type BedrockPromptVariable struct {
+	Text *string `json:"text,omitempty"` // Text value for the variable
+}
+
+// ==================== RESPONSE TYPES ====================
+
+// BedrockAnthropicTextResponse represents the response structure from Bedrock's Anthropic text completion API.
+// It includes the completion text and stop reason information.
+type BedrockAnthropicTextResponse struct {
+	Completion string `json:"completion"`  // Generated completion text
+	StopReason string `json:"stop_reason"` // Reason for completion termination
+	Stop       string `json:"stop"`        // Stop sequence that caused completion to stop
+}
+
+// BedrockMistralTextResponse represents the response structure from Bedrock's Mistral text completion API.
+// It includes multiple output choices with their text and stop reasons.
+type BedrockMistralTextResponse struct {
+	Outputs []struct {
+		Text       string `json:"text"`        // Generated text
+		StopReason string `json:"stop_reason"` // Reason for completion termination
+	} `json:"outputs"` // Array of output choices
+}
+
+// BedrockConverseResponse represents a Bedrock Converse API response
+type BedrockConverseResponse struct {
+	Output                        *BedrockConverseOutput    `json:"output"`                                  // Required: Response output
+	StopReason                    string                    `json:"stopReason"`                              // Required: Reason for stopping
+	Usage                         *BedrockTokenUsage        `json:"usage"`                                   // Required: Token usage information
+	Metrics                       *BedrockConverseMetrics   `json:"metrics"`                                 // Required: Response metrics
+	AdditionalModelResponseFields json.RawMessage           `json:"additionalModelResponseFields,omitempty"` // Optional: Additional model-specific response fields (json.RawMessage preserves key ordering)
+	PerformanceConfig             *BedrockPerformanceConfig `json:"performanceConfig,omitempty"`             // Optional: Performance configuration used
+	ServiceTier                   *BedrockServiceTier       `json:"serviceTier,omitempty"`                   // Optional: Service tier that was used
+	Trace                         *BedrockConverseTrace     `json:"trace,omitempty"`                         // Optional: Guardrail trace information
+}
+
+// BedrockConverseOutput represents the output of a Converse request (union type)
+type BedrockConverseOutput struct {
+	Message *BedrockMessage `json:"message,omitempty"` // Generated message (most common case)
+}
+
+// BedrockTokenUsage represents token usage information
+type BedrockTokenUsage struct {
+	InputTokens  int `json:"inputTokens"`  // Number of input tokens (excludes cache-read tokens)
+	OutputTokens int `json:"outputTokens"` // Number of output tokens
+	TotalTokens  int `json:"totalTokens"`  // Total tokens (input + output + cached tokens)
+	// Number of cached input tokens read from the cache; excluded from inputTokens.
+	CacheReadInputTokens  int                         `json:"cacheReadInputTokens"`
+	CacheWriteInputTokens int                         `json:"cacheWriteInputTokens"`  // Number of cached tokens written
+	CacheDetails          *[]BedrockCacheWriteDetails `json:"cacheDetails,omitempty"` // Cache details
+}
+
+type BedrockCacheWriteTTL string
+
+const (
+	BedrockCacheWriteTTL5m BedrockCacheWriteTTL = "5m"
+	BedrockCacheWriteTTL1h BedrockCacheWriteTTL = "1h"
+)
+
+type BedrockCacheWriteDetails struct {
+	InputTokens int                  `json:"inputTokens"` // Number of input tokens written to the cache
+	TTL         BedrockCacheWriteTTL `json:"ttl"`         // Time to live for the cache
+}
+
+// BedrockConverseMetrics represents response metrics
+type BedrockConverseMetrics struct {
+	LatencyMs int64 `json:"latencyMs"` // Response latency in milliseconds
+}
+
+// BedrockConverseTrace represents guardrail trace information
+type BedrockConverseTrace struct {
+	Guardrail *BedrockGuardrailTrace `json:"guardrail,omitempty"` // Guardrail trace details
+}
+
+// BedrockGuardrailTrace represents guardrail trace information returned by Bedrock Converse / ConverseStream.
+// Both paths use the same shape: inputAssessment is map[guardrailId]Assessment,
+// outputAssessments is map[guardrailId][]Assessment.
+type BedrockGuardrailTrace struct {
+	ActionReason      *string                                 `json:"actionReason,omitempty"`      // Human-readable reason the guardrail acted
+	InputAssessment   map[string]BedrockGuardrailAssessment   `json:"inputAssessment,omitempty"`   // Map of guardrail ID → single assessment
+	OutputAssessments map[string][]BedrockGuardrailAssessment `json:"outputAssessments,omitempty"` // Map of guardrail ID → array of assessments
+	ModelOutput       []interface{}                           `json:"modelOutput,omitempty"`       // Model output after guardrail evaluation
+	Action            *string                                 `json:"action,omitempty"`            // Action taken by guardrail (NONE | INTERVENED)
+	Trace             *BedrockGuardrailTraceDetail            `json:"trace,omitempty"`             // Detailed trace information
+}
+
+// BedrockGuardrailAssessment represents a guardrail assessment
+type BedrockGuardrailAssessment struct {
+	AppliedGuardrailDetails   *BedrockGuardrailAppliedDetails            `json:"appliedGuardrailDetails,omitempty"`
+	AutomatedReasoningPolicy  *BedrockGuardrailAutomatedReasoningPolicy  `json:"automatedReasoningPolicy,omitempty"`
+	ContentPolicy             *BedrockGuardrailContentPolicy             `json:"contentPolicy,omitempty"`
+	ContextualGroundingPolicy *BedrockGuardrailContextualGroundingPolicy `json:"contextualGroundingPolicy,omitempty"`
+	InvocationMetrics         *BedrockGuardrailInvocationMetrics         `json:"invocationMetrics,omitempty"`
+	SensitiveInfoPolicy       *BedrockGuardrailSensitiveInfoPolicy       `json:"sensitiveInformationPolicy,omitempty"`
+	TopicPolicy               *BedrockGuardrailTopicPolicy               `json:"topicPolicy,omitempty"`
+	WordPolicy                *BedrockGuardrailWordPolicy                `json:"wordPolicy,omitempty"`
+}
+
+// BedrockGuardrailAppliedDetails holds metadata about the specific guardrail that was applied
+type BedrockGuardrailAppliedDetails struct {
+	GuardrailArn       *string  `json:"guardrailArn,omitempty"`
+	GuardrailID        *string  `json:"guardrailId,omitempty"`
+	GuardrailOrigin    []string `json:"guardrailOrigin,omitempty"`
+	GuardrailOwnership *string  `json:"guardrailOwnership,omitempty"`
+	GuardrailVersion   *string  `json:"guardrailVersion,omitempty"`
+}
+
+// BedrockGuardrailAutomatedReasoningPolicy represents an automated reasoning policy assessment
+type BedrockGuardrailAutomatedReasoningPolicy struct {
+	Findings []interface{} `json:"findings,omitempty"`
+}
+
+// BedrockGuardrailContextualGroundingPolicy represents a contextual grounding policy assessment
+type BedrockGuardrailContextualGroundingPolicy struct {
+	Filters []BedrockGuardrailContextualGroundingFilter `json:"filters,omitempty"`
+}
+
+// BedrockGuardrailContextualGroundingFilter represents a single contextual grounding filter result
+type BedrockGuardrailContextualGroundingFilter struct {
+	Type      *string  `json:"type,omitempty"`
+	Action    *string  `json:"action,omitempty"`
+	Score     *float64 `json:"score,omitempty"`
+	Threshold *float64 `json:"threshold,omitempty"`
+	Detected  *bool    `json:"detected,omitempty"`
+}
+
+// BedrockGuardrailInvocationMetrics holds latency and usage metrics for a guardrail invocation
+type BedrockGuardrailInvocationMetrics struct {
+	GuardrailCoverage          *BedrockGuardrailCoverage `json:"guardrailCoverage,omitempty"`
+	GuardrailProcessingLatency *int64                    `json:"guardrailProcessingLatency,omitempty"`
+	Usage                      *BedrockGuardrailUsage    `json:"usage,omitempty"`
+}
+
+// BedrockGuardrailCoverage holds coverage statistics for a guardrail invocation
+type BedrockGuardrailCoverage struct {
+	Images         *BedrockGuardrailCoverageCount `json:"images,omitempty"`
+	TextCharacters *BedrockGuardrailCoverageCount `json:"textCharacters,omitempty"`
+}
+
+// BedrockGuardrailCoverageCount holds guarded/total counts for a coverage dimension
+type BedrockGuardrailCoverageCount struct {
+	Guarded *int64 `json:"guarded,omitempty"`
+	Total   *int64 `json:"total,omitempty"`
+}
+
+// BedrockGuardrailUsage holds token/unit consumption for a guardrail invocation
+type BedrockGuardrailUsage struct {
+	AutomatedReasoningPolicies          *int64 `json:"automatedReasoningPolicies,omitempty"`
+	AutomatedReasoningPolicyUnits       *int64 `json:"automatedReasoningPolicyUnits,omitempty"`
+	ContentPolicyImageUnits             *int64 `json:"contentPolicyImageUnits,omitempty"`
+	ContentPolicyUnits                  *int64 `json:"contentPolicyUnits,omitempty"`
+	ContextualGroundingPolicyUnits      *int64 `json:"contextualGroundingPolicyUnits,omitempty"`
+	SensitiveInformationPolicyFreeUnits *int64 `json:"sensitiveInformationPolicyFreeUnits,omitempty"`
+	SensitiveInformationPolicyUnits     *int64 `json:"sensitiveInformationPolicyUnits,omitempty"`
+	TopicPolicyUnits                    *int64 `json:"topicPolicyUnits,omitempty"`
+	WordPolicyUnits                     *int64 `json:"wordPolicyUnits,omitempty"`
+}
+
+// BedrockGuardrailTopicPolicy represents topic policy assessment
+type BedrockGuardrailTopicPolicy struct {
+	Topics []BedrockGuardrailTopic `json:"topics,omitempty"` // Topics identified
+}
+
+// BedrockGuardrailTopic represents a topic identified by guardrail
+type BedrockGuardrailTopic struct {
+	Name   *string `json:"name,omitempty"`   // Topic name
+	Type   *string `json:"type,omitempty"`   // Topic type
+	Action *string `json:"action,omitempty"` // Action taken
+}
+
+// BedrockGuardrailContentPolicy represents content policy assessment
+type BedrockGuardrailContentPolicy struct {
+	Filters []BedrockGuardrailContentFilter `json:"filters,omitempty"` // Content filters applied
+}
+
+// BedrockGuardrailContentFilter represents a content filter
+type BedrockGuardrailContentFilter struct {
+	Type       *string `json:"type,omitempty"`       // Filter type
+	Confidence *string `json:"confidence,omitempty"` // Confidence level
+	Action     *string `json:"action,omitempty"`     // Action taken
+}
+
+// BedrockGuardrailWordPolicy represents word policy assessment
+type BedrockGuardrailWordPolicy struct {
+	CustomWords      []BedrockGuardrailCustomWord      `json:"customWords,omitempty"`      // Custom words detected
+	ManagedWordLists []BedrockGuardrailManagedWordList `json:"managedWordLists,omitempty"` // Managed word lists matched
+}
+
+// BedrockGuardrailCustomWord represents a custom word detected
+type BedrockGuardrailCustomWord struct {
+	Match  *string `json:"match,omitempty"`  // Matched word
+	Action *string `json:"action,omitempty"` // Action taken
+}
+
+// BedrockGuardrailManagedWordList represents a managed word list match
+type BedrockGuardrailManagedWordList struct {
+	Match  *string `json:"match,omitempty"`  // Matched word
+	Type   *string `json:"type,omitempty"`   // Word list type
+	Action *string `json:"action,omitempty"` // Action taken
+}
+
+// BedrockGuardrailSensitiveInfoPolicy represents sensitive information policy assessment
+type BedrockGuardrailSensitiveInfoPolicy struct {
+	PIIEntities []BedrockGuardrailPIIEntity `json:"piiEntities,omitempty"` // PII entities detected
+	Regexes     []BedrockGuardrailRegex     `json:"regexes,omitempty"`     // Regex patterns matched
+}
+
+// BedrockGuardrailPIIEntity represents a PII entity detected
+type BedrockGuardrailPIIEntity struct {
+	Type   *string `json:"type,omitempty"`   // PII entity type
+	Match  *string `json:"match,omitempty"`  // Matched text
+	Action *string `json:"action,omitempty"` // Action taken
+}
+
+// BedrockGuardrailRegex represents a regex pattern match
+type BedrockGuardrailRegex struct {
+	Name   *string `json:"name,omitempty"`   // Regex name
+	Match  *string `json:"match,omitempty"`  // Matched text
+	Action *string `json:"action,omitempty"` // Action taken
+}
+
+// BedrockGuardrailTraceDetail represents detailed guardrail trace
+type BedrockGuardrailTraceDetail struct {
+	Trace *string `json:"trace,omitempty"` // Detailed trace information
+}
+
+// ==================== COUNT TOKENS TYPES ====================
+
+// BedrockCountTokensRequest represents a Bedrock CountTokens API request
+type BedrockCountTokensRequest struct {
+	Input struct {
+		Converse *BedrockConverseRequest `json:"converse,omitempty"`
+	} `json:"input"`
+}
+
+// BedrockCountTokensResponse represents a Bedrock CountTokens API response
+type BedrockCountTokensResponse struct {
+	InputTokens int `json:"inputTokens"`
+}
+
+// ==================== INVOKE MODEL RESPONSE TYPES ====================
+
+// BedrockInvokeMessagesResponse represents the Anthropic Messages API response
+// format returned by Bedrock's InvokeModel endpoint for Claude 3+ models.
+type BedrockInvokeMessagesResponse struct {
+	ID           string                              `json:"id"`
+	Type         string                              `json:"type"`
+	Role         string                              `json:"role"`
+	Content      []BedrockInvokeMessagesContentBlock `json:"content"`
+	Model        string                              `json:"model"`
+	StopReason   string                              `json:"stop_reason,omitempty"`
+	StopSequence *string                             `json:"stop_sequence,omitempty"`
+	Usage        *BedrockInvokeMessagesUsage         `json:"usage,omitempty"`
+}
+
+// BedrockInvokeMessagesContentBlock represents a content block in an Anthropic Messages response.
+type BedrockInvokeMessagesContentBlock struct {
+	Type     string      `json:"type"`
+	Text     string      `json:"text,omitempty"`
+	ID       string      `json:"id,omitempty"`
+	Name     string      `json:"name,omitempty"`
+	Input    interface{} `json:"input,omitempty"`
+	Thinking string      `json:"thinking,omitempty"`
+}
+
+// BedrockInvokeMessagesUsage represents token usage in an Anthropic Messages response.
+type BedrockInvokeMessagesUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// BedrockInvokeAI21Response represents AI21 Jamba's InvokeModel response format.
+type BedrockInvokeAI21Response struct {
+	ID      string                    `json:"id"`
+	Choices []BedrockInvokeAI21Choice `json:"choices"`
+	Usage   *BedrockInvokeAI21Usage   `json:"usage,omitempty"`
+}
+
+// BedrockInvokeAI21Choice represents a single choice in an AI21 response.
+type BedrockInvokeAI21Choice struct {
+	Index        int                      `json:"index"`
+	Message      BedrockInvokeAI21Message `json:"message"`
+	FinishReason string                   `json:"finish_reason"`
+}
+
+// BedrockInvokeAI21Message represents a message in an AI21 response choice.
+type BedrockInvokeAI21Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// BedrockInvokeAI21Usage represents token usage in an AI21 response.
+type BedrockInvokeAI21Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// ==================== ERROR TYPES ====================
+
+// BedrockError represents a Bedrock API error response
+type BedrockError struct {
+	Type    string  `json:"__type"`         // Error type
+	Message string  `json:"message"`        // Error message
+	Code    *string `json:"code,omitempty"` // Optional error code
+}
+
+// ==================== STREAMING RESPONSE TYPES ====================
+
+// BedrockConverseStreamResponse represents the overall streaming response structure
+type BedrockConverseStreamResponse struct {
+	Events []BedrockStreamEvent `json:"-"` // Events are parsed from the stream, not JSON
+}
+
+// BedrockStreamEvent represents a union type for all possible streaming events
+type BedrockStreamEvent struct {
+	// Flat structure matching actual Bedrock API response
+	Role              *string                   `json:"role,omitempty"`              // For messageStart events
+	ContentBlockIndex *int                      `json:"contentBlockIndex,omitempty"` // For content block events
+	Delta             *BedrockContentBlockDelta `json:"delta,omitempty"`             // For contentBlockDelta events
+	StopReason        *string                   `json:"stopReason,omitempty"`        // For messageStop events
+
+	// Start field for tool use events
+	Start *BedrockContentBlockStart `json:"start,omitempty"` // For contentBlockStart events
+
+	// Marker for contentBlockStop events. The wire payload of contentBlockStop carries
+	// only contentBlockIndex, so the flat union needs an explicit flag to represent it.
+	// Never serialized directly: ToEncodedEvents builds the payload from ContentBlockIndex.
+	ContentBlockStop bool `json:"-"`
+
+	// Metadata and usage (can appear at top level)
+	Usage   *BedrockTokenUsage      `json:"usage,omitempty"`   // Usage information
+	Metrics *BedrockConverseMetrics `json:"metrics,omitempty"` // Performance metrics
+	Trace   *BedrockConverseTrace   `json:"trace,omitempty"`   // Trace information
+
+	// Additional fields
+	AdditionalModelResponseFields interface{} `json:"additionalModelResponseFields,omitempty"`
+
+	// For InvokeModelWithResponseStream (Legacy API)
+	// InvokeModelRawChunks holds one or more raw byte payloads for legacy invoke stream.
+	// Multiple chunks are needed when a single Bifrost event maps to multiple Anthropic SSE events
+	// (e.g., Completed → message_delta + message_stop).
+	InvokeModelRawChunks [][]byte `json:"invokeModelRawChunks,omitempty"`
+}
+
+// BedrockMessageStartEvent indicates the start of a message
+type BedrockMessageStartEvent struct {
+	Role string `json:"role"` // "assistant" or "user"
+}
+
+// BedrockContentBlockStart contains details about the starting content block
+type BedrockContentBlockStart struct {
+	ToolUse *BedrockToolUseStart `json:"toolUse,omitempty"`
+}
+
+// BedrockToolUseStart contains details about a tool use block start
+type BedrockToolUseStart struct {
+	ToolUseID string `json:"toolUseId"` // Unique identifier for the tool use
+	Name      string `json:"name"`      // Name of the tool being used
+}
+
+// BedrockContentBlockDelta represents the incremental content
+type BedrockContentBlockDelta struct {
+	Text             *string                      `json:"text,omitempty"`             // Text content delta
+	ReasoningContent *BedrockReasoningContentText `json:"reasoningContent,omitempty"` // Reasoning content delta
+	ToolUse          *BedrockToolUseDelta         `json:"toolUse,omitempty"`          // Tool use delta
+	Citation         *BedrockCitation             `json:"citation,omitempty"`         // nova_grounding citation delta
+}
+
+// BedrockWebCitationLocation represents the web location of a citation
+type BedrockWebCitationLocation struct {
+	URL    string `json:"url"`
+	Domain string `json:"domain"`
+}
+
+// BedrockCitationLocation represents the location of a citation (union type)
+type BedrockCitationLocation struct {
+	Web *BedrockWebCitationLocation `json:"web,omitempty"`
+}
+
+// BedrockCitation represents a single citation returned by nova_grounding
+type BedrockCitation struct {
+	Location BedrockCitationLocation `json:"location"`
+}
+
+// BedrockCitationsContent represents the citations block embedded in a text content block
+type BedrockCitationsContent struct {
+	Citations []BedrockCitation `json:"citations"`
+}
+
+// BedrockToolUseDelta represents incremental tool use content
+type BedrockToolUseDelta struct {
+	Input string `json:"input"` // Incremental input for the tool (JSON string)
+}
+
+// BedrockMessageStopEvent indicates the end of a message
+type BedrockMessageStopEvent struct {
+	StopReason                    string      `json:"stopReason"`
+	AdditionalModelResponseFields interface{} `json:"additionalModelResponseFields,omitempty"`
+}
+
+// BedrockMetadataEvent provides metadata about the response
+type BedrockMetadataEvent struct {
+	Usage   *BedrockTokenUsage      `json:"usage,omitempty"`   // Token usage information
+	Metrics *BedrockConverseMetrics `json:"metrics,omitempty"` // Performance metrics
+	Trace   *BedrockConverseTrace   `json:"trace,omitempty"`   // Trace information
+}
+
+// ==================== EMBEDDING TYPES ====================
+
+// BedrockTitanEmbeddingRequest represents a Bedrock Titan embedding request
+type BedrockTitanEmbeddingRequest struct {
+	InputText   string                 `json:"inputText"`            // Required: Text to embed
+	Dimensions  *int                   `json:"dimensions,omitempty"` // Optional: 256, 512, or 1024 (titan-embed-text-v2 only)
+	Normalize   *bool                  `json:"normalize,omitempty"`  // Optional: normalize the embedding
+	ExtraParams map[string]interface{} `json:"-"`
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (req *BedrockTitanEmbeddingRequest) GetExtraParams() map[string]interface{} {
+	return req.ExtraParams
+}
+
+// BedrockTitanEmbeddingResponse represents a Bedrock Titan embedding response
+type BedrockTitanEmbeddingResponse struct {
+	Embedding           []float64 `json:"embedding"`           // The embedding vector
+	InputTextTokenCount int       `json:"inputTextTokenCount"` // Number of tokens in input
+}
+
+// BedrockCohereEmbeddingContentBlock represents a single content block in a mixed input
+type BedrockCohereEmbeddingContentBlock struct {
+	Type     string                          `json:"type"`                // "text" or "image_url"
+	Text     *string                         `json:"text,omitempty"`      // for type=text
+	ImageURL *BedrockCohereEmbeddingImageURL `json:"image_url,omitempty"` // for type=image_url
+}
+
+// BedrockCohereEmbeddingImageURL holds the URL for an image content block
+type BedrockCohereEmbeddingImageURL struct {
+	URL string `json:"url"`
+}
+
+// BedrockCohereEmbeddingInput represents a mixed text+image input
+type BedrockCohereEmbeddingInput struct {
+	Content []BedrockCohereEmbeddingContentBlock `json:"content"`
+}
+
+// BedrockCohereEmbeddingRequest represents a Bedrock Cohere embedding request.
+// Unlike the direct Cohere API, Bedrock does not accept a "model" field in the body.
+type BedrockCohereEmbeddingRequest struct {
+	InputType       string                        `json:"input_type"`                 // Required
+	Texts           []string                      `json:"texts,omitempty"`            // text-only inputs
+	Images          []string                      `json:"images,omitempty"`           // image-only inputs (data URIs)
+	Inputs          []BedrockCohereEmbeddingInput `json:"inputs,omitempty"`           // mixed text+image inputs
+	EmbeddingTypes  []string                      `json:"embedding_types,omitempty"`  // e.g. ["float"]
+	OutputDimension *int                          `json:"output_dimension,omitempty"` // 256, 512, 1024, or 1536
+	MaxTokens       *int                          `json:"max_tokens,omitempty"`       // max 128000
+	Truncate        *string                       `json:"truncate,omitempty"`         // NONE, LEFT, or RIGHT
+	ExtraParams     map[string]interface{}        `json:"-"`
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (req *BedrockCohereEmbeddingRequest) GetExtraParams() map[string]interface{} {
+	return req.ExtraParams
+}
+
+// BedrockCohereEmbeddingResponse handles both Bedrock Cohere embedding response shapes.
+// When embedding_types is not set, Bedrock returns embeddings as a raw [][]float32
+// ("embeddings_floats"). When embedding_types is set, it returns an object with typed
+// arrays ("embeddings_by_type"). Using json.RawMessage defers parsing until we know the shape.
+type BedrockCohereEmbeddingResponse struct {
+	ID           string          `json:"id"`
+	Embeddings   json.RawMessage `json:"embeddings"`
+	ResponseType string          `json:"response_type"`
+	Texts        []string        `json:"texts,omitempty"`
+}
+
+const TaskTypeTextImage = "TEXT_IMAGE"
+const TaskTypeImageVariation = "IMAGE_VARIATION"
+const TaskTypeInpainting = "INPAINTING"
+const TaskTypeOutpainting = "OUTPAINTING"
+const TaskTypeBackgroundRemoval = "BACKGROUND_REMOVAL"
+
+// BedrockImageGenerationRequest represents a Bedrock image generation request
+type BedrockImageGenerationRequest struct {
+	TaskType              *string                   `json:"taskType"`              // Should be "TEXT_IMAGE"
+	TextToImageParams     *BedrockTextToImageParams `json:"textToImageParams"`     // Parameters for text-to-image
+	ImageGenerationConfig *ImageGenerationConfig    `json:"imageGenerationConfig"` // Image generation config
+	ExtraParams           map[string]interface{}    `json:"-"`
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (req *BedrockImageGenerationRequest) GetExtraParams() map[string]interface{} {
+	return req.ExtraParams
+}
+
+type BedrockTextToImageParams struct {
+	Text         string  `json:"text"`                   // Prompt for image generation
+	NegativeText *string `json:"negativeText,omitempty"` // Negative prompt for image generation
+	Style        *string `json:"style,omitempty"`        // Style for image generation
+}
+
+type ImageGenerationConfig struct {
+	NumberOfImages *int     `json:"numberOfImages,omitempty"`
+	Height         *int     `json:"height,omitempty"`
+	Width          *int     `json:"width,omitempty"`
+	CfgScale       *float64 `json:"cfgScale,omitempty"`
+	Quality        *string  `json:"quality,omitempty"`
+	Seed           *int     `json:"seed,omitempty"`
+}
+
+// BedrockImageVariationRequest represents a Bedrock image variation request
+type BedrockImageVariationRequest struct {
+	TaskType              *string                      `json:"taskType"`              // Should be "IMAGE_VARIATION"
+	ImageVariationParams  *BedrockImageVariationParams `json:"imageVariationParams"`  // Parameters for image variation
+	ImageGenerationConfig *ImageGenerationConfig       `json:"imageGenerationConfig"` // Image generation config (reused)
+	ExtraParams           map[string]interface{}       `json:"-"`
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (req *BedrockImageVariationRequest) GetExtraParams() map[string]interface{} {
+	return req.ExtraParams
+}
+
+type BedrockImageVariationParams struct {
+	Text               *string  `json:"text,omitempty"`               // Prompt/text for variation
+	NegativeText       *string  `json:"negativeText,omitempty"`       // Negative prompt
+	Images             []string `json:"images"`                       // Base64-encoded image strings
+	SimilarityStrength *float64 `json:"similarityStrength,omitempty"` // Range: 0.2 to 1.0
+}
+
+// BedrockImageEditRequest represents a Bedrock image edit request
+type BedrockImageEditRequest struct {
+	TaskType                *string                         `json:"taskType"` // "INPAINTING", "OUTPAINTING", or "BACKGROUND_REMOVAL"
+	InPaintingParams        *BedrockInPaintingParams        `json:"inPaintingParams,omitempty"`
+	OutPaintingParams       *BedrockOutPaintingParams       `json:"outPaintingParams,omitempty"`
+	BackgroundRemovalParams *BedrockBackgroundRemovalParams `json:"backgroundRemovalParams,omitempty"`
+	ImageGenerationConfig   *ImageGenerationConfig          `json:"imageGenerationConfig,omitempty"` // Used by INPAINTING and OUTPAINTING
+	ExtraParams             map[string]interface{}          `json:"-"`
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (req *BedrockImageEditRequest) GetExtraParams() map[string]interface{} {
+	return req.ExtraParams
+}
+
+type BedrockInPaintingParams struct {
+	Image        string  `json:"image"`                  // Base64-encoded image
+	Text         string  `json:"text"`                   // Prompt for inpainting
+	NegativeText *string `json:"negativeText,omitempty"` // Negative prompt
+	MaskPrompt   *string `json:"maskPrompt,omitempty"`   // Mask prompt
+	MaskImage    *string `json:"maskImage,omitempty"`    // Base64-encoded mask image
+	ReturnMask   *bool   `json:"returnMask,omitempty"`   // Return mask (default: false)
+}
+
+type BedrockOutPaintingParams struct {
+	Text            string  `json:"text"`                      // Prompt for outpainting
+	NegativeText    *string `json:"negativeText,omitempty"`    // Negative prompt
+	Image           string  `json:"image"`                     // Base64-encoded image
+	MaskPrompt      *string `json:"maskPrompt,omitempty"`      // Mask prompt
+	MaskImage       *string `json:"maskImage,omitempty"`       // Base64-encoded mask image
+	ReturnMask      *bool   `json:"returnMask,omitempty"`      // Return mask (default: false)
+	OutPaintingMode *string `json:"outPaintingMode,omitempty"` // "DEFAULT" or "PRECISE"
+}
+
+type BedrockBackgroundRemovalParams struct {
+	Image string `json:"image"` // Base64-encoded image
+}
+
+// StabilityAIImageGenerationRequest represents the request format for Stability AI models on Bedrock
+// (e.g. stability.stable-image-core-v1:1, stability.stable-image-ultra-v1:1)
+type StabilityAIImageGenerationRequest struct {
+	Prompt         string                 `json:"prompt"`
+	AspectRatio    *string                `json:"aspect_ratio,omitempty"`
+	OutputFormat   *string                `json:"output_format,omitempty"`
+	Seed           *int                   `json:"seed,omitempty"`
+	NegativePrompt *string                `json:"negative_prompt,omitempty"`
+	ExtraParams    map[string]interface{} `json:"-"`
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface
+func (req *StabilityAIImageGenerationRequest) GetExtraParams() map[string]interface{} {
+	return req.ExtraParams
+}
+
+// StabilityAIImageEditRequest is the flat JSON body for Stability AI image-edit models on Bedrock.
+// Only the fields valid for the detected task type are populated.
+type StabilityAIImageEditRequest struct {
+	// Shared params
+	Image          *string `json:"image,omitempty"` // base64, primary input image
+	Prompt         *string `json:"prompt,omitempty"`
+	NegativePrompt *string `json:"negative_prompt,omitempty"`
+	Seed           *int    `json:"seed,omitempty"`
+	OutputFormat   *string `json:"output_format,omitempty"`
+	StylePreset    *string `json:"style_preset,omitempty"`
+	Mask           *string `json:"mask,omitempty"` // base64 mask image
+	GrowMask       *int    `json:"grow_mask,omitempty"`
+
+	// Outpaint
+	Left  *int `json:"left,omitempty"`
+	Right *int `json:"right,omitempty"`
+	Up    *int `json:"up,omitempty"`
+	Down  *int `json:"down,omitempty"`
+
+	// Upscale-creative / upscale-conservative / outpaint
+	Creativity *float64 `json:"creativity,omitempty"`
+
+	// Recolor
+	SelectPrompt *string `json:"select_prompt,omitempty"`
+
+	// Search-replace
+	SearchPrompt *string `json:"search_prompt,omitempty"`
+
+	// Control-sketch / control-structure
+	ControlStrength *float64 `json:"control_strength,omitempty"`
+
+	// Style-guide
+	AspectRatio *string  `json:"aspect_ratio,omitempty"`
+	Fidelity    *float64 `json:"fidelity,omitempty"`
+
+	// Style-transfer (uses different image field names)
+	InitImage           *string  `json:"init_image,omitempty"`
+	StyleImage          *string  `json:"style_image,omitempty"`
+	StyleStrength       *float64 `json:"style_strength,omitempty"`
+	CompositionFidelity *float64 `json:"composition_fidelity,omitempty"`
+	ChangeStrength      *float64 `json:"change_strength,omitempty"`
+
+	ExtraParams map[string]interface{} `json:"-"`
+}
+
+func (req *StabilityAIImageEditRequest) GetExtraParams() map[string]interface{} {
+	return req.ExtraParams
+}
+
+// BedrockImageGenerationResponse represents a Bedrock image generation response.
+// The Seeds and FinishReasons fields are populated by Stability AI edit models only.
+type BedrockImageGenerationResponse struct {
+	Images        []string  `json:"images"`                   // list of Base64 encoded images
+	MaskImage     string    `json:"maskImage,omitempty"`      // Base64 encoded mask image (optional)
+	Error         string    `json:"error,omitempty"`          // error message (if present)
+	Seeds         []int     `json:"seeds,omitempty"`          // Stability AI: seeds used per image
+	FinishReasons []*string `json:"finish_reasons,omitempty"` // Stability AI: finish reason per image (may be null)
+}
+
+// ==================== MODELS TYPES ====================
+type BedrockModelLifecycle struct {
+	Status string `json:"status"`
+}
+
+type BedrockModel struct {
+	CustomizationsSupported    []string              `json:"customizationsSupported,omitempty"`
+	InferenceTypesSupported    []string              `json:"inferenceTypesSupported,omitempty"`
+	InputModalities            []string              `json:"inputModalities,omitempty"`
+	ModelArn                   string                `json:"modelArn"`
+	ModelID                    string                `json:"modelId"`
+	ModelLifecycle             BedrockModelLifecycle `json:"modelLifecycle,omitempty"`
+	ModelName                  string                `json:"modelName"`
+	OutputModalities           []string              `json:"outputModalities,omitempty"`
+	ProviderName               string                `json:"providerName"`
+	ResponseStreamingSupported bool                  `json:"responseStreamingSupported"`
+}
+
+// BedrockListModelsResponse represents the response from AWS Bedrock's ListFoundationModels API
+type BedrockListModelsResponse struct {
+	ModelSummaries []BedrockModel `json:"modelSummaries"`
+}
+
+// ==================== FILE TYPES (S3 WRAPPER) ====================
+
+// BedrockFileUploadRequest wraps S3 PutObject for Bedrock file operations
+type BedrockFileUploadRequest struct {
+	Bucket   string `json:"bucket"`             // S3 bucket name
+	Key      string `json:"key,omitempty"`      // S3 object key (optional, auto-generated if empty)
+	Body     []byte `json:"-"`                  // File content (not serialized to JSON)
+	Filename string `json:"filename,omitempty"` // Original filename
+	Purpose  string `json:"purpose,omitempty"`  // Purpose of the file (e.g., "batch")
+}
+
+// BedrockFileUploadResponse wraps S3 PutObject response
+type BedrockFileUploadResponse struct {
+	S3Uri       string `json:"s3Uri"`                 // Full S3 URI (s3://bucket/key)
+	ETag        string `json:"etag,omitempty"`        // S3 ETag
+	Bucket      string `json:"bucket"`                // S3 bucket name
+	Key         string `json:"key"`                   // S3 object key
+	SizeBytes   int64  `json:"sizeBytes"`             // File size in bytes
+	ContentType string `json:"contentType,omitempty"` // MIME content type
+	CreatedAt   int64  `json:"createdAt,omitempty"`   // Unix timestamp of creation
+}
+
+// BedrockFileListRequest wraps S3 ListObjectsV2 request
+type BedrockFileListRequest struct {
+	Bucket            string `json:"bucket"`                      // S3 bucket name
+	Prefix            string `json:"prefix,omitempty"`            // S3 key prefix filter
+	MaxKeys           int    `json:"maxKeys,omitempty"`           // Maximum number of keys to return
+	ContinuationToken string `json:"continuationToken,omitempty"` // Pagination token
+}
+
+// BedrockFileListResponse wraps S3 ListObjectsV2 response
+type BedrockFileListResponse struct {
+	Files                 []BedrockFileInfo `json:"files"`                           // List of file info
+	IsTruncated           bool              `json:"isTruncated"`                     // Whether there are more results
+	NextContinuationToken string            `json:"nextContinuationToken,omitempty"` // Token for next page
+}
+
+// BedrockFileInfo represents S3 object metadata
+type BedrockFileInfo struct {
+	S3Uri        string `json:"s3Uri"`                  // Full S3 URI
+	Key          string `json:"key"`                    // S3 object key
+	SizeBytes    int64  `json:"sizeBytes"`              // File size in bytes
+	LastModified int64  `json:"lastModified,omitempty"` // Unix timestamp of last modification
+	ETag         string `json:"etag,omitempty"`         // S3 ETag
+}
+
+// BedrockFileRetrieveRequest wraps S3 HeadObject request
+type BedrockFileRetrieveRequest struct {
+	Bucket string `json:"bucket"`
+	Prefix string `json:"prefix"`
+	S3Uri  string `json:"s3Uri"` // Full S3 URI (s3://bucket/key)
+	ETag   string `json:"etag"`  // S3 ETag
+}
+
+// BedrockFileRetrieveResponse wraps S3 HeadObject response
+type BedrockFileRetrieveResponse struct {
+	S3Uri        string `json:"s3Uri"`                  // Full S3 URI
+	Key          string `json:"key"`                    // S3 object key
+	SizeBytes    int64  `json:"sizeBytes"`              // File size in bytes
+	LastModified int64  `json:"lastModified,omitempty"` // Unix timestamp of last modification
+	ContentType  string `json:"contentType,omitempty"`  // MIME content type
+	ETag         string `json:"etag,omitempty"`         // S3 ETag
+}
+
+// BedrockFileDeleteRequest wraps S3 DeleteObject request
+type BedrockFileDeleteRequest struct {
+	Bucket string `json:"bucket"`
+	Prefix string `json:"prefix"`
+	S3Uri  string `json:"s3Uri"` // Full S3 URI (s3://bucket/key)
+	ETag   string `json:"etag"`  // S3 ETag
+}
+
+// BedrockFileDeleteResponse wraps S3 DeleteObject response
+type BedrockFileDeleteResponse struct {
+	S3Uri   string `json:"s3Uri"`   // Full S3 URI that was deleted
+	Deleted bool   `json:"deleted"` // Whether deletion was successful
+}
+
+// BedrockFileContentRequest wraps S3 GetObject request
+type BedrockFileContentRequest struct {
+	Bucket string `json:"bucket"`
+	Prefix string `json:"prefix,omitempty"`
+	S3Uri  string `json:"s3Uri"` // Full S3 URI (s3://bucket/key)
+	ETag   string `json:"etag"`  // S3 ETag
+}
+
+// BedrockFileContentResponse wraps S3 GetObject response
+type BedrockFileContentResponse struct {
+	S3Uri       string `json:"s3Uri"`                 // Full S3 URI
+	Content     []byte `json:"-"`                     // File content (not serialized to JSON)
+	ContentType string `json:"contentType,omitempty"` // MIME content type
+	SizeBytes   int64  `json:"sizeBytes"`             // File size in bytes
+}
+
+// ==================== INVOKE REQUEST TYPES ====================
+
+// BedrockInvokeRequest is a union struct covering ALL model families' InvokeModel request formats.
+// It uses detection methods (IsMessagesRequest, IsCohereCommandRRequest) to determine correct routing:
+// messages-based requests (Anthropic Messages, Nova, AI21) go through the Responses path,
+// while prompt-based requests (Anthropic legacy, Mistral, Llama, Cohere) go through Text Completions.
+type BedrockInvokeRequest struct {
+	ModelID string `json:"-"` // From URL path
+
+	// ==================== COMMON FIELDS ====================
+
+	// Messages array (Anthropic Messages, Nova, AI21 Jamba)
+	// Custom UnmarshalJSON normalizes AI21's string content to []BedrockContentBlock
+	Messages []BedrockMessage `json:"messages,omitempty"`
+	System   interface{}      `json:"system,omitempty"` // string | []BedrockSystemMessage | []map[string]interface{}
+
+	// Text prompt (Anthropic legacy, Mistral, Llama, Cohere Command)
+	Prompt string `json:"prompt,omitempty"`
+
+	// Sampling parameters (most families)
+	Temperature *float64 `json:"temperature,omitempty"`
+	TopP        *float64 `json:"top_p,omitempty"`
+	TopK        *int     `json:"top_k,omitempty"`
+
+	// Token limits (different names per family)
+	MaxTokens         *int `json:"max_tokens,omitempty"`           // Anthropic Messages, Mistral, Cohere, AI21
+	MaxTokensToSample *int `json:"max_tokens_to_sample,omitempty"` // Anthropic legacy
+	MaxGenLen         *int `json:"max_gen_len,omitempty"`          // Meta Llama
+
+	// Stop sequences (different names per family)
+	Stop          []string `json:"stop,omitempty"`           // Mistral, AI21
+	StopSequences []string `json:"stop_sequences,omitempty"` // Anthropic, Cohere
+
+	// ==================== ANTHROPIC MESSAGES API ====================
+
+	AnthropicVersion  string      `json:"anthropic_version,omitempty"`
+	AnthropicBeta     interface{} `json:"anthropic_beta,omitempty"` // string or []string
+	Tools             interface{} `json:"tools,omitempty"`
+	ToolChoice        interface{} `json:"tool_choice,omitempty"`
+	Thinking          interface{} `json:"thinking,omitempty"`
+	OutputConfig      interface{} `json:"output_config,omitempty"`
+	AnthropicMetadata interface{} `json:"metadata,omitempty"`
+
+	// ==================== AMAZON NOVA ====================
+
+	SchemaVersion                string                  `json:"schemaVersion,omitempty"`
+	InferenceConfig              *BedrockInferenceConfig `json:"inferenceConfig,omitempty"`
+	ToolConfig                   *BedrockToolConfig      `json:"toolConfig,omitempty"`
+	AdditionalModelRequestFields interface{}             `json:"additionalModelRequestFields,omitempty"`
+
+	// ==================== META LLAMA ====================
+
+	Images []string `json:"images,omitempty"` // Base64-encoded images (Llama 3.2+)
+
+	// ==================== COHERE ====================
+
+	CohereP           *float64           `json:"p,omitempty"`
+	CohereK           *int               `json:"k,omitempty"`
+	ReturnLikelihoods *string            `json:"return_likelihoods,omitempty"`
+	NumGenerations    *int               `json:"num_generations,omitempty"`
+	LogitBias         map[string]float64 `json:"logit_bias,omitempty"`
+	Truncate          *string            `json:"truncate,omitempty"`
+
+	// Cohere Command R/R+ specific
+	Message     string                  `json:"message,omitempty"`
+	ChatHistory []BedrockCohereRMessage `json:"chat_history,omitempty"`
+
+	// ==================== AI21 JAMBA ====================
+
+	N                *int     `json:"n,omitempty"`
+	FrequencyPenalty *float64 `json:"frequency_penalty,omitempty"`
+	PresencePenalty  *float64 `json:"presence_penalty,omitempty"`
+
+	// ==================== BEDROCK IMAGE GEN / EDIT / VARIATION (Titan/Nova Canvas) ====================
+
+	TaskType                *string                         `json:"taskType,omitempty"`
+	TextToImageParams       *BedrockTextToImageParams       `json:"textToImageParams,omitempty"`
+	ImageVariationParams    *BedrockImageVariationParams    `json:"imageVariationParams,omitempty"`
+	InPaintingParams        *BedrockInPaintingParams        `json:"inPaintingParams,omitempty"`
+	OutPaintingParams       *BedrockOutPaintingParams       `json:"outPaintingParams,omitempty"`
+	BackgroundRemovalParams *BedrockBackgroundRemovalParams `json:"backgroundRemovalParams,omitempty"`
+	ImageGenerationConfig   *ImageGenerationConfig          `json:"imageGenerationConfig,omitempty"`
+
+	// ==================== STABILITY AI IMAGE ====================
+
+	// Image is the base64-encoded input image (SA edit / variation)
+	Image          *string `json:"image,omitempty"`
+	Mask           *string `json:"mask,omitempty"`            // base64 mask for inpainting
+	NegativePrompt *string `json:"negative_prompt,omitempty"` // SA gen / edit
+	AspectRatio    *string `json:"aspect_ratio,omitempty"`    // SA gen
+	OutputFormat   *string `json:"output_format,omitempty"`   // SA gen
+	Seed           *int    `json:"seed,omitempty"`            // SA gen / edit
+
+	// ==================== EMBEDDINGS ====================
+
+	InputText       string                        `json:"inputText,omitempty"`        // Titan embed
+	Texts           []string                      `json:"texts,omitempty"`            // Cohere embed
+	InputType       *string                       `json:"input_type,omitempty"`       // Cohere embed
+	Normalize       *bool                         `json:"normalize,omitempty"`        // Titan embed v2
+	Dimensions      *int                          `json:"dimensions,omitempty"`       // Titan embed v2
+	EmbeddingTypes  []string                      `json:"embedding_types,omitempty"`  // Cohere embed: ["float","int8","uint8","binary","ubinary"]
+	OutputDimension *int                          `json:"output_dimension,omitempty"` // Cohere embed: 256, 512, 1024, 1536
+	Inputs          []BedrockCohereEmbeddingInput `json:"inputs,omitempty"`           // Cohere embed: mixed text+image inputs
+
+	// ==================== INTERNAL ====================
+	Stream      bool                   `json:"-"`
+	ExtraParams map[string]interface{} `json:"-"`
+}
+
+// BedrockCohereRMessage represents a Cohere Command R/R+ chat history message
+type BedrockCohereRMessage struct {
+	Role    string `json:"role"`    // "USER" or "CHATBOT"
+	Message string `json:"message"` // Message content
+}
+
+// BedrockInvokeEmbeddingResp is the Titan single-embedding invoke response format.
+type BedrockInvokeEmbeddingResp struct {
+	Embedding           []float32 `json:"embedding"`
+	InputTextTokenCount int       `json:"inputTextTokenCount"`
+}
+
+// BedrockInvokeCohereEmbeddingResp is the Cohere multi-embedding invoke response format.
+type BedrockInvokeCohereEmbeddingResp struct {
+	Embeddings   [][]float32 `json:"embeddings"`
+	ResponseType string      `json:"response_type"`
+}

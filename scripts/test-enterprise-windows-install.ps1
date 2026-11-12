@@ -515,10 +515,9 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not protect $stage" }
     & icacls.exe $stage /setowner '*S-1-5-32-544' | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $stage" }
-    # A standalone Windows host without a policy_dir keeps the embedded rule
-    # packs only while the config names none: rule_pack: default would select
-    # the default pack of a policy_dir this host does not have, and the Setup
-    # refuses it ("policy_dir is not set").
+    # The config names no rule_pack, so the embedded default pack applies;
+    # strict and permissive need a policy_dir that holds their pack folder
+    # (GAP-1041).
     $adminConfigVersion = if ($UpgradeFrom) { Get-AdminConfigVersion $PreviousVersion } else { 9 }
     $configText = @(
         "config_version: $adminConfigVersion"
@@ -602,22 +601,92 @@ try {
     $run = Invoke-Lifecycle -Name '02-setup-ensure-noop' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
     Assert-Result $run 'setup-ensure-noop' (@('--action', 'ensure', '--noop', '--installed', '--version', $Version, '--ready') + $installedChecks)
 
-    Step 'Setup /ensure repairs a drifted runtime ACL with CONFIG='
+    # Runtime-folder drift. Setup and the guardian put back a trusted-only drift
+    # (an extra entry that grants no write) in place. A folder another account
+    # can write is never given a trusted access list back in place on
+    # standalone (g582, GAP-0651; live in Setup since GAP-1048): ensure refuses
+    # before it changes anything and names the account and the icacls fix,
+    # and the same ensure converges once that fix is applied.
     $runtimeDirectory = Join-Path $stateRoot 'runtime'
-    & icacls.exe $runtimeDirectory /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
-    $run = Invoke-Lifecycle -Name '02-ensure-runtime-acl-repair' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
-    Assert-Result $run 'ensure-runtime-acl-repair' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') +
-        $installedChecks + @('--allow-warning', 'ensure_repair'))
-    Assert-ServicesRunning
+    $usersSid = 'S-1-5-32-545'
     $writeMask = [int][Security.AccessControl.FileSystemRights]::Write
-    foreach ($ace in (Get-Acl -LiteralPath $runtimeDirectory).Access) {
-        $sid = $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-        if ($sid -eq 'S-1-5-32-545' -and $ace.AccessControlType -eq 'Allow' -and
-            (([int]$ace.FileSystemRights -band $writeMask) -ne 0)) {
-            Fail "Setup left a Users write ACE on $runtimeDirectory"
+    function Get-RuntimeUsersAces([switch]$WriteOnly) {
+        foreach ($ace in (Get-Acl -LiteralPath $runtimeDirectory).Access) {
+            $sid = $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+            if ($sid -eq $usersSid -and $ace.AccessControlType -eq 'Allow' -and
+                (-not $WriteOnly -or (([int]$ace.FileSystemRights -band $writeMask) -ne 0))) {
+                $ace
+            }
         }
     }
+
+    # Bounded evidence for the Setup/guardian race on this drift (GAP-0573):
+    # the folder's access list, when the last lifecycle result was written and
+    # the guardian's repair lines after it.
+    function Write-RuntimeRepairEvidence([string]$When) {
+        try {
+            Write-Host "  runtime folder evidence ($When, $([DateTime]::UtcNow.ToString('o'))):"
+            & icacls.exe $runtimeDirectory 2>&1 | Select-Object -First 16 | ForEach-Object { Write-Host "    $_" }
+            $lastResult = Join-Path $env:SystemRoot 'Logs\DefenseClaw\last-result.json'
+            if (Test-Path -LiteralPath $lastResult) {
+                Write-Host "    last-result written $((Get-Item -LiteralPath $lastResult).LastWriteTimeUtc.ToString('o'))"
+            }
+            $environment = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\DefenseClawHookGuardian' -Name Environment -ErrorAction SilentlyContinue).Environment
+            foreach ($entry in @($environment)) { if ($entry -like 'DEFENSECLAW_WINDOWS_SERVICE_LOG=*') { Write-Host "    guardian $entry" } }
+            $guardianLog = Join-Path $stateRoot 'logs\guardian\hook-guardian.log'
+            if (Test-Path -LiteralPath $guardianLog) {
+                Write-Host "    $guardianLog $((Get-Item -LiteralPath $guardianLog).Length) bytes, last repair or runtime lines:"
+                Get-Content -LiteralPath $guardianLog -Tail 600 | Where-Object { $_ -match 'defenseclaw_repair|\\runtime' } |
+                    Select-Object -Last 12 | ForEach-Object { Write-Host "      $($_.Substring(0, [Math]::Min(400, $_.Length)))" }
+            }
+            else { Write-Host "    $guardianLog is missing" }
+        }
+        catch { Write-Host "    evidence unavailable: $($_.Exception.Message)" }
+    }
+
+    Step 'Setup /ensure repairs a trusted-only drift of the runtime ACL with CONFIG='
+    & icacls.exe $runtimeDirectory /grant "*${usersSid}:(OI)(CI)RX" | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
+    Write-RuntimeRepairEvidence 'after the drift'
+    $run = Invoke-Lifecycle -Name '02-ensure-runtime-acl-repair' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+    Write-RuntimeRepairEvidence 'after ensure'
+    # The running hook guardian races Setup for this drift. Setup either puts
+    # the ACL back itself (ensure_repair or a change) or finds that the
+    # guardian already did and names that repair (guardian_repaired_drift,
+    # GAP-0573). Both are correct; either way ensure must not report a no-op.
+    Assert-Result $run 'ensure-runtime-acl-repair' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
+        $installedChecks + @('--allow-warning', 'ensure_repair', '--allow-warning', 'guardian_repaired_drift'))
+    $repairResult = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
+    foreach ($warning in @($repairResult.warnings)) {
+        if ($warning.code -eq 'guardian_repaired_drift' -and $warning.message.IndexOf($runtimeDirectory, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            Fail "ensure named a guardian repair that is not the drifted $runtimeDirectory`: $($warning.message)"
+        }
+    }
+    Assert-ServicesRunning
+    if (@(Get-RuntimeUsersAces).Count -ne 0) { Fail "Setup left a Users entry on $runtimeDirectory" }
+
+    Step 'Setup /ensure refuses a runtime folder another account can write, then converges after the named fix'
+    & icacls.exe $runtimeDirectory /grant "*${usersSid}:(OI)(CI)M" | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "icacls could not drift $runtimeDirectory" }
+    $run = Invoke-Lifecycle -Name '02-ensure-runtime-untrusted-refused' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+    $refusal = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
+    $refusalText = (@($refusal.errors | ForEach-Object { [string]$_.message }) -join ' ')
+    if ($run.ExitCode -eq 0 -or [bool]$refusal.ok -or [bool]$refusal.transaction_pending -or
+        $refusalText.IndexOf($runtimeDirectory, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+        -not $refusalText.Contains($usersSid) -or -not $refusalText.Contains('/remove:g')) {
+        Fail "ensure did not refuse the Users-writable $runtimeDirectory naming the account and the fix (exit $($run.ExitCode)): $refusalText"
+    }
+    if (@(Get-RuntimeUsersAces -WriteOnly).Count -eq 0) {
+        Fail "ensure gave $runtimeDirectory a trusted access list back in place instead of refusing it"
+    }
+    Assert-ServicesRunning
+    & icacls.exe $runtimeDirectory /remove:g "*$usersSid" | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "icacls could not remove the Users entry from $runtimeDirectory" }
+    $run = Invoke-Lifecycle -Name '02-ensure-runtime-after-fix' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+    Assert-Result $run 'ensure-runtime-after-fix' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') +
+        $installedChecks + @('--allow-warning', 'ensure_repair', '--allow-warning', 'guardian_repaired_drift'))
+    Assert-ServicesRunning
+    if (@(Get-RuntimeUsersAces).Count -ne 0) { Fail "a Users entry remains on $runtimeDirectory after the fix" }
 
     Step 'Setup /ensure refuses foreign-OS config before replacing the running deployment'
     $foreignConfig = Join-Path $stage 'foreign-os-config.yaml'

@@ -67,7 +67,10 @@ func recordWindowsAnchorsProfileRefusal(cmd *cobra.Command, opts *windowsEnterpr
 // access. Its lock lives in the Administrators-only lifecycle directory.
 // An event the gateway marked reported under <DataDir> may be removed. A
 // test replaces it.
-var windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
+var windowsChangeSpool = protectedWindowsChangeSpool
+
+// protectedWindowsChangeSpool is the production windowsChangeSpool.
+func protectedWindowsChangeSpool(layout managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
 	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
 	if err != nil {
 		return enterprisestatus.ChangeSpool{}, err
@@ -90,7 +93,8 @@ var windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus
 					return createWindowsBundleDirectory(path, windowsBundleVersionSDDL(service.String(), true))
 				})
 			if err != nil {
-				return fmt.Errorf("prepare protected change spool: %w; run `enterprise windows repair --profile standalone --json` from an elevated administrator or SYSTEM session, then retry the credential command", err)
+				return fmt.Errorf("prepare protected change spool: %w; run %s from an elevated PowerShell prompt (or as SYSTEM), then retry the credential command",
+					err, windowsEnterpriseAdminCommand("repair", "--json"))
 			}
 			return nil
 		},

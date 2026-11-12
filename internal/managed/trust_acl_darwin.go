@@ -9,6 +9,7 @@ package managed
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os/exec"
 	"syscall"
 	"time"
@@ -125,3 +126,15 @@ func judgeDarwinPathACLStrict(path string) error {
 	}
 	return JudgeDarwinACLOutputStrict(path, output)
 }
+
+// validateAccountPathACL is ValidatePathACLForAccount on macOS.
+func validateAccountPathACL(path string, _ int, account string) error {
+	output, err := readDarwinACL(path)
+	if err != nil {
+		return err
+	}
+	return JudgeDarwinACLOutputForAccount(path, output, account)
+}
+
+// modeWithoutACLMask: a macOS ACL never changes the mode bits, so they stand.
+func modeWithoutACLMask(_ string, mode fs.FileMode) fs.FileMode { return mode }

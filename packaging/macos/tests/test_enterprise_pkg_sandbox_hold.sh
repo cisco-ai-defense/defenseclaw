@@ -31,6 +31,26 @@ _hold_gone() {
   return 1
 }
 
+# A stop or a continue signal is applied when the process next runs, so on a
+# busy host its state is not read the moment the signal was sent. These wait up
+# to about 5 s, as _hold_gone does, for the state the case expects.
+_hold_stopped() {
+  local _
+  for _ in $(seq 50); do
+    [[ "$(_hold_state "$1")" == T ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+_hold_running() {
+  local _
+  for _ in $(seq 50); do
+    [[ -e "/proc/$1" && "$(_hold_state "$1")" != T ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 # A stand-in ps: the -axo listing shows pid under the daemon's command line
 # with the start time list_start, and -o lstart= prints now_start (with the
 # leading pad macOS ps adds) while the process lives.
@@ -61,7 +81,7 @@ t_pkg_holds_pre_104_sandbox_daemons() {
   chmod +x "${d}/bin/sleep"
   printf '{"product_version": "1.0.3"}\n' >"${d}/state/deployment.json"
   PATH="${d}/bin:${PATH}" sh "${d}/preinstall" >/dev/null 2>&1
-  assert_status "$(_hold_state "${pid}" | tr -d '\n' | grep -c T)" 1 "the 1.0.3 LaunchAgent daemon was not held"
+  _hold_stopped "${pid}" || _fail "the 1.0.3 LaunchAgent daemon was not held"
   grep -q "^${pid}|" "${d}/state/sandbox-daemons.held" || _fail "the held daemon was not recorded"
   # The postinstall's kill, before its programs get new files (its own
   # later steps fail here: no payload).
@@ -94,7 +114,7 @@ t_pkg_hold_single_digit_day_and_resume() {
   local pid=$!
   _hold_ps "${d}" "${pid}" "Fri Nov  6 01:50:08 2026" "Fri Nov  6 01:50:08 2026"
   PATH="${d}/bin:${PATH}" sh "${d}/preinstall" >/dev/null 2>&1
-  assert_status "$(_hold_state "${pid}" | tr -d '\n' | grep -c T)" 1 "the day-6 daemon was not held"
+  _hold_stopped "${pid}" || _fail "the day-6 daemon was not held"
   PATH="${d}/bin:${PATH}" sh "${d}/postinstall" >/dev/null 2>&1
   _hold_gone "${pid}" || _fail "the held day-6 daemon survived the postinstall"
   # The pid now names another start: resume it, never kill it.
@@ -102,10 +122,10 @@ t_pkg_hold_single_digit_day_and_resume() {
   pid=$!
   _hold_ps "${d}" "${pid}" "Fri Nov  6 01:50:08 2026" "Sat Nov  7 09:00:00 2026"
   PATH="${d}/bin:${PATH}" sh "${d}/preinstall" >/dev/null 2>&1
-  assert_status "$(_hold_state "${pid}" | tr -d '\n' | grep -c T)" 1 "the daemon was not held"
+  _hold_stopped "${pid}" || _fail "the daemon was not held"
   PATH="${d}/bin:${PATH}" sh "${d}/postinstall" >/dev/null 2>&1
   [[ -e "/proc/${pid}" ]] || _fail "a process that was no longer the held daemon was killed"
-  assert_status "$(_hold_state "${pid}" | tr -d '\n' | grep -c T)" 0 "a held process the postinstall did not kill stays stopped"
+  _hold_running "${pid}" || _fail "a held process the postinstall did not kill stays stopped"
   [[ ! -e "${d}/state/sandbox-daemons.held" ]] || _fail "the held list was left behind"
   kill -KILL "${pid}" 2>/dev/null
 }

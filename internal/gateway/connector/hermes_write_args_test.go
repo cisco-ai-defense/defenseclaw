@@ -151,38 +151,3 @@ func TestHermesWriteViewRetarget(t *testing.T) {
 		t.Fatal("the unverified view has no target")
 	}
 }
-
-// TestHermesV4ATargets pins the reading of a V4A patch as Hermes'
-// parse_v4a_patch reads it.
-func TestHermesV4ATargets(t *testing.T) {
-	w := func(path string) HermesPatchTarget { return HermesPatchTarget{Path: path, Write: true} }
-	d := func(path string) HermesPatchTarget { return HermesPatchTarget{Path: path} }
-	for _, test := range []struct {
-		name, body string
-		want       []HermesPatchTarget
-	}{
-		{name: "update add delete", body: "*** Begin Patch\n*** Update File: a\n@@ f @@\n x\n+y\n*** Add File: /abs/b\n+z\n*** Delete File: ~/c\n*** End Patch\n",
-			want: []HermesPatchTarget{w("a"), w("/abs/b"), d("~/c")}},
-		{name: "move", body: "*** Move File: a.md  ->  ~/.ssh/authorized_keys\n", want: []HermesPatchTarget{d("a.md"), w("~/.ssh/authorized_keys")}},
-		{name: "loose whitespace", body: "***Update \t File: ~/.ssh/authorized_keys \nctx line\n", want: []HermesPatchTarget{w("~/.ssh/authorized_keys")}},
-		{name: "crlf", body: "*** Begin Patch\r\n*** Update File: a\r\n+y\r\n*** End Patch\r\n", want: []HermesPatchTarget{w("a")}},
-		// Parsing starts after the last Begin line before the first End line.
-		{name: "last begin", body: "*** Begin Patch\n*** Update File: a\n+y\n***  Begin  Patch\n*** Update File: b\n+y\n*** End Patch\n*** Update File: c\n+y\n",
-			want: []HermesPatchTarget{w("b")}},
-		{name: "content lines are not headers", body: "*** Update File: a\n+*** Update File: b\n *** Delete File: c\n", want: []HermesPatchTarget{w("a")}},
-		{name: "update without hunk", body: "*** Update File: a\n@@ f @@\n*** Add File: b\n"},
-		{name: "update only a no-newline marker", body: "*** Update File: a\n\\ No newline at end of file\n"},
-		{name: "empty path", body: "*** Delete File:   \n"},
-		{name: "move without destination", body: "*** Move File: a -> \n"},
-		{name: "traversal", body: "*** Delete File: x/../../.ssh/authorized_keys\n"},
-		{name: "no operations", body: "*** Begin Patch\n*** End Patch\n"},
-		{name: "prose", body: "please update a\n"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			got, parsed := HermesV4ATargets(test.body)
-			if parsed != (test.want != nil) || !reflect.DeepEqual(got, test.want) {
-				t.Fatalf("got %+v parsed=%t, want %+v", got, parsed, test.want)
-			}
-		})
-	}
-}

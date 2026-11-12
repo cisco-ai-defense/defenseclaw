@@ -308,6 +308,39 @@ func TestManagedConfigRestartRequiredClassifiesBundleChanges(t *testing.T) {
 	}
 }
 
+// GAP-0044 review: the loader folds key case, so a start-only key spelled
+// with capitals is classified start-only, by the managed classifier and by
+// RestartRequired over raw change paths alike; a defaulted setting is
+// compared as the loader reads it; keys that differ only in case are a
+// change; a lowercase document classifies exactly as before.
+func TestRestartClassificationFoldsKeyCaseAsTheLoaderDoes(t *testing.T) {
+	before := []byte("config_version: 9\nguardrail:\n  mode: observe\n")
+	defaults := ManagedDefaults{GOOS: "windows", APIPort: 18970}
+	for _, tc := range []struct{ after, want string }{
+		{"config_version: 9\nguardrail:\n  mode: observe\nGateway:\n  api_port: 9999\n", "gateway.api_port"},
+		{"config_version: 9\nGuardrail:\n  mode: observe\n  Port: 4000\n", "guardrail.port"},
+		{"config_version: 9\nguardrail:\n  mode: observe\nEnterprise:\n  Machine_Policy:\n    Default:\n      Managed_Hooks_Only: preserve\n",
+			"enterprise.machine_policy.default.managed_hooks_only"},
+		{"config_version: 9\nGuardrail:\n  Mode: action\n", ""},
+		{"config_version: 9\nguardrail:\n  mode: observe\ngateway:\n  api_port: 18970\n", ""},
+	} {
+		keys, err := ManagedConfigRestartRequired(before, []byte(tc.after), defaults)
+		if err != nil || strings.Join(keys, ",") != tc.want {
+			t.Errorf("%q: restart = %v, %v; want %q", tc.after, keys, err, tc.want)
+		}
+	}
+	withHost := []byte("config_version: 9\nguardrail:\n  mode: observe\n  host: 127.0.0.1\n")
+	if keys, _ := ManagedConfigRestartRequired(withHost, []byte("config_version: 9\nguardrail:\n  mode: observe\n  host: 127.0.0.1\n  Host: 127.0.0.1\n"), defaults); strings.Join(keys, ",") != "guardrail.host" {
+		t.Errorf("keys that differ only in case: restart = %v, want guardrail.host", keys)
+	}
+	if got := RestartRequired([]string{"Gateway.api_port", "guardrail.Port", "Guardrail.Mode"}); strings.Join(got, ",") != "Gateway.api_port,guardrail.Port" {
+		t.Errorf("RestartRequired over raw paths = %v", got)
+	}
+	if got := RestartRequired([]string{"gateway.api_port", "guardrail.mode"}); strings.Join(got, ",") != "gateway.api_port" {
+		t.Errorf("lowercase paths = %v", got)
+	}
+}
+
 func TestManagedConnectorSetRestartClassificationByPlatform(t *testing.T) {
 	before := []byte("guardrail:\n  connectors:\n    claudecode: {}\n    opencode: {}\n")
 	for _, tc := range []struct {

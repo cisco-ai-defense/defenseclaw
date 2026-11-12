@@ -30,15 +30,24 @@ func TestShellHookRestartWindowNoAnswerFollowsTheOutageMode(t *testing.T) {
 		env              []string
 		allow            bool
 		wantText         string
+		wantProof        string
 	}{
-		{"refused then no answer, open tier", "open", []string{"DC_COLD_FAILS=1", "DC_COLD_FIRST_RC=7", "DC_COLD_DROP_LISTENER=1", "DC_COLD_THEN_RC=9"}, true, "restarting or not running"},
-		{"refused then no answer, strict tier", "closed", []string{"DC_COLD_FAILS=1", "DC_COLD_FIRST_RC=7", "DC_COLD_DROP_LISTENER=1", "DC_COLD_THEN_RC=9"}, false, "restarting or not running"},
-		{"no answer with no refusal, open tier", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=9"}, false, "the gateway is running but did not answer"},
+		{"refused then no answer, open tier", "open", []string{"DC_COLD_FAILS=1", "DC_COLD_FIRST_RC=7", "DC_COLD_DROP_LISTENER=1", "DC_COLD_THEN_RC=9", "DC_COLD_PROOF=no_holder"}, true, "restarting or not running", ""},
+		{"refused then no answer, strict tier", "closed", []string{"DC_COLD_FAILS=1", "DC_COLD_FIRST_RC=7", "DC_COLD_DROP_LISTENER=1", "DC_COLD_THEN_RC=9", "DC_COLD_PROOF=no_holder"}, false, "restarting or not running", ""},
+		{"no answer with no refusal, open tier", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=9"}, false, "the gateway is running but did not answer", "proof_unavailable"},
+		{"no answer with a bounded proof result", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=9", "DC_COLD_PROOF=answered_before"}, false, "the gateway is running but did not answer", "answered_before"},
+		{"no answer with an unknown proof result", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=9", "DC_COLD_PROOF=unexpected"}, false, "the gateway is running but did not answer", "proof_unavailable"},
 		// hook-post 10: no answer while a start or restart of this account's
 		// gateway holds its start lock (the old gateway is stopping, or the
 		// new one is not ready): the restart outage, with no refusal first.
-		{"no answer during a restart, open tier", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=10"}, true, "restarting or not running"},
-		{"no answer during a restart, strict tier", "closed", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=10"}, false, "restarting or not running"},
+		{"no answer during a restart, open tier", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=10"}, true, "restarting or not running", ""},
+		{"no answer during a restart, strict tier", "closed", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=10"}, false, "restarting or not running", ""},
+		// hook-post 12: the verified gateway took a call that names nothing
+		// protected and was late (a burst, a long operand list, GAP-0518): the
+		// outage mode decides, and the text names a running gateway that did
+		// not answer, not a restart.
+		{"late ordinary call, open tier", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=12"}, true, "the gateway is running but did not answer", ""},
+		{"late ordinary call, strict tier", "closed", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=12"}, false, "the gateway is running but did not answer", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := append([]string{"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_OUTAGE_MODE=" + tc.outageMode}, tc.env...)
@@ -77,6 +86,9 @@ func TestShellHookRestartWindowNoAnswerFollowsTheOutageMode(t *testing.T) {
 			}
 			if got := records[0]["outcome"]; got != want {
 				t.Fatalf("row %+v, want outcome %s (the answer the call got)", records[0], want)
+			}
+			if got := records[0]["restart_proof"]; got != tc.wantProof {
+				t.Fatalf("row %+v, want restart_proof %q", records[0], tc.wantProof)
 			}
 		})
 	}

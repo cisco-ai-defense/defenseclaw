@@ -6,7 +6,6 @@ package config
 import (
 	"context"
 	"errors"
-	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -46,10 +45,17 @@ func (e *ManagedDataDirTrustError) Error() string {
 
 func (e *ManagedDataDirTrustError) Unwrap() error { return e.Err }
 
+// managedRuntimeGatewayAccount names the gateway service whose Modify entry the
+// managed data_dir check accepts: the SCM pin in a service or pinned console,
+// else the service registered for the install root the running binary sits in,
+// so an unpinned administrator console reading the installer-written tree is
+// not refused. It is a variable so the Windows tests can name the scope.
+var managedRuntimeGatewayAccount = managed.GatewayServiceAccount
+
 func validateManagedEnterpriseRuntime(cfg *Config, checkPolicyInputs, checkDataDir, checkListener bool) error {
 	if checkDataDir {
 		if err := managed.ValidateTrustedServiceRuntimeDir(
-			cfg.DataDir, "managed data_dir", os.Getenv(managed.WindowsServiceAccountEnv),
+			cfg.DataDir, "managed data_dir", managedRuntimeGatewayAccount(),
 		); err != nil {
 			if ReportConfigLoadError != nil {
 				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")

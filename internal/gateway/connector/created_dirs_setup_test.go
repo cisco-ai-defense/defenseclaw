@@ -99,6 +99,33 @@ func TestRemovalLeavingNoNewDirs(t *testing.T) {
 	}
 }
 
+func TestGAP0669RemovalLeavingNoNewDirsKeepsAccountFile(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	conn := &createdDirsConnector{stubConnector: stubConnector{name: "fake"}}
+	opts := SetupOpts{DataDir: dataDir}
+	err := WithUserHomeDir(home, func() error {
+		return RemovalLeavingNoNewDirs(conn, opts, func() error {
+			if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(dataDir, "hooks", "codex-hook.sh"), []byte("managed"), 0o600); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(dataDir, "personal.txt"), []byte("account note"), 0o600)
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, "hooks", "codex-hook.sh")); !os.IsNotExist(err) {
+		t.Fatalf("managed file stayed: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dataDir, "personal.txt")); err != nil || string(got) != "account note" {
+		t.Fatalf("account file changed: %q, %v", got, err)
+	}
+}
+
 // The OpenCode plugin folder is made before any Setup (the gateway's
 // registration snapshot) and is not a hook config path, so it was never
 // listed and stayed after uninstall --all --binaries, empty.
@@ -214,5 +241,31 @@ func TestRecordHookConfigParentDirsListsEveryConnectorsFolders(t *testing.T) {
 	RecordHookConfigParentDirs("copilot", dataDir, []string{dir})
 	if got := readWatcherCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile)).Dirs; !slices.Equal(got, []string{dir}) {
 		t.Fatalf("recorded %v, want %v", got, []string{dir})
+	}
+}
+
+func TestSetupRecordingCreatedDirsPrunesMissingEarlierFolders(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	oldProject := filepath.Join(home, "old-project")
+	current := filepath.Join(home, ".config", "amp")
+	for _, dir := range []string{oldProject, current} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recordPath := filepath.Join(dataDir, watcherCreatedDirsFile)
+	if err := recordCreatedDirs(recordPath, []string{oldProject, current}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(oldProject); err != nil {
+		t.Fatal(err)
+	}
+
+	// A later connector setup may create no folders of its own. It must
+	// still discard a prior project that is gone and retain live folders.
+	recordDirsNowPresent(dataDir, nil)
+	if got := readWatcherCreatedDirs(recordPath).Dirs; !slices.Equal(got, []string{current}) {
+		t.Fatalf("created-folder record = %v, want only %s", got, current)
 	}
 }

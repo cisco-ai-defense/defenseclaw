@@ -72,11 +72,23 @@ func normalizePathFactsForCommandsInShell(
 	for i := range commands {
 		commandByID[commands[i].ID] = &commands[i]
 	}
+	// One index per command: a command of thousands of operands has a path
+	// fact for each, and each fact asked the whole argument list (GAP-0483).
+	indexByID := make(map[int64]*commandPathIndex, len(commands))
 	for i := range facts {
+		command := commandByID[facts[i].CommandID]
+		var index *commandPathIndex
+		if command != nil {
+			if index = indexByID[command.ID]; index == nil {
+				index = newCommandPathIndex(command)
+				indexByID[command.ID] = index
+			}
+		}
 		context := pathContextForCommand(
 			facts[i],
 			cwd,
-			commandByID[facts[i].CommandID],
+			command,
+			index,
 		)
 		context.windowsShellCWD = windowsShellCWD
 		normalized, absolute, resolved := derivePathWithContext(
@@ -102,6 +114,7 @@ func pathContextForCommand(
 	fact PathFact,
 	cwd string,
 	command *CommandFact,
+	index *commandPathIndex,
 ) pathNormalizationContext {
 	effectiveFlavor := fact.Flavor
 	registry := false
@@ -120,16 +133,13 @@ func pathContextForCommand(
 		return context
 	}
 
-	context.expansion.literal = commandProvesLiteralPath(*command, fact)
+	context.expansion.literal = index.provesLiteralPath(fact)
 	switch command.Dialect {
 	case DialectPOSIX:
 		context.syntax = pathSyntaxPOSIX
 		context.trustedSyntax = true
 		context.registry = false
-		context.expansion.expandTilde = posixCommandExpandsTilde(
-			*command,
-			fact,
-		)
+		context.expansion.expandTilde = index.posixExpandsTilde(fact)
 	case DialectCMD:
 		context.syntax = pathSyntaxWindows
 		context.trustedSyntax = true
@@ -162,60 +172,86 @@ func pathContextForCommand(
 	return context
 }
 
-func commandProvesLiteralPath(command CommandFact, fact PathFact) bool {
-	matched := false
-	static := true
-	for _, argument := range command.Arguments {
-		if argument.Value != fact.Value {
-			continue
-		}
-		matched = true
-		static = static && !argument.Expands
-	}
-	for _, redirect := range command.Redirects {
-		if redirect.Target != fact.Value || redirect.Access != fact.Access {
-			continue
-		}
-		matched = true
-		static = static && !redirect.Expands
-	}
-	return matched && static
+// commandPathIndex answers, for the path facts of one command, what the
+// command arguments and redirects that spell the same value say about it.
+// It holds exactly what a scan of every argument and redirect would find,
+// built once per command.
+type commandPathIndex struct {
+	// arguments is keyed by an argument value: static is true when none of
+	// the arguments of that value expands, plain when none expands, is
+	// quoted or is a literal tilde.
+	arguments map[string]argumentProof
+	// redirects is keyed by a redirect target and access: the value is true
+	// when none of those redirects expands.
+	redirects map[redirectProofKey]bool
+	// tildeGlobs are the StaticGlob values of unquoted leading-tilde
+	// arguments the parser retains for expansion.
+	tildeGlobs map[string]struct{}
 }
 
-func posixCommandExpandsTilde(
-	command CommandFact,
-	fact PathFact,
-) bool {
+type argumentProof struct{ static, plain bool }
+
+type redirectProofKey struct {
+	target string
+	access PathAccess
+}
+
+func newCommandPathIndex(command *CommandFact) *commandPathIndex {
+	index := &commandPathIndex{
+		arguments: make(map[string]argumentProof, len(command.Arguments)),
+		redirects: make(map[redirectProofKey]bool, len(command.Redirects)),
+	}
+	for _, argument := range command.Arguments {
+		proof, seen := index.arguments[argument.Value]
+		if !seen {
+			proof = argumentProof{static: true, plain: true}
+		}
+		proof.static = proof.static && !argument.Expands
+		proof.plain = proof.plain && !argument.Expands &&
+			argument.Quote == QuoteNone && !argument.literalTilde
+		index.arguments[argument.Value] = proof
+		if argument.Value == "" && argument.Expands && argument.Quote == QuoteNone &&
+			strings.HasPrefix(argument.StaticGlob, "~/") &&
+			!strings.ContainsAny(argument.StaticGlob, "*?[") {
+			if index.tildeGlobs == nil {
+				index.tildeGlobs = make(map[string]struct{})
+			}
+			index.tildeGlobs[argument.StaticGlob] = struct{}{}
+		}
+	}
+	for _, redirect := range command.Redirects {
+		key := redirectProofKey{target: redirect.Target, access: redirect.Access}
+		static, seen := index.redirects[key]
+		index.redirects[key] = (!seen || static) && !redirect.Expands
+	}
+	return index
+}
+
+func (index *commandPathIndex) provesLiteralPath(fact PathFact) bool {
+	argument, inArguments := index.arguments[fact.Value]
+	redirectStatic, inRedirects := index.redirects[redirectProofKey{target: fact.Value, access: fact.Access}]
+	return (inArguments || inRedirects) &&
+		(!inArguments || argument.static) && (!inRedirects || redirectStatic)
+}
+
+func (index *commandPathIndex) posixExpandsTilde(fact PathFact) bool {
 	matched := false
 	expands := true
-	for _, argument := range command.Arguments {
-		if argument.Value == "" && argument.Expands &&
-			argument.Quote == QuoteNone && argument.StaticGlob == fact.Value &&
-			strings.HasPrefix(fact.Value, "~/") &&
-			!strings.ContainsAny(fact.Value, "*?[") {
-			// The POSIX parser retains an unquoted leading-tilde word in
-			// StaticGlob because expansion prevents generic argv authority.
-			// A trusted active home still makes this exact path resolvable.
-			matched = true
-			continue
-		}
-		if argument.Value != fact.Value {
-			continue
-		}
+	if strings.HasPrefix(fact.Value, "~/") && !strings.ContainsAny(fact.Value, "*?[") {
+		// The POSIX parser retains an unquoted leading-tilde word in
+		// StaticGlob because expansion prevents generic argv authority.
+		// A trusted active home still makes this exact path resolvable.
+		_, matched = index.tildeGlobs[fact.Value]
+	}
+	if argument, ok := index.arguments[fact.Value]; ok {
 		// A quoted or escaped tilde, also one a wrapper (sudo, env,
 		// command, exec) passed on, is the literal name the program gets
 		// (GAP-1455, round m). Structured argv keeps the home spelling.
 		matched = true
-		expands = expands &&
-			!argument.Expands &&
-			argument.Quote == QuoteNone &&
-			!argument.literalTilde
+		expands = argument.plain
 	}
-	for _, redirect := range command.Redirects {
-		if redirect.Target != fact.Value || redirect.Access != fact.Access {
-			continue
-		}
-		// A static raw POSIX redirect beginning with '~' was quoted or
+	if _, ok := index.redirects[redirectProofKey{target: fact.Value, access: fact.Access}]; ok {
+		// A static raw POSIX redirect beginning with a tilde was quoted or
 		// escaped: an actually unquoted tilde is marked as an expansion by
 		// the parser and cannot produce an exact redirect target.
 		matched = true
@@ -351,7 +387,7 @@ func derivePathWithHome(
 		fact,
 		cwd,
 		activeHome,
-		pathContextForCommand(fact, cwd, nil),
+		pathContextForCommand(fact, cwd, nil, nil),
 	)
 }
 
@@ -676,7 +712,7 @@ func windowsNonFilesystemProviderPath(value string) bool {
 
 func canonicalExtendedWindowsPath(value string) (string, bool, bool) {
 	slashed := strings.ReplaceAll(value, `\`, "/")
-	if !strings.HasPrefix(slashed, "//?/") {
+	if !strings.HasPrefix(slashed, "//?/") && !windowsDeviceNamespaceVolumePath(slashed) {
 		return value, false, true
 	}
 
@@ -705,6 +741,20 @@ func canonicalExtendedWindowsPath(value string) (string, bool, bool) {
 		canonical += strings.Join(parts, `\`)
 	}
 	return canonical, true, true
+}
+
+// windowsDeviceNamespaceVolumePath reports //./C:/... and //./UNC/...: the
+// Win32 device namespace opens a volume or a share by the same path as the
+// \\?\ prefix does, so the file is the one the plain drive path names
+// (rel-1-0-6:GAP-0729). Other device names (pipes, COM ports, physical
+// drives) are not paths of files.
+func windowsDeviceNamespaceVolumePath(slashed string) bool {
+	if !strings.HasPrefix(slashed, "//./") {
+		return false
+	}
+	remainder := slashed[len("//./"):]
+	return len(remainder) >= len("UNC/") && strings.EqualFold(remainder[:len("UNC/")], "UNC/") ||
+		len(remainder) >= 3 && isASCIILetter(remainder[0]) && remainder[1] == ':' && remainder[2] == '/'
 }
 
 func safeExtendedWindowsParts(

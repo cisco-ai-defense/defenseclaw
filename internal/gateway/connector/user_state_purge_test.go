@@ -7,14 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
+	"slices"
 	"testing"
 )
 
-// uninstall --purge left every enrolled account's ~/.defenseclaw, then kept
-// its hook scripts as stubs and its foreign-hooks-backup. The purge removes
-// all of it: nothing of ~/.defenseclaw stays.
-func TestPurgeUserStateRemovesEverything(t *testing.T) {
+// Purge removes managed files while retaining user data and saved originals
+// that have not been restored.
+func TestPurgeUserStateRemovesManagedFilesAndKeepsOtherEntries(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the purge runs for the Linux and macOS standalone profile")
 	}
@@ -38,21 +37,26 @@ func TestPurgeUserStateRemovesEverything(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := PurgeUserState(dataDir); err != nil {
+	result, err := PurgeUserStateWithResult(dataDir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(dataDir); !os.IsNotExist(err) {
-		var left []string
-		_ = filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
-			if err == nil && !info.IsDir() {
-				rel, _ := filepath.Rel(dataDir, path)
-				left = append(left, filepath.ToSlash(rel))
-			}
-			return nil
-		})
-		t.Fatalf("the purge left %s: %v (%s)", dataDir, err, strings.Join(left, ","))
+	if !result.Removed || !slices.Contains(result.Kept, ".venv/bin/defenseclaw") ||
+		!slices.Contains(result.Kept, "foreign-hooks-backup/cursor/20260929/hooks.json") ||
+		!slices.Contains(result.Kept, "connector_backups/devin/config.json") {
+		t.Fatalf("purge result = %+v", result)
 	}
-	// A rerun on the removed folder is a no-op.
+	for _, name := range []string{"hooks/devin-hook.sh", "hooks/.hook-devin.token", "hooks/.hookcfg.devin", "hook_contract_lock.json", "logs/hooks.log"} {
+		if _, err := os.Lstat(filepath.Join(dataDir, filepath.FromSlash(name))); !os.IsNotExist(err) {
+			t.Errorf("managed entry %s stayed: %v", name, err)
+		}
+	}
+	for _, name := range []string{".venv/bin/defenseclaw", "foreign-hooks-backup/cursor/20260929/hooks.json", "connector_backups/devin/config.json"} {
+		if got, err := os.ReadFile(filepath.Join(dataDir, filepath.FromSlash(name))); err != nil || string(got) != files[name] {
+			t.Errorf("account entry %s changed: %q, %v", name, got, err)
+		}
+	}
+	// A rerun keeps the same account entries.
 	if err := PurgeUserState(dataDir); err != nil {
 		t.Fatalf("rerun: %v", err)
 	}

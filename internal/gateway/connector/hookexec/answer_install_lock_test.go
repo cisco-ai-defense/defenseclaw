@@ -107,6 +107,13 @@ func unreadableLook(path string) (fs.FileInfo, error) {
 func TestEarlyAnswerWatchdogAnswersClosedDuringInstallInEveryHookForm(t *testing.T) {
 	const budget = 150 * time.Millisecond
 	shortAnswerBudget(t, budget)
+	// The watchdog ends the call only once its hook-failures line is written:
+	// under -race on a loaded runner the line took longer than the 100 ms
+	// wait, and its goroutine wrote into the TempDir after the subtest's
+	// cleanup had begun to remove it (GAP-0680 class).
+	previousLogWait := answerWatchdogLogWait
+	answerWatchdogLogWait = 30 * time.Second
+	t.Cleanup(func() { answerWatchdogLogWait = previousLogWait })
 	covered := map[string]bool{}
 	for _, form := range nativeToolHookForms {
 		covered[form.connector] = true
@@ -288,7 +295,7 @@ func TestPerUserOutageWatchdogChecksInstallStartedAfterRefusal(t *testing.T) {
 		t.Fatal("outage did not prepare a future install check")
 	}
 	mkdirInstallLock(t, home)
-	if !watchdog.installCheck() || !nativeAnswerBlocks(watchdog.installCode, string(watchdog.installOut)) {
+	if !watchdog.installCheck() || !nativeAnswerBlocks(watchdog.install.code, string(watchdog.install.out)) {
 		t.Fatal("an install started after a refusal did not close the deadline answer")
 	}
 }

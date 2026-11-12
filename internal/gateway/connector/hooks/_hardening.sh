@@ -197,6 +197,10 @@ _DC_INSTALL_WINDOW_SEEN=0
 # Set only by defenseclaw_await_gateway for this call; an inherited value can
 # never open a per-user outage (defenseclaw_per_user_outage_open).
 _DC_TRANSPORT_STATUS=""
+# Set by defenseclaw_await_gateway for a verified gateway that took the call
+# and was late with one that names nothing protected (hook-post status 12,
+# GAP-0518): the outage status 7, but not a restart.
+_DC_LATE_ORDINARY=""
 # The config's outage mode for this call (defenseclaw_config_outage_open);
 # never inherited.
 _DC_CONFIG_OUTAGE_MODE=""
@@ -1437,7 +1441,7 @@ defenseclaw_log_hook_failure() {
   local log_file="${log_dir}/hook-failures.jsonl"
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date 2>/dev/null || printf unknown)"
-  local safe_ts safe_connector safe_hook_name safe_reason safe_category safe_fail_mode
+  local safe_ts safe_connector safe_hook_name safe_reason safe_category safe_fail_mode restart_proof="" restart_field=""
 	local correlation_payload="${PAYLOAD:-${CONTENT:-}}" session_id="" call_id="" tool_id="" hook_event=""
 	if [ -n "$correlation_payload" ]; then
 	  # The hook event, as the native hook's line names it: the gateway tells a
@@ -1471,12 +1475,28 @@ defenseclaw_log_hook_failure() {
   safe_reason="$(defenseclaw_json_escape "$reason")"
   safe_category="$(defenseclaw_json_escape "$category")"
   safe_fail_mode="$(defenseclaw_json_escape "$fail_mode")"
+  # Exit 9 is a verified per-user call with no HTTP status. The helper's
+  # fixed token records which restart-window check did not complete.
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) ;;
+    *)
+      if [ "$category" = transport ] && [ "${_DC_TRANSPORT_STATUS:-}" = 9 ] &&
+         [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] && [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ]; then
+        case "${RESPONSE:-}" in
+          DCPOSTPROOF1:no_verified_connection|DCPOSTPROOF1:no_holder|DCPOSTPROOF1:not_fresh|DCPOSTPROOF1:answer_record_unavailable|DCPOSTPROOF1:answered_before|DCPOSTPROOF1:proof_unavailable)
+            restart_proof="${RESPONSE#DCPOSTPROOF1:}"
+            restart_field=',"restart_proof":"'"$restart_proof"'"'
+            ;;
+        esac
+      fi
+      ;;
+  esac
   # stderr is redirected before the append so a failed open of the log
   # (full disk, read-only home) cannot print a shell diagnostic naming this
   # script into the agent-visible block reason (GAP-1974).
-  printf '{"ts":"%s","connector":"%s","hook":"%s","event":"%s","reason":"%s","category":"%s","fail_mode":"%s","outcome":"%s","session_id":"%s","call_id":"%s","tool_id":"%s"}\n' \
+  printf '{"ts":"%s","connector":"%s","hook":"%s","event":"%s","reason":"%s","category":"%s","fail_mode":"%s","outcome":"%s","session_id":"%s","call_id":"%s","tool_id":"%s"%s}\n' \
     "$safe_ts" "$safe_connector" "$safe_hook_name" "$(defenseclaw_json_escape "$hook_event")" "$safe_reason" "$safe_category" "$safe_fail_mode" "$outcome" \
-    "$(defenseclaw_json_escape "$session_id")" "$(defenseclaw_json_escape "$call_id")" "$(defenseclaw_json_escape "$tool_id")" \
+    "$(defenseclaw_json_escape "$session_id")" "$(defenseclaw_json_escape "$call_id")" "$(defenseclaw_json_escape "$tool_id")" "$restart_field" \
     2>/dev/null >> "$log_file" || true
   chmod 600 "$log_file" 2>/dev/null || true
   return 0
@@ -2218,6 +2238,10 @@ defenseclaw_await_gateway() {
     defenseclaw_refused_while_coming_up && return 7
     status=1
   fi
+  if [ "$status" = 12 ]; then
+    _DC_LATE_ORDINARY=1
+    status=7
+  fi
   _DC_TRANSPORT_STATUS="$status"
   [ -n "$post" ] || return "$status"
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
@@ -2235,7 +2259,7 @@ defenseclaw_await_gateway() {
     # its restart window. Keep that outage result before another attempt can
     # reach a newly listening gateway and run out of answer time.
     if defenseclaw_own_gateway_alive; then
-      _DC_GATEWAY_RESTART_WAITED=1
+      [ -n "$_DC_LATE_ORDINARY" ] || _DC_GATEWAY_RESTART_WAITED=1
       return 7
     fi
     # An operator stop is not a restart: the fail mode applies at once. An
@@ -2481,6 +2505,11 @@ defenseclaw_api_listener_unproven() {
 defenseclaw_gateway_unreachable_reason() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) printf '%s' 'gateway unreachable'; return 0 ;;
+  esac
+  case "${RESPONSE:-}" in
+    "DCPOSTROOT1:Your DefenseClaw gateway is running as root."*)
+      printf '%s' "${RESPONSE#DCPOSTROOT1:}"
+      return 0 ;;
   esac
   if [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] && [ -n "${API_ADDR:-}" ] &&
      defenseclaw_api_listener_unproven "$API_ADDR"; then
@@ -3215,6 +3244,39 @@ defenseclaw_read_hook_stdin() {
   defenseclaw_read_stdin_into "${1:-}" "$_dc_rhs_outcome"
 }
 
+# _dc_read_stdin_bounded LIMIT VAR does IFS= read -r -d '' -n LIMIT VAR with
+# the same status and value, in bytes (the caller sets LC_ALL=C). bash reads a
+# pipe one byte per read(2) call, which for a large call (an 889 KB patch) is
+# 889,000 system calls and the largest cost of the hook. The first 16 KiB are
+# read as before; when they are all there and the limit is not reached,
+# head(1) copies the rest, bounded, to the hook's own scratch folder and read
+# takes it from the file in blocks. A short call, a hook without head and an
+# unowned scratch folder read as before. A NUL ends the read (status 0, a
+# shorter value), the end of input gives 1 and a value of LIMIT bytes 0, as
+# before; a failed copy gives 2, the status of a read that could not read.
+_dc_read_stdin_bounded() {
+  local _dc_rb_limit="$1" _dc_rb_first=16384 _dc_rb_file="" _dc_rb_chunk="" _dc_rb_tail="" _dc_rb_status=0
+  if [ "${_DC_SC_RENDER:-0}" = 1 ] || [ "$_dc_rb_limit" -le "$_dc_rb_first" ] ||
+    [ "${_DEFENSECLAW_HOOK_HOME_OWNED:-}" != 1 ] || [ -z "${DEFENSECLAW_HOOK_HOME:-}" ] ||
+    ! command -v head >/dev/null 2>&1; then
+    IFS= read -r -d '' -n "$_dc_rb_limit" "$2"
+    return
+  fi
+  IFS= read -r -d '' -n "$_dc_rb_first" _dc_rb_chunk || _dc_rb_status=$?
+  if [ "$_dc_rb_status" -ne 0 ] || [ "${#_dc_rb_chunk}" -lt "$_dc_rb_first" ]; then
+    printf -v "$2" '%s' "$_dc_rb_chunk"
+    return "$_dc_rb_status"
+  fi
+  _dc_rb_file="${DEFENSECLAW_HOOK_HOME}/stdin.$$"
+  if ! head -c "$((_dc_rb_limit - _dc_rb_first))" >"$_dc_rb_file" 2>/dev/null; then
+    printf -v "$2" '%s' "$_dc_rb_chunk"
+    return 2
+  fi
+  IFS= read -r -d '' -n "$((_dc_rb_limit - _dc_rb_first))" _dc_rb_tail <"$_dc_rb_file" || _dc_rb_status=$?
+  printf -v "$2" '%s%s' "$_dc_rb_chunk" "$_dc_rb_tail"
+  return "$_dc_rb_status"
+}
+
 # defenseclaw_read_stdin_into VAR OUTCOME sets VAR as
 # VAR="$(defenseclaw_read_stdin_capped OUTCOME)" did, and returns its status.
 # A body that is read whole is stored with its trailing newlines removed, as
@@ -3228,7 +3290,7 @@ defenseclaw_read_stdin_into() {
   esac
   _dc_stdin_cap
   _dc_rsi_cap="$_DC_STDIN_CAP"
-  IFS= read -r -d '' -n "$((_dc_rsi_cap + 1))" _dc_rsi_body || _dc_rsi_read=$?
+  _dc_read_stdin_bounded "$((_dc_rsi_cap + 1))" _dc_rsi_body || _dc_rsi_read=$?
   if [ "$_dc_rsi_read" -eq 0 ] && [ "${#_dc_rsi_body}" -le "$_dc_rsi_cap" ]; then
     printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" nul "$_dc_rsi_outcome")"
     return 4
@@ -4109,7 +4171,7 @@ _dc_gateway_post_once() {
             # 126, as for a helper that cannot run: nothing was sent.
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 126
           fi
-          _DC_HOOK_POST_DATA_DIR="$_dc_post_data" _DC_HOOK_POST_DEADLINE_MS="$_dc_post_remaining_ms" exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
+          _DC_HOOK_POST_DATA_DIR="$_dc_post_data" _DC_HOOK_POST_ACCOUNT_HOME="${DEFENSECLAW_AGENT_HOME:-}" _DC_HOOK_POST_DEADLINE_MS="$_dc_post_remaining_ms" exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
         ) 2>/dev/null |
         defenseclaw_keep_nul_visible
       exit "${PIPESTATUS[1]}"
@@ -4128,13 +4190,32 @@ _dc_gateway_post_once() {
         # must not change the outage decision (rel-1-0-6 GAP-0497).
         11) return 7 ;;
         126|127) ;;
-        9) _dc_post_sent_noanswer=1; return 9 ;;
+        8)
+          _dc_post_peer_final=1
+          case "$_dc_post_output" in
+            "DCPOSTROOT1:Your DefenseClaw gateway is running as root."*) printf '%s' "$_dc_post_output" ;;
+          esac ;;
+        9)
+          _dc_post_sent_noanswer=1
+          case "$_dc_post_output" in
+            DCPOSTPROOF1:no_verified_connection|DCPOSTPROOF1:no_holder|DCPOSTPROOF1:not_fresh|DCPOSTPROOF1:answer_record_unavailable|DCPOSTPROOF1:answered_before)
+              printf '%s' "$_dc_post_output" ;;
+            *) printf '%s' 'DCPOSTPROOF1:proof_unavailable' ;;
+          esac
+          return 9 ;;
         # 10 (hookexec.PerUserPostRestartNoAnswerExit): no status while a
         # start or restart of this account's gateway holds its start lock and
         # the process behind the call's connection exited or gave up the port
         # during the call, the restart outage (rel-1-0-6 GAP-0295). The
         # restart wait names it.
         10) return 7 ;;
+        # 12 (hookexec.PerUserPostLateOrdinaryExit): the verified gateway took
+        # the call and gave no status by the deadline, and the helper's scan
+        # found nothing protected in the call (GAP-0518). The first try runs in
+        # a command substitution: the status carries it to
+        # defenseclaw_await_gateway, which reads it as the outage without the
+        # restart wait. Another caller reads it as any failure, closed.
+        12) return 12 ;;
         *) _dc_post_peer_final=1 ;;
       esac
       return 1

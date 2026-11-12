@@ -50,6 +50,9 @@ func TestRunGuardrailMultiRemovedAgentKeepsOtherConnectors(t *testing.T) {
 		t.Skip("per-user Codex setup on Windows needs protected executable evidence")
 	}
 	f := newAgentSettingsRefusalFixture(t)
+	// The skip needs proof that no agent is left in the account, and that proof
+	// reads the account home. This test owns that home.
+	testenv.SetHome(t, testenv.PrivateTempDir(t))
 	// Only Claude Code's pack knows this marker. A skipped connector has no
 	// fresh per-connector publication, so an accidental global-rule fallback
 	// would allow its hook when the agent returns in the same process.
@@ -250,6 +253,7 @@ func TestSetupConnectorsIsolatedSkipsAnActiveConnectorWhoseAgentExecutableIsGone
 			if (tc.lstatError || tc.knownDir) && runtime.GOOS == "windows" {
 				t.Skip("the home-directory and symlink-loop fixtures are Unix-only")
 			}
+			testenv.SetHome(t, testenv.PrivateTempDir(t))
 			s := multiBootSidecar(t)
 			s.cfg.DataDir = testenv.PrivateTempDir(t)
 			s.health = NewSidecarHealth()
@@ -387,6 +391,7 @@ func (b *waitingAbsentConnector) Setup(ctx context.Context, _ connector.SetupOpt
 }
 
 func TestPendingAbsentConnectorRetainedHookIsDenied(t *testing.T) {
+	testenv.SetHome(t, testenv.PrivateTempDir(t))
 	s := multiBootSidecar(t)
 	s.cfg.DataDir = testenv.PrivateTempDir(t)
 	s.cfg.Guardrail.HookFailMode = "closed"

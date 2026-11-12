@@ -419,7 +419,9 @@ func TestManagedHookTakesTheAnswerAfterALateEarlyHint(t *testing.T) {
 func gatewayStartingFor(t *testing.T, starting func() bool) {
 	t.Helper()
 	previous := hookDeliveryGatewayStarting
-	hookDeliveryGatewayStarting = func(context.Context, Options) bool { return starting() }
+	hookDeliveryGatewayStarting = func(Options) func(context.Context) bool {
+		return func(context.Context) bool { return starting() }
+	}
 	t.Cleanup(func() { hookDeliveryGatewayStarting = previous })
 }
 
@@ -576,5 +578,41 @@ func TestManagedHookSendsAgainWhenTheGatewayThatAcceptedTheCallExitsDuringAStart
 	result, elapsed := runAgainstGateway(t, "claudecode", server.Listener.Addr().String(), managedToolCall("claudecode"))
 	if blocked(result) {
 		t.Fatalf("call whose gateway exited during a restart was blocked after %s (requests %d): code=%d stdout=%q stderr=%q", elapsed, requests.Load(), result.code, result.stdout, result.stderr)
+	}
+}
+
+// A stalled receipt write must not keep the hook alive after its receipt
+// timeout. Closing the transport releases the pipe writer before taking mu.
+func TestGAP0271ReceiptTimeoutUnblocksPendingWrite(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	delivery := &hookDeliveryRequest{writer: writer}
+	written := make(chan struct{})
+	go func() {
+		_ = delivery.acknowledge(false)
+		close(written)
+	}()
+	for start := time.Now(); ; {
+		if !delivery.mu.TryLock() {
+			break
+		}
+		delivery.mu.Unlock()
+		if time.Since(start) > time.Second {
+			t.Fatal("receipt writer did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	closed := make(chan struct{})
+	go func() { delivery.close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(200 * time.Millisecond):
+		_ = reader.Close()
+		t.Fatal("receipt close waited for its blocked writer")
+	}
+	select {
+	case <-written:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("receipt writer did not stop after close")
 	}
 }

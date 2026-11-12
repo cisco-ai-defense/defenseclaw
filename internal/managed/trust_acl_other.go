@@ -6,6 +6,12 @@
 
 package managed
 
+import "io/fs"
+
 func validateTrustedPathACL(string) error { return nil }
 
 func validateStrictPathACL(string) error { return nil }
+
+func validateAccountPathACL(string, int, string) error { return nil }
+
+func modeWithoutACLMask(_ string, mode fs.FileMode) fs.FileMode { return mode }

@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // provenPowerShellStateWrite judges the PowerShell reading of a Windows-home
@@ -21,7 +22,14 @@ import (
 // ${C:\...} = x, the path of a .NET file write) is read as the write
 // Set-Content -LiteralPath <target> it is. Only a twin whose own reading
 // proves the mutation of active state counts. The caller has already seen a
-// DefenseClaw state mention.
+// DefenseClaw state mention. A command that reaches the state only through a
+// link (a junction onto the state directory) does not spell DefenseClaw: it
+// is read when the mention scan, which walks the link on the file system as
+// the cmdlet route does, places it in the state, and the reading then follows
+// the text and values that scan places there (GAP-1023 IB34). A managed
+// gateway cannot walk the user's links: there the text and values are those
+// that spell a path the hook client lists in the state tree, as the user's
+// walk placed it (clientStateSpellings).
 func provenPowerShellStateWrite(request trustedActionRequest) bool {
 	home := request.Input.ActiveHome
 	if len(home) < 2 || home[1] != ':' {
@@ -33,10 +41,22 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 		return false
 	}
 	command, known := trustedBashCommandInput(request.Input)
-	if !known || !strings.Contains(strings.ToLower(command), "defenseclaw") {
+	if !known {
 		return false
 	}
-	forms, bounded, ok := powerShellStateWriteForms(command)
+	var mentions func(string) bool
+	if !strings.Contains(strings.ToLower(command), "defenseclaw") {
+		cwd := request.Input.CWD
+		mentions = func(text string) bool { return request.targetMemo.ActionStateTargetMention(text, cwd, home) }
+		if request.ProtectedHomeHook {
+			spellings := clientStateSpellings(request.ResolvedWriteTargets, home)
+			mentions = func(text string) bool { return psSpellsAny(text, spellings) }
+		}
+		if !mentions(command) {
+			return false
+		}
+	}
+	forms, bounded, ok := powerShellStateWriteForms(command, home, request.Input.CWD, request.ResolvedWriteTargets, mentions)
 	if !ok {
 		return false
 	}
@@ -76,6 +96,46 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 			if proven(variant) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// clientStateSpellings returns the spellings (psLinkKey) of the paths the
+// hook client's map places in the active state tree of home, also relative to
+// the folder the client ran the call in. The client walks a quoted path of a
+// PowerShell call as the user and lists it when it reaches the state
+// (hookpaths stateOperand), where a gateway that cannot read the home sees
+// neither the link nor where it leads.
+func clientStateSpellings(targets map[string]string, home string) []string {
+	state := psLinkKey(home + `\.defenseclaw`)
+	cwd := psLinkKey(targets[hookpaths.CWDKey])
+	var spellings []string
+	for key, value := range targets {
+		if key == "" || strings.HasPrefix(key, "\x00") {
+			continue
+		}
+		if physical := psLinkKey(value); physical != state && !strings.HasPrefix(physical, state+`\`) {
+			continue
+		}
+		spelling := psLinkKey(key)
+		spellings = append(spellings, spelling)
+		if rest, ok := strings.CutPrefix(spelling, cwd+`\`); ok && cwd != "" {
+			spellings = append(spellings, rest)
+		}
+	}
+	return spellings
+}
+
+// psSpellsAny reports text that spells one of spellings (psLinkKey).
+func psSpellsAny(text string, spellings []string) bool {
+	if len(spellings) == 0 {
+		return false
+	}
+	text = strings.ToLower(strings.ReplaceAll(text, "/", `\`))
+	for _, spelling := range spellings {
+		if spelling != "" && strings.Contains(text, spelling) {
+			return true
 		}
 	}
 	return false
@@ -250,15 +310,26 @@ func newPSScan(runes []rune, budget *psBudget) *psStateScan {
 // reports a command past the reading bounds. ok is false when PowerShell
 // cannot parse the command: a < that starts a token is a parse error there
 // (a Git Bash here-document or input redirect), so nothing runs in that
-// reading.
-func powerShellStateWriteForms(command string) (forms []string, bounded, ok bool) {
+// reading. mentions, when not nil, also places text in the state (psMerger).
+func powerShellStateWriteForms(command, home, cwd string, targets map[string]string, mentions func(string) bool) (forms []string, bounded, ok bool) {
 	seen := map[string]bool{}
 	budget := &psBudget{}
-	bounded, ok = psCollectStateWriteForms(command, 0, seen, &forms, budget)
+	merge := newPSMerger(home, cwd, targets)
+	merge.mentions = mentions
+	reading := psReading{merge}
+	bounded, ok = reading.collect(command, 0, true, seen, &forms, budget)
 	return forms, bounded, ok
 }
 
-func psCollectStateWriteForms(command string, depth int, seen map[string]bool, forms *[]string, budget *psBudget) (bool, bool) {
+// psReading is the user home, working directory and known links a command
+// is read in.
+type psReading struct{ merge psMerger }
+
+// collect adds the state-naming twins of command to forms. A command with a
+// variable bound to a string is also read with the value in place of each
+// use (psBindStaticValues); bind is false for that reading, which has no
+// use left to bind.
+func (reading psReading) collect(command string, depth int, bind bool, seen map[string]bool, forms *[]string, budget *psBudget) (bool, bool) {
 	scan := newPSScan([]rune(command), budget)
 	scan.code(0, false)
 	if scan.overBound() {
@@ -269,38 +340,51 @@ func psCollectStateWriteForms(command string, depth int, seen map[string]bool, f
 	}
 	add := func(form string) {
 		form = strings.TrimSpace(form)
-		if form == "" || seen[form] || !strings.Contains(strings.ToLower(form), "defenseclaw") ||
-			psOutputOnly(form) {
+		if form == "" || seen[form] || psOutputOnly(form) || !reading.merge.namesState(form) {
 			return
 		}
 		seen[form] = true
 		*forms = append(*forms, form)
 	}
+	if bind {
+		readings := psBindStaticValues(command, reading.merge, budget)
+		if budget.over {
+			return true, true
+		}
+		for _, bound := range readings {
+			if bounded, _ := reading.collect(bound, depth, false, seen, forms, budget); bounded {
+				return true, true
+			}
+		}
+	}
 	for _, piece := range scan.pieces {
 		add(piece)
+		for _, target := range psPatchRunTargets(piece, reading.merge, budget) {
+			add("Set-Content -LiteralPath " + target + " -Value x")
+		}
 		body, nested := psNestedShellBody(piece, budget)
 		if budget.over {
 			return true, true
 		}
-		if !nested || !strings.Contains(strings.ToLower(body), "defenseclaw") {
+		if !nested || !reading.merge.namesState(body) {
 			continue
 		}
 		if depth >= psNestedShellDepth {
 			return true, true
 		}
 		// A body PowerShell cannot parse runs nothing; only its bound counts.
-		if bounded, _ := psCollectStateWriteForms(body, depth+1, seen, forms, budget); bounded {
+		if bounded, _ := reading.collect(body, depth+1, true, seen, forms, budget); bounded {
 			return true, true
 		}
 	}
 	for _, body := range scan.bodies {
-		if !strings.Contains(strings.ToLower(body), "defenseclaw") {
+		if !reading.merge.namesState(body) {
 			continue
 		}
 		if depth >= psNestedShellDepth {
 			return true, true
 		}
-		if bounded, _ := psCollectStateWriteForms(body, depth+1, seen, forms, budget); bounded {
+		if bounded, _ := reading.collect(body, depth+1, true, seen, forms, budget); bounded {
 			return true, true
 		}
 	}
@@ -555,9 +639,34 @@ func psArrayBody(text string) string {
 // spaces as Start-Process does) is the shell's argument line (checker it15
 // RV15-2).
 func psStartProcessShellBody(words []psWord, budget *psBudget) (string, bool) {
-	words = psJoinListWords(words, budget)
-	var file, arguments string
-	var positional []string
+	file, arguments, _ := psStartProcessParts(psJoinListWords(words, budget), budget)
+	program := psProgramName(psUnquote(file, budget))
+	if program != "powershell" && program != "pwsh" || arguments == "" {
+		return "", false
+	}
+	var parts []string
+	for _, part := range psSplitArguments(psArrayBody(arguments), budget) {
+		if part == "" {
+			return "", false
+		}
+		parts = append(parts, psUnquote(part, budget))
+	}
+	line := strings.Join(parts, " ")
+	inner := psWords("powershell "+line, budget)
+	return psShellArgumentsBody(inner, func(rest []psWord) string {
+		texts := make([]string, 0, len(rest))
+		for _, word := range rest {
+			texts = append(texts, psUnquote(word.text, budget))
+		}
+		return strings.Join(texts, " ")
+	})
+}
+
+// psStartProcessParts returns the program (-FilePath or the first positional
+// word), the argument list (-ArgumentList or the second positional word) and
+// the positional words left over of a Start-Process call whose words (the
+// cmdlet first, comma lists joined) are words.
+func psStartProcessParts(words []psWord, budget *psBudget) (file, arguments string, positional []string) {
 	for k := 1; k < len(words); k++ {
 		name, _, hasValue := strings.Cut(strings.ToLower(words[k].text), ":")
 		if words[k].quoted || !strings.HasPrefix(name, "-") || len(name) < 2 {
@@ -588,28 +697,9 @@ func psStartProcessShellBody(words []psWord, budget *psBudget) (string, bool) {
 		file, positional = positional[0], positional[1:]
 	}
 	if arguments == "" && len(positional) > 0 {
-		arguments = positional[0]
+		arguments, positional = positional[0], positional[1:]
 	}
-	program := psProgramName(psUnquote(file, budget))
-	if program != "powershell" && program != "pwsh" || arguments == "" {
-		return "", false
-	}
-	var parts []string
-	for _, part := range psSplitArguments(psArrayBody(arguments), budget) {
-		if part == "" {
-			return "", false
-		}
-		parts = append(parts, psUnquote(part, budget))
-	}
-	line := strings.Join(parts, " ")
-	inner := psWords("powershell "+line, budget)
-	return psShellArgumentsBody(inner, func(rest []psWord) string {
-		texts := make([]string, 0, len(rest))
-		for _, word := range rest {
-			texts = append(texts, psUnquote(word.text, budget))
-		}
-		return strings.Join(texts, " ")
-	})
+	return file, arguments, positional
 }
 
 // psStartProcessSwitch reports a Start-Process switch parameter (no value).
@@ -733,6 +823,14 @@ func (s *psStateScan) code(i int, nested bool) int {
 			if pipedFrom != "" {
 				if body, ok := psPipedInvokeBody(pipedFrom, text, s.budget); ok {
 					s.bodies = append(s.bodies, body)
+				}
+				// A program reads what is piped into it: an envelope piped
+				// into apply_patch is the patch it applies, as when it is
+				// the argument (GAP-1023 IB34). The run is read as a piece
+				// with the piped text as its argument.
+				if strings.Contains(pipedFrom, "*** ") && psRunsPatch(psWords(text, s.budget), s.budget) &&
+					s.account(len(cur)+len(pipedFrom)+1) {
+					s.pieces = append(s.pieces, strings.TrimSpace(text)+" "+strings.TrimSpace(pipedFrom))
 				}
 			}
 		}

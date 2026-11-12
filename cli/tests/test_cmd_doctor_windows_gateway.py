@@ -523,6 +523,35 @@ class WindowsWatchdogDoctorTests(unittest.TestCase):
         self.assertTrue(applicable)
         return result
 
+    def test_watchdog_files_are_read_from_the_install_home_after_a_data_dir_move(self):
+        # GAP-0801: config set data_dir moves the stores, while the watchdog
+        # keeps its PID, ownership lock and state beside gateway.pid.
+        home = os.path.join(self.temp.name, "install-home")
+        moved = os.path.join(self.temp.name, "dc14data")
+        os.makedirs(home)
+        os.makedirs(moved)
+        with open(os.path.join(home, "config.yaml"), "w", encoding="utf-8") as handle:
+            handle.write(f"config_version: 9\ndata_dir: {moved}\nobservability: {{}}\n")
+        cfg = make_watchdog_cfg(moved)
+        record = PIDRecord("missing")
+        ownership = WatchdogOwnershipEvidence("free", source="stable", reason="no ownership lock is held")
+        evidence = cmd_doctor.GatewayEvidence(platform_name="win32")
+        env = {"DEFENSECLAW_HOME": home}
+
+        with (
+            patch.dict(os.environ, env),
+            patch("defenseclaw.doctor_gateway.read_watchdog_pid_record", return_value=record) as pid_reader,
+            patch("defenseclaw.doctor_gateway.inspect_watchdog_ownership", return_value=ownership) as ownership_reader,
+        ):
+            os.environ.pop("DEFENSECLAW_CONFIG", None)
+            os.environ.pop("DEFENSECLAW_DEPLOYMENT_MODE", None)
+            cmd_doctor._inspect_windows_watchdog_runtime(cfg, evidence)
+
+        pid_reader.assert_called_once_with(os.path.join(home, "watchdog.pid"), platform_name="win32")
+        ownership_reader.assert_called_once_with(
+            os.path.join(home, ".watchdog.lock"), os.path.join(home, "watchdog.pid"), platform_name="win32"
+        )
+
     def test_real_gateway_evidence_exposes_watchdog_runtime_collectors(self):
         executable = os.path.abspath("defenseclaw-gateway.exe")
         record = PIDRecord(

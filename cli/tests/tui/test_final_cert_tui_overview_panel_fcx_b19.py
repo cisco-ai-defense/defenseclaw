@@ -104,6 +104,14 @@ def test_watchdog_row_counts_one_dir_in_the_singular() -> None:
     assert model.watchdog_detail() == "2 skill dirs, 1 plugin dir"
 
 
+def test_gap0613_watchdog_row_names_unavailable_admission_connector() -> None:
+    model = _model()
+    model.set_health(HealthSnapshot(watcher=SubsystemHealth(state="degraded", details={
+        "skill_dirs": 1, "watch_roots_unavailable": 1, "admission_scanning_off": ["claudecode"],
+    })))
+    assert "admission scanning off for claudecode" in model.watchdog_detail()
+
+
 async def test_notice_keeps_full_action_after_a_height_only_resize_to_80x24(tmp_path, monkeypatch) -> None:
     # GAP-0514: the end of an actionable notice must remain readable at 80x24.
     # The Overview sample started at 80x45 lands after the resize, as it did on

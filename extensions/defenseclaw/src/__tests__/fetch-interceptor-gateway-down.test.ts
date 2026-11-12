@@ -24,7 +24,7 @@ function refused(): Error & { code: string } {
   return Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:14010"), { code: "ECONNREFUSED" });
 }
 
-describe("gateway down: refused proxy hop", () => {
+describe("saved closed model outage mode: refused proxy hop", () => {
   const originalFetch = globalThis.fetch;
   const originalHttpRequest = http.request;
   const originalHttpsRequest = https.request;
@@ -38,7 +38,7 @@ describe("gateway down: refused proxy hop", () => {
     }) as typeof fetch;
     http.request = (() =>
       Object.assign(new EventEmitter(), { end: () => undefined, write: () => true })) as unknown as typeof http.request;
-    interceptor = createFetchInterceptor(14010);
+    interceptor = createFetchInterceptor({ guardrailPort: 14010, getOutageMode: () => "closed" });
     interceptor.start();
   });
 

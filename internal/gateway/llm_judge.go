@@ -19,7 +19,10 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -222,11 +225,46 @@ func newLLMJudgeWithReason(cfg *config.JudgeConfig, llm config.LLMConfig, dotenv
 	} else {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s)\n", model)
 	}
+	endpoint := llm.BaseURL
+	if bp, ok := provider.(*bifrostProvider); ok {
+		endpoint = bp.baseURL
+	}
 	return &LLMJudge{
 		cfg: cfg, model: model, providerName: llm.ProviderPrefix(),
 		provider: provider, rp: rp,
-		calls: judgeSchedulerFor(firstNonEmpty(llm.BaseURL, model), cfg.MaxParallel),
+		calls: judgeSchedulerFor(firstNonEmpty(endpoint, model), judgeParallelLimit(cfg, llm, endpoint)),
 	}, ""
+}
+
+func judgeParallelLimit(cfg *config.JudgeConfig, llm config.LLMConfig, endpoint string) int {
+	if cfg.MaxParallelExplicit || cfg.MaxParallel > 0 {
+		return cfg.MaxParallel
+	}
+	if localJudgeEndpoint(endpoint) || (endpoint == "" && llm.IsLocalProvider()) {
+		return 1
+	}
+	return 0
+}
+
+func localJudgeEndpoint(endpoint string) bool {
+	if strings.HasPrefix(strings.ToLower(endpoint), "unix:") {
+		return true
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") ||
+		host == "localhost.localdomain" || strings.HasSuffix(host, ".localhost.localdomain") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast()
 }
 
 // chat sends one judge request. With guardrail.judge.max_parallel set it
@@ -240,7 +278,20 @@ func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (*Ch
 		return nil, fmt.Errorf("judge call waited for a free slot (guardrail.judge.max_parallel) past its deadline: %w", err)
 	}
 	defer release()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if end, bounded := hookJudgeAnswerEnd(ctx); bounded && !time.Now().Before(end) {
+		return nil, context.Canceled
+	}
 	return j.provider.ChatCompletion(ctx, req)
+}
+
+func judgeFailureReason(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	return err.Error()
 }
 
 // llmJudgeAllowsEmptyAPIKey reports whether the selected provider has a
@@ -614,7 +665,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, InputContent: content})
+			judgeFailureReason(err), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, InputContent: content})
 		return errorVerdict("llm-judge-injection")
 	}
 
@@ -1324,7 +1375,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, ToolName: toolName, InputContent: content})
+			judgeFailureReason(err), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, ToolName: toolName, InputContent: content})
 		return errorVerdict("llm-judge-pii")
 	}
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: provider returned (dir=%s, choices=%d)\n", direction, len(resp.Choices))
@@ -1826,7 +1877,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, InputContent: content})
+			judgeFailureReason(err), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, InputContent: content})
 		return errorVerdict("llm-judge-exfil")
 	}
 
@@ -2364,7 +2415,7 @@ func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample s
 		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, dir,
 			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, ToolName: toolName, InputContent: args})
+			judgeFailureReason(err), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, ToolName: toolName, InputContent: args})
 		return errorVerdict("llm-judge-tool")
 	}
 

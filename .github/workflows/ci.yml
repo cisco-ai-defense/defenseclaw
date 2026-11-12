@@ -155,7 +155,10 @@ jobs:
         # 2026-10-31: on 710e2cc0d8 the 28 shards ran 8 to 12.5 minutes and
         # shard 4 hit the 11m -timeout twice (the gateway race time grew to
         # about 4.5 hours), so 36 shards bring each back to about 7.5 minutes.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
+        # 2026-11-10: the times recorded on the red runs of rel/1.0.9 (U12,
+        # U16, U17) total about 4.6 hours, 7.7 minutes in 36 shards; 40 keep
+        # each under 7 minutes.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -171,7 +174,7 @@ jobs:
       - name: Run gateway race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 36
+          GO_TEST_SHARDS: 40
         run: |
           set -euo pipefail
           test_regex="$(python3 scripts/go_test_shards.py \
@@ -283,7 +286,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -303,12 +306,9 @@ jobs:
         timeout-minutes: 18
         env:
           GO_PACKAGE_SHARD: ${{ matrix.shard }}
-          GO_PACKAGE_SHARDS: 16
+          GO_PACKAGE_SHARDS: 19
         run: |
           set -euo pipefail
-          # One deadline for the whole shard, package discovery included: 16 of
-          # the step 18 minutes (see run_timeout below).
-          deadline=$((SECONDS + 960))
           go list ./... > "$RUNNER_TEMP/go-packages.txt"
           # Time-balanced (scripts/test-timings/go-linux.json): a whole package
           # per line, or "<package><TAB><-run regex>" for one part of a package
@@ -336,6 +336,7 @@ jobs:
           # left, so the run that overruns the shard is stopped by go test with
           # the goroutine dump that names its test; a run that cannot start
           # inside the deadline fails and says so.
+          deadline=$((SECONDS + 960))
           run_timeout() { # run_timeout <part>: the -timeout of the next go test run
             local left=$((deadline - SECONDS))
             if (( left < 30 )); then
@@ -387,6 +388,74 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  go-test-frozen-gateway:
+    # The three frozen-gateway tests of the hook (a gateway of the account that
+    # takes no accept is an outage, not a listener of another account) run
+    # here alone and are skipped in the shared jobs above (they need
+    # DEFENSECLAW_FROZEN_GATEWAY_JOB=1). The hook proves who holds a listener
+    # by reading every other process of its account and refuses, by design, a
+    # same-account holder it cannot see into; a second test binary of the
+    # account running at the same time (the deliberate mixed-credential and
+    # private-thread helpers of the other hookexec tests) is such a holder.
+    # -p 1 runs one package, and the step fails if any of the three did not
+    # run and pass, so a skip cannot pass for a run. The two tests that ran in
+    # the remaining-package shard keep its race detector and coverage profile
+    # (the profile joins the Combine Go coverage step).
+    name: Go Test (frozen gateway, alone)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        id: go
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
+      - name: Run the frozen-gateway tests alone
+        timeout-minutes: 10
+        env:
+          DEFENSECLAW_FROZEN_GATEWAY_JOB: "1"
+        run: |
+          set -euo pipefail
+          # The two tests that ran in the remaining-package shard keep the
+          # race detector there; the parallel test starts many hook processes
+          # against a budget of seconds each and runs without it (the race
+          # detector's slowdown of every child is not what it looks for). Both
+          # write a coverage profile (atomic, as -race does) and the profiles
+          # are merged into the one the Go Test aggregate requires.
+          race_tests=(
+            TestFrozenOwnGatewayFollowsTheOutageMode
+            TestFrozenGatewayTheDaemonStartedFollowsTheOutageMode
+          )
+          parallel_tests=(TestParallelHookProcessesFollowTheOutageModeOfAFrozenGateway)
+          pkg=./internal/gateway/connector/hookexec
+          log="$RUNNER_TEMP/frozen-gateway.log"
+          : > "$log"
+          # checkptr is off only in modernc.org, as in the shared race jobs.
+          go test -v -race -gcflags=modernc.org/...=-d=checkptr=0 -p 1 -count=1 -timeout 8m \
+            -coverprofile=coverage-go-frozen-gateway-race.out \
+            -run "^($(IFS="|"; echo "${race_tests[*]}"))$" "$pkg" 2>&1 | tee -a "$log"
+          go test -v -covermode=atomic -p 1 -count=1 -timeout 8m \
+            -coverprofile=coverage-go-frozen-gateway-parallel.out \
+            -run "^($(IFS="|"; echo "${parallel_tests[*]}"))$" "$pkg" 2>&1 | tee -a "$log"
+          for name in "${race_tests[@]}" "${parallel_tests[@]}"; do
+            grep -q "^--- PASS: $name " "$log" || { echo "::error::$name did not run and pass"; exit 1; }
+          done
+          python3 scripts/merge_go_coverage.py --output coverage-go-frozen-gateway.out \
+            coverage-go-frozen-gateway-race.out coverage-go-frozen-gateway-parallel.out
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: go-coverage-frozen-gateway
+          path: coverage-go-frozen-gateway.out
+          retention-days: 1
+
   go-pinned:
     # A pull request with no Go change still runs the Go tests that name a
     # file it changes, such as a docs page a test reads.
@@ -420,13 +489,60 @@ jobs:
           done < <(python3 -c 'import json, os; [print(t["package"] + "\t" + t["run"]) for t in json.loads(os.environ["GO_TESTS"])]')
           exit "$status"
 
+  go-test-throughput:
+    # The managed sandbox open-loop tests (internal/gateway
+    # gap0490_open_loop_test.go, built without -race) measure wall-clock
+    # answers inside the hook window of 3.5 s. They run in a job of their own,
+    # one go test process at a time (-p 1), so no other package, shard or build
+    # competes with them for the runner: on a shared runner the gateway shared
+    # the box with the compilers and the same stream failed 3 of 4 runs at
+    # load 52 (GAP-0490). Each test measures the single-stream latency of the
+    # real path right before its stream, states its p95 budget from it, and
+    # fails INCONCLUSIVE, naming that baseline, when the box cannot carry the
+    # stream or the launcher did not issue the required rate (never a skip,
+    # never a pass). The Cadence and Judgement tests run that judgement against
+    # stand-ins and recorded numbers.
+    #
+    # The tests answer a call only after its journal row is durable (power-loss
+    # fsync, by design). A hosted runner disk can stall one fsync for 0.5 to 2 s
+    # (run 42575454395: p95 1.786 s with answered share 1.000), which no
+    # gateway code can answer around. So the job puts the test data directories
+    # (every t.TempDir: the audit store, the sandbox bindings) on a RAM-backed
+    # path. The code path is the real one, with the real fsync calls, and the
+    # budgets are unchanged; only the runner disk is out of the measurement.
+    # The real-disk run stays the local gate (go test on a build box).
+    name: Go Throughput Test (no race)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        id: go
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
+      - name: Run the open-loop throughput tests (-p 1, no race, data on RAM)
+        run: |
+          set -euo pipefail
+          ramdir="$(mktemp -d /dev/shm/dc-throughput.XXXXXX)"
+          trap 'rm -rf "$ramdir"' EXIT
+          test "$(stat -f -c %T "$ramdir")" = tmpfs
+          TMPDIR="$ramdir" go test -p 1 -count=1 -timeout 4m -v -run '^TestGAP0490OpenLoop(SandboxStream|TwoSandboxes|FourSandboxes|Cadence[A-Za-z]+|Judgement[A-Za-z]+|Queueing[A-Za-z]+)$' ./internal/gateway
+
   go-test:
     # Preserve the existing required-check name while combining the complete
     # race/coverage suite from the gateway and audit shards plus all remaining
     # packages. A pull request without Go changes skips the shards and runs
     # only Go Pinned Tests, if any.
     name: Go Test
-    needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]
+    needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-test-throughput, go-test-frozen-gateway, go-pinned]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -437,6 +553,8 @@ jobs:
           GATEWAY_RESULT: ${{ needs.go-test-gateway.result }}
           AUDIT_RESULT: ${{ needs.go-test-audit.result }}
           OTHER_RESULT: ${{ needs.go-test-other.result }}
+          THROUGHPUT_RESULT: ${{ needs.go-test-throughput.result }}
+          FROZEN_GATEWAY_RESULT: ${{ needs.go-test-frozen-gateway.result }}
           PINNED_RESULT: ${{ needs.go-pinned.result }}
         run: |
           set -euo pipefail
@@ -448,6 +566,8 @@ jobs:
           test "$GATEWAY_RESULT" = success
           test "$AUDIT_RESULT" = success
           test "$OTHER_RESULT" = success
+          test "$THROUGHPUT_RESULT" = success
+          test "$FROZEN_GATEWAY_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         if: ${{ needs.changes.outputs.go != 'false' }}
         with:
@@ -468,8 +588,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 36 gateway + 4 audit + 16 remaining-package shards.
-          test "${#coverage_parts[@]}" -eq 56
+          # 40 gateway + 4 audit + 19 remaining-package shards, plus the
+          # frozen-gateway job.
+          test "${#coverage_parts[@]}" -eq 64
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
@@ -1051,7 +1172,7 @@ jobs:
           name: install-smoke-assets
           path: ${{ runner.temp }}/assets
       - name: strace for the processes-per-hook count
-        run: command -v strace || { sudo apt-get update -q && sudo apt-get install -y -q strace; }
+        run: bash scripts/runner-apt-install.sh strace strace
       - name: Install into a throwaway HOME
         run: python3 scripts/perf/dcperf.py provision --assets "$RUNNER_TEMP/assets" --home "$RUNNER_TEMP/perf-home"
       - name: Measure and check the budgets
@@ -1252,8 +1373,35 @@ jobs:
             part: darwin
             shard: 1
           - os: macos-latest
-            label: macos-latest darwin gateway and cli
+            label: macos-latest darwin gateway 1 of 4
             part: darwin-unix
+            package: internal/gateway
+            shards: 4
+            shard: 0
+          - os: macos-latest
+            label: macos-latest darwin gateway 2 of 4
+            part: darwin-unix
+            package: internal/gateway
+            shards: 4
+            shard: 1
+          - os: macos-latest
+            label: macos-latest darwin gateway 3 of 4
+            part: darwin-unix
+            package: internal/gateway
+            shards: 4
+            shard: 2
+          - os: macos-latest
+            label: macos-latest darwin gateway 4 of 4
+            part: darwin-unix
+            package: internal/gateway
+            shards: 4
+            shard: 3
+          - os: macos-latest
+            label: macos-latest darwin cli
+            part: darwin-unix
+            package: internal/cli
+            shards: 1
+            shard: 0
           - os: macos-latest
             label: macos-latest darwin connector 1 of 4
             part: darwin-connector
@@ -1344,9 +1492,16 @@ jobs:
       - name: Go tests of the darwin paths in the gateway and CLI packages
         # In internal/gateway and internal/cli, the tests of their darwin,
         # unix, linux||darwin and !windows test files plus the foreign-hook
-        # guard, which keys sessions by the agent process.
+        # guard, which keys sessions by the agent process. The gateway package
+        # runs in four parts and the CLI package in one: the gateway package
+        # alone ran past its 10-minute -timeout as one test binary on the
+        # hosted macOS runner. Every part keeps the 10-minute -timeout.
         if: runner.os == 'macOS' && matrix.part == 'darwin-unix'
         shell: bash
+        env:
+          UNIX_PACKAGE: ${{ matrix.package }}
+          GO_TEST_SHARDS: ${{ matrix.shards }}
+          GO_TEST_SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           # A link-free TMPDIR, as in the darwin paths step.
@@ -1358,6 +1513,11 @@ jobs:
             for file in "$@"; do
               case "$file" in
                 *_windows_test.go | *_linux_test.go) continue ;;
+                # The open-loop throughput tests measure wall-clock answers
+                # and run alone, without -race, in Go Throughput Test; on a
+                # shared macOS runner they only report INCONCLUSIVE and use
+                # the job time.
+                */gap0490_open_loop_test.go) continue ;;
                 *_darwin_test.go | *_unix_test.go | */hook_foreign_guard*_test.go) ;;
                 *) grep -Eq '^//go:build .*(darwin|unix|!windows|!linux)' "$file" || continue ;;
               esac
@@ -1367,11 +1527,22 @@ jobs:
             local IFS='|'
             echo "^(${names[*]})\$"
           }
-          for pkg in internal/gateway internal/cli; do
-            pattern=$(unix_tests "$pkg"/*_test.go)
-            echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
-            go test -count=1 -timeout 10m -run "$pattern" "./$pkg"
-          done
+          pkg="$UNIX_PACKAGE"
+          pattern=$(unix_tests "$pkg"/*_test.go)
+          echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
+          if [ "$GO_TEST_SHARDS" -gt 1 ]; then
+            # Time-balanced parts of the unix and darwin tests (the Linux
+            # times are the best recorded weights; go_test_shards.py covers
+            # every selected test in exactly one part).
+            pattern="$(python3 scripts/go_test_shards.py \
+              --package-dir "$pkg" \
+              --match "$pattern" \
+              --timings scripts/test-timings/go-linux.json \
+              --shard-count "$GO_TEST_SHARDS" \
+              --shard-index "$GO_TEST_SHARD")"
+            echo "part $((GO_TEST_SHARD + 1)) of $GO_TEST_SHARDS: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') tests"
+          fi
+          go test -count=1 -timeout 10m -run "$pattern" "./$pkg"
       - name: Go tests of the darwin connector package, part ${{ matrix.shard }}
         # One of four time-balanced parts of the connector package's tests
         # (go_test_shards.py covers every test exactly once). The package
@@ -1570,7 +1741,8 @@ jobs:
           path: ${{ runner.temp }}/enterprise-install
       - name: Install RPM archive reader on the disposable runner
         shell: bash
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libarchive-tools
+        # The runner image ships rpm, which the check prefers over bsdtar.
+        run: bash scripts/runner-apt-install.sh "rpm|bsdtar" libarchive-tools
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: enterprise-install-windows
@@ -1966,14 +2138,12 @@ jobs:
         run: >-
           go test -count=1
           ./cmd/defenseclaw-enterprise-setup
-          ./cmd/defenseclaw-setup
           ./internal/windowsresources
           ./internal/tools/windowsresources
       - name: Vet the public installer contracts
         run: >-
           go vet
           ./cmd/defenseclaw-enterprise-setup
-          ./cmd/defenseclaw-setup
           ./internal/windowsresources
           ./internal/tools/windowsresources
       - name: Cross-compile the native Windows bootstrap and tests

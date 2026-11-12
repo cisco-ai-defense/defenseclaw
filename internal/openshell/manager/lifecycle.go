@@ -425,7 +425,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 		return unsyncedStopRefusal(name, flushErr)
 	}
 	if !ended {
-		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
+		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, hookAlarmStopCondition(ctx), nil)
 	}
 	m.keepRunLog(ctx, gw, b, run)
 	stopped, err := gw.Client.StopSandbox(ctx, name)
@@ -501,7 +501,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	m.mu.Lock()
 	b.sb = sb
 	m.mu.Unlock()
-	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStop, false, nil, sb.Status.ExitCode)
+	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStop, false, hookAlarmStopCondition(ctx), sb.Status.ExitCode)
 	return nil
 }
 

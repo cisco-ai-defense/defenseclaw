@@ -129,9 +129,17 @@ func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
 	} else if err == nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "removed %d per-user registrations; %d pending, %d failed\n", report.Removed, len(report.Pending), len(report.Failed))
 		for _, user := range report.Purged {
+			detail := report.PurgedDetail[user]
 			line := "purged " + user + ": ~/.defenseclaw and the per-user binaries in ~/.local/bin are gone"
-			if report.PurgedDetail[user].Kept {
+			if detail.Kept {
 				line = "kept " + user + ": ~/.defenseclaw holds its own DefenseClaw install from before the managed deployment, which stays as it is"
+			} else if len(detail.KeptEntries) > 0 {
+				if detail.Data {
+					line = "purged " + user + ": DefenseClaw-owned entries in ~/.defenseclaw were removed"
+				} else {
+					line = "kept " + user + ": no DefenseClaw-owned entries were found in ~/.defenseclaw"
+				}
+				line += "; kept account entries: " + strings.Join(detail.KeptEntries, ", ")
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), line)
 		}
@@ -1180,11 +1188,10 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []
 
 // addEnterpriseHookLegacyStatePurges ends the job of every eligible account
 // the manifest does not name (the machine policy covered it without a
-// per-user enrollment) with the purge of its ~/.defenseclaw, when that
-// folder holds no DefenseClaw install of the account's own: only what
-// DefenseClaw wrote there, such as the hook script, hook token, hook config
-// and connector backups an earlier failed install left (rel-1-0-2
-// GAP-0576). The purge, as the account, first restores the files those
+// per-user enrollment) with the purge of known managed entries in its
+// ~/.defenseclaw, when that folder holds no DefenseClaw install of the
+// account's own. The account may also have files of its own there, which
+// stay. The purge, as the account, first restores the files any connector
 // backups belong to. A folder with the account's own per-user install
 // (enterprisehooks.HoldsPerUserInstall), one that is not a plain folder, or
 // one that cannot be read is left as it is, and the uninstall names it

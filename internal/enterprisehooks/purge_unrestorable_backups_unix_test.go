@@ -33,8 +33,8 @@ func TestPurgeUserStateRemovesAFailedInstallsLeftovers(t *testing.T) {
 	dataDir := filepath.Join(home, ".defenseclaw")
 	record := `{"orphan":true}` + "\n"
 	writeOwnInstallTestFile(t, filepath.Join(dataDir, "hooks", "claude-code-hook.sh"), "#!/bin/sh\nexit 0\n", 0o700)
-	writeOwnInstallTestFile(t, filepath.Join(dataDir, ".hook-claudecode.token"), "sample-not-a-secret\n", 0o600)
-	writeOwnInstallTestFile(t, filepath.Join(dataDir, ".hookcfg-claudecode.json"), `{"orphan":true}`+"\n", 0o600)
+	writeOwnInstallTestFile(t, filepath.Join(dataDir, "hooks", ".hook-claudecode.token"), "sample-not-a-secret\n", 0o600)
+	writeOwnInstallTestFile(t, filepath.Join(dataDir, "hooks", ".hookcfg.claudecode"), `{"orphan":true}`+"\n", 0o600)
 	writeOwnInstallTestFile(t, filepath.Join(dataDir, "connector_backups", "claudecode", "settings.json.json"), record, 0o600)
 	summary, err := PurgeUserState(context.Background(), InstallOptions{
 		UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(), Registry: connector.NewDefaultRegistry(),

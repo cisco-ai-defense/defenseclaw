@@ -844,6 +844,9 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 				}
 				fd = parsed
 			}
+			if fd == 0 {
+				posixLiteralStdinReplaced(command, out)
+			}
 			target := projectPOSIXWord(redirection.Word)
 			targetFD, targetFDErr := strconv.ParseInt(target.Value, 10, 64)
 			if !target.Expands && targetFDErr == nil &&
@@ -885,7 +888,9 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			}) {
 				return
 			}
-			out.markPartial(IssueUnsupportedConstruct)
+			if fd != 0 || command.Program != "apply_patch" {
+				out.markPartial(IssueUnsupportedConstruct)
+			}
 			continue
 		}
 		access, ok := posixRedirectAccess(redirection.Op)
@@ -902,13 +907,8 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			}
 			fd = parsed
 		}
-		if fd == 0 && command.LiteralStdinComplete {
-			// Redirect ordering could replace the heredoc as stdin. The private
-			// projection deliberately does not model that mixed form.
-			command.LiteralStdin = ""
-			command.LiteralStdinComplete = false
-			command.LiteralStdinAmbiguous = true
-			out.markPartial(IssueUnsupportedConstruct)
+		if fd == 0 {
+			posixLiteralStdinReplaced(command, out)
 		}
 		target := projectPOSIXWord(redirection.Word)
 		if !target.Expands && len(target.Value) > maxScalarBytes {
@@ -938,18 +938,42 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 	}
 }
 
+// posixLiteralStdinReplaced drops the here-document text a command holds when a
+// later input redirect of descriptor 0 (a file, a descriptor copy, a here-string
+// or a close) takes over its stdin. The shell opens the redirects in order and
+// the last one wins, so the earlier document is no stdin of the command, in
+// whole or in the text it shows (LiteralStdinView).
+func posixLiteralStdinReplaced(command *CommandFact, out *parseOutput) {
+	if !command.LiteralStdinComplete && command.LiteralStdinView == "" {
+		return
+	}
+	command.LiteralStdin = ""
+	command.LiteralStdinView = ""
+	command.LiteralStdinComplete = false
+	command.LiteralStdinAmbiguous = true
+	if command.Program != "apply_patch" {
+		// An apply_patch call without a document reading is partial anyway
+		// (classifyPOSIXApplyPatchStdin), and a later here-document may
+		// still be its stdin, so the call is not marked partial here.
+		out.markPartial(IssueUnsupportedConstruct)
+	}
+}
+
 func projectPOSIXLiteralHeredoc(
 	redirection *syntax.Redirect,
 	command *CommandFact,
 	out *parseOutput,
 ) {
-	if redirection == nil || command == nil || redirection.Op != syntax.Hdoc ||
-		redirection.Hdoc == nil {
+	if redirection == nil || command == nil || redirection.Hdoc == nil ||
+		redirection.Op != syntax.Hdoc &&
+			(redirection.Op != syntax.DashHdoc || command.Program != "apply_patch") {
 		out.markPartial(IssueUnsupportedConstruct)
 		return
 	}
-	if command.LiteralStdinComplete || command.LiteralStdinAmbiguous {
+	patch := command.Program == "apply_patch"
+	if !patch && (command.LiteralStdinComplete || command.LiteralStdinAmbiguous) {
 		command.LiteralStdin = ""
+		command.LiteralStdinView = ""
 		command.LiteralStdinComplete = false
 		command.LiteralStdinAmbiguous = true
 		out.markPartial(IssueUnsupportedConstruct)
@@ -957,10 +981,30 @@ func projectPOSIXLiteralHeredoc(
 	}
 	if redirection.N != nil {
 		parsed, err := strconv.ParseInt(redirection.N.Value, 10, 64)
+		if err == nil && parsed != 0 && patch {
+			// A document on another descriptor is no stdin of the patch
+			// call: the stdin stays what the other redirects left.
+			return
+		}
 		if err != nil || parsed != 0 {
 			out.markPartial(IssueUnsupportedConstruct)
 			return
 		}
+	}
+	if patch {
+		// The shell opens the redirects in order and the last input redirect
+		// of descriptor 0 is the stdin: a here-document after an earlier
+		// input redirect or an earlier here-document is the stdin the
+		// command reads, and replaces whatever the earlier ones showed.
+		command.LiteralStdin = ""
+		command.LiteralStdinView = ""
+		command.LiteralStdinComplete = false
+		command.LiteralStdinAmbiguous = false
+		projectPOSIXPatchHeredoc(redirection, command, out)
+		if !command.LiteralStdinComplete && command.LiteralStdinView == "" {
+			command.LiteralStdinAmbiguous = true
+		}
+		return
 	}
 	if posixDescriptorIsRedirected(command, 0) {
 		out.markPartial(IssueUnsupportedConstruct)
@@ -980,14 +1024,8 @@ func projectPOSIXLiteralHeredoc(
 		return
 	}
 	body, exact := literalPOSIXHeredocBody(redirection.Hdoc)
-	limit := maxScalarBytes
-	if command.Program == "apply_patch" {
-		// Patch envelopes can contain ordinary file content beyond the
-		// scalar operand bound; the shell command itself remains bounded.
-		limit = maxCommandBytes
-	}
 	if delimiter.Expands || delimiter.Quote != QuoteSingle ||
-		delimiter.Value == "" || !exact || len(body) > limit ||
+		delimiter.Value == "" || !exact || len(body) > maxScalarBytes ||
 		strings.ContainsRune(body, '\x00') {
 		out.markPartial(IssueUnsupportedConstruct)
 		return
@@ -1012,6 +1050,129 @@ func literalPOSIXHeredocBody(word *syntax.Word) (string, bool) {
 		text.WriteString(literal.Value)
 	}
 	return text.String(), true
+}
+
+// projectPOSIXPatchHeredoc reads the here-document of an apply_patch command
+// in every delimiter spelling (unquoted, double-quoted, quoted by a
+// backslash, single-quoted, each also with <<-). The spelling decides only
+// whether the shell expands the body (any quoting of the delimiter word
+// prevents it); <<- only strips the leading tabs of the lines. A body that
+// reaches the command byte for byte is the literal stdin in every spelling.
+func projectPOSIXPatchHeredoc(
+	redirection *syntax.Redirect,
+	command *CommandFact,
+	out *parseOutput,
+) {
+	delimiter := projectPOSIXWord(redirection.Word)
+	if delimiter.Expands || delimiter.Value == "" {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	body, dynamic, readable := posixHeredocText(
+		redirection.Hdoc, posixHeredocDelimiterQuoted(redirection.Word),
+		redirection.Op == syntax.DashHdoc,
+	)
+	// Patch envelopes can contain ordinary file content beyond the scalar
+	// operand bound; the shell command itself remains bounded.
+	if !readable || len(body) > maxCommandBytes || strings.ContainsRune(body, '\x00') {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	if !dynamic {
+		command.LiteralStdin = body
+		command.LiteralStdinComplete = true
+		return
+	}
+	// The shell expands this body, so its bytes are not known. The patch keeps
+	// the text it shows, each expansion replaced by one "$", for the readers of
+	// its envelope (applyPatchStdinText). A substitution in the body is a
+	// command of its own in the facts, judged by its own facts; the patch stays
+	// as certain as with a quoted body, only the text of the lines that hold an
+	// expansion is unknown.
+	command.LiteralStdinView = body
+	command.LiteralStdinAmbiguous = true
+}
+
+// posixHeredocDelimiterQuoted reports a here-document delimiter with any part
+// quoted, in single or double quotes or by a backslash: the shell then leaves
+// the body unexpanded.
+func posixHeredocDelimiterQuoted(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.SglQuoted, *syntax.DblQuoted:
+			return true
+		case *syntax.Lit:
+			if strings.Contains(typed.Value, "\\") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// posixHeredocText is the text of a here-document body as the shell hands it
+// to the command, less the expansions: for <<- the leading tabs of every line
+// are dropped. dynamic is set for a body the shell expands: a substitution or
+// parameter expansion, or a backslash before $, a backquote, another backslash
+// or a line end. The text then holds one "$" for each expansion and keeps the
+// backslashes as written. readable is false for a quoted body that is not one
+// literal.
+func posixHeredocText(
+	body *syntax.Word, quoted, stripTabs bool,
+) (text string, dynamic, readable bool) {
+	var out strings.Builder
+	lineStart := true
+	for _, part := range body.Parts {
+		literal, ok := part.(*syntax.Lit)
+		if !ok {
+			if quoted {
+				return "", false, false
+			}
+			out.WriteByte('$')
+			lineStart = false
+			dynamic = true
+			continue
+		}
+		for index := 0; index < len(literal.Value); index++ {
+			char := literal.Value[index]
+			if lineStart && stripTabs && char == '\t' {
+				continue
+			}
+			out.WriteByte(char)
+			lineStart = char == '\n'
+		}
+		if !quoted && posixHeredocLiteralEscapes(literal.Value) {
+			dynamic = true
+		}
+	}
+	return out.String(), dynamic, true
+}
+
+// posixHeredocLiteralEscapes reports text of an unquoted here-document body
+// the shell may expand: a $ or backquote the parser left in a literal, or a
+// backslash before $, a backquote, a backslash or a line end. Any other
+// backslash stays two ordinary characters.
+func posixHeredocLiteralEscapes(text string) bool {
+	for index := 0; index < len(text); index++ {
+		if text[index] == '$' || text[index] == '`' {
+			return true
+		}
+		if text[index] != '\\' {
+			continue
+		}
+		if index+1 == len(text) {
+			return true
+		}
+		switch text[index+1] {
+		case '$', '`', '\\', '\n':
+			return true
+		}
+		index++
+	}
+	return false
 }
 
 // posixHeredocBodyRunsNothing reports an unquoted heredoc body that expands
@@ -1277,7 +1438,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				return
 			}
 			child = parseCommandAs(nested, dialect, out.nextID, wrapperDepth+1)
-		case "sudo", "exec", "env", "command", "nsenter", "chroot":
+		case "sudo", "exec", "env", "command", "builtin", "nsenter", "chroot":
 			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(command.Argv, program)
 			if uncertain {
 				out.markPartial(IssueUnsupportedConstruct)
@@ -1511,6 +1672,20 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				return nil, false, false
 			}
 			if strings.HasPrefix(argv[i], "-") {
+				return nil, false, true
+			}
+			return cloneSlice(argv[i:]), true, false
+		}
+
+	case "builtin":
+		// builtin NAME runs the shell builtin NAME in the caller shell with the
+		// caller descriptors, so a redirect on it is a redirect of the NAME it
+		// runs, as for command. The shell accepts a leading --.
+		for i := 1; i < len(argv); i++ {
+			switch {
+			case argv[i] == "--":
+				continue
+			case strings.HasPrefix(argv[i], "-"):
 				return nil, false, true
 			}
 			return cloneSlice(argv[i:]), true, false

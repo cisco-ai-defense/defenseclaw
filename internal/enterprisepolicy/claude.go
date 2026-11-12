@@ -139,6 +139,13 @@ func renderClaudeHigherPrecedence(opts Options, policy config.ResolvedConnectorP
 func claudeHandlerIsOwned(opts Options, raw any) bool {
 	command := stringField(raw, "command")
 	if opts.goos() == "windows" {
+		// Windows managed Setup registers the launcher through the guarded
+		// cmd.exe form; that is the current managed form on that host.
+		if fields := claudeHandlerFields(raw); fields != nil {
+			if launcher, _, guarded := connector.ClaudeCodeManagedGuardLauncher(fields); guarded {
+				return strings.EqualFold(launcher, opts.HookBinary)
+			}
+		}
 		if !strings.EqualFold(command, opts.HookBinary) {
 			return false
 		}
@@ -374,17 +381,23 @@ func claudeMatcherMatchesAll(matcher string) bool {
 	return err == nil && compiled.MatchString("")
 }
 
+// claudeHandlerFields is the field map of a decoded handler, or nil.
+func claudeHandlerFields(raw any) map[string]any {
+	switch v := raw.(type) {
+	case *object:
+		return v.values
+	case map[string]any:
+		return v
+	}
+	return nil
+}
+
 // claudeHandlerRuns reports whether Claude Code runs a handler as a command
 // that can decide the call: type "command", no "if" filter, and no
 // background run unless the contract runs the group in the background.
 func claudeHandlerRuns(raw any, group connector.ManagedHookGroup) bool {
-	var fields map[string]any
-	switch v := raw.(type) {
-	case *object:
-		fields = v.values
-	case map[string]any:
-		fields = v
-	default:
+	fields := claudeHandlerFields(raw)
+	if fields == nil {
 		return false
 	}
 	if fields["type"] != "command" {
@@ -649,7 +662,8 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 			if opts.goos() == "darwin" {
 				format = "plist"
 			}
-			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks for %s; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy `defenseclaw-gateway enterprise policy export --connector claudecode --format %s` through it (the export also sets requiredMinimumVersion under version_floor: enforce)", source.name, strings.Join(missing, ", "), claudeMergeMinimumVersion, format)
+			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks for %s; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy %s through it (the export also sets requiredMinimumVersion under version_floor: enforce)", source.name, strings.Join(missing, ", "), claudeMergeMinimumVersion,
+				policyExportCommand(opts.goos(), "--connector", "claudecode", "--format", format))
 			if policy.HigherPrecedenceSources == config.HigherPrecedenceWarn {
 				state.detail("%s", message)
 				state.HigherPrecedence = state.HigherPrecedence[:len(state.HigherPrecedence)-1]
@@ -721,7 +735,7 @@ func (t claudeTarget) Reconcile(opts Options) (State, error) {
 		return state, err
 	}
 	if policy.Ownership == config.MachinePolicyOwnershipVerifyOnly && state.OwnedEntries == 0 {
-		state.detail("missing_defenseclaw_hooks: deploy the output of `defenseclaw-gateway enterprise policy export --connector claudecode` through your policy tool")
+		state.detail("missing_defenseclaw_hooks: deploy the output of %s through your policy tool", policyExportCommand(opts.goos(), "--connector", "claudecode"))
 	}
 	state.finish()
 	return state, nil

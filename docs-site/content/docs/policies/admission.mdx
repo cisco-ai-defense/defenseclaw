@@ -83,7 +83,13 @@ and keep shared skills outside profiles. For policy on profile assets, set
 `runtime_detection.enabled: true` so hooks apply default, registry and
 approval rules to profile assets; use `asset_policy.mode: action` to block.
 Set `asset_policy.enabled: true` as well. Denied names are refused by hooks
-even with runtime detection off. Profile skills and plugins are not scanned as the enrolled user.
+even with runtime detection off. With asset policy in action mode and runtime
+detection on, the hook also sends the text of the selected profile skill or
+plugin, and the gateway refuses one the in-process prompt-injection detector
+rates HIGH or CRITICAL (role or instruction override, fake system or delimiter
+blocks, base64-hidden instructions, tag characters), and a skill or plugin whose
+text was not sent or could not be read in full. Profile skills and
+plugins are not scanned by the skill-scanner as the enrolled user.
 
 Each enrolled user's MCP server has its own verdict. The install block and
 runtime disable that admission records for one user's server apply to that
@@ -95,10 +101,10 @@ server name refuses the call.
 
 A verdict is for a server's definition, not only its name. When the command,
 arguments, folder or environment of a server change under the same name,
-DefenseClaw refuses its tool calls ("is not scanned yet") until admission has
-scanned the new definition, and it starts that admission at once: at the
-first tool call, or within 30 seconds when no call comes first. The new
-verdict then decides. A rejected definition stays blocked. When a server
+DefenseClaw starts admission for the new definition at once: at the first
+tool call, or within 30 seconds when no call comes first. While the scan is
+pending, the hook behavior follows the tier table below. The new verdict
+then decides. A rejected definition stays blocked. When a server
 that admission rejected is changed back to a definition that scans clean,
 DefenseClaw lifts its own block and the server's tool calls are allowed
 again. A block an administrator set stays. On a per-user gateway, two
@@ -117,11 +123,44 @@ decided on the list read before, and the gateway log says why.
 Admission decides on tool calls, not on process starts. Claude Code starts
 the servers of a project it opens as soon as the user approves the
 project's `.mcp.json`, as the user and before DefenseClaw has scanned them.
-Until admission allows a server, DefenseClaw refuses every tool call to it
-("is not scanned yet"), and it keeps refusing the calls of a server that
-admission rejected or could not scan. The server process itself can run
-until Claude Code stops it. It runs with the user's own rights, the same
-rights the user has to start any program.
+
+| Hook tier | New server while admission is pending or unavailable | Completed failed or rejected scan |
+| --- | --- | --- |
+| Per-user default or permissive | The call runs with a warning naming the server and pending scan. The audit records `allow`, `would_block=true`, and the admission reason. | A scan that found something blocks the server. A server DefenseClaw could not scan (see below) runs with a warning that names the cause and the next step; the audit records `allow` and `would_block=true`. |
+| Per-user strict or managed standalone | The call is blocked with the server name and a retry time based on the scan timeout. | The call is blocked. |
+
+A scan that cannot run is not a malicious verdict. A server whose launcher is
+not `npx` or `uvx` (for example `python3`, `node` or a local binary), or whose
+URL is a loopback, private or link-local address, cannot be scanned. The
+first call and every later call of such a server get the same decision: in the
+per-user default and permissive tiers the call runs with a warning, and in the
+strict tier and on a managed device it is blocked. The agent is told why the
+server could not be scanned and the one next step: `defenseclaw mcp allow
+<name>` (on a managed device, ask the administrator, because the managed launcher
+[refuses it](/docs/enterprise/managed-commands)), or start the server with `npx` or `uvx`, or serve it from a
+public URL. `defenseclaw mcp list` says the same.
+
+An administrator's allow rule for the server beats that block in every tier,
+the strict tier and managed profiles included. On a managed device add the
+rule to `asset_policy.mcp.allowed` in the machine policy, with the server's
+name and its URL (or its command and arguments), for example the loopback
+endpoint of a local agent gateway:
+
+```yaml
+asset_policy:
+  mcp:
+    allowed:
+      - name: gas
+        url: http://127.0.0.1:18795/mcp
+        reason: local agent gateway, reviewed
+```
+
+An explicit deny still wins over the allow rule. A server whose scan found
+something is not covered by this: allow it only after the finding is reviewed.
+
+An explicit asset-policy deny or runtime disable blocks in every tier. The
+server process itself can run until Claude Code stops it. It runs with the
+user's own rights, the same rights the user has to start any program.
 
 On managed Windows, a project server whose `cwd` is a relative path, or
 names a folder the server cannot start in, is blocked as not scanned. The
@@ -442,7 +481,7 @@ the whole compiled admission policy.
 
 The `defenseclaw config get ... --effective` reads above are for a per-user
 installation; they do not show the managed verdict. On managed Linux, the
-installed `defenseclaw` launcher accepts only `sandbox` commands. The managed
+installed `defenseclaw` launcher accepts only the commands in [Managed command availability](/docs/enterprise/managed-commands). The managed
 Windows CLI has no `config get`.
 A standard account is refused when it tries to read the managed policy with
 the gateway command. To check the managed policy, run `policy evaluate` for
@@ -654,7 +693,7 @@ without waiting for its files to change. An MCP server is matched on its
 definition too, so a `command` or `url` rule added later rejects a server
 that was already installed; the hooks refuse its tool calls once the config
 applies. Managed Windows profile assets and managed Linux/macOS connector
-assets are refused only by the hooks. Remove those assets with your device
+assets are refused only by the hooks (on managed Windows from their content, as above). Remove those assets with your device
 management tool while the hooks refuse them.
 
 A Claude Code plugin is refused at the hook as well. Claude Code runs a plugin

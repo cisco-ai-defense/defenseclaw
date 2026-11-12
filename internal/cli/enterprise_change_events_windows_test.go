@@ -86,7 +86,7 @@ func TestWindowsChangeSpoolParentDescriptorForEveryCreationStep(t *testing.T) {
 }
 
 func TestWindowsFirstChangeEventAndReservationKeepCanonicalACLs(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	const sid = "S-1-5-80-1-2-3-4-5"
@@ -270,6 +270,87 @@ func TestWindowsChangeSyntaxRefusalsAreAudited(t *testing.T) {
 	}
 }
 
+// g079 review F1: an elevated credential refusal on a computer without an
+// installed standalone deployment records no change event, as an early
+// refusal does (recordWindowsChangeRefusal); on an installed deployment, and
+// on any record the trusted read cannot call cleanly absent, it records one. Before, every refusal wrote the computer's change spool, so
+// a test that missed the spool stub wrote the real one.
+func TestWindowsSecretRefusalIsAuditedOnlyOnAnInstalledDeployment(t *testing.T) {
+	root := t.TempDir()
+	layout := managed.StandaloneLayout{ConfigDir: filepath.Join(root, "etc"), LifecycleDir: filepath.Join(root, "install")}
+	stubWindowsSecretHost(t, layout)
+	spool := stubWindowsChangeSpool(t)
+	for _, installed := range []bool{false, true} {
+		windowsSecretDeploymentInstalled = func() (bool, error) { return installed, nil }
+		before := len(windowsChangeEvents(t, spool))
+		_, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "../escape", fromStdin: true}, "x")
+		if commandExitCode(err) != windowsSecretExitInvalid {
+			t.Fatalf("installed=%v: an unsafe name = %v (exit %d), want 1639", installed, err, commandExitCode(err))
+		}
+		events := windowsChangeEvents(t, spool)
+		want := 0
+		if installed {
+			want = 1
+		}
+		if len(events)-before != want {
+			t.Fatalf("installed=%v: %d change events, want %d", installed, len(events)-before, want)
+		}
+		if installed {
+			if ev := events[len(events)-1]; ev.Outcome != enterprisestatus.ChangeRefused || ev.ReasonCode != "invalid_arguments" {
+				t.Fatalf("refusal event = %+v", ev)
+			}
+		}
+	}
+
+	// g079 review 2 R1: through the trusted reader, only a clean absence and
+	// a tombstone leave the refusal unrecorded. A record that is there but
+	// cannot be classified (State Unknown: it does not parse, is too large or
+	// cannot be opened), one that fails the owner or DACL check, and a read
+	// that fails record it, as before g079.
+	savedAbsent, savedInspector, savedValidator := windowsSecretDeploymentAbsent, windowsEnterpriseRecordInspector, windowsEnterpriseRecordValidator
+	t.Cleanup(func() {
+		windowsSecretDeploymentAbsent, windowsEnterpriseRecordInspector, windowsEnterpriseRecordValidator = savedAbsent, savedInspector, savedValidator
+	})
+	windowsSecretDeploymentInstalled, windowsSecretDeploymentAbsent = trustedWindowsSecretDeploymentInstalled, trustedWindowsSecretDeploymentAbsent
+	for _, tc := range []struct {
+		name       string
+		state      winpath.EnterpriseDeploymentState
+		inspectErr error
+		untrusted  error
+		records    bool
+	}{
+		{name: "no record", state: winpath.EnterpriseDeploymentAbsent},
+		{name: "tombstone", state: winpath.EnterpriseDeploymentTombstone},
+		{name: "unclassified record", state: winpath.EnterpriseDeploymentUnknown, records: true},
+		{name: "untrusted record", state: winpath.EnterpriseDeploymentInstalled, untrusted: errors.New("owner is not trusted"), records: true},
+		{name: "failed read", inspectErr: errors.New("the deployment record cannot be inspected"), records: true},
+		{name: "installed", state: winpath.EnterpriseDeploymentInstalled, records: true},
+	} {
+		windowsEnterpriseRecordInspector = func(profile string) (winpath.EnterpriseDeployment, error) {
+			return winpath.EnterpriseDeployment{Profile: profile, State: tc.state}, tc.inspectErr
+		}
+		windowsEnterpriseRecordValidator = func(string) error { return tc.untrusted }
+		before := len(windowsChangeEvents(t, spool))
+		_, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "../escape", fromStdin: true}, "x")
+		if commandExitCode(err) != windowsSecretExitInvalid {
+			t.Fatalf("%s: an unsafe name = %v (exit %d), want 1639", tc.name, err, commandExitCode(err))
+		}
+		events := windowsChangeEvents(t, spool)
+		want := 0
+		if tc.records {
+			want = 1
+		}
+		if len(events)-before != want {
+			t.Fatalf("%s: %d change events, want %d", tc.name, len(events)-before, want)
+		}
+		if tc.records {
+			if ev := events[len(events)-1]; ev.Outcome != enterprisestatus.ChangeRefused || ev.ReasonCode != "invalid_arguments" {
+				t.Fatalf("%s: refusal event = %+v", tc.name, ev)
+			}
+		}
+	}
+}
+
 // An ensure with TRUSTANCHORS= whose BUNDLE= is rejected after the anchors
 // were staged installs no anchors and records one refused anchor install
 // with the bundle's refusal code. Before, the run staged the anchors and
@@ -430,7 +511,7 @@ func TestWindowsAnchorsLockRefusalRecordsOneChangeEvent(t *testing.T) {
 // The real Windows creator must stamp both directories, including the
 // protected flag, on a never-bundled install and on an inherited parent.
 func TestWindowsChangeSpoolProtectsTheBundleParent(t *testing.T) {
-	if !windowsEnterpriseIsElevated() {
+	if !testTokenIsElevated() {
 		t.Skip("setting the Administrators owner requires elevation")
 	}
 	service, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + managed.StandaloneWindowsGatewaySvc)
@@ -446,7 +527,7 @@ func TestWindowsChangeSpoolProtectsTheBundleParent(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			spool, err := windowsChangeSpool(layout)
+			spool, err := protectedWindowsChangeSpool(layout)
 			if err != nil {
 				t.Fatal(err)
 			}

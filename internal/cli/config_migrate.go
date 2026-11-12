@@ -282,19 +282,21 @@ func expandMigrationInputPath(path string) string {
 // config_version 8 administrator config installed by Setup is migrated to 9
 // in place (config.yaml.v8.bak, migration-v9.json, actor lifecycle), and an
 // installed config the writer has not recorded gets its
-// config.generation.json entry. The caller has already pinned the managed
+// config.generation.json entry. approvedSHA256 is the sha256 of the approved
+// source this run installed at path (Setup's CONFIG=), "" when it installed
+// none: a hand-edit record of exactly those bytes is the lifecycle's own
+// write that the hook guardian claimed, and it is recorded again as the
+// lifecycle's generation (GAP-0646). Without an approved source a hand-edit
+// record stays a hand edit. The caller has already pinned the managed
 // standalone environment.
-func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
+func migrateManagedStandaloneConfig(ctx context.Context, path, approvedSHA256 string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure"}
-	if bundleOpt, ok, err := managedStandaloneBundleGeneration(path, raw); err != nil {
+	opt, err := managedStandaloneLifecycleRecordOptions(path, raw, "enterprise windows ensure")
+	if err != nil {
 		return err
-	} else if ok {
-		opt = bundleOpt
-		opt.ExpectSHA256 = configwrite.SHA256Hex(raw)
 	}
 	// A staged bundle binds the bytes already installed through the
 	// generation record alone. An unreadable record is the only evidence of
@@ -308,7 +310,7 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 	// record that decodes only in part (a truncated write) proves no counter
 	// either; the Windows ensure recovers a provable one before this step.
 	if _, err := configwrite.ReadGenerationState(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("cannot prove the previous config generation from %s; restore that file from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
+		return fmt.Errorf("cannot prove the previous config generation from %s; restore that file from the last verified administrator backup, then run %s.%s", configwrite.GenerationPath(path), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1"), windowsEnterpriseSetupSourceNote)
 	}
 	restoreACL, err := keepConfigDACL(path)
 	if err != nil {
@@ -346,6 +348,16 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 		}
 	}
 	if !fromBundle {
+		// Bytes the hook guardian kept as an edit it could not record yet
+		// (it could not tell whether a lifecycle run owned config.yaml) are
+		// recorded as that hand edit first, so this step goes on exactly as
+		// if the guardian had recorded them, and never adopts them as the
+		// lifecycle's (GAP-0646 review L2, REVIEW-g646 #5).
+		if handEdit, ok := managedConfigHandEditOptions(path, raw, approvedSHA256, "the Windows lifecycle config step"); ok {
+			if _, err := configwrite.Locked(ctx, path, handEdit, func() (bool, error) { return true, nil }); err != nil {
+				return err
+			}
+		}
 		if repaired, err := repairManagedStandaloneCursorFailMode(ctx, path, raw, opt); err != nil {
 			return err
 		} else if repaired {
@@ -354,16 +366,51 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 	}
 	if state, err := configwrite.ReadGenerationState(path); err == nil &&
 		state.ConfigSHA256 == configwrite.SHA256Hex(raw) &&
+		(!configwrite.IsHandEditActor(state.Actor) || !strings.EqualFold(approvedSHA256, configwrite.SHA256Hex(raw))) &&
 		(opt.Bundle.ID == "" || managedStandaloneGenerationMatches(state, raw, opt)) {
 		// Already recorded, but the record still takes the DACL of the
 		// config: an uninstall that keeps state leaves it administrator-only,
 		// and the gateway service reads it for its generation (GAP-0293).
 		return restoreACL(written...)
 	}
+	// Bytes this run installed from its approved source are recorded only
+	// as those bytes: a config.yaml that changed after the check above is a
+	// conflict, never the lifecycle's generation (GAP-0646 review 4).
+	if approvedSHA256 != "" && strings.EqualFold(approvedSHA256, configwrite.SHA256Hex(raw)) {
+		opt.RecordSHA256 = approvedSHA256
+	}
+	managedStandaloneConfigBeforeRecord(path)
 	if _, err := configwrite.Locked(ctx, path, opt, func() (bool, error) { return true, nil }); err != nil {
 		return err
 	}
+	if opt.RecordSHA256 != "" {
+		// This run installed exactly these bytes from its approved source:
+		// a hand edit kept for them is approved now.
+		forgetManagedConfigHandEdit(path, raw)
+	}
 	return restoreACL(written...)
+}
+
+// managedStandaloneConfigBeforeRecord runs just before the config step
+// records the installed config.yaml. A seam for tests.
+var managedStandaloneConfigBeforeRecord = func(string) {}
+
+// managedStandaloneLifecycleRecordOptions is what the Windows standalone
+// lifecycle records for raw at path: the lifecycle actor with reason, or the
+// principal and bundle of a bundle staged for those bytes. Setup's pre-step
+// and the transaction's config step use it, so a config.yaml either of them
+// writes is recorded the same way (GAP-0646).
+func managedStandaloneLifecycleRecordOptions(path string, raw []byte, reason string) (configwrite.Options, error) {
+	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: reason}
+	bundleOpt, ok, err := managedStandaloneBundleGeneration(path, raw)
+	if err != nil {
+		return opt, err
+	}
+	if ok {
+		opt = bundleOpt
+		opt.ExpectSHA256 = configwrite.SHA256Hex(raw)
+	}
+	return opt, nil
 }
 
 // repairManagedStandaloneCursorFailMode writes config.RepairMigratedCursorFailMode
@@ -467,9 +514,14 @@ func recordRestoredManagedStandaloneConfig(ctx context.Context, path string) err
 	if err != nil {
 		return fmt.Errorf("read the access control list of %s: %w", path, err)
 	}
-	if _, err := configwrite.Locked(ctx, path, configwrite.Options{
-		Actor: configwrite.ActorLifecycle, Reason: "enterprise windows rollback",
-	}, func() (bool, error) { return true, nil }); err != nil {
+	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows rollback"}
+	// A restored config the hook guardian kept as a hand edit (recorded as
+	// one before this run recorded its own, or one it could not record) is
+	// recorded as that edit again, not as the rollback's (GAP-0646 review L2).
+	if handEdit, kept := managedConfigHandEditOptions(path, raw, "", "an enterprise windows rollback"); kept {
+		opt = handEdit
+	}
+	if _, err := configwrite.Locked(ctx, path, opt, func() (bool, error) { return true, nil }); err != nil {
 		return err
 	}
 	return restoreACL(configwrite.GenerationPath(path))
@@ -544,7 +596,7 @@ func repairManagedStandaloneConfigGeneration(ctx context.Context, path string, a
 	}
 	opt.RecordSHA256 = configwrite.SHA256Hex(approved)
 	if opt.GenerationFloor == 0 {
-		return false, fmt.Errorf("cannot prove the previous config generation; restore %s from the last verified administrator backup, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1", configwrite.GenerationPath(path))
+		return false, fmt.Errorf("cannot prove the previous config generation; restore %s from the last verified administrator backup, then run %s.%s", configwrite.GenerationPath(path), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1"), windowsEnterpriseSetupSourceNote)
 	}
 	restoreACL, err := keepConfigDACL(path)
 	if err != nil {

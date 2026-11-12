@@ -296,6 +296,9 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	)
 	respellTrustedPOSIXHomeTilde(&facts, homeRewrittenCommands, homeTildeOperands)
 	resolveTrustedDriveHomePaths(&facts)
+	if drive := strings.ToLower(input.CurrentWindowsDrive); len(drive) == 1 && drive >= "a" && drive <= "z" {
+		facts.CurrentWindowsDrive = drive
+	}
 	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
 	facts.ActiveAgentFilesCaseInsensitive = cloneSlice(
 		activeAgentFilesCaseInsensitive,
@@ -370,7 +373,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	facts.POSIXNonRootUIDZeroAccountWrites =
 		projectPOSIXNonRootUIDZeroAccountWrites(input)
 	facts.POSIXUnrestrictedSudoersGrantWrites =
-		projectPOSIXUnrestrictedSudoersGrantWrites(input)
+		projectPOSIXUnrestrictedSudoersGrantWrites(input, facts)
 	return facts
 }
 
@@ -467,7 +470,7 @@ func analyzeStructuredArgv(
 		nestedDialect = DialectNone
 	)
 	switch program {
-	case "env", "sudo", "command", "exec", "nsenter", "chroot":
+	case "env", "sudo", "command", "builtin", "exec", "nsenter", "chroot":
 		nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(argv, program)
 		if uncertain {
 			out.markUnsupported(IssueUnsupportedConstruct)
@@ -794,7 +797,7 @@ func exactTransparentPOSIXWrapper(
 		return false
 	}
 	switch command.Program {
-	case "env", "command", "exec":
+	case "env", "command", "builtin", "exec":
 		nested, ok, uncertain := staticPOSIXWrapperArgv(
 			command.Argv,
 			command.Program,
@@ -1482,6 +1485,14 @@ type toolArgumentSemantics struct {
 	flow               toolFlow
 }
 
+// PathTool reports whether tool is a reviewed file-path tool: one whose typed
+// arguments name the files it reads, writes, appends to, copies or patches.
+// Shell, network and unknown tools are not.
+func PathTool(tool string) bool {
+	semantics, known := lookupToolArgumentSemantics(tool)
+	return known && semantics.acceptsPaths
+}
+
 func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 	if tool == "" || strings.TrimSpace(tool) != tool {
 		return toolArgumentSemantics{}, false
@@ -2037,6 +2048,7 @@ func equivalentCommandFact(left, right CommandFact) bool {
 		left.Program != right.Program ||
 		left.ArgvComplete != right.ArgvComplete ||
 		left.LiteralStdin != right.LiteralStdin ||
+		left.LiteralStdinView != right.LiteralStdinView ||
 		left.LiteralStdinComplete != right.LiteralStdinComplete ||
 		left.LiteralStdinAmbiguous != right.LiteralStdinAmbiguous ||
 		!equivalentCommandArgv(left.Argv, right.Argv, left.Dialect) ||

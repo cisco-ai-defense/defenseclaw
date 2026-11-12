@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -60,7 +62,7 @@ func standaloneEnterpriseHookExecutable(executable string) bool {
 	if !strings.EqualFold(filepath.Base(bin), "bin") {
 		return false
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
+	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return false
 	}
@@ -355,6 +357,58 @@ func enterpriseManagedHookRuntimeFailMode() string {
 	return "closed"
 }
 
+// windowsConnectorRemovedFromRoster reports whether a hook call for name is
+// the call of an agent still running after the administrator removed the
+// connector from the roster. The hook runs as the user and cannot read the
+// administrator-only removed-connectors record, so it reads the guardian's
+// off-roster marker from the machine hook runtime directory (user-readable,
+// administrator-owned, the directory of the undo closure). A seam for tests.
+var windowsConnectorRemovedFromRoster = func(executable, name string) bool {
+	if !enterprisehooks.WindowsConnectorOffRosterConnector(name) || !standaloneEnterpriseHookCheck(executable) {
+		return false
+	}
+	if held, err := windowsStandaloneHooksHeldClosed(); held || err != nil {
+		return false
+	}
+	off, err := windowsConnectorOffRosterRead(name)
+	return err == nil && off
+}
+
+// windowsConnectorOffRosterRead is replaceable in tests.
+var windowsConnectorOffRosterRead = enterprisehooks.WindowsConnectorOffRoster
+
+// windowsExcludedAccountNoop reports whether a hook call is the call of an
+// account the current machine policy excludes from enrollment
+// (exclude_users). That account is not governed, so it holds no row in the
+// protected target set, and the resolver answers "absent from the protected
+// target set", the answer of an account whose enrollment is still pending. It
+// is allowed without a verdict, as an account the policy does not cover is,
+// only when the resolver failed for that reason alone, the hook is the
+// standalone one, the hot-config undo closure is neither held nor unreadable,
+// and the running gateway service answers, on its own-status pipe, that its
+// current configuration excludes the account that connected. The hook cannot
+// read that configuration, and no file it can read grants the pass: a gateway
+// that is down, an answer that is slow or unreadable, and any other state
+// keep the refusal, which still tells a new account to wait for its
+// enrollment (GAP-0979).
+func windowsExcludedAccountNoop(executable string, resolveErr error) bool {
+	if !errors.Is(resolveErr, enterprisehooks.ErrWindowsManagedSIDUnregistered) || !standaloneEnterpriseHookCheck(executable) {
+		return false
+	}
+	if held, err := windowsStandaloneHooksHeldClosed(); held || err != nil {
+		return false
+	}
+	excluded, err := windowsCurrentAccountExcluded()
+	return err == nil && excluded
+}
+
+// windowsCurrentAccountExcluded asks the gateway service whether the machine
+// policy excludes the account that runs this process; it is replaceable in
+// tests.
+var windowsCurrentAccountExcluded = func() (bool, error) {
+	return refusalpipe.AccountExcluded(context.Background())
+}
+
 func enterpriseManagedRuntimeAbsenceNoop(
 	executable string,
 	connectorName string,
@@ -370,8 +424,24 @@ func enterpriseManagedRuntimeAbsenceNoop(
 	) {
 		return true
 	}
+	if windowsExcludedAccountNoop(executable, resolveErr) {
+		return true
+	}
 	if resolveErr != nil || policyActive || registered {
 		return false
+	}
+	// On the standalone profile a hook call a running agent still makes for
+	// Claude Code or Codex from its cached settings is allowed, with no
+	// gateway contact and no token read, as the Cursor tombstone adapter allows
+	// it, only when the administrator took the connector off the roster
+	// (GAP-0916): the connector's machine policy is gone and the guardian has
+	// published the connector as off the roster, and the hot-config undo
+	// closure is neither held nor unreadable. Anything else, a failed undo, a
+	// lifecycle window, a connector still on the roster, falls through to the
+	// refusal below. Secure Client and a process that is not the standalone
+	// hook are unchanged.
+	if windowsConnectorRemovedFromRoster(executable, connectorName) {
+		return true
 	}
 	// An absent machine target is a trusted no-op only for the stable per-user
 	// launcher after its installer-owned state has become an inactive
@@ -439,6 +509,21 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	if !prepared || err == nil {
 		return ""
+	}
+	// A registered account with no runtime selected for it is pending, not
+	// drifted (GAP-1026): the guardian publishes a runtime only in the
+	// account's own connected session, and revokes the selection when its
+	// protected record is gone. The resolver tags that missing selection as
+	// drift when no integrity finding backs it, so an account that had been
+	// enrolled was told DefenseClaw "is not set up correctly" and to contact
+	// its administrator, while it only waits for a connected session. A
+	// standalone account is refused either way; Secure Client keeps its class,
+	// whose fail mode differs (a pending account follows the profile's open
+	// default, a drifted one the mode its authenticated generation names).
+	if errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending) &&
+		enterprisehooks.WindowsManagedRuntimeFailureClassOf(err) == enterprisehooks.WindowsManagedRuntimeFailureDrift &&
+		standaloneEnterpriseHookCheck(nativeHookExecutable()) {
+		return enterprisehooks.WindowsManagedEnrollmentPendingReason
 	}
 	switch enterprisehooks.WindowsManagedRuntimeFailureClassOf(err) {
 	case enterprisehooks.WindowsManagedRuntimeFailureUnregistered:
@@ -679,4 +764,19 @@ func windowsHookPathHasNoReparsePoints(path string) bool {
 		}
 		cursor = parent
 	}
+}
+
+// enterpriseManagedHookRuntimeEnrolledPending reports whether reason is the
+// enrollment-pending refusal of an account the guardian enrolled for this
+// connector before (GAP-1026): a standalone hook only. A never-enrolled
+// account is refused with the enrollment wait text, and Secure Client keeps
+// its texts.
+func enterpriseManagedHookRuntimeEnrolledPending(reason string) bool {
+	if reason != enterprisehooks.WindowsManagedEnrollmentPendingReason || !standaloneEnterpriseHookCheck(nativeHookExecutable()) {
+		return false
+	}
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	home, connector := nativeEnterpriseHookRuntimeSnapshot.home, nativeEnterpriseHookRuntimeSnapshot.connector
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	return enterpriseConnectorEnrolledBefore(home, connector)
 }

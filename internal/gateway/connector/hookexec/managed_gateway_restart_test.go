@@ -236,7 +236,7 @@ func TestWatchGatewayStarts(t *testing.T) {
 			defer cancel(nil)
 			finished := make(chan struct{})
 			go func() {
-				watchGatewayStarts(ctx, done, cancel, probe, time.Millisecond, deadline)
+				watchGatewayStarts(ctx, done, cancel, probe, time.Millisecond, gatewayRunningWatchInterval, deadline)
 				close(finished)
 			}()
 			select {

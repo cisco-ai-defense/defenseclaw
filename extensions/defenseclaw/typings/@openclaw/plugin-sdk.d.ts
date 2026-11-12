@@ -39,6 +39,18 @@ declare module "@openclaw/plugin-sdk" {
     };
   }
 
+  interface ToolResultPersistEvent {
+    toolName?: string;
+    toolCallId?: string;
+    message: unknown;
+  }
+
+  interface ToolResultPersistContext {
+    sessionKey?: string;
+    toolName?: string;
+    toolCallId?: string;
+  }
+
   export interface ToolContext {
     agentId?: string;
     sessionKey?: string;
@@ -63,16 +75,18 @@ declare module "@openclaw/plugin-sdk" {
 
   interface ServiceRegistration {
     id: string;
-    start: () => Promise<{ stop: () => void }>;
+    start: () => Promise<{ stop: () => void } | void>;
+    /** Called by current OpenClaw releases when the service is replaced or removed. */
+    stop?: () => void | Promise<void>;
   }
 
   export interface PluginApi {
     on(event: "before_tool_call", handler: (event: BeforeToolCallEvent, ctx?: ToolContext) => BeforeToolCallResult | void | Promise<BeforeToolCallResult | void>): void;
+    on(event: "tool_result_persist", handler: (event: ToolResultPersistEvent, ctx?: ToolResultPersistContext) => { message?: unknown } | void): void;
+    on(event: "before_prompt_build", handler: () => { prependContext: string } | void | Promise<{ prependContext: string } | void>): void;
     on(event: string, handler: (...args: any[]) => void | Promise<void>): void;
     registerCommand(def: CommandRegistration): void;
     registerService(def: ServiceRegistration): void;
-    /** OpenClaw plugin configuration (see openclaw.plugin.json configSchema). */
-    getPluginConfig?: () => Promise<Record<string, unknown>>;
     /** VS Code–style extension globalState for stable ids (optional). */
     globalState?: {
       get(key: string): unknown;

@@ -137,7 +137,7 @@ func TestManagedInstallLayoutTargets(t *testing.T) {
 	install := filepath.Join(sep, "pf", "DefenseClaw")
 	state := filepath.Join(sep, "pd", "DefenseClaw")
 	ipc := filepath.Join(install, "ipc")
-	targets := ManagedInstallLayout{InstallRoot: install, StateRoot: state, IPCDirectory: ipc}.targets()
+	targets := ManagedInstallLayout{InstallRoot: install, StateRoot: state, IPCDirectory: ipc, Standalone: true}.targets()
 	var got []string
 	for _, target := range targets {
 		got = append(got, string(target.kind)+":"+target.path)
@@ -163,6 +163,7 @@ func TestManagedInstallLayoutTargets(t *testing.T) {
 		"AdminDirectory:" + filepath.Join(state, "logs", "guardian"),
 		"AdminDirectory:" + filepath.Join(state, "logs", "cmid-broker"),
 		"ConfigFile:" + filepath.Join(state, "etc", "config.yaml"),
+		"ConfigFile:" + filepath.Join(state, "etc", "config.yaml.lock"),
 		"AdminFile:" + filepath.Join(state, "hook-guardian", "targets.yaml"),
 		"AdminFile:" + filepath.Join(state, "install", "deployment.json"),
 		"AdminFile:" + filepath.Join(state, "install", "agent-application-control-attestation.json"),
@@ -195,6 +196,27 @@ func TestManagedInstallLayoutTargets(t *testing.T) {
 	}
 	if got := (ManagedInstallLayout{}).targets(); len(got) != 0 {
 		t.Fatalf("empty layout targets = %+v", got)
+	}
+}
+
+// Secure Client behaviour stays unchanged: its layout lists the objects it
+// listed before, none of the standalone profile's lazily created locks.
+func TestManagedInstallLayoutLazyLocksAreStandaloneOnly(t *testing.T) {
+	state := filepath.Join(string(filepath.Separator), "state")
+	lock := filepath.Join(state, "etc", "config.yaml.lock")
+	has := func(layout ManagedInstallLayout) bool {
+		for _, target := range layout.targets() {
+			if target.path == lock {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(ManagedInstallLayout{StateRoot: state, Standalone: true}) {
+		t.Error("the standalone layout must list the config lock")
+	}
+	if has(ManagedInstallLayout{StateRoot: state}) {
+		t.Error("the Secure Client layout must not list the config lock")
 	}
 }
 

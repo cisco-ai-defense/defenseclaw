@@ -101,10 +101,20 @@ func newSidecarRuntimeFixtureExportingTo(
 	off ...observability.Bucket,
 ) sidecarRuntimeFixture {
 	t.Helper()
+	return newSidecarRuntimeFixtureExportingToInDir(t, t.TempDir(), signer, remote, off...)
+}
+
+func newSidecarRuntimeFixtureExportingToInDir(
+	t *testing.T,
+	directory string,
+	signer audit.ProjectionIntegritySigner,
+	remote delivery.Adapter,
+	off ...observability.Bucket,
+) sidecarRuntimeFixture {
+	t.Helper()
 	previousInstanceID := gatewaylog.SidecarInstanceID()
 	gatewaylog.SetSidecarInstanceID("sidecar-runtime-test")
 	t.Cleanup(func() { gatewaylog.SetSidecarInstanceID(previousInstanceID) })
-	directory := t.TempDir()
 	path := filepath.Join(directory, "audit.db")
 	store := newMigratedTestAuditStore(t, path)
 	retentionDays := 0

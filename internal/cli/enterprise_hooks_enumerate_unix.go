@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -151,7 +152,7 @@ func runEnterpriseHooksRevokeGone(ctx context.Context, stdout, stderr io.Writer,
 	if err := enterpriseHooksRevokeGoneRootCheck(); err != nil {
 		return err
 	}
-	current, err := enterpriseHooksEnumerateConfigLoader()
+	current, _, err := enterpriseHooksEnumerateConfigLoader()
 	if err != nil {
 		return fmt.Errorf("enterprise hooks revoke-gone: load managed config: %w", err)
 	}
@@ -277,10 +278,14 @@ func enterpriseHookEnumeratorStatePath(manifestPath string) string {
 	return filepath.Join(filepath.Dir(manifestPath), enterpriseHookEnumeratorStateFile)
 }
 
-// enterpriseHooksEnumerateConfigLoader is replaceable in tests.
-var enterpriseHooksEnumerateConfigLoader = func() (*config.Config, error) {
-	loaded, _, err := loadGatewayConfigV8(config.ConfigPath())
-	return loaded, err
+// enterpriseHooksEnumerateConfigLoader returns the config and the sha256 of
+// the file bytes it was parsed from. It is replaceable in tests.
+var enterpriseHooksEnumerateConfigLoader = func() (*config.Config, string, error) {
+	loaded, _, source, err := loadGatewayConfigV8Source(config.ConfigPath())
+	if err != nil {
+		return nil, "", err
+	}
+	return loaded, configwrite.SHA256Hex(source), nil
 }
 
 func runEnterpriseHooksEnumerateCycle(
@@ -291,11 +296,37 @@ func runEnterpriseHooksEnumerateCycle(
 	state *enterprisehooks.UnixEnumeratorState,
 ) (enterpriseHooksEnumerateReport, error) {
 	report := enterpriseHooksEnumerateReport{Manifest: manifestPath}
-	// Reload each cycle so an administrator's enrollment change applies
+	// Capture before loading the config. A lifecycle update during this
+	// cycle leaves its record on the older generation, so status waits for
+	// a later scan of the new inputs (GAP-0640).
+	var configGeneration uint64
+	var snapshotSHA256 string
+	if state, err := configwrite.ReadGenerationState(config.ConfigPath()); err == nil {
+		configGeneration, snapshotSHA256 = state.Generation, state.ConfigSHA256
+	}
+	// A cycle that starts on a config its record does not name says so before
+	// the scan, so the lifecycle change that restarted this enumerator sees
+	// the new generation at once and waits for the result (GAP-0782).
+	if !opts.dryRun {
+		if err := enterpriseHooksEnumerateScanStartedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), configGeneration, snapshotSHA256); err != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the start of the scan: %v\n", err)
+		}
+	}
+	// Reload each cycle so an administrator enrollment change applies
 	// without restarting the service.
-	current, err := enterpriseHooksEnumerateConfigLoader()
+	current, loadedSHA256, err := enterpriseHooksEnumerateConfigLoader()
 	if err != nil {
 		return report, fmt.Errorf("load managed config: %w", err)
+	}
+	// The stamp names the bytes this scan parsed. A generation number can be
+	// reused after the record is rebuilt, and a digest read in a separate
+	// step can name a file edited and restored around the load, so the digest
+	// comes from the load itself and the number counts only while both agree.
+	// A scan whose snapshot and loaded bytes differ is stamped empty and
+	// waits for the next cycle.
+	configSHA256 := loadedSHA256
+	if loadedSHA256 == "" || snapshotSHA256 != loadedSHA256 {
+		configGeneration, configSHA256 = 0, ""
 	}
 	if !current.StandaloneEnterprise() {
 		return report, errors.New("the managed config is no longer the standalone profile")
@@ -373,8 +404,16 @@ func runEnterpriseHooksEnumerateCycle(
 	}
 	// Status and verify report agents found installed but not enrollable,
 	// so an unprotected agent is never a silent gap.
-	if err := enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected); err != nil {
+	if err := replaceEnterpriseHookUnprotectedAgentsRecord(current.DataDir, func() error {
+		return enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected, configGeneration, configSHA256)
+	}); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents: %v\n", err)
+	}
+	// The gateway cannot read that root-only record; it answers a user own
+	// status from a copy of the record as it stands, whether or not this
+	// cycle could replace it (rel-1-0-6 GAP-0789).
+	if err := enterpriseHooksEnumerateGatewayAgents(current.DataDir, enterprisehooks.UnprotectedAgentsPath(manifestPath)); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents for the gateway: %v\n", err)
 	}
 	if !manifestMode {
 		if err := enterpriseHooksEnumerateRefusedWriter(current.DataDir, cycle.RefusedSurfaces); err != nil {
@@ -407,8 +446,10 @@ func enterpriseHooksEnumerateDiscoveryBudget(interval time.Duration) time.Durati
 var (
 	enterpriseHooksEnumerateManifestWriter    = enterprisehooks.WriteUnixTargetsManifestAtomic
 	enterpriseHooksEnumerateEligibleWriter    = enterprisehooks.WriteUnixEnumeratorAccounts
-	enterpriseHooksEnumerateUnprotectedWriter = enterprisehooks.WriteUnixUnprotectedAgents
+	enterpriseHooksEnumerateUnprotectedWriter = enterprisehooks.WriteUnixUnprotectedAgentsForConfig
+	enterpriseHooksEnumerateScanStartedWriter = enterprisehooks.WriteUnixUnprotectedAgentsScanStarted
 	enterpriseHooksEnumerateRefusedWriter     = writeEnterpriseHookRefusedSurfaces
+	enterpriseHooksEnumerateGatewayAgents     = publishEnterpriseHookUnixGatewayUnprotectedAgents
 )
 
 // enterpriseHooksEnumerateResolver is replaceable in tests.
@@ -512,6 +553,15 @@ func enterpriseHooksEnumerateDiscoverAll(ctx context.Context, account unixidenti
 			versions[name] = version
 		}
 	}
+	sources := map[string]string{}
+	for name, source := range response.VersionSources {
+		// Only a path the worker could have run: absolute, clean, bounded.
+		// The enumerator accepts it only as one of the connector own CLI
+		// candidates (see carryVerifiedAgentVersions).
+		if wanted[name] && versions[name] != "" && len(source) <= 512 && filepath.IsAbs(source) && filepath.Clean(source) == source {
+			sources[name] = source
+		}
+	}
 	reasons := map[string]string{}
 	for name, reason := range response.Reasons {
 		if wanted[name] {
@@ -567,7 +617,7 @@ func enterpriseHooksEnumerateDiscoverAll(ctx context.Context, account unixidenti
 		privateInstalls = append(privateInstalls, install)
 	}
 	privateInstalls = append(privateInstalls, incompletes...)
-	return enterprisehooks.UnixDiscovery{Versions: versions, Reasons: reasons, Surfaces: surfaces, PrivateInstalls: privateInstalls}, nil
+	return enterprisehooks.UnixDiscovery{Versions: versions, Reasons: reasons, VersionSources: sources, Surfaces: surfaces, PrivateInstalls: privateInstalls}, nil
 }
 
 // enterpriseHookSessionUIDs lists uids with a live login session:
@@ -675,4 +725,13 @@ func writeEnterpriseHookRefusedSurfaces(dataDir string, refused []enterprisehook
 		return err
 	}
 	return enterpriseHookAuthorizationFileTrustCheck(path)
+}
+
+// publishEnterpriseHookUnixGatewayUnprotectedAgents makes sure the guardian
+// state directory is the ledger one and mirrors the record for the gateway.
+func publishEnterpriseHookUnixGatewayUnprotectedAgents(dataDir, rootRecordPath string) error {
+	if err := ensureEnterpriseHookStandaloneAuthDir(managed.HookGuardianAuthorizationDir(dataDir)); err != nil {
+		return err
+	}
+	return mirrorEnterpriseHookGatewayUnprotectedAgents(dataDir, rootRecordPath)
 }

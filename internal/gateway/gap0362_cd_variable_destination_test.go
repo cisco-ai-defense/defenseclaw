@@ -47,9 +47,11 @@ func TestGAP0362CdVariableCopyDestination(t *testing.T) {
 		{"ordinary and pushd", `pushd ~/proj && f=out2.txt; cp a.txt $f`, false},
 		{"ordinary and subshell cd", `(cd ~/proj && f=out2.txt; cp a.txt $f)`, false},
 	}
-	// GAP-0402 keeps nested words after pushd, cd options and a subshell
-	// unknown. The managed benign twins retain that known conservative
-	// false block until those bindings have placed client evidence.
+	// GAP-0402 kept nested words after pushd, cd options and a subshell
+	// unknown, so the managed benign twins below were a recorded
+	// conservative false block. The straight-line walk now reads the
+	// destination of each of them exactly (rel-1-0-6:GAP-0880, GAP-0885), so
+	// those twins allow in every profile; the protected rows block as before.
 	for _, scope := range []struct{ name, start, end string }{
 		{"subshell cd", `(cd ~/proj && f=%s; `, `)`},
 		{"subshell pushd", `(pushd ~/proj && f=%s; `, `)`},
@@ -102,14 +104,14 @@ func TestGAP0362CdVariableCopyDestination(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					// GAP-0402 records the conservative managed false block for
-					// these nested pushd, cd-option and subshell benign twins.
-					wantBlock := row.block || managed && strings.Contains(row.name, "/")
+					// The GAP-0402 managed false block of the nested pushd,
+					// cd-option and subshell benign twins is gone: every row
+					// with row.block false allows, with row.block true it blocks.
 					want := `{"action":"allow"`
-					if wantBlock {
+					if row.block {
 						want = `{"action":"block"`
 					}
-					if !strings.HasPrefix(got, want) || wantBlock && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+					if !strings.HasPrefix(got, want) || row.block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%q = %.300s, want %s", row.command, got, want)
 					}
 				})

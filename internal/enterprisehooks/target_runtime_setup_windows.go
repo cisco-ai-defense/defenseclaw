@@ -255,14 +255,14 @@ func ProtectWindowsManagedRuntimeAdminFile(path string) error {
 // contract, and each planned root's identity is pinned into the plan. On
 // Secure Client a drifted retained root is re-stamped to it first (recorded in
 // RepairedProfiles) and a profile that still cannot be planned is skipped
-// with its rows kept; the standalone profile and strict mode refuse both.
+// with its rows kept; the direct standalone plan and strict mode refuse both.
 // Absent roots receive independent random staging names and marker SIDs.
 func PlanWindowsManagedRuntimeRoots(
 	manifest Manifest,
 	manifestPath string,
 	manifestSHA256 string,
 ) (WindowsManagedRuntimePlan, error) {
-	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, false, nil)
+	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, false, false, nil)
 }
 
 // PlanWindowsManagedRuntimeRootsForValidation is the Upgrade/Repair plan. It
@@ -277,7 +277,23 @@ func PlanWindowsManagedRuntimeRootsForValidation(
 	manifestPath string,
 	manifestSHA256 string,
 ) (WindowsManagedRuntimePlan, error) {
-	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, true, nil)
+	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, true, false, nil)
+}
+
+// PlanWindowsManagedRuntimeRootsForValidationSkippingAccountFailures is the
+// standalone lifecycle's validation plan. A profile whose runtime root is
+// unusable is recorded as skipped while the other profiles proceed. No
+// skipped root is followed, repaired, or accepted for that account. The
+// direct validation plan above remains strict for callers checking one user.
+func PlanWindowsManagedRuntimeRootsForValidationSkippingAccountFailures(
+	manifest Manifest,
+	manifestPath string,
+	manifestSHA256 string,
+) (WindowsManagedRuntimePlan, error) {
+	if !windowsEnterpriseStandaloneProcess() {
+		return WindowsManagedRuntimePlan{}, errors.New("enterprise hooks: account-level validation skips require standalone")
+	}
+	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, true, true, nil)
 }
 
 // PlanWindowsManagedRuntimeRootsSkippingBusyProfiles plans like
@@ -301,14 +317,14 @@ func PlanWindowsManagedRuntimeRootsSkippingBusyProfiles(
 	if publish == nil {
 		return WindowsManagedRuntimePlan{}, fmt.Errorf("enterprise hooks: skipping busy profiles requires a manifest publisher")
 	}
-	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, false, publish)
+	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, false, false, publish)
 }
 
 func planWindowsManagedRuntimeRoots(
 	manifest Manifest,
 	manifestPath string,
 	manifestSHA256 string,
-	validation bool,
+	validation, skipAccountFailures bool,
 	publish func(Manifest) (string, error),
 ) (WindowsManagedRuntimePlan, error) {
 	var plan WindowsManagedRuntimePlan
@@ -323,13 +339,11 @@ func planWindowsManagedRuntimeRoots(
 	if !validWindowsManagedRuntimeDigest(manifestSHA256) {
 		return plan, fmt.Errorf("enterprise hooks: invalid managed runtime manifest SHA-256")
 	}
-	// A Secure Client plan keeps going past one profile it cannot use
-	// (26.8.4): that user is skipped, and an Install, Upgrade or Repair plan
-	// re-stamps a drifted retained root first. The standalone profile keeps
-	// main's plan, where such a profile fails the lifecycle, and strict mode
-	// keeps it on both profiles. A per-user install folder is refused
-	// everywhere.
-	resilient := !windowsEnterpriseStandaloneProcess() && !managed.TrustStrictAncestors()
+	// Secure Client skips an unusable profile and may repair its retained
+	// root. Standalone lifecycle validation also skips that account, without
+	// repairing or following its folder. Direct standalone validation and
+	// strict mode still return the account failure.
+	resilient := !managed.TrustStrictAncestors() && (!windowsEnterpriseStandaloneProcess() || skipAccountFailures)
 	var (
 		targets []windowsManagedRuntimeTarget
 		skipped []WindowsManagedRuntimeSkippedProfile

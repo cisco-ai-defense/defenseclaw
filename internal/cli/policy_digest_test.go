@@ -121,3 +121,30 @@ func TestPolicyDigestReportsWhetherTheGatewayAppliedIt(t *testing.T) {
 		t.Fatalf("report without a digest: state=%+v warnings=%s", state, codes(result))
 	}
 }
+
+func TestPolicyDigestRecordedHandEditRecoveryByWindowsDeploymentMode(t *testing.T) {
+	for _, tc := range []struct {
+		name, extra, want, absent string
+	}{
+		{
+			name: "signed bundle", extra: `,"gateway_reported_bundle_id":"b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8"`,
+			want: "enterprise windows repair", absent: "/ensure CONFIG=",
+		},
+		{
+			name: "standalone config", want: "ensure with the intended config", absent: "enterprise windows repair",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := enterprisestatus.New("verify", "standalone", "windows", "1.0.9")
+			report := `{"effective_digest":"sha256:` + strings.Repeat("a", 64) +
+				`","config_generation":7,"config_generation_recorded":true,"config_recorded_as_hand_edit":true` + tc.extra + `}`
+			state := applyEnterprisePolicyReport(result, []byte(report), false)
+			if state == nil || !state.ConfigUnrecorded || len(result.Warnings) != 1 ||
+				result.Warnings[0].Code != "config_edited_outside_lifecycle" ||
+				!strings.Contains(result.Warnings[0].Message, tc.want) ||
+				strings.Contains(result.Warnings[0].Message, tc.absent) {
+				t.Fatalf("recovery guidance for %s: state=%+v warnings=%+v", tc.name, state, result.Warnings)
+			}
+		})
+	}
+}

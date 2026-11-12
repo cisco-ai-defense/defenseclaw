@@ -19,8 +19,9 @@ import (
 // repaired here when the object has a canonical form, and what survives is
 // accepted and logged on Secure Client: every file read below is
 // schema-validated and the lifecycle files are hash-bound to the transaction.
-// A standalone process refuses a drifted file without repairing it in place;
-// Setup /repair rewrites it (GAP-0561). Structural failures
+// A standalone process refuses a drifted file without repairing it in place,
+// and Setup refuses it before it stops anything (GAP-0561, GAP-0590).
+// Structural failures
 // (missing element, reparse point, hard link, wrong type, non-NTFS) stay
 // fatal, and TrustStrictAncestorsEnv keeps every verdict fatal.
 var (
@@ -82,6 +83,13 @@ func validateWindowsManagedHooksTrustedDir(path string, kind managed.ObjectKind,
 	if err == nil || managed.TrustStrictAncestors() {
 		return err
 	}
+	// On standalone a folder another account can write or owns is refused
+	// and named, never re-stamped in place (g582 round 4).
+	if kind != "" {
+		if refused := windowsManagedHooksInPlaceRefusal(path, kind); refused != nil {
+			return errors.Join(err, refused)
+		}
+	}
 	if repaired, ensureErr := repairWindowsManagedHooksObject(path, kind); ensureErr != nil {
 		return errors.Join(err, ensureErr)
 	} else if repaired && windowsManagedHooksStrictDirCheck(path, label) == nil {
@@ -89,6 +97,10 @@ func validateWindowsManagedHooksTrustedDir(path string, kind managed.ObjectKind,
 	}
 	return managed.ValidateTrustedRuntimeDirTolerant(path, label)
 }
+
+// windowsManagedHooksInPlaceRefusal is managed.RefuseStandaloneInPlaceRepair;
+// tests replace it.
+var windowsManagedHooksInPlaceRefusal = managed.RefuseStandaloneInPlaceRepair
 
 // repairWindowsManagedHooksObject stamps kind's canonical descriptor on path.
 // EnsureCanonical logs the outcome itself (MarkerRepair, MarkerAccept or

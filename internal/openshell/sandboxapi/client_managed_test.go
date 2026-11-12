@@ -21,6 +21,7 @@ package sandboxapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -105,7 +106,7 @@ func TestUnixClientTalksToTheOwnDaemonOnly(t *testing.T) {
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth = r.Header.Get("Authorization")
 		w.Header().Set("Connection", "close")
-		_, _ = io.WriteString(w, `{"enabled":true}`)
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"enabled":true,"daemon_pid":%d}`, os.Getpid()))
 	})}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -114,6 +115,9 @@ func TestUnixClientTalksToTheOwnDaemonOnly(t *testing.T) {
 	st, err := c.Status(context.Background())
 	if err != nil || !st.Enabled || auth != "" {
 		t.Fatalf("status %+v err %v auth %q", st, err, auth)
+	}
+	if st, pid, err := c.StatusWithPeer(context.Background()); err != nil || !st.Enabled || pid != os.Getpid() {
+		t.Fatalf("verified status %+v pid %d err %v", st, pid, err)
 	}
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatal(err)

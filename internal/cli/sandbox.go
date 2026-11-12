@@ -277,7 +277,7 @@ func managedWindowsSandboxRefusal(err error) error {
 		return err
 	}
 	return fmt.Errorf("%w. %s", err, windowsManagedStandardUserViewAnswer("The sandbox registrations",
-		"enterprise windows sandbox list --user "+managedHostCurrentAccountName()))
+		"enterprise", "windows", "sandbox", "list", "--user", managedHostCurrentAccountName()))
 }
 
 // sandboxRunE adapts a command to cobra: it prints the error once, styled,

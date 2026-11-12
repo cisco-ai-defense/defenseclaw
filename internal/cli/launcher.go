@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -29,6 +30,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
@@ -45,12 +47,27 @@ import (
 // access boundary. Windows has no launcher: its defenseclaw.exe is the
 // administrator command.
 
-const (
-	launcherCommand = "defenseclaw"
+const launcherCommand = "defenseclaw"
 
-	// launcherRefusal answers every command the launcher does not offer.
-	launcherRefusal = "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
-)
+// launcherRefusal answers every command the launcher does not offer.
+var launcherRefusal = launcherRefusalFor(runtime.GOOS)
+
+func launcherRefusalFor(goos string) string {
+	message := "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy."
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		return message
+	}
+	platform := goos
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	// The layout is the target OS's POSIX layout, so join with path, not the
+	// host separator: the text must be the same when a Windows host evaluates
+	// the Linux or macOS refusal (the docs fixture).
+	gateway := path.Join(layout.BinDir, "defenseclaw-gateway")
+	return message + fmt.Sprintf(" For administrator views, run `sudo %s enterprise %s status`, `sudo %s enterprise %s verify`, or `sudo %s audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.", gateway, platform, gateway, platform, gateway)
+}
 
 // launcherArgv0 is the name the process was started under; a seam for tests.
 var launcherArgv0 = func() string {
@@ -81,39 +98,6 @@ func launcherActive() bool {
 	return managedHost
 }
 
-// launcherOffers reports whether the launcher runs args at all. The bare
-// command and the help and version requests show the launcher's own text.
-func launcherOffers(args []string) bool {
-	if len(args) == 0 {
-		return true
-	}
-	switch args[0] {
-	case "sandbox", "-h", "--help", "--version":
-		return true
-	case "status":
-		// The user's own protection state (cowork-1-0-8 GAP-0053).
-		return true
-	case "guardrail":
-		// The user's own guardrail profile (GAP-0431, GAP-0422), and nothing
-		// else of the guardrail tree.
-		return len(args) >= 3 && args[1] == "profile" && args[2] == "explain"
-	case "help":
-		// `help` explains the sandbox tree; cobra would answer `help status`
-		// with the root help, as if status existed. `help --help` is the
-		// help command's own usage: the root help lists `help`, so asking
-		// about it must answer (GAP-0471).
-		if len(args) == 1 {
-			return true
-		}
-		switch args[1] {
-		case "sandbox", "status", "-h", "--help":
-			return true
-		}
-		return false
-	}
-	return false
-}
-
 // prepareLauncherRoot cuts root down to the sandbox tree: the other commands
 // are removed, the gateway's daemon bootstrap and the sidecar run are
 // replaced by the launcher's help, and the help describes the launcher.
@@ -136,13 +120,15 @@ func prepareLauncherRoot(root *cobra.Command) {
 	root.Long = `Your organization manages DefenseClaw on this computer. Here defenseclaw runs
 your coding agents in sandboxes under the policy your organization set for you:
 
-  defenseclaw status                 show whether your Claude Code and Cowork are protected
+  defenseclaw status                 Show whether DefenseClaw protects your Claude Code and Cowork sessions and other managed connectors
   defenseclaw sandbox run claude     run Claude Code in a sandbox
   defenseclaw sandbox status         show your sandbox and managed policy state
   defenseclaw sandbox policy explain show the policy that applies to you
 
 "defenseclaw guardrail profile explain" shows the guardrail profile that
-applies to your agents. Every other DefenseClaw command is for administrators.`
+applies to your agents. Administrator status, verify and audit export use the
+installed defenseclaw-gateway binary; doctor, alerts and tui are not offered
+by this managed launcher.`
 	root.CompletionOptions.DisableDefaultCmd = true
 	// The gateway's own flags (--host, --port, --version-json, ...) belong to
 	// the commands removed above; the launcher refuses them, so its help does

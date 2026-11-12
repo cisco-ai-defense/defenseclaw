@@ -655,7 +655,7 @@ targets:
                 CodexManagedHooksLockPath = (
                     Microsoft.PowerShell.Management\Join-Path `
                         $codexMachinePolicyDirectory `
-                        '.defenseclaw-managed-hooks.lock'
+                        '.defenseclaw-managed-hooks.writer.lock'
                 )
                 CodexTargetEnabled = $false
                 ClaudeTargetEnabled = $true
@@ -1527,7 +1527,8 @@ targets:
         function script:Write-DefenseClawJsonAtomic {
             param(
                 [Parameter(Mandatory)]$Value,
-                [Parameter(Mandatory)][string]$Path
+                [Parameter(Mandatory)][string]$Path,
+                [string]$Kind
             )
             $isPurgeIntent = (
                 $script:HarnessState.ContainsKey('layout') -and
@@ -1613,12 +1614,29 @@ targets:
                 # install that delivers Cowork snapshots its host artifacts.
                 # This harness delivers no Cowork; the stub only accepts it.
                 [switch]$CoworkRequested,
+                # The production function's uninstall-only switch (GAP-0773):
+                # a kept link at the Codex machine-policy folder leaves the
+                # Codex machine state out of the snapshot. This harness has no
+                # such link; the stub only accepts it.
+                [switch]$SkipLinkedCodexMachineState,
                 # The production function's replacement hook, published
                 # before the services stop (GAP-0993). Production types it
                 # [hashtable]; this harness's sources are plain strings, so
                 # the stub keeps it untyped and records what it was given.
-                [object]$EarlyHookSource
+                [object]$EarlyHookSource,
+                # The content gate scope of the transaction's ACL drift
+                # repair (g582 review 2 S1): an uninstall passes Retain, a
+                # purge Purge, every other action the Lifecycle default.
+                [ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$ContentGateScope = 'Lifecycle'
             )
+            $expectedContentGateScope = switch ([string]$script:HarnessState.operation) {
+                'uninstall' { if ([bool]$script:HarnessState['self_purge']) { 'Purge' } else { 'Retain' } }
+                'purge' { 'Purge' }
+                default { 'Lifecycle' }
+            }
+            if ($ContentGateScope -cne $expectedContentGateScope) {
+                throw "transaction content gate scope $ContentGateScope, want $expectedContentGateScope for $([string]$script:HarnessState.operation)"
+            }
             if ($null -ne $EarlyHookSource -and
                 $script:HarnessState.operation -in @('uninstall', 'purge')) {
                 throw (
@@ -2460,8 +2478,12 @@ targets:
                 [string]$InstallRootIdentity = '',
                 [string]$StateRootIdentity = '',
                 [bool]$UninstallPurgeRequested = $false,
-                [bool]$UninstallPurgeUserStateRequested = $false
+                [bool]$UninstallPurgeUserStateRequested = $false,
+                [hashtable]$ApprovedPolicySources = @{}
             )
+            if ($ApprovedPolicySources.Count -ne 0) {
+                throw 'Secure Client deployment metadata recorded approved policy sources'
+            }
             if ($null -eq $ManagedHooksActivation) {
                 throw 'deployment metadata fixture lost managed-hook activation evidence'
             }
@@ -2865,7 +2887,11 @@ targets:
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$Action
+                [Parameter(Mandatory)][string]$Action,
+                # The uninstall's removal passes -Teardown (GAP-0773); this
+                # harness has no Codex machine-policy folder link, so the stub
+                # only accepts it.
+                [switch]$Teardown
             )
             if ($script:HarnessState.ContainsKey(
                     'require_inactive_tombstone_adoption'
@@ -2913,7 +2939,8 @@ targets:
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [switch]$RecordLifecycle
+                [switch]$RecordLifecycle,
+                [string]$ApprovedConfigSHA256
             )
         }
         function script:Wait-DefenseClawEnterpriseReadiness {
@@ -2924,8 +2951,18 @@ targets:
                 [bool]$RequireBroker = $true,
                 [bool]$RequireEnumerator = $true,
                 [int]$TimeoutSeconds = 90,
-                [switch]$AllowFailedTargets
+                [switch]$AllowFailedTargets,
+                [string[]]$AllowedFailedTargetSIDs,
+                [switch]$GuardianCoverageDeferred
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
+            if ($GuardianCoverageDeferred) {
+                # GAP-0947 pin: only the standalone rollback of a held Codex
+                # republish defers the guardian coverage proof.
+                throw 'Secure Client lifecycle deferred the guardian coverage proof'
+            }
             $script:HarnessState.events.Add(
                 'readiness-require-broker:{0}' -f (
                     $RequireBroker.ToString().ToLowerInvariant()
@@ -2945,8 +2982,12 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [string]$ExpectedManifestSHA256,
                 [int]$TimeoutSeconds = 90,
-                [switch]$AllowFailedTargets
+                [switch]$AllowFailedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             if ($script:HarnessState.service_start_modes[
                     $GatewayServiceName
                 ] -ne 4) {
@@ -3026,8 +3067,12 @@ targets:
                 [switch]$AllowTransactionRecordedBrokerAbsence,
                 [switch]$AllowTransactionRecordedEnumeratorAbsence,
                 [string[]]$ExpectedGatewayAccount,
-                [switch]$AcceptDegradedTargets
+                [switch]$AcceptDegradedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             if ($null -ne $ExpectedGatewayAccount) {
                 $script:HarnessState.verified_gateway_account = @($ExpectedGatewayAccount)
             }
@@ -3317,8 +3362,12 @@ targets:
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
-                [switch]$AcceptDegradedTargets
+                [switch]$AcceptDegradedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             return [ordered]@{
                 ok = $true
                 installed = $false
@@ -7578,8 +7627,12 @@ targets:
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
-                [switch]$AcceptDegradedTargets
+                [switch]$AcceptDegradedTargets,
+                [string[]]$AllowedFailedTargetSIDs
             )
+            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
+                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
             return [pscustomobject]@{
                 schema_version = 1
                 ok = $true
@@ -7615,6 +7668,15 @@ targets:
             if ($WithLock) {
                 [IO.File]::WriteAllBytes(
                     $layout.CodexManagedHooksLockPath,
+                    [byte[]]@()
+                )
+                # The lock of 1.0.8 and earlier goes with it (GAP-0650).
+                [IO.File]::WriteAllBytes(
+                    (
+                        Microsoft.PowerShell.Management\Join-Path `
+                            $layout.CodexMachinePolicyDirectory `
+                            '.defenseclaw-managed-hooks.lock'
+                    ),
                     [byte[]]@()
                 )
             }

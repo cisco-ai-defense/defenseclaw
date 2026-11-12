@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // windowsEnterpriseUserCleanupFailureMin is how many failed guardian passes
@@ -22,7 +21,7 @@ const windowsEnterpriseUserCleanupFailureMin = 3
 // windowsEnterpriseUserCleanupsForStatus reads the guardian's per-user
 // cleanup ledger; tests replace it.
 var windowsEnterpriseUserCleanupsForStatus = func() ([]enterpriseHookUserCleanup, error) {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return nil, err
 	}
@@ -54,6 +53,6 @@ func applyWindowsEnterpriseUserCleanupFailures(result *enterprisestatus.Result) 
 	}
 	result.AddWarning("user_cleanup_failing", fmt.Sprintf(
 		"the hook guardian could not remove DefenseClaw's registration of %d connector(s) an account is no longer enrolled for, and retries it on every pass: %s. "+
-			"The registration stays in that account's agent configuration until it is removed. Fix what the reason names, then run %s",
+			"The registration stays in that account's agent configuration until it is removed. Fix what the reason names, then run %s from an elevated PowerShell prompt",
 		len(failing), windowsEnterpriseBoundedLabels(failing), windowsEnterpriseAdminCommand("repair")))
 }

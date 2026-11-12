@@ -34,7 +34,8 @@ import (
 //
 // A client may ask for a fixed handful of things and may not describe any
 // of them: the process table, the connection table, the event stream, DNS
-// answers, liveness, and the kernel-policy status. There is no path, no
+// answers, liveness, the kernel-policy status and, from the Cowork VM
+// helper, the discovery read of its configured homes. There is no path, no
 // filter, no glob, no pid, and no command anywhere in a request. That is
 // the whole security argument for putting a privileged
 // process on the other end -- the set of things it will ever do is fixed at
@@ -60,6 +61,17 @@ const (
 	// state, fieldless like every other request. The gateway never sends
 	// policy; it only learns what is running.
 	OpKernelStatus = "kernel_status"
+	// OpDiscovery asks for the AI Discovery read of the user homes the
+	// helper's own configuration names (cowork-1-0-8 GAP-0008): a fixed
+	// allowlist of agent config, MCP, skill, rule and plugin paths, read
+	// without following links and within byte caps, answered with names,
+	// presence and modification times only. Fieldless like every other
+	// request: the caller names no home and no path. Only an unmanaged Linux
+	// helper (the Cowork VM package) serves it; every other helper answers
+	// "unsupported operation", as a helper that predates it does. The body
+	// carries its own schema version (inventory.BrokeredHomeReport), so
+	// protocolVersion is unchanged and both directions stay compatible.
+	OpDiscovery = "discovery"
 )
 
 // protocolVersion is bumped on any incompatible frame change. A mismatch is
@@ -135,10 +147,25 @@ type KernelStatus struct {
 	Warnings []string `json:"warnings,omitempty"`
 	// UpdatedUnixNano is when the reconciler last wrote its state.
 	UpdatedUnixNano int64 `json:"updated_unix_ns,omitempty"`
+	// CountersEpoch names the run of the helper's since-start counts
+	// (Counters' would_block_total and blocked_total, CustomerEvents and
+	// CustomerPolicies): a random id (kernelpolicy.NewEpoch) drawn when the
+	// helper process starts. Another value is a restarted helper whose
+	// counts began again at zero, so the gateway counts their growth from
+	// zero rather than guessing a restart from a count that went down,
+	// which misses one whose new count already passed the old
+	// (cowork-1-0-8 GAP-0080). Compared for equality only. Zero from a
+	// helper that predates it.
+	CountersEpoch int64 `json:"counters_epoch,omitempty"`
 	// Changes is the reconciler's bounded ring of state changes, oldest
 	// first; the gateway drains it by Seq into log.ai.runtime.kernel_policy
 	// records (the helper emits no telemetry itself).
 	Changes []KernelChange `json:"changes,omitempty"`
+	// SeqEpoch names the sequence the Changes' Seq count in: the helper
+	// starts a new one, again at 1, when its state file is missing or
+	// unreadable. Another value is a restarted sequence (cowork-1-0-8
+	// GAP-0080). Zero from a helper that predates it.
+	SeqEpoch int64 `json:"seq_epoch,omitempty"`
 	// IntentMode is the enterprise.tetragon mode the drop-in asks for, before
 	// any cap (Mode is what runs). Approval says whether enforce_ack approves
 	// this build's kernel controls: not_needed (the mode is not enforce),

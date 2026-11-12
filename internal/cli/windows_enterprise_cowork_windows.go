@@ -359,7 +359,7 @@ func loadWindowsCoworkSourceConfig(path string) (*config.Config, error) {
 	if err == nil || !errors.As(err, &drift) {
 		return c, err
 	}
-	layout, layoutErr := managed.StandaloneWindowsLayout()
+	layout, layoutErr := windowsManagedLayout.standalone()
 	if layoutErr != nil {
 		return nil, err
 	}

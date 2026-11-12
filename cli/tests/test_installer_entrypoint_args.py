@@ -33,11 +33,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers import POWERSHELL, run_powershell
+
 ROOT = Path(__file__).resolve().parents[2]
 HANDOFF_SH = ROOT / "scripts" / "defenseclaw-upgrade.sh"
 INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
 BASH = shutil.which("bash")
-POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
 
 posix_only = pytest.mark.skipif(os.name == "nt" or BASH is None, reason="POSIX handoff")
 
@@ -198,8 +199,8 @@ def test_install_ps1_help_forms_print_usage_and_exit_0(tmp_path: Path, flag: str
         "DEFENSECLAW_HOME": str(tmp_path / "home"),
     }
     invoke = ["-File", str(INSTALL_PS1), flag] if via == "file" else ["-Command", f"& '{INSTALL_PS1}' {flag}; exit $LASTEXITCODE"]
-    proc = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", *invoke],
+    proc = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", *invoke],
         capture_output=True,
         text=True,
         encoding="utf-8",

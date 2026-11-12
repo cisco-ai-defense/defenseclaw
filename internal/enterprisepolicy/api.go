@@ -14,10 +14,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Result is the aggregate lifecycle outcome.
@@ -264,29 +266,9 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 	result := Result{}
 	var errs []error
 	for _, name := range connectors {
-		route := opts.Route(name)
-		if route != RouteMachinePolicy {
-			state := State{Connector: name, Route: route, ForeignHooks: opts.PolicyFor(name).ForeignHooks}
-			if name == "kiro" {
-				kiroRouteDetail(route, &state)
-			}
-			if name == ConnectorOpenCode && opts.OpenCodePluginPath != "" {
-				// Say why OpenCode is not on its machine policy route.
-				openCodePerUserFallback(opts, opts.PolicyFor(name), &state)
-			}
-			if name == connectorAmp && opts.goos() == "windows" {
-				state.Conflicts = append(state.Conflicts, InspectWindowsAmpMachineFolder(opts)...)
-			}
-			result.States = append(result.States, state)
-			continue
-		}
-		target, _ := TargetFor(name)
-		state, err := target.Verify(opts)
+		state, err := verifyConnector(opts, name)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
-		} else if state.Route == RouteMachinePolicy {
-			verifyPublishedFiles(opts, name, &state)
-			noteVerifyOnlyExport(opts, &state)
 		}
 		result.States = append(result.States, state)
 	}
@@ -303,6 +285,82 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 	return result, errors.Join(errs...)
 }
 
+// verifyConnector is one connector's share of VerifyAll: machine-policy
+// verify and Setup's status and verify (MachinePolicyProblems) both ask it, so
+// they cannot disagree about a connector's conflicts (GAP-0930).
+func verifyConnector(opts Options, name string) (State, error) {
+	route := opts.Route(name)
+	if route != RouteMachinePolicy {
+		state := State{Connector: name, Route: route, ForeignHooks: opts.PolicyFor(name).ForeignHooks}
+		if name == "kiro" {
+			kiroRouteDetail(route, &state)
+		}
+		if name == ConnectorOpenCode && opts.OpenCodePluginPath != "" {
+			// Say why OpenCode is not on its machine policy route.
+			openCodePerUserFallback(opts, opts.PolicyFor(name), &state)
+		}
+		if name == connectorAmp && opts.goos() == "windows" {
+			state.Conflicts = append(state.Conflicts, InspectWindowsAmpMachineFolder(opts)...)
+		}
+		return state, nil
+	}
+	target, _ := TargetFor(name)
+	state, err := target.Verify(opts)
+	if err == nil && state.Route == RouteMachinePolicy {
+		verifyPublishedFiles(opts, name, &state)
+		noteVerifyOnlyExport(opts, &state)
+	}
+	if state.Route == RouteMachinePolicy {
+		// Also when the target's own read failed on the same folder.
+		noteVendorFolderProblem(opts, name, &state)
+	}
+	return state, err
+}
+
+// noteVendorFolderProblem makes machine-policy verify say what the publish,
+// the repair and Setup's lifecycle say about the same vendor folder: a folder
+// DefenseClaw did not create that holds its recorded file and lets another
+// account delete or replace that file (or, for a vendor that loads every file
+// in it, add one) leaves the connector uncovered, with the folder, the unsafe
+// entry and the fix named (GAP-0756, GAP-0760). So does a vendor policy file
+// DefenseClaw has no record of that another account can change and the publish
+// cannot move aside (GAP-0930). The target's own conflict about the same file
+// (Copilot's "remove it") is replaced by that message, not listed beside it.
+// Standalone Windows only.
+func noteVendorFolderProblem(opts Options, name string, state *State) {
+	var prepend []string
+	for _, problem := range InspectRecordedVendorFolders(opts, []string{name}) {
+		if problem.UnrecordedFile {
+			file := strings.ToLower(problem.File)
+			state.Conflicts = slices.DeleteFunc(state.Conflicts, func(conflict string) bool {
+				return conflict != problem.Message && strings.Contains(strings.ToLower(conflict), file)
+			})
+		}
+		if !slices.Contains(state.Conflicts, problem.Message) && !slices.Contains(prepend, problem.Message) {
+			prepend = append(prepend, problem.Message)
+		}
+	}
+	if len(prepend) == 0 {
+		return
+	}
+	state.Conflicts = append(prepend, state.Conflicts...)
+	state.finish()
+}
+
+// policyExportCommand is the `enterprise policy export` whose output an
+// administrator deploys through a policy tool, in backticks. On Windows it is
+// the installed CLI as typed in an elevated PowerShell prompt: Setup puts no
+// DefenseClaw command on PATH (cowork-1-0-8 GAP-0076). On Linux and macOS it
+// is the gateway by its absolute path: it is not on the PATH either
+// (cowork-1-0-8 GAP-0081).
+func policyExportCommand(goos string, args ...string) string {
+	export := append([]string{"enterprise", "policy", "export"}, args...)
+	if goos == "windows" {
+		return "`" + managed.WindowsAdminCommand(export...) + "` (from an elevated PowerShell prompt)"
+	}
+	return "`" + managed.StandaloneGatewayPath(goos) + " " + strings.Join(export, " ") + "`"
+}
+
 // noteVerifyOnlyExport names the fix for a file DefenseClaw only checks
 // (ownership: verify_only) that carries none of its entries: deploy the
 // export. enterprise policy verify listed a conflict per missing entry and
@@ -317,7 +375,8 @@ func noteVerifyOnlyExport(opts Options, state *State) {
 			return
 		}
 	}
-	state.detail("missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only); deploy the output of `defenseclaw-gateway enterprise policy export --connector %s` through your policy tool, then run ensure", state.Connector)
+	state.detail("missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only); deploy the output of %s through your policy tool, then run ensure",
+		policyExportCommand(opts.goos(), "--connector", state.Connector))
 }
 
 // RemoveAll removes DefenseClaw's machine policy for every connector with a

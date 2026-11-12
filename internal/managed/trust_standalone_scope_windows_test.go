@@ -7,7 +7,9 @@ package managed
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -166,7 +168,7 @@ func TestStandaloneTrustNeverRepairsDriftedConfigInPlace(t *testing.T) {
 	if err == nil {
 		t.Fatal("standalone accepted a drifted config.yaml")
 	}
-	if !strings.Contains(err.Error(), "Setup /ensure") {
+	if !strings.Contains(err.Error(), `.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure`) {
 		t.Fatalf("standalone refusal %q does not say how to recover", err)
 	}
 	if *calls != 0 {
@@ -220,6 +222,200 @@ func TestStandaloneTrustRecoversOnlyThroughTrustedRewrite(t *testing.T) {
 	}
 	if *calls != 0 {
 		t.Fatalf("repair calls = %d, want none on standalone", *calls)
+	}
+}
+
+// GAP-0590: only an untrusted owner or writer on the file itself, under
+// folders the standalone walk trusts, is leaf drift: that is what a fresh
+// file from the approved source recovers. A trusted file, drift on a folder
+// above it, and a structural failure are not.
+func TestStandaloneFileLeafDriftIsOnlyTheFileItself(t *testing.T) {
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	t.Setenv(ConfigPathEnv, "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setTestFileDACL(t, path, testDACL(t, canonicalTestDACL), true)
+	trusted := ValidateTrustedFilePathStandalone(path, "fixture") == nil
+	if got := StandaloneFileLeafDrift(path, "fixture"); got != nil {
+		t.Fatalf("leaf drift on a canonical file: %v", got)
+	}
+	setTestFileDACL(t, path, testDACL(t, usersWriteDACL), true)
+	got := StandaloneFileLeafDrift(path, "fixture")
+	switch {
+	case trusted && (got == nil || got.SID != "S-1-5-32-545" || !strings.EqualFold(got.Path, path) || got.Owner):
+		t.Fatalf("leaf drift = %+v, want the BUILTIN\\Users writer on %s", got, path)
+	case !trusted && got != nil:
+		t.Fatalf("leaf drift %+v under folders the standalone walk refuses", got)
+	}
+
+	// Drift on the folder that holds the file: a new file there is no safer.
+	nested := filepath.Join(dir, "etc")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(nested, "config.yaml")
+	if err := os.WriteFile(inner, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setTestFileDACL(t, inner, testDACL(t, usersWriteDACL), true)
+	setTestFileDACL(t, nested, testDACL(t, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)(A;;FA;;;BU)"), true)
+	if got := StandaloneFileLeafDrift(inner, "fixture"); got != nil {
+		t.Fatalf("leaf drift %+v with an untrusted writer on the folder above", got)
+	}
+
+	// A folder where the file should be is a structural failure.
+	if got := StandaloneFileLeafDrift(nested, "fixture"); got != nil {
+		t.Fatalf("leaf drift %+v for a folder", got)
+	}
+	if !trusted {
+		t.Skip("the temp folders are not trusted by the standalone walk here; the positive case ran only as a negative")
+	}
+}
+
+// GAP-0603: on real descriptors, an untrusted owner with a canonical DACL,
+// an untrusted entry with an administrator owner, and both are each drift on
+// the file itself, and name the principal. icacls sets the owner (it enables
+// the restore privilege an elevated administrator holds).
+func TestStandaloneFileLeafDriftOwnerEntryAndBoth(t *testing.T) {
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	t.Setenv(ConfigPathEnv, "")
+	for _, tc := range []struct {
+		name         string
+		owner, entry bool
+	}{
+		{"owner untrusted, ACL canonical", true, false},
+		{"entry untrusted, owner administrators", false, true},
+		{"both untrusted", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "deployment.json")
+			if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			setTestFileDACL(t, path, testDACL(t, canonicalTestDACL), true)
+			if err := exec.Command("icacls.exe", path, "/setowner", "*S-1-5-32-544").Run(); err != nil {
+				t.Skipf("icacls cannot set the owner here (needs an elevated administrator): %v", err)
+			}
+			if ValidateTrustedFilePathStandalone(path, "fixture") != nil {
+				t.Skip("the temp folders are not trusted by the standalone walk here")
+			}
+			if tc.entry {
+				setTestFileDACL(t, path, testDACL(t, usersWriteDACL), true)
+			}
+			if tc.owner {
+				if out, err := exec.Command("icacls.exe", path, "/setowner", "*S-1-5-32-545").CombinedOutput(); err != nil {
+					t.Fatalf("icacls /setowner Users: %v %s", err, out)
+				}
+			}
+			got := StandaloneFileLeafDrift(path, "fixture")
+			if got == nil || got.SID != "S-1-5-32-545" || !strings.EqualFold(got.Path, path) {
+				t.Fatalf("leaf drift = %+v, want BUILTIN\\Users on %s", got, path)
+			}
+			// The owner verdict comes first when both are drifted.
+			if got.Owner != tc.owner {
+				t.Fatalf("leaf drift Owner = %t, want %t", got.Owner, tc.owner)
+			}
+			if !strings.Contains(RefuseStandaloneContentDrift(got).Error(), "give the file back to Administrators") {
+				t.Fatalf("refusal %q does not name the owner fix", RefuseStandaloneContentDrift(got))
+			}
+		})
+	}
+}
+
+// unsupportedObjectEntryDACL grants BUILTIN\Users full control through a
+// well-formed allow object entry, which the trust walk cannot read.
+const unsupportedObjectEntryDACL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(OA;;FA;00000000-0000-0000-0000-000000000001;;BU)"
+
+// GAP-0590 review S1: a null DACL, or an allow entry of a type the walk
+// cannot read, on the file itself is leaf drift too, so Setup rewrites
+// config.yaml and targets.yaml from the approved source. Before, only an
+// untrusted owner or writer counted, the gate refused with the CONFIG=
+// recovery, and that recovery wrote nothing, every time.
+func TestStandaloneFileLeafDriftNullDACLAndUnsupportedEntry(t *testing.T) {
+	leaf := `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`
+	for name, tc := range map[string]struct {
+		verdict error
+		sid     string
+		acl     string
+	}{
+		"null DACL":         {&UntrustedDACLError{Path: leaf, Null: true, text: leaf + ": null Windows DACL is not trusted"}, "S-1-1-0", "null"},
+		"unsupported entry": {&UntrustedDACLError{Path: leaf, text: leaf + ": unsupported allow ACE type 0x5; refusing managed trust"}, "", "unsupported"},
+		"untrusted writer":  {&UntrustedPrincipalError{Path: leaf, SID: "S-1-5-32-545", text: "x"}, "S-1-5-32-545", ""},
+	} {
+		got := standaloneLeafVerdict(fmt.Errorf("wrapped: %w", tc.verdict))
+		if got == nil || got.Path != leaf || got.SID != tc.sid || got.ACL != tc.acl || got.Owner || got.Error() != tc.verdict.Error() {
+			t.Errorf("%s: leaf verdict = %+v, want %s on %s", name, got, tc.sid, leaf)
+		}
+		if refused := RefuseStandaloneContentDrift(tc.verdict).Error(); !strings.Contains(refused, standaloneConfigDriftRecovery()) {
+			t.Errorf("%s: refusal %q does not name the config.yaml rewrite", name, refused)
+		}
+	}
+	for _, structural := range []error{nil, errors.New(leaf + ": reparse point"), fmt.Errorf("%s: inspect Windows DACL: %w", leaf, windows.ERROR_ACCESS_DENIED)} {
+		if got := standaloneLeafVerdict(structural); got != nil {
+			t.Errorf("leaf verdict for %v = %+v, want none", structural, got)
+		}
+	}
+
+	// On a real descriptor: the walk's own verdict is leaf drift.
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	t.Setenv(ConfigPathEnv, "")
+	for name, set := range map[string]func(path string) error{
+		"null DACL": func(path string) error {
+			return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, nil, nil)
+		},
+		"unsupported entry": func(path string) error {
+			// A well-formed allow object entry (type 0x5) for BUILTIN\Users,
+			// built from SDDL. Never patch the type byte of a plain entry in a
+			// descriptor Windows is given: the object layout then runs past
+			// the entry and the ACL, and SetNamedSecurityInfo corrupted the
+			// test process heap (0xC0000374, g582 review 6 M3). The Go-only
+			// classifier rows above keep the patched form.
+			return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil,
+				testDACL(t, unsupportedObjectEntryDACL), nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("ok"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			setTestFileDACL(t, path, testDACL(t, canonicalTestDACL), true)
+			if err := exec.Command("icacls.exe", path, "/setowner", "*S-1-5-32-544").Run(); err != nil {
+				t.Skipf("icacls cannot set the owner here (needs an elevated administrator): %v", err)
+			}
+			if ValidateTrustedFilePathStandalone(path, "fixture") != nil {
+				t.Skip("the temp folders are not trusted by the standalone walk here")
+			}
+			if err := set(path); err != nil {
+				t.Skipf("NTFS does not take this descriptor here: %v", err)
+			}
+			got := StandaloneFileLeafDrift(path, "fixture")
+			if got == nil || !strings.EqualFold(got.Path, path) || got.ACL == "" {
+				t.Fatalf("leaf drift = %+v (walk: %v), want the access list of %s", got, ValidateTrustedFilePathStandalone(path, "fixture"), path)
+			}
+		})
+	}
+}
+
+// GAP-0590: a content-drift refusal names the recovery that works for that
+// file: Setup writes config.yaml and targets.yaml new from the approved
+// source; any other content file is the administrator's to check.
+func TestStandaloneContentDriftNamesTheWorkingRecovery(t *testing.T) {
+	for name, want := range map[string]string{
+		"config.yaml":     "CONFIG=<the approved administrator-only config>'` so Setup writes a new config.yaml",
+		"targets.yaml":    "Setup writes a new targets.yaml enumerated from it",
+		"deployment.json": "remove that entry, or give the file back to Administrators, and check the file",
+		"journal.json":    "remove that entry, or give the file back to Administrators, and check the file",
+	} {
+		refused := RefuseStandaloneContentDrift(&UntrustedPrincipalError{Path: `C:\ProgramData\Cisco\DefenseClaw\etc\` + name, SID: "S-1-5-32-545", text: "x"})
+		if !strings.Contains(refused.Error(), want) || !strings.HasPrefix(refused.Error(), "x; a standalone install does not repair this file in place") {
+			t.Errorf("%s: refusal %q, want it to name %q", name, refused, want)
+		}
 	}
 }
 
@@ -370,4 +566,161 @@ func TestStandaloneServiceRuntimeFileKeepsGatewayWriter(t *testing.T) {
 	if err := AcceptServiceRuntimeFileDrift(path, "hook token", account); err == nil {
 		t.Fatal("standalone accepted a token with a Users writer")
 	}
+}
+
+// inheritedCreateChildDirForTest returns a folder whose only extra entry is
+// the container-only BUILTIN\Users create-child grant it inherits from its
+// parent, the shape a folder takes after its protection is reset to inherit
+// from C:\ProgramData.
+func inheritedCreateChildDirForTest(t *testing.T) string {
+	t.Helper()
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	parent := filepath.Join(t.TempDir(), "parent")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	setTestFileDACL(t, parent, testDACL(t, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;CI;0x1201bf;;;BU)"), true)
+	dir := filepath.Join(parent, "policies")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	return dir
+}
+
+// GAP-0566: the normal walk's acceptance of an inherited Users create-child
+// entry is the Secure Client rule. On standalone a standard user who can add
+// a file to a folder whose every file is loaded changes what is enforced, so
+// the folder is refused there.
+func TestStandaloneTrustRefusesInheritedCreateChild(t *testing.T) {
+	t.Run("secure client accepts", func(t *testing.T) {
+		dir := inheritedCreateChildDirForTest(t)
+		pinTrustProfileForTest(t, false)
+		previousHost, previousPath := SecureClientHostVerified, SecureClientProcessPathVerified
+		t.Cleanup(func() { SecureClientHostVerified, SecureClientProcessPathVerified = previousHost, previousPath })
+		SecureClientHostVerified = func() bool {
+			return ValidateTrustedSecureClientHostDir(dir, "Secure Client installation") == nil
+		}
+		SecureClientProcessPathVerified = func(path string) bool { return strings.EqualFold(path, dir) }
+		if err := ValidateTrustedRuntimeDir(dir, "policy folder"); err != nil {
+			t.Fatalf("Secure Client refused the inherited create-child folder: %v", err)
+		}
+	})
+	// A verified host alone does not make a per-user directory managed.
+	t.Run("verified host refuses a per-user directory", func(t *testing.T) {
+		base := t.TempDir()
+		t.Cleanup(AddTrustedMachineInstallBaseForTest(base))
+		t.Setenv(TrustStrictAncestorsEnv, "")
+		pinTrustProfileForTest(t, false)
+		state := filepath.Join(base, "Cisco", "Cisco Secure Client", "DefenseClaw")
+		oss := filepath.Join(base, "Cisco", "oss-data", "audit")
+		managedDir := filepath.Join(state, "audit")
+		if err := os.MkdirAll(oss, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(managedDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !PlatformInstallerOwnedPath(oss) || !PlatformInstallerOwnedPath(managedDir) {
+			t.Fatal("the test folder is not inside the stand-in Cisco root")
+		}
+		previousHost, previousPath := SecureClientHostVerified, SecureClientProcessPathVerified
+		t.Cleanup(func() { SecureClientHostVerified, SecureClientProcessPathVerified = previousHost, previousPath })
+		flags := uint8(windows.INHERITED_ACE | windows.CONTAINER_INHERIT_ACE)
+		SecureClientHostVerified = func() bool { return true }
+		SecureClientProcessPathVerified = func(path string) bool {
+			return strings.HasPrefix(strings.ToLower(filepath.Clean(path)), strings.ToLower(state)+string(filepath.Separator))
+		}
+		if AcceptInheritedCreateChild(oss, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("an OSS audit folder under the Cisco root accepted an inherited create-child entry")
+		}
+		if !AcceptInheritedCreateChild(managedDir, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("the managed Secure Client folder refused the inherited create-child entry")
+		}
+		SecureClientHostVerified = nil
+		if AcceptInheritedCreateChild(managedDir, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("an unset host verifier accepted an inherited create-child entry")
+		}
+		SecureClientHostVerified = func() bool { return true }
+		SecureClientProcessPathVerified = nil
+		if AcceptInheritedCreateChild(managedDir, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("an unset process verifier accepted an inherited create-child entry")
+		}
+	})
+	// GAP-0566 review 1: the audit store, judge-body and hook token walks
+	// accept the entry only inside the platform installer's roots, so a
+	// per-user data_dir elsewhere under ProgramData is refused on every
+	// profile.
+	t.Run("outside the installer roots the exported helper refuses", func(t *testing.T) {
+		dir := inheritedCreateChildDirForTest(t)
+		pinTrustProfileForTest(t, false)
+		if PlatformInstallerOwnedPath(dir) {
+			t.Skip("the test temp folder is inside the platform installer roots")
+		}
+		if AcceptInheritedCreateChild(dir, "audit store", windows.INHERITED_ACE|windows.CONTAINER_INHERIT_ACE, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("an inherited create-child entry was accepted for an audit folder outside the installer roots")
+		}
+	})
+	t.Run("standalone refuses", func(t *testing.T) {
+		dir := inheritedCreateChildDirForTest(t)
+		pinTrustProfileForTest(t, true)
+		if err := ValidateTrustedRuntimeDir(dir, "policy folder"); err == nil {
+			t.Fatal("standalone accepted a policy folder standard users can add files to")
+		}
+		if AcceptInheritedCreateChild(dir, "audit store", windows.INHERITED_ACE|windows.CONTAINER_INHERIT_ACE, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("standalone accepted an inherited create-child entry for the audit store and token folders")
+		}
+	})
+}
+
+func TestTrustedRuntimeDirRequiresManagedProcessForInheritedCreateChild(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host func() bool
+		path func(string) bool
+	}{
+		{name: "unverified process"},
+		{name: "verified host with OSS process", host: func() bool { return true }, path: func(string) bool { return false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinTrustProfileForTest(t, false)
+			previousHost, previousPath := SecureClientHostVerified, SecureClientProcessPathVerified
+			t.Cleanup(func() { SecureClientHostVerified, SecureClientProcessPathVerified = previousHost, previousPath })
+			SecureClientHostVerified, SecureClientProcessPathVerified = tc.host, tc.path
+			if err := ValidateTrustedRuntimeDir(inheritedCreateChildDirForTest(t), "policy folder"); err == nil {
+				t.Fatal("ordinary runtime trust accepted an inherited create-child entry outside managed state")
+			}
+		})
+	}
+}
+
+// The process environment cannot turn a per-user Cisco-root directory into
+// a managed Secure Client state directory. This also exercises the default
+// callback before internal/cli registers the installed-process classifier.
+func TestInheritedCreateChildEnvironmentPinDoesNotVerifyManagedPath(t *testing.T) {
+	base := t.TempDir()
+	t.Cleanup(AddTrustedMachineInstallBaseForTest(base))
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	t.Setenv(DeploymentModeEnv, DeploymentModeManagedEnterprise)
+	for _, profile := range []string{"", ProfileSecureClient} {
+		t.Run("profile="+profile, func(t *testing.T) {
+			t.Setenv(EnterpriseProfileEnv, profile)
+			path := filepath.Join(base, "Cisco", "oss-data", "audit")
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if AcceptInheritedCreateChild(path, "audit store", windows.INHERITED_ACE|windows.CONTAINER_INHERIT_ACE,
+				0x1201bf, usersSIDForTest(t)) {
+				t.Fatal("an environment pin accepted a per-user folder")
+			}
+		})
+	}
+}
+
+func usersSIDForTest(t *testing.T) *windows.SID {
+	t.Helper()
+	sid, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sid
 }

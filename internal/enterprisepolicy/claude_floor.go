@@ -737,7 +737,8 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 			}
 			state.conflict("Claude Code version floor: %s and DefenseClaw's %s is missing, so Claude Code builds below %s can start; %s", unset, plan.path, plan.floor, restore)
 		case plan.mode == config.ClaudeVersionFloorEnforce:
-			state.detail("Claude Code version floor: %s; deploy the output of `defenseclaw-gateway enterprise policy export --connector claudecode --format version-floor` through your policy tool, or set the key yourself (Claude Code reads it from %s)", unset, claudeFloorSettingVersion)
+			state.detail("Claude Code version floor: %s; deploy the output of %s through your policy tool, or set the key yourself (Claude Code reads it from %s)",
+				unset, policyExportCommand(opts.goos(), "--connector", "claudecode", "--format", "version-floor"), claudeFloorSettingVersion)
 		case plan.mode == config.ClaudeVersionFloorReport:
 			state.detail("Claude Code version floor: %s, so Claude Code builds below %s can start (version_floor: report)", unset, plan.floor)
 		default:

@@ -82,6 +82,7 @@ import (
 const (
 	codeOpenShell             = "openshell_failed"
 	codeOpenShellPrerequisite = "openshell_prerequisite_missing"
+	codeOpenShellPinRaised    = "openshell_pin_raised"
 	codeLauncherConflict      = "openshell_launcher_conflict"
 	codeSandboxGroups         = "sandbox_user_groups"
 	codeSandboxPending        = "sandbox_pending_restart"
@@ -124,14 +125,13 @@ type openshellSettings struct {
 	// (enterprise.openshell.driver_fallback tightened by openshell.admin):
 	// docker, none, or "" where none applies (macOS, the docker driver).
 	Fallback string
-	// Version is enterprise.openshell.version: an exact version, a range or
-	// "" (any release the DefenseClaw build supports). In setup mode an
-	// exact pin older than openshell.SupportedMin is raised to the release
-	// this build installs, and RaisedFrom keeps the pin
-	// (openshell.ManagedSetupPin).
+	// Version is the effective enterprise.openshell.version: an exact version,
+	// a range or "" (any supported release). RaisedFrom keeps a lower pin.
 	Version, RaisedFrom string
-	GatewayPort         int
-	E2fsprogsDir        string
+	// FloorConflict says the configured range ends at or below the floor.
+	FloorConflict bool
+	GatewayPort   int
+	E2fsprogsDir  string
 	// TelemetryAllowed is openshell.admin.allow_upstream_telemetry.
 	TelemetryAllowed bool
 	// RequiredFor says openshell.admin or a profile's sandbox section sets
@@ -156,8 +156,10 @@ func openshellSettingsOf(goos string, cfg *config.Config) openshellSettings {
 	s.Driver = o.SandboxDriver(goos)
 	s.Fallback = o.SandboxDriverFallback(goos, cfg.OpenShell.Admin)
 	s.Version = strings.TrimSpace(o.Version)
-	if v, raised := openshell.ManagedSetupPin(s.Install == config.EnterpriseOpenShellInstallSetup, s.Version); raised {
+	if v, raised, possible := openshell.ManagedVersionPin(s.Version); raised {
 		s.Version, s.RaisedFrom = v, s.Version
+	} else if !possible {
+		s.FloorConflict = true
 	}
 	s.GatewayPort = o.GatewayPort
 	if s.GatewayPort == 0 {
@@ -491,6 +493,10 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 		}
 		return nil
 	}
+	if settings.FloorConflict {
+		return fmt.Errorf("enterprise.openshell.version %q has no release at or above the OpenShell %s floor; set a range that includes %s or later",
+			settings.Version, openshell.SupportedMin, openshell.SupportedMin)
+	}
 
 	// An enabled setup needs a release this build can install. Older releases
 	// refused an enabled setup without that pin too.
@@ -522,6 +528,9 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 		op.links = append(op.links, link)
 		if link.Kind == "enable" {
 			op.dirs = append(op.dirs, desiredDir{Path: filepath.Dir(link.Path), Mode: 0o755, Owner: root, External: true})
+		}
+		if link.Kind == "launcher" {
+			op.dirs = append(op.dirs, env.launcherParentDirs()...)
 		}
 	}
 	op.daemonInputs = daemonInputsDigest(units, p.payload, op.digest)
@@ -558,8 +567,22 @@ func (e *Env) planPackagedMacOSSandbox(p *plan, op *openshellPlan) error {
 	}
 	if !e.foreignLauncher() {
 		op.links = append(op.links, desiredLink{Path: e.launcherPath(), Target: e.launcherTarget(), Kind: "launcher"})
+		p.dirs = append(p.dirs, e.launcherParentDirs()...)
 	}
 	return nil
+}
+
+// launcherParentDirs are the shared folders above the launcher, created when
+// absent and recorded so an uninstall removes them once empty, and only
+// then (GAP-0091): /usr/local and /usr/local/bin on macOS, /usr/bin on Linux.
+// One that already existed is never re-moded or removed.
+func (e *Env) launcherParentDirs() []desiredDir {
+	root := rootOwner()
+	var dirs []desiredDir
+	for dir := filepath.Dir(e.launcherPath()); dir != "/usr" && dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		dirs = append([]desiredDir{{Path: dir, Mode: 0o755, Owner: root, External: true}}, dirs...)
+	}
+	return dirs
 }
 
 // daemonInputsDigest is what a running sandbox daemon depends on.
@@ -628,7 +651,6 @@ func (l *lifecycle) applyOpenShellLinks(p *plan) error {
 			return fmt.Errorf("%s: %w", path, err)
 		}
 		l.noteChange("removed %s, which the deployment no longer uses", path)
-		_ = removeDirIfEmpty(env.P(filepath.Dir(path)))
 	}
 	if !p.openshell.settings.Enabled {
 		// What the lifecycle derived while the subsystem was on goes with it.
@@ -797,10 +819,13 @@ func (a *openshellApplied) switchKey() string {
 	}
 	version := a.Version
 	if a.Install != config.EnterpriseOpenShellInstallSetup {
-		// In prerequisite mode the pin checks the administrator's OpenShell
-		// (a verify row); changing it replaces nothing in an account
-		// (GAP-0244).
+		// Supported prerequisite pin changes replace nothing in an account.
+		// Moving any old requirement across the floor does require a switch;
+		// keep a running legacy sandbox until OpenShell reports it stopped.
 		version = ""
+		if _, raised, possible := openshell.ManagedVersionPin(a.Version); raised || !possible {
+			version = "below-floor"
+		}
 	}
 	key := strings.Join([]string{a.Install, a.Driver, version, strconv.Itoa(a.GatewayPort)}, "|")
 	if a.Fallback != "" {
@@ -957,7 +982,9 @@ func (l *lifecycle) removeOpenShellFiles(record *Deployment) {
 			l.result.AddWarning(codeOpenShell, fmt.Sprintf("could not remove %s: %v", link.Path, err))
 			continue
 		}
-		_ = removeDirIfEmpty(env.P(filepath.Dir(link.Path)))
+		// The folder above the link goes with the recorded folders
+		// (CreatedDirs), never by name: /usr/local/bin or a *.wants folder
+		// that existed before stays (GAP-0091).
 	}
 	if env.GOOS == "linux" {
 		for _, u := range env.userUnits() {

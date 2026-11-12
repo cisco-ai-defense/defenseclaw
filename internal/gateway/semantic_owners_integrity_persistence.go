@@ -1526,18 +1526,30 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		return kept
 	}
 	commandText := strings.ToLower(input.Command)
-	overBudget, unresolved := false, false
+	overBudget, unresolved, resolvedTarget := false, false, false
 	evidence := request
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
+	evidence.resolvedTarget = &resolvedTarget
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
+	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
+		(request.Connector == "claudecode" || request.Connector == "codex") &&
+		hookpaths.ProvedOrdinaryVariableTargets(input.Command, input.CWD, facts.ActiveHome) {
+		kept := findings[:0]
+		for _, finding := range findings {
+			if finding.RuleID != "persistence.ssh_authorized_keys_command" && finding.RuleID != "PATH-SSH-DIR" {
+				kept = append(kept, finding)
+			}
+		}
+		return kept
+	}
 	if symlinkWrite && overBudget {
 		// The only write found is an operand the client's full bounded map
 		// left out. The call still blocks, as over the evaluation budget,
 		// not as a key write it does not name (GAP-0146); a protected target
 		// the client found is its ActionDecisionKey and is proved above.
 		symlinkWrite = false
-		findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+		findings = withOmittedOperandLimitFinding(findings, request.EnforcementCapable)
 	}
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
@@ -1588,12 +1600,17 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				// what it is, not as a key write (rel-1-0-2:GAP-0690).
 				title = unresolvedWriteTargetTitle
 			}
-			return append(kept, adjustConfidence(input.Tool, RuleFinding{
+			finding := adjustConfidence(input.Tool, RuleFinding{
 				RuleID: named.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
 				enforcement: findingEnforcementAllowed,
-			}))
+			})
+			if named.ID == rule.ID &&
+				(trustedAuthorizedKeysSymlinkWrite(input) || resolvedTarget && !overBudget && !unresolved) {
+				finding = finding.withTrustedActionProof(newResolvedTargetFindingProof(named.ID, true))
+			}
+			return append(kept, finding)
 		}
 	}
 	return appendTrustedCMDPrivateKeyReadFinding(
@@ -1734,7 +1751,6 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 		trustedUnknownOutputAuthorizedKeysWrite(facts) ||
 		trustedAwkOutputAuthorizedKeysWrite(facts) ||
 		trustedGitConfigEnvironmentAuthorizedKeysWrite(facts) ||
-		trustedUnknownKeyAuthorizedKeysWrite(input, facts) ||
 		homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite) ||
 		trustedStaticStatementAuthorizedKeysWrite(input) ||
 		trustedStaticRedirectAuthorizedKeysWrite(input, facts) ||
@@ -1845,22 +1861,6 @@ const unresolvedWriteTargetTitle = "A write target could not be resolved (unread
 // guidance never showed (GAP-1555).
 const archiveBeforeWriteTitle = "Archive extraction may create a link before a later write. " +
 	"Run the extraction and the write as separate commands"
-
-// trustedUnknownKeyAuthorizedKeysWrite judges the target of a native
-// file-write tool call (write, edit, multiedit, create) whose arguments
-// carry a key outside the tool's reviewed schema: the harness still writes
-// the file its target key names, so each such target is judged as the same
-// tool's structured write (actionfacts.UnknownKeyWriteTargetViews). Only a
-// match counts.
-func trustedUnknownKeyAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
-	for _, view := range actionfacts.UnknownKeyWriteTargetViews(input, facts) {
-		projected := view.EnforcementProjection()
-		if projected.EnforcementEligible() && sshAuthorizedKeysStructuredPrerequisite(projected) {
-			return true
-		}
-	}
-	return false
-}
 
 // trustedSandboxGuestAuthorizedKeysWrite judges a sandbox call once more in
 // the guest's own namespace. The request's working directory is the host
@@ -2170,14 +2170,15 @@ func matchesGlobalLDPreload(
 	_ actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	return canonicalSemanticPath(semanticPathValue(candidate)) == "/etc/ld.so.preload" &&
+	return actionfacts.EtcSpelling(canonicalSemanticPath(semanticPathValue(candidate))) == "/etc/ld.so.preload" &&
 		(candidate.Access == actionfacts.PathAccessWrite ||
 			candidate.Access == actionfacts.PathAccessAppend)
 }
 
 // globalLDPreloadInstallPrerequisite proves a system-wide loader injection
 // only when a closed literal producer writes one absolute shared-object path
-// to the active preload file, or one exact profile fragment exports that path.
+// to the active preload file, or one exact profile fragment exports that path,
+// or a native file-tool call writes either (ExactGlobalLDPreloadFileWrite).
 // Merely reading either location, clearing it during remediation, setting
 // process-local LD_PRELOAD, or writing opaque/dynamic content is insufficient.
 func globalLDPreloadInstallPrerequisite(
@@ -2187,9 +2188,7 @@ func globalLDPreloadInstallPrerequisite(
 	if !facts.Authoritative() || !facts.EnforcementEligible() {
 		return false
 	}
-	if actionfacts.ExactGlobalLDPreloadProfileWrite(input, facts) {
-		return true
-	}
+	typed := actionfacts.ExactGlobalLDPreloadFileWrite(input, facts)
 	for _, target := range facts.Paths {
 		preloadFile := matchesGlobalLDPreload(facts, target)
 		profileFragment := actionfacts.ExactGlobalLDPreloadProfilePath(
@@ -2197,6 +2196,11 @@ func globalLDPreloadInstallPrerequisite(
 		) && target.Access == actionfacts.PathAccessWrite
 		if !preloadFile && !profileFragment {
 			continue
+		}
+		// A native file-tool write has no producer command: the text it
+		// writes is proven from its own arguments, for the file it targets.
+		if typed {
+			return true
 		}
 		destination, ok := integrityCommandByID(facts, target.CommandID)
 		if !ok || !integrityCommandMutatesPath(destination, target) ||
@@ -2474,6 +2478,15 @@ func sudoersLiteralOutputReachesDestination(
 	if source.ID == destination.ID {
 		return true
 	}
+	if chain := shellWrapperChain(facts, source); len(chain) != 0 {
+		if slices.ContainsFunc(chain, func(wrapper actionfacts.CommandFact) bool {
+			return wrapper.ID == destination.ID
+		}) {
+			return true
+		}
+		// A pipe from the wrapper is the pipe of the command it runs.
+		source = chain[len(chain)-1]
+	}
 	if source.PipelineID != 0 && source.PipelineID == destination.PipelineID &&
 		hasCommandDataFlow(
 			facts,
@@ -2500,6 +2513,33 @@ func sudoersLiteralOutputReachesDestination(
 			actionfacts.DataStdout,
 			actionfacts.DataStdin,
 		)
+}
+
+// shellWrapperChain returns the command and builtin wrappers around source,
+// innermost first. Both run the word they are given in the caller shell with
+// the caller descriptors, so a redirect or a pipe written on the wrapper is
+// the redirect or the pipe of the command it runs: the wrapper adds no
+// process and no output of its own. A source that redirects its own output
+// has no chain.
+func shellWrapperChain(
+	facts actionfacts.Facts,
+	source actionfacts.CommandFact,
+) []actionfacts.CommandFact {
+	if len(source.Redirects) != 0 {
+		return nil
+	}
+	var chain []actionfacts.CommandFact
+	for current := source; current.ParentCommandID != 0; {
+		parent, ok := integrityCommandByID(facts, current.ParentCommandID)
+		if !ok || parent.Dialect != actionfacts.DialectPOSIX ||
+			(parent.Program != "command" && parent.Program != "builtin") ||
+			!parent.ArgvComplete || parent.ControlFlowUncertain {
+			return chain
+		}
+		chain = append(chain, parent)
+		current = parent
+	}
+	return chain
 }
 
 func sudoersLiteralCommandOutput(command actionfacts.CommandFact) (string, bool) {
@@ -2767,6 +2807,26 @@ var activeDefenseClawStateNames = []string{
 	"quarantine", "receipts", "registries",
 }
 
+// managedSettingsCaseFold reports a host whose file system ignores case; a
+// variable so that a test can stand in for the platform.
+var managedSettingsCaseFold = actionfacts.CaseInsensitiveFilesystem
+
+// managedAgentSettingsCandidate reports a path of the machine policy files
+// DefenseClaw publishes for an agent, in either path syntax.
+func managedAgentSettingsCandidate(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	caseFold := managedSettingsCaseFold()
+	// The cleaned forms collapse a leading // of a \\host\C$ share path into
+	// one slash, which names another directory: the text as written names
+	// the volume, so it is read too.
+	for _, value := range []string{exactSemanticPathValue(candidate), candidate.Value} {
+		if candidate.Flavor == actionfacts.PathFlavorPOSIX && actionfacts.ManagedAgentSettingsPath(value, caseFold) ||
+			actionfacts.WindowsManagedAgentSettingsPath(value) {
+			return true
+		}
+	}
+	return false
+}
+
 func matchesActiveDefenseClawState(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
@@ -2783,13 +2843,22 @@ func matchesActiveDefenseClawStateInLine(
 	lineStaysOff func() bool,
 	clientTargets map[string]string,
 ) bool {
+	if managedAgentSettingsCandidate(facts, candidate) {
+		// The machine policy files DefenseClaw publishes for an agent are
+		// protected like its own state, whoever the active user is
+		// (rel-1-0-6:GAP-0734).
+		return true
+	}
 	relative, ok := activeHomeRelative(facts, candidate)
-	if runtime.GOOS == "linux" && candidate.Flavor == actionfacts.PathFlavorPOSIX {
+	if runtime.GOOS == "linux" && !pathCaseFoldHost && candidate.Flavor == actionfacts.PathFlavorPOSIX {
 		relative, ok = exactActiveDefenseClawRelative(facts, candidate)
 	}
 	relative = strings.TrimRight(relative, "/")
 	if !ok || relative != ".defenseclaw" && !strings.HasPrefix(relative, ".defenseclaw/") {
-		return findAncestorStartChangesState(facts, candidate, lineStaysOff, clientTargets)
+		// The machine install and state of a managed deployment are
+		// protected like ~/.defenseclaw (rel-1-0-6:GAP-0796).
+		return matchesDefenseClawMachineLayout(facts, candidate) ||
+			findAncestorStartChangesState(facts, candidate, lineStaysOff, clientTargets)
 	}
 	state := strings.TrimPrefix(strings.TrimPrefix(relative, ".defenseclaw"), "/")
 	switch {
@@ -3904,7 +3973,7 @@ func matchesSafeDefenseClawStateCandidate(
 	}
 	// POSIX Linux names are case-sensitive. A distinct .DefenseClaw tree is
 	// ordinary user work even though the catalog's regex is case-insensitive.
-	if runtime.GOOS == "linux" && candidate.Flavor == actionfacts.PathFlavorPOSIX {
+	if runtime.GOOS == "linux" && !pathCaseFoldHost && candidate.Flavor == actionfacts.PathFlavorPOSIX {
 		exact, inside := exactActiveDefenseClawRelative(facts, candidate)
 		if !inside || !strings.HasPrefix(exact, ".defenseclaw/") {
 			return true

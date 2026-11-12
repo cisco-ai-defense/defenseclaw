@@ -84,11 +84,11 @@ func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body, stat
 			summary = "see gateway /health telemetry.details.destinations"
 		}
 		result.AddWarning("optional_destination_failing", "optional telemetry destination failing: "+summary+
-			"; inspect `defenseclaw-gateway status` or gateway /health telemetry details")
+			"; inspect "+managedWindowsGatewayCommand("status")+" or gateway /health telemetry details")
 	}
-	// A project skill folder the hook guardian could not verify (a link in
-	// its path, a folder outside the user's own profile) is not watched and
-	// its skills are refused (GAP-1356). /health gives only the number.
+	// A project skill folder the hook or hook guardian could not verify is
+	// not watched. /health gives only the number; a selected skill under
+	// one of these roots is refused until a fresh inspection verifies it.
 	if n := health.Watcher.Details.ProjectSkillRootsUnverified; n > 0 {
 		result.AddWarning("project_skill_root_unverified", fmt.Sprintf("%d project skill folder(s) could not be verified: "+
 			"they are not watched and their skills are refused; the gateway log names each folder and the reason", n))

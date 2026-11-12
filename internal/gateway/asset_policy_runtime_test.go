@@ -518,8 +518,8 @@ func TestNormalizeSkillRuntimeNameDocumentsPathBehavior(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {
-			if got := normalizeSkillRuntimeName(tc.input); got != tc.want {
-				t.Errorf("normalizeSkillRuntimeName(%q) = %q, want %q", tc.input, got, tc.want)
+			if got := assetfacts.SkillRuntimeName(tc.input); got != tc.want {
+				t.Errorf("SkillRuntimeName(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}
@@ -804,12 +804,13 @@ func TestMCPURLRuleMatchesTheCallersServer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	call := func(ctx context.Context) bool {
+	callIn := func(ctx context.Context, session string) bool {
 		_, matched := api.claudeCodeMCPAssetDecision(ctx, claudeCodeHookRequest{
-			HookEventName: "PreToolUse", ToolName: "mcp__notes__count_words", CWD: project,
+			HookEventName: "PreToolUse", SessionID: session, ToolName: "mcp__notes__count_words", CWD: project,
 		})
 		return matched
 	}
+	call := func(ctx context.Context) bool { return callIn(ctx, "") }
 	if !call(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})) {
 		t.Fatal("url deny did not match the server in the caller's home")
 	}
@@ -837,7 +838,9 @@ func TestMCPURLRuleMatchesTheCallersServer(t *testing.T) {
 	if !call(commandLine) {
 		t.Fatal("url deny did not match the server the agent's command line defines")
 	}
-	if call(peer) {
+	// A later agent process (another session) connects to what the caller's
+	// files list; it does not inherit the command-line definition.
+	if callIn(peer, "later-session") {
 		t.Fatal("url deny matched the caller's benign server")
 	}
 	unproven := context.WithValue(peer, claimedAssetFactsContextKey{}, assetfacts.Facts{MCPUnproven: "notes"})

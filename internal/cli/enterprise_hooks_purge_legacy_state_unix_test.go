@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -69,10 +70,11 @@ func TestRemoveAllPurgesTheLegacyStateOnlyOfAccountsWithoutAnOwnInstall(t *testi
 	}
 	for _, home := range []string{legacy, own} {
 		write(filepath.Join(home, ".defenseclaw", "hooks", "claude-code-hook.sh"), "#!/bin/sh\nexit 0\n")
-		write(filepath.Join(home, ".defenseclaw", ".hook-claudecode.token"), "sample\n")
-		write(filepath.Join(home, ".defenseclaw", ".hookcfg-claudecode.json"), "{}\n")
+		write(filepath.Join(home, ".defenseclaw", "hooks", ".hook-claudecode.token"), "sample\n")
+		write(filepath.Join(home, ".defenseclaw", "hooks", ".hookcfg.claudecode"), "{}\n")
 		write(filepath.Join(home, ".defenseclaw", "connector_backups", "claudecode", "settings.json.json"), "{}\n")
 	}
+	write(filepath.Join(legacy, ".defenseclaw", "personal.txt"), "account note\n")
 	write(filepath.Join(own, ".defenseclaw", "config.yaml"), "data_dir: ~/.defenseclaw\n")
 	write(filepath.Join(own, ".defenseclaw", "session-facts.json"), "{}\n")
 	// The one-liner install as it is before `defenseclaw init`.
@@ -103,6 +105,18 @@ func TestRemoveAllPurgesTheLegacyStateOnlyOfAccountsWithoutAnOwnInstall(t *testi
 	jobs := plan(nil)
 	if got := purgeTargetsOf(jobs[legacyUID]); len(got) != 1 || got[0] != filepath.Join(legacy, ".defenseclaw") {
 		t.Fatalf("the legacy-only folder is not purged once: %v", got)
+	}
+	legacyData := filepath.Join(legacy, ".defenseclaw")
+	if err := connector.PurgeUserState(legacyData); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(legacyData, "personal.txt")); err != nil || string(got) != "account note\n" {
+		t.Fatalf("eligible account file changed: %q, %v", got, err)
+	}
+	for _, rel := range []string{"hooks/claude-code-hook.sh", "hooks/.hook-claudecode.token", "hooks/.hookcfg.claudecode"} {
+		if _, err := os.Lstat(filepath.Join(legacyData, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Errorf("managed file %s stayed: %v", rel, err)
+		}
 	}
 	if got := purgeTargetsOf(jobs[ownUID]); len(got) != 0 {
 		t.Fatalf("an account's own per-user install was given a purge: %v", got)

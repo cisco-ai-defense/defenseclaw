@@ -21,6 +21,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -29,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import pytest
 from click.testing import CliRunner
 from defenseclaw.agent_selection import SELECTION_LIFETIME, SetupAgentSelection
 from defenseclaw.config import (
@@ -46,6 +49,23 @@ from defenseclaw.context import AppContext
 from defenseclaw.db import Store
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.models import Event, ScanResult
+
+# The PowerShell the tests launch, found once. None where it is not installed.
+POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
+
+
+def run_powershell(arguments, *, interpreter=None, **kwargs) -> subprocess.CompletedProcess:
+    """The one place a test starts PowerShell.
+
+    A host without PowerShell skips the test here instead of failing it with a
+    TypeError from launching None. Tests pass the arguments after the
+    interpreter; a test that runs once per discovered interpreter passes it as
+    interpreter. Tests start PowerShell only through this function.
+    """
+    shell = POWERSHELL if interpreter is None else interpreter
+    if shell is None:
+        pytest.skip("PowerShell is not installed")
+    return subprocess.run([shell, *arguments], **kwargs)
 
 
 def record_test_setup_agent_selections(data_dir, connectors):
@@ -240,18 +260,24 @@ def seed_cached_plugin(
     return str(root)
 
 
+# The files digest the tests stand-in rule loaders report (tests/test_cmd_guardrail_packs.py _valid).
+SELECTED_PACK_PIN = "sha256:" + "a" * 64
+
+
 def select_pack(cfg: Config, block, path: str) -> None:
     """Make a guardrail scope (``cfg.guardrail`` or one connector entry) select the pack at *path*.
 
     A built-in preset name is selected by name; any other folder is registered under its
-    folder name in ``guardrail.custom_packs`` (config_version 9 has no directory key).
+    folder name in ``guardrail.custom_packs`` (config_version 9 has no directory key),
+    pinned to ``SELECTED_PACK_PIN``: an unpinned entry is a config error, which falls back to
+    the built-in pack, so a test that registers one pins it to what its stand-in loader reports.
     """
     from defenseclaw.config import CustomRulePack
     from defenseclaw.policy_catalog import RULE_PACK_PRESETS
 
     name = os.path.basename(path.rstrip("/\\")) if path else ""
     if name and name not in RULE_PACK_PRESETS:
-        cfg.guardrail.custom_packs[name] = CustomRulePack(path=path)
+        cfg.guardrail.custom_packs[name] = CustomRulePack(path=path, digest=SELECTED_PACK_PIN)
     block.rule_pack = name
 
 
@@ -322,6 +348,20 @@ def make_separate_stderr_runner() -> CliRunner:
         return CliRunner(mix_stderr=False)  # type: ignore[call-arg]
     except TypeError:
         return CliRunner()
+
+
+def registered_audit_action_count() -> int:
+    # schemas/audit-event.json is the registry that make check-audit-actions
+    # holds equal to the Go and Python constants, and the unfiltered audit-sink
+    # selector lists exactly these actions. Tests that pin the selector size
+    # read it here, so adding an action cannot leave a stale literal behind.
+    schema = json.loads(
+        (Path(__file__).resolve().parents[2] / "schemas" / "audit-event.json").read_text(encoding="utf-8")
+    )
+    for branch in schema["properties"]["action"]["anyOf"]:
+        if "enum" in branch:
+            return len(branch["enum"])
+    raise AssertionError("schemas/audit-event.json has no literal action enum")
 
 
 def cleanup_app(app: AppContext, db_path: str, tmp_dir: str) -> None:

@@ -551,7 +551,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	// directory; only an uninstall that leaves it empty removes it (see
 	// removeLockWithLastState), and acquireLock lets no waiter run on the
 	// removed file.
-	if err := env.ensureDir(env.P(env.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
+	if err := env.ensureLifecycleDir(); err != nil {
 		r.AddError(codeState, err.Error())
 		l.reportNoSpace(err)
 		return 0
@@ -931,7 +931,27 @@ func (l *lifecycle) removeLockWithLastState(record *Deployment) {
 	env := l.env
 	dir := env.P(env.Layout.LifecycleDir)
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != lockFileName || !entries[0].Type().IsRegular() {
+	if err != nil {
+		return
+	}
+	// The lock, and the list of shared parents created before any record
+	// (a run that never committed), are all that may be left.
+	var created []string
+	lockSeen := false
+	for _, entry := range entries {
+		switch {
+		case entry.Name() == lockFileName && entry.Type().IsRegular():
+			lockSeen = true
+		case entry.Name() == createdParentDirsName && entry.Type().IsRegular():
+			created = env.createdParentDirs()
+		default:
+			return
+		}
+	}
+	if !lockSeen {
+		return
+	}
+	if err := removeFile(env.P(env.createdParentDirsPath())); err != nil {
 		return
 	}
 	if err := os.Remove(filepath.Join(dir, lockFileName)); err != nil {
@@ -944,15 +964,16 @@ func (l *lifecycle) removeLockWithLastState(record *Deployment) {
 		return
 	}
 	_ = removeDirIfEmpty(env.P(env.Layout.InstallRoot))
+	// Only the parents the deployment recorded creating (/opt and /opt/cisco
+	// when absent, from the lifecycle or the package preinstall): one that
+	// existed before stays, empty or not (GAP-0091).
+	dirs := created
 	if record != nil {
-		dirs := append([]string(nil), record.CreatedDirs...)
-		sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
-		for _, created := range dirs {
-			_ = removeDirIfEmpty(env.P(created))
-		}
+		dirs = mergeUnique(dirs, record.CreatedDirs)
 	}
-	if env.GOOS == "darwin" {
-		_ = removeDirIfEmpty(env.P("/opt/cisco"))
+	sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, dir := range dirs {
+		_ = removeDirIfEmpty(env.P(dir))
 	}
 }
 
@@ -2481,6 +2502,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	newRecord.CreatedServiceAccount = newRecord.CreatedServiceAccount || account.Created
 	newRecord.CreatedDirs = mergeUnique(newRecord.CreatedDirs, createdDirs)
+	newRecord.CreatedDirs = mergeUnique(newRecord.CreatedDirs, env.createdParentDirs())
 	newRecord.CreatedDirs = slices.DeleteFunc(newRecord.CreatedDirs, func(dir string) bool { return slices.Contains(p.coworkRetiredDirs, dir) })
 	for _, file := range p.files {
 		newRecord.Files[file.Path] = file.SHA
@@ -2529,6 +2551,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := env.saveDeployment(newRecord); err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	_ = removeFile(env.P(env.createdParentDirsPath()))
 	if l.bundle != nil {
 		// The commit point of the bundle: the gateway reported its policy
 		// above. A step below that fails does not undo it (finishBundle).
@@ -2567,6 +2590,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		if l.awaitGuardianReport(ctx, activationStarted) {
 			l.noteRepairedTargets(activationStarted)
 		}
+		// The enumerator restarted with the new install publishes its first
+		// record a few seconds later; the result below reads that record.
+		scanDeadline := env.Now().Add(env.InstallScanTimeout)
+		l.awaitInstallScan(ctx)
+		// The enumerator rewrites targets.yaml after the config changes (a
+		// connector roster change); the guardian reconciles it, and removes
+		// the hook files of a removed connector, within the same bound.
+		l.awaitGuardianCatchUp(ctx, scanDeadline, activationStarted)
 	}
 	// The change succeeds only when the gateway runs it. A config.yaml
 	// replaced during the run is confirmed by its follow-up transaction, and
@@ -4225,10 +4256,6 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 				errs = append(errs, err)
 			}
 		}
-		if env.GOOS == "darwin" {
-			_ = removeDirIfEmpty(env.P("/opt/cisco"))
-			_ = removeDirIfEmpty(env.P("/Library/Logs/Cisco"))
-		}
 		if !l.opts.KeepServiceAccount {
 			// By now the services, the binaries (this CLI included) and the
 			// deployment record are gone, so failing the uninstall here would
@@ -4665,10 +4692,13 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		l.perUserStateKept[user] = true
 		r.AddWarning(codePerUserState, fmt.Sprintf("the DefenseClaw per-user data and binaries of user %s were not removed: %s; fix the cause and rerun %s", user, reason, rerun))
 	}
-	// A purge deletes data an account created before the install; name each
-	// account, instead of a bare "done".
+	// Name both removed DefenseClaw entries and account entries that remain.
 	for _, user := range report.Purged {
-		r.Changes = append(r.Changes, purgedUserChange(user, report.PurgedDetail[user]))
+		detail := report.PurgedDetail[user]
+		r.Changes = append(r.Changes, purgedUserChange(user, detail))
+		if len(detail.KeptEntries) > 0 {
+			r.AddWarning(codePerUserState, fmt.Sprintf("kept account entries in ~/.defenseclaw of user %s: %s", user, strings.Join(detail.KeptEntries, ", ")))
+		}
 	}
 	// The enrollment had replaced the account's own Claude Code hook script
 	// with a blocker; the uninstall removed it, and the account's own hook
@@ -4696,11 +4726,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 
 // purgedUserDetail is what the purge found and removed for one account.
 type purgedUserDetail struct {
-	Data     bool `json:"data"`
-	Kept     bool `json:"kept"`
-	Binaries bool `json:"binaries"`
-	Gateway  bool `json:"gateway"`
-	UVCache  bool `json:"uv_cache"`
+	Data        bool     `json:"data"`
+	Kept        bool     `json:"kept"`
+	KeptEntries []string `json:"kept_entries"`
+	Binaries    bool     `json:"binaries"`
+	Gateway     bool     `json:"gateway"`
+	UVCache     bool     `json:"uv_cache"`
 	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
 	// backups were moved to instead of being deleted (GAP-2015).
 	RemovedConnectorBackups string `json:"removed_connector_backups"`
@@ -4714,7 +4745,10 @@ type purgedUserDetail struct {
 // have lost per-user binaries and a gateway (GAP-1444), and where the data
 // of the account's own per-user install went (#1299).
 func purgedUserChange(user string, detail purgedUserDetail) string {
-	const data = "all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder)"
+	data := "all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder)"
+	if len(detail.KeptEntries) > 0 {
+		data = "DefenseClaw-owned per-user entries of user %s in ~/.defenseclaw"
+	}
 	var text string
 	if detail.Kept {
 		// A machine uninstall never deletes or moves an account's own
@@ -4746,6 +4780,9 @@ func purgedUserChange(user string, detail purgedUserDetail) string {
 	}
 	if detail.UnrestorableConnectorBackups != "" {
 		text += "; connector backup records that name no file DefenseClaw can put back (an earlier failed install, say) were kept in " + detail.UnrestorableConnectorBackups + " (delete them when nothing in them is needed)"
+	}
+	if len(detail.KeptEntries) > 0 {
+		text += "; kept account entries in ~/.defenseclaw: " + strings.Join(detail.KeptEntries, ", ")
 	}
 	return text
 }

@@ -190,3 +190,40 @@ func TestWindowsBundleStartOnlyPaths(t *testing.T) {
 		t.Fatalf("no change: %v %v", startOnly, refresh)
 	}
 }
+
+// GAP-0044: only a change of the Claude Code managed_hooks_only lock, as the
+// config spells its exact paths, restarts just the hook guardian and the
+// gateway on Windows; another start-only key keeps the transaction.
+func TestWindowsEnterpriseGuardianRestartPaths(t *testing.T) {
+	const enforce = "config_version: 9\nenterprise:\n  machine_policy:\n    default:\n      managed_hooks_only: enforce\n"
+	startOnly := func(before, after string) []string {
+		t.Helper()
+		restart, err := configwrite.ManagedConfigRestartRequired([]byte(before), []byte(after), configwrite.ManagedDefaults{GOOS: "windows"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths, _ := windowsBundleStartOnlyPaths(restart)
+		return paths
+	}
+	for _, tc := range []struct {
+		name, before, after string
+		want                bool
+	}{
+		{"default lock", enforce, strings.Replace(enforce, "enforce", "preserve", 1), true},
+		{"claudecode lock", enforce, enforce + "    connectors:\n      claudecode:\n        managed_hooks_only: preserve\n", true},
+		{"lock and another key", enforce, strings.Replace(enforce, "enforce", "preserve\n      foreign_hooks: report", 1), false},
+		{"codex lock", enforce, enforce + "    connectors:\n      codex:\n        managed_hooks_only: preserve\n", false},
+		{"lock spelled out", "config_version: 9\n", enforce, true},
+		{"new block with another key", "config_version: 9\n", strings.Replace(enforce, "enforce", "enforce\n      ownership: verify_only", 1), false},
+		{"no start-only key", enforce, enforce + "guardrail:\n  block_at: HIGH\n", false},
+	} {
+		if got := windowsEnterpriseGuardianRestartPaths(startOnly(tc.before, tc.after)); got != tc.want {
+			t.Errorf("%s: guardian restart = %t, want %t (start-only %v)", tc.name, got, tc.want, startOnly(tc.before, tc.after))
+		}
+	}
+	code, message := windowsEnterpriseGuardianRestartWarning("1.0.9", []string{"enterprise.machine_policy.default.managed_hooks_only"})
+	if code != windowsEnterpriseConfigRestartCode || !strings.Contains(message, "1.0.9 and upgraded nothing") ||
+		!strings.Contains(message, "restarted the hook guardian and then the gateway") {
+		t.Fatalf("warning %s: %s", code, message)
+	}
+}

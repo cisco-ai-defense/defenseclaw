@@ -38,7 +38,7 @@ func windowsEnterpriseClaudeDropInDriftMessage(path string, removed bool) string
 	}
 	return "DefenseClaw's Claude Code machine policy drop-in " + path + " " + what +
 		", so Claude Code may run without some DefenseClaw hooks. A running hook guardian puts it back at its next pass." +
-		" Fix: run " + windowsEnterpriseAdminCommand("repair") + " (or reconcile); keep your own settings in another managed-settings.d file"
+		" Fix: from an elevated PowerShell prompt run " + windowsEnterpriseAdminCommand("repair") + " (or reconcile); keep your own settings in another managed-settings.d file"
 }
 
 // applyWindowsEnterpriseClaudeDropInDrift fails status and verify while the
@@ -56,6 +56,10 @@ func repairWindowsEnterpriseClaudeDropIn() string {
 	if path == "" {
 		return ""
 	}
+	// The restore refuses a record or drop-in an untrusted account can write
+	// only under the standalone scope, which Setup's own process lacks
+	// (GAP-1048).
+	defer pinWindowsStandaloneTrustScope()()
 	if restored, err := windowsEnterpriseClaudeDropInRestore(); err != nil || !restored {
 		return ""
 	}

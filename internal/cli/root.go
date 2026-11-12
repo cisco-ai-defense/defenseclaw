@@ -111,6 +111,23 @@ func writeMachineVersion(w io.Writer) error {
 	})
 }
 
+// skipsDaemonBootstrap reports whether cmd runs without the daemon bootstrap
+// (config load, audit store, PID registration): a command that carries the
+// shared annotation, and the help command cobra generates for the root.
+// `--help` never reaches the pre-run, but `help` and `help <command>` are a
+// command of their own and did, so a managed standard user with no per-user
+// config got the managed refusal instead of the help the command table
+// lists as Offered (GAP-0830).
+func skipsDaemonBootstrap(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
+		return true
+	}
+	return cmd.Name() == "help" && cmd.Parent() != nil && !cmd.Parent().HasParent()
+}
+
 func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	if versionJSON {
 		return nil
@@ -123,7 +140,7 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	// which runs on hosts that may be halfway through a partial
 	// install with no v8 config). Opting-in via the shared annotation
 	// keeps the exemption discoverable in one place.
-	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
+	if skipsDaemonBootstrap(cmd) {
 		return nil
 	}
 	// The bare root command (it has no parent) is the per-user gateway
@@ -400,7 +417,7 @@ func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
 	// rootPersistentPreRunE above; the two initializers must agree on
 	// the annotation contract or scrub regresses whenever it's routed
 	// through the no-audit variant.
-	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
+	if skipsDaemonBootstrap(cmd) {
 		return nil
 	}
 	if err := daemon.RegisterCurrentProcess(); err != nil {
@@ -465,17 +482,25 @@ func loadGatewayCommandConfigFor(cmd *cobra.Command) error {
 // never decodes an unconverted 0.8.x source; `defenseclaw migrate` converts a
 // released config once, and this runtime refuses what it has not converted.
 func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, error) {
+	candidate, startup, _, err := loadGatewayConfigV8Source(path)
+	return candidate, startup, err
+}
+
+// loadGatewayConfigV8Source is loadGatewayConfigV8 that also returns the
+// config file bytes the load parsed, so a caller can name the exact input of
+// its decisions (a digest of a second read could name a different file).
+func loadGatewayConfigV8Source(path string) (*config.Config, *observabilityV8Startup, []byte, error) {
 	// An un-migrated config_version 8 file runs as the v9 migration would
 	// write it (read-only), so its data.json and audit.db policy still apply.
 	// A failed migration refuses the file: run as raw v8 it would drop the
 	// data.json admission policy and the audit.db block/allow entries.
 	loaded, err := loadConfigV8Source(path, config.DefaultDataPath(), "", true)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	candidate := loaded.runtime
 	if !config.CurrentSchemaVersion(candidate.ConfigVersion) {
-		return nil, nil, fmt.Errorf("the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
+		return nil, nil, nil, fmt.Errorf("the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	// The managed-mode environment policy (envvars.Lookup) follows the
 	// loaded config: on a standalone enterprise host ignore-listed variables
@@ -483,7 +508,7 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 	envvars.SetManagedStandalone(candidate.StandaloneEnterprise())
 	startup, err := prepareCompiledObservabilityV8Startup(candidate, loaded)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// Start uses this loader before launching a child. Refuse an unsafe
 	// personal JSONL destination here, with its name and path, rather than
@@ -491,10 +516,10 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 	// Managed service accounts have their own ACL-aware lifecycle preflight.
 	if !managed.IsManagedEnterprise(candidate.DeploymentMode) {
 		if err := checkJSONLDestinationPaths(loaded.compiled, ""); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
-	return candidate, startup, nil
+	return candidate, startup, loaded.sourceRaw, nil
 }
 
 // prepareObservabilityV8Startup remains a testable exact-source seam for
@@ -681,6 +706,8 @@ func loadDotEnvIntoOS(path string) {
 		return
 	}
 	managedHost := envvars.ManagedStandalone() || dotEnvManagedSource()
+	// An adopted gateway token copy never shadows the one the operator saved.
+	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -692,7 +719,7 @@ func loadDotEnvIntoOS(path string) {
 		}
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(v)
-		if !dotEnvKeyIsValid(k) || strings.IndexByte(v, 0) >= 0 || dotEnvKeyIsProcessControl(k) {
+		if !dotEnvKeyIsValid(k) || strings.IndexByte(v, 0) >= 0 || dotEnvKeyIsProcessControl(k) || shadowed.Has(k) {
 			continue
 		}
 		// A managed standalone host skips what the registry ignores there.

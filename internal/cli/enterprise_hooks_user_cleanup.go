@@ -14,11 +14,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // Per-user cleanup of DefenseClaw's own registrations and plugins after a
@@ -214,8 +214,9 @@ func sortEnterpriseHookUserCleanups(entries []enterpriseHookUserCleanup) {
 
 // runEnterpriseHookUserCleanups attempts every entry and returns the ones
 // still to clean. A failed attempt records its error; an entry that is only
-// waiting for its user to sign in is carried unchanged, so a waiting ledger
-// is not rewritten on every reconcile.
+// waiting for its user to sign in, or whose attempt was cut short by a
+// cancelled pass, is carried unchanged, so a waiting ledger is not rewritten
+// on every reconcile and an interrupted cleanup is not delayed.
 func runEnterpriseHookUserCleanups(
 	ctx context.Context,
 	entries []enterpriseHookUserCleanup,
@@ -232,6 +233,15 @@ func runEnterpriseHookUserCleanups(
 			continue
 		}
 		outcome, err := attempt(ctx, entry)
+		if outcome != enterpriseHookUserCleanupDone && ctx.Err() != nil {
+			// The pass was cancelled while the attempt ran (a newer pass
+			// superseded it, or the service is stopping). The attempt did not
+			// fail on its own: record no error, so the next pass retries at
+			// once instead of after the retry interval.
+			remaining = append(remaining, entry)
+			result.Pending = append(result.Pending, label)
+			continue
+		}
 		switch outcome {
 		case enterpriseHookUserCleanupDone:
 			result.Removed = append(result.Removed, label)
@@ -291,22 +301,9 @@ func sameEnterpriseHookUserCleanups(left, right []enterpriseHookUserCleanup) boo
 // is an empty ledger.
 func loadEnterpriseHookUserCleanups(dataDir string) ([]enterpriseHookUserCleanup, error) {
 	path := enterpriseHookUserCleanupPath(dataDir)
-	info, err := pathidentity.LstatPinned(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("inspect per-user cleanup ledger %s: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("per-user cleanup ledger is not a regular file: %s", path)
-	}
-	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
+	data, exists, err := readEnterpriseHookPublishedRecord(path, "per-user cleanup ledger", enterpriseHookUserCleanupMaxBytes, enterpriseHookAuthorizationFileTrustCheck)
+	if err != nil || !exists {
 		return nil, err
-	}
-	data, err := readEnterpriseHookBoundedFile(path, info, enterpriseHookUserCleanupMaxBytes, "per-user cleanup ledger")
-	if err != nil {
-		return nil, fmt.Errorf("read per-user cleanup ledger %s: %w", path, err)
 	}
 	var ledger enterpriseHookUserCleanupLedger
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -369,10 +366,65 @@ func saveEnterpriseHookUserCleanups(dataDir string, pending []enterpriseHookUser
 	return enterpriseHookAuthorizationFileTrustCheck(path)
 }
 
+// addEnterpriseHookDiscoveredCleanups adds to planned the cleanups the caller
+// found by looking at the accounts' own folders (discovered): an account that
+// holds files of a connector the roster no longer lists, whether or not the
+// guardian ever recorded it as protected. A connector admitted for the
+// account is not off the roster for it, and an entry already planned stays as
+// planned (GAP-0964).
+func addEnterpriseHookDiscoveredCleanups(
+	planned, discovered []enterpriseHookUserCleanup,
+	admitted func(connectorName, sid string) bool,
+) []enterpriseHookUserCleanup {
+	seen := make(map[string]bool, len(planned)+len(discovered))
+	for _, entry := range planned {
+		seen[enterpriseHookUserCleanupKey(entry.Connector, entry.SID)] = true
+	}
+	for _, entry := range discovered {
+		key := enterpriseHookUserCleanupKey(entry.Connector, entry.SID)
+		if seen[key] || admitted(entry.Connector, entry.SID) {
+			continue
+		}
+		seen[key] = true
+		planned = append(planned, entry)
+	}
+	sortEnterpriseHookUserCleanups(planned)
+	return planned
+}
+
+// enterpriseHookUserCleanupHeldMaxPasses is how many guardian passes an entry
+// may wait as "the connector is published again, the account is not admitted
+// yet" before it is dropped: an account the enrollment never admits for the
+// connector (a profile the enumerator cannot read, an agent that is not
+// installed) must not keep the entry for ever. The count lives in the guardian
+// process; a restart starts it again.
+const enterpriseHookUserCleanupHeldMaxPasses = 12
+
+var enterpriseHookUserCleanupHeldPasses = struct {
+	sync.Mutex
+	byKey map[string]int
+}{byKey: map[string]int{}}
+
+func countEnterpriseHookUserCleanupHeldPass(key string) int {
+	enterpriseHookUserCleanupHeldPasses.Lock()
+	defer enterpriseHookUserCleanupHeldPasses.Unlock()
+	enterpriseHookUserCleanupHeldPasses.byKey[key]++
+	return enterpriseHookUserCleanupHeldPasses.byKey[key]
+}
+
+func resetEnterpriseHookUserCleanupHeldPasses(key string) {
+	enterpriseHookUserCleanupHeldPasses.Lock()
+	defer enterpriseHookUserCleanupHeldPasses.Unlock()
+	delete(enterpriseHookUserCleanupHeldPasses.byKey, key)
+}
+
 // reconcileEnterpriseHookUserCleanups is the guardian step: plan from the
-// previous protected rows and the ledger, attempt every cleanup of a user the
-// manifest does not enroll, log the outcome, and persist what is still
-// pending. An error means the ledger
+// previous protected rows, the ledger and the cleanups discovered in the
+// accounts' own folders (nil where the platform has none), attempt every
+// cleanup of a user the manifest does not enroll, except an entry hold names
+// (nil holds none: a connector the config publishes again, for an account the
+// enrollment is about to admit), log the outcome, and persist
+// what is still pending. An error means the ledger
 // could not be written, so the caller must not publish state that drops
 // the revoked rows.
 func reconcileEnterpriseHookUserCleanups(
@@ -381,6 +433,8 @@ func reconcileEnterpriseHookUserCleanups(
 	dataDir string,
 	manifest enterprisehooks.Manifest,
 	perUser func(string) bool,
+	discovered []enterpriseHookUserCleanup,
+	hold func(connectorName, sid string) bool,
 	attempt enterpriseHookUserCleanupAttempt,
 	now time.Time,
 ) error {
@@ -404,6 +458,7 @@ func reconcileEnterpriseHookUserCleanups(
 		perUser,
 		now,
 	)
+	planned = addEnterpriseHookDiscoveredCleanups(planned, discovered, admitted)
 	known := map[string]bool{}
 	for _, entry := range pending {
 		known[enterpriseHookUserCleanupLabel(entry)] = true
@@ -414,9 +469,24 @@ func reconcileEnterpriseHookUserCleanups(
 	// again (then it is dropped) or the user is revoked again (then it runs).
 	var due, held []enterpriseHookUserCleanup
 	for _, entry := range planned {
-		if admitted(entry.Connector, entry.SID) {
+		key := enterpriseHookUserCleanupKey(entry.Connector, entry.SID)
+		switch {
+		case admitted(entry.Connector, entry.SID):
+			resetEnterpriseHookUserCleanupHeldPasses(key)
 			held = append(held, entry)
-		} else {
+		case hold != nil && hold(entry.Connector, entry.SID):
+			// A connector the config publishes again, for an account the
+			// enrollment should admit: waiting for its row. An account that
+			// never gets one must not keep the entry for ever (GAP-0964).
+			if passes := countEnterpriseHookUserCleanupHeldPass(key); passes >= enterpriseHookUserCleanupHeldMaxPasses {
+				resetEnterpriseHookUserCleanupHeldPasses(key)
+				fmt.Fprintf(stderr, "defenseclaw: enterprise per-user cleanup: dropped the held cleanup %s: the connector has been published again and the account has had no manifest row for %d passes; its files, if any, stay as they are\n",
+					enterpriseHookUserCleanupLabel(entry), passes)
+				continue
+			}
+			held = append(held, entry)
+		default:
+			resetEnterpriseHookUserCleanupHeldPasses(key)
 			due = append(due, entry)
 		}
 	}

@@ -171,7 +171,8 @@ func scannerRuntimePreflight(binary string, defaults ...string) error {
 		// ErrScannerRuntimeUnavailable lets the rescan loop retry soon: Setup
 		// starts the gateway before it has prepared the runtime (GAP-0975).
 		return fmt.Errorf("scanner: %w: it cannot be run (%v); scans run again once Setup has prepared it, "+
-			"and the DefenseClaw Setup with /repair prepares it again", ErrScannerRuntimeUnavailable, problem)
+			"and `%s`, run from an elevated PowerShell prompt, prepares it again", ErrScannerRuntimeUnavailable, problem,
+			managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", "standalone"))
 	}
 	return nil
 }

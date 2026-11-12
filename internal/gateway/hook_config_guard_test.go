@@ -573,6 +573,54 @@ func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
 	}
 }
 
+func TestHookConfigGuardRefreshesSavedOpenTierChange(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "hooks.json")
+	conn := &runtimePolicyCaptureConnector{stubConnector: stubConnector{name: "claudecode"}, configPath: path}
+	opts := connector.SetupOpts{DataDir: root, HookFailMode: "open", PolicyTier: "default"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, time.Hour)
+	if !guard.Start(ctx, conn, opts) {
+		t.Fatal("guard did not start")
+	}
+	defer guard.Stop()
+	sidecar := &Sidecar{}
+	sidecar.bindHookRuntimePolicyResolver(guard)
+	cfg := config.DefaultConfig()
+	cfg.DataDir = root
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.RulePack = "default"
+	sidecar.publishConfig(cfg)
+	if err := guard.RefreshPolicy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	conn.mu.Lock()
+	before := conn.setupCalls
+	conn.mu.Unlock()
+	for _, tier := range []string{"strict", "default"} {
+		changed := cloneConfig(cfg)
+		changed.Guardrail.RulePack = tier
+		sidecar.publishConfig(changed)
+		guard.mu.Lock()
+		guard.suppressUntil = time.Time{}
+		guard.mu.Unlock()
+		if err := guard.RefreshPolicy(ctx); err != nil {
+			t.Fatalf("%s refresh: %v", tier, err)
+		}
+		conn.mu.Lock()
+		got, calls := conn.lastOpts.PolicyTier, conn.setupCalls
+		conn.mu.Unlock()
+		if got != tier || calls != before+1 {
+			t.Fatalf("%s refresh rendered tier %q in %d calls, want %d", tier, got, calls, before+1)
+		}
+		before, cfg = calls, changed
+	}
+}
+
 type failOnceBakedConnector struct {
 	failModeBakedConnector
 	failClosedOnce bool

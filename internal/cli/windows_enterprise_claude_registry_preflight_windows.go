@@ -70,7 +70,7 @@ func windowsEnterpriseStandaloneClaudeRegistryPolicyPreflight(configPath string)
 	}
 	return errors.New("claude_registry_policy: the Claude Code registry policy " + windowsEnterpriseClaudeRegistryPolicyPath +
 		" holds a value. Claude Code reads that value instead of DefenseClaw's managed settings drop-in, so DefenseClaw cannot guard " +
-		"Claude Code on this computer, and nothing was changed. Delete that registry value (or set it empty) and run Setup again; " +
-		"or, if the registry policy must stay, set guardrail.connectors.claudecode.enabled: false in the config and run Setup again " +
+		"Claude Code on this computer, and nothing was changed. Delete that registry value (or set it empty) and run the same command again; " +
+		"or, if the registry policy must stay, set guardrail.connectors.claudecode.enabled: false in the config you supplied and run the same command again " +
 		"(DefenseClaw then does not guard Claude Code)")
 }

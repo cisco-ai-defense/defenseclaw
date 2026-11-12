@@ -22,8 +22,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -52,6 +54,7 @@ type windowsEnterpriseLifecycleOptions struct {
 	gatewayBinary       string
 	acpBinary           string
 	hookBinary          string
+	hookGuardBinary     string
 	sensorHelperBinary  string
 	policyCompiler      string
 	cliBinary           string
@@ -214,6 +217,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// the check of a supplied config changed
 	// (noteWindowsEnterpriseRefusalRecovery).
 	recoveryChanges []string
+	// rewrittenBeforeLifecycle names the managed files (config.yaml,
+	// targets.yaml) Setup wrote new from the approved source before the
+	// lifecycle ran (noteWindowsEnterpriseRewriteBeforeRefusal).
+	rewrittenBeforeLifecycle []string
 	// activationStartedAt is when a standalone change action started, and
 	// installedBeforeRun whether a deployment was installed then: a run
 	// that installs one records its activation (GAP-0967), dated when the
@@ -326,6 +333,7 @@ func init() {
 	recovery.Hidden = true // Setup uses this once after a timed-out lifecycle child.
 	enterpriseWindowsCmd.AddCommand(recovery)
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsOpenCodePortClearCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsStandaloneFleetInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsEnterpriseCoworkInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())
@@ -362,6 +370,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.StringVar(&opts.gatewayBinary, "gateway-binary", "", "source defenseclaw-gateway.exe")
 	flags.StringVar(&opts.acpBinary, "acp-binary", "", "source defenseclaw-acp.exe")
 	flags.StringVar(&opts.hookBinary, "hook-binary", "", "source defenseclaw-hook.exe")
+	flags.StringVar(&opts.hookGuardBinary, "hook-guard-binary", "", "source defenseclaw-hook-guard.exe (standalone profile)")
 	flags.StringVar(&opts.sensorHelperBinary, "sensor-helper-binary", "", "source defenseclaw-sensor-helper.exe")
 	flags.StringVar(&opts.policyCompiler, "policy-compiler", "", "standalone source policy_compiler.py")
 	flags.StringVar(&opts.cliBinary, "cli-binary", "", "optional source defenseclaw.exe")
@@ -464,7 +473,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 // windowsEnterpriseInspectionHiddenFlags are the lifecycle flags status and
 // verify leave out of their help.
 var windowsEnterpriseInspectionHiddenFlags = []string{
-	"broker-binary", "gateway-binary", "acp-binary", "hook-binary", "sensor-helper-binary", "policy-compiler", "cli-binary",
+	"broker-binary", "gateway-binary", "acp-binary", "hook-binary", "hook-guard-binary", "sensor-helper-binary", "policy-compiler", "cli-binary",
 	"install-root", "state-root", "gateway-service-name", "guardian-service-name",
 	"certification-codex-home", "core-hardening-certification",
 	"attest-agent-application-control", "attest-claude-effective-policy",
@@ -540,7 +549,7 @@ func runWindowsEnterpriseLifecycle(
 	if windowsEnterpriseMutationAction(action) {
 		// The run and the installer it starts leave the CPU to the hooks
 		// that must answer each tool call in time (GAP-0155).
-		windowsLifecycleYieldToHooks()
+		windowsEnterpriseLifecycleYield()
 	}
 	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
 		recordWindowsAnchorsProfileRefusal(cmd, opts, err)
@@ -548,6 +557,15 @@ func runWindowsEnterpriseLifecycle(
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 		}
 		return failPreflight(err)
+	}
+	windowsEnterpriseRunStandalone.Store(windowsEnterpriseStandalone(opts))
+	if windowsEnterpriseStandalone(opts) {
+		// Setup runs this from a staged copy that carries no profile pin and
+		// sits outside the install root: it still refuses to give a folder or
+		// file another account can write back its access list in place
+		// (GAP-0651).
+		managed.MarkStandaloneLifecycleProcess()
+		defer managed.UnmarkStandaloneLifecycleProcess()
 	}
 	if (opts.bundlePath != "" || opts.trustAnchors != "") && !windowsEnterpriseStandalone(opts) {
 		return failPreflight(errors.New("--bundle and --trust-anchors are valid only with --profile standalone"))
@@ -729,10 +747,11 @@ func runWindowsEnterpriseLifecycle(
 				"only the installed CLI can uninstall from its own folder: %s would keep that folder "+
 					"in use, so the uninstall would stop halfway. From a prompt whose folder is outside %s "+
 					"(for example, cd /d C:\\ first), run \"%s\" enterprise windows uninstall --profile standalone, "+
-					"or run DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall",
+					"or run %s. %s",
 				filepath.Base(executable),
 				filepath.Dir(filepath.Dir(executable)),
 				filepath.Join(filepath.Dir(executable), "defenseclaw.exe"),
+				windowsEnterpriseSetupCommand("/uninstall"), managed.WindowsSetupSource,
 			))
 		}
 		if callerPID, ok := windowsEnterpriseSelfUninstallCaller(
@@ -1080,6 +1099,7 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	appendValue("-GatewayBinary", opts.gatewayBinary)
 	appendValue("-ACPBinary", opts.acpBinary)
 	appendValue("-HookBinary", opts.hookBinary)
+	appendValue("-HookGuardBinary", opts.hookGuardBinary)
 	appendValue("-SensorHelperBinary", opts.sensorHelperBinary)
 	appendValue("-PolicyCompiler", opts.policyCompiler)
 	appendValue("-CLIBinary", opts.cliBinary)
@@ -1635,9 +1655,9 @@ func prepareWindowsEnterprisePowerShellTemp() (string, func() error, error) {
 	return prepareWindowsEnterprisePowerShellTempWithOps(
 		windowsEnterprisePowerShellTempOps{
 			isElevated: func() bool {
-				return windows.GetCurrentProcessToken().IsElevated()
+				return windowsEnterpriseStagingElevated()
 			},
-			userTemp: trustedWindowsEnterpriseUserTempDirectory,
+			userTemp: windowsEnterpriseUserTempDirectory,
 			elevatedTempRoot: func() (string, error) {
 				// ProgramData permits create-only access at its root without
 				// granting unprivileged callers replacement access to this child.
@@ -1777,6 +1797,23 @@ func createProtectedWindowsEnterpriseDirectoryWithFallback(
 	return "", newWindowsEnterpriseStagingBlockedPrereq(label, parents, err)
 }
 
+// windowsEnterpriseRunStandalone is set once the lifecycle has resolved its
+// profile. The staging directories are created before any helper carries the
+// profile pin, and their block is the one text of this file that both
+// profiles produce.
+var windowsEnterpriseRunStandalone atomic.Bool
+
+// windowsEnterpriseStagingRetryStep ends the remedy of a blocked staging
+// directory. Secure Client keeps "run Setup again". A standalone computer may
+// be running the installed CLI, not Setup, and has no Setup installed, so it
+// asks for the failed run again (cowork-1-0-8 GAP-0095).
+func windowsEnterpriseStagingRetryStep() string {
+	if windowsEnterpriseRunStandalone.Load() {
+		return "run the same command again"
+	}
+	return "run Setup again"
+}
+
 // windowsEnterpriseStagingBlockedError is the prerequisite reported when
 // every staging parent refused a protected directory. Its text is the
 // resilience-event line; it still unwraps to the access-denied cause.
@@ -1802,7 +1839,7 @@ func newWindowsEnterpriseStagingBlockedPrereq(label string, parents []string, ca
 		"remedy": "allow " + executable + " through Controlled Folder Access (Windows Security > Virus & threat " +
 			"protection > Ransomware protection > Allow an app through Controlled folder access, or " +
 			"Add-MpPreference -ControlledFolderAccessAllowedApplications '" + executable + "') and in the " +
-			"endpoint protection allow list, then run Setup again",
+			"endpoint protection allow list, then " + windowsEnterpriseStagingRetryStep(),
 	}).Error()
 	managed.EmitResilienceEvent(managed.MarkerPrereq, parseWindowsEnterprisePrereqFields(line))
 	return &windowsEnterpriseStagingBlockedError{line: line, cause: cause}
@@ -1847,6 +1884,11 @@ func createProtectedWindowsEnterpriseDirectory(
 	}
 	return "", fmt.Errorf("create protected %s: random path collisions exhausted", label)
 }
+
+// windowsEnterpriseUserTempDirectory is the caller's own temp folder, where
+// an unelevated lifecycle stages its scripts and its PowerShell temp. The
+// package's tests point it into their own temp folder (GAP-0079).
+var windowsEnterpriseUserTempDirectory = trustedWindowsEnterpriseUserTempDirectory
 
 func trustedWindowsEnterpriseUserTempDirectory() (string, error) {
 	// A read-only Status command is intentionally available without elevation.
@@ -2097,6 +2139,7 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		serviceAccount string
 		jsonOutput     bool
 		record         bool
+		approvedSHA256 string
 		recordRestored bool
 		repairRollback bool
 	)
@@ -2109,6 +2152,9 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 			if repairRollback && (record || recordRestored) {
 				return errors.New("repair-rollback is read-only and cannot record a config generation")
 			}
+			if approvedSHA256 != "" && (!record || !windowsServiceConfigSHA256Pattern.MatchString(approvedSHA256)) {
+				return errors.New("approved-config-sha256 takes the 64 lowercase hex digits of the installed approved source and needs record-lifecycle")
+			}
 			if recordRestored {
 				return recordRestoredWindowsServiceConfig(cmd, configPath, dataDir, serviceAccount, jsonOutput)
 			}
@@ -2117,7 +2163,7 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 			if repairRollback {
 				report, err = validateWindowsRepairRollbackConfig(configPath, dataDir, serviceAccount)
 			} else {
-				report, err = validateWindowsServiceConfig(configPath, dataDir, serviceAccount, record)
+				report, err = validateWindowsServiceConfigApproved(configPath, dataDir, serviceAccount, record, approvedSHA256)
 			}
 			if jsonOutput {
 				if err != nil {
@@ -2143,6 +2189,8 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
 	cmd.Flags().BoolVar(&record, "record-lifecycle", false,
 		"migrate a config_version 8 config and record the installed config generation (install-like lifecycle only)")
+	cmd.Flags().StringVar(&approvedSHA256, "approved-config-sha256", "",
+		"sha256 of the approved source this run installed as config.yaml; with record-lifecycle it records those bytes as the lifecycle generation over a hand-edit record of them")
 	cmd.Flags().BoolVar(&recordRestored, "record-restored", false,
 		"record the config a lifecycle rollback restored as a new generation, without validating or migrating it")
 	cmd.Flags().BoolVar(&repairRollback, "repair-rollback", false,
@@ -2260,6 +2308,10 @@ func recordRestoredWindowsServiceConfig(cmd *cobra.Command, configPath, dataDir,
 	return err
 }
 
+// windowsServiceConfigSHA256Pattern is a sha256 as config.generation.json
+// records it.
+var windowsServiceConfigSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // validateWindowsServiceConfig checks the installed config. Only the
 // install-like lifecycle passes record, inside its transaction: verify and
 // status run the same check read-only, so a hand edit is never recorded as
@@ -2269,6 +2321,20 @@ func validateWindowsServiceConfig(
 	expectedDataDir string,
 	serviceAccount string,
 	record bool,
+) (windowsServiceConfigValidation, error) {
+	return validateWindowsServiceConfigApproved(configPath, expectedDataDir, serviceAccount, record, "")
+}
+
+// validateWindowsServiceConfigApproved is validateWindowsServiceConfig for
+// the transaction's config step, which also passes the sha256 of the approved
+// source it installed as config.yaml ("" for none; see
+// migrateManagedStandaloneConfig).
+func validateWindowsServiceConfigApproved(
+	configPath string,
+	expectedDataDir string,
+	serviceAccount string,
+	record bool,
+	approvedSHA256 string,
 ) (windowsServiceConfigValidation, error) {
 	var report windowsServiceConfigValidation
 	configPath, err := filepath.Abs(strings.TrimSpace(configPath))
@@ -2340,7 +2406,7 @@ func validateWindowsServiceConfig(
 		// config becomes 9 here, and the installed config is recorded in
 		// config.generation.json.
 		if record {
-			if err := migrateManagedStandaloneConfig(context.Background(), configPath); err != nil {
+			if err := migrateManagedStandaloneConfig(context.Background(), configPath, approvedSHA256); err != nil {
 				return windowsServiceConfigValidation{}, err
 			}
 		}

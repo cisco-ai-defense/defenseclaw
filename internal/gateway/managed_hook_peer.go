@@ -736,7 +736,7 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		}
 		r, release := a.admitHookCaller(w, r, strconv.Itoa(peer.UID), route)
 		if release == nil {
-			if hookCallerLeft(r) {
+			if hookCallerLeft(r) || hookCallerShed(r) {
 				a.recordManagedPeerCallerGone(w, r, authorizer, peer)
 			}
 			return
@@ -749,7 +749,7 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.URL.Path == managedGuardianRepairAuditPath {
+		if r.URL.Path == managedGuardianRepairAuditPath || r.URL.Path == managedGuardianAccountRemovedAuditPath {
 			// The guardian runs as root and reports repairs over the same
 			// kernel-verified socket; user hooks cannot create audit rows.
 			if peer.UID != 0 {
@@ -958,6 +958,7 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux.HandleFunc(managed.OwnProfileExplainPath, a.handleOwnProfileExplain)
 	mux.HandleFunc(managed.OwnStatusPath, a.handleOwnStatus)
 	mux.HandleFunc(managedGuardianRepairAuditPath, a.handleManagedGuardianRepairAudit)
+	mux.HandleFunc(managedGuardianAccountRemovedAuditPath, a.handleManagedGuardianAccountRemovedAudit)
 	mux.HandleFunc(managed.LaunchCoverageReportPath, a.handleManagedLaunchCoverageAudit)
 	mux.HandleFunc(connector.UserScopedRotationProofPath, a.serveRotationListenerProof)
 	a.registerSandboxAuthorityRoutes(mux)

@@ -56,7 +56,7 @@ You are an AI agent. Turn one sentence from the user into one rule in a custom r
 
 1. Observe first. Do not switch an agent to action mode, change a fail mode, disable a connector or edit `config.yaml` by hand without the user's yes. `use-pack` edits `config.yaml` through the CLI; ask first.
 2. Never put a real key, token or customer string in a rule or an example.
-3. Stop on a managed computer: exit code `3`, or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`. There, the administrator delivers packs.
+3. Stop on a managed computer: exit code `3`, or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json` ([Managed command availability](/docs/enterprise/managed-commands)). There, the administrator delivers packs.
 4. Never edit the shipped `default`, `strict` or `permissive` packs. Copy one.
 
 ### Steps
@@ -72,7 +72,7 @@ You are an AI agent. Turn one sentence from the user into one rule in a custom r
 
    Expected: no output.
    If the source folder is missing, run `defenseclaw init` first and tell the user.
-   In every mode, observe included, DefenseClaw blocks an agent that copies into `~/.defenseclaw` (`tamper.detector_state_write`: DefenseClaw protects its own files; with the permissive pack it only reports it). Then ask the user to run step 2 themselves, and continue.
+   In every mode, observe included, DefenseClaw blocks an agent that copies into `~/.defenseclaw` (`tamper.detector_state_write`: DefenseClaw protects its own files with every rule pack). Then ask the user to run step 2 themselves, and continue.
 
 3. Write the rule file. Use this shape, which the quickstart demo also uses. Replace the id, expression, pattern and title.
 

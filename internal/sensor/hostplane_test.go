@@ -520,3 +520,189 @@ func TestScriptAgentOnDarwinAttributesItsChildren(t *testing.T) {
 			findings[0].RootPID, agentPID)
 	}
 }
+
+// cowork-1-0-8 GAP-0080 (review S4 of GAP-0072): a helper restart (a
+// package upgrade, a config push) replaces the Plane C source and its
+// buffers, and the events they had dropped vanished from status. The count
+// is carried: the ended source's final coverage stands until the next one
+// starts, which names the earlier drops in one line of their own, counted
+// once at every step.
+func TestHostPlaneCarriesBufferDropsAcrossARestart(t *testing.T) {
+	first := newFake(plane.WithBufferDrops(fullCoverage(), 3, plane.SensorEventBuffer))
+	host := newHost(first)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	check := func(step string, wantRunning bool, want int64, lines ...string) {
+		t.Helper()
+		_, _, running, coverage := host.stats()
+		joined := strings.Join(coverage.Limitations, "; ")
+		if running != wantRunning || coverage.BufferDropped != want || strings.Count(joined, "dropped") != len(lines) {
+			t.Fatalf("%s: running %t, BufferDropped %d, limitations %q; want %t, %d and %q",
+				step, running, coverage.BufferDropped, coverage.Limitations, wantRunning, want, lines)
+		}
+		for _, line := range lines {
+			if !strings.Contains(joined, line) {
+				t.Fatalf("%s: limitations %q lack %q", step, coverage.Limitations, line)
+			}
+		}
+	}
+	restart := func(previous, next *fakeSource) {
+		t.Helper()
+		previous.buffer.Close() // the helper restarted: its stream ended
+		deadline := time.Now().Add(5 * time.Second)
+		for !host.ended() {
+			if time.Now().After(deadline) {
+				t.Fatal("the ended stream was not noticed")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		host.replaceSource(next)
+	}
+	if err := host.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check("first source", true, 3, "3 events were dropped from the sensor's event buffer")
+
+	second := newFake(plane.WithBufferDrops(fullCoverage(), 2, plane.HelperStreamBuffer))
+	restart(first, second)
+	check("replaced, not started", false, 3, "3 events were dropped from the sensor's event buffer")
+	if err := host.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check("second source", true, 5, "2 events were dropped from the gateway's event buffer",
+		"3 events were dropped under back-pressure in earlier event streams of the sensor")
+
+	third := newFake(fullCoverage())
+	restart(second, third)
+	if err := host.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check("third source, no drops of its own", true, 5,
+		"5 events were dropped under back-pressure in earlier event streams of the sensor")
+}
+
+// g072 review 2 N3: a source whose start fails between the replace and the
+// start keeps the earlier drops named, through a further replace, and the
+// next source that starts names them once.
+func TestHostPlaneKeepsBufferDropsWhenTheNextSourceFailsToStart(t *testing.T) {
+	first := newFake(plane.WithBufferDrops(fullCoverage(), 3, plane.SensorEventBuffer))
+	host := newHost(first)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	check := func(step string, wantRunning bool, want int64, lines ...string) {
+		t.Helper()
+		_, _, running, coverage := host.stats()
+		joined := strings.Join(coverage.Limitations, "; ")
+		if running != wantRunning || coverage.BufferDropped != want || strings.Count(joined, "dropped") != len(lines) {
+			t.Fatalf("%s: running %t, BufferDropped %d, limitations %q; want %t, %d and %q",
+				step, running, coverage.BufferDropped, coverage.Limitations, wantRunning, want, lines)
+		}
+		for _, line := range lines {
+			if !strings.Contains(joined, line) {
+				t.Fatalf("%s: limitations %q lack %q", step, coverage.Limitations, line)
+			}
+		}
+	}
+	if err := host.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first.buffer.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for !host.ended() {
+		if time.Now().After(deadline) {
+			t.Fatal("the ended stream was not noticed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	failing := newFake(fullCoverage())
+	failing.startErr = errors.New("sensor helper unreachable")
+	host.replaceSource(failing)
+	if err := host.start(ctx); err == nil {
+		t.Fatal("the failing source started")
+	}
+	check("start failed", false, 3, "3 events were dropped from the sensor's event buffer")
+	next := newFake(plane.WithBufferDrops(fullCoverage(), 1, plane.HelperStreamBuffer))
+	host.replaceSource(next)
+	check("replaced again, not started", false, 3, "3 events were dropped from the sensor's event buffer")
+	if err := host.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check("next source", true, 4, "1 events were dropped from the gateway's event buffer",
+		"3 events were dropped under back-pressure in earlier event streams of the sensor")
+}
+
+// cowork-1-0-8 GAP-0080, the class: every loss a source counts for its own
+// life is carried across a restart, not only its buffer drops. The kernel
+// overflows (ENOBUFS) left status with the source, and the backend's events
+// lost, which the telemetry reports as events_lost, went back to zero on
+// every helper restart. A source without a backend keeps the tally for the
+// next one, and the sources' own coverage is never changed.
+func TestHostPlaneCarriesEveryLossAcrossARestart(t *testing.T) {
+	coverage := func(lost, overflows, dropped int64, backend bool) plane.Coverage {
+		start := fullCoverage()
+		if backend {
+			start.Backend = &plane.Backend{Kind: plane.BackendTetragon, EventsLost: lost}
+		}
+		return plane.WithBufferDrops(plane.WithKernelOverflows(start, overflows), dropped, plane.SensorEventBuffer)
+	}
+	first := newFake(coverage(4, 2, 3, true))
+	host := newHost(first)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	check := func(step string, dropped, overflows, backendLost int64, lines ...string) {
+		t.Helper()
+		_, _, running, got := host.stats()
+		lost := int64(-1)
+		if got.Backend != nil {
+			lost = got.Backend.EventsLost
+		}
+		if !running || got.BufferDropped != dropped || got.KernelOverflows != overflows || lost != backendLost {
+			t.Fatalf("%s: running %t, dropped %d, overflows %d, events lost %d; want %d, %d, %d",
+				step, running, got.BufferDropped, got.KernelOverflows, lost, dropped, overflows, backendLost)
+		}
+		joined := strings.Join(got.Limitations, "; ")
+		for _, line := range lines {
+			if !strings.Contains(joined, line) {
+				t.Fatalf("%s: limitations %q lack %q", step, got.Limitations, line)
+			}
+		}
+	}
+	restart := func(previous, next *fakeSource) {
+		t.Helper()
+		previous.buffer.Close() // the helper restarted: its stream ended
+		deadline := time.Now().Add(5 * time.Second)
+		for !host.ended() {
+			if time.Now().After(deadline) {
+				t.Fatal("the ended stream was not noticed")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		host.replaceSource(next)
+		if err := host.start(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := host.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check("first source", 3, 2, 4, "process events were lost 2 times when the netlink receive buffer overflowed (ENOBUFS)")
+
+	second := newFake(coverage(1, 0, 0, true))
+	restart(first, second)
+	retiredLines := []string{
+		"3 events were dropped under back-pressure in earlier event streams of the sensor",
+		"process events were lost 2 times when the netlink receive buffer overflowed (ENOBUFS) in earlier event streams of the sensor",
+	}
+	check("second source", 3, 2, 5, retiredLines...)
+
+	third := newFake(coverage(0, 0, 0, false)) // a helper without Tetragon
+	restart(second, third)
+	check("third source, no backend", 3, 2, -1, retiredLines...)
+
+	fourth := newFake(coverage(2, 1, 0, true))
+	restart(third, fourth)
+	check("fourth source", 3, 3, 7, retiredLines...)
+	if first.coverage.Backend.EventsLost != 4 || fourth.coverage.Backend.EventsLost != 2 {
+		t.Fatalf("a source's own coverage changed: %d, %d", first.coverage.Backend.EventsLost, fourth.coverage.Backend.EventsLost)
+	}
+}

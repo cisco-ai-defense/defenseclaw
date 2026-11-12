@@ -666,6 +666,63 @@ func TestHelperRestartResumesWithoutTouchingTetragon(t *testing.T) {
 	}
 }
 
+// cowork-1-0-8 GAP-0080: the change sequence carries the epoch it counts
+// in. A helper restart keeps both and the sequence goes on; a state file
+// that is gone starts the sequence again under a new epoch, which the
+// gateway tells from the old one even once it passes the old Seq.
+func TestTheChangeSequenceNamesItsEpoch(t *testing.T) {
+	h := enforcing(t)
+	first := h.status()
+	if first.SeqEpoch == 0 || first.Seq == 0 {
+		t.Fatalf("seq %d, epoch %d: want both set", first.Seq, first.SeqEpoch)
+	}
+	h.now = h.now.Add(time.Minute)
+	h.start(h.intent)
+	h.pass()
+	if again := h.status(); again.SeqEpoch != first.SeqEpoch || again.Seq < first.Seq {
+		t.Fatalf("after a helper restart: seq %d, epoch %d; want epoch %d, seq at least %d",
+			again.Seq, again.SeqEpoch, first.SeqEpoch, first.Seq)
+	}
+	data, err := os.ReadFile(h.dirs.StateFile())
+	if err != nil || !strings.Contains(string(data), `"seq_epoch":`) {
+		t.Fatalf("the state file does not record the epoch: %v", err)
+	}
+	h.ctl.flush()
+	h.ctl.persist()
+	if err := os.Remove(h.dirs.StateFile()); err != nil {
+		t.Fatal(err)
+	}
+	h.ctl = nil
+	h.now = h.now.Add(time.Minute)
+	h.start(h.intent)
+	h.pass()
+	if reset := h.status(); reset.SeqEpoch == 0 || reset.SeqEpoch == first.SeqEpoch {
+		t.Fatalf("a state file that was gone kept epoch %d (first %d)", reset.SeqEpoch, first.SeqEpoch)
+	}
+}
+
+// cowork-1-0-8 GAP-0080 review L4: the epoch was the start's wall clock, so
+// a state file that was gone named its new sequence like the old one when
+// the clock read the same at both starts (a frozen or reset container
+// clock). The epoch is a random id: the new sequence is told apart anyway.
+func TestTheChangeSequenceEpochDoesNotFollowTheClock(t *testing.T) {
+	h := enforcing(t)
+	first := h.status()
+	h.ctl.flush()
+	h.ctl.persist()
+	if err := os.Remove(h.dirs.StateFile()); err != nil {
+		t.Fatal(err)
+	}
+	h.ctl = nil
+	// The clock reads what it read when the first sequence began.
+	h.now = time.Unix(0, first.SeqEpoch)
+	h.start(h.intent)
+	h.pass()
+	if reset := h.status(); reset.SeqEpoch == 0 || reset.SeqEpoch == first.SeqEpoch {
+		t.Fatalf("a state file that was gone kept epoch %d under the same clock", reset.SeqEpoch)
+	}
+}
+
 func TestAStaleAckDemotesARunningEnforcer(t *testing.T) {
 	h := enforcing(t)
 	// A new build changes kernel_policy: the old ack no longer matches.

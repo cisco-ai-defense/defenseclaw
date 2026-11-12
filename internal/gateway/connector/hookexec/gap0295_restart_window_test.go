@@ -21,7 +21,9 @@ import (
 func stubRestartWindowProof(t *testing.T, fresh bool) {
 	t.Helper()
 	previous := perUserRestartWindowProof
-	perUserRestartWindowProof = func(string, *perUserPeerCheck) bool { return fresh }
+	perUserRestartWindowProof = func(string, *perUserPeerCheck) restartProofResult {
+		return restartProofResult{ok: fresh, reason: "proof_rejected"}
+	}
 	t.Cleanup(func() { perUserRestartWindowProof = previous })
 }
 

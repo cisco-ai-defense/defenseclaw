@@ -58,13 +58,13 @@ func (retries *enterpriseHookWatchRetries) observe(reason string, run enterprise
 	seen := make(map[string]struct{}, len(run.Rows)+1)
 	for index, row := range run.Rows {
 		key := enterpriseHookWatchRetryKey(row, index)
-		if row.OK || row.Pending {
+		if row.OK || row.Pending || row.Removed {
 			continue
 		}
 		seen[key] = struct{}{}
 		markFailed(key)
 	}
-	if run.StateErr != nil {
+	if run.StateErr != nil || run.PolicyErr != nil {
 		seen[enterpriseHookWatchGlobalRetry] = struct{}{}
 		markFailed(enterpriseHookWatchGlobalRetry)
 	}
@@ -115,7 +115,7 @@ func enterpriseHookWatchFailedOwnedPaths(run enterpriseHookReconcileRun) map[str
 	failed := make(map[string]bool, len(run.WatchPathOwners))
 	failedTargets := make(map[string]bool, len(run.Rows))
 	for index, row := range run.Rows {
-		if !row.OK && !row.Pending {
+		if !row.OK && !row.Pending && !row.Removed {
 			failedTargets[enterpriseHookWatchRetryKey(row, index)] = true
 		}
 	}

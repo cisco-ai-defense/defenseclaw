@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from defenseclaw.file_permissions import atomic_write_private_bytes
+from defenseclaw.file_permissions import atomic_write_private_bytes, serialize_dotenv
 
 
 def persist_env_var(env_path: Path, key: str, value: str) -> None:
@@ -31,8 +31,10 @@ def persist_env_var(env_path: Path, key: str, value: str) -> None:
 
     lines: list[str] = []
     found = False
+    existing = b""
     if env_path.exists():
-        lines = env_path.read_text(encoding="utf-8").splitlines()
+        existing = env_path.read_bytes()
+        lines = existing.decode("utf-8").splitlines()
         new_lines: list[str] = []
         for line in lines:
             stripped = line.strip()
@@ -46,9 +48,9 @@ def persist_env_var(env_path: Path, key: str, value: str) -> None:
     if not found:
         lines.append(f"{key}={value}")
 
-    content = "\n".join(lines) + "\n"
+    content = serialize_dotenv([line.encode("utf-8") for line in lines], existing)
 
     # Protect the staging file before writing secrets, including on Windows.
     # The shared writer also verifies the published file and cleans up on
     # replacement failure.
-    atomic_write_private_bytes(env_path, content.encode("utf-8"))
+    atomic_write_private_bytes(env_path, content)
