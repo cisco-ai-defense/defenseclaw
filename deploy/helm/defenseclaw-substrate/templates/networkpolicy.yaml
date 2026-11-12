@@ -16,8 +16,8 @@ spec:
       app.kubernetes.io/name: defenseclaw-substrate
   policyTypes: [Ingress]
 ---
-# Gateway: the actor listener only from atenet-egress (actors reach it only
-# through egress, with the injected actor JWT); the admin listener only from
+# Gateway: the actor listener (plain HTTP) only from atenet-egress (actors
+# reach it only through egress, with the injected actor JWT); the admin listener only from
 # this namespace and adminFrom (launcher ingress, fleet).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

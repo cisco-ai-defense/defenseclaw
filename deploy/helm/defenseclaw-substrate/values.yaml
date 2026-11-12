@@ -82,7 +82,10 @@ gateway:
   pdb:
     minAvailable: 1
   ports:
-    actor: 8443
+    # The actor listener, plain HTTP: atenet-egress reaches it on an http
+    # rule (an https rule cannot verify an in-cluster certificate; see
+    # README, Known limits). The NetworkPolicy admits only atenet-egress.
+    actor: 8080
     admin: 9443
     metrics: 9464
   args: []

@@ -21,8 +21,8 @@ spec:
   policyTypes: [Ingress]
 ---
 # Source: defenseclaw-substrate/templates/networkpolicy.yaml
-# Gateway: the actor listener only from atenet-egress (actors reach it only
-# through egress, with the injected actor JWT); the admin listener only from
+# Gateway: the actor listener (plain HTTP) only from atenet-egress (actors
+# reach it only through egress, with the injected actor JWT); the admin listener only from
 # this namespace and adminFrom (launcher ingress, fleet).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -54,7 +54,7 @@ spec:
           app: atenet-egress
     ports:
     - protocol: TCP
-      port: 8443
+      port: 8080
   - from:
     # This namespace's pods, never a Substrate worker pod (which hosts
     # actors) even if worker pools share the namespace.
@@ -567,8 +567,11 @@ spec:
     targetPort: health
 ---
 # Source: defenseclaw-substrate/templates/gateway.yaml
-# The actor Service: the only DefenseClaw host in rendered egress policies.
-# It exposes the actor listener and nothing else (D15).
+# The actor Service: the only DefenseClaw host in rendered egress policies,
+# as an http rule on port 80 to defenseclaw-actor.<ns>.svc.cluster.local
+# (GAP-0023: egress trusts only public CAs upstream, and actors resolve only
+# the exact names in their policy). It exposes the actor listener and nothing
+# else (D15); the actor JWT egress injects is the authentication.
 apiVersion: v1
 kind: Service
 metadata:
@@ -589,8 +592,8 @@ spec:
     app.kubernetes.io/instance: dc
     app.kubernetes.io/component: gateway
   ports:
-  - name: https
-    port: 443
+  - name: http
+    port: 80
     targetPort: actor
 ---
 # Source: defenseclaw-substrate/templates/gateway.yaml
@@ -1031,7 +1034,7 @@ spec:
         - serve
         - --substrate
         - --substrate-role=gateway
-        - --actor-listen=:8443
+        - --actor-listen=:8080
         - --admin-listen=:9443
         - --metrics-listen=:9464
         - --leader-address=defenseclaw-leader.defenseclaw-system.svc:7443
@@ -1050,7 +1053,7 @@ spec:
               fieldPath: metadata.namespace
         ports:
         - name: actor
-          containerPort: 8443
+          containerPort: 8080
         - name: admin
           containerPort: 9443
         - name: metrics
