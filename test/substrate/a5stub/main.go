@@ -119,7 +119,8 @@ func proxyTo(target, prefix, tokenFile string) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		log.Info("llm", "path", r.URL.Path, "jwt", jwtClaims(r.Header.Get(kit.PlaceholderHeader)), "auth_was_placeholder",
+		log.Info("llm", "path", r.URL.Path, "jwt", jwtClaims(r.Header.Get(kit.PlaceholderHeader)),
+			"client", r.Header.Get("X-DefenseClaw-Client"), "auth_was_placeholder",
 			strings.Contains(r.Header.Get("Authorization"), "placeholder") || strings.Contains(r.Header.Get("X-Api-Key"), "placeholder"))
 		rp.ServeHTTP(w, r)
 		log.Info("llm.done", "path", r.URL.Path, "ms", time.Since(start).Milliseconds())

@@ -70,6 +70,13 @@ func TestClaudeCodeOverlay(t *testing.T) {
 			}
 		}
 	}
+	if h := doc.Env["ANTHROPIC_CUSTOM_HEADERS"]; h != "x-defenseclaw-actor: defenseclaw-actor-placeholder\nX-DefenseClaw-Client: claudecode-llm/1.0" ||
+		strings.Count(h, "\n") != 1 {
+		t.Fatalf("model headers %q (two headers on two lines)", h)
+	}
+	if _, inImageEnv := ov.Env["ANTHROPIC_CUSTOM_HEADERS"]; inImageEnv {
+		t.Fatal("ANTHROPIC_CUSTOM_HEADERS in the image ENV, where a newline cannot be kept")
+	}
 	if doc.Env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != DefaultGatewayURL+"/v1/logs" {
 		t.Fatalf("otel %q", doc.Env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"])
 	}
@@ -93,7 +100,6 @@ func TestClaudeCodeOverlay(t *testing.T) {
 		"ANTHROPIC_MODEL": ClaudeCodeBedrockModel, "ANTHROPIC_SMALL_FAST_MODEL": ClaudeCodeBedrockModel,
 		"ANTHROPIC_DEFAULT_OPUS_MODEL": ClaudeCodeBedrockModel, "ANTHROPIC_DEFAULT_SONNET_MODEL": ClaudeCodeBedrockModel,
 		"CLAUDE_CODE_SUBAGENT_MODEL": ClaudeCodeBedrockModel,
-		"ANTHROPIC_CUSTOM_HEADERS":   "x-defenseclaw-actor: defenseclaw-actor-placeholder\nX-DefenseClaw-Client: claudecode-llm/1.0",
 	} {
 		if ov.Env[k] != want {
 			t.Errorf("env %s=%q, want %q", k, ov.Env[k], want)

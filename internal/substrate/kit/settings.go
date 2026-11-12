@@ -367,11 +367,6 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 			env["ANTHROPIC_BASE_URL"] = gw + "/llm/anthropic"
 			env["ANTHROPIC_API_KEY"] = "placeholder-not-a-secret"
 		}
-		// Model calls carry the placeholder too, so egress gives the
-		// gateway's /llm route the actor JWT as the verified caller (D2).
-		// The actor listener's CSRF gate also wants X-DefenseClaw-Client on
-		// every POST (GAP-0037). Claude Code takes one header per line.
-		env["ANTHROPIC_CUSTOM_HEADERS"] = PlaceholderHeader + ": " + PlaceholderValue + "\nX-DefenseClaw-Client: claudecode-llm/1.0"
 		if model != "" {
 			for _, k := range claudeCodeModelSlots {
 				env[k] = model
@@ -383,6 +378,10 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 	}
 	return env
 }
+
+// ClaudeCodeModelHeaders are the headers Claude Code adds to every model
+// call in an actor image, one per line.
+const ClaudeCodeModelHeaders = PlaceholderHeader + ": " + PlaceholderValue + "\nX-DefenseClaw-Client: claudecode-llm/1.0"
 
 // claudeDropIn points the managed hook matrix at the actor hook.
 func claudeDropIn(data []byte, hookCmd string) ([]byte, error) {
@@ -412,6 +411,14 @@ func claudeDropIn(data []byte, hookCmd string) ([]byte, error) {
 	}
 	if env, ok := doc["env"].(map[string]any); ok {
 		env["OTEL_RESOURCE_ATTRIBUTES"] = "defenseclaw.connector=claudecode,service.name=claudecode,defenseclaw.sandbox.runtime=substrate"
+		// Model calls carry the placeholder, so egress gives the gateway's
+		// /llm route the actor JWT as the verified caller (D2), and
+		// X-DefenseClaw-Client for the actor listener's CSRF gate
+		// (GAP-0037). Claude Code splits this on newlines; it lives here,
+		// not in the image ENV, because a Dockerfile ENV cannot hold a
+		// newline (the "\n" stayed two characters and the second header
+		// was never sent).
+		env["ANTHROPIC_CUSTOM_HEADERS"] = ClaudeCodeModelHeaders
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
