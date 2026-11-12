@@ -89,7 +89,9 @@ spec:
   policyTypes: [Ingress]
   ingress:
   - from:
-    - podSelector: {}
+    - podSelector:
+        matchExpressions:
+        - {key: ate.dev/worker-pool, operator: DoesNotExist}
     ports:
     - {protocol: TCP, port: 4317}
     - {protocol: TCP, port: 4318}

@@ -37,7 +37,11 @@ spec:
     - protocol: TCP
       port: {{ .Values.gateway.ports.actor }}
   - from:
-    - podSelector: {}
+    # This namespace's pods, never a Substrate worker pod (which hosts
+    # actors) even if worker pools share the namespace.
+    - podSelector:
+        matchExpressions:
+        - {key: ate.dev/worker-pool, operator: DoesNotExist}
     {{- with .Values.networkPolicy.adminFrom }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

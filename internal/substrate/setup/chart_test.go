@@ -185,7 +185,10 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 				t.Errorf("%s: actor port peers %s", name, from)
 			}
 		case 9443:
-			if strings.Contains(string(from), "atenet-egress") || strings.Contains(string(from), "worker-pool") {
+			// Never atenet-egress (actors), and the namespace peer must
+			// exclude Substrate worker pods, which host actors.
+			if strings.Contains(string(from), "atenet-egress") || !strings.Contains(string(from), "DoesNotExist") ||
+				strings.Contains(string(from), "podSelector: {}") {
 				t.Errorf("%s: admin port admits egress or actors: %s", name, from)
 			}
 		}

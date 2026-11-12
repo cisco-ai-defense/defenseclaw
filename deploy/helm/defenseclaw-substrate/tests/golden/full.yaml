@@ -56,7 +56,11 @@ spec:
     - protocol: TCP
       port: 8443
   - from:
-    - podSelector: {}
+    # This namespace's pods, never a Substrate worker pod (which hosts
+    # actors) even if worker pools share the namespace.
+    - podSelector:
+        matchExpressions:
+        - {key: ate.dev/worker-pool, operator: DoesNotExist}
     ports:
     - protocol: TCP
       port: 9443
@@ -199,7 +203,9 @@ spec:
   policyTypes: [Ingress]
   ingress:
   - from:
-    - podSelector: {}
+    - podSelector:
+        matchExpressions:
+        - {key: ate.dev/worker-pool, operator: DoesNotExist}
     ports:
     - {protocol: TCP, port: 4317}
     - {protocol: TCP, port: 4318}
