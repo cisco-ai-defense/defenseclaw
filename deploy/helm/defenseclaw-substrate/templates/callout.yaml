@@ -1,4 +1,4 @@
-{{- $sel := dict "ctx" . "component" "callout" }}
+{{- $sel := dict "ctx" . "component" "callout" "serving" true }}
 # The atenet-egress ext_proc callout. It serves TLS 1.3 with the servicedns
 # pod certificate for defenseclaw-callout.<namespace>.svc, which Envoy checks,
 # and accepts only the atenet-egress client certificate.

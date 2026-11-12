@@ -1,4 +1,4 @@
-{{- $sel := dict "ctx" . "component" "controller" }}
+{{- $sel := dict "ctx" . "component" "controller" "serving" false }}
 # Two replicas, one active through the lease: policies, admission, idle
 # suspend, drift and inventory.
 apiVersion: apps/v1

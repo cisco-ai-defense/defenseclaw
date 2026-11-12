@@ -160,6 +160,15 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 			}
 		}
 	}
+	// A pod no Service selects gets no servicedns serving certificate, and a
+	// pod that mounts one it cannot get never starts.
+	if c, ok := byName["Deployment/defenseclaw-controller"]; ok {
+		raw, _ := yaml.Marshal(c.Spec)
+		if strings.Contains(string(raw), "servicedns.podcert.ate.dev/identity\n            keyType") ||
+			strings.Contains(string(raw), "name: servicedns\n") {
+			t.Errorf("%s: the controller mounts a servicedns serving certificate but no Service selects it", name)
+		}
+	}
 	// D15: the actor Service exposes only the actor listener; the admin
 	// Service only the admin listener.
 	for svc, port := range map[string]string{"defenseclaw-actor": "actor", "defenseclaw-admin": "admin"} {

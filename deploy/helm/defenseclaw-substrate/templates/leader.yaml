@@ -1,4 +1,4 @@
-{{- $sel := dict "ctx" . "component" "leader" }}
+{{- $sel := dict "ctx" . "component" "leader" "serving" true }}
 # The gateway leader: one replica holding the lease and the RWO store. Recreate,
 # so the old pod releases the volume before the new one mounts it; failover
 # is the lease moving and the volume reattaching (about 30 s).

@@ -63,3 +63,14 @@ func TestPreDeleteOverTheAteapiClient(t *testing.T) {
 		t.Errorf("CreateAtespace without access: %v", err)
 	}
 }
+
+func TestAccessPolicyMessageNamesNoAtespace(t *testing.T) {
+	msg := toPB(AccessPolicy{Atespace: "eng-web", UID: "u", Version: 2, Bindings: []Binding{{Role: RoleEditor, Members: []string{"user:a"}}}})
+	if msg.GetMetadata().GetAtespace() != "" || msg.GetMetadata().GetName() != "default" || msg.GetMetadata().GetUid() != "u" {
+		t.Errorf("metadata %+v", msg.GetMetadata())
+	}
+	back := fromPB("eng-web", msg)
+	if back.Atespace != "eng-web" || back.Version != 2 || len(back.Bindings) != 1 {
+		t.Errorf("round trip %+v", back)
+	}
+}

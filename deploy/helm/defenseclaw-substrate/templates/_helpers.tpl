@@ -115,7 +115,9 @@ the ateapi client reads by default (internal/substrate/ateapi): the token for
 ate-api-server, its serving CA, the pod's podidentity client certificate and
 the podidentity CA the callout checks atenet-egress against.
 /run/servicedns.podcert.ate.dev holds the serving certificate for the
-Services that select the pod.
+Services that select the pod: only pods a Service selects ("serving" true),
+since the signer issues no certificate without a Service DNS name and the pod
+would never start.
 */}}
 {{- define "dc.volumes" -}}
 - name: config
@@ -148,7 +150,7 @@ Services that select the pod.
             podcert.ate.dev/canarying: live
         path: podidentity-ca.crt
     {{- end }}
-{{- if .ctx.Values.podCertificates.enabled }}
+{{- if and .ctx.Values.podCertificates.enabled .serving }}
 - name: servicedns
   projected:
     sources:
@@ -174,7 +176,7 @@ Services that select the pod.
 - name: ate
   mountPath: /var/run/ate
   readOnly: true
-{{- if .ctx.Values.podCertificates.enabled }}
+{{- if and .ctx.Values.podCertificates.enabled .serving }}
 - name: servicedns
   mountPath: /run/servicedns.podcert.ate.dev
   readOnly: true

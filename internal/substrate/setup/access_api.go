@@ -94,7 +94,9 @@ func fromPB(atespace string, p *pb.AccessPolicy) *AccessPolicy {
 }
 
 func toPB(p AccessPolicy) *pb.AccessPolicy {
-	out := &pb.AccessPolicy{Metadata: &pb.ResourceMetadata{Atespace: p.Atespace, Name: "default", Uid: p.UID, Version: p.Version}}
+	// The atespace goes in the request's reference only: ate-api-server
+	// refuses an access policy whose metadata names one.
+	out := &pb.AccessPolicy{Metadata: &pb.ResourceMetadata{Name: "default", Uid: p.UID, Version: p.Version}}
 	for _, b := range p.Bindings {
 		out.Bindings = append(out.Bindings, &pb.Binding{Role: b.Role, Members: b.Members})
 	}

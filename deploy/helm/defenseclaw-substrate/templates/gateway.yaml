@@ -1,4 +1,4 @@
-{{- $sel := dict "ctx" . "component" "gateway" }}
+{{- $sel := dict "ctx" . "component" "gateway" "serving" true }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
