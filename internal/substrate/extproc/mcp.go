@@ -126,20 +126,24 @@ func exactObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	return out, nil
 }
 
-// InspectToolClient is the ToolJudge adapter to the gateway's tool inspect
-// route (POST /api/v1/inspect/tool), the entry point the hooks' tool and
-// MCP rules run behind. A tools/call reaches it as the tool
-// mcp__<server>__<tool> with mcp_server_name set, the name and arguments
-// shape the hooks send, so the callout runs the same rules and adds none.
-type InspectToolClient struct {
+// VerdictPath is the gateway's callout verdict route (A2): it runs the hook
+// path's MCP evaluation, the MCP asset policy and the tool rules in action
+// mode, for one tools/call, and answers allow, alert or block. It is served
+// on an internal listener, never the actor listener.
+const VerdictPath = "/api/v1/substrate/callout/mcp-verdict"
+
+// VerdictClient is the ToolJudge adapter to the gateway's callout verdict
+// route, so a tools/call the hooks would refuse is refused at egress with
+// the same verdict, and the callout adds no rules of its own.
+type VerdictClient struct {
 	url       string
 	tokenFile string
 	http      *http.Client
 }
 
-// NewInspectToolClient builds a client from the judge settings; an empty
-// URL is no client.
-func NewInspectToolClient(cfg JudgeConfig) (*InspectToolClient, error) {
+// NewVerdictClient builds a client from the judge settings; an empty URL is
+// no client.
+func NewVerdictClient(cfg JudgeConfig) (*VerdictClient, error) {
 	if cfg.URL == "" {
 		return nil, nil
 	}
@@ -159,26 +163,47 @@ func NewInspectToolClient(cfg JudgeConfig) (*InspectToolClient, error) {
 		}
 		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
 	}
-	return &InspectToolClient{url: cfg.URL, tokenFile: cfg.TokenFile, http: &http.Client{Transport: tr}}, nil
+	return &VerdictClient{url: cfg.URL, tokenFile: cfg.TokenFile, http: &http.Client{Transport: tr}}, nil
 }
 
-type inspectToolRequest struct {
-	Tool          string          `json:"tool"`
-	Args          json.RawMessage `json:"args,omitempty"`
-	MCPServerName string          `json:"mcp_server_name,omitempty"`
+// VerdictRequest is the callout verdict route's request body.
+type VerdictRequest struct {
+	Actor VerdictActor `json:"actor"`
+	MCP   VerdictMCP   `json:"mcp"`
 }
 
-type inspectToolVerdict struct {
+// VerdictActor names the actor; UID is empty until a UIDResolver is wired.
+type VerdictActor struct {
+	Atespace string `json:"atespace"`
+	Name     string `json:"name"`
+	UID      string `json:"uid,omitempty"`
+}
+
+// VerdictMCP is the tools/call: the destination host, the MCP server name the
+// admin gave it, the tool and its arguments as sent.
+type VerdictMCP struct {
+	Host      string          `json:"host"`
+	Server    string          `json:"server"`
+	Tool      string          `json:"tool"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+// VerdictResponse is the route's answer. Action is allow, alert or block;
+// Source says which evaluation decided (asset_policy or tool_rules).
+type VerdictResponse struct {
 	Action   string   `json:"action"`
-	Severity string   `json:"severity"`
-	Reason   string   `json:"reason"`
-	Findings []string `json:"findings"`
+	Severity string   `json:"severity,omitempty"`
+	Reason   string   `json:"reason,omitempty"`
+	Source   string   `json:"source,omitempty"`
+	RuleIDs  []string `json:"rule_ids,omitempty"`
 }
 
-// JudgeToolCall implements ToolJudge.
-func (c *InspectToolClient) JudgeToolCall(ctx context.Context, call ToolCall) (ToolVerdict, error) {
-	body, err := json.Marshal(inspectToolRequest{
-		Tool: "mcp__" + toolNamePart(call.Server) + "__" + call.Tool, Args: call.Args, MCPServerName: call.Server,
+// JudgeToolCall implements ToolJudge. Any answer but 200 with a known action
+// is an error, which the engine's failure mode handles.
+func (c *VerdictClient) JudgeToolCall(ctx context.Context, call ToolCall) (ToolVerdict, error) {
+	body, err := json.Marshal(VerdictRequest{
+		Actor: VerdictActor{Atespace: call.Actor.Atespace, Name: call.Actor.Name, UID: call.Actor.UID},
+		MCP:   VerdictMCP{Host: call.Host, Server: call.Server, Tool: call.Tool, Arguments: call.Args},
 	})
 	if err != nil {
 		return ToolVerdict{}, err
@@ -204,26 +229,21 @@ func (c *InspectToolClient) JudgeToolCall(ctx context.Context, call ToolCall) (T
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-		return ToolVerdict{}, fmt.Errorf("tool inspect: HTTP %d", resp.StatusCode)
+		return ToolVerdict{}, fmt.Errorf("callout verdict: HTTP %d", resp.StatusCode)
 	}
-	var v inspectToolVerdict
+	var v VerdictResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v); err != nil {
 		return ToolVerdict{}, err
 	}
-	return ToolVerdict{Block: strings.EqualFold(v.Action, "block"), Alert: strings.EqualFold(v.Action, "alert"), Severity: v.Severity, Reason: v.Reason, Findings: v.Findings}, nil
-}
-
-// toolNamePart keeps an MCP server name to the characters a hook tool name
-// carries.
-func toolNamePart(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
+	out := ToolVerdict{Severity: v.Severity, Reason: v.Reason, Findings: v.RuleIDs}
+	switch strings.ToLower(v.Action) {
+	case "block":
+		out.Block = true
+	case "alert":
+		out.Alert = true
+	case "allow":
+	default:
+		return ToolVerdict{}, fmt.Errorf("callout verdict: unknown action %q", v.Action)
 	}
-	return b.String()
+	return out, nil
 }

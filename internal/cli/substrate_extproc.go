@@ -85,7 +85,7 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 		return err
 	}
 	opts := extproc.Options{Config: cfg, Events: extproc.NewJSONLogSink(stdout)}
-	judge, err := extproc.NewInspectToolClient(cfg.Judge)
+	judge, err := extproc.NewVerdictClient(cfg.Judge)
 	if err != nil {
 		return err
 	}

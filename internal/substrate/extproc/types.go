@@ -137,7 +137,8 @@ type ToolVerdict struct {
 }
 
 // ToolJudge runs a tool call through the same MCP and tool rules the hooks
-// use. InspectToolClient is the adapter to the gateway's inspect route.
+// use, the MCP asset policy included. VerdictClient is the adapter to the
+// gateway's callout verdict route.
 type ToolJudge interface {
 	JudgeToolCall(ctx context.Context, call ToolCall) (ToolVerdict, error)
 }

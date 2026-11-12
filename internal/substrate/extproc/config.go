@@ -114,7 +114,8 @@ type AskConfig struct {
 	Hold time.Duration `yaml:"hold"`
 }
 
-// JudgeConfig points the MCP tool judge at the gateway's inspect route.
+// JudgeConfig points the MCP tool judge at the gateway's callout verdict
+// route (VerdictPath) on an internal listener.
 type JudgeConfig struct {
 	URL       string        `yaml:"url"`
 	TokenFile string        `yaml:"token_file"`

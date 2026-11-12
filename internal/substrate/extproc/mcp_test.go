@@ -26,38 +26,50 @@ import (
 	"testing"
 )
 
-func TestInspectToolClient(t *testing.T) {
-	var got inspectToolRequest
+func TestVerdictClient(t *testing.T) {
+	var got VerdictRequest
+	answer := `{"action":"block","severity":"HIGH","reason":"matched","source":"asset_policy","rule_ids":["R1"]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/inspect/tool" || r.Header.Get("Authorization") != "Bearer tok-1" ||
+		if r.URL.Path != VerdictPath || r.Header.Get("Authorization") != "Bearer tok-1" ||
 			r.Header.Get("X-DefenseClaw-Client") == "" || r.Header.Get("Content-Type") != "application/json" {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		_ = json.NewDecoder(r.Body).Decode(&got)
-		_, _ = w.Write([]byte(`{"action":"block","severity":"HIGH","reason":"matched","findings":["R1"]}`))
+		_, _ = w.Write([]byte(answer))
 	}))
 	defer srv.Close()
 	tok := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tok, []byte("tok-1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c, err := NewInspectToolClient(JudgeConfig{URL: srv.URL + "/api/v1/inspect/tool", TokenFile: tok})
+	c, err := NewVerdictClient(JudgeConfig{URL: srv.URL + VerdictPath, TokenFile: tok})
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := c.JudgeToolCall(context.Background(), ToolCall{Server: "my server", Tool: "run", Args: json.RawMessage(`{"a":1}`)})
-	if err != nil || !v.Block || v.Reason != "matched" {
+	call := ToolCall{Actor: ActorRef{Atespace: "a4-gv", Name: "p1", UID: "u1"}, Host: "mcp.x", Server: "tickets", Tool: "run",
+		Args: json.RawMessage(`{"a":1}`)}
+	v, err := c.JudgeToolCall(context.Background(), call)
+	if err != nil || !v.Block || v.Reason != "matched" || len(v.Findings) != 1 {
 		t.Fatalf("%+v %v", v, err)
 	}
-	if got.Tool != "mcp__my_server__run" || got.MCPServerName != "my server" || string(got.Args) != `{"a":1}` {
+	if got.Actor != (VerdictActor{"a4-gv", "p1", "u1"}) || got.MCP.Host != "mcp.x" || got.MCP.Server != "tickets" ||
+		got.MCP.Tool != "run" || string(got.MCP.Arguments) != `{"a":1}` {
 		t.Fatalf("request: %+v", got)
 	}
-	if c, err := NewInspectToolClient(JudgeConfig{}); c != nil || err != nil {
+	answer = `{"action":"alert"}`
+	if v, err := c.JudgeToolCall(context.Background(), call); err != nil || v.Block || !v.Alert {
+		t.Fatalf("alert: %+v %v", v, err)
+	}
+	answer = `{"action":"maybe"}`
+	if _, err := c.JudgeToolCall(context.Background(), call); err == nil {
+		t.Fatal("unknown action accepted")
+	}
+	if c, err := NewVerdictClient(JudgeConfig{}); c != nil || err != nil {
 		t.Fatalf("empty URL: %v %v", c, err)
 	}
-	bad, _ := NewInspectToolClient(JudgeConfig{URL: srv.URL + "/nope"})
-	if _, err := bad.JudgeToolCall(context.Background(), ToolCall{Server: "s", Tool: "t"}); err == nil {
+	bad, _ := NewVerdictClient(JudgeConfig{URL: srv.URL + "/nope"})
+	if _, err := bad.JudgeToolCall(context.Background(), call); err == nil {
 		t.Fatal("HTTP error not reported")
 	}
 }
