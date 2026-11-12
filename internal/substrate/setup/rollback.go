@@ -114,7 +114,7 @@ func CheckUpgrade(installed, target string) error {
 	switch {
 	case to.Compare(from) < 0:
 		return fmt.Errorf("%w: %s is older than the installed %s; use helm rollback, which checks the store schema", ErrSkew, target, installed)
-	case to.Major != from.Major && !(to.Major == from.Major+1 && to.Minor == 0):
+	case to.Major != from.Major && (to.Major != from.Major+1 || to.Minor != 0):
 		return fmt.Errorf("%w: %s -> %s skips a major release; upgrade one release at a time", ErrSkew, installed, target)
 	case to.Major == from.Major && to.Minor > from.Minor+1:
 		return fmt.Errorf("%w: %s -> %s skips a minor release; upgrade one minor at a time", ErrSkew, installed, target)

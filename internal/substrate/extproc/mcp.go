@@ -80,11 +80,11 @@ func parseToolCalls(body []byte) ([]toolCallReq, error) {
 			if errors.Is(err, errDuplicateKey) {
 				return nil, errors.New("the tools/call params repeat a key, so they are ambiguous")
 			}
-			return nil, errors.New("The tools/call request has no params object.")
+			return nil, errors.New("the tools/call request has no params object")
 		}
 		var name string
 		if raw, ok := params["name"]; !ok || json.Unmarshal(raw, &name) != nil || name == "" {
-			return nil, errors.New("The tools/call request names no tool.")
+			return nil, errors.New("the tools/call request names no tool")
 		}
 		out = append(out, toolCallReq{name: name, args: params["arguments"]})
 	}
