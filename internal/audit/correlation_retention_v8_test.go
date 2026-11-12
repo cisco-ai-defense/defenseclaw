@@ -37,13 +37,14 @@ func TestCorrelationRetentionIsBoundedGraphAwareAndPreservesActiveState(t *testi
 	instance := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyDefenseClaw)
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 	old := now.Add(-91 * 24 * time.Hour)
+	fresh := now.Add(-time.Hour)
 
 	activeCursorEvent, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: old, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
 		if err := tx.PutCursor(t.Context(), CorrelationCursor{
 			ConnectorInstanceID: instance.ConnectorInstanceID, SessionID: "active-session", AgentID: "active-agent",
 			ActiveTurnID: "active-turn", Phase: "active", Sequence: 7,
 			LastSemanticEventID: event.SemanticEventID, ProfileVersion: instance.ProfileVersion,
-			Active: true, UpdatedAt: old,
+			Active: true, UpdatedAt: fresh,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -70,6 +71,32 @@ func TestCorrelationRetentionIsBoundedGraphAwareAndPreservesActiveState(t *testi
 			ScopeKind: CorrelationOperationScopeSession, ScopeID: "active-session",
 			SessionID: "active-session", TurnID: "active-turn",
 			StartSemanticEventID: event.SemanticEventID, StartedAt: old,
+			Status: CorrelationOperationActive, UpdatedAt: fresh,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	// A session that never ended (agent killed, no SessionEnd) leaves its
+	// cursor active and its tool call pending for good. Untouched for the
+	// whole retention window, that state is dead and must not pin the graph
+	// it points at (issue #1440: 3.4M observations kept for 16 days).
+	staleCursorEvent, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: old, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
+		if err := tx.PutCursor(t.Context(), CorrelationCursor{
+			ConnectorInstanceID: instance.ConnectorInstanceID, SessionID: "stale-session", AgentID: "stale-agent",
+			ActiveTurnID: "stale-turn", Phase: "active", Sequence: 3,
+			LastSemanticEventID: event.SemanticEventID, ProfileVersion: instance.ProfileVersion,
+			Active: true, UpdatedAt: old,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	stalePendingEvent, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: old, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
+		if err := tx.PutPendingOperation(t.Context(), CorrelationPendingOperation{
+			ConnectorInstanceID: instance.ConnectorInstanceID, Namespace: "codex", Kind: CorrelationIdentifierTool,
+			OperationID: "stale-tool", Type: CorrelationOperationTool,
+			ScopeKind: CorrelationOperationScopeSession, ScopeID: "stale-session",
+			SessionID: "stale-session", TurnID: "stale-turn",
+			StartSemanticEventID: event.SemanticEventID, StartedAt: old,
 			Status: CorrelationOperationActive, UpdatedAt: old,
 		}); err != nil {
 			t.Fatal(err)
@@ -91,7 +118,7 @@ func TestCorrelationRetentionIsBoundedGraphAwareAndPreservesActiveState(t *testi
 		t.Fatal(err)
 	}
 	if result.RowsDeleted[RetentionCorrelationReceipts] != 1 ||
-		result.RowsDeleted[RetentionCorrelationEvents] < 2 {
+		result.RowsDeleted[RetentionCorrelationEvents] < 4 {
 		t.Fatalf("correlation retention counts=%+v", result.RowsDeleted)
 	}
 	for _, eventID := range []SemanticEventID{
@@ -101,7 +128,10 @@ func TestCorrelationRetentionIsBoundedGraphAwareAndPreservesActiveState(t *testi
 			t.Fatalf("protected correlation event %s was reaped", eventID)
 		}
 	}
-	for _, eventID := range []SemanticEventID{orphanEvent.SemanticEventID, expiredReceiptEvent.SemanticEventID} {
+	for _, eventID := range []SemanticEventID{
+		orphanEvent.SemanticEventID, expiredReceiptEvent.SemanticEventID,
+		staleCursorEvent.SemanticEventID, stalePendingEvent.SemanticEventID,
+	} {
 		if countCorrelationEvent(t, store, eventID) != 0 {
 			t.Fatalf("unreferenced old correlation event %s survived", eventID)
 		}

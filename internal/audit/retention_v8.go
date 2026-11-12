@@ -968,7 +968,7 @@ func (reaper *RetentionReaper) drainCorrelationState(
 	stages = append(stages,
 		correlationStage{RetentionCorrelationReceipts, []any{unixNano(now)}, false},
 		correlationStage{RetentionCorrelationCursors, []any{unixNano(cutoff)}, false},
-		correlationStage{RetentionCorrelationPending, []any{unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationPending, []any{unixNano(cutoff), reaper.batchSize(), unixNano(cutoff), reaper.batchSize()}, false},
 		correlationStage{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}, false},
 		correlationStage{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}, false},
 	)
@@ -1169,16 +1169,40 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 				fingerprint_sha256 LIMIT ?
 		)`, nil
 	case RetentionCorrelationCursors:
+		// A cursor still active after the whole retention window belongs to a
+		// session that never ended (agent killed, no session end): it is
+		// dead and no longer pins the graph (issue #1440). IN (0, 1) keeps
+		// the (active, updated) index in use.
 		return `DELETE FROM correlation_cursors WHERE rowid IN (
 			SELECT rowid FROM correlation_cursors
-			WHERE active=0 AND updated_time_unix_nano < ?
+			WHERE active IN (0, 1) AND updated_time_unix_nano < ?
 			ORDER BY updated_time_unix_nano, connector_instance_id, session_id, agent_id LIMIT ?
 		)`, nil
 	case RetentionCorrelationPending:
+		// Two bounded branches, each served by its own partial index
+		// (idx_correlation_pending_retention for ended operations,
+		// idx_correlation_pending_stale for open ones). An operation still
+		// open after the whole retention window is dead: its tool call never
+		// reported an end (agent killed). It no longer pins the graph it
+		// points at (issue #1440).
 		return `DELETE FROM correlation_pending_operations WHERE rowid IN (
-			SELECT rowid FROM correlation_pending_operations
-			WHERE status<>'active' AND updated_time_unix_nano < ?
-			ORDER BY updated_time_unix_nano, connector_instance_id, operation_id, operation_type LIMIT ?
+			SELECT rowid FROM (
+				SELECT * FROM (
+					SELECT rowid, updated_time_unix_nano AS updated, connector_instance_id AS connector,
+						operation_id AS operation, operation_type AS kind
+					FROM correlation_pending_operations
+					WHERE status<>'active' AND updated_time_unix_nano < ?
+					ORDER BY updated_time_unix_nano, connector_instance_id, operation_id, operation_type LIMIT ?
+				)
+				UNION ALL
+				SELECT * FROM (
+					SELECT rowid, updated_time_unix_nano AS updated, connector_instance_id AS connector,
+						operation_id AS operation, operation_type AS kind
+					FROM correlation_pending_operations
+					WHERE status='active' AND updated_time_unix_nano < ?
+					ORDER BY updated_time_unix_nano, connector_instance_id, operation_id, operation_type LIMIT ?
+				)
+			) ORDER BY updated, connector, operation, kind LIMIT ?
 		)`, nil
 	case RetentionCorrelationRelationships:
 		// Each protected-node test is one equality lookup on (kind, id), so
