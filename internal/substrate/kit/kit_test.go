@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 func init() { requireRootOwned = false }
@@ -152,14 +151,14 @@ func TestUnattendedFailsClosed(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("unattended outage: exit %d, want 2", code)
 	}
-	// The helper's mode wins over an environment that says nothing.
+	// The gateway naming the run unattended closes it too.
 	code = RunHook(context.Background(), HookOptions{Connector: "claudecode", Config: cfg, Stdin: strings.NewReader(ccPre),
 		Stdout: &out, Stderr: &errb, Getenv: func(string) string { return "" },
 		Send: func(context.Context, Request) (Response, string, error) {
-			return Response{}, ModeUnattend, ErrUnreachable
+			return Response{Status: 503, Mode: ModeUnattend, FailMode: "open"}, "", nil
 		}})
 	if code != 2 {
-		t.Fatalf("helper unattended outage: exit %d, want 2", code)
+		t.Fatalf("gateway-unattended outage: exit %d, want 2", code)
 	}
 	if Mode(func(string) string { return "interactive" }) != ModeInteract || Mode(func(string) string { return "" }) != ModeInteract {
 		t.Fatal("the environment must not loosen the mode")
@@ -256,74 +255,43 @@ func TestTransportPlaceholderRetryAndProxy(t *testing.T) {
 	}
 }
 
-func TestHelperServesPostsAndTightensMode(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	var gotMode string
+// GAP-0047: there is nothing for the agent to stand in for. The hook opens
+// its own connection per call; the kit listens on nothing.
+func TestHookPostsOnItsOwnConnection(t *testing.T) {
+	var n int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMode = r.Header.Get("X-DefenseClaw-Actor-Mode")
-		if r.Method == http.MethodGet && r.Header.Get(WarmHeader) == "1" {
-			w.WriteHeader(204)
-			return
+		n++
+		if r.Header.Get(PlaceholderHeader) != PlaceholderValue {
+			t.Errorf("placeholder %q", r.Header.Get(PlaceholderHeader))
 		}
+		w.Header().Set(FailModeHeader, "closed")
 		io.WriteString(w, `{"action":"allow"}`)
 	}))
 	defer srv.Close()
-	h, err := NewHelper(testConfig(srv.URL), nil)
-	if err != nil {
-		t.Fatal(err)
+	t.Setenv("TMPDIR", t.TempDir())
+	var out, errb bytes.Buffer
+	code := RunHook(context.Background(), HookOptions{Connector: "claudecode", Config: testConfig(srv.URL),
+		Stdin: strings.NewReader(ccPre), Stdout: &out, Stderr: &errb, Getenv: func(string) string { return "" }})
+	if code != 0 || n != 1 {
+		t.Fatalf("code %d posts %d stderr %q", code, n, errb.String())
 	}
-	if _, err := os.Lstat(HelperDir()); err == nil {
-		t.Fatal("NewHelper created its directory before serving (golden-snapshot rule)")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go h.Serve(ctx)
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if _, err := callHelper(ctx, helperRequest{Op: "ping"}, time.Second); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("helper did not come up")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if info, err := os.Lstat(HelperDir()); err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("helper dir %v %v", info, err)
-	}
-	resp, err := callHelper(ctx, helperRequest{Op: "warm", Connector: "claudecode"}, time.Second)
-	if err != nil || resp.Error != "" {
-		t.Fatalf("warm %+v %v", resp, err)
-	}
-	resp, err = callHelper(ctx, helperRequest{Op: "post", Request: Request{Path: "/api/v1/substrate/hook/claudecode", Body: []byte(`{}`)}}, 3*time.Second)
-	if err != nil || resp.Response.Status != 200 || resp.Mode != ModeInteract {
-		t.Fatalf("post %+v %v", resp, err)
-	}
-	callHelper(ctx, helperRequest{Op: "mode", Mode: ModeUnattend}, time.Second)
-	callHelper(ctx, helperRequest{Op: "mode", Mode: ModeInteract}, time.Second)
-	resp, _ = callHelper(ctx, helperRequest{Op: "post", Request: Request{Path: "/api/v1/substrate/hook/claudecode", Body: []byte(`{}`)}}, 3*time.Second)
-	if resp.Mode != ModeUnattend || gotMode != ModeUnattend {
-		t.Fatalf("mode %q header %q, want unattended for good", resp.Mode, gotMode)
-	}
-	// A second helper for the same user steps aside.
-	h2, _ := NewHelper(testConfig(srv.URL), nil)
-	if err := h2.Serve(ctx); err == nil || err != errHelperRunning {
-		t.Fatalf("second helper: %v", err)
+	if entries, _ := os.ReadDir(os.Getenv("TMPDIR")); len(entries) != 0 {
+		t.Fatalf("the hook left %d entries in TMPDIR (a socket?)", len(entries))
 	}
 }
 
 func TestGatewayNamesTheOutageMode(t *testing.T) {
 	for _, tc := range []struct {
-		cfg, gw, helper, env, want string
+		cfg, gw, env, want string
 	}{
-		{"closed", "", "", "", "closed"}, {"closed", "open", "", "", "open"}, {"open", "closed", "", "", "closed"},
-		{"open", "open", ModeUnattend, "", "closed"}, {"open", "open", "", ModeUnattend, "closed"}, {"open", "bogus", "", "", "open"},
+		{"closed", "", "", "closed"}, {"closed", "open", "", "open"}, {"open", "closed", "", "closed"},
+		{"open", "open", ModeUnattend, "closed"}, {"open", "bogus", "", "open"},
 	} {
-		if got := outageMode(tc.cfg, Response{FailMode: tc.gw}, tc.helper, tc.env); got != tc.want {
+		if got := outageMode(tc.cfg, Response{FailMode: tc.gw}, tc.env); got != tc.want {
 			t.Errorf("%+v: %s", tc, got)
 		}
 	}
-	if got := outageMode("open", Response{Mode: ModeUnattend, FailMode: "open"}, "", ""); got != "closed" {
+	if got := outageMode("open", Response{Mode: ModeUnattend, FailMode: "open"}, ""); got != "closed" {
 		t.Errorf("gateway-unattended run: %s", got)
 	}
 }

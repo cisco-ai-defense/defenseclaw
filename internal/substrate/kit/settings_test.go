@@ -19,7 +19,7 @@ func overlayFor(t *testing.T, h *harness.Spec, provider string) Overlay {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ov, err := ActorOverlay(art, OverlayOptions{Config: DefaultConfig(), Home: "/sandbox", Workdir: "/work", Provider: provider})
+	ov, err := ActorOverlay(art, OverlayOptions{Config: DefaultConfig(), Home: "/sandbox", Workdir: "/work", Provider: provider, HarnessVersion: "2.1.300"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +70,13 @@ func TestClaudeCodeOverlay(t *testing.T) {
 			}
 		}
 	}
+	if h := doc.Env["ANTHROPIC_CUSTOM_HEADERS"]; h != "x-defenseclaw-actor: defenseclaw-actor-placeholder\nX-DefenseClaw-Client: claudecode-llm/1.0" ||
+		strings.Count(h, "\n") != 1 {
+		t.Fatalf("model headers %q (two headers on two lines)", h)
+	}
+	if _, inImageEnv := ov.Env["ANTHROPIC_CUSTOM_HEADERS"]; inImageEnv {
+		t.Fatal("ANTHROPIC_CUSTOM_HEADERS in the image ENV, where a newline cannot be kept")
+	}
 	if doc.Env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != DefaultGatewayURL+"/v1/logs" {
 		t.Fatalf("otel %q", doc.Env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"])
 	}
@@ -93,7 +100,6 @@ func TestClaudeCodeOverlay(t *testing.T) {
 		"ANTHROPIC_MODEL": ClaudeCodeBedrockModel, "ANTHROPIC_SMALL_FAST_MODEL": ClaudeCodeBedrockModel,
 		"ANTHROPIC_DEFAULT_OPUS_MODEL": ClaudeCodeBedrockModel, "ANTHROPIC_DEFAULT_SONNET_MODEL": ClaudeCodeBedrockModel,
 		"CLAUDE_CODE_SUBAGENT_MODEL": ClaudeCodeBedrockModel,
-		"ANTHROPIC_CUSTOM_HEADERS":   "x-defenseclaw-actor: defenseclaw-actor-placeholder\nX-DefenseClaw-Client: claudecode-llm/1.0",
 	} {
 		if ov.Env[k] != want {
 			t.Errorf("env %s=%q, want %q", k, ov.Env[k], want)
@@ -163,5 +169,21 @@ func TestOverlayIsDeterministic(t *testing.T) {
 				t.Fatalf("%s differs between two renders", a.Files[i].Path)
 			}
 		}
+	}
+}
+
+// Bedrock serves Haiku 5.5 only to Claude Code 2.1.280 and newer.
+func TestClaudeCodeModelFollowsTheHarnessVersion(t *testing.T) {
+	for v, want := range map[string]string{
+		"2.1.156": ClaudeCodeBedrockFallbackModel, "2.1.279": ClaudeCodeBedrockFallbackModel,
+		"2.1.280": ClaudeCodeBedrockModel, "2.2.0": ClaudeCodeBedrockModel, "": ClaudeCodeBedrockModel,
+	} {
+		if got := claudeCodeDefaultModel(v); got != want {
+			t.Errorf("%q: %s, want %s", v, got, want)
+		}
+	}
+	env := modelEnv("claudecode", "http://gw", OverlayOptions{HarnessVersion: "2.1.156", Model: "us.anthropic.claude-haiku-5-5"})
+	if env["ANTHROPIC_MODEL"] != "us.anthropic.claude-haiku-5-5" {
+		t.Fatal("an explicit --model must win")
 	}
 }

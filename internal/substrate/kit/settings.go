@@ -70,6 +70,9 @@ type OverlayOptions struct {
 	Provider string
 	// Model is the default model id ("" leaves the connector's default).
 	Model string
+	// HarnessVersion is the agent version the image pins (it decides the
+	// Claude Code default model, ClaudeCodeHaiku55MinVersion).
+	HarnessVersion string
 }
 
 // SubstrateIngress is the remote ingress of cfg's gateway URL.
@@ -288,6 +291,42 @@ func dedupe(in []string) []string {
 // model the gateway's /llm/bedrock allows.
 const ClaudeCodeBedrockModel = "us.anthropic.claude-haiku-5-5"
 
+// ClaudeCodeHaiku55MinVersion is the oldest Claude Code Bedrock serves
+// Haiku 5.5 to: an older one gets "400 Claude Code <v> does not support this
+// model; version 2.1.280 or newer is required" (live on E1, 2026-11-12).
+const ClaudeCodeHaiku55MinVersion = "2.1.280"
+
+// ClaudeCodeBedrockFallbackModel is the model of an image whose pinned
+// Claude Code predates ClaudeCodeHaiku55MinVersion, until the harness pin
+// moves (substrate-1 GAP: the OpenShell harness pins 2.1.156).
+const ClaudeCodeBedrockFallbackModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+// claudeCodeDefaultModel is the Bedrock model for a Claude Code version.
+func claudeCodeDefaultModel(version string) string {
+	if version == "" || versionAtLeast(version, ClaudeCodeHaiku55MinVersion) {
+		return ClaudeCodeBedrockModel
+	}
+	return ClaudeCodeBedrockFallbackModel
+}
+
+// versionAtLeast compares dotted numeric versions.
+func versionAtLeast(v, min string) bool {
+	a, b := strings.Split(v, "."), strings.Split(min, ".")
+	for i := 0; i < len(a) || i < len(b); i++ {
+		var x, y int
+		if i < len(a) {
+			x, _ = strconv.Atoi(a[i])
+		}
+		if i < len(b) {
+			y, _ = strconv.Atoi(b[i])
+		}
+		if x != y {
+			return x > y
+		}
+	}
+	return true
+}
+
 // claudeCodeModelSlots are the Claude Code variables that name a model.
 var claudeCodeModelSlots = []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 	"ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"}
@@ -318,7 +357,7 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 		switch o.Provider {
 		case "", "bedrock":
 			if model == "" {
-				model = ClaudeCodeBedrockModel
+				model = claudeCodeDefaultModel(o.HarnessVersion)
 			}
 			env["CLAUDE_CODE_USE_BEDROCK"] = "1"
 			env["ANTHROPIC_BEDROCK_BASE_URL"] = gw + "/llm/bedrock"
@@ -328,11 +367,6 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 			env["ANTHROPIC_BASE_URL"] = gw + "/llm/anthropic"
 			env["ANTHROPIC_API_KEY"] = "placeholder-not-a-secret"
 		}
-		// Model calls carry the placeholder too, so egress gives the
-		// gateway's /llm route the actor JWT as the verified caller (D2).
-		// The actor listener's CSRF gate also wants X-DefenseClaw-Client on
-		// every POST (GAP-0037). Claude Code takes one header per line.
-		env["ANTHROPIC_CUSTOM_HEADERS"] = PlaceholderHeader + ": " + PlaceholderValue + "\nX-DefenseClaw-Client: claudecode-llm/1.0"
 		if model != "" {
 			for _, k := range claudeCodeModelSlots {
 				env[k] = model
@@ -344,6 +378,10 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 	}
 	return env
 }
+
+// ClaudeCodeModelHeaders are the headers Claude Code adds to every model
+// call in an actor image, one per line.
+const ClaudeCodeModelHeaders = PlaceholderHeader + ": " + PlaceholderValue + "\nX-DefenseClaw-Client: claudecode-llm/1.0"
 
 // claudeDropIn points the managed hook matrix at the actor hook.
 func claudeDropIn(data []byte, hookCmd string) ([]byte, error) {
@@ -373,6 +411,14 @@ func claudeDropIn(data []byte, hookCmd string) ([]byte, error) {
 	}
 	if env, ok := doc["env"].(map[string]any); ok {
 		env["OTEL_RESOURCE_ATTRIBUTES"] = "defenseclaw.connector=claudecode,service.name=claudecode,defenseclaw.sandbox.runtime=substrate"
+		// Model calls carry the placeholder, so egress gives the gateway's
+		// /llm route the actor JWT as the verified caller (D2), and
+		// X-DefenseClaw-Client for the actor listener's CSRF gate
+		// (GAP-0037). Claude Code splits this on newlines; it lives here,
+		// not in the image ENV, because a Dockerfile ENV cannot hold a
+		// newline (the "\n" stayed two characters and the second header
+		// was never sent).
+		env["ANTHROPIC_CUSTOM_HEADERS"] = ClaudeCodeModelHeaders
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

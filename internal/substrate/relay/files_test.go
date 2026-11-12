@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -33,7 +34,7 @@ type fileEnv struct {
 
 func newFileEnv(t *testing.T) *fileEnv {
 	t.Helper()
-	s, _, _, ec := testServer(t, []string{"sh"})
+	s, _, ec := testServer(t, []string{"sh"})
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	return &fileEnv{t: t, s: s, srv: srv, tok: ec.token(t, claims(time.Now(), nil), TokenType)}
@@ -239,9 +240,14 @@ func TestExecOutputCap(t *testing.T) {
 	if r.status != 200 || r.code != ExitOutputLimit || len(r.stdout) != 1000 || !strings.Contains(string(r.stderr), "output limit") {
 		t.Fatalf("code %d, %d bytes, stderr %q", r.code, len(r.stdout), r.stderr)
 	}
-	// Both streams share the budget.
+	// Both streams share the budget. They are separate pipes read by
+	// separate goroutines, so which one the cut lands in depends on read
+	// order (600+400 or 400+600); the total never passes the budget.
 	r = e.exec(ExecRequest{Argv: []string{"sh", "-c", "head -c 600 /dev/zero; head -c 600 /dev/zero >&2"}, MaxOutputBytes: 1000})
-	if r.code != ExitOutputLimit || len(r.stdout) != 600 || len(r.stderr) < 400 {
+	msg := "output limit of 1000 bytes reached"
+	data := len(r.stderr) - len(msg)
+	if r.code != ExitOutputLimit || !strings.HasSuffix(string(r.stderr), msg) || len(r.stdout)+data != 1000 ||
+		(len(r.stdout) != 600 && len(r.stdout) != 400) {
 		t.Fatalf("code %d, %d + %d bytes", r.code, len(r.stdout), len(r.stderr))
 	}
 }
@@ -334,7 +340,7 @@ func TestFilesRoundTripKeepsModesAndLinks(t *testing.T) {
 	if err := os.Symlink("a.txt", filepath.Join(proj, "ln")); err != nil {
 		t.Fatal(err)
 	}
-	// A link that leaves the tree is kept as a link.
+	// A link that leaves the tree is not created (GAP-0111).
 	if err := os.Symlink("/etc/dc-nonexistent", filepath.Join(proj, "abs")); err != nil {
 		t.Fatal(err)
 	}
@@ -346,9 +352,12 @@ func TestFilesRoundTripKeepsModesAndLinks(t *testing.T) {
 	if code, msg := e.status("PUT", "/dcrelay/1/files?dir="+dst, &buf); code != http.StatusNoContent {
 		t.Fatalf("put: %d %s", code, msg)
 	}
-	want := tree(t, proj)
+	want := withoutEntry(tree(t, proj), "abs")
 	if got := tree(t, filepath.Join(dst, "proj")); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("uploaded tree differs\n got %q\nwant %q", got, want)
+	}
+	if _, err := os.Lstat(filepath.Join(dst, "proj", "abs")); err == nil {
+		t.Fatal("a link out of the destination was created")
 	}
 	// Download it again, as a directory and as one file.
 	resp := e.do("GET", "/dcrelay/1/files?path="+filepath.Join(dst, "proj"), nil, e.tok)
@@ -403,25 +412,28 @@ func TestPutRefusesUnsafeArchives(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		ents func(outside string) []ent
+		// skipped: the archive is taken, but its link out is not created,
+		// so what follows it lands inside the destination (GAP-0111).
+		skipped bool
 	}{
-		{"absolute path", func(o string) []ent { return []ent{{name: filepath.Join(o, "abs"), mode: 0o644, body: "x"}} }},
-		{"parent escape", func(string) []ent { return []ent{{name: "../escape", mode: 0o644, body: "x"}} }},
-		{"nested escape", func(string) []ent { return []ent{{name: "a/../../escape", mode: 0o644, body: "x"}} }},
-		{"escape of a directory entry", func(string) []ent { return []ent{{name: "../d/", typ: tar.TypeDir, mode: 0o755}} }},
+		{"absolute path", func(o string) []ent { return []ent{{name: filepath.Join(o, "abs"), mode: 0o644, body: "x"}} }, false},
+		{"parent escape", func(string) []ent { return []ent{{name: "../escape", mode: 0o644, body: "x"}} }, false},
+		{"nested escape", func(string) []ent { return []ent{{name: "a/../../escape", mode: 0o644, body: "x"}} }, false},
+		{"escape of a directory entry", func(string) []ent { return []ent{{name: "../d/", typ: tar.TypeDir, mode: 0o755}} }, false},
 		{"write through a link out", func(o string) []ent {
 			return []ent{{name: "ln", typ: tar.TypeSymlink, link: o}, {name: "ln/escape", mode: 0o644, body: "x"}}
-		}},
+		}, true},
 		{"write through a relative link out", func(string) []ent {
 			return []ent{{name: "ln", typ: tar.TypeSymlink, link: "../.."}, {name: "ln/escape", mode: 0o644, body: "x"}}
-		}},
+		}, true},
 		{"directory through a link out", func(o string) []ent {
 			return []ent{{name: "ln", typ: tar.TypeSymlink, link: o}, {name: "ln/sub/", typ: tar.TypeDir, mode: 0o755}}
-		}},
-		{"character device", func(string) []ent { return []ent{{name: "dev", typ: tar.TypeChar, mode: 0o644}} }},
-		{"fifo", func(string) []ent { return []ent{{name: "pipe", typ: tar.TypeFifo, mode: 0o644}} }},
+		}, true},
+		{"character device", func(string) []ent { return []ent{{name: "dev", typ: tar.TypeChar, mode: 0o644}} }, false},
+		{"fifo", func(string) []ent { return []ent{{name: "pipe", typ: tar.TypeFifo, mode: 0o644}} }, false},
 		{"hard link", func(string) []ent {
 			return []ent{{name: "a", mode: 0o644, body: "x"}, {name: "b", typ: tar.TypeLink, link: "a"}}
-		}},
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newFileEnv(t)
@@ -432,8 +444,17 @@ func TestPutRefusesUnsafeArchives(t *testing.T) {
 				t.Fatal(err)
 			}
 			code, msg := e.status("PUT", "/dcrelay/1/files?dir="+dst, bytes.NewReader(mkTar(t, tc.ents(outside)...)))
-			if code != http.StatusBadRequest {
-				t.Fatalf("status %d %s", code, msg)
+			want := http.StatusBadRequest
+			if tc.skipped {
+				want = http.StatusNoContent
+				if _, err := os.Lstat(filepath.Join(dst, "ln")); err == nil {
+					if fi, _ := os.Lstat(filepath.Join(dst, "ln")); fi.Mode()&os.ModeSymlink != 0 {
+						t.Fatal("the link out was created")
+					}
+				}
+			}
+			if code != want {
+				t.Fatalf("status %d (want %d) %s", code, want, msg)
 			}
 			// Nothing appeared outside the destination.
 			left, _ := os.ReadDir(outside)
@@ -458,7 +479,7 @@ func TestPutRefusesUnsafeArchives(t *testing.T) {
 	})
 }
 
-func TestPutKeepsEscapingLinksButNeverFollowsExistingOnes(t *testing.T) {
+func TestPutSkipsEscapingLinksAndNeverFollowsExistingOnes(t *testing.T) {
 	e := newFileEnv(t)
 	base := t.TempDir()
 	victim := filepath.Join(base, "victim")
@@ -485,8 +506,8 @@ func TestPutKeepsEscapingLinksButNeverFollowsExistingOnes(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(dst, "f")); string(b) != "new" {
 		t.Fatalf("f = %q", b)
 	}
-	if l, err := os.Readlink(filepath.Join(dst, "kept")); err != nil || l != "/somewhere/else" {
-		t.Fatalf("link %q %v", l, err)
+	if _, err := os.Lstat(filepath.Join(dst, "kept")); err == nil {
+		t.Fatal("a link out of the destination was created (GAP-0111)")
 	}
 }
 
@@ -573,4 +594,71 @@ func TestWriteTarSkipsSpecialFilesAndExtractTarEnforcesTheCap(t *testing.T) {
 	if err := WriteTar(io.Discard, "/"); err == nil {
 		t.Fatal("archived the file system root")
 	}
+}
+
+func tarOf(t *testing.T, add func(tw *tar.Writer)) *bytes.Reader {
+	t.Helper()
+	var b bytes.Buffer
+	tw := tar.NewWriter(&b)
+	add(tw)
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return bytes.NewReader(b.Bytes())
+}
+
+// GAP-0111: symlinks stay inside, entries and bytes are capped.
+func TestExtractTarBounds(t *testing.T) {
+	for name, link := range map[string]string{"absolute": "/etc/passwd", "climbs": "../../outside", "climbs from a subdir": "../../x"} {
+		dir := t.TempDir()
+		r := tarOf(t, func(tw *tar.Writer) {
+			tw.WriteHeader(&tar.Header{Name: "a/l", Typeflag: tar.TypeSymlink, Linkname: link, Mode: 0o777})
+		})
+		res, err := ExtractTar(r, dir, ExtractOptions{})
+		if err != nil || res.SkippedLinkCount != 1 || len(res.SkippedLinks) != 1 || res.Symlinks != 0 {
+			t.Errorf("%s symlink %q: %+v %v", name, link, res, err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "a", "l")); err == nil {
+			t.Errorf("%s symlink %q was created", name, link)
+		}
+	}
+	dir := t.TempDir()
+	r := tarOf(t, func(tw *tar.Writer) {
+		tw.WriteHeader(&tar.Header{Name: "a/b/l", Typeflag: tar.TypeSymlink, Linkname: "../c", Mode: 0o777})
+	})
+	if _, err := ExtractTar(r, dir, ExtractOptions{}); err != nil {
+		t.Fatalf("an inside symlink refused: %v", err)
+	}
+	r = tarOf(t, func(tw *tar.Writer) {
+		for i := 0; i < 5; i++ {
+			tw.WriteHeader(&tar.Header{Name: fmt.Sprintf("d%d/", i), Typeflag: tar.TypeDir, Mode: 0o755})
+		}
+	})
+	if _, err := ExtractTar(r, t.TempDir(), ExtractOptions{MaxEntries: 3}); !errors.Is(err, ErrTooManyEntries) {
+		t.Fatalf("entry cap: %v", err)
+	}
+	r = tarOf(t, func(tw *tar.Writer) {
+		for i := 0; i < 3; i++ {
+			tw.WriteHeader(&tar.Header{Name: fmt.Sprintf("f%d", i), Typeflag: tar.TypeReg, Mode: 0o644, Size: 10})
+			tw.Write(bytes.Repeat([]byte("x"), 10))
+		}
+	})
+	if _, err := ExtractTar(r, t.TempDir(), ExtractOptions{MaxBytes: 25}); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("byte cap: %v", err)
+	}
+	if DefaultExtractMaxEntries <= 0 || DefaultExtractMaxBytes <= 0 {
+		t.Fatal("no default caps")
+	}
+}
+
+// withoutEntry drops the lines of a tree listing that name entry.
+func withoutEntry(lines []string, entry string) []string {
+	var out []string
+	for _, l := range lines {
+		if f := strings.Fields(l); len(f) > 0 && (f[0] == entry || strings.HasPrefix(f[0], entry+" ") || strings.HasSuffix(f[0], "/"+entry)) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
 }

@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,11 +32,19 @@ import (
 // is tested in the relay package).
 type tokenVerifier struct{}
 
+var tokenSeq atomic.Int64
+
+// testTask is the task text the test sessions are registered for.
+const testTask = "fix it"
+
 func (tokenVerifier) Verify(_ context.Context, r *http.Request) (relay.Session, error) {
 	if relay.TokenFrom(r) != testToken {
 		return relay.Session{}, errors.New("unknown token")
 	}
-	return relay.Session{Person: "alice@example.test", Actor: testTarget.String(), ActorUID: "uid-1"}, nil
+	// Each request stands for a new session token (a token opens one task),
+	// bound to the task text the tests run (GAP-0070, GAP-0071).
+	return relay.Session{Person: "alice@example.test", Actor: testTarget.String(), ActorUID: "uid-1",
+		TokenID: fmt.Sprintf("jti-%d", tokenSeq.Add(1)), TaskDigest: relay.TaskDigest(testTask)}, nil
 }
 
 // realRelay is the relay's own handler, with a headless command that
@@ -47,10 +56,9 @@ func realRelay(t *testing.T) http.Handler {
 	}
 	cfg := kit.DefaultConfig()
 	cfg.Relay.Headless = []string{"sh", "-c", "echo one; sleep 1; echo two:$0; exit 3", "{prompt}"}
-	s := relay.NewServer(relay.Options{Config: cfg, Verifier: tokenVerifier{}, TmuxDir: t.TempDir(),
-		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Warm:          func(context.Context, string) error { return nil },
-		SetUnattended: func(context.Context) error { return nil },
+	s := relay.NewServer(relay.Options{Config: cfg, Verifier: tokenVerifier{},
+		Log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Warm: func(context.Context, string) error { return nil },
 	})
 	return s.Handler()
 }
@@ -139,7 +147,7 @@ func TestRunTaskWaitsWhileFull(t *testing.T) {
 		}
 		return 0, nil
 	})
-	code, err := RunTask(context.Background(), TaskOptions{Options: r.options(), Prompt: "p", Emit: func(relay.TaskEvent) {}})
+	code, err := RunTask(context.Background(), TaskOptions{Options: r.options(), Prompt: testTask, Emit: func(relay.TaskEvent) {}})
 	if err != nil || code != 3 {
 		t.Fatalf("%d %v", code, err)
 	}
@@ -167,7 +175,7 @@ func TestTaskRefusals(t *testing.T) {
 		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
 			r := newRig(t, nil)
 			r.admin.setAnswer(func(*http.Request) (int, http.Header) { return tc.status, nil })
-			_, err := RunTask(context.Background(), TaskOptions{Options: r.options(), Prompt: "p", Emit: func(relay.TaskEvent) {}})
+			_, err := RunTask(context.Background(), TaskOptions{Options: r.options(), Prompt: testTask, Emit: func(relay.TaskEvent) {}})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("run: %v", err)
 			}

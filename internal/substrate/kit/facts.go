@@ -88,7 +88,11 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	isPre := event == "PreToolUse" || event == "preToolUse"
 	if isPre && readTools[connector][view.ToolName] {
 		for _, pf := range f.Paths {
-			if pf.Type == "file" && (pf.Field == "tool_input.file_path" || pf.Field == "tool_input.notebook_path") {
+			// Only a read of a skill's files: the gateway scans what is about
+			// to reach the model's context there (attest.HookAssets); any
+			// other read target's content has no reader (GAP-0072).
+			if pf.Type == "file" && (pf.Field == "tool_input.file_path" || pf.Field == "tool_input.notebook_path") &&
+				(inSkillRoot(pf.Abs) || inSkillRoot(pf.Resolved)) {
 				budget = attach(f, "read_target", pf.Abs, pf.Resolved, budget)
 			}
 		}
@@ -222,6 +226,18 @@ func inspectPath(field, p, cwd string) PathFact {
 	}
 	pf.InsideCWD = within(target, cwd)
 	return pf
+}
+
+// inSkillRoot reports a path inside a .claude, .codex or .agents skill
+// folder.
+func inSkillRoot(p string) bool {
+	p = filepath.ToSlash(p)
+	for _, root := range []string{"/.claude/skills/", "/.codex/skills/", "/.agents/skills/"} {
+		if p != "" && strings.Contains(p, root) {
+			return true
+		}
+	}
+	return false
 }
 
 func within(p, dir string) bool {

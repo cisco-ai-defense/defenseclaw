@@ -12,8 +12,12 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,9 +36,17 @@ import (
 
 // The test binary is the relay's run-agent wrapper in the tmux tests, as the
 // relay binary is in an actor.
+// The test binary doubles as a probe of hardenProcess: run with
+// "harden-probe" it hardens itself and prints its dumpable flag.
 func TestMain(m *testing.M) {
-	if len(os.Args) > 1 && os.Args[1] == RunAgentCommand {
-		os.Exit(runAgent(os.Args[2:], os.Stderr))
+	if len(os.Args) > 1 && os.Args[1] == "harden-probe" {
+		if err := hardenProcess(); err != nil {
+			fmt.Println("error", err)
+			os.Exit(1)
+		}
+		d, err := dumpable()
+		fmt.Println("dumpable", d, err)
+		os.Exit(0)
 	}
 	os.Exit(m.Run())
 }
@@ -147,7 +159,7 @@ var self = Identity{Atespace: "a5-eng", Name: "cc-1", UID: "uid-1"}
 func claims(now time.Time, mut func(map[string]any)) map[string]any {
 	c := map[string]any{
 		"iss": "https://defenseclaw-admin", "sub": "alice@example.test", "aud": []string{"dcrelay"},
-		"iat": now.Unix(), "nbf": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(), "jti": "j1",
+		"iat": now.Unix(), "nbf": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(), "jti": newID(),
 		"dc.actor": map[string]string{"atespace": self.Atespace, "actorName": self.Name, "actorUID": self.UID},
 	}
 	if mut != nil {
@@ -247,36 +259,33 @@ func (r *recorder) list() []string {
 	return append([]string(nil), r.events...)
 }
 
-func testServer(t *testing.T, argv []string) (*Server, *recorder, string, signer) {
+func testServer(t *testing.T, argv []string) (*Server, *recorder, signer) {
 	t.Helper()
 	v, ec, _ := testVerifier(t)
 	cfg := kit.DefaultConfig()
 	cfg.Relay.Connector = "claudecode"
 	cfg.Relay.Interactive = argv
 	cfg.Relay.Headless = []string{"sh", "-c", `echo "out:$0 mode:$DEFENSECLAW_ACTOR_MODE"; echo err >&2; exit 3`, "{prompt}"}
-	cfg.Relay.Tmux = "tmux"
-	// A short socket path: unix socket paths are limited to 108 bytes.
-	dir, err := os.MkdirTemp("/tmp", "dcr")
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Chmod(dir, 0o700)
-	t.Cleanup(func() {
-		exec.Command("tmux", "-S", filepath.Join(dir, "tmux.sock"), "kill-server").Run()
-		os.RemoveAll(dir)
-	})
 	rec := &recorder{}
-	s := NewServer(Options{Config: cfg, Verifier: v, TmuxDir: filepath.Join(dir, "t"),
-		Warm:          func(context.Context, string) error { rec.add("warm"); return nil },
-		SetUnattended: func(context.Context) error { rec.add("unattended"); return nil },
+	s := NewServer(Options{Config: cfg, Verifier: v,
+		Warm: func(context.Context, string) error { rec.add("warm"); return nil },
 	})
-	return s, rec, filepath.Join(dir, "t"), ec
+	t.Cleanup(func() {
+		if s.agent != nil {
+			s.agent.mu.Lock()
+			if s.agent.cmd != nil && s.agent.running {
+				_ = s.agent.cmd.Process.Kill()
+			}
+			s.agent.mu.Unlock()
+		}
+	})
+	return s, rec, ec
 }
 
 // The golden-snapshot rule: a relay that has only served its wake-up probe
 // has created nothing and asked for nothing.
 func TestNothingStartsBeforeFirstAuthenticatedRequest(t *testing.T) {
-	s, rec, dir, ec := testServer(t, []string{"sh"})
+	s, rec, ec := testServer(t, []string{"sh"})
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/readyz")
@@ -287,8 +296,8 @@ func TestNothingStartsBeforeFirstAuthenticatedRequest(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status: %d", resp.StatusCode)
 	}
-	if _, err := os.Stat(dir); err == nil || s.session != "" || len(rec.list()) != 0 {
-		t.Fatalf("state before the first authenticated request: dir=%v session=%q calls=%v", err, s.session, rec.list())
+	if s.session != "" || s.agent != nil || len(rec.list()) != 0 {
+		t.Fatalf("state before the first authenticated request: session=%q agent=%v calls=%v", s.session, s.agent, rec.list())
 	}
 	req, _ := http.NewRequest("GET", srv.URL+"/dcrelay/1/status", nil)
 	req.Header.Set("Authorization", "Bearer "+ec.token(t, claims(time.Now(), nil), TokenType))
@@ -301,12 +310,9 @@ func TestNothingStartsBeforeFirstAuthenticatedRequest(t *testing.T) {
 	}
 }
 
-func needTmux(t *testing.T) {
+func needLinux(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("actors are Linux")
-	}
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
 	}
 }
 
@@ -353,8 +359,8 @@ func readUntil(t *testing.T, c *websocket.Conn, want string, ctl func(Control)) 
 }
 
 func TestWebSocketSessionSurvivesReconnect(t *testing.T) {
-	needTmux(t)
-	s, rec, _, ec := testServer(t, []string{"sh", "-c", `while read l; do echo "got:$l cols:$(tput cols)"; done`})
+	needLinux(t)
+	s, rec, ec := testServer(t, []string{"sh", "-c", `while read l; do echo "got:$l cols:$(stty size | cut -d" " -f2)"; done`})
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 	if _, resp, err := dialWS(t, srv.URL, "", nil); err == nil || resp.StatusCode != 401 {
@@ -378,7 +384,7 @@ func TestWebSocketSessionSurvivesReconnect(t *testing.T) {
 		t.Fatalf("hello %+v", hello)
 	}
 	if ev := rec.list(); len(ev) == 0 || ev[0] != "warm" {
-		t.Fatalf("the hook helper was not pre-connected before the attachment: %v", ev)
+		t.Fatalf("the gateway path was not pre-connected before the attachment: %v", ev)
 	}
 	c.WriteMessage(websocket.BinaryMessage, Encode(FrameData, []byte("one\r")))
 	readUntil(t, c, "got:one cols:100", nil)
@@ -389,9 +395,13 @@ func TestWebSocketSessionSurvivesReconnect(t *testing.T) {
 	c.WriteMessage(websocket.BinaryMessage, EncodeControl(Control{Type: CtlDetach}))
 	c.Close()
 
-	// The token in a subprotocol works too and is never echoed.
+	// A token opens one attachment.
+	if _, resp, err := dialWS(t, srv.URL, tok, nil); err == nil || resp.StatusCode != 401 {
+		t.Fatalf("a used token opened a second attachment: %v", err)
+	}
+	// A new token in a subprotocol works too and is never echoed.
 	h := http.Header{}
-	d := websocket.Dialer{Subprotocols: []string{Subprotocol, TokenProtocol + tok}}
+	d := websocket.Dialer{Subprotocols: []string{Subprotocol, TokenProtocol + ec.token(t, claims(time.Now(), nil), TokenType)}}
 	c2, resp, err := d.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/dcrelay/1/ws?cols=90&rows=30", h)
 	if err != nil {
 		t.Fatal(err)
@@ -404,33 +414,17 @@ func TestWebSocketSessionSurvivesReconnect(t *testing.T) {
 	c2.WriteMessage(websocket.BinaryMessage, Encode(FrameData, []byte("three\r")))
 	out := readUntil(t, c2, "got:three", nil)
 	if !strings.Contains(out, "got:one") {
-		// tmux redraws the same session: the earlier output is still there.
+		// The scrollback of the same session comes first.
 		t.Fatalf("the session did not survive the reconnect: %q", out)
 	}
-	if !s.tmux.Alive(context.Background()) {
+	if !s.agent.Running() {
 		t.Fatal("session gone")
 	}
 }
 
-func TestRunAgentRecordsStatus(t *testing.T) {
-	dir := t.TempDir()
-	for _, tc := range []struct {
-		argv []string
-		want int
-	}{{[]string{"sh", "-c", "exit 7"}, 7}, {[]string{"sh", "-c", "exit 0"}, 0}, {[]string{"sh", "-c", "kill -TERM $$"}, 128 + 15}, {[]string{"/nonexistent/agent"}, 127}} {
-		f := filepath.Join(dir, "exit")
-		os.Remove(f)
-		got := runAgent(append([]string{"--status", f, "--"}, tc.argv...), &bytes.Buffer{})
-		code, ok := readStatus(f)
-		if got != tc.want || !ok || code != tc.want {
-			t.Fatalf("%v: exit %d, recorded %d %v, want %d", tc.argv, got, code, ok, tc.want)
-		}
-	}
-}
-
 func TestAgentExitIsReported(t *testing.T) {
-	needTmux(t)
-	s, _, _, ec := testServer(t, []string{"sh", "-c", "read l; exit 7"})
+	needLinux(t)
+	s, _, ec := testServer(t, []string{"sh", "-c", "read l; exit 7"})
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 	c, _, err := dialWS(t, srv.URL, ec.token(t, claims(time.Now(), nil), TokenType), nil)
@@ -455,8 +449,8 @@ func TestAgentExitIsReported(t *testing.T) {
 }
 
 func TestLongPollFallback(t *testing.T) {
-	needTmux(t)
-	s, _, _, ec := testServer(t, []string{"sh", "-c", `while read l; do echo "lp:$l"; done`})
+	needLinux(t)
+	s, _, ec := testServer(t, []string{"sh", "-c", `while read l; do echo "lp:$l"; done`})
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 	tok := ec.token(t, claims(time.Now(), nil), TokenType)
@@ -518,11 +512,26 @@ func TestLongPollFallback(t *testing.T) {
 }
 
 func TestHeadlessTaskIsUnattendedAndReportsExit(t *testing.T) {
-	s, rec, _, ec := testServer(t, []string{"sh"})
+	s, rec, ec := testServer(t, []string{"sh"})
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
+	taskTok := func(task string) string {
+		return ec.token(t, claims(time.Now(), func(c map[string]any) { c["dc.task_sha256"] = TaskDigest(task) }), TokenType)
+	}
+	for name, tc := range map[string]struct{ tok, body string }{
+		"another task text":   {taskTok("fix the bug"), `{"prompt":"rm -rf the repo"}`},
+		"interactive session": {ec.token(t, claims(time.Now(), nil), TokenType), `{"prompt":"fix the bug"}`},
+		"extra args":          {taskTok("fix the bug"), `{"prompt":"fix the bug","args":["--x"]}`},
+	} {
+		req, _ := http.NewRequest("POST", srv.URL+"/dcrelay/1/task", strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer "+tc.tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil || resp.StatusCode == http.StatusOK {
+			t.Fatalf("%s: task started (%v)", name, err)
+		}
+	}
 	req, _ := http.NewRequest("POST", srv.URL+"/dcrelay/1/task", strings.NewReader(`{"prompt":"fix the bug"}`))
-	req.Header.Set("Authorization", "Bearer "+ec.token(t, claims(time.Now(), nil), TokenType))
+	req.Header.Set("Authorization", "Bearer "+taskTok("fix the bug"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -551,8 +560,8 @@ func TestHeadlessTaskIsUnattendedAndReportsExit(t *testing.T) {
 	if len(out) != 1 || out[0] != "out:fix the bug mode:unattended" || len(errs) != 1 || code == nil || *code != 3 {
 		t.Fatalf("events %+v", events)
 	}
-	if ev := rec.list(); len(ev) < 2 || ev[0] != "unattended" || ev[1] != "warm" {
-		t.Fatalf("calls %v: unattended must come before anything runs", ev)
+	if ev := rec.list(); len(ev) < 1 || ev[0] != "warm" {
+		t.Fatalf("calls %v: the gateway path is warmed before the task runs", ev)
 	}
 	if _, err := expandHeadless([]string{"x"}, "p"); err == nil {
 		t.Fatal("a headless command without {prompt} accepted")
@@ -561,3 +570,145 @@ func TestHeadlessTaskIsUnattendedAndReportsExit(t *testing.T) {
 		t.Fatal("an interactive-only connector accepted a task")
 	}
 }
+
+func TestAttachmentEndsWithItsToken(t *testing.T) {
+	needLinux(t)
+	s, _, ec := testServer(t, []string{"sh", "-c", "while read l; do echo $l; done"})
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	now := time.Now()
+	tok := ec.token(t, claims(now, func(c map[string]any) { c["exp"] = now.Add(2 * time.Second).Unix() }), TokenType)
+	// The verifier allows 60 s of skew; the relay itself ends the
+	// attachment at the token's exp.
+	c, _, err := dialWS(t, srv.URL, tok, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	var msg string
+	readUntil(t, c, "ctl:error", func(cc Control) {
+		if cc.Type == CtlError {
+			msg = cc.Message
+		}
+	})
+	if msg != "session token expired" {
+		t.Fatalf("message %q", msg)
+	}
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		if _, _, err := c.ReadMessage(); err != nil {
+			break
+		}
+	}
+	if !s.agent.Running() {
+		t.Fatal("the agent stopped with the attachment")
+	}
+}
+
+func TestLongPollAttachmentsAreCapped(t *testing.T) {
+	needLinux(t)
+	s, _, ec := testServer(t, []string{"sh", "-c", "while read l; do echo $l; done"})
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	open := func() int {
+		req, _ := http.NewRequest("POST", srv.URL+"/dcrelay/1/poll", nil)
+		req.Header.Set("Authorization", "Bearer "+ec.token(t, claims(time.Now(), nil), TokenType))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for i := 0; i < maxPollsPerPerson; i++ {
+		if code := open(); code != 200 {
+			t.Fatalf("open %d: %d", i, code)
+		}
+	}
+	if code := open(); code != http.StatusTooManyRequests {
+		t.Fatalf("over the cap: %d", code)
+	}
+}
+
+func TestSessionKeysNeedAnIssuer(t *testing.T) {
+	dir := t.TempDir()
+	ec, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalPKIXPublicKey(&ec.PublicKey)
+	p := filepath.Join(dir, "k.pem")
+	os.WriteFile(p, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o644)
+	cfg := kit.DefaultConfig()
+	cfg.Relay.SessionKeys = map[string]string{"k1": p}
+	if _, err := NewVerifier(cfg); err == nil {
+		t.Fatal("session keys without an issuer accepted")
+	}
+	cfg.Relay.SessionIssuer = "https://defenseclaw-admin"
+	if v, err := NewVerifier(cfg); err != nil || v == nil {
+		t.Fatalf("%v %v", v, err)
+	}
+	v, ec1, _ := testVerifier(t)
+	v.Issuer = ""
+	if _, err := v.VerifyToken(ec1.token(t, claims(time.Now(), nil), TokenType)); err == nil {
+		t.Fatal("a verifier without an issuer accepted a token")
+	}
+}
+
+// The agent's user can neither trace the relay nor open its descriptors
+// (the PTY master): the relay is not dumpable once hardened.
+func TestRelayIsNotDumpable(t *testing.T) {
+	needLinux(t)
+	self, _ := os.Executable()
+	out, err := exec.Command(self, "harden-probe").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "dumpable false <nil>" {
+		t.Fatalf("probe: %q %v", out, err)
+	}
+	// The agent the relay starts is dumpable again (exec resets it).
+	a := &Agent{Argv: []string{"sh", "-c", "grep -q . /proc/self/status && echo ok"}, Env: os.Environ()}
+	at, err := a.Attach(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got strings.Builder
+	for ev := range at.Events {
+		got.Write(ev.data)
+	}
+	if !strings.Contains(got.String(), "ok") {
+		t.Fatalf("agent output %q", got.String())
+	}
+}
+
+// The client and the relay together, under -race (GAP-0088).
+func TestClientAttachDetach(t *testing.T) {
+	needLinux(t)
+	s, _, ec := testServer(t, []string{"sh", "-c", "while read l; do echo got:$l; done"})
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	for _, lp := range []bool{false, true} {
+		pr, pw := io.Pipe()
+		var out syncBuffer
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			pw.Write([]byte("hi\r"))
+			for i := 0; i < 50 && !strings.Contains(out.String(), "got:hi"); i++ {
+				time.Sleep(50 * time.Millisecond)
+			}
+			pw.Write([]byte{DetachKey})
+		}()
+		res, err := Attach(context.Background(), pr, &out, AttachOptions{BaseURL: srv.URL,
+			Token: ec.token(t, claims(time.Now(), nil), TokenType), LongPoll: lp})
+		if err != nil || !res.Detached || res.Session == "" || !strings.Contains(out.String(), "got:hi") {
+			t.Fatalf("long-poll=%v: %+v %v %q", lp, res, err, out.String())
+		}
+	}
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }

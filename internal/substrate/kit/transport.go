@@ -33,9 +33,6 @@ type Request struct {
 	// and ignores any caller value for them.
 	Header map[string]string `json:"header,omitempty"`
 	Body   []byte            `json:"body,omitempty"`
-	// SkillCommit are skill-folder fingerprints the helper records as seen
-	// by the gateway once it answers 2xx (skills.go).
-	SkillCommit map[string]string `json:"skill_commit,omitempty"`
 }
 
 // Response is the gateway's answer.
@@ -66,16 +63,36 @@ func NewTransport(cfg Config) (*Transport, error) {
 		return nil, err
 	}
 	base, _ := url.Parse(strings.TrimRight(cfg.GatewayURL, "/"))
-	roots, err := trustPool(cfg.CAFiles)
-	if err != nil {
-		return nil, err
+	// Every hook is a new process: parsing a CA pool costs tens of
+	// milliseconds on a microVM, so it is built only for an https gateway
+	// (the actor listener is plain HTTP inside the cluster).
+	var roots *x509.CertPool
+	if base.Scheme == "https" {
+		var err error
+		if roots, err = trustPool(cfg.CAFiles); err != nil {
+			return nil, err
+		}
 	}
 	dialer := &net.Dialer{Timeout: cfg.connectTimeout(), KeepAlive: 30 * time.Second}
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// Every hook is a new process with no DNS cache, and in an actor
+		// each lookup goes through egress DNS. An absolute name skips the
+		// ndots search list (the gateway FQDN has four dots, under
+		// Kubernetes' ndots:5), and tcp4 asks for A only. The plain dial is
+		// the fallback (an IPv6-only cluster).
+		if host, port, err := net.SplitHostPort(addr); err == nil && net.ParseIP(host) == nil &&
+			strings.Contains(host, ".") && !strings.HasSuffix(host, ".") {
+			if c, err := dialer.DialContext(ctx, "tcp4", net.JoinHostPort(host+".", port)); err == nil {
+				return c, nil
+			}
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}
 	tr := &http.Transport{
 		// Hook traffic never follows the workload's proxy variables: the
 		// agent controls them. Substrate egress is transparent.
 		Proxy:               nil,
-		DialContext:         dialer.DialContext,
+		DialContext:         dial,
 		TLSClientConfig:     &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout: cfg.connectTimeout() + time.Second,
 		ForceAttemptHTTP2:   true,
@@ -86,20 +103,25 @@ func NewTransport(cfg Config) (*Transport, error) {
 	return &Transport{cfg: cfg, base: base, client: &http.Client{Transport: tr}, newKey: randomKey}, nil
 }
 
+// trustPool is the projected Substrate bundle (egress MITM anchors and
+// system roots), or the system roots when no configured bundle can be read
+// (an https gateway behind the egress MITM then fails its handshake,
+// closed).
 func trustPool(files []string) (*x509.CertPool, error) {
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
-	}
+	pool := x509.NewCertPool()
+	loaded := false
 	for _, f := range files {
 		pem, err := os.ReadFile(f)
 		if err != nil {
-			// A projected bundle is mounted at actor start; a missing one
-			// leaves the system roots, and an https gateway behind the
-			// egress MITM then fails its handshake, closed.
 			continue
 		}
-		pool.AppendCertsFromPEM(pem)
+		loaded = pool.AppendCertsFromPEM(pem) || loaded
+	}
+	if loaded {
+		return pool, nil
+	}
+	if sys, err := x509.SystemCertPool(); err == nil && sys != nil {
+		return sys, nil
 	}
 	return pool, nil
 }
@@ -211,8 +233,9 @@ func (t *Transport) once(ctx context.Context, r Request, key string, budget time
 		Mode: resp.Header.Get(ModeHeader), FailMode: resp.Header.Get(FailModeHeader)}, nil
 }
 
-// Warm opens (or re-opens) a connection to the actor listener so the next
-// hook does not pay for TCP and TLS through egress. Any HTTP answer counts.
+// Warm makes one request to the actor listener so the egress path (the
+// policy's DNS name and rule) is ready before the first hook after a resume
+// (E6). Any HTTP answer counts.
 func (t *Transport) Warm(ctx context.Context, connector string) error {
 	ctx, cancel := context.WithTimeout(ctx, t.cfg.maxTime())
 	defer cancel()

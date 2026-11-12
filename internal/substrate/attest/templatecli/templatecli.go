@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest/kitspec"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // Exit codes.
@@ -190,7 +191,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	c.bind(fs)
 	var (
 		connectorName = fs.String("connector", "claudecode", "claudecode or codex")
-		from          = fs.String("from", "", "base image (the OpenShell harness image for the connector, with tmux)")
+		from          = fs.String("from", "", "base image (the OpenShell harness image for the connector)")
 		to            = fs.String("to", "", "target repository and tag")
 		kitVersion    = fs.String("kit-version", "dev", "kit version")
 		hookBin       = fs.String("hook-binary", "", "defenseclaw-actor-hook (linux static)")
@@ -208,6 +209,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		noMCP         = fs.Bool("no-mcp-static", false, "do not run mcp-scanner over tool descriptions")
 		analyzers     = fs.String("mcp-analyzers", "yara", "mcp-scanner analyzers")
 		keepEP        = fs.Bool("keep-entrypoint", false, "keep the base image ENTRYPOINT and CMD (tests; a real actor image starts the relay)")
+		agentFile     = fs.String("agent-binary", "", "the connector's pinned agent build (default: download it); checked against the kit's pinned checksum")
 		dry           = fs.Bool("dry-run", false, "scan the composed image and stop before pushing")
 		trusted       multi
 		mcpHosts      multi
@@ -263,9 +265,24 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		}
 		keys[kid] = b
 	}
+	// The kit's pinned agent build, when the connector has one (GAP-0114):
+	// from --agent-binary, or downloaded, and checked against the pin.
+	var agent []byte
+	if _, pinned := kit.AgentReleases[*connectorName]; pinned {
+		if *agentFile != "" {
+			if agent, err = os.ReadFile(*agentFile); err != nil {
+				return ExitUsageError, err
+			}
+			if err := kit.CheckAgent(*connectorName, "amd64", agent); err != nil {
+				return ExitUsageError, err
+			}
+		} else if agent, err = kit.FetchAgent(context.Background(), nil, *connectorName, "amd64"); err != nil {
+			return ExitUsageError, err
+		}
+	}
 	spec, tpl, harnessVersion, err := kitspec.Spec(kitspec.Options{Connector: *connectorName, KitVersion: *kitVersion, GatewayURL: *gateway,
 		FailMode: *failMode, Provider: *provider, Model: *model, HookBinary: hook, RelayBinary: relay, SessionKeys: keys,
-		Providers: providers(*connectorName, *provider)})
+		AgentBinary: agent, Arch: "amd64", Providers: providers(*connectorName, *provider)})
 	if err != nil {
 		return ExitUsageError, err
 	}
@@ -513,7 +530,8 @@ func runScan(ctx context.Context, args []string, stdout io.Writer) (int, error) 
 	skill, mcp := scanners(cfg, *noMCP, *analyzers)
 	so := attest.ScanOptions{Skill: skill, MCPStatic: mcp, Compiled: policy.CompileAdmission(cfg), AllowedMCPHosts: mcpHosts, BlockAtOrAbove: floor}
 	if *connectorName != "" {
-		spec, _, _, err := kitspec.Spec(kitspec.Options{Connector: *connectorName, KitVersion: "scan", HookBinary: []byte("x"), RelayBinary: []byte("x")})
+		spec, _, _, err := kitspec.Spec(kitspec.Options{Connector: *connectorName, KitVersion: "scan", HookBinary: []byte("x"), RelayBinary: []byte("x"),
+			MetadataOnly: true})
 		if err != nil {
 			return ExitUsageError, err
 		}

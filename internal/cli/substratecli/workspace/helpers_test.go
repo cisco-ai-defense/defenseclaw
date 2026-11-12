@@ -58,17 +58,15 @@ type actor struct {
 func newActor(t *testing.T) *actor {
 	t.Helper()
 	cfg := kit.DefaultConfig()
-	cfg.Relay.Tmux = "tmux"
 	wd, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.Relay.Workdir = wd
 	s := relay.NewServer(relay.Options{
-		Config: cfg, Verifier: bearer(testToken), TmuxDir: filepath.Join(t.TempDir(), "t"),
-		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Warm:          func(context.Context, string) error { return nil },
-		SetUnattended: func(context.Context) error { return nil },
+		Config: cfg, Verifier: bearer(testToken),
+		Log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Warm: func(context.Context, string) error { return nil },
 	})
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)

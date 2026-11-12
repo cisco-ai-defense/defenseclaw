@@ -62,6 +62,11 @@ func RunTask(ctx context.Context, o TaskOptions) (int, error) {
 	if strings.TrimSpace(o.Prompt) == "" {
 		return -1, errors.New("a task needs a prompt")
 	}
+	if len(o.Args) > 0 {
+		// The relay runs the template's headless command with the
+		// registered task text only (GAP-0071).
+		return -1, errors.New("a task takes no extra agent arguments: the template's headless command runs with the task text")
+	}
 	if err := o.normalize(); err != nil {
 		return -1, err
 	}
@@ -93,7 +98,7 @@ func RunTask(ctx context.Context, o TaskOptions) (int, error) {
 		// The client puts the person's bearer on the request; the token
 		// argument is not used for it.
 		code, err := relay.RunTask(ctx, l.tun.HTTPClient(), l.tun.BaseURL(), "",
-			relay.TaskRequest{Prompt: o.Prompt, Args: o.Args}, track)
+			relay.TaskRequest{Prompt: o.Prompt}, track)
 		if err == nil {
 			return code, nil
 		}

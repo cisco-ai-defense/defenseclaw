@@ -206,7 +206,7 @@ func (w execWriter) Write(p []byte) (int, error) {
 }
 
 func (s *Server) fileExec(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r, "exec"); !ok {
+	if _, ok := s.auth(w, r, "exec", false); !ok {
 		return
 	}
 	var req ExecRequest
@@ -297,15 +297,35 @@ var (
 
 // ExtractOptions configures ExtractTar.
 type ExtractOptions struct {
-	// MaxBytes caps the total file content; 0 means no cap.
+	// MaxBytes caps the total file content; 0 means DefaultExtractMaxBytes.
 	MaxBytes int64
+	// MaxEntries caps the archive's entries; 0 means
+	// DefaultExtractMaxEntries.
+	MaxEntries int
 }
+
+// Defaults of ExtractOptions (GAP-0111): an archive is bounded even when the
+// caller sets no limit.
+const (
+	DefaultExtractMaxBytes   int64 = 2 << 30
+	DefaultExtractMaxEntries       = 200000
+)
+
+// ErrTooManyEntries: the archive has more entries than the limit.
+var ErrTooManyEntries = errors.New("archive has more entries than the limit")
 
 // ExtractResult counts what ExtractTar wrote.
 type ExtractResult struct {
 	Files, Dirs, Symlinks int
 	Bytes                 int64
+	// SkippedLinks are symlinks not created because they point outside the
+	// destination (at most maxSkippedNames names; SkippedLinkCount counts
+	// them all).
+	SkippedLinks     []string `json:"skipped_links,omitempty"`
+	SkippedLinkCount int      `json:"skipped_link_count,omitempty"`
 }
+
+const maxSkippedNames = 20
 
 // cleanEntry returns the slash-separated path of a tar entry below the
 // destination, "." for the destination itself.
@@ -343,13 +363,23 @@ type dirMode struct {
 // ExtractTar extracts regular files, directories and symlinks from r below
 // dir, which must exist. Modes and modification times are kept (without the
 // set-id and sticky bits); every entry path is cleaned and refused when it
-// is absolute or leaves dir; a symlink is created as it is (its target may
-// point anywhere) but never followed out of dir while extracting, so a link
-// cannot redirect a later entry. An entry replaces what is at its path.
+// is absolute or leaves dir; a symlink that points outside dir (an absolute
+// target or one that climbs out) is not created and is reported in
+// SkippedLinks (GAP-0111), and no link is followed out of dir while
+// extracting, so a link cannot redirect a later entry. The
+// entries and the total file content are capped (ExtractOptions). An entry
+// replaces what is at its path.
 // Device nodes, FIFOs and hard links are refused. Extraction is not atomic:
 // a refused archive may have written the entries before the bad one.
 func ExtractTar(r io.Reader, dir string, o ExtractOptions) (ExtractResult, error) {
 	var res ExtractResult
+	if o.MaxBytes <= 0 {
+		o.MaxBytes = DefaultExtractMaxBytes
+	}
+	if o.MaxEntries <= 0 {
+		o.MaxEntries = DefaultExtractMaxEntries
+	}
+	entries := 0
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return res, err
@@ -372,6 +402,9 @@ func ExtractTar(r io.Reader, dir string, o ExtractOptions) (ExtractResult, error
 		if hdr.Typeflag == tar.TypeXGlobalHeader {
 			continue
 		}
+		if entries++; entries > o.MaxEntries {
+			return res, fmt.Errorf("%w (%d)", ErrTooManyEntries, o.MaxEntries)
+		}
 		name, err := cleanEntry(hdr.Name)
 		if err != nil {
 			return res, err
@@ -392,7 +425,7 @@ func ExtractTar(r io.Reader, dir string, o ExtractOptions) (ExtractResult, error
 				return res, fmt.Errorf("%w: a file cannot be the destination", ErrUnsafePath)
 			}
 			res.Bytes += hdr.Size
-			if o.MaxBytes > 0 && res.Bytes > o.MaxBytes {
+			if hdr.Size < 0 || res.Bytes > o.MaxBytes {
 				return res, fmt.Errorf("%w (%d bytes)", ErrTooLarge, o.MaxBytes)
 			}
 			if err := extractFile(root, tr, name, hdr, mode); err != nil {
@@ -402,6 +435,13 @@ func ExtractTar(r io.Reader, dir string, o ExtractOptions) (ExtractResult, error
 		case tar.TypeSymlink:
 			if name == "." || hdr.Linkname == "" || strings.ContainsRune(hdr.Linkname, 0) {
 				return res, fmt.Errorf("%w: bad symlink %q", ErrUnsafePath, hdr.Name)
+			}
+			if !linkStaysInside(name, hdr.Linkname) {
+				res.SkippedLinkCount++
+				if len(res.SkippedLinks) < maxSkippedNames {
+					res.SkippedLinks = append(res.SkippedLinks, name)
+				}
+				continue
 			}
 			if err := replaceable(root, name); err != nil {
 				return res, err
@@ -424,6 +464,19 @@ func ExtractTar(r io.Reader, dir string, o ExtractOptions) (ExtractResult, error
 		}
 	}
 	return res, nil
+}
+
+// linkStaysInside reports whether a symlink at name (a clean path below the
+// destination) with target link resolves inside the destination, by path:
+// absolute targets and targets that climb above the destination are
+// refused. A link through another link is checked when that one is used:
+// os.Root never follows a link out of the tree.
+func linkStaysInside(name, link string) bool {
+	if strings.HasPrefix(link, "/") || (runtime.GOOS == "windows" && strings.ContainsAny(link, `\:`)) {
+		return false
+	}
+	p := path.Clean(path.Join(path.Dir(name), link))
+	return p != ".." && !strings.HasPrefix(p, "../")
 }
 
 func mkParent(root *os.Root, name string) error {
@@ -480,7 +533,7 @@ func extractFile(root *os.Root, r io.Reader, name string, hdr *tar.Header, mode 
 }
 
 func (s *Server) filePut(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r, "files-put"); !ok {
+	if _, ok := s.auth(w, r, "files-put", false); !ok {
 		return
 	}
 	dir := r.URL.Query().Get("dir")
@@ -501,9 +554,13 @@ func (s *Server) filePut(w http.ResponseWriter, r *http.Request) {
 	var tooBig *http.MaxBytesError
 	switch {
 	case err == nil:
-		s.log.Info("relay.files.put", "files", res.Files, "dirs", res.Dirs, "symlinks", res.Symlinks, "bytes", res.Bytes)
+		s.log.Info("relay.files.put", "files", res.Files, "dirs", res.Dirs, "symlinks", res.Symlinks, "bytes", res.Bytes,
+			"skipped_links", res.SkippedLinkCount)
+		if res.SkippedLinkCount > 0 {
+			w.Header().Set("X-Dcrelay-Skipped-Links", strconv.Itoa(res.SkippedLinkCount))
+		}
 		w.WriteHeader(http.StatusNoContent)
-	case errors.Is(err, ErrTooLarge), errors.As(err, &tooBig):
+	case errors.Is(err, ErrTooLarge), errors.Is(err, ErrTooManyEntries), errors.As(err, &tooBig):
 		http.Error(w, "relay: files: "+err.Error(), http.StatusRequestEntityTooLarge)
 	case errors.Is(err, ErrUnsafePath), errors.Is(err, ErrUnsupportedEntry), errors.Is(err, ErrBadArchive):
 		http.Error(w, "relay: files: "+err.Error(), http.StatusBadRequest)
@@ -513,7 +570,7 @@ func (s *Server) filePut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) fileGet(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r, "files-get"); !ok {
+	if _, ok := s.auth(w, r, "files-get", false); !ok {
 		return
 	}
 	p := r.URL.Query().Get("path")

@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // A launcher session token is a compact JWS (typ "dcrelay+jwt", ES256 or
@@ -44,6 +46,9 @@ type Session struct {
 	ActorUID string    `json:"actor_uid"`
 	TokenID  string    `json:"jti,omitempty"`
 	Expires  time.Time `json:"expires"`
+	// TaskDigest is the SHA-256 (hex) of the --task text the actor was
+	// registered for; empty for an interactive session (GAP-0071).
+	TaskDigest string `json:"task_digest,omitempty"`
 }
 
 // Verifier checks the credential of an incoming request.
@@ -113,7 +118,7 @@ type KeyVerifier struct {
 	// Keys maps a kid to an *ecdsa.PublicKey (P-256) or ed25519.PublicKey.
 	Keys     map[string]crypto.PublicKey
 	Audience string
-	// Issuer, when set, must equal iss.
+	// Issuer must equal iss (GAP-0073).
 	Issuer string
 	// Self returns this actor's identity; a token must name it.
 	Self        func() (Identity, error)
@@ -158,6 +163,8 @@ type Claims struct {
 		Name     string `json:"actorName"`
 		UID      string `json:"actorUID"`
 	} `json:"dc.actor"`
+	// TaskDigest is the registered task's digest (dc.task_sha256).
+	TaskDigest string `json:"dc.task_sha256"`
 }
 
 // Verify implements Verifier.
@@ -244,7 +251,7 @@ func (v *KeyVerifier) VerifyToken(tok string) (Session, error) {
 		return Session{}, errors.New("session token not valid yet")
 	case c.IssuedAt == 0 || exp.Sub(iat) > maxLife:
 		return Session{}, errors.New("session token lifetime too long")
-	case v.Issuer != "" && c.Issuer != v.Issuer:
+	case v.Issuer == "" || c.Issuer != v.Issuer:
 		return Session{}, errors.New("session token issuer is not accepted")
 	}
 	audOK := false
@@ -273,7 +280,8 @@ func (v *KeyVerifier) VerifyToken(tok string) (Session, error) {
 	if self.Atespace != c.Actor.Atespace || self.Name != c.Actor.Name || self.UID != c.Actor.UID {
 		return Session{}, errors.New("session token is for another actor")
 	}
-	return Session{Person: sub, Actor: c.Actor.Atespace + "/" + c.Actor.Name, ActorUID: c.Actor.UID, TokenID: c.ID, Expires: exp}, nil
+	return Session{Person: sub, Actor: c.Actor.Atespace + "/" + c.Actor.Name, ActorUID: c.Actor.UID, TokenID: c.ID, Expires: exp,
+		TaskDigest: c.TaskDigest}, nil
 }
 
 // LoadPublicKey reads a PEM public key (PKIX: P-256 ECDSA or Ed25519).
@@ -307,7 +315,8 @@ func LoadPublicKey(path string) (crypto.PublicKey, error) {
 // x-defenseclaw-actor placeholder, so the gateway learns the calling actor
 // from its verified JWT, not from anything the relay says. The gateway
 // route is A2's: POST /api/v1/substrate/relay/verify {"token": ...} ->
-// 200 Session, any other status refuses.
+// 200 Session (with task_digest from the registration for a --task actor),
+// any other status refuses.
 type GatewayVerifier struct {
 	URL    string
 	Client *http.Client
@@ -325,7 +334,8 @@ func (g *GatewayVerifier) Verify(ctx context.Context, r *http.Request) (Session,
 		return Session{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-defenseclaw-actor", "placeholder")
+	req.Header.Set(kit.PlaceholderHeader, kit.PlaceholderValue)
+	req.Header.Set("X-DefenseClaw-Client", "actor-relay/"+kit.Version)
 	resp, err := g.Client.Do(req)
 	if err != nil {
 		return Session{}, fmt.Errorf("session token check: %w", err)
