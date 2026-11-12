@@ -13,8 +13,12 @@ A4 extproc.Config); "enabled" is the chart's, not the callout's. */ -}}
 {{- $admin := include "dc.adminHost" . -}}
 {{- if not (hasKey $c "failure_mode") }}{{ $_ := set $c "failure_mode" "closed" }}{{ end -}}
 {{- if not (hasKey $c "defenseclaw_hosts") -}}
-{{- $_ := set $c "defenseclaw_hosts" (list $actor (trimSuffix ".cluster.local" $actor) $admin (trimSuffix ".cluster.local" $admin)) -}}
+{{- $_ := set $c "defenseclaw_hosts" (list $actor (trimSuffix ".cluster.local" $actor)) -}}
 {{- end -}}
+{{- /* The admin Service is never a callout-allowed host (D15, GAP-0066): it is
+refused in every spelling, whatever config.yaml says. */ -}}
+{{- $adminShort := trimSuffix ".svc.cluster.local" $admin -}}
+{{- $_ := set $c "internal_hosts" (list $admin (trimSuffix ".cluster.local" $admin) $adminShort (first (splitList "." $adminShort))) -}}
 {{- if not (hasKey $c "egress_peers") }}{{ $_ := set $c "egress_peers" (list .Values.substrate.egressSpiffeId) }}{{ end -}}
 {{- if and .Values.callout.judge.tokenSecret (not (hasKey $c "judge")) -}}
 {{- $_ := set $c "judge" (dict "url" (printf "https://%s/api/v1/substrate/callout/verdict" $admin) "token_file" "/var/run/secrets/defenseclaw-callout-judge/token" "ca_file" "/var/run/ate/ca.crt") -}}

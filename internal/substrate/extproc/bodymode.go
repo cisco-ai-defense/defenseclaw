@@ -16,84 +16,61 @@
 
 package extproc
 
-import (
-	"sync"
-	"time"
-)
+import "sync"
 
-// Body mode detection (D9). The egress filter honours a mode_override only
-// when it was rendered with allow_mode_override (upstream #3817's
+// Body mode (D9). The egress filter honours a mode_override only when it
+// was rendered with allow_mode_override (upstream #3817's
 // --experimental-additional-egress-extproc-allow-mode-override); stock
-// v1.0.0 ignores it. Nothing in a request says which, so the callout
-// watches: after an override on a request with a body, the next message is
-// the body when it was honoured, and the stream ends without one when it was
-// not. bodyMissLimit misses in a row mark it unsupported; a body marks it
-// supported. Unsupported is probed again after bodyReprobe, so a filter
-// redeployed with the setting is picked up without a restart.
+// v1.0.0 ignores it. With body_inspection auto or on, the callout asks for
+// the body of every qualifying request; off never asks.
+//
+// Nothing turns body mode off at run time (GAP-0045). Every way a requested
+// body fails to arrive can be produced by an actor, as measured on cluster
+// a4: stock v1.0.0 ends the stream as cancelled, exactly like a client
+// abort; on #3817 an abort mid-body ends it cleanly; and a chunked body over
+// Envoy's buffer gets a local 413, which reaches the callout as a response
+// phase before the body. So a missing body only makes that request's event
+// an alert (body_not_received:<signal>), and a body that arrives marks the
+// filter supported for the readiness check. On a stock filter set
+// body_inspection off (headers only, recorded on every MCP request).
+
+// Stream end signals, recorded on the request's event.
 const (
-	bodyMissLimit = 3
-	bodyReprobe   = 10 * time.Minute
+	signalEOF      = "eof"
+	signalCanceled = "canceled"
+	signalError    = "error"
+	signalResponse = "response_before_body"
 )
 
 type bodyMode struct {
 	setting string
-	now     func() time.Time
 
-	mu        sync.Mutex
-	supported int // 0 unknown, 1 supported, -1 unsupported
-	misses    int
-	since     time.Time
+	mu       sync.Mutex
+	received bool
 }
 
-func newBodyMode(setting string, now func() time.Time) *bodyMode {
-	return &bodyMode{setting: setting, now: now}
-}
+func newBodyMode(setting string) *bodyMode { return &bodyMode{setting: setting} }
 
 // want reports whether to ask for the body of a qualifying request.
-func (b *bodyMode) want() bool {
-	switch b.setting {
-	case BodyOff:
-		return false
-	case BodyOn:
-		return true
-	}
+func (b *bodyMode) want() bool { return b.setting != BodyOff }
+
+// arrived records a requested body that came.
+func (b *bodyMode) arrived() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.supported >= 0 {
-		return true
-	}
-	if b.now().Sub(b.since) >= bodyReprobe {
-		b.supported, b.misses = 0, 0
-		return true
-	}
-	return false
+	b.received = true
+	b.mu.Unlock()
 }
 
-// observe records whether a requested body arrived.
-func (b *bodyMode) observe(arrived bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if arrived {
-		b.supported, b.misses = 1, 0
-		return
-	}
-	b.misses++
-	if b.misses >= bodyMissLimit && b.supported <= 0 {
-		b.supported, b.since = -1, b.now()
-	}
-}
-
+// status is off, supported (a body has arrived) or unknown, for the
+// readiness check and doctor.
 func (b *bodyMode) status() string {
 	if b.setting == BodyOff {
 		return "off"
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	switch b.supported {
-	case 1:
+	if b.received {
 		return "supported"
-	case -1:
-		return "unsupported"
 	}
 	return "unknown"
 }

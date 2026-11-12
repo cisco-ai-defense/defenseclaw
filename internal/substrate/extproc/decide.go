@@ -34,11 +34,15 @@ const (
 	CategoryActorNotLive    = "actor_not_live"
 	CategoryActorUnverified = "actor_unverified"
 	CategoryURLRule         = "url_rule"
+	CategoryPathAmbiguous   = "path_ambiguous"
 	CategoryChainEgress     = "chain_egress"
+	CategoryChainUnchecked  = "chain_unchecked"
 	CategoryAskDenied       = "ask_denied"
 	CategoryAskPending      = "ask_pending"
 	CategoryMCPToolBlocked  = "mcp_tool_blocked"
+	CategoryBodyUninspected = "body_uninspectable"
 	CategoryCalloutError    = "callout_error"
+	CategoryInternalHost    = "defenseclaw_internal"
 )
 
 // Decision sources the callout adds to egress.Source.
@@ -133,23 +137,25 @@ type Options struct {
 
 // Engine decides requests. It is safe for concurrent use.
 type Engine struct {
-	cfg       *Config
-	policies  PolicySource
-	uids      *UIDCache
-	asks      AskSink
-	chain     *chainQueue
-	checker   ChainChecker
-	judge     ToolJudge
-	events    EventSink
-	red       *Redactor
-	secrets   *secretValues
-	dcHosts   *hostMatcher
-	mcpHosts  *hostMatcher
-	bodyHosts *hostMatcher
-	mcpNames  map[string]string
-	bindings  []binding
-	body      *bodyMode
-	now       func() time.Time
+	cfg        *Config
+	policies   PolicySource
+	uids       *UIDCache
+	asks       AskSink
+	chain      *chainQueue
+	checker    ChainChecker
+	judge      ToolJudge
+	events     EventSink
+	red        *Redactor
+	secrets    *secretValues
+	dcHosts    *hostMatcher
+	internal   *hostMatcher
+	mcpHosts   *hostMatcher
+	bodyHosts  *hostMatcher
+	mcpNames   map[string]string
+	bindings   []binding
+	body       *bodyMode
+	chainLimit chainLimiter
+	now        func() time.Time
 }
 
 // NewEngine builds an Engine and starts its chain worker; Close stops it.
@@ -179,6 +185,7 @@ func NewEngine(o Options) (*Engine, error) {
 	e.secrets.now = e.now
 	e.red = newRedactor(cfg, e.secrets)
 	e.dcHosts = mustHostMatcher(cfg.DefenseClawHosts)
+	e.internal = mustHostMatcher(cfg.InternalHosts)
 	e.mcpHosts = mustHostMatcher(mcpHostNames(cfg.MCPHosts))
 	e.bodyHosts = mustHostMatcher(cfg.BodyHosts)
 	for _, entry := range cfg.MCPHosts {
@@ -188,7 +195,7 @@ func NewEngine(o Options) (*Engine, error) {
 		}
 	}
 	e.bindings = compileBindings(cfg.Secrets)
-	e.body = newBodyMode(cfg.BodyInspection, e.now)
+	e.body = newBodyMode(cfg.BodyInspection)
 	e.chain = newChainQueue(o.ChainSink, cfg.Chain.QueueSize)
 	return e, nil
 }
@@ -200,7 +207,7 @@ func (e *Engine) Close() { e.chain.close() }
 func (e *Engine) Redactor() *Redactor { return e.red }
 
 // BodyModeStatus is the body-mode detection state (for readiness and
-// doctor): off, unknown, supported or unsupported.
+// doctor): off, unknown or supported.
 func (e *Engine) BodyModeStatus() string { return e.body.status() }
 
 // InvalidateActor is the lifecycle hook: a deleted, recreated or forked
@@ -230,8 +237,10 @@ func (e *Engine) failure(v Verdict, category, reason string) Verdict {
 	return v
 }
 
-// DecideHeaders decides a request on its headers.
+// DecideHeaders decides a request on its headers, within MessageBudget.
 func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
+	ctx, cancel := context.WithTimeout(ctx, MessageBudget)
+	defer cancel()
 	defer func() {
 		if r := recover(); r != nil {
 			v = e.failure(Verdict{}, CategoryCalloutError, "The DefenseClaw egress callout hit an internal error.")
@@ -243,6 +252,12 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	}
 	if req.Host == "" {
 		return deny(v, string(egress.CategoryInvalidDestination), string(egress.SourceGuard), "", egress.CategoryInvalidDestination.Reason())
+	}
+	if _, ok := e.internal.match(req.Host); ok {
+		// D15: the admin listener is never reachable from an actor, even
+		// if a policy or a looser NetworkPolicy would let it through.
+		return deny(v, CategoryInternalHost, sourceOwnHost, "",
+			"Actors can't reach this DefenseClaw service; it is for people and DefenseClaw itself.")
 	}
 	if _, ok := e.dcHosts.match(req.Host); ok {
 		// The actor listener: the gateway verifies the JWT and inspects the
@@ -273,13 +288,23 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	}
 
 	askRule := ""
-	reqPath := req.Path
-	if i := strings.IndexAny(reqPath, "?#"); i >= 0 {
-		reqPath = reqPath[:i]
-	}
+	// URL rules match the canonical path (GAP-0046): an equivalent
+	// spelling (/./admin, /%61dmin, //admin) matches like the plain one, and
+	// a path an origin could read another way is refused where a path rule
+	// applies.
+	reqPath, pathErr := canonicalPath(pathOnly(req.Path))
 	for _, r := range pol.urlRules {
-		if !r.matches(req.Host, req.Method, reqPath) {
+		if !r.appliesTo(req.Host, req.Method) {
 			continue
+		}
+		if r.pathPrefix != "" {
+			if pathErr != nil {
+				return deny(v, CategoryPathAmbiguous, sourceProfile, r.name,
+					"The request path uses an ambiguous encoding (an encoded slash, backslash, percent sign or control character), so DefenseClaw can't check it against this profile's path rules for "+req.Host+".")
+			}
+			if !pathHasPrefix(reqPath, r.pathPrefix) {
+				continue
+			}
 		}
 		switch r.action {
 		case "deny":
@@ -299,13 +324,25 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		v.Findings = append(v.Findings, f.String())
 	}
 
-	if cv, hit := e.checkChain(ctx, ChainStep{Kind: StepObservedEgress, Actor: req.Actor, Host: req.Host,
-		Method: req.Method, Allowed: true, Time: e.now()}); hit {
+	switch cv, outcome, why := e.checkChain(ctx, ChainStep{Kind: StepObservedEgress, Actor: req.Actor, Host: req.Host,
+		Method: req.Method, Allowed: true, Time: e.now()}); outcome {
+	case chainHit:
 		reason := cv.Reason
 		if reason == "" {
 			reason = "Earlier in this session the actor read a secret; DefenseClaw blocks sending data off the cluster after that."
 		}
 		return deny(v, CategoryChainEgress, sourceChain, cv.Rule, clip(reason, 320))
+	case chainUnchecked:
+		// The step still reaches the window through the observed_egress
+		// queue (Finish); only this request's check is missing.
+		if e.chainFailClosed(pol) {
+			v = deny(v, CategoryChainUnchecked, sourceChain, why,
+				"DefenseClaw could not check this request against the actor's earlier tool calls in time, and this actor's policy refuses unchecked egress.")
+			v.Retryable = true
+			return v
+		}
+		v.Alert = true
+		v.Findings = append(v.Findings, "chain_unchecked:"+why)
 	}
 
 	if askRule == "" {
@@ -324,10 +361,44 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	if v.Source == "" {
 		v.Source = string(d.Source)
 	}
-	v.WantBody, v.BodyOverCap = e.wantBody(req)
-	if v.BodyOverCap {
+	var why string
+	v.WantBody, why = e.wantBody(req)
+	return e.uninspected(v, why)
+}
+
+// Why an inspected host's body is not inspected. The first two are framing
+// the actor chose; the others are the deployment's.
+const (
+	whyOverCap    = "over_cap"
+	whyStreaming  = "streaming_content_type"
+	whyInspectOff = "body_inspection_off"
+)
+
+// uninspected applies GAP-0044 to a request on an MCP or admin-listed host
+// whose body won't be inspected: inspect or refuse, never allow silently.
+// Framing the actor controls (a body over the cap, a streaming content
+// type) is refused when the failure mode is closed and an alert when open.
+// body_inspection off is recorded; a filter that ignores the override is
+// an alert when the stream ends without the body (Server.end).
+func (e *Engine) uninspected(v Verdict, why string) Verdict {
+	switch why {
+	case "":
+		return v
+	case whyOverCap, whyStreaming:
+		v.BodyOverCap = why == whyOverCap
+		if e.cfg.FailureMode == FailureClosed {
+			reason := "DefenseClaw inspects the requests sent to this host, and this one's body is over the inspection limit, so it can't be checked."
+			if why == whyStreaming {
+				reason = "DefenseClaw inspects the requests sent to this host, and this one's body is a stream (event stream, gRPC or multipart), so it can't be checked."
+			}
+			return deny(v, CategoryBodyUninspected, sourceCallout, why, reason)
+		}
+		v.Alert = true
+	}
+	if why == whyOverCap {
 		v.Findings = append(v.Findings, "body_over_cap")
 	}
+	v.Findings = append(v.Findings, "body_not_inspected:"+why)
 	return v
 }
 
@@ -357,44 +428,42 @@ func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, 
 	return deny(v, CategoryAskPending, sourceAsk, rule, "This host needs an approval that has not been given yet.")
 }
 
-// wantBody reports whether the request qualifies for body mode (D9) and
-// whether it is over the cap. MCP and admin-listed hosts only; a request
-// with a body of known length up to the cap; never an SSE or gRPC stream.
-func (e *Engine) wantBody(req *Request) (want, overCap bool) {
+// wantBody reports whether to buffer the request's body (D9), or why a body
+// on an inspected host can't be. MCP and admin-listed hosts only. Every
+// request with a body counts, whatever its method or content type and
+// whether or not it states a length (GAP-0044: framing is the actor's
+// choice): a request without Content-Length is buffered too, bounded by
+// the egress filter's buffer and then by the cap in DecideBody. A stated
+// length over the cap, and event-stream, gRPC and multipart bodies (never
+// buffered, D9), can't be inspected.
+func (e *Engine) wantBody(req *Request) (bool, string) {
 	_, mcp := e.mcpHosts.match(req.Host)
 	_, listed := e.bodyHosts.match(req.Host)
-	if !mcp && !listed {
-		return false, false
-	}
-	if req.EndOfStream || req.ContentLength == 0 {
-		return false, false
+	if (!mcp && !listed) || req.EndOfStream {
+		// No body: Envoy marks end of stream on the headers. A stated
+		// Content-Length of 0 is not trusted on its own.
+		return false, ""
 	}
 	ct := strings.ToLower(req.ContentType)
 	if strings.Contains(ct, "text/event-stream") || strings.HasPrefix(ct, "application/grpc") ||
 		strings.HasPrefix(ct, "multipart/") {
-		return false, false
-	}
-	if mcp && !strings.Contains(ct, "json") {
-		return false, false
-	}
-	switch m := req.Method; m {
-	case "POST", "PUT", "PATCH":
-	default:
-		return false, false
-	}
-	if req.ContentLength < 0 {
-		// Unknown length: Envoy would buffer without a bound we can check.
-		return false, true
+		return false, whyStreaming
 	}
 	if req.ContentLength > e.cfg.BodyMaxBytes {
-		return false, true
+		return false, whyOverCap
 	}
-	return e.body.want(), false
+	if !e.body.want() {
+		return false, whyInspectOff
+	}
+	return true, ""
 }
 
 // DecideBody decides a request again on its buffered body; v is its headers
-// verdict.
+// verdict. Every tools/call of a batch is judged within one MessageBudget:
+// a batch that does not fit follows the failure mode.
 func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body []byte) (out Verdict) {
+	ctx, cancel := context.WithTimeout(ctx, MessageBudget)
+	defer cancel()
 	defer func() {
 		if r := recover(); r != nil {
 			out = e.failure(v, CategoryCalloutError, "The DefenseClaw egress callout hit an internal error.")
@@ -402,9 +471,8 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 	}()
 	v.WantBody = false
 	if int64(len(body)) > e.cfg.BodyMaxBytes {
-		v.BodyOverCap = true
-		v.Findings = append(v.Findings, "body_over_cap")
-		return v
+		// A body sent without a length, larger than the cap.
+		return e.uninspected(v, whyOverCap)
 	}
 	v.BodyInspected = true
 	pol, err := e.policies.PolicyFor(ctx, req.Actor)
@@ -423,7 +491,7 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 	}
 	calls, err := parseToolCalls(body)
 	if err != nil {
-		return deny(v, CategoryMCPToolBlocked, sourceTool, "jsonrpc", clip(err.Error(), 320))
+		return deny(v, CategoryMCPToolBlocked, sourceTool, "jsonrpc", clip(refusalReason(err), 320))
 	}
 	if len(calls) == 0 {
 		return v

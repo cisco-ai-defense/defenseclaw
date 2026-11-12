@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
@@ -49,36 +50,13 @@ import (
 // ext_proc no UID): the gateway finds the live UID and its registration.
 // Verdicts are in action mode, as for every sandboxed hook: a rule that
 // blocks denies. An unattended actor's ask is a deny (D12).
-
-type substrateCalloutRequest struct {
-	V         string `json:"v"`
-	RequestID string `json:"request_id,omitempty"`
-	Actor     struct {
-		Atespace string `json:"atespace"`
-		Name     string `json:"name"`
-	} `json:"actor"`
-	MCP struct {
-		Server    string `json:"server"`
-		URL       string `json:"url,omitempty"`
-		Transport string `json:"transport,omitempty"`
-		Method    string `json:"method,omitempty"`
-		Tool      string `json:"tool"`
-	} `json:"mcp"`
-	Args      json.RawMessage `json:"args,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
-}
+//
+// The wire types are calloutapi's, shared with the callout's client
+// (extproc.VerdictClient), so the two sides cannot drift (GAP-0015).
+type substrateCalloutRequest = calloutapi.Request
 
 // SubstrateCalloutVerdict is the route's answer.
-type SubstrateCalloutVerdict struct {
-	V        string   `json:"v"`
-	Verdict  string   `json:"verdict"`
-	Reason   string   `json:"reason,omitempty"`
-	Severity string   `json:"severity,omitempty"`
-	Findings []string `json:"findings,omitempty"`
-	Source   string   `json:"source"`
-	ActorUID string   `json:"actor_uid,omitempty"`
-	Profile  string   `json:"profile,omitempty"`
-}
+type SubstrateCalloutVerdict = calloutapi.Response
 
 func (a *APIServer) substrateCalloutVerdict(st *substrateState) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

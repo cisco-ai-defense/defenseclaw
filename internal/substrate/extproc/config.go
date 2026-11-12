@@ -37,8 +37,9 @@ type Config struct {
 	// callout can't decide: a Control API outage past the stale window, a
 	// tool judge error, an internal error. Managed installs render closed.
 	FailureMode string `yaml:"failure_mode"`
-	// BodyInspection is auto (use body mode when the egress filter allows
-	// mode_override, detected at run time), on (assume it does) or off.
+	// BodyInspection is auto or on (ask for the body of every qualifying
+	// request; the two are the same since run-time detection was removed,
+	// GAP-0045) or off (headers only, recorded).
 	BodyInspection string `yaml:"body_inspection"`
 	// BodyMaxBytes caps a buffered body; a larger one is judged on its
 	// headers and recorded body_over_cap. Default 1 MiB.
@@ -52,6 +53,11 @@ type Config struct {
 	// requests (hooks, model calls) are allowed without inspection: the
 	// gateway inspects them, and their bodies are never buffered.
 	DefenseClawHosts []string `yaml:"defenseclaw_hosts"`
+	// InternalHosts are DefenseClaw Services an actor must never reach
+	// through egress, in every spelling (the admin Service, D15). They are
+	// refused before any other check. The chart renders them; the default
+	// is the admin Service in defenseclaw-system.
+	InternalHosts []string `yaml:"internal_hosts"`
 	// ClusterDomains are in-cluster name suffixes (svc.cluster.local). The
 	// EgressPolicy decided they are reachable; the egress guard's intranet
 	// rule (.local) must not refuse them.
@@ -105,17 +111,22 @@ type ChainConfig struct {
 	CheckBudget time.Duration `yaml:"check_budget"`
 	// QueueSize bounds the observed_egress queue; a full queue drops.
 	QueueSize int `yaml:"queue_size"`
+	// FailureMode decides a request whose chain check could not answer (an
+	// error, the budget, the actor's in-flight cap): auto (default) refuses
+	// for unattended actors and alerts for the rest, closed always refuses
+	// (managed installs), open always alerts.
+	FailureMode string `yaml:"failure_mode"`
 }
 
 // AskConfig configures ask-required hosts.
 type AskConfig struct {
-	// Hold is how long a request waits for an ask's outcome. It must stay
-	// under the egress filter's message timeout (2 s on stock v1.0.0).
+	// Hold is how long a request waits for an ask's outcome, at most
+	// MessageBudget.
 	Hold time.Duration `yaml:"hold"`
 }
 
 // JudgeConfig points the MCP tool judge at the gateway's callout verdict
-// route (VerdictPath) on an internal listener.
+// route (calloutapi.Path) on the admin listener.
 type JudgeConfig struct {
 	URL       string        `yaml:"url"`
 	TokenFile string        `yaml:"token_file"`
@@ -143,8 +154,9 @@ type SecretBinding struct {
 // ProfileConfig is the egress part of a profile.
 type ProfileConfig struct {
 	Name string `yaml:"name"`
-	// Atespaces are path.Match globs (eng-*) of the atespaces the profile
-	// applies to; the first matching profile wins.
+	// Atespaces are names or path.Match globs (eng-*) of the atespaces the
+	// profile applies to. An exact name wins over a glob; an atespace two
+	// profiles match equally is refused per the failure mode.
 	Atespaces []string     `yaml:"atespaces"`
 	Egress    EgressLists  `yaml:"egress"`
 	URLRules  []URLRuleCfg `yaml:"url_rules"`
@@ -185,7 +197,12 @@ const (
 	defaultQueueSize    = 4096
 	defaultAskHold      = 1500 * time.Millisecond
 	defaultJudgeTimeout = 1500 * time.Millisecond
-	maxConfigBytes      = 4 << 20
+	// MessageBudget is the time the callout takes to answer one message
+	// (headers or body), under the egress filter's 2 s message timeout
+	// (atenet v1.0.0), so DefenseClaw's answer, not Envoy's failure
+	// mode, decides (GAP-0062). ask.hold and judge.timeout fit inside it.
+	MessageBudget  = 1800 * time.Millisecond
+	maxConfigBytes = 4 << 20
 )
 
 // Failure modes and body inspection settings.
@@ -193,6 +210,7 @@ const (
 	FailureClosed = "closed"
 	FailureOpen   = "open"
 	BodyAuto      = "auto"
+	ChainAuto     = "auto"
 	BodyOn        = "on"
 	BodyOff       = "off"
 	dlpAlert      = "alert"
@@ -282,6 +300,10 @@ func (c *Config) normalize() error {
 	if len(c.DefenseClawHosts) == 0 {
 		c.DefenseClawHosts = []string{"defenseclaw-actor.defenseclaw-system.svc", "defenseclaw-actor.defenseclaw-system.svc.cluster.local"}
 	}
+	if len(c.InternalHosts) == 0 {
+		c.InternalHosts = []string{"defenseclaw-admin.defenseclaw-system.svc.cluster.local", "defenseclaw-admin.defenseclaw-system.svc",
+			"defenseclaw-admin.defenseclaw-system", "defenseclaw-admin"}
+	}
 	setDur := func(d *time.Duration, def time.Duration, name string, max time.Duration) error {
 		if *d == 0 {
 			*d = def
@@ -299,12 +321,19 @@ func (c *Config) normalize() error {
 		{&c.UID.CacheTTL, defaultCacheTTL, 10 * time.Minute, "uid.cache_ttl"},
 		{&c.UID.StaleMax, defaultStaleMax, 10 * time.Minute, "uid.stale_max"},
 		{&c.Chain.CheckBudget, defaultCheckBudget, 500 * time.Millisecond, "chain.check_budget"},
-		{&c.Ask.Hold, defaultAskHold, time.Hour, "ask.hold"},
-		{&c.Judge.Timeout, defaultJudgeTimeout, time.Hour, "judge.timeout"},
+		{&c.Ask.Hold, defaultAskHold, MessageBudget, "ask.hold"},
+		{&c.Judge.Timeout, defaultJudgeTimeout, MessageBudget, "judge.timeout"},
 	} {
 		if err := setDur(d.p, d.def, d.name, d.max); err != nil {
 			return err
 		}
+	}
+	switch c.Chain.FailureMode = strings.ToLower(strings.TrimSpace(c.Chain.FailureMode)); c.Chain.FailureMode {
+	case "":
+		c.Chain.FailureMode = ChainAuto
+	case ChainAuto, FailureClosed, FailureOpen:
+	default:
+		return bad("chain.failure_mode %q (want auto, closed or open)", c.Chain.FailureMode)
 	}
 	if c.Chain.QueueSize == 0 {
 		c.Chain.QueueSize = defaultQueueSize
@@ -315,7 +344,7 @@ func (c *Config) normalize() error {
 	for _, list := range []struct {
 		name  string
 		hosts []string
-	}{{"mcp_hosts", mcpHostNames(c.MCPHosts)}, {"body_hosts", c.BodyHosts}, {"defenseclaw_hosts", c.DefenseClawHosts}} {
+	}{{"mcp_hosts", mcpHostNames(c.MCPHosts)}, {"body_hosts", c.BodyHosts}, {"defenseclaw_hosts", c.DefenseClawHosts}, {"internal_hosts", c.InternalHosts}} {
 		if _, err := newHostMatcher(list.hosts); err != nil {
 			return bad("%s: %v", list.name, err)
 		}

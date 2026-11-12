@@ -6614,6 +6614,11 @@
                   "minimum": 0,
                   "maximum": 1048576,
                   "default": 4096
+                },
+                "failure_mode": {
+                  "type": "string",
+                  "enum": ["auto", "closed", "open"],
+                  "default": "auto"
                 }
               }
             },

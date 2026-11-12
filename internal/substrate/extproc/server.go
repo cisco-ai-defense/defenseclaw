@@ -74,11 +74,17 @@ type streamState struct {
 // Process implements ExternalProcessorServer.
 func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
 	var st streamState
-	defer s.end(&st)
+	signal := signalError
+	defer func() { s.end(&st, signal) }()
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			if errors.Is(err, io.EOF) || status.Code(err) == codes.Canceled {
+			switch {
+			case errors.Is(err, io.EOF):
+				signal = signalEOF
+				return nil
+			case status.Code(err) == codes.Canceled:
+				signal = signalCanceled
 				return nil
 			}
 			return err
@@ -95,12 +101,15 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	}
 }
 
-// end closes a stream: a requested body that never came means the filter
-// ignored the override.
-func (s *Server) end(st *streamState) {
+// end closes a stream, or handles a response phase while a body is
+// awaited. A requested body that never came makes the request's event an
+// alert with how the stream ended: the filter already sent it on,
+// uninspected (GAP-0045).
+func (s *Server) end(st *streamState, signal string) {
 	if st.awaitingBody {
 		st.awaitingBody = false
-		s.eng.body.observe(false)
+		st.verdict.Alert = true
+		st.verdict.Findings = append(st.verdict.Findings, "body_not_received:"+signal)
 		s.finish(st)
 	}
 }
@@ -138,7 +147,7 @@ func (s *Server) handle(ctx context.Context, st *streamState, msg *extprocv3.Pro
 	case *extprocv3.ProcessingRequest_RequestBody:
 		if st.awaitingBody && st.req != nil {
 			st.awaitingBody = false
-			s.eng.body.observe(true)
+			s.eng.body.arrived()
 			st.verdict = s.eng.DecideBody(ctx, st.req, st.verdict, r.RequestBody.GetBody())
 			s.finish(st)
 			if !st.verdict.Allow {
@@ -151,9 +160,13 @@ func (s *Server) handle(ctx context.Context, st *streamState, msg *extprocv3.Pro
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestTrailers{
 			RequestTrailers: &extprocv3.TrailersResponse{}}}, false
 	case *extprocv3.ProcessingRequest_ResponseHeaders:
+		// A response phase before the requested body: the filter ignored
+		// the override and sent the request on.
+		s.end(st, signalResponse)
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &extprocv3.HeadersResponse{Response: &extprocv3.CommonResponse{}}}}, false
 	case *extprocv3.ProcessingRequest_ResponseBody:
+		s.end(st, signalResponse)
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseBody{
 			ResponseBody: &extprocv3.BodyResponse{Response: &extprocv3.CommonResponse{}}}}, false
 	case *extprocv3.ProcessingRequest_ResponseTrailers:
@@ -241,9 +254,10 @@ type TLSOptions struct {
 	// podCertificate credential bundle), read again on every handshake so
 	// rotation needs no restart.
 	Bundle string
-	// ClientCA verifies the egress gateway's client certificate. Without it
-	// the certificate is required and its SPIFFE ID checked, but its chain
-	// is not.
+	// ClientCA verifies the egress gateway's client certificate (the
+	// podidentity CA). It is required: without a verified chain any pod
+	// could present a self-signed certificate naming the egress SPIFFE ID
+	// (GAP-0065).
 	ClientCA string
 	// Peers are the SPIFFE IDs allowed to connect (Config.EgressPeers).
 	Peers []string
@@ -253,6 +267,9 @@ type TLSOptions struct {
 func ServerTLS(o TLSOptions) (*tls.Config, error) {
 	if o.Bundle == "" {
 		return nil, errors.New("extproc: a TLS credential bundle is required")
+	}
+	if o.ClientCA == "" {
+		return nil, errors.New("extproc: a client CA is required to verify the egress gateway (--client-ca)")
 	}
 	var mu sync.Mutex
 	var cached *tls.Certificate
@@ -285,21 +302,19 @@ func ServerTLS(o TLSOptions) (*tls.Config, error) {
 	for _, p := range o.Peers {
 		peers[p] = true
 	}
+	pem, err := os.ReadFile(o.ClientCA)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, errors.New("extproc: client CA file has no certificates")
+	}
 	cfg := &tls.Config{
 		MinVersion:     tls.VersionTLS12,
-		ClientAuth:     tls.RequireAnyClientCert,
+		ClientAuth:     tls.RequireAndVerifyClientCert,
+		ClientCAs:      pool,
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return load() },
-	}
-	if o.ClientCA != "" {
-		pem, err := os.ReadFile(o.ClientCA)
-		if err != nil {
-			return nil, err
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, errors.New("extproc: client CA file has no certificates")
-		}
-		cfg.ClientCAs, cfg.ClientAuth = pool, tls.RequireAndVerifyClientCert
 	}
 	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
 		if len(cs.PeerCertificates) == 0 {

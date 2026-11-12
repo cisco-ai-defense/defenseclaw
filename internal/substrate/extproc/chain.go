@@ -18,6 +18,7 @@ package extproc
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,33 +95,114 @@ func (q *chainQueue) droppedCount() uint64 {
 	return q.dropped.Load()
 }
 
-// checkChain runs the synchronous egress-chain check under the budget. A
-// miss, an error, a panic or the deadline is no hit: the hook-side step
-// stands.
-func (e *Engine) checkChain(ctx context.Context, step ChainStep) (ChainVerdict, bool) {
-	if e.checker == nil {
-		return ChainVerdict{}, false
+// chainPerActorInflight caps one actor's concurrent chain checks, so an
+// actor flooding its own window can't take the leader's time from others
+// (GAP-0090); a check over the cap is unchecked at once.
+const chainPerActorInflight = 4
+
+// Chain check outcomes.
+const (
+	chainClear = iota
+	chainHit
+	chainUnchecked
+)
+
+// Why a chain check could not answer.
+const (
+	uncheckedError    = "error"
+	uncheckedTimeout  = "timeout"
+	uncheckedBusy     = "actor_busy"
+	uncheckedInternal = "internal_error"
+)
+
+// chainLimiter counts in-flight checks per actor.
+type chainLimiter struct {
+	mu sync.Mutex
+	n  map[string]int
+}
+
+func (l *chainLimiter) acquire(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.n == nil {
+		l.n = map[string]int{}
 	}
+	if l.n[key] >= chainPerActorInflight {
+		return false
+	}
+	l.n[key]++
+	return true
+}
+
+func (l *chainLimiter) release(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.n[key]--; l.n[key] <= 0 {
+		delete(l.n, key)
+	}
+}
+
+// checkChain runs the synchronous egress-chain check under the budget. A
+// miss is clear. An error, a panic, the deadline or the actor's in-flight
+// cap is unchecked, with the reason: the caller applies the chain failure
+// mode, because on the hook path an egress chain only alerts and the
+// callout is where it blocks (GAP-0090).
+func (e *Engine) checkChain(ctx context.Context, step ChainStep) (ChainVerdict, int, string) {
+	if e.checker == nil {
+		return ChainVerdict{}, chainClear, ""
+	}
+	key := step.Actor.Atespace + "/" + step.Actor.Name
+	if !e.chainLimit.acquire(key) {
+		return ChainVerdict{}, chainUnchecked, uncheckedBusy
+	}
+	// Released when the check returns, not at the deadline, so a slow
+	// leader keeps counting against the actor that sent it.
 	ctx, cancel := context.WithTimeout(ctx, e.cfg.Chain.CheckBudget)
-	defer cancel()
 	type result struct {
-		v   ChainVerdict
-		err error
+		v        ChainVerdict
+		err      error
+		panicked bool
+		timedOut bool
 	}
 	ch := make(chan result, 1)
 	go func() {
+		defer e.chainLimit.release(key)
+		defer cancel()
 		defer func() {
 			if r := recover(); r != nil {
-				ch <- result{err: context.Canceled}
+				ch <- result{panicked: true}
 			}
 		}()
 		v, err := e.checker.CheckEgress(ctx, step)
-		ch <- result{v, err}
+		ch <- result{v: v, err: err, timedOut: errors.Is(ctx.Err(), context.DeadlineExceeded)}
 	}()
 	select {
 	case r := <-ch:
-		return r.v, r.err == nil && r.v.Deny
+		switch {
+		case r.panicked:
+			return ChainVerdict{}, chainUnchecked, uncheckedInternal
+		case r.err != nil && r.timedOut:
+			return ChainVerdict{}, chainUnchecked, uncheckedTimeout
+		case r.err != nil:
+			return ChainVerdict{}, chainUnchecked, uncheckedError
+		case r.v.Deny:
+			return r.v, chainHit, ""
+		}
+		return r.v, chainClear, ""
 	case <-ctx.Done():
-		return ChainVerdict{}, false
+		return ChainVerdict{}, chainUnchecked, uncheckedTimeout
 	}
+}
+
+// chainFailClosed reports whether an unchecked chain step refuses: always
+// with chain.failure_mode closed, never with open, and with auto (the
+// default) for unattended actors only, since nobody watches their alerts.
+func (e *Engine) chainFailClosed(pol *Policy) bool {
+	switch e.cfg.Chain.FailureMode {
+	case FailureClosed:
+		return true
+	case FailureOpen:
+		return false
+	}
+	return pol.Unattended
 }

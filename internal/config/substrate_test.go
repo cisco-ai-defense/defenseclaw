@@ -148,7 +148,7 @@ substrate:
     blocklist_files: [/etc/defenseclaw/feeds/egress.yaml]
     actor_secrets_dir: /var/run/dc/actor-secrets
     uid: {cache_ttl: 60s, stale_max: 60s}
-    chain: {check_budget: 20ms, queue_size: 4096}
+    chain: {check_budget: 20ms, queue_size: 4096, failure_mode: closed}
     ask: {hold: 1500ms}
     judge: {url: https://defenseclaw-leader.defenseclaw-system.svc/api/v1/substrate/callout/verdict, token_file: /var/run/dc/judge-token, ca_file: /var/run/dc/ca.crt, timeout: 1500ms}
     dlp: {credential_headers: deny}
@@ -230,6 +230,7 @@ func TestSubstrateValidate(t *testing.T) {
 		"rps":                       func(s *SubstrateConfig) { s.RateLimits.PerActorRPS = -1 },
 		"failure mode":              func(s *SubstrateConfig) { s.Extproc.FailureMode = "ignore" },
 		"body mode":                 func(s *SubstrateConfig) { s.Extproc.BodyInspection = "always" },
+		"chain failure mode":        func(s *SubstrateConfig) { s.Extproc.Chain.FailureMode = "sometimes" },
 		"body cap":                  func(s *SubstrateConfig) { s.Extproc.BodyMaxBytes = 2 << 20 },
 		"mcp host":                  func(s *SubstrateConfig) { s.Extproc.MCPHosts = []string{"*"} },
 		"provider uri":              func(s *SubstrateConfig) { s.LLM.Credential.ProviderURI = "sk-live-value" },

@@ -140,8 +140,9 @@ type SubstrateExtprocConfig struct {
 	// FailureMode is closed (default) or open when the callout can't
 	// decide; managed installs are always closed.
 	FailureMode string `mapstructure:"failure_mode" yaml:"failure_mode,omitempty"`
-	// BodyInspection is auto (default: when the egress filter allows the
-	// body override, detected at run time), on or off.
+	// BodyInspection is auto (default) or on: the callout asks for the body
+	// of every qualifying request (an egress filter without mode override
+	// ignores it and each request is an alert); off: headers only.
 	BodyInspection string `mapstructure:"body_inspection" yaml:"body_inspection,omitempty"`
 	BodyMaxBytes   int    `mapstructure:"body_max_bytes"  yaml:"body_max_bytes,omitempty"`
 	// MCPHosts are the remote MCP servers whose JSON-RPC bodies are
@@ -184,10 +185,14 @@ type SubstrateExtprocUIDConfig struct {
 }
 
 // SubstrateExtprocChainConfig bounds the egress chain check (default 20ms,
-// at most 500ms) and the observed_egress queue (default 4096).
+// at most 500ms) and the observed_egress queue (default 4096). FailureMode
+// decides a request whose check could not answer: auto (default) refuses
+// for unattended actors and alerts for the rest, closed always refuses
+// (managed installs), open always alerts.
 type SubstrateExtprocChainConfig struct {
 	CheckBudget string `mapstructure:"check_budget" yaml:"check_budget,omitempty"`
 	QueueSize   int    `mapstructure:"queue_size"   yaml:"queue_size,omitempty"`
+	FailureMode string `mapstructure:"failure_mode" yaml:"failure_mode,omitempty"`
 }
 
 // SubstrateExtprocAskConfig is how long a request waits for an ask
@@ -656,8 +661,8 @@ func (s *SubstrateConfig) validateExtproc(bad func(key, format string, a ...any)
 		{"extproc.uid.cache_ttl", e.UID.CacheTTL, 10 * time.Minute},
 		{"extproc.uid.stale_max", e.UID.StaleMax, 10 * time.Minute},
 		{"extproc.chain.check_budget", e.Chain.CheckBudget, 500 * time.Millisecond},
-		{"extproc.ask.hold", e.Ask.Hold, time.Hour},
-		{"extproc.judge.timeout", e.Judge.Timeout, time.Hour},
+		{"extproc.ask.hold", e.Ask.Hold, 1800 * time.Millisecond},
+		{"extproc.judge.timeout", e.Judge.Timeout, 1800 * time.Millisecond},
 	} {
 		if d.v == "" {
 			continue
@@ -665,6 +670,11 @@ func (s *SubstrateConfig) validateExtproc(bad func(key, format string, a ...any)
 		if v, err := time.ParseDuration(strings.TrimSpace(d.v)); err != nil || v < 0 || v > d.max {
 			bad(d.key, "%q must be a Go duration from 0 to %s", d.v, d.max)
 		}
+	}
+	switch strings.ToLower(strings.TrimSpace(e.Chain.FailureMode)) {
+	case "", "auto", SubstrateFailClosed, SubstrateFailOpen:
+	default:
+		bad("extproc.chain.failure_mode", "%q must be auto, closed or open", e.Chain.FailureMode)
 	}
 	if q := e.Chain.QueueSize; q < 0 || q > 1<<20 {
 		bad("extproc.chain.queue_size", "%d is outside 0-%d", q, 1<<20)

@@ -17,7 +17,11 @@
 package extproc
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -222,16 +226,43 @@ func decodedVariants(s string) []string {
 	return out
 }
 
+// findShape returns the first secret shape in any of the variants.
+func findShape(vars []string) (secretshape.InlineSecret, bool) {
+	for _, v := range vars {
+		if sec, ok := secretshape.FindInlineSecret(v); ok {
+			return sec, true
+		}
+	}
+	return secretshape.InlineSecret{}, false
+}
+
+// jsonStrings returns the string keys and values of a JSON document,
+// unescaped, one per line; ok is false when body is not JSON.
+func jsonStrings(body []byte) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	var b strings.Builder
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return b.String(), true
+		}
+		if err != nil {
+			return "", false
+		}
+		if s, ok := tok.(string); ok {
+			b.WriteString(s)
+			b.WriteByte(0x0a)
+		}
+	}
+}
+
 // scanURL scans :path (path and query) for secret shapes, actor secrets and
 // unbound placeholders.
 func (e *Engine) scanURL(req *Request, pol *Policy) []finding {
 	vars := decodedVariants(req.Path)
 	var out []finding
-	for _, v := range vars {
-		if sec, ok := secretshape.FindInlineSecret(v); ok {
-			out = append(out, finding{kind: findSecretInURL, where: "url", label: sec.Label, deny: true})
-			break
-		}
+	if sec, ok := findShape(vars); ok {
+		out = append(out, finding{kind: findSecretInURL, where: "url", label: sec.Label, deny: true})
 	}
 	if name, ok := e.secrets.exactValue(pol.actorSecrets, vars...); ok {
 		out = append(out, finding{kind: findActorSecret, where: "url", label: name, deny: true})
@@ -251,14 +282,15 @@ func (e *Engine) scanHeaders(req *Request, pol *Policy) []finding {
 			continue
 		}
 		where := "header:" + safeHeaderName(h.Name)
-		if name, ok := e.secrets.exactValue(pol.actorSecrets, decodedVariants(h.Value)...); ok {
+		vars := decodedVariants(h.Value)
+		if name, ok := e.secrets.exactValue(pol.actorSecrets, vars...); ok {
 			out = append(out, finding{kind: findActorSecret, where: where, label: name, deny: true})
 			continue
 		}
 		if name, ok := unboundPlaceholder(e.bindings, req.Host, h.Value); ok {
 			out = append(out, finding{kind: findPlaceholderUnbound, where: where, label: name})
 		}
-		sec, ok := secretshape.FindInlineSecret(h.Value)
+		sec, ok := findShape(vars)
 		if !ok {
 			continue
 		}
@@ -271,14 +303,20 @@ func (e *Engine) scanHeaders(req *Request, pol *Policy) []finding {
 	return out
 }
 
-// scanBody scans an inspected body.
+// scanBody scans an inspected body in the same decode set as the URL and
+// headers (GAP-0064): as sent, its JSON string values unescaped (so a
+// \u-escaped secret is seen), and each URL-decoded up to twice.
 func (e *Engine) scanBody(req *Request, pol *Policy, body []byte) []finding {
 	text := string(body)
+	vars := decodedVariants(text)
+	if js, ok := jsonStrings(body); ok && js != text {
+		vars = append(vars, decodedVariants(js)...)
+	}
 	var out []finding
-	if sec, ok := secretshape.FindInlineSecret(text); ok {
+	if sec, ok := findShape(vars); ok {
 		out = append(out, finding{kind: findSecretInBody, where: "body", label: sec.Label, deny: true})
 	}
-	if name, ok := e.secrets.exactValue(pol.actorSecrets, text); ok {
+	if name, ok := e.secrets.exactValue(pol.actorSecrets, vars...); ok {
 		out = append(out, finding{kind: findActorSecret, where: "body", label: name, deny: true})
 	}
 	if name, ok := unboundPlaceholder(e.bindings, req.Host, text); ok {

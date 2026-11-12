@@ -18,6 +18,7 @@ package extproc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -31,10 +32,13 @@ import (
 type Policy struct {
 	Name           string
 	UnattendedAsks string
-	decider        *egress.Decider
-	urlRules       []urlRule
-	askHosts       *hostMatcher
-	actorSecrets   []string
+	// Unattended is set by a registration-backed PolicySource for an
+	// unattended actor; StaticPolicies cannot know and leaves it false.
+	Unattended   bool
+	decider      *egress.Decider
+	urlRules     []urlRule
+	askHosts     *hostMatcher
+	actorSecrets []string
 }
 
 type urlRule struct {
@@ -45,14 +49,13 @@ type urlRule struct {
 	action     string
 }
 
-func (r urlRule) matches(host, method, reqPath string) bool {
+// appliesTo reports whether the rule covers the host and method; its path
+// prefix is matched separately, on the canonical path.
+func (r urlRule) appliesTo(host, method string) bool {
 	if _, ok := r.hosts.match(host); !ok {
 		return false
 	}
-	if len(r.methods) > 0 && !r.methods[method] {
-		return false
-	}
-	return r.pathPrefix == "" || strings.HasPrefix(reqPath, r.pathPrefix)
+	return len(r.methods) == 0 || r.methods[method]
 }
 
 // compilePolicy builds a Policy. The Decider runs in open mode: the
@@ -87,7 +90,13 @@ func compilePolicy(cfg *Config, p ProfileConfig, blocklists []*egress.Feed) (*Po
 		if err != nil {
 			return nil, err
 		}
-		ur := urlRule{name: r.Name, hosts: hm, pathPrefix: r.PathPrefix, action: r.Action}
+		prefix := r.PathPrefix
+		if prefix != "" {
+			if prefix, err = canonicalPath(prefix); err != nil {
+				return nil, fmt.Errorf("profile %s: url rule %q: path_prefix %q is ambiguous", p.Name, r.Name, r.PathPrefix)
+			}
+		}
+		ur := urlRule{name: r.Name, hosts: hm, pathPrefix: prefix, action: r.Action}
 		if len(r.Methods) > 0 {
 			ur.methods = map[string]bool{}
 			for _, m := range r.Methods {
@@ -125,8 +134,8 @@ func loadBlocklists(files []string) ([]*egress.Feed, error) {
 	return out, nil
 }
 
-// StaticPolicies maps atespaces to the configured profiles: the first
-// profile with a matching atespace glob, else the default profile, else the
+// StaticPolicies maps atespaces to the configured profiles: the profile
+// whose atespaces match (see PolicyFor), else the default profile, else the
 // feeds alone. It stands in until registrations (A2/A3) name each actor's
 // profile.
 type StaticPolicies struct {
@@ -161,14 +170,38 @@ func NewStaticPolicies(cfg *Config) (*StaticPolicies, error) {
 	return s, nil
 }
 
-// PolicyFor implements PolicySource.
+// ErrAmbiguousProfile is an atespace more than one profile's globs match
+// with no single exact name among them: the callout and the gateway (which
+// uses the registration's profile) could pick different profiles, so the
+// callout does not guess (GAP-0069) and the failure mode applies.
+var ErrAmbiguousProfile = errors.New("extproc: more than one profile matches the atespace")
+
+// PolicyFor implements PolicySource. A profile naming the atespace exactly
+// wins over globs; two exact names, or two globs and no exact name, are
+// ErrAmbiguousProfile. Configuration order never decides.
 func (s *StaticPolicies) PolicyFor(_ context.Context, actor ActorRef) (*Policy, error) {
+	var exact, glob []int
 	for i, globs := range s.globs {
 		for _, g := range globs {
 			if ok, _ := path.Match(g, actor.Atespace); ok {
-				return s.profiles[i], nil
+				if g == actor.Atespace {
+					exact = append(exact, i)
+				} else {
+					glob = append(glob, i)
+				}
+				break
 			}
 		}
+	}
+	switch {
+	case len(exact) == 1:
+		return s.profiles[exact[0]], nil
+	case len(exact) > 1:
+		return nil, ErrAmbiguousProfile
+	case len(glob) == 1:
+		return s.profiles[glob[0]], nil
+	case len(glob) > 1:
+		return nil, ErrAmbiguousProfile
 	}
 	return s.fallback, nil
 }

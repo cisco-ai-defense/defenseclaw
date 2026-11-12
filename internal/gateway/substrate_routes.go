@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
@@ -44,7 +45,7 @@ import (
 
 const (
 	substrateAdminPrefix   = "/api/v1/substrate/"
-	substrateCalloutPath   = "/api/v1/substrate/callout/verdict"
+	substrateCalloutPath   = calloutapi.Path
 	substrateAdminMaxBody  = 1 << 20
 	substrateSessionMaxTTL = identity.MaxSessionLifetime
 )
