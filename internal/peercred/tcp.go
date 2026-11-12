@@ -30,3 +30,14 @@ func LoopbackTCPPeerUID(local, remote *net.TCPAddr) (int, error) {
 	}
 	return loopbackTCPOwner(local, remote)
 }
+
+// LoopbackTCPPeerSID returns the user SID of the process on the client end
+// of a loopback TCP connection this process accepted (Windows: the owning
+// PID from the kernel TCP table, then that process token). Other platforms
+// return ErrUnsupported; use LoopbackTCPPeerUID there.
+func LoopbackTCPPeerSID(local, remote *net.TCPAddr) (string, error) {
+	if local == nil || remote == nil || !local.IP.IsLoopback() || !remote.IP.IsLoopback() {
+		return "", errors.New("peercred: the connection is not on a loopback address")
+	}
+	return loopbackTCPOwnerSID(local, remote)
+}
