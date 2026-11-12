@@ -39,6 +39,7 @@ const (
 	CategoryAskDenied       = "ask_denied"
 	CategoryAskPending      = "ask_pending"
 	CategoryMCPToolBlocked  = "mcp_tool_blocked"
+	CategoryBodyUninspected = "body_uninspectable"
 	CategoryCalloutError    = "callout_error"
 )
 
@@ -335,10 +336,47 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	if v.Source == "" {
 		v.Source = string(d.Source)
 	}
-	v.WantBody, v.BodyOverCap = e.wantBody(req)
-	if v.BodyOverCap {
+	var why string
+	v.WantBody, why = e.wantBody(req)
+	return e.uninspected(v, why)
+}
+
+// Why an inspected host's body is not inspected. The first two are framing
+// the actor chose; the others are the deployment's.
+const (
+	whyOverCap     = "over_cap"
+	whyStreaming   = "streaming_content_type"
+	whyUnsupported = "body_mode_unsupported"
+	whyInspectOff  = "body_inspection_off"
+)
+
+// uninspected applies GAP-0044 to a request on an MCP or admin-listed host
+// whose body won't be inspected: inspect or refuse, never allow silently.
+// Framing the actor controls (a body over the cap, a streaming content
+// type) is refused when the failure mode is closed and an alert when open.
+// A filter without body mode is an alert (the readiness check reports
+// it); body_inspection off is recorded.
+func (e *Engine) uninspected(v Verdict, why string) Verdict {
+	switch why {
+	case "":
+		return v
+	case whyOverCap, whyStreaming:
+		v.BodyOverCap = why == whyOverCap
+		if e.cfg.FailureMode == FailureClosed {
+			reason := "DefenseClaw inspects the requests sent to this host, and this one's body is over the inspection limit, so it can't be checked."
+			if why == whyStreaming {
+				reason = "DefenseClaw inspects the requests sent to this host, and this one's body is a stream (event stream, gRPC or multipart), so it can't be checked."
+			}
+			return deny(v, CategoryBodyUninspected, sourceCallout, why, reason)
+		}
+		v.Alert = true
+	case whyUnsupported:
+		v.Alert = true
+	}
+	if why == whyOverCap {
 		v.Findings = append(v.Findings, "body_over_cap")
 	}
+	v.Findings = append(v.Findings, "body_not_inspected:"+why)
 	return v
 }
 
@@ -368,39 +406,37 @@ func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, 
 	return deny(v, CategoryAskPending, sourceAsk, rule, "This host needs an approval that has not been given yet.")
 }
 
-// wantBody reports whether the request qualifies for body mode (D9) and
-// whether it is over the cap. MCP and admin-listed hosts only; a request
-// with a body of known length up to the cap; never an SSE or gRPC stream.
-func (e *Engine) wantBody(req *Request) (want, overCap bool) {
+// wantBody reports whether to buffer the request's body (D9), or why a body
+// on an inspected host can't be. MCP and admin-listed hosts only. Every
+// request with a body counts, whatever its method or content type and
+// whether or not it states a length (GAP-0044: framing is the actor's
+// choice): a request without Content-Length is buffered too, bounded by
+// the egress filter's buffer and then by the cap in DecideBody. A stated
+// length over the cap, and event-stream, gRPC and multipart bodies (never
+// buffered, D9), can't be inspected.
+func (e *Engine) wantBody(req *Request) (bool, string) {
 	_, mcp := e.mcpHosts.match(req.Host)
 	_, listed := e.bodyHosts.match(req.Host)
-	if !mcp && !listed {
-		return false, false
-	}
-	if req.EndOfStream || req.ContentLength == 0 {
-		return false, false
+	if (!mcp && !listed) || req.EndOfStream {
+		// No body: Envoy marks end of stream on the headers. A stated
+		// Content-Length of 0 is not trusted on its own.
+		return false, ""
 	}
 	ct := strings.ToLower(req.ContentType)
 	if strings.Contains(ct, "text/event-stream") || strings.HasPrefix(ct, "application/grpc") ||
 		strings.HasPrefix(ct, "multipart/") {
-		return false, false
-	}
-	if mcp && !strings.Contains(ct, "json") {
-		return false, false
-	}
-	switch m := req.Method; m {
-	case "POST", "PUT", "PATCH":
-	default:
-		return false, false
-	}
-	if req.ContentLength < 0 {
-		// Unknown length: Envoy would buffer without a bound we can check.
-		return false, true
+		return false, whyStreaming
 	}
 	if req.ContentLength > e.cfg.BodyMaxBytes {
-		return false, true
+		return false, whyOverCap
 	}
-	return e.body.want(), false
+	switch {
+	case e.cfg.BodyInspection == BodyOff:
+		return false, whyInspectOff
+	case !e.body.want():
+		return false, whyUnsupported
+	}
+	return true, ""
 }
 
 // DecideBody decides a request again on its buffered body; v is its headers
@@ -413,9 +449,8 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 	}()
 	v.WantBody = false
 	if int64(len(body)) > e.cfg.BodyMaxBytes {
-		v.BodyOverCap = true
-		v.Findings = append(v.Findings, "body_over_cap")
-		return v
+		// A body sent without a length, larger than the cap.
+		return e.uninspected(v, whyOverCap)
 	}
 	v.BodyInspected = true
 	pol, err := e.policies.PolicyFor(ctx, req.Actor)

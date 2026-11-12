@@ -245,52 +245,6 @@ func TestStreamMCPAllowedThenResponsePhases(t *testing.T) {
 	}
 }
 
-func TestBodyModeNeverForSSEOrModelOrOtherHosts(t *testing.T) {
-	h := newHarness(t, nil)
-	body := mcpCall("x")
-	cases := []struct {
-		name string
-		msg  *extprocv3.ProcessingRequest
-	}{
-		{"sse request body", headersMsg(identityAttrs("t1", "c1"), false, ":method", "POST", ":authority", "mcp.example.com",
-			":path", "/mcp", "content-type", "text/event-stream", "content-length", "10")},
-		{"sse listening GET", headersMsg(identityAttrs("t1", "c1"), true, ":method", "GET", ":authority", "mcp.example.com",
-			":path", "/mcp", "accept", "text/event-stream")},
-		{"model call via DefenseClaw", headersMsg(identityAttrs("t1", "c1"), false, ":method", "POST",
-			":authority", "defenseclaw-actor.defenseclaw-system.svc", ":path", "/llm/bedrock/model/x/invoke-with-response-stream",
-			"content-type", "application/json", "content-length", "100")},
-		{"unlisted host", headersMsg(identityAttrs("t1", "c1"), false, ":method", "POST", ":authority", "example.com",
-			":path", "/", "content-type", "application/json", "content-length", strconv.Itoa(len(body)))},
-		{"grpc", headersMsg(identityAttrs("t1", "c1"), false, ":method", "POST", ":authority", "upload.example.org",
-			":path", "/svc/M", "content-type", "application/grpc", "content-length", "10")},
-		{"chunked, length unknown", headersMsg(identityAttrs("t1", "c1"), false, ":method", "POST", ":authority", "mcp.example.com",
-			":path", "/mcp", "content-type", "application/json")},
-		{"over cap", headersMsg(identityAttrs("t1", "c1"), false, ":method", "POST", ":authority", "mcp.example.com",
-			":path", "/mcp", "content-type", "application/json", "content-length", strconv.Itoa(2<<20))},
-	}
-	c := dial(t, h)
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			s, cancel := open(t, c)
-			defer cancel()
-			r := exchange(t, s, tc.msg)
-			if r.GetModeOverride() != nil || r.GetRequestHeaders() == nil {
-				t.Fatalf("got %v", r)
-			}
-		})
-	}
-	evs := waitEvents(t, h.events, 6)
-	var overCap int
-	for _, e := range evs {
-		if e.BodyOverCap {
-			overCap++
-		}
-	}
-	if overCap != 2 {
-		t.Fatalf("want 2 body_over_cap events (unknown length, over cap), got %d: %+v", overCap, evs)
-	}
-}
-
 func TestBodyModeOff(t *testing.T) {
 	h := newHarness(t, func(c *Config, _ *Options) { c.BodyInspection = BodyOff })
 	s, cancel := open(t, dial(t, h))
@@ -343,8 +297,8 @@ func TestDecideBody(t *testing.T) {
 		t.Fatalf("batch: %+v", v)
 	}
 	big := bytes.Repeat([]byte("a"), (1<<20)+1)
-	if v := h.eng.DecideBody(ctx, r, base, big); !v.Allow || !v.BodyOverCap || v.BodyInspected {
-		t.Fatalf("over cap: %+v", v)
+	if v := h.eng.DecideBody(ctx, r, base, big); v.Allow || !v.BodyOverCap || v.BodyInspected || v.Category != CategoryBodyUninspected {
+		t.Fatalf("over cap (closed refuses, GAP-0044): %+v", v)
 	}
 	h.judge.block, h.judge.err = false, errors.New("gateway down")
 	if v := h.eng.DecideBody(ctx, r, base, mcpCall("x")); v.Allow || v.Category != CategoryCalloutError || !v.Retryable {
