@@ -5,6 +5,7 @@ package kit
 
 import (
 	"bytes"
+	"path"
 	"strings"
 	"testing"
 
@@ -128,6 +129,15 @@ func TestWave3HookRegistrationsAreRootOwned(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("%s: %s not in the overlay", name, p)
+		}
+		rootDirs := map[string]bool{}
+		for _, d := range ov.RootDirs {
+			rootDirs[d] = true
+		}
+		for _, d := range []string{XDGConfigHome, path.Dir(p)} {
+			if !rootDirs[d] {
+				t.Errorf("%s: %s is not made root-owned and readable (RootDirs %v)", name, d, ov.RootDirs)
+			}
 		}
 		if got := wave2RelayEnv[name]["XDG_CONFIG_HOME"]; got != XDGConfigHome {
 			t.Errorf("%s: the agent does not run with XDG_CONFIG_HOME=%s (%q)", name, XDGConfigHome, got)

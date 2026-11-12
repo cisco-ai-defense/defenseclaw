@@ -304,7 +304,14 @@ func moveToXDG(ov *Overlay, o OverlayOptions, rel string) bool {
 	return false
 }
 
-func xdgEnv(ov *Overlay) {
+// xdgEnv makes every folder of the registration's path root-owned and
+// readable (a folder the build makes on the way would otherwise be 0644, which
+// the agent cannot enter) and keeps the common tools' folders the agent's.
+func xdgEnv(ov *Overlay, rel ...string) {
+	ov.RootDirs = append(ov.RootDirs, XDGConfigHome)
+	for _, r := range rel {
+		ov.RootDirs = append(ov.RootDirs, path.Join(XDGConfigHome, r))
+	}
 	for _, d := range xdgUserDirs {
 		ov.UserDirs = append(ov.UserDirs, path.Join(XDGConfigHome, d))
 	}
@@ -319,7 +326,7 @@ func xdgEnv(ov *Overlay) {
 func ampHarden(ov *Overlay, o OverlayOptions) {
 	moveToXDG(ov, o, "amp/plugins/defenseclaw.ts")
 	ov.Remove = append(ov.Remove, path.Join(o.Home, ".config", "amp"))
-	xdgEnv(ov)
+	xdgEnv(ov, "amp", "amp/plugins")
 	ov.Files = append(ov.Files, ImageFile{Path: path.Join(XDGConfigHome, "amp", "settings.json"), Mode: 0o600, User: true, Data: []byte("{}\n")})
 }
 
@@ -351,7 +358,7 @@ func devinHarden(ov *Overlay, o OverlayOptions) {
 	}
 	ov.Files = kept
 	ov.Remove = append(ov.Remove, "/usr/local/lib/defenseclaw/devin/config.json", path.Join(o.Home, ".config", "devin"))
-	xdgEnv(ov)
+	xdgEnv(ov, "devin")
 	ov.UserDirs = append(ov.UserDirs, path.Join(XDGConfigHome, "devin", "cli"))
 }
 
