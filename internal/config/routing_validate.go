@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -53,6 +54,7 @@ func (r *RoutingConfig) Validate() error {
 		}
 	}
 	aliases := make(map[string]struct{}, len(r.Models))
+	providers := make(map[string]string, len(r.Models))
 	for i, model := range r.Models {
 		name := strings.TrimSpace(model.Name)
 		if name == "" {
@@ -68,6 +70,7 @@ func (r *RoutingConfig) Validate() error {
 			return fmt.Errorf("models[%d].name %q is duplicated", i, name)
 		}
 		aliases[name] = struct{}{}
+		providers[name] = strings.TrimSpace(model.Provider)
 		if strings.TrimSpace(model.Provider) == "" {
 			return fmt.Errorf("models[%d].provider must be non-empty", i)
 		}
@@ -96,6 +99,9 @@ func (r *RoutingConfig) Validate() error {
 		}
 		if model.APIKeyEnv != "" && !routingEnvNamePattern.MatchString(model.APIKeyEnv) {
 			return fmt.Errorf("models[%d].api_key_env %q is not a valid environment variable name", i, model.APIKeyEnv)
+		}
+		if err := model.validatePolicyKeys(i); err != nil {
+			return err
 		}
 	}
 	if r.Enabled && len(r.Models) == 0 {
@@ -153,17 +159,28 @@ func (r *RoutingConfig) Validate() error {
 			return fmt.Errorf("decisions[%d].operator %q must be AND or OR", i, decision.Operator)
 		}
 		for j, condition := range decision.Conditions {
-			conditionType := strings.ToLower(strings.TrimSpace(condition.Type))
-			if conditionType != "keyword" {
-				return fmt.Errorf("decisions[%d].conditions[%d].type %q is unsupported (supported: keyword)", i, j, condition.Type)
-			}
 			conditionName := strings.TrimSpace(condition.Name)
-			if _, exists := keywordSignals[conditionName]; !exists {
-				return fmt.Errorf("decisions[%d].conditions[%d] references unknown keyword signal %q", i, j, condition.Name)
+			switch strings.ToLower(strings.TrimSpace(condition.Type)) {
+			case RoutingConditionKeyword:
+				if _, exists := keywordSignals[conditionName]; !exists {
+					return fmt.Errorf("decisions[%d].conditions[%d] references unknown keyword signal %q", i, j, condition.Name)
+				}
+			case RoutingConditionConnector, RoutingConditionAPIFamily:
+				if r.EffectiveClassifier() == RoutingClassifierVLLMSR {
+					return fmt.Errorf("decisions[%d].conditions[%d].type %q needs classifier rules or systemone (vllm_sr supports keyword only)", i, j, condition.Type)
+				}
+				if strings.EqualFold(condition.Type, RoutingConditionAPIFamily) && !slices.Contains(RoutingAPIs, conditionName) {
+					return fmt.Errorf("decisions[%d].conditions[%d].name %q must be one of %s", i, j, condition.Name, strings.Join(RoutingAPIs, ", "))
+				}
+				if conditionName == "" {
+					return fmt.Errorf("decisions[%d].conditions[%d].name must be non-empty", i, j)
+				}
+			default:
+				return fmt.Errorf("decisions[%d].conditions[%d].type %q is unsupported (supported: keyword, connector, api_family)", i, j, condition.Type)
 			}
 		}
 	}
-	return nil
+	return r.validatePolicyKeys(providers)
 }
 
 func validateRoutingURL(field, raw string) error {

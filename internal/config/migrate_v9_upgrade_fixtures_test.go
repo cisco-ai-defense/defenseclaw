@@ -33,6 +33,9 @@ import (
 // each with a same-name provider overlay, a skill-scanner policy named custom
 // and a custom rule pack. config.yaml names its home @HOME@.
 //   - 0.8.10-v8: a 0.8.10 home after its own config v8 upgrade.
+//   - 1.0.8, 1.0.9: that release MigrateV9 output on the 0.8.10 home plus a
+//     1.0.9 semantic routing block (vLLM Semantic Router, no classifier key),
+//     which 1.0.10 must keep byte for byte.
 //   - 1.0.0, 1.0.1: the config_version 9 home that release's upgrade left
 //     (config.yaml is the output of that release's MigrateV9 on the 0.8.10
 //     home, with the policy file at an absolute path, since neither could
@@ -44,7 +47,7 @@ import (
 // config.yaml equal to config.golden.yaml, and the rollback must leave the
 // home exactly as it was. DEFENSECLAW_UPDATE_GOLDEN=1 rewrites the goldens.
 func TestUpgradeFixturesMigrateRollBackAndReUpgrade(t *testing.T) {
-	for _, release := range []string{"0.8.10-v8", "1.0.0", "1.0.1"} {
+	for _, release := range []string{"0.8.10-v8", "1.0.0", "1.0.1", "1.0.8", "1.0.9"} {
 		t.Run(release, func(t *testing.T) {
 			fixture, err := filepath.Abs(filepath.Join("testdata", "upgrade", release))
 			if err != nil {

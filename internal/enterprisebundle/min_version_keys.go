@@ -25,6 +25,10 @@ func CheckKeyProductFloor(cfg *config.Config, minProductVersion string) error {
 		// enterprise.account_join: 1.0.7 and later.
 		keys, floor = append(keys, later...), config.AccountJoinMinProductVersion
 	}
+	if later := cfg.UsesMinProductVersion1010Keys(); len(later) > 0 {
+		// semantic routing policy, route-only and profile routing: 1.0.10 and later.
+		keys, floor = append(keys, later...), config.RoutingMinProductVersion
+	}
 	if len(keys) == 0 {
 		return nil
 	}
