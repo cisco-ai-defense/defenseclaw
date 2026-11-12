@@ -45,7 +45,7 @@ func TestManagedAgentInventoryIsForceCollectedAndReservedToManagedDestination(t 
 		t.Fatalf("base operator route=%+v present=%t", baseOperator.Routes, ok)
 	}
 	operator, ok := plan.RuntimeDestination("operator-console")
-	if !ok || len(operator.Routes) != 2 {
+	if !ok || len(operator.Routes) != 3 {
 		t.Fatalf("managed operator routes=%+v present=%t", operator.Routes, ok)
 	}
 	drop := operator.Routes[0]
@@ -62,8 +62,16 @@ func TestManagedAgentInventoryIsForceCollectedAndReservedToManagedDestination(t 
 		}) {
 		t.Fatalf("reserved operator drop route=%+v", drop)
 	}
-	if operator.Routes[1].Index != 1 || operator.Routes[1].Action != ObservabilityV8RouteSend {
-		t.Fatalf("operator original route not shifted intact=%+v", operator.Routes[1])
+	health := operator.Routes[1]
+	if health.Index != 1 || !health.Generated || health.Action != ObservabilityV8RouteDrop ||
+		health.Name != "drop-managed-endpoint-health" ||
+		!reflect.DeepEqual(health.Signals, []observability.Signal{observability.SignalLogs}) ||
+		!reflect.DeepEqual(health.Selector.Buckets, []observability.Bucket{observability.BucketPlatformHealth}) ||
+		!reflect.DeepEqual(health.Selector.Actions, []observability.ProducerKey{ObservabilityV8ManagedEndpointHealthAction}) {
+		t.Fatalf("reserved operator endpoint health drop route=%+v", health)
+	}
+	if operator.Routes[2].Index != 2 || operator.Routes[2].Action != ObservabilityV8RouteSend {
+		t.Fatalf("operator original route not shifted intact=%+v", operator.Routes[2])
 	}
 	// v8-only contract: managed destination now has exactly TWO
 	// routes (Vineet's [P1]). The old middle route

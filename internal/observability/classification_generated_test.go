@@ -26,10 +26,10 @@ func TestGeneratedProducerGroupsAreExactPublicClassificationAuthority(t *testing
 	t.Parallel()
 	ensureGeneratedProducerClassifications()
 
-	if got, want := len(generatedProducerGroups), 255; got != want {
+	if got, want := len(generatedProducerGroups), 256; got != want {
 		t.Fatalf("generated producer groups = %d, want %d", got, want)
 	}
-	if got, want := len(gatewayEventClassifications), 16; got != want {
+	if got, want := len(gatewayEventClassifications), 17; got != want {
 		t.Fatalf("gateway classifications = %d, want %d", got, want)
 	}
 	if got, want := len(auditActionClassifications), 239; got != want {

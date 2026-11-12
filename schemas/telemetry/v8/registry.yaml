@@ -1121,6 +1121,70 @@ structured_types:
     items: {structured_ref: defenseclaw.inventory.agent_metadata_item}
     min_items: 0
     max_items: 64
+  - id: defenseclaw.health.reason
+    kind: object
+    introduced_in: telemetry-registry-v1
+    additional_properties: false
+    fields:
+      - {name: code, required: true, type: string, field_class: metadata, sensitivity: safe, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[A-Z][A-Z0-9_]{0,63}$'}}}
+      - {name: component, required: true, type: string, field_class: metadata, sensitivity: safe, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[a-z][a-z0-9_]{0,63}$'}}}
+      - {name: severity, required: true, type: string, field_class: metadata, sensitivity: safe, normalization: {id: enum-v1, overrides: {enum: [unhealthy, degraded, starting]}}}
+      - {name: connector, required: false, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[a-z0-9][a-z0-9_.-]{0,63}$'}}}
+  - id: defenseclaw.health.reasons
+    kind: array
+    introduced_in: telemetry-registry-v1
+    items: {structured_ref: defenseclaw.health.reason}
+    min_items: 0
+    max_items: 32
+  - id: defenseclaw.health.subsystem_item
+    kind: object
+    introduced_in: telemetry-registry-v1
+    additional_properties: false
+    fields:
+      - {name: name, required: true, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[a-z][a-z0-9_]{0,63}$'}}}
+      - {name: state, required: true, type: string, field_class: metadata, sensitivity: safe, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 32, pattern: '^[a-z][a-z0-9_]{0,31}$'}}}
+      - {name: since, required: false, type: string, field_class: metadata, sensitivity: safe, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'}}}
+      - {name: error_class, required: false, type: string, field_class: metadata, sensitivity: safe, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[A-Z][A-Z0-9_]{0,63}$'}}}
+  - id: defenseclaw.health.subsystems
+    kind: array
+    introduced_in: telemetry-registry-v1
+    items: {structured_ref: defenseclaw.health.subsystem_item}
+    min_items: 0
+    max_items: 16
+  - id: defenseclaw.health.hook_connector
+    kind: object
+    introduced_in: telemetry-registry-v1
+    additional_properties: false
+    fields:
+      - {name: connector, required: true, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[a-z0-9][a-z0-9_.-]{0,63}$'}}}
+      - {name: targets, required: true, type: int64, field_class: metadata, sensitivity: safe, normalization: {id: numeric-range-v1, overrides: {min: 0, max: 1000000}}}
+      - {name: ok, required: true, type: int64, field_class: metadata, sensitivity: safe, normalization: {id: numeric-range-v1, overrides: {min: 0, max: 1000000}}}
+      - {name: failed, required: true, type: int64, field_class: metadata, sensitivity: safe, normalization: {id: numeric-range-v1, overrides: {min: 0, max: 1000000}}}
+      - {name: pending, required: true, type: int64, field_class: metadata, sensitivity: safe, normalization: {id: numeric-range-v1, overrides: {min: 0, max: 1000000}}}
+      - {name: last_activity_at, required: false, type: string, field_class: metadata, sensitivity: safe, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'}}}
+      - {name: tool_inspection_mode, required: false, type: string, field_class: metadata, sensitivity: safe, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 32, pattern: '^[a-z][a-z0-9_-]{0,31}$'}}}
+  - id: defenseclaw.health.hook_connectors
+    kind: array
+    introduced_in: telemetry-registry-v1
+    items: {structured_ref: defenseclaw.health.hook_connector}
+    min_items: 0
+    max_items: 16
+  - id: defenseclaw.health.failing_target
+    kind: object
+    introduced_in: telemetry-registry-v1
+    additional_properties: false
+    fields:
+      - {name: connector, required: true, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[a-z0-9][a-z0-9_.-]{0,63}$'}}}
+      - {name: user.id, required: false, type: string, field_class: identifier, sensitivity: sensitive, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 192, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,191}$'}}}
+      - {name: user.id_kind, required: false, type: string, field_class: metadata, sensitivity: safe, normalization: {id: enum-v1, overrides: {enum: [windows_sid, posix_uid]}}}
+      - {name: error_class, required: true, type: string, field_class: metadata, sensitivity: safe, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[A-Z][A-Z0-9_]{0,63}$'}}}
+      - {name: pending, required: true, type: boolean, field_class: metadata, sensitivity: safe, normalization: {id: identity-v1}}
+  - id: defenseclaw.health.failing_targets
+    kind: array
+    introduced_in: telemetry-registry-v1
+    items: {structured_ref: defenseclaw.health.failing_target}
+    min_items: 0
+    max_items: 16
 structured_bindings:
   - {attribute: gen_ai.input.messages, structured_type: gen_ai.input_messages, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
   - {attribute: gen_ai.output.messages, structured_type: gen_ai.output_messages, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
@@ -1133,6 +1197,10 @@ structured_bindings:
   - {attribute: defenseclaw.inventory.mcp.metadata, structured_type: defenseclaw.inventory.mcp_metadata, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
   - {attribute: defenseclaw.inventory.agent.identifiers, structured_type: defenseclaw.inventory.agent_identifiers, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
   - {attribute: defenseclaw.inventory.agent.metadata, structured_type: defenseclaw.inventory.agent_metadata, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
+  - {attribute: defenseclaw.health.reasons, structured_type: defenseclaw.health.reasons, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
+  - {attribute: defenseclaw.health.subsystems, structured_type: defenseclaw.health.subsystems, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
+  - {attribute: defenseclaw.health.hooks.connectors, structured_type: defenseclaw.health.hook_connectors, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
+  - {attribute: defenseclaw.health.hooks.failing_targets, structured_type: defenseclaw.health.failing_targets, public_encoding: sealed_typed, canonical_wire_encoding: native_json}
 go_symbol_policy:
   version: 1
   package: observability
