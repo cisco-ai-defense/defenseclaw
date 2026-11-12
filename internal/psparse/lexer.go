@@ -29,13 +29,14 @@ type lexer struct {
 	// whether we are at a command-start position.
 	prevSignificant TokenKind
 	prevWasValue    bool // last token could end a value (for dash disambiguation)
+	atStart         bool // at a token boundary (for '#' comment vs bareword)
 }
 
 func newLexer(src string) *lexer {
 	if len(src) > maxInput {
 		src = src[:maxInput]
 	}
-	l := &lexer{src: src}
+	l := &lexer{src: src, atStart: true}
 	l.runes = make([]rune, 0, len(src))
 	l.pos = make([]int, 0, len(src)+1)
 	for off := 0; off < len(src); {
@@ -79,6 +80,7 @@ func (l *lexer) emit(k TokenKind, a, b int) {
 		l.prevWasValue = k == TokVariable || k == TokNumber || k == TokString ||
 			k == TokGeneric || k == TokRParen || k == TokRBracket || k == TokRBrace
 	}
+	l.setAtStart(k)
 }
 
 func (l *lexer) push(t Token) {
@@ -87,6 +89,20 @@ func (l *lexer) push(t Token) {
 		l.prevSignificant = t.Kind
 		l.prevWasValue = t.Kind == TokVariable || t.Kind == TokNumber || t.Kind == TokString ||
 			t.Kind == TokGeneric || t.Kind == TokRParen || t.Kind == TokRBracket || t.Kind == TokRBrace
+	}
+	l.setAtStart(t.Kind)
+}
+
+// setAtStart records whether the next token begins at a token boundary (after a
+// separator, opener or comment/newline), which decides whether a '#' starts a
+// line comment or is part of a generic token.
+func (l *lexer) setAtStart(k TokenKind) {
+	switch k {
+	case TokNewline, TokComment, TokSemi, TokPipe, TokPipePipe, TokAmpAmp, TokAmp,
+		TokLParen, TokLBrace, TokLBracket, TokComma, TokAtParen, TokAtBrace:
+		l.atStart = true
+	default:
+		l.atStart = false
 	}
 }
 
@@ -97,6 +113,7 @@ func (l *lexer) lex() []Token {
 		switch {
 		case r == ' ' || r == '\t' || r == '\r' || r == '\f' || r == 0xA0:
 			l.i++
+			l.atStart = true
 		case r == '`' && (l.peek(1) == '\n' || l.peek(1) == '\r' || l.peek(1) == -1):
 			// line continuation: swallow backtick + newline
 			l.i++
@@ -106,17 +123,18 @@ func (l *lexer) lex() []Token {
 			if l.cur() == '\n' {
 				l.i++
 			}
+			l.atStart = true
 		case r == '\n':
 			a := l.i
 			l.i++
 			l.emit(TokNewline, a, l.i)
-		case r == '#':
+		case r == '#' && l.atStart:
 			l.lexLineComment()
-		case r == '<' && l.peek(1) == '#':
+		case r == '<' && l.peek(1) == '#' && l.atStart:
 			l.lexBlockComment()
-		case r == '\'':
+		case isSingleQuote(r):
 			l.lexSingleString()
-		case r == '"':
+		case isDoubleQuote(r):
 			l.lexDoubleString()
 		case r == '@' && (l.peek(1) == '"' || l.peek(1) == '\''):
 			l.lexHereString()
@@ -132,13 +150,13 @@ func (l *lexer) lex() []Token {
 			l.lexSplatVariable()
 		case r == '$':
 			l.lexDollar()
-		case r == '-':
+		case isDash(r):
 			l.lexDash()
-		case r == '*' && l.peek(1) == '>':
+		case r == '*' && l.peek(1) == '>' && l.atStart:
 			a := l.i
 			l.i++ // consume *
 			l.scanRedirectFromHere(a, "*")
-		case r >= '1' && r <= '6' && l.peek(1) == '>':
+		case r >= '1' && r <= '6' && l.peek(1) == '>' && l.atStart:
 			a := l.i
 			l.i++ // consume the stream digit
 			l.scanRedirectFromHere(a, string(r))
@@ -182,8 +200,8 @@ func (l *lexer) lexSingleString() {
 	a := l.i
 	l.i++ // opening '
 	for l.i < len(l.runes) {
-		if l.cur() == '\'' {
-			if l.peek(1) == '\'' { // '' escapes a quote
+		if isSingleQuote(l.cur()) {
+			if isSingleQuote(l.peek(1)) { // a doubled quote escapes one
 				l.i += 2
 				continue
 			}
@@ -216,8 +234,8 @@ func (l *lexer) lexDoubleString() {
 			depth--
 			l.i++
 			continue
-		case r == '"' && depth == 0:
-			if l.peek(1) == '"' { // "" escapes a quote
+		case isDoubleQuote(r) && depth == 0:
+			if isDoubleQuote(l.peek(1)) { // a doubled quote escapes one
 				l.i += 2
 				continue
 			}
@@ -362,7 +380,20 @@ func (l *lexer) lexDash() {
 			l.i++
 		}
 		vs := l.i
-		for l.i < len(l.runes) && l.cur() != '\n' {
+		var q rune
+		for l.i < len(l.runes) {
+			c := l.cur()
+			if c == '\n' {
+				break
+			}
+			if q == 0 && c == '|' { // an unquoted pipe ends the verbatim tail
+				break
+			}
+			if q == 0 && (c == '\'' || c == '"') {
+				q = c
+			} else if q != 0 && c == q {
+				q = 0
+			}
 			l.i++
 		}
 		if l.i > vs {
@@ -441,14 +472,17 @@ func (l *lexer) lexNumber() {
 			}
 		}
 	}
-	// multiplier / type suffix (kb mb gb tb pb, l, d)
+	// multiplier / numeric type suffix (kb mb gb tb pb, l u y s n d ...)
+	letterStart := l.i
 	for l.i < len(l.runes) && isLetter(l.cur()) {
 		l.i++
 	}
 	raw := l.slice(a, l.i)
-	// A run with more than one dot (an IP or a version) is not a number: re-lex
-	// the whole token as a bareword string to match the reference parser.
-	if strings.Count(raw, ".") > 1 {
+	suffix := string(l.runes[letterStart:l.i])
+	// Not a number if it has more than one dot (an IP/version) or a trailing
+	// letter run that is not a valid numeric suffix (7z, 1.txt): re-lex as a
+	// bareword, which at statement start is a command (F14).
+	if strings.Count(raw, ".") > 1 || !validNumberSuffix(suffix) {
 		l.i = a
 		l.lexBareword()
 		return
@@ -573,7 +607,12 @@ func (l *lexer) lexSymbolOperator() {
 		l.lexBareword()
 		return
 	}
-	// redirections: > >> 2> *> n> n>> n>&m  and input <
+	// redirections (> >> 2> *> n> n>&m, input <) are operators only at a token
+	// boundary; glued to a word (a2>x, a<<b) they are part of the bareword.
+	if (r == '>' || r == '<') && !l.atStart {
+		l.lexBareword()
+		return
+	}
 	if r == '>' {
 		l.scanRedirectFromHere(a, "")
 		return
@@ -646,8 +685,8 @@ func (l *lexer) lexBareword() {
 		if strings.ContainsRune(";,|&(){}[]'\"", r) {
 			break
 		}
-		if r == '>' || r == '<' {
-			break
+		if r == '$' && dollarStartsVar(l.peek(1)) {
+			break // a variable / ${ } / $( ) starts here; the bareword ends
 		}
 		// a redirect stream number like 2> ends the word only at the digit+>
 		l.i++
@@ -671,7 +710,53 @@ func isNameChar(r rune) bool {
 	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 func isLetter(r rune) bool { return unicode.IsLetter(r) }
+
+// validNumberSuffix reports whether the trailing letters of a numeric literal
+// form a valid PowerShell multiplier and/or type suffix. Anything else means
+// the token is a bareword, not a number.
+func validNumberSuffix(s string) bool {
+	if s == "" {
+		return true
+	}
+	s = strings.ToLower(s)
+	for _, m := range []string{"kb", "mb", "gb", "tb", "pb"} {
+		if strings.HasPrefix(s, m) {
+			s = s[2:]
+			break
+		}
+	}
+	switch s {
+	case "", "l", "u", "ul", "lu", "y", "uy", "s", "us", "n", "d":
+		return true
+	}
+	return false
+}
+
 func isHex(r rune) bool {
 	return unicode.IsDigit(r) || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
 }
 func isSpace(r rune) bool { return r == ' ' || r == '\t' || r == '\r' || r == '\f' || r == 0xA0 }
+
+// PowerShell treats several Unicode quote and dash characters the same as the
+// ASCII ones (its tokenizer's special-character tables).
+func isSingleQuote(r rune) bool {
+	switch r {
+	case '\'', '‘', '’', '‚', '‛':
+		return true
+	}
+	return false
+}
+func isDoubleQuote(r rune) bool {
+	switch r {
+	case '"', '“', '”', '„', '‟':
+		return true
+	}
+	return false
+}
+func isDash(r rune) bool {
+	switch r {
+	case '-', '–', '—', '―':
+		return true
+	}
+	return false
+}

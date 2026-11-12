@@ -55,20 +55,24 @@ func TestExtractNestedScriptsDynamicNotDropped(t *testing.T) {
 }
 
 func TestLiteralStringConcat(t *testing.T) {
+	// A parenthesised argument is a ParenExpression on the reference side, so
+	// LiteralString must report it non-static (not evaluate the concatenation).
 	sc, _ := Parse(`x ('a' + 'b' + 'c')`, Options{})
-	var got string
 	WalkCommands(sc, func(c *Command) {
-		if n, _ := LiteralString(c.Name); n == "x" {
-			for _, el := range c.Elements {
-				if a, ok := el.(*Arg); ok {
-					if s, ok := LiteralString(a.Value); ok {
-						got = s
-					}
+		if n, _ := LiteralString(c.Name); n != "x" {
+			return
+		}
+		for _, el := range c.Elements {
+			if a, ok := el.(*Arg); ok {
+				if v, ok := LiteralString(a.Value); ok {
+					t.Errorf("parenthesised arg resolved static %q; want non-static", v)
 				}
 			}
 		}
 	})
-	if got != "abc" {
-		t.Errorf("literal concat: got %q want abc", got)
+	// A + concatenation of string literals passed directly (no parens) is also
+	// a binary expression -> non-static.
+	if v, ok := LiteralString(&Binary{Op: "+", LHS: &StringLit{Static: true, Value: "a"}, RHS: &StringLit{Static: true, Value: "b"}}); ok {
+		t.Errorf("binary + resolved static %q; want non-static", v)
 	}
 }

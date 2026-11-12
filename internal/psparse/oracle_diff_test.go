@@ -171,6 +171,19 @@ func TestOracleDifferential(t *testing.T) {
 		t.Skip("set PSPARSE_ORACLE (pwsh path) and PSPARSE_CORPUS (JSONL paths) to run the differential")
 	}
 	items := loadCorpus(t, strings.Split(corpusEnv, ":"))
+	// include the reviewer's hand-written valid-PowerShell grammar lines so the
+	// node-level differential covers the same corpus as the value gate.
+	seenExtra := map[string]bool{}
+	for _, it := range items {
+		seenExtra[it.Text] = true
+	}
+	for _, s := range revExtraLines {
+		t := bq2(s)
+		if !seenExtra[t] {
+			seenExtra[t] = true
+			items = append(items, corpusItem{Text: t, Dialect: DialectPwsh7})
+		}
+	}
 	if len(items) == 0 {
 		t.Fatal("empty corpus")
 	}

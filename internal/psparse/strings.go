@@ -7,7 +7,7 @@ package psparse
 import (
 	"strconv"
 	"strings"
-	"unicode/utf8"
+	"unicode"
 )
 
 // stringLit builds a StringLit from a TokString token, resolving the literal
@@ -16,15 +16,15 @@ func (p *parser) stringLit(t Token) *StringLit {
 	sl := &StringLit{span: span{t.Start, t.End}, Kind: t.Str}
 	switch t.Str {
 	case StrSingle:
-		inner := trimDelims(t.Raw, 1, 1)
-		sl.Value = strings.ReplaceAll(inner, "''", "'")
+		inner := trimRuneDelims(t.Raw)
+		sl.Value = collapseDoubled(inner, isSingleQuote)
 		sl.Static = true
 	case StrHereSingle:
 		sl.Value = hereBody(t.Raw)
 		sl.Static = true
 	case StrDouble:
-		inner := trimDelims(t.Raw, 1, 1)
-		inner = strings.ReplaceAll(inner, `""`, `"`)
+		inner := trimRuneDelims(t.Raw)
+		inner = collapseDoubled(inner, isDoubleQuote)
 		parts, static, lit := p.expandable(inner, t.Start+1)
 		sl.Parts, sl.Static, sl.Value = parts, static, lit
 	case StrHereDouble:
@@ -38,11 +38,30 @@ func (p *parser) stringLit(t Token) *StringLit {
 	return sl
 }
 
-func trimDelims(s string, left, right int) string {
-	if len(s) >= left+right {
-		return s[left : len(s)-right]
+// trimRuneDelims drops the first and last rune (the quote delimiters), which
+// may be multi-byte Unicode quote characters.
+func trimRuneDelims(s string) string {
+	rs := []rune(s)
+	if len(rs) >= 2 {
+		return string(rs[1 : len(rs)-1])
 	}
-	return s
+	return ""
+}
+
+// collapseDoubled replaces each doubled quote-class pair (the quote-escape
+// form) with one repl rune.
+func collapseDoubled(s string, isClass func(rune) bool) string {
+	rs := []rune(s)
+	var b strings.Builder
+	for i := 0; i < len(rs); i++ {
+		if isClass(rs[i]) && i+1 < len(rs) && isClass(rs[i+1]) {
+			b.WriteRune(rs[i]) // a doubled quote collapses to that same quote char
+			i++
+			continue
+		}
+		b.WriteRune(rs[i])
+	}
+	return b.String()
 }
 
 // hereBody extracts the content of a here-string (@" ... "@ / @' ... '@),
@@ -56,7 +75,7 @@ func hereBody(raw string) string {
 	body := raw[nl+1:]
 	// strip the terminator: last line is  "@  or  '@
 	if i := strings.LastIndexByte(body, '\n'); i >= 0 {
-		return body[:i]
+		return strings.TrimSuffix(body[:i], "\r")
 	}
 	// no trailing newline before terminator: drop the final 2 delimiter bytes
 	if len(body) >= 2 {
@@ -78,20 +97,36 @@ func (p *parser) expandable(s string, base int) (parts []StringPart, static bool
 	}
 	runes := []rune(s)
 	hasExpr := false
+	forceDyn := false
 	for i := 0; i < len(runes); {
 		r := runes[i]
 		switch {
 		case r == '`' && i+1 < len(runes):
+			if runes[i+1] == 'u' && i+2 < len(runes) && runes[i+2] == '{' {
+				j := i + 3
+				for j < len(runes) && runes[j] != '}' {
+					j++
+				}
+				if j < len(runes) {
+					if cp, err := strconv.ParseInt(string(runes[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
+						lit.WriteRune(rune(cp))
+						i = j + 1
+						continue
+					}
+				}
+				forceDyn = true // malformed `u{...}: cannot resolve statically
+			}
 			lit.WriteRune(backtickEscape(runes[i+1]))
 			i += 2
 		case r == '$' && i+1 < len(runes) && runes[i+1] == '(':
 			flush()
 			inner, consumed := scanParenBody(runes[i+2:])
-			sub, _ := Parse(inner, Options{Dialect: p.dialect})
-			parts = append(parts, StringPart{Expr: &SubExpr{Statements: sub.Statements}})
+			stmts, ds := p.subParse(inner)
+			p.diags = append(p.diags, ds...)
+			parts = append(parts, StringPart{Expr: &SubExpr{Statements: stmts}})
 			hasExpr = true
 			i += 2 + consumed
-		case r == '$' && i+1 < len(runes) && (runes[i+1] == '{' || isNameStart(runes[i+1]) || runes[i+1] == '$' || runes[i+1] == '?' || runes[i+1] == '^'):
+		case r == '$' && i+1 < len(runes) && runes[i+1] != '(' && dollarStartsVar(runes[i+1]):
 			flush()
 			v, consumed := scanEmbeddedVar(runes[i:])
 			parts = append(parts, StringPart{Expr: v})
@@ -103,7 +138,7 @@ func (p *parser) expandable(s string, base int) (parts []StringPart, static bool
 		}
 	}
 	flush()
-	static = !hasExpr
+	static = !hasExpr && !forceDyn
 	for _, pt := range parts {
 		if pt.Expr == nil {
 			literal += pt.Lit
@@ -130,8 +165,51 @@ func backtickEscape(r rune) rune {
 		return 12
 	case 'v':
 		return 11
+	case 'e':
+		return 0x1b
 	}
 	return r
+}
+
+// dollarStartsVar reports whether a '$' followed by r begins a variable or a
+// $( ) sub-expression (so a bareword ends before it). Matches the tokenizer:
+// a name char, a digit, '_', '?', '^', '$', '{' or '('.
+func dollarStartsVar(r rune) bool {
+	return r == '(' || r == '{' || r == '$' || r == '?' || r == '^' || r == '_' || r == ':' ||
+		unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// decodeBareword resolves PowerShell 7 backtick escapes in a bareword / command
+// name (the raw keeps the escapes so spans stay exact; the value is decoded).
+// Handles `n `t `r `0 `a `b `f `v `e, `u{hex}, and `<char> (literal char).
+func decodeBareword(raw string) string {
+	if !strings.ContainsRune(raw, '`') {
+		return raw
+	}
+	rs := []rune(raw)
+	var b strings.Builder
+	for i := 0; i < len(rs); i++ {
+		if rs[i] == '`' && i+1 < len(rs) {
+			if rs[i+1] == 'u' && i+2 < len(rs) && rs[i+2] == '{' {
+				j := i + 3
+				for j < len(rs) && rs[j] != '}' {
+					j++
+				}
+				if j < len(rs) {
+					if cp, err := strconv.ParseInt(string(rs[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
+						b.WriteRune(rune(cp))
+						i = j
+						continue
+					}
+				}
+			}
+			b.WriteRune(backtickEscape(rs[i+1]))
+			i++
+			continue
+		}
+		b.WriteRune(rs[i])
+	}
+	return b.String()
 }
 
 // scanParenBody returns the text inside a $( ... ) starting just after the '(',
@@ -199,12 +277,14 @@ func scanEmbeddedVar(runes []rune) (Expr, int) {
 	return &Variable{Name: name, Scope: scope}, i
 }
 
+var numberMultipliers = map[string]float64{"kb": 1 << 10, "mb": 1 << 20, "gb": 1 << 30, "tb": 1 << 40, "pb": 1 << 50}
+
 func numberLit(t Token) *Number {
 	n := &Number{span: span{t.Start, t.End}, Text: t.Raw}
 	txt := strings.TrimRight(t.Raw, "lLdD")
 	mult := 1.0
 	lower := strings.ToLower(txt)
-	for suf, m := range map[string]float64{"kb": 1 << 10, "mb": 1 << 20, "gb": 1 << 30, "tb": 1 << 40, "pb": 1 << 50} {
+	for suf, m := range numberMultipliers {
 		if strings.HasSuffix(lower, suf) {
 			mult = m
 			txt = txt[:len(txt)-2]
@@ -228,6 +308,3 @@ func numberLit(t Token) *Number {
 	}
 	return n
 }
-
-// ensure utf8 import is used (defensive against empty inputs)
-var _ = utf8.RuneLen

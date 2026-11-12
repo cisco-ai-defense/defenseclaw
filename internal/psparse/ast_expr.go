@@ -149,6 +149,7 @@ func (*Index) expr() {}
 type TypeExpr struct {
 	span
 	Name string
+	Args []Expr // attribute arguments, e.g. [ValidateScript({...})] — walked for nested commands
 }
 
 func (*TypeExpr) expr() {}

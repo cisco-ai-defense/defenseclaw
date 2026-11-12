@@ -6,6 +6,7 @@ package psparse
 
 import (
 	"encoding/base64"
+	"strconv"
 	"strings"
 	"unicode/utf16"
 )
@@ -99,8 +100,15 @@ func walkCommandsExpr(e Expr, fn func(*Command)) {
 			walkCommandsExpr(el, fn)
 		}
 	case *Hashtable:
+		for _, k := range v.Keys {
+			walkCommandsExpr(k, fn)
+		}
 		for _, val := range v.Values {
 			walkCommandsExpr(val, fn)
+		}
+	case *TypeExpr:
+		for _, a := range v.Args {
+			walkCommandsExpr(a, fn)
 		}
 	case *Paren:
 		walkCommandsStmt(v.Inner, fn)
@@ -154,26 +162,23 @@ func LiteralString(e Expr) (string, bool) {
 		}
 		return "", false
 	case *Number:
-		return v.Text, true
+		// format the parsed value, matching the reference parser's constant
+		// value (0x10 -> "16", 1kb -> "1024", 1e3 -> "1000").
+		if v.Int {
+			return strconv.FormatInt(int64(v.Value), 10), true
+		}
+		if f, err := strconv.ParseFloat(v.Text, 64); err == nil {
+			return strconv.FormatFloat(f, 'g', -1, 64), true
+		}
+		return strconv.FormatFloat(v.Value, 'g', -1, 64), true
 	case *Binary:
-		if v.Op == "+" {
-			l, lok := LiteralString(v.LHS)
-			r, rok := LiteralString(v.RHS)
-			if lok && rok {
-				return l + r, true
-			}
-		}
+		// a binary expression argument is a non-constant node on the reference
+		// side (never a static value).
+		return "", false
 	case *Paren:
-		switch inner := v.Inner.(type) {
-		case *ExprStatement:
-			return LiteralString(inner.Expr)
-		case *Pipeline:
-			if len(inner.Elements) == 1 {
-				if es, ok := inner.Elements[0].(*ExprStatement); ok {
-					return LiteralString(es.Expr)
-				}
-			}
-		}
+		// a parenthesised argument is a ParenExpression (non-constant) on the
+		// reference side, so it is never a static literal value.
+		return "", false
 	case *ArrayLit:
 		// a comma list of literals joins with spaces (ArgumentList style)
 		parts := make([]string, 0, len(v.Elements))
