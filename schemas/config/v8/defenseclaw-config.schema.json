@@ -4667,6 +4667,262 @@
         "CRITICAL"
       ]
     },
+    "routingAdmin": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Organization routing policy. On a standalone managed device it comes from the signed bundle and only tightens what users and profiles get; on OSS its denies and budget denies are reported, not enforced.",
+      "properties": {
+        "rules": {
+          "type": "array",
+          "maxItems": 256,
+          "description": "Per-subject routing rules. Every matching rule applies: a deny wins, allow lists intersect, the first matching default that survives is used.",
+          "items": {
+            "$ref": "#/$defs/routingAdminRule"
+          }
+        },
+        "budgets": {
+          "type": "array",
+          "maxItems": 64,
+          "description": "Spend limits per user, group or connector, counted on this device from the computed cost of agent calls.",
+          "items": {
+            "$ref": "#/$defs/routingBudget"
+          }
+        },
+        "visibility": {
+          "$ref": "#/$defs/routingVisibility"
+        }
+      }
+    },
+    "routingAdminRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "match"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "match": {
+          "$ref": "#/$defs/routingAdminMatch"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "constrain",
+            "deny"
+          ],
+          "description": "constrain (default) narrows the models; deny refuses the request on a managed device."
+        },
+        "allow": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "routing.models aliases the matched requests may use; a request that is not routed must use one of them too."
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Alias used when nothing else the caller may use was chosen; must be in allow when allow is set."
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 512,
+          "description": "Refusal text of a deny rule."
+        }
+      },
+      "if": {
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "const": "deny"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "allow"
+              ]
+            },
+            {
+              "required": [
+                "default"
+              ]
+            }
+          ]
+        }
+      },
+      "else": {
+        "anyOf": [
+          {
+            "required": [
+              "allow"
+            ]
+          },
+          {
+            "required": [
+              "default"
+            ]
+          }
+        ],
+        "not": {
+          "required": [
+            "message"
+          ]
+        }
+      }
+    },
+    "routingAdminMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Requests a rule selects. Keys combine with AND, the values of one key with OR. groups, users and agents compare against a verified caller only.",
+      "properties": {
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "users": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "connectors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/connectorName"
+          }
+        },
+        "agents": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "pattern": "^agt-[0-9a-f]{16}$"
+          }
+        },
+        "categories": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+          }
+        },
+        "severity_at_least": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        }
+      }
+    },
+    "routingBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scope",
+        "subject",
+        "period",
+        "limit_usd",
+        "on_exceed"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "user",
+            "group",
+            "connector"
+          ]
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "user: a users entry or * (each user its own limit); group: one groups entry (pooled); connector: a connector name or *."
+        },
+        "period": {
+          "type": "string",
+          "enum": [
+            "day",
+            "week",
+            "month"
+          ],
+          "description": "UTC calendar window; a week starts Monday."
+        },
+        "limit_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 10000000
+        },
+        "on_exceed": {
+          "type": "string",
+          "pattern": "^(warn|deny|downgrade:.+)$",
+          "description": "warn, deny (managed devices only; OSS reports it) or downgrade:<alias>[,<alias>...]."
+        }
+      },
+      "if": {
+        "properties": {
+          "scope": {
+            "const": "group"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "subject": {
+            "not": {
+              "const": "*"
+            }
+          }
+        }
+      }
+    },
+    "routingVisibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "users_see": {
+          "type": "string",
+          "enum": [
+            "own",
+            "none"
+          ],
+          "description": "own (default): a user reads only their own usage; none: only administrators read usage."
+        }
+      }
+    },
     "routing": {
       "type": "object",
       "additionalProperties": false,
@@ -4696,6 +4952,9 @@
         }
       ],
       "properties": {
+        "admin": {
+          "$ref": "#/$defs/routingAdmin"
+        },
         "enabled": {
           "type": "boolean"
         },

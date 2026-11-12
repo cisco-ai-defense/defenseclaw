@@ -4104,15 +4104,16 @@ class RoutingConfig:
     port: int = 0
     algorithm: str = ""
     # Keep the nested routing graph as mappings/lists rather than duplicating
-    # the rapidly evolving Go DTO hierarchy here.  Python setup commands only
-    # toggle the lifecycle fields above, but these values must still be part of
-    # the modeled v8 snapshot: otherwise changing ``enabled`` on a disabled
-    # config replaces the entire routing block and silently drops the model
-    # catalog, signals, and decisions.
+    # the Go DTO hierarchy here: the gateway's config-v8 validate checks them
+    # on every write. They must still be part of the modeled v8 snapshot:
+    # otherwise saving a changed ``enabled`` replaces the entire routing block
+    # and silently drops the model catalog, signals, decisions and the
+    # organization policy in ``admin`` (rules, budgets, visibility).
     remote: dict[str, Any] = field(default_factory=dict)
     models: list[dict[str, Any]] = field(default_factory=list)
     signals: dict[str, Any] = field(default_factory=dict)
     decisions: list[dict[str, Any]] = field(default_factory=list)
+    admin: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"enabled": self.enabled}
@@ -4130,6 +4131,8 @@ class RoutingConfig:
             d["signals"] = copy.deepcopy(self.signals)
         if self.decisions:
             d["decisions"] = copy.deepcopy(self.decisions)
+        if self.admin:
+            d["admin"] = copy.deepcopy(self.admin)
         return d
 
 
@@ -5769,6 +5772,7 @@ def _serialize_routing(d: dict[str, Any]) -> None:
         "models",
         "signals",
         "decisions",
+        "admin",
     )
     has_value = any(
         (
@@ -8682,6 +8686,7 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
         models=mapping_list("models"),
         signals=mapping("signals"),
         decisions=mapping_list("decisions"),
+        admin=mapping("admin"),
     )
 
 
