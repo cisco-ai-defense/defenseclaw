@@ -35,6 +35,10 @@ type Attestation struct {
 	// Reason says why a template is not attested (no attestation, bad
 	// signature, digest mismatch...).
 	Reason string
+	// ValidUntil is when the verdict must be checked again (the earliest
+	// attest.Verified.ValidUntil of the template's images); zero = the
+	// controller's own TTL only.
+	ValidUntil time.Time
 }
 
 // Attestor verifies a template's DefenseClaw attestation (lane A9

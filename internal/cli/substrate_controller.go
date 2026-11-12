@@ -47,7 +47,8 @@ var substrateControllerCmd = &cobra.Command{
 	Long: `Run the DefenseClaw controller for Agent Substrate actors: it writes each
 actor's egress policy before its first resume, re-checks it on resume,
 reverts foreign policy changes (three reverts in ten minutes mark the actor
-policy_conflict), adopts forks, suspends idle actors and reports inventory.
+policy_conflict: it keeps only the DefenseClaw rule until its policy is
+DefenseClaw's again), admits only attested, digest-pinned templates, adopts forks, suspends idle actors and reports inventory.
 It reads substrate: from config.yaml and runs as one replica in the
 DefenseClaw namespace; events go to stdout as JSON lines.
 
@@ -98,6 +99,16 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	if substrateControllerCheck {
 		return substrateControllerReport(ctx, cmd, client)
 	}
+	attestor := controller.Attestor(controller.NoAttestor{})
+	if sub.AttestationRequired() {
+		// Anchors come from the admin-only Secret mount and are re-read on
+		// change; a missing file refuses every template (fail closed).
+		ver, anchors := controller.VerifierFromConfig(sub.Templates)
+		if _, err := anchors.Get(); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v: every template is refused until the trust anchors are mounted\n", err)
+		}
+		attestor = &controller.TemplateAttestor{Verifier: ver, VolumeImages: sub.Templates.VolumeImages}
+	}
 	var cpu controller.CPUSource
 	idleAfter := sub.EffectiveIdleSuspendAfter()
 	if substrateControllerUsage != "" {
@@ -112,11 +123,11 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 		idleAfter = 0 // no CPU source: never suspend on silence alone (E4)
 	}
 	ctl, err := controller.New(controller.Options{
-		Client: client, Attestor: controller.NoAttestor{}, Activity: controller.NoActivity{}, CPU: cpu,
+		Client: client, Attestor: attestor, Activity: controller.NoActivity{}, CPU: cpu,
 		Registry: controller.NewMemoryRegistry(), Resolver: &controller.ConfigResolver{Config: cfg},
 		Sink:     &controller.JSONSink{W: cmd.OutOrStdout()},
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
-		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(),
+		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(), Templates: sub.Templates,
 		KitVersion: appVersion, IdleSuspendAfter: idleAfter,
 	})
 	if err != nil {

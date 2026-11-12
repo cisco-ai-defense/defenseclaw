@@ -19,7 +19,8 @@
 // template DefenseClaw attested and a profile allows, writes each actor's
 // EgressPolicy before its first resume (forks too) and re-checks it on
 // every resume, reverts foreign policy changes until three reverts in ten
-// minutes mark the actor policy_conflict (E14), adopts forks with their
+// minutes mark the actor policy_conflict (E14; it then keeps only the
+// DefenseClaw rule), adopts forks with their
 // parent's attribution (E17), suspends idle actors (E4), refuses old kits
 // (E18) and reports inventory and shadow AI. It runs as one replica.
 package controller
@@ -37,7 +38,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 )
 
@@ -54,7 +57,13 @@ const (
 	// idle; DefaultCPUSampleMaxAge how fresh the sample must be.
 	DefaultIdleCPU         = 0.05
 	DefaultCPUSampleMaxAge = 2 * time.Minute
-	templateCacheTTL       = 30 * time.Second
+	// templateCacheTTL bounds how long a template's attestation verdict is
+	// reused; after it the attestor runs again (it has its own short
+	// cache), so a revoked key or rotated anchors reach admitted templates.
+	templateCacheTTL = 30 * time.Second
+	// registrationTTL bounds how long a registration is reused before the
+	// registry is read again (approvals and revocations).
+	registrationTTL = 30 * time.Second
 	// MigrateHint is the fix the kit refusal names.
 	MigrateHint = "rebuild the template with the current kit: defenseclaw substrate migrate"
 )
@@ -78,6 +87,9 @@ type Options struct {
 	LauncherAtespaces map[string]bool
 	// RequireAttestation gives no policy to an unattested template.
 	RequireAttestation bool
+	// Templates holds the image allow lists (allowed_images and
+	// profile_images) every admitted template's containers must match.
+	Templates config.SubstrateTemplatesConfig
 	// KitVersion is this release's kit version (N); N and N-1 are
 	// accepted. Empty or unparseable accepts every kit.
 	KitVersion string
@@ -124,11 +136,17 @@ type actorState struct {
 	ourVersion int64
 	reverts    []time.Time
 	conflict   bool
-	refused    string
-	recheckGen int32
-	reg        Registration
-	regOK      bool
-	written    bool
+	// lastForeign is the last foreign change seen while in conflict.
+	lastForeign time.Time
+	refused     string
+	recheckGen  int32
+	reg         Registration
+	regOK       bool
+	regAt       time.Time
+	written     bool
+	// unmanagedChecked is set once an unmanaged actor's policy was checked
+	// for a DefenseClaw policy left from when it was managed.
+	unmanagedChecked bool
 }
 
 // New checks the options and fills defaults.
@@ -387,11 +405,16 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 			c.emit(ev)
 		}
 		if !res.Managed {
-			return nil // inventory only
+			// Inventory only. An actor that was managed (its atespace left
+			// launcher_atespaces or its profile assignment went away) must
+			// not keep DefenseClaw's allow list, JWT and secret rules with
+			// nothing enforcing them: remove a DefenseClaw policy once.
+			return c.unmanaged(ctx, a, st, base)
 		}
+		st.unmanagedChecked = false
 		if res.Refuse != "" {
 			c.refuseOnce(st, base, EventProfileRefused, res.Refuse, "", "")
-		} else if c.admit(ctx, a, st, base) == "" {
+		} else if c.admit(ctx, a, st, base, res.Profile.Name) == "" {
 			if err := c.apply(ctx, a, st, reg, res.Profile, base); err != nil {
 				return err
 			}
@@ -405,7 +428,8 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 // attribution finds or creates the actor's registration. A non-empty
 // refuse means the actor gets no policy.
 func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actorState, launcher bool, base Event) (Registration, string, error) {
-	if st.regOK {
+	now := c.o.Now()
+	if st.regOK && now.Sub(st.regAt) < registrationTTL {
 		st.reg.Template = ateapi.Key(a.GetActorTemplate())
 		return st.reg, "", nil
 	}
@@ -414,6 +438,10 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 	if err != nil {
 		return Registration{}, "", fmt.Errorf("%s: registry: %w", st.key, err)
 	}
+	// A registration that is gone (the launcher revoked it, or an in-memory
+	// registry restarted) is made again below like a new one: in a launcher
+	// atespace that makes the actor foreign (no policy).
+	st.regOK = false
 	if !ok {
 		reg = Registration{Atespace: md.GetAtespace(), Name: md.GetName(), UID: md.GetUid(), Source: SourceAtespace}
 		if tag := a.GetSourceTag(); tag.GetName() != "" {
@@ -425,11 +453,18 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 				reg = parent
 				reg.Atespace, reg.Name, reg.UID, reg.Source = md.GetAtespace(), md.GetName(), md.GetUid(), SourceFork
 				reg.ParentUID = parent.UID
+				// A fork inherits chain windows (keyed on the parent in the
+				// leader) but never the parent's ask approvals (PLAN §5.3).
+				reg.Approved = nil
 				reg.ForkedBy = ForkedByUnknown
 				if launcher {
 					// Only DefenseClaw may fork in a launcher atespace (the
 					// access policy grants it alone).
 					reg.ForkedBy = ForkedByDefenseClaw
+				} else {
+					// Someone else forked it: it is not that person's actor,
+					// so it gets no person binding (no per-person secrets).
+					reg.Person, reg.Workload = "", ""
 				}
 				ev := base
 				ev.Type, ev.Severity, ev.Message = EventFork, SeverityInfo, "fork adopted with its parent's attribution"
@@ -452,7 +487,7 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 		}
 	}
 	reg.Template = ateapi.Key(a.GetActorTemplate())
-	st.reg, st.regOK = reg, true
+	st.reg, st.regOK, st.regAt = reg, true, now
 	return reg, "", nil
 }
 
@@ -477,7 +512,7 @@ func (c *Controller) parentRegistration(ctx context.Context, tag *ateapi.ObjectR
 }
 
 // admit checks the template's attestation and kit version.
-func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState, base Event) string {
+func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState, base Event, profile string) string {
 	tmpl, att, err := c.template(ctx, a.GetActorTemplate())
 	if err != nil {
 		c.refuseOnce(st, base, EventTemplateUnverified, "template could not be read: "+err.Error(), "", "")
@@ -490,6 +525,17 @@ func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState,
 		}
 		c.refuseOnce(st, base, EventTemplateUnverified, "template "+ateapi.Key(ateapi.RefOf(tmpl.GetMetadata()))+" is not attested: "+reason, SignalUnattestedTemplate, att.Digest)
 		return "template_unverified"
+	}
+	if att.Attested {
+		// PLAN §5.3 step 2: an attested digest that a profile allows.
+		var repos []string
+		for _, ct := range tmpl.GetContainers() {
+			repos = append(repos, imageRepo(ct.GetImage()))
+		}
+		if repo, ok := ImagesAllowed(c.o.Templates, profile, repos); !ok {
+			c.refuseOnce(st, base, EventTemplateUnverified, fmt.Sprintf("image %s is not allowed for profile %s (substrate.templates.allowed_images / profile_images)", repo, profile), SignalUnattestedTemplate, att.Digest)
+			return "image_not_allowed"
+		}
 	}
 	if att.KitVersion != "" && !KitAccepted(c.o.KitVersion, att.KitVersion) {
 		c.refuseOnce(st, base, EventKitRefused, fmt.Sprintf("kit %s is older than N-1 of %s; %s", att.KitVersion, c.o.KitVersion, MigrateHint), SignalOldKit, att.KitVersion)
@@ -504,22 +550,22 @@ func (c *Controller) template(ctx context.Context, ref *ateapi.ObjectRef) (*atea
 	c.mu.Lock()
 	ct, ok := c.templates[k]
 	c.mu.Unlock()
-	if ok && now.Sub(ct.at) < templateCacheTTL {
+	if ok && now.Sub(ct.at) < templateCacheTTL && (ct.att.ValidUntil.IsZero() || now.Before(ct.att.ValidUntil)) {
 		return ct.tmpl, ct.att, nil
 	}
 	tmpl, err := c.o.Client.GetActorTemplate(ctx, ref)
 	if err != nil {
 		return nil, Attestation{}, err
 	}
-	if ok && ct.tmpl.GetMetadata().GetUid() == tmpl.GetMetadata().GetUid() && ct.tmpl.GetMetadata().GetVersion() == tmpl.GetMetadata().GetVersion() {
-		ct.at = now
-	} else {
-		att, err := c.o.Attestor.Attest(ctx, tmpl)
-		if err != nil {
-			att = Attestation{Reason: "attestation check failed: " + err.Error()}
-		}
-		ct = cachedTemplate{tmpl: tmpl, att: att, at: now}
+	// Always attest again after the TTL, even for an unchanged template: a
+	// revoked key, rotated anchors or a raised policy generation must reach
+	// templates admitted before (GAP-0054). The attestor caches the
+	// registry work itself.
+	att, err := c.o.Attestor.Attest(ctx, tmpl)
+	if err != nil {
+		att = Attestation{Reason: "attestation check failed: " + err.Error()}
 	}
+	ct = cachedTemplate{tmpl: tmpl, att: att, at: now}
 	c.mu.Lock()
 	c.templates[k] = ct
 	c.mu.Unlock()
@@ -578,7 +624,19 @@ func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState,
 		c.fail(base, "render: "+err.Error())
 		return fmt.Errorf("%s: render: %w", st.key, err)
 	}
-	want := res.Policy
+	full := res.Policy
+	deny, err := render.DenyOnly(c.o.Settings)
+	if err != nil {
+		c.fail(base, "render: "+err.Error())
+		return fmt.Errorf("%s: render deny-only: %w", st.key, err)
+	}
+	// In policy_conflict the actor keeps only the DefenseClaw rule (the
+	// actor JWT to the actor listener, so hooks still get verdicts): a
+	// foreign policy is never left in force (GAP-0055).
+	want := full
+	if st.conflict {
+		want = deny
+	}
 	state := a.GetStatus().GetState()
 	cur, err := c.o.Client.GetActorEgressPolicy(ctx, ref)
 	if ateapi.IsNotFound(err) {
@@ -590,33 +648,38 @@ func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState,
 			c.fail(base, "create policy: "+err.Error())
 			return fmt.Errorf("%s: create policy: %w", st.key, err)
 		}
-		c.wrote(st, created, base, state, "created", res)
+		how := "created"
+		if st.conflict {
+			how = "created deny-only (policy_conflict)"
+		}
+		c.wrote(st, created, base, state, how, res)
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("%s: get policy: %w", st.key, err)
 	}
 	m := cur.GetMetadata()
-	if render.Equal(cur, want) {
-		// Our own last write matching is no news. A conflict clears only
-		// when another writer brings the policy back to DefenseClaw's.
-		ours := m.GetUid() == st.ourUID && m.GetVersion() == st.ourVersion
+	ours := m.GetUid() == st.ourUID && m.GetVersion() == st.ourVersion
+	if st.conflict && !ours && render.Equal(cur, full) {
+		// Another writer brought the policy back to DefenseClaw's: the
+		// conflict is over.
+		st.conflict, st.reverts = false, nil
 		st.ourUID, st.ourVersion, st.written = m.GetUid(), m.GetVersion(), true
-		if st.conflict && !ours {
-			st.conflict, st.reverts = false, nil
-			ev := base
-			ev.Type, ev.Severity, ev.Message = EventConflictCleared, SeverityInfo, "the actor's policy matches DefenseClaw's again"
-			c.emit(ev)
-		}
+		ev := base
+		ev.Type, ev.Severity, ev.Message = EventConflictCleared, SeverityInfo, "the actor's policy matches DefenseClaw's again"
+		c.emit(ev)
+		c.recheck(st, a, base, "confirmed")
+		return nil
+	}
+	if render.Equal(cur, want) {
+		st.ourUID, st.ourVersion, st.written = m.GetUid(), m.GetVersion(), true
 		c.recheck(st, a, base, "confirmed")
 		return nil
 	}
 	now := c.o.Now()
-	foreign := st.ourVersion != 0 && (m.GetVersion() != st.ourVersion || m.GetUid() != st.ourUID)
-	if foreign {
-		if st.conflict {
-			return nil // stop reverting; never write while in conflict
-		}
+	foreign := st.ourVersion != 0 && !ours
+	enter := false
+	if foreign && !st.conflict {
 		st.reverts = append(st.reverts, now)
 		cut := now.Add(-c.o.ConflictWindow)
 		kept := st.reverts[:0]
@@ -626,30 +689,53 @@ func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState,
 			}
 		}
 		st.reverts = kept
+		if len(st.reverts) >= c.o.ConflictReverts {
+			st.conflict, enter, want = true, true, deny
+		}
 	}
 	upd := &ateapi.EgressPolicy{Metadata: &ateapi.ResourceMetadata{Uid: m.GetUid(), Version: m.GetVersion()}, Rules: want.GetRules()}
 	updated, err := c.o.Client.UpdateActorEgressPolicy(ctx, ref, upd)
 	if ateapi.IsConflict(err) {
+		if enter {
+			st.conflict = false // decide again on the next pass
+			st.reverts = st.reverts[:len(st.reverts)-1]
+		}
 		return nil // changed under us; the next pass decides again
 	}
 	if err != nil {
+		if enter {
+			st.conflict = false
+			st.reverts = st.reverts[:len(st.reverts)-1]
+		}
 		c.fail(base, "update policy: "+err.Error())
 		return fmt.Errorf("%s: update policy: %w", st.key, err)
 	}
 	how := "updated"
-	if foreign {
+	switch {
+	case enter:
+		how = "replaced with deny-only (policy_conflict)"
+	case foreign && st.conflict:
+		how = "reverted to deny-only (policy_conflict)"
+	case foreign:
 		how = "reverted"
+	case st.conflict:
+		how = "deny-only (policy_conflict)"
+	}
+	// One foreign_rule event per revert outside a conflict; inside one, at
+	// most one per conflict window (a GitOps loop would flood otherwise).
+	if foreign && (!st.conflict || enter || now.Sub(st.lastForeign) >= c.o.ConflictWindow) {
+		st.lastForeign = now
 		ev := base
 		ev.Type, ev.Severity, ev.Message = EventForeignRule, SeverityWarn, "a foreign change to the actor's egress policy was reverted"
-		ev.Detail = map[string]any{"foreign_version": m.GetVersion(), "reverts_in_window": len(st.reverts), "window": c.o.ConflictWindow.String()}
+		ev.Detail = map[string]any{"foreign_version": m.GetVersion(), "reverts_in_window": len(st.reverts), "window": c.o.ConflictWindow.String(),
+			"policy_conflict": st.conflict}
 		c.emit(ev)
 	}
 	c.wrote(st, updated, base, state, how, res)
-	if foreign && len(st.reverts) >= c.o.ConflictReverts {
-		st.conflict = true
+	if enter {
 		ev := base
 		ev.Type, ev.Severity = EventPolicyConflict, SeverityAlert
-		ev.Message = fmt.Sprintf("%d foreign changes reverted in %s: marked policy_conflict; DefenseClaw stops reverting and never widens the policy until it matches again",
+		ev.Message = fmt.Sprintf("%d foreign changes reverted in %s: marked policy_conflict; the actor keeps only the DefenseClaw rule (no other egress) until its policy is DefenseClaw's again",
 			len(st.reverts), c.o.ConflictWindow)
 		ev.Signal = c.signal(base, SignalPolicyConflict, "", st.firstSeen)
 		c.emit(ev)
@@ -730,4 +816,46 @@ func majorMinor(v string) (int, int, bool) {
 		return 0, 0, false
 	}
 	return ma, mi, true
+}
+
+// unmanaged handles an actor DefenseClaw does not (or no longer) manage. A
+// policy that carries DefenseClaw's actor rule was written by DefenseClaw
+// while the actor was managed; it is removed once, so the actor falls to
+// default deny instead of keeping DefenseClaw's allow list, JWT and secret
+// rules with nothing enforcing them (GAP-0083). Other writers' policies on
+// unmanaged actors are left alone.
+func (c *Controller) unmanaged(ctx context.Context, a *ateapi.Actor, st *actorState, base Event) error {
+	if st.unmanagedChecked {
+		return nil
+	}
+	ref := ateapi.RefOf(a.GetMetadata())
+	cur, err := c.o.Client.GetActorEgressPolicy(ctx, ref)
+	if ateapi.IsNotFound(err) {
+		st.unmanagedChecked, st.written, st.ourVersion = true, false, 0
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%s: get policy: %w", st.key, err)
+	}
+	if !st.written && !render.IsDefenseClaw(cur, c.o.Settings) {
+		st.unmanagedChecked = true
+		return nil
+	}
+	if _, err := c.o.Client.DeleteActorEgressPolicy(ctx, ref, &ateapi.DeleteOptions{Uid: cur.GetMetadata().GetUid(), Version: cur.GetMetadata().GetVersion()}); err != nil && !ateapi.IsNotFound(err) {
+		return fmt.Errorf("%s: remove policy: %w", st.key, err)
+	}
+	st.unmanagedChecked, st.written, st.ourVersion, st.conflict, st.reverts = true, false, 0, false, nil
+	ev := base
+	ev.Type, ev.Severity, ev.Message = EventPolicyRemoved, SeverityWarn, "egress policy removed: DefenseClaw no longer manages the actor"
+	c.emit(ev)
+	return nil
+}
+
+// imageRepo is the repository name of an image reference, or the reference
+// itself when it does not parse.
+func imageRepo(image string) string {
+	if r, err := attest.ParseRef(image); err == nil {
+		return r.Name()
+	}
+	return image
 }

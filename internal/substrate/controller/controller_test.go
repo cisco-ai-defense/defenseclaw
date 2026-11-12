@@ -297,13 +297,21 @@ func TestDriftRevertAndConflictRule(t *testing.T) {
 	ref := ateapi.RefOf(a.GetMetadata())
 	r.pass()
 	want := r.api.Policy(ref)
+	deny, err := render.DenyOnly(controller.SettingsFromConfig(r.cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
 	wide := []*ateapi.EgressRule{{Https: &ateapi.HttpsRule{Hostnames: []string{"*"}}}}
 	for i := 1; i <= 3; i++ {
 		r.clk.Add(time.Minute)
 		_ = r.api.ForeignSetPolicy(ref, wide)
 		r.pass()
-		if !render.Equal(r.api.Policy(ref), want) {
-			t.Fatalf("revert %d did not restore the policy", i)
+		exp := want
+		if i == 3 {
+			exp = deny // the third revert marks the conflict: deny-only
+		}
+		if !render.Equal(r.api.Policy(ref), exp) {
+			t.Fatalf("revert %d: policy = %v", i, r.api.Policy(ref).GetRules())
 		}
 	}
 	if n := len(r.sink.Events(controller.EventForeignRule)); n != 3 {
@@ -313,26 +321,43 @@ func TestDriftRevertAndConflictRule(t *testing.T) {
 	if len(conf) != 1 || conf[0].Severity != controller.SeverityAlert || conf[0].Signal.SignalID != controller.SignalPolicyConflict {
 		t.Fatalf("conflict events = %+v", conf)
 	}
-	// Idle passes after the third revert keep the conflict: the matching
-	// policy is DefenseClaw's own write (live run, TST A3-C3).
+	// Idle passes keep the conflict: the deny-only policy is DefenseClaw's
+	// own write (live run, TST A3-C3).
 	r.pass()
 	r.pass()
 	if len(r.sink.Events(controller.EventConflictCleared)) != 0 {
-		t.Fatal("the conflict cleared on DefenseClaw's own revert")
+		t.Fatal("the conflict cleared on DefenseClaw's own write")
 	}
-	// A fourth change is not reverted.
-	r.clk.Add(time.Minute)
-	_ = r.api.ForeignSetPolicy(ref, wide)
-	writes := len(r.api.PolicyWrites())
+	// A fourth foreign change never stays in force (GAP-0055): it is
+	// replaced with deny-only again, without a new alert.
+	for range 3 {
+		r.clk.Add(time.Minute)
+		_ = r.api.ForeignSetPolicy(ref, wide)
+		r.pass()
+		if !render.Equal(r.api.Policy(ref), deny) {
+			t.Fatalf("a foreign policy stayed in force in policy_conflict: %v", r.api.Policy(ref).GetRules())
+		}
+	}
+	if len(r.sink.Events(controller.EventPolicyConflict)) != 1 {
+		t.Fatal("a second conflict alert")
+	}
+	// A deleted policy comes back deny-only.
+	if _, err := r.api.DeleteActorEgressPolicy(context.Background(), ref, nil); err != nil {
+		t.Fatal(err)
+	}
 	r.pass()
-	if len(r.api.PolicyWrites()) != writes {
-		t.Fatal("reverted while in policy_conflict")
+	if !render.Equal(r.api.Policy(ref), deny) {
+		t.Fatal("a deleted policy in conflict did not come back deny-only")
 	}
-	// The conflict clears once the policy matches again.
+	// The conflict clears once another writer restores DefenseClaw's policy.
 	_ = r.api.ForeignSetPolicy(ref, want.GetRules())
 	r.pass()
 	if len(r.sink.Events(controller.EventConflictCleared)) != 1 {
 		t.Fatal("conflict not cleared")
+	}
+	r.pass()
+	if !render.Equal(r.api.Policy(ref), want) {
+		t.Fatal("after the conflict cleared the policy is not DefenseClaw's")
 	}
 }
 

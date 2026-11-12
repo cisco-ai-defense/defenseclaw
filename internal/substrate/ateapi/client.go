@@ -49,6 +49,9 @@ type (
 	ActorState           = pb.ActorState
 	ActorStatus          = pb.ActorStatus
 	ActorTemplate        = pb.ActorTemplate
+	Container            = pb.Container
+	Volume               = pb.Volume
+	ImageVolumeSource    = pb.ImageVolumeSource
 	Atespace             = pb.Atespace
 	Tag                  = pb.Tag
 	TagScope             = pb.TagScope
