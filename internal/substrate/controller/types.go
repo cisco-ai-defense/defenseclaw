@@ -153,6 +153,7 @@ const (
 	EventForeignRule        = "sandbox.policy.foreign_rule"
 	EventPolicyConflict     = "sandbox.policy_conflict"
 	EventConflictCleared    = "sandbox.policy_conflict.cleared"
+	EventConflictReset      = "sandbox.policy_conflict.reset"
 	EventResumeRecheck      = "sandbox.resume_recheck"
 	EventTemplateUnverified = "sandbox.template_unverified"
 	EventKitRefused         = "sandbox.kit_refused"

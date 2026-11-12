@@ -29,6 +29,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
 )
 
 const (
@@ -340,5 +342,76 @@ func TestUsageCPUSweepsOnInsert(t *testing.T) {
 	u.Ingest(controller.UsageSample{UID: "fresh", Epoch: 1, CPUTime: 1, At: clk.Now()})
 	if u.Len() != 1 {
 		t.Fatalf("stale actors not swept on insert: %d", u.Len())
+	}
+}
+
+type memResets struct {
+	cms map[string]*setup.ConfigMap
+}
+
+func (m *memResets) GetConfigMap(_ context.Context, ns, name string) (*setup.ConfigMap, error) {
+	cm := m.cms[ns+"/"+name]
+	if cm == nil {
+		return nil, nil
+	}
+	c := *cm
+	c.Data = map[string]string{}
+	for k, v := range cm.Data {
+		c.Data[k] = v
+	}
+	return &c, nil
+}
+func (m *memResets) UpdateConfigMap(_ context.Context, cm *setup.ConfigMap) error {
+	m.cms[cm.Namespace+"/"+cm.Name] = cm
+	return nil
+}
+func (m *memResets) CreateConfigMap(_ context.Context, cm *setup.ConfigMap) error {
+	m.cms[cm.Namespace+"/"+cm.Name] = cm
+	return nil
+}
+
+// Lead 11-12: an audited admin reset clears policy_conflict; the next pass
+// writes DefenseClaw's policy and drift handling starts over.
+func TestAdminPolicyReset(t *testing.T) {
+	store := &memResets{cms: map[string]*setup.ConfigMap{}}
+	r := newRig(t, func(_ *config.Config, o *controller.Options) { o.Resets, o.Namespace = store, "defenseclaw-system" })
+	a := r.actor("eng-web", "alice-1", ateapi.ActorStateRunning, "sub-alice")
+	ref := ateapi.RefOf(a.GetMetadata())
+	r.pass()
+	full := r.api.Policy(ref)
+	wide := []*ateapi.EgressRule{{Https: &ateapi.HttpsRule{Hostnames: []string{"*"}}}}
+	for range 3 {
+		r.clk.Add(time.Minute)
+		_ = r.api.ForeignSetPolicy(ref, wide)
+		r.pass()
+	}
+	if len(r.sink.Events(controller.EventPolicyConflict)) != 1 {
+		t.Fatal("no conflict")
+	}
+	if err := controller.RequestReset(context.Background(), store, "defenseclaw-system",
+		controller.ResetRequest{Atespace: "eng-web", Actor: "alice-1", By: "admin@example.com", Reason: "GitOps fixed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.RequestReset(context.Background(), store, "defenseclaw-system", controller.ResetRequest{Atespace: "eng-web", Actor: "alice-1"}); err == nil {
+		t.Fatal("a reset without a requester was accepted")
+	}
+	r.pass()
+	if !render.Equal(r.api.Policy(ref), full) {
+		t.Fatal("the reset did not write DefenseClaw's policy")
+	}
+	ev := r.sink.Events(controller.EventConflictReset)
+	if len(ev) != 1 || ev[0].Detail["by"] != "admin@example.com" || ev[0].Detail["was_in_conflict"] != true {
+		t.Fatalf("reset events = %+v", ev)
+	}
+	if cm := store.cms["defenseclaw-system/"+controller.ResetConfigMap]; len(cm.Data) != 0 {
+		t.Fatalf("handled request left: %v", cm.Data)
+	}
+	// Drift handling starts over: one foreign change is reverted to the
+	// full policy, not to deny-only.
+	r.clk.Add(time.Minute)
+	_ = r.api.ForeignSetPolicy(ref, wide)
+	r.pass()
+	if !render.Equal(r.api.Policy(ref), full) {
+		t.Fatal("after the reset a foreign change was not reverted to DefenseClaw's policy")
 	}
 }

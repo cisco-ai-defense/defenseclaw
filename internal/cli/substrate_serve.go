@@ -336,6 +336,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				substrateRateLimited.WithLabelValues(string(scope), route).Inc()
 			},
 		}
+		out.PolicyReset = substratePolicyResetter()
 		if people != nil {
 			adminTLS := servingTLS
 			if !serveFlags.plainHTTP {

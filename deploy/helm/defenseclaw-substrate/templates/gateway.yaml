@@ -81,6 +81,8 @@ spec:
         volumeMounts:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
         {{- include "dc.gatewaySecretMounts" . | nindent 8 }}
+        # The admin route writes policy_conflict resets for the controller.
+        {{- include "dc.kubeTokenMount" . | nindent 8 }}
         {{- if .Values.admin.tlsSecretName }}
         - name: admin-tls
           mountPath: /etc/defenseclaw/admin-tls
@@ -89,6 +91,7 @@ spec:
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
       {{- include "dc.gatewaySecretVolumes" . | nindent 6 }}
+      {{- include "dc.kubeTokenVolume" . | nindent 6 }}
       {{- if .Values.admin.tlsSecretName }}
       - name: admin-tls
         secret:

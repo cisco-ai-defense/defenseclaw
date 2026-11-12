@@ -24,6 +24,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
 )
 
@@ -56,4 +58,21 @@ func substrateRecordStoreState(ctx context.Context, namespace string) error {
 	}
 	fmt.Fprintf(os.Stderr, "[substrate] store schema %d recorded in %s\n", st.SchemaVersion, serveFlags.storeStateCM)
 	return nil
+}
+
+// substratePolicyResetter writes admin policy_conflict resets into the
+// controller's ConfigMap in this namespace (nil outside a cluster).
+func substratePolicyResetter() gateway.SubstratePolicyReset {
+	ns := os.Getenv("POD_NAMESPACE")
+	if ns == "" || os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
+		return nil
+	}
+	kube, err := setup.NewInClusterKube(setup.InClusterDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[substrate] policy reset is off: %v\n", err)
+		return nil
+	}
+	return func(ctx context.Context, atespace, actor, by, reason string) error {
+		return controller.RequestReset(ctx, kube, ns, controller.ResetRequest{Atespace: atespace, Actor: actor, By: by, Reason: reason, At: time.Now().UTC()})
+	}
 }

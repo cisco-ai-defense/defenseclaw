@@ -122,6 +122,9 @@ type SubstrateConfig struct {
 	LLM http.Handler
 	// Actions creates and deletes actors for the launcher (nil: 501).
 	Actions SubstrateActorActions
+	// PolicyReset records an admin policy_conflict reset for the
+	// controller (nil: 501).
+	PolicyReset SubstratePolicyReset
 	// Profiles picks a create's profile and launcher atespace (nil: every
 	// create is refused).
 	Profiles SubstrateProfileResolver

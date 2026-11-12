@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
 )
 
 var (
@@ -142,7 +143,19 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	} else {
 		idleAfter = 0 // no CPU source: never suspend on silence alone (E4)
 	}
+	// Admin policy_conflict resets arrive through a ConfigMap in our own
+	// namespace (the gateway's admin route writes them).
+	var resets controller.ResetStore
+	ns := os.Getenv("POD_NAMESPACE")
+	if ns != "" && os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		if kube, err := setup.NewInClusterKube(setup.InClusterDir); err == nil {
+			resets = kube
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: policy resets are off: %v\n", err)
+		}
+	}
 	ctl, err := controller.New(controller.Options{
+		Resets: resets, Namespace: ns,
 		Client: client, Attestor: attestor, Activity: controller.NoActivity{}, CPU: cpu,
 		Registry: controller.NewMemoryRegistry(), Resolver: &controller.ConfigResolver{Config: cfg},
 		Sink:     &controller.JSONSink{W: cmd.OutOrStdout()},

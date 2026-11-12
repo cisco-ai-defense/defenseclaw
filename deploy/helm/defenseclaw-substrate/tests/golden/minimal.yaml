@@ -242,8 +242,29 @@ rules:
   verbs: [create]
 - apiGroups: [""]
   resources: [configmaps]
-  resourceNames: [defenseclaw-store-state]
+  resourceNames: [defenseclaw-store-state, defenseclaw-policy-resets]
   verbs: [get, update, patch]
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+# The controller reads and clears admin policy_conflict resets (the gateway
+# admin route writes them into defenseclaw-policy-resets).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-controller
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: controller
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-policy-resets]
+  verbs: [get, update]
 ---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -287,6 +308,28 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: defenseclaw-gateway
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-controller
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-controller
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-controller
   namespace: defenseclaw-system
 ---
 # Source: defenseclaw-substrate/templates/callout.yaml
@@ -657,6 +700,10 @@ spec:
         - name: ate
           mountPath: /var/run/ate
           readOnly: true
+        # Reads admin policy_conflict resets (defenseclaw-policy-resets).
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
         - name: template-anchors
           mountPath: /etc/defenseclaw/substrate/template-anchors
           readOnly: true
@@ -680,6 +727,20 @@ spec:
               audience: api.ate-system.svc
               expirationSeconds: 3600
               path: token
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
       # Admin-only: only the controller mounts it; a Secret update reaches
       # the file in about a minute and the controller re-reads it.
       - name: template-anchors
@@ -819,6 +880,10 @@ spec:
         - name: llm-credentials
           mountPath: /var/run/secrets/defenseclaw-llm
           readOnly: true
+        # The admin route writes policy_conflict resets for the controller.
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
       volumes:
       - name: config
         configMap:
@@ -847,6 +912,20 @@ spec:
         secret:
           secretName: defenseclaw-llm
           optional: true
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
 ---
 # Source: defenseclaw-substrate/templates/leader.yaml
 # The gateway leader: one replica holding the lease and the RWO store. Recreate,

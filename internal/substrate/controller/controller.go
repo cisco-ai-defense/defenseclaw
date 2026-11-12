@@ -87,6 +87,10 @@ type Options struct {
 	LauncherAtespaces map[string]bool
 	// RequireAttestation gives no policy to an unattested template.
 	RequireAttestation bool
+	// Resets, when set, is read every pass for admin policy_conflict
+	// resets (ResetConfigMap in Namespace).
+	Resets    ResetStore
+	Namespace string
 	// Templates holds the image allow lists (allowed_images and
 	// profile_images) every admitted template's containers must match.
 	Templates config.SubstrateTemplatesConfig
@@ -209,6 +213,7 @@ func (c *Controller) Run(ctx context.Context) error {
 // Reconcile is one pass over every actor. New and resuming actors go first
 // so their policy lands before they reach the network.
 func (c *Controller) Reconcile(ctx context.Context) error {
+	c.applyResets(ctx)
 	actors, err := c.listActors(ctx)
 	if err != nil {
 		return err

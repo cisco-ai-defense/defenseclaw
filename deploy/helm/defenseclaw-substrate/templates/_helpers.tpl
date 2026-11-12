@@ -264,3 +264,27 @@ checksum/config: {{ include "dc.config" .ctx | sha256sum }}
     - {key: token, path: token}
 {{- end }}
 {{- end -}}
+
+{{/* The Kubernetes API token for pods that call the Kubernetes API (the
+service account automount stays off). */}}
+{{- define "dc.kubeTokenMount" -}}
+- name: kube-api-token
+  mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+  readOnly: true
+{{- end -}}
+{{- define "dc.kubeTokenVolume" -}}
+- name: kube-api-token
+  projected:
+    sources:
+    - serviceAccountToken:
+        expirationSeconds: 3600
+        path: token
+    - configMap:
+        name: kube-root-ca.crt
+        items:
+        - {key: ca.crt, path: ca.crt}
+    - downwardAPI:
+        items:
+        - path: namespace
+          fieldRef: {fieldPath: metadata.namespace}
+{{- end -}}
