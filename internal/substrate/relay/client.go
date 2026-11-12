@@ -32,6 +32,10 @@ type AttachOptions struct {
 	Rows    uint16
 	// LongPoll uses the HTTP long-poll transport instead of WebSocket.
 	LongPoll bool
+	// FlatRoutes means BaseURL ends where the relay's routes begin, so the
+	// WebSocket is BaseURL + "/ws" and not BaseURL + "/dcrelay/1/ws" (the
+	// gateway's attach route adds /dcrelay/1 itself).
+	FlatRoutes bool
 	// HTTPClient carries long-poll requests (default http.DefaultClient).
 	HTTPClient *http.Client
 	// Dialer dials WebSocket (default websocket.DefaultDialer).
@@ -99,7 +103,11 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 	u := strings.Replace(strings.Replace(strings.TrimRight(o.BaseURL, "/"), "https://", "wss://", 1), "http://", "ws://", 1)
 	h := http.Header{}
 	h.Set("Authorization", "Bearer "+o.Token)
-	conn, resp, err := dd.DialContext(ctx, u+"/dcrelay/1/ws"+sizeQuery(o), h)
+	wsPath := "/dcrelay/1/ws"
+	if o.FlatRoutes {
+		wsPath = "/ws"
+	}
+	conn, resp, err := dd.DialContext(ctx, u+wsPath+sizeQuery(o), h)
 	if err != nil {
 		if resp != nil {
 			return AttachResult{}, fmt.Errorf("relay refused the attachment (status %d): %w", resp.StatusCode, err)

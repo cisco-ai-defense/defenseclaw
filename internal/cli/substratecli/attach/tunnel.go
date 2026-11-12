@@ -357,6 +357,23 @@ func (tu *Tunnel) netError(err error) error {
 	return &dialError{what: "could not reach the admin listener at " + tu.host, err: err}
 }
 
+// mapRelayPath turns the relay's own path under the attach prefix
+// (<prefix>/dcrelay/1/status) into the path the gateway's attach route takes
+// (<prefix>/status): the route adds /dcrelay/1 itself. The clients built on
+// BaseURL keep writing the relay's paths.
+func (tu *Tunnel) mapRelayPath(r *http.Request) {
+	u, err := url.Parse(tu.base)
+	if err != nil {
+		return
+	}
+	base := u.EscapedPath()
+	esc := r.URL.EscapedPath()
+	if rest, ok := strings.CutPrefix(esc, base+"/dcrelay/1"); ok && (rest == "" || strings.HasPrefix(rest, "/")) {
+		r.URL.RawPath = base + rest
+		r.URL.Path, _ = url.PathUnescape(r.URL.RawPath)
+	}
+}
+
 // bearerTransport adds the bearer to every request to the admin listener.
 type bearerTransport struct{ tu *Tunnel }
 
@@ -376,6 +393,7 @@ func (b bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	r := req.Clone(req.Context())
+	tu.mapRelayPath(r)
 	r.Header.Set("Authorization", "Bearer "+tok)
 	// The admin listener refuses a write without the client tag (its CSRF gate).
 	r.Header.Set("X-DefenseClaw-Client", "substrate-launcher")

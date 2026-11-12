@@ -132,7 +132,7 @@ func TestRunTaskWaitsWhileFull(t *testing.T) {
 	r.admin.setAnswer(func(rq *http.Request) (int, http.Header) {
 		mu.Lock()
 		defer mu.Unlock()
-		if rq.Method == http.MethodPost && strings.HasSuffix(rq.URL.Path, "/dcrelay/1/task") {
+		if rq.Method == http.MethodPost && strings.HasSuffix(rq.URL.Path, "/attach/task") {
 			if tasks++; tasks == 1 {
 				return 503, http.Header{"Retry-After": {"2"}}
 			}

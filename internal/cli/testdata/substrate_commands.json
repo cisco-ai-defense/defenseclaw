@@ -438,6 +438,11 @@
         "usage": "with --kube, the kubeconfig context (default: its current one)"
       },
       {
+        "name": "kube-namespace",
+        "type": "string",
+        "usage": "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)"
+      },
+      {
         "name": "kubeconfig",
         "type": "string",
         "usage": "with --kube, the kubeconfig file (default: kubectl's own rules)"
@@ -889,7 +894,7 @@
       {
         "name": "name",
         "type": "string",
-        "usage": "name for the agent (default: chosen by the cluster)",
+        "usage": "a readable start for the agent's name; a random suffix is added, so a name is never used twice (default: the agent's command)",
         "metavar": "NAME"
       },
       {

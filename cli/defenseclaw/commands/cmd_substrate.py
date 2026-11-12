@@ -321,6 +321,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("json", "bool", "same as --output json"),
             _Flag("kube", "bool", "sign in with your current kubeconfig identity (clusters without a sign-in server)"),
             _Flag("kube-context", "string", "with --kube, the kubeconfig context (default: its current one)"),
+            _Flag(
+                "kube-namespace",
+                "string",
+                "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)",
+            ),
             _Flag("kubeconfig", "string", "with --kube, the kubeconfig file (default: kubectl's own rules)"),
             _Flag(
                 "name",
@@ -526,7 +531,15 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("json", "bool", "same as --output json"),
             _Flag("keep", "bool", "keep the agent after a finished --task (default: it stays until you delete it)"),
             _Flag("max-upload-mb", "int", "refuse a copy larger than this many MB (default 500)", default="0"),
-            _Flag("name", "string", "name for the agent (default: chosen by the cluster)", metavar="NAME"),
+            _Flag(
+                "name",
+                "string",
+                (
+                    "a readable start for the agent's name; a random suffix is added, so a name is never used twice "
+                    "(default: the agent's command)"
+                ),
+                metavar="NAME",
+            ),
             _Flag("no-asks", "bool", "do not show guard questions on this terminal"),
             _Flag("no-upload", "bool", "start with an empty folder; upload nothing"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
