@@ -21,7 +21,9 @@ func TestWindowsHereDocBodyBannerAtHomeIsText(t *testing.T) {
 		for _, command := range []string{
 			"cat <<\"EOT\"\n*** Begin Patch\n*** End Patch\nEOT",
 			"cat <<EOT\n*** Begin Patch\n*** End Patch\nEOT",
-			"cat <<EOT\n*** Begin Patch\n*** End Patch\nEOT",
+			"cat <<'EOT' > notes.txt\n*** Begin Patch\n*** End Patch\nEOT",
+			"cat <<EOT && echo done\n*** Begin Patch\n*** End Patch\nEOT",
+			"tee notes.txt <<EOT || true\n*** Begin Patch\nEOT",
 		} {
 			if got := ActionCommandDecisionWithDialectAndGlobFacts(command, home, home, d, nil); got != "" {
 				t.Errorf("dialect %q %q = %q, want allow", d, command, got)
@@ -44,6 +46,19 @@ func TestWindowsHereDocBodyStillScannedWhenItCanRun(t *testing.T) {
 			"cat <<EOT > ~/.ssh/authorized_keys\n*** Begin Patch\nEOT",
 		} {
 			if got := ActionCommandDecisionWithDialectAndGlobFacts(command, home, home, d, nil); got != "protected-target" {
+				t.Errorf("dialect %q %q = %q, want protected-target", d, command, got)
+			}
+		}
+		// A body handed to a program that may run it (process substitution
+		// as an output or an argument, a pipeline into a shell) is read as
+		// before: its glob words stay scanned (T7 review P2).
+		for _, command := range []string{
+			"cat <<'EOT' > >(bash)\n*** Begin Patch\n*** End Patch\nEOT",
+			"tee >(bash) <<EOT\n*** Begin Patch\n*** End Patch\nEOT",
+			"cat <<EOT | sh\n*** Begin Patch\nEOT",
+			"cat <<EOT > $(echo out)\n*** Begin Patch\nEOT",
+		} {
+			if got := ActionCommandDecisionWithDialectAndGlobFacts(command, home, home, d, nil); got == "" {
 				t.Errorf("dialect %q %q = %q, want protected-target", d, command, got)
 			}
 		}

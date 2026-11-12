@@ -246,6 +246,10 @@ type trustedActionRequest struct {
 	// confirmed a protected file rather than conservatively holding an
 	// unresolved write.
 	resolvedTarget *bool
+	// unprovenTarget, when set, is told the class (hookpaths.UnprovenWriteTitle)
+	// of an authorized-keys proof that held a write whose target it could not
+	// resolve, rather than a protected file it found (rel-1-0-10:GAP-0013).
+	unprovenTarget *string
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.

@@ -18,7 +18,8 @@ var actionHereDocDataPrograms = map[string]bool{
 
 // actionWindowsBlankHereDocData blanks, for the Windows target scan, the
 // glob words of the literal body text of a here-document that a top-level data program reads
-// (cat <<"EOT" ... EOT). The body is text, not words: its *** banner lines
+// (cat <<"EOT" ... EOT), alone or in a ; && || list, when no argument
+// or output of the program runs code (actionHereDocOutputsRunNothing). The body is text, not words: its *** banner lines
 // read as a glob that selects .ssh at the home, and Codex on Windows was denied
 // a cat heredoc holding the apply_patch banner (rel-1-0-4:GAP-1717, still
 // denied on 1.0.9). PowerShell cannot parse an unquoted << and runs nothing;
@@ -36,13 +37,13 @@ func actionWindowsBlankHereDocData(command string) string {
 		return command
 	}
 	var spans [][2]int
-	for _, stmt := range file.Stmts {
+	for _, stmt := range actionHereDocListStatements(file.Stmts) {
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || stmt.Background || stmt.Coprocess || len(call.Args) == 0 || len(call.Assigns) > 0 {
 			continue
 		}
 		program, ok := plainLiteralWord(call.Args[0])
-		if !ok || !actionHereDocDataPrograms[programBase(program)] {
+		if !ok || !actionHereDocDataPrograms[programBase(program)] || !actionHereDocOutputsRunNothing(call, stmt) {
 			continue
 		}
 		for _, redirect := range stmt.Redirs {
@@ -93,6 +94,59 @@ func actionWindowsBlankHereDocData(command string) string {
 		}
 	}
 	return string(out)
+}
+
+// actionHereDocListStatements returns the statements of a top-level list
+// (a; b, a && b, a || b), each with its own redirects. A pipeline stage is
+// not one: its standard output may feed a program that runs the body.
+func actionHereDocListStatements(stmts []*syntax.Stmt) []*syntax.Stmt {
+	var out []*syntax.Stmt
+	var walk func(stmt *syntax.Stmt)
+	walk = func(stmt *syntax.Stmt) {
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && len(stmt.Redirs) == 0 && !stmt.Negated &&
+			(binary.Op == syntax.AndStmt || binary.Op == syntax.OrStmt) {
+			walk(binary.X)
+			walk(binary.Y)
+			return
+		}
+		out = append(out, stmt)
+	}
+	for _, stmt := range stmts {
+		walk(stmt)
+	}
+	return out
+}
+
+// actionHereDocOutputsRunNothing reports that no argument of the data
+// program and no redirect word other than the here-documents can run code:
+// no command or process substitution and no arithmetic. tee >(bash) <<EOT
+// or cat <<EOT > >(bash) hand the body to a shell, so it is not data there.
+func actionHereDocOutputsRunNothing(call *syntax.CallExpr, stmt *syntax.Stmt) bool {
+	runs := func(word *syntax.Word) bool {
+		found := false
+		syntax.Walk(word, func(node syntax.Node) bool {
+			switch node.(type) {
+			case *syntax.CmdSubst, *syntax.ProcSubst, *syntax.ArithmExp:
+				found = true
+			}
+			return !found
+		})
+		return found
+	}
+	for _, arg := range call.Args[1:] {
+		if runs(arg) {
+			return false
+		}
+	}
+	for _, redirect := range stmt.Redirs {
+		if redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc {
+			continue
+		}
+		if redirect.Word != nil && runs(redirect.Word) {
+			return false
+		}
+	}
+	return true
 }
 
 func actionHereDocSeparator(c byte) bool {

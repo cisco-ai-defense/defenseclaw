@@ -1527,10 +1527,12 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	}
 	commandText := strings.ToLower(input.Command)
 	overBudget, unresolved, resolvedTarget := false, false, false
+	unprovenClass := ""
 	evidence := request
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
 	evidence.resolvedTarget = &resolvedTarget
+	evidence.unprovenTarget = &unprovenClass
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
@@ -1590,8 +1592,22 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				}
 			}
 			title := named.Title
+			enforcement := findingEnforcementAllowed
+			// A write the link walk held only because it could not resolve
+			// the target is not a known key write: outside the strict and
+			// managed tiers it warns (rel-1-0-10:GAP-0013, GAP-0004).
+			unprovenOnly := symlinkWrite && unprovenClass != "" && named.ID == rule.ID &&
+				unprovenKeyWriteMayWarn(request, commandText) &&
+				!trustedAuthorizedKeysSymlinkWrite(input) &&
+				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
+				!trustedSandboxGuestAuthorizedKeysWrite(request)
+			if unprovenOnly {
+				enforcement = findingEnforcementAlertOnly
+			}
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
+			} else if unprovenOnly && !unresolved {
+				title = hookpaths.UnprovenWriteTitle(unprovenClass) + unprovenWriteGuidance
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request) {
@@ -1604,7 +1620,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				RuleID: named.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
-				enforcement: findingEnforcementAllowed,
+				enforcement: enforcement,
 			})
 			if named.ID == rule.ID &&
 				(trustedAuthorizedKeysSymlinkWrite(input) || resolvedTarget && !overBudget && !unresolved) {
@@ -1617,6 +1633,27 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
 		generation, request, input,
 	)
+}
+
+// unprovenKeyWriteMayWarn reports a call whose authorized-keys finding
+// warns, not blocks, when the proof could only hold its write as unknown:
+// a shell command (a native write or patch tool keeps its enforcement) in
+// the default or permissive tier of a per-user install (no managed hook
+// peer) that does not name
+// an authorized-keys file or carry base64 text that could spell one. The
+// strict tier and every managed install keep the block (owner 2026-11-06
+// ruling on rel-1-0-6:GAP-0675; S7 plan: unknown effects never block in
+// default; lead answer 2026-11-12 for rel-1-0-10:GAP-0013). A target the
+// proof found protected blocks in every tier. The confirm ("ask") ceiling
+// for these calls belongs to the hook answer path (S8), so they alert.
+func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText string) bool {
+	if request.StrictPolicy || request.ManagedInstall || request.ProtectedHomeHook ||
+		!trustedShellCommandInput(request.Input) {
+		return false
+	}
+	return !strings.Contains(commandText, "authorized_k") &&
+		!strings.Contains(commandText, "administrators_authorized") &&
+		!strings.Contains(commandText, "base64")
 }
 
 // sshControlFileTitlePrefix opens the title of a block whose only SSH target
