@@ -459,16 +459,46 @@ func acquireStandaloneSetupEnsure() (release func(), err error) {
 	return release, err
 }
 
+// standaloneSetupMutexTrusted reports a Setup mutex that SYSTEM or the
+// Administrators group owns: one Setup or its recovery created. An owner that
+// cannot be read is not trusted.
+func standaloneSetupMutexTrusted(handle windows.Handle) bool {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_KERNEL_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return false
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		return false
+	}
+	return owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid)
+}
+
+// untrustedStandaloneSetupMutex is the release of a Setup mutex the run goes
+// on without (holdStandaloneSetupMutex): it holds nothing, and the run says
+// why on stderr.
+func untrustedStandaloneSetupMutex(label, why string) (release func()) {
+	runtime.UnlockOSThread()
+	fmt.Fprintf(os.Stderr, "warning: Setup ignores the host-wide %s mutex because %s; the lifecycle lock orders this run\n", label, why)
+	return func() {}
+}
+
 // errStandaloneSetupMutexHeld is a host-wide Setup mutex another process
 // still held when the wait for it ended.
 var errStandaloneSetupMutexHeld = errors.New("standalone Setup mutex is held")
 
 // holdStandaloneSetupMutex takes the host-wide named mutex name, waiting up
 // to wait for another holder to let go (errStandaloneSetupMutexHeld past it).
-// Only SYSTEM and Administrators can open it, and creating a Global\ object
-// needs a privilege a standard account does not have, so no other account
-// can hold it to stall Setup. An abandoned mutex (a killed holder) is taken.
-// The owning thread stays fixed until the returned release runs.
+// Setup creates it owned by Administrators with access for SYSTEM and
+// Administrators only. Any signed-in account can create a Global\ mutex of
+// the same name first, though, and hold it to stall every Setup (the 1.0.10
+// T1 review). A mutex that exists already is used only when SYSTEM or
+// Administrators own it; one another account owns, or one Setup may not
+// open, is ignored with a warning, and the run goes on without it: the
+// lifecycle lock still orders the runs that change the deployment, so
+// nothing runs next to another and nothing fails open. An abandoned mutex (a
+// killed holder) is taken. The owning thread stays fixed until the returned
+// release runs.
 func holdStandaloneSetupMutex(name, label string, wait time.Duration) (release func(), err error) {
 	runtime.LockOSThread()
 	defer func() {
@@ -490,11 +520,18 @@ func holdStandaloneSetupMutex(name, label string, wait time.Duration) (release f
 	}
 	handle, createErr := windows.CreateMutex(attrs, false, namePointer)
 	if handle == 0 {
+		if errors.Is(createErr, windows.ERROR_ACCESS_DENIED) {
+			return untrustedStandaloneSetupMutex(label, "Setup may not open it"), nil
+		}
 		return nil, fmt.Errorf("create %s mutex: %w", label, createErr)
 	}
 	if createErr != nil && !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
 		_ = windows.CloseHandle(handle)
 		return nil, fmt.Errorf("open %s mutex: %w", label, createErr)
+	}
+	if createErr != nil && !standaloneSetupMutexTrusted(handle) {
+		_ = windows.CloseHandle(handle)
+		return untrustedStandaloneSetupMutex(label, "an account other than SYSTEM or Administrators owns it"), nil
 	}
 	milliseconds := uint32(0)
 	if wait > 0 {

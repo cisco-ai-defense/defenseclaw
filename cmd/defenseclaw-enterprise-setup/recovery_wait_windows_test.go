@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -41,7 +42,15 @@ func holdTestRecoveryMutex(t *testing.T) (release func()) {
 			held <- err
 			return
 		}
-		handle, err := windows.CreateMutex(nil, true, name)
+		// Owned by Administrators, as the recovery creates it, whatever the
+		// default owner of the test token is.
+		descriptor, err := windows.SecurityDescriptorFromString("O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)")
+		if err != nil {
+			held <- err
+			return
+		}
+		attrs := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
+		handle, err := windows.CreateMutex(attrs, true, name)
 		if err != nil {
 			held <- err
 			return
@@ -78,8 +87,13 @@ func TestStandaloneUninstallRecoveryHoldsItsMutexThroughTheReplay(t *testing.T) 
 	})
 	setupRecoveryOpenParent = func(int) (standaloneSetupParent, error) {
 		return &fakeStandaloneSetupParent{wait: func() error {
-			if err := awaitStandaloneUninstallRecovery(0); err != nil {
-				t.Errorf("the recovery held its mutex while its Setup still ran: %v", err)
+			// From READY on: a rerun issued while the Setup that armed the
+			// recovery still runs sees the recovery too (the 1.0.10 T1
+			// review). It asks from another thread, as a rerun does.
+			answer := make(chan error, 1)
+			go func() { answer <- awaitStandaloneUninstallRecovery(0) }()
+			if err := <-answer; !errors.Is(err, errStandaloneSetupMutexHeld) {
+				t.Errorf("a rerun between READY and the exit of the Setup did not see the recovery: %v", err)
 			}
 			return nil
 		}}, nil
@@ -161,5 +175,83 @@ func TestStandaloneUninstallRerunDuringTheArmedRecoveryIsBusy(t *testing.T) {
 		code != enterpriseBusyExitCode || result.ExitCode != code || len(result.Errors) != 1 ||
 		result.Errors[0].Code != "lifecycle_busy" || !strings.Contains(result.Errors[0].Message, "earlier Setup /uninstall") {
 		t.Fatalf("rerun during the recovery: code=%d armed=%v stdout=%q stderr=%q parse=%v", code, armed, stdout.String(), stderr.String(), err)
+	}
+}
+
+// A Global\\ mutex another account created first, and holds, stalled every
+// standalone Setup that waits for it (the 1.0.10 T1 review): Setup now goes on
+// without a mutex that SYSTEM or Administrators do not own. The test owns
+// the mutex as its own user, which is neither.
+func TestStandaloneSetupMutexIgnoresAMutexAnotherOwnerHolds(t *testing.T) {
+	token := windows.GetCurrentProcessToken()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		t.Skip("runs as SYSTEM: a mutex it owns is trusted")
+	}
+	name := fmt.Sprintf(`Global\Cisco-DefenseClaw-Test-Squat-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	held, done := make(chan error, 1), make(chan struct{})
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		descriptor, err := windows.SecurityDescriptorFromString("O:" + user.User.Sid.String() + "D:(A;;GA;;;WD)")
+		if err != nil {
+			held <- err
+			return
+		}
+		attrs := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
+		pointer, err := windows.UTF16PtrFromString(name)
+		if err != nil {
+			held <- err
+			return
+		}
+		handle, err := windows.CreateMutex(attrs, true, pointer)
+		if err != nil {
+			held <- err
+			return
+		}
+		held <- nil
+		<-done
+		_ = windows.ReleaseMutex(handle)
+		_ = windows.CloseHandle(handle)
+	}()
+	if err := <-held; err != nil {
+		t.Fatalf("hold the squatted mutex: %v", err)
+	}
+	defer close(done)
+	started := time.Now()
+	release, err := holdStandaloneSetupMutex(name, "test squat", 5*time.Second)
+	if err != nil {
+		t.Fatalf("a mutex another owner holds stalled Setup: %v after %s", err, time.Since(started))
+	}
+	release()
+	if took := time.Since(started); took > 2*time.Second {
+		t.Fatalf("Setup waited %s for a mutex another owner holds", took)
+	}
+}
+
+// A held mutex that Administrators own is still waited for.
+func TestStandaloneSetupMutexWaitsForAMutexAdministratorsOwn(t *testing.T) {
+	name := fmt.Sprintf(`Global\Cisco-DefenseClaw-Test-Trusted-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	held, done := make(chan error, 1), make(chan struct{})
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		release, err := holdStandaloneSetupMutex(name, "test trusted", 0)
+		held <- err
+		if err != nil {
+			return
+		}
+		<-done
+		release()
+	}()
+	if err := <-held; err != nil {
+		t.Skipf("cannot create an Administrators-owned mutex here (not elevated?): %v", err)
+	}
+	defer close(done)
+	if _, err := holdStandaloneSetupMutex(name, "test trusted", 300*time.Millisecond); !errors.Is(err, errStandaloneSetupMutexHeld) {
+		t.Fatalf("held trusted mutex: err=%v, want errStandaloneSetupMutexHeld", err)
 	}
 }

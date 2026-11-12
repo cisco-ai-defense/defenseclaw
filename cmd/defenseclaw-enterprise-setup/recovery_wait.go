@@ -30,13 +30,17 @@ func standaloneSetupWaitsForRecovery(opts enterpriseSetupOptions) bool {
 }
 
 // standaloneRecoveryWaitBound is how long such a run waits: the limit, or
-// less when TIMEOUTSECONDS would otherwise leave too little to start the
-// lifecycle child after the wait (minimumEnterpriseLifecycleStart). Zero
-// means it only checks.
+// less so that the action keeps at least half of TIMEOUTSECONDS (and never
+// under minimumEnterpriseLifecycleStart) once the wait ends. A run that waited
+// until only the 60-second start minimum was left started an upgrade it could
+// not finish, timed out midway and rolled back, where without the wait it
+// ended 1618 with nothing changed (1.0.10 T1 review). Past the bound the run
+// is that 1618. Zero means it only checks.
 func standaloneRecoveryWaitBound(opts enterpriseSetupOptions, now time.Time) time.Duration {
 	bound := enterpriseSetupRecoveryWaitLimit
 	if opts.LifecycleTimeout > 0 {
-		left := enterpriseSetupLifecycleDeadline(opts, now).Sub(now) - minimumEnterpriseLifecycleStart
+		reserve := max(opts.LifecycleTimeout/2, minimumEnterpriseLifecycleStart)
+		left := enterpriseSetupLifecycleDeadline(opts, now).Sub(now) - reserve
 		if left < bound {
 			bound = left
 		}

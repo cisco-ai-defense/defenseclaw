@@ -38,8 +38,17 @@ func TestStandaloneRecoveryWaitLeavesTheLifecycleItsStart(t *testing.T) {
 	if got := standaloneRecoveryWaitBound(enterpriseSetupOptions{LifecycleTimeout: 30 * time.Minute, Started: now}, now); got != 10*time.Minute {
 		t.Errorf("default TIMEOUTSECONDS: wait %s, want the 10 minute limit", got)
 	}
-	if got := standaloneRecoveryWaitBound(enterpriseSetupOptions{LifecycleTimeout: 5 * time.Minute, Started: now}, now); got != 4*time.Minute {
-		t.Errorf("TIMEOUTSECONDS=300: wait %s, want 4m (the lifecycle keeps its 60 s start)", got)
+	if got := standaloneRecoveryWaitBound(enterpriseSetupOptions{LifecycleTimeout: 5 * time.Minute, Started: now}, now); got != 150*time.Second {
+		t.Errorf("TIMEOUTSECONDS=300: wait %s, want 2m30s (the action keeps half of TIMEOUTSECONDS)", got)
+	}
+	// An upgrade after the longest wait still has half of its own budget:
+	// a wait to the 60-second start minimum left it a minute, and it timed
+	// out midway and rolled back (1.0.10 T1 review).
+	if got := standaloneRecoveryWaitBound(enterpriseSetupOptions{LifecycleTimeout: 11 * time.Minute, Started: now}, now); got != 330*time.Second {
+		t.Errorf("TIMEOUTSECONDS=660: wait %s, want 5m30s", got)
+	}
+	if got := standaloneRecoveryWaitBound(enterpriseSetupOptions{LifecycleTimeout: 90 * time.Second, Started: now}, now); got != 30*time.Second {
+		t.Errorf("TIMEOUTSECONDS=90: wait %s, want 30s (never under the 60 s start)", got)
 	}
 	if got := standaloneRecoveryWaitBound(enterpriseSetupOptions{LifecycleTimeout: 5 * time.Minute, Started: now.Add(-6 * time.Minute)}, now); got != 0 {
 		t.Errorf("spent TIMEOUTSECONDS: wait %s, want a check only", got)
