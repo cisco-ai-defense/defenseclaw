@@ -26,6 +26,7 @@ type parser struct {
 	topParams []*Variable
 	exprMode  bool // true inside (), $(), @{} values, [], method args
 	forHeader int  // >0 while inside a for/foreach header, so 'in' is a keyword
+	budget    *int // shared remaining work budget for nested string re-parses (F12)
 }
 
 // Parse parses PowerShell source into a Script. It always returns a non-nil
@@ -34,6 +35,8 @@ func Parse(src string, opts Options) (*Script, error) {
 	l := newLexer(src)
 	toks := l.lex()
 	p := &parser{toks: toks, dialect: opts.Dialect}
+	budget := 8*len(src) + 4096
+	p.budget = &budget
 	sc := &Script{Dialect: opts.Dialect}
 	sc.start = 0
 	sc.end = len(src)
@@ -44,6 +47,22 @@ func Parse(src string, opts Options) (*Script, error) {
 	sc.Params = p.topParams
 	sc.Diagnostics = p.diags
 	return sc, nil
+}
+
+// subParse parses nested script text found inside an expandable string ($( )).
+// It shares one work budget and the recursion depth with the outer parse so
+// deeply nested "$( "$( ... )" )" strings cannot blow up (F12); when the budget
+// or depth is exhausted it returns a ps_depth_limit diagnostic rather than
+// re-lexing the remaining text at every level.
+func (p *parser) subParse(src string) ([]Statement, []Diagnostic) {
+	if p.overDepth() || p.budget == nil || *p.budget <= 0 {
+		return nil, []Diagnostic{{Reason: ReasonDepthLimit, Detail: "nested string parse budget/depth exhausted"}}
+	}
+	*p.budget -= len(src)
+	l := newLexer(src)
+	sub := &parser{toks: l.lex(), dialect: p.dialect, depth: p.depth + 1, budget: p.budget}
+	sts := sub.parseStatementList(stopTop)
+	return sts, sub.diags
 }
 
 // topParams accumulates names from a top-level param() block.

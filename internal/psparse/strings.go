@@ -121,8 +121,9 @@ func (p *parser) expandable(s string, base int) (parts []StringPart, static bool
 		case r == '$' && i+1 < len(runes) && runes[i+1] == '(':
 			flush()
 			inner, consumed := scanParenBody(runes[i+2:])
-			sub, _ := Parse(inner, Options{Dialect: p.dialect})
-			parts = append(parts, StringPart{Expr: &SubExpr{Statements: sub.Statements}})
+			stmts, ds := p.subParse(inner)
+			p.diags = append(p.diags, ds...)
+			parts = append(parts, StringPart{Expr: &SubExpr{Statements: stmts}})
 			hasExpr = true
 			i += 2 + consumed
 		case r == '$' && i+1 < len(runes) && runes[i+1] != '(' && dollarStartsVar(runes[i+1]):
