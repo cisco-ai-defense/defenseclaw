@@ -54,12 +54,18 @@ func main() {
 	flag.Var(keys, "session-key", "launcher session-token public key, kid=PEM file (repeatable)")
 	audience := flag.String("session-audience", "dcrelay", "session token audience")
 	verifyURL := flag.String("verify-url", "", "gateway session-token check URL (instead of keys)")
+	interactive := flag.String("interactive", "", "relay interactive argv, space-separated (test variants; default: the connector)")
 	flag.Parse()
+	if *interactive != "" {
+		interactiveArgv = strings.Fields(*interactive)
+	}
 	if err := run(*connectorName, *out, *uid, *gid, *gateway, *failMode, *provider, *model, *version, *listen, keys, *audience, *verifyURL); err != nil {
 		fmt.Fprintln(os.Stderr, "kitgen:", err)
 		os.Exit(1)
 	}
 }
+
+var interactiveArgv []string
 
 const (
 	home    = "/sandbox"
@@ -86,6 +92,7 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 	cfg := kit.DefaultConfig()
 	cfg.GatewayURL, cfg.FailMode, cfg.KitVersion = gateway, failMode, version
 	cfg.Relay.Listen, cfg.Relay.SessionAudience, cfg.Relay.VerifyURL = listen, audience, verifyURL
+	cfg.Relay.Interactive = interactiveArgv
 	keyFiles := map[string][]byte{}
 	if len(keys) > 0 {
 		cfg.Relay.SessionKeys = map[string]string{}

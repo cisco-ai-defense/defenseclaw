@@ -23,9 +23,11 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -50,6 +52,8 @@ func main() {
 		err = attach(os.Args[2:])
 	case "task":
 		code, err = task(os.Args[2:])
+	case "exec":
+		err = execLine(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -180,6 +184,79 @@ func attach(args []string) error {
 	}
 	return nil
 }
+
+// execLine attaches, waits for the relay's hello, types one shell line into
+// the agent's terminal (a shell in the bench images), prints the screen
+// output up to the marker the line echoes, and detaches. It reports the
+// hello and done times relative to the dial on stderr.
+func execLine(args []string) error {
+	fs := flag.NewFlagSet("exec", flag.ExitOnError)
+	url := fs.String("url", "", "relay origin")
+	tokenFile := fs.String("token-file", "", "session token file")
+	line := fs.String("line", "", "shell line; it must print __A5DONE__ when it ends, spelled so the echoed line does not contain it")
+	timeout := fs.Duration("timeout", 60*time.Second, "overall timeout")
+	fs.Parse(args)
+	tok, err := readToken(*tokenFile)
+	if err != nil {
+		return err
+	}
+	start := time.Now()
+	pr, pw := io.Pipe()
+	var screen strings.Builder
+	var mu sync.Mutex
+	done := make(chan struct{})
+	var helloAt time.Duration
+	out := writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		screen.Write(p)
+		if strings.Contains(screen.String(), "__A5DONE__") {
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		}
+		return len(p), nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	go func() {
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
+		pw.Write([]byte{relay.DetachKey})
+	}()
+	var sendOnce sync.Once
+	res, err := relay.Attach(ctx, pr, out, relay.AttachOptions{BaseURL: *url, Token: tok, Cols: 200, Rows: 50,
+		OnControl: func(c relay.Control) {
+			if c.Type == relay.CtlHello {
+				helloAt = time.Since(start)
+				sendOnce.Do(func() { go pw.Write([]byte(*line + "\r")) })
+			}
+		}})
+	if err != nil {
+		return err
+	}
+	total := time.Since(start)
+	mu.Lock()
+	s := screen.String()
+	mu.Unlock()
+	if i := strings.Index(s, "__A5DONE__"); i >= 0 {
+		s = s[:i]
+	}
+	fmt.Print(s)
+	fmt.Fprintf(os.Stderr, "hello_ms=%d total_ms=%d session=%s detached=%v\n", helloAt.Milliseconds(), total.Milliseconds(), res.Session, res.Detached)
+	if ctx.Err() != nil {
+		return fmt.Errorf("timed out")
+	}
+	return nil
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 func task(args []string) (int, error) {
 	fs := flag.NewFlagSet("task", flag.ExitOnError)
