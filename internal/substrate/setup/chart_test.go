@@ -81,16 +81,18 @@ func TestChartGoldens(t *testing.T) {
 func TestChartRefusesBadValues(t *testing.T) {
 	helm := helmBinary(t)
 	for name, set := range map[string]string{
-		"hpa below 2":             "gateway.hpa.minReplicas=1",
-		"short digest":            "image.digest=sha256:abc",
-		"bad atespace":            "managedAtespaces={Bad_Name}",
-		"ingress no host":         "admin.expose.type=Ingress",
-		"ingress no tls":          "admin.expose.type=Ingress,admin.expose.ingress.host=dc.example.com",
-		"lb no source ranges":     "admin.expose.type=LoadBalancer",
-		"expose nodeport":         "admin.expose.type=NodePort",
-		"managed fails open":      "config.deployment_mode=managed_enterprise,config.substrate.extproc.failure_mode=open",
-		"secrets ns = release ns": "substrate.credentialProvider.secretsNamespace=default",
-		"unknown value":           "gateway.surprise=1",
+		"hpa below 2":               "gateway.hpa.minReplicas=1",
+		"short digest":              "image.digest=sha256:abc",
+		"bad atespace":              "managedAtespaces={Bad_Name}",
+		"ingress no host":           "admin.expose.type=Ingress",
+		"ingress no tls":            "admin.expose.type=Ingress,admin.expose.ingress.host=dc.example.com",
+		"lb no source ranges":       "admin.expose.type=LoadBalancer",
+		"expose nodeport":           "admin.expose.type=NodePort",
+		"managed fails open":        "config.deployment_mode=managed_enterprise,config.substrate.extproc.failure_mode=open,config.substrate.templates.allowed_images={reg.example.com/dc/*}",
+		"secrets ns = release ns":   "substrate.credentialProvider.secretsNamespace=default",
+		"managed no allowed_images": "config.deployment_mode=managed_enterprise",
+		"managed unattested":        "config.deployment_mode=managed_enterprise,config.substrate.require_attested_templates=false,config.substrate.templates.allowed_images={reg.example.com/dc/*}",
+		"unknown value":             "gateway.surprise=1",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {
