@@ -55,6 +55,7 @@ Every value is checked by `values.schema.json`. The main ones:
 | `admin.url` | Ingress host, or the in-cluster admin Service | the https URL laptops use, published in ConfigMap `defenseclaw-launcher-endpoint` (key `admin_url`) that every authenticated user may read; `login --kube` sends a Kubernetes credential only to this URL. Required for `LoadBalancer`. |
 | `admin.tlsSecretName` | "" | a `kubernetes.io/tls` Secret for the external name; without it the admin listener presents its in-cluster certificate |
 | `controller.templateAnchorsSecret` | `defenseclaw-template-anchors` | admin-only Secret (key `anchors.pem`) with the template signing keys; without it every template is refused |
+| `substrate.podPorts` | `[443, 8443, 8445]` | container ports of the Substrate pods DefenseClaw calls (ate-api-server, the idp JWKS); NetworkPolicies match pod ports, so change them when a Substrate release moves a port |
 | `networkPolicy.egress.*` | on, OTLP 4317/4318 | egress limits for the gateway, leader and callout (DNS, Kubernetes and Substrate APIs, the release, OTLP; providers on 443 for gateway and leader) |
 | `metrics.prometheusRule.enabled` | false | alert rules |
 | `observability.local.enabled` | false | a local OTel collector for trying the chart |

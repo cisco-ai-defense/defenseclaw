@@ -23,6 +23,10 @@ substrate:
   egressSpiffeId: spiffe://cluster.local/ns/ate-system/sa/atenet-egress
   egressPodLabels:
     app: atenet-egress
+  # Container ports of the Substrate pods DefenseClaw calls (Substrate
+  # v1.0.0: ate-api-server 443 and 8445, ate-idp-server 8443). The egress
+  # NetworkPolicies match pod ports, not Service ports.
+  podPorts: [443, 8443, 8445]
   # The upstream Kubernetes credential provider. The bootstrap Job grants the
   # launcher atespaces the secrets namespace below in its namespace policy,
   # and the pre-delete Job removes the grant.

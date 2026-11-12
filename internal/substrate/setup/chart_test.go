@@ -317,6 +317,14 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	if _, ok := byName["NetworkPolicy/defenseclaw-default-deny"]; !ok {
 		t.Errorf("%s: no default deny", name)
 	}
+	// GAP-0139: egress to the Substrate namespace allows the idp pod port
+	// (8443 behind Service port 443), or the gateway cannot fetch the JWKS.
+	if gw, ok := byName["NetworkPolicy/defenseclaw-gateway-egress"]; ok {
+		raw, _ := yaml.Marshal(gw.Spec)
+		if !strings.Contains(string(raw), "port: 8443") {
+			t.Errorf("%s: gateway egress does not allow the idp pod port 8443", name)
+		}
+	}
 	// GAP-0084: the pods that hold keys have egress limits.
 	for _, c := range []string{"gateway", "leader", "callout", "controller"} {
 		if _, ok := byName["NetworkPolicy/defenseclaw-"+c+"-egress"]; !ok {

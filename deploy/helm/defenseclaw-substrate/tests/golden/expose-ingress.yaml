@@ -55,13 +55,18 @@ spec:
         matchLabels:
           app.kubernetes.io/instance: dc
           app.kubernetes.io/name: defenseclaw-substrate
-  # The Substrate namespace (ate-api-server, the actor JWT issuer).
+  # The Substrate namespace (ate-api-server, the actor JWT issuer's JWKS).
+  # A NetworkPolicy matches the pod port after the Service is resolved,
+  # so these are the pods' container ports (GAP-0139: idp serves 8443
+  # behind Service port 443).
   - to:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: ate-system
     ports:
     - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 8443}
+    - {protocol: TCP, port: 8445}
   # Model providers (/llm) and template registries (controller), the
   # Kubernetes API (leader Lease, store state, resets;
   # 6443 is its usual endpoint port). The callout needs neither.
@@ -105,13 +110,18 @@ spec:
         matchLabels:
           app.kubernetes.io/instance: dc
           app.kubernetes.io/name: defenseclaw-substrate
-  # The Substrate namespace (ate-api-server, the actor JWT issuer).
+  # The Substrate namespace (ate-api-server, the actor JWT issuer's JWKS).
+  # A NetworkPolicy matches the pod port after the Service is resolved,
+  # so these are the pods' container ports (GAP-0139: idp serves 8443
+  # behind Service port 443).
   - to:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: ate-system
     ports:
     - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 8443}
+    - {protocol: TCP, port: 8445}
   # Model providers (/llm) and template registries (controller), the
   # Kubernetes API (leader Lease, store state, resets;
   # 6443 is its usual endpoint port). The callout needs neither.
@@ -155,13 +165,18 @@ spec:
         matchLabels:
           app.kubernetes.io/instance: dc
           app.kubernetes.io/name: defenseclaw-substrate
-  # The Substrate namespace (ate-api-server, the actor JWT issuer).
+  # The Substrate namespace (ate-api-server, the actor JWT issuer's JWKS).
+  # A NetworkPolicy matches the pod port after the Service is resolved,
+  # so these are the pods' container ports (GAP-0139: idp serves 8443
+  # behind Service port 443).
   - to:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: ate-system
     ports:
     - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 8443}
+    - {protocol: TCP, port: 8445}
   # OTLP export.
   - ports:
     - {protocol: TCP, port: 4317}
@@ -199,13 +214,18 @@ spec:
         matchLabels:
           app.kubernetes.io/instance: dc
           app.kubernetes.io/name: defenseclaw-substrate
-  # The Substrate namespace (ate-api-server, the actor JWT issuer).
+  # The Substrate namespace (ate-api-server, the actor JWT issuer's JWKS).
+  # A NetworkPolicy matches the pod port after the Service is resolved,
+  # so these are the pods' container ports (GAP-0139: idp serves 8443
+  # behind Service port 443).
   - to:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: ate-system
     ports:
     - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 8443}
+    - {protocol: TCP, port: 8445}
   # Model providers (/llm) and template registries (controller), the
   # Kubernetes API (leader Lease, store state, resets;
   # 6443 is its usual endpoint port). The callout needs neither.

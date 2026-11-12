@@ -40,13 +40,18 @@ spec:
   # This release's pods (leader RPC, admin listener for the callout judge).
   - to:
     - {{- toYaml $release | nindent 6 }}
-  # The Substrate namespace (ate-api-server, the actor JWT issuer).
+  # The Substrate namespace (ate-api-server, the actor JWT issuer's JWKS).
+  # A NetworkPolicy matches the pod port after the Service is resolved,
+  # so these are the pods' container ports (GAP-0139: idp serves 8443
+  # behind Service port 443).
   - to:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: {{ $.Values.substrate.namespace }}
     ports:
-    - {protocol: TCP, port: 443}
+    {{- range $.Values.substrate.podPorts }}
+    - {protocol: TCP, port: {{ . }}}
+    {{- end }}
   {{- if ne $c "callout" }}
   # Model providers (/llm) and template registries (controller), the
   # Kubernetes API (leader Lease, store state, resets;
