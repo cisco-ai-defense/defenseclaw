@@ -4827,6 +4827,7 @@ _INBOUND_CLASS_IDS: Final = (
     "otlp.codex.tool_result.v1",
     "otlp.claudecode.user_prompt.v1",
     "otlp.codex.response_completed.v1",
+    "otlp.claudecode.api_request.v1",
     "otlp.claudecode.token_usage.v1",
     "otlp.codex.token_usage.v1",
     "otlp.genai.duration.metric.v1",
@@ -5158,7 +5159,14 @@ def _candidate_inbound_otlp(
         if alias_id in alias_ids:
             raise CandidateRenderError("materialized inbound alias ID is duplicated")
         alias_ids.add(alias_id)
-        if target in {"$derived_duration_seconds", "$derived_cached_input_tokens"}:
+        if target in {
+            "$derived_duration_seconds",
+            "$derived_cached_input_tokens",
+            "$derived_reasoning_tokens",
+            "$derived_uncached_input_tokens",
+            "$derived_cache_read_tokens",
+            "$derived_cache_creation_tokens",
+        }:
             field_contract: JSONObject = {"field_class": "metadata", "sensitivity": "internal"}
         else:
             attribute = attributes.get(target)

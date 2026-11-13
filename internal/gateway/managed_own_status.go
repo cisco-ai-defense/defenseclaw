@@ -185,6 +185,9 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	if connectors != nil {
 		answer["connectors"] = connectors
 	}
+	if usage := a.ownUsageSummary(ctx, idKey, self); usage != nil {
+		answer["usage"] = usage
+	}
 	return answer
 }
 
