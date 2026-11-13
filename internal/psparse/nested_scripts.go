@@ -166,7 +166,10 @@ func ExtractNestedScripts(sc *Script) []NestedScript {
 			// without doubling that backslash, injecting a literal quote the
 			// resolved text does not show (review 6 R6-3). Either way the resolved
 			// text is not what the child runs: treat it as opaque.
-			if strings.ContainsRune(out[i].Text, '"') || hasLegacyTrailingBackslash(out[i].Source) {
+			// Windows PowerShell 5.1 also drops an empty native argument, so an empty
+			// host word is not part of the argv the child sees and the joined text is
+			// not what runs (review 10 R10-1); pwsh 7 passes "" and keeps the word.
+			if strings.ContainsRune(out[i].Text, '"') || hasLegacyTrailingBackslash(out[i].Source) || hasEmptyHostWord(out[i].Source) {
 				out[i].Static, out[i].Text, out[i].Reason = false, "", ReasonLegacyQuoting
 			}
 		}
@@ -183,6 +186,21 @@ func ExtractNestedScripts(sc *Script) []NestedScript {
 		}
 	}
 	return out
+}
+
+// hasEmptyHostWord reports whether any host word of a command is the empty
+// string (review 10 R10-1).
+func hasEmptyHostWord(n Node) bool {
+	c, ok := n.(*Command)
+	if !ok {
+		return false
+	}
+	for _, w := range hostWords(c) {
+		if w.static && w.text == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // hasLegacyTrailingBackslash reports whether any static host word of a

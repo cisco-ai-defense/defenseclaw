@@ -22,6 +22,15 @@
 // has pwsh 7.7 differential rows. Anything else is NotStatic with a reason
 // code, and a newly found spelling is a corpus row, never a new special case.
 //
+// Where the differential evidence comes from. The only independent
+// source-to-argv oracle (a real pwsh 7.7 caller with an argv-recording shim host,
+// TestHostArgvOracle) runs on Linux; Windows PowerShell 5.1 legacy argument
+// passing and the cmd.exe command line are covered by data recorded on a
+// Windows host (review 10: 283 of 283 cmd rows, and the empty-argument drop that
+// is ps_legacy_quoting here), not by a test that runs in CI. The property
+// reference restates the same word model, so it checks the table and the join,
+// not the model.
+//
 // Cost of failing closed on child-process argv. psparse does not model how a
 // native host (powershell, pwsh, cmd) receives its command line, so a nested
 // script is reported Static only when its resolved text is certain to be what
