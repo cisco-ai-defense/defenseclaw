@@ -418,6 +418,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		base.addReason(ReasonProgramShadowed, ScopeRole)
 	}
 	prevPrim := w.lastPrim
+	cmdStart := len(w.res.Effects) // first effect index (0-based) of this command
 	baseIdx := w.emit(base)
 	w.lastPrim = baseIdx
 
@@ -524,7 +525,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 
 	// 7. Operands.
-	ops, execCmds := w.classifyOperands(inner[1:], entry, dialect)
+	ops, execCmds, unaccounted := w.classifyOperands(inner[1:], entry, dialect)
 	// find/xargs -exec inner commands run with the matched paths; walk each so
 	// its effects (incl. an inner sh -c) appear (review N4). The roots stay as
 	// read operands below.
@@ -569,9 +570,28 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		w.emit(e)
 	}
+	// A command run by xargs gets its operands from stdin: emit its positional
+	// role with an unknown target so `ls | xargs rm` is a (dynamic) delete
+	// rather than exec-only (review R3-3 / round-3 leftovers).
+	if fromInput && !emittedTargetEffect {
+		if role := posModeRole(entry.Pos); role != RoleNone {
+			e := Effect{Kind: role.kind(), Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
+				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+			e.addReason(ReasonOperandsFromInput, ScopeTarget)
+			w.emit(e)
+		}
+	}
 
 	// 8. Redirections.
 	w.handleRedirs(c, dialect, cmdNo, depth, cond, readIdx)
+
+	// Choke point (review N4-1): an unaccounted argv token makes every effect
+	// this command emitted not fully known.
+	if unaccounted {
+		for i := cmdStart; i < len(w.res.Effects); i++ {
+			w.res.Effects[i].addReason(ReasonUnknownFlag, ScopeRole)
+		}
+	}
 
 	// 9. Nested command substitutions.
 	for _, sub := range c.Nested {
@@ -591,11 +611,12 @@ func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect, co
 		return false
 	}
 	if popd {
+		// popd -n pops a stack entry without changing directory; a plain popd
+		// rotates to the next. Either way the exact result is not modeled
+		// cheaply: go dynamic (review N4-2).
+		w.curCWD = ""
 		if n := len(w.cwdStack); n > 0 {
-			w.curCWD = w.cwdStack[n-1]
 			w.cwdStack = w.cwdStack[:n-1]
-		} else {
-			w.curCWD = ""
 		}
 		return true
 	}
@@ -603,7 +624,12 @@ func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect, co
 	// directory, which we cannot know (review N2/J6). cmd's /d is a switch.
 	var dir Word
 	found := false
+	hasSlashD := false
 	for _, a := range args {
+		if a.Static && dialect == DialectCMD && (a.Value == "/d" || a.Value == "/D") {
+			hasSlashD = true
+			continue
+		}
 		if a.Static && a.Value != "-" && (strings.HasPrefix(a.Value, "-") ||
 			(dialect == DialectCMD && strings.HasPrefix(a.Value, "/"))) {
 			continue
@@ -612,8 +638,23 @@ func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect, co
 		found = true
 		break
 	}
+	// pushd with no dir swaps the top two entries; pushd +N/-N rotates: not
+	// modeled -> dynamic (review N4-2).
 	if pushd {
+		if !found || (dir.Static && (strings.HasPrefix(dir.Value, "+") || strings.HasPrefix(dir.Value, "-"))) {
+			w.cwdStack = append(w.cwdStack, w.curCWD)
+			w.curCWD = ""
+			return true
+		}
 		w.cwdStack = append(w.cwdStack, w.curCWD)
+	}
+	// cmd `cd D:\x` without /d changes D:'s directory but leaves the active
+	// drive's cwd unchanged (review N4-3).
+	if cd && dialect == DialectCMD && found && dir.Static && !hasSlashD &&
+		len(dir.Value) >= 2 && isDriveLetter(dir.Value[0]) && dir.Value[1] == ':' {
+		if w.curCWD == "" || len(w.curCWD) < 2 || !strings.EqualFold(string(w.curCWD[0]), string(dir.Value[0])) {
+			return true // different drive, no /d: active cwd unchanged
+		}
 	}
 	switch {
 	case !found:
@@ -636,8 +677,15 @@ func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect, co
 	if cond {
 		w.curCWD = ""
 	}
+	// Bound the cwd length so a long cd chain stays linear (review N4-5): a path
+	// that has grown absurdly long goes dynamic instead of being re-cleaned.
+	if len(w.curCWD) > maxCWDBytes {
+		w.curCWD = ""
+	}
 	return true
 }
+
+const maxCWDBytes = 4096
 
 // programTarget builds the target for a program spelling. A path spelling that
 // cannot be placed (dynamic cwd, drive-relative) is reported unknown with the
@@ -719,7 +767,7 @@ type operand struct {
 }
 
 // classifyOperands walks flags and positionals of a command against a table row.
-func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]operand, [][]Word) {
+func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]operand, [][]Word, bool) {
 	var out []operand
 	var inner [][]Word
 	var positionals []Word
@@ -762,17 +810,19 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		fname, inlineVal, hasInline := splitInlineFlagValue(name, dialect)
 		fl, ok := flagLookup(p, fname, dialect)
 		if !ok {
-			// POSIX combined short flags: -xzf, -sSLo.
+			// POSIX combined short flags (-xzf, -sSLo): the split marks the
+			// token unaccounted if any component is unlisted.
 			if dialect == DialectPOSIX && len(name) > 2 && name[0] == '-' && name[1] != '-' {
-				consumed, uf := w.splitShortFlags(name, words, &i, p, &out, &inPlace)
-				if consumed {
-					continue
+				_, uf := w.splitShortFlags(name, words, &i, p, &out, &inPlace)
+				if uf {
+					unknownFlag = true
 				}
-				unknownFlag = unknownFlag || uf
+				continue
 			}
-			if strings.HasPrefix(fname, "--") {
-				unknownFlag = true
-			}
+			// Any other flag token not in the table entry is unaccounted
+			// (review N4-1): a lone short flag -Q, a cmd switch /Q, a PowerShell
+			// -Bogus. The whole command is then not fully known.
+			unknownFlag = true
 			i++
 			continue
 		}
@@ -826,7 +876,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		i++
 	}
 	out = append(out, w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del, hasExpr: hasExpr, destDir: destDir})...)
-	return out, inner
+	return out, inner, unknownFlag
 }
 
 // execPlaceholders marks the {} and stdin (-) operands of a find/xargs inner
@@ -899,18 +949,18 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 				*out = append(*out, operand{role: RoleExecProgram})
 			}
 			*i = len(words)
-			return true, false
+			return true, unknownFlag
 		}
 		if fl.Value {
 			if j+1 < len(body) {
 				*out = append(*out, operandValue(fl, Word{Value: body[j+1:], Static: true}, p))
 				*i++
-				return true, false
+				return true, unknownFlag
 			}
 			if *i+1 < len(words) {
 				*out = append(*out, operandValue(fl, words[*i+1], p))
 				*i += 2
-				return true, false
+				return true, unknownFlag
 			}
 		}
 	}
@@ -1949,4 +1999,20 @@ func (w *walker) applyWorkdir(workdir string) {
 	} else {
 		w.curCWD = workdir
 	}
+}
+
+// posModeRole maps a positional mode to the role its operands carry, for the
+// xargs-from-stdin case where the operands are not on the command line.
+func posModeRole(p PosMode) Role {
+	switch p {
+	case PosAllRead:
+		return RoleRead
+	case PosAllDelete:
+		return RoleDelete
+	case PosAllWrite:
+		return RoleWrite
+	case PosAllPerm:
+		return RolePerm
+	}
+	return RoleNone
 }

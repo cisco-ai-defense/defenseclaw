@@ -4,7 +4,10 @@
 
 package effects
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestSelfAuditKnownPathsAreCanonical asserts that no effect carries a KNOWN
 // path whose spelling is non-canonical for its flavor (review round 3 self-
@@ -56,6 +59,42 @@ func TestSelfAuditUnlistedFlagIsNotFullyKnown(t *testing.T) {
 		r := Extract(Call{Surface: SurfaceShell, Command: cmd}, envOpts)
 		if r.FullyKnown() {
 			t.Errorf("command with an unlisted flag is fully known: %q", cmd)
+		}
+	}
+}
+
+// TestSelfAuditPOSIXCanonical adds POSIX non-canonical spellings: a KNOWN path
+// must have no .., //, /./ or trailing /. (review N4-6).
+func TestSelfAuditPOSIXCanonical(t *testing.T) {
+	for _, cmd := range []string{
+		`rm /home/u/../etc/passwd`,
+		`cat /home/u//.bashrc`,
+		`rm /home/u/./.bashrc`,
+		`rm ../../etc/passwd`,
+		`cat /home/u/.ssh/.`,
+	} {
+		r := Extract(Call{Surface: SurfaceShell, Command: cmd}, envOpts)
+		for i, e := range r.Effects {
+			if e.TargetState == TargetStateKnown && e.Target.Type == TargetPath && e.Target.Path != "" {
+				if strings.Contains(e.Target.Path, "/../") || strings.Contains(e.Target.Path, "//") ||
+					strings.Contains(e.Target.Path, "/./") || strings.HasSuffix(e.Target.Path, "/.") {
+					t.Errorf("KNOWN non-canonical POSIX path effect %d for %q: %q", i, cmd, e.Target.Path)
+				}
+			}
+		}
+	}
+}
+
+// TestSelfAuditMutationUnlistedFlag injects an unlisted flag into known-good
+// commands and requires each to stop being fully known (review N4-6).
+func TestSelfAuditMutationUnlistedFlag(t *testing.T) {
+	good := []string{`cp a.txt dir/`, `rm /tmp/x`, `cat /home/u/.bashrc`, `chmod 644 /home/u/x`, `grep foo /home/u/.netrc`}
+	for _, g := range good {
+		parts := strings.SplitN(g, " ", 2)
+		mutated := parts[0] + " --s7-unlisted-flag " + parts[1]
+		r := Extract(Call{Surface: SurfaceShell, Command: mutated}, envOpts)
+		if r.FullyKnown() {
+			t.Errorf("mutation kept the command fully known: %q", mutated)
 		}
 	}
 }

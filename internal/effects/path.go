@@ -59,9 +59,19 @@ func canonicalIssue(s string, flavor Flavor) ReasonCode {
 		_ = lw
 		return ""
 	}
-	// POSIX: an MSYS/Cygwin virtual root other than a drive mount (/proc, /dev,
-	// /cygdrive handled by the Git Bash mapping) stays canonical here; ANSI-C
-	// quoting is caught at the word level.
+	// POSIX: a path with a .. (after a component that might be a symlink), a
+	// //, a /./ or a trailing /. is not canonical and must not be lexically
+	// collapsed to a KNOWN key until the resolver can follow links (review
+	// N4-4). ANSI-C quoting is caught at the word level.
+	if strings.Contains(s, "//") || strings.Contains(s, "/./") {
+		return ReasonNonCanonicalPath
+	}
+	if s == ".." || strings.HasPrefix(s, "../") || strings.HasSuffix(s, "/..") || strings.Contains(s, "/../") {
+		return ReasonNonCanonicalPath
+	}
+	if strings.HasSuffix(s, "/.") {
+		return ReasonNonCanonicalPath
+	}
 	return ""
 }
 
@@ -264,4 +274,11 @@ func looksGlob(s string) bool {
 		}
 	}
 	return false
+}
+
+// KnownPathCanonical reports whether a path spelling is canonical for its
+// flavor (the harness self-audit uses it to confirm no KNOWN path is
+// non-canonical over the corpus -- review N4-6).
+func KnownPathCanonical(spelling string, flavor Flavor) bool {
+	return canonicalIssue(spelling, flavor) == ""
 }
