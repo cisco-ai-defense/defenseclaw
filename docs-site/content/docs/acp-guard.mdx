@@ -148,10 +148,19 @@ The gateway's `enterprise acp` command has `enroll`, `verify` and `revoke`, each
 | Protocol | initialize, auth, session lifecycle, cancellation, extensions | Strict JSON-RPC 2.0 NDJSON; no batches; 1 MiB frame and 128 pending-ID limits. An error response with a null `id` is checked and forwarded. In action mode any other invalid frame ends the session and names the side that sent it. |
 | Prompt | `session/prompt` | Rules, scanners, optional judge, observe or action policy. |
 | Output | `session/update` and the prompt response | Checked per frame and again over the whole buffered turn. Action mode releases nothing before the terminal prompt response passes. |
-| Approval | `session/request_permission`, `elicitation/create` | Allow or block. An unresolved confirmation fails closed in action mode. |
-| Filesystem | `fs/read_text_file`, `fs/write_text_file` | Content and method policy in both directions. |
-| Terminal | `terminal/*` | Content and method policy in both directions. |
-| Extensions | for example `cursor/*` | Kept as ACP extensions and checked as tool traffic. |
+| Approval | `session/request_permission`, `elicitation/create` | The tool call the request asks about is judged as the hook connector would judge it (below); `elicitation/create` is checked as content. An unresolved confirmation fails closed in action mode. |
+| Filesystem | `fs/read_text_file`, `fs/write_text_file` | Judged as a Read or Write of the path, with the same protected-target rules as the hook connectors, plus method policy. |
+| Terminal | `terminal/create` and the other `terminal/*` methods | `terminal/create` is judged as the shell command it runs, on the editor's platform, with the same command rules, effects and protected targets as the hook connectors. The other terminal methods get content and method policy. |
+| Extensions | for example `cursor/*` | Kept as ACP extensions and judged as tool calls by the same non-shell tool lane as MCP tools. |
+
+### Actions are judged like hook tool calls
+
+A frame that makes the editor or the agent act (`terminal/create`, `fs/read_text_file`, `fs/write_text_file`, a permission request, a tool call the agent reports in `session/update`, an extension method) is turned into the tool call a hook connector would report for the same action. It then runs through the same code as a hook tool call: the rule packs of the agent's connector, protected targets, command and path rules, and the same managed and enterprise policy. The same action gets the same verdict and rule IDs whether it arrives by hook or by ACP.
+
+- A block refuses the frame; the editor shows the reason, as for any other blocked frame.
+- An alert is allowed and recorded.
+- A frame that must carry an action but not in the documented shape (a `terminal/create` with no command, a permission request that shows no action) is refused as unreadable. It is never treated as clean.
+- A tool call the agent reports after it ran it (`tool_call` in `session/update`) cannot be refused any more. Its finding is recorded and the report is allowed; the agent's own permission request, sent before it ran, is where the action is judged.
 
 Protocol version: ACP `schema-v1.21.0`.
 
