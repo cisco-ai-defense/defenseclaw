@@ -33,7 +33,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -172,7 +174,11 @@ func runWindowsHookImageStage(hookSHA, guardSHA string) windowsHookImageStageRep
 		return failed(err)
 	}
 	defer restoreOwner()
-	return stageWindowsHookImage(osWindowsHookImageFS{}, osWindowsHookImageStarter{}, windowsHookImageStageRequest{
+	starter := osWindowsHookImageStarter{}
+	if roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone); err == nil {
+		starter.ManifestPath = filepath.Join(roots.StateRoot, "hook-guardian", "targets.yaml")
+	}
+	return stageWindowsHookImage(osWindowsHookImageFS{}, starter, windowsHookImageStageRequest{
 		Bin:         bin,
 		HookSHA256:  hookSHA,
 		GuardSHA256: guardSHA,
@@ -204,7 +210,7 @@ func runWindowsHookImagePrune(keep []string) windowsHookImagePruneReport {
 	// A folder a DefenseClaw-written config still names, or that was
 	// superseded recently, stays (review 1 P1-2).
 	return pruneWindowsHookImages(osWindowsHookImageFS{}, bin, keep, windowsHookImagePrunePolicy{
-		Scan: scanWindowsHookImageConfigs(roots),
+		Scan: scanWindowsHookImageConfigs(roots, bin),
 		Now:  time.Now(),
 	})
 }
@@ -274,12 +280,22 @@ func (osWindowsHookImageFS) RandomHex(n int) (string, error) {
 	return hex.EncodeToString(buffer), nil
 }
 
-type osWindowsHookImageStarter struct{}
+// osWindowsHookImageStarter starts the checks. ManifestPath is the
+// guardian's targets.yaml: when an enrolled account is signed in (an active
+// session), the checks run with that account's own session token, so its
+// application control and EDR rules decide them as they will decide its
+// agent's hook. Otherwise (no one signed in, or not LocalSystem) they run
+// with a filtered copy of the installer token, which is not that user: a
+// rule that names one user or group is not seen then, and the report's note
+// says which token ran.
+type osWindowsHookImageStarter struct {
+	ManifestPath string
+}
 
 // Start runs one start check: no window, only the standard handles, inside a
 // kill-on-close job, under the filtered token (windowsHookImageFilteredToken)
 // when it can be made, and returns what the image printed and its status.
-func (osWindowsHookImageStarter) Start(req windowsHookImageStart) (windowsHookImageStartResult, error) {
+func (s osWindowsHookImageStarter) Start(req windowsHookImageStart) (windowsHookImageStartResult, error) {
 	var result windowsHookImageStartResult
 	ctx, cancel := context.WithTimeout(context.Background(), req.Timeout)
 	defer cancel()
@@ -288,9 +304,10 @@ func (osWindowsHookImageStarter) Start(req windowsHookImageStart) (windowsHookIm
 	if req.Stdin != nil {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
-	token, err := windowsHookImageFilteredToken()
-	if err != nil {
-		result.TokenProblem = err.Error()
+	token, label, problem := windowsHookImageStartToken(s.ManifestPath)
+	result.Token = label
+	if token == 0 {
+		result.TokenProblem = problem
 	} else {
 		defer token.Close()
 		cmd.SysProcAttr.Token = syscall.Token(token)
@@ -310,6 +327,26 @@ func (osWindowsHookImageStarter) Start(req windowsHookImageStart) (windowsHookIm
 		return result, fmt.Errorf("%w: %s", err, boundedWindowsHookImageText(stderr))
 	}
 	return result, nil
+}
+
+// windowsHookImageStartToken picks the token of one start check: the
+// session token of an enrolled account that is signed in, else the filtered
+// installer token, else none (the installer token itself). It returns the
+// token (0 for none), what it is and, for none, why.
+func windowsHookImageStartToken(manifestPath string) (windows.Token, string, string) {
+	why := ""
+	if manifestPath != "" {
+		token, sid, err := enterprisehooks.WindowsEnrolledSessionPrimaryToken(manifestPath)
+		if err == nil {
+			return token, "the session token of the enrolled account " + sid, ""
+		}
+		why = " (" + err.Error() + ")"
+	}
+	token, err := windowsHookImageFilteredToken()
+	if err != nil {
+		return 0, "the installer token", err.Error()
+	}
+	return token, "a filtered copy of the installer token (no privileges, Administrators deny-only)" + why, ""
 }
 
 var procCreateRestrictedToken = windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")

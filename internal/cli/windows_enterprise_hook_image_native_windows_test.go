@@ -23,6 +23,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 const windowsHookImageNativeHelperEnv = "DC_HOOKIMG_NATIVE_HELPER"
@@ -292,5 +294,108 @@ func TestWindowsHookImageNativeStarterUsesTheFilteredToken(t *testing.T) {
 	count, err := strconv.Atoi(strings.TrimPrefix(fields[1], "privileges="))
 	if err != nil || count < 0 || count > 1 {
 		t.Fatalf("the started image kept %s (only SeChangeNotify may stay)", fields[1])
+	}
+}
+
+// windowsHookImageNativeModuleRoot is the repository root (the folder of
+// go.mod above this package).
+func windowsHookImageNativeModuleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found above the test folder")
+		}
+		dir = parent
+	}
+}
+
+// The start check runs the real hook and guard (built from this tree with a
+// known version and commit) from a launch folder, the way Setup runs it
+// (review 2 P2-B): it must pass, so a field failure of the check is the
+// field's (application control, EDR), not the check's.
+func TestWindowsHookImageNativeSelfTestRunsTheBuiltHook(t *testing.T) {
+	root := windowsHookImageNativeModuleRoot(t)
+	folder := filepath.Join(t.TempDir(), "bin", "hooks", "0123456789abcdef")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const version, commit = "9.9.9-hookimg-selftest", "hookimgselftest"
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("the go tool is not on PATH: %v", err)
+	}
+	ldflags := "-X main.version=" + version + " -X main.commit=" + commit
+	for _, image := range []struct{ pkg, name string }{
+		{"./cmd/defenseclaw-hook", "defenseclaw-hook.exe"},
+		{"./cmd/defenseclaw-hook-guard", "defenseclaw-hook-guard.exe"},
+	} {
+		build := exec.Command(goTool, "build", "-ldflags", ldflags, "-o", filepath.Join(folder, image.name), image.pkg)
+		build.Dir = root
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build %s: %v\n%s", image.pkg, err, out)
+		}
+	}
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", filepath.Join(home, ".defenseclaw"))
+	notes, problem := checkWindowsHookImageStarts(osWindowsHookImageStarter{},
+		filepath.Join(folder, "defenseclaw-hook.exe"), filepath.Join(folder, "defenseclaw-hook-guard.exe"),
+		windowsHookImageBuild{Version: version, Commit: commit})
+	t.Logf("notes: %v", notes)
+	if problem != "" {
+		t.Fatalf("the start check of the built hook failed: %s", problem)
+	}
+}
+
+// The real file list of a claudecode target (which watches the machine
+// folder C:\Program Files\ClaudeCode\managed-settings.d) and the real scan
+// never open a folder as a file (review 2 P1-A): no entry of the scan is a
+// folder, and a folder handed to the reader is refused as unsafe, never read.
+func TestWindowsHookImageNativeScanWithAClaudeTarget(t *testing.T) {
+	state := t.TempDir()
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"hooks":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guardianDir := filepath.Join(state, "hook-guardian")
+	if err := os.MkdirAll(guardianDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "version: 1\ntargets:\n  - user: alice\n    user_home: '" + home + "'\n    sid: S-1-5-21-1-2-3-1001\n    connector: claudecode\n"
+	if err := os.WriteFile(filepath.Join(guardianDir, "targets.yaml"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	roots := winpath.EnterpriseRoots{StateRoot: state, LifecycleDir: filepath.Join(state, "lifecycle")}
+	entries, problems := windowsHookImageConfigFiles(roots)
+	if len(problems) != 0 {
+		t.Fatalf("listing problems: %v", problems)
+	}
+	sawAccount := false
+	for _, entry := range entries {
+		if entry.User && strings.EqualFold(entry.Path, filepath.Join(home, ".claude", "settings.json")) {
+			sawAccount = true
+		}
+	}
+	if !sawAccount {
+		t.Fatalf("the claudecode target's settings.json is not an account file of the list: %+v", entries)
+	}
+	scan := scanWindowsHookImageConfigs(roots, `C:\Program Files\Cisco\DefenseClaw\bin`)
+	for _, line := range append(append([]string{}, scan.Incomplete...), scan.Skipped...) {
+		if strings.Contains(strings.ToLower(line), `managed-settings.d:`) {
+			t.Fatalf("the scan opened the managed-settings.d folder as a file: %s", line)
+		}
+	}
+	if _, err := readWindowsHookImageConfigFile(home); err == nil {
+		t.Fatal("the reader read a folder")
 	}
 }

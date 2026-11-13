@@ -6,6 +6,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"strings"
 	"testing"
@@ -133,30 +134,129 @@ func TestHookImageFoldersNamedIn(t *testing.T) {
 	body := `{"hooks":{"PreToolUse":[{"command":"\"C:\\Program Files\\Cisco\\DefenseClaw\\bin\\hooks\\0123456789abcdef\\defenseclaw-hook-guard.exe\" ..."}]}}
 command = 'C:\Program Files\Cisco\DefenseClaw\bin\hooks\FEDCBA9876543210\defenseclaw-hook.exe hook'
 c:/progra~1/cisco/defenseclaw/bin/hooks/aaaaaaaaaaaaaaaa/DefenseClaw-Hook.exe
+C:\Program Files\Cisco\Other\bin\hooks\cccccccccccccccc\defenseclaw-hook.exe
+hooks\dddddddddddddddd\defenseclaw-hook.exe
 C:\Program Files\Cisco\DefenseClaw\bin\hooks\bbbbbbbbbbbbbbbb\other.exe
 C:\Program Files\Cisco\DefenseClaw\bin\hooks\.staging-0123456789abcdef0123456789abcdef\defenseclaw-hook.exe
 C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
-	got := strings.Join(windowsHookImageFoldersNamedIn([]byte(body)), ",")
-	if got != "0123456789abcdef,aaaaaaaaaaaaaaaa,fedcba9876543210" {
+	// Only an absolute image path of this install's bin counts (the R3
+	// family helper): not another install, a relative path, an 8.3 spelling,
+	// another file name, a staging folder or the transition image.
+	got := strings.Join(windowsHookImageFoldersNamedIn([]byte(body), hookImageTestBin), ",")
+	if got != "0123456789abcdef,fedcba9876543210" {
 		t.Fatalf("folders named = %s", got)
 	}
-	scan := scanWindowsHookImageConfigFiles([]string{`C:\a.json`, `C:\gone.json`, `C:\held.json`, `C:\A.JSON`}, func(path string) ([]byte, error) {
+	read := func(path string) ([]byte, error) {
 		switch path {
-		case `C:\a.json`:
+		case `C:\a.json`, `C:\Users\u\.cursor\hooks.json`:
 			return []byte(body), nil
-		case `C:\held.json`:
+		case `C:\held.json`, `C:\Users\u\.codex\hooks.json`:
 			return nil, errors.New("The process cannot access the file because it is being used by another process.")
 		}
 		return nil, fs.ErrNotExist
-	})
-	if len(scan.Named["aaaaaaaaaaaaaaaa"]) != 1 || len(scan.Incomplete) != 1 || !strings.HasPrefix(scan.Incomplete[0], `C:\held.json: `) {
+	}
+	scan := scanWindowsHookImageConfigFiles([]windowsHookImageConfigFile{
+		{Path: `C:\a.json`}, {Path: `C:\gone.json`}, {Path: `C:\held.json`}, {Path: `C:\A.JSON`},
+		{Path: `C:\Users\u\.cursor\hooks.json`, User: true}, {Path: `C:\Users\u\.codex\hooks.json`, User: true},
+	}, hookImageTestBin, read)
+	// A machine file that cannot be read voids the scan; an account file
+	// that cannot be read is skipped and voids nothing.
+	if len(scan.Named["0123456789abcdef"]) != 2 || len(scan.Incomplete) != 1 || !strings.HasPrefix(scan.Incomplete[0], `C:\held.json: `) ||
+		len(scan.Skipped) != 1 || !strings.HasPrefix(scan.Skipped[0], `C:\Users\u\.codex\hooks.json: `) {
 		t.Fatalf("scan = %+v", scan)
+	}
+	if !scan.UserFiles[`c:\users\u\.cursor\hooks.json`] || len(scan.NamedBySystem()["0123456789abcdef"]) != 1 {
+		t.Fatalf("account files %v, by system %v", scan.UserFiles, scan.NamedBySystem())
+	}
+}
+
+type fakeScanEntry struct {
+	name string
+	mode fs.FileMode
+}
+
+func (e fakeScanEntry) Name() string               { return e.name }
+func (e fakeScanEntry) IsDir() bool                { return e.mode.IsDir() }
+func (e fakeScanEntry) Type() fs.FileMode          { return e.mode.Type() }
+func (e fakeScanEntry) Info() (fs.FileInfo, error) { return fakeScanInfo(e), nil }
+func (e fakeScanEntry) String() string             { return e.name }
+
+type fakeScanInfo fakeScanEntry
+
+func (i fakeScanInfo) Name() string       { return i.name }
+func (i fakeScanInfo) Size() int64        { return 1 }
+func (i fakeScanInfo) Mode() fs.FileMode  { return i.mode }
+func (i fakeScanInfo) ModTime() time.Time { return time.Time{} }
+func (i fakeScanInfo) IsDir() bool        { return i.mode.IsDir() }
+func (i fakeScanInfo) Sys() any           { return nil }
+
+// The watched paths of a claudecode target include the machine folder
+// C:\Program Files\ClaudeCode\managed-settings.d (review 2 P1-A): it is
+// expanded to its regular files instead of being opened as a file, which
+// failed on Windows and voided every scan.
+func TestHookImageScanExpandsAWatchedFolder(t *testing.T) {
+	dropIns := `C:\Program Files\ClaudeCode\managed-settings.d`
+	entries := map[string]fs.FileMode{
+		dropIns:                              fs.ModeDir,
+		`C:\Users\u\.claude\settings.json`:   0,
+		`C:\Users\u\.claude\link.json`:       fs.ModeSymlink,
+		`C:\Users\u\.claude`:                 fs.ModeDir,
+		`C:\ProgramData\Cursor\hooks.json`:   0,
+		`C:\ProgramData\Cursor\reparse.json`: fs.ModeIrregular,
+	}
+	lstat := func(path string) (fs.FileInfo, error) {
+		mode, ok := entries[path]
+		if !ok {
+			return nil, fs.ErrNotExist
+		}
+		return fakeScanInfo{name: path, mode: mode}, nil
+	}
+	readDir := func(path string) ([]fs.DirEntry, error) {
+		if path != dropIns {
+			return nil, errors.New("unexpected folder " + path)
+		}
+		return []fs.DirEntry{
+			fakeScanEntry{"90-defenseclaw.json", 0},
+			fakeScanEntry{".defenseclaw-managed-hooks.lock", 0},
+			fakeScanEntry{"nested", fs.ModeDir},
+			fakeScanEntry{"planted.json", fs.ModeSymlink},
+		}, nil
+	}
+	files, incomplete, skipped := expandWindowsHookImageConfigFiles([]windowsHookImageConfigFile{
+		{Path: dropIns},
+		{Path: `C:\Users\u\.claude\settings.json`, User: true},
+		{Path: `C:\Users\u\.claude\link.json`, User: true},
+		{Path: `C:\Users\u\.claude\missing.json`, User: true},
+		{Path: `C:\ProgramData\Cursor\hooks.json`},
+		{Path: `C:\ProgramData\Cursor\reparse.json`},
+		{Path: dropIns},
+	}, lstat, readDir)
+	var got []string
+	for _, file := range files {
+		got = append(got, fmt.Sprintf("%s|%v", file.Path, file.User))
+	}
+	want := []string{
+		dropIns + `\90-defenseclaw.json|false`,
+		`C:\Users\u\.claude\settings.json|true`,
+		`C:\ProgramData\Cursor\hooks.json|false`,
+	}
+	if strings.Join(got, ";") != strings.Join(want, ";") {
+		t.Fatalf("files = %v, want %v", got, want)
+	}
+	// A link in a machine folder voids the scan; an account's link is
+	// skipped (never read).
+	if len(incomplete) != 2 || !strings.Contains(incomplete[0], `planted.json`) || !strings.Contains(incomplete[1], `reparse.json`) {
+		t.Fatalf("incomplete = %v", incomplete)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], `link.json`) {
+		t.Fatalf("skipped = %v", skipped)
 	}
 }
 
 // retireFixture is a 1.0.10 install with a staged launch set, the
 // deployment record of its images and a config scan the test drives.
 type retireFixture struct {
+	userFiles  map[string]bool
 	fs         *fakeHookImageFS
 	recorded   map[string]string
 	named      []map[string][]string // one per Scan call; the last repeats
@@ -192,7 +292,7 @@ func (r *retireFixture) steps() windowsHookImageRetireSteps {
 		Scan: func() windowsHookImageConfigScan {
 			index := min(r.scans, len(r.named)-1)
 			r.scans++
-			return windowsHookImageConfigScan{Named: r.named[index]}
+			return windowsHookImageConfigScan{Named: r.named[index], UserFiles: r.userFiles}
 		},
 		Now:   func() time.Time { return r.clock },
 		Sleep: func(d time.Duration) { r.clock = r.clock.Add(d) },
@@ -295,5 +395,39 @@ func TestHookImageStageKeepsTheMarkerWhenTheStartFails(t *testing.T) {
 	}
 	if image := winpath.ResolveEnterpriseHookImageWith(r.fs, hookImageTestBin); image.State != winpath.EnterpriseHookImageRetired {
 		t.Fatalf("a failed stage un-retired: %+v", image)
+	}
+}
+
+// An account file that still names a folder is the guardian's to rewrite at
+// that account's next pass; retire does not wait for it (the older Setup
+// reads only machine files) and reports it (review 2 P2-C).
+func TestHookImageRetireDoesNotWaitForAnAccountFile(t *testing.T) {
+	r := newRetireFixture(t)
+	folder, _ := winpath.EnterpriseHookImageDigest(r.recorded["hook"])
+	r.userFiles = map[string]bool{`c:\users\c\.kiro\hooks.json`: true}
+	r.named = []map[string][]string{{folder: {`C:\Users\c\.kiro\hooks.json`}}}
+	report := retireWindowsHookImages(r.steps())
+	if !report.OK || len(report.StillNamed) != 0 || !strings.Contains(strings.Join(report.Notes, "\n"), "still_named_by_account_file: "+`C:\Users\c\.kiro\hooks.json`) {
+		t.Fatalf("retire = %+v", report)
+	}
+}
+
+// A writer that failed is in the report's error, not only a note
+// (review 2 P3).
+func TestHookImageRetireReportsAWriterError(t *testing.T) {
+	r := newRetireFixture(t)
+	r.named = []map[string][]string{{}}
+	steps := r.steps()
+	steps.RestartGuardian = func() error { return errors.New("the guardian service did not stop") }
+	report := retireWindowsHookImages(steps)
+	if !report.OK || !strings.Contains(report.Error, "guardian restart: the guardian service did not stop") {
+		t.Fatalf("retire = %+v", report)
+	}
+	folder, _ := winpath.EnterpriseHookImageDigest(r.recorded["hook"])
+	r.named = []map[string][]string{{folder: {`C:\ProgramData\OpenAI\Codex\requirements.toml`}}}
+	r.scans = 0
+	report = retireWindowsHookImages(steps)
+	if report.OK || report.Reason != windowsHookImageRetirePending || !strings.Contains(report.Error, "guardian restart") {
+		t.Fatalf("pending retire = %+v", report)
 	}
 }

@@ -196,16 +196,19 @@ jobs:
           # The versioned hook image (GAP-0751 review 1): the folder rename that
           # prune relies on is refused while an image runs, the launch folder
           # DACL, and the start check (timeout, no inherited handles, filtered
-          # token). Every test must PASS here, none may SKIP.
+          # token, the self test of the built hook, the real config scan of a
+          # claudecode target). Every test must PASS here, none may SKIP.
           $hookImage = Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-v', '-count=1', '-run', '^TestWindowsHookImageNative', './internal/cli'
-          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-hook-image-native-test.log')
+          ) -TimeoutSeconds 1800 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-hook-image-native-test.log')
           foreach ($hookImageTest in @(
             'TestWindowsHookImageNativeRenameRefusedWhileAnImageRuns',
             'TestWindowsHookImageNativeFolderDACL',
             'TestWindowsHookImageNativeStarterTimesOut',
             'TestWindowsHookImageNativeStarterInheritsNoHandles',
-            'TestWindowsHookImageNativeStarterUsesTheFilteredToken'
+            'TestWindowsHookImageNativeStarterUsesTheFilteredToken',
+            'TestWindowsHookImageNativeSelfTestRunsTheBuiltHook',
+            'TestWindowsHookImageNativeScanWithAClaudeTarget'
           )) {
             if ([string]$hookImage.StdOut -notmatch "(?m)^--- PASS: $([regex]::Escape($hookImageTest)) ") {
               throw "$hookImageTest did not complete with PASS on the native Windows runner"

@@ -152,18 +152,28 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 	} else if err != nil {
 		return fail(windowsHookImageRetireRefused, "inspect %s: %v", marker, err)
 	}
-	// From here the writers name the transition set: have them write.
+	// From here the writers name the transition set: have them write. A
+	// writer that failed is named in the report's error (and the scan below
+	// still decides ok or pending).
+	var writerErrors []string
 	if err := steps.ReconcileCodex(); err != nil {
-		report.Notes = append(report.Notes, "Codex requirements reconcile: "+err.Error())
+		writerErrors = append(writerErrors, "Codex requirements reconcile: "+err.Error())
 	}
 	if err := steps.RestartGuardian(); err != nil {
-		report.Notes = append(report.Notes, "guardian restart: "+err.Error())
+		writerErrors = append(writerErrors, "guardian restart: "+err.Error())
+	}
+	report.Notes = append(report.Notes, writerErrors...)
+	withWriterErrors := func(text string) string {
+		if len(writerErrors) == 0 {
+			return text
+		}
+		return text + " (" + strings.Join(writerErrors, "; ") + ")"
 	}
 	deadline := steps.Now().Add(steps.Wait)
 	var after windowsHookImageConfigScan
 	for {
 		after = steps.Scan()
-		if len(after.Incomplete) == 0 && len(after.Named) == 0 {
+		if len(after.Incomplete) == 0 && len(after.NamedBySystem()) == 0 {
 			break
 		}
 		if !steps.Now().Before(deadline) {
@@ -171,12 +181,22 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		}
 		steps.Sleep(steps.Poll)
 	}
+	// Only the machine files decide: the older release's Setup reads those.
+	// An account file that still names a folder is the guardian's to
+	// rewrite when it reaches that account; it is reported, not waited for.
 	still := map[string]bool{}
 	for folder, files := range after.Named {
 		for _, file := range files {
-			report.StillNamed = append(report.StillNamed, windowsHookImageNamedFile{File: file, Folder: folder})
 			still[strings.ToLower(file)] = true
+			if after.UserFiles[strings.ToLower(file)] {
+				report.Notes = append(report.Notes, fmt.Sprintf("still_named_by_account_file: %s names %s (the guardian rewrites it at that account's next pass)", file, folder))
+				continue
+			}
+			report.StillNamed = append(report.StillNamed, windowsHookImageNamedFile{File: file, Folder: folder})
 		}
+	}
+	for _, note := range after.Skipped {
+		report.Notes = append(report.Notes, "skipped_unsafe: "+note)
 	}
 	sort.Slice(report.StillNamed, func(i, j int) bool {
 		if report.StillNamed[i].File != report.StillNamed[j].File {
@@ -198,11 +218,12 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		report.Notes = append(report.Notes, "scan_incomplete: "+note)
 	}
 	if len(after.Incomplete) > 0 {
-		return fail(windowsHookImageRetirePending, "some files could not be read, so it is not known whether they still name a launch folder; fix the reason in notes, then run retire again")
+		return fail(windowsHookImageRetirePending, "%s", withWriterErrors("some machine files could not be read, so it is not known whether they still name a launch folder; fix the reason in notes, then run retire again"))
 	}
 	if len(report.StillNamed) > 0 {
-		return fail(windowsHookImageRetirePending, "%d file(s) still name a launch folder after %s; the guardian rewrites them when it reaches the account (for example at its next sign-in): run retire again before the older Setup", len(report.StillNamed), steps.Wait)
+		return fail(windowsHookImageRetirePending, "%s", withWriterErrors(fmt.Sprintf("%d machine file(s) still name a launch folder after %s; run retire again before the older Setup", len(report.StillNamed), steps.Wait)))
 	}
 	report.OK = true
+	report.Error = strings.Join(writerErrors, "; ")
 	return report
 }

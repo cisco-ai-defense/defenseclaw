@@ -189,6 +189,9 @@ type windowsHookImageStartResult struct {
 	// user's application control rules decide. TokenProblem says why not.
 	Restricted   bool
 	TokenProblem string
+	// Token names the token the start ran with (an enrolled account's
+	// session token, the filtered installer token or the installer token).
+	Token string
 }
 
 // windowsHookImageStarter starts an image once. The Windows implementation
@@ -468,18 +471,30 @@ func checkWindowsHookImageStarts(starter windowsHookImageStarter, hook, guard st
 	start := func(req windowsHookImageStart) (windowsHookImageStartResult, error) {
 		req.Timeout = windowsHookImageStartTimeout
 		result, err := starter.Start(req)
-		if err == nil && !result.Restricted && !tokenNoted {
+		if !tokenNoted {
 			tokenNoted = true
-			notes = append(notes, "start check ran with the installer token: "+result.TokenProblem)
+			switch {
+			case !result.Restricted && result.TokenProblem != "":
+				notes = append(notes, "start check ran with the installer token: "+result.TokenProblem)
+			case result.Token != "":
+				notes = append(notes, "start check ran as "+result.Token)
+			}
 		}
 		return result, err
 	}
+	ranAs := func(result windowsHookImageStartResult) string {
+		token := result.Token
+		if token == "" {
+			token = "the installer token"
+		}
+		return fmt.Sprintf(" [exit %d, ran as %s, stderr: %q]", result.ExitCode, token, boundedWindowsHookImageText(result.Stderr))
+	}
 	result, err := start(windowsHookImageStart{Path: hook, Args: []string{"--version-json"}})
 	if err != nil {
-		return notes, fmt.Sprintf("the staged hook %s did not start: %v", hook, err)
+		return notes, fmt.Sprintf("the staged hook %s did not start: %v", hook, err) + ranAs(result)
 	}
 	if result.ExitCode != 0 {
-		return notes, fmt.Sprintf("the staged hook %s ended with status %d: %s", hook, result.ExitCode, boundedWindowsHookImageText(result.Stderr))
+		return notes, fmt.Sprintf("the staged hook %s ended with status %d", hook, result.ExitCode) + ranAs(result)
 	}
 	output := result.Stdout
 	if len(output) > windowsHookImageOutputLimit {
@@ -503,22 +518,22 @@ func checkWindowsHookImageStarts(starter windowsHookImageStarter, hook, guard st
 	if guard != "" {
 		result, err = start(windowsHookImageStart{Path: guard, Args: []string{"--version"}})
 		if err != nil {
-			return notes, fmt.Sprintf("the staged hook guard %s did not start: %v", guard, err)
+			return notes, fmt.Sprintf("the staged hook guard %s did not start: %v", guard, err) + ranAs(result)
 		}
 		want := fmt.Sprintf("defenseclaw-hook-guard version %s (commit=%s,", build.Version, build.Commit)
 		if result.ExitCode != 0 || len(result.Stdout) > windowsHookImageOutputLimit ||
 			!strings.HasPrefix(strings.TrimSpace(string(result.Stdout)), want) {
 			return notes, fmt.Sprintf("the staged hook guard %s reports %q (status %d), not %q",
-				guard, boundedWindowsHookImageText(result.Stdout), result.ExitCode, want)
+				guard, boundedWindowsHookImageText(result.Stdout), result.ExitCode, want) + ranAs(result)
 		}
 	}
 	command, args := windowsHookImageSelfTestCommand(hook, guard)
 	result, err = start(windowsHookImageStart{Path: command, Args: args, Stdin: windowsHookImageSelfTestInput})
 	if err != nil {
-		return notes, fmt.Sprintf("the managed Claude Code hook command of %s did not start: %v", hook, err)
+		return notes, fmt.Sprintf("the managed Claude Code hook command of %s did not start: %v", hook, err) + ranAs(result)
 	}
 	if problem := windowsHookImageSelfTestProblem(result); problem != "" {
-		return notes, fmt.Sprintf("the managed Claude Code hook command of %s %s", hook, problem)
+		return notes, fmt.Sprintf("the managed Claude Code hook command of %s %s", hook, problem) + ranAs(result)
 	}
 	return notes, ""
 }
@@ -530,7 +545,14 @@ var windowsHookImageSelfTestArgs = []string{"hook", "--connector", "claudecode",
 // windowsHookImageSelfTestInput is the canned PreToolUse call of the self
 // test: a Read of a file that does not exist. During Setup the lifecycle
 // holds the gateway, so the managed hook answers it closed (a deny), which is
-// a pass: the chain started from the new folder and answered.
+// a pass: the chain started from the new folder and answered. The pass rule
+// (windowsHookImageSelfTestProblem): exit 0 (allow, with no output or one
+// JSON answer) or exit 2 with a reason (one JSON answer on stdout or text on
+// stderr); a guard or cmd.exe message that the hook or guard could not
+// start, any other status, more than one answer or a bare exit 2 fail. The
+// managed hook may write one audit line for this call (a SYSTEM-attributed
+// row in the audit store and the SIEM export, tool Read of
+// defenseclaw-hook-image-self-test.txt).
 var windowsHookImageSelfTestInput = []byte(`{"session_id":"defenseclaw-hook-image-self-test",` +
 	`"transcript_path":"","cwd":"C:\\Windows\\Temp","hook_event_name":"PreToolUse","tool_name":"Read",` +
 	`"tool_input":{"file_path":"C:\\Windows\\Temp\\defenseclaw-hook-image-self-test.txt"}}` + "\n")
@@ -688,6 +710,9 @@ func pruneWindowsHookImages(fsys windowsHookImageFS, bin string, keep []string, 
 	staged := windowsHookImageStageTimes(fsys, root, entries)
 	for _, note := range policy.Scan.Incomplete {
 		report.Notes = append(report.Notes, "scan_incomplete: "+note)
+	}
+	for _, note := range policy.Scan.Skipped {
+		report.Notes = append(report.Notes, "skipped_unsafe: "+note)
 	}
 	for _, entry := range entries {
 		name := entry.Name()
