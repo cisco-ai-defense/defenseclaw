@@ -275,6 +275,14 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 			continue
 		}
 		servers, err := ParseMCPConfig(p, data)
+		if errors.Is(err, ErrMCPConfigAmbiguous) {
+			sum.MCPServers++
+			res := &scanner.ScanResult{Scanner: ConfigScannerName, Target: p, Timestamp: o.now()}
+			res.Findings = append(res.Findings, ambiguousFinding(p, err))
+			note(ConfigScannerName, "1")
+			record(config.AdmissionTypeMCP, path.Base(p), p, ConfigScannerName, res)
+			continue
+		}
 		if err != nil {
 			sum.MCPServers++
 			record(config.AdmissionTypeMCP, path.Base(p), p, ConfigScannerName, failedScan(ConfigScannerName, p, err))
@@ -420,11 +428,25 @@ const RuleLinkNamesOverCap = "link-names-over-cap"
 // least one MCP server definition. A binary or ordinary file never does.
 func definesMCPServers(data []byte) bool {
 	for _, as := range []string{"config.json", "config.toml"} {
-		if servers, err := ParseMCPConfig(as, data); err == nil && len(servers) > 0 {
+		servers, err := ParseMCPConfig(as, data)
+		if errors.Is(err, ErrMCPConfigAmbiguous) {
+			return true // it may define servers the decoder cannot see (GAP-0176)
+		}
+		if err == nil && len(servers) > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// ambiguousFinding is the HIGH finding for an MCP config with keys that
+// differ only by case (GAP-0176): the agent and the scan would read
+// different servers.
+func ambiguousFinding(p string, err error) scanner.Finding {
+	return scanner.Finding{ID: RuleMCPConfigAmbiguous, RuleID: RuleMCPConfigAmbiguous, Severity: scanner.SeverityHigh,
+		Title: "MCP config has keys that differ only by case", Description: err.Error() +
+			"; the agent reads the exact keys and the scan cannot tell which servers it starts, so the file is refused",
+		Location: p, Scanner: ConfigScannerName, Category: "mcp-config"}
 }
 
 // decide runs the admission rules on one result. accepted are the rule ids

@@ -147,10 +147,21 @@ would never start.
 {{/* "true" when the release runs in managed_enterprise (GAP-0135). */}}
 {{/* The gateway's Kubernetes sign-in is on (internal/cli substrateKubeSignIn):
 no substrate.identity.oidc.issuer, not a managed install, and not turned
-off with --no-kube-sign-in in custom gateway args. */}}
+off with --no-kube-sign-in in custom gateway args. The flag is a Go bool:
+--no-kube-sign-in and --no-kube-sign-in=<true value> turn it off, =false
+keeps it on, and the last one wins, as the gateway parses it. */}}
 {{- define "dc.kubeSignIn" -}}
 {{- $issuer := dig "substrate" "identity" "oidc" "issuer" "" (.Values.config | default dict) -}}
-{{- if and (not $issuer) (not (include "dc.managed" .)) (not (has "--no-kube-sign-in" (.Values.gateway.args | default list))) }}true{{ end -}}
+{{- $off := false -}}
+{{- range (.Values.gateway.args | default list) -}}
+{{- $a := toString . -}}
+{{- if eq $a "--no-kube-sign-in" -}}
+{{- $off = true -}}
+{{- else if hasPrefix "--no-kube-sign-in=" $a -}}
+{{- $off = has (trimPrefix "--no-kube-sign-in=" $a) (list "1" "t" "T" "TRUE" "true" "True") -}}
+{{- end -}}
+{{- end -}}
+{{- if and (not $issuer) (not (include "dc.managed" .)) (not $off) }}true{{ end -}}
 {{- end -}}
 
 {{/* The auth-delegator ClusterRoleBinding's name: gateway.authDelegatorBinding,
@@ -413,14 +424,17 @@ the leader. */}}
   secret:
     secretName: {{ .Values.gateway.relaySessionSecret }}
     optional: true
+    defaultMode: 0440
 - name: llm-credentials
   secret:
     secretName: {{ .Values.gateway.llmCredentialsSecret }}
     optional: true
+    defaultMode: 0440
 {{- with .Values.callout.judge.tokenSecret }}
 - name: callout-judge
   secret:
     secretName: {{ . }}
+    defaultMode: 0440
     items:
     - {key: token, path: token}
 {{- end }}

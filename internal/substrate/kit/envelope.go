@@ -93,6 +93,14 @@ type SkillFingerprint struct {
 	// decides for it (GAP-0039). With FP empty and Path a skill root, it
 	// stands for that root's folders past the listing cap.
 	Over bool `json:"over,omitempty"`
+	// Sums are the folder's file digests (relative name -> sha256 hex), sent
+	// when its files did not fit this post: the gateway rebuilds FP from them
+	// and trusts, without the files, a folder the attested template build
+	// admitted (GAP-0164).
+	Sums map[string]string `json:"sums,omitempty"`
+	// Big marks a folder whose files are more than one post carries
+	// (MaxAttachBytes): it is never attached, so only its Sums can match it.
+	Big bool `json:"big,omitempty"`
 }
 
 // PathFact is one path argument as the actor's file system resolves it.

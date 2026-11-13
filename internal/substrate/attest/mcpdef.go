@@ -91,9 +91,13 @@ func isMCPConfig(p string) bool {
 }
 
 // ParseMCPConfig reads the servers one config file defines. A file that
-// parses but names no servers returns none; a file that does not parse is an
+// parses but names no servers returns none; a file that does not parse, or
+// has keys that differ only by case (ErrMCPConfigAmbiguous, GAP-0176), is an
 // error, so a malformed config is never read as "no servers".
 func ParseMCPConfig(p string, data []byte) ([]MCPServer, error) {
+	if err := checkMCPConfigKeys(p, data); err != nil {
+		return nil, fmt.Errorf("%s: %w", p, err)
+	}
 	var out []MCPServer
 	if strings.HasSuffix(p, ".toml") {
 		var doc struct {

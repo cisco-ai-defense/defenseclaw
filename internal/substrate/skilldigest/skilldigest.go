@@ -34,9 +34,33 @@ func Digest(files map[string][]byte) string {
 	if len(files) == 0 || len(files) > MaxFiles {
 		return ""
 	}
-	names := make([]string, 0, len(files))
+	sums := make(map[string]string, len(files))
 	for n, b := range files {
-		if n == "" || strings.HasPrefix(n, "/") || strings.Contains("/"+n+"/", "/../") || strings.Count(n, "/") > MaxDepth || len(b) > MaxFileBytes {
+		if len(b) > MaxFileBytes {
+			return ""
+		}
+		sums[n] = Sum(b)
+	}
+	return DigestSums(sums)
+}
+
+// Sum is the file digest DigestSums takes: lowercase hex sha256.
+func Sum(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// DigestSums is Digest from the files' digests (relative name -> Sum) instead
+// of their content, so a folder too big for one hook post can be matched to
+// an attested digest by its manifest (substrate-1 GAP-0164). It is "" for the
+// same names Digest refuses, and for a value that is not a Sum.
+func DigestSums(sums map[string]string) string {
+	if len(sums) == 0 || len(sums) > MaxFiles {
+		return ""
+	}
+	names := make([]string, 0, len(sums))
+	for n, s := range sums {
+		if n == "" || strings.HasPrefix(n, "/") || strings.Contains("/"+n+"/", "/../") || strings.Count(n, "/") > MaxDepth || !isSum(s) {
 			return ""
 		}
 		names = append(names, n)
@@ -45,8 +69,19 @@ func Digest(files map[string][]byte) string {
 	h := sha256.New()
 	h.Write([]byte("defenseclaw skill folder v1\n"))
 	for _, n := range names {
-		sum := sha256.Sum256(files[n])
-		h.Write([]byte(n + "\x00" + hex.EncodeToString(sum[:]) + "\n"))
+		h.Write([]byte(n + "\x00" + sums[n] + "\n"))
 	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+func isSum(s string) bool {
+	if len(s) != 2*sha256.Size {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
