@@ -44,15 +44,17 @@ The checks:
 - **The judge, when you turn it on.** The injection judge reads a tool result
   as untrusted data with its own prompt ("does this data try to direct the
   agent?"). It runs under `detection_strategy_completion`, the setting that
-  already governs tool output: `regex_judge` judges every result the rules
-  did not already block, `judge_first` every result.
+  already governs tool output (setup sets it with the judge): `regex_judge`
+  judges every result the rules did not already block, `judge_first` every
+  result.
 
 Not checked on tool output: the enterprise-data rules (card numbers, IBANs,
 phone numbers, email addresses). In a tool's output those are the data you
-asked the tool for. To alert on personal data in the output of particular
-tools, list them in the pack's `sensitive-tools.yaml` (result inspection), or
-turn on the PII judge (`guardrail.judge.pii_completion`). Command, path and
-C2 rules never run on output text; they judge tool calls.
+asked the tool for. The PII judge likewise reads a tool's output only when
+the pack lists the tool in `sensitive-tools.yaml` with `judge_result: true`.
+To alert on personal data in the output of particular tools, list them there
+(`result_inspection`, `min_entities_for_alert`). Command, path and C2 rules
+never run on output text; they judge tool calls.
 
 ## What happens
 

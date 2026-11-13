@@ -382,8 +382,11 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content, toolName s
 	defer cancel()
 
 	// tool_result is a tool's output on its way to the model (GAP-0171): the
-	// injection judge reads it as untrusted data with its own prompt, and the
-	// PII judge reads it as before, as completion-side content.
+	// injection judge reads it as untrusted data with its own prompt. The PII
+	// judge reads it (as completion-side content) only for a tool the pack
+	// lists with judge_result: personal data in a tool's output is the data
+	// the user asked the tool for, and judging every output alerted on 63% of
+	// benign AgentDojo tool outputs (s7tr-jb.judge).
 	toolResult := direction == directionToolResult
 	piiDirection := direction
 	if toolResult {
@@ -396,6 +399,10 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content, toolName s
 	}
 	if piiDirection == "completion" && !j.cfg.PIICompletion {
 		runPII = false
+	}
+	if toolResult && runPII {
+		entry := j.suppressionPack(ctx).LookupSensitiveTool(toolName)
+		runPII = entry != nil && entry.JudgeResult
 	}
 	// The exfil judge only fires on user prompts — completion-side
 	// content is the model's own output and credential-file leakage

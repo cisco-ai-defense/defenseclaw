@@ -126,7 +126,7 @@ func TestRunJudgesToolResultUsesToolResultPrompt(t *testing.T) {
 	clean := `{"Instruction Manipulation":{"reasoning":"","label":false,"signal_strength":"weak_signal"},"Context Manipulation":{"reasoning":"","label":false,"signal_strength":"weak_signal"},"Obfuscation":{"reasoning":"","label":false,"signal_strength":"weak_signal"},"Semantic Manipulation":{"reasoning":"","label":false,"signal_strength":"weak_signal"},"Token Exploitation":{"reasoning":"","label":false,"signal_strength":"weak_signal"}}`
 	mock := &mockLLMProvider{response: &ChatResponse{Choices: []ChatChoice{{Message: &ChatMessage{Role: "assistant", Content: clean}}}}}
 	j := newMockJudge(t, mock)
-	j.cfg.Injection = true
+	j.cfg.Injection, j.cfg.PII, j.cfg.PIICompletion = true, true, true
 	j.RunJudges(context.Background(), directionToolResult, "Rating 4.5. Lovely stay, book early.", "get_rating_reviews")
 	if len(mock.captured) != 1 {
 		t.Fatalf("want one injection judge call on a tool result, got %d", len(mock.captured))
@@ -134,11 +134,20 @@ func TestRunJudgesToolResultUsesToolResultPrompt(t *testing.T) {
 	if sys := mock.captured[0].Messages[0].Content; sys != toolResultInjectionSystemPrompt {
 		t.Fatalf("tool result judged with the prompt judge's system prompt: %.80q", sys)
 	}
-	// A completion still gets no injection judge.
+	// The PII judge reads a tool's output only for a tool the pack lists with
+	// judge_result (users_list in the default pack): injection + PII.
+	mock.captured = nil
+	j.RunJudges(context.Background(), directionToolResult, "alice@example.com, bob@example.org", "users_list")
+	if len(mock.captured) != 2 {
+		t.Fatalf("listed sensitive tool: %d judge calls, want injection + PII", len(mock.captured))
+	}
+	// A completion still gets the PII judge only.
 	mock.captured = nil
 	j.RunJudges(context.Background(), "completion", "Here is the summary.", "")
-	if len(mock.captured) != 0 {
-		t.Fatalf("completion ran %d judge calls, want 0", len(mock.captured))
+	for _, req := range mock.captured {
+		if req.Messages[0].Content == toolResultInjectionSystemPrompt || req.Messages[0].Content == injectionSystemPrompt {
+			t.Fatal("completion ran the injection judge")
+		}
 	}
 }
 

@@ -391,8 +391,8 @@ and is not available through Converse or InvokeModel.
 A judge on a local model (Ollama, vLLM or LM Studio on your own machine)
 answers one call at a time, so judge calls queue behind each other. With the
 judge on, a prompt can start up to three judge calls (prompt injection,
-exfiltration and PII), each tool result can start an injection call and a
-PII call ([Tool results](/docs/guardrail/tool-results)), each reply a PII call, and
+exfiltration and PII), each tool result an injection call ([Tool
+results](/docs/guardrail/tool-results)), each reply a PII call, and
 the agent's next tool call waits behind them. These settings keep the
 tool-call judge and stop the other calls:
 
