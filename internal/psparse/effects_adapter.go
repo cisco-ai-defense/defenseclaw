@@ -6,7 +6,6 @@ package psparse
 
 import (
 	"encoding/base64"
-	"strconv"
 	"strings"
 	"unicode/utf16"
 )
@@ -153,15 +152,12 @@ func LiteralString(e Expr) (string, bool) {
 		}
 		return "", false
 	case *Number:
-		// format the parsed value, matching the reference parser's constant
-		// value (0x10 -> "16", 1kb -> "1024", 1e3 -> "1000").
-		if v.Int {
-			return strconv.FormatInt(int64(v.Value), 10), true
+		// the pwsh-formatted value computed in numberLit (0x10 -> "16",
+		// 1.0d -> "1.0", a too-big integer keeps its exact digits).
+		if v.OK {
+			return v.Display, true
 		}
-		if f, err := strconv.ParseFloat(v.Text, 64); err == nil {
-			return strconv.FormatFloat(f, 'g', -1, 64), true
-		}
-		return strconv.FormatFloat(v.Value, 'g', -1, 64), true
+		return "", false
 	case *Binary:
 		// a binary expression argument is a non-constant node on the reference
 		// side (never a static value).

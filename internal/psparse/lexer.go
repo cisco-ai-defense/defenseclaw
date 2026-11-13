@@ -469,6 +469,11 @@ func (l *lexer) lexNumber() {
 		for l.i < len(l.runes) && isHex(l.cur()) {
 			l.i++
 		}
+	} else if l.cur() == '0' && (l.peek(1) == 'b' || l.peek(1) == 'B') {
+		l.i += 2
+		for l.i < len(l.runes) && (l.cur() == '0' || l.cur() == '1') {
+			l.i++
+		}
 	} else {
 		for l.i < len(l.runes) && (unicode.IsDigit(l.cur()) || l.cur() == '.') {
 			l.i++

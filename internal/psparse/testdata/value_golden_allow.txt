@@ -13,33 +13,7 @@ V3JpdGUtT3V0cHV0IEDigJgKeArigJlA	pending step-3: smart-quote value
 V3JpdGUtT3V0cHV0IOKAk+KAk3g=	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IC0tIC0tJSBh	pending step-3: --% verbatim tail as elements
 ZnVuY3Rpb24gZiB7IHBhcmFtKFtQYXJhbWV0ZXIoVmFsdWVGcm9tUGlwZWxpbmUpXSRpKSBwcm9jZXNzIHsgUmVtb3ZlLUl0ZW0gJGkgfSB9	pending step-3: param/attribute block command recursion
-V3JpdGUtT3V0cHV0IDB4RkZGRkZGRkY=	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDB4ODAwMDAwMDA=	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDEyMzQ1Njc4OTAxMjM0NTY3	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IDkyMjMzNzIwMzY4NTQ3NzU4MDg=	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IDFlNg==	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDEuNW1i	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDEuMGQ=	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDEuNTBk	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDF1	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDBiMTAx	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDFu	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDF5	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDF1eQ==	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDFz	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDF1cw==	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDF1bA==	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDFlLTU=	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IDFlMjA=	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IC41	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IDFlMzA5	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IDEuMmUza2I=	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDB4RkZGRkZGRkZGRkZGRkZGRg==	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDB4RkZGRkZGRkZ1	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IDFlMTU=	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IDEyMzQ1Njc4OS4xMjM=	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IDEuNWUtNw==	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IDB4N2ZmZmZmZmZmZmZmZmZmZm4=	pending step-3: number value formatting (int width / suffix / decimal)
 V3JpdGUtT3V0cHV0IDEuNW4=	pending step-3: number value formatting (int width / suffix / decimal)
 c3dpdGNoIC1SZWdleCAtQ2FzZVNlbnNpdGl2ZSAoJHgpIHsgJ15hJyB7IFJlbW92ZS1JdGVtIEM6XHggfSBkZWZhdWx0IHsgUmVtb3ZlLUl0ZW0gQzpceSB9IH0=	pending step-3: command count mismatch (delta review)
 c3dpdGNoIC1GaWxlIEM6XHgudHh0IHsgJ2EnIHsgUmVtb3ZlLUl0ZW0gQzpceSB9IH0=	pending step-3: command count mismatch (delta review)

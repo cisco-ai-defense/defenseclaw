@@ -38,9 +38,11 @@ type StringPart struct {
 // multiplier or hex/0x form). Value is the parsed magnitude when resolvable.
 type Number struct {
 	span
-	Text  string
-	Value float64
-	Int   bool
+	Text    string
+	Value   float64
+	Int     bool
+	Display string // pwsh-formatted value (0x10 -> "16", 1.0d -> "1.0")
+	OK      bool   // Display is a trusted value
 }
 
 func (*Number) expr() {}

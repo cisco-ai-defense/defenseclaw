@@ -5,6 +5,7 @@
 package psparse
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"unicode"
@@ -338,30 +339,106 @@ var numberMultipliers = map[string]float64{"kb": 1 << 10, "mb": 1 << 20, "gb": 1
 
 func numberLit(t Token) *Number {
 	n := &Number{span: span{t.Start, t.End}, Text: t.Raw}
-	txt := strings.TrimRight(t.Raw, "lLdD")
-	mult := 1.0
-	lower := strings.ToLower(txt)
-	for suf, m := range numberMultipliers {
-		if strings.HasSuffix(lower, suf) {
-			mult = m
-			txt = txt[:len(txt)-2]
+	raw := t.Raw
+	lower := strings.ToLower(raw)
+	// multiplier suffix (kb mb gb tb pb)
+	mult := int64(1)
+	for _, suf := range []string{"kb", "mb", "gb", "tb", "pb"} {
+		if i := strings.Index(lower, suf); i >= 0 {
+			switch suf {
+			case "kb":
+				mult = 1 << 10
+			case "mb":
+				mult = 1 << 20
+			case "gb":
+				mult = 1 << 30
+			case "tb":
+				mult = 1 << 40
+			case "pb":
+				mult = 1 << 50
+			}
+			raw = raw[:i] + raw[i+2:]
+			lower = strings.ToLower(raw)
 			break
 		}
 	}
-	if strings.HasPrefix(strings.ToLower(txt), "0x") {
-		if v, err := strconv.ParseInt(txt[2:], 16, 64); err == nil {
-			n.Value = float64(v) * mult
-			n.Int = true
+	// trailing numeric type suffix (l u y s n d and combos)
+	isDecimalType := false
+	unsigned := false
+	for len(raw) > 0 {
+		c := raw[len(raw)-1]
+		if c == 'd' || c == 'D' {
+			isDecimalType = true
+		}
+		if c == 'u' || c == 'U' {
+			unsigned = true
+		}
+		if strings.IndexByte("lLuUyYsSnNdD", c) >= 0 {
+			raw = raw[:len(raw)-1]
+			continue
+		}
+		break
+	}
+	low := strings.ToLower(raw)
+	setInt := func(v int64) {
+		n.Value, n.Int = float64(v), true
+		n.Display, n.OK = strconv.FormatInt(v, 10), true
+	}
+	switch {
+	case strings.HasPrefix(low, "0x"):
+		dig := raw[2:]
+		if u, err := strconv.ParseUint(dig, 16, 64); err == nil {
+			var v int64
+			if unsigned {
+				v = int64(u) // a u suffix keeps the unsigned value (no sign wrap)
+			} else if len(dig) <= 8 {
+				v = int64(int32(uint32(u))) // 1-8 hex digits: Int32 width (wraps)
+			} else {
+				v = int64(u) // 9-16 hex digits: Int64 width (wraps)
+			}
+			setInt(v * mult)
+		}
+		return n
+	case strings.HasPrefix(low, "0b"):
+		if u, err := strconv.ParseUint(raw[2:], 2, 64); err == nil {
+			setInt(int64(u) * mult)
+		}
+		return n
+	case !strings.ContainsAny(raw, ".eE") && !isDecimalType:
+		// a decimal integer
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			setInt(v * mult)
+		} else if mult == 1 {
+			n.Display, n.OK = raw, true // too big for int64: the exact source digits
+		}
+		return n
+	case isDecimalType && mult == 1 && !strings.ContainsAny(raw, "eE"):
+		// a [decimal] literal keeps its written form (trailing zeros): 1.50d -> "1.50"
+		n.Display, n.OK = raw, true
+		return n
+	default:
+		if f, err := strconv.ParseFloat(raw, 64); err == nil {
+			f *= float64(mult)
+			n.Value = f
+			switch {
+			case math.IsInf(f, 1):
+				n.Display, n.OK = "Infinity", true
+			case math.IsInf(f, -1):
+				n.Display, n.OK = "-Infinity", true
+			case f == math.Trunc(f) && math.Abs(f) < 1e15:
+				n.Display, n.Int, n.OK = strconv.FormatInt(int64(f), 10), true, true
+			default:
+				// .NET double.ToString() uses E notation for magnitudes >= 1e15
+				// or < 1e-4, else a plain decimal. (A direct range test avoids
+				// log10 float imprecision at exact powers of ten.)
+				if a := math.Abs(f); a != 0 && (a >= 1e15 || a < 1e-4) {
+					n.Display = strconv.FormatFloat(f, 'E', -1, 64)
+				} else {
+					n.Display = strconv.FormatFloat(f, 'f', -1, 64)
+				}
+				n.OK = true
+			}
 		}
 		return n
 	}
-	if v, err := strconv.ParseInt(txt, 10, 64); err == nil {
-		n.Value = float64(v) * mult
-		n.Int = true
-		return n
-	}
-	if v, err := strconv.ParseFloat(txt, 64); err == nil {
-		n.Value = v * mult
-	}
-	return n
 }
