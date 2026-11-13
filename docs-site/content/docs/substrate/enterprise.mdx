@@ -137,12 +137,12 @@ The platform team builds the approved agent images once, signs them with the com
 ```bash
 defenseclaw substrate template build --connector claudecode --from REGISTRY/harness/claudecode@sha256:... \
   --to REGISTRY/actors/claudecode:1.0.10 --hook-binary defenseclaw-actor-hook --relay-binary defenseclaw-actor-relay \
-  --key attestation.key
+  --key attestation.key --session-key relay-session.pub
 defenseclaw substrate template verify REGISTRY/actors/claudecode@sha256:... --anchors attestation.pub
 defenseclaw substrate template publish REGISTRY/actors/claudecode@sha256:... TARGET:TAG --anchors attestation.pub
 ```
 
-Each build is scanned and attested, and the controller admits only an image whose attestation verifies against the anchors. A template made any other way, for example with plain `kubectl ate create actor-template`, still starts, but its agents get no network. The admin sees why in `doctor` and in the fleet view.
+`relay-session.pub` is the public half of the gateway's relay session key (Secret `defenseclaw-relay-session`, made as in [the open-source setup](/docs/substrate/open-source)). Without it nobody could attach to the agents, so the build stops with an error. Each build is scanned and attested, and the controller admits only an image whose attestation verifies against the anchors. A template made any other way, for example with plain `kubectl ate create actor-template`, still starts, but its agents get no network. The admin sees why in `doctor` and in the fleet view.
 
 </Step>
 
