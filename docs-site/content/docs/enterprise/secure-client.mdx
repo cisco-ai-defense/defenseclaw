@@ -437,6 +437,27 @@ sudo tail -n 100 /Library/Logs/Cisco/SecureClient/DefenseClaw/gateway.err.log
 sudo tail -n 100 /Library/Logs/Cisco/SecureClient/DefenseClaw/hook-guardian.err.log
 ```
 
+## Endpoint health report
+
+From 1.0.10, about every 30 minutes the gateway sends Cisco AI Defense an endpoint health report and writes the last one to
+`diagnostics/health_report_last.json` under its `data_dir` (`runtime`). Run elevated (as root on macOS),
+`enterprise windows status --json` and `enterprise macos status --json` summarize it in a `health_report` object.
+The object is absent until the first report:
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `healthy`, `degraded`, `unhealthy` or `starting` |
+| `observed_at`, `built_at` | When the report was built and written (RFC 3339 UTC) |
+| `sequence`, `trigger` | Report number, and `startup`, `scheduled` or `config_reload` |
+| `reason_codes` | The report's reason codes, such as `HOOKS_PARTIAL` |
+| `delivery` | `result` (`queued`, `not_routed` or `failed`), `at`, `failure_class`, `cloud_state` |
+| `stale` | More than three report intervals passed since `observed_at`: the gateway stopped reporting |
+| `error` | `unreadable`, `access_denied` or `invalid`: the file exists but could not be used |
+
+The text output adds one line, such as `Health report: degraded (HOOKS_PARTIAL) at 2026-11-12T11:30:00Z, delivery queued`.
+The report never changes `ok`, `warnings` or the exit code, and `verify` does not check it. Read `status`, `stale`
+and `delivery.result` to find a device that needs attention. The gateway sends nothing until the Cisco AI Defense endpoint is configured.
+
 ## Restart-required controls
 
 In managed mode, `config.yaml` is the only live configuration source. Hot

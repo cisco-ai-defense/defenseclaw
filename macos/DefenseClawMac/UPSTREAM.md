@@ -20,12 +20,14 @@ SPDX-License-Identifier: Apache-2.0
 
 The macOS app was imported from [`keitheobrien/defenseclaw_mac`](https://github.com/keitheobrien/defenseclaw_mac) at:
 
-- Stable release: `v1.1.34`
-- Commit: `6ce825fc9022477b371455d87834b732c1343210`
-- Commit title: `Merge pull request #39 from keitheobrien/kobrien/runtime-discovery-setup-1.1.34`
-- Imported: 2026-10-30
+- Stable release: `v1.1.36`
+- Commit: `31df78fb1b9ec92187c9bc35730f4bd9584c0e5e`
+- Commit title: `Merge pull request #41 from keitheobrien/kobrien/fix/runtime-upgrade-ownership-1.1.35`
+- Imported: 2026-11-13
 
 The import includes the Xcode project, Swift sources, the gateway administrator helper and its build script, applicable tests, developer build/test scripts, icon-generation tool, asset catalog, and README images. It intentionally excludes the upstream repository's Git metadata, `.codex` configuration, personal signing identities, duplicate license file, standalone release wrapper, and two tests for the bundled runtime that Cisco does not ship. The upstream `scripts/build_unified_dmg.sh` behavior is adapted into the monorepo's `scripts/build-macos-app-release.sh`, which builds the DMG and zip from the same unpublished commit as the backend release; the runtime is installed by that release's `install.sh` rather than embedded in the app.
+
+Upstream v1.1.36 adds an administrator upgrade flow (authorized Stop, `RuntimeUpgradeStateAccess` ownership recovery, authorized Restart) for its root-run administrator gateway. It is not imported: the Cisco helper never starts a gateway as root. Its single `repair` action already returns the root-owned files an earlier root gateway left in the DefenseClaw home. The part that applies here, returning root-owned agent config files, is ported into that repair (`GatewayAdminAgentConfigRepair`).
 
 Cisco integration changes after import include the Cisco bundle identifier, unified release source, synchronized DefenseClaw version, ad-hoc-by-default signing, install and update through the release's `install.sh`, an administrator helper that trusts its own signing team instead of a pinned personal team, monorepo CI/release workflows, and Cisco Apache-2.0 headers.
 
