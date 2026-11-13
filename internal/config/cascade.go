@@ -1322,3 +1322,27 @@ func (c *Config) withMeetCascade(members []string, profile GuardrailProfile) Gua
 	}
 	return profile
 }
+
+// CascadeUnknown is the unknown tier guardrail.cascade sets for connector of
+// this (base or profile-derived) guardrail block: pack, alert, confirm or
+// block. Under the Secure Client integration callers do not ask.
+func (g *GuardrailConfig) CascadeUnknown(connector string) string {
+	if g == nil {
+		return CascadeUnknownPack
+	}
+	u := cascadeOr(g.Cascade.Unknown, CascadeUnknownPack)
+	if connector = strings.TrimSpace(connector); connector != "" {
+		if pc, ok := g.connectorOverride(connector); ok && pc.Cascade != nil && pc.Cascade.Unknown != "" {
+			u = cascadeOr(pc.Cascade.Unknown, u)
+		}
+	}
+	if g.profileCascade != nil && g.profileCascade.Unknown != "" {
+		u = cascadeOr(g.profileCascade.Unknown, u)
+	}
+	if connector != "" {
+		if pc, ok := g.profileConnectors[normalizeConnectorKey(connector)]; ok && pc.Cascade != nil && pc.Cascade.Unknown != "" {
+			u = cascadeOr(pc.Cascade.Unknown, u)
+		}
+	}
+	return u
+}

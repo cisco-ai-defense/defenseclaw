@@ -191,6 +191,9 @@ type ToolInspectVerdict struct {
 	// agent cannot ask, such a confirm is the HIGH alert the judge mapping
 	// gives, not a block (decisionConfirmWithoutAsk). Never serialized.
 	decisionConfirm bool
+	// cascadeOutcome is what the cascade's final step (the policy, the
+	// CRITICAL floor) did with the call, nil when it changed nothing.
+	cascadeOutcome *CascadeOutcome
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -1909,6 +1912,16 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	default: // regex_only / unset
 		return nil
 	}
+	// guardrail.cascade.judge.no_verdict: a call the model lane was asked
+	// about and gave no verdict on is at least the unknown tier when set to
+	// unknown (registered first, so the escalated fail-closed refusal below
+	// decides before it). An observe hook's judge answers after the hook.
+	observeAnswer := false
+	defer func() {
+		if out == nil && !observeAnswer && cfg.ResolveCascade(connector).JudgeNoVerdict == config.CascadeNoVerdictUnknown {
+			out = cascadeNoVerdict(cfg, connector, a.boundedTier(ctx, connector))
+		}
+	}()
 
 	// The generic /inspect handlers run under a 200ms deadline
 	// (inspectScanTimeout) — no judge round-trip fits, and blowing
@@ -1985,6 +1998,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		jctx, cancel := context.WithTimeout(callCtx, timeout)
 		defer cancel()
 		jctx = withJudgeSuppressionPack(jctx, pack)
+		jctx = withCascadeSystemOne(jctx, cfg, connector)
 		var v *ScanVerdict
 		if strings.EqualFold(strategyDirection, "tool_call") {
 			jctx = withDecisionRuleFloor(jctx, ruleFloor)
@@ -2004,7 +2018,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		resume := yieldHookRunSlot(ctx)
 		v := call(ctx)
 		resume()
-		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+		return a.finishHookJudge(ctx, cfg, connector, strategyDirection, judge, ruleFloor, v)
 	}
 
 	// A bounded action hook cancels the model request when its answer
@@ -2030,6 +2044,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	if observe {
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge does not hold the answer (observe) connector=%s direction=%s\n",
 			connector, strategyDirection)
+		observeAnswer = true
 		return nil
 	}
 	left := time.Until(answerEnd)
@@ -2045,7 +2060,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	defer resume()
 	select {
 	case v := <-done:
-		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+		return a.finishHookJudge(ctx, cfg, connector, strategyDirection, judge, ruleFloor, v)
 	case <-wait.C:
 	case <-ctx.Done():
 	}
@@ -2236,6 +2251,9 @@ func hookJudgeLaneVerdict(cfg *config.Config, connector, strategyDirection strin
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge unavailable (connector=%s direction=%s scanner=%q); keeping regex/AID verdict\n",
 			connector, strategyDirection, failedScanner)
 		return nil
+	}
+	if v.cascadeFixed {
+		return v
 	}
 	if !cfg.SecureClientIntegration() {
 		// The judge severity goes through block_at / alert_at like every

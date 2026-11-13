@@ -37,15 +37,18 @@ const boundedTruncatedTitle = "Input exceeds policy evaluation limit, judged as 
 // a member of its profile meet that enforces on the hook path is
 // (shareBodyStrictTier, as the shell limit and share-body paths read it),
 // else the posture of the connector's pack.
+//
+// guardrail.cascade.unknown replaces the pack's tier when it is set (alert,
+// confirm, block; cascadeBoundedTier).
 func (a *APIServer) boundedTier(ctx context.Context, connectorName string) bounded.Tier {
-	if a.shareBodyStrictTier(ctx, connectorName) {
-		return bounded.TierStrict
-	}
 	cfg := a.decisionConfig(ctx)
+	if a.shareBodyStrictTier(ctx, connectorName) {
+		return cascadeBoundedTier(cfg, connectorName, bounded.TierStrict)
+	}
 	if cfg == nil {
 		return bounded.TierDefault
 	}
-	return bounded.TierOf(cfg.HookPolicyTierForConnector(connectorName))
+	return cascadeBoundedTier(cfg, connectorName, bounded.TierOf(cfg.HookPolicyTierForConnector(connectorName)))
 }
 
 // boundedTruncatedFinding is the evaluation-limit finding of an input read up

@@ -333,6 +333,10 @@ const (
 	TierDefault Tier = iota
 	TierPermissive
 	TierStrict
+	// TierConfirm is the tier guardrail.cascade.unknown: confirm selects: an
+	// unknown case asks where the connector can (its confirm mapping applies
+	// where it cannot). No pack posture maps to it.
+	TierConfirm
 )
 
 // TierOf is the tier of a pack posture as the config resolves it
@@ -352,8 +356,11 @@ func TierOf(posture string) Tier {
 // alert in the default and permissive packs, which never block an unknown
 // case (where the connector can ask, its own confirm mapping applies).
 func Unknown(tier Tier) Action {
-	if tier == TierStrict {
+	switch tier {
+	case TierStrict:
 		return Block
+	case TierConfirm:
+		return Confirm
 	}
 	return Alert
 }

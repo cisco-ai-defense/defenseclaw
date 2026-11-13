@@ -695,6 +695,7 @@ func (s *Sidecar) publishGeneration(g *Generation) {
 	}
 	publishGeneration(g)
 	s.generation.Store(g)
+	noteCascade(s.logger, g)
 	// Sandbox and security-action records need the applied policy stamp even
 	// when the install watcher is disabled or has no directories to watch.
 	audit.SetPolicyStamp(livePolicyStampV8)

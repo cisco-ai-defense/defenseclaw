@@ -109,6 +109,13 @@ type ScanVerdict struct {
 	// needs_review category (MEDIUM, nothing actionable): audit-only in the
 	// default pack when the rules did not flag the call (judgeReviewOnlyAudit).
 	reviewOnly bool
+	// systemOneBlocked marks a judge-lane verdict on a call System One
+	// confidently blocked (guardrail.cascade.judge.block_needs_system_one).
+	systemOneBlocked bool
+	// cascadeFixed marks a verdict whose action guardrail.cascade set (an
+	// on_unsure or no_verdict answer): the hook lane does not map it by
+	// severity again. In-process only.
+	cascadeFixed bool
 }
 
 func allowVerdict(scanner string) *ScanVerdict {

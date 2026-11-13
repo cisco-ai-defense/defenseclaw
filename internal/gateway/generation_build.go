@@ -188,6 +188,16 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		}
 	}
 
+	cascadePolicy, err := buildCascadePolicy(ctx, cfg)
+	if err != nil {
+		// The load compiled these bytes already; a failure here is a bug,
+		// and the generation is refused (the previous one stays).
+		return nil, fmt.Errorf("generation: guardrail.cascade.policy: %w", err)
+	}
+	if cascadePolicy != nil {
+		g.CascadePolicy = cascadePolicy
+		g.Components["cascade_policy"] = cascadePolicy.Digest
+	}
 	if !cfg.SecureClientIntegration() {
 		if err := cfg.Scanners.CheckPinnedFiles(); err != nil {
 			if in.strictScannerPins {
@@ -678,5 +688,6 @@ func CurrentPolicyHealth() (PolicyHealth, bool) {
 		health.LastReloadError = g.scannerPinError
 	}
 	health.OPAUnavailable = g.opaError
+	health.CascadeInvalid = g.Config.Guardrail.Cascade.Invalid().Message()
 	return health, true
 }
