@@ -1438,9 +1438,15 @@ def setup_llm(
     help="Full endpoint URL, e.g. http://127.0.0.1:8791/v1/systemone. https anywhere, http only to loopback.",
 )
 @click.option(
+    "--protocol",
+    type=click.Choice(["system-one", "gemini-decisions"], case_sensitive=False),
+    default=None,
+    help="Wire protocol: system-one (default) or gemini-decisions (Gemini Decision 1, Google AI Studio key).",
+)
+@click.option(
     "--api-key-env",
     default=None,
-    help="Env var holding the bearer token (default DEFENSECLAW_DECISION_MODEL_KEY; local servers need none).",
+    help="Env var holding the token (default DEFENSECLAW_DECISION_MODEL_KEY; local servers need none).",
 )
 @click.option(
     "--timeout",
@@ -1479,6 +1485,7 @@ def setup_decision_model(
     enabled: bool | None,
     model: str | None,
     base_url: str | None,
+    protocol: str | None,
     api_key_env: str | None,
     timeout: float | None,
     allow_threshold: float | None,
@@ -1526,7 +1533,7 @@ def setup_decision_model(
         api_key_env = _validated_api_key_env_name(
             api_key_env, "'--api-key-env'", dmod.DECISION_MODEL_KEY_ENV
         )
-    flags_given = any(v is not None for v in (enabled, model, base_url, api_key_env, timeout,
+    flags_given = any(v is not None for v in (enabled, model, base_url, protocol, api_key_env, timeout,
                                               allow_threshold, block_threshold, on_confident_block, connectors))
     if not non_interactive and not flags_given:
         dm = cfg.decision_model
@@ -1539,8 +1546,15 @@ def setup_decision_model(
         click.echo()
         enabled = click.confirm(f"  {dmod.INIT_QUESTION}", default=dm.enabled)
         if enabled:
-            base_url = click.prompt("  Endpoint URL", default=dm.base_url or dmod.DEFAULT_BASE_URL).strip()
-            model = click.prompt("  Model name", default=dm.model or "").strip()
+            protocol = click.prompt(
+                "  Protocol (system-one, or gemini-decisions for Gemini Decision 1)",
+                type=click.Choice(["system-one", "gemini-decisions"], case_sensitive=False),
+                default=dm.effective_protocol(),
+            ).strip().lower()
+            gemini = protocol == "gemini-decisions"
+            url_default = dmod.GEMINI_BASE_URL if gemini else dmod.DEFAULT_BASE_URL
+            base_url = click.prompt("  Endpoint URL", default=dm.base_url or url_default).strip()
+            model = click.prompt("  Model name", default=dm.model or (dmod.GEMINI_MODEL if gemini else "")).strip()
             api_key_env = click.prompt(
                 "  Token env var (leave the default for a local server)",
                 default=dm.effective_api_key_env(),
@@ -1556,6 +1570,7 @@ def setup_decision_model(
             enabled=enabled,
             model=model,
             base_url=base_url,
+            protocol=protocol,
             api_key_env=api_key_env,
             timeout=timeout,
             allow_threshold=allow_threshold,
@@ -1571,7 +1586,8 @@ def setup_decision_model(
 
         details = (
             f"enabled={'true' if updated.enabled else 'false'} previous={previous} "
-            f"model={''.join(updated.model.split()) or '(unset)'} api_key_env={updated.effective_api_key_env()}"
+            f"model={''.join(updated.model.split()) or '(unset)'} protocol={updated.effective_protocol()} "
+            f"api_key_env={updated.effective_api_key_env()}"
         )
         try:
             saved_change_audit(app.logger).log_config_change("decision_model", details)

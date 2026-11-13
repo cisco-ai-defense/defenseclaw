@@ -1767,6 +1767,11 @@ DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD = 0.30
 DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD = 0.75
 DECISION_MODEL_DEFAULT_TIMEOUT = 1.0
 DECISION_MODEL_ON_CONFIDENT_BLOCK = ("escalate", "decide")
+# Wire protocols: System One ({model, state, questions}, Bearer token) and
+# Google's Decisions API ({model, input, questions}, x-goog-api-key).
+DECISION_MODEL_PROTOCOL_SYSTEM_ONE = "system-one"
+DECISION_MODEL_PROTOCOL_GEMINI = "gemini-decisions"
+DECISION_MODEL_PROTOCOLS = (DECISION_MODEL_PROTOCOL_SYSTEM_ONE, DECISION_MODEL_PROTOCOL_GEMINI)
 
 
 @dataclass
@@ -1789,6 +1794,8 @@ class DecisionModelConfig:
     enabled: bool = False
     model: str = ""
     base_url: str = ""
+    # system-one (default) or gemini-decisions (Gemini Decision 1).
+    protocol: str = ""
     api_key_env: str = ""
     credential: str = ""
     timeout: float = 0.0
@@ -1805,6 +1812,9 @@ class DecisionModelConfig:
 
     def effective_api_key_env(self) -> str:
         return self.api_key_env.strip() or DECISION_MODEL_KEY_ENV
+
+    def effective_protocol(self) -> str:
+        return (self.protocol or "").strip().lower() or DECISION_MODEL_PROTOCOL_SYSTEM_ONE
 
     def effective_timeout(self) -> float:
         return self.timeout if self.timeout > 0 else DECISION_MODEL_DEFAULT_TIMEOUT
@@ -1840,6 +1850,8 @@ class DecisionModelConfig:
             return f"timeout must be between 0 and 30 seconds, got {self.timeout}"
         if self.effective_on_confident_block() not in DECISION_MODEL_ON_CONFIDENT_BLOCK:
             return f"on_confident_block must be escalate or decide, got {self.on_confident_block!r}"
+        if self.effective_protocol() not in DECISION_MODEL_PROTOCOLS:
+            return f"protocol must be system-one or gemini-decisions, got {self.protocol!r}"
         if self.base_url.strip():
             err = decision_model_url_error(self.base_url)
             if err:
@@ -1895,6 +1907,7 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
         enabled=raw.get("enabled") is True or str(raw.get("enabled", "")).strip().lower() == "true",
         model=str(raw.get("model", "") or ""),
         base_url=str(raw.get("base_url", "") or ""),
+        protocol=str(raw.get("protocol", "") or ""),
         api_key_env=str(raw.get("api_key_env", "") or ""),
         credential=str(raw.get("credential", "") or ""),
         timeout=_num("timeout"),
