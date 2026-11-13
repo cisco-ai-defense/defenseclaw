@@ -9049,9 +9049,18 @@ function Enter-DefenseClawLifecycleLock {
                 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)',
                 [Security.AccessControl.AccessControlSections]::All
             )
-            Microsoft.PowerShell.Security\Set-Acl `
-                -LiteralPath $path `
-                -AclObject $security
+            try {
+                Microsoft.PowerShell.Security\Set-Acl `
+                    -LiteralPath $path `
+                    -AclObject $security
+            }
+            catch [IO.IOException] {
+                # Secure Client repairs the lock in its verdict below, as it
+                # did when this stamp sat inside the catch above.
+                if (Test-DefenseClawStandaloneProfile) {
+                    throw
+                }
+            }
         }
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {

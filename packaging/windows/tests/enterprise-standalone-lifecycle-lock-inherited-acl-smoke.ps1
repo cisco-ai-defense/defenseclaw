@@ -61,7 +61,7 @@ try {
                     throw 'fixture: the lock does not inherit'
                 }
             }
-            function Test-Take([string]$Label, [bool]$ExpectTaken) {
+            function Test-Take([string]$Label, [bool]$ExpectTaken, [string]$Refusal = '') {
                 $lock = $null
                 try {
                     $lock = Enter-DefenseClawLifecycleLock -Layout $layout -TimeoutSeconds 5 3>$null
@@ -75,6 +75,9 @@ try {
                 catch {
                     if ($ExpectTaken) {
                         $failures.Add("${Label}: refused: $($_.Exception.Message)")
+                    }
+                    elseif ($Refusal -and [string]$_.Exception.Message -notmatch $Refusal) {
+                        $failures.Add("${Label}: refused for another reason: $($_.Exception.Message)")
                     }
                 }
                 finally {
@@ -96,12 +99,18 @@ try {
             Set-TestLock $script:AdministratorsSID
             $out = & icacls.exe $layout.LifecycleLockPath /grant '*S-1-5-32-545:(M)' 2>&1
             if ($LASTEXITCODE -ne 0) { throw "fixture: icacls /grant: $out" }
-            Test-Take 'an inheriting lock with a Users write entry' $false
+            Test-Take 'an inheriting lock with a Users write entry' $false 'refusing to re-stamp|untrusted|S-1-5-32-545'
+            $usersEntry = @((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $layout.LifecycleLockPath).GetAccessRules(
+                $true, $true, [Security.Principal.SecurityIdentifier]) |
+                Microsoft.PowerShell.Core\Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-545' })
+            if ($usersEntry.Count -eq 0) {
+                $failures.Add('an inheriting lock with a Users write entry: the entry was stamped away')
+            }
 
             $user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
             if ($user -notin @($script:SystemSID, $script:AdministratorsSID)) {
                 Set-TestLock $user
-                Test-Take 'an inheriting lock another account owns' $false
+                Test-Take 'an inheriting lock another account owns' $false 'inherits from an ancestor|untrusted owner|refusing to re-stamp'
             }
         }
         finally {

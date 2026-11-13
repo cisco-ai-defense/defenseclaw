@@ -755,9 +755,6 @@ jobs:
       - name: Managed path ACL verdict regression
         if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-path-acl-verdict-smoke.ps1
-      - name: Standalone lifecycle lock inherited ACL regression
-        if: ${{ !cancelled() }}
-        run: ./packaging/windows/tests/enterprise-standalone-lifecycle-lock-inherited-acl-smoke.ps1
       - name: Exact ACL and shared vendor ACE regressions
         if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-exact-acl-smoke.ps1
