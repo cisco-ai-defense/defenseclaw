@@ -3,7 +3,11 @@
 
 package modelusage
 
-import "time"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"time"
+)
 
 // SpendSink is where finished calls charge routing.admin budgets: the
 // routing admin runtime (routingadmin.Runtime.Add). The gateway wires it in;
@@ -22,24 +26,43 @@ func (e *Engine) SetSpendSink(sink SpendSink) {
 	e.budgetSink.Store(&spendSinkBox{sink: sink})
 }
 
-// chargeBudgets charges a finished call to its budget keys with the
+// chargeBudgets charges a finished agent call to its budget keys with the
 // resolved cost: computed, else reported (lead ruling 2026-11-12T23:38Z).
-// An unknown cost is passed as unknown, never as 0.
+// A call that returned usage nobody can price is passed as unknown, never 0.
+// A call with no usage at all (refused, failed or cancelled before the
+// provider counted anything) bills nothing and is not unknown. Each call
+// gets an id minted here, so a client-chosen request id cannot merge calls.
 func (e *Engine) chargeBudgets(f CallFacts, rec Record) {
-	if e == nil || len(f.ChargeKeys) == 0 {
+	if e == nil || len(f.ChargeKeys) == 0 || f.CallRole != RoleAgent {
 		return
 	}
 	box := e.budgetSink.Load()
 	if box == nil || box.sink == nil {
 		return
 	}
+	id := newCallID()
 	usd := rec.Cost.ComputedUSD
 	if usd == nil {
 		usd = rec.Cost.USD
 	}
-	if usd == nil {
-		box.sink.Add(f.RequestID, f.ChargeKeys, 0, false, rec.EndedAt)
-		return
+	// A stream cancelled after the provider started answering, before the
+	// final usage, was billed by the provider for output nobody counted:
+	// its cost is unknown, never the input-only (or zero) total.
+	cutShort := rec.Outcome == "cancelled" && rec.TTFB > 0 && rec.Usage.Has&HasOutput == 0
+	switch {
+	case cutShort:
+		box.sink.Add(id, f.ChargeKeys, 0, false, rec.EndedAt)
+	case usd != nil:
+		box.sink.Add(id, f.ChargeKeys, *usd, true, rec.EndedAt)
+	case rec.Usage.Has != 0:
+		box.sink.Add(id, f.ChargeKeys, 0, false, rec.EndedAt)
 	}
-	box.sink.Add(f.RequestID, f.ChargeKeys, *usd, true, rec.EndedAt)
+}
+
+// newCallID is a random id for one upstream call (the idempotency key of
+// its budget charge).
+func newCallID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }

@@ -199,7 +199,7 @@ func (s *Sidecar) applyRoutingAdmin(cfg *config.Config) {
 	routingAdminRuntime.SetFeed(cfg.BudgetFeedReady())
 	routingAdminFleet.apply(cfg)
 	routingAdminRuntime.SetInterval(routingAdminSyncInterval(cfg))
-	routingAdminRuntime.SetFleet(routingAdminFleet.counter(), routingAdminFleet.mapper(), routingAdminFleet.hasher())
+	routingAdminRuntime.SetFleet(routingAdminFleet.counter(), routingAdminFleet.mapper())
 }
 
 // routingAdminSyncInterval is routing.admin.budget_store.sync_interval (the

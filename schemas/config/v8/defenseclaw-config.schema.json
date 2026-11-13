@@ -5378,7 +5378,7 @@
     "routingBudgetStore": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Opt-in fleet budget store (defenseclaw-gateway budget-store serve). Absent: budgets count on each device. Devices send only charge keys (keyed hashes, no names), UTC days and dollar amounts, signed with the shared tenant secret, over HTTPS.",
+      "description": "Opt-in fleet budget store (defenseclaw-gateway budget-store serve). Absent: budgets count on each device. Each device uses its own credential (budget-store device issue, installed by MDM) and sends only the pseudonymous charge keys it was issued, UTC days and dollar amounts, over HTTPS.",
       "properties": {
         "url": {
           "type": "string",
@@ -5390,7 +5390,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
-          "description": "Protected credential with the tenant secret (base64, 32 bytes); default routing-budget-store-key."
+          "description": "Protected credential with this device's own credential; default routing-budget-store-device."
         },
         "ca_file": {
           "type": "string",
@@ -5422,7 +5422,6 @@
         "listen",
         "tls_cert_file",
         "tls_key_file",
-        "secret_file",
         "db_path"
       ],
       "properties": {
@@ -5443,12 +5442,6 @@
           "maxLength": 4096,
           "pattern": "^(/|[A-Za-z]:[\\\\/])"
         },
-        "secret_file": {
-          "type": "string",
-          "minLength": 2,
-          "maxLength": 4096,
-          "pattern": "^(/|[A-Za-z]:[\\\\/])"
-        },
         "db_path": {
           "type": "string",
           "minLength": 2,
@@ -5458,7 +5451,14 @@
         "rate_limit_per_minute": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 100000
+          "maximum": 100000,
+          "description": "Requests per device per minute (default 600)."
+        },
+        "device_daily_cap_usd": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10000000,
+          "description": "Spend one device may add per UTC day (default 500)."
         }
       }
     },

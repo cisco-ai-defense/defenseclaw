@@ -87,7 +87,7 @@ func TestRoutingTestRefusals(t *testing.T) {
 			t.Fatalf("%.40s: %d %s", tc.body, rec.Code, rec.Body.String())
 		}
 	}
-	if routingTestAllowed("k", time.Now()); routingTestAllowed("k", time.Now()) {
+	if routingTestAllowed("k", true, time.Now()); routingTestAllowed("k", true, time.Now()) {
 		t.Fatal("a second dry run within 200 ms is refused")
 	}
 }
@@ -142,5 +142,24 @@ func TestUnroutedGateCostsNothingWithoutAnAdminPolicy(t *testing.T) {
 	denied := SemanticRouteOutcome{Result: SemanticRouteDenied, Deny: &engine.DenyReason{Code: "x"}}
 	if got := p.gateOriginal(context.Background(), denied, "anthropic", "claude"); got.Result != SemanticRouteDenied || got.Deny.Code != "x" {
 		t.Fatalf("a denied outcome stays denied: %+v", got)
+	}
+}
+
+func TestRoutingAPIUsersSeeNone(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.Routing.Admin = &config.RoutingAdminConfig{Visibility: &config.RoutingVisibility{UsersSee: "none"}}
+	a := &APIServer{scannerCfg: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/routing/effective", nil)
+	req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{UID: 1001, Name: "u"}))
+	if !cfg.StandaloneEnterprise() {
+		t.Skip("fixture is not a standalone managed config on this platform")
+	}
+	if _, _, ok := a.routingAPICaller(req, cfg); ok {
+		t.Fatal("users_see none: a standard user reads nothing")
+	}
+	cfg.Routing.Admin.Visibility = nil
+	if key, admin, ok := a.routingAPICaller(req, cfg); !ok || admin || key != "1001" {
+		t.Fatalf("users_see own: the kernel peer reads its own (key %q admin %v ok %v)", key, admin, ok)
 	}
 }

@@ -143,18 +143,8 @@ type Policy struct {
 // none (the engine then skips Evaluate). managed is cfg.StandaloneEnterprise().
 // The input has passed config validation.
 func Compile(rules []config.RoutingAdminRule, budgets []config.RoutingBudget, managed bool) *Policy {
-	return CompileWith(rules, budgets, managed, nil)
-}
-
-// CompileWith is Compile with the subject hash of named-user and group
-// budget keys (nil: an unkeyed SHA-256 prefix, device only; a fleet uses a
-// keyed hash of the tenant secret so the store cannot read subjects).
-func CompileWith(rules []config.RoutingAdminRule, budgets []config.RoutingBudget, managed bool, hash func(string) string) *Policy {
 	if len(rules) == 0 && len(budgets) == 0 {
 		return nil
-	}
-	if hash == nil {
-		hash = shortHash
 	}
 	p := &Policy{Managed: managed}
 	for _, r := range rules {
@@ -176,7 +166,7 @@ func CompileWith(rules []config.RoutingAdminRule, budgets []config.RoutingBudget
 		case b.Scope == config.RoutingBudgetScopeConnector && b.Subject != config.RoutingBudgetSubjectAll:
 			c.subject = config.NormalizeConnectorName(b.Subject)
 		case b.Subject != config.RoutingBudgetSubjectAll:
-			c.subject = hash(b.Subject)
+			c.subject = shortHash(b.Subject)
 		}
 		p.budgets = append(p.budgets, c)
 	}
@@ -340,7 +330,7 @@ func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Ver
 				continue
 			}
 			if b.action == config.RoutingBudgetOnExceedDeny {
-				v.Deny = &Deny{Code: "budget_cost_unknown:" + b.ID, Message: "The cost of a model call for budget " + b.ID + " could not be computed, so the budget cannot tell how much is left; ask your administrator to price the model (observability.pricing)."}
+				v.Deny = &Deny{Code: "budget_cost_unknown:" + b.ID, Message: "A recent model call of yours could not be priced, so budget " + b.ID + " cannot tell how much is left. Try again in a few minutes; if it keeps happening, ask your administrator to add the model to observability.pricing."}
 				return
 			}
 			if b.action == config.RoutingBudgetOnExceedWarn {
@@ -533,6 +523,10 @@ func intersect(a, b []string) []string {
 	}
 	return out
 }
+
+// LocalSubjectHash is the device-local form of a budget subject in charge
+// keys (budget-store device issue maps it to the fleet form).
+func LocalSubjectHash(s string) string { return shortHash(s) }
 
 func shortHash(s string) string {
 	sum := sha256.Sum256([]byte(s))

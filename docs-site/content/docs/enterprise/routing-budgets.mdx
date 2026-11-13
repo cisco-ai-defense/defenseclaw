@@ -51,36 +51,47 @@ routing:
 
 ## Spend across devices: the budget store (optional)
 
-Without a store, each device counts its own spend; a user with two devices has two limits. The opt-in budget store sums spend across devices.
+Without a store, each device counts its own spend; a user with two devices has two limits. The opt-in budget store sums spend across devices. Each device gets its own credential, which names only that device's users and the budgets they are in.
 
-1. Create a tenant secret, 32 random bytes in base64 (`openssl rand -base64 32`). Give it to every device as the protected credential `routing-budget-store-key`.
-2. On the store host, derive the store's key and keep only that. The store never holds the tenant secret, so it cannot compute the hash of a name:
-
-   ```bash
-   defenseclaw-gateway budget-store derive-auth-key --secret-file ./tenant-secret > /etc/defenseclaw-budget-store/secret
-   chmod 600 /etc/defenseclaw-budget-store/secret   # owned by the account that runs the store
-   shred -u ./tenant-secret
-   ```
-
-3. Run the store as its own service account with a TLS certificate:
+1. On an administrator workstation, create a tenant secret once and keep it there (`openssl rand -base64 32 > tenant-secret; chmod 600 tenant-secret`). No device and no store holds it.
+2. Run the store as its own service account with a TLS certificate. Copy the bundle's `routing.admin.budgets` into its config, so it knows the group and connector limits:
 
    ```yaml
    # config.yaml on the store host
    config_version: 9
    routing:
      admin:
+       budgets: []   # the same budgets as the device bundle
        budget_store:
          server:
            listen: 0.0.0.0:8443
            tls_cert_file: /etc/defenseclaw-budget-store/cert.pem
            tls_key_file: /etc/defenseclaw-budget-store/key.pem
-           secret_file: /etc/defenseclaw-budget-store/secret
            db_path: /var/lib/defenseclaw-budget-store/store.db
+           device_daily_cap_usd: 500   # the most one device may add per UTC day
    ```
 
    ```bash
    defenseclaw-gateway budget-store serve --config /etc/defenseclaw-budget-store/config.yaml
    ```
+
+3. Issue a credential for each device, naming its users (UPN or SID) and the groups of theirs that budgets name:
+
+   ```bash
+   defenseclaw-gateway budget-store device issue --config bundle-config.yaml --secret-file ./tenant-secret \
+     --user alice@example.com --group "EXAMPLE\\eng" \
+     --credential-out laptop-17.cred --record-out laptop-17.record
+   ```
+
+   Install `laptop-17.cred` on the device as the protected credential `routing-budget-store-device` with your MDM. Copy `laptop-17.record` to the store host and register it:
+
+   ```bash
+   defenseclaw-gateway budget-store device add --config /etc/defenseclaw-budget-store/config.yaml --record laptop-17.record
+   ```
+
+   Delete both files after. On Windows, run `device issue` in a folder only Administrators and SYSTEM can read; it refuses to leave the files anywhere else.
+
+   Name each person the same way on every device (the SID when you have it): a UPN on one device and a SID on another count as two people. Issue a device again, add it and revoke the old credential when its users or groups change, or when you add a per-user (`subject: "*"`) budget to the bundle; until then that budget counts on each device only.
 
 4. In the device bundle:
 
@@ -92,20 +103,47 @@ Without a store, each device counts its own spend; a user with two devices has t
          ca_file: /etc/defenseclaw/budget-store-ca.pem   # recommended with a private CA
    ```
 
+Manage devices and read fleet totals on the store host:
+
+```bash
+defenseclaw-gateway budget-store device list   --config /etc/defenseclaw-budget-store/config.yaml
+defenseclaw-gateway budget-store device revoke --config /etc/defenseclaw-budget-store/config.yaml d3f1...
+defenseclaw-gateway budget-store report        --config /etc/defenseclaw-budget-store/config.yaml --since 2026-11-01
+```
+
 What the store sees:
 
 | Sent | Not sent |
 | --- | --- |
-| Budget id, a keyed hash for each user (from the verified domain SID or UPN), group and named user, connector names, UTC days, dollar amounts | User, group, device or host names, prompts, models |
+| Device id, budget id, a keyed hash for each user, group and named user, connector names, UTC days, dollar amounts | User, group, device or host names, prompts, models |
 
-- Every request and every answer is signed with a key derived from the tenant secret, over HTTPS. The device refuses plain HTTP, redirects, proxies from the environment and answers the store did not sign (for example rewritten by a TLS-inspecting proxy).
+What a device may do:
+
+- Add spend only for its own users and the budgets its credential names. Anything else is refused.
+- Spend only grows: the store ignores a lower value, and only today's and yesterday's spend (UTC) can grow.
+- Read the fleet spend of its own users. For a group or connector budget it learns only whether the limit is reached, never the total. Once the limit is reached, every device in that budget learns it.
+- Group and connector totals and every device's spend are read on the store host only (`report`); the store has no network API for them.
+- A revoked device is refused within 10 seconds. Its spend so far stays counted; `device revoke --drop-spend-from 2026-11-01` also deletes its spend from that day on (for example forged spend that tripped a group's deny budget). `report --by-device` shows each device's spend. `device add` does not bring a revoked device back unless you pass `--reactivate`.
+- One device adds at most `device_daily_cap_usd` per UTC day over all its keys (or its own `--cap-usd`); `device list` shows the last day a device reached it.
+- One device may run at most 16 gateway processes at once and use at most 64 connector names a day beyond its credential's keys.
+
+More:
+
+- Every request, and every answer to an authenticated request, is signed with the device's key, over HTTPS. The device refuses plain HTTP, redirects, proxies from the environment and spend answers the store did not sign (for example rewritten by a TLS-inspecting proxy). Any other answer only makes it count on this device.
 - Set `ca_file` to your private CA. Without it the device trusts the system roots, including any TLS-inspection root on the device.
+- The store must know every group and connector budget: when its config lacks one, devices count on their own spend and `defenseclaw routing budgets list` names the missing budget.
 - When the store is down or refuses, budgets keep counting this device only. `defenseclaw routing budgets list` and `doctor` say so, and the fleet total comes back when the store answers.
-- A user with no verified SID or UPN on a device is counted on that device only.
+- A user the device's credential does not name, or with no verified SID or UPN, is counted on that device only.
+- A local administrator of a device can read and add spend for that device's users and its groups, up to its daily cap; revoke the device to stop it. They cannot reach other users.
 - New network traffic: each managed device's gateway connects to the store URL every `sync_interval` (30 seconds by default) and when a new user starts an agent. Allow it in your firewall, and expose the store only to the devices' network. The store sees each device's address and when it sends.
-- Every managed device holds the tenant secret. A local administrator of any managed device can read the spend of every user and group the budgets name, and can write spend that trips deny budgets on every device. Treat the store as part of your IT trust boundary.
-- To rotate the secret, give the store and every device the new value together. Devices pick it up at the next bundle reload; fleet spend counted under the old secret no longer adds to the new totals, and each device keeps its own spend.
+- If the tenant secret leaks, the hashes of names can be computed: make a new secret and issue every device again. Spend counted under the old secret no longer adds up.
+- The store's database holds every device's secret: protect it and its backups like the TLS key. Anyone with a copy can act as any device within that device's keys.
 - Budget ids and connector names reach the store as they are: do not put a person's name in a budget id.
+- Turning the store on in the middle of a period starts per-user, group and named-user budgets again on each device.
+- Devices behind one NAT address share a high request limit (20 times `rate_limit_per_minute`); a busy host on that address can push them to per-device counting for a minute.
+- After a gateway restart, a user's spend on other devices is read within seconds; calls made in those seconds see only this device's spend.
+- The TLS key must be owned by the account that runs the store and readable only by it. It may be a link, for example into `/etc/letsencrypt/live`, when the file it points to meets that rule.
+- A stream the user stops after the answer started has no final token count: the user's own budget reads as unknown for 10 minutes (a deny budget then refuses on a managed device).
 
 ## Check it
 

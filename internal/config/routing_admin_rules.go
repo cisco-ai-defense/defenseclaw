@@ -461,9 +461,9 @@ func validateRoutingAdminFailClosed(rules []RoutingAdminRule, floor []string) er
 type RoutingBudgetStoreConfig struct {
 	// URL is https://host[:port] of the store.
 	URL string `mapstructure:"url" yaml:"url,omitempty"`
-	// Credential names the protected credential that holds the 32-byte
-	// tenant secret (base64) the store and the devices share
-	// (default routing-budget-store-key).
+	// Credential names the protected credential that holds this device's
+	// own credential (budget-store device issue, installed by MDM; default
+	// routing-budget-store-device). No device holds a tenant-wide secret.
 	Credential string `mapstructure:"credential" yaml:"credential,omitempty"`
 	// CAFile is a PEM file of the only CA the device trusts for the store
 	// (a private certificate); empty = the system roots.
@@ -485,17 +485,19 @@ type RoutingBudgetStoreServerConfig struct {
 	// the store serves HTTPS only).
 	TLSCertFile string `mapstructure:"tls_cert_file" yaml:"tls_cert_file,omitempty"`
 	TLSKeyFile  string `mapstructure:"tls_key_file"  yaml:"tls_key_file,omitempty"`
-	// SecretFile holds the tenant secret (base64, owner-only file).
-	SecretFile string `mapstructure:"secret_file" yaml:"secret_file,omitempty"`
-	// DBPath is the store's SQLite file.
+	// DBPath is the store's SQLite file (devices and spend).
 	DBPath string `mapstructure:"db_path" yaml:"db_path,omitempty"`
-	// RateLimitPerMinute caps requests per client address (default 600).
+	// RateLimitPerMinute caps requests per device (default 600; 20 times
+	// that per client address before authentication).
 	RateLimitPerMinute int `mapstructure:"rate_limit_per_minute" yaml:"rate_limit_per_minute,omitempty"`
+	// DeviceDailyCapUSD is the default spend one device may add per UTC day
+	// (default 500; device issue --cap-usd sets one device's).
+	DeviceDailyCapUSD float64 `mapstructure:"device_daily_cap_usd" yaml:"device_daily_cap_usd,omitempty"`
 }
 
 // Defaults of routing.admin.budget_store.
 const (
-	RoutingBudgetStoreDefaultCredential = "routing-budget-store-key"
+	RoutingBudgetStoreDefaultCredential = "routing-budget-store-device"
 	RoutingBudgetStoreDefaultSync       = 30 * time.Second
 	RoutingBudgetStoreDefaultTimeoutMs  = 2000
 	RoutingBudgetStoreDefaultRate       = 600
@@ -564,13 +566,16 @@ func ValidateRoutingBudgetStore(b *RoutingBudgetStoreConfig, device bool) error 
 		if _, _, err := net.SplitHostPort(strings.TrimSpace(s.Listen)); err != nil {
 			return settingErrorAt(at+".server.listen", fmt.Errorf("%s.server.listen must be host:port", at))
 		}
-		for key, path := range map[string]string{"tls_cert_file": s.TLSCertFile, "tls_key_file": s.TLSKeyFile, "secret_file": s.SecretFile, "db_path": s.DBPath} {
+		for key, path := range map[string]string{"tls_cert_file": s.TLSCertFile, "tls_key_file": s.TLSKeyFile, "db_path": s.DBPath} {
 			if !filepath.IsAbs(strings.TrimSpace(path)) {
 				return settingErrorAt(at+".server."+key, fmt.Errorf("%s.server.%s must be an absolute path (the store serves HTTPS only)", at, key))
 			}
 		}
 		if s.RateLimitPerMinute < 0 || s.RateLimitPerMinute > 100000 {
 			return settingErrorAt(at+".server.rate_limit_per_minute", fmt.Errorf("%s.server.rate_limit_per_minute must be 0 to 100000", at))
+		}
+		if math.IsNaN(s.DeviceDailyCapUSD) || s.DeviceDailyCapUSD < 0 || s.DeviceDailyCapUSD > RoutingBudgetMaxLimitUSD {
+			return settingErrorAt(at+".server.device_daily_cap_usd", fmt.Errorf("%s.server.device_daily_cap_usd must be 0 to %.0f", at, RoutingBudgetMaxLimitUSD))
 		}
 	}
 	return nil

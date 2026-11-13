@@ -24,12 +24,24 @@ func TestChargeBudgetsResolvesTheCost(t *testing.T) {
 	e.SetSpendSink(sink)
 	computed, reported := 0.25, 9.0
 	keys := []string{"user:d:*:1001"}
-	e.chargeBudgets(CallFacts{RequestID: "r1", ChargeKeys: keys}, Record{Cost: Cost{USD: &computed, Basis: BasisComputed}})
-	e.chargeBudgets(CallFacts{RequestID: "r2", ChargeKeys: keys}, Record{Cost: Cost{USD: &reported, Basis: BasisReported, ComputedUSD: &computed}})
-	e.chargeBudgets(CallFacts{RequestID: "r3", ChargeKeys: keys}, Record{Cost: Cost{USD: &reported, Basis: BasisReported}})
-	e.chargeBudgets(CallFacts{RequestID: "r4", ChargeKeys: keys}, Record{})
-	e.chargeBudgets(CallFacts{RequestID: "r5"}, Record{Cost: Cost{USD: &computed, Basis: BasisComputed}})
+	agent := func(id string) CallFacts { return CallFacts{RequestID: id, CallRole: RoleAgent, ChargeKeys: keys} }
+	e.chargeBudgets(agent("same"), Record{Cost: Cost{USD: &computed, Basis: BasisComputed}})
+	e.chargeBudgets(agent("same"), Record{Cost: Cost{USD: &reported, Basis: BasisReported, ComputedUSD: &computed}})
+	e.chargeBudgets(agent("r3"), Record{Cost: Cost{USD: &reported, Basis: BasisReported}})
+	e.chargeBudgets(agent("r4"), Record{Usage: Usage{Input: 10, Has: HasInput}}) // usage nobody can price
+	e.chargeBudgets(agent("r5"), Record{Outcome: "failed"})                      // no usage: bills nothing
+	e.chargeBudgets(CallFacts{RequestID: "r6", CallRole: "judge", ChargeKeys: keys}, Record{Cost: Cost{USD: &computed}})
+	e.chargeBudgets(CallFacts{RequestID: "r7", CallRole: RoleAgent}, Record{Cost: Cost{USD: &computed}})
 	if len(sink.ids) != 4 || sink.usd[0] != 0.25 || sink.usd[1] != 0.25 || sink.usd[2] != 9 || sink.known[3] || !sink.known[2] {
-		t.Fatalf("computed, else reported, unknown passed as unknown, keyless calls skipped: %+v", sink)
+		t.Fatalf("computed, else reported; unpriced usage is unknown; no usage, judge and keyless calls skipped: %+v", sink)
+	}
+	n := len(sink.ids)
+	e.chargeBudgets(agent("r8"), Record{Outcome: "cancelled", TTFB: time.Millisecond, Usage: Usage{Input: 10, Has: HasInput}, Cost: Cost{USD: &computed}})
+	e.chargeBudgets(agent("r9"), Record{Outcome: "cancelled"}) // cancelled before any answer: nothing billed
+	if len(sink.ids) != n+1 || sink.known[n] {
+		t.Fatalf("a stream cut short after the answer started is unknown, never its partial cost: %+v", sink)
+	}
+	if sink.ids[0] == sink.ids[1] || sink.ids[0] == "same" {
+		t.Fatal("call ids are minted per call, never the client request id")
 	}
 }

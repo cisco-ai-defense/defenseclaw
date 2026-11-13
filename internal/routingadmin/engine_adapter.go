@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -37,7 +38,6 @@ type Runtime struct {
 	local  SpendCounter // this device's store (per-device budgets and the fallback)
 	fleet  SpendCounter // optional: shared by devices or gateway replicas
 	keys   FleetKeys    // local <-> fleet key forms (nil: the same keys)
-	hash   func(string) string
 	// feed is true once agent call costs reach Charge (the usage engine
 	// records agent calls with a computed cost); until then budgets read
 	// as not loaded, so a managed deny budget refuses instead of counting 0.
@@ -81,10 +81,24 @@ const DefaultSyncInterval = 30 * time.Second
 // NewRuntime returns an empty runtime; it costs nothing until a config
 // with routing.admin rules or budgets is compiled.
 func NewRuntime() *Runtime {
+	return &Runtime{interval: DefaultSyncInterval, kick: make(chan struct{}, 1), epoch: newEpoch()}
+}
+
+// newEpoch is a random writer id: the store learns nothing about the
+// process or host.
+func newEpoch() string {
 	var id [12]byte
 	_, _ = rand.Read(id[:])
-	// A random epoch: the store learns nothing about the process or host.
-	return &Runtime{interval: DefaultSyncInterval, kick: make(chan struct{}, 1), epoch: hex.EncodeToString(id[:])}
+	return hex.EncodeToString(id[:])
+}
+
+// writerOf is the writer identity of a fleet counter (the budget store's
+// device id), "" when it has none.
+func writerOf(c SpendCounter) string {
+	if w, ok := c.(interface{ WriterID() string }); ok {
+		return w.WriterID()
+	}
+	return ""
 }
 
 // Decisions returns the recent-decisions ring.
@@ -138,18 +152,43 @@ func (rt *Runtime) SetFeed(active bool) {
 	rt.mu.Unlock()
 }
 
-// SetFleet installs (or, with a nil counter, removes) the fleet counter, its
-// key mapping and the subject hash budget keys use (a keyed hash shared by
-// the fleet; nil = the device-only hash). Generations compile again.
-func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys, hash func(string) string) {
+// SetFleet installs (or, with a nil counter, removes) the fleet counter and
+// its key mapping (the device credential maps local keys to fleet keys).
+//
+// A counter with another writer id (a new device credential) is a new
+// writer at the store: this process's spend so far stays with the old
+// writer (it is stored on this device and keeps counting there), and the
+// process starts a new epoch with no local spend, so the store never counts
+// the same spend under two device ids.
+func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys) {
 	if rt == nil {
 		return
 	}
+	rt.pushMu.Lock()
 	rt.mu.Lock()
-	rt.fleet, rt.keys, rt.hash = fleet, keys, hash
+	old, ledger, local, epoch, ctx := rt.fleet, rt.ledger, rt.local, rt.epoch, rt.ctx
+	rotate := old != nil && fleet != nil && writerOf(old) != writerOf(fleet)
+	if rotate {
+		rt.epoch = newEpoch()
+	}
+	rt.fleet, rt.keys = fleet, keys
 	rt.last, rt.lastEv = nil, nil
 	rt.mu.Unlock()
+	if rotate && ledger != nil {
+		if rows := ledger.TakeLocal(); len(rows) > 0 && local != nil {
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			ledger.PushResult(local.Push(pctx, epoch, rows))
+			cancel()
+		}
+	}
+	rt.pushMu.Unlock()
 	rt.startSync()
+	if rotate {
+		rt.Kick()
+	}
 }
 
 // Charge counts usd against keys (no idempotency; tests and Add use it).
@@ -214,10 +253,9 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 		}
 		return ev
 	}
-	hash := rt.hash
 	rt.mu.Unlock()
 	a := cfg.Routing.Admin
-	policy := CompileWith(a.Rules, a.Budgets, cfg.StandaloneEnterprise(), hash)
+	policy := Compile(a.Rules, a.Budgets, cfg.StandaloneEnterprise())
 	if policy == nil {
 		rt.mu.Lock()
 		rt.last, rt.lastEv, rt.ids = cfg, nil, nil
@@ -322,7 +360,8 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 	}
 	ledger.ApplyRemote(ids, localRows, time.Now())
 	if fleet != nil {
-		ledger.SyncFailed(errFleetFallback)
+		// Keep why: the store down, the device refused, a budget it lacks.
+		ledger.SyncFailed(fmt.Errorf("%w (%v)", errFleetFallback, err))
 	}
 }
 
