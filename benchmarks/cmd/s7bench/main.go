@@ -234,6 +234,7 @@ func main() {
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
 	secretFlow := flag.String("secret-flow", "", "secret flow tracking (builds that carry it): off | shadow (records hits in flow_hits, never changes an answer); empty keeps the config default")
 	resultPlaceholder := flag.Bool("result-placeholder", false, "session surface: a non-shell call whose source recorded no result is replayed with a fixed neutral placeholder as its tool result, so a rule that needs a completed read to have returned content can be measured on corpora that drop results (an upper bound; the owner sessions keep their real results)")
+	chainLanes := flag.String("chain-lanes", "", "guardrail.cascade.lanes of the scope chains: <chain_effects>,<chain_effects_value> as off|shadow|on (empty keeps the shipped defaults)")
 	flag.Parse()
 	if *surface != "hook" && *surface != "prompt" && *surface != "tool-result" && *surface != "session" {
 		fmt.Fprintln(os.Stderr, "-surface must be hook, prompt, tool-result or session")
@@ -328,6 +329,14 @@ func main() {
 	cfg.Guardrail.DetectionStrategy = *strategy
 	cfg.Guardrail.DetectionStrategyToolCall = *strategy
 	gateway.S7ApplyFlow(cfg, *secretFlow)
+	if *chainLanes != "" {
+		parts := strings.Split(*chainLanes, ",")
+		if len(parts) != 2 {
+			fmt.Fprintln(os.Stderr, "-chain-lanes needs two values")
+			os.Exit(2)
+		}
+		cfg.Guardrail.Cascade.Lanes = map[string]string{"chain_effects": parts[0], "chain_effects_value": parts[1]}
+	}
 	if *judgeModel != "" {
 		cfg.Guardrail.Judge.Enabled = true
 		cfg.Guardrail.Judge.ToolInjection = true
