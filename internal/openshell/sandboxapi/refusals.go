@@ -219,6 +219,14 @@ func HostRunRefusedOn(conn, surface, profile, projectDir, requestAccess string) 
 // is its registered reason code ("no_kvm_group"), which the contact line
 // asks the person to quote so IT knows the cause (GAP-0257).
 func HostRunUnavailable(conn, why, code, requestAccess string) string {
+	if strings.TrimRight(strings.TrimSpace(why), ". ") == UnavailableSetupChanging {
+		// The organization's change of the sandbox setup is still being
+		// applied: a notice that clears by itself, so it says to retry and
+		// names no exception to ask IT for, as the sandbox CLI's own
+		// message does (GAP-0023, GAP-0187; rel-1-0-10 GAP-0001 F9).
+		return adminSentence() + harnessFor(conn).display + " must run in a sandbox, and sandboxes aren't available on this computer right now: " +
+			UnavailableSetupChanging + "."
+	}
 	reason := ""
 	if w := strings.TrimRight(refusalReason(why), ". "); w != "" {
 		reason = " (" + w + ")"

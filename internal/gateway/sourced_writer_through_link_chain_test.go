@@ -5,10 +5,14 @@ package gateway
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -114,6 +118,15 @@ func TestSourcedWriterIsJudgedWhereverItSitsInTheCommand(t *testing.T) {
 // launcher around a shell command string read the script behind folder links
 // and judge it as the bare bash -c does, with or without the links
 // (rel-1-0-9:GAP-1021).
+//
+// Every launcher row (through the links, without them, and the ordinary
+// script through them) is judged per user and managed, once, not for every
+// link count and connector, the owner's test budget: row x of a launcher is
+// judged at link count x mod 3 by connector x mod 2 (x = launcher index +
+// row kind), so each link count and each connector judges every row kind,
+// and every launcher meets all three kinds. One fixture serves each link
+// count; the rows only read it. The check at the end shows that every
+// launcher row and every connector and row kind was judged.
 func TestSourcedWriterBehindLinksIsBlockedUnderAnyShellLauncher(t *testing.T) {
 	launchers := []string{
 		`bash -c`, `bash -l -c`, `bash -lc`, `bash --login -c`, `bash -i -c`, `bash -ec`, `bash -lec`,
@@ -121,17 +134,107 @@ func TestSourcedWriterBehindLinksIsBlockedUnderAnyShellLauncher(t *testing.T) {
 		`sudo bash -c`, `sudo -u root bash -c`, `env bash -c`, `env -i bash -c`, `env A=1 sh -c`,
 		`sudo env bash -c`, `nohup bash -c`, `timeout 5 bash -c`, `command bash -c`, `exec bash -c`,
 	}
-	for _, links := range []int{3, 9, hookpaths.SystemLinkLimit() - 1} {
-		t.Run(fmt.Sprintf("%d links", links), func(t *testing.T) {
-			var rows []r106Reader2Row
-			for _, launcher := range launchers {
-				rows = append(rows,
-					r106Reader2Row{launcher + " through links", "project", launcher + ` ". ./c/wk.sh"`, "block"},
-					r106Reader2Row{launcher + " without links", "project", launcher + ` ". ./real/wk.sh"`, "block"},
-					r106Reader2Row{launcher + " ordinary through links", "project", launcher + ` ". ./c/ok.sh"`, "allow"},
-				)
+	linkCounts := []int{3, 9, hookpaths.SystemLinkLimit() - 1}
+	connectors := []string{"claudecode", "codex"}
+	kinds := []func(launcher string) r106Reader2Row{
+		func(launcher string) r106Reader2Row {
+			return r106Reader2Row{launcher + " through links", "project", launcher + ` ". ./c/wk.sh"`, "block"}
+		},
+		func(launcher string) r106Reader2Row {
+			return r106Reader2Row{launcher + " without links", "project", launcher + ` ". ./real/wk.sh"`, "block"}
+		},
+		func(launcher string) r106Reader2Row {
+			return r106Reader2Row{launcher + " ordinary through links", "project", launcher + ` ". ./c/ok.sh"`, "allow"}
+		},
+	}
+	// The link counts run from the longest chain down. A host that cannot
+	// make a chain that long (the subtest skips: a Windows runner refused the
+	// 9 and 62 link chains, Windows Native CI 43342767808 gw7) hands its rows
+	// to the next shorter count, so every launcher row is still judged
+	// wherever any chain can be made.
+	type pendingRow struct{ launcher, kind, connector int }
+	judged := map[[2]int]bool{} // {launcher, kind}
+	kindsJudged := map[[2]int]bool{}
+	var pending []pendingRow
+	ran := 0
+	for li := len(linkCounts) - 1; li >= 0; li-- {
+		links := linkCounts[li]
+		for j := range launchers {
+			for kind := range kinds {
+				if x := j + kind; x%len(linkCounts) == li {
+					pending = append(pending, pendingRow{j, kind, x % len(connectors)})
+				}
 			}
-			r106Reader2CheckWith(t, rows, func(t *testing.T, f b36ManagedHookFixture) { linkedScriptFolder(t, f, links) })
+		}
+		t.Run(fmt.Sprintf("%d links", links), func(t *testing.T) {
+			f := newB36ManagedHookFixture(t)
+			linkedScriptFolder(t, f, links)
+			ran++
+			for _, row := range pending {
+				judged[[2]int{row.launcher, row.kind}] = true
+				kindsJudged[[2]int{row.connector, row.kind}] = true
+				sourcedWriterLauncherCheck(t, f, connectors[row.connector], kinds[row.kind](launchers[row.launcher]))
+			}
+			pending = nil
 		})
+	}
+	if ran == 0 {
+		// As before the rotation: a host that cannot make any link (a
+		// Windows runner without the symlink privilege) skips every link
+		// count, so the test says it judged nothing there.
+		t.Skip("no link chain could be made on this host, so no launcher row was judged")
+	}
+	for j, launcher := range launchers {
+		for kind := range kinds {
+			if !judged[[2]int{j, kind}] {
+				t.Errorf("%s, row kind %d never judged; the rotation must cover it", launcher, kind)
+			}
+		}
+	}
+	for ci, connector := range connectors {
+		for kind := range kinds {
+			if !kindsJudged[[2]int{ci, kind}] {
+				t.Errorf("%s: row kind %d never judged; the rotation must cover it", connector, kind)
+			}
+		}
+	}
+}
+
+// sourcedWriterLauncherCheck is one row of r106Reader2CheckWith for one
+// connector on a fixture the caller set up once: the row through a per-user
+// action-mode gateway and a managed one (home hidden, the real hook client
+// header).
+func sourcedWriterLauncherCheck(t *testing.T, f b36ManagedHookFixture, connector string, row r106Reader2Row) {
+	t.Helper()
+	cwd := f.project
+	if row.where == "home" {
+		cwd = f.home
+	}
+	command := strings.NewReplacer("{P}", f.project, "{K}", f.keys, "{H}", f.home).Replace(row.command)
+	payload := mustJSON(t, map[string]any{"session_id": "r106", "hook_event_name": "PreToolUse", "cwd": cwd,
+		"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_r106",
+		"tool_input": map[string]any{"command": command, "description": "Run test fixture command"}})
+	header := f.clientHeader(t, payload)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = connector
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
+	req.Header.Set(hookpaths.Header, header)
+	if connector == "codex" {
+		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+	}
+	recorder := httptest.NewRecorder()
+	api.handleAgentHook(connector).ServeHTTP(recorder, req)
+	perUser := "allow"
+	if body := recorder.Body.String(); strings.Contains(body, `"deny"`) || strings.Contains(body, `"block"`) {
+		perUser = "block"
+	}
+	managed := f.post(t, connector, payload, header)
+	if err := os.Chmod(f.homes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if perUser != row.want || managed != row.want {
+		t.Errorf("%s %s: per-user %s, managed %s, want %s", connector, row.name, perUser, managed, row.want)
 	}
 }

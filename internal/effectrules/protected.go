@@ -40,10 +40,16 @@ func gradeTarget(t effects.Target, state effects.TargetState, set protectedSet, 
 		}
 		return gradeNo
 	}
-	// No lexical path: the spelling is fully dynamic. It could be anything,
-	// so every set it is asked about is unknown, never no.
+	// No lexical path: the spelling is fully dynamic. A relative spelling can
+	// still name a protected file (a dynamic cwd plus ../.ssh/authorized_keys),
+	// so check the shape; otherwise it carries no protected signal and is not
+	// claimed as a member of any named set (which would make a benign dynamic
+	// read look like a credential read).
 	if t.Path == "" {
-		return gradeUnknown
+		if suspiciousShape(t, set, flavor) {
+			return gradeUnknown
+		}
+		return gradeNo
 	}
 	// A concrete lexical name that is a member is authoritative even before
 	// its physical path is read (writing the name ~/.ssh/authorized_keys is a
@@ -76,6 +82,12 @@ func gradeTarget(t effects.Target, state effects.TargetState, set protectedSet, 
 	if underDir {
 		// A new child of a protected directory (a control file we do not
 		// list, or a link placed there) stays suspect.
+		return gradeUnknown
+	}
+	if suspiciousShape(t, set, flavor) {
+		// A canonical path whose basename/shape is a protected file's but in an
+		// unexpected directory (a CDPATH / reassigned-HOME resolution that came
+		// out canonical but wrong): unknown, not clean (rule c).
 		return gradeUnknown
 	}
 	// The resolver trusted the path and it is neither a member nor under a
@@ -194,4 +206,93 @@ func atOrUnder(child, base string) bool {
 // defaultResolver reads the file system through the hook's bounded reader.
 func defaultResolver(p string) (string, bool) {
 	return hookpaths.ResolveWriteTarget(p)
+}
+
+// matchBasis names why a target matched a set, so the restricted tier can
+// require an exact canonical member. For a known grade it is exact, tree or
+// link; for unknown it is glob, dir, dynamic or unresolved.
+func matchBasis(t effects.Target, grade setGrade, set protectedSet, flavor effects.Flavor) string {
+	if grade == gradeKnown {
+		switch {
+		case memberExact(t.Path, set, flavor):
+			return "exact"
+		case underTree(t.Path, set, flavor):
+			return "tree"
+		default:
+			return "link"
+		}
+	}
+	switch {
+	case t.Glob != "":
+		return "glob"
+	case t.Path == "":
+		return "dynamic"
+	case underProtectedDir(t.Path, set, flavor):
+		return "dir"
+	case suspiciousShape(t, set, flavor):
+		return "wrong_dir"
+	default:
+		return "unresolved"
+	}
+}
+
+// dirExact reports that a path is exactly one of the set's protected
+// directories (the directory itself, not a child).
+func dirExact(p string, set protectedSet, flavor effects.Flavor) bool {
+	if p == "" {
+		return false
+	}
+	key := canon(p, flavor)
+	for _, d := range set.dirs {
+		if canon(d, flavor) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// suspiciousShape reports a concrete path whose home-relative shape matches
+// one of the set's protected file tails (for example .../.ssh/authorized_keys
+// or .../.bashrc) but which is not an exact member -- a protected basename in
+// an unexpected directory. memberExact has already been checked by the
+// caller, so any tail hit here is a wrong-directory match.
+func suspiciousShape(t effects.Target, set protectedSet, flavor effects.Flavor) bool {
+	// Match the resolved path and the as-written spelling: a dynamic cwd that
+	// left the path empty can still carry a relative spelling whose tail is a
+	// protected file (../.ssh/authorized_keys, ~/.bashrc).
+	for _, cand := range []string{t.Path, t.Spelling} {
+		if cand == "" {
+			continue
+		}
+		key := canon(cand, flavor)
+		for _, tail := range set.tails {
+			if tail == "" {
+				continue
+			}
+			// tail begins with a separator; match at a component boundary.
+			if hasSuffixSep(key, canon(tail, flavor)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasSuffixSep reports whether key ends with suffix, where suffix already
+// starts with a separator so the match lands on a path-component boundary.
+func hasSuffixSep(key, suffix string) bool {
+	return len(key) > len(suffix) && strings.HasSuffix(key, suffix)
+}
+
+// canonFlavor is canon for a path that may be empty.
+func canonFlavor(p string, flavor effects.Flavor) string {
+	if p == "" {
+		return ""
+	}
+	return canon(p, flavor)
+}
+
+// hasPrefixSep reports whether child is under base at a component boundary.
+func hasPrefixSep(child, base string) bool {
+	return atOrUnder(child, base) && child != base
 }

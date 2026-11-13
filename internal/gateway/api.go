@@ -71,10 +71,13 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health *SidecarHealth
-	client *Client
-	store  *audit.Store
-	logger *audit.Logger
+	// modelUsage is the local usage store behind GET /usage (nil until the
+	// sidecar binds it; the store itself reports whether it is on).
+	modelUsage atomic.Pointer[usageQuerierBox]
+	health     *SidecarHealth
+	client     *Client
+	store      *audit.Store
+	logger     *audit.Logger
 	// protectedFiles is the sidecar's protected-file watch (nil when off or
 	// in a test server); the hook handler records tool calls for it.
 	protectedFiles *protectedFileWatch
@@ -1421,6 +1424,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/enforce/allowed", a.handleEnforceAllowed)
 	mux.HandleFunc("/alerts", a.handleAlerts)
 	mux.HandleFunc("/audit/event", a.handleAuditEvent)
+	mux.HandleFunc("/usage", a.handleUsage)
 	mux.HandleFunc("/policy/evaluate", a.handlePolicyEvaluate)
 	mux.HandleFunc("/policy/reload", a.handlePolicyReload)
 	mux.HandleFunc("/v1/skill/scan", a.handleSkillScan)
@@ -5093,11 +5097,6 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	// Any cached LLM-judge verdict was rendered under the previous
-	// policy; drop it in O(1) so the next call re-evaluates under
-	// the fresh rulepack. Safe no-op when the cache is unset.
-	InvalidateJudgeVerdictCache()
 
 	if err := a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), policyCfg.PolicyDir, "policy and config reloaded via API"); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy reloaded but compliance logging failed"})

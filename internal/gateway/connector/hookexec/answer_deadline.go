@@ -385,9 +385,23 @@ func lateOrdinaryLook(opts Options) bool {
 // answers false for every call on Windows, where the shared reader (with the
 // Windows lexer) is the one scan.
 func bothLateScansOrdinary(opts Options) bool {
-	return toolGateEvent(opts.Connector, opts.Event) &&
+	return toolGateEvent(opts.Connector, opts.Event) && lateOrdinaryConnector(opts.Connector) &&
 		(runtime.GOOS == "windows" || hookpaths.LateOrdinaryCall(opts.Connector, opts.failurePayload)) &&
 		OrdinaryNoAnswerPayload(opts.failurePayload)
+}
+
+// lateOrdinaryConnector reports a connector whose ordinary late calls may
+// follow the outage tier: Claude Code and Codex only (GAP-0518 contract,
+// fail_mode.failure_outcomes). The link-hop scan already answers false for
+// every other connector on Linux and macOS; on Windows it does not run, so
+// without this a Kiro or Devin shell call on a gateway that did not answer
+// was allowed by payload shape alone (rel-1-0-10 GAP-0030).
+func lateOrdinaryConnector(connector string) bool {
+	switch strings.ToLower(strings.TrimSpace(connector)) {
+	case "claudecode", "codex":
+		return true
+	}
+	return false
 }
 
 // lateOrdinaryCheck is the scan of a per-user tool call that the verified

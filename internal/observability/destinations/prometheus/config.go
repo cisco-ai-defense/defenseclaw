@@ -365,7 +365,8 @@ func officialFamilyShape(name, base string, metricType dto.MetricType) bool {
 	suffix := strings.TrimPrefix(name, base)
 	switch metricType {
 	case dto.MetricType_COUNTER:
-		return suffix == "_total" || suffix == "_bytes_total"
+		// _USD_total: defenseclaw.model.cost, a counter in USD.
+		return suffix == "_total" || suffix == "_bytes_total" || suffix == "_USD_total"
 	case dto.MetricType_HISTOGRAM:
 		return suffix == "_bytes" || suffix == "_milliseconds" ||
 			suffix == "_nanoseconds" || suffix == "_seconds"

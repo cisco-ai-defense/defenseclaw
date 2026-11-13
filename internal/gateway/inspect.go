@@ -1097,6 +1097,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			observation.ParserUncertaintyCount,
 		)
 	}
+	// The live shadow run of the effect lane records through the audit log
+	// (guardrail.effects_rules=shadow, GAP-0256); it never changes the verdict.
+	action.recordEffectShadow = func(res EffectShadowResult) {
+		a.recordEffectShadow(ctx, firstNonEmpty(req.Connector, action.Connector), res)
+	}
 	// CodeGuard: scan file content for any file-write tool.
 	//
 	// the legacy gate matched only the canonical
@@ -1894,6 +1899,9 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	if judge == nil {
 		return nil
 	}
+	if strings.EqualFold(strategyDirection, "tool_call") && hookJudgeSkipsNoEffectCall(connector, toolName, current) {
+		return nil
+	}
 
 	switch strategy {
 	case "judge_first":
@@ -2000,7 +2008,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		resume := yieldHookRunSlot(ctx)
 		v := call(ctx)
 		resume()
-		return hookJudgeLaneVerdict(cfg, connector, strategyDirection, v)
+		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
 	}
 
 	// A bounded action hook cancels the model request when its answer
@@ -2041,7 +2049,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	defer resume()
 	select {
 	case v := <-done:
-		return hookJudgeLaneVerdict(cfg, connector, strategyDirection, v)
+		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
 	case <-wait.C:
 	case <-ctx.Done():
 	}
@@ -2049,6 +2057,24 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		hookJudgeAnswerWindow, connector, strategyDirection)
 	fallback(judgeFallbackLate)
 	return nil
+}
+
+// claudeCodeNoEffectTools are Claude Code built-ins whose call acts on nothing
+// outside the agent: ToolSearch loads tool definitions and TodoWrite edits the
+// agent's own task list. The judge read the tool names in a ToolSearch query
+// ("select:mcp__gmail__search_messages,...") as data access and blocked 17 of
+// 127 benign ToolSearch calls on the s3 corpus (Gemma 3 27B judge).
+var claudeCodeNoEffectTools = map[string]bool{"ToolSearch": true, "TodoWrite": true}
+
+// hookJudgeSkipsNoEffectCall reports a Claude Code no-effect built-in the
+// rules did not flag: the judge and the decision model are not asked, and the
+// call stays out of the session history later samples carry. Only Claude
+// Code: other connectors pass MCP tool names without a prefix (Cursor's
+// beforeMCPExecution), where a TodoWrite tool can write to a remote service.
+// A flagged call is judged as before, so the rule floor and the escalated
+// fail-closed refusal hold.
+func hookJudgeSkipsNoEffectCall(connector, toolName string, current *ToolInspectVerdict) bool {
+	return config.NormalizeConnectorName(connector) == "claudecode" && claudeCodeNoEffectTools[toolName] && !rulesFlagged(current)
 }
 
 // regexJudgeLocalVerdictDecisive reports whether the rule/AID verdict settles
@@ -2145,6 +2171,38 @@ func (a *APIServer) hookLaneJudge(ctx context.Context, cfg *config.Config, strat
 		strategy = "regex_judge"
 	}
 	return judge, strategy
+}
+
+// judgeReviewOnlyAudit makes a lone review finding of the tool judge audit
+// only in the default pack (owner decision 2026-11-13, GAP-0045): when the
+// judge's only finding is one needs_review category (MEDIUM, nothing
+// actionable) and the rules did not flag the call, the call is allowed. The
+// finding stays on the verdict, so the hook records it (the judge event and
+// the scan finding rows) without an alert. Strict and permissive keep their
+// levels, a call the rules flagged keeps the alert, and HIGH and CRITICAL
+// judge verdicts are unchanged. Secure Client keeps the judge action.
+func judgeReviewOnlyAudit(cfg *config.Config, connector string, ruleFlagged bool, v *ScanVerdict) *ScanVerdict {
+	// The mark alone is not trusted: a merged verdict (the decision model's
+	// HIGH floor over a lone judge finding) can copy it, so the verdict must
+	// still be one MEDIUM finding.
+	if v == nil || !v.reviewOnly || ruleFlagged || cfg == nil || cfg.SecureClientIntegration() ||
+		!strings.EqualFold(v.Severity, "MEDIUM") || len(v.Findings) != 1 {
+		return v
+	}
+	// The posture of the pack whose levels mapped the verdict
+	// (resolveThresholds): the connector's effective pack, application
+	// protection overlay included.
+	ref := cfg.EffectiveRulePackRefForConnector(connector)
+	if packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)) != "default" {
+		return v
+	}
+	if normalizedGuardrailAction(v.Action) != guardrailActionAlert {
+		return v
+	}
+	out := *v
+	out.Action = guardrailActionAllow
+	out.Reason = strings.TrimSpace(out.Reason + " (audit only: a lone review finding of the judge in the default pack)")
+	return &out
 }
 
 // hookJudgeLaneVerdict is the hook-lane verdict of judge result v: nil when

@@ -37,6 +37,7 @@ type S7Engine struct {
 	hook      http.HandlerFunc
 	connector string
 	profile   string
+	judgeRec  *s7RecordingProvider
 }
 
 // S7NewEngine boots the sidecar generation for cfg and returns the
@@ -75,6 +76,9 @@ func S7NewEngine(cfg *config.Config, connectorName string) (*S7Engine, error) {
 	// known regardless). Real symlink-through-link attacks are not exercised
 	// here; that is a documented harness limit.
 	effectResolverOverride = func(path string) (string, bool) { return path, true }
+	// The harness reads the effect verdict per case from Deterministic (the
+	// same effectShadowRun core); the hook's async live run is not needed.
+	effectShadowLiveOff = true
 	return &S7Engine{
 		sc: sc, api: api, connector: connectorName,
 		hook:    api.handleUnifiedConnectorHook(connectorName),
@@ -82,8 +86,9 @@ func S7NewEngine(cfg *config.Config, connectorName string) (*S7Engine, error) {
 	}, nil
 }
 
-// Hook answers one hook payload through the connector's handler.
-func (e *S7Engine) Hook(ctx context.Context, body []byte) (code int, out []byte) {
+// Hook answers one hook payload through the connector's handler. headers
+// (name, value pairs) are set on the request, e.g. the hook's answer wait.
+func (e *S7Engine) Hook(ctx context.Context, body []byte, headers ...string) (code int, out []byte) {
 	defer func() {
 		if r := recover(); r != nil {
 			code, out = 500, []byte(`{"action":"allow","reason":"panic"}`)
@@ -91,6 +96,9 @@ func (e *S7Engine) Hook(ctx context.Context, body []byte) (code int, out []byte)
 	}()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+e.connector, bytes.NewReader(body)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
 	rec := httptest.NewRecorder()
 	e.hook(rec, req)
 	return rec.Code, rec.Body.Bytes()
@@ -128,7 +136,8 @@ type S7Det struct {
 	// Effect is the effect-model rule lane verdict (guardrail.effects_rules
 	// shadow or on), computed beside today's answer for the disagreement
 	// measurement. Nil when the lane is off.
-	Effect *EffectShadowResult `json:"effect,omitempty"`
+	Effect     *EffectShadowResult `json:"effect,omitempty"`
+	EffectFull *EffectShadowResult `json:"effect_full,omitempty"`
 }
 
 // Deterministic evaluates the call the way evaluateAgentHook projects it.
@@ -151,6 +160,7 @@ func (e *S7Engine) Deterministic(ctx context.Context, toolName string, args json
 		out.Findings = append(out.Findings, S7Finding{RuleID: f.RuleID, Severity: f.Severity, Confidence: f.Confidence, Disposition: f.Disposition, Route: f.Route})
 	}
 	out.Effect = r.EffectShadow
+	out.EffectFull = r.EffectShadowFull
 	return out
 }
 

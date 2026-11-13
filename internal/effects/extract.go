@@ -6,6 +6,7 @@ package effects
 
 import (
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
@@ -242,6 +243,10 @@ func (s *childSpec) set(name, val string, ok bool) {
 
 const walkWorkBudget = 20000
 
+// deadlineCheckEvery is how many units of work pass between two reads of the
+// clock for Options.Deadline.
+const deadlineCheckEvery = 32
+
 func newWalker(res *Result, o Options) *walker {
 	env := map[string]string{}
 	for k, v := range o.Env {
@@ -269,6 +274,11 @@ func (w *walker) spend() bool {
 	}
 	w.work--
 	if w.work <= 0 {
+		w.overBudget = true
+		w.res.addUnknown(ReasonLimit)
+		return false
+	}
+	if !w.o.Deadline.IsZero() && w.work%deadlineCheckEvery == 0 && time.Now().After(w.o.Deadline) {
 		w.overBudget = true
 		w.res.addUnknown(ReasonLimit)
 		return false

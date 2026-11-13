@@ -135,8 +135,10 @@ func TestClaudeCodePreToolUseAuditCommitBudget(t *testing.T) {
 	if got := (rows("audit_events") - auditRows) / measured; got != 5 {
 		t.Fatalf("audit rows per call = %d, want 5", got)
 	}
-	if got := (rows("correlation_observations") - observationRows) / measured; got != 19 {
-		t.Fatalf("correlation observations per call = %d, want 19", got)
+	// 6, not 19: the metrics of the call write no observation row of their
+	// own (S8 R1, #1384); the log records keep theirs.
+	if got := (rows("correlation_observations") - observationRows) / measured; got != 6 {
+		t.Fatalf("correlation observations per call = %d, want 6", got)
 	}
 	// rel-1-0-3 GAP-0320: the unique keys a hook call writes are time
 	// ordered, so each lands at the end of its index instead of on a random

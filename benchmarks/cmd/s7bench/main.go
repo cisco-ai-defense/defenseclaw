@@ -52,28 +52,29 @@ type corpusCase struct {
 }
 
 type record struct {
-	Case       string            `json:"case"`
-	Idx        int               `json:"idx"`
-	N          int               `json:"n"`
-	SrcTool    string            `json:"src_tool"`
-	Tool       string            `json:"tool"`
-	Mapped     string            `json:"mapped"`
-	Status     int               `json:"status"`
-	Action     string            `json:"action"`
-	RawAction  string            `json:"raw_action"`
-	Severity   string            `json:"sev"`
-	WouldBlock bool              `json:"would_block"`
-	RuleIDs    []string          `json:"rule_ids,omitempty"`
-	Findings   []string          `json:"findings,omitempty"`
-	DetOnly    bool              `json:"detection_only,omitempty"`
-	Reason     string            `json:"reason,omitempty"`
-	Det        *gateway.S7Det    `json:"det,omitempty"`
-	DM         *gateway.S7DM     `json:"dm,omitempty"`
-	Judge      *gateway.S7Judge  `json:"judge,omitempty"`
-	PostStatus int               `json:"post_status,omitempty"`
-	LatencyUs  int64             `json:"lat_us"`
-	Err        string            `json:"err,omitempty"`
-	Extra      map[string]string `json:"extra,omitempty"`
+	Case       string                `json:"case"`
+	Idx        int                   `json:"idx"`
+	N          int                   `json:"n"`
+	SrcTool    string                `json:"src_tool"`
+	Tool       string                `json:"tool"`
+	Mapped     string                `json:"mapped"`
+	Status     int                   `json:"status"`
+	Action     string                `json:"action"`
+	RawAction  string                `json:"raw_action"`
+	Severity   string                `json:"sev"`
+	WouldBlock bool                  `json:"would_block"`
+	RuleIDs    []string              `json:"rule_ids,omitempty"`
+	Findings   []string              `json:"findings,omitempty"`
+	DetOnly    bool                  `json:"detection_only,omitempty"`
+	Reason     string                `json:"reason,omitempty"`
+	Det        *gateway.S7Det        `json:"det,omitempty"`
+	DM         *gateway.S7DM         `json:"dm,omitempty"`
+	Judge      *gateway.S7Judge      `json:"judge,omitempty"`
+	JudgeCalls []gateway.S7JudgeCall `json:"judge_calls,omitempty"`
+	PostStatus int                   `json:"post_status,omitempty"`
+	LatencyUs  int64                 `json:"lat_us"`
+	Err        string                `json:"err,omitempty"`
+	Extra      map[string]string     `json:"extra,omitempty"`
 }
 
 var shellTools = map[string]bool{"bash_command": true, "bash": true, "execute_command": true, "shell": true,
@@ -201,11 +202,13 @@ func main() {
 	dmModel := flag.String("dm-model", "", "decision model name")
 	dmTimeout := flag.Float64("dm-timeout", 0, "decision model timeout seconds (0: product default)")
 	judgeTimeout := flag.Float64("judge-timeout", 0, "hook judge timeout seconds (0: product default)")
+	judgeParallel := flag.Int("judge-max-parallel", 16, "guardrail.judge.max_parallel; the local proxy stands in for a remote endpoint, which the product does not serialize (a loopback judge URL defaults to 1)")
 	dmHook := flag.Bool("dm-hook", false, "decision model answers alone for the connector (cascade 2)")
 	layers := flag.String("layers", "", "probe layers per call: dm,judge")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
 	effectsRules := flag.String("effects-rules", "", "guardrail.effects_rules lane: off|shadow|on (empty keeps the config default)")
+	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
 	flag.Parse()
 	if *corpus == "" || *out == "" || *policyDir == "" {
 		fmt.Fprintln(os.Stderr, "need -corpus -out -policy-dir")
@@ -240,6 +243,8 @@ func main() {
 			cfg.Guardrail.Judge.HookTimeout = *judgeTimeout
 			cfg.Guardrail.Judge.Timeout = *judgeTimeout
 		}
+		cfg.Guardrail.Judge.MaxParallel = *judgeParallel
+		cfg.Guardrail.Judge.MaxParallelExplicit = true
 		cfg.Guardrail.Judge.LLM = config.LLMConfig{Model: "openai/" + *judgeModel, Provider: "openai", BaseURL: *judgeURL, APIKey: "s7-local-proxy"}
 	}
 	if *dmURL != "" {
@@ -254,7 +259,12 @@ func main() {
 		os.Exit(1)
 	}
 	hasJudge, hasDM := engine.HasJudge()
-	fmt.Fprintf(os.Stderr, "[s7bench] pack=%s mode=%s strategy=%s judge=%v dm=%v layers=%q\n", *pack, *mode, *strategy, hasJudge, hasDM, *layers)
+	recording := hasJudge && engine.RecordJudgeCalls()
+	var preHeaders []string
+	if *answerWithin > 0 {
+		preHeaders = []string{"X-DefenseClaw-Hook-Answer-Within-Ms", fmt.Sprint(*answerWithin)}
+	}
+	fmt.Fprintf(os.Stderr, "[s7bench] pack=%s mode=%s strategy=%s judge=%v dm=%v layers=%q record=%v answer_within_ms=%d\n", *pack, *mode, *strategy, hasJudge, hasDM, *layers, recording, *answerWithin)
 	wantDM := strings.Contains(*layers, "dm")
 	wantJudge := strings.Contains(*layers, "judge")
 
@@ -304,7 +314,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for c := range jobs {
-				runCase(engine, c, *post, *det, wantDM, wantJudge, emit, &decisions)
+				runCase(engine, c, *post, *det, wantDM, wantJudge, preHeaders, emit, &decisions)
 				if n := done.Add(1); n%1000 == 0 {
 					fmt.Fprintf(os.Stderr, "[s7bench] %d cases %d decisions %.0fs\n", n, decisions.Load(), time.Since(start).Seconds())
 				}
@@ -344,7 +354,7 @@ type hookResp struct {
 	RuleIDs    []string `json:"rule_ids"`
 }
 
-func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge bool, emit func(record), decisions *atomic.Int64) {
+func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge bool, preHeaders []string, emit func(record), decisions *atomic.Int64) {
 	h := sha256.Sum256([]byte(c.ID))
 	sid := "s7-" + hex.EncodeToString(h[:12])
 	ctx := context.Background()
@@ -367,9 +377,10 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 			"tool_name": tool, "tool_input": input, "permission_mode": "default", "transcript_path": "",
 			"tool_use_id": fmt.Sprintf("toolu_%s_%d", sid[3:15], i)})
 		t0 := time.Now()
-		status, resp := e.Hook(ctx, body)
+		status, resp := e.Hook(ctx, body, preHeaders...)
 		r := record{Case: c.ID, Idx: i, N: len(events), SrcTool: ev.ToolName, Tool: tool, Mapped: mapped, Status: status,
 			LatencyUs: time.Since(t0).Microseconds()}
+		r.JudgeCalls = e.TakeJudgeCalls(sid)
 		var hr hookResp
 		if err := json.Unmarshal(resp, &hr); err != nil {
 			r.Err = "decode: " + err.Error()

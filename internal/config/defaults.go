@@ -205,6 +205,7 @@ func DefaultConfig() *Config {
 			DetectionStrategy:           "regex_judge",
 			DetectionStrategyCompletion: "regex_only",
 			EffectsRules:                "shadow",
+			EffectsRulesTier:            "restricted",
 			SecretFlow: SecretFlowConfig{
 				Mode:        "shadow",
 				Reencodings: true,

@@ -38,3 +38,24 @@ func TestEffectsRulesSchemaEnum(t *testing.T) {
 		}
 	}
 }
+
+// TestEffectsRulesTierDefaultAndEnum proves the tier ships restricted and the
+// schema accepts only restricted|full.
+func TestEffectsRulesTierDefaultAndEnum(t *testing.T) {
+	if cfg := DefaultConfig(); cfg.Guardrail.EffectsRulesTier != "restricted" {
+		t.Fatalf("default EffectsRulesTier = %q, want restricted", cfg.Guardrail.EffectsRulesTier)
+	}
+	for _, value := range []string{"restricted", "full"} {
+		raw := []byte("config_version: 9\nguardrail:\n  effects_rules_tier: " + value + "\n")
+		if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err != nil {
+			t.Fatalf("effects_rules_tier %s: ValidateCandidate() = %v, want accept", value, err)
+		}
+	}
+	for _, value := range []string{"both", "Restricted", "none"} {
+		raw := []byte("config_version: 9\nguardrail:\n  effects_rules_tier: " + value + "\n")
+		if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err == nil ||
+			!strings.Contains(err.Error(), "effects_rules_tier") {
+			t.Fatalf("effects_rules_tier %s: ValidateCandidate() = %v, want refusal", value, err)
+		}
+	}
+}

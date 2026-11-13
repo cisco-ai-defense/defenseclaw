@@ -1519,6 +1519,13 @@
       "pattern": "^(|[Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
       "description": "Lowest severity that takes the action: CRITICAL, HIGH, MEDIUM or LOW, in any case. Empty inherits: a connector falls back to the global value, and the global value to the rule pack's level."
     },
+    "effectsRulesTier": {
+      "type": "string",
+      "enum": [
+        "restricted",
+        "full"
+      ]
+    },
     "effectsRules": {
       "type": "string",
       "enum": [
@@ -2230,6 +2237,9 @@
         },
         "effects_rules": {
           "$ref": "#/$defs/effectsRules"
+        },
+        "effects_rules_tier": {
+          "$ref": "#/$defs/effectsRulesTier"
         },
         "secret_flow": {
           "$ref": "#/$defs/secretFlow"
@@ -3440,6 +3450,12 @@
         "connectors": {
           "$ref": "#/$defs/connectorObservabilityMap"
         },
+        "tokenomics": {
+          "$ref": "#/$defs/tokenomics"
+        },
+        "pricing": {
+          "$ref": "#/$defs/pricing"
+        },
         "local": {
           "$ref": "#/$defs/localStore"
         },
@@ -3815,6 +3831,239 @@
       "properties": {
         "webhooks": {
           "$ref": "#/$defs/webhooks"
+        }
+      }
+    },
+    "tokenomics": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-call model usage records, cost and the local usage aggregate. Off by default; an absent block is the pre-1.0.10 behaviour.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Master switch. Off: no usage record, no store, no goroutine."
+        },
+        "record_routing_provenance": {
+          "type": "boolean",
+          "default": true,
+          "description": "Put requested and selected model, route decision and profile on each usage record."
+        },
+        "roles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "agent",
+              "judge",
+              "decision_model",
+              "ai_defense",
+              "router_classifier"
+            ]
+          },
+          "description": "Call roles to record. Empty or absent: all."
+        },
+        "native_otel_import": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "claudecode": {
+              "type": "boolean",
+              "default": true,
+              "description": "Import per-call usage from the Claude Code OTLP stream (cross-check only while the proxy carries the connector)."
+            },
+            "codex": {
+              "type": "boolean",
+              "default": true,
+              "description": "Import per-call usage from the Codex OTLP stream (cross-check only while the proxy carries the connector)."
+            }
+          }
+        },
+        "cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "compute": {
+              "type": "boolean",
+              "default": true,
+              "description": "Compute cost from observability.pricing."
+            },
+            "currency": {
+              "const": "USD",
+              "default": "USD"
+            },
+            "keep_reported": {
+              "type": "boolean",
+              "default": true,
+              "description": "Keep a per-call provider or agent reported cost and mark its basis as reported."
+            }
+          }
+        },
+        "local_store": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Keep an hourly usage aggregate in <data_dir>/model_usage/model_usage.db for the usage API and status."
+            },
+            "retention_days": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3650,
+              "default": 30
+            },
+            "granularity": {
+              "const": "hour",
+              "default": "hour"
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "labels": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "connector",
+                  "provider",
+                  "model",
+                  "route_decision",
+                  "call_role",
+                  "profile"
+                ]
+              },
+              "description": "Labels on defenseclaw.model.cost and defenseclaw.model.tokens. A closed set: identity labels are refused."
+            }
+          }
+        }
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Versioned price table. The gateway prices only from this table; no price is compiled into a binary. Managed hosts take it from the admin config in the signed bundle.",
+      "properties": {
+        "version": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Table version stamped on every record. Required when models are listed."
+        },
+        "models": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "provider",
+              "model",
+              "input_per_mtok",
+              "output_per_mtok"
+            ],
+            "properties": {
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "description": "Exact model id, or a prefix ending in * (longest prefix wins)."
+              },
+              "input_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million input tokens (uncached)."
+              },
+              "output_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million output tokens (reasoning included unless reasoning_per_mtok is set)."
+              },
+              "cache_read_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million cache-read input tokens. Absent: priced at input_per_mtok."
+              },
+              "cache_write_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million cache-creation input tokens. Absent: priced at input_per_mtok."
+              },
+              "reasoning_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million reasoning output tokens. Absent: priced at output_per_mtok."
+              }
+            }
+          }
+        },
+        "ai_defense": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "per_call_usd": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000
+            }
+          }
+        },
+        "unknown_model": {
+          "enum": [
+            "omit",
+            "fallback"
+          ],
+          "default": "omit",
+          "description": "omit: a model without a price entry has no cost. fallback: price it with fallback."
+        },
+        "fallback": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "input_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million input tokens (uncached)."
+            },
+            "output_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million output tokens (reasoning included unless reasoning_per_mtok is set)."
+            },
+            "cache_read_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million cache-read input tokens. Absent: priced at input_per_mtok."
+            },
+            "cache_write_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million cache-creation input tokens. Absent: priced at input_per_mtok."
+            },
+            "reasoning_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million reasoning output tokens. Absent: priced at output_per_mtok."
+            }
+          }
         }
       }
     },

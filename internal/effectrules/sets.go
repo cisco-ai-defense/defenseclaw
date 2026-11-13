@@ -55,6 +55,11 @@ type protectedSet struct {
 	files []string
 	dirs  []string
 	trees []string
+	// tails are the home-relative suffixes of the home file members (for
+	// example "/.ssh/authorized_keys", "/.bashrc"). A canonical path that ends
+	// in one of these but is not an exact member is a protected basename in an
+	// unexpected directory (rule c): graded unknown, not clean.
+	tails []string
 }
 
 // agentConfigFolders are the per-connector configuration folders whose hook
@@ -156,6 +161,19 @@ func buildSets(home string, flavor effects.Flavor) map[string]protectedSet {
 	}
 	sets[SetSelfProtection] = protectedSet{files: stFiles, dirs: []string{state}, trees: stTrees}
 
+	homeKey := canonFlavor(home, flavor)
+	for name, ps := range sets {
+		var tails []string
+		for _, f := range ps.files {
+			fk := canonFlavor(f, flavor)
+			if homeKey != "" && (fk == homeKey || hasPrefixSep(fk, homeKey)) {
+				tails = append(tails, fk[len(homeKey):])
+			}
+		}
+		ps.tails = tails
+		sets[name] = ps
+	}
+
 	return sets
 }
 
@@ -172,10 +190,9 @@ func joinFlavor(flavor effects.Flavor, parts ...string) string {
 			continue
 		}
 		p = strings.TrimRight(p, "/\\")
-		switch {
-		case out == "":
+		if out == "" {
 			out = p
-		default:
+		} else {
 			out += sep + strings.TrimLeft(p, "/\\")
 		}
 	}

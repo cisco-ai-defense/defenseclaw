@@ -1448,6 +1448,7 @@ _bundle-data: _checkout-write-preflight
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
 	@mkdir -p cli/defenseclaw/_data/llm
+	@mkdir -p cli/defenseclaw/_data/pricing
 	@mkdir -p cli/defenseclaw/_data/config/v8
 	@rm -rf cli/defenseclaw/_data/telemetry/v8
 	@mkdir -p cli/defenseclaw/_data/telemetry/v8
@@ -1474,6 +1475,8 @@ _bundle-data: _checkout-write-preflight
 	@# Textual TUI model picker via importlib.resources. Tracked source lives
 	@# at bundles/llm/; _data/llm/ is the gitignored build-staging copy.
 	cp bundles/llm/model_catalog.json cli/defenseclaw/_data/llm/
+	@# Reviewed default price table; only the CLI writers read it (init, setup tokenomics, upgrade).
+	cp bundles/pricing/default-pricing.json cli/defenseclaw/_data/pricing/
 	@# v8 config contracts are canonical under schemas/. The wheel receives
 	@# exact build-staging copies so importlib.resources works after install.
 	cp schemas/config/v8/defenseclaw-config.schema.json cli/defenseclaw/_data/config/v8/
