@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/paymentcard"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -2128,10 +2129,17 @@ func triagePatterns(direction, content string) []TriageSignal {
 		if norm {
 			ev = "[normalized] " + ev
 		}
+		// The shared paymentcard rules already accepted the number (Luhn,
+		// scheme, layout, token boundaries). A nearby context word such as
+		// "card" or "cvv" only raises confidence; it is never the signal.
+		confidence := 0.90
+		if paymentcard.ContextNear(src, loc[0], loc[1]) {
+			confidence = 0.95
+		}
 		signals = append(signals, TriageSignal{
 			Level: "HIGH_SIGNAL", FindingID: "TRIAGE-PII-CC",
 			Category: "pii", Pattern: "credit card number",
-			Evidence: ev, Confidence: 0.95,
+			Evidence: ev, Confidence: confidence,
 		})
 	}
 

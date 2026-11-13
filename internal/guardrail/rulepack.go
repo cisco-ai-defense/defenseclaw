@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 	"gopkg.in/yaml.v3"
 )
 
@@ -488,6 +489,30 @@ func filesDigest(sums map[string]string) string {
 		fmt.Fprintf(h, "%s\n%s\n", rel, sums[rel])
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// ShippedRulePackFilesDigest is the FilesDigest of a folder that holds
+// exactly the embedded built-in pack name as a managed Windows install ships
+// it (policyassets.ShippedRulePackFiles). The gateway refuses a shipped
+// folder that loads with any other digest (#1445).
+func ShippedRulePackFilesDigest(name string) (string, error) {
+	files, err := policyassets.ShippedRulePackFiles()
+	if err != nil {
+		return "", err
+	}
+	sums := map[string]string{}
+	for _, file := range files {
+		rel, ok := strings.CutPrefix(file.Path, name+"/")
+		if !ok {
+			continue
+		}
+		sum := sha256.Sum256(file.Data)
+		sums[rel] = hex.EncodeToString(sum[:])
+	}
+	if len(sums) == 0 {
+		return "", fmt.Errorf("%q is not a shipped rule pack", name)
+	}
+	return filesDigest(sums), nil
 }
 
 // FilesDigest is the hex digest of the files the pack was loaded from (each
