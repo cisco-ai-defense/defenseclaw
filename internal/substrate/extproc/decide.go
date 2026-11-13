@@ -264,16 +264,16 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		// hook or model call itself. Never buffered (model streams).
 		return Verdict{Allow: true, OwnHost: true, Source: sourceOwnHost}
 	}
-	uid, err := e.uids.Resolve(ctx, req.Actor)
+	rec, err := e.uids.Resolve(ctx, req.Actor)
 	switch {
 	case errors.Is(err, ErrActorNotLive):
 		return deny(v, CategoryActorNotLive, sourceIdentity, "",
-			"The Substrate Control API reports no running actor with this name.")
+			"DefenseClaw's registrations say this actor was deleted.")
 	case err != nil:
 		return e.failure(v, CategoryActorUnverified,
-			"The Substrate Control API could not confirm that this actor is running.")
+			"DefenseClaw could not look up this actor's registration.")
 	}
-	req.Actor.UID = uid
+	req.Actor.UID, req.Actor.Profile, req.Actor.Unattended = rec.UID, rec.Profile, rec.Unattended
 	pol, err := e.policies.PolicyFor(ctx, req.Actor)
 	if err != nil || pol == nil {
 		return e.failure(v, CategoryCalloutError, "DefenseClaw could not load this actor's policy.")

@@ -645,8 +645,9 @@ func kubeHTTPClient() (*http.Client, error) {
 
 // substrateLeaderPermissions is who may call what on the leader
 // (GAP-0094): gateway replicas every method; the callout only the egress
-// chain check; the controller the registrations, the chain lifecycle and
-// the activity feed. An identity listed in two roles gets both sets.
+// chain check and the name lookup of a registration (GAP-0090); the
+// controller the registrations, the chain lifecycle and the activity feed.
+// An identity listed in two roles gets both sets.
 func substrateLeaderPermissions(gateways, callouts, controllers []string) leader.Permissions {
 	p := leader.Permissions{}
 	add := func(ids []string, methods ...string) {
@@ -657,7 +658,7 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 		}
 	}
 	add(gateways, "*")
-	add(callouts, chainstate.MethodChainEgress)
+	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup)
 	add(controllers, leader.MethodRegistrationGet, leader.MethodRegistrationList, leader.MethodRegistrationWrite,
 		chainstate.MethodChainLifecycle, leader.MethodActivitySnapshot)
 	return p

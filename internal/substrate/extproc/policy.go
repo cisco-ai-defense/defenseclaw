@@ -134,14 +134,17 @@ func loadBlocklists(files []string) ([]*egress.Feed, error) {
 	return out, nil
 }
 
-// StaticPolicies maps atespaces to the configured profiles: the profile
-// whose atespaces match (see PolicyFor), else the default profile, else the
-// feeds alone. It stands in until registrations (A2/A3) name each actor's
-// profile.
+// StaticPolicies maps actors to the configured profiles: the profile the
+// actor's registration names, else the profile whose atespaces match (see
+// PolicyFor), else the default profile, else the feeds alone. An
+// unregistered actor is matched by its atespace.
 type StaticPolicies struct {
 	profiles []*Policy
 	globs    [][]string
 	fallback *Policy
+	byName   map[string]*Policy
+	// unattended holds each policy's copy for unattended actors (GAP-0090).
+	unattended map[*Policy]*Policy
 }
 
 // NewStaticPolicies compiles cfg's profiles.
@@ -150,7 +153,7 @@ func NewStaticPolicies(cfg *Config) (*StaticPolicies, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &StaticPolicies{}
+	s := &StaticPolicies{byName: map[string]*Policy{}, unattended: map[*Policy]*Policy{}}
 	for _, p := range cfg.Profiles {
 		pol, err := compilePolicy(cfg, p, feeds)
 		if err != nil {
@@ -158,6 +161,7 @@ func NewStaticPolicies(cfg *Config) (*StaticPolicies, error) {
 		}
 		s.profiles = append(s.profiles, pol)
 		s.globs = append(s.globs, p.Atespaces)
+		s.byName[p.Name] = pol
 		if p.Name == cfg.DefaultProfile {
 			s.fallback = pol
 		}
@@ -166,6 +170,11 @@ func NewStaticPolicies(cfg *Config) (*StaticPolicies, error) {
 		if s.fallback, err = compilePolicy(cfg, ProfileConfig{Name: "default", UnattendedAsks: "deny"}, feeds); err != nil {
 			return nil, err
 		}
+	}
+	for _, pol := range append(append([]*Policy(nil), s.profiles...), s.fallback) {
+		cp := *pol
+		cp.Unattended = true
+		s.unattended[pol] = &cp
 	}
 	return s, nil
 }
@@ -176,10 +185,30 @@ func NewStaticPolicies(cfg *Config) (*StaticPolicies, error) {
 // callout does not guess (GAP-0069) and the failure mode applies.
 var ErrAmbiguousProfile = errors.New("extproc: more than one profile matches the atespace")
 
-// PolicyFor implements PolicySource. A profile naming the atespace exactly
-// wins over globs; two exact names, or two globs and no exact name, are
-// ErrAmbiguousProfile. Configuration order never decides.
+// PolicyFor implements PolicySource. The profile the actor's registration
+// names wins, so the callout and the gateway apply the same one; an
+// unregistered actor (or a profile this callout does not have) is matched
+// by atespace, where a profile naming the atespace exactly wins over globs
+// and two exact names, or two globs and no exact name, are
+// ErrAmbiguousProfile. Configuration order never decides. An unattended
+// actor gets its policy's unattended copy.
 func (s *StaticPolicies) PolicyFor(_ context.Context, actor ActorRef) (*Policy, error) {
+	pol, err := s.match(actor)
+	if err != nil || !actor.Unattended {
+		return pol, err
+	}
+	if u := s.unattended[pol]; u != nil {
+		return u, nil
+	}
+	cp := *pol
+	cp.Unattended = true
+	return &cp, nil
+}
+
+func (s *StaticPolicies) match(actor ActorRef) (*Policy, error) {
+	if pol := s.byName[actor.Profile]; actor.Profile != "" && pol != nil {
+		return pol, nil
+	}
 	var exact, glob []int
 	for i, globs := range s.globs {
 		for _, g := range globs {

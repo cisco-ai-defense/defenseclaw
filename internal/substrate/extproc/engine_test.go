@@ -38,18 +38,20 @@ var (
 )
 
 type fakeUIDs struct {
-	mu    sync.Mutex
-	uid   string
-	live  bool
-	err   error
-	calls int
+	mu         sync.Mutex
+	uid        string
+	profile    string
+	unattended bool
+	live       bool
+	err        error
+	calls      int
 }
 
-func (f *fakeUIDs) ResolveUID(context.Context, string, string) (string, bool, error) {
+func (f *fakeUIDs) ResolveActor(context.Context, string, string) (ActorRecord, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
-	return f.uid, f.live, f.err
+	return ActorRecord{UID: f.uid, Profile: f.profile, Unattended: f.unattended}, f.live, f.err
 }
 
 type fakeAsks struct {
@@ -345,8 +347,8 @@ func TestUIDCacheStaleAndInvalidate(t *testing.T) {
 	c := NewUIDCache(f, 10*time.Second, 60*time.Second)
 	c.now = func() time.Time { return now }
 	a := ActorRef{Atespace: "s", Name: "n"}
-	if uid, err := c.Resolve(context.Background(), a); uid != "u1" || err != nil {
-		t.Fatal(uid, err)
+	if rec, err := c.Resolve(context.Background(), a); rec.UID != "u1" || err != nil {
+		t.Fatal(rec, err)
 	}
 	now = now.Add(5 * time.Second)
 	_, _ = c.Resolve(context.Background(), a)
@@ -355,8 +357,8 @@ func TestUIDCacheStaleAndInvalidate(t *testing.T) {
 	}
 	f.err = errors.New("down")
 	now = now.Add(30 * time.Second)
-	if uid, err := c.Resolve(context.Background(), a); uid != "u1" || err != nil {
-		t.Fatalf("stale entry not served: %q %v", uid, err)
+	if rec, err := c.Resolve(context.Background(), a); rec.UID != "u1" || err != nil {
+		t.Fatalf("stale entry not served: %+v %v", rec, err)
 	}
 	now = now.Add(60 * time.Second)
 	if _, err := c.Resolve(context.Background(), a); err == nil {
@@ -364,8 +366,35 @@ func TestUIDCacheStaleAndInvalidate(t *testing.T) {
 	}
 	f.err, f.uid = nil, "u2"
 	c.Invalidate("s", "n")
-	if uid, _ := c.Resolve(context.Background(), a); uid != "u2" {
-		t.Fatalf("recreated actor kept old UID: %q", uid)
+	if rec, _ := c.Resolve(context.Background(), a); rec.UID != "u2" {
+		t.Fatalf("recreated actor kept old UID: %+v", rec)
+	}
+}
+
+// An unregistered actor's miss is reused for uidMissTTL only, so a launched
+// actor's registration is seen within a second (GAP-0090).
+func TestUIDCacheMissIsShort(t *testing.T) {
+	f := &fakeUIDs{live: true}
+	now := time.Unix(1000, 0)
+	c := NewUIDCache(f, 60*time.Second, 60*time.Second)
+	c.now = func() time.Time { return now }
+	a := ActorRef{Atespace: "s", Name: "n"}
+	if rec, err := c.Resolve(context.Background(), a); rec.UID != "" || err != nil {
+		t.Fatal(rec, err)
+	}
+	f.uid = "u1"
+	now = now.Add(uidMissTTL / 2)
+	if rec, _ := c.Resolve(context.Background(), a); rec.UID != "" || f.calls != 1 {
+		t.Fatalf("miss not reused: %+v calls %d", rec, f.calls)
+	}
+	now = now.Add(uidMissTTL)
+	if rec, _ := c.Resolve(context.Background(), a); rec.UID != "u1" {
+		t.Fatalf("registration not seen after the miss TTL: %+v", rec)
+	}
+	f.live, f.uid = false, ""
+	c.Invalidate("s", "n")
+	if _, err := c.Resolve(context.Background(), a); !errors.Is(err, ErrActorNotLive) {
+		t.Fatalf("deleted actor: %v", err)
 	}
 }
 
