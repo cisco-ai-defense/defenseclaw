@@ -77,9 +77,17 @@ def _claude_settings() -> tuple[dict[str, str], dict[str, str], dict[str, Any]]:
 
 # Gateway signing sends the AWS credential only to an AWS Bedrock runtime
 # host (the gateway refuses others, internal/gateway/routeonly_sigv4.go).
+# Group 1 is the region the host names.
 _BEDROCK_RUNTIME_HOST = re.compile(
-    r"(?:^|\.)bedrock-runtime(?:-fips)?\.[a-z]{2}(?:-[a-z]+)+-[0-9]+\.(?:vpce\.)?amazonaws\.com(?:\.cn)?$"
+    r"(?:^|\.)bedrock-runtime(?:-fips)?\.([a-z]{2}(?:-[a-z]+)+-[0-9]+)\.(?:vpce\.)?amazonaws\.com(?:\.cn)?$"
 )
+
+
+def bedrock_signable(url: str) -> bool:
+    """Whether the gateway would sign for url (Go bedrockSignableURL)."""
+    parts = urllib.parse.urlsplit(str(url or "").strip())
+    return parts.scheme == "https" and bool(_BEDROCK_RUNTIME_HOST.search((parts.hostname or "").lower()))
+
 
 _SIGNING_OPTIONS = (
     "use a Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) "
@@ -142,8 +150,7 @@ def _claude_bedrock_upstream(env: dict[str, str], own: dict[str, str], settings:
             f"which the DefenseClaw gateway does not have; {_SIGNING_OPTIONS}"
         )
     profile = profile or "default"
-    host = (urllib.parse.urlsplit(upstream).hostname or "").lower()
-    if urllib.parse.urlsplit(upstream).scheme != "https" or not _BEDROCK_RUNTIME_HOST.search(host):
+    if not bedrock_signable(upstream):
         raise RouteOnlyError(
             "gateway Bedrock signing sends AWS credentials only to an https "
             f"bedrock-runtime.<region>.amazonaws.com host, not {upstream}; {_SIGNING_OPTIONS}"
@@ -174,7 +181,9 @@ def detect_upstream(connector: str) -> Upstream | None:
         profile = doc.get("profile")
         profiles = doc.get("profiles") or {}
         if profile and isinstance(profiles.get(profile), dict) and profiles[profile].get("model_provider"):
-            raise RouteOnlyError(f"the active Codex profile {profile!r} sets its own model_provider; route-only routes the top-level provider only")
+            raise RouteOnlyError(
+                f"the active Codex profile {profile!r} sets its own model_provider; route-only routes the top-level provider only"
+            )
         provider = str(doc.get("model_provider") or "openai")
         if provider == CODEX_ROUTE_PROVIDER:
             return None
@@ -216,12 +225,12 @@ def _check_host(cfg: Any) -> None:
     mode = str(getattr(cfg, "deployment_mode", "") or "").strip()
     if mode == "managed_enterprise":
         # Managed hosts are configured by the bundle; the gateway validation
-        # refuses a managed macOS bundle whose route-only upstream has no
+        # refuses a managed macOS or Windows bundle whose route-only upstream has no
         # gateway credential (custody, every call would answer 503) and
         # doctor fails such a host.
         raise RouteOnlyError(
             "route-only on managed hosts comes from the signed policy bundle (routing.route_only); "
-            "on managed macOS the bundle also needs a gateway credential (routing.models[].credential) "
+            "on managed macOS and Windows the bundle also needs a gateway credential (routing.models[].credential) "
             "for each routed upstream, because the agent credential is not forwarded there"
         )
 
@@ -252,7 +261,9 @@ def enable(cfg: Any, connector: str) -> dict[str, Any]:
     if connector not in ROUTE_ONLY_CONNECTORS:
         raise RouteOnlyError(f"{connector} has no route-only support (supported: {_SUPPORTED})")
     if not cfg.routing.enabled or not cfg.routing.models:
-        raise RouteOnlyError("turn on semantic routing with at least one model first (routing.enabled and routing.models)")
+        raise RouteOnlyError(
+            "turn on semantic routing with at least one model first (routing.enabled and routing.models)"
+        )
     connectors, upstreams = _route_only(cfg)
     detected = detect_upstream(connector)
     if detected is None:
@@ -286,7 +297,13 @@ def disable(cfg: Any, connector: str) -> dict[str, Any]:
     # The running gateway restores on reload; this also covers a gateway
     # that is stopped or down (DESIGN 7.4).
     restored = restore_agent_config(connector)
-    return {"connector": connector, "enabled": False, "changed": was, "restart_agent": was, "agent_config_restored": restored}
+    return {
+        "connector": connector,
+        "enabled": False,
+        "changed": was,
+        "restart_agent": was,
+        "agent_config_restored": restored,
+    }
 
 
 def status(cfg: Any) -> list[dict[str, Any]]:
