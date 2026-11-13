@@ -170,6 +170,8 @@ func TestManagedCommandsMatchTheWindowsBinary(t *testing.T) {
 					err = policyConfigOnlyPreRunE(cmd, nil)
 				} else if slices.Equal(probe, []string{"audit", "compact"}) {
 					err = prepareManagedAuditCompactEnvironment()
+				} else if slices.Equal(probe, []string{"audit", "rejected"}) {
+					err = auditRejectedPersistentPreRunE(cmd, nil)
 				} else {
 					err = prepareManagedAuditExportEnvironment()
 				}

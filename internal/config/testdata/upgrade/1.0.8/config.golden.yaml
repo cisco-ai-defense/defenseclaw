@@ -17,7 +17,12 @@ scanners:
     policy_file:
       path: @HOME@/custom
       digest: sha256:5c96c04167f2684aae76877470b96254b0636a029dd291f9a4d4d5194d0f6b18
-observability: {}
+# T25 (#1442): the audit store keys 1.0.6 added (#1384), set with 'defenseclaw
+# config set'. 1.0.8 has no rejected-record store: 1.0.10 loads this with it off.
+observability:
+  local:
+    retention_days: 14
+    max_store_mb: 256
 update:
   check: false
 llm_providers:

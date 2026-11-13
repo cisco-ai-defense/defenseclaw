@@ -17,7 +17,16 @@ scanners:
     policy_file:
       path: @HOME@/custom
       digest: sha256:5c96c04167f2684aae76877470b96254b0636a029dd291f9a4d4d5194d0f6b18
-observability: {}
+# T25 (#1442): retention kept forever and a disabled JSONL export. 1.0.9 has
+# no rejected-record store: 1.0.10 loads this with it off.
+observability:
+  local:
+    retention_days: 0
+  destinations:
+    - name: siem-file
+      kind: jsonl
+      enabled: false
+      path: '@HOME@/exports/events.jsonl'
 update:
   check: false
 llm_providers:
