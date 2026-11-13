@@ -825,7 +825,11 @@ func deadlineRestartAnswer(opts Options, sp spec, failMode, reason string) func(
 		}
 		return renderPerUserRestartAnswer(fixed, sp, failMode, reason)
 	}
-	open, closed := inTier("open"), inTier("closed")
+	// Both renderings at once: the answer is ready as soon as either was.
+	openDone := make(chan *perUserRestartAnswer, 1)
+	go func() { openDone <- inTier("open") }()
+	closed := inTier("closed")
+	open := <-openDone
 	return sync.OnceValue(func() *perUserRestartAnswer {
 		if tier == nil || open.mode == closed.mode {
 			return closed
@@ -876,6 +880,14 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 	go func() {
 		reason := perUserGatewayRestartingReason
 		if !fresh {
+			reason = perUserGatewayNoAnswerReason
+		}
+		// The answer is rendered beside the late-call scan, so it is ready
+		// when the scan ends; the tier is read at the deadline only
+		// (restartAnswerNow, GAP-0268).
+		rendered := make(chan func() *perUserRestartAnswer, 1)
+		go func() { rendered <- deadlineRestartAnswer(opts, sp, failMode, reason) }()
+		if !fresh {
 			// A gateway that has been up for a while and took the call may
 			// only be late (a burst, a long operand list). Its call follows
 			// the outage mode at the deadline when the scan finds nothing a
@@ -885,13 +897,11 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 			if !opts.lateOrdinary() {
 				return
 			}
-			reason = perUserGatewayNoAnswerReason
 			w.mu.Lock()
 			w.restartProof = func() restartProofResult { return restartProofResult{ok: true} }
 			w.mu.Unlock()
 		}
-		// The tier is read at the deadline only (restartAnswerNow, GAP-0268).
-		render := deadlineRestartAnswer(opts, sp, failMode, reason)
+		render := <-rendered
 		w.mu.Lock()
 		if w.restart == nil && w.restartRender == nil {
 			w.restartRender = render
