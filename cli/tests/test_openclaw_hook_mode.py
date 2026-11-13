@@ -71,3 +71,22 @@ class OpenClawNativeFloorTest(unittest.TestCase):
         self.assertTrue(openclaw_lacks_native_hooks("OpenClaw 2026.8.34 (abc)"))
         self.assertFalse(openclaw_lacks_native_hooks("2026.8.35"))
         self.assertFalse(openclaw_lacks_native_hooks(""))
+
+
+class OpenClawOperatorAdminTest(unittest.TestCase):
+    def _off(self, block):
+        from unittest.mock import patch
+
+        from defenseclaw.openclaw_plugin_config import openclaw_operator_admin_off
+
+        home = tempfile.mkdtemp()
+        path = os.path.join(home, "config.yaml")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"connectors": {"openclaw": block}}, f)
+        with patch("defenseclaw.config.config_path", return_value=path):
+            return openclaw_operator_admin_off()
+
+    def test_only_an_explicit_false_turns_remediation_off(self):
+        self.assertTrue(self._off({"operator_admin": False}))
+        self.assertFalse(self._off({"operator_admin": True}))
+        self.assertFalse(self._off({}))

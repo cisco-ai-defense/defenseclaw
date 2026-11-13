@@ -410,6 +410,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: create client: %w", err)
 	}
+	client.SetOperatorAdmin(cfg.OpenClawOperatorAdmin())
 	fmt.Fprintf(os.Stderr, "[sidecar] device identity loaded (id=%s)\n", client.device.DeviceID)
 
 	// Plan B6 / S0.10: install the per-boot HMAC seed for telemetry
@@ -4768,6 +4769,9 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 		defer cancel()
 
 		if err := s.client.DisableSkill(ctx, r.Event.Name); err != nil {
+			if errors.Is(err, ErrOpenClawRemediationUnavailable) {
+				actions = append(actions, openClawRemediationUnavailableAction)
+			}
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable skill %s failed: %v\n",
 				r.Event.Name, err)
 		} else {
@@ -4935,6 +4939,9 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 		defer cancel()
 
 		if err := s.client.DisablePlugin(ctx, r.Event.Name); err != nil {
+			if errors.Is(err, ErrOpenClawRemediationUnavailable) {
+				actions = append(actions, openClawRemediationUnavailableAction)
+			}
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable plugin %s failed: %v\n",
 				r.Event.Name, err)
 		} else {
@@ -4975,6 +4982,9 @@ func (s *Sidecar) handleMCPAdmission(r watcher.AdmissionResult) {
 		defer cancel()
 
 		if err := s.client.BlockMCPServer(ctx, r.Event.Name); err != nil {
+			if errors.Is(err, ErrOpenClawRemediationUnavailable) {
+				actions = append(actions, openClawRemediationUnavailableAction)
+			}
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway block MCP %s failed: %v\n",
 				r.Event.Name, err)
 		} else {

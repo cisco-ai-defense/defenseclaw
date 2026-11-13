@@ -251,6 +251,8 @@ DefenseClaw asks OpenClaw for these scopes:
 | `operator.approvals` | Answer OpenClaw exec approvals (`exec.approval.resolve`). |
 | `operator.admin` | Change OpenClaw's config to disable a blocked skill, plugin or MCP server (`config.patch`, `skills.update`). |
 
+`operator.admin` is optional. With `connectors.openclaw.operator_admin: false` DefenseClaw asks for the other three only. A blocked skill, plugin or MCP server is then still refused by DefenseClaw admission and inspection, but OpenClaw is not told to disable it: the alert and audit row say `openclaw_remediation_unavailable`, and `defenseclaw status` and `defenseclaw doctor` show `OpenClaw remediation: off (no operator.admin)`. The same happens when OpenClaw refuses `config.patch` or `skills.update` for the missing scope. If OpenClaw asks you to approve a scope upgrade for the admin scope, approve it with `openclaw devices approve`, or set `operator_admin: false` and restart the gateway.
+
 #### What this command sets vs. leaves at defaults
 
 `defenseclaw setup openclaw` is the dedicated alias. It delegates to the shared guardrail setup and exposes the common options, not every `setup guardrail` flag ([quick-alias reference](/docs/guardrail/aliases), [full guardrail setup](/docs/guardrail)). The flags above set the connector, mode, optional HITL and optional rule pack. Everything else uses the shipped defaults ([Defaults](/docs/policies/defaults)).

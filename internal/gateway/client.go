@@ -82,6 +82,10 @@ type Client struct {
 	bufferHandshakeEvents bool
 	handshakeBuf          []EventFrame
 
+	// noOperatorAdmin is connectors.openclaw.operator_admin false: connect
+	// asks OpenClaw for read, write and approvals only.
+	noOperatorAdmin atomic.Bool
+
 	// OnEvent is called for every non-connect event frame.
 	OnEvent func(EventFrame)
 
@@ -255,6 +259,20 @@ func (c *Client) Connect(ctx context.Context) error {
 // errOpenClawListenerUnverified is a loopback OpenClaw gateway port whose
 // listener is not this account's (GAP-0594).
 var errOpenClawListenerUnverified = errors.New("the OpenClaw gateway listener does not belong to this account")
+
+// ErrOpenClawRemediationUnavailable is returned for an OpenClaw RPC that
+// needs operator.admin (skills.update, config.patch) when DefenseClaw runs
+// without it: connectors.openclaw.operator_admin false, or OpenClaw refused
+// the scope. The block stays recorded and enforced at DefenseClaw admission
+// and inspect; only the OpenClaw-side disable is not sent.
+var ErrOpenClawRemediationUnavailable = errors.New("openclaw_remediation_unavailable (scope operator.admin)")
+
+// openClawRemediationUnavailableAction marks the alert and audit row of a
+// block OpenClaw was not told about.
+const openClawRemediationUnavailableAction = "openclaw_remediation_unavailable"
+
+// openClawAdminMethods are the OpenClaw RPCs that need operator.admin.
+var openClawAdminMethods = map[string]bool{"skills.update": true, "config.patch": true}
 
 // verifyOpenClawListener checks the account of the accepted server socket:
 // on Linux this account or root, on macOS this account only (the socket
@@ -465,6 +483,9 @@ func (c *Client) sendConnect(ctx context.Context, nonce string) (*HelloOK, error
 	clientMode := "backend"
 	role := "operator"
 	scopes := []string{"operator.read", "operator.write", "operator.admin", "operator.approvals"}
+	if !c.RequestsOperatorAdmin() {
+		scopes = []string{"operator.read", "operator.write", "operator.approvals"}
+	}
 	token := c.wsToken()
 
 	deviceParams := ConnectDeviceParams{
@@ -621,6 +642,9 @@ func (c *Client) readLoop(conn *websocket.Conn, readDone chan struct{}) {
 
 // Request sends an RPC request and waits for the response.
 func (c *Client) Request(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
+	if openClawAdminMethods[method] && !c.RequestsOperatorAdmin() {
+		return nil, fmt.Errorf("gateway: %s: %w", method, ErrOpenClawRemediationUnavailable)
+	}
 	resp, err := c.request(ctx, method, params)
 	if err != nil {
 		return nil, err
@@ -631,6 +655,10 @@ func (c *Client) Request(ctx context.Context, method string, params interface{})
 		if resp.Error != nil {
 			msg = resp.Error.Message
 			code = resp.Error.Code
+		}
+		if openClawAdminMethods[method] && strings.Contains(strings.ToLower(msg), "operator.admin") {
+			// A pairing approved without the admin scope: same degrade.
+			return nil, fmt.Errorf("gateway: %s: %s (%s): %w", method, msg, code, ErrOpenClawRemediationUnavailable)
 		}
 		return nil, fmt.Errorf("gateway: %s: %s (%s)", method, msg, code)
 	}
@@ -1020,6 +1048,19 @@ func openClawPairingApprovalHint(deviceID string) string {
 		"DefenseClaw keeps retrying and connects once it is approved"
 }
 
+// SetOperatorAdmin is connectors.openclaw.operator_admin. It takes effect on
+// the next connect.
+func (c *Client) SetOperatorAdmin(on bool) { c.noOperatorAdmin.Store(!on) }
+
+// RequestsOperatorAdmin reports whether connect asks OpenClaw for
+// operator.admin (the default).
+func (c *Client) RequestsOperatorAdmin() bool { return !c.noOperatorAdmin.Load() }
+
+// openClawNoAdminOptOut is appended to the pairing hint of a scope upgrade
+// while DefenseClaw asks for operator.admin.
+const openClawNoAdminOptOut = ". Or, to run without OpenClaw-side remediation (no operator.admin), set " +
+	"connectors.openclaw.operator_admin: false and restart the gateway"
+
 // handleConnectRejection reacts to a failed connect attempt. It returns the
 // operator step for an OpenClaw pairing or token rejection, or "" for any
 // other failure. It never writes OpenClaw state.
@@ -1032,6 +1073,9 @@ func (c *Client) handleConnectRejection(connectErr error) string {
 		return hint
 	case openClawPairingApprovalNeeded(connectErr):
 		hint = openClawPairingApprovalHint(c.device.DeviceID)
+		if c.RequestsOperatorAdmin() && strings.Contains(strings.ToLower(connectErr.Error()), "more scopes than") {
+			hint += openClawNoAdminOptOut
+		}
 		fmt.Fprintf(os.Stderr, "[gateway] %s\n", hint)
 	case isAuthError(connectErr):
 		hint = openClawTokenRejectedHint

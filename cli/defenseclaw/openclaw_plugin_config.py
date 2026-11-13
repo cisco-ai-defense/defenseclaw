@@ -144,12 +144,10 @@ def openclaw_install_policy_state(cfg: object) -> str:
     return "ours" if args[-3:] == ["connector", "openclaw", "install-policy"] else "operator"
 
 
-def openclaw_install_policy_wanted(cfg: object) -> bool:
-    # Mirrors Go Config.OpenClawInstallPolicyOn: on and off are what they
-    # say; auto is on in the strict tier and on managed installs.
+def _openclaw_connector_block() -> dict:
+    # connectors.openclaw in config.yaml, or {} when it cannot be read.
     from defenseclaw.config import config_path
 
-    setting = ""
     try:
         import yaml
 
@@ -157,10 +155,22 @@ def openclaw_install_policy_wanted(cfg: object) -> bool:
             raw = yaml.safe_load(stream) or {}
         connectors = raw.get("connectors") if isinstance(raw, dict) else None
         openclaw = connectors.get("openclaw") if isinstance(connectors, dict) else None
-        if isinstance(openclaw, dict):
-            setting = str(openclaw.get("install_policy") or "").strip().lower()
     except Exception:  # noqa: BLE001 - doctor reads what it can
-        setting = ""
+        return {}
+    return openclaw if isinstance(openclaw, dict) else {}
+
+
+def openclaw_operator_admin_off() -> bool:
+    # Mirrors Go Config.OpenClawOperatorAdmin: only an explicit false turns it
+    # off; OpenClaw is then not told to disable a blocked skill, plugin or MCP
+    # server (DefenseClaw admission and inspect still enforce the block).
+    return _openclaw_connector_block().get("operator_admin") is False
+
+
+def openclaw_install_policy_wanted(cfg: object) -> bool:
+    # Mirrors Go Config.OpenClawInstallPolicyOn: on and off are what they
+    # say; auto is on in the strict tier and on managed installs.
+    setting = str(_openclaw_connector_block().get("install_policy") or "").strip().lower()
     if setting in ("on", "off"):
         return setting == "on"
     from defenseclaw.config import _is_managed_enterprise_mode
@@ -168,5 +178,7 @@ def openclaw_install_policy_wanted(cfg: object) -> bool:
     if _is_managed_enterprise_mode(getattr(cfg, "deployment_mode", "")):
         return True
     guardrail = getattr(cfg, "guardrail", None)
-    tier = guardrail.hook_policy_tier("openclaw") if guardrail is not None and hasattr(guardrail, "hook_policy_tier") else ""
+    tier = ""
+    if guardrail is not None and hasattr(guardrail, "hook_policy_tier"):
+        tier = guardrail.hook_policy_tier("openclaw")
     return tier == "strict"

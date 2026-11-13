@@ -12987,11 +12987,25 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         hook_mode = configured_openclaw_hook_mode(cfg)
         if hook_mode != "proxy":
             _emit("pass", "OpenClaw hook mode", f"{hook_mode}: {openclaw_hook_mode_detail(hook_mode)}", r=r)
-        from defenseclaw.openclaw_plugin_config import openclaw_install_policy_state, openclaw_install_policy_wanted
+        from defenseclaw.openclaw_plugin_config import (
+            openclaw_install_policy_state,
+            openclaw_install_policy_wanted,
+            openclaw_operator_admin_off,
+        )
+
+        if openclaw_operator_admin_off():
+            _emit(
+                "skip",
+                "OpenClaw remediation",
+                "off (no operator.admin): blocks are enforced by DefenseClaw, OpenClaw is not told to disable them",
+                r=r,
+            )
 
         policy_state = openclaw_install_policy_state(cfg)
         if policy_state == "ours":
-            _emit("pass", "OpenClaw install admission", "OpenClaw asks DefenseClaw before a skill or plugin install", r=r)
+            _emit(
+                "pass", "OpenClaw install admission", "OpenClaw asks DefenseClaw before a skill or plugin install", r=r
+            )
         elif openclaw_install_policy_wanted(cfg):
             _emit(
                 "warn",
@@ -13001,7 +13015,8 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
                 remediation=(
                     "remove your own security.installPolicy from openclaw.json, then run `defenseclaw setup openclaw`"
                     if policy_state == "operator"
-                    else "run `defenseclaw setup openclaw` (needs OpenClaw 2026.8.35 or later); the setup output names the reason"
+                    else "run `defenseclaw setup openclaw` (needs OpenClaw 2026.8.35 or later); "
+                    "the setup output names the reason"
                 ),
                 r=r,
             )
