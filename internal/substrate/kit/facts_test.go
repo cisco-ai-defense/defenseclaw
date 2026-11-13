@@ -75,6 +75,10 @@ func TestFactsApplyPatchPaths(t *testing.T) {
 }
 
 func TestFactsMCPAdmission(t *testing.T) {
+	// The connector reads user-scope configs too (GAP-0185): an empty home.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
 	repo := t.TempDir()
 	os.MkdirAll(filepath.Join(repo, "tools"), 0o755)
 	os.WriteFile(filepath.Join(repo, "tools", "srv.py"), []byte("print('mcp')"), 0o644)

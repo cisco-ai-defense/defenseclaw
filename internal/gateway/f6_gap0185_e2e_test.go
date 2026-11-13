@@ -101,6 +101,8 @@ func gap0185Kit(t *testing.T, strict bool, event string, ev map[string]any) gap0
 }
 
 func TestGAP0185KitToGatewayRepoMCPServers(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // the kit reads user-scope MCP configs too
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	repo := gap0185Repo(t, gap0185RepoConfig)
 	call := func(tool string, input map[string]any) map[string]any {
 		return map[string]any{"cwd": repo, "tool_name": tool, "tool_input": input}
@@ -144,6 +146,8 @@ func TestGAP0185KitToGatewayRepoMCPServers(t *testing.T) {
 // A repository config the gateway cannot read as servers follows the fail
 // mode: refused where unscanned content is refused, alerted on elsewhere.
 func TestGAP0185KitToGatewayUnreadableConfigFollowsTheFailMode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // the kit reads user-scope MCP configs too
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	repo := gap0185Repo(t, `{"mcpServers":{"notes":{"command":"node","args":["srv.js"]`)
 	ev := func() map[string]any {
 		return map[string]any{"cwd": repo, "tool_name": "mcp__notes__read_notes", "tool_input": map[string]any{}}
