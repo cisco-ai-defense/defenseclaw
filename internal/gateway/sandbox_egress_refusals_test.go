@@ -298,7 +298,7 @@ func TestSandboxEgressRefusalNotice(t *testing.T) {
 		"- webhook.site (webhook catcher): the user can allow it for this sandbox with `defenseclaw sandbox unblock webhook.site --sandbox dc-claude-app`.\n" +
 		"- registry.example:8443 (port the proxy does not relay): only the user's DefenseClaw operator can add the port (openshell.egress.ports).\n" +
 		"- 10.1.2.3 (private network): only the user's DefenseClaw operator can open it (openshell.egress.allow).\n" +
-		"- and 1 more, not named here: they are blocked too\n" +
+		"- and 1 more, not named here (blocked too)\n" +
 		"Tell the user if the task needs them, and do not try to reach them another way."
 	specific, _ := got.HookOutput["hookSpecificOutput"].(map[string]interface{})
 	if got.AdditionalContext != want || specific["additionalContext"] != want || got.Action != "alert" {

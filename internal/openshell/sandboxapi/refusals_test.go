@@ -259,7 +259,7 @@ func TestRefusalHarnessNamesMatchHarnessSpecs(t *testing.T) {
 // does (rel-1-0-10 GAP-0001 F9).
 func TestHostRunUnavailableWhileSetupChangesAsksForNoException(t *testing.T) {
 	for _, why := range []string{sandboxapi.UnavailableSetupChanging, sandboxapi.UnavailableSetupChanging + "."} {
-		got := sandboxapi.HostRunUnavailable("claudecode", why, "openshell_setup_changing", "help@example.com")
+		got := sandboxapi.HostRunUnavailable("claudecode", why, "prerequisite_missing", "help@example.com")
 		for _, banned := range []string{"Need an exception", "help@example.com", "quote reason"} {
 			if strings.Contains(got, banned) {
 				t.Fatalf("setup-changing refusal carries %q: %q", banned, got)

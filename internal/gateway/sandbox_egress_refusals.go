@@ -272,7 +272,7 @@ func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
 		// The whole carried set is marked told, so the note says that the
 		// rest exist and that they are off limits too, even unnamed
 		// (rel-1-0-10 GAP-0001 F4).
-		fmt.Fprintf(&b, "\n- and %d more, not named here: they are blocked too", more)
+		fmt.Fprintf(&b, "\n- and %d more, not named here (blocked too)", more)
 	}
 	if slices.ContainsFunc(refusals, func(r SandboxEgressRefusal) bool { return r.Note != "" }) {
 		b.WriteString("\nTell the user if the task needs them; do what each line says, and do not try to reach the others another way.")
