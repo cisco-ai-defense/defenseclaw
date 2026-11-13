@@ -104,6 +104,7 @@ func TestFirstStartAfterV8MigrationKeepsConfiguredMCPServers(t *testing.T) {
 		w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
 		w.scannerFactory = func(InstallEvent) scanner.Scanner { return &failingScanner{countingScanner{name: "mcp-scanner"}} }
 		w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return servers, nil })
+		w.markMCPNoScanAdmissionsOwed() // as Run does at the start
 		w.runRescanCycle(context.Background())
 		return admitted
 	}
