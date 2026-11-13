@@ -1009,6 +1009,8 @@ func (a *APIServer) inspectCodexToolResult(
 ) *ToolInspectVerdict {
 	req = req.withTrustedActiveHome(ctx)
 	content := codexToolResponseString(req.ToolResponse)
+	// The tool-result judges get the call this output answers (judge_packet.go).
+	ctx = withToolResultCall(ctx, req.ToolName, req.ToolInput)
 	if sandboxToolResultUntrusted(ctx) {
 		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, ruleContentScopeUntrusted))
 	}

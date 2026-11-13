@@ -131,7 +131,7 @@ func TestRunJudgesToolResultUsesToolResultPrompt(t *testing.T) {
 	if len(mock.captured) != 1 {
 		t.Fatalf("want one injection judge call on a tool result, got %d", len(mock.captured))
 	}
-	if sys := mock.captured[0].Messages[0].Content; sys != toolResultInjectionSystemPrompt {
+	if sys := mock.captured[0].Messages[0].Content; !strings.HasPrefix(sys, toolResultInjectionSystemPrompt) {
 		t.Fatalf("tool result judged with the prompt judge's system prompt: %.80q", sys)
 	}
 	// The PII judge reads a tool's output only for a tool the pack lists with
@@ -145,7 +145,7 @@ func TestRunJudgesToolResultUsesToolResultPrompt(t *testing.T) {
 	mock.captured = nil
 	j.RunJudges(context.Background(), "completion", "Here is the summary.", "")
 	for _, req := range mock.captured {
-		if req.Messages[0].Content == toolResultInjectionSystemPrompt || req.Messages[0].Content == injectionSystemPrompt {
+		if strings.HasPrefix(req.Messages[0].Content, toolResultInjectionSystemPrompt) || req.Messages[0].Content == injectionSystemPrompt {
 			t.Fatal("completion ran the injection judge")
 		}
 	}

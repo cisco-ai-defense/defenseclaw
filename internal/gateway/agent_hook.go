@@ -3613,7 +3613,18 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
 	case isResultLikeEvent(req.HookEventName):
-		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
+		// The tool-result judges get the call this output answers (judge_packet.go):
+		// a placeholder tool name or the whole hook envelope is no call.
+		var callTool string
+		var callArgs json.RawMessage
+		if !req.ToolNameIsLabel {
+			callTool = req.ToolName
+		}
+		if !req.ToolArgsAreHookEnvelope && !req.ToolArgsProjectionUncertain {
+			callArgs = req.ToolArgs
+		}
+		resultCtx := withToolResultCall(ctx, callTool, callArgs)
+		verdict = a.inspectMessageContent(resultCtx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a
 		// PostToolUse referencing an unregistered MCP server gets
 		// captured in audit / would-block telemetry. mergeAssetDecision

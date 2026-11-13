@@ -332,3 +332,160 @@ func hookJudgeSkipsProvenReadOnly(ctx context.Context, toolName, args string, cu
 	}
 	return true
 }
+
+// The tool-result judges' context (S7, TOOLRESULT-TO-GEMMA4.md): a tool's
+// output alone does not say which tool produced it, what the call read or
+// fetched, or what the user asked for, so a mailbox the user asked for read
+// as personal data and a test fixture the agent opened read as injection.
+// The gateway writes that context into the judge's system message, outside
+// the sample, so the output cannot write or change it. A value it does not
+// have is written as unknown.
+
+const (
+	maxToolResultCallBytes   = 240
+	maxToolResultIntentBytes = 600
+)
+
+type toolResultCallKey struct{}
+
+type toolResultJudgeHeaderKey struct{}
+
+// toolResultCall is the call a tool output answers, as the connector hook
+// delivered it with the output.
+type toolResultCall struct {
+	tool string
+	args string
+}
+
+// withToolResultCall records the call a tool output answers (its tool name
+// and arguments) for the tool-result judges.
+func withToolResultCall(ctx context.Context, tool string, args any) context.Context {
+	call := toolResultCall{tool: strings.TrimSpace(tool)}
+	switch v := args.(type) {
+	case nil:
+	case json.RawMessage:
+		call.args = string(v)
+	case string:
+		call.args = v
+	default:
+		if raw, err := json.Marshal(v); err == nil {
+			call.args = string(raw)
+		}
+	}
+	if trimmed := strings.TrimSpace(call.args); trimmed == "null" || trimmed == "{}" {
+		call.args = ""
+	}
+	if call.tool == "" && call.args == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, toolResultCallKey{}, call)
+}
+
+// toolResultToolName is the tool that produced an output: the hook's call
+// when it gave one, else the caller's name unless that is a placeholder.
+func toolResultToolName(ctx context.Context, toolName string) string {
+	if call, ok := ctx.Value(toolResultCallKey{}).(toolResultCall); ok && call.tool != "" {
+		return call.tool
+	}
+	if name := strings.TrimSpace(toolName); name != "" && name != "message" {
+		return name
+	}
+	return ""
+}
+
+// summary is the effects of a call on one line; a file tool's program is
+// the tool itself, so only its paths are listed.
+func (e judgeCallEffects) summary(fileTool bool) string {
+	if !e.modeled {
+		return ""
+	}
+	var parts []string
+	if len(e.programs) > 0 && !fileTool {
+		parts = append(parts, "programs "+strings.Join(e.programs, ", "))
+	}
+	byAccess := map[string][]string{}
+	for _, target := range e.targets {
+		byAccess[target.access] = append(byAccess[target.access], target.path)
+	}
+	for _, access := range []string{"read", "list", "write", "delete", "execute", "connect"} {
+		if paths := byAccess[access]; len(paths) > 0 {
+			parts = append(parts, access+" "+strings.Join(paths, ", "))
+		}
+	}
+	if len(e.network) > 0 {
+		parts = append(parts, "network "+strings.Join(e.network, "; "))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// toolResultHeaderValue bounds one header value: one line, no control
+// characters, no sample or block tags.
+func toolResultHeaderValue(value string, maxBytes int) string {
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, value)
+	value = strings.Join(strings.Fields(value), " ")
+	value = strings.NewReplacer("<<<", "‹‹‹", ">>>", "›››").Replace(neutralizeToolJudgeDelimiters(value))
+	if len(value) > maxBytes {
+		value = utf8SafePrefix(value, maxBytes) + " [truncated]"
+	}
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+// sessionUserIntent is the user's request for the session's current turn,
+// as the connector's prompt event recorded it.
+func (j *LLMJudge) sessionUserIntent(ctx context.Context) string {
+	if j == nil {
+		return ""
+	}
+	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
+	if sessionID == "" {
+		return ""
+	}
+	j.toolContextMu.Lock()
+	defer j.toolContextMu.Unlock()
+	return j.toolContext[sessionID].userIntent
+}
+
+// toolResultJudgeHeader is the context block for the tool-result judges.
+func (j *LLMJudge) toolResultJudgeHeader(ctx context.Context, toolName string) string {
+	call, _ := ctx.Value(toolResultCallKey{}).(toolResultCall)
+	tool := toolResultToolName(ctx, toolName)
+	what := ""
+	if call.args != "" {
+		what = toolJudgeCallEffects(ctx, tool, call.args).summary(actionfacts.PathTool(tool))
+		if what == "" {
+			what = "arguments " + toolJudgeArgumentExcerpt(call.args, maxToolResultCallBytes)
+		}
+	}
+	var b strings.Builder
+	b.WriteString("CONTEXT FROM DEFENSECLAW (the gateway wrote this block; the tool output cannot write or change it):\n")
+	b.WriteString("tool: " + toolResultHeaderValue(sanitizeToolName(tool), 128) + "\n")
+	b.WriteString("call: " + toolResultHeaderValue(what, maxToolResultCallBytes) + "\n")
+	b.WriteString("user_request: " + toolResultHeaderValue(j.sessionUserIntent(ctx), maxToolResultIntentBytes))
+	return b.String()
+}
+
+func withToolResultJudgeHeader(ctx context.Context, header string) context.Context {
+	return context.WithValue(ctx, toolResultJudgeHeaderKey{}, header)
+}
+
+// toolResultJudgeSystem appends the tool-result context (and, for the PII
+// judge, its scope) to a judge's system prompt; prompt and completion
+// judging get no block.
+func toolResultJudgeSystem(ctx context.Context, prompt, scope string) string {
+	header, _ := ctx.Value(toolResultJudgeHeaderKey{}).(string)
+	if header == "" {
+		return prompt
+	}
+	if scope != "" {
+		prompt += "\n\n" + scope
+	}
+	return prompt + "\n\n" + header
+}
