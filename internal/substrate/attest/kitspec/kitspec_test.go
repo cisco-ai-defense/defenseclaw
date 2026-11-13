@@ -12,10 +12,12 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
@@ -219,5 +221,37 @@ func TestSpecRootOwnedFilesInTheHomeAreNotExpectedChains(t *testing.T) {
 	}
 	if spec.UserFiles["/usr/local/lib/defenseclaw/antigravity/hooks.json"] {
 		t.Error("the canonical hooks copy outside the home is the checked file")
+	}
+}
+
+// rel-1-0-10 GAP-0279 (decision: keep the flag). An actor starts Claude Code
+// with CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1, as an OpenShell sandbox does:
+// a workload-writable settings file must not start a background launcher
+// (processWrapper) outside the pre-tool check. The price is that user-scope
+// plugins never load in an actor, and the template scan says so. This guards
+// against the flag being dropped without that decision being revisited.
+func TestSpecKeepsClaudeCodePersonalConfigRestricted(t *testing.T) {
+	spec, _, err := Spec(Options{Connector: "claudecode", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r"), MetadataOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const flag = "CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG"
+	if got := spec.Env[flag]; got != "1" {
+		t.Errorf("image env %s = %q, want 1", flag, got)
+	}
+	var dropIn []byte
+	for _, f := range spec.Files {
+		if f.Path == connector.ClaudeCodeSandboxDropInPath {
+			dropIn = f.Data
+		}
+	}
+	var doc struct {
+		Env map[string]string `json:"env"`
+	}
+	if dropIn == nil || json.Unmarshal(dropIn, &doc) != nil {
+		t.Fatalf("no readable managed settings drop-in %s in the kit", connector.ClaudeCodeSandboxDropInPath)
+	}
+	if got := doc.Env[flag]; got != "1" {
+		t.Errorf("managed settings env %s = %q, want 1", flag, got)
 	}
 }

@@ -163,6 +163,8 @@ defenseclaw substrate template build --connector claudecode \
 
 `template build` adds the DefenseClaw hook and relay to the base image, scans the agent's config, skills, plugins and MCP servers, and pushes the image with a signed record of the result (the attestation). A skill or MCP server with a finding at HIGH or above stops the build. If a finding is a known false positive, `--accept-finding RULE-ID --reason "..."` lets the build pass and records the rule and the reason in the attestation. `--connector` takes `claudecode` or `codex`. The kits for the other agents come from the same kit generator in the repository (`deploy/images/actor-kit/kitgen`); see [Agents and features](/docs/substrate/agents). `template scan IMAGE` scans an image without changing it. The relay in the image accepts only session tokens signed with that key by the gateway. For an install in another namespace, add `--session-issuer https://defenseclaw-admin.NAMESPACE.svc.cluster.local`. Run `defenseclaw substrate template build --help` for every flag.
 
+User-scope Claude Code plugins do not load in Substrate actors, because personal config is restricted (`CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1`). The scan still checks them and prints a note. Use project or managed scope instead.
+
 Agents from an image that was not built and checked this way get no network at all. Substrate needs the image pinned by digest.
 
 Then check the image and publish it. `publish` copies it to the registry the cluster pulls from and, with `--template`, creates the ActorTemplate from the attested image:
