@@ -22,6 +22,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"unicode/utf16"
 )
 
@@ -152,8 +154,14 @@ func TestHostScriptTwinStopsAtTheWrapperDepth(t *testing.T) {
 		source = `powershell -c '` + strings.ReplaceAll(source, `'`, `''`) + `'`
 	}
 	input := hookShellInput(t, "PowerShell", source)
-	if twin, ok := HostScriptTwin(input, Analyze(input)); ok {
-		t.Fatalf("over-deep launchers have a reading: %#v", twin)
+	if reading := HostScriptReadings(input, Analyze(input), 0, false); !reading.Caps.Has(bounded.Depth) {
+		t.Fatalf("over-deep launchers are not truncated at the depth: %#v", reading)
+	}
+	// The depth is one budget of the call: a reading that starts with the
+	// layers a parent used reaches the bound with fewer of its own.
+	shallow := hookShellInput(t, "PowerShell", `powershell -c 'powershell -c Get-Date'`)
+	if reading := HostScriptReadings(shallow, Analyze(shallow), maxWrapperDepth-1, false); !reading.Caps.Has(bounded.Depth) {
+		t.Fatalf("the depth restarts for a twin: %#v", reading)
 	}
 	within := `Get-Content C:\tmp\a.txt`
 	for layer := 0; layer < maxWrapperDepth-1; layer++ {

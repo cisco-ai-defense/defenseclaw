@@ -17,8 +17,10 @@
 package actionfacts
 
 import (
+	"slices"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
@@ -88,13 +90,24 @@ type hostUnwrap struct {
 	dialect Dialect
 	// layers is the number of launchers unwrapped.
 	layers int
-	// limit: another wrapper layer was left because the wrapper depth is spent.
+	// limit: another wrapper layer was left because a bound ended the reading
+	// (the wrapper depth, the nested size budget, a mid-list body past its
+	// size); caps names the bound (internal/guardrail/bounded).
 	limit bool
+	caps  bounded.CapSet
 }
 
 // maxHostMidListBody bounds the script text substituted into the middle of a
 // statement list; whole-call replacement is bounded by the nested size budget.
 const maxHostMidListBody = 4 << 10
+
+// The bounds of the script reading, for the cross-lane bound test
+// (internal/gateway bounded_lanes_test.go registers each as a lane cap).
+const (
+	MaxWrapperDepth    = maxWrapperDepth
+	MaxHostMidListBody = maxHostMidListBody
+	MaxListReadings    = maxListReadings
+)
 
 // unwrapHostSource unwraps source (PowerShell or cmd.exe grammar) until no
 // static host wrapper is left, at most maxWrapperDepth layers. ok is false when
@@ -107,16 +120,22 @@ func unwrapHostSource(source string, dialect Dialect, depth int) (hostUnwrap, bo
 		var ok bool
 		switch result.dialect {
 		case DialectPowerShell:
-			next, nextDialect, ok = unwrapPowerShellOnce(result.source)
+			var caps bounded.CapSet
+			next, nextDialect, ok, caps = unwrapPowerShellOnce(result.source)
+			result.caps = result.caps.Union(caps)
+			result.limit = result.limit || caps.Any()
 		case DialectCMD:
 			next, nextDialect, ok = unwrapCMDOnce(result.source)
 		}
-		if !ok || strings.TrimSpace(next) == "" ||
-			len(next)*(depth+layer+2) > maxNestedCommandBytes {
+		if !ok || strings.TrimSpace(next) == "" {
+			break
+		}
+		if len(next)*(depth+layer+2) > maxNestedCommandBytes {
+			result.limit, result.caps = true, result.caps.Union(bounded.Of(bounded.Bytes))
 			break
 		}
 		if depth+layer >= maxWrapperDepth {
-			result.limit = true
+			result.limit, result.caps = true, result.caps.Union(bounded.Of(bounded.Depth))
 			break
 		}
 		result.source, result.dialect = next, nextDialect
@@ -129,10 +148,11 @@ func unwrapHostSource(source string, dialect Dialect, depth int) (hostUnwrap, bo
 // statements of a PowerShell source. A source that is one wrapper statement is
 // replaced whole (and may change grammar to cmd.exe's); wrappers among other
 // statements are replaced in place when their script is one simple line.
-func unwrapPowerShellOnce(source string) (string, Dialect, bool) {
+func unwrapPowerShellOnce(source string) (string, Dialect, bool, bounded.CapSet) {
+	var caps bounded.CapSet
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) != 0 || len(script.Statements) == 0 {
-		return "", DialectNone, false
+		return "", DialectNone, false, caps
 	}
 	type edit struct {
 		start, end int
@@ -146,6 +166,12 @@ func unwrapPowerShellOnce(source string) (string, Dialect, bool) {
 		if !ok {
 			continue
 		}
+		if !whole && len(body) > maxHostMidListBody {
+			// A body past the size a statement list takes in place is not read
+			// there: the reading is truncated, not skipped.
+			caps = caps.Union(bounded.Of(bounded.Bytes))
+			continue
+		}
 		if !whole && (dialect != DialectPowerShell || !simpleHostBody(body)) {
 			continue
 		}
@@ -153,16 +179,16 @@ func unwrapPowerShellOnce(source string) (string, Dialect, bool) {
 		wholeDialect = dialect
 	}
 	if len(edits) == 0 {
-		return "", DialectNone, false
+		return "", DialectNone, false, caps
 	}
 	if whole {
-		return edits[0].body, wholeDialect, true
+		return edits[0].body, wholeDialect, true, caps
 	}
 	next := source
 	for i := len(edits) - 1; i >= 0; i-- {
 		next = next[:edits[i].start] + edits[i].body + next[edits[i].end:]
 	}
-	return next, DialectPowerShell, true
+	return next, DialectPowerShell, true, caps
 }
 
 // simpleHostBody reports a script that can stand between other statements of
@@ -601,10 +627,29 @@ var powerShellVerbNoun = lazyMustCompile(`(?i)^\s*(?:&\s*\{\s*)?(?:get|set|new|r
 // ... }) or a verb-noun cmdlet. HostScriptTwin then
 // reads the same text a second time as PowerShell; the reading only adds.
 func powerShellOnlyGrammar(source string) bool {
-	if strings.HasPrefix(strings.TrimSpace(source), "& {") {
+	trimmed := strings.TrimSpace(source)
+	if strings.HasPrefix(trimmed, "& {") {
 		return true
 	}
-	return powerShellVerbNoun.MatchString(source)
+	if powerShellVerbNoun.MatchString(source) {
+		return true
+	}
+	first := strings.ToLower(trimmed)
+	if end := strings.IndexAny(first, " \t\r\n;|"); end > 0 {
+		first = first[:end]
+	}
+	return powerShellOnlyAliases[first] || powerShellVariableAssignment.MatchString(trimmed)
+}
+
+// powerShellVariableAssignment is a statement that starts with $name = ...:
+// no POSIX shell has that, and cmd.exe does not expand it.
+var powerShellVariableAssignment = lazyMustCompile(`^\$[A-Za-z_][A-Za-z0-9_:]*\s*[-+*/]?=`)
+
+// powerShellOnlyAliases are PowerShell aliases that no POSIX or cmd.exe
+// program is called: a text that opens with one is PowerShell.
+var powerShellOnlyAliases = map[string]bool{
+	"iwr": true, "irm": true, "iex": true, "gci": true, "sls": true, "saps": true,
+	"cpi": true, "ii": true,
 }
 
 // rawCMDLauncherLine is the line a `cmd /c <line>` call written in a POSIX
@@ -649,29 +694,78 @@ func rawCMDLauncherLine(source string) (string, Dialect, bool) {
 	return "", DialectNone, false
 }
 
-// HostScriptTwin is the second reading of a call that runs a static
+// maxListReadings is the number of statements of one list that are read one by
+// one; a longer list is truncated (the bound rule), not read in part silently.
+const maxListReadings = 32
+
+// HostScriptReading is what HostScriptReadings returns: the readings of the
+// script a call runs, to be judged beside the call as written, and the bounds
+// that cut the reading short.
+type HostScriptReading struct {
+	// Twins are the second readings: the script of a static launcher, call
+	// block or Invoke-Expression literal, or the statements of a PowerShell
+	// list one by one. Each is judged on its own; their findings are only
+	// ever added to those of the call as written.
+	Twins []Input
+	// Depth is the number of wrapper layers used so far, including the ones
+	// this reading unwrapped. A twin is read again with it as its depth, so
+	// one call has one wrapper budget however its twins nest.
+	Depth int
+	// Listed marks twins that are statements (or edge-trimmed runs of
+	// statements) of a list: they are never split into statements again.
+	Listed bool
+	// Caps is the set of bounds the reading hit: the wrapper depth, the
+	// nested size budget, a body past the in-list size, a list past
+	// maxListReadings. A truncated reading is judged at the unknown tier of
+	// the pack at least (internal/guardrail/bounded).
+	Caps bounded.CapSet
+}
+
+// HostScriptTwin is HostScriptReadings for one reading at depth 0: the one
+// twin when the call has exactly one, for callers that want the script of a
+// launcher.
+func HostScriptTwin(input Input, facts Facts) (Input, bool) {
+	reading := HostScriptReadings(input, facts, 0, false)
+	if len(reading.Twins) != 1 {
+		return Input{}, false
+	}
+	return reading.Twins[0], true
+}
+
+// HostScriptReadings (listed: the input is itself a statement or a run of
+// statements of a list, so it is not split again) is the second reading of a call that runs a static
 // powershell, pwsh or cmd launcher, a call block or an Invoke-Expression of a
-// literal: the same call written as the script it runs, in the script's own
-// grammar (psparse decides what the launcher runs: ExtractNestedScripts).
+// literal, or that is a list of PowerShell statements: the same call written
+// as the script it runs, in the script's own grammar (psparse decides what the
+// launcher runs: ExtractNestedScripts), a statement at a time for a list.
 //
 // The reading is ADDITIVE. The call is analyzed as written, exactly as before,
-// and its facts are never changed by the launcher; a caller judges this input
-// as a separate reading and may only add the findings it raises to those of the
-// call as written (the gateway does, through withOverLimitTwinFindings). A
+// and its facts are never changed by the launcher; a caller judges each twin
+// as a separate reading and may only add the findings it raises to those of
+// the call as written (the gateway does, through withOverLimitTwinFindings). A
 // psparse result therefore cannot hide, replace or soften anything the
 // tokenizer saw, and a launcher psparse cannot resolve to one static script has
-// no reading at all (the call stays as unknown as it was).
-func HostScriptTwin(input Input, facts Facts) (Input, bool) {
-	if facts.Parse.Status == StatusLimitExceeded {
-		return Input{}, false
+// no reading at all (the call stays as unknown as it was). A bound of the
+// reading itself is not silent: it comes back in Caps.
+func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostScriptReading {
+	reading := HostScriptReading{Depth: depth}
+	if facts.Parse.Status == StatusLimitExceeded && len(input.Argv) == 0 &&
+		len(shellCommandText(input)) > maxCommandBytes {
+		return reading
 	}
-	// Hook calls run this on every tool call: most have no launcher, call
-	// block or Invoke-Expression, and a substring screen says so before any
-	// parse.
-	if len(input.Argv) == 0 && !mayHoldHostScript(shellCommandText(input)) {
-		return Input{}, false
+	if depth >= 2*maxWrapperDepth {
+		// A twin of a twin of a twin: one call never reads past twice the
+		// wrapper depth, whatever its shape (a list of lists of lists).
+		reading.Caps = bounded.Of(bounded.Depth)
+		return reading
 	}
 	source := shellCommandText(input)
+	// Hook calls run this on every tool call: most have no launcher, call
+	// block, Invoke-Expression or statement list, and a substring screen says
+	// so before any parse.
+	if len(input.Argv) == 0 && !mayHoldHostScript(source) && !strings.ContainsAny(source, ";\r\n") {
+		return reading
+	}
 	var dialect Dialect
 	layers := 0 // launchers already resolved from the argv or the POSIX call
 	switch {
@@ -679,11 +773,11 @@ func HostScriptTwin(input Input, facts Facts) (Input, bool) {
 		program := commandProgramForDialect(input.Argv[0], DialectPowerShell)
 		script, ok := hostFromArgv(program, input.Argv)
 		if !ok {
-			return Input{}, false
+			return reading
 		}
 		source, dialect, layers = script.body, script.dialect, 1
 	case source == "" || len(source) > maxCommandBytes:
-		return Input{}, false
+		return reading
 	default:
 		dialect, _ = chooseRawCommandDialect(input.Tool, input.DialectHint, source)
 		if dialect == DialectPOSIX || dialect == DialectNone || dialect == DialectMixed {
@@ -695,24 +789,122 @@ func HostScriptTwin(input Input, facts Facts) (Input, bool) {
 				body, bodyDialect, ok = source, DialectPowerShell, true
 			}
 			if !ok {
-				return Input{}, false
+				return reading
 			}
-			source, dialect, layers = body, bodyDialect, 1
+			source, dialect = body, bodyDialect
+			if body != shellCommandText(input) {
+				layers = 1
+			}
 		}
 	}
 	if dialect != DialectPowerShell && dialect != DialectCMD {
-		return Input{}, false
+		return reading
 	}
-	unwrapped, more := unwrapHostSource(source, dialect, layers)
-	if unwrapped.limit || !more && layers == 0 {
-		return Input{}, false
+	unwrapped, _ := unwrapHostSource(source, dialect, depth+layers)
+	reading.Caps = unwrapped.caps
+	reading.Depth = depth + layers + unwrapped.layers
+	if unwrapped.layers > 0 || layers > 0 {
+		twin := input
+		twin.Args, twin.Argv = nil, nil
+		twin.Command = unwrapped.source
+		if unwrapped.dialect == DialectPowerShell {
+			twin.Command = withoutUnreachableStatements(unwrapped.source)
+		}
+		twin.DialectHint = unwrapped.dialect
+		reading.Twins = append(reading.Twins, twin)
+		// The twin is a script: its own list of statements is read when the
+		// twin is read in turn, with the depth carried.
+		return reading
 	}
-	twin := input
-	twin.Args, twin.Argv = nil, nil
-	twin.Command = unwrapped.source
-	if unwrapped.dialect == DialectPowerShell {
-		twin.Command = withoutUnreachableStatements(unwrapped.source)
+	if dialect != DialectPowerShell || listed {
+		return reading
 	}
-	twin.DialectHint = unwrapped.dialect
-	return twin, true
+	statements, caps := powerShellStatementTexts(source)
+	reading.Caps = reading.Caps.Union(caps)
+	for _, text := range statements {
+		twin := input
+		twin.Args, twin.Argv = nil, nil
+		twin.Command = text
+		twin.DialectHint = DialectPowerShell
+		reading.Twins = append(reading.Twins, twin)
+	}
+	reading.Depth = depth + 1
+	reading.Listed = len(reading.Twins) != 0
+	return reading
+}
+
+// powerShellInertCommands are commands that change nothing a later statement
+// depends on but the working folder or the terminal: a directory change or a
+// print. They are the benign neighbours an attack can be put between.
+var powerShellInertCommands = map[string]bool{
+	"set-location": true, "sl": true, "cd": true, "chdir": true, "push-location": true, "pushd": true,
+	"pop-location": true, "popd": true, "write-output": true, "write-host": true, "echo": true,
+	"get-date": true, "clear-host": true, "cls": true,
+}
+
+// powerShellInertStatement reports a top-level statement that is one inert
+// command (powerShellInertCommands).
+func powerShellInertStatement(statement psparse.Statement) bool {
+	pipeline, ok := statement.(*psparse.Pipeline)
+	if !ok || pipeline.ChainRHS != nil || pipeline.Background || len(pipeline.Redirs) != 0 || len(pipeline.Elements) != 1 {
+		return false
+	}
+	command, ok := pipeline.Elements[0].(*psparse.Command)
+	if !ok || command.InvokeOp != "" || len(command.Redirs) != 0 {
+		return false
+	}
+	name, ok := psparse.LiteralString(command.Name)
+	return ok && powerShellInertCommands[strings.ToLower(name)]
+}
+
+// powerShellStatementTexts reads a PowerShell script psparse reads in full as
+// the readings an attack inside it needs: the script without its inert
+// statements at either edge (a directory change before it, a print after it),
+// which keeps every binding and branch of what is left, and each statement
+// that stands on its own (no variable, block or flow construct: nothing a
+// neighbour could bind or guard). A script of one statement, or one psparse
+// does not read in full, has none. A list longer than maxListReadings is
+// truncated.
+func powerShellStatementTexts(source string) ([]string, bounded.CapSet) {
+	var caps bounded.CapSet
+	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
+	if script == nil || len(script.Diagnostics) != 0 || len(script.Statements) < 2 {
+		return nil, caps
+	}
+	statements := script.Statements
+	if len(statements) > maxListReadings {
+		caps = caps.Union(bounded.Of(bounded.Items))
+		statements = statements[:maxListReadings]
+	}
+	span := func(index int) (int, int, bool) {
+		start, end := statements[index].Span()
+		return start, end, start >= 0 && end <= len(source) && start < end
+	}
+	var texts []string
+	first, last := 0, len(statements)-1
+	for first <= last && powerShellInertStatement(statements[first]) {
+		first++
+	}
+	for last >= first && powerShellInertStatement(statements[last]) {
+		last--
+	}
+	if (first > 0 || last < len(statements)-1) && first <= last {
+		start, _, ok1 := span(first)
+		_, end, ok2 := span(last)
+		if ok1 && ok2 {
+			texts = append(texts, strings.TrimSpace(source[start:end]))
+		}
+	}
+	for index := first; index <= last; index++ {
+		start, end, ok := span(index)
+		if !ok {
+			continue
+		}
+		text := strings.TrimSpace(source[start:end])
+		if strings.ContainsAny(text, "${") || powerShellInertStatement(statements[index]) || slices.Contains(texts, text) {
+			continue
+		}
+		texts = append(texts, text)
+	}
+	return texts, caps
 }

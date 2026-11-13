@@ -116,7 +116,7 @@ func TestWindowsStatementWrappersKeepTheFixtureVerdict(t *testing.T) {
 				for _, id := range missed[wrapper.name] {
 					unique[id[strings.Index(id, "/")+1:]] = true
 				}
-				t.Logf("%s: %s hides %d (tool, fixture) pairs over %d fixtures", pack, wrapper.name, len(missed[wrapper.name]), len(unique))
+				t.Logf("%s: %s hides %d (tool, fixture) pairs over %d fixtures: %v", pack, wrapper.name, len(missed[wrapper.name]), len(unique), missed[wrapper.name])
 				if wrapper.name != "call-block" {
 					continue
 				}

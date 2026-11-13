@@ -38,6 +38,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -165,6 +166,13 @@ type trustedActionRequest struct {
 	// because a managed device fails closed.
 	ManagedInstall             bool
 	UnknownKeyPossibleOverflow bool
+	// hostTwinDepth is the number of wrapper layers the call's parents used
+	// reading it as a script (actionfacts.HostScriptReadings): one budget for a
+	// call however its twins nest.
+	hostTwinDepth int
+	// hostTwinListed: the call is a statement, or a run of statements, of a
+	// list already read one by one.
+	hostTwinListed bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
@@ -549,6 +557,21 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
+	// A Windows call the tokenizer stopped reading at its input bound (one word
+	// over the word limit) is truncated: judged as unknown at the pack's
+	// unknown tier at least, never a clean allow (rel-1-0-10:GAP-0345).
+	if facts.Parse.Status == actionfacts.StatusLimitExceeded &&
+		(facts.Parse.Dialect == actionfacts.DialectPowerShell || facts.Parse.Dialect == actionfacts.DialectCMD) {
+		defer func() {
+			findings = withBoundedTruncation(findings, bounded.Of(bounded.Bytes), request)
+		}()
+	}
+	// A download cradle psparse proves on the tree, in a call the tokenizer
+	// cannot prove it in, is judged at the unknown tier of the pack at least
+	// (rel-1-0-10:GAP-0160): an alert outside the strict tier, a block in it.
+	defer func() {
+		findings = withCradleUnknownTier(findings, request)
+	}()
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
 	// that view when the action already names a possible active hook mutation;
 	// a text mention or an inactive .sample path needs no second reading.
@@ -575,9 +598,21 @@ func dispatchTrustedAction(
 	// literal also runs the script it names. psparse reads that script (the
 	// launcher itself stays as the tokenizer saw it); the script reading only
 	// ever adds findings (host_script_twin.go).
-	if twin, ok := hostScriptTwinRequest(request, facts); ok {
+	if twins, caps := hostScriptTwinRequests(request, facts); len(twins) != 0 || caps.Any() {
 		defer func() {
-			findings = withOverLimitTwinFindings(findings, withoutLimitFindings(dispatchTrustedAction(parent, twin)))
+			for _, twin := range twins {
+				twinFindings := dispatchTrustedAction(parent, twin)
+				if twin.hostTwinListed {
+					// A statement of a list read alone is a fragment: that it
+					// is too large to judge says nothing the whole call's own
+					// limit does not, and its stronger finding of a rule the
+					// call raised keeps the call's name for it.
+					findings = withHostTwinFindings(findings, withoutLimitFindings(twinFindings))
+					continue
+				}
+				findings = withOverLimitTwinFindings(findings, twinFindings)
+			}
+			findings = withBoundedTruncation(findings, caps, request)
 		}()
 	}
 	twins, overflow := unknownKeyTwinRequests(request, facts)
@@ -6376,13 +6411,56 @@ func powerShellStatementListOnly(facts actionfacts.Facts) bool {
 	return true
 }
 
-// withoutLimitFindings drops the evaluation-limit finding of a script reading:
-// that the second reading of a call was too large to judge says nothing about
-// the call, which has its own result.
+// withCradleUnknownTier raises a download-cradle finding the tokenizer could
+// not prove (it is recorded, not enforced) to the unknown tier of the pack when
+// psparse proves the cradle on the tree: alert-only outside the strict tier,
+// enforced in it. It only raises; a finding already enforced stays.
+func withCradleUnknownTier(findings []RuleFinding, request trustedActionRequest) []RuleFinding {
+	if !request.EnforcementCapable {
+		return findings
+	}
+	proven := false
+	for index := range findings {
+		finding := &findings[index]
+		if finding.RuleID != "CMD-WIN-IWR-IEX" || finding.contributesToEnforcement() || finding.contributesToAlertOnly() {
+			continue
+		}
+		if !proven && !actionfacts.PowerShellFetchedContentExecution(request.Input) {
+			return findings
+		}
+		proven = true
+		if request.StrictPolicy || request.ManagedInstall {
+			finding.enforcement = findingEnforcementAllowed
+		} else {
+			finding.enforcement = findingEnforcementAlertOnly
+		}
+	}
+	return findings
+}
+
+// withHostTwinFindings joins the findings of a script reading to those of the
+// call as written (withOverLimitTwinFindings) and keeps the name the call as
+// written gave a rule: a stronger finding of the same rule family from the
+// reading raises the proof, never renames the finding (a Windows path rule
+// stays the Windows path rule).
+func withHostTwinFindings(findings, twin []RuleFinding) []RuleFinding {
+	before := slices.Clone(findings)
+	joined := withOverLimitTwinFindings(findings, twin)
+	for index := range before {
+		if index < len(joined) && joined[index].RuleID != before[index].RuleID &&
+			trustedActionFindingKey(joined[index].RuleID) == trustedActionFindingKey(before[index].RuleID) {
+			joined[index].RuleID, joined[index].Title = before[index].RuleID, before[index].Title
+		}
+	}
+	return joined
+}
+
+// withoutLimitFindings drops the evaluation-limit finding of a reading that is
+// a fragment of the call.
 func withoutLimitFindings(findings []RuleFinding) []RuleFinding {
 	kept := findings[:0:0]
 	for _, finding := range findings {
-		if finding.RuleID != "ACTION-COMPOUND-LIMIT" {
+		if canonicalTrustedRuleID(finding.RuleID) != evaluationLimitRuleID {
 			kept = append(kept, finding)
 		}
 	}
