@@ -568,7 +568,9 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 			dm, jv := e.Layers(ctx, sid, tool, string(input), wantDM, wantJudge)
 			r.DM, r.Judge = &dm, &jv
 		}
-		if (post && (ev.Outcome == "succeeded" || (surface == "session" && ev.Outcome == ""))) || surface == "tool-result" {
+		// Session surface: a source trace records the calls that ran, so a call whose outcome the source does not state ("unknown", "")
+		// is replayed as one that completed; only a call the source says failed gets no PostToolUse.
+		if (post && (ev.Outcome == "succeeded" || (surface == "session" && ev.Outcome != "failed"))) || surface == "tool-result" {
 			var resp any = map[string]any{"stdout": "", "stderr": "", "interrupted": false}
 			if surface == "tool-result" {
 				resp = ev.Result
