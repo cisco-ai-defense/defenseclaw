@@ -3588,6 +3588,7 @@ func (s *Sidecar) setGuardrailProxy(proxy *GuardrailProxy) {
 		}
 		proxy.bindObservabilityV8TraceMode(lifecycle, true)
 		proxy.generationSource = s.Generation
+		proxy.kernelPeer = s.proxyKernelPeer
 	}
 	s.guardrailProxy = proxy
 	s.proxyMu.Unlock()

@@ -752,18 +752,16 @@ func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response) {
 }
 
 // routeOnlySetupFor is the route-only rendering of connector derived from
-// config.yaml, or nil when the connector is not routed (Setup then restores
-// an earlier render). Managed hosts get nil until the verified-caller slice
-// lands (DESIGN 17.2, 19).
+// config.yaml on an OSS per-user gateway, or nil when the connector is not
+// routed (Setup then restores an earlier render). Managed hosts render per
+// enrolled user through the guardian (ManagedRouteOnlySetup), never from
+// the gateway or into a machine-wide file (DESIGN 17.7).
 func routeOnlySetupFor(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
-	if cfg == nil || !cfg.Routing.Enabled || cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
+	if cfg == nil || cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
 		return nil
 	}
-	if !slices.Contains(cfg.Routing.RouteOnly.Connectors, connectorName) || strings.TrimSpace(apiAddr) == "" {
-		return nil
-	}
-	up, ok := cfg.Routing.RouteOnly.Upstreams[connectorName]
-	if !ok {
+	route := routeOnlySetupBase(cfg, connectorName, apiAddr)
+	if route == nil {
 		return nil
 	}
 	token, err := newRouteTokenStore(cfg.DataDir, routeOwner()).Token(connectorName)
@@ -771,7 +769,43 @@ func routeOnlySetupFor(cfg *config.Config, connectorName, apiAddr string) *conne
 		fmt.Fprintf(os.Stderr, "[routing] route-only credential for %s unavailable: %v\n", connectorName, err)
 		return nil
 	}
-	route := &connector.RouteOnlySetup{BaseURL: "http://" + apiAddr + routeOnlyPrefix + connectorName, Token: token}
+	route.Token = token
+	return route
+}
+
+// ManagedRouteOnlySetup is the route-only rendering of one enrolled user on
+// a managed (standalone) host: the guardian calls it for protected targets
+// only and renders the result into that user agent files (Claude Code user
+// settings.json, Codex ~/.codex/config.toml), with token the user route
+// credential (connector.ManagedRouteToken). nil when the connector is not
+// routed on this host.
+func ManagedRouteOnlySetup(cfg *config.Config, connectorName, apiAddr, token string) *connector.RouteOnlySetup {
+	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(token) == "" {
+		return nil
+	}
+	route := routeOnlySetupBase(cfg, connectorName, apiAddr)
+	if route == nil {
+		return nil
+	}
+	route.Token = token
+	return route
+}
+
+// RouteOnlyRouted reports whether config.yaml routes connector route-only.
+func RouteOnlyRouted(cfg *config.Config, connectorName string) bool {
+	return cfg != nil && cfg.Routing.Enabled && slices.Contains(cfg.Routing.RouteOnly.Connectors, connectorName)
+}
+
+// routeOnlySetupBase is the rendering without its credential, or nil.
+func routeOnlySetupBase(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
+	if !RouteOnlyRouted(cfg, connectorName) || strings.TrimSpace(apiAddr) == "" {
+		return nil
+	}
+	up, ok := cfg.Routing.RouteOnly.Upstreams[connectorName]
+	if !ok {
+		return nil
+	}
+	route := &connector.RouteOnlySetup{BaseURL: "http://" + apiAddr + routeOnlyPrefix + connectorName}
 	if up.API == config.RoutingAPIConverse || up.API == config.RoutingAPIInvoke {
 		route.Bedrock = true
 		if up.Bedrock != nil && up.Bedrock.Auth != "" && up.Bedrock.Auth != config.RoutingBedrockAuthPassthrough {

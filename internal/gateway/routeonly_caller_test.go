@@ -261,3 +261,46 @@ func TestRouteEpochRotationRefusesOldCredentialsAtOnce(t *testing.T) {
 		t.Fatal("another account credential must not change with that bump")
 	}
 }
+
+func TestRouteOnlySetupManagedVsOSS(t *testing.T) {
+	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.Routing.Enabled = true
+	cfg.Routing.RouteOnly = config.RoutingRouteOnlyConfig{Connectors: []string{"codex"}, Upstreams: map[string]config.RoutingUpstreamConfig{"codex": {BaseURL: "https://api.openai.com/v1", API: "responses"}}}
+	if ManagedRouteOnlySetup(cfg, "codex", "127.0.0.1:18970", "tok") != nil {
+		t.Fatal("an OSS host never gets the managed per-user rendering")
+	}
+	if routeOnlySetupFor(cfg, "codex", "127.0.0.1:18970") == nil {
+		t.Fatal("OSS rendering missing")
+	}
+	cfg.DeploymentMode, cfg.Enterprise.Profile = "managed_enterprise", "standalone"
+	if routeOnlySetupFor(cfg, "codex", "127.0.0.1:18970") != nil {
+		t.Fatal("a managed gateway never renders route-only itself (no machine-wide file)")
+	}
+	route := ManagedRouteOnlySetup(cfg, "codex", "127.0.0.1:18970", "tok")
+	if route == nil || route.Token != "tok" || route.BaseURL != "http://127.0.0.1:18970/r/codex" {
+		t.Fatalf("managed rendering = %+v", route)
+	}
+	if ManagedRouteOnlySetup(cfg, "codex", "127.0.0.1:18970", "") != nil || ManagedRouteOnlySetup(cfg, "claudecode", "127.0.0.1:18970", "tok") != nil {
+		t.Fatal("no credential or an unrouted connector renders nothing")
+	}
+}
+
+func TestGuardrailProxyKernelPeerAttachesTheVerifiedSubject(t *testing.T) {
+	restore := identityFactsEnabled.Load()
+	identityFactsEnabled.Store(true)
+	t.Cleanup(func() { identityFactsEnabled.Store(restore) })
+	p := &GuardrailProxy{skipAuthForTest: true}
+	r, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:4000/v1/chat/completions", nil)
+	verified := false
+	p.kernelPeer = func(*http.Request, string) (string, bool) { return "1001", verified }
+	out, ok := p.authenticateRequest(r)
+	if _, has := verifiedSubjectFromContext(out.Context()); !ok || has {
+		t.Fatal("an unverified peer must leave the request base-only")
+	}
+	verified = true
+	out, ok = p.authenticateRequest(r)
+	subject, has := verifiedSubjectFromContext(out.Context())
+	if !ok || !has || subject.UserID != "1001" || subject.Source != subjectSourceKernelPeer {
+		t.Fatalf("verified peer subject = %+v %v", subject, has)
+	}
+}

@@ -389,3 +389,16 @@ func routeCallerRefusalText(reason string) string {
 		return "this account is not verified for routing through DefenseClaw (" + reason + "); run defenseclaw doctor"
 	}
 }
+
+// proxyKernelPeer is the guardrail proxy verified caller (S1 DESIGN 15.2,
+// Q3): only on a managed host with routing.enabled, by the same rules as
+// route-only without a route credential; OSS and routing off keep the
+// 1.0.9 token behaviour.
+func (s *Sidecar) proxyKernelPeer(r *http.Request, connectorName string) (string, bool) {
+	cfg := s.currentConfig()
+	if cfg == nil || !cfg.StandaloneEnterprise() || !cfg.Routing.Enabled || connectorName == "" {
+		return "", false
+	}
+	caller := s.apiSnapshot().verifiedRouteCaller(r, connectorName, false, "")
+	return caller.Subject, caller.Verified
+}

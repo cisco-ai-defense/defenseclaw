@@ -92,6 +92,10 @@ type ContentInspector interface {
 // requests, runs guardrail inspection, and forwards to the upstream LLM
 // provider.
 type GuardrailProxy struct {
+	// kernelPeer names the verified caller of a request from the kernel
+	// (managed hosts with routing on, S1 DESIGN 15.2 Q3); nil or false
+	// leaves authentication as it was.
+	kernelPeer func(r *http.Request, connectorName string) (string, bool)
 	// generationSource is the gateway's published generation; each request
 	// pins it in withProxyAgent. nil outside a gateway.
 	generationSource func() *Generation
@@ -821,7 +825,9 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	withCorr := CorrelationMiddleware(SharedAgentRegistry())(logged)
 	withRequestID := p.requestIDMiddleware(dropProxyUserClaims(withCorr))
 	handler := inboundTraceContextMiddleware(withRequestID)
-	srv := &http.Server{Addr: addr, Handler: handler}
+	// The kernel peer of a loopback caller is read once per connection,
+	// and only when a managed routing request asks (proxyKernelPeer).
+	srv := &http.Server{Addr: addr, Handler: handler, ConnContext: acpPeerConnContext}
 
 	p.health.SetGuardrail(StateStarting, "", map[string]interface{}{
 		"port": p.cfg.Port,
@@ -4478,6 +4484,16 @@ func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, mode
 func (p *GuardrailProxy) authenticateRequest(r *http.Request) (*http.Request, bool) {
 	if !p.credentialsAccepted(r) {
 		return r, false
+	}
+	if p.kernelPeer != nil {
+		// Managed with routing on: the account the kernel names for the
+		// loopback connection, when DefenseClaw protects it for this
+		// connector, is the subject (profile overlay, routing caller);
+		// anyone else keeps the base-only answer below.
+		if subject, ok := p.kernelPeer(r, p.connectorName()); ok {
+			return r.WithContext(attachVerifiedSubject(r.Context(), p.observabilityV8Emitter(), subject,
+				sanitizeLLMEventUser(userScopedIdentityName(subject)), subjectSourceKernelPeer)), true
+		}
 	}
 	if p.presentsOwnerCredential(r) {
 		// The correlation middleware took the user from the loopback
