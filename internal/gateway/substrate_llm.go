@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -85,7 +86,14 @@ var substrateProviderRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 // egress events, health, models) and every other provider path answer 404
 // (D15; GAP-0041). A provider with no entry serves nothing.
 var substrateModelPaths = map[string][]*regexp.Regexp{
-	"bedrock": {regexp.MustCompile(`^/model/[^/]+/(invoke|invoke-with-response-stream|converse|converse-stream)$`)},
+	"bedrock": {
+		regexp.MustCompile(`^/model/[^/]+/(invoke|invoke-with-response-stream|converse|converse-stream)$`),
+		// Bedrock Runtime's OpenAI-compatible API on the same host and
+		// credential: the OpenAI-family models (GPT-5.6 Luna) under their
+		// inference-profile IDs, for Codex, OpenCode, Copilot CLI and
+		// Hermes (GAP-0187).
+		substrateBedrockOpenAIPathRE,
+	},
 	"anthropic": {
 		regexp.MustCompile(`^/v1/messages$`),
 		regexp.MustCompile(`^/v1/messages/count_tokens$`),
@@ -183,6 +191,13 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.exposedValueCheck(w, r) {
 		return
 	}
+	modelRouted := false
+	if provider == "bedrock" && substrateBedrockOpenAIPathRE.MatchString(upstream) {
+		var ok bool
+		if modelRouted, ok = s.bedrockOpenAIModel(w, r); !ok {
+			return
+		}
+	}
 	key, err := os.ReadFile(p.CredentialFile)
 	if err != nil || strings.TrimSpace(string(key)) == "" {
 		fmt.Fprintf(os.Stderr, "[substrate] llm: provider %s has no readable credential (%s)\n", provider, p.CredentialFile)
@@ -205,6 +220,9 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r2.Header.Set("x-goog-api-key", secret)
 	default:
 		r2.Header.Set("Authorization", "Bearer "+secret)
+	}
+	if modelRouted {
+		r2.Header.Set("X-DefenseClaw-Model-Routed", "1")
 	}
 	if provider == "bedrock" {
 		if routed, ok := substrateBedrockRoute(upstream, s.cfg.BedrockModels); ok {
@@ -304,6 +322,55 @@ func substrateBedrockARNPath(escaped string) (string, bool) {
 		return "", false
 	}
 	return "/model/" + id + "/" + m[2], true
+}
+
+// substrateBedrockOpenAIPathRE is Bedrock Runtime's OpenAI-compatible API
+// (/openai/v1/responses and /openai/v1/chat/completions), where the model is
+// named in the body, not the path.
+var substrateBedrockOpenAIPathRE = regexp.MustCompile(`^/openai/v1/(responses|chat/completions)$`)
+
+// bedrockOpenAIModel holds the body model of a call to Bedrock's
+// OpenAI-compatible API to substrate.llm.bedrock_models, as
+// substrateBedrockRoute does for /model/<id>: a model that is not listed is
+// replaced by the first listed one. With no list the body is not read. A
+// body that cannot be read as a JSON object with a string model is refused
+// (the check fails closed). routed reports a replaced model; ok is false
+// when the call was refused.
+func (s *substrateLLM) bedrockOpenAIModel(w http.ResponseWriter, r *http.Request) (routed, ok bool) {
+	allowed := s.cfg.BedrockModels
+	if len(allowed) == 0 {
+		return false, true
+	}
+	if enc := strings.TrimSpace(r.Header.Get("Content-Encoding")); enc != "" && !strings.EqualFold(enc, "identity") {
+		writeSubstrateRefusal(w, http.StatusUnsupportedMediaType, "model_check_needs_plain_body")
+		return false, false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, substrateLLMMaxDLPBody+1))
+	if err != nil || len(body) > substrateLLMMaxDLPBody {
+		writeSubstrateRefusal(w, http.StatusRequestEntityTooLarge, "body_too_large")
+		return false, false
+	}
+	_ = r.Body.Close()
+	var doc map[string]json.RawMessage
+	var model string
+	if json.Unmarshal(body, &doc) != nil || json.Unmarshal(doc["model"], &model) != nil {
+		writeSubstrateRefusal(w, http.StatusBadRequest, "model_unreadable")
+		return false, false
+	}
+	listed := false
+	for _, m := range allowed {
+		listed = listed || strings.EqualFold(model, m)
+	}
+	if !listed {
+		doc["model"], _ = json.Marshal(allowed[0])
+		if body, err = json.Marshal(doc); err != nil {
+			writeSubstrateRefusal(w, http.StatusBadRequest, "model_unreadable")
+			return false, false
+		}
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	return !listed, true
 }
 
 // substrateBedrockRoute rewrites /model/<id>/<action> to the first allowed

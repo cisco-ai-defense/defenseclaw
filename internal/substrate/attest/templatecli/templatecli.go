@@ -275,7 +275,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		blockAt       = fs.String("block-at", "high", "lowest finding severity that blocks the build (critical, high, medium, low, none)")
 		gen           = fs.Int64("policy-generation", 1, "policy generation recorded in the attestation")
 		builder       = fs.String("builder-id", "", "builder id recorded in the attestation")
-		provider      = fs.String("provider", "", "model route (claudecode: bedrock|anthropic; codex: openai|bedrock-mantle)")
+		provider      = fs.String("provider", "", "model route (claudecode: bedrock|anthropic; codex: bedrock|openai; default from substrate.llm.providers)")
 		model         = fs.String("model", "", "default model id")
 		gateway       = fs.String("gateway-url", "", "actor listener URL (default http://<substrate.services.actor> of --config, the in-cluster Service)")
 		failMode      = fs.String("fail-mode", "", "interactive outage mode: open or closed")
@@ -355,6 +355,13 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 			return ExitUsageError, err
 		}
 	}
+	// The model route (GAP-0187): --provider, else the route of the
+	// providers the install serves (substrate.llm.providers).
+	route, err := kit.ModelProvider(*connectorName, *provider, cfg.Substrate.LLM.Providers)
+	if err != nil {
+		return ExitUsageError, err
+	}
+	*provider = route
 	// The hook posts to the install's actor Service by its FQDN (GAP-0023):
 	// the same name the controller renders the egress rule for.
 	if strings.TrimSpace(*gateway) == "" {
