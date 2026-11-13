@@ -528,6 +528,16 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			return
 		}
 		if code, ok := powershellLaunchCode(inner[1:]); ok {
+			// A -Command payload whose source carries a " is not trusted: effects
+			// never knows the child's edition, and under Windows PowerShell 5.1 /
+			// legacy native argument passing the child drops the quotes, so a
+			// command hidden inside the quoted span would be missed. Treat the
+			// launch as opaque (psparse delta review 5 (b)).
+			if strings.Contains(code, `"`) {
+				w.opaqueExec(origin, cond)
+				w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+				return
+			}
 			w.unwrapCode(code, true, DialectPowerShell, depth, cond, origin)
 			w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 			return
@@ -1379,7 +1389,11 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		return e
 	}
-	if op.glob || (op.pattern && !op.quoted) || (op.pattern && op.quoted && w.o.flavor() == FlavorWindows) {
+	// PowerShell expands * ? [ ] inside quotes too, on every platform, so a
+	// wildcard metachar in a PowerShell path argument is a glob regardless of
+	// flavor or quoting (psparse delta review 5 (c)).
+	if op.glob || (op.pattern && !op.quoted) || (op.pattern && op.quoted && w.o.flavor() == FlavorWindows) ||
+		(dialect == DialectPowerShell && looksGlob(op.value)) {
 		e.Target.Type = TargetPath
 		e.Target.Glob = cap4k(op.value)
 		e.addReason(ReasonGlob, ScopeTarget)
