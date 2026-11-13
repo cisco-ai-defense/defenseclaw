@@ -220,7 +220,7 @@ func TestLeaderOutageStillRevertsForeignEdits(t *testing.T) {
 
 // GAP-0141: a revert the controller saw only as RUNNING -> SUSPENDED (no new
 // snapshot generation) or CRASHED -> SUSPENDED is sent as reverted; a real
-// suspend stays suspended.
+// suspend stays suspended. A revert that ends SUSPENDED also pauses the clock.
 func TestRevertSeenOnlyAsItsOutcome(t *testing.T) {
 	life := &lifeRec{}
 	r := newRig(t, func(_ *config.Config, o *controller.Options) { o.Lifecycle = life })
@@ -235,13 +235,13 @@ func TestRevertSeenOnlyAsItsOutcome(t *testing.T) {
 		}
 		r.pass()
 	}
-	step(func() error { return r.api.Revert(ref) })                               // reverted
+	step(func() error { return r.api.Revert(ref) })                               // suspended, reverted
 	step(func() error { return r.api.SetState(ref, ateapi.ActorStateRunning) })   // resumed
 	step(func() error { return r.api.SetState(ref, ateapi.ActorStateSuspended) }) // suspended (new generation)
 	step(func() error { return r.api.SetState(ref, ateapi.ActorStateRunning) })   // resumed
 	step(func() error { return r.api.SetState(ref, ateapi.ActorStateCrashed) })   // crashed
-	step(func() error { return r.api.Revert(ref) })                               // reverted
-	want := []string{"reverted", "resumed", "suspended", "resumed", "crashed", "reverted"}
+	step(func() error { return r.api.Revert(ref) })                               // suspended, reverted
+	want := []string{"suspended", "reverted", "resumed", "suspended", "resumed", "crashed", "suspended", "reverted"}
 	if got := life.names(); !slices.Equal(got, want) {
 		t.Fatalf("lifecycle = %v, want %v", got, want)
 	}

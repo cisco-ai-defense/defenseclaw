@@ -63,6 +63,9 @@ type (
 	HttpGetAction        = pb.HttpGetAction
 	Selector             = pb.Selector
 	SnapshotConfig       = pb.SnapshotConfig
+	Snapshot             = pb.Snapshot
+	SnapshotStorage      = pb.SnapshotStorage
+	WorkerAssignment     = pb.WorkerAssignment
 	ResourceRequirements = pb.ResourceRequirements
 	Resources            = pb.Resources
 	ImageVolumeSource    = pb.ImageVolumeSource
@@ -109,6 +112,13 @@ const (
 	ActorMetadataFieldAtespace = pb.ActorMetadataField_ACTOR_METADATA_FIELD_ATESPACE
 	ActorMetadataFieldName     = pb.ActorMetadataField_ACTOR_METADATA_FIELD_NAME
 	ActorMetadataFieldUID      = pb.ActorMetadataField_ACTOR_METADATA_FIELD_UID
+)
+
+// Snapshot owner and durable storage states (ActorStatus.snapshots).
+const (
+	SnapshotOwnerActor       = pb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR
+	SnapshotStoragePending   = pb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_PENDING
+	SnapshotStorageCompleted = pb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED
 )
 
 // RegisterControlServer registers a Control implementation on a gRPC server
