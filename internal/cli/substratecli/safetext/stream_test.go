@@ -340,3 +340,14 @@ func FuzzStreamAgainstTheTerminal(f *testing.F) {
 		}
 	})
 }
+
+// GAP-0126 residual (R2, P4): DECSCL with Pc 0 or 2 turns on 8-bit controls as
+// ESC SP G does, so it is refused like it.
+func TestStreamRefusesDECSCL(t *testing.T) {
+	for _, in := range []string{"\x1b[62;0\"p", "\x1b[62;2\"p", "\x1b[63;2\"p", "\x1b[61\"p"} {
+		var f Stream
+		if out := f.Filter([]byte("a" + in + "b")); strings.Contains(string(out), "\"p") || !strings.HasPrefix(string(out), "a") {
+			t.Errorf("DECSCL %q passes: %q", in, out)
+		}
+	}
+}
