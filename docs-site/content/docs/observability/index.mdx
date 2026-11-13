@@ -380,6 +380,21 @@ observability:
 
 On per-user and standalone installs, if a completed retention pass still leaves the used pages of `audit.db` above `max_store_mb`, gateway health reports `retention_state: warning`, `retention_cap_used_bytes`, `retention_cap_bytes`, and a bounded `retention_cap_reason`. `defenseclaw status`, `defenseclaw doctor`, and `defenseclaw-gateway status` show the size, cap, reason, and one suggested step. Active correlation cursors and pending operations can keep old graph rows for a long session, and the newest hour is always kept. End unused sessions or raise `observability.local.max_store_mb` if the warning persists. This is a warning only; it does not block tool calls. A later pass that meets the cap clears the warning.
 
+### Audit database size
+
+Retention deletes old rows, but SQLite does not shrink `audit.db` by itself, so the file can stay at its largest size. `defenseclaw doctor` shows the size and the deleted space it still holds (`Audit database size`). To give that space back:
+
+```bash
+defenseclaw audit compact --dry-run   # what it would reclaim; the gateway can keep running
+defenseclaw-gateway stop
+defenseclaw audit compact
+defenseclaw-gateway start
+```
+
+`compact` keeps every row. It needs free disk space of about twice the live data next to `audit.db`, and it refuses, with the numbers, when the disk is short. After one run the store uses incremental `auto_vacuum`, so retention gives later deletes back on its own. Before it rewrites the store it runs SQLite's integrity check; a damaged store is left as it is, and `doctor` names the repair. This replaces the manual `sqlite3 audit.db VACUUM` step of earlier releases, which needed `sqlite3` and left `auto_vacuum` off.
+
+While it runs, the store is locked: a gateway started in that time finds the store busy, retries and then fails to start, so start the gateway only after `compact` returns. On a managed computer an administrator stops the gateway service (on Linux, its two sockets too), runs `defenseclaw-gateway audit compact` as root (or from an elevated PowerShell prompt), and starts the service again. While the service is stopped, hooks block agent tool calls unless the administrator set `hook_fail_mode: open`, and an `ensure` run in that window can fail and roll back; run it again after the start.
+
 ### 1.0.7 retention and memory limits
 
 Since 1.0.10 a metric recorded during a hook call (hook invocations, latency and outcome, inspect counts, lifecycle gauges) no longer writes a correlation row of its own in `audit.db`: it is exported after the call commits its log records, and the calls log records keep their correlation rows. A local correlation graph or timeline query therefore lists the calls log records, not its metric points; the exported metrics are unchanged.
