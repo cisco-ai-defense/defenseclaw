@@ -13,9 +13,9 @@ import (
 
 func TestParseECRRegistryHost(t *testing.T) {
 	for host, want := range map[string][3]string{
-		"123456789012.dkr.ecr.us-east-1.amazonaws.com":         {"123456789012", "us-east-1", ""},
+		"123456789012.dkr.ecr.us-east-1.amazonaws.com":          {"123456789012", "us-east-1", ""},
 		"123456789012.dkr.ecr-fips.us-gov-west-1.amazonaws.com": {"123456789012", "us-gov-west-1", "fips"},
-		"123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn":     {"123456789012", "cn-north-1", ""},
+		"123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn":      {"123456789012", "cn-north-1", ""},
 	} {
 		acct, region, fips, ok := ParseECRRegistryHost(host)
 		if !ok || acct != want[0] || region != want[1] || fips != (want[2] == "fips") {
