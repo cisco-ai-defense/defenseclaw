@@ -454,7 +454,7 @@ Defaults from the loader. Omitted keys take these values.
 | `claw.workspace_dir` | empty | Set by `setup <connector> --workspace` or `config set`; scopes hooks to one folder, and setup without `--workspace` keeps it ([Per-connector files](#per-connector-files)). |
 | `gateway.host`, `gateway.port` | `127.0.0.1`, `18789` | The upstream agent gateway (OpenClaw and ZeptoClaw fleet link). |
 | `gateway.fleet_mode` | `auto` | `auto`, `enabled` or `disabled`: when to dial `host:port` ([OpenClaw fleet link](#openclaw-fleet-link)). |
-| `gateway.token_env` | `DEFENSECLAW_GATEWAY_TOKEN` | The variable that holds the sidecar API token ([Keys](/docs/reference/keys)). |
+| `gateway.token_env` | `DEFENSECLAW_GATEWAY_TOKEN` | The variable that holds the sidecar API token ([Keys](/docs/reference/keys)). `OPENCLAW_GATEWAY_TOKEN` is not accepted here: it holds the OpenClaw gateway credential, and the gateway skips it. `defenseclaw doctor --fix` changes it to `DEFENSECLAW_GATEWAY_TOKEN`. |
 | `gateway.api_port`, `gateway.api_bind` | `18970`, empty | The sidecar REST API. Empty `api_bind` binds `127.0.0.1` ([Gateway API](/docs/reference/gateway-api#bind-address)). |
 | `gateway.device_key_file` | `<data_dir>/device.key` | The device key. |
 | `gateway.auto_approve_safe` | `false` | Auto-approve safe requests from the upstream gateway. |

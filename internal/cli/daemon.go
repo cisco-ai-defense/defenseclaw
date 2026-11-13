@@ -1446,8 +1446,6 @@ func readDotEnv(path string) map[string]string {
 		return nil
 	}
 	env := make(map[string]string)
-	// An adopted gateway token copy never shadows the one the operator saved.
-	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -1458,9 +1456,6 @@ func readDotEnv(path string) map[string]string {
 			continue
 		}
 		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-		if shadowed.Has(key) {
-			continue
-		}
 		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
 			value = value[1 : len(value)-1]
 		}
@@ -1470,24 +1465,30 @@ func readDotEnv(path string) map[string]string {
 }
 
 func daemonGatewayToken(cfg *config.Config) string {
-	const (
-		canonicalTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
-		legacyTokenEnv    = "OPENCLAW_GATEWAY_TOKEN"
-	)
+	const canonicalTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
 
 	// Daemon.childEnv preserves a genuinely custom token environment
-	// override, but replaces the canonical/legacy process variables with the
-	// data directory's dotenv values when those exist. Resolve the parent's
-	// readiness credential in that same order so it always authenticates with
-	// the token the child actually received.
-	tokenEnv := ""
+	// override, but replaces the canonical process variable with the data
+	// directory's dotenv value when it exists. Resolve the parent's readiness
+	// credential in that same order so it always authenticates with the token
+	// the child actually received. OPENCLAW_GATEWAY_TOKEN is the OpenClaw
+	// WebSocket credential and never the gateway token (R-TOK); a gateway
+	// token equal to it is not one either (the child mints a new one, which
+	// runningGatewayToken then reports).
+	openClaw := ""
 	if cfg != nil {
-		tokenEnv = strings.TrimSpace(cfg.Gateway.TokenEnv)
+		openClaw = strings.TrimSpace(cfg.Gateway.OpenClawToken)
+	}
+	usable := func(token, dotenvOpenClaw string) bool {
+		return token != "" && !envvars.IsSecretRefText(token) && token != openClaw && token != dotenvOpenClaw
+	}
+	if cfg != nil {
+		tokenEnv := strings.TrimSpace(cfg.Gateway.TokenEnv)
 		if running := runningGatewayToken(cfg.DataDir); running != "" {
 			return running
 		}
-		if tokenEnv != "" && !daemonEnvironmentKeyEqual(tokenEnv, canonicalTokenEnv) && !daemonEnvironmentKeyEqual(tokenEnv, legacyTokenEnv) {
-			if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" && !envvars.IsSecretRefText(token) {
+		if tokenEnv != "" && !daemonEnvironmentKeyEqual(tokenEnv, canonicalTokenEnv) && !config.IsOpenClawGatewayTokenEnv(tokenEnv) {
+			if token := strings.TrimSpace(os.Getenv(tokenEnv)); usable(token, "") {
 				return token
 			}
 		}
@@ -1497,16 +1498,11 @@ func daemonGatewayToken(cfg *config.Config) string {
 	if cfg != nil && cfg.DataDir != "" {
 		paths = append(paths, filepath.Join(cfg.DataDir, ".env"))
 	}
-	tokenKeys := []string{canonicalTokenEnv, legacyTokenEnv}
-	if daemonEnvironmentKeyEqual(tokenEnv, legacyTokenEnv) {
-		tokenKeys = []string{legacyTokenEnv, canonicalTokenEnv}
-	}
 	for _, path := range paths {
 		env := readDotEnv(path)
-		for _, key := range tokenKeys {
-			if token := strings.TrimSpace(daemonDotenvValue(env, key)); token != "" && !envvars.IsSecretRefText(token) {
-				return token
-			}
+		dotenvOpenClaw := strings.TrimSpace(daemonDotenvValue(env, config.OpenClawGatewayTokenEnv))
+		if token := strings.TrimSpace(daemonDotenvValue(env, canonicalTokenEnv)); usable(token, dotenvOpenClaw) {
+			return token
 		}
 	}
 	if cfg != nil {

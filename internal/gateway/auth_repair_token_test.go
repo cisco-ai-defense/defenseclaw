@@ -17,9 +17,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
-// newAuthRepairedClient returns a client that booted on boot-token and then
-// adopted rotated-token from openclaw.json through auth repair.
-func newAuthRepairedClient(t *testing.T) *Client {
+// newAuthRepairedClient returns a client whose DefenseClaw gateway token is
+// master-token, that booted with the OpenClaw credential boot-oc-token, and
+// then adopted rotated-oc-token from openclaw.json through auth repair. It
+// returns the data directory too.
+func newAuthRepairedClient(t *testing.T) (*Client, string) {
 	t.Helper()
 	home := t.TempDir()
 	dataDir := testenv.PrivateTempDir(t)
@@ -27,68 +29,111 @@ func newAuthRepairedClient(t *testing.T) *Client {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(home, ".openclaw", "openclaw.json"),
-		[]byte(`{"gateway":{"auth":{"token":"rotated-token"}}}`), 0o600); err != nil {
+		[]byte(`{"gateway":{"auth":{"token":"rotated-oc-token"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "hooks", ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=\"master-token\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, ".env"),
+		[]byte("DEFENSECLAW_GATEWAY_TOKEN=master-token\nOPENCLAW_GATEWAY_TOKEN=boot-oc-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	client, err := NewClient(&config.GatewayConfig{
-		Token:         "boot-token",
+		Token:         "master-token",
+		OpenClawToken: "boot-oc-token",
 		ClawHome:      home,
 		DeviceKeyFile: filepath.Join(dataDir, "device.key"),
 	}, dataDir)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	client.handleConnectRejection(errors.New("AUTH_TOKEN_MISMATCH"))
-	if got := client.RefreshedToken(); got != "rotated-token" {
-		t.Fatalf("RefreshedToken = %q, want rotated-token", got)
+	if got := client.wsToken(); got != "boot-oc-token" {
+		t.Fatalf("wsToken before repair = %q, want boot-oc-token", got)
 	}
-	return client
+	client.handleConnectRejection(errors.New("AUTH_TOKEN_MISMATCH"))
+	if got := client.wsToken(); got != "rotated-oc-token" {
+		t.Fatalf("wsToken after repair = %q, want rotated-oc-token", got)
+	}
+	return client, dataDir
 }
 
-// GAP-2259: when OpenClaw rotates gateway.auth.token, auth repair adopts the
-// new token and writes it to .env, so the CLI presents it to the running
-// API server (graceful shutdown during 'setup openclaw'). The API server
-// must accept it next to its boot token instead of logging invalid_token.
-func TestTokenAuth_AcceptsTokenAdoptedByAuthRepair(t *testing.T) {
-	client := newAuthRepairedClient(t)
+// R-TOK: auth repair changes only the OpenClaw WebSocket credential. The
+// DefenseClaw gateway token stays as it was in memory, in .env and in
+// hooks/.token; the adopted token is saved only as OPENCLAW_GATEWAY_TOKEN.
+func TestAuthRepair_ChangesOnlyTheOpenClawCredential(t *testing.T) {
+	client, dataDir := newAuthRepairedClient(t)
+	if client.cfg.Token != "master-token" {
+		t.Fatalf("cfg.Token = %q, want master-token (auth repair must not touch the master)", client.cfg.Token)
+	}
+	env, err := loadDotEnv(filepath.Join(dataDir, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env["DEFENSECLAW_GATEWAY_TOKEN"] != "master-token" {
+		t.Errorf(".env DEFENSECLAW_GATEWAY_TOKEN = %q, want master-token", env["DEFENSECLAW_GATEWAY_TOKEN"])
+	}
+	if env["OPENCLAW_GATEWAY_TOKEN"] != "rotated-oc-token" {
+		t.Errorf(".env OPENCLAW_GATEWAY_TOKEN = %q, want rotated-oc-token", env["OPENCLAW_GATEWAY_TOKEN"])
+	}
+	hook, err := os.ReadFile(filepath.Join(dataDir, "hooks", ".token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(hook) != "DEFENSECLAW_GATEWAY_TOKEN=\"master-token\"\n" {
+		t.Errorf("hooks/.token = %q, want the master token unchanged", hook)
+	}
+}
+
+// R-TOK negative cell: an OpenClaw gateway token (the one saved at boot and
+// the one auth repair adopted) presented as Bearer is refused by
+// /enforce/allow and shutdown. Only the DefenseClaw gateway token passes.
+func TestTokenAuth_RefusesOpenClawGatewayTokens(t *testing.T) {
+	client, _ := newAuthRepairedClient(t)
 
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
-	cfg.Gateway.Token = "boot-token"
+	cfg.Gateway.Token = "master-token"
+	cfg.Gateway.OpenClawToken = "boot-oc-token"
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), client, store, logger, cfg)
 	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	for tok, want := range map[string]int{
-		"boot-token":    http.StatusOK,
-		"rotated-token": http.StatusOK,
-		"other-token":   http.StatusUnauthorized,
-	} {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/shutdown", nil)
-		req.Header.Set("Authorization", "Bearer "+tok)
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-		if rr.Code != want {
-			t.Errorf("token %s: status = %d, want %d", tok, rr.Code, want)
+	for _, path := range []string{"/enforce/allow", "/api/v1/admin/shutdown"} {
+		for tok, want := range map[string]int{
+			"master-token":     http.StatusOK,
+			"boot-oc-token":    http.StatusUnauthorized,
+			"rotated-oc-token": http.StatusUnauthorized,
+			"other-token":      http.StatusUnauthorized,
+		} {
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+			req.Header.Set("Authorization", "Bearer "+tok)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != want {
+				t.Errorf("%s token %s: status = %d, want %d", path, tok, rr.Code, want)
+			}
 		}
 	}
 }
 
-// GAP-2346: the guardrail proxy (LLM calls and /v1/events/egress from the
-// OpenClaw plugin) must accept the rotated token next to the boot token too,
-// otherwise OpenClaw turns fail with api-auth-failure until a restart.
-func TestGuardrailProxyAuth_AcceptsTokenAdoptedByAuthRepair(t *testing.T) {
-	client := newAuthRepairedClient(t)
+// R-TOK negative cell: the guardrail proxy refuses an OpenClaw gateway token
+// in X-DC-Auth (before 1.0.10 it accepted the adopted one, GAP-2346).
+func TestGuardrailProxyAuth_RefusesOpenClawGatewayTokens(t *testing.T) {
+	newAuthRepairedClient(t)
 	conn := connector.NewOpenClawConnector()
-	conn.SetCredentials("boot-token")
-	proxy := &GuardrailProxy{connector: conn}
-	proxy.SetRefreshedGatewayTokenSource(client.RefreshedToken)
+	conn.SetCredentials("master-token")
+	proxy := &GuardrailProxy{connector: conn, gatewayToken: "master-token"}
 
 	for tok, want := range map[string]bool{
-		"boot-token":    true,
-		"rotated-token": true,
-		"other-token":   false,
-		"":              false,
+		"master-token":     true,
+		"boot-oc-token":    false,
+		"rotated-oc-token": false,
+		"other-token":      false,
+		"":                 false,
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/v1/events/egress", nil)
 		req.RemoteAddr = "127.0.0.1:40000"

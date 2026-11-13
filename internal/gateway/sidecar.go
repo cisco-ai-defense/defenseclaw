@@ -5393,7 +5393,6 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetConnectorSwitchState(registry, setupOpts)
 		proxy.SetHILTApprovalManager(s.hilt)
 		proxy.SetNotifier(s.osNotifier)
-		proxy.SetRefreshedGatewayTokenSource(s.client.RefreshedToken)
 		// In managed_enterprise mode, replace the proxy's opensource
 		// AID client (constructed by NewGuardrailProxy from the same
 		// CiscoAIDefenseConfig) with the token-authenticated managed
@@ -5726,10 +5725,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// Synthesize a first-boot gateway token once for all connectors — the
 	// token is baked into every connector's hook scripts and is the shared
 	// secret the API server authenticates inbound hooks against.
-	dotenvPath := filepath.Join(s.currentConfig().DataDir, ".env")
-	apiToken := s.currentConfig().Gateway.ResolvedToken()
-	if apiToken == "" {
-		tok, err := EnsureGatewayToken(dotenvPath)
+	apiToken, needed := masterGatewayToken(s.currentConfig())
+	if needed {
+		tok, err := EnsureGatewayToken(filepath.Join(s.currentConfig().DataDir, ".env"), openClawGatewayTokens(&s.currentConfig().Gateway)...)
 		if err != nil {
 			s.health.SetGuardrail(StateError, err.Error(), nil)
 			return fmt.Errorf("first-boot gateway token: %w", err)
@@ -9546,11 +9544,11 @@ func (s *Sidecar) Health() *SidecarHealth {
 // known token.
 func (s *Sidecar) ensureGatewayTokenSynthesis() (string, error) {
 	cfg := s.currentConfig()
-	if tok := cfg.Gateway.ResolvedToken(); tok != "" {
+	if tok, needed := masterGatewayToken(cfg); !needed {
 		return tok, nil
 	}
 	dotenvPath := filepath.Join(cfg.DataDir, ".env")
-	tok, err := EnsureGatewayToken(dotenvPath)
+	tok, err := EnsureGatewayToken(dotenvPath, openClawGatewayTokens(&cfg.Gateway)...)
 	if err != nil {
 		return "", err
 	}
@@ -9584,4 +9582,37 @@ func deriveAIInventoryHashKey(apiToken string) []byte {
 	mac := hmac.New(sha256.New, []byte(apiToken))
 	_, _ = mac.Write([]byte("ai-discovery/path-hash/v1"))
 	return mac.Sum(nil)
+}
+
+// masterGatewayToken returns the DefenseClaw gateway token cfg resolves,
+// and reports whether EnsureGatewayToken must mint one: none resolves, or
+// the one that does is an OpenClaw gateway token (R-TOK). ResolvedToken
+// already skips OPENCLAW_GATEWAY_TOKEN and a value equal to it; this also
+// refuses the openclaw.json gateway.auth.token, which a 1.0.9 auth repair
+// copied into DEFENSECLAW_GATEWAY_TOKEN.
+func masterGatewayToken(cfg *config.Config) (string, bool) {
+	tok := cfg.Gateway.ResolvedToken()
+	if tok == "" {
+		return "", true
+	}
+	for _, openClaw := range openClawGatewayTokens(&cfg.Gateway) {
+		if tok == openClaw {
+			return "", true
+		}
+	}
+	return tok, false
+}
+
+// openClawGatewayTokens are the OpenClaw gateway tokens the master must not
+// equal: the saved OpenClaw WebSocket credential and the openclaw.json
+// gateway.auth.token.
+func openClawGatewayTokens(g *config.GatewayConfig) []string {
+	var tokens []string
+	if t := strings.TrimSpace(g.OpenClawToken); t != "" {
+		tokens = append(tokens, t)
+	}
+	if t, ok, _ := readOpenClawGatewayTokenAt(openClawConfigPathOf(g)); ok && strings.TrimSpace(t) != "" {
+		tokens = append(tokens, strings.TrimSpace(t))
+	}
+	return tokens
 }

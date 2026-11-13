@@ -922,8 +922,6 @@ func readGatewayTokenDotenv(path string) map[string]string {
 	if err != nil {
 		return values
 	}
-	// An adopted gateway token copy never shadows the one the operator saved.
-	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -935,7 +933,7 @@ func readGatewayTokenDotenv(path string) map[string]string {
 		}
 		key = strings.TrimSpace(key)
 		canonicalKey, ok := canonicalGatewayTokenEnvironmentKey(key)
-		if !ok || shadowed.Has(canonicalKey) {
+		if !ok {
 			continue
 		}
 		value = strings.TrimSpace(value)

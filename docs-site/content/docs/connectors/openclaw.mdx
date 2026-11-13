@@ -290,7 +290,9 @@ defenseclaw guardrail allow-private-upstream bedrock-runtime.us-east-1.amazonaws
 
 ### OpenClaw gateway token
 
-DefenseClaw also reads the gateway token from `openclaw.json` (`gateway.auth.token`):
+The DefenseClaw gateway connects to the OpenClaw gateway over a WebSocket. It signs in with the OpenClaw gateway token. This token is only for that connection. It is not the DefenseClaw API token (`DEFENSECLAW_GATEWAY_TOKEN`): the DefenseClaw API refuses it with 401, so an OpenClaw plugin or agent tool that reads `openclaw.json` cannot use it to allow a blocked tool or stop the gateway.
+
+DefenseClaw takes the OpenClaw gateway token from `OPENCLAW_GATEWAY_TOKEN` (the environment of the gateway, then `~/.defenseclaw/.env`). Without it, DefenseClaw reads `gateway.auth.token` from `openclaw.json`:
 
 - A plain string is used as it is.
 - A secret reference with `"source": "env"` is read from that variable in the environment of the shell that runs `init` or `setup`. DefenseClaw refuses a variable that holds one of its own credentials:
@@ -301,13 +303,25 @@ DefenseClaw also reads the gateway token from `openclaw.json` (`gateway.auth.tok
   - a name that starts with `DEFENSECLAW_`, or contains `API_KEY`, `SECRET`, `PASSWORD`, `ACCESS_KEY`, `PRIVATE_KEY` or `SESSION_TOKEN`.
 - DefenseClaw cannot read other secret sources, such as `"source": "store"`. For those, `init` and `setup` print a warning and finish.
 
-DefenseClaw saves a token it reads to `~/.defenseclaw/.env` (mode 0600). If it could not read the token, give it yourself:
+DefenseClaw saves a token it reads to `~/.defenseclaw/.env` (mode 0600) as `OPENCLAW_GATEWAY_TOKEN`. When OpenClaw rejects the token, DefenseClaw reads `openclaw.json` again and saves the new value under the same name only. If it could not read the token, give it yourself and restart the gateway:
 
 ```bash
-defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN
+defenseclaw keys set OPENCLAW_GATEWAY_TOKEN
+defenseclaw-gateway restart
 ```
 
-You can also set `OPENCLAW_GATEWAY_TOKEN` or `DEFENSECLAW_GATEWAY_TOKEN` in the environment of the gateway.
+You can also set `OPENCLAW_GATEWAY_TOKEN` in the environment of the gateway.
+
+#### Upgrade from 1.0.9 or earlier
+
+Before 1.0.10 the OpenClaw gateway token was also the DefenseClaw API token, and `gateway.token_env` could be `OPENCLAW_GATEWAY_TOKEN`. The upgrade separates them:
+
+- `defenseclaw migrate`, which the upgrade runs, and the gateway at first start create a new `DEFENSECLAW_GATEWAY_TOKEN` in `~/.defenseclaw/.env` when there is none, or when it holds the OpenClaw token.
+- `OPENCLAW_GATEWAY_TOKEN` stays in `.env`. The gateway still uses it to connect to OpenClaw.
+- `gateway.token_env: OPENCLAW_GATEWAY_TOKEN` is changed to `DEFENSECLAW_GATEWAY_TOKEN`. `defenseclaw doctor` warns about a config that still has it, and `defenseclaw doctor --fix` changes it.
+- Connector hooks keep working. They use their own connector tokens.
+
+A script that called the DefenseClaw API with `OPENCLAW_GATEWAY_TOKEN` must use `DEFENSECLAW_GATEWAY_TOKEN`.
 
 DefenseClaw 1.0.5 and 1.0.6 could save the secret reference text itself in `~/.defenseclaw/.env` when `init` failed. Later builds ignore that line. `init` and `defenseclaw doctor --fix` remove it and say so.
 

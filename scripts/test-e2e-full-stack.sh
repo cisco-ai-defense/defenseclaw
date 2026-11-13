@@ -275,19 +275,13 @@ sync_gateway_token_env_from_dotenv() {
         export DEFENSECLAW_GATEWAY_TOKEN="$dc_token"
         synced=true
     fi
+    # OPENCLAW_GATEWAY_TOKEN is the OpenClaw WebSocket credential only. It is
+    # never the DefenseClaw API token (R-TOK), so it never fills the cache.
     if [ -n "$oc_token" ]; then
         export OPENCLAW_GATEWAY_TOKEN="$oc_token"
-        synced=true
-    elif [ -n "$dc_token" ]; then
-        export OPENCLAW_GATEWAY_TOKEN="$dc_token"
-        synced=true
     fi
-    if [ "$synced" = true ]; then
-        if [ -n "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-            GATEWAY_TOKEN_CACHE="$DEFENSECLAW_GATEWAY_TOKEN"
-        elif [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
-            GATEWAY_TOKEN_CACHE="$OPENCLAW_GATEWAY_TOKEN"
-        fi
+    if [ "$synced" = true ] && [ -n "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+        GATEWAY_TOKEN_CACHE="$DEFENSECLAW_GATEWAY_TOKEN"
     fi
 }
 
@@ -380,16 +374,13 @@ PY
         GATEWAY_TOKEN_CACHE="${DEFENSECLAW_GATEWAY_TOKEN:-}"
     fi
 
-    # Strategy 4: legacy OpenClaw token from the current process env.
-    if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
-        GATEWAY_TOKEN_CACHE="${OPENCLAW_GATEWAY_TOKEN:-}"
-    fi
-
-    # Strategy 5: read token_env name from config, then check that env var.
+    # Strategy 4: read token_env name from config, then check that env var.
+    # A token_env naming OPENCLAW_GATEWAY_TOKEN (1.0.9 configs) is skipped:
+    # that variable is the OpenClaw credential, not the DefenseClaw token.
     if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$DC_HOME/config.yaml" ]; then
         local token_env_name
         token_env_name=$(grep 'token_env:' "$DC_HOME/config.yaml" 2>/dev/null | head -1 | awk '{print $2}' | tr -d "'\"" || true)
-        if [ -n "$token_env_name" ]; then
+        if [ -n "$token_env_name" ] && [ "$token_env_name" != "OPENCLAW_GATEWAY_TOKEN" ]; then
             GATEWAY_TOKEN_CACHE="${!token_env_name:-}"
         fi
     fi
@@ -2841,7 +2832,7 @@ PY
             fail "guardrail round-trip (X-DC-Auth): LLM responded" "err='$err' response='$response'"
         fi
     else
-        skip "guardrail round-trip (X-DC-Auth)" "no OPENCLAW_GATEWAY_TOKEN configured"
+        skip "guardrail round-trip (X-DC-Auth)" "no DEFENSECLAW_GATEWAY_TOKEN configured"
     fi
 
     # ── 6c. Auth rejection: invalid token must return 401 ──

@@ -4394,7 +4394,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			if a.scannerCfg != nil {
 				expected = a.scannerCfg.Gateway.Token
 			}
-			if !writeGatewayTokenListenerProof(w, r, a.openClawPluginProofToken(), expected, a.client.RefreshedToken()) &&
+			if !writeGatewayTokenListenerProof(w, r, a.openClawPluginProofToken(), expected) &&
 				!writeOpenClawPluginAccountProof(w, r, a.openClawPluginProofToken(), a.openClawPluginAccount()) {
 				a.emitHTTPAuthFailure(r.Context(), r, connector.UserScopedListenerProofPath,
 					gatewaylog.ErrCodeAuthInvalidToken, userScopedListenerProofRefusedReason)
@@ -4609,7 +4609,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		if !constantTimeStringMatch(token, expected) && !a.matchesRefreshedGatewayToken(token) {
+		if !constantTimeStringMatch(token, expected) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
 			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
@@ -4624,16 +4624,6 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})
-}
-
-// matchesRefreshedGatewayToken accepts the gateway token the OpenClaw
-// client adopted from openclaw.json after boot. Auth repair persists that
-// token to .env and hooks/.token, so the CLI (for example the graceful
-// shutdown during 'setup openclaw') presents it before this process
-// restarts (GAP-2259). The boot token stays valid until the restart.
-func (a *APIServer) matchesRefreshedGatewayToken(token string) bool {
-	refreshed := a.client.RefreshedToken()
-	return refreshed != "" && constantTimeStringMatch(token, refreshed)
 }
 
 // constantTimeStringMatch returns true iff a == b without leaking

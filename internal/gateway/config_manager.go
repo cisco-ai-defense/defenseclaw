@@ -2568,8 +2568,12 @@ func holdGuardrailProcessSettings(g *config.GuardrailConfig, running config.Guar
 // gateway and sandbox topology after loading the file, so it is runtime state,
 // not a configuration change. TokenEnv remains in the comparison, which keeps
 // custody changes and effective-secret changes restart-required.
+// OpenClawToken is the OpenClaw WebSocket credential the client owns at
+// runtime (auth repair re-reads openclaw.json and saves it in .env), so a
+// new value is not a configuration change.
 func effectiveGatewayConfigForDiff(gateway config.GatewayConfig) config.GatewayConfig {
 	gateway.Token = gateway.ResolvedToken()
+	gateway.OpenClawToken = ""
 	gateway.NoTLS = false
 	return gateway
 }
