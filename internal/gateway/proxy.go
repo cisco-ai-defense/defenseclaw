@@ -1821,11 +1821,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// then reads it as a block. bedrockHeld holds the bytes of an open
 		// tool call until the tool-call rules decide (GAP-0098).
 		bedrockBlockMsg := ""
-		// bedrockHeld holds what is not forwarded yet: the open tool call,
-		// and the start of a frame whose end has not come, so the agent
-		// only ever gets whole frames and a block follows a whole one.
 		var bedrockHeld []byte
-		streamEnding := false // the upstream read ended: forward every byte
 		bedrockHolding := func() bool {
 			return bedrockStream != nil && mode == "action" && bedrockStream.Holding()
 		}
@@ -1855,15 +1851,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				}
 			}
 			lastScanLen = accumulated.Len()
-			out := initialBuf
-			if bedrockStream != nil && !streamEnding {
-				// Whole frames only: the start of a frame that is cut here
-				// goes out with the rest of it (GAP-0098 residual).
-				keep := min(bedrockStream.PartialLen(), len(out))
-				bedrockHeld = append(bedrockHeld, out[len(out)-keep:]...)
-				out = out[:len(out)-keep]
-			}
-			_, _ = w.Write(out)
+			_, _ = w.Write(initialBuf)
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -1874,7 +1862,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 		for {
 			n, readErr := resp.Body.Read(buf)
-			streamEnding = readErr != nil
 			if n > 0 {
 				chunk := buf[:n]
 
@@ -1954,21 +1941,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				} else if bedrockHolding() {
 					bedrockHeld = append(bedrockHeld, chunk...)
 				} else {
-					out := chunk
-					if bedrockStream != nil {
-						// Forward whole frames only; the start of a frame
-						// that is cut at the end of this read waits for the
-						// rest of it. A tool call that turns out refused then
-						// leaves the agent a stream the block can follow.
-						bedrockHeld = append(bedrockHeld, chunk...)
-						keep := bedrockStream.PartialLen()
-						if streamEnding || keep > len(bedrockHeld) {
-							keep = 0
-						}
-						out = bedrockHeld[:len(bedrockHeld)-keep]
-						bedrockHeld = append([]byte(nil), bedrockHeld[len(bedrockHeld)-keep:]...)
+					if len(bedrockHeld) > 0 {
+						_, _ = w.Write(bedrockHeld)
+						bedrockHeld = nil
 					}
-					_, _ = w.Write(out)
+					_, _ = w.Write(chunk)
 					if flusher != nil {
 						flusher.Flush()
 					}
@@ -1994,7 +1971,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				break
 			}
 		}
-		streamEnding = true
 		if bedrockBlockMsg == "" && !preblocked && !initialFlushed && len(initialBuf) > 0 {
 			flushInitialBuf()
 		}
