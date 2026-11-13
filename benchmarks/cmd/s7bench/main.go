@@ -311,7 +311,10 @@ func main() {
 	if *judgeModel != "" {
 		cfg.Guardrail.Judge.Enabled = true
 		cfg.Guardrail.Judge.ToolInjection = true
-		cfg.Guardrail.Judge.HookConnectors = []string{"claudecode"}
+		// The judge covers every connector the run sends cases to: with
+		// -connector auto a Codex or Cursor case goes to its own handler,
+		// which a claudecode-only list left unjudged.
+		cfg.Guardrail.Judge.HookConnectors = append([]string{"claudecode"}, extra...)
 		if *judgeTimeout > 0 {
 			cfg.Guardrail.Judge.HookTimeout = *judgeTimeout
 			cfg.Guardrail.Judge.Timeout = *judgeTimeout
