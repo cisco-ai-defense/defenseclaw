@@ -118,15 +118,16 @@ def _openclaw_compatibility_summary(public_name: str, raw_version: str) -> str:
     from defenseclaw.connector_contracts import openclaw_lacks_native_hooks
     from defenseclaw.platform_support import uses_guardrail_proxy
 
+    if not uses_guardrail_proxy("openclaw"):
+        # Windows: no proxy; setup refuses an OpenClaw before 2026.8.35.
+        return (
+            f"{public_name} uses its native plugin hooks (no guardrail proxy on this host) "
+            "and is not agent-version gated"
+        )
     if raw_version and openclaw_lacks_native_hooks(raw_version):
         return (
             f"{public_name} uses the guardrail proxy and is not agent-version gated "
             "(native hooks need OpenClaw 2026.8.35 or later)"
-        )
-    if not uses_guardrail_proxy("openclaw"):
-        return (
-            f"{public_name} uses its native plugin hooks (no guardrail proxy on this host) "
-            "and is not agent-version gated"
         )
     return f"{public_name} uses its plugin hooks next to the proxy and is not agent-version gated"
 

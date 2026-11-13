@@ -1077,10 +1077,10 @@ def _print_agents(
             else:
                 ux.warn(f"{issue}; OpenClaw may skip reload. Run defenseclaw setup openclaw.")
         else:
-            from defenseclaw.openclaw_plugin_config import configured_openclaw_hook_mode, openclaw_hook_mode_detail
+            from defenseclaw.openclaw_plugin_config import openclaw_plugin_evidence
 
-            hook_mode = configured_openclaw_hook_mode(cfg)
-            _status_row("OpenClaw hooks", f"{hook_mode} ({openclaw_hook_mode_detail(hook_mode)})")
+            hook_mode, hook_detail, _seen = openclaw_plugin_evidence(cfg, None if sidecar_down else health)
+            _status_row("OpenClaw hooks", f"{hook_mode} ({hook_detail})")
             from defenseclaw.openclaw_plugin_config import openclaw_operator_admin_off
 
             if openclaw_operator_admin_off():

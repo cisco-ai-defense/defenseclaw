@@ -186,8 +186,10 @@ export class DaemonClient {
   }
 
   /** Guardrail settings for the separate-user layout (GET /api/v1/openclaw/runtime). */
-  async runtime(): Promise<ApiResponse<Record<string, unknown>>> {
-    return this.get<Record<string, unknown>>("/api/v1/openclaw/runtime");
+  async runtime(hookMode?: string, timeoutMs?: number): Promise<ApiResponse<Record<string, unknown>>> {
+    // hook_mode tells the gateway which mode this plugin runs (status shows it).
+    const query = hookMode ? `?hook_mode=${encodeURIComponent(hookMode)}` : "";
+    return this.doRequest<Record<string, unknown>>("GET", `/api/v1/openclaw/runtime${query}`, undefined, undefined, timeoutMs);
   }
 
   async listBlocked(): Promise<ApiResponse<BlockEntry[]>> {
@@ -241,8 +243,9 @@ export class DaemonClient {
     path: string,
     body?: unknown,
     correlationPartial?: Partial<CorrelationContext>,
+    timeoutMs?: number,
   ): Promise<ApiResponse<T>> {
-    const res = await this.sendRaw(method, path, body, correlationPartial, this.timeoutMs);
+    const res = await this.sendRaw(method, path, body, correlationPartial, timeoutMs ?? this.timeoutMs);
     if (res.status === 0) {
       return { ok: false, error: res.error ?? "request failed", status: 0 };
     }

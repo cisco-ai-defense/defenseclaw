@@ -147,7 +147,7 @@ npm install -g --prefix /usr/local openclaw@2026.8.35   # both accounts can run 
 
 Install OpenClaw where the DefenseClaw account can run it, such as `/usr/local/bin`: setup reads the OpenClaw version to choose the hook mode. An OpenClaw under the OpenClaw account's home (`npm -g --prefix ~/.local`) cannot be run by the DefenseClaw account, so setup uses the proxy mode, without the native hooks or the prompt gate, and says so.
 
-In the DefenseClaw `config.yaml` also set `claw.home_dir` and `claw.config_file` to the OpenClaw home and `openclaw.json` of the OpenClaw account. Put the OpenClaw gateway token (`gateway.auth.token` of the OpenClaw account) in the DefenseClaw account's `~/.defenseclaw/.env` as `OPENCLAW_GATEWAY_TOKEN=...`, mode 0600: the DefenseClaw gateway presents it to the OpenClaw gateway, and it never reads `openclaw.json` for it.
+In the DefenseClaw `config.yaml` also set `claw.home_dir` and `claw.config_file` to the OpenClaw home and `openclaw.json` of the OpenClaw account. Put the OpenClaw gateway token (`gateway.auth.token` of the OpenClaw account) in the DefenseClaw account's `~/.defenseclaw/.env` as `OPENCLAW_GATEWAY_TOKEN=...`, mode 0600: the DefenseClaw gateway presents it to the OpenClaw gateway. It reads `openclaw.json` for the token only when that file is readable, which in this layout it usually is not.
 
 How it works:
 
@@ -180,9 +180,9 @@ Setup in this layout does not edit `openclaw.json`. It always saves the block to
 }
 ```
 
-The `hookMode` line and the `hooks` grant are absent in proxy mode, and an `approvals.plugin` block follows when human approval is on. If your `openclaw.json` has a `plugins.allow` list, add `defenseclaw` to it; do not create one, because it is an exclusive allowlist. The OpenClaw account, or an administrator, merges the block into `openclaw.json` and restarts the OpenClaw gateway. Then run `defenseclaw setup openclaw` again: it checks the file and finishes.
+The `hookMode` line and the `hooks` grant are absent in proxy mode, and an `approvals.plugin` block follows when human approval is on. If your `openclaw.json` has a `plugins.allow` list, add `defenseclaw` to it; do not create one, because it is an exclusive allowlist. The OpenClaw account, or an administrator, merges the block into `openclaw.json` and restarts the OpenClaw gateway. Then run `defenseclaw setup openclaw --no-restart` again and restart the DefenseClaw unit. When setup can read the file it checks it. Either way, `defenseclaw status` shows the hook mode only once the plugin has called the gateway; until then it reads `unverified` and names the step.
 
-Two units, one for each account. Adjust the paths to your install. The DefenseClaw unit starts the gateway the way `defenseclaw setup` and `defenseclaw doctor` expect: as a daemon with its `gateway.pid`, so setup can restart it. Do not run `defenseclaw-gateway` in the foreground from a unit; setup then reports that another process holds the gateway port.
+Two units, one for each account. Adjust the paths to your install. The DefenseClaw unit starts the gateway the way `defenseclaw setup` and `defenseclaw doctor` expect: as a daemon with its `gateway.pid`. Do not run `defenseclaw-gateway` in the foreground from a unit; setup then reports that another process holds the gateway port. With the unit in place, run setup with `--no-restart` and restart the gateway through systemd (`sudo systemctl restart defenseclaw-gateway`), so the gateway stays under the unit and systemd restarts it after a crash.
 
 ```ini
 # /etc/systemd/system/defenseclaw-gateway.service
@@ -191,12 +191,12 @@ Description=DefenseClaw gateway
 After=network-online.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=forking
 User=defenseclaw
 Group=defenseclaw
 ExecStart=/usr/local/bin/defenseclaw-gateway start
 ExecStop=/usr/local/bin/defenseclaw-gateway stop
+Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target

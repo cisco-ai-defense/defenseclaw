@@ -259,7 +259,11 @@ def _plugin_component() -> Component:
         pass
 
     for path in candidates:
-        if not path.is_file():
+        try:
+            if not path.is_file():
+                continue
+        except OSError:
+            # A folder of another account (separate-user layout).
             continue
         try:
             with path.open(encoding="utf-8") as fh:
@@ -283,7 +287,7 @@ def _plugin_component() -> Component:
     return Component(
         name="plugin",
         version="(not installed)",
-        origin="~/.openclaw/extensions/defenseclaw",
+        origin=str(candidates[0].parent) if candidates else "~/.openclaw/extensions/defenseclaw",
         status="missing",
     )
 

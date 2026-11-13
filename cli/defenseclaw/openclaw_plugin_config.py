@@ -128,10 +128,11 @@ def expected_openclaw_hook_mode(cfg: object) -> str:
     from defenseclaw.connector_contracts import openclaw_lacks_native_hooks
     from defenseclaw.platform_support import uses_guardrail_proxy
 
-    if str(_openclaw_connector_block().get("hooks", {}).get("mode", "") or "").strip().lower() == "proxy":
-        return "proxy"
     if not uses_guardrail_proxy("openclaw"):
         return "native"
+    hooks = _openclaw_connector_block().get("hooks")
+    if isinstance(hooks, dict) and str(hooks.get("mode") or "").strip().lower() == "proxy":
+        return "proxy"
     version = _cached_openclaw_version(cfg)
     if not version or openclaw_lacks_native_hooks(version):
         return "proxy"
@@ -242,13 +243,13 @@ def openclaw_separate_user_notes(cfg: object) -> list[str]:
             pass
     except PermissionError:
         notes.append(
-            f"This account cannot read {config_file}, so setup did not check it: make sure the block in {merge} "
-            "is merged into it and the OpenClaw gateway was restarted. OpenClaw rewrites the file with mode 0600, "
-            "so a read grant does not last."
+            f"This account cannot read {config_file}, so setup did not check it. When the gateway sets OpenClaw "
+            f"up it saves the block to merge in {merge}: merge it and restart the OpenClaw gateway. "
+            "defenseclaw status shows the hook mode as unverified until the plugin calls in."
         )
     except OSError:
         pass
-    hooks = block.get("hooks") if isinstance(block.get("hooks"), dict) else {}
+    hooks = block.get("hooks") if isinstance(block.get("hooks"), dict) else {}  # hooks: null is {}
     if str(hooks.get("mode") or "").strip().lower() != "proxy" and not _cached_openclaw_version(cfg):
         notes.append(
             "This account could not run openclaw to read its version, so the block uses the proxy mode, without "
@@ -262,10 +263,13 @@ def openclaw_plugin_package_candidates(cfg: object | None = None) -> list[str]:
     # Where the OpenClaw plugin's package.json is: the administrator-installed
     # plugin_dir, then <claw.home_dir>/extensions/defenseclaw (GAP-0140).
     block = _openclaw_connector_block()
-    out = []
     plugin_dir = str(block.get("plugin_dir") or "").strip()
-    if str(block.get("plugin_install") or "").strip().lower() == "external" and plugin_dir:
-        out.append(os.path.join(os.path.expanduser(plugin_dir), "package.json"))
+    if str(block.get("plugin_install") or "").strip().lower() == "external":
+        # Only the administrator-installed folder: the OpenClaw home may
+        # belong to another account, which could plant the evidence
+        # (rel-1-0-10 REVIEW-4 P2-3).
+        return [os.path.join(os.path.expanduser(plugin_dir), "package.json")] if plugin_dir else []
+    out = []
     claw = getattr(cfg, "claw", None) if cfg is not None else None
     home = str(getattr(claw, "home_dir", "") or "") if claw is not None else ""
     if not home:
@@ -287,3 +291,41 @@ def _configured_claw_home() -> str:
         return str(claw.get("home_dir") or "") if isinstance(claw, dict) else ""
     except Exception:  # noqa: BLE001 - a lookup only
         return ""
+
+
+# The plugin asks the gateway for its runtime settings every minute; three
+# missed rounds mean OpenClaw no longer runs it.
+OPENCLAW_PLUGIN_SEEN_FRESH_S = 180
+
+
+def openclaw_plugin_evidence(cfg: object, health: object) -> tuple[str, str, bool]:
+    """The OpenClaw hook mode as the running plugin reports it.
+
+    Returns (mode, detail, seen). With the gateway down (no health document)
+    it is the configured mode. With the gateway up, the mode counts only when
+    the plugin called in within OPENCLAW_PLUGIN_SEEN_FRESH_S; otherwise the
+    mode is "unverified" and the detail says what setup expects and what to
+    do (rel-1-0-10 REVIEW-4 P1-1, P2-4).
+    """
+    from datetime import datetime, timezone
+
+    expected = configured_openclaw_hook_mode(cfg)
+    if not isinstance(health, dict):
+        return expected, openclaw_hook_mode_detail(expected), False
+    seen = health.get("openclaw_plugin")
+    last = str(seen.get("last_seen_at") or "") if isinstance(seen, dict) else ""
+    age = None
+    if last:
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(last.replace("Z", "+00:00"))).total_seconds()
+        except ValueError:
+            age = None
+    if age is not None and age <= OPENCLAW_PLUGIN_SEEN_FRESH_S:
+        mode = str(seen.get("hook_mode") or "") or expected
+        return mode, openclaw_hook_mode_detail(mode), True
+    step = "restart the OpenClaw gateway so it loads the DefenseClaw plugin"
+    if str(_openclaw_connector_block().get("plugin_account") or "").strip():
+        merge = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "openclaw-merge.json")
+        step = f"merge the block in {merge} into openclaw.json and " + step
+    when = "has not called in since the gateway started" if age is None else f"last called in {int(age // 60)} min ago"
+    return "unverified", f"expected {expected}; the OpenClaw plugin {when}: {step}", False

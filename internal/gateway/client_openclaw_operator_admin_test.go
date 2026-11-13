@@ -44,7 +44,7 @@ func TestOpenClawOperatorAdminOffRefusesAdminRPCsLocally(t *testing.T) {
 }
 
 func TestOpenClawScopeUpgradeHintNamesTheOptOut(t *testing.T) {
-	c := &Client{device: &DeviceIdentity{DeviceID: "dev1"}, pending: map[string]chan *ResponseFrame{}}
+	c := rejectionClient(t, t.TempDir())
 	scope := errors.New("connect rejected: pairing required: device requests more scopes than approved (NOT_PAIRED)")
 	if hint := c.handleConnectRejection(scope); !strings.Contains(hint, "operator_admin: false") {
 		t.Fatalf("hint %q does not name the operator_admin opt-out", hint)

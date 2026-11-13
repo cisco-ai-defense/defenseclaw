@@ -82,6 +82,7 @@ import {
   getRuntimeSettings,
   loadOpenClawOutageMode,
   loadSidecarConfig,
+  separateUserLayout,
   setRuntimeSettings,
 } from "./sidecar-config.js";
 import { isLoopbackHost } from "./listener-proof.js";
@@ -360,7 +361,12 @@ export default function (api: DefenseClawPluginHost) {
   const promptGateOn = (): boolean => {
     if (hookMode === "native") return true;
     const runtime = getRuntimeSettings();
-    return runtime.inspectTimeoutMs > 0 ? runtime.promptGate : pluginCfg.promptGate === true;
+    if (runtime.inspectTimeoutMs > 0) return runtime.promptGate;
+    // Not answered yet. In the separate-user layout openclaw.json has no
+    // promptGate key: the gate is on, so the check runs and a gateway that
+    // does not answer gets the outage rule, not a skipped gate
+    // (rel-1-0-10 REVIEW-4 P2-1).
+    return separateUserLayout() || pluginCfg.promptGate === true;
   };
   const sidecarConfig = loadSidecarConfig();
   const SIDECAR_API = sidecarConfig.baseUrl;
@@ -438,19 +444,29 @@ export default function (api: DefenseClawPluginHost) {
   // starts and every minute until it stops.
   let runtimeTimer: ReturnType<typeof setInterval> | undefined;
   let runtimeFailureLogged = false;
-  const refreshRuntime = (): Promise<void> =>
-    Promise.resolve()
-      .then(() => daemonClient.runtime())
+  // One request at a time; a prompt waits at most RUNTIME_PROMPT_WAIT_MS.
+  const RUNTIME_PROMPT_WAIT_MS = 3_000;
+  let runtimeInFlight: Promise<void> | undefined;
+  const refreshRuntime = (timeoutMs?: number): Promise<void> => {
+    if (runtimeInFlight) return runtimeInFlight;
+    runtimeInFlight = Promise.resolve()
+      .then(() => daemonClient.runtime(hookMode, timeoutMs))
       .then((res) => {
         if (res.ok && res.data) {
           setRuntimeSettings(res.data);
           runtimeFailureLogged = false;
         } else if (!runtimeFailureLogged) {
           runtimeFailureLogged = true;
-          console.warn(`[defenseclaw] could not read the guardrail settings from the gateway (status ${res.status}); the prompt gate follows openclaw.json until it answers`);
+          const until = separateUserLayout() ? "the prompt gate stays on" : "the prompt gate follows openclaw.json";
+          console.warn(`[defenseclaw] could not read the guardrail settings from the gateway (status ${res.status}); ${until} until it answers`);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        runtimeInFlight = undefined;
+      });
+    return runtimeInFlight;
+  };
   const startRuntimeRefresh = (): void => {
     if (runtimeTimer) return;
     void refreshRuntime();
@@ -788,7 +804,7 @@ export default function (api: DefenseClawPluginHost) {
       // Until the gateway first answers, ask it once more: in the
       // separate-user layout openclaw.json has no promptGate key and the
       // gate is only in GET /api/v1/openclaw/runtime (rel-1-0-10 GAP-0138).
-      if (hookMode !== "native" && getRuntimeSettings().inspectTimeoutMs <= 0) await refreshRuntime();
+      if (hookMode !== "native" && getRuntimeSettings().inspectTimeoutMs <= 0) await refreshRuntime(RUNTIME_PROMPT_WAIT_MS);
       if (!promptGateOn()) return;
       const prompt = typeof event?.prompt === "string" ? event.prompt : "";
       if (!prompt) return;

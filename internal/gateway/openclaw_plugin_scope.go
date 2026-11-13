@@ -105,6 +105,9 @@ func (a *APIServer) handleOpenClawRuntime(w http.ResponseWriter, r *http.Request
 		timeout = 30
 	}
 	hilt := cfg.EffectiveHILTForConnector(openClawPluginScope).Enabled
+	if authenticatedInspectConnector(r.Context()) == openClawPluginScope {
+		a.health.RecordOpenClawPluginSeen(r.URL.Query().Get("hook_mode"))
+	}
 	a.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"mode":               mode,
 		"hilt_enabled":       hilt,

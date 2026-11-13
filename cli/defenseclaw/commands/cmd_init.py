@@ -3831,6 +3831,19 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
         click.echo("  You can enable it later with 'defenseclaw setup guardrail'.")
         return False
 
+    if str(gc.connector or "").strip().lower() == "openclaw":
+        # The OpenClaw preflight (plugin bytes and owners, OpenClaw files, the
+        # native floor) runs before init configures anything, as in setup
+        # openclaw (rel-1-0-10 GAP-0075, REVIEW-4 P2-6).
+        from defenseclaw.commands.cmd_setup import _agent_settings_refusal
+
+        if refusal := _agent_settings_refusal(
+            cfg, "openclaw", workspace_dir="", will_restart=True,
+            changed="Init configured no guardrail", rerun="command",
+        ):
+            ux.warn(refusal, indent="  ")
+            return False
+
     ok, warnings = execute_guardrail_setup(app, save_config=False)
 
     if warnings:

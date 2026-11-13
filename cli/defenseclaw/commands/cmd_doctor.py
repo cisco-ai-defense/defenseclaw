@@ -12980,13 +12980,18 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         from defenseclaw.openclaw_plugin_config import (
             configured_openclaw_hook_mode,
             configured_openclaw_plugin_config_issue,
-            openclaw_hook_mode_detail,
             openclaw_plugin_config_unreadable,
+            openclaw_plugin_evidence,
         )
 
         hook_mode = configured_openclaw_hook_mode(cfg)
         if hook_mode != "proxy":
-            _emit("pass", "OpenClaw hook mode", f"{hook_mode}: {openclaw_hook_mode_detail(hook_mode)}", r=r)
+            # Proxy mode has the interception row below as its evidence.
+            live_mode, live_detail, _seen = openclaw_plugin_evidence(cfg, live_health)
+            if live_mode == "unverified":
+                _emit("warn", "OpenClaw hook mode", live_detail, r=r)
+            else:
+                _emit("pass", "OpenClaw hook mode", f"{live_mode}: {live_detail}", r=r)
         from defenseclaw.openclaw_plugin_config import (
             openclaw_install_policy_state,
             openclaw_install_policy_wanted,

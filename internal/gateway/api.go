@@ -2419,7 +2419,7 @@ func (a *APIServer) handleSkillDisable(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := a.client.DisableSkill(ctx, req.SkillKey); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2454,7 +2454,7 @@ func (a *APIServer) handleSkillEnable(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := a.client.EnableSkill(ctx, req.SkillKey); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2495,7 +2495,7 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
 		return a.client.DisablePlugin(callCtx, req.PluginName)
 	}); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2532,7 +2532,7 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
 		return a.client.EnablePlugin(callCtx, req.PluginName)
 	}); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2666,7 +2666,7 @@ func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := a.client.PatchConfig(ctx, req.Path, req.Value); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2855,6 +2855,30 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 // enableAllowedRuntime restores a disabled skill or plugin in OpenClaw. The
 // caller chooses the mutation order: Secure Client retains the legacy flow;
 // config-driven policy commits before this is called.
+// openClawRemediationSkipped reports a re-enable OpenClaw was not asked for
+// because DefenseClaw runs without operator.admin. The allow still counts and
+// the disable record is cleared; the operator re-enables it in OpenClaw if
+// OpenClaw had disabled it (rel-1-0-10 REVIEW-4 P2-2).
+func openClawRemediationSkipped(targetType, name string, err error) bool {
+	if !errors.Is(err, ErrOpenClawRemediationUnavailable) {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "[api] allow %s %s: OpenClaw not asked to re-enable it (no operator.admin); re-enable it in OpenClaw if it is still disabled there\n",
+		targetType, name)
+	return true
+}
+
+// writeOpenClawRPCError answers an OpenClaw RPC failure: 409 with code
+// openclaw_remediation_unavailable for the local operator_admin refusal, 502
+// for an OpenClaw failure.
+func (a *APIServer) writeOpenClawRPCError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrOpenClawRemediationUnavailable) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "code": openClawRemediationUnavailableAction})
+		return
+	}
+	a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+}
+
 func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementRequest, runtimeName, policyName, actionConnector string) (int, error) {
 	if a.store == nil {
 		return 0, nil
@@ -2875,13 +2899,13 @@ func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementReq
 	case "skill":
 		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
 			return a.client.EnableSkill(ctx, req.TargetName)
-		}); err != nil {
+		}); err != nil && !openClawRemediationSkipped(req.TargetType, req.TargetName, err) {
 			return http.StatusBadGateway, err
 		}
 	case "plugin":
 		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
 			return a.client.EnablePlugin(ctx, runtimeName)
-		}); err != nil {
+		}); err != nil && !openClawRemediationSkipped(req.TargetType, runtimeName, err) {
 			return http.StatusBadGateway, err
 		}
 		if runtimeName != policyName {

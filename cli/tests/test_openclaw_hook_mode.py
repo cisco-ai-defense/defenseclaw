@@ -133,3 +133,36 @@ class OpenClawCompatibilitySummaryTest(unittest.TestCase):
         with patch("defenseclaw.platform_support.host_os", return_value="linux"):
             self.assertIn("next to the proxy", _openclaw_compatibility_summary("openclaw", "2026.8.35"))
             self.assertIn("uses the guardrail proxy", _openclaw_compatibility_summary("openclaw", "2026.3.24"))
+
+
+class OpenClawPluginEvidenceTest(unittest.TestCase):
+    # rel-1-0-10 REVIEW-4 P1-1/P2-4: with the gateway up the mode counts only
+    # once the plugin called in recently.
+    def _cfg(self):
+        home = tempfile.mkdtemp()
+        with open(os.path.join(home, "openclaw.json"), "w", encoding="utf-8") as f:
+            json.dump({"plugins": {"entries": {"defenseclaw": {"config": {"hookMode": "hybrid"}}}}}, f)
+        claw = SimpleNamespace(home_dir=home, config_file=os.path.join(home, "openclaw.json"))
+        return SimpleNamespace(claw=claw, data_dir=home)
+
+    def _evidence(self, health):
+        from unittest.mock import patch
+
+        from defenseclaw.openclaw_plugin_config import openclaw_plugin_evidence
+
+        missing = os.path.join(tempfile.mkdtemp(), "config.yaml")
+        with patch("defenseclaw.config.config_path", return_value=missing):
+            return openclaw_plugin_evidence(self._cfg(), health)
+
+    def test_mode_needs_the_plugin_to_call_in(self):
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        self.assertEqual(self._evidence(None)[0], "hybrid")
+        mode, detail, seen = self._evidence({})
+        self.assertEqual((mode, seen), ("unverified", False))
+        self.assertIn("expected hybrid", detail)
+        fresh = {"openclaw_plugin": {"last_seen_at": now.isoformat(), "hook_mode": "hybrid"}}
+        self.assertEqual(self._evidence(fresh)[:1] + (self._evidence(fresh)[2],), ("hybrid", True))
+        stale = {"openclaw_plugin": {"last_seen_at": (now - timedelta(minutes=10)).isoformat(), "hook_mode": "hybrid"}}
+        self.assertEqual(self._evidence(stale)[0], "unverified")
