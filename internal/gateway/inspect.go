@@ -1914,6 +1914,12 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	default: // regex_only / unset
 		return nil
 	}
+	if strategy == "regex_judge" && strings.EqualFold(strategyDirection, "tool_call") && hookJudgeSkipsProvenReadOnly(ctx, toolName, content, current) {
+		// Not asked, but kept in the session history so a later call that
+		// sends what this one read is judged with it.
+		judge.prepareToolJudgeSample(ctx, toolName, content)
+		return nil
+	}
 
 	// A decision-model floor set while the judge runs is the answer when
 	// the judge is late (GAP-0392).

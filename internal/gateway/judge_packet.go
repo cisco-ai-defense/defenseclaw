@@ -274,3 +274,61 @@ func renderJudgeFlaggingRules(ctx context.Context, b *strings.Builder) {
 	}
 	b.WriteString("\n<FLAGGING_RULES>\n" + strings.Join(rules, "\n") + "\n</FLAGGING_RULES>")
 }
+
+// judgeReadOnlyPrograms only read what their operands name and print to
+// stdout. A program that can write, send, run another program or print the
+// environment (find -exec/-delete, sort -o, tee, env, printenv, git, curl,
+// any interpreter) is not here.
+var judgeReadOnlyPrograms = map[string]bool{
+	"cat": true, "head": true, "tail": true, "ls": true, "grep": true, "egrep": true, "fgrep": true, "rg": true,
+	"wc": true, "stat": true, "file": true, "pwd": true, "tree": true, "du": true, "df": true, "nl": true,
+	"realpath": true, "readlink": true, "basename": true, "dirname": true, "echo": true, "printf": true, "true": true,
+}
+
+// hookJudgeSkipsProvenReadOnly reports a tool call the rules did not flag
+// and the parser proves only reads (S7 TASKS B: ask the judge about the
+// calls the rules leave open, not about reads): the parse is complete and
+// authoritative, every command is a read-only program (a pipe between them
+// included; a file tool is decided by its typed paths), every path effect is a
+// read, list or metadata look, and there is no network action. Such a
+// call cannot change, run or send anything; the judge could at most ask for
+// review of a read, and a later call that sends what was read still meets
+// it, because the read is kept in the session history (TARGET_HISTORY).
+func hookJudgeSkipsProvenReadOnly(ctx context.Context, toolName, args string, current *ToolInspectVerdict) bool {
+	if rulesFlagged(current) {
+		return false
+	}
+	in := actionfacts.Input{Tool: toolName, ActiveHome: hookActiveHome(ctx)}
+	trimmed := strings.TrimSpace(args)
+	if !json.Valid([]byte(trimmed)) {
+		return false
+	}
+	in.Args = json.RawMessage(trimmed)
+	facts := actionfacts.Analyze(in)
+	if len(facts.Network) > 0 || !facts.Authoritative() {
+		return false
+	}
+	fileTool := actionfacts.PathTool(toolName)
+	if fileTool && len(facts.Paths) == 0 || !fileTool && len(facts.Commands) == 0 {
+		return false
+	}
+	for _, command := range facts.Commands {
+		if fileTool {
+			// A file tool's typed arguments name what it touches; the path
+			// effects below decide.
+			break
+		}
+		if command.Kind != actionfacts.CommandKindProcess || command.Effect == actionfacts.EffectUncertain ||
+			command.ControlFlowUncertain || !judgeReadOnlyPrograms[command.Program] {
+			return false
+		}
+	}
+	for _, path := range facts.Paths {
+		switch path.Access {
+		case actionfacts.PathAccessRead, actionfacts.PathAccessList, actionfacts.PathAccessMetadata:
+		default:
+			return false
+		}
+	}
+	return true
+}
