@@ -181,7 +181,7 @@ func TestPromptWalkHistoryAndAllowlist(t *testing.T) {
 		{"not valid json", `{"input":`, nil, "the body is not valid JSON"},
 	} {
 		got := passthroughPromptFor([]byte(c.body), false)
-		if strings.Join(got.Segments, "|") != strings.Join(c.want, "|") || len(got.Segments) != len(c.want) || !(got.Unreadable == c.unreadable || (strings.HasPrefix(c.unreadable, "the body is not valid JSON") && strings.HasPrefix(got.Unreadable, c.unreadable))) {
+		if strings.Join(got.Segments, "|") != strings.Join(c.want, "|") || len(got.Segments) != len(c.want) || (got.Unreadable != c.unreadable && (!strings.HasPrefix(c.unreadable, "the body is not valid JSON") || !strings.HasPrefix(got.Unreadable, c.unreadable))) {
 			t.Errorf("%s: %q / %q, want %q / %q", c.name, got.Segments, got.Unreadable, c.want, c.unreadable)
 		}
 	}
