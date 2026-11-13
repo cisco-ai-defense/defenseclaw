@@ -69,6 +69,7 @@ func TestCredentialLiteralDispositionFollowsWhatTheCallDoesWithIt(t *testing.T) 
 		{"memory entity", "mcp__memory__create_entities", map[string]any{"entities": []any{map[string]any{"name": "t", "observations": []any{"Password: " + password}}}}, credAlert},
 		{"memory observation", "mcp__memory__add_observations", map[string]any{"observations": []any{map[string]any{"entityName": "t", "contents": []any{"key " + stripe}}}}, credAlert},
 		{"database write", "mcp__sqlite__write_query", map[string]any{"query": "INSERT INTO s VALUES ('smtp','password','" + password + "')"}, credAlert},
+		{"send tool message", "mcp__chat__post_message", map[string]any{"text": "use this key: " + stripe}, credAlert},
 		{"database read", "mcp__sqlite__read_query", map[string]any{"query": "select '" + stripe + "'"}, credAudit},
 		{"directory listing", "mcp__fs__list_directory", map[string]any{"path": "/work/" + github}, credAudit},
 		{"echo into a file", "Bash", map[string]any{"command": "echo " + github + " > /work/n.txt"}, credAlert},
@@ -125,6 +126,7 @@ func TestSecretAssignmentRuleAcceptsOnlyRandomLookingValues(t *testing.T) {
 		{"is flag", "is_secret: Kj7mNp2Qr9sVw4xYz6bCdE", false},
 		{"path value", "secret_path: /var/run/secrets/kubernetes.io/token1", false},
 		{"dotted host", "password: db1.internal.example.corp", false},
+		{"newline artifact", "nntotal_tokens = 0nscience_count", false},
 		{"function call", "password: get_password_from_vault2(", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {

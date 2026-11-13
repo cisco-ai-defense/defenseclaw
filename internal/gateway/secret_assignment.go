@@ -125,6 +125,18 @@ func secretAssignmentValueLooksSecret(raw string) bool {
 		strings.Contains(value, "//") || secretAssignmentDotted.MatchString(value) || secretAssignmentIdentifier(value) {
 		return false
 	}
+	// A value built from short underscore- or dash-separated pieces
+	// (0nscience_count, max-retry-3) is a name or a phrase. A generated token
+	// with separators still carries one long random piece.
+	if segments := strings.FieldsFunc(value, func(r rune) bool { return r == '_' || r == '-' }); len(segments) > 1 {
+		longest := 0
+		for _, segment := range segments {
+			longest = max(longest, len(segment))
+		}
+		if longest < 10 {
+			return false
+		}
+	}
 	var letters, upper, lowerCount, digits, symbols int
 	for _, r := range value {
 		switch {

@@ -54,6 +54,9 @@ func trustedActionPersistsCredentialLiteral(facts actionfacts.Facts) bool {
 		return !wrote
 	case strings.HasPrefix(tool, "mcp__") || strings.HasPrefix(tool, "mcp."):
 		return trustedActionMutatingToolName(tool)
+	case trustedActionSendToolName(tool):
+		// A send tool hands its message to someone else.
+		return true
 	}
 	return trustedActionShellPersistsLiteral(facts)
 }
