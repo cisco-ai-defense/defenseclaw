@@ -3015,11 +3015,10 @@ var actionPowerShellListOnly = map[string]bool{
 	"select-object": true, "select": true, "format-list": true, "fl": true, "format-table": true, "ft": true,
 	"format-wide": true, "fw": true, "measure-object": true, "measure": true, "sort-object": true,
 	"out-string": true, "write-output": true, "echo": true,
-	// Get-Content and Get-Acl read what a file holds and who may use it and
-	// write nothing; the bare statements are read-only already
-	// (actionKnownReadOnlyWindowsStatement), so a launcher around them is too
-	// (rel-1-0-10:GAP-0157).
-	"get-content": true, "gc": true, "get-acl": true,
+	// Get-Content reads what a file holds and writes nothing; the bare
+	// statement is read-only already (actionKnownReadOnlyWindowsStatement), so a
+	// launcher around it is too (rel-1-0-10:GAP-0157).
+	"get-content": true, "gc": true,
 }
 
 // actionPowerShellListOnlyBodyText is the text a list-only body may hold:
@@ -4589,7 +4588,7 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 		}
 	}
 	switch program {
-	case "cat", "get-content", "get-childitem", "get-item", "gi", "get-acl", "format-table", "ft", "format-list", "fl", "format-wide", "fw", "measure-object", "measure", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location",
+	case "cat", "get-content", "get-childitem", "get-item", "gi", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location",
 		// cmd type, and the search and select filters, only read (GAP-2168).
 		"type", "findstr", "select-string", "sls", "select-object", "select",
 		// Git Bash search and count programs read their operands as on a

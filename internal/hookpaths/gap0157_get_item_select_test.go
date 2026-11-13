@@ -31,7 +31,6 @@ func TestGetItemSelectObjectIsADisplayOfTheProtectedFile(t *testing.T) {
 		{"select properties", `Get-Item ` + key + ` | Select-Object Length,LastWriteTime`, ""},
 		{"select alias", `gi ` + key + ` | select Length`, ""},
 		{"plain Get-Item", `Get-Item ` + key, ""},
-		{"Get-Acl properties", `Get-Acl ` + key + ` | Select-Object -ExpandProperty Access | Format-Table IdentityReference,FileSystemRights`, ""},
 		{"Get-Acl into Set-Acl", `Get-Acl ` + key + ` | Set-Acl C:\work\x.txt`, "protected-target"},
 		{"launcher Get-Content", `powershell -NoProfile -Command "Get-Content -Path ` + key + `"`, ""},
 		{"launcher Get-Item select", `powershell -NoProfile -Command "Get-Item ` + key + ` | Select-Object Length,LastWriteTime"`, ""},

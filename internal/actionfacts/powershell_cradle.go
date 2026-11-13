@@ -52,6 +52,24 @@ func PowerShellFetchedContentExecution(input Input) bool {
 	return PowerShellFetchedContentExecuted(source, dialect)
 }
 
+// PowerShellStatementList reports a shell call whose text is a list of
+// several top-level PowerShell statements (a prefix, a trailer, a ; or newline
+// separated script), as psparse reads it. A tokenizer that does not read a
+// statement list calls such a call partial for that reason alone.
+func PowerShellStatementList(input Input) (list bool) {
+	defer func() {
+		if recover() != nil {
+			list = false
+		}
+	}()
+	source := shellCommandText(input)
+	if source == "" || len(source) > maxCommandBytes {
+		return false
+	}
+	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
+	return script != nil && len(script.Diagnostics) == 0 && len(script.Statements) > 1
+}
+
 // PowerShellFetchedContentExecuted is PowerShellFetchedContentExecution for a
 // command text read in the grammar dialect (PowerShell, cmd.exe, or a POSIX
 // shell running a launcher).

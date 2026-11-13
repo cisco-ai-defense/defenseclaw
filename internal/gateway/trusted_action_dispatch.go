@@ -6318,13 +6318,62 @@ func commandByID(
 // powerShellCradleShadowOnly reports a download cradle (psparse's reading of
 // the script: Invoke-Expression of fetched content, in a spelling the tokenizer
 // cannot prove) in a call whose parse is partial. It adds the download-execute
-// finding in shadow: recorded, never enforced. A partial tokenizer parse (a
-// statement list, a sibling the tokenizer does not model) keeps the product's
-// rule from enforcing the pipe form, but it does not change what runs: a fetch
-// whose output feeds Invoke-Expression is a cradle wherever it stands among the
-// statements, so the finding is raised for the record (rel-1-0-10:GAP-0160).
-func powerShellCradleShadowOnly(input actionfacts.Input, _ actionfacts.Facts) bool {
+// finding in shadow: recorded, never enforced. The pipe form keeps the product's
+// rule when the tokenizer's parse is partial for a reason of its own (a sibling
+// statement it does not model raises nothing, the partial-sibling fixture). A
+// statement list alone is no such reason: the tokenizer only does not read a
+// list of statements, and a fetch whose output feeds Invoke-Expression is a
+// cradle wherever it stands in a list of statements psparse reads in full
+// (rel-1-0-10:GAP-0160).
+func powerShellCradleShadowOnly(input actionfacts.Input, facts actionfacts.Facts) bool {
+	if powerShellDownloadExecPrerequisite(facts) &&
+		!(powerShellStatementListOnly(facts) && actionfacts.PowerShellStatementList(input)) {
+		return false
+	}
 	return actionfacts.PowerShellFetchedContentExecution(input)
+}
+
+// powerShellListSiblings are the programs a statement list around a cradle may
+// hold without making the tokenizer's partial parse more than "a list of
+// statements": the cradle's own words and the statements that only change
+// directory or print.
+var powerShellListSiblings = map[string]bool{
+	"invoke-webrequest": true, "iwr": true, "invoke-restmethod": true, "irm": true, "curl": true, "wget": true,
+	"invoke-expression": true, "iex": true, "new-object": true,
+	"set-location": true, "sl": true, "cd": true, "chdir": true, "push-location": true, "pushd": true,
+	"pop-location": true, "popd": true, "write-output": true, "write-host": true, "echo": true, "get-date": true,
+}
+
+// powerShellStatementListOnly reports a partial parse whose only reasons are
+// that the tokenizer does not read a list of statements (and, for the
+// statements of powerShellListSiblings, the operand grammar of a directory
+// change). A sibling the tokenizer does not model at all is another reason.
+func powerShellStatementListOnly(facts actionfacts.Facts) bool {
+	if facts.Parse.Status != actionfacts.StatusPartial || len(facts.Parse.Issues) == 0 {
+		return false
+	}
+	// A cradle inside a launcher's body keeps the product's rule: the body is
+	// the launcher's operand, and a partial parse of it raises nothing.
+	for _, command := range facts.Commands {
+		switch strings.ToLower(command.Program) {
+		case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
+			return false
+		}
+	}
+	for _, issue := range facts.Parse.Issues {
+		switch issue {
+		case actionfacts.IssueUnsupportedConstruct:
+		case actionfacts.IssueUnknownOperandGrammar:
+			for _, command := range facts.Commands {
+				if !powerShellListSiblings[strings.ToLower(command.Program)] {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func filterExactFallbackFindings(
