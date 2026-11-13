@@ -58,7 +58,7 @@ var ClaudeCode = register(&Spec{
 	DefaultVersion: claudeCodePin.Version,
 	Provider:       connector.NewClaudeCodeConnector(),
 	TamperTier:     connector.SandboxTamperTierManaged,
-	verification:   Verification{Status: VerifiedLive, Note: "2.1.311: TestLiveRunConfig on the real image with docker and mock models (hooks, a DefenseClaw block, hostile settings, provider pins, MCP, safe mode; TST-1087); 2.1.156: test/e2e/openshell TestSandboxDaemon through an OpenShell gateway (hooks at the ingress, a blocked command denied, egress blocklist and OpenShell deny), owed again for 2.1.311"},
+	verification:   Verification{Status: VerifiedLive, Note: "2.1.311: TestLiveClaudeCodeRunConfig on the real image with docker and mock models (hooks, a DefenseClaw block, hostile settings, provider and personal-config pins, MCP, safe mode; TST-1087, TST-1231); 2.1.156: test/e2e/openshell TestSandboxDaemon through an OpenShell gateway (hooks at the ingress, a blocked command denied, egress blocklist and OpenShell deny), owed again for 2.1.311"},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/claude", "--version"},
 		VersionRE:   regexp.MustCompile(`^v?([0-9]+\.[0-9]+\.[0-9]+) \(Claude Code\)`),

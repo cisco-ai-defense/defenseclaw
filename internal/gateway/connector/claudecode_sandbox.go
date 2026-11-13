@@ -45,14 +45,34 @@ const ClaudeCodeSandboxDropInPath = claudeCodeSandboxManagedRoot + "/managed-set
 // user how to: DISABLE_UPDATES makes `claude update` say updates are managed,
 // and DISABLE_INSTALLATION_CHECKS drops the native-installer checks (a
 // ~/.local/bin/claude link, the installMethod in ~/.claude.json) that the
-// relocated binary never satisfies. The in-image launcher puts ~/.local/bin
+// pinned binary never satisfies. The in-image launcher puts ~/.local/bin
 // on PATH for the one check that ignores it.
+//
+// CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1 (2.1.311) treats the user's own
+// Claude Code files (~/.claude, which the workload can write) as untrusted.
+// Claude reads it from the environment it started with, before any settings
+// apply, so no settings file can turn it off. It is what keeps a user
+// settings processWrapper from taking effect: that key names a launcher
+// Claude starts its background service, sessions and workers through,
+// outside any tool call and so unseen by PreToolUse, and a managed
+// processWrapper or CLAUDE_CODE_PROCESS_WRAPPER of "" does not outrank it
+// (Claude skips an empty managed value; measured on 2.1.311, rel-1-0-10
+// TST-1230). With the flag Claude also ignores CLAUDE_CODE_PLUGIN_DIRS,
+// CLAUDE_CODE_PLUGIN_DIR_WATCH and CLAUDE_CODE_PROCESS_WRAPPER in the user
+// settings env block, loads no user-scope plugins, ignores allowed-tools in
+// the user's own skills and commands, lets the user's own agents neither
+// widen their permission mode nor add MCP servers, refuses cloud subagents,
+// and refuses every prompt while ~/.claude/settings.json has errors (it
+// names the file). Managed settings, the hooks, the OTLP export and the
+// endpoint pins are unchanged (the hook-fire probe and the run-config probe
+// pass with it).
 var claudeCodeSandboxStartupEnv = map[string]string{
 	"DISABLE_AUTOUPDATER":                                  "1",
 	"DISABLE_UPDATES":                                      "1",
 	"DISABLE_INSTALLATION_CHECKS":                          "1",
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":             "1",
 	"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
+	"CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG":                 "1",
 }
 
 // claudeCodeSandboxPinnedEnv are managed-env values that project or user
@@ -111,11 +131,31 @@ var claudeCodeSandboxPinnedEnv = map[string]string{
 	"LD_AUDIT":                                "",
 	"BASH_ENV":                                "",
 	"ENV":                                     "",
-	// CLAUDE_CODE_PLUGIN_DIRS (new in 2.1.311) loads every plugin in the
-	// folders it names, as --plugin-dir does: their skills, agents,
-	// commands, hooks and MCP servers. A settings env block may set it, so a
-	// repository could add code and instructions of its choosing.
-	"CLAUDE_CODE_PLUGIN_DIRS": "",
+	// New in 2.1.311 and personal-config sensitive (with
+	// CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG Claude ignores them in the user
+	// settings env block). Each is pinned too, for a claude started without
+	// the startup environment:
+	//
+	//   - CLAUDE_CODE_PLUGIN_DIRS names folders that are each a plugin root,
+	//     loaded as --plugin-dir loads one: its skills, agents, commands,
+	//     hooks and MCP servers. Set in the user settings env block, Claude
+	//     loads the plugin and starts its MCP server (measured; Claude does
+	//     not read it from a project's settings).
+	//   - CLAUDE_CODE_PROCESS_WRAPPER names the launcher Claude starts its
+	//     background service, sessions and workers through. This pin stops
+	//     it in a settings env block; the processWrapper settings key is
+	//     stopped by CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG alone (see
+	//     claudeCodeSandboxStartupEnv).
+	//   - CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER switches on proxyAuthHelper,
+	//     a command Claude runs at startup, with no tool call, to print a
+	//     Proxy-Authorization header for the HTTPS_PROXY that OpenShell
+	//     sends sandbox egress through. A user settings file can name the
+	//     helper and switch it on in its env block. The helper key itself
+	//     stays unpinned: "" there is a value Claude keeps, and the sandbox
+	//     proxy takes no credentials from Claude.
+	"CLAUDE_CODE_PLUGIN_DIRS":              "",
+	"CLAUDE_CODE_PROCESS_WRAPPER":          "",
+	"CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER": "",
 }
 
 // claudeCodeSandboxServiceEndpointEnv are the settings-env variables that
@@ -171,10 +211,14 @@ var claudeCodeSandboxServiceEndpointEnv = []string{
 // for Bedrock and gcpAuthRefresh for Vertex, providers a settings file can
 // select through its env block. DefenseClaw passes credentials as OpenShell
 // placeholders and never uses them (apiKeyHelper would also add a second auth
-// header, which Bedrock Mantle rejects). 2.1.311 adds inferenceCredentialHelper
-// (z.string().trim().optional(), read by Claude Code and Claude Desktop): a
-// program that prints the inference credential.
-var claudeCodeSandboxPinnedHelpers = []string{"apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh", "inferenceCredentialHelper"}
+// header, which Bedrock Mantle rejects).
+//
+// inferenceCredentialHelper is not pinned: in 2.1.311 it is a field of Claude
+// Desktop's third-party managed configuration (scope 3p, which Desktop hands
+// to the Claude Code it starts), not a Claude Code settings key, and a
+// ~/.claude/settings.json that names one is not run (measured with the pin
+// removed; an apiKeyHelper planted the same way runs).
+var claudeCodeSandboxPinnedHelpers = []string{"apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh"}
 
 // SandboxArtifacts renders the Claude Code overlay: sandbox hook scripts,
 // the managed-settings.d drop-in (hooks, allowManagedHooksOnly, OTLP to the

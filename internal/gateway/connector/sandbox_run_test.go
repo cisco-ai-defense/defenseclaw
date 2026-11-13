@@ -465,10 +465,12 @@ func TestClaudeCodeSandboxRunFilesPinHookShellEnv(t *testing.T) {
 // provider and service endpoints 2.1.156 did not (the Anthropic-on-Google
 // Cloud provider, the first-party base URL override, the host gateway
 // hand-off, the artifacts, memory, bridge, feature-flag, voice and runner
-// services, per-signal OTLP endpoints). The managed tier the image and run
-// drop-ins merge into must pin every one, so a repository's committed
-// settings cannot move model traffic, credentials or telemetry off the run's
-// endpoint without a tool call.
+// services, per-signal OTLP endpoints) and personal-config-sensitive
+// variables (plugin folders, the background launcher, the proxy auth
+// helper switch). The managed tier the image and run drop-ins merge into
+// must pin every one, so settings cannot move model traffic, credentials or
+// telemetry off the run's endpoint, or start code of their own, without a
+// tool call.
 func TestClaudeCodeSandboxPinsEndpointsNewIn2311(t *testing.T) {
 	target := SandboxRenderTarget{IngressPort: 18971, AgentVersion: "2.1.311"}
 	run := SandboxRunConfig{
@@ -492,8 +494,9 @@ func TestClaudeCodeSandboxPinsEndpointsNewIn2311(t *testing.T) {
 		"ANTHROPIC_GOOGLE_CLOUD_BASE_URL", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_GATEWAY",
 		"CLAUDE_CODE_API_BASE_URL", "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
 	}
-	// Hard-coded on purpose: deleting a name from the production list must
-	// fail here (measured on the 2.1.311 binary).
+	// Hard-coded on purpose (measured on the 2.1.311 binary): the static
+	// service pins must be exactly these, so dropping one from the
+	// production list, or adding one nobody reviewed, fails here.
 	service := []string{
 		"ANT_CLAUDE_CODE_METRICS_ENDPOINT", "ANT_OTEL_EXPORTER_OTLP_ENDPOINT", "ANT_OTEL_EXPORTER_OTLP_HEADERS",
 		"BETA_TRACING_ENDPOINT", "CLAUDE_BRIDGE_BASE_URL", "CLAUDE_BRIDGE_SESSION_INGRESS_URL",
@@ -503,10 +506,28 @@ func TestClaudeCodeSandboxPinsEndpointsNewIn2311(t *testing.T) {
 		"CLAUDE_CODE_MODEL_CATALOG_URL", "CLAUDE_REMOTE_TOOLS_BRIDGE_URL", "CLAUDE_RUNNER_API_BASE_URL",
 		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_PROFILES_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "SESSION_INGRESS_URL", "VOICE_STREAM_BASE_URL",
-		"CLAUDE_CODE_PLUGIN_DIRS",
 	}
-	if len(service) != 25 {
-		t.Fatalf("hard-coded list has %d names", len(service))
+	if got := slices.Sorted(slices.Values(claudeCodeSandboxServiceEndpointEnv)); !slices.Equal(got, slices.Sorted(slices.Values(service))) {
+		t.Errorf("service endpoint pins = %v, want the reviewed %v", got, service)
+	}
+	// The personal-config-sensitive variables 2.1.311 added sit in the
+	// pinned env map ("" = unset), and the restrict flag that stops the
+	// processWrapper settings key is real process environment.
+	personal := []string{"CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_CODE_PROCESS_WRAPPER", "CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER"}
+	for _, key := range personal {
+		if value, ok := claudeCodeSandboxPinnedEnv[key]; !ok || value != "" {
+			t.Errorf("claudeCodeSandboxPinnedEnv[%s] = %q (present %v), want \"\"", key, value, ok)
+		}
+		if value, ok := merged[key]; !ok || value != "" {
+			t.Errorf("merged managed env %s = %#v (present %v), want \"\"", key, value, ok)
+		}
+	}
+	artifacts, err := NewClaudeCodeConnector().SandboxArtifacts(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := artifacts.Env["CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG"]; got != "1" {
+		t.Errorf("sandbox create env CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG = %q, want 1", got)
 	}
 	for _, key := range append(provider, service...) {
 		value, ok := merged[key]
@@ -528,9 +549,14 @@ func TestClaudeCodeSandboxPinsEndpointsNewIn2311(t *testing.T) {
 			t.Errorf("%s is both a static service pin and a per-run variable", key)
 		}
 	}
-	for _, helper := range []string{"apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh", "inferenceCredentialHelper"} {
+	for _, helper := range []string{"apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh"} {
 		if value, ok := source.settings[helper]; !ok || value != "" {
 			t.Errorf("merged managed %s = %#v (present %v), want \"\"", helper, value, ok)
+		}
+	}
+	for _, key := range []string{"inferenceCredentialHelper", "proxyAuthHelper", "processWrapper"} {
+		if value, ok := source.settings[key]; ok {
+			t.Errorf("merged managed settings set %s = %#v; it is not a key the sandbox pins", key, value)
 		}
 	}
 	if err := validateClaudeCodeRunSettingsSchema(runFiles[ClaudeCodeSandboxRunDropInPath]); err != nil {

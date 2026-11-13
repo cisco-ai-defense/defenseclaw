@@ -1840,9 +1840,10 @@ For both harnesses the allowed run is repeated with hostile user and project
 settings planted: every known way to switch the managed hooks off or divert
 them. The hooks must still fire, and none of the planted programs may run.
 `HookFireOptions.RunFiles` mounts a sandbox's per-run files into every probe
-container. `TestLiveRunConfig` (tag `openshell_integration`, on branch
-`test/openshell-live`; see [Testing](#testing)) uses it to prove the per-run
-configuration below against the real harnesses.
+container. `TestLiveClaudeCodeRunConfig` (tag `openshell_integration`, in
+`internal/openshell/image`) and, for Codex, `TestLiveRunConfig` (on branch
+`test/openshell-live`) use it to prove the per-run configuration below
+against the real harnesses; see [Testing](#testing).
 
 The normal hook-fire probe checks the image's hook contract for either
 driver. A vm image additionally passes the exported-filesystem resolver
@@ -2094,11 +2095,26 @@ settings a hostile settings file could use to bypass the hooks:
 `CLAUDE_CODE_SIMPLE=0` keeps the hooks (all but `SessionStart`) on in bare
 mode, the hook-command prefix and shell overrides are emptied, `SHELL` is
 `/bin/bash`, the Stop and SessionEnd hook limits keep Claude's defaults, and
-loader and shell-startup variables are cleared. Startup variables that must
-apply before the managed `env` does (`DISABLE_AUTOUPDATER=1`,
-`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
-`CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1`) travel through
-`sandbox create --env`. A pre-seeded `/sandbox/.claude.json` skips onboarding
+loader and shell-startup variables are cleared. It also empties the
+2.1.311 variables a user settings file could use to start code without a
+tool call: `CLAUDE_CODE_PLUGIN_DIRS` (each folder is loaded as a plugin,
+with its skills, hooks and MCP servers), `CLAUDE_CODE_PROCESS_WRAPPER` (a
+launcher for background sessions) and `CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER`
+(which would run the settings' `proxyAuthHelper` for the sandbox's
+`HTTPS_PROXY`), and the service endpoints 2.1.311 reads (artifacts, memory,
+Remote Control bridge, feature flags, voice, runner, model catalog, internal
+metrics and tracing, per-signal OTLP endpoints other than the ingress).
+Startup variables that must apply before the managed `env` does
+(`DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
+`CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1`,
+`CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1`) travel through
+`sandbox create --env`. `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` makes
+Claude treat the workload-writable `~/.claude` as untrusted: a
+`processWrapper` there no longer launches background sessions (an empty
+managed value does not outrank it), user-scope plugins do not load, the
+user's own skills and commands cannot pre-approve tools, and Claude refuses
+every prompt while `~/.claude/settings.json` has errors, naming the file.
+Managed settings, the hooks and the OTLP export are unchanged. A pre-seeded `/sandbox/.claude.json` skips onboarding
 and trusts `/work`, and the launcher re-approves the API key placeholder on
 every start. Skip-permissions runs pass `--dangerously-skip-permissions`.
 
@@ -3340,9 +3356,23 @@ until that is fixed.
 Policy, provider-profile, sandbox-artifact and hook golden files are
 regenerated with `DEFENSECLAW_UPDATE_GOLDEN=1`; review the diff.
 
-Live tests need a real OpenShell 0.1.x gateway (with bind mounts enabled for
-the workspace tests) and Docker, so CI cannot run them. They are kept for dev
-hosts on branch `test/openshell-live`, one commit on top of this branch: the
+The live run-config probe for Claude Code needs Docker but no OpenShell
+gateway. It builds (or reuses) the Claude Code overlay image, runs the
+hook-fire probe with the per-run files mounted, and proves each pin against a
+hostile setting with a control run that drops the pin: the provider pins,
+MCP block and allow, safe mode, and the user-settings `processWrapper`,
+`proxyAuthHelper` and `CLAUDE_CODE_PLUGIN_DIRS`:
+
+```bash
+DEFENSECLAW_E2E_DATA_DIR=$(mktemp -d) \
+  go test -tags openshell_integration ./internal/openshell/image/ \
+  -run TestLiveClaudeCodeRunConfig -v -timeout 60m
+```
+
+The other live tests need a real OpenShell 0.1.x gateway (with bind mounts
+enabled for the workspace tests) and Docker, so CI cannot run them. They are
+kept for dev hosts on branch `test/openshell-live`, one commit on top of
+this branch: the
 `openshell_integration` Go tests in `internal/openshell/`,
 `internal/openshell/image/`, `internal/openshell/workspace/`,
 `internal/openshell/sandboxcli/` and `internal/gateway/`, the end-to-end

@@ -123,7 +123,6 @@ func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
 				AWSAuthRefresh      string            `json:"awsAuthRefresh"`
 				AWSCredentialExport string            `json:"awsCredentialExport"`
 				GCPAuthRefresh      string            `json:"gcpAuthRefresh"`
-				InferenceHelper     string            `json:"inferenceCredentialHelper"`
 				StatusLine          struct {
 					Type    string `json:"type"`
 					Command string `json:"command"`
@@ -155,57 +154,47 @@ func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
 			// line through /bin/sh.
 			bin := strings.SplitN(env["PATH"], ":", 2)[0]
 			runPlanted(t, root, tier, map[string][]string{
-				"shell-prefix":     {env["CLAUDE_CODE_SHELL_PREFIX"], "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh"},
-				"shell":            {env["CLAUDE_CODE_SHELL"], "-c", "true"},
-				"curl":             {filepath.Join(bin, "curl"), "-q"},
-				"jq":               {filepath.Join(bin, "jq"), "-r"},
-				"settings-hook":    {"/bin/sh", "-c", hooks[0].Hooks[0].Command},
-				"bash-env":         {"bash", "-c", ". " + env["BASH_ENV"]},
-				"apikey-helper":    {"/bin/sh", "-c", settings.APIKeyHelper},
-				"aws-refresh":      {"/bin/sh", "-c", settings.AWSAuthRefresh},
-				"aws-export":       {"/bin/sh", "-c", settings.AWSCredentialExport},
-				"gcp-refresh":      {"/bin/sh", "-c", settings.GCPAuthRefresh},
-				"status-line":      {"/bin/sh", "-c", settings.StatusLine.Command},
-				"inference-helper": {"/bin/sh", "-c", settings.InferenceHelper},
-				"plugin-hook":      {"/bin/sh", "-c", pluginCommand(t, env["CLAUDE_CODE_PLUGIN_DIRS"], "hooks/hooks.json")},
-				"plugin-mcp":       {pluginCommand(t, env["CLAUDE_CODE_PLUGIN_DIRS"], ".mcp.json")},
+				"shell-prefix":  {env["CLAUDE_CODE_SHELL_PREFIX"], "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh"},
+				"shell":         {env["CLAUDE_CODE_SHELL"], "-c", "true"},
+				"curl":          {filepath.Join(bin, "curl"), "-q"},
+				"jq":            {filepath.Join(bin, "jq"), "-r"},
+				"settings-hook": {"/bin/sh", "-c", hooks[0].Hooks[0].Command},
+				"bash-env":      {"bash", "-c", ". " + env["BASH_ENV"]},
+				"apikey-helper": {"/bin/sh", "-c", settings.APIKeyHelper},
+				"aws-refresh":   {"/bin/sh", "-c", settings.AWSAuthRefresh},
+				"aws-export":    {"/bin/sh", "-c", settings.AWSCredentialExport},
+				"gcp-refresh":   {"/bin/sh", "-c", settings.GCPAuthRefresh},
+				"status-line":   {"/bin/sh", "-c", settings.StatusLine.Command},
+				"plugin-mcp":    {pluginMCPCommand(t, env["CLAUDE_CODE_PLUGIN_DIRS"])},
 			})
 		})
 	}
 }
 
-// pluginCommand reads the command a planted plugin's hooks.json or
-// .mcp.json would run, checking the plugin manifest is there too.
-func pluginCommand(t *testing.T, plugin, file string) string {
+// pluginMCPCommand reads the command a planted plugin's .mcp.json would
+// run, checking the plugin manifest is there too.
+func pluginMCPCommand(t *testing.T, plugin string) string {
 	t.Helper()
 	if _, err := os.Stat(filepath.Join(plugin, ".claude-plugin", "plugin.json")); err != nil {
 		t.Fatalf("planted plugin has no manifest: %v", err)
 	}
-	data, err := os.ReadFile(filepath.Join(plugin, file))
+	data, err := os.ReadFile(filepath.Join(plugin, ".mcp.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var doc struct {
-		Hooks map[string][]struct {
-			Hooks []struct {
-				Command string `json:"command"`
-			} `json:"hooks"`
-		} `json:"hooks"`
 		MCPServers map[string]struct {
 			Command string `json:"command"`
 		} `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
-		t.Fatalf("%s: %v", file, err)
+		t.Fatalf(".mcp.json: %v", err)
 	}
-	if s := doc.Hooks["SessionStart"]; len(s) == 1 && len(s[0].Hooks) == 1 {
-		return s[0].Hooks[0].Command
+	server, ok := doc.MCPServers["dc-hostile"]
+	if !ok || server.Command == "" {
+		t.Fatal(".mcp.json plants no command")
 	}
-	if server, ok := doc.MCPServers["dc-hostile"]; ok {
-		return server.Command
-	}
-	t.Fatalf("%s plants no command", file)
-	return ""
+	return server.Command
 }
 
 // TestCodexHostileSettingsPlantsBothTiers checks the Codex plan the same way:

@@ -38,12 +38,14 @@ import (
 // The files are schema-checked here against the harness versions DefenseClaw
 // reviewed (Claude Code 2.1.311, Codex 0.146.0): Claude Code silently drops a
 // whole settings file that carries one schema-invalid field, and Codex
-// refuses to start on a malformed requirements file. The live proof is the
-// run-config probe (TestLiveRunConfig, build tag openshell_integration, kept
-// with the other live OpenShell tests outside this tree; see docs/SANDBOX.md,
-// Testing): it passed for Claude Code 2.1.311 on the real image with docker
-// and mock models (rel-1-0-10 TST-1087). TestSandboxDaemon, which needs an
-// OpenShell gateway, last ran on 2.1.156.
+// refuses to start on a malformed requirements file. The live proof for
+// Claude Code is the run-config probe TestLiveClaudeCodeRunConfig
+// (internal/openshell/image, build tag openshell_integration; see
+// docs/SANDBOX.md, Testing): it passed for 2.1.311 on the real image with
+// docker and mock models (rel-1-0-10 TST-1231). Codex's half and
+// TestSandboxDaemon, which needs an OpenShell gateway, are kept with the
+// other live OpenShell tests on branch test/openshell-live; TestSandboxDaemon
+// last ran on 2.1.156.
 
 // SandboxRunConfig is the per-run input of SandboxRunFiles.
 type SandboxRunConfig struct {
