@@ -114,7 +114,7 @@ func TestLauncherAttachesThroughTheRealAdminHandler(t *testing.T) {
 	}
 	defer tun.Close()
 	big := bytes.Repeat([]byte("t"), 2<<20)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, tun.BaseURL()+"/dcrelay/1/files?dir=/work", bytes.NewReader(big))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, relay.RouteURL(tun.BaseURL(), relay.RouteFiles)+"?dir=/work", bytes.NewReader(big))
 	req.Header.Set("Content-Type", "application/x-tar")
 	resp, err := tun.HTTPClient().Do(req)
 	if err != nil {
@@ -127,7 +127,7 @@ func TestLauncherAttachesThroughTheRealAdminHandler(t *testing.T) {
 	// run --task, the long-poll transport and exec are POSTs (GAP-0102):
 	// through the tunnel they carry the client tag and pass the gate.
 	for _, route := range []string{"task", "poll", "exec"} {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, tun.BaseURL()+"/dcrelay/1/"+route, strings.NewReader("{}"))
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, relay.RouteURL(tun.BaseURL(), route), strings.NewReader("{}"))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := tun.HTTPClient().Do(req)
 		if err != nil {

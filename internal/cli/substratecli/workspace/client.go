@@ -64,8 +64,10 @@ const (
 // error.
 type TokenFunc func(ctx context.Context) (string, error)
 
-// Client is a workspace.Transport over the file routes of one actor's relay
-// (POST /dcrelay/1/exec, PUT and GET /dcrelay/1/files). It knows nothing of
+// Client is a workspace.Transport over the file routes of one actor relay
+// (exec, files; relay.AttachRoutes). BaseURL is a route base: the gateway
+// attach prefix for the launcher (GAP-0158), relay.RouteBase(origin) for a
+// relay reached directly. It knows nothing of
 // the router: the http.Client it is given already reaches the actor, and the
 // sandbox argument of every method is ignored (one actor per client).
 type Client struct {
@@ -83,8 +85,8 @@ type Client struct {
 var _ osw.Transport = (*Client)(nil)
 
 // NewClient builds a Client. hc carries the connection to the actor (already
-// tunnelled), baseURL is the relay's origin, token supplies the session
-// token.
+// tunnelled), baseURL is the route base (see Client), token supplies the
+// session token.
 func NewClient(hc *http.Client, baseURL string, token func(context.Context) (string, error)) *Client {
 	if hc == nil {
 		hc = &http.Client{}
@@ -136,7 +138,7 @@ func (e *HTTPError) gatewayError() string {
 // ok. A refusal comes back as *HTTPError, a failure to reach the actor as a
 // plain error.
 func (c *Client) request(ctx context.Context, op, method, route string, q url.Values, body io.Reader, contentType string, ok ...int) (*http.Response, error) {
-	u := c.BaseURL + route
+	u := relay.RouteURL(c.BaseURL, route)
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
@@ -180,10 +182,10 @@ func (c *Client) request(ctx context.Context, op, method, route string, q url.Va
 }
 
 // DetectRoot asks the relay for the actor's working directory (the image
-// WORKDIR, "workdir" in GET /dcrelay/1/status), sets RemoteRoot to it, and
+// WORKDIR, "workdir" in the status route), sets RemoteRoot to it, and
 // returns it. A relay that does not say gets DefaultRemoteRoot.
 func (c *Client) DetectRoot(ctx context.Context) (string, error) {
-	resp, err := c.request(ctx, "the status request", http.MethodGet, "/dcrelay/1/status", nil, nil, "", http.StatusOK)
+	resp, err := c.request(ctx, "the status request", http.MethodGet, relay.RouteStatus, nil, nil, "", http.StatusOK)
 	if err != nil {
 		return "", err
 	}
@@ -268,7 +270,7 @@ func (c *Client) Exec(ctx context.Context, _ string, req osw.ExecRequest) (*osw.
 	}
 	var resp *http.Response
 	for i := 1; ; i++ {
-		resp, err = c.request(ctx, "the command", http.MethodPost, "/dcrelay/1/exec", nil, bytes.NewReader(body), "application/json", http.StatusOK)
+		resp, err = c.request(ctx, "the command", http.MethodPost, relay.RouteExec, nil, bytes.NewReader(body), "application/json", http.StatusOK)
 		var refused *HTTPError
 		if err == nil || errors.As(err, &refused) || i >= attempts || ctx.Err() != nil {
 			break
@@ -363,7 +365,7 @@ func (c *Client) Upload(ctx context.Context, _, localPath, remoteDir string) err
 		pw.CloseWithError(err) // nil closes with EOF
 		done <- err
 	}()
-	resp, err := c.request(ctx, "the upload", http.MethodPut, "/dcrelay/1/files", url.Values{"dir": {remoteDir}}, pr, "application/x-tar", http.StatusNoContent)
+	resp, err := c.request(ctx, "the upload", http.MethodPut, relay.RouteFiles, url.Values{"dir": {remoteDir}}, pr, "application/x-tar", http.StatusNoContent)
 	pr.CloseWithError(errUploadDone)
 	tarErr := <-done
 	if err != nil {
@@ -393,7 +395,7 @@ func (c *Client) Download(ctx context.Context, _, remotePath, localDir string) e
 	if fi, err := os.Stat(localDir); err != nil || !fi.IsDir() {
 		return fmt.Errorf("workspace: download: %s is not a directory", localDir)
 	}
-	resp, err := c.request(ctx, "the download", http.MethodGet, "/dcrelay/1/files", url.Values{"path": {remotePath}}, nil, "", http.StatusOK)
+	resp, err := c.request(ctx, "the download", http.MethodGet, relay.RouteFiles, url.Values{"path": {remotePath}}, nil, "", http.StatusOK)
 	if err != nil {
 		var refused *HTTPError
 		if errors.As(err, &refused) && refused.Status == http.StatusNotFound {

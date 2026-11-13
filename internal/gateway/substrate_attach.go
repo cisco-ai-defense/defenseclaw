@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
 // Attach through the admin listener (GAP-0085, GAP-0086; lead ruling
@@ -98,9 +99,6 @@ type SubstrateRelayDialer interface {
 	DialRelay(ctx context.Context, atespace, name string) (net.Conn, error)
 }
 
-// substrateAttachRoutes are the relay paths an attach may reach.
-var substrateAttachRoutes = []string{"ws", "poll", "task", "status", "exec", "files"}
-
 // substrateAttachSessionTTL is the lifetime of the per-request session
 // token (a WebSocket keeps its connection past it; the relay checks the
 // token at the upgrade).
@@ -114,11 +112,13 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 		}
 		rest := strings.Trim(r.PathValue("rest"), "/")
 		if rest == "" {
-			rest = "ws"
+			rest = relay.RouteWS
 		}
 		head, _, _ := strings.Cut(rest, "/")
 		known := false
-		for _, p := range substrateAttachRoutes {
+		// relay.AttachRoutes is the one route table: the launcher builds
+		// <attach>/<route>, the relay serves relay.Path(route) (GAP-0158).
+		for _, p := range relay.AttachRoutes {
 			known = known || head == p
 		}
 		if !known || strings.Contains(rest, "..") || strings.Contains(rest, "//") {
@@ -146,7 +146,7 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 		proxy := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.Out.URL.Scheme, pr.Out.URL.Host = "http", "actor.invalid"
-				pr.Out.URL.Path, pr.Out.URL.RawPath = "/dcrelay/1/"+rest, ""
+				pr.Out.URL.Path, pr.Out.URL.RawPath = relay.Path(rest), ""
 				pr.Out.Host = "actor.invalid"
 				pr.Out.Header.Del("Authorization")
 				pr.Out.Header.Del("Cookie")

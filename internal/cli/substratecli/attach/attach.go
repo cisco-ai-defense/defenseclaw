@@ -539,7 +539,7 @@ func (a *attacher) handshakeRefused(ctx context.Context, st int, err error) (out
 
 // probe asks the relay status through the route and returns the status.
 func (a *attacher) probe(ctx context.Context) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.tun.BaseURL()+"/dcrelay/1/status", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, relay.RouteURL(a.tun.BaseURL(), relay.RouteStatus), nil)
 	if err != nil {
 		return 0, err
 	}

@@ -159,17 +159,17 @@ func (s *Server) Handler() http.Handler {
 	// The wake-up probe of the actor template: no authentication, no state,
 	// nothing started.
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
-	mux.HandleFunc("GET /dcrelay/1/ws", s.serveWS)
-	mux.HandleFunc("POST /dcrelay/1/poll", s.pollOpen)
-	mux.HandleFunc("GET /dcrelay/1/poll/{id}", s.pollRead)
-	mux.HandleFunc("POST /dcrelay/1/poll/{id}", s.pollWrite)
-	mux.HandleFunc("DELETE /dcrelay/1/poll/{id}", s.pollClose)
-	mux.HandleFunc("POST /dcrelay/1/task", s.taskStart)
-	mux.HandleFunc("GET /dcrelay/1/task/{id}", s.taskFollow)
-	mux.HandleFunc("GET /dcrelay/1/status", s.status)
-	mux.HandleFunc("POST /dcrelay/1/exec", s.fileExec)
-	mux.HandleFunc("PUT /dcrelay/1/files", s.filePut)
-	mux.HandleFunc("GET /dcrelay/1/files", s.fileGet)
+	mux.HandleFunc("GET "+Path(RouteWS), s.serveWS)
+	mux.HandleFunc("POST "+Path(RoutePoll), s.pollOpen)
+	mux.HandleFunc("GET "+Path(RoutePoll+"/{id}"), s.pollRead)
+	mux.HandleFunc("POST "+Path(RoutePoll+"/{id}"), s.pollWrite)
+	mux.HandleFunc("DELETE "+Path(RoutePoll+"/{id}"), s.pollClose)
+	mux.HandleFunc("POST "+Path(RouteTask), s.taskStart)
+	mux.HandleFunc("GET "+Path(RouteTask+"/{id}"), s.taskFollow)
+	mux.HandleFunc("GET "+Path(RouteStatus), s.status)
+	mux.HandleFunc("POST "+Path(RouteExec), s.fileExec)
+	mux.HandleFunc("PUT "+Path(RouteFiles), s.filePut)
+	mux.HandleFunc("GET "+Path(RouteFiles), s.fileGet)
 	return mux
 }
 
