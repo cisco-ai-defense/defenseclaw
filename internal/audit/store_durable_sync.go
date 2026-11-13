@@ -15,16 +15,15 @@ import (
 	"time"
 )
 
-// auditDurablePragmas are the audit pragmas with synchronous=FULL and
-// fullfsync on. The store's pool runs synchronous=NORMAL: a WAL commit is
-// on disk only after the next checkpoint, so a power loss can take back the
-// last commits. On the durable connection SQLite flushes the whole WAL at
+// secureClientAuditDurablePragmas are the Secure Client audit pragmas with
+// synchronous=FULL and fullfsync on, for the durable connection only a
+// Secure Client store opens. The pool runs synchronous=NORMAL: a WAL commit
+// is on disk only after the next checkpoint, so a power loss can take back
+// the last commits. On the durable connection SQLite flushes the whole WAL at
 // every commit (with F_FULLFSYNC on macOS), which makes every commit before
-// it durable too.
-var (
-	auditDurablePragmas             = buildAuditDurablePragmas(auditPragmas)
-	secureClientAuditDurablePragmas = buildAuditDurablePragmas(secureClientAuditPragmas)
-)
+// it durable too. Other stores commit their durable writes on the writer
+// connection with the same two pragmas set for the batch (durableBatchConn).
+var secureClientAuditDurablePragmas = buildAuditDurablePragmas(secureClientAuditPragmas)
 
 func buildAuditDurablePragmas(pragmas string) string {
 	const normal, full = "&_pragma=synchronous(NORMAL)", "&_pragma=synchronous(FULL)"
@@ -35,8 +34,8 @@ func buildAuditDurablePragmas(pragmas string) string {
 }
 
 // SyncCommittedWrites makes every audit write committed before the call
-// survive a power loss: it commits one readiness write on the durable
-// connection (auditDurablePragmas), then flushes the database folder so a
+// survive a power loss: it commits one readiness write with synchronous=FULL
+// (durableGrouped), then flushes the database folder so a
 // WAL file created since the store opened keeps its entry. A producer that
 // marks an occurrence reported once it is stored (a trust anchor or
 // credential change event) calls it first, so the marker never outlives
@@ -54,7 +53,10 @@ func (s *Store) SyncCommittedWrites(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer release()
+	// The hook-call write group takes the store lifecycle lock in its own
+	// batch runner; holding it here too would nest the read lock under a
+	// waiting Close (durableQueue).
+	defer s.releaseUnlessGrouped(release)()
 	// Concurrent callers share one commit, and so one flush (durableGrouped):
 	// the flush of a commit covers every write committed before it.
 	invalid := false
@@ -93,11 +95,12 @@ func (s *Store) durableConn() (*sql.DB, error) {
 	if s.durableDB != nil {
 		return s.durableDB, nil
 	}
-	pragmas := auditDurablePragmas
-	if s.secureClientSchema {
-		pragmas = secureClientAuditDurablePragmas
+	if !s.secureClientSchema {
+		// Durable writes of other stores ride the writer connection
+		// (durableQueue, durableBatchConn): there is no second connection.
+		return nil, errors.New("audit: only a Secure Client store opens a durable connection")
 	}
-	db, err := openSQLiteWithPragmas(s.dbPath, pragmas)
+	db, err := openSQLiteWithPragmas(s.dbPath, secureClientAuditDurablePragmas)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open SQLite durable connection: %w", err)
 	}
