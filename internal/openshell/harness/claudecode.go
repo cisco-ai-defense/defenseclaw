@@ -26,17 +26,34 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
-// claudeCodeBaseVersion is the Claude Code release the digest-pinned
-// community base image ships (measured: /usr/local/bin/claude 2.1.156). That
-// pin is relocated from the base, and it is the only pinned release.
-const claudeCodeBaseVersion = "2.1.156"
+// ClaudeCodeBedrockFloor is the oldest Claude Code Amazon Bedrock serves
+// Claude Haiku 5.5 to (it answers older releases "version 2.1.280 or newer
+// is required"). The pinned release must not be older.
+const ClaudeCodeBedrockFloor = "2.1.280"
+
+// claudeCodePin is the only Claude Code release the images install: the
+// vendor's stable channel at the time of pinning, at or above
+// ClaudeCodeBedrockFloor, and inside the claudecode-hooks-v2 contract. The
+// community base image ships Claude Code 2.1.156, which Bedrock refuses for
+// Claude Haiku 5.5 (GAP-0024), so the pin replaces it.
+var claudeCodePin = binaryPin{
+	Version: "2.1.311",
+	Binaries: map[string]tarballArchive{
+		"aarch64": {URL: "https://downloads.claude.ai/claude-code-releases/2.1.311/linux-arm64/claude", SHA256: "2e2496c9a8065df93acb0fca2d341f59a6b8777649b2e025ab8c9bcd5eef61f3"},
+		"x86_64":  {URL: "https://downloads.claude.ai/claude-code-releases/2.1.311/linux-x64/claude", SHA256: "86dc1fcc69498159eaf15f446613e847010f9036bfbbdffd4c49350be8489ada"},
+	},
+	DigestSource: "downloads.claude.ai claude-code-releases/2.1.311/manifest.json (linux-arm64, linux-x64 checksums), whose " +
+		"signature verified with the release key DefenseClaw pins (internal/sensor/claude_release_key.asc, fingerprint " +
+		"31ddde24ddfab679f42d7bd2baa929ff1a7ecace) on 2026-11-13; the same digests as the claude executable of the npm packages " +
+		"@anthropic-ai/claude-code-linux-arm64@2.1.311 and -linux-x64@2.1.311",
+}
 
 // ClaudeCode is the Claude Code harness.
 var ClaudeCode = register(&Spec{
 	Name:           "claudecode",
 	DisplayName:    "Claude Code",
 	Command:        "claude",
-	DefaultVersion: claudeCodeBaseVersion,
+	DefaultVersion: claudeCodePin.Version,
 	Provider:       connector.NewClaudeCodeConnector(),
 	TamperTier:     connector.SandboxTamperTierManaged,
 	verification:   Verification{Status: VerifiedLive, Note: "test/e2e/openshell TestSandboxDaemon: hooks at the ingress, a DefenseClaw-blocked command denied, egress blocklist and OpenShell deny"},
@@ -55,20 +72,18 @@ case "$(head -c 2 "$p")" in
   *) printf '%s\n' "$p" ;;
 esac`,
 	},
-	// Only the base image's release is pinned: the digest-pinned base
-	// carries its bytes. Another release would come from the npm registry
-	// with no reviewed digest, so it is refused.
+	// Only claudeCodePin is installed: the vendor's native executable,
+	// downloaded over https and refused unless its sha256 is the pin. The
+	// base image's own copy is replaced by the link, so it can never run.
 	install: func(version string) ([]InstallStep, error) {
-		if version != claudeCodeBaseVersion {
-			return nil, fmt.Errorf("harness claudecode: %s has no pinned digests (DefenseClaw pins the base image's %s)", version, claudeCodeBaseVersion)
+		bin := InstallRootBase + "/claudecode/bin/claude"
+		run, err := claudeCodePin.installRun(bin, version)
+		if err != nil {
+			return nil, fmt.Errorf("harness claudecode: %w", err)
 		}
-		root := InstallRootBase + "/claudecode"
 		return []InstallStep{{
-			Comment: "Relocate the base image's Claude Code " + version + " to a root-owned prefix and pin it",
-			Run: `set -eu; root=` + shellQuote(root) + `; ` +
-				`install -d -o root -g root -m 0755 "$root" "$root/bin"; ` +
-				`src="$(readlink -f /usr/local/bin/claude)"; ` +
-				`case "$src" in "$root"/*) ;; *) install -o root -g root -m 0755 "$src" "$root/bin/claude"; ln -sfn "$root/bin/claude" /usr/local/bin/claude ;; esac; ` +
+			Comment: "Replace the base image's Claude Code with the pinned " + version + " in a root-owned prefix (vendor release sha256 checked)",
+			Run: run + "; ln -sfn " + shellQuote(bin) + " /usr/local/bin/claude; " +
 				`got="$(DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 /usr/local/bin/claude --version 2>/dev/null | awk 'NR==1{print $1}')"; ` +
 				pinVersionCheck("Claude Code", version),
 		}}, nil

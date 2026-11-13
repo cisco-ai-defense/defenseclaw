@@ -1755,9 +1755,15 @@ modes and owners are set in the tar headers) and streams it to
    has `curl` but not `jq`, so every build still runs `apt-get update` and
    installs the archive's current `jq` there.)
 2. Installs the harness at a version whose Linux hook contract is known. Any
-   other version fails before the build starts. Claude Code 2.1.156 is
-   relocated from the digest-pinned base image, and no other Claude Code
-   version is pinned. Codex 0.146.0 replaces the base image's 0.117, which is
+   other version fails before the build starts. Claude Code 2.1.311 replaces
+   the digest-pinned base image's 2.1.156: Amazon Bedrock serves Claude
+   Haiku 5.5 only to Claude Code 2.1.280 and newer (the floor
+   `harness.ClaudeCodeBedrockFloor`). The build downloads Anthropic's native
+   executable for its architecture from `downloads.claude.ai` over https
+   only and installs it only when its sha256 is the one pinned from the
+   release's signed `manifest.json` (checked with the release key
+   DefenseClaw pins), so the build needs https to `downloads.claude.ai`. No
+   other Claude Code version is pinned. Codex 0.146.0 replaces the base image's 0.117, which is
    outside every reviewed contract. An npm-installed harness (Codex,
    OpenCode, Copilot CLI, Amp) is downloaded once with `npm pack`, installed
    from that tarball only after its SHA-512 matches the pinned registry
@@ -2180,7 +2186,8 @@ start compares the render with the image's digest instead of rewriting.
   imported servers, putting Claude in its exclusive MCP mode. With `allow`
   the servers go to `/usr/local/lib/defenseclaw/run/claude-mcp-servers.json`
   instead, which the launcher merges into `~/.claude.json`. Every key is
-  checked against the 2.1.156 settings schema, and the merge with the
+  checked against the 2.1.156 settings schema (each key is still in the
+  2.1.311 binary), and the merge with the
   image's drop-in must keep the hook contract.
 - **Codex:** Codex reads one `managed_config.toml` and one
   `requirements.toml`, so both are the image's documents with run keys
@@ -2304,7 +2311,7 @@ images stay unverified, so they are never selected for a sandbox.
 
 | Connector | Pinned harness | Hook registration in the image | Tier | Yolo flag | Credential profiles | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | 2.1.156 (the base image's copy) | `/etc/claude-code/managed-settings.d/50-defenseclaw.json` | managed | `--dangerously-skip-permissions` | Anthropic API key, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock Mantle | verified |
+| Claude Code | 2.1.311 (Anthropic release, native sha256 pinned; Bedrock Haiku 5.5 needs 2.1.280+) | `/etc/claude-code/managed-settings.d/50-defenseclaw.json` | managed | `--dangerously-skip-permissions` | Anthropic API key, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock Mantle | verified |
 | Codex | 0.146.0 (npm, native sha256 pinned) | `/etc/codex/requirements.toml` | managed | `--dangerously-bypass-approvals-and-sandbox` | OpenAI API key, Bedrock Mantle | verified |
 | OpenCode | 2.1.4 (@opencode/cli, native sha256 pinned) | Root-owned plugin `/usr/local/lib/defenseclaw/opencode/defenseclaw.js`, registered in `/etc/opencode/opencode.json`; the launcher refuses to start beside any other plugin | user | `--auto` | Anthropic API key, OpenAI API key, Bedrock Mantle | unverified (fresh V2 OpenShell run required) |
 | GitHub Copilot CLI | 1.0.88 (npm, native sha256 pinned) | `/etc/github-copilot/policy.d/50-defenseclaw.json`, with `allowManagedHooksOnly` in `/etc/github-copilot/managed-settings.json` | managed | `--yolo` | GitHub token (endpoints unverified), bring-your-own Anthropic key or Bedrock Mantle | verified |

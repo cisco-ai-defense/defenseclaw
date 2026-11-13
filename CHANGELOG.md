@@ -8,6 +8,11 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.10
+
+### Changed
+- **OpenShell sandboxes run Claude Code 2.1.311, so Amazon Bedrock serves them Claude Haiku 5.5.** The image relocated the community base image's Claude Code 2.1.156, which Bedrock refuses for Haiku 5.5 ("version 2.1.280 or newer is required"). The build now downloads Anthropic's native 2.1.311 executable from `downloads.claude.ai` over https only and installs it only when its sha256 is the one pinned from the release's signed `manifest.json` (checked with the release key DefenseClaw pins), for x86_64 and arm64. The image build needs https to `downloads.claude.ai`. The image's hook contract is `claudecode-hooks-v2` (rel-1-0-10:GAP-0024).
+
 ## [Unreleased] — 1.0.9
 
 - **The managed Windows Setup ships the `strict` and `permissive` rule packs, so `rule_pack: strict` works without `policy_dir` (#1445).** Before, Setup shipped only the default pack, and `strict` with no `policy_dir` was refused with `1639` (GAP-1041). The lifecycle now writes the two packs that the signed binaries embed to `C:\ProgramData\Cisco\DefenseClaw-RulePacks\<digest>`, an administrator-only folder named by a digest of the packs' files, before the gateway starts; if the config uses the default pack, a failed write is only a warning. The gateway refuses a shipped folder whose files are not its release's, and `status` and `verify` report `rule_pack_shipped_invalid`; `/repair` or `/ensure` writes the folder again. A `policy_dir` that holds the pack still takes precedence. Linux, macOS and Secure Client are unchanged.
