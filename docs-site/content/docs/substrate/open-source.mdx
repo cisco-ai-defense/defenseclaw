@@ -90,7 +90,7 @@ The doctor checks that the gateway can verify agent identities, that the callout
 
 ### Sign in
 
-With your own cluster and no identity provider, use your Kubernetes identity. The launcher sends your current kubeconfig credentials and the gateway checks them with a Kubernetes TokenReview (or your client certificate through the API server). You are then the Kubernetes user, and events record that as a user ID of kind `k8s_user`.
+With your own cluster and no identity provider, use your Kubernetes identity. The launcher sends your current kubeconfig credentials and the gateway checks them with a Kubernetes TokenReview (or your client certificate through the API server). You are then the Kubernetes user, and events record that as a user ID of kind `k8s_user`. For this the chart gives the gateway's service account one cluster-wide right, to create TokenReviews; it renders no such grant when an OIDC issuer is set, on a managed install, or when the gateway runs with `--no-kube-sign-in`.
 
 ```bash
 defenseclaw substrate login --kube --admin-url https://defenseclaw-admin.example.test

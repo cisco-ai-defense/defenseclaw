@@ -1,0 +1,9 @@
+# An open-source install with no OIDC issuer: people sign in with their
+# Kubernetes credentials, so the gateway ServiceAccount may create
+# TokenReviews (GAP-0153). A custom release namespace and name show the
+# cluster-scoped names.
+config:
+  deployment_mode: ""
+  substrate:
+    identity:
+      oidc: {}

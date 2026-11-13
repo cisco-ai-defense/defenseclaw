@@ -145,6 +145,18 @@ since the signer issues no certificate without a Service DNS name and the pod
 would never start.
 */}}
 {{/* "true" when the release runs in managed_enterprise (GAP-0135). */}}
+{{/* The gateway's Kubernetes sign-in is on (internal/cli substrateKubeSignIn):
+no substrate.identity.oidc.issuer, not a managed install, and not turned
+off with --no-kube-sign-in in custom gateway args. */}}
+{{- define "dc.kubeSignIn" -}}
+{{- $issuer := dig "substrate" "identity" "oidc" "issuer" "" (.Values.config | default dict) -}}
+{{- if and (not $issuer) (not (include "dc.managed" .)) (not (has "--no-kube-sign-in" (.Values.gateway.args | default list))) }}true{{ end -}}
+{{- end -}}
+
+{{- define "dc.tokenReviewName" -}}
+{{- printf "defenseclaw-tokenreview-%s-%s" .Release.Namespace .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "dc.managed" -}}
 {{- $m := lower (toString (.Values.deploymentMode | default (.Values.config.deployment_mode | default ""))) -}}
 {{- if has $m (list "managed" "managed_enterprise" "managed-enterprise") }}true{{ end -}}
