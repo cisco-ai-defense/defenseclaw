@@ -1526,7 +1526,7 @@ func TestCorrelationRetentionRotatesFirstStageAcrossBudgetedRuns(t *testing.T) {
 	for range 7 {
 		budgetExpired = false
 		result := RetentionRunResult{RowsDeleted: newRetentionCounts()}
-		if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), now, &result); err != nil {
+		if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), time.Unix(0, 0).UTC(), now, &result); err != nil {
 			t.Fatal(err)
 		}
 		if !result.Backlog {
@@ -1893,7 +1893,7 @@ func TestCorrelationRetentionBatchYieldsToAWaitingHookWrite(t *testing.T) {
 	}
 
 	result := RetentionRunResult{RowsDeleted: newRetentionCounts()}
-	if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), now, &result); err != nil {
+	if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), time.Unix(0, 0).UTC(), now, &result); err != nil {
 		t.Fatal(err)
 	}
 	if result.Backlog {
