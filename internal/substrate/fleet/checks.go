@@ -55,10 +55,19 @@ func result(id, status, edge, format string, args ...any) Check {
 	return Check{ID: id, Status: status, EdgeCase: edge, Message: fmt.Sprintf(format, args...)}
 }
 
-// Bucket is what the CLI read of the Substrate snapshot bucket. A nil
+// Bucket is what the CLI read of the Substrate snapshot bucket, with the
+// object store's own CLI (aws or gcloud) as the administrator. A nil
 // pointer member is "could not be read".
 type Bucket struct {
-	Location            string
+	// Location is the install file's storage.snapshotLocation.
+	Location string
+	// Err is set when the bucket could not be read at all (no CLI, no
+	// credentials, access denied); Missing when the store says it does
+	// not exist.
+	Err     string
+	Missing bool
+	// Notes are warnings the reader found that no member below holds.
+	Notes               []string
 	Encrypted           *bool
 	PublicAccessBlocked *bool
 	// RetentionDays is the lifecycle expiry of snapshot objects; 0 means none.
@@ -98,21 +107,25 @@ type Observed struct {
 	ServedIssuer  string
 	InstallIssuer string
 
-	// Bucket is nil when the install keeps no snapshots in object storage
-	// the CLI can read (kind with a local store).
+	// Bucket is nil when the install file names no object-storage
+	// snapshot location (s3:// or gs://), for example kind with a local
+	// store.
 	Bucket *Bucket
 
-	// The policies the CLI read (nil when absent), and the grants the
-	// release needs (from the chart plan).
+	// The policies the CLI read as the gateway's ServiceAccount (nil when
+	// absent), and the grants the release needs (the chart's plan: the
+	// launcher atespaces from the config, the managed ones from
+	// --managed-atespaces, the chart's ServiceAccounts).
 	GlobalPolicy      *setup.AccessPolicy
 	AtespacePolicies  map[string]*setup.AccessPolicy
 	LauncherAtespaces []string
 	WritableAtespaces []string
 	Editors           []string
 	GlobalViewers     []string
-	// PoliciesReadable is false when the CLI's identity could not read
-	// access policies (it is not a global viewer).
+	// PoliciesReadable is false when the access policies could not be
+	// read; PoliciesNote says why.
 	PoliciesReadable bool
+	PoliciesNote     string
 
 	// The SubstrateInstall settings in effect: the callout service, the
 	// router clients, and whether the body opt-in is on (nil when the
@@ -123,9 +136,11 @@ type Observed struct {
 	BodyOptIn      *bool
 	OpenAPPA       bool
 
-	// ActorRoutes are the route patterns the actor listener serves (the
-	// gateway reports them on its admin listener); nil when not read.
-	ActorRoutes []string
+	// ActorRoutes are the probed paths (ActorListenerProbes) the actor
+	// listener answered with anything but 404, read through a port-forward
+	// to the actor Service; nil when not read (ActorRoutesNote says why).
+	ActorRoutes     []string
+	ActorRoutesNote string
 
 	NamespaceLabels map[string]string
 }
@@ -236,10 +251,17 @@ func CheckActorKeysVerify(o Observed) Check {
 // cluster's region (E10).
 func CheckSnapshotBucket(o Observed) Check {
 	b := o.Bucket
-	if b == nil {
-		return result(CheckBucket, Skip, "E10", "no object-storage snapshot location to check")
+	switch {
+	case b == nil:
+		return result(CheckBucket, Skip, "E10", "the install file names no object-storage snapshot location "+
+			"(storage.snapshotLocation s3:// or gs://)")
+	case b.Missing:
+		return result(CheckBucket, Fail, "E10", "snapshot bucket %s does not exist: actors cannot be suspended", b.Location)
+	case b.Err != "":
+		return result(CheckBucket, Warn, "E10", "snapshot bucket %s could not be read from here (%s)", b.Location, b.Err)
 	}
-	var fails, warns []string
+	var fails []string
+	warns := append([]string{}, b.Notes...)
 	switch {
 	case b.Encrypted == nil:
 		warns = append(warns, "encryption could not be read")
@@ -247,8 +269,10 @@ func CheckSnapshotBucket(o Observed) Check {
 		fails = append(fails, "not encrypted at rest")
 	}
 	switch {
-	case b.PublicAccessBlocked == nil:
+	case b.PublicAccessBlocked == nil && len(b.Notes) == 0:
 		warns = append(warns, "public access settings could not be read")
+	case b.PublicAccessBlocked == nil:
+		// A note says why (Cloud Storage: inherited).
 	case !*b.PublicAccessBlocked:
 		fails = append(fails, "public access is not blocked")
 	}
@@ -275,7 +299,8 @@ func CheckSnapshotBucket(o Observed) Check {
 // (E2, E3, E17).
 func CheckOpenFGAGrants(o Observed) Check {
 	if !o.PoliciesReadable {
-		return result(CheckGrants, Warn, "E2", "could not read the access policies; run doctor as a global viewer")
+		return result(CheckGrants, Warn, "E2", "could not read the access policies as the gateway's ServiceAccount (%s)",
+			o.PoliciesNote)
 	}
 	editors, viewers := members(o.Editors), members(o.GlobalViewers)
 	var problems []string
@@ -322,7 +347,11 @@ func CheckOpenFGAGrants(o Observed) Check {
 			}
 		}
 	}
-	return result(CheckGrants, Pass, "E2", "launcher atespaces are DefenseClaw's alone; the managed and global grants are in place")
+	managed := "the managed and global grants are in place"
+	if len(o.WritableAtespaces) <= len(o.LauncherAtespaces) {
+		managed = "the global grant is in place (no managed atespaces were named with --managed-atespaces)"
+	}
+	return result(CheckGrants, Pass, "E2", "launcher atespaces are DefenseClaw's alone; %s", managed)
 }
 
 func members(principals []string) []string {
@@ -400,6 +429,23 @@ var actorRoutePrefixes = []string{
 
 var actorRouteExact = []string{"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify"}
 
+// ActorListenerProbes are the paths verify asks the actor listener for,
+// without an actor token: one per actor route (they answer 401), and one
+// per route of the admin listener and the host gateway API (they must
+// answer 404, PLAN 6.1). A GET without a token reaches no handler. There is
+// no "/llm/../" probe: the listener sends every /llm/ path to the model
+// proxy, which has no admin route, so it answers 401 there by design.
+var ActorListenerProbes = []string{
+	"/api/v1/substrate/hook/claudecode", "/api/v1/substrate/notify/codex", "/api/v1/substrate/inspect/tool",
+	"/llm/bedrock", "/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify",
+	"/", "/health", "/status", "/api/v1/substrate/info", "/api/v1/substrate/actors", "/api/v1/substrate/actors/a/b",
+	"/api/v1/substrate/actors/a/b/attach", "/api/v1/substrate/session-cert", "/api/v1/substrate/batches",
+	"/api/v1/substrate/usage", "/api/v1/substrate/doctor", "/api/v1/substrate/asks", "/api/v1/substrate/decisions",
+	"/api/v1/substrate/policy/explain", "/api/v1/substrate/secrets", "/api/v1/substrate/bundle/status",
+	"/api/v1/substrate/fleet/verify", "/api/v1/substrate/signin", "/api/v1/fleet/", "/api/v1/claude-code/hook",
+	"/api/v1/codex/notify", "/api/v1/admin/shutdown",
+}
+
 // ActorRouteAllowed reports whether route may be on the actor listener.
 func ActorRouteAllowed(route string) bool {
 	if slices.Contains(actorRouteExact, route) {
@@ -418,7 +464,7 @@ func ActorRouteAllowed(route string) bool {
 // (E1, D15).
 func CheckActorListenerRoutes(o Observed) Check {
 	if o.ActorRoutes == nil {
-		return result(CheckActorRoutes, Warn, "E1", "could not read the actor listener's routes")
+		return result(CheckActorRoutes, Warn, "E1", "could not read the actor listener's routes (%s)", o.ActorRoutesNote)
 	}
 	var extra []string
 	for _, r := range o.ActorRoutes {
@@ -430,7 +476,12 @@ func CheckActorListenerRoutes(o Observed) Check {
 		return result(CheckActorRoutes, Fail, "E1", "the actor listener serves routes actors must not reach: %s",
 			strings.Join(extra, ", "))
 	}
-	return result(CheckActorRoutes, Pass, "E1", "the actor listener serves only actor routes (%d)", len(o.ActorRoutes))
+	if len(o.ActorRoutes) == 0 {
+		return result(CheckActorRoutes, Warn, "E1", "the actor Service answered none of the actor routes: it may not be "+
+			"DefenseClaw's actor listener")
+	}
+	return result(CheckActorRoutes, Pass, "E1", "the actor listener serves only actor routes (%d of %d probed paths answer)",
+		len(o.ActorRoutes), len(ActorListenerProbes))
 }
 
 // APIAccessLabel is the namespace label Substrate's NetworkPolicy admits to

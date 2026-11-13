@@ -51,6 +51,27 @@ type ChartPlan struct {
 	RelaySessionSecret string `json:"relay_session_secret,omitempty"`
 }
 
+// ChartEditors are the principals the chart's plan makes editors
+// (dc.hookPlan "editors"): the gateway, controller and hooks
+// ServiceAccounts of the release namespace.
+func ChartEditors(namespace string) []string {
+	return chartPrincipals(namespace, "gateway", "controller", "hooks")
+}
+
+// ChartGlobalViewers are the chart plan's global viewers (dc.hookPlan
+// "global_viewers").
+func ChartGlobalViewers(namespace string) []string {
+	return chartPrincipals(namespace, "gateway", "controller", "callout", "hooks")
+}
+
+func chartPrincipals(namespace string, components ...string) []string {
+	out := make([]string, len(components))
+	for i, c := range components {
+		out[i] = "system:serviceaccount:" + namespace + ":defenseclaw-" + c
+	}
+	return out
+}
+
 // PlanAPI is the ate-api-server address and token audience.
 type PlanAPI struct {
 	Address  string `json:"address"`

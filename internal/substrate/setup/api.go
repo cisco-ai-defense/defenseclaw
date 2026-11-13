@@ -70,9 +70,11 @@ func (a *API) GetAccessPolicy(ctx context.Context, atespace string) (*AccessPoli
 		return nil, err
 	}
 	out := &AccessPolicy{Atespace: atespace, UID: p.GetMetadata().GetUid(), Version: p.GetMetadata().GetVersion()}
+	var bindings []Binding
 	for _, b := range p.GetBindings() {
-		out.Bindings = append(out.Bindings, Binding{Role: b.GetRole(), Members: append([]string{}, b.GetMembers()...)})
+		bindings = append(bindings, Binding{Role: b.GetRole(), Members: append([]string{}, b.GetMembers()...)})
 	}
+	out.Bindings = mergeRoles(bindings)
 	return out, nil
 }
 

@@ -7,6 +7,7 @@
 package setup
 
 import (
+	"slices"
 	"reflect"
 	"strings"
 	"testing"
@@ -95,5 +96,26 @@ func sortStrings(s []string) {
 		for j := i; j > 0 && s[j] < s[j-1]; j-- {
 			s[j], s[j-1] = s[j-1], s[j]
 		}
+	}
+}
+
+// A second binding of a role is read as part of the first: the launcher
+// policy then removes a foreign editor written there, and verify sees it.
+func TestMergeRolesKeepsEveryMember(t *testing.T) {
+	p := AccessPolicy{Atespace: "eng-web", Bindings: mergeRoles([]Binding{
+		{Role: RoleEditor, Members: []string{Member("dc")}},
+		{Role: RoleViewer, Members: []string{"user:carol"}},
+		{Role: RoleEditor, Members: []string{"user:mallory", Member("dc")}},
+	})}
+	if got := p.Members(RoleEditor); len(got) != 2 || got[1] != "user:mallory" || len(p.Bindings) != 2 {
+		t.Fatalf("merged = %+v", p.Bindings)
+	}
+	next, changes := LauncherPolicy("eng-web", &p, []string{"dc"})
+	if slices.Contains(next.Members(RoleEditor), "user:mallory") || len(changes) != 2 {
+		t.Fatalf("launcher policy kept a foreign editor: %+v, %v", next.Bindings, changes)
+	}
+	split := AccessPolicy{Bindings: []Binding{{Role: RoleEditor, Members: []string{"a"}}, {Role: RoleEditor, Members: []string{"b"}}}}
+	if got := split.Members(RoleEditor); len(got) != 2 {
+		t.Errorf("Members over two bindings = %v", got)
 	}
 }

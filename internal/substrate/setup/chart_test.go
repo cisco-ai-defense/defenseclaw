@@ -461,4 +461,8 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	if !slices.Contains(p.GlobalViewers, "system:serviceaccount:defenseclaw-system:defenseclaw-hooks") {
 		t.Errorf("%s: the hooks ServiceAccount cannot list actors for the uninstall", name)
 	}
+	// verify's openfga_grants check derives the same principals (GAP-0209).
+	if !slices.Equal(p.Editors, ChartEditors(p.Namespace)) || !slices.Equal(p.GlobalViewers, ChartGlobalViewers(p.Namespace)) {
+		t.Errorf("%s: plan editors %v / viewers %v differ from ChartEditors / ChartGlobalViewers", name, p.Editors, p.GlobalViewers)
+	}
 }

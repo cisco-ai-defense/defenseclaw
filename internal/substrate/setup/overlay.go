@@ -44,6 +44,9 @@ const (
 	KeyExtprocTimeout = "atenet.egress.additionalExtprocTimeout"
 	// KeyRouteTimeout is the router's route timeout for long streams (#2560, E21).
 	KeyRouteTimeout = "atenet.router.routeTimeout"
+	// KeySnapshotLocation is where Substrate keeps actor snapshots
+	// (s3://BUCKET/PREFIX or gs://BUCKET/PREFIX); verify reads the bucket.
+	KeySnapshotLocation = "storage.snapshotLocation"
 )
 
 // DataplaneEnvoy is the only dataplane with an additional callout.
