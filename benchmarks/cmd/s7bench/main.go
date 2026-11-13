@@ -19,11 +19,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -49,10 +52,14 @@ type payload struct {
 type corpusCase struct {
 	ID      string  `json:"id"`
 	Payload payload `json:"payload"`
+	Strata  struct {
+		Provider string `json:"provider"`
+	} `json:"strata"`
 }
 
 type record struct {
 	Case       string                `json:"case"`
+	Connector  string                `json:"connector,omitempty"`
 	Idx        int                   `json:"idx"`
 	N          int                   `json:"n"`
 	SrcTool    string                `json:"src_tool"`
@@ -205,6 +212,10 @@ func main() {
 	judgeParallel := flag.Int("judge-max-parallel", 16, "guardrail.judge.max_parallel; the local proxy stands in for a remote endpoint, which the product does not serialize (a loopback judge URL defaults to 1)")
 	dmHook := flag.Bool("dm-hook", false, "decision model answers alone for the connector (cascade 2)")
 	layers := flag.String("layers", "", "probe layers per call: dm,judge")
+	connectorFlag := flag.String("connector", "claudecode", "claudecode (legacy: every case as a Claude Code call) | auto (each case to the hook handler of its strata.provider connector, with that connector's payload shape) | a connector name")
+	scratch := flag.String("scratch-dir", "", "parent directory of the run's scratch dir (default: the system temp dir)")
+	scratchCapMB := flag.Int("scratch-cap-mb", 2048, "fail the run loudly when its scratch dir (audit.db + WAL) passes this many MiB")
+	walGuard := flag.Bool("wal-guard", true, "run the product audit WAL guard pass every 500 ms (false reproduces the unbounded WAL growth; measurement only, keep -scratch-cap-mb low)")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
@@ -213,11 +224,63 @@ func main() {
 		fmt.Fprintln(os.Stderr, "need -corpus -out -policy-dir")
 		os.Exit(2)
 	}
-	dataDir, err := os.MkdirTemp("", "s7bench-")
+	dataDir, err := os.MkdirTemp(*scratch, "s7bench-")
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(dataDir)
+	var engine *gateway.S7Engine
+	var scratchPeak atomic.Int64
+	var decisionsTotal, casesTotal atomic.Int64
+	startRun := time.Now()
+	// The scratch dir is removed on every way out: normal end, panic, SIGINT/SIGTERM/SIGHUP, boot failure, cap exceeded.
+	cleaned := atomic.Bool{}
+	cleanup := func() {
+		if cleaned.Swap(true) {
+			return
+		}
+		if engine != nil {
+			engine.Close()
+		}
+		_ = os.RemoveAll(dataDir)
+	}
+	defer cleanup()
+	defer func() {
+		if r := recover(); r != nil {
+			cleanup()
+			panic(r)
+		}
+	}()
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		sig := <-sigs
+		fmt.Fprintf(os.Stderr, "[s7bench] %v: removing scratch dir %s and exiting\n", sig, dataDir)
+		cleanup()
+		os.Exit(130)
+	}()
+	dirSize := func() int64 {
+		var n int64
+		_ = filepath.Walk(dataDir, func(_ string, info os.FileInfo, err error) error {
+			if err == nil && info.Mode().IsRegular() {
+				n += info.Size()
+			}
+			return nil
+		})
+		return n
+	}
+	go func() {
+		for range time.Tick(time.Second) {
+			n := dirSize()
+			if n > scratchPeak.Load() {
+				scratchPeak.Store(n)
+			}
+			if n > int64(*scratchCapMB)<<20 {
+				fmt.Fprintf(os.Stderr, "[s7bench] FATAL: scratch dir %s is %d MiB, over the %d MiB cap (audit.db + WAL growth); removing it and exiting 3\n", dataDir, n>>20, *scratchCapMB)
+				cleanup()
+				os.Exit(3)
+			}
+		}
+	}()
 
 	cfg := config.DefaultConfig()
 	cfg.ConfigVersion = config.ConfigVersionV9
@@ -229,6 +292,20 @@ func main() {
 	cfg.Guardrail.Connector = "claudecode"
 	cfg.ClaudeCode.Enabled = true
 	cfg.ClaudeCode.Mode = *mode
+	cfg.Codex.Enabled = true
+	cfg.Codex.Mode = *mode
+	extra := []string{}
+	if *connectorFlag != "claudecode" {
+		cfg.ConnectorHooks = map[string]config.AgentHookConfig{}
+		names := []string{"codex"}
+		for name := range knownConnectors {
+			if name != "claudecode" && name != "codex" {
+				cfg.ConnectorHooks[name] = config.AgentHookConfig{Enabled: true, Mode: *mode}
+			}
+			names = append(names, name)
+		}
+		extra = names
+	}
 	cfg.Guardrail.DetectionStrategy = *strategy
 	cfg.Guardrail.DetectionStrategyToolCall = *strategy
 	if *judgeModel != "" {
@@ -249,10 +326,16 @@ func main() {
 			cfg.DecisionModel.HookConnectors = []string{"claudecode"}
 		}
 	}
-	engine, err := gateway.S7NewEngine(cfg, "claudecode")
+	var err2 error
+	engine, err2 = gateway.S7NewEngineMulti(cfg, "claudecode", extra)
+	err = err2
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "boot:", err)
+		cleanup()
 		os.Exit(1)
+	}
+	if !*walGuard {
+		engine.Close()
 	}
 	hasJudge, hasDM := engine.HasJudge()
 	recording := hasJudge && engine.RecordJudgeCalls()
@@ -310,7 +393,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for c := range jobs {
-				runCase(engine, c, *post, *det, wantDM, wantJudge, preHeaders, emit, &decisions)
+				runCase(engine, c, *connectorFlag, *post, *det, wantDM, wantJudge, preHeaders, emit, &decisions)
 				if n := done.Add(1); n%1000 == 0 {
 					fmt.Fprintf(os.Stderr, "[s7bench] %d cases %d decisions %.0fs\n", n, decisions.Load(), time.Since(start).Seconds())
 				}
@@ -338,6 +421,15 @@ func main() {
 	close(jobs)
 	wg.Wait()
 	fmt.Fprintf(os.Stderr, "[s7bench] done cases=%d decisions=%d in %.1fs\n", done.Load(), decisions.Load(), time.Since(start).Seconds())
+	casesTotal.Store(done.Load())
+	decisionsTotal.Store(decisions.Load())
+	stats := engine.Stats(context.Background())
+	wall := time.Since(startRun).Seconds()
+	rs := map[string]any{"cases": casesTotal.Load(), "decisions": decisionsTotal.Load(), "wall_s": wall, "decisions_per_s": float64(decisionsTotal.Load()) / wall,
+		"scratch_peak_bytes": scratchPeak.Load(), "scratch_cap_mb": *scratchCapMB, "load1_at_end": loadAvg(), "audit": stats, "pack": *pack, "connector_flag": *connectorFlag, "gomaxprocs": runtime.GOMAXPROCS(0)}
+	if b, err := json.MarshalIndent(rs, "", " "); err == nil {
+		_ = os.WriteFile(*out+".runstats.json", b, 0o644)
+	}
 }
 
 type hookResp struct {
@@ -350,7 +442,9 @@ type hookResp struct {
 	RuleIDs    []string `json:"rule_ids"`
 }
 
-func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge bool, preHeaders []string, emit func(record), decisions *atomic.Int64) {
+func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag string, post, det, wantDM, wantJudge bool, preHeaders []string, emit func(record), decisions *atomic.Int64) {
+	conn := connectorOf(connectorFlag, c.Strata.Provider)
+	legacy := connectorFlag == "claudecode"
 	h := sha256.Sum256([]byte(c.ID))
 	sid := "s7-" + hex.EncodeToString(h[:12])
 	ctx := context.Background()
@@ -361,10 +455,17 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 	cwd := "/home/bench/work"
 	if intent := firstNonEmpty(c.Payload.Intent, c.Payload.Prompt); intent != "" {
 		body, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": cwd, "prompt": intent, "transcript_path": ""})
-		e.Hook(ctx, body)
+		e.HookFor(ctx, conn, body)
 	}
 	for i, ev := range events {
-		tool, input, mapped := mapTool(ev)
+		var tool string
+		var input json.RawMessage
+		var mapped string
+		if legacy {
+			tool, input, mapped = mapTool(ev)
+		} else {
+			tool, input, mapped = buildCall(conn, ev)
+		}
 		ecwd := cwd
 		if ev.CWD != "" {
 			ecwd = ev.CWD
@@ -372,9 +473,35 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 		body, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": sid, "cwd": ecwd,
 			"tool_name": tool, "tool_input": input, "permission_mode": "default", "transcript_path": "",
 			"tool_use_id": fmt.Sprintf("toolu_%s_%d", sid[3:15], i)})
+		if conn == "codex" {
+			var bm map[string]any
+			_ = json.Unmarshal(body, &bm)
+			bm["turn_id"] = sid
+			bm["model"] = "bench"
+			body, _ = json.Marshal(bm)
+		}
+		if conn == "cursor" && mapped == "shell" {
+			// Cursor's shell hook is beforeShellExecution: it names no tool, its payload is the command.
+			var in struct {
+				Command string `json:"command"`
+			}
+			_ = json.Unmarshal(input, &in)
+			body, _ = json.Marshal(map[string]any{"hook_event_name": "beforeShellExecution", "conversation_id": sid, "generation_id": sid, "cwd": ecwd, "command": in.Command, "workspace_roots": []string{ecwd}})
+		}
 		t0 := time.Now()
-		status, resp := e.Hook(ctx, body, preHeaders...)
-		r := record{Case: c.ID, Idx: i, N: len(events), SrcTool: ev.ToolName, Tool: tool, Mapped: mapped, Status: status,
+		status, resp := e.HookFor(ctx, conn, body, preHeaders...)
+		fallback := ""
+		if status >= 400 && conn != "claudecode" && !legacy {
+			// The connector's handler refused the payload shape (a binding this harness cannot supply): judge the call through the
+			// Claude Code handler instead, and say so in the record, so a refused shape is never scored as an allow.
+			cc := ev
+			ftool, finput, _ := mapTool(cc)
+			fbody, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": sid, "cwd": ecwd, "tool_name": ftool, "tool_input": finput,
+				"permission_mode": "default", "transcript_path": "", "tool_use_id": fmt.Sprintf("toolu_%s_%d", sid[3:15], i)})
+			fallback = fmt.Sprintf("%s:%d", conn, status)
+			status, resp = e.HookFor(ctx, "claudecode", fbody, preHeaders...)
+		}
+		r := record{Case: c.ID, Connector: conn, Idx: i, N: len(events), SrcTool: ev.ToolName, Tool: tool, Mapped: mapped, Status: status,
 			LatencyUs: time.Since(t0).Microseconds()}
 		r.JudgeCalls = e.TakeJudgeCalls(sid)
 		var hr hookResp
@@ -388,10 +515,16 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 		}
 		r.Reason = hr.Reason
 		if status != 200 {
+			if os.Getenv("S7_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "[s7bench-debug] %s status=%d body=%s resp=%s\n", conn, status, string(body), string(resp))
+			}
 			r.Err = fmt.Sprintf("http %d", status)
 		}
+		if fallback != "" {
+			r.Extra = map[string]string{"connector_fallback": fallback}
+		}
 		if det {
-			d := e.Deterministic(ctx, tool, input, ecwd)
+			d := e.DeterministicFor(ctx, conn, tool, input, ecwd)
 			r.Det = &d
 		}
 		if wantDM || wantJudge {
@@ -402,7 +535,7 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 			pb, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": sid, "cwd": ecwd,
 				"tool_name": tool, "tool_input": input, "tool_response": map[string]any{"stdout": "", "stderr": "", "interrupted": false},
 				"transcript_path": "", "tool_use_id": fmt.Sprintf("toolu_%s_%d", sid[3:15], i)})
-			r.PostStatus, _ = e.Hook(ctx, pb)
+			r.PostStatus, _ = e.HookFor(ctx, conn, pb)
 		}
 		decisions.Add(1)
 		emit(r)
@@ -414,6 +547,18 @@ func firstNonEmpty(v ...string) string {
 		if s != "" {
 			return s
 		}
+	}
+	return ""
+}
+
+func loadAvg() string {
+	b, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return ""
+	}
+	f := strings.Fields(string(b))
+	if len(f) > 0 {
+		return f[0]
 	}
 	return ""
 }
