@@ -668,10 +668,46 @@ var netExecDirectoryProtocols = map[string]struct{}{
 	"rdp": {}, "ssh": {}, "ftp": {}, "vnc": {}, "nfs": {}, "smtp": {},
 }
 
-// ExactNetExecDomainServiceAuth reports whether command is a complete
-// NetExec/CrackMapExec invocation that authenticates to a domain service with
-// a statically resolved password or NT hash. It is case-sensitive on the hash
-// short option (-H) so the help flag (-h) is never read as a credential.
+// netExecAuthToken reports whether a NetExec/CrackMapExec argument carries an
+// authentication indicator: a username, password, NT/LM hash, Kerberos key or
+// ccache, in the spaced (-p), joined (-pSECRET), long (--password) or
+// --password=SECRET forms. Empty values (anonymous / null session, -u "" -p "")
+// still count: the attempt is what the pack blocks.
+func netExecAuthToken(arg string) bool {
+	switch arg {
+	case "-u", "-p", "-H", "-k",
+		"--username", "--password", "--hash", "--hashes",
+		"--use-kcache", "--kerberos", "--aesKey", "--aeskey", "--nthash":
+		return true
+	}
+	lower := strings.ToLower(arg)
+	for _, prefix := range []string{
+		"--password=", "--username=", "--hash=", "--hashes=", "--aeskey=", "--nthash=",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	// Joined short option: -pSECRET, -uUSER, -HHASH (but not a long option).
+	if len(arg) > 2 && arg[0] == '-' && arg[1] != '-' {
+		switch arg[1] {
+		case 'p', 'u', 'H':
+			return true
+		}
+	}
+	return false
+}
+
+// ExactNetExecDomainServiceAuth reports whether command is a statically
+// resolved NetExec/CrackMapExec invocation that authenticates (or attempts to)
+// against a domain service (rel-1-0-10:GAP-0014, GAP-0051). NetExec always
+// takes the protocol as its first positional, so the protocol is argv[1];
+// options and the target host may appear in any order after it. A help or
+// version invocation is never a match. It does not inspect credential values,
+// so option order, flags before or after the target, joined and long option
+// spellings, multiple passwords, and empty (anonymous) credentials are all
+// covered. The recognizer keeps the parse authoritative so the opt-in pack can
+// enforce; it mints no credential-acquisition fact.
 func ExactNetExecDomainServiceAuth(command CommandFact) bool {
 	argv, ok := directoryCredentialStaticArgv(command)
 	if !ok || len(argv) < 3 ||
@@ -681,36 +717,18 @@ func ExactNetExecDomainServiceAuth(command CommandFact) bool {
 	if _, ok := netExecDirectoryPrograms[strings.ToLower(command.Program)]; !ok {
 		return false
 	}
-	args := argv[1:]
-	if _, ok := netExecDirectoryProtocols[strings.ToLower(args[0])]; !ok {
+	if _, ok := netExecDirectoryProtocols[strings.ToLower(argv[1])]; !ok {
 		return false
 	}
-	target := args[1]
-	if target == "" || strings.HasPrefix(target, "-") ||
-		unresolvedCredentialRemoteScalar(target) {
-		return false
-	}
-	hasCredential := false
-	for index := 1; index < len(args); index++ {
-		arg := args[index]
+	hasAuth := false
+	for _, arg := range argv[2:] {
 		lower := strings.ToLower(arg)
 		if arg == "-h" || lower == "--help" || lower == "--version" {
 			return false
 		}
-		switch {
-		case arg == "-p" || lower == "--password" || arg == "-H" ||
-			lower == "--hash" || lower == "--hashes":
-			if index+1 >= len(args) {
-				return false
-			}
-			value := args[index+1]
-			if value == "" || strings.HasPrefix(value, "-") ||
-				unresolvedCredentialRemoteScalar(value) {
-				return false
-			}
-			hasCredential = true
-			index++
+		if netExecAuthToken(arg) {
+			hasAuth = true
 		}
 	}
-	return hasCredential
+	return hasAuth
 }
