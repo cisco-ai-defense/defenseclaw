@@ -249,9 +249,18 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 		}
 	case "ENT-IBAN":
 		return func(_, match string, _, _ int) bool { return validIBAN(match) }
-	case "ENT-EMAIL-BULK":
+	case "ENT-EMAIL-BULK", "PII-EMAIL-FIELD":
 		return func(text, match string, start, end int) bool {
 			return credibleEmailContext(text, match, start, end)
+		}
+	case "PII-EMAIL-LIST":
+		// One address is ENT-EMAIL-BULK (LOW): a vendor no-reply address in
+		// an agent's own instructions must not block (substrate-1:GAP-0149).
+		// Five or more distinct addresses together (a CSV, a list, mailto
+		// links) is a bulk disclosure (substrate-1:GAP-0159).
+		return func(text, match string, start, end int) bool {
+			return emailListMember(text, start, end) && credibleEmailContext(text, match, start, end) &&
+				emailListAt(text, start)
 		}
 	case "ENT-PHONE-E164":
 		return func(text, match string, start, _ int) bool {
@@ -492,6 +501,57 @@ func credibleEmailContext(text, match string, start, end int) bool {
 		}
 	}
 	return true
+}
+
+const (
+	// emailListMinDistinct distinct addresses make a bulk email list.
+	emailListMinDistinct = 5
+	// emailListWindow bounds, in bytes from the first address, where the
+	// other addresses of one list must be.
+	emailListWindow = 4096
+)
+
+var emailAddressPattern = lazyregexp.New(`(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`)
+
+// gitIdentityLinePattern opens a line that names a commit identity: git log
+// and show headers and commit trailers. A git log of a busy repository lists
+// many authors; that is project history, not a disclosure of addresses.
+var gitIdentityLinePattern = lazyregexp.New(`(?i)^[\s>*-]*(?:author|commit|committer|co-authored-by|signed-off-by|reviewed-by|acked-by|tested-by|reported-by|suggested-by|helped-by|cc)\s*:`)
+
+// emailListAt reports emailListMinDistinct or more distinct list members in
+// the window that starts at the address at start.
+func emailListAt(text string, start int) bool {
+	end := min(len(text), start+emailListWindow)
+	seen := make(map[string]struct{}, emailListMinDistinct)
+	for _, loc := range emailAddressPattern.Regexp().FindAllStringIndex(text[start:end], -1) {
+		s, e := start+loc[0], start+loc[1]
+		if !emailListMember(text, s, e) {
+			continue
+		}
+		seen[strings.ToLower(text[s:e])] = struct{}{}
+		if len(seen) >= emailListMinDistinct {
+			return true
+		}
+	}
+	return false
+}
+
+// emailListMember applies the per-address checks of credibleEmailContext
+// that do not read the whole text, plus the commit-identity exclusion.
+func emailListMember(text string, start, end int) bool {
+	if start < 0 || end > len(text) || start >= end {
+		return false
+	}
+	address := strings.ToLower(text[start:end])
+	if strings.HasSuffix(address, ".compute.amazonaws.com") || emailDomainLooksLikeNumericHost(address) ||
+		emailIsPathSegment(text, start, end) {
+		return false
+	}
+	if strings.HasPrefix(strings.TrimLeft(text[end:], "\"'`"), ":") {
+		return false
+	}
+	lineStart := strings.LastIndexByte(text[:start], '\n') + 1
+	return !gitIdentityLinePattern.MatchString(text[lineStart:start])
 }
 
 // gitUserEmailPlaceholder reports a documentation-domain address given as

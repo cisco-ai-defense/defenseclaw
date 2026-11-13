@@ -67,9 +67,23 @@ rules:
   - id: ENT-EMAIL-BULK
     pattern: '(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b'
     title: "Email address"
-    severity: MEDIUM
+    severity: LOW
     confidence: 0.40
     tags: [pii]
+
+  - id: PII-EMAIL-LIST
+    pattern: '(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b'
+    title: "Five or more email addresses together"
+    severity: MEDIUM
+    confidence: 0.75
+    tags: [pii, bulk]
+
+  - id: PII-EMAIL-FIELD
+    pattern: '(?i)\b(?:e-?mail)(?:[\s_-]+address)?["''\s*_:#=-]{1,12}[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b'
+    title: "Email address in a labeled field"
+    severity: MEDIUM
+    confidence: 0.70
+    tags: [pii, structured]
 
   - id: ENT-PASSPORT-US
     pattern: '\b[A-Z]\d{8}\b'
