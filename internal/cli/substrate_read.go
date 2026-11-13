@@ -161,9 +161,9 @@ them and how long ago they started. Administrators see only their own agents unl
 			now := time.Now()
 			rows := make([][]string, 0, len(live))
 			for _, a := range live {
-				rows = append(rows, []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)})
+				rows = append(rows, []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateDash(a.State), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)})
 			}
-			substrateTable(cmd.OutOrStdout(), []string{"NAME", "AGENT", "PROFILE", "AGE", "BATCH"}, rows)
+			substrateTable(cmd.OutOrStdout(), []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH"}, rows)
 			return nil
 		},
 	}

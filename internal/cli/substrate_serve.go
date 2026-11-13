@@ -497,6 +497,8 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 					substrateRouterCheck(ctx, router, routerErr)}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), ConnectorOf: substrateTemplateConnector(ctl)},
+			// PLAN 7.3: the profile sandbox_class picks the class at create.
+			SandboxClass: gateway.SubstrateSandboxClassFor(c),
 			Limiter: ratelimit.New(ratelimit.Config{
 				PerActorRPS: c.Substrate.RateLimits.PerActorRPS, PerAtespaceRPS: c.Substrate.RateLimits.PerAtespaceRPS,
 			}),

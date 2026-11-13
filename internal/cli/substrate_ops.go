@@ -86,6 +86,9 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 			inner(e)
 		}
 	}
+	if follow {
+		defer substratePresence(cmd, a)()
+	}
 	code, err := attach.FollowTask(fctx, o, id, emit)
 	if err != nil && (!errors.Is(err, context.Canceled) || follow) {
 		return substrateFail(err)

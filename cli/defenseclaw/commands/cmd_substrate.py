@@ -600,7 +600,12 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("no-upload", "bool", "start with an empty folder; upload nothing"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
             _Flag("parallel", "int", "with --batch, how many agents run at once (default 4)", default="0"),
-            _Flag("profile", "string", "guard profile to run under (default: the one from login)", metavar="NAME"),
+            _Flag(
+                "profile",
+                "string",
+                "guard profile to run under (default: the one the cluster gives you)",
+                metavar="NAME",
+            ),
             _Flag("ref", "string", "with --clone, the branch, tag or commit", metavar="REF"),
             _Flag(
                 "secret",
