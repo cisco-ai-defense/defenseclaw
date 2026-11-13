@@ -296,3 +296,169 @@ func TestSSEFramerLongLineIsLinear(t *testing.T) {
 		t.Errorf("a 4 MiB line took %v in 4 KiB reads", d)
 	}
 }
+
+// GAP-0196 (RV9): the heartbeat gate skips the heartbeat text and nothing
+// else. A user message before the heartbeat in the same turn is inspected,
+// whatever the wire format, and so is every other text of the body.
+func TestPassthroughCoverageHeartbeatSameTurnProperty(t *testing.T) {
+	covAllowPrivate(t)
+	const hb = "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. If nothing needs attention, reply HEARTBEAT_OK."
+	if !isHeartbeatMessage(hb, nil) {
+		t.Skip("the heartbeat text of this tree changed")
+	}
+	type wire struct {
+		name, provider, path string
+		user                 func(text string) any // one user message
+		body                 func(items ...any) map[string]any
+	}
+	chatMsg := func(text string) any { return map[string]any{"role": "user", "content": text} }
+	wires := []wire{
+		{"responses", "openai", "/v1/responses",
+			func(text string) any { return map[string]any{"type": "message", "role": "user", "content": text} },
+			func(items ...any) map[string]any { return map[string]any{"model": "dc-test-model", "input": items} }},
+		{"anthropic", "anthropic", "/v1/messages", chatMsg,
+			func(items ...any) map[string]any {
+				return map[string]any{"model": "dc-test-model", "max_tokens": 16, "messages": items}
+			}},
+		{"chat", "openai", "/v1/chat/completions", chatMsg,
+			func(items ...any) map[string]any { return map[string]any{"model": "dc-test-model", "messages": items} }},
+		{"chat-parts", "openai", "/v1/chat/completions",
+			func(text string) any {
+				return map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": text}}}
+			},
+			func(items ...any) map[string]any { return map[string]any{"model": "dc-test-model", "messages": items} }},
+	}
+	shapes := []struct {
+		name  string
+		texts []string
+	}{
+		{"marker-then-heartbeat", []string{covMarker, hb}},
+		{"two-markers-then-heartbeat", []string{"a harmless sentence", covMarker, hb}},
+		{"heartbeat-copy-then-marker-then-heartbeat", []string{hb, covMarker, hb}},
+		{"marker-containing-the-heartbeat", []string{covMarker + " " + hb + " and more", hb}},
+	}
+	for _, managed := range []bool{false, true} {
+		for _, w := range wires {
+			for _, sh := range shapes {
+				w, sh, managed := w, sh, managed
+				t.Run(fmt.Sprintf("managed=%v/%s/%s", managed, w.name, sh.name), func(t *testing.T) {
+					covSetManaged(t, managed)
+					up := newCovUpstream(t)
+					insp := &covInspector{}
+					proxy := covProxy(t, up, w.provider, insp)
+					up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
+					items := make([]any, len(sh.texts))
+					for i, tx := range sh.texts {
+						items[i] = w.user(tx)
+					}
+					covPost(proxy, up, w.path, covJSON(t, w.body(items...)), nil)
+					if !insp.saw("prompt") || up.count() != 0 {
+						t.Errorf("a user message before the heartbeat was not inspected (saw=%v, upstream hits=%d)", insp.saw("prompt"), up.count())
+					}
+				})
+			}
+			t.Run(fmt.Sprintf("managed=%v/%s/heartbeat-alone-passes", managed, w.name), func(t *testing.T) {
+				covSetManaged(t, managed)
+				up := newCovUpstream(t)
+				proxy := covProxy(t, up, w.provider, &covInspector{})
+				up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
+				covPost(proxy, up, w.path, covJSON(t, w.body(w.user(hb))), nil)
+				if up.count() != 1 {
+					t.Errorf("a pure heartbeat turn was blocked (%d hits)", up.count())
+				}
+			})
+		}
+	}
+}
+
+// GAP-0196 (RV9): a request body that is not a JSON object is inspected (the
+// text of its fields) or takes the fail mode, in every mode; it is never an
+// empty pass.
+func TestPassthroughCoverageNonObjectRequestProperty(t *testing.T) {
+	covAllowPrivate(t)
+	multipart := func(parts ...[3]string) string { // name, filename+type ("" for a text field), value
+		var b strings.Builder
+		for _, p := range parts {
+			b.WriteString("--dcb\r\nContent-Disposition: form-data; name=\"" + p[0] + "\"")
+			if p[1] != "" {
+				ct, fn, _ := strings.Cut(p[1], "|")
+				b.WriteString("; filename=\"" + fn + "\"\r\nContent-Type: " + ct)
+			}
+			b.WriteString("\r\n\r\n" + p[2] + "\r\n")
+		}
+		b.WriteString("--dcb--\r\n")
+		return b.String()
+	}
+	const mpct = "multipart/form-data; boundary=dcb"
+	type tc struct {
+		name, path, ct, body string
+		marker, readable     bool // the marker is in a text position; a benign body of this shape passes
+	}
+	cases := []tc{
+		{"multipart-prompt-field", "/v1/images/edits", mpct, multipart([3]string{"model", "", "dc-test-model"}, [3]string{"image", "image/png|a.png", "\x89PNG\r\n\x1a\n"}, [3]string{"prompt", "", covMarker}), true, true},
+		{"multipart-transcription-prompt", "/v1/audio/transcriptions", mpct, multipart([3]string{"model", "", "dc-test-model"}, [3]string{"file", "audio/wav|a.wav", "RIFF"}, [3]string{"prompt", "", covMarker}), true, true},
+		{"multipart-text-file", "/v1/images/edits", mpct, multipart([3]string{"file", "text/plain|a.txt", covMarker}), true, true},
+		{"form-urlencoded", "/v1/responses", "application/x-www-form-urlencoded", "model=dc-test-model&input=" + covMarker, true, true},
+		{"json-array-root", "/v1/responses", "application/json", `[{"model":"dc-test-model","input":"` + covMarker + `"}]`, true, true},
+		{"json-string-root", "/v1/responses", "application/json", `"` + covMarker + `"`, true, true},
+		{"text-body", "/v1/responses", "text/plain", covMarker, true, true},
+		{"unlabelled-text-body", "/v1/responses", "", "model dc-test-model " + covMarker, true, true},
+	}
+	benignOf := func(c tc) string { return strings.ReplaceAll(c.body, covMarker, "a harmless sentence") }
+	for _, managed := range []bool{false, true} {
+		for _, c := range cases {
+			c, managed := c, managed
+			t.Run(fmt.Sprintf("managed=%v/%s", managed, c.name), func(t *testing.T) {
+				covSetManaged(t, managed)
+				up := newCovUpstream(t)
+				insp := &covInspector{}
+				proxy := covProxy(t, up, "openai", insp)
+				up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
+				hdr := map[string]string{"Content-Type": c.ct}
+				rec := covPost(proxy, up, c.path, []byte(c.body), hdr)
+				if !insp.saw("prompt") || up.count() != 0 {
+					t.Errorf("the marker in a %s body was not inspected (saw=%v, upstream hits=%d, status %d)", c.name, insp.saw("prompt"), up.count(), rec.Code)
+				}
+				// The same shape with benign text is read and passes.
+				up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
+				if rec := covPost(proxy, up, c.path, []byte(benignOf(c)), hdr); up.count() != 1 {
+					t.Errorf("a benign %s body did not reach the upstream (status %d)", c.name, rec.Code)
+				}
+			})
+		}
+		// What cannot be read takes the fail mode: refused on a managed install,
+		// forwarded with an alert otherwise.
+		for _, c := range []tc{
+			{name: "binary-body", path: "/v1/responses", ct: "application/octet-stream", body: "\x00\x01\x02\xff\xfe"},
+			{name: "multipart-no-boundary", path: "/v1/images/edits", ct: "multipart/form-data", body: multipart([3]string{"prompt", "", "x"})},
+			{name: "multipart-garbage", path: "/v1/images/edits", ct: mpct, body: "--dcb\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx"},
+			{name: "json-array-no-text", path: "/v1/responses", ct: "application/json", body: `[1,2,3]`},
+		} {
+			c, managed := c, managed
+			t.Run(fmt.Sprintf("managed=%v/unreadable/%s", managed, c.name), func(t *testing.T) {
+				covSetManaged(t, managed)
+				up := newCovUpstream(t)
+				proxy := covProxy(t, up, "openai", &covInspector{})
+				up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
+				covPost(proxy, up, c.path, []byte(c.body), map[string]string{"Content-Type": c.ct})
+				if managed && up.count() != 0 {
+					t.Errorf("managed forwarded a body it cannot read (%d hits)", up.count())
+				}
+				if !managed && up.count() != 1 {
+					t.Errorf("the OSS default did not forward the unreadable body with an alert (%d hits)", up.count())
+				}
+			})
+		}
+	}
+	// Media only: a transcription with an audio file and no text carries no text.
+	t.Run("media-only-passes", func(t *testing.T) {
+		covSetManaged(t, true)
+		up := newCovUpstream(t)
+		proxy := covProxy(t, up, "openai", &covInspector{})
+		up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
+		covPost(proxy, up, "/v1/audio/transcriptions", []byte(multipart([3]string{"model", "", "dc-test-model"}, [3]string{"file", "audio/wav|a.wav", "RIFF"})), map[string]string{"Content-Type": mpct})
+		if up.count() != 1 {
+			t.Errorf("a media-only transcription was refused (%d hits)", up.count())
+		}
+	})
+}

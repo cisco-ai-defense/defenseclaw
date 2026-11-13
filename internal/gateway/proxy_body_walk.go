@@ -8,8 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
+	"mime/multipart"
+	"net/url"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Inspect by default (substrate-1 GAP-0189, GAP-0196). The guardrail proxy
@@ -593,14 +597,23 @@ func passthroughPromptFor(body []byte, jsonHint bool) passthroughSidePrompt {
 		return passthroughSidePrompt{}
 	}
 	if trimmed[0] != '{' && trimmed[0] != '[' && !jsonHint {
-		return passthroughSidePrompt{}
+		return plainBodyPrompt(body)
 	}
 	root, err := parseJSONTree(trimmed)
 	if err != nil {
 		return passthroughSidePrompt{Unreadable: "the body is not valid JSON: " + err.Error()}
 	}
 	if root.kind != 'o' {
-		return passthroughSidePrompt{}
+		// A JSON array or scalar at the root is no model request the proxy
+		// knows, but its strings are still read: they are text a provider
+		// may take for a prompt. No text at all takes the fail mode.
+		w := &textWalker{}
+		w.walk(root, "", 1)
+		side := passthroughSidePrompt{Segments: w.segs, Text: strings.Join(w.segs, "\n"), Unreadable: w.ambiguous}
+		if len(w.segs) == 0 && side.Unreadable == "" {
+			side.Unreadable = "the JSON body is not an object and carries no text"
+		}
+		return side
 	}
 	w := &textWalker{}
 	seen := map[string]bool{}
@@ -641,6 +654,92 @@ func passthroughPromptFor(body []byte, jsonHint bool) passthroughSidePrompt {
 		side.Unreadable = "the body carries no prompt text"
 	}
 	return side
+}
+
+// passthroughPromptForRequest reads a request body by its content type: a
+// multipart or a form body by its text fields (GAP-0196), anything else as
+// passthroughPromptFor does.
+func passthroughPromptForRequest(body []byte, contentType string, jsonHint bool) passthroughSidePrompt {
+	if mt, params, err := mime.ParseMediaType(contentType); err == nil {
+		switch {
+		case strings.HasPrefix(mt, "multipart/"):
+			return multipartPrompt(body, params["boundary"])
+		case mt == "application/x-www-form-urlencoded":
+			return formPrompt(body)
+		}
+	}
+	return passthroughPromptFor(body, jsonHint)
+}
+
+// plainBodyPrompt reads a body that is not JSON and not a form: text is
+// inspected as it is; binary bytes cannot be, and take the fail mode.
+func plainBodyPrompt(body []byte) passthroughSidePrompt {
+	if utf8.Valid(body) && !bytes.Contains(body, []byte{0}) {
+		t := string(body)
+		return passthroughSidePrompt{Segments: []string{t}, Text: t}
+	}
+	return passthroughSidePrompt{Unreadable: "the body is binary and neither JSON nor a form"}
+}
+
+// formPrompt reads an application/x-www-form-urlencoded body: every value
+// is text, except the fields known not to be (model, user, size ...).
+func formPrompt(body []byte) passthroughSidePrompt {
+	vals, err := url.ParseQuery(string(body))
+	if err != nil {
+		return passthroughSidePrompt{Unreadable: "the form body cannot be parsed: " + err.Error()}
+	}
+	w := &textWalker{}
+	for k, vs := range vals {
+		if walkSkipScalar[normKey(k)] {
+			continue
+		}
+		for _, v := range vs {
+			w.add(v)
+		}
+	}
+	return passthroughSidePrompt{Segments: w.segs, Text: strings.Join(w.segs, "\n")}
+}
+
+// multipartPrompt reads a multipart/form-data body: every text field, and
+// every part whose own type is text, is inspected; a file of a binary type
+// (an image or an audio file to edit or transcribe) is media and is not.
+// A body that cannot be parsed takes the fail mode.
+func multipartPrompt(body []byte, boundary string) passthroughSidePrompt {
+	if boundary == "" {
+		return passthroughSidePrompt{Unreadable: "the multipart body has no boundary"}
+	}
+	w := &textWalker{}
+	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	parts := 0
+	for {
+		part, err := mr.NextRawPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return passthroughSidePrompt{Unreadable: "the multipart body cannot be parsed: " + err.Error()}
+		}
+		parts++
+		data, err := io.ReadAll(part)
+		if err != nil {
+			return passthroughSidePrompt{Unreadable: "the multipart body cannot be parsed: " + err.Error()}
+		}
+		ct := strings.ToLower(part.Header.Get("Content-Type"))
+		mt, _, _ := mime.ParseMediaType(ct)
+		file := part.FileName() != ""
+		isText := textMediaType(mt) && (!file || mt != "")
+		if !isText || (!file && walkSkipScalar[normKey(part.FormName())]) {
+			continue // binary media (an image or an audio file), or a field that is no text
+		}
+		if !utf8.Valid(data) {
+			return passthroughSidePrompt{Unreadable: "a multipart text field is not valid UTF-8"}
+		}
+		w.add(string(data))
+	}
+	if parts == 0 {
+		return passthroughSidePrompt{Unreadable: "the multipart body has no parts"}
+	}
+	return passthroughSidePrompt{Segments: w.segs, Text: strings.Join(w.segs, "\n")}
 }
 
 // ---- replies ---------------------------------------------------------------------
@@ -699,14 +798,16 @@ func scanReplyBody(data []byte) (replyScan, bool) {
 
 // joinPromptSegments adds the segments of a body to the text the proxy
 // already inspects (the user turn), once: a segment the text contains, or
-// that is part of skip (the heartbeat text), is left out.
+// that is exactly skip (the heartbeat text), is left out. A segment that only
+// contains the heartbeat text, or is part of it, is text like any other
+// (GAP-0196: a user message before a heartbeat in the same turn).
 func joinPromptSegments(inspect string, segs []string, skip string) string {
 	budget := 64 << 20
 	seen := map[string]bool{}
 	var b strings.Builder
 	b.WriteString(inspect)
 	for _, s := range segs {
-		if seen[s] || (skip != "" && strings.Contains(skip, s)) {
+		if seen[s] || (skip != "" && strings.TrimSpace(s) == strings.TrimSpace(skip)) {
 			continue
 		}
 		seen[s] = true

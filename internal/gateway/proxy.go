@@ -1486,7 +1486,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// Every prompt-side text of the body, not only the user turn: system,
 	// developer and instructions text wherever it sits, and the tool
 	// results sent back since the model's last turn (GAP-0196).
-	side := passthroughPromptFor(body, jsonHint)
+	side := passthroughPromptForRequest(body, wireCT, jsonHint)
 	if bodyUndecodable != "" {
 		side = passthroughSidePrompt{Unreadable: bodyUndecodable}
 	}
@@ -1495,7 +1495,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// results, tool definitions).
 	skipText := ""
 	if userText != "" && (isHeartbeatMessage(userText, partial.Messages) || isSessionStartupMessage(userText)) {
-		skipText, inspectRaw = inspectRaw+"\n"+userText, ""
+		skipText, inspectRaw = userText, ""
 	}
 	inspectRaw = joinPromptSegments(inspectRaw, side.Segments, skipText)
 	inspectionText := promptInspectionText(inspectRaw)
@@ -2700,7 +2700,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// never the other text of the body.
 	chatSkip := ""
 	if userText != "" && (isHeartbeatMessage(userText, req.Messages) || isSessionStartupMessage(userText)) {
-		chatSkip, inspectText = inspectText+"\n"+userText, ""
+		chatSkip, inspectText = userText, ""
 	}
 	inspectText = joinPromptSegments(inspectText, chatSide.Segments, chatSkip)
 	if chatSide.Unreadable != "" && p.uninspectablePrompt(r.Context(), req.Model, mode, chatSide.Unreadable) {
