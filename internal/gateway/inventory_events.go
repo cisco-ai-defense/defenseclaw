@@ -700,6 +700,13 @@ func hasNativeMCPReader(connectorName string) bool {
 	return false
 }
 
+// readMCPServersUnderHomeForOS preserves the best-effort reader used by
+// callers that do not publish authoritative inventory snapshots.
+func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.MCPServerEntry {
+	groups, _ := readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos)
+	return groups
+}
+
 // readMCPServersUnderHomeForOSWithStatus reads each native config source under
 // home and reports whether an expected source was unreadable or invalid.
 func readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos string) ([][]config.MCPServerEntry, bool) {
