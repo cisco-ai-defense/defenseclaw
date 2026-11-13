@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
@@ -49,13 +50,19 @@ type acpFrameAction struct {
 	// prose is the frame's text that is not the action (a permission's
 	// title and content blocks), still judged by the content rules.
 	prose string
+	// trunc holds the caps hit while reading the frame (more locations than
+	// the bound, a field left out of the kept state for size, an action
+	// whose shape is not known). What was read is judged as usual and the
+	// verdict is then raised to the unknown tier of the pack
+	// (internal/guardrail/bounded), never below.
+	trunc bounded.Truncated
 }
 
-// acpMaxFrameToolCalls bounds the calls one frame may have judged (a
-// permission naming many locations). A frame that names more is refused as
-// unread, never judged in part: a location past the bound was never judged,
-// and a permission is the one point where the action can still be refused
-// (rel-1-0-10:GAP-0296).
+// acpMaxFrameToolCalls bounds the locations of one frame that are judged one
+// by one (a permission naming many). A frame that names more has its first
+// ones judged and is then judged at the unknown tier of the pack: alert in
+// the default and permissive packs, which the editor shows as the permission
+// it asks the user, and block in strict (rel-1-0-10:GAP-0296, GAP-0331).
 const acpMaxFrameToolCalls = 64
 
 // acpFrameToolCalls is the action of one ACP frame. ok is false for a frame
@@ -83,8 +90,10 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 		if json.Unmarshal(msg.Params, &params) != nil || !acpJSONObject(params.ToolCall) {
 			return acpFrameAction{calls: []acpToolCall{{unread: true}}, enforceable: true}, true
 		}
-		calls, prose := acpToolCallUpdateCalls(params.ToolCall, goos, true)
-		return acpFrameAction{calls: calls, enforceable: true, prose: prose}, true
+		toolCall, trunc := acpMergeToolCall(req.ToolCallState, params.ToolCall)
+		calls, prose, more := acpToolCallUpdateCalls(toolCall, goos, true)
+		trunc.Merge(more)
+		return acpFrameAction{calls: calls, enforceable: true, prose: prose, trunc: trunc}, true
 	case "session/update":
 		var params struct {
 			Update json.RawMessage `json:"update"`
@@ -99,13 +108,22 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 			(update.SessionUpdate != "tool_call" && update.SessionUpdate != "tool_call_update") {
 			return acpFrameAction{}, false
 		}
-		calls, prose := acpToolCallUpdateCalls(params.Update, goos, false)
+		update2 := params.Update
+		var trunc bounded.Truncated
+		if acpUpdateNamesAnAction(update2) {
+			// A report that carries the kind, input or locations of the call
+			// is the call as the editor merges it onto the earlier reports;
+			// a status or output update alone names no action.
+			update2, trunc = acpMergeToolCall(req.ToolCallState, update2)
+		}
+		calls, prose, more := acpToolCallUpdateCalls(update2, goos, false)
+		trunc.Merge(more)
 		if len(calls) == 0 {
 			// A status or output report names no action: its text is agent
 			// output, judged as before.
 			return acpFrameAction{}, false
 		}
-		return acpFrameAction{calls: calls, prose: prose}, true
+		return acpFrameAction{calls: calls, prose: prose, trunc: trunc}, true
 	}
 	if acp.Classify(msg, req.Direction) != acp.SurfaceTool {
 		return acpFrameAction{}, false
@@ -189,8 +207,18 @@ func acpFileCall(method string, raw json.RawMessage) acpToolCall {
 // permission's toolCall, a tool_call report) as the tool calls it performs:
 // by its kind, from its rawInput and locations. prose is its other text
 // (title, content blocks). A report that names no input gives no calls; a
-// permission for an action it does not show is refused as unread.
-func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) ([]acpToolCall, string) {
+// permission for an action it does not show is refused as unread. trunc holds
+// the caps hit: more locations than acpMaxFrameToolCalls (the first ones are
+// judged), or an action whose shape could not be fixed.
+//
+// A call without a kind (the field is optional in an update, and the kind may
+// have come only in the first report) is read by the shape of its input, as
+// the effects model reads it: a command is a shell call, text to write or a
+// replacement is a Write or Edit of its location, a location alone is a Write
+// of it (a permission is asked before the action, so the strictest file
+// reading applies). It is never judged as a generic tool, which reads its
+// locations as reads (rel-1-0-10:GAP-0330).
+func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (calls []acpToolCall, prose string, trunc bounded.Truncated) {
 	var call struct {
 		Kind      string          `json:"kind"`
 		Title     string          `json:"title"`
@@ -201,11 +229,11 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 	}
 	if json.Unmarshal(raw, &call) != nil {
 		if permission {
-			return []acpToolCall{{unread: true}}, ""
+			return []acpToolCall{{unread: true}}, "", trunc
 		}
-		return nil, ""
+		return nil, "", trunc
 	}
-	prose := acpToolCallProse(raw)
+	prose = acpToolCallProse(raw)
 	input := map[string]json.RawMessage{}
 	hasInput := acpJSONObject(call.RawInput) && json.Unmarshal(call.RawInput, &input) == nil && len(input) > 0
 	var paths []string
@@ -213,32 +241,57 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 		paths = append(paths, path)
 	}
 	for _, location := range call.Locations {
-		if path := strings.TrimSpace(location.Path); path != "" && !slices.Contains(paths, path) {
-			paths = append(paths, path)
-			if len(paths) > acpMaxFrameToolCalls {
-				break // addPaths refuses the frame as unread
-			}
+		path := strings.TrimSpace(location.Path)
+		if path == "" || slices.Contains(paths, path) {
+			continue
 		}
+		if len(paths) == acpMaxFrameToolCalls {
+			trunc.Hit(bounded.Locations)
+			break
+		}
+		paths = append(paths, path)
 	}
 	if !hasInput && len(paths) == 0 {
 		if permission {
 			// The editor is asked to allow an action the frame does not
 			// show: it cannot be shown to be safe.
-			return []acpToolCall{{unread: true}}, prose
+			return []acpToolCall{{unread: true}}, prose, trunc
 		}
-		return nil, prose
+		return nil, prose, trunc
 	}
-	var calls []acpToolCall
+	// The text an edit writes, under the names ACP agents use. Kiro's own
+	// fs_write and str_replace inputs say file_text, old_str and new_str
+	// (connector.KiroTrustedWriteArgs); read only as "content", the text
+	// never reached the content rules.
+	content, hasContent := acpInputTextOf(input, "content", "file_text", "fileText", "text")
+	oldText, hasOld := acpInputTextOf(input, "old_string", "old_str", "oldStr", "oldString")
+	newText, hasNew := acpInputTextOf(input, "new_string", "new_str", "newStr", "newString")
+	kind := call.Kind
+	if kind == "" {
+		_, hasCommand := acpInputCommandKey(input)
+		switch {
+		case hasCommand:
+			kind = "execute"
+		case len(paths) > 0:
+			kind = "edit"
+		default:
+			// An input that names no command and no location: the action it
+			// performs is not known.
+			trunc.Hit(bounded.Items)
+		}
+	}
+	added := 0
 	addPaths := func(tool string, args func(path string) map[string]string) {
 		for _, path := range paths {
-			if len(calls) == acpMaxFrameToolCalls {
-				calls = append(calls, acpToolCall{unread: true})
+			if added == acpMaxFrameToolCalls {
+				trunc.Hit(bounded.Locations)
 				return
 			}
+			added++
 			calls = append(calls, acpToolCall{tool: tool, args: acpMarshal(args(path))})
 		}
 	}
-	switch call.Kind {
+	switch kind {
 	case "execute":
 		command, ok := acpInputCommand(input, goos)
 		if !ok {
@@ -248,20 +301,13 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 			if !hasInput {
 				args = json.RawMessage(`{}`)
 			}
-			return []acpToolCall{{tool: "shell", args: args}}, prose
+			return []acpToolCall{{tool: "shell", args: args}}, prose, trunc
 		}
 		return []acpToolCall{{tool: "shell", args: acpCommandArgs(command),
-			cwd: acpInputString(input, "cwd", "workdir", "working_directory", "directory")}}, prose
+			cwd: acpInputString(input, "cwd", "workdir", "working_directory", "directory")}}, prose, trunc
 	case "read":
 		addPaths("Read", func(path string) map[string]string { return map[string]string{"file_path": path} })
 	case "edit":
-		// The text an edit writes, under the names ACP agents use. Kiro's own
-		// fs_write and str_replace inputs say file_text, old_str and new_str
-		// (connector.KiroTrustedWriteArgs); read only as "content", the text
-		// never reached the content rules.
-		content, hasContent := acpInputTextOf(input, "content", "file_text", "fileText", "text")
-		oldText, hasOld := acpInputTextOf(input, "old_string", "old_str", "oldStr", "oldString")
-		newText, hasNew := acpInputTextOf(input, "new_string", "new_str", "newStr", "newString")
 		addPaths("Write", func(path string) map[string]string {
 			switch {
 			case hasOld && hasNew && path == paths[0]:
@@ -282,7 +328,7 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 		}
 	}
 	if len(calls) > 0 {
-		return calls, prose
+		return calls, prose, trunc
 	}
 	// Any other kind (search, move, think, other) or a kind the input does
 	// not fit: a tool call under the tool's name, read by the non-shell tool
@@ -291,9 +337,58 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 	if !hasInput {
 		args = json.RawMessage(`{}`)
 	}
-	calls = append(calls, acpToolCall{tool: acpToolName(call.Title, call.Kind), args: args})
+	calls = append(calls, acpToolCall{tool: acpToolName(call.Title, kind), args: args})
 	addPaths("Read", func(path string) map[string]string { return map[string]string{"file_path": path} })
-	return calls, prose
+	return calls, prose, trunc
+}
+
+// acpUpdateNamesAnAction reports that a tool_call report carries the kind,
+// the input or the locations of its call.
+func acpUpdateNamesAnAction(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return false
+	}
+	for _, name := range []string{"kind", "rawInput", "locations"} {
+		if value, ok := fields[name]; ok && strings.TrimSpace(string(value)) != "null" {
+			return true
+		}
+	}
+	return false
+}
+
+// acpMergeToolCall applies a ToolCallUpdate (own) onto the fields the guard
+// kept of the call it names (state, Evaluation.ToolCallState), as the editor
+// does: a field own holds replaces the kept one. A field the guard left out
+// of the state for size is a cap hit.
+func acpMergeToolCall(state, own json.RawMessage) (json.RawMessage, bounded.Truncated) {
+	var trunc bounded.Truncated
+	if len(state) == 0 {
+		return own, trunc
+	}
+	var kept struct {
+		Kind      json.RawMessage `json:"kind"`
+		Title     json.RawMessage `json:"title"`
+		RawInput  json.RawMessage `json:"rawInput"`
+		Locations json.RawMessage `json:"locations"`
+		Truncated bool            `json:"truncated"`
+	}
+	var fields map[string]json.RawMessage
+	if len(state) > acp.MaxFrameBytes || json.Unmarshal(state, &kept) != nil || json.Unmarshal(own, &fields) != nil || fields == nil {
+		return own, trunc
+	}
+	if kept.Truncated {
+		trunc.Hit(bounded.Bytes)
+	}
+	for name, value := range map[string]json.RawMessage{"kind": kept.Kind, "title": kept.Title, "rawInput": kept.RawInput, "locations": kept.Locations} {
+		if len(value) == 0 {
+			continue
+		}
+		if present, ok := fields[name]; !ok || strings.TrimSpace(string(present)) == "null" {
+			fields[name] = value
+		}
+	}
+	return acpMarshal(fields), trunc
 }
 
 // acpToolCallProse is the text of a ToolCall other than its rawInput and
@@ -329,6 +424,17 @@ func acpInputCommand(input map[string]json.RawMessage, goos string) (string, boo
 			return strings.Join(words, " "), true
 		}
 		return "", false
+	}
+	return "", false
+}
+
+// acpInputCommandKey reports that input names a command (command or cmd), in
+// whatever shape.
+func acpInputCommandKey(input map[string]json.RawMessage) (string, bool) {
+	for _, key := range []string{"command", "cmd"} {
+		if _, ok := input[key]; ok {
+			return key, true
+		}
 	}
 	return "", false
 }
@@ -435,21 +541,22 @@ func (a *APIServer) inspectACPFrameAction(
 ) (verdict *ToolInspectVerdict, reportOnly bool) {
 	profile := a.hookProfileForRequest(ctx, connectorName)
 	session := acpFrameSessionID(req, false)
-	secureClient := a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration()
+	tier := a.boundedTier(ctx, connectorName)
+	trunc := action.trunc
 	for _, call := range action.calls {
 		var judged *ToolInspectVerdict
 		cwd := acpCallDirectory(req.SessionCWD, call.cwd)
-		switch {
-		case call.unread:
+		if call.unread {
 			judged = acpUnreadToolCallVerdict(connectorName)
-		case call.tool == "shell" && !filepath.IsAbs(cwd) && !secureClient:
-			// A command runs in the directory the editor gave the session
-			// when the frame names none. With neither known, the rules would
-			// read the files a command names relative to nothing, so the
-			// command is unknown, never clean (rel-1-0-10:GAP-0297). The
-			// guard of Secure Client sends no session directory.
-			judged = acpUnreadToolCallVerdict(connectorName)
-		default:
+		} else {
+			if acpCallNeedsDirectory(call) && !acpAbsolute(cwd) {
+				// A command runs in the directory the frame names, else in
+				// the session's; a file named relative to one. With none
+				// known, the rules read what the call names relative to
+				// nothing: judged as given, then raised to the unknown tier
+				// of the pack, never clean (rel-1-0-10:GAP-0297, GAP-0331).
+				trunc.Hit(bounded.Paths)
+			}
 			// Judged as the hook path judges a tool call that can be
 			// refused. The report of a tool the agent already ran is then
 			// capped below: an alert that would have blocked, as for a hook
@@ -470,6 +577,11 @@ func (a *APIServer) inspectACPFrameAction(
 		}
 		verdict = strongerACPVerdict(verdict, judged)
 	}
+	// What was read before a cap decides on its own; a frame cut short or
+	// read relative to nothing is at least the unknown tier of the pack: alert
+	// in the default and permissive packs (the editor still asks the user a
+	// permission), block in strict.
+	verdict.floorBoundedTruncated(trunc, tier)
 	if verdict != nil && !action.enforceable {
 		if decided := normalizeCodexAction(verdict.Action); decided == "block" || decided == "confirm" {
 			capped := *verdict
@@ -488,6 +600,46 @@ func (a *APIServer) inspectACPFrameAction(
 		verdict = &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
 	return verdict, reportOnly
+}
+
+// acpCallNeedsDirectory reports a call whose verdict depends on the
+// directory it runs in: a shell command, and a file call that names its path
+// relative.
+func acpCallNeedsDirectory(call acpToolCall) bool {
+	if call.tool == "shell" {
+		return true
+	}
+	switch call.tool {
+	case "Read", "Write", "Edit", "delete_file":
+		var args struct {
+			FilePath string `json:"file_path"`
+			Path     string `json:"path"`
+		}
+		if json.Unmarshal(call.args, &args) != nil {
+			return false
+		}
+		path := strings.TrimSpace(args.FilePath + args.Path)
+		return path != "" && !acpAbsolute(path)
+	}
+	return false
+}
+
+// acpAbsolute reports a path or directory that names its place by itself, in
+// either platform's spelling: a rooted POSIX path, a drive or UNC path of
+// Windows, or one under the home (~). A Windows spelling is absolute here
+// whatever platform the gateway runs on, as the rules read it.
+func acpAbsolute(path string) bool {
+	path = strings.TrimSpace(path)
+	switch {
+	case path == "":
+		return false
+	case filepath.IsAbs(path), strings.HasPrefix(path, "/"), strings.HasPrefix(path, `\\`), strings.HasPrefix(path, "~"):
+		return true
+	case len(path) >= 3 && path[1] == ':' && (path[2] == '\\' || path[2] == '/') &&
+		(path[0]|0x20) >= 'a' && (path[0]|0x20) <= 'z':
+		return true
+	}
+	return false
 }
 
 // acpCallDirectory is the directory an ACP action runs in: the one the frame

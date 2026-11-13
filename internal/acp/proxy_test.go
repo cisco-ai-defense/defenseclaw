@@ -1158,14 +1158,117 @@ func TestCopyFramesSendsTheSessionDirectoryWithAgentFrames(t *testing.T) {
 
 func TestProxyStateBoundsTheSessionDirectoriesItKeeps(t *testing.T) {
 	state := &proxyState{}
-	for i := 0; i < maxTrackedSessions+10; i++ {
+	load := func(session string) {
 		state.noteSessionCWD(Message{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "session/load",
-			Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"s%d","cwd":"/tmp/x"}`, i))}, ClientToAgent, "")
+			Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"%s","cwd":"/tmp/%s"}`, session, session))}, ClientToAgent, "")
 	}
-	if len(state.sessionCWDs) != maxTrackedSessions {
-		t.Fatalf("%d session directories kept, want %d", len(state.sessionCWDs), maxTrackedSessions)
+	load("first")
+	for i := 0; i < maxTrackedSessions-1; i++ {
+		load(fmt.Sprintf("s%d", i))
 	}
-	if state.sessionCWD(fmt.Sprintf("s%d", maxTrackedSessions+5)) != "" {
-		t.Fatal("a session past the bound has a directory")
+	if state.sessionCWDs.len() != maxTrackedSessions {
+		t.Fatalf("%d session directories kept, want %d", state.sessionCWDs.len(), maxTrackedSessions)
+	}
+	// A session that is in use stays; the least recently used one goes.
+	if state.sessionCWD("first") != "/tmp/first" {
+		t.Fatal("first session lost before the bound")
+	}
+	load("one-more")
+	if state.sessionCWDs.len() != maxTrackedSessions {
+		t.Fatalf("%d session directories kept after the bound, want %d", state.sessionCWDs.len(), maxTrackedSessions)
+	}
+	if state.sessionCWD("one-more") != "/tmp/one-more" || state.sessionCWD("first") != "/tmp/first" {
+		t.Fatal("the new session and the one in use must be kept")
+	}
+	if state.sessionCWD("s0") != "" {
+		t.Fatal("the least recently used session kept its directory")
+	}
+}
+
+// An answer settles its request whatever method the agent answered as, and an
+// answer naming a tracked session does not re-point it (GAP-0297 review).
+func TestProxyStateSessionAnswersSettleAndNeverRepoint(t *testing.T) {
+	state := &proxyState{}
+	request := func(id, cwd string) Message {
+		return Message{JSONRPC: "2.0", ID: json.RawMessage(id), Method: "session/new", Params: json.RawMessage(`{"cwd":"` + cwd + `"}`)}
+	}
+	answer := func(id, result string) Message {
+		return Message{JSONRPC: "2.0", ID: json.RawMessage(id), Result: json.RawMessage(result)}
+	}
+	state.noteSessionCWD(request("1", "/tmp/a"), ClientToAgent, "")
+	state.noteSessionCWD(answer("1", `{"sessionId":"a"}`), AgentToClient, "session/new")
+	state.noteSessionCWD(request("2", "/tmp/b"), ClientToAgent, "")
+	state.noteSessionCWD(answer("2", `{"sessionId":"a"}`), AgentToClient, "session/new") // names a tracked session
+	if state.sessionCWD("a") != "/tmp/a" {
+		t.Fatalf("session a re-pointed to %q", state.sessionCWD("a"))
+	}
+	state.noteSessionCWD(request("3", "/tmp/c"), ClientToAgent, "")
+	state.noteSessionCWD(answer("3", `{"stopReason":"end_turn"}`), AgentToClient, "session/prompt") // answered as another method
+	if len(state.newSessionCWDs) != 0 {
+		t.Fatalf("%d pending session directories left after their answers", len(state.newSessionCWDs))
+	}
+	// An agent that sends session/load itself records nothing.
+	state.noteSessionCWD(Message{JSONRPC: "2.0", ID: json.RawMessage("9"), Method: "session/load",
+		Params: json.RawMessage(`{"sessionId":"x","cwd":"/tmp/x"}`)}, AgentToClient, "")
+	if state.sessionCWD("x") != "" {
+		t.Fatal("a session/load from the agent set a directory")
+	}
+}
+
+// GAP-0330: the guard keeps the fields of each tool call the agent reports and
+// hands the state before a frame to the gateway, which merges the frame onto it.
+func TestProxyStateFoldsToolCallsAsTheEditorMergesThem(t *testing.T) {
+	state := &proxyState{}
+	update := func(kind, fields string) Message {
+		return Message{JSONRPC: "2.0", Method: "session/update", Params: json.RawMessage(
+			`{"sessionId":"s","update":{"sessionUpdate":"` + kind + `","toolCallId":"t1"` + fields + `}}`)}
+	}
+	if before := state.foldToolCall(update("tool_call", `,"kind":"execute","title":"Run ls","rawInput":{"command":"ls"}`)); before != nil {
+		t.Fatalf("state before the first report: %s", before)
+	}
+	before := state.foldToolCall(update("tool_call_update", `,"status":"in_progress"`))
+	var got toolCallFields
+	if err := json.Unmarshal(before, &got); err != nil || string(got.Kind) != `"execute"` || string(got.RawInput) != `{"command":"ls"}` {
+		t.Fatalf("state before the update: %s (%v)", before, err)
+	}
+	permission := Message{JSONRPC: "2.0", ID: json.RawMessage("5"), Method: "session/request_permission",
+		Params: json.RawMessage(`{"sessionId":"s","toolCall":{"toolCallId":"t1","title":"Run ls"},"options":[]}`)}
+	before = state.foldToolCall(permission)
+	if err := json.Unmarshal(before, &got); err != nil || string(got.Kind) != `"execute"` {
+		t.Fatalf("a permission without a kind does not get the kind of its call: %s", before)
+	}
+	// A later field replaces the kept one; a null does not.
+	state.foldToolCall(update("tool_call_update", `,"rawInput":{"command":"pwd"},"kind":null`))
+	before = state.foldToolCall(update("tool_call_update", ``))
+	if err := json.Unmarshal(before, &got); err != nil || string(got.Kind) != `"execute"` || string(got.RawInput) != `{"command":"pwd"}` {
+		t.Fatalf("merged state: %s", before)
+	}
+	// Another session or tool call has its own state; a frame that is no tool call has none.
+	other := Message{JSONRPC: "2.0", Method: "session/update", Params: json.RawMessage(`{"sessionId":"s2","update":{"sessionUpdate":"tool_call_update","toolCallId":"t1"}}`)}
+	if before := state.foldToolCall(other); before != nil {
+		t.Fatalf("state leaked across sessions: %s", before)
+	}
+	if before := state.foldToolCall(Message{Method: "session/update", Params: json.RawMessage(`{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk"}}`)}); before != nil {
+		t.Fatalf("state for a frame that is no tool call: %s", before)
+	}
+}
+
+func TestProxyStateToolCallStateIsBounded(t *testing.T) {
+	state := &proxyState{}
+	big := strings.Repeat("a", maxToolCallStateBytes)
+	state.foldToolCall(Message{JSONRPC: "2.0", Method: "session/update", Params: json.RawMessage(
+		`{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"big","kind":"execute","rawInput":{"command":"` + big + `"}}}`)})
+	before := state.foldToolCall(Message{JSONRPC: "2.0", Method: "session/update", Params: json.RawMessage(
+		`{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"big"}}`)})
+	var got toolCallFields
+	if err := json.Unmarshal(before, &got); err != nil || !got.Truncated || len(got.RawInput) != 0 || string(got.Kind) != `"execute"` {
+		t.Fatalf("oversize state: %s (%v)", before, err)
+	}
+	for i := 0; i < maxTrackedToolCalls+5; i++ {
+		state.foldToolCall(Message{JSONRPC: "2.0", Method: "session/update", Params: json.RawMessage(
+			fmt.Sprintf(`{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"c%d","kind":"read"}}`, i))})
+	}
+	if state.toolCalls.len() != maxTrackedToolCalls {
+		t.Fatalf("%d tool calls kept, want %d", state.toolCalls.len(), maxTrackedToolCalls)
 	}
 }

@@ -114,6 +114,13 @@ func validJSONRPCID(id json.RawMessage) bool {
 	return number.String() != ""
 }
 
+// acpFreeFormKey names the members that hold data nothing here reads by key:
+// the output a tool reported (rawOutput) and the extension metadata (_meta,
+// ACP's reserved member). Keys that differ only in case are ordinary there (a
+// header map with ETag and etag), so the folded check stops at them; an
+// exact duplicate is still refused.
+func acpFreeFormKey(key string) bool { return key == "rawOutput" || key == "_meta" }
+
 // foldJSONKey is a key as encoding/json matches it to a struct field: with
 // simple case folding, each rune read as the smallest rune of its fold orbit.
 func foldJSONKey(key string) string {
@@ -131,7 +138,8 @@ func foldJSONKey(key string) string {
 // rejectDuplicateJSONKeys recursively rejects ambiguous objects. Different
 // JSON implementations disagree about whether the first or last duplicate
 // wins, which otherwise creates a parser-smuggling boundary between the guard
-// and the ACP peer. Keys that differ only in letter case are duplicates too
+// and the ACP peer. Keys that differ only in letter case are duplicates too,
+// except inside free-form members (acpFreeFormKey)
 // (rel-1-0-10:GAP-0295): encoding/json, which reads every frame here, matches
 // a field name without regard to case and keeps the last such key, while the
 // editor and the agent (serde and other exact-match readers) read the exact
@@ -140,8 +148,8 @@ func foldJSONKey(key string) string {
 func rejectDuplicateJSONKeys(frame []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(frame))
 	decoder.UseNumber()
-	var visit func() error
-	visit = func() error {
+	var visit func(free bool) error
+	visit = func(free bool) error {
 		token, err := decoder.Token()
 		if err != nil {
 			return err
@@ -162,7 +170,10 @@ func rejectDuplicateJSONKeys(frame []byte) error {
 				if !keyOK {
 					return errors.New("object key is not a string")
 				}
-				folded := foldJSONKey(key)
+				folded := key
+				if !free {
+					folded = foldJSONKey(key)
+				}
 				if first, duplicate := seen[folded]; duplicate {
 					if first == key {
 						return fmt.Errorf("duplicate JSON key %q", key)
@@ -170,7 +181,7 @@ func rejectDuplicateJSONKeys(frame []byte) error {
 					return fmt.Errorf("JSON keys %q and %q differ only in letter case", first, key)
 				}
 				seen[folded] = key
-				if err := visit(); err != nil {
+				if err := visit(free || acpFreeFormKey(key)); err != nil {
 					return err
 				}
 			}
@@ -178,7 +189,7 @@ func rejectDuplicateJSONKeys(frame []byte) error {
 			return err
 		case '[':
 			for decoder.More() {
-				if err := visit(); err != nil {
+				if err := visit(free); err != nil {
 					return err
 				}
 			}
@@ -188,7 +199,7 @@ func rejectDuplicateJSONKeys(frame []byte) error {
 			return errors.New("unexpected closing delimiter")
 		}
 	}
-	if err := visit(); err != nil {
+	if err := visit(false); err != nil {
 		return err
 	}
 	var extra any

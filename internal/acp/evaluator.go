@@ -166,6 +166,12 @@ type Evaluation struct {
 	// there, and its command is judged there (rel-1-0-10:GAP-0297). Empty
 	// when the guard did not see the session start.
 	SessionCWD string `json:"session_cwd,omitempty"`
+	// ToolCallState holds the fields (kind, title, rawInput, locations) of
+	// the tool call a session/update or a session/request_permission frame
+	// names, as the agent reported them before this frame. The editor applies
+	// a ToolCallUpdate onto the tool_call it names, so a frame that omits the
+	// kind is the call that report gave (rel-1-0-10:GAP-0330).
+	ToolCallState json.RawMessage `json:"tool_call_state,omitempty"`
 }
 
 type Verdict struct {

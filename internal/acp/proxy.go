@@ -188,8 +188,13 @@ type proxyState struct {
 	// by session ID, and newSessionCWDs those of a session/new (or fork)
 	// still waiting for its answer, by request ID. A frame that names no
 	// directory of its own is judged in its session's (GAP-0297).
-	sessionCWDs    map[string]string
+	sessionCWDs    *lruMap[string]
 	newSessionCWDs map[string]string
+	// toolCalls holds, per session and toolCallId, the fields of the tool
+	// call the agent has reported so far (kind, title, rawInput, locations),
+	// as the editor merges them: a permission or an update that omits the
+	// kind is judged with the kind of the call it belongs to (GAP-0330).
+	toolCalls *lruMap[json.RawMessage]
 	// silenceGen and silenceTimer drive the notice for an agent that does
 	// not answer a prompt (armSilenceNotice).
 	silenceGen   uint64
@@ -273,8 +278,15 @@ func (s *proxyState) recordFailMode(session string, verdict Verdict) {
 	}
 }
 
-// maxTrackedSessions bounds the session directories one guard remembers.
-const maxTrackedSessions = 1024
+// maxTrackedSessions and maxTrackedToolCalls bound what one guard remembers;
+// the least recently used entry goes first. The gateway judges a frame of an
+// unknown session or tool call at the unknown tier, never as clean.
+const (
+	maxTrackedSessions  = 1024
+	maxTrackedToolCalls = 256
+	// maxToolCallStateBytes bounds the state kept and sent for one tool call.
+	maxToolCallStateBytes = 64 << 10
+)
 
 // noteSessionCWD remembers the working directory of a session the editor
 // starts: session/load and session/resume name the session and its directory;
@@ -300,40 +312,142 @@ func (s *proxyState) noteSessionCWD(msg Message, direction Direction, matched st
 				s.newSessionCWDs[msg.IDKey()] = params.CWD
 			}
 		case "session/load", "session/resume":
-			s.setSessionCWDLocked(params.SessionID, params.CWD)
+			s.setSessionCWDLocked(params.SessionID, params.CWD, true)
 		}
 		return
 	}
-	if direction == AgentToClient && msg.Method == "" && (matched == "session/new" || matched == "session/fork") {
+	if direction == AgentToClient && msg.Method == "" {
+		// Any answer settles its request: a pending directory never outlives
+		// it, whatever method the agent answered as.
 		cwd, ok := s.newSessionCWDs[msg.IDKey()]
 		delete(s.newSessionCWDs, msg.IDKey())
+		if !ok || (matched != "session/new" && matched != "session/fork") {
+			return
+		}
 		var result struct {
 			SessionID string `json:"sessionId"`
 		}
-		if ok && json.Unmarshal(msg.Result, &result) == nil {
-			s.setSessionCWDLocked(result.SessionID, cwd)
+		if json.Unmarshal(msg.Result, &result) == nil {
+			// An answer naming a session the guard already tracks does not
+			// re-point it: the editor gave that session its directory.
+			s.setSessionCWDLocked(result.SessionID, cwd, false)
 		}
 	}
 }
 
-func (s *proxyState) setSessionCWDLocked(session, cwd string) {
+// setSessionCWDLocked records the directory of session. replace is true for
+// a request the editor sent for that session (session/load), false for an
+// agent's answer, which never changes a tracked session.
+func (s *proxyState) setSessionCWDLocked(session, cwd string, replace bool) {
 	if session == "" {
 		return
 	}
-	if _, known := s.sessionCWDs[session]; !known && len(s.sessionCWDs) >= maxTrackedSessions {
+	if s.sessionCWDs == nil {
+		s.sessionCWDs = newLRUMap[string](maxTrackedSessions)
+	}
+	if !replace && s.sessionCWDs.has(session) {
 		return
 	}
-	if s.sessionCWDs == nil {
-		s.sessionCWDs = map[string]string{}
-	}
-	s.sessionCWDs[session] = cwd
+	s.sessionCWDs.put(session, cwd)
 }
 
 // sessionCWD is the directory the editor gave session, or "".
 func (s *proxyState) sessionCWD(session string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sessionCWDs[session]
+	if s.sessionCWDs == nil {
+		return ""
+	}
+	cwd, _ := s.sessionCWDs.get(session)
+	return cwd
+}
+
+// toolCallFields are the fields of a tool call the guard keeps and sends.
+type toolCallFields struct {
+	Kind      json.RawMessage `json:"kind,omitempty"`
+	Title     json.RawMessage `json:"title,omitempty"`
+	RawInput  json.RawMessage `json:"rawInput,omitempty"`
+	Locations json.RawMessage `json:"locations,omitempty"`
+	// Truncated says a field was left out for size.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// toolCallOf reads the tool call a session/update (tool_call and
+// tool_call_update) or a session/request_permission frame names: its
+// session, its toolCallId and the object that holds its fields.
+func toolCallOf(msg Message) (session, id string, fields map[string]json.RawMessage, ok bool) {
+	if msg.Method != "session/update" && msg.Method != "session/request_permission" {
+		return "", "", nil, false
+	}
+	var params map[string]json.RawMessage
+	if json.Unmarshal(msg.Params, &params) != nil {
+		return "", "", nil, false
+	}
+	_ = json.Unmarshal(params["sessionId"], &session)
+	key := "toolCall"
+	if msg.Method == "session/update" {
+		key = "update"
+	}
+	if json.Unmarshal(params[key], &fields) != nil || fields == nil {
+		return "", "", nil, false
+	}
+	if msg.Method == "session/update" {
+		var kind string
+		_ = json.Unmarshal(fields["sessionUpdate"], &kind)
+		if kind != "tool_call" && kind != "tool_call_update" {
+			return "", "", nil, false
+		}
+	}
+	if json.Unmarshal(fields["toolCallId"], &id) != nil || id == "" || session == "" {
+		return "", "", nil, false
+	}
+	return session, id, fields, true
+}
+
+// foldToolCall merges the tool call a frame names into the state kept for it
+// (a field the frame holds replaces the kept one, as the editor applies an
+// update) and returns the state as it was before the frame, which the gateway
+// merges the frame onto. It returns nil for a frame that names no tool call
+// or one the guard has not seen.
+func (s *proxyState) foldToolCall(msg Message) json.RawMessage {
+	session, id, fields, ok := toolCallOf(msg)
+	if !ok {
+		return nil
+	}
+	key := session + "\x00" + id
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.toolCalls == nil {
+		s.toolCalls = newLRUMap[json.RawMessage](maxTrackedToolCalls)
+	}
+	before, _ := s.toolCalls.get(key)
+	var state toolCallFields
+	if len(before) > 0 {
+		_ = json.Unmarshal(before, &state)
+	}
+	set := func(dst *json.RawMessage, name string) {
+		if raw, present := fields[name]; present && string(bytes.TrimSpace(raw)) != "null" {
+			*dst = raw
+		}
+	}
+	set(&state.Kind, "kind")
+	set(&state.Title, "title")
+	set(&state.RawInput, "rawInput")
+	set(&state.Locations, "locations")
+	merged, err := json.Marshal(state)
+	if err == nil && len(merged) > maxToolCallStateBytes {
+		state.RawInput, state.Truncated = nil, true
+		merged, err = json.Marshal(state)
+	}
+	if err == nil && len(merged) > maxToolCallStateBytes {
+		state.Locations = nil
+		merged, err = json.Marshal(state)
+	}
+	if err != nil || len(merged) > maxToolCallStateBytes {
+		return before
+	}
+	s.toolCalls.put(key, merged)
+	return before
 }
 
 // forgetFailOpen drops every open fail mode: an answer that failed
@@ -1173,6 +1287,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 		}
 		if direction == AgentToClient && msg.Method != "" {
 			evaluation.SessionCWD = state.sessionCWD(promptSessionID(msg))
+			evaluation.ToolCallState = state.foldToolCall(msg)
 		}
 		verdict, evalErr := evaluate(ctx, opts, evaluation)
 		if evalErr != nil && state.peerProtocolFixes && ctx.Err() != nil {

@@ -208,6 +208,9 @@ type acpActionEnv struct {
 	// sessionCWD is the directory the editor gave the session, as the guard
 	// sends it (Evaluation.SessionCWD): the project, unless a test changes it.
 	sessionCWD string
+	// toolCallState is the state of the tool call the frame names, as the guard
+	// sends it (Evaluation.ToolCallState).
+	toolCallState json.RawMessage
 }
 
 func newACPActionEnv(t *testing.T, pack string) *acpActionEnv {
@@ -266,7 +269,7 @@ func (e *acpActionEnv) post(t *testing.T, direction acp.Direction, frame []byte,
 	t.Helper()
 	evaluation := acp.Evaluation{
 		Profile: "default", Mode: e.mode, AgentID: "kiro", ClientID: "zed",
-		Direction: direction, Payload: frame, SessionCWD: e.sessionCWD,
+		Direction: direction, Payload: frame, SessionCWD: e.sessionCWD, ToolCallState: e.toolCallState,
 	}
 	if asMethod != "" {
 		evaluation.Method, evaluation.Surface = asMethod, acp.SurfaceTool
