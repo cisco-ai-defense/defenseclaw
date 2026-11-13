@@ -349,3 +349,20 @@ func TestSettledClaudeToolCallReleasesItsReplayReceipt(t *testing.T) {
 	}
 	waitForCorrelationRowsForTest(t, fixture.path, 1, accepted)
 }
+
+// TestSettledClaudeToolCallLeavesNoChainPendingAction: the tool chain's
+// pending action of a PreToolUse is gone once its PostToolUse came, so a
+// settled call leaves none of its 1 KB (S8 R5).
+func TestSettledClaudeToolCallLeavesNoChainPendingAction(t *testing.T) {
+	fixture := newAuditFailureHookFixture(t, "open")
+	cwd := t.TempDir()
+	const actions = `SELECT COUNT(*) FROM guardrail_chain_pending_actions`
+	sendClaudeToolHookForTest(t, fixture, cwd, "PreToolUse", "toolu_r5_chain")
+	if got := countCorrelationRowsForTest(t, fixture.path, actions); got != 1 {
+		t.Fatalf("PreToolUse left %d chain pending actions, want 1", got)
+	}
+	sendClaudeToolHookForTest(t, fixture, cwd, "PostToolUse", "toolu_r5_chain")
+	if got := countCorrelationRowsForTest(t, fixture.path, actions); got != 0 {
+		t.Fatalf("a settled call left %d chain pending actions, want 0", got)
+	}
+}
