@@ -3227,17 +3227,6 @@ func claudeCodeHookInteger(value interface{}) (int, bool) {
 	}
 }
 
-// verifyClaudeCodeHookMatrix validates the default v1 matrix for compatibility
-// with focused helpers. Production setup uses the version-selected variant.
-func verifyClaudeCodeHookMatrix(
-	hooks map[string]interface{},
-	expectedCommand string,
-	expectedArgs []string,
-	hooksDir string,
-) error {
-	return verifyClaudeCodeHookGroups(hooks, expectedCommand, expectedArgs, hooksDir, hookGroups)
-}
-
 func verifyClaudeCodeHookMatrixForSetup(
 	hooks map[string]interface{},
 	expectedCommand string,

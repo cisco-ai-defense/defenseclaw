@@ -327,6 +327,37 @@ jobs:
             if [[ "$item" == *$'\t'* ]]; then parts+=("$item"); else packages+=("$item"); fi
           done < "$RUNNER_TEMP/go-shard.txt"
           test "$(( ${#packages[@]} + ${#parts[@]} ))" -gt 0
+          # The connector hook tests run the real gateway binary
+          # (installNativeGatewayForHookTest). Built inside the test, the
+          # first hook test of every connector part paid about 150 s for it,
+          # inside the -timeout and the recorded test times of whichever test
+          # came first (run 43229287498). Built here in the background (at a
+          # lower priority than the race run beside it), it overlaps the
+          # whole-package run of the shard and stays out of the -timeout and
+          # of the test times; the connector run waits for it. Linked to read
+          # an empty account home of its own, never the runner account's
+          # ~/.defenseclaw (rel-1-0-6:GAP-0345), as in the darwin connector
+          # step.
+          connector=github.com/defenseclaw/defenseclaw/internal/gateway/connector
+          native_build=""
+          if grep -qE "^${connector}(\$|"$'\t'")" "$RUNNER_TEMP/go-shard.txt"; then
+            mkdir -p "$RUNNER_TEMP/dc-test-gateway/account-home"
+            nice -n 10 go build -ldflags "-X github.com/defenseclaw/defenseclaw/internal/cli.outageAccountHomeBake=$RUNNER_TEMP/dc-test-gateway/account-home" \
+              -o "$RUNNER_TEMP/dc-test-gateway/defenseclaw" ./cmd/defenseclaw > "$RUNNER_TEMP/dc-test-gateway/build.log" 2>&1 &
+            native_build=$!
+          fi
+          native_gateway() { # wait for the background gateway build once; its status
+            [ -n "$native_build" ] || return 0
+            local build_status=0
+            wait "$native_build" || build_status=$?
+            native_build=""
+            cat "$RUNNER_TEMP/dc-test-gateway/build.log"
+            if (( build_status != 0 )); then
+              echo "::error::Go shard $GO_PACKAGE_SHARD could not build the test gateway (exit $build_status)" >&2
+              return 1
+            fi
+            export DC_TEST_NATIVE_GATEWAY="$RUNNER_TEMP/dc-test-gateway/defenseclaw"
+          }
           status=0
           profiles=()
           timings="go-test-timings-other-$GO_PACKAGE_SHARD.json"
@@ -358,12 +389,16 @@ jobs:
             return "$go_status"
           }
           if (( ${#packages[@]} > 0 )); then
+            for package in "${packages[@]}"; do
+              if [ "$package" = "$connector" ]; then native_gateway || status=1; fi
+            done
             run_go packages -coverprofile="$RUNNER_TEMP/cover-packages.out" "${packages[@]}" || status=1
             profiles+=("$RUNNER_TEMP/cover-packages.out")
           fi
           for index in "${!parts[@]}"; do
             package="${parts[index]%%$'\t'*}"
             pattern="${parts[index]#*$'\t'}"
+            if [ "$package" = "$connector" ]; then native_gateway || status=1; fi
             echo "::group::go test $package (part $((index + 1)) of ${#parts[@]} in this shard)"
             run_go "part-$index" -coverprofile="$RUNNER_TEMP/cover-part-$index.out" -run "$pattern" "$package" || status=1
             echo "::endgroup::"

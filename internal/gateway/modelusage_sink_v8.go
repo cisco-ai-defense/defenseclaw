@@ -43,6 +43,25 @@ func newModelUsageV8Sink(
 	return &modelUsageV8Sink{emitter: emitter, metrics: metrics}
 }
 
+// ReportDrops implements modelusage.DropReporter: the records the engine or
+// the store lost since the last report, as defenseclaw.tokenomics.dropped.
+func (s *modelUsageV8Sink) ReportDrops(n int64) {
+	if s == nil || s.metrics == nil || n <= 0 {
+		return
+	}
+	runtime := s.metrics()
+	if runtime == nil {
+		return
+	}
+	at := time.Now().UTC()
+	item := newHookV8MetricBatchItemForProducer(context.Background(), at, llmEventMeta{Source: "gateway"}, modelUsageV8Producer,
+		observability.EventName(observability.TelemetryInstrumentDefenseClawTokenomicsDropped),
+		func(b *observability.FamilyBuilder, e observability.FamilyEnvelopeInput) (observability.Record, error) {
+			return b.BuildMetricDefenseClawTokenomicsDropped(observability.MetricDefenseClawTokenomicsDroppedInput{Envelope: e, Value: n})
+		})
+	_, _ = runtime.RecordGeneratedMetricBatch(context.Background(), []observabilityruntime.GeneratedMetricBatchItem{item})
+}
+
 // Emit implements modelusage.Sink.
 func (s *modelUsageV8Sink) Emit(ctx context.Context, rec modelusage.Record) {
 	if s == nil {
@@ -120,7 +139,11 @@ func emitModelUsageLogV8(ctx context.Context, emitter sidecarRuntimeEmitter, rec
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		meta := llmEventMeta{Source: connector, RequestID: f.RequestID}
+		meta := llmEventMeta{
+			Source: connector, RequestID: f.RequestID,
+			SessionID: f.SessionID, TurnID: f.TurnID, AgentID: f.AgentID,
+			PromptID: f.ModelRequestID, ResponseID: f.ModelResponseID,
+		}
 		envelope := hookModelLogEnvelope(ctx, snapshot, meta, connector, observability.TelemetryEventModelUsage)
 		envelope.Provenance.Producer = modelUsageV8Producer
 		record, buildErr := builder.BuildLogModelUsage(buildModelUsageLogInput(envelope, rec))
