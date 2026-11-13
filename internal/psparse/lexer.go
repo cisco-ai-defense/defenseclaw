@@ -437,8 +437,21 @@ func (l *lexer) lexDash() {
 		a := l.i
 		l.i++ // dash
 		start := l.i
-		for l.i < len(l.runes) && isNameChar(l.cur()) {
-			l.i++
+		for l.i < len(l.runes) {
+			if isNameChar(l.cur()) {
+				l.i++
+				continue
+			}
+			if l.cur() == '`' && l.i+1 < len(l.runes) {
+				// a backtick escape inside a parameter name keeps the token
+				// whole (pwsh does), so -W`indowStyle is one parameter; the
+				// host parser then treats it as an unknown option and fails
+				// closed instead of reading its value as the script (review 4
+				// R4-5).
+				l.i += 2
+				continue
+			}
+			break
 		}
 		name := string(l.runes[start:l.i])
 		hasColon := false
