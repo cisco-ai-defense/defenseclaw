@@ -95,6 +95,14 @@ func ProvesWindowsUACPolicySuppression(facts Facts) bool {
 	return false
 }
 
+// windowsNativeExecutableDialect reports the shells whose argv of an external
+// Windows executable (mpcmdrun, dism, schtasks, sc, auditpol) is the program's
+// own: cmd.exe and PowerShell. The operand grammar belongs to the program, so an
+// exact proof over it must not depend on which of the two shells launched it.
+func windowsNativeExecutableDialect(dialect Dialect) bool {
+	return dialect == DialectCMD || dialect == DialectPowerShell
+}
+
 func windowsSecurityControlParityFactsEligible(facts Facts) bool {
 	return facts.Authoritative() && facts.EnforcementEligible() &&
 		(facts.Parse.Dialect == DialectCMD || facts.Parse.Dialect == DialectPowerShell)
@@ -121,14 +129,14 @@ func windowsSecurityControlParityCommandEligible(command CommandFact) bool {
 }
 
 func exactWindowsDefenderDefinitionsRemoval(command CommandFact) bool {
-	return command.Dialect == DialectCMD && len(command.Argv) == 3 &&
+	return windowsNativeExecutableDialect(command.Dialect) && len(command.Argv) == 3 &&
 		windowsEqualPath(command.Argv[0], windowsDefenderDefinitionToolPath) &&
 		strings.EqualFold(command.Argv[1], "-RemoveDefinitions") &&
 		strings.EqualFold(command.Argv[2], "-All")
 }
 
 func exactWindowsDefenderDISMRemoval(command CommandFact) bool {
-	if command.Dialect != DialectCMD || len(command.Argv) != 7 {
+	if !windowsNativeExecutableDialect(command.Dialect) || len(command.Argv) != 7 {
 		return false
 	}
 	want := map[string]struct{}{
@@ -190,7 +198,7 @@ func exactWindowsDefenderFeatureRemoval(command CommandFact) bool {
 }
 
 func exactWindowsDefenderScheduledTaskDelete(command CommandFact) bool {
-	if command.Dialect != DialectCMD || len(command.Argv) != 5 {
+	if !windowsNativeExecutableDialect(command.Dialect) || len(command.Argv) != 5 {
 		return false
 	}
 	deleteSeen := false

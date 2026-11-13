@@ -60,7 +60,7 @@ func TestHostScriptTwinIsTheScriptTheCallRuns(t *testing.T) {
 		name, tool, command string
 	}{
 		{"powershell without profile switch", "PowerShell", `powershell -Command "Get-Content C:\tmp\a.txt"`},
-		{"powershell abbreviations", "PowerShell", `powershell.exe -nop -noni -ex Bypass -c "Get-Content C:\tmp\a.txt"`},
+		{"powershell abbreviations", "PowerShell", `powershell.exe -nop -NonInteractive -ExecutionPolicy Bypass -c "Get-Content C:\tmp\a.txt"`},
 		{"pwsh single quoted", "PowerShell", `pwsh -c 'Get-Content C:\tmp\a.txt'`},
 		{"pwsh joins words", "PowerShell", `pwsh -Command Get-Content C:\tmp\a.txt`},
 		{"encoded command", "PowerShell", `powershell -EncodedCommand ` + encodedPowerShell(bare)},
@@ -96,7 +96,7 @@ func TestHostScriptTwinIsTheScriptTheCallRuns(t *testing.T) {
 	}
 	for _, command := range []string{
 		`cmd /c type C:\tmp\a.txt`,
-		`cmd.exe /d /c "type C:\tmp\a.txt"`,
+		`cmd.exe /d /c type C:\tmp\a.txt`,
 	} {
 		input := hookShellInput(t, "PowerShell", command)
 		twin, ok := HostScriptTwin(input, Analyze(input))
