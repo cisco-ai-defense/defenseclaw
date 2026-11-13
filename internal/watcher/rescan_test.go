@@ -770,7 +770,7 @@ func TestEnumerateClaudeWatcherPluginsUsesManifestlessCacheVersionBoundary(t *te
 		t.Fatal(err)
 	}
 
-	got := enumerateClaudeWatcherPlugins(cache)
+	got := enumerateClaudeWatcherPlugins(cache, true)
 	if len(got) != 1 || !sameWatcherPath(got[0], version) {
 		t.Fatalf("cache plugin roots = %v, want only %q", got, version)
 	}

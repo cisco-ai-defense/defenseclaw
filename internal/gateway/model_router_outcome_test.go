@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
 func engineRouterTestConfig() *config.Config {
@@ -140,5 +141,62 @@ func TestEngineRouterVLLMWithoutContainerIsInactive(t *testing.T) {
 	cfg.Routing.Decisions = cfg.Routing.Decisions[:1]
 	if newEngineRouter(cfg, nil, "").RouterActive(context.Background()) {
 		t.Fatal("vllm_sr without a started container must leave routing off, as in 1.0.9")
+	}
+}
+
+// Lead item 1: a 1.0.9 managed config names the routed key by api_key_env;
+// after the upgrade the key still resolves on the managed host (doctor
+// warns to move it to a protected credential).
+func TestEngineRouterManagedAPIKeyEnvKeepsWorking(t *testing.T) {
+	t.Setenv("ROUTING_MANAGED_LEGACY_KEY_7731", "k-legacy")
+	cfg := engineRouterTestConfig()
+	cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	cfg.Enterprise.Profile = "standalone"
+	if !cfg.StandaloneEnterprise() {
+		t.Fatal("fixture is not standalone")
+	}
+	cfg.Routing.Models[1].APIKeyEnv = "ROUTING_MANAGED_LEGACY_KEY_7731"
+	r := newEngineRouter(cfg, nil, "")
+	b, _ := mustRouterEngine(t, r).Backend("paid")
+	if got := r.backendKey(cfg, b); got != "k-legacy" {
+		t.Fatalf("managed api_key_env key = %q", got)
+	}
+	// A named credential is the only source, even when it is missing.
+	b.Credential = "missing-credential"
+	if got := r.backendKey(cfg, b); got != "" {
+		t.Fatalf("a model with a credential read the environment: %q", got)
+	}
+}
+
+func mustRouterEngine(t *testing.T, r *engineRouter) *engine.Engine {
+	t.Helper()
+	eng, _ := r.engineFor(context.Background())
+	if eng == nil {
+		t.Fatal("no engine")
+	}
+	return eng
+}
+
+// S11 REVIEW-slice3 S1-5: a managed device keeps the engine when the vLLM
+// Semantic Router is down, so the admin floor still applies.
+func TestEngineRouterManagedKeepsEngineWithoutVLLM(t *testing.T) {
+	cfg := engineRouterTestConfig()
+	cfg.Routing.Classifier = ""
+	cfg.Routing.Decisions = cfg.Routing.Decisions[:1]
+	if newEngineRouter(cfg, nil, "").RouterActive(context.Background()) {
+		t.Fatal("OSS without the container keeps 1.0.9 routing off")
+	}
+	cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	cfg.Enterprise.Profile = "standalone"
+	if !cfg.StandaloneEnterprise() {
+		t.Skip("fixture is not standalone on this build")
+	}
+	r := newEngineRouter(cfg, nil, "")
+	if !r.RouterActive(context.Background()) {
+		t.Fatal("managed must keep the engine")
+	}
+	out := r.RouteDetailed(context.Background(), &ModelRouterInput{Model: "m", Messages: []ChatMessage{{Role: "user", Content: "refactor"}}})
+	if out.Result != SemanticRouteFallback {
+		t.Fatalf("no classifier = %+v, want the original request", out)
 	}
 }

@@ -129,10 +129,12 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		return d
 	}
 
-	// 5. Nothing survives: D3 fallback, or a managed deny when the original
-	// request is outside the policy.
+	// 5. Nothing survives: D3 fallback to the original request. The admin
+	// Gate judges that original at the forwarded exit (S11 DESIGN 10.2: a
+	// binding rule refuses it there, with its own reason), so only the S1
+	// floor (routing.admin.denied_providers) denies here, managed only.
 	d.verdict = verdict
-	if e.managed && (verdict.Bind || e.providerDenied(pol, req.RequestedProvider)) {
+	if e.managed && e.providerDenied(pol, req.RequestedProvider) {
 		d.Outcome, d.FailureCode = OutcomeDenied, FailureFiltered
 		d.Deny = &DenyReason{Code: "routing_admin_denied", Message: "routing.admin does not allow this model for you, and no allowed model can serve this request"}
 		return d

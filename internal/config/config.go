@@ -470,7 +470,8 @@ type RoutingModelBackend struct {
 	// (routing_policy.go RoutingAPIs); empty uses the provider default.
 	APIs []string `mapstructure:"apis" yaml:"apis,omitempty"`
 	// Credential names the protected credential that holds the key on a
-	// standalone managed host (api_key_env is refused there).
+	// standalone managed host (preferred there; api_key_env still works
+	// for 1.0.9 configs, with a doctor warning).
 	Credential string `mapstructure:"credential" yaml:"credential,omitempty"`
 	// Bedrock says how the gateway signs calls to a bedrock backend.
 	Bedrock *RoutingBedrockAuthConfig `mapstructure:"bedrock" yaml:"bedrock,omitempty"`
