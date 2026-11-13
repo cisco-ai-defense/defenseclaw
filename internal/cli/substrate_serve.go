@@ -470,6 +470,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		if err != nil {
 			return out, fmt.Errorf("serve: controller for the create path: %w", err)
 		}
+		router, routerErr := substrateRouter()
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
 			Actors: actors, Registrations: regs, Activity: recorder,
@@ -479,7 +480,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				return gateway.SubstrateUnattendedAskFor(c, profile)
 			},
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
-			Relays: substrateRelays(),
+			Relays: relayDialer(router),
 			Skills: newRuntimeSkillScanner(c),
 			// GAP-0039: an unscanned skill folder is refused where hooks fail
 			// closed (managed, strict tier) and alerted on elsewhere; scan
@@ -491,7 +492,8 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			WorkspaceMaxBytes: c.Substrate.EffectiveWorkspaceMaxBytes(),
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
-					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil)}
+					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
+					substrateRouterCheck(ctx, router, routerErr)}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), ConnectorOf: substrateTemplateConnector(ctl)},
 			Limiter: ratelimit.New(ratelimit.Config{
@@ -744,20 +746,32 @@ func substrateKubeSecrets() gateway.SubstrateSecretStore {
 	return &kubeSecrets{server: "https://" + net.JoinHostPort(host, port), tokenFile: serveFlags.kubeTokenFile, http: hc}
 }
 
-// substrateRelays is attach's way to the relays (nil when no router is
-// configured or the pod identity bundle is missing).
-func substrateRelays() gateway.SubstrateRelayDialer {
+// substrateRouter builds attach's way to the relays: nil, nil when no router
+// address is set; nil and the reason when it cannot be built. The doctor
+// row substrate.attach_router names either (GAP-0157).
+func substrateRouter() (*routerDialer, error) {
 	if serveFlags.routerAddress == "" {
-		return nil
+		fmt.Fprintln(os.Stderr, "[substrate] attach is off: no --router-address (run, connect, pull, logs and checkpoint answer attach_unavailable)")
+		return nil, nil
 	}
 	files, err := podcert.NewFiles(serveFlags.peerBundle, serveFlags.peerTrust)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[substrate] attach is off: pod identity: %v\n", err)
-		return nil
+		err = fmt.Errorf("pod identity: %w", err)
+		fmt.Fprintf(os.Stderr, "[substrate] attach is off: %v\n", err)
+		return nil, err
 	}
-	d, err := newRouterDialer(serveFlags.routerAddress, serveFlags.routerServerName, serveFlags.routerCAFile, serveFlags.relayPort, files)
+	d, err := newRouterDialer(serveFlags.routerAddress, serveFlags.routerServerName, serveFlags.routerCAFile, serveFlags.relayPort, files.Certificate)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[substrate] attach is off: %v\n", err)
+		return nil, err
+	}
+	return d, nil
+}
+
+// relayDialer is d as the attach route's dialer (a nil *routerDialer must be
+// a nil interface, so attach answers attach_unavailable).
+func relayDialer(d *routerDialer) gateway.SubstrateRelayDialer {
+	if d == nil {
 		return nil
 	}
 	return d
