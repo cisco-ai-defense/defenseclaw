@@ -20,7 +20,7 @@ for current behavior.
 - **CodeGuard custom rules are compiled once per rule-folder content**, not for every inspected write.
 
 ### Fixed
-- **Kiro 3.x runs the tool a prompt asks for again, so DefenseClaw inspects it.** In the default interface of kiro-cli 3.x (the v3 engine, also `kiro-cli --v3`) the prompt hook printed nothing, and Kiro added that as an empty command result (`Output:`, `Exit Code: 0`) to the turn; models then answered as if the command had already run and called no tool, so no tool-call check ran. The hook now prints one line, `DefenseClaw checked this prompt. No command has run yet.` (rel-1-0-10:GAP-0248).
+- **Kiro 3.x runs the tool a prompt asks for again, so DefenseClaw inspects it.** In the default interface of kiro-cli 3.x (the v3 engine, also `kiro-cli --v3`) the prompt hook printed nothing, and Kiro added that as an empty command result (`Output:`, `Exit Code: 0`) to the turn; models then answered as if the command had already run and called no tool, so no tool-call check ran. The hook now prints one line, `DefenseClaw prompt hook: this is not command output. No command has run for this prompt yet.` (rel-1-0-10:GAP-0248).
 - **A Kiro, Devin or other non-Claude-Code, non-Codex shell call on a per-user Windows gateway that does not answer is blocked again**, as the fail-mode contract and `status` say; only Claude Code and Codex take the ordinary late-call path (rel-1-0-10 GAP-0030).
 
 ### Security

@@ -1,8 +1,7 @@
 #!/bin/bash
 # defenseclaw-managed-hook v1
 # DefenseClaw Kiro hook. Kiro adds hook stdout to agent context, so this
-# bridge keeps stdout empty, except the v3 prompt note at the end, and
-# blocks with exit 2 plus stderr.
+# bridge keeps stdout empty and blocks with exit 2 plus stderr.
 set -euo pipefail
 {{if not .SecureClient}}# The agent's environment cannot change how this script runs: a function
 # nesting limit, a read timeout, ignored commands and POSIX mode would end a
@@ -604,21 +603,24 @@ if [ "$ACTION" = "block" ] || [ "$DECISION" = "deny" ] || [ "$DECISION" = "block
   kiro_block_reason "${REASON:-Blocked by DefenseClaw Kiro policy.}"
   exit 2
 fi
-# Kiro v3 (kiro-cli 3.x by default, --v3 before it) adds the result of a
+{{if not .Sandbox}}# Kiro v3 (kiro-cli 3.x by default, --v3 before it) adds the result of a
 # UserPromptSubmit hook that printed nothing to the turn as
 # "Output: ... Exit Code: 0", the shape of a shell result, and the model
 # then answers as if the command it was asked to run had already run
 # (rel-1-0-10:GAP-0248). An answered prompt on that surface prints one line
 # that says so instead (hookexec.KiroV3PromptCheckedNote); Kiro wraps it as
-# hook output. JSON escapes every quote inside a string value, so only the
-# envelope field matches.
+# hook output. The match reads the first 4 KB (Kiro writes hook_event_name
+# second) and is confirmed on the parsed top-level field, so a nested key
+# never prints it. The sandbox runs the unmarked CLI 2.x agent only.
 if [ "$HOOK_SURFACE" = "v3" ]; then
-  case "$PAYLOAD" in
+  case "${PAYLOAD:0:4096}" in
     *'"hook_event_name":"UserPromptSubmit"'*|*'"hook_event_name": "UserPromptSubmit"'*)
-      printf '%s\n' "DefenseClaw checked this prompt. No command has run yet." ;;
+      if [ "$(_dc_hook_event_field "$PAYLOAD" hook_event_name 2>/dev/null)" = "UserPromptSubmit" ]; then
+        printf '%s\n' "DefenseClaw prompt hook: this is not command output. No command has run for this prompt yet."
+      fi ;;
   esac
 fi
-exit 0{{else}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{end}}exit 0{{else}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
 {{if .SecureClient}}  DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null || true)
   REASON=$(echo "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null || true)
 {{else}}  _dc_jq_into DECISION line "$OUTPUT" -r '.decision // empty' 2>/dev/null || true

@@ -129,11 +129,15 @@ func TestKiroV3PromptHookSaysNoCommandRan(t *testing.T) {
 		{"v3 prompt block", "v3", prompt, ok(`{"action":"block","hook_output":{"decision":"block","reason":"marker rule matched"}}`), 2, ""},
 		{"v3 tool allow", "v3", tool, ok(`{"action":"allow"}`), 0, ""},
 		{"2.x agent prompt allow", "", prompt, ok(`{"action":"allow"}`), 0, ""},
+		{"Secure Client v3 prompt allow", "sc", prompt, ok(`{"action":"allow"}`), 0, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := run(t, "kiro", tc.rt, func(o *Options) {
 				o.Event = ""
 				o.HookSurface = tc.surface
+				if tc.surface == "sc" {
+					o.HookSurface, o.SecureClient = "v3", true
+				}
 				o.Stdin = strings.NewReader(tc.stdin)
 			})
 			if r.code != tc.wantCode || r.stdout != tc.wantStdout {

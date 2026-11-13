@@ -17,14 +17,15 @@ import (
 // the .kiro/hooks config prints hookexec.KiroV3PromptCheckedNote, so Kiro v3
 // does not add an empty "Output: ... Exit Code: 0" result the model reads as
 // a command that already ran (rel-1-0-10:GAP-0248). A tool call, a block,
-// the CLI 2.x agent config and a command that only quotes the event name
-// keep stdout empty.
+// the CLI 2.x agent config, a command that only quotes the event name and
+// a nested event key keep stdout empty.
 func TestKiroShellHookV3PromptSaysNoCommandRan(t *testing.T) {
 	v3 := []string{"--hook-surface", "v3"}
 	prompt := `{"hook_event_name":"UserPromptSubmit","session_id":"s1","cwd":"/tmp","prompt":"run echo hi"}`
 	spaced := `{"hook_event_name": "UserPromptSubmit", "session_id": "s1", "prompt": "run echo hi"}`
 	tool := `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"execute_bash","tool_input":{"command":"echo hi"}}`
 	quoted := `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"execute_bash","tool_input":{"command":"echo \"hook_event_name\":\"UserPromptSubmit\""}}`
+	nested := `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"mcp_x","tool_input":{"hook_event_name":"UserPromptSubmit"}}`
 	allow := `200|{"action":"allow"}`
 	block := `200|{"action":"block","reason":"marker rule matched","hook_output":{"decision":"block","reason":"marker rule matched"}}`
 	for _, tc := range []struct {
@@ -39,6 +40,7 @@ func TestKiroShellHookV3PromptSaysNoCommandRan(t *testing.T) {
 		{"v3 prompt block", v3, prompt, block, 2, ""},
 		{"v3 tool allow", v3, tool, allow, 0, ""},
 		{"v3 tool that quotes the event name", v3, quoted, allow, 0, ""},
+		{"v3 tool with a nested event key", v3, nested, allow, 0, ""},
 		{"2.x agent prompt allow", nil, prompt, allow, 0, ""},
 	} {
 		run := runPerUserHookForStop(t, NewKiroConnector(), "kiro-hook.sh", tc.args, tc.stdin, tc.reply)
