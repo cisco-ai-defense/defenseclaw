@@ -18,6 +18,7 @@ package extproc
 
 import (
 	"errors"
+	"net/url"
 	"strings"
 )
 
@@ -38,8 +39,12 @@ var errAmbiguousPath = errors.New("ambiguous path encoding")
 //     character, a malformed escape, a raw backslash or a raw control
 //     character is errAmbiguousPath, so no origin can read the request as a
 //     different path than the one matched;
-//   - empty segments are merged (//a is /a) and dot segments removed
-//     (RFC 3986 5.2.4), "." and ".." spelt with escapes included;
+//   - empty segments are merged (//a is /a) and "." segments removed,
+//     escaped spellings included;
+//   - a ".." segment, literal or escaped, is errAmbiguousPath: origins and
+//     proxies that route the raw path read /admin/../public under /admin,
+//     while RFC 3986 resolution reads /public, so no single canonical form
+//     is right for both (GAP-0046);
 //   - a trailing slash is kept, so /admin/ still matches a /admin/ prefix.
 //
 // "*" (OPTIONS *) is returned as is; any other path that does not start
@@ -74,10 +79,7 @@ func canonicalPath(raw string) (string, error) {
 		case "", ".":
 			trailing = last
 		case "..":
-			if len(segs) > 0 {
-				segs = segs[:len(segs)-1]
-			}
-			trailing = last
+			return "", errAmbiguousPath
 		default:
 			segs = append(segs, seg)
 			trailing = false
@@ -147,8 +149,12 @@ func pathOnly(p string) string {
 // front of them) read as the request's real method (GAP-0046).
 var methodOverrideHeaders = []string{"x-http-method-override", "x-http-method", "x-method-override"}
 
+// methodOverrideParam is the query parameter frameworks read as the real
+// method (Laravel, Rails, Express method-override's query getter).
+const methodOverrideParam = "_method"
+
 // requestMethods is the request's method plus any method an override
-// header names, upper-cased.
+// header or a _method query parameter names, upper-cased.
 func requestMethods(req *Request) []string {
 	out := []string{strings.ToUpper(req.Method)}
 	for _, h := range req.Headers {
@@ -156,6 +162,24 @@ func requestMethods(req *Request) []string {
 			if h.Name == name {
 				if m := strings.ToUpper(strings.TrimSpace(h.Value)); m != "" {
 					out = append(out, m)
+				}
+			}
+		}
+	}
+	if i := strings.IndexByte(req.Path, '?'); i >= 0 {
+		q := req.Path[i+1:]
+		if j := strings.IndexByte(q, '#'); j >= 0 {
+			q = q[:j]
+		}
+		// Parsed leniently, as frameworks do: a malformed pair elsewhere in
+		// the query does not hide this one.
+		for _, pair := range strings.FieldsFunc(q, func(r rune) bool { return r == '&' || r == ';' }) {
+			k, v, _ := strings.Cut(pair, "=")
+			if dk, err := url.QueryUnescape(k); err == nil && strings.EqualFold(dk, methodOverrideParam) {
+				if dv, err := url.QueryUnescape(v); err == nil {
+					if m := strings.ToUpper(strings.TrimSpace(dv)); m != "" {
+						out = append(out, m)
+					}
 				}
 			}
 		}

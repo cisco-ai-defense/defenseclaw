@@ -124,6 +124,15 @@ func TestBodyDecodingGAP0044(t *testing.T) {
 			})
 		}
 	}
+	// Two Content-Encoding lines are one list, as a merging origin reads
+	// them: the gzip layer is undone and the secret is found (r2 variant).
+	h2 := newHarness(t, nil)
+	r2 := req("eng-web", "POST", "upload.example.org", "/up", "content-type", "application/octet-stream")
+	r2.ContentType = "application/octet-stream"
+	r2.Headers = append(r2.Headers, Header{"content-encoding", "identity"}, Header{"content-encoding", "gzip"})
+	if v := h2.eng.DecideBody(ctx, r2, Verdict{Allow: true}, gz(t, secret)); v.Allow || v.Category != findSecretInBody {
+		t.Fatalf("duplicate Content-Encoding lines: %+v", v)
+	}
 	// A gzip bomb is over the cap, not decoded to the end.
 	h := newHarness(t, nil)
 	r := req("eng-web", "POST", "mcp.example.com", "/mcp")
