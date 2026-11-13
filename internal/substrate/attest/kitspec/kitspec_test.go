@@ -227,9 +227,10 @@ func TestSpecRootOwnedFilesInTheHomeAreNotExpectedChains(t *testing.T) {
 // rel-1-0-10 GAP-0279 (decision: keep the flag). An actor starts Claude Code
 // with CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1, as an OpenShell sandbox does:
 // a workload-writable settings file must not start a background launcher
-// (processWrapper) outside the pre-tool check. The price is that user-scope
-// plugins never load in an actor, and the template scan says so. This guards
-// against the flag being dropped without that decision being revisited.
+// (processWrapper) outside the pre-tool check. The price is that a plugin folder in the personal skills folder
+// (~/.claude/skills) loads as skills only, not as a plugin, and the template
+// scan says so. This guards against the flag being dropped without that
+// decision being revisited.
 func TestSpecKeepsClaudeCodePersonalConfigRestricted(t *testing.T) {
 	spec, _, err := Spec(Options{Connector: "claudecode", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r"), MetadataOnly: true})
 	if err != nil {

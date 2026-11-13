@@ -11,15 +11,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 )
 
-// rel-1-0-10 GAP-0279: the scan output says plainly that a user-scope plugin
-// does not load in an actor, and prints nothing extra when there is no note.
+// rel-1-0-10 GAP-0279: the scan output says plainly that a plugin folder in a
+// personal skills folder does not load as a plugin in an actor, and prints nothing extra when there is no note.
 func TestPrintScanShowsTheUserScopePluginNote(t *testing.T) {
 	sum := attest.ScanSummary{Plugins: 1, Verdict: attest.VerdictClean, Findings: map[string]int{},
-		Notes: []string{"user-scope plugins do not load in Substrate actors, because personal config is restricted; use project or managed scope instead. Plugins in a personal folder: demo"}}
+		Notes: []string{"a plugin folder in a personal skills folder (~/.claude/skills) does not load as a plugin in Substrate actors, because personal config is restricted (CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1): Claude Code loads it as skills only. Install it as a marketplace plugin enabled at project or managed scope instead. Affected: demo"}}
 	var out bytes.Buffer
 	printScan(&out, sum, attest.HookChecks{RootOwned: true, PhoneHomeOff: true})
 	got := out.String()
-	if !strings.Contains(got, "NOTE user-scope plugins do not load in Substrate actors") || !strings.Contains(got, "project or managed scope") {
+	if !strings.Contains(got, "NOTE a plugin folder in a personal skills folder") || !strings.Contains(got, "project or managed scope") {
 		t.Fatalf("scan output lacks the note:\n%s", got)
 	}
 	if !strings.Contains(got, "verdict clean") {
