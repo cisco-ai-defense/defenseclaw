@@ -48,7 +48,7 @@ func ParseWithComments(command string) (*syntax.File, bool) {
 }
 
 func parse(command string, comments bool) (*syntax.File, bool) {
-	if len(command) < largeCommandMin || len(command) > largeCommandMax {
+	if len(command) < largeCommandMin || len(command) > MaxCommandBytes {
 		return parseCommand(command, comments)
 	}
 	key := parseCacheKey{command, comments}

@@ -29,6 +29,12 @@ var budgetShapes = map[string]budgetShape{
 	"words":      {"echo ", "a ", ""},
 	"arith":      {"echo $((1", "+1", "))"},
 	"heredoc":    {"cat > f <<'EOF'\n", "d | e && f\n", "EOF\n"},
+	"heredoc-q":  {"cat > f <<'EOF'\n", "d | e\n", "EOF\n"},
+	"heredoc-u":  {"cat > f <<EOF\n", "d | e\n", "EOF\n"},
+	"heredoc-s":  {"cat > f <<EOF\n", "d | $(e)\n", "EOF\n"},
+	"heredoc-d":  {"cat <<-'EOF'\n", "\td | e\n", "\tEOF\n"},
+	"squote":     {"echo '", "a|a&&", "'"},
+	"comment":    {"echo a # ", "a|", "\n"},
 	"hugeword":   {"echo ", "aaaaaaaaaaaaaaaa", ""},
 	"unparsed":   {"", "a|", "fi"},
 	"wrapped":    {"(((", "a|", "a"},
@@ -114,6 +120,15 @@ func TestTreeBudgetCoversEveryTreeKind(t *testing.T) {
 		{"arith", MaxTreeDepth + 100, BudgetDepth},
 		{"arith", 9000, BudgetDepth},
 		{"heredoc", 3 * MaxChainOperators, ""},
+		// The first stage counts what the shell parses, not data (the P3
+		// of the review: base reads these in full).
+		{"heredoc-q", 100000, ""},
+		{"heredoc-u", 100000, ""},
+		{"heredoc-d", 100000, ""},
+		{"squote", 20000, ""},
+		{"comment", 60000, ""},
+		// A here-document that expands a command substitution is code.
+		{"heredoc-s", 20000, BudgetChain},
 		{"hugeword", 20000, ""},
 	} {
 		command := shape(row.name, row.n)
@@ -136,7 +151,7 @@ func TestHardBoundsRefuseWithoutAParse(t *testing.T) {
 		{"bytes", "echo " + strings.Repeat("a", MaxCommandBytes), BudgetBytes},
 		{"tokens", "echo " + strings.Repeat("a ", MaxTokens), BudgetTokens},
 		{"statements", strings.Repeat("a;", MaxTokens/2+1), BudgetTokens},
-		{"heredoc chain bytes", shape("heredoc", MaxChainBytes), BudgetChain},
+		{"heredoc raw bound", shape("heredoc-q", rawChainBytes+1), BudgetChain},
 		{"nesting", strings.Repeat("(", MaxNestingDepth+1) + "a", BudgetNesting},
 	} {
 		alloc, took := measure(func() {
@@ -254,6 +269,21 @@ func TestBudgetAnswersAreStableAcrossTheMemo(t *testing.T) {
 	}
 }
 
+// treeChain counts the chain nodes of file.
+func treeChain(file *syntax.File) int {
+	chain := 0
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if binary, ok := node.(*syntax.BinaryCmd); ok {
+			switch binary.Op {
+			case syntax.Pipe, syntax.PipeAll, syntax.AndStmt, syntax.OrStmt:
+				chain++
+			}
+		}
+		return true
+	})
+	return chain
+}
+
 // FuzzBudget generates large commands from the family table (and takes raw
 // text as well) and asserts the invariants of the budget: it answers; a
 // command past the budget is never parsed; a command within it parses to a
@@ -277,8 +307,20 @@ func FuzzBudget(f *testing.F) {
 			if cloneFile(file) == nil {
 				t.Fatal("a parsed command could not be copied")
 			}
-			if got := measureTree(file); reason == "" && got != "" {
+			got := measureTree(file)
+			if reason == "" && got != "" {
 				t.Fatalf("a command within the budget measures as %q", got)
+			}
+			// The first stage never counts fewer chain operators than the
+			// tree holds (its reading of data may skip real code only up to
+			// the raw bound, which this check does not excuse).
+			if _, aware, _, nesting := scanCounts(command); nesting == "" && aware.chain < treeChain(file) {
+				t.Fatalf("the first stage counts %d chain bytes but the tree has %d chain nodes", aware.chain, treeChain(file))
+			}
+			// The soft bounds hold: a text under both is never past a
+			// tree bound, so it is not parsed to find out.
+			if chain := strings.Count(command, "|") + strings.Count(command, "&&"); got != "" && len(command) <= softBytes && chain <= softChainBytes {
+				t.Fatalf("a %d-byte command with %d chain bytes measures as %q but the first stage passes it", len(command), chain, got)
 			}
 		}
 	})

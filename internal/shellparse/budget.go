@@ -80,13 +80,13 @@ const (
 	MaxChainBytes = 16384
 
 	// MaxTokens bounds the blank-separated words plus the separator and
-	// operator bytes (; & | newline and the arithmetic operators) of the text; over it the text is refused unparsed. It bounds
-	// the parse of a flat command (about 230 bytes of heap per byte of
-	// text, 120 MiB at the bound; quoted text and here-documents are
-	// cheaper) and sits above the ordinary large texts the readers accept
-	// (a 300 KB here-document of shell code has 140,000). The largest real
-	// call has about 15,000.
-	MaxTokens = 262144
+	// operator bytes (; & | newline and the arithmetic operators) of the
+	// text, outside data (quoted text, comments and here-document bodies are
+	// not parsed as commands and not counted). Over it the text is refused
+	// unparsed. It bounds the parse of a flat command: 131,072 tokens of
+	// statements cost 60 MiB and 40 ms (the curve). The largest real call
+	// has about 15,000.
+	MaxTokens = 131072
 
 	// softChainBytes and softBytes are the sizes from which a text is
 	// measured on its tree. Below both, the text cannot be past
@@ -156,52 +156,67 @@ var budgetMemo struct {
 	entries []budgetMemoEntry
 }
 
+// rawChainBytes and rawTokens are the bounds on the raw counts, which
+// include every byte of the text, data and all. The counts of the first
+// stage skip what the shell reads as data (below); that is a reading of the
+// grammar by this pass, not by the parser, so where the two differ the
+// parser is given a text the raw bound has still limited, and the tree
+// measure that follows counts what it really holds.
+const (
+	rawChainBytes = 8 * MaxChainBytes
+	rawTokens     = 4 * MaxTokens
+)
+
+// budgetCounts are the counts of one pass over the text.
+type budgetCounts struct {
+	chain, tokens int
+	inWord        bool
+}
+
+// feed counts the byte at command[i] and returns how many bytes it consumed
+// beyond itself.
+func (n *budgetCounts) feed(command string, i int) (extra int) {
+	c := command[i]
+	switch c {
+	case '|':
+		n.chain++
+		n.tokens++
+	case '&':
+		if i+1 < len(command) && command[i+1] == '&' {
+			n.chain++
+			extra = 1
+		}
+		n.tokens++
+	default:
+		if tokenBytes[c] {
+			n.tokens++
+		}
+	}
+	blank := c == ' ' || c == '\t' || c == '\n' || c == '\r' || tokenBytes[c] || c == '|' || c == '&' || c == '(' || c == ')'
+	if !blank && !n.inWord {
+		n.tokens++
+	}
+	n.inWord = !blank
+	return extra
+}
+
 func computeBudget(command string) string {
 	if len(command) > MaxCommandBytes {
 		return BudgetBytes
 	}
-	depth, chain, tokens, braces, inWord := 0, 0, 0, false, false
-	for i := 0; i < len(command); i++ {
-		c := command[i]
-		switch c {
-		case '(', '{', '[':
-			if depth++; depth > MaxNestingDepth {
-				return BudgetNesting
-			}
-			braces = braces || c == '{'
-		case ')', '}', ']':
-			if depth > 0 {
-				depth--
-			}
-		case '|':
-			chain++
-			tokens++
-		case '&':
-			if i+1 < len(command) && command[i+1] == '&' {
-				chain++
-				i++
-			}
-			tokens++
-		default:
-			if tokenBytes[c] {
-				tokens++
-			}
-		}
-		blank := c == ' ' || c == '\t' || c == '\n' || c == '\r' || tokenBytes[c] || c == '|' || c == '&' || c == '(' || c == ')'
-		if !blank && !inWord {
-			tokens++
-		}
-		inWord = !blank
+	raw, aware, braces, reason := scanCounts(command)
+	if reason != "" {
+		return reason
 	}
 	if braces && BraceExpansionTooLarge(command) {
 		return BudgetBraces
 	}
 	switch {
-	case chain > MaxChainBytes:
+	case aware.chain > MaxChainBytes || raw.chain > rawChainBytes:
 		return BudgetChain
-	case tokens > MaxTokens:
+	case aware.tokens > MaxTokens || raw.tokens > rawTokens:
 		return BudgetTokens
-	case chain <= softChainBytes && len(command) <= softBytes:
+	case aware.chain <= softChainBytes && len(command) <= softBytes:
 		return ""
 	}
 	file, ok := parseUnbudgeted(command)
@@ -209,12 +224,183 @@ func computeBudget(command string) string {
 		// Text that does not parse has no tree to count. Past the soft
 		// chain bound it may be a chain with a syntax error (GAP-0284); other
 		// text is bounded by MaxTokens and MaxCommandBytes.
-		if chain > softChainBytes {
+		if aware.chain > softChainBytes {
 			return BudgetUnparsed
 		}
 		return ""
 	}
 	return measureTree(file)
+}
+
+// scanCounts is the one linear pass over the raw bytes: the nesting of ( {
+// [ (whose overflow it returns as the reason) and the two counts, raw and
+// aware of data.
+func scanCounts(command string) (raw, aware budgetCounts, braces bool, reason string) {
+	depth := 0
+	var pending []heredocSpec
+	dataUntil := 0
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		switch c {
+		case '(', '{', '[':
+			if depth++; depth > MaxNestingDepth {
+				return raw, aware, braces, BudgetNesting
+			}
+			braces = braces || c == '{'
+		case ')', '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		}
+		if i < dataUntil {
+			// Data the shell does not parse: only the raw count sees it.
+			raw.feed(command, i)
+			aware.inWord = true
+			continue
+		}
+		if end := dataSpan(command, i, &pending); end > i {
+			dataUntil = end
+			raw.feed(command, i)
+			aware.inWord = true
+			continue
+		}
+		if skip := aware.feed(command, i); skip > 0 {
+			raw.feed(command, i)
+			raw.feed(command, i+skip)
+			i += skip
+			continue
+		}
+		raw.feed(command, i)
+	}
+	return raw, aware, braces, ""
+}
+
+// heredocSpec is a here-document whose body starts after the next newline.
+type heredocSpec struct {
+	delim string
+	dash  bool // <<-: leading tabs of the closing line are removed
+	plain bool // the delimiter is unquoted: the body expands $( and `
+}
+
+// dataSpan returns the end of the data that starts at command[i], or i when
+// none does. Data is what the shell never parses as commands: a
+// single-quoted string, a comment, and the body of a here-document (unless
+// the body is expanded and holds a command substitution). The pass counts a
+// | or && in it for the raw bound only, so a here-document of shell code or
+// prose is not mistaken for a chain. A here-document marker adds to
+// pending; the body is data from the next newline.
+func dataSpan(command string, i int, pending *[]heredocSpec) int {
+	switch c := command[i]; c {
+	case '\\':
+		return i + 2 // an escaped byte is never a quote, a # or a <
+	case '\'':
+		if i > 0 && command[i-1] == '$' {
+			for j := i + 1; j < len(command); j++ {
+				if command[j] == '\\' {
+					j++
+				} else if command[j] == '\'' {
+					return j + 1
+				}
+			}
+			return len(command)
+		}
+		if end := strings.IndexByte(command[i+1:], '\''); end >= 0 {
+			return i + 1 + end + 1
+		}
+		return len(command)
+	case '#':
+		if i == 0 || strings.IndexByte(" \t\n;&|()", command[i-1]) >= 0 {
+			if end := strings.IndexByte(command[i:], '\n'); end >= 0 {
+				return i + end
+			}
+			return len(command)
+		}
+	case '<':
+		if i+1 < len(command) && command[i+1] == '<' && (i+2 >= len(command) || command[i+2] != '<') && (i == 0 || command[i-1] != '<') {
+			if spec, ok := heredocMarker(command, i+2); ok {
+				*pending = append(*pending, spec)
+			}
+		}
+	case '\n':
+		if len(*pending) == 0 {
+			return i
+		}
+		end := i + 1
+		for _, spec := range *pending {
+			end = heredocBodyEnd(command, end, spec)
+		}
+		*pending = (*pending)[:0]
+		return end
+	}
+	return i
+}
+
+// heredocMarker reads the delimiter after << at command[i:].
+func heredocMarker(command string, i int) (heredocSpec, bool) {
+	spec := heredocSpec{plain: true}
+	if i < len(command) && command[i] == '-' {
+		spec.dash = true
+		i++
+	}
+	for i < len(command) && (command[i] == ' ' || command[i] == '\t') {
+		i++
+	}
+	start := i
+	for i < len(command) {
+		c := command[i]
+		switch {
+		case c == '\'' || c == '"':
+			end := strings.IndexByte(command[i+1:], c)
+			if end < 0 {
+				return spec, false
+			}
+			spec.delim += command[i+1 : i+1+end]
+			spec.plain = false
+			i += end + 2
+			continue
+		case c == '\\' && i+1 < len(command):
+			spec.delim += string(command[i+1])
+			spec.plain = false
+			i += 2
+			continue
+		case c == ' ' || c == '\t' || c == '\n' || c == ';' || c == '&' || c == '|' || c == '(' || c == ')' || c == '<' || c == '>':
+		default:
+			spec.delim += string(c)
+			i++
+			continue
+		}
+		break
+	}
+	return spec, i > start && spec.delim != ""
+}
+
+// heredocBodyEnd returns the end of the body of spec that starts at from:
+// the end of the line that closes it, or of the text. The body of an
+// unquoted here-document that holds a command substitution is not data: its
+// start is returned.
+func heredocBodyEnd(command string, from int, spec heredocSpec) int {
+	for line := from; line < len(command); {
+		eol := strings.IndexByte(command[line:], '\n')
+		next := len(command)
+		text := command[line:]
+		if eol >= 0 {
+			text, next = command[line:line+eol], line+eol+1
+		}
+		if spec.dash {
+			text = strings.TrimLeft(text, "\t")
+		}
+		if text == spec.delim {
+			if spec.plain && strings.ContainsAny(command[from:line], "`$") {
+				return from
+			}
+			return next
+		}
+		line = next
+	}
+	if spec.plain && strings.ContainsAny(command[from:], "`$") {
+		return from
+	}
+	return len(command)
 }
 
 // tokenBytes are the bytes that make a token of their own for MaxTokens:

@@ -22,9 +22,6 @@ import (
 const (
 	// largeCommandMin is the size from which a command is cached.
 	largeCommandMin = 64 << 10
-	// largeCommandMax bounds the commands kept; a larger one is parsed each
-	// time.
-	largeCommandMax = 4 << 20
 	// parseCacheEntries bounds how many large commands are kept.
 	parseCacheEntries = 4
 	// parseCacheLife is how long a kept command stays: one hook call, with
