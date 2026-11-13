@@ -151,9 +151,13 @@ func (s *Store) InsertRejectedRecords(ctx context.Context, rows []RejectedRecord
 				return execErr
 			}
 		}
-		if _, execErr := tx.ExecContext(ctx, `DELETE FROM rejected_records WHERE id IN (
-			SELECT id FROM rejected_records ORDER BY id DESC LIMIT -1 OFFSET ?
-		)`, maxRows); execErr != nil {
+		// Rows leave only oldest first (this cap and retention), so the ids
+		// of the kept rows are contiguous and the cap is one indexed range
+		// delete; an OFFSET walk would read up to maxRows rows while this
+		// transaction holds the write lock. A gap can only make it keep
+		// fewer rows than the cap.
+		if _, execErr := tx.ExecContext(ctx, `DELETE FROM rejected_records
+			WHERE id <= (SELECT MAX(id) FROM rejected_records) - ?`, maxRows); execErr != nil {
 			return execErr
 		}
 		return tx.Commit()
