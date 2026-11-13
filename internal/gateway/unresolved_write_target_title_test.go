@@ -66,9 +66,11 @@ func TestManagedWriteTargetTheHookCannotResolveIsNamedAsUnresolved(t *testing.T)
 				switch {
 				case !row.unresolved && (verdict != "block" || named || !keys):
 					t.Errorf("%s %s %s: %s, unresolved title %v, keys title %v, want a block named %q: %.300s", connector, where, row.name, verdict, named, keys, keysTitle, body)
-				case row.unresolved && verdict == "block" && (!named || keys):
-					t.Errorf("%s %s %s: block with unresolved title %v, keys title %v, want it named as unresolved: %.300s", connector, where, row.name, named, keys, body)
-				case row.unresolved && verdict == "block":
+				case row.unresolved && (verdict == "block" || verdict == "alert") && (!named || keys):
+					t.Errorf("%s %s %s: %s with unresolved title %v, keys title %v, want it named as unresolved: %.300s", connector, where, row.name, verdict, named, keys, body)
+				case row.unresolved && (verdict == "block" || verdict == "alert"):
+					// The cell is the default pack: an unresolved target is UNCERTAIN there and
+					// alerts; the strict pack blocks it (rel-1-0-10:GAP-0018).
 					blocked++
 				case row.unresolved && verdict != "allow":
 					t.Errorf("%s %s %s: %s", connector, where, row.name, verdict)

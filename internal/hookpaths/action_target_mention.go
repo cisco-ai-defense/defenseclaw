@@ -238,6 +238,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		// Quoting makes *, ? and [ literal only in a POSIX reading of a
 		// POSIX home; a Windows-spelled home reads them as wildcards.
 		literalReading := !spelledWindows && !actionPosixWindowsHome(home)
+		if memo.nonWritesExcused() && !stateOnly {
+			// A pipeline of readers (sudo sha256sum KEYS | sed -n 1,5p | tail) prints
+			// to the terminal: its statements read like a direct reader does.
+			for stmt := range actionReadOnlyPipelines(file, home) {
+				direct[stmt] = true
+			}
+		}
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -388,8 +395,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// moved file under that name (rel-1-0-6:GAP-0217).
 				readOnly := !stateOnly && actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home)
 				if !readOnly && !stateOnly && memo.nonWritesExcused() {
-					// A shell body or an ssh remote command that only reads.
-					readOnly = actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true)
+					// A shell body or an ssh remote command that only reads, or a
+					// reader whose output goes to a sink the scan cannot resolve
+					// (a variable-named file): the effect is UNCERTAIN, not a known
+					// copy of the content into a resolved file.
+					readOnly = actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) ||
+						actionReaderToUnknownSink(stmt, home)
 				}
 				readsReplaced := len(replacedEntries) > 0 && readOnly
 				var quick func([]string) bool
@@ -5450,4 +5461,75 @@ func actionPathHasDotComponent(word string) bool {
 		}
 	}
 	return false
+}
+
+// actionReaderToUnknownSink reports a statement that only reads (the statement
+// without its output redirects is a reader) whose every output redirect names a
+// file the scan cannot resolve (a word with a variable or substitution in it).
+// Such a sink is unknown: the statement is no known copy of the protected
+// content into a named file, which keeps its block.
+func actionReaderToUnknownSink(stmt *syntax.Stmt, home string) bool {
+	if len(stmt.Redirs) == 0 {
+		return false
+	}
+	for _, redir := range stmt.Redirs {
+		if redir.Word == nil {
+			return false
+		}
+		switch redir.Op {
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll:
+		default:
+			return false
+		}
+		if _, static := StaticWord(redir.Word, home); static {
+			return false
+		}
+	}
+	bare := *stmt
+	bare.Redirs = nil
+	return actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{&bare}}, home, 0, true)
+}
+
+// actionReadOnlyPipelines returns the statements of every list operand or top
+// level statement that is a pipeline whose stages all only read, with no
+// redirect: the statements of such a pipeline, stage by stage.
+func actionReadOnlyPipelines(file *syntax.File, home string) map[*syntax.Stmt]bool {
+	out := map[*syntax.Stmt]bool{}
+	var mark func(stmt *syntax.Stmt)
+	var stages func(stmt *syntax.Stmt)
+	stages = func(stmt *syntax.Stmt) {
+		if stmt == nil {
+			return
+		}
+		out[stmt] = true
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && (binary.Op == syntax.Pipe || binary.Op == syntax.PipeAll) {
+			stages(binary.X)
+			stages(binary.Y)
+		}
+	}
+	mark = func(stmt *syntax.Stmt) {
+		if stmt == nil {
+			return
+		}
+		binary, ok := stmt.Cmd.(*syntax.BinaryCmd)
+		if !ok {
+			return
+		}
+		switch binary.Op {
+		case syntax.AndStmt, syntax.OrStmt:
+			mark(binary.X)
+			mark(binary.Y)
+		case syntax.Pipe, syntax.PipeAll:
+			if len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated &&
+				actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) {
+				stages(stmt)
+			}
+		}
+	}
+	if file != nil {
+		for _, stmt := range file.Stmts {
+			mark(stmt)
+		}
+	}
+	return out
 }

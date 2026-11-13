@@ -1659,6 +1659,14 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 // variable-expanded word the proof cannot bound is unknown only
 // (unprovenTargetMayWarn).
 func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home string, held unprovenWrite) bool {
+	if held.evidenceGap {
+		// A managed gateway that holds no complete reading from its hook client
+		// (no header, an undecodable or rejected one, a map past its bound)
+		// cannot tell an unknown call from a stripped one: it keeps failing
+		// closed. The unknown tier is for a call whose own words leave the
+		// target open.
+		return false
+	}
 	if held.class == hookpaths.UnprovenTargetUnresolved {
 		return unprovenTargetMayWarn(request, commandText, home, held)
 	}
@@ -1794,6 +1802,10 @@ var unprovenIndirection = lazyregexp.New(`(?m)(?:^|[\s;&|(){}])(?:eval|source|tr
 // hookpaths.UnprovenWriteTitle class and the operand at fault, if one was.
 type unprovenWrite struct {
 	class, operand string
+	// evidenceGap: the call came to a managed gateway with no complete reading
+	// from its hook client (no header, an undecodable or rejected one, a map past
+	// its bound).
+	evidenceGap bool
 }
 
 // unprovenOperandNearProtected reports an operand at or under the active

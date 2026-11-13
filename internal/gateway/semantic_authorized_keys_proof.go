@@ -1051,9 +1051,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// protected file: class (hookpaths.UnprovenWriteTitle) names why. The
 	// first true answer decides the call, so the class is that answer's
 	// (rel-1-0-10:GAP-0013).
+	// evidenceGap: a managed gateway holds no complete reading from its hook
+	// client (no header, an undecodable or rejected one, a map past its bound).
+	evidenceGap := request.ProtectedHomeHook &&
+		(len(request.ResolvedWriteTargets) == 0 || request.ResolvedWriteTargets[hookpaths.TruncatedKey] != "")
 	unproven := func(class, operand string) bool {
 		if request.unprovenTarget != nil && request.unprovenTarget.class == "" {
-			*request.unprovenTarget = unprovenWrite{class: class, operand: operand}
+			*request.unprovenTarget = unprovenWrite{class: class, operand: operand, evidenceGap: evidenceGap}
 		}
 		return true
 	}

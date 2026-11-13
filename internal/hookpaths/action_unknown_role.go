@@ -101,11 +101,7 @@ func actionCallRoleUnknown(call *syntax.CallExpr, home string) bool {
 		return true
 	}
 	base := programBase(program)
-	// A bare name is a utility on the path, and one the scan does not list
-	// may still write (a GNU gtee, gtruncate): only a program named by a path
-	// to a file of its own (./send.sh, scripts/run.py) is a script whose
-	// arguments are its own business. The variable-named program above is the
-	// same: the script is whatever the variable holds.
-	return !actionRoleKnownProgram(base) && !actionRoleKnownProgram(strings.TrimPrefix(base, "g")) &&
-		strings.Contains(program, "/")
+	// A program the scan does not list is unknown, bare name or path alike;
+	// the GNU g prefix of a listed coreutil (gtee, gtruncate) is that coreutil.
+	return !actionRoleKnownProgram(base) && !actionRoleKnownProgram(strings.TrimPrefix(base, "g"))
 }

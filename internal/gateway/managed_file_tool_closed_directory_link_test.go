@@ -233,8 +233,15 @@ func TestManagedShellWriteThroughALinkIntoAClosedDirectoryStaysBlockedWhenTheCom
 					}
 					return sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": command}))(project)
 				})
-				if !blocked {
+				// The link text the client read is inside a folder the command opens, so the
+				// target is UNCERTAIN: the strict pack blocks it, the default and permissive
+				// packs alert on it (managed follows the pack; S7 lead 2026-11-13,
+				// rel-1-0-10:GAP-0018).
+				switch {
+				case profile == "strict" && !blocked:
 					t.Fatalf("append through a link the command reopens allowed by the managed hook in %s: %.600s", profile, body)
+				case profile != "strict" && (blocked || !strings.Contains(body, "persistence.ssh_authorized_keys_command")):
+					t.Fatalf("append through a link the command reopens is not an alert on the key rule in %s: blocked=%v %.600s", profile, blocked, body)
 				}
 			})
 		}
@@ -426,7 +433,9 @@ func TestManagedShellWriteThroughAClosedFolderLinkStaysBlockedWhenTheClientMapIs
 		}
 		return call
 	})
-	if !blocked {
-		t.Fatalf("key append through a closed-folder link allowed with a map at its bound: %.600s", body)
+	// The default pack alerts on a target the client map leaves unresolved (UNCERTAIN);
+	// the strict pack blocks it (managed follows the pack; rel-1-0-10:GAP-0018).
+	if blocked || !strings.Contains(body, "persistence.ssh_authorized_keys_command") {
+		t.Fatalf("key append through a closed-folder link with a map at its bound is not an alert on the key rule: blocked=%v %.600s", blocked, body)
 	}
 }
