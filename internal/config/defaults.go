@@ -205,6 +205,7 @@ func DefaultConfig() *Config {
 			DetectionStrategy:           "regex_judge",
 			DetectionStrategyCompletion: "regex_only",
 			EffectsRules:                "shadow",
+			EffectsRulesTier:            "restricted",
 			Judge: JudgeConfig{
 				Injection:     true,
 				PII:           true,

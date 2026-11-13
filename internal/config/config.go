@@ -1857,6 +1857,11 @@ type GuardrailConfig struct {
 	// decide). Ships "shadow"; the lead flips it to "on" once the corpus
 	// numbers hold.
 	EffectsRules                string `mapstructure:"effects_rules"                 yaml:"effects_rules,omitempty"`
+	// EffectsRulesTier selects how far the effect lane may block: "restricted"
+	// (a listed command on an exact canonical known protected target) or
+	// "full" (any known mutation of a known protected target). Ships
+	// "restricted". It only matters while effects_rules is shadow or on.
+	EffectsRulesTier            string `mapstructure:"effects_rules_tier"            yaml:"effects_rules_tier,omitempty"`
 	JudgeSweep                  bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
 
 	// RetainJudgeBodies controls whether raw LLM-judge responses are
@@ -4145,6 +4150,7 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
 	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
 	viper.SetDefault("guardrail.effects_rules", "shadow")
+	viper.SetDefault("guardrail.effects_rules_tier", "restricted")
 	// judge_sweep runs the full LLM judge on content the regex
 	// triager classified as no-signal. Flipped from false to true
 	// in the multi-provider-adapters PR after internal red-team

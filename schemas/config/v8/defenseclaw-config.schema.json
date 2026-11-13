@@ -1519,6 +1519,13 @@
       "pattern": "^(|[Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
       "description": "Lowest severity that takes the action: CRITICAL, HIGH, MEDIUM or LOW, in any case. Empty inherits: a connector falls back to the global value, and the global value to the rule pack's level."
     },
+    "effectsRulesTier": {
+      "type": "string",
+      "enum": [
+        "restricted",
+        "full"
+      ]
+    },
     "effectsRules": {
       "type": "string",
       "enum": [
@@ -2188,6 +2195,9 @@
         },
         "effects_rules": {
           "$ref": "#/$defs/effectsRules"
+        },
+        "effects_rules_tier": {
+          "$ref": "#/$defs/effectsRulesTier"
         },
         "judge_sweep": {
           "type": "boolean"

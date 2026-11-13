@@ -347,6 +347,7 @@ guardrail:
   detection_strategy_completion: regex_only  # default for tool results and completions; regex_judge also sends them to the judge
   detection_strategy_tool_call: ""   # per-lane override; empty -> detection_strategy
   effects_rules: shadow        # off | shadow | on: the effect-model rule lane (ships shadow; on only after the corpus holds)
+  effects_rules_tier: restricted  # restricted | full: how far the effect lane may block (ships restricted)
 
   # judge.llm omitted: the judge inherits the top-level llm block.
   judge:

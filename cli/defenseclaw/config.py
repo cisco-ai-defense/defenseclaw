@@ -3006,6 +3006,7 @@ class GuardrailConfig:
     detection_strategy_completion: str = ""  # per-direction override
     detection_strategy_tool_call: str = ""  # per-direction override
     effects_rules: str = "shadow"  # off | shadow | on (effect-model rule lane)
+    effects_rules_tier: str = "restricted"  # restricted | full (effect block scope)
     # Run full judge classification on content with no regex signal
     # (regex_judge mode). Flipped from False to True in the
     # multi-provider-adapters PR: pure-regex triage misses enough
@@ -6943,6 +6944,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         effects_rules=raw.get("effects_rules", "shadow"),
+        effects_rules_tier=raw.get("effects_rules_tier", "restricted"),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack=str(raw.get("rule_pack", "") or ""),
         custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
