@@ -17,6 +17,8 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -98,7 +100,13 @@ func TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts(t *testing.T) {
 		return apis[c]
 	}
 	modes, events := []string{"action", "observe"}, []string{"PreToolUse", "PermissionRequest"}
-	judged := map[cell][2]int{}
+	type judgment struct {
+		test         toolCallCorpusCase
+		cell         cell
+		cwd          string
+		bash, cowork coworkVerdict
+	}
+	var judgments []judgment
 	turn := map[bool]int{}
 	for _, test := range commands {
 		k := turn[test.IsAttack]
@@ -111,42 +119,54 @@ func TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts(t *testing.T) {
 			{"strict", modes[k%2], events[(k/2)%2]},
 			{[]string{"default", "permissive"}[(k/4)%2], modes[(k+1)%2], events[(k/2+1)%2]},
 		} {
-			counts := judged[c]
-			if test.IsAttack {
-				counts[0]++
-			} else {
-				counts[1]++
+			api(c)
+			judgments = append(judgments, judgment{test: test, cell: c, cwd: cwd})
+		}
+	}
+	// The verdicts are independent reads of one APIServer per cell, as a
+	// gateway serves concurrent hooks, so they run on every CPU; the checks
+	// below read the results in corpus order.
+	forEachOnEveryCPU(len(judgments), func(i int) {
+		j := &judgments[i]
+		evaluate := func(tool string, server map[string]interface{}) coworkVerdict {
+			payload := map[string]interface{}{"hook_event_name": j.cell.event, "tool_name": tool}
+			if server != nil {
+				payload["mcp_server"] = server
 			}
-			judged[c] = counts
-			evaluate := func(tool string, server map[string]interface{}) coworkVerdict {
-				payload := map[string]interface{}{"hook_event_name": c.event, "tool_name": tool}
-				if server != nil {
-					payload["mcp_server"] = server
-				}
-				return coworkVerdictOf(api(c).evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
-					HookEventName: c.event, ToolName: tool, CWD: cwd,
-					ToolInput: map[string]interface{}{"command": test.Command},
-					Payload:   payload,
-				}))
+			return coworkVerdictOf(apis[j.cell].evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+				HookEventName: j.cell.event, ToolName: tool, CWD: j.cwd,
+				ToolInput: map[string]interface{}{"command": j.test.Command},
+				Payload:   payload,
+			}))
+		}
+		j.bash = evaluate("Bash", nil)
+		j.cowork = evaluate("mcp__workspace__bash", coworkWorkspaceServer())
+	})
+	judged := map[cell][2]int{}
+	for _, j := range judgments {
+		test, c, bash, cowork := j.test, j.cell, j.bash, j.cowork
+		counts := judged[c]
+		if test.IsAttack {
+			counts[0]++
+		} else {
+			counts[1]++
+		}
+		judged[c] = counts
+		compared++
+		if bash.raw == "block" {
+			bashBlocks++
+		}
+		if !test.IsAttack {
+			benign++
+		}
+		if coworkBashReadsPOSIX(test.Command) {
+			if !cowork.equal(bash) {
+				t.Errorf("%s/%s %s %q (%s): Cowork %+v, Bash %+v", c.profile, c.mode, c.event, test.Command, test.ID, cowork, bash)
 			}
-			bash := evaluate("Bash", nil)
-			cowork := evaluate("mcp__workspace__bash", coworkWorkspaceServer())
-			compared++
-			if bash.raw == "block" {
-				bashBlocks++
-			}
-			if !test.IsAttack {
-				benign++
-			}
-			if coworkBashReadsPOSIX(test.Command) {
-				if !cowork.equal(bash) {
-					t.Errorf("%s/%s %s %q (%s): Cowork %+v, Bash %+v", c.profile, c.mode, c.event, test.Command, test.ID, cowork, bash)
-				}
-			} else {
-				windowsOnly++
-				if coworkActionRank(cowork.raw) > coworkActionRank(bash.raw) {
-					t.Errorf("%s/%s %s %q (%s): Cowork %+v is stricter than Bash %+v on Windows", c.profile, c.mode, c.event, test.Command, test.ID, cowork, bash)
-				}
+		} else {
+			windowsOnly++
+			if coworkActionRank(cowork.raw) > coworkActionRank(bash.raw) {
+				t.Errorf("%s/%s %s %q (%s): Cowork %+v is stricter than Bash %+v on Windows", c.profile, c.mode, c.event, test.Command, test.ID, cowork, bash)
 			}
 		}
 	}
@@ -252,4 +272,20 @@ func TestCoworkFetchAndNavigateGetWebFetchVerdicts(t *testing.T) {
 			}
 		}
 	}
+}
+
+// forEachOnEveryCPU runs do(0) .. do(n-1) on GOMAXPROCS goroutines and
+// returns when all are done. do must only write its own index's result and
+// must not call t.Fatal (t.Error is safe).
+func forEachOnEveryCPU(n int, do func(i int)) {
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range min(runtime.GOMAXPROCS(0), n) {
+		wg.Go(func() {
+			for i := int(next.Add(1) - 1); i < n; i = int(next.Add(1) - 1) {
+				do(i)
+			}
+		})
+	}
+	wg.Wait()
 }
