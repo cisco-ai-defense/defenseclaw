@@ -270,7 +270,7 @@ func (e *S7Engine) Layers(ctx context.Context, sessionID, toolName, args string,
 
 // startWALGuard runs the product's own audit WAL guard pass (auditWALGuardPass, the one runAuditWALGuard calls every 2 s in a running
 // gateway) in a goroutine. The harness never calls Sidecar.Run, so without this nothing checkpoints and the audit WAL grows without
-// bound under a sustained hook load (7-24 GB per run seen on dc-build-1). The pass runs every 500 ms here because the harness
+// bound under a sustained hook load (7-24 GB per run seen on the build box). The pass runs every 500 ms here because the harness
 // drives far more calls per second than a host does.
 func (e *S7Engine) startWALGuard() {
 	ctx, cancel := context.WithCancel(context.Background())
