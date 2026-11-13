@@ -45,3 +45,20 @@ func TestAcceptedCredentialMatch_PaddedSyntheticTokensStillReport(t *testing.T) 
 		})
 	}
 }
+
+// A connection string whose password is a variable slot carries no password.
+func TestConnectionStringWithAVariablePasswordIsNotACredential(t *testing.T) {
+	for _, match := range []string{
+		"postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/db",
+		"postgres://app:$DB_PASSWORD@db.internal/app",
+		"mysql://app:{{ db_password }}@db.internal/app",
+		"redis://:<password>@cache.internal/0",
+	} {
+		if acceptedCredentialMatch("SEC-CONNSTR", match) {
+			t.Errorf("acceptedCredentialMatch(SEC-CONNSTR, %q) = true, want false", match)
+		}
+	}
+	if !acceptedCredentialMatch("SEC-CONNSTR", "postgres://app:changeme123@db.internal/app") {
+		t.Error("a literal weak password must still be a credential")
+	}
+}

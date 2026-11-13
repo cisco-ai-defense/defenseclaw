@@ -1142,7 +1142,10 @@ func acceptedCredentialMatch(ruleID, match string) bool {
 	// A URI with user-info has already proved a credential-bearing structure.
 	// Never hide weak/default passwords based on their spelling.
 	if ruleID == "SEC-CONNSTR" {
-		return true
+		// A password that is a reference to a variable (${DB_PASSWORD},
+		// $DB_PASS, {{ db_password }}, <password>) is a template slot, not a
+		// password: nothing is exposed.
+		return !secretAssignmentVarRef.MatchString(strings.TrimSpace(candidate))
 	}
 	if knownPublicCredentialExample(ruleID, candidate) {
 		return false

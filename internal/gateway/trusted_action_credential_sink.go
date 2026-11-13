@@ -174,8 +174,9 @@ func trustedActionFixtureTarget(p string) bool {
 	}
 	base := path.Base(p)
 	for _, marker := range []string{
-		"_test.", ".test.", ".spec.", "test_", "conftest", ".example", ".sample", ".template",
+		"_test.", ".test.", ".spec.", "test_", "conftest", ".example", ".sample", "template",
 		".dist", "example.", "sample.", "fixture",
+		".j2", ".jinja", ".tmpl", ".tpl", ".erb", ".mustache", ".hbs",
 	} {
 		if strings.Contains(base, marker) {
 			return true
