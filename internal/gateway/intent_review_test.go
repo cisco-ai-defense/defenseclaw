@@ -54,6 +54,7 @@ func TestIntentReviewScopeFloorKeepsEscalatedFailClosedRefusal(t *testing.T) {
 		return escalationHookServerWith(t, &mockLLMProvider{err: errors.New("judge provider down")}, "default", func(c *config.Config) {
 			c.Guardrail.HookFailMode = "closed"
 			c.Guardrail.Judge.HookTimeout = 0.3
+			c.Guardrail.Judge.IntentScope = config.IntentScopeAlert
 		})
 	}
 	a := newServer(t)
@@ -68,15 +69,6 @@ func TestIntentReviewScopeFloorKeepsEscalatedFailClosedRefusal(t *testing.T) {
 		t.Fatalf("with a task the scope floor replaced the failed judge: raw_action=%q, refusal finding=%v, scope finding=%v (want the fail-closed block)",
 			probe.RawAction, findingStringHasRuleID(probe.Findings, "llm-judge:"+escalatedJudgeUnavailableFinding),
 			findingStringHasRuleID(probe.Findings, "llm-judge:"+intentScopeFinding))
-	}
-}
-
-// Check 4: a judge failure under the floor must still count as a fallback
-// (metric and loud log), or operators lose the judge-unavailable signal.
-func TestIntentReviewScopeFloorKeepsJudgeFallbackSignal(t *testing.T) {
-	v := applyIntentScopeFloor(errorVerdict("llm-judge-tool"), "r")
-	if hookJudgeCallFallback(v, context.Background()) == "" {
-		t.Fatalf("a failed judge under the scope floor records no fallback (JudgeFailed=%v)", v.JudgeFailed)
 	}
 }
 
@@ -153,8 +145,7 @@ func TestIntentReviewScopeTargetsNotFromToolResponseFallback(t *testing.T) {
 	// What the generic hook does with it: the text is the task, never a scope target.
 	j.ObserveSessionPromptScope(ctx, req.Content, req.PromptField)
 	j.ObserveSessionPrompt(ctx, "continue")
-	sample := j.toolJudgeContextSample(ctx, "http_post", `{"url":"https://collector.example/u","data":"payload"}`)
-	if j.takeScopeFloor(sample) == "" {
+	if j.scopeFloorReason(ctx, "http_post", `{"url":"https://collector.example/u","data":"payload"}`, "") == "" {
 		t.Errorf("a host from a tool_response fallback became a session scope target and silenced the floor")
 	}
 }

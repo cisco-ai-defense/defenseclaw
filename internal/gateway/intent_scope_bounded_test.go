@@ -75,7 +75,7 @@ func TestIntentScopeDepthAndValueCapsAreNotSilent(t *testing.T) {
 		t.Fatalf("a recipient past the depth cap must make the call out of scope: %q", r)
 	}
 	many := func(n int) string {
-		items := make([]string, n-1)
+		items := make([]string, n-2) // to and extra count too: every node below the root
 		for i := range items {
 			items[i] = "x"
 		}
@@ -146,7 +146,7 @@ func TestClearSessionTaskKeepsCallsAndScope(t *testing.T) {
 		t.Fatalf("the recorded call must stay:\n%s", sample)
 	}
 	j.ObserveSessionPrompt(ctx, "continue")
-	if j.takeScopeFloor(j.toolJudgeContextSample(ctx, "http.post", `{"url":"https://artifacts.corp.example/builds/7"}`)) != "" {
+	if j.scopeFloorReason(ctx, "http.post", `{"url":"https://artifacts.corp.example/builds/7"}`, "") != "" {
 		t.Fatal("the scope targets of the session must stay")
 	}
 }
@@ -215,7 +215,7 @@ func intentScopeDepthCall(size int, seen bool) boundedLaneCall {
 }
 
 func intentScopeValuesCall(size int, seen bool) boundedLaneCall {
-	items := make([]string, size-1)
+	items := make([]string, size-2)
 	for i := range items {
 		items[i] = "x"
 	}
@@ -237,7 +237,7 @@ func intentScopeDecide(t *testing.T, api *APIServer, env boundedEnv, call bounde
 		intentScopeJudged[api] = true
 		api.scannerCfg.DataDir = t.TempDir()
 		api.scannerCfg.Guardrail.DetectionStrategy = "regex_judge"
-		api.scannerCfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"claudecode"}}
+		api.scannerCfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"claudecode"}, IntentScope: config.IntentScopeAlert}
 		clean := &mockLLMProvider{response: &ChatResponse{Model: "m", Choices: []ChatChoice{{Message: &ChatMessage{Content: `{"findings": []}`}}}, Usage: &ChatUsage{PromptTokens: 1, CompletionTokens: 1}}}
 		api.SetHookJudge(&LLMJudge{cfg: &api.scannerCfg.Guardrail.Judge, model: "test-model", provider: clean, rp: &guardrail.RulePack{}})
 	}

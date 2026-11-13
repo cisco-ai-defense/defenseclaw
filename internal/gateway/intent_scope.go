@@ -17,13 +17,15 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -53,12 +55,14 @@ import (
 const scopeUnreadableReason = "the call may send data and its destination cannot be read, so it is judged as outside the user's task (unreadable_send)"
 
 const (
-	intentScopeFinding    = "INTENT-SCOPE-SEND"
-	maxNamedScopeTargets  = 20
-	maxScopeDestinations  = 16
-	maxScopeDepth         = 10
-	maxScopeValues        = 1024
-	pendingScopeFloorsCap = 256
+	intentScopeFinding     = "INTENT-SCOPE-SEND"
+	maxNamedScopeTargets   = 20
+	maxScopeDestinations   = 16
+	maxScopeDepth          = 10
+	maxScopeValues         = 1024
+	maxScopeScanMatches    = 4096
+	maxScopeGitConfigBytes = 64 << 10
+	maxScopeGitDepth       = 12
 )
 
 var (
@@ -73,7 +77,8 @@ var (
 var scopeSendSegments = map[string]bool{
 	"post": true, "upload": true, "send": true, "email": true, "mail": true, "publish": true, "webhook": true,
 	"notify": true, "submit": true, "export": true, "forward": true, "share": true, "put": true, "push": true,
-	"dispatch": true, "transmit": true, "sync": true, "bcc": true,
+	"dispatch": true, "transmit": true, "sync": true, "bcc": true, "backup": true, "archive": true,
+	"snapshot": true, "replicate": true, "mirror": true,
 }
 
 // scopeReadSegments are tool-name words of a call that does not send data
@@ -93,7 +98,11 @@ var scopeSinkKeys = map[string]bool{
 	"destination": true, "dest": true, "recipient": true, "recipients": true, "to": true, "cc": true, "bcc": true,
 	"bcc_override": true, "webhook": true, "webhook_url": true, "log_destination": true, "upload_url": true,
 	"target_url": true, "sink": true, "recipient_email": true, "send_to": true, "callback": true, "callback_url": true,
-	"forward_to": true,
+	"forward_to": true, "output_url": true, "output_uri": true, "output_destination": true, "export_url": true,
+	"export_destination": true, "backup_url": true, "backup_destination": true, "backup_location": true,
+	"archive_url": true, "archive_destination": true, "archive_location": true, "snapshot_destination": true,
+	"destination_url": true, "destination_uri": true, "dest_url": true, "dest_bucket": true, "target_bucket": true,
+	"upload_destination": true, "replica_url": true, "mirror_url": true,
 }
 
 // scopeAmbiguousKeys name a place that is a source as often as a sink (a fetch
@@ -184,7 +193,9 @@ func scopeStrings(args string, trunc *bounded.Truncated) []scopeString {
 		return []scopeString{{"", args}}
 	}
 	var out []scopeString
-	values := bounded.NewCounter(trunc, bounded.Nodes, maxScopeValues)
+	// Every node below the root counts, strings or not: a call of a million
+	// numbers, nulls or empty arrays is as unread as one of a million strings.
+	nodes := bounded.NewCounter(trunc, bounded.Nodes, maxScopeValues)
 	var walk func(key string, v any, depth int)
 	walk = func(key string, v any, depth int) {
 		if !trunc.Within(bounded.Depth, depth, maxScopeDepth) {
@@ -192,15 +203,19 @@ func scopeStrings(args string, trunc *bounded.Truncated) []scopeString {
 		}
 		switch t := v.(type) {
 		case string:
-			if values.Take() {
-				out = append(out, scopeString{strings.ToLower(key), t})
-			}
+			out = append(out, scopeString{strings.ToLower(key), t})
 		case []any:
 			for _, e := range t {
+				if !nodes.Take() {
+					return
+				}
 				walk(key, e, depth+1)
 			}
 		case map[string]any:
 			for k, e := range t {
+				if !nodes.Take() {
+					return
+				}
 				walk(k, e, depth+1)
 			}
 		}
@@ -281,10 +296,22 @@ func scopeToolVerb(toolName string) (sends, reads bool) {
 	return false, false
 }
 
-// callSendDestinations returns the places a sending call goes to, and the caps
-// its reading hit; nil for a call that does not send. unreadable reports a
-// command that may send and could not be read (the unknown tier applies to the
-// send; there is no text scan).
+// scanScopeMatches returns the matches of re in t, at most maxScopeScanMatches
+// of them; more is a cap hit (the bound rule), and the scan stops there.
+func scanScopeMatches(re *lazyregexp.Regexp, t string, trunc *bounded.Truncated) [][]string {
+	ms := re.FindAllStringSubmatch(t, maxScopeScanMatches+1)
+	if len(ms) > maxScopeScanMatches {
+		trunc.Hit(bounded.Items)
+		ms = ms[:maxScopeScanMatches]
+	}
+	return ms
+}
+
+// callSendDestinations returns the distinct places a sending call goes to, and
+// the caps its reading hit; nil for a call that does not send. A repeat of a
+// destination already read costs nothing; the seventeenth distinct one is a cap
+// hit. unreadable reports a command that may send and could not be read (the
+// unknown tier applies to the send; there is no text scan).
 func callSendDestinations(toolName, args string, trunc *bounded.Truncated) (dests []scopeDest, unreadable bool) {
 	toolSends, toolReads := scopeToolVerb(toolName)
 	values := scopeStrings(args, trunc)
@@ -328,11 +355,10 @@ func callSendDestinations(toolName, args string, trunc *bounded.Truncated) (dest
 		return nil, false
 	}
 	for _, t := range texts {
-		// One match past the cap is enough to know the cap is hit.
-		for _, m := range scopeURLHostRe.FindAllStringSubmatch(t, maxScopeDestinations+1) {
+		for _, m := range scanScopeMatches(scopeURLHostRe, t, trunc) {
 			add(scopeDest{host: strings.ToLower(m[1])})
 		}
-		for _, m := range scopeEmailRe.FindAllStringSubmatch(t, maxScopeDestinations+1) {
+		for _, m := range scanScopeMatches(scopeEmailRe, t, trunc) {
 			add(scopeDest{mailbox: strings.ToLower(m[0])})
 		}
 		if !strings.Contains(t, "://") && !strings.Contains(t, "@") && !strings.ContainsAny(t, " \t\n/\\") {
@@ -368,23 +394,24 @@ func mergeScopeTargets(session []string, prompt string) []string {
 }
 
 // intentScopeExceeded returns a reason when the call sends data to a
-// destination neither the task nor an earlier prompt of the session names, or
-// "" (also when there is no task: with nothing to check against, the judge
-// decides alone). sessionTargets are the targets the session's user prompts
-// named; they never come from tool output.
-func intentScopeExceeded(intent string, sessionTargets []string, toolName, args string) string {
+// destination neither the task nor an earlier prompt of the session names (nor
+// a host the working folder's git remotes name), or "" (also when there is no
+// task: with nothing to check against, the judge decides alone).
+// sessionTargets are the targets the session's user prompts named, never from
+// tool output; gitHosts are the hosts of the git remotes of the call's folder.
+func intentScopeExceeded(intent string, sessionTargets []string, toolName, args string, gitHosts ...string) string {
 	if strings.TrimSpace(intent) == "" {
 		return ""
 	}
 	var trunc bounded.Truncated
 	dests, unreadable := callSendDestinations(toolName, args, &trunc)
-	named := append(namedScopeTargets(intent), sessionTargets...)
+	named := append(append(namedScopeTargets(intent), sessionTargets...), gitHosts...)
 	// What was read before a cap is still judged, and a call cut short at a cap
 	// is judged as unknown at least: the stricter of the two stands.
 	exceeded := false
 	for _, d := range dests {
 		if d.mailbox != "" {
-			if scopeNamedMailbox(d.mailbox, named) {
+			if scopeNamedMailbox(d.mailbox, named) || scopePartyNamed(d.mailbox, intent, named) {
 				continue
 			}
 		} else if scopeLoopback(d.host) || scopeNamedHost(d.host, named) {
@@ -409,48 +436,186 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 	return ""
 }
 
-// keepScopeFloor remembers the scope finding of a prepared sample until it is
-// judged, as keepDecisionState does for the decision model. A sample is unique
-// (it carries the call's nonce), so the key is its digest; when the cap is
-// reached the oldest pending floor goes, one at a time.
-func (j *LLMJudge) keepScopeFloor(sample, reason string) {
-	j.scopeFloorsMu.Lock()
-	defer j.scopeFloorsMu.Unlock()
-	if j.scopeFloors == nil {
-		j.scopeFloors = make(map[[sha256.Size]byte]scopeFloorEntry)
+// scopePartyNamed reports a mailbox of a party the task names without its
+// address: a word of the task is a whole word of the mailbox's local part (at
+// least three letters), and the task names the mailbox's domain. A word alone
+// is not enough: a look-alike local part at another domain is not the party.
+func scopePartyNamed(mailbox, intent string, named []string) bool {
+	at := strings.LastIndexByte(mailbox, '@')
+	if at <= 0 || !scopeNamedHost(mailbox[at+1:], named) {
+		return false
 	}
-	for len(j.scopeFloors) >= pendingScopeFloorsCap {
-		var oldest [sha256.Size]byte
-		oldestSeq := uint64(1<<63 - 1)
-		for key, e := range j.scopeFloors {
-			if e.seq < oldestSeq {
-				oldest, oldestSeq = key, e.seq
-			}
+	words := map[string]bool{}
+	for _, w := range strings.FieldsFunc(strings.ToLower(intent), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+		if len(w) >= 3 {
+			words[w] = true
 		}
-		delete(j.scopeFloors, oldest)
 	}
-	j.scopeFloorSeq++
-	j.scopeFloors[sha256.Sum256([]byte(sample))] = scopeFloorEntry{reason: reason, seq: j.scopeFloorSeq}
+	for _, p := range strings.FieldsFunc(mailbox[:at], func(r rune) bool { return r == '.' || r == '_' || r == '-' || r == '+' }) {
+		if len(p) >= 3 && words[p] {
+			return true
+		}
+	}
+	return false
 }
 
-func (j *LLMJudge) takeScopeFloor(sample string) string {
-	j.scopeFloorsMu.Lock()
-	defer j.scopeFloorsMu.Unlock()
-	key := sha256.Sum256([]byte(sample))
-	e := j.scopeFloors[key]
-	delete(j.scopeFloors, key)
-	return e.reason
+// scopeGitRemoteHosts returns the hosts of the git remotes of the repository
+// that holds dir: the forge the user's work is on, which a task about that work
+// names without spelling it (a push, a pull request, a CI call). It reads the
+// repository's own config file, never a tool result.
+func scopeGitRemoteHosts(dir string) []string {
+	if dir == "" || !filepath.IsAbs(dir) {
+		return nil
+	}
+	dir = filepath.Clean(dir)
+	for depth := 0; depth < maxScopeGitDepth; depth++ {
+		if hosts, ok := readGitRemoteHosts(filepath.Join(dir, ".git", "config")); ok {
+			return hosts
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return nil
 }
 
-type scopeFloorEntry struct {
+func readGitRemoteHosts(path string) ([]string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	var hosts []string
+	seen := map[string]bool{}
+	sc := bufio.NewScanner(&limitedScopeReader{r: f, left: maxScopeGitConfigBytes})
+	inRemote := false
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if strings.HasPrefix(line, "[") {
+			inRemote = strings.HasPrefix(line, "[remote ")
+			continue
+		}
+		if !inRemote || !strings.HasPrefix(line, "url") {
+			continue
+		}
+		_, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		host := gitRemoteHost(strings.TrimSpace(value))
+		if host != "" && !seen[host] && len(hosts) < 8 {
+			seen[host] = true
+			hosts = append(hosts, host)
+		}
+	}
+	return hosts, true
+}
+
+type limitedScopeReader struct {
+	r    *os.File
+	left int
+}
+
+func (l *limitedScopeReader) Read(p []byte) (int, error) {
+	if l.left <= 0 {
+		return 0, os.ErrClosed
+	}
+	if len(p) > l.left {
+		p = p[:l.left]
+	}
+	n, err := l.r.Read(p)
+	l.left -= n
+	return n, err
+}
+
+// gitRemoteHost is the host of a git remote url: https://host/x, ssh://git@host/x
+// or the scp form git@host:x.
+func gitRemoteHost(url string) string {
+	if loc := scopeShellURLRe.FindStringSubmatch(url); loc != nil {
+		return strings.ToLower(loc[1])
+	}
+	if m := scopeRemoteOperand.FindStringSubmatch(url); m != nil {
+		return strings.ToLower(m[1])
+	}
+	return ""
+}
+
+// scopeShadowObserver, when set (the benchmark harness), is told of every call
+// the scope floor recorded in shadow.
+var scopeShadowObserver atomic.Pointer[func(sessionID, tool, reason string)]
+
+// hookScopeFloorState is the scope finding of one hook tool call, read before the
+// judge ran.
+type hookScopeFloorState struct {
 	reason string
-	seq    uint64
+	mode   string
 }
 
-// applyIntentScopeFloor keeps the judge's verdict from falling below an alert
-// for a call that exceeds the task's scope. A judge verdict at or above the
-// floor is returned unchanged; a lower one, no verdict, or a failed judge gets
-// the scope finding; a lone review-only finding stops being audit-only.
+// hookScopeFloor reads the scope finding of a tool call from the session's task
+// and the call's arguments. It is deterministic, takes no model's answer and is
+// read before the judge runs, so a judge that is late, busy, skipped or failed
+// cannot drop it (GAP-0372). The task is kept by the hook session judges.
+func (a *APIServer) hookScopeFloor(ctx context.Context, toolName, args, cwd string) hookScopeFloorState {
+	cfg := a.decisionConfig(ctx)
+	if cfg == nil {
+		return hookScopeFloorState{}
+	}
+	mode := cfg.Guardrail.Judge.IntentScopeMode()
+	if mode == config.IntentScopeOff {
+		return hookScopeFloorState{}
+	}
+	for _, j := range a.hookSessionJudges(ctx) {
+		if reason := j.scopeFloorReason(ctx, toolName, args, cwd); reason != "" {
+			return hookScopeFloorState{reason: reason, mode: mode}
+		}
+	}
+	return hookScopeFloorState{}
+}
+
+// scopeFloorReason is the scope finding of a call in this judge's session, or "".
+func (j *LLMJudge) scopeFloorReason(ctx context.Context, toolName, args, cwd string) string {
+	if j == nil {
+		return ""
+	}
+	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
+	if sessionID == "" {
+		return ""
+	}
+	j.toolContextMu.Lock()
+	entry, ok := j.toolContext[sessionID]
+	j.toolContextMu.Unlock()
+	if !ok || entry.userIntent == "" {
+		return ""
+	}
+	return intentScopeExceeded(entry.userIntent, entry.scopeTargets, toolName, args, scopeGitRemoteHosts(cwd)...)
+}
+
+// applyHookScopeFloor folds the scope finding into the hook verdict: in shadow
+// mode only a judge event and a log line are recorded and the verdict is
+// returned as it is; otherwise the finding goes through the connector's
+// block_at / alert_at like a judge finding, and never lowers the verdict.
+func (a *APIServer) applyHookScopeFloor(ctx context.Context, connector string, scope hookScopeFloorState, toolName, args string, verdict *ToolInspectVerdict) *ToolInspectVerdict {
+	if scope.reason == "" {
+		return verdict
+	}
+	if scope.mode != config.IntentScopeAlert {
+		recordIntentScopeShadow(ctx, toolName, args, scope.reason)
+		return verdict
+	}
+	cfg := a.decisionConfig(ctx)
+	if cfg == nil {
+		return verdict
+	}
+	floor := hookJudgeLaneVerdict(cfg, connector, "tool_call", applyIntentScopeFloor(nil, scope.reason))
+	return mergeWithJudgeVerdict(verdict, floor)
+}
+
+// applyIntentScopeFloor is the verdict of a scope finding: at least a MEDIUM
+// alert, HIGH (the unknown tier) for a call read only up to a cap or not at
+// all, merged under a judge verdict without lowering it. A nil judged verdict
+// gives the floor alone.
 func applyIntentScopeFloor(judged *ScanVerdict, reason string) *ScanVerdict {
 	if reason == "" {
 		return judged
@@ -476,11 +641,6 @@ func applyIntentScopeFloor(judged *ScanVerdict, reason string) *ScanVerdict {
 		return floor
 	}
 	if judged.JudgeFailed {
-		// Never replace a judge failure: the hook has to see it (fallback
-		// metric, loud log, the escalated fail-closed refusal). The alert
-		// rides next to it.
-		floor.JudgeFailed = true
-		floor.judgeFailedUnderFloor = true
 		return floor
 	}
 	if guardrailSeverityRank(judged.Severity) > guardrailSeverityRank(floor.Severity) ||
@@ -502,19 +662,10 @@ func applyIntentScopeFloor(judged *ScanVerdict, reason string) *ScanVerdict {
 	return &out
 }
 
-// intentScopeMode is guardrail.judge.intent_scope of this judge.
-func (j *LLMJudge) intentScopeMode() string {
-	if j == nil || j.cfg == nil {
-		return config.IntentScopeAlert
-	}
-	return j.cfg.IntentScopeMode()
-}
-
-// recordIntentScopeShadow records a call the scope floor would have raised, in
-// shadow mode: a judge event of kind tool_intent_scope_shadow (action allow, the
-// finding INTENT-SCOPE-SEND, the tool name) and one log line with the reason.
-// The verdict is not touched.
-func (j *LLMJudge) recordIntentScopeShadow(ctx context.Context, toolName, args, reason string) {
+// recordIntentScopeShadow records a call the scope floor would have raised: a
+// judge event of kind tool_intent_scope_shadow (action allow, the finding, the
+// tool name, the reason as evidence) and one log line. The verdict is untouched.
+func recordIntentScopeShadow(ctx context.Context, toolName, args, reason string) {
 	shadow := applyIntentScopeFloor(nil, reason)
 	findings := judgeFindingsPayload(shadow)
 	for i := range findings {
@@ -522,7 +673,10 @@ func (j *LLMJudge) recordIntentScopeShadow(ctx context.Context, toolName, args, 
 		findings[i].Evidence = reason
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] intent-scope shadow: tool=%s reason=%q (record only, verdict unchanged)\n", sanitizeToolName(toolName), reason)
-	emitJudge(ctx, "tool_intent_scope_shadow", j.model, gatewaylog.DirectionToolCall,
+	if obs := scopeShadowObserver.Load(); obs != nil {
+		(*obs)(SessionIDFromContext(ctx), sanitizeToolName(toolName), reason)
+	}
+	emitJudge(ctx, "tool_intent_scope_shadow", "", gatewaylog.DirectionToolCall,
 		len(args), 0, "allow", deriveSeverity(shadow.Severity), "", "",
 		JudgeEmitOpts{Findings: findings, ToolName: sanitizeToolName(toolName)})
 }

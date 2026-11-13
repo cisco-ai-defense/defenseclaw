@@ -18,7 +18,6 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -49,48 +48,6 @@ func TestIntentHookAPIBlockedPromptRecordsNoDownloadHost(t *testing.T) {
 	}
 }
 
-// Pending scope floors leave one at a time, and nothing outlives its take: the
-// store stays bounded however many calls pass (P4-1, P3-B of the review).
-func TestScopeFloorSurvivesPendingCap(t *testing.T) {
-	j := &LLMJudge{}
-	j.keepScopeFloor("first", "r1")
-	for i := 0; i < pendingScopeFloorsCap+10; i++ {
-		j.keepScopeFloor(fmt.Sprintf("s%d", i), "r")
-	}
-	if got := j.takeScopeFloor(fmt.Sprintf("s%d", pendingScopeFloorsCap+9)); got == "" {
-		t.Fatal("the newest pending floor was dropped")
-	}
-	if got := j.takeScopeFloor("first"); got != "" {
-		t.Fatal("the oldest pending floor should have been evicted, not kept forever")
-	}
-	if n := len(j.scopeFloors); n > pendingScopeFloorsCap {
-		t.Fatalf("pending floors grew past the cap: %d", n)
-	}
-	if j.takeScopeFloor("never kept") != "" {
-		t.Fatal("a floor appeared from nowhere")
-	}
-}
-
-func TestScopeFloorStoreIsBoundedPast20000Calls(t *testing.T) {
-	j := &LLMJudge{}
-	for i := 0; i < 20000; i++ {
-		sample := fmt.Sprintf("sample %d with a long body %s", i, strings.Repeat("x", 4096))
-		j.keepScopeFloor(sample, "r")
-		if i%3 != 0 { // a third are never judged (an ineligible or skipped call)
-			if j.takeScopeFloor(sample) == "" {
-				t.Fatalf("call %d lost its floor", i)
-			}
-		}
-	}
-	if n := len(j.scopeFloors); n > pendingScopeFloorsCap {
-		t.Fatalf("%d pending floors after 20,000 calls, cap %d", n, pendingScopeFloorsCap)
-	}
-	// the latest unjudged sample is still there: eviction took the oldest, not the newest
-	if j.takeScopeFloor(fmt.Sprintf("sample %d with a long body %s", 19998, strings.Repeat("x", 4096))) == "" {
-		t.Fatal("eviction removed a recent floor")
-	}
-}
-
 // A Gemma primary with fallback models keeps the exact schema: a fallback may
 // reject the bound keywords (P4-5 of the review).
 func TestJudgeSchemaBoundWithFallbackModels(t *testing.T) {
@@ -113,15 +70,13 @@ func TestObserveSessionPromptScopeKeepsFallbackTextOutOfTheScope(t *testing.T) {
 	ctx := ContextWithSessionID(context.Background(), "scope-fallback")
 	j.ObserveSessionPromptScope(ctx, "the docs are at https://collector.example/x", "")
 	j.ObserveSessionPrompt(ctx, "continue")
-	sample := j.toolJudgeContextSample(ctx, "http_post", `{"url":"https://collector.example/u","data":"payload"}`)
-	if j.takeScopeFloor(sample) == "" {
+	if j.scopeFloorReason(ctx, "http_post", `{"url":"https://collector.example/u","data":"payload"}`, "") == "" {
 		t.Fatal("text that is not a user prompt silenced the floor")
 	}
 	own := ContextWithSessionID(context.Background(), "scope-own")
 	j.ObserveSessionPromptScope(own, "post it to https://collector.example/x", "post it to https://collector.example/x")
 	j.ObserveSessionPrompt(own, "continue")
-	sample = j.toolJudgeContextSample(own, "http_post", `{"url":"https://collector.example/u","data":"payload"}`)
-	if j.takeScopeFloor(sample) != "" {
+	if j.scopeFloorReason(own, "http_post", `{"url":"https://collector.example/u","data":"payload"}`, "") != "" {
 		t.Fatal("a host the user typed must be in scope")
 	}
 }

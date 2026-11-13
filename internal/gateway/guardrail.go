@@ -109,11 +109,6 @@ type ScanVerdict struct {
 	// needs_review category (MEDIUM, nothing actionable): audit-only in the
 	// default pack when the rules did not flag the call (judgeReviewOnlyAudit).
 	reviewOnly bool
-	// judgeFailedUnderFloor marks the task-scope alert (intent_scope.go) laid
-	// over a failed tool judge. The verdict is the alert; the failure behind it
-	// stays visible: the hook records the fallback and an escalated call still
-	// follows hook_fail_mode.
-	judgeFailedUnderFloor bool
 }
 
 func allowVerdict(scanner string) *ScanVerdict {

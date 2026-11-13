@@ -132,13 +132,6 @@ type LLMJudge struct {
 	toolContextMu sync.Mutex
 	toolContext   map[string]toolJudgeSessionContext
 
-	// scopeFloors holds, per prepared sample, the scope finding of a call that
-	// sends data to a destination the user's task does not name
-	// (intent_scope.go); runToolDecision applies it to the judge's verdict.
-	scopeFloorsMu sync.Mutex
-	scopeFloors   map[[sha256.Size]byte]scopeFloorEntry
-	scopeFloorSeq uint64
-
 	telemetryMu sync.RWMutex
 	traceV8     judgeTraceV8Runtime
 	// traceV8Authoritative remains true after a v8 runtime detaches. A nil
@@ -2233,11 +2226,6 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	}
 	writeToolJudgeSection(&sample, nonce, "CURRENT_TOOL_CALL", fmt.Sprintf("tool=%q", sanitizeToolName(toolName)), current)
 	sampleText := strings.TrimSuffix(sample.String(), "\n")
-	if j.intentScopeMode() != config.IntentScopeOff {
-		if reason := intentScopeExceeded(entry.userIntent, entry.scopeTargets, toolName, args); reason != "" {
-			j.keepScopeFloor(sampleText, reason)
-		}
-	}
 	if j.decision != nil {
 		state := decisionModelState{
 			SessionUserIntent: entry.userIntent,

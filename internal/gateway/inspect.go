@@ -1221,10 +1221,13 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// default (regex_only) returns nil and no LLM round-trip happens. Runs
 	// after the regex/AID lanes so regex_judge can skip the round-trip when
 	// the local lanes already condemned the call.
+	// The task-scope floor is read here, before the judge runs and apart from
+	// it: a judge that is late, busy, skipped or failed cannot drop it (GAP-0372).
+	scope := a.hookScopeFloor(ctx, toolName, argsStr, req.callerCWD)
 	if jv := a.runHookJudge(ctx, "tool_call", "prompt", req.Connector, argsStr, toolName, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
-	return verdict
+	return a.applyHookScopeFloor(ctx, req.Connector, scope, toolName, argsStr, verdict)
 }
 
 // highestInspectConfidence keeps verdict confidence aligned with the visible
@@ -1934,15 +1937,10 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		// tiers of a per-user install) keeps the rule verdict with the
 		// fallback warning and metric below. Secure Client never escalates.
 		defer func() {
-			if out == nil || out.judgeFailedUnderFloor {
+			if out == nil {
 				fmt.Fprintf(os.Stderr, "[inspect] hook judge gave no verdict on an escalated CRITICAL finding connector=%s direction=%s; hook_fail_mode closed: refusing\n",
 					connector, strategyDirection)
-				refusal := escalatedJudgeFailClosedVerdict()
-				if out != nil {
-					// The task-scope alert stands next to the refusal.
-					refusal.Findings = append(refusal.Findings, out.Findings...)
-				}
-				out = refusal
+				out = escalatedJudgeFailClosedVerdict()
 			}
 		}()
 	}
@@ -2228,16 +2226,7 @@ func judgeReviewOnlyAudit(cfg *config.Config, connector string, ruleFlagged bool
 // the judge gave none (the caller keeps the regex/AID verdict), else v with
 // its action set by the connector block_at / alert_at.
 func hookJudgeLaneVerdict(cfg *config.Config, connector, strategyDirection string, v *ScanVerdict) *ScanVerdict {
-	if v != nil && v.JudgeFailed && v.judgeFailedUnderFloor {
-		// The tool judge failed and the task-scope alert stands in for its
-		// verdict. The failure was counted where the judge ran
-		// (hookJudgeCallFallback); the alert goes on through block_at/alert_at.
-		fmt.Fprintf(os.Stderr, "[inspect] hook judge unavailable (connector=%s direction=%s scanner=%q); the task-scope alert stands\n",
-			connector, strategyDirection, v.Scanner)
-		kept := *v
-		kept.JudgeFailed = false
-		v = &kept
-	} else if v == nil || v.JudgeFailed {
+	if v == nil || v.JudgeFailed {
 		// Degrade LOUD: surface the judge unavailability so operators
 		// can see the lane fell back to the regex/AID verdict rather
 		// than mistaking the absence of a judge finding for a clean

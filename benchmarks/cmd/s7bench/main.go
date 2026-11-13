@@ -71,10 +71,12 @@ type record struct {
 	DM         *gateway.S7DM         `json:"dm,omitempty"`
 	Judge      *gateway.S7Judge      `json:"judge,omitempty"`
 	JudgeCalls []gateway.S7JudgeCall `json:"judge_calls,omitempty"`
-	PostStatus int                   `json:"post_status,omitempty"`
-	LatencyUs  int64                 `json:"lat_us"`
-	Err        string                `json:"err,omitempty"`
-	Extra      map[string]string     `json:"extra,omitempty"`
+	// ScopeShadow lists the task-scope findings the floor recorded in shadow for this call.
+	ScopeShadow []string          `json:"scope_shadow,omitempty"`
+	PostStatus  int               `json:"post_status,omitempty"`
+	LatencyUs   int64             `json:"lat_us"`
+	Err         string            `json:"err,omitempty"`
+	Extra       map[string]string `json:"extra,omitempty"`
 }
 
 var shellTools = map[string]bool{"bash_command": true, "bash": true, "execute_command": true, "shell": true,
@@ -207,6 +209,7 @@ func main() {
 	layers := flag.String("layers", "", "probe layers per call: dm,judge")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
+	intentScope := flag.String("intent-scope", "", "guardrail.judge.intent_scope for the task-scope floor: shadow (the default), off, or alert (a harness-only value: the loader refuses it)")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
 	flag.Parse()
 	if *corpus == "" || *out == "" || *policyDir == "" {
@@ -231,6 +234,7 @@ func main() {
 	cfg.ClaudeCode.Mode = *mode
 	cfg.Guardrail.DetectionStrategy = *strategy
 	cfg.Guardrail.DetectionStrategyToolCall = *strategy
+	cfg.Guardrail.Judge.IntentScope = *intentScope
 	if *judgeModel != "" {
 		cfg.Guardrail.Judge.Enabled = true
 		cfg.Guardrail.Judge.ToolInjection = true
@@ -256,6 +260,7 @@ func main() {
 	}
 	hasJudge, hasDM := engine.HasJudge()
 	recording := hasJudge && engine.RecordJudgeCalls()
+	engine.RecordScopeShadow()
 	var preHeaders []string
 	if *answerWithin > 0 {
 		preHeaders = []string{"X-DefenseClaw-Hook-Answer-Within-Ms", fmt.Sprint(*answerWithin)}
@@ -377,6 +382,7 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 		r := record{Case: c.ID, Idx: i, N: len(events), SrcTool: ev.ToolName, Tool: tool, Mapped: mapped, Status: status,
 			LatencyUs: time.Since(t0).Microseconds()}
 		r.JudgeCalls = e.TakeJudgeCalls(sid)
+		r.ScopeShadow = e.TakeScopeShadow(sid)
 		var hr hookResp
 		if err := json.Unmarshal(resp, &hr); err != nil {
 			r.Err = "decode: " + err.Error()
