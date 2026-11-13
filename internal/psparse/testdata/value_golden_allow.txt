@@ -1,60 +1,20 @@
 # value-gate allow-list: base64(line)\treason. Each is a clean-line
 # disagreement with the pwsh 7.7 golden that is not yet fixed. Shrinks as
 # the delta-review (PSPARSE-DELTA-REVIEW.md) fixes land.
-R2V0LVByb2Nlc3MgLUlkIC0x	pending step-3: parameter vs argument boundary
-V3JpdGUtT3V0cHV0IGEgLWI=	pending step-3: parameter vs argument boundary
-V3JpdGUtT3V0cHV0IC1hOmI=	pending step-3: parameter vs argument boundary
-V3JpdGUtT3V0cHV0IC1hOiBi	pending step-3: parameter vs argument boundary
-TmV3LUl0ZW0gLVBhdGg6IEM6XHg=	pending step-3: parameter vs argument boundary
 TmV3LUl0ZW0gLVBhdGg6IC1OYW1lOmNoaWxkLnR4dA==	pending step-3: parameter vs argument boundary
-R2V0LUNoaWxkSXRlbSAtUGF0aDpDOlx4IC1SZWN1cnNl	pending step-3: parameter vs argument boundary
-R2V0LUNoaWxkSXRlbSAtUGF0aDonQzpceCB5Jw==	pending step-3: parameter vs argument boundary
-R2V0LUNoaWxkSXRlbSAtUGF0aDokZW52OlRFTVBceA==	pending step-3: parameter vs argument boundary
-R2V0LUNoaWxkSXRlbSAuIC1SZWN1cnNl	pending step-3: parameter vs argument boundary
-Z2l0IGNvbW1pdCAtbSAibXNnIiAtLSAu	pending step-3: parameter vs argument boundary
+Z2l0IGNvbW1pdCAtbSAibXNnIiAtLSAu	pending step-3: glued operator/bracket/comment splits an argument
 Y21kIC9jIC0tJSBlY2hvIGhpIHwgUmVtb3ZlLUl0ZW0gQzpceA==	pending step-3: --% verbatim tail as elements
 aWNhY2xzIC0tJSBDOlx4IC9ncmFudCBFdmVyeW9uZTpG	pending step-3: --% verbatim tail as elements
-bHMgYAogIC1SZWN1cnNl	pending step-3: parameter vs argument boundary
-R2V0LUl0ZW0geCA8IyBjICM+IC1Gb3JjZQ==	pending step-3: parameter vs argument boundary
 R2V0LUl0ZW0gLS0gLXg=	pending step-3: parameter vs argument boundary
 JiB7IFJlbW92ZS1JdGVtIEM6XHggfQ==	pending step-3: glued operator/bracket/comment splits an argument
 LiB7IFJlbW92ZS1JdGVtIEM6XHggfQ==	pending step-3: glued operator/bracket/comment splits an argument
-JiAnQzpcUHJvZ3JhbSBGaWxlc1x4LmV4ZScgLWE=	pending step-3: parameter vs argument boundary
-UmVtb3ZlLUl0ZW0gLVBhdGggQzpceCxDOlx5	pending step-3: parameter vs argument boundary
-cG93ZXJzaGVsbCAtZW5jIFpRQmpBR2dBYndBPQ==	pending step-3: parameter vs argument boundary
-cG93ZXJzaGVsbCAtTm9QIC1Ob25JIC1XIEhpZGRlbiAtRXhlYyBCeXBhc3MgLUVuYyBaUUJqQUdnQWJ3QT0=	pending step-3: parameter vs argument boundary
-cG93ZXJzaGVsbCDigJNDb21tYW5kIFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: parameter vs argument boundary
-R2V0LUl0ZW0g4oCUUGF0aCBDOlx4	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0ICQoMSl4	pending step-3: glued operator/bracket/comment splits an argument
-R2V0LUNvbnRlbnQgLVJhdzokdHJ1ZSB4	pending step-3: parameter vs argument boundary
-R2V0LUNvbnRlbnQgeCB8IE91dC1GaWxlIC1GaWxlUGF0aCBDOlx5IC1FbmNvZGluZyB1dGY4	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IEM6XHhcW2Fd	pending step-3: [..] brackets are literal in an argument
 V3JpdGUtT3V0cHV0IDEtMg==	pending step-3: fused/glued token should stay one literal argument
-Q29weS1JdGVtIC1QYXRoOkM6XGEgLURlc3RpbmF0aW9uOkM6XGI=	pending step-3: parameter vs argument boundary
-Q29weS1JdGVtIEM6XGEgLURlc3RpbmF0aW9uIEM6XGI=	pending step-3: parameter vs argument boundary
-cHdzaCAtYyAnUmVtb3ZlLUl0ZW0gQzpceCc=	pending step-3: parameter vs argument boundary
-cHdzaCAtQ29tbWFuZCAiUmVtb3ZlLUl0ZW0gJGVudjpURU1QIg==	pending step-3: parameter vs argument boundary
-V3JpdGUtT3V0cHV0IC1OYW1lOiJ4IHki	pending step-3: parameter vs argument boundary
-V3JpdGUtT3V0cHV0IC1OYW1lOid4Jw==	pending step-3: parameter vs argument boundary
-V3JpdGUtT3V0cHV0IC1OYW1lOiR4	pending step-3: parameter vs argument boundary
-V3JpdGUtT3V0cHV0IC1OYW1lOigxKQ==	pending step-3: parameter vs argument boundary
-V3JpdGUtT3V0cHV0IC1OYW1lOmEsYg==	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0ICdhJyM7IFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: command count mismatch (delta review)
 V3JpdGUtT3V0cHV0ICgxKSM7IFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: command count mismatch (delta review)
-UmVtb3ZlLUl0ZW0gPCNjIz4gQzpcV2luZG93cyAtUmVjdXJzZQ==	pending step-3: parameter vs argument boundary
-UmVtb3ZlLUl0ZW0gLiAtUmVjdXJzZSAtRm9yY2U=	pending step-3: parameter vs argument boundary
-UmVtb3ZlLUl0ZW0gOnggLUZvcmNl	pending step-3: parameter vs argument boundary
-UmVtb3ZlLUl0ZW0gQzpceCAtUmVjdXJzZTokdHJ1ZQ==	pending step-3: parameter vs argument boundary
-UmVtb3ZlLUl0ZW0gLVJlY3Vyc2U6ICRmYWxzZSBDOlx4	pending step-3: parameter vs argument boundary
 UmVtb3ZlLUl0ZW0gQzpceCBgIAotUmVjdXJzZQ==	pending step-3: glued operator/bracket/comment splits an argument
-UmVtb3ZlLUl0ZW0gLVBhdGggKFtJTy5QYXRoXTo6Q29tYmluZSgnQzpcJywgJ3gnKSk=	pending step-3: parameter vs argument boundary
-UmVtb3ZlLUl0ZW0gLVBhdGggJ0M6XGEnIC1QYXRoICdDOlxiJw==	pending step-3: parameter vs argument boundary
-JHIgPSAoUmVtb3ZlLUl0ZW0gQzpceCAtZik=	pending step-3: parameter vs argument boundary
-JHIgPSAoR2V0LUNoaWxkSXRlbSBDOlx4IC1pbiB5KQ==	pending step-3: parameter vs argument boundary
-JHIgPSAkKENvcHktSXRlbSBhIC1qb2luIGIp	pending step-3: parameter vs argument boundary
 UmVtb3ZlLUl0ZW0gJChHZXQtTG9jYXRpb24pXHg=	pending step-3: glued operator/bracket/comment splits an argument
-UmVtb3ZlLUl0ZW0gLVBhdGggQzpcYSdiJw==	pending step-3: parameter vs argument boundary
-UmVtb3ZlLUl0ZW0gLVBhdGg6QzpcYSdiIGMn	pending step-3: parameter vs argument boundary
 UmVtb3ZlLUl0ZW0gQzpceFxbYWJdJ2Mn	pending step-3: [..] brackets are literal in an argument
 V3JpdGUtT3V0cHV0IGFbMF0=	pending step-3: [..] brackets are literal in an argument
 V3JpdGUtT3V0cHV0IDEtMi0z	pending step-3: fused/glued token should stay one literal argument
@@ -71,22 +31,16 @@ V3JpdGUtT3V0cHV0ICdhJzwjYyM+J2In	pending step-3: fused/glued token should stay o
 V3JpdGUtT3V0cHV0IC1hJ2In	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IC1hImIi	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IC1hJHg=	pending step-3: parameter vs argument boundary
-cG9gd2Vyc2hlbGwgLWMgUmVtb3ZlLUl0ZW0gQzpceA==	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IGB1ezQxfQ==	pending step-3: `u{hex} escape in a bareword/name
 V3JpdGUtT3V0cHV0IGFgdXs0MX1i	pending step-3: `u{hex} escape in a bareword/name
 YCQoUmVtb3ZlLUl0ZW0gQzpceCk=	pending step-3: backtick-escaped $( ) name
 YHV7NzJ9bSBDOlx4	pending step-3: delta review (cmd0 name mine=("u{72}m",true) oracle=("rm",true))
 V3JpdGUtT3V0cHV0IOKAmGHigJnigJhi4oCZ	pending step-3: smart-quote value
-UmVtb3ZlLUl0ZW0g4oCTUmVjdXJzZSBDOlx4	pending step-3: parameter vs argument boundary
-UmVtb3ZlLUl0ZW0g4oCURm9yY2UgQzpceA==	pending step-3: parameter vs argument boundary
-UmVtb3ZlLUl0ZW0g4oCVRm9yY2UgQzpceA==	pending step-3: parameter vs argument boundary
-R2V0LUNoaWxkSXRlbSDigJNQYXRoOkM6XHg=	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IEDigJwKeCAkeQrigJ1A	pending step-3: smart-quote / CRLF here-string
 V3JpdGUtT3V0cHV0IEDigJgKeArigJlA	pending step-3: smart-quote / CRLF here-string
 V3JpdGUtT3V0cHV0IGHigJhiIGPigJk=	pending step-3: smart-quote value
 V3JpdGUtT3V0cHV0IDXigJMz	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IOKAk+KAk3g=	pending step-3: fused/glued token should stay one literal argument
-R2V0LUl0ZW0g4oCTUGF0aCDigJN4	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IC0tJSBhIGI=	pending step-3: --% verbatim tail as elements
 V3JpdGUtT3V0cHV0IC0tJSAiYSBiIg==	pending step-3: --% verbatim tail as elements
 V3JpdGUtT3V0cHV0IC0tJSBhIHwgUmVtb3ZlLUl0ZW0gQzpceA==	pending step-3: --% verbatim tail as elements
@@ -102,12 +56,6 @@ V3JpdGUtT3V0cHV0IC0tJSBhICYmIFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: --% verbati
 V3JpdGUtT3V0cHV0IC0tJSBhClJlbW92ZS1JdGVtIEM6XHg=	pending step-3: --% verbatim tail as elements
 V3JpdGUtT3V0cHV0IC0tJSBhIDI+JjE=	pending step-3: --% verbatim tail as elements
 V3JpdGUtT3V0cHV0IC0tJSBhIHx8IFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: --% verbatim tail as elements
-cG93ZXJzaGVsbCAtZXAgYnlwYXNzIC1jIFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: parameter vs argument boundary
-cG93ZXJzaGVsbCAtYyAiUmVtb3ZlLUl0ZW0gQzpceCI=	pending step-3: parameter vs argument boundary
-cHdzaCAtbm9wIC1jIFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: parameter vs argument boundary
-cG93ZXJzaGVsbCAtYyAtIA==	pending step-3: parameter vs argument boundary
-U3RhcnQtUHJvY2VzcyBwb3dlcnNoZWxsIC1BcmcgJy1jIFJlbW92ZS1JdGVtIEM6XHgn	pending step-3: parameter vs argument boundary
-Y21kIC9jIGdpdCBsb2cgLW4gMQ==	pending step-3: parameter vs argument boundary
 JiB7IHBhcmFtKCRwKSBSZW1vdmUtSXRlbSAkcCB9IEM6XHg=	pending step-3: glued operator/bracket/comment splits an argument
 dXNpbmcgbmFtZXNwYWNlIFN5c3RlbS5JTzsgUmVtb3ZlLUl0ZW0gQzpceA==	pending step-3: top-level keyword statement (using/enum/data/requires) over-produces commands
 ZW51bSBFIHsgQTsgQiB9OyBSZW1vdmUtSXRlbSBDOlx4	pending step-3: top-level keyword statement (using/enum/data/requires) over-produces commands
@@ -133,7 +81,6 @@ V3JpdGUtT3V0cHV0IDFlMjA=	pending step-3: fused/glued token should stay one liter
 V3JpdGUtT3V0cHV0IC41	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IDFlMzA5	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IDEuMmUza2I=	pending step-3: number value formatting (int width / suffix / decimal)
-R2V0LVByb2Nlc3MgLUlkIDB4MTA=	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IDB4RkZGRkZGRkZGRkZGRkZGRg==	pending step-3: number value formatting (int width / suffix / decimal)
 V3JpdGUtT3V0cHV0IDB4RkZGRkZGRkZ1	pending step-3: number value formatting (int width / suffix / decimal)
 V3JpdGUtT3V0cHV0IDFlMTU=	pending step-3: fused/glued token should stay one literal argument
@@ -148,4 +95,3 @@ c3dpdGNoIC1yZWdleCAtZmlsZSBDOlx4IHsgJ2EnIHsgYnJlYWsgfSB9	pending step-3: command
 c3dpdGNoIChHZXQtQ2hpbGRJdGVtKSB7IGRlZmF1bHQgeyBSZW1vdmUtSXRlbSAkXyB9IH0=	pending step-3: command count mismatch (delta review)
 c3dpdGNoICgnYScsJ2InKSB7IGEgeyBSZW1vdmUtSXRlbSBDOlx4OyBjb250aW51ZSB9IGIgeyBSZW1vdmUtSXRlbSBDOlx5IH0gfQ==	pending step-3: command count mismatch (delta review)
 c3dpdGNoIC1maWxlOkM6XHggeyBhIHsgUmVtb3ZlLUl0ZW0gQzpceSB9IH0=	pending step-3: command count mismatch (delta review)
-aWV4IC1DICdSZW1vdmUtSXRlbSBDOlx4Jw==	pending step-3: parameter vs argument boundary

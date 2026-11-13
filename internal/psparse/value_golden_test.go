@@ -69,7 +69,7 @@ func projectMine(c *Command) goldenProj {
 	for _, el := range c.Elements {
 		switch e := el.(type) {
 		case *Parameter:
-			ge := goldenEl{param: "-" + strings.ToLower(e.Name)}
+			ge := goldenEl{param: strings.ToLower(e.Name)} // oracle ParameterName has no leading dash
 			if e.Colon != nil {
 				ge.hasColon = true
 				ge.colon, ge.colonOK = LiteralString(e.Colon)
@@ -138,6 +138,9 @@ func cmpCommand(mine, oracle goldenProj) string {
 
 func loadAllow(t *testing.T) map[string]string {
 	allow := map[string]string{}
+	if os.Getenv("PSPARSE_GATE_NOALLOW") == "1" {
+		return allow
+	}
 	f, err := os.Open(valueAllowFile)
 	if err != nil {
 		return allow
