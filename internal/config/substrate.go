@@ -1000,10 +1000,11 @@ func (m *ProfileMatchSubstrate) validate(prefix string) error {
 
 // substrateWorkloadSubjectRe is the workload subject rule (GAP-0043), the
 // same as identity.WorkloadSubjectPattern (config does not import the
-// identity package): exact, or a prefix ending in ":*" or "/*".
-var substrateWorkloadSubjectRe = regexp.MustCompile(`^(?:[^*]+|[^*]+[:/]\*)$`)
+// identity package): exact, or a prefix ending in ":*" or "/*" with a
+// separator before the last one (so repo:* is refused, repo:acme/* is not).
+var substrateWorkloadSubjectRe = regexp.MustCompile(`^(?:[^*]+|[^*]*[:/][^*]+[:/]\*)$`)
 
-const substrateWorkloadSubjectHint = `%q must be exact or end in ":*" or "/*" (for example repo:acme/web:*); a raw prefix such as repo:acme/web* also trusts repo:acme/web-evil, and a bare * trusts everything`
+const substrateWorkloadSubjectHint = `%q must be exact or end in ":*" or "/*" (for example repo:acme/web:*); a raw prefix such as repo:acme/web* also trusts repo:acme/web-evil, a wildcard right after the first segment (repo:*) trusts every repository of the issuer, and a bare * trusts everything`
 
 func httpsURL(raw string) bool {
 	u, err := url.Parse(raw)

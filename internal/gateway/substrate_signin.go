@@ -38,15 +38,24 @@ func (c SubstrateConfig) signinDecision(connector string, secrets []string) sign
 	return signin.Evaluate(sandboxauth.CanonicalConnector(connector), c.Managed, placeholders)
 }
 
-// templateConnector is the connector a template carries (its attested label),
-// or "" when the Actions cannot tell (GAP-0160). ErrSubstrateTemplateNotFound
-// is a template that does not exist.
-func (c SubstrateConfig) templateConnector(ctx context.Context, atespace, template string) (string, error) {
+// readTemplate reads what a template's attestation says, once per create:
+// its connector ("" when the Actions cannot tell, GAP-0160) and, when the
+// Actions reads kits, the kit itself for Create (nil otherwise).
+// ErrSubstrateTemplateNotFound is a template that does not exist.
+func (c SubstrateConfig) readTemplate(ctx context.Context, atespace, template string) (string, *SubstrateTemplateKit, error) {
+	if kr, ok := c.Actions.(SubstrateTemplateKitReader); ok {
+		kit, err := kr.ReadTemplateKit(ctx, atespace, template)
+		if err != nil {
+			return "", &SubstrateTemplateKit{}, err
+		}
+		return kit.Connector, &kit, nil
+	}
 	lk, ok := c.Actions.(SubstrateTemplateConnector)
 	if !ok {
-		return "", nil
+		return "", nil, nil
 	}
-	return lk.TemplateConnector(ctx, atespace, template)
+	conn, err := lk.TemplateConnector(ctx, atespace, template)
+	return conn, nil, err
 }
 
 // sameSubstrateConnector compares two connector names as the sandbox does.

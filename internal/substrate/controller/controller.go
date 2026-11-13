@@ -668,9 +668,12 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 	if refuse == refusePending {
 		// Unregistered and just created in a launcher atespace: no
 		// inventory, alert or policy change until the registration is
-		// read or the grace ends (GAP-0145).
+		// read or the grace ends (GAP-0145). A policy that is not
+		// DefenseClaw's is the exception: whoever made the actor outside
+		// DefenseClaw wrote it, and it must not stay in force while the
+		// controller waits.
 		st.hold = RefusalRegistrationPending
-		return nil
+		return c.dropForeignPolicy(ctx, a, st, base)
 	}
 	if !st.inventoried {
 		st.inventoried = true
@@ -1019,6 +1022,33 @@ func (c *Controller) signal(base Event, id, version string, first time.Time) *Si
 		Detector: "substrate_controller", Source: "substrate", Version: version, FirstSeen: first, LastSeen: c.o.Now(),
 		SandboxID: base.ActorUID, SandboxName: base.Atespace + "/" + base.Actor,
 	}
+}
+
+// dropForeignPolicy removes the actor's egress policy when it is not
+// DefenseClaw's. It runs while an unregistered, just created actor of a
+// launcher atespace is held: DefenseClaw's own policy (written by the create
+// path) stays, anything else was written by whoever made the actor and goes
+// at once, so the actor keeps no creator-chosen egress during the grace
+// (GAP-0145 residual).
+func (c *Controller) dropForeignPolicy(ctx context.Context, a *ateapi.Actor, st *actorState, base Event) error {
+	ref := ateapi.RefOf(a.GetMetadata())
+	cur, err := c.o.Client.GetActorEgressPolicy(ctx, ref)
+	if ateapi.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%s: get policy: %w", st.key, err)
+	}
+	if render.IsDefenseClaw(cur, c.o.Settings) {
+		return nil
+	}
+	if _, err := c.o.Client.DeleteActorEgressPolicy(ctx, ref, &ateapi.DeleteOptions{Uid: cur.GetMetadata().GetUid(), Version: cur.GetMetadata().GetVersion()}); err != nil && !ateapi.IsNotFound(err) {
+		return fmt.Errorf("%s: remove policy: %w", st.key, err)
+	}
+	ev := base
+	ev.Type, ev.Severity, ev.Message = EventPolicyRemoved, SeverityWarn, "egress policy removed: it is not DefenseClaw's and the actor is not registered yet"
+	c.emit(ev)
+	return nil
 }
 
 func (c *Controller) removePolicy(ctx context.Context, a *ateapi.Actor, st *actorState, base Event) error {
