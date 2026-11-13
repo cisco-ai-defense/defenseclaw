@@ -39,14 +39,16 @@ auto_vacuum gives its free pages back without a rewrite. No row is changed or
 removed, and running it again is safe.
 
 Stop the gateway first: compact refuses while the gateway or any other program
-has the audit database open, and a gateway started during the compaction
-cannot open the store until it ends. The rewrite needs free disk space next to
+has the audit database open. A gateway started during the compaction finds
+the store busy and fails to start: start it after compact returns. compact
+runs SQLite's integrity check first and does not rewrite a damaged store. The rewrite needs free disk space next to
 audit.db of about twice the live data; compact checks it first and refuses
 with the numbers when the disk is short. --dry-run reports what compact would
 reclaim and changes nothing; it also works while the gateway runs.
 
 On a managed computer run it as an administrator (root, or an elevated
-PowerShell prompt on Windows) after you stop the gateway service.
+PowerShell prompt on Windows) after you stop the gateway service. While the
+service is stopped, hooks block tool calls unless hook_fail_mode is open.
 
 Examples:
   defenseclaw-gateway audit compact --dry-run
@@ -113,10 +115,14 @@ func auditCompactManaged() bool {
 	return (cfg != nil && cfg.StandaloneEnterprise()) || managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv))
 }
 
-// auditCompactGatewayRunning reports the gateway this data directory
-// records; tests replace it.
+// auditCompactGatewayRunning reports the gateway the configured data
+// directory records; tests replace it.
 var auditCompactGatewayRunning = func() (bool, int) {
-	return daemon.New(config.DefaultDataPath()).IsRunning()
+	dataDir := config.DefaultDataPath()
+	if cfg != nil && strings.TrimSpace(cfg.DataDir) != "" {
+		dataDir = cfg.DataDir
+	}
+	return daemon.New(dataDir).IsRunning()
 }
 
 // auditCompactStopStart names the commands that stop and start the gateway
@@ -156,14 +162,30 @@ func runAuditCompact(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	running, pid := auditCompactGatewayRunning()
+	// A managed Windows gateway is a service: ask the SCM too.
+	if live, err := auditCompactServiceLive(); err != nil && !auditCompactDryRun {
+		return fmt.Errorf("audit compact: read the state of the gateway service: %w; nothing was changed", err)
+	} else if live {
+		running = true
+	}
 	if running && !auditCompactDryRun {
 		return auditCompactInUse(db, pid)
 	}
-	report, err := audit.CompactStore(db, audit.CompactOptions{DryRun: auditCompactDryRun, FreeDiskBytes: dataDirFreeBytes})
+	// On managed Windows the administrator is not the gateway service, so
+	// the store is checked as the service's runtime file instead of opened
+	// through the service's custody open (CompactOptions.ServiceOwned).
+	serviceOwned := runtime.GOOS == "windows" && auditCompactManaged()
+	report, err := audit.CompactStore(db, audit.CompactOptions{
+		DryRun: auditCompactDryRun, FreeDiskBytes: dataDirFreeBytes, ServiceOwned: serviceOwned,
+	})
 	var space *audit.CompactSpaceError
 	switch {
 	case errors.Is(err, audit.ErrCompactStoreInUse):
 		return auditCompactInUse(db, 0)
+	case errors.Is(err, audit.ErrCompactStoreDamaged):
+		return fmt.Errorf("audit compact: %w, so it was not rewritten. Run defenseclaw doctor: it names the repair "+
+			"(defenseclaw-gateway restart rebuilds a damaged 0.x store or moves a corrupt one aside and starts a new one). "+
+			"Nothing was changed", err)
 	case errors.As(err, &space):
 		return fmt.Errorf("%w. Free some space on that disk and run defenseclaw audit compact again. Nothing was changed", err)
 	case err != nil:
@@ -213,7 +235,7 @@ func writeAuditCompactText(out io.Writer, report audit.CompactReport, running bo
 		}
 		if report.NeedBytes > 0 {
 			free := "unknown"
-			if report.DiskFreeBytes > 0 {
+			if report.DiskFreeKnown {
 				free = auditCompactMiB(int64(report.DiskFreeBytes))
 			}
 			fmt.Fprintf(out, "It needs about %s of free disk space next to audit.db (free now: %s).\n",
@@ -225,6 +247,9 @@ func writeAuditCompactText(out io.Writer, report audit.CompactReport, running bo
 		}
 		fmt.Fprintln(out, "Dry run: nothing was changed.")
 		return
+	}
+	if report.IntegrityCheck == "unfinished" {
+		fmt.Fprintln(out, "The integrity check before the rewrite did not finish within its 5-minute budget; the rewrite itself completed.")
 	}
 	switch report.Method {
 	case audit.CompactVacuum:

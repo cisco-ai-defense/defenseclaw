@@ -391,7 +391,9 @@ defenseclaw audit compact
 defenseclaw-gateway start
 ```
 
-`compact` keeps every row. It needs free disk space of about twice the live data next to `audit.db`, and it refuses, with the numbers, when the disk is short. After one run the store uses incremental `auto_vacuum`, so retention gives later deletes back on its own. This replaces the manual `sqlite3 audit.db VACUUM` step of earlier releases, which needed `sqlite3` and left `auto_vacuum` off. On a managed computer an administrator stops the gateway service, runs `defenseclaw-gateway audit compact` as root (or from an elevated PowerShell prompt), and starts the service again.
+`compact` keeps every row. It needs free disk space of about twice the live data next to `audit.db`, and it refuses, with the numbers, when the disk is short. After one run the store uses incremental `auto_vacuum`, so retention gives later deletes back on its own. Before it rewrites the store it runs SQLite's integrity check; a damaged store is left as it is, and `doctor` names the repair. This replaces the manual `sqlite3 audit.db VACUUM` step of earlier releases, which needed `sqlite3` and left `auto_vacuum` off.
+
+While it runs, the store is locked: a gateway started in that time finds the store busy, retries and then fails to start, so start the gateway only after `compact` returns. On a managed computer an administrator stops the gateway service (on Linux, its two sockets too), runs `defenseclaw-gateway audit compact` as root (or from an elevated PowerShell prompt), and starts the service again. While the service is stopped, hooks block agent tool calls unless the administrator set `hook_fail_mode: open`, and an `ensure` run in that window can fail and roll back; run it again after the start.
 
 ### 1.0.7 retention and memory limits
 

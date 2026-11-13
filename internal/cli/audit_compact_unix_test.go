@@ -64,6 +64,16 @@ func TestAuditCompactRootOnAManagedComputerRunsAsTheGatewayServiceAccount(t *tes
 		t.Fatalf("root compacted the store itself (%d -> %d bytes)", before, size)
 	}
 
+	// A descriptor with no service group is refused (root's group 0 must
+	// never reach the child).
+	managedStandaloneAdminDeployment = func() (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
+		return managed.StandaloneLayout{}, &managed.RuntimeDescriptor{ServiceUID: serviceUID, ServiceGID: 0}, nil
+	}
+	ranAs = nil
+	if err := runAuditCompact(cmd, nil); err == nil || ranAs != nil {
+		t.Fatalf("managed root compact with service gid 0 = %v (ran as %v)", err, ranAs)
+	}
+
 	// A store another account owns is refused.
 	managedStandaloneAdminDeployment = func() (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
 		return managed.StandaloneLayout{}, &managed.RuntimeDescriptor{ServiceUID: serviceUID + 1, ServiceGID: serviceGID}, nil
@@ -87,5 +97,36 @@ func TestAuditCompactIsRefusedToAStandardAccountOnAManagedComputer(t *testing.T)
 	err := auditCompactPersistentPreRunE(cmd, nil)
 	if err == nil || !strings.Contains(err.Error(), "needs root (sudo) or the gateway service account") {
 		t.Fatalf("standard account on a managed computer = %v", err)
+	}
+}
+
+func TestAuditCompactServiceChildGetsOnlyThePinsLocaleAndPath(t *testing.T) {
+	values := map[string]string{
+		managed.ConfigPathEnv:                   "/etc/defenseclaw/config.yaml",
+		"DEFENSECLAW_HOME":                      "/var/lib/defenseclaw",
+		managed.DeploymentModeEnv:               managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv:            managed.ProfileStandalone,
+		managed.HookGuardianAuthorizationDirEnv: "/var/lib/defenseclaw-hook-guardian",
+		"LANG":                                  "C.UTF-8",
+		"PATH":                                  "/root/bin:/usr/bin",
+		"SUDO_USER":                             "alice",
+		"LD_PRELOAD":                            "/tmp/x.so",
+		"HOME":                                  "/root",
+	}
+	env := auditCompactChildEnv(func(key string) string { return values[key] })
+	got := strings.Join(env, "\n")
+	for _, want := range []string{"DEFENSECLAW_HOME=/var/lib/defenseclaw", "HOME=/var/lib/defenseclaw", "LANG=C.UTF-8", "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+		managed.ConfigPathEnv + "=/etc/defenseclaw/config.yaml", managed.HookGuardianAuthorizationDirEnv + "=/var/lib/defenseclaw-hook-guardian"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("child env lacks %q:\n%s", want, got)
+		}
+	}
+	for _, leaked := range []string{"SUDO_USER", "LD_PRELOAD", "HOME=/root", "/root/bin"} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("child env leaks %q:\n%s", leaked, got)
+		}
+	}
+	if len(env) != 8 {
+		t.Errorf("child env has %d entries, want 8:\n%s", len(env), got)
 	}
 }

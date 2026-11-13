@@ -4,12 +4,15 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -307,5 +310,130 @@ func TestCompactStoreRefusesAMissingPathAndAFileThatIsNotAnAuditStore(t *testing
 		if _, err := CompactStore(other, CompactOptions{DryRun: dryRun}); err == nil {
 			t.Fatalf("CompactStore(dry run %v) compacted a database without schema_version", dryRun)
 		}
+	}
+}
+
+// compactClaimedPathEnv names the store TestCompactClaimedStoreChildProcess
+// tries to open while the parent holds the compaction claim.
+const compactClaimedPathEnv = "DEFENSECLAW_TEST_COMPACT_CLAIMED"
+
+func TestCompactClaimRefusesAStoreOpenedByAnotherProcess(t *testing.T) {
+	path, rows := prunedStoreWithoutAutoVacuum(t)
+	opened, err := openHardenedAuditSQLite(path, auditDBPathHooks{exclusive: true})
+	if err != nil {
+		t.Fatalf("open exclusive: %v", err)
+	}
+	conn, err := opened.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := claimExclusive(context.Background(), conn); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCompactClaimedStoreChildProcess$", "-test.v")
+	child.Env = append(os.Environ(), compactClaimedPathEnv+"="+path)
+	output, err := child.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "STORE_BUSY") {
+		t.Fatalf("a gateway store opened during the claim: %v\n%s", err, output)
+	}
+	_ = conn.Close()
+	_ = opened.Close()
+	// After the claim the store opens again, unchanged.
+	if got := compactRows(t, path); got != rows {
+		t.Fatalf("rows after the claim = %d, want %d", got, rows)
+	}
+}
+
+// TestCompactClaimedStoreChildProcess opens the store the way the gateway
+// does (NewStore, Init) and reports that SQLite refused it as busy.
+func TestCompactClaimedStoreChildProcess(t *testing.T) {
+	path := os.Getenv(compactClaimedPathEnv)
+	if path == "" {
+		return
+	}
+	store, err := NewStore(path)
+	if err == nil {
+		err = store.Init()
+		_ = store.Close()
+	}
+	if err == nil {
+		t.Fatal("the gateway store opened while the compaction claim was held")
+	}
+	if !isSQLiteBusy(err) {
+		t.Fatalf("the gateway store open failed without SQLITE_BUSY: %v", err)
+	}
+	fmt.Println("STORE_BUSY")
+}
+
+func TestCompactStoreRefusesAFullDiskThatReportsZeroFreeBytes(t *testing.T) {
+	path, _ := prunedStoreWithoutAutoVacuum(t)
+	before, _ := compactFileSizes(path)
+	_, err := CompactStore(path, CompactOptions{FreeDiskBytes: func(string) (uint64, error) { return 0, nil }})
+	var space *CompactSpaceError
+	if !errors.As(err, &space) || space.Free != 0 {
+		t.Fatalf("CompactStore on a disk with 0 bytes free = %v", err)
+	}
+	if size, _ := compactFileSizes(path); size != before {
+		t.Fatalf("a refused compaction changed the store (size %d -> %d)", before, size)
+	}
+}
+
+func TestCompactStoreRefusesADamagedStoreAndLeavesItAsItWas(t *testing.T) {
+	path, _ := prunedStoreWithoutAutoVacuum(t)
+	pageSize := compactPragma(t, path, "page_size")
+	pages := compactPragma(t, path, "page_count")
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	junk := bytes.Repeat([]byte{0xa5}, int(pageSize*40))
+	if _, err := file.WriteAt(junk, pageSize*(pages/2)); err != nil {
+		t.Fatal(err)
+	}
+	_ = file.Close()
+	damaged, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = CompactStore(path, CompactOptions{FreeDiskBytes: roomyDisk})
+	if !errors.Is(err, ErrCompactStoreDamaged) {
+		t.Fatalf("CompactStore of a damaged store = %v, want ErrCompactStoreDamaged", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, damaged) {
+		t.Fatalf("a refused compaction changed the damaged store: %v", err)
+	}
+	if info, err := os.Stat(path + "-wal"); err == nil && info.Size() > 0 {
+		t.Fatalf("the refused compaction wrote a %d-byte WAL", info.Size())
+	}
+}
+
+func TestCompactTempDirectoryTakesEffect(t *testing.T) {
+	path, _ := prunedStoreWithoutAutoVacuum(t)
+	opened, err := openHardenedAuditSQLite(path, auditDBPathHooks{exclusive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close() //nolint:errcheck
+	conn, err := opened.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close() //nolint:errcheck
+	dir := filepath.Dir(path)
+	if err := setCompactTempDirectory(context.Background(), conn, dir); err != nil {
+		t.Fatalf("set the temporary folder: %v", err)
+	}
+	defer conn.ExecContext(context.Background(), `PRAGMA temp_store_directory=''`) //nolint:errcheck
+	var got string
+	var store int
+	if err := conn.QueryRowContext(context.Background(), `PRAGMA temp_store_directory`).Scan(&got); err != nil || got != dir {
+		t.Fatalf("temp_store_directory = %q, %v; want %q", got, err, dir)
+	}
+	if err := conn.QueryRowContext(context.Background(), `PRAGMA temp_store`).Scan(&store); err != nil || store != 1 {
+		t.Fatalf("temp_store = %d, %v; want 1 (file)", store, err)
 	}
 }

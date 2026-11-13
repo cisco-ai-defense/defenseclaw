@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CompactMethod is how a compaction gives the free pages of audit.db back to
@@ -51,6 +52,16 @@ var ErrCompactStoreInUse = errors.New("another process has the audit database op
 // ErrCompactNoStore: there is no audit database at the path.
 var ErrCompactNoStore = errors.New("no audit database")
 
+// ErrCompactStoreDamaged: the store failed SQLite's integrity check. A
+// compaction never rewrites a damaged store; the gateway's own recovery
+// (doctor, defenseclaw-gateway restart) handles it.
+var ErrCompactStoreDamaged = errors.New("the audit database failed SQLite's integrity check")
+
+// compactIntegrityBudget bounds the integrity check before a rewrite. A
+// check that does not finish in time is reported, not failed: VACUUM reads
+// every page itself and rolls back on a damaged one.
+var compactIntegrityBudget = 5 * time.Minute
+
 // CompactSpaceError refuses a compaction the disk has no room for.
 type CompactSpaceError struct {
 	Dir        string
@@ -71,8 +82,16 @@ type CompactOptions struct {
 	DryRun bool
 	// FreeDiskBytes reports the free space of a directory. A compaction
 	// needs room for what it writes (CompactReport.NeedBytes); nil or an
-	// error skips the check, and SQLite still fails cleanly on a full disk.
+	// error leaves the free space unknown and skips the check (SQLite still
+	// fails cleanly on a full disk). A known 0 refuses.
 	FreeDiskBytes func(dir string) (uint64, error)
+	// ServiceOwned compacts a managed store that the gateway service owns
+	// as an administrator who is not that service (managed Windows). The
+	// store, its folders and its sidecars must pass the managed service
+	// runtime file checks (validateServiceOwnedAuditDB), which need no
+	// gateway token and change no ACL; the caller has checked that the
+	// service is stopped.
+	ServiceOwned bool
 }
 
 // CompactReport describes one compaction, or with DryRun what one would do.
@@ -94,9 +113,14 @@ type CompactReport struct {
 	FileBytesAfter  int64 `json:"file_bytes_after,omitempty"`
 	WALBytesAfter   int64 `json:"wal_bytes_after,omitempty"`
 	// NeedBytes is the free disk space the method needs, DiskFreeBytes what
-	// the disk has (0 when unknown).
+	// the disk has when DiskFreeKnown.
 	NeedBytes     uint64 `json:"need_free_disk_bytes"`
 	DiskFreeBytes uint64 `json:"disk_free_bytes"`
+	DiskFreeKnown bool   `json:"disk_free_known"`
+	// IntegrityCheck is the result of SQLite's quick_check before a rewrite:
+	// "ok", "skipped" (nothing to rewrite, or a dry run) or "unfinished"
+	// (compactIntegrityBudget ran out).
+	IntegrityCheck string `json:"integrity_check"`
 }
 
 // ReclaimableBytes is about what the compaction gives back: the free pages
@@ -131,7 +155,9 @@ func (r CompactReport) ReclaimedBytes() int64 {
 // connection, in this or another process, has the file open, and refuses
 // every other opener while it is held, so a gateway started during the
 // compaction cannot write beside it. Re-running it is safe: a compact store
-// is only checkpointed.
+// is only checkpointed. With ServiceOwned (managed Windows, an administrator
+// compacting the stopped gateway service's store) the managed service runtime
+// file checks replace the custody open, which needs the service's token.
 func CompactStore(path string, opts CompactOptions) (CompactReport, error) {
 	absolute, err := compactStorePath(path)
 	if err != nil {
@@ -145,7 +171,22 @@ func CompactStore(path string, opts CompactOptions) (CompactReport, error) {
 	if err := auditDBOpenElsewhere(absolute); err != nil {
 		return CompactReport{}, fmt.Errorf("%w: %w", ErrCompactStoreInUse, err)
 	}
-	opened, err := openHardenedAuditSQLite(absolute, auditDBPathHooks{exclusive: true})
+	if opts.ServiceOwned {
+		if err := validateServiceOwnedAuditDB(absolute, false); err != nil {
+			return CompactReport{}, err
+		}
+	}
+	// The integrity and space checks read the store through the read-only
+	// handle, which never checkpoints or removes the WAL: a store that
+	// fails them is left exactly as it was.
+	planned, err := planCompaction(absolute, opts)
+	if err != nil {
+		return planned, err
+	}
+	if planned.DiskFreeKnown && planned.DiskFreeBytes < planned.NeedBytes {
+		return planned, &CompactSpaceError{Dir: filepath.Dir(absolute), Need: planned.NeedBytes, Free: planned.DiskFreeBytes}
+	}
+	opened, revalidate, err := openCompactConnection(absolute, opts)
 	if err != nil {
 		if isSQLiteBusy(err) {
 			return CompactReport{}, ErrCompactStoreInUse
@@ -162,15 +203,16 @@ func CompactStore(path string, opts CompactOptions) (CompactReport, error) {
 	if err := claimExclusive(ctx, conn); err != nil {
 		return CompactReport{}, err
 	}
-	// The sidecars SQLite opened for the claim pass the same checks.
-	if err := opened.prepared.validateAfterOpen(); err != nil {
+	// The files SQLite opened for the claim pass the same checks.
+	if err := revalidate(); err != nil {
 		return CompactReport{}, err
 	}
 	report, err := readCompaction(ctx, conn, absolute, opts)
 	if err != nil {
 		return CompactReport{}, err
 	}
-	if report.DiskFreeBytes > 0 && report.DiskFreeBytes < report.NeedBytes {
+	report.IntegrityCheck = planned.IntegrityCheck
+	if report.DiskFreeKnown && report.DiskFreeBytes < report.NeedBytes {
 		return report, &CompactSpaceError{Dir: filepath.Dir(absolute), Need: report.NeedBytes, Free: report.DiskFreeBytes}
 	}
 	switch report.Method {
@@ -180,6 +222,7 @@ func CompactStore(path string, opts CompactOptions) (CompactReport, error) {
 		_, err = conn.ExecContext(ctx, `PRAGMA incremental_vacuum`)
 	}
 	if err != nil {
+		// VACUUM and incremental_vacuum roll back on failure.
 		return report, fmt.Errorf("compact the audit database (%s): %w", report.Method, err)
 	}
 	if busy, err := checkpointTruncate(ctx, conn); err != nil || busy != 0 {
@@ -195,6 +238,92 @@ func CompactStore(path string, opts CompactOptions) (CompactReport, error) {
 		return report, fmt.Errorf("compact the audit database: close: %w", err)
 	}
 	report.FileBytesAfter, report.WALBytesAfter = compactFileSizes(absolute)
+	return report, nil
+}
+
+// openCompactConnection opens the store in exclusive locking mode: through
+// the store's custody checks, or for ServiceOwned through a plain open after
+// validateServiceOwnedAuditDB, which revalidate repeats on the same file.
+func openCompactConnection(absolute string, opts CompactOptions) (*hardenedAuditSQLite, func() error, error) {
+	if !opts.ServiceOwned {
+		opened, err := openHardenedAuditSQLite(absolute, auditDBPathHooks{exclusive: true})
+		if err != nil {
+			return nil, nil, err
+		}
+		return opened, opened.prepared.validateAfterOpen, nil
+	}
+	before, err := os.Lstat(absolute)
+	if err != nil {
+		return nil, nil, fmt.Errorf("audit: inspect %s: %w", absolute, err)
+	}
+	db, err := openSQLiteWithPragmas(absolute, exclusiveLockingQuery+strings.TrimPrefix(auditPragmasFor(false), "?"))
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("audit: open %s: %w", absolute, err)
+	}
+	revalidate := func() error {
+		if err := validateServiceOwnedAuditDB(absolute, true); err != nil {
+			return err
+		}
+		after, err := os.Lstat(absolute)
+		if err != nil || !os.SameFile(before, after) {
+			return fmt.Errorf("audit: %s changed while compact opened it", absolute)
+		}
+		return nil
+	}
+	return &hardenedAuditSQLite{DB: db}, revalidate, nil
+}
+
+// planCompaction reads the store read-only, picks the method and runs a
+// bounded quick_check before a rewrite.
+func planCompaction(absolute string, opts CompactOptions) (CompactReport, error) {
+	db, err := OpenReadOnlyDB(absolute)
+	if err != nil {
+		if isSQLiteBusy(err) {
+			// A compaction claim, or a writer in exclusive mode, holds it.
+			return CompactReport{}, ErrCompactStoreInUse
+		}
+		return CompactReport{}, err
+	}
+	defer db.Close() //nolint:errcheck -- read-only handle.
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return CompactReport{}, err
+	}
+	defer conn.Close() //nolint:errcheck -- returns the connection to the pool.
+	report, err := readCompaction(context.Background(), conn, absolute, opts)
+	if err != nil {
+		if isSQLiteBusy(err) {
+			return report, ErrCompactStoreInUse
+		}
+		if isSQLiteCorrupt(err) {
+			return report, fmt.Errorf("%w: %w", ErrCompactStoreDamaged, err)
+		}
+		return report, err
+	}
+	report.IntegrityCheck = "skipped"
+	if report.Method == CompactNothing {
+		return report, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), compactIntegrityBudget)
+	defer cancel()
+	var result string
+	err = conn.QueryRowContext(ctx, `PRAGMA quick_check(1)`).Scan(&result)
+	switch {
+	case ctx.Err() != nil:
+		report.IntegrityCheck = "unfinished"
+	case err != nil && isSQLiteCorrupt(err):
+		return report, fmt.Errorf("%w: %w", ErrCompactStoreDamaged, err)
+	case err != nil:
+		return report, fmt.Errorf("audit: check %s: %w", absolute, err)
+	case result != "ok":
+		return report, fmt.Errorf("%w: quick_check: %s", ErrCompactStoreDamaged, result)
+	default:
+		report.IntegrityCheck = "ok"
+	}
 	return report, nil
 }
 
@@ -252,6 +381,7 @@ func inspectCompaction(absolute string, opts CompactOptions) (CompactReport, err
 	defer conn.Close() //nolint:errcheck -- returns the connection to the pool.
 	report, err := readCompaction(ctx, conn, absolute, opts)
 	report.DryRun = true
+	report.IntegrityCheck = "skipped"
 	return report, err
 }
 
@@ -294,7 +424,7 @@ func readCompaction(ctx context.Context, conn *sql.Conn, absolute string, opts C
 	}
 	if opts.FreeDiskBytes != nil {
 		if freeDisk, err := opts.FreeDiskBytes(filepath.Dir(absolute)); err == nil {
-			report.DiskFreeBytes = freeDisk
+			report.DiskFreeBytes, report.DiskFreeKnown = freeDisk, true
 		}
 	}
 	return report, nil
@@ -305,15 +435,33 @@ func readCompaction(ctx context.Context, conn *sql.Conn, absolute string, opts C
 // as large as the live data and holds audit history, which stays in the
 // store's own private folder and is counted by the space check.
 func vacuumInDirectory(ctx context.Context, conn *sql.Conn, dir string) error {
+	if err := setCompactTempDirectory(ctx, conn, dir); err != nil {
+		return err
+	}
+	// temp_store_directory is process-wide in SQLite: put it back.
+	defer conn.ExecContext(ctx, `PRAGMA temp_store_directory=''`) //nolint:errcheck -- the process ends after a compaction.
+	return vacuumToIncrementalAutoVacuum(ctx, conn)
+}
+
+// setCompactTempDirectory puts SQLite's temporary files on disk in dir and
+// reads the setting back: the space check counted the VACUUM copy on that
+// disk, so a setting SQLite ignored refuses the rewrite.
+func setCompactTempDirectory(ctx context.Context, conn *sql.Conn, dir string) error {
 	quoted := "'" + strings.ReplaceAll(dir, "'", "''") + "'"
 	for _, statement := range []string{`PRAGMA temp_store=FILE`, `PRAGMA temp_store_directory=` + quoted} {
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("%s: %w", statement, err)
 		}
 	}
-	// temp_store_directory is process-wide in SQLite: put it back.
-	defer conn.ExecContext(ctx, `PRAGMA temp_store_directory=''`) //nolint:errcheck -- the process ends after a compaction.
-	return vacuumToIncrementalAutoVacuum(ctx, conn)
+	var got string
+	var store int
+	if err := conn.QueryRowContext(ctx, `PRAGMA temp_store_directory`).Scan(&got); err != nil || got != dir {
+		return fmt.Errorf("audit: SQLite did not take the temporary folder %s (got %q): %v", dir, got, err)
+	}
+	if err := conn.QueryRowContext(ctx, `PRAGMA temp_store`).Scan(&store); err != nil || store != 1 {
+		return fmt.Errorf("audit: SQLite did not put temporary files on disk (temp_store=%d): %v", store, err)
+	}
+	return nil
 }
 
 // vacuumToIncrementalAutoVacuum rewrites the store with only the rows that

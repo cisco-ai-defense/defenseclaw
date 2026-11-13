@@ -60,11 +60,12 @@ func prunedAuditStore(t *testing.T) string {
 func useAuditCompact(t *testing.T, db string, running bool, pid int) *cobra.Command {
 	t.Helper()
 	previousCfg, previousRunning, previousFree := cfg, auditCompactGatewayRunning, dataDirFreeBytes
-	previousDry, previousJSON := auditCompactDryRun, auditCompactJSON
+	previousDry, previousJSON, previousLive := auditCompactDryRun, auditCompactJSON, auditCompactServiceLive
 	t.Cleanup(func() {
 		cfg, auditCompactGatewayRunning, dataDirFreeBytes = previousCfg, previousRunning, previousFree
-		auditCompactDryRun, auditCompactJSON = previousDry, previousJSON
+		auditCompactDryRun, auditCompactJSON, auditCompactServiceLive = previousDry, previousJSON, previousLive
 	})
+	auditCompactServiceLive = func() (bool, error) { return false, nil }
 	cfg = &config.Config{AuditDB: db}
 	auditCompactGatewayRunning = func() (bool, int) { return running, pid }
 	dataDirFreeBytes = func(string) (uint64, error) { return 1 << 40, nil }
@@ -174,5 +175,28 @@ func TestAuditCompactManagedRefusalNamesTheServiceCommands(t *testing.T) {
 	err := auditCompactInUse("/var/lib/defenseclaw/audit.db", 0)
 	if !strings.Contains(err.Error(), stop) || !strings.Contains(err.Error(), start) || strings.Contains(stop, "defenseclaw-gateway stop") {
 		t.Fatalf("managed refusal %q, stop %q, start %q", err, stop, start)
+	}
+}
+
+func TestAuditCompactRefusesWhileTheManagedGatewayServiceRuns(t *testing.T) {
+	db := prunedAuditStore(t)
+	before := auditCompactSize(t, db)
+	cmd := useAuditCompact(t, db, false, 0)
+	auditCompactServiceLive = func() (bool, error) { return true, nil }
+	err := runAuditCompact(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "compact needs it alone") {
+		t.Fatalf("compact beside a running gateway service = %v", err)
+	}
+	if size := auditCompactSize(t, db); size != before {
+		t.Fatalf("a refused compaction changed audit.db (%d -> %d bytes)", before, size)
+	}
+}
+
+func TestAuditCompactRefusesADiskWithZeroFreeBytes(t *testing.T) {
+	db := prunedAuditStore(t)
+	cmd := useAuditCompact(t, db, false, 0)
+	dataDirFreeBytes = func(string) (uint64, error) { return 0, nil }
+	if err := runAuditCompact(cmd, nil); err == nil || !strings.Contains(err.Error(), "0 MiB are free") {
+		t.Fatalf("compact on a full disk = %v", err)
 	}
 }
