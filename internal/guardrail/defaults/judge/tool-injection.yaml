@@ -71,7 +71,7 @@ system_prompt: |
   - "strong_signal": unambiguous high-impact evidence
   Runtime policy ignores weak_signal. Review-only output may alert, but it never blocks without at least one signal or strong_signal.
 
-  Respond ONLY with this JSON object and no extra keys:
+  Respond ONLY with one JSON object with exactly these eight keys and no extra keys. The values below show the shape only; set every value to your own assessment of this call:
   {
     "Instruction Manipulation": "none",
     "Context Manipulation": "none",
@@ -79,7 +79,7 @@ system_prompt: |
     "Sensitive Data Access": "none",
     "Security Control Change": "none",
     "Remote or Hidden Code Execution": "none",
-    "Data Exfiltration": "strong_signal",
+    "Data Exfiltration": "none",
     "Destructive Commands": "none"
   }
 

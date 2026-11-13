@@ -769,11 +769,33 @@ func (w *InstallWatcher) mcpFailureAllowed(evt InstallEvent, baseline *audit.Sna
 }
 
 // mcpFingerprintFailed reports a scanner fingerprint that marks a failed
-// scan, a refused launcher or a server kept unverified.
+// scan, a refused launcher, a server kept unverified or a policy refusal.
 func mcpFingerprintFailed(fingerprint string) bool {
 	return strings.HasSuffix(fingerprint, mcpScanFailedMark) ||
 		strings.HasSuffix(fingerprint, mcpLauncherRefusedMark) ||
-		strings.HasSuffix(fingerprint, unverifiedMCPMark)
+		strings.HasSuffix(fingerprint, unverifiedMCPMark) ||
+		strings.HasSuffix(fingerprint, mcpPolicyRefusedMark)
+}
+
+// mcpPolicyRefusalLapsed reports a baseline the admission policy refused
+// before any scan whose refusal is gone: the deny was removed. It evaluates
+// the policy only (no scan, no audit row), so the discovery poll can ask it
+// every 30 s. Secure Client keeps main (issue #1092).
+func (w *InstallWatcher) mcpPolicyRefusalLapsed(evt InstallEvent, baseline *audit.SnapshotRow) bool {
+	if baseline == nil || evt.Type != InstallMCP || w.secureClientActive() ||
+		!strings.HasSuffix(baseline.ScannerFingerprint, mcpPolicyRefusedMark) {
+		return false
+	}
+	snapshot := w.admissionPolicySnapshot()
+	if snapshot.Config == nil {
+		return false
+	}
+	connector := w.eventConnector(evt)
+	if decision, _, _ := w.rootAssetPolicy(snapshot.Config, evt, connector); decision.Enabled && decision.RawAction == "block" {
+		return false
+	}
+	out := w.evaluateAdmissionSnapshot(context.Background(), w.admissionInputFor(snapshot.Config, evt, string(evt.Type), connector), snapshot)
+	return out != nil && out.Verdict != "blocked" && out.Verdict != "rejected"
 }
 
 // MCPPublication is what the servers a watcher admits hold for a tool call.

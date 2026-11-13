@@ -1217,17 +1217,6 @@ locals {
         A = data('defenseclaw.gateway.judge.errors', rollup='rate').sum(by=['judge.reason']).scale(60).publish(label='Judge errors / min')
       EOT
     }
-    guardrail_cache = {
-      name        = "Guardrail cache hits and misses"
-      description = "Verdict cache hit/miss rate by scanner and verdict."
-      plot_type   = "AreaChart"
-      stacked     = true
-      axis_label  = "events / min"
-      program     = <<-EOT
-        A = data('defenseclaw.guardrail.cache.hits', rollup='rate').sum(by=['scanner', 'verdict']).scale(60).publish(label='Cache hits / min')
-        B = data('defenseclaw.guardrail.cache.misses', rollup='rate').sum(by=['scanner', 'verdict']).scale(60).publish(label='Cache misses / min')
-      EOT
-    }
     llm_bridge_latency_p95 = {
       name        = "LLM bridge latency p95"
       description = "P95 LiteLLM bridge latency grouped by model and status."
@@ -1631,7 +1620,6 @@ locals {
     sandbox_error_transitions       = "connector"
     alerts_by_type_severity         = "alert.severity"
     judge_errors_by_reason          = "judge.reason"
-    guardrail_cache                 = "plot_label"
     gateway_errors_by_code          = "error.code"
     schema_violations_by_code       = "code"
     http_requests_by_route_status   = "http.status_code"

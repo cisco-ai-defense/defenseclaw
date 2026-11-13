@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -105,8 +107,11 @@ func goldenBinarySource(base, name, original string) string {
 // change to a hook's decision, its output or its request fails here.
 //
 // DC_HOOK_GOLDEN_FULL=1 runs every event, answer and mode and the whole
-// corpus (the default runs the tool-call event of each hook in every mode
-// and a sample of the rest). DC_HOOK_GOLDEN_UPDATE=1 rewrites the golden
+// corpus. The default runs the tool-call event of each hook in every mode
+// with an allow, a block and a gateway error, every other answer on a
+// rotating per-user, strict and managed mode (hookGoldenToolCallRotated) and
+// a sample of the rest; hookGoldenCheckRotation fails the test when the
+// default leaves an answer or a mode unjudged. DC_HOOK_GOLDEN_UPDATE=1 rewrites the golden
 // (with FULL=1, from the hooks whose behaviour it must keep), and
 // DC_HOOK_GOLDEN_DUMP=DIR writes each case's normalized observation to DIR,
 // so two trees can be compared whole. A mismatch is also written whole to
@@ -535,14 +540,17 @@ func hookGoldenCases(t *testing.T, full bool) []hookGoldenCase {
 	for _, a := range answers {
 		byName[a.name] = a
 	}
-	for _, h := range hookGoldenHooks() {
+	for hi, h := range hookGoldenHooks() {
 		for ei, event := range h.events {
-			for _, m := range modes {
-				for _, a := range answers {
+			for mi, m := range modes {
+				for ai, a := range answers {
 					// Every answer in every mode for the tool-call event; the
 					// other events in full runs, and with the main answers.
 					main := a.name == "allow" || a.name == "block-output" || a.name == "block-bare" || a.name == "http-500" || a.name == "unreachable"
 					if ei > 0 && !full && (!main || m.name != "user-default-open" && m.name != "managed-closed") {
+						continue
+					}
+					if ei == 0 && !full && !hookGoldenToolCallRotated(hi, ai, mi, a, m) {
 						continue
 					}
 					if a.unreachable && !full && ei == 0 && m.name != "user-default-open" && m.name != "user-default-closed" &&
@@ -578,8 +586,14 @@ func hookGoldenCases(t *testing.T, full bool) []hookGoldenCase {
 			"over-cap":       h.payload(event, huge, "<WORK>"),
 		}
 		for _, name := range []string{"empty", "not-json", "nul", "trailing-nl", "nested-event", "over-transport", "over-cap"} {
-			for _, m := range []hookGoldenMode{modes[0], modes[1], modes[5]} {
-				for _, a := range []string{"allow", "block-output"} {
+			for mi, m := range []hookGoldenMode{modes[0], modes[1], modes[5]} {
+				for ai, a := range []string{"allow", "block-output"} {
+					// A giant pad (about 1 MB) runs on all three modes, with
+					// the answer alternating by hook and mode, so both
+					// answers meet the pad on every mode across the hooks.
+					if !full && strings.HasPrefix(name, "over-") && (hi+mi)%2 != ai {
+						continue
+					}
 					add(hookGoldenCase{id: "/stdin-" + name, hook: h, mode: m, answer: byName[a], event: event, stdin: stdins[name]})
 				}
 			}
@@ -596,7 +610,95 @@ func hookGoldenCases(t *testing.T, full bool) []hookGoldenCase {
 				answer: byName[rotate[i%len(rotate)]], event: h.events[0], command: cmd})
 		}
 	}
+	if !full {
+		hookGoldenCheckRotation(t, cases)
+	}
 	return cases
+}
+
+// hookGoldenToolCallRotated reports whether the default run judges answer
+// ai on mode mi for the tool-call event of hook hi. The full table (12 hooks
+// x 10 modes x 25 answers) took most of the test's 412 s on a CI runner, one
+// real hook process each. Every mode of every hook keeps a benign allow, its
+// block twin and a gateway error (http-500); the unreachable gateway keeps
+// the modes it had. Every other answer runs on one per-user mode, one strict
+// mode and one managed mode, rotating with the hook, so that across the
+// hooks each answer still meets every mode.
+func hookGoldenToolCallRotated(hi, ai, mi int, a hookGoldenAnswer, m hookGoldenMode) bool {
+	switch {
+	case a.unreachable, a.name == "allow", a.name == "block-output", a.name == "http-500":
+		return true
+	}
+	modes := hookGoldenModes()
+	var group []int
+	for i, other := range modes {
+		if hookGoldenModeGroup(other) == hookGoldenModeGroup(m) {
+			group = append(group, i)
+		}
+	}
+	return group[(hi+ai)%len(group)] == mi
+}
+
+// hookGoldenModeGroup is the rotation group of a mode: managed (standalone or
+// Secure Client), strict per-user, or per-user.
+func hookGoldenModeGroup(m hookGoldenMode) string {
+	switch {
+	case m.managed:
+		return "managed"
+	case m.name == "user-strict-tier" || slices.Contains(m.env, "DEFENSECLAW_STRICT_AVAILABILITY=1"):
+		return "strict"
+	}
+	return "user"
+}
+
+// hookGoldenCheckRotation fails the test when the default cases leave a
+// tool-call answer of a hook without a per-user, a strict or a managed mode,
+// a mode of a hook without its allow and block twin, or an answer and mode
+// pair unjudged on every hook (sandbox-visibility:GAP-0028).
+func hookGoldenCheckRotation(t *testing.T, cases []hookGoldenCase) {
+	t.Helper()
+	type cell struct{ hook, mode, answer string }
+	ran := map[cell]bool{}
+	for _, c := range cases {
+		if c.event == c.hook.events[0] && strings.Count(c.id, "/") == 3 {
+			ran[cell{c.hook.name, c.mode.name, c.answer.name}] = true
+		}
+	}
+	modes := hookGoldenModes()
+	for _, a := range hookGoldenAnswers() {
+		for _, m := range modes {
+			if a.unreachable {
+				continue // keeps the modes it had (hookGoldenToolCallRotated)
+			}
+			seen := false
+			for _, h := range hookGoldenHooks() {
+				seen = seen || ran[cell{h.name, m.name, a.name}]
+			}
+			if !seen {
+				t.Errorf("golden rotation: answer %s never runs on mode %s", a.name, m.name)
+			}
+		}
+		for _, h := range hookGoldenHooks() {
+			groups := map[string]bool{}
+			for _, m := range modes {
+				if ran[cell{h.name, m.name, a.name}] {
+					groups[hookGoldenModeGroup(m)] = true
+				}
+			}
+			for _, g := range []string{"user", "strict", "managed"} {
+				if !groups[g] {
+					t.Errorf("golden rotation: %s answer %s has no %s mode", h.name, a.name, g)
+				}
+			}
+		}
+	}
+	for _, h := range hookGoldenHooks() {
+		for _, m := range modes {
+			if !ran[cell{h.name, m.name, "allow"}] || !ran[cell{h.name, m.name, "block-output"}] {
+				t.Errorf("golden rotation: %s on %s lacks its allow and block twin", h.name, m.name)
+			}
+		}
+	}
 }
 
 // hookGoldenRequest is one request the fake gateway received.
@@ -788,6 +890,28 @@ func (g *hookGoldenGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 var hookGoldenRenderMu sync.Mutex
 
+// startWrittenHook starts the command newCmd builds for a hook script the
+// case has just rendered, and returns it with the time it started. The cases
+// run on parallel workers: a fork in another worker that lands while this case's
+// script is still open for writing keeps a copy of that descriptor until
+// its child execs, and an exec of the script fails with ETXTBSY ("text file
+// busy", golang/go#22315) meanwhile. That failed TestShellHookLoweredBodyCapOnlyTightens
+// on CI (a7a585cb4f, ce46cdca54, 597b55a328: "setup: fork/exec
+// .../hooks/cursor-hook.sh: text file busy"). The script is final once
+// rendered, so a fresh command for it runs the same hook: it is started
+// again for up to 5 s. Any other error, and ETXTBSY past that, is returned.
+// No stdin byte is read before a start succeeds.
+func startWrittenHook(newCmd func() *exec.Cmd) (*exec.Cmd, time.Time, error) {
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		cmd := newCmd()
+		started := time.Now()
+		err := cmd.Start()
+		if err == nil || !errors.Is(err, syscall.ETXTBSY) || time.Now().After(deadline) {
+			return cmd, started, err
+		}
+	}
+}
+
 func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservation, error) {
 	var obs hookGoldenObservation
 	caseStart := time.Now()
@@ -950,23 +1074,27 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	env, review2Delay := review2Env(env, base)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, script, c.hook.args(c.event)...)
-	if sh := os.Getenv("DC_REVIEW2_BASH"); sh != "" {
-		cmd = exec.CommandContext(ctx, sh, append([]string{script}, c.hook.args(c.event)...)...)
-	}
-	cmd.Dir = work
-	cmd.Env = env
+	var input io.Reader = bytes.NewReader(stdin)
 	if review2Delay > 0 {
 		pr, pw := io.Pipe()
 		go func() { time.Sleep(review2Delay); _, _ = pw.Write(stdin); _ = pw.Close() }()
-		cmd.Stdin = pr
-	} else {
-		cmd.Stdin = bytes.NewReader(stdin)
+		input = pr
 	}
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	hookStart := time.Now()
-	runErr := cmd.Run()
+	cmd, hookStart, runErr := startWrittenHook(func() *exec.Cmd {
+		cmd := exec.CommandContext(ctx, script, c.hook.args(c.event)...)
+		if sh := os.Getenv("DC_REVIEW2_BASH"); sh != "" {
+			cmd = exec.CommandContext(ctx, sh, append([]string{script}, c.hook.args(c.event)...)...)
+		}
+		cmd.Dir = work
+		cmd.Env = env
+		cmd.Stdin = input
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		return cmd
+	})
+	if runErr == nil {
+		runErr = cmd.Wait()
+	}
 	obs.raw.HookMs = time.Since(hookStart).Milliseconds()
 	obs.raw.LoadAfter = hookGoldenLoad()
 	obs.raw.Stdout, obs.raw.Stderr, obs.raw.Root, obs.raw.Addr = stdout.String(), stderr.String(), root, addr
