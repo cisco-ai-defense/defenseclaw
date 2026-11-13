@@ -468,6 +468,13 @@ func (runtime *Runtime) emitWithLeaseControls(
 	if !inbound {
 		export = observability.RemoteExportFrom(ctx)
 	}
+	if !localOnly && !inbound && originDestination == "" && !suppressAll &&
+		observability.ExportOnlyInCall(ctx) && !observability.SkipLocalWrite(ctx) &&
+		audit.CallWritesOpen(ctx, local.store) {
+		// The hook call stores this occurrence in its row of record: no local
+		// row, export after the call commits (dispatchAfterLocalCommit).
+		ctx = observability.WithSkipLocalWrite(ctx)
+	}
 	var outcome pipeline.LocalLogOutcome
 	var processErr error
 	switch {

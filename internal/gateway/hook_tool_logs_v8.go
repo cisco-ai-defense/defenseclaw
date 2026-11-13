@@ -28,6 +28,12 @@ func (a *APIServer) emitHookToolLogV8(
 	if a == nil {
 		return
 	}
+	if phase != "result" && !a.managedAIDOnly() {
+		// The requested tool call is in the hook_decision row of the call:
+		// inside an open call batch it is exported only (one local row per
+		// decision, #1384, bar H1). Secure Client keeps every row (#1092).
+		ctx = observability.WithExportOnlyInCall(ctx)
+	}
 	_, _ = emitHookToolLogV8WithEmitter(
 		ctx, a.observabilityV8RuntimeEmitter(), meta, phase, tool, input, output, exitCode,
 	)
