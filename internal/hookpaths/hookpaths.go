@@ -2012,6 +2012,22 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				if !protectedDecision && NoDereferenceTouchShape(command, cwd, home) {
 					noDereferenceTouchSafe, protectedDecision = noDereferenceTouchStatus(command, cwd, home)
 				}
+				// The replace verbs (mv, install, sed -i) change the entry a
+				// name holds; the same key carries that proof (F7).
+				if !protectedDecision && !noDereferenceTouchSafe && ReplaceVerbShape(command, cwd, home) &&
+					replaceVerbSafe(command, cwd, home) {
+					noDereferenceTouchSafe = true
+				}
+				// A word the shell expands (a glob, a quoted or escaped glob
+				// character, an ANSI-C string) is read by the one word
+				// resolver in this client's own decision. A managed gateway
+				// cannot read the user's home, so the client carries that
+				// decision for every verb, not a fixed list (GAP-0326,
+				// GAP-0327: managed at least as strict as per-user).
+				if !protectedDecision && !noDereferenceTouchSafe && !isApplyPatchToolName(tool) &&
+					actionClientShellWordSyntax(command) {
+					protectedDecision = ActionCommandDecision(command, cwd, home) != ""
+				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
@@ -2062,7 +2078,6 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					literalOperands = append(literalOperands, boundedOperands...)
 				}
 				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
-				literalOperands = append(literalOperands, quotedGlobNameWriteOperands(command, cwd, home, facts.Paths)...)
 				if concreteOperands.ready {
 					literalOperands = append(literalOperands, concreteOperands.loop...)
 					literalOperands = append(literalOperands, concreteOperands.sourceGlob...)

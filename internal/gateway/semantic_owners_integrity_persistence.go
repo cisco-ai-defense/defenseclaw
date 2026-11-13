@@ -1885,13 +1885,20 @@ func trustedNoDereferenceTouchSafe(command, cwd, home string, evidence map[strin
 	if managed && !filepath.IsAbs(cwd) {
 		cwd = evidence[hookpaths.CWDKey]
 	}
-	if !hookpaths.NoDereferenceTouchShape(command, cwd, home) {
+	// One key carries the entry-only proof: touch -h and the replace verbs
+	// (mv, install, sed -i) change the name an operand holds, not the file a
+	// link reaches.
+	touch := hookpaths.NoDereferenceTouchShape(command, cwd, home)
+	if !touch && !hookpaths.ReplaceVerbShape(command, cwd, home) {
 		return false
 	}
 	if managed {
 		return evidence[hookpaths.NoDereferenceTouchSafeKey] == "1"
 	}
-	return hookpaths.NoDereferenceTouchSafe(command, cwd, home)
+	if touch {
+		return hookpaths.NoDereferenceTouchSafe(command, cwd, home)
+	}
+	return hookpaths.ReplaceVerbSafe(command, cwd, home)
 }
 
 // An unmodeled program's output option cannot prove a safe read. When that

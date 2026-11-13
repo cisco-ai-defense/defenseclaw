@@ -102,7 +102,9 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		}
 	}
 	SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
-	quotedGlobNameWriteOperands(command, cwd, home, fallbackFacts.Paths)
+	actionClientShellWordSyntax(command)
+	ReplaceVerbShape(command, cwd, home)
+	replaceVerbSafe(command, cwd, home)
 	actionGlobFacts(command, cwd, home)
 	LinkWalkFacts(command, cwd, home)
 }
@@ -122,7 +124,7 @@ var gap0749ResolveReaderCalls = []string{
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
 	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
-	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "quotedGlobNameWriteOperands", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
+	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "ReplaceVerbShape", "actionClientShellWordSyntax", "replaceVerbSafe", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
 }
 
 // TestGAP0749ResolveReadersCoverResolve: the argv readers a bounded sweep
