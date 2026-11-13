@@ -791,20 +791,24 @@ func runWindowsReacquiringHolder(t *testing.T, cmd *exec.Cmd) (stop func(), reop
 	}
 }
 
-// startWindowsRotatingHolder opens path with no sharing and, every 300 ms,
+// startWindowsRotatingHolder opens path with no sharing and, at each step,
 // duplicates that handle to a new value and closes the old one, so the file
-// is never free and no handle value lasts two checks. When its handle is
-// closed by someone else it says so ("lost n") and opens the file again only
-// after allowReopen: a re-open on its own next tick raced the test's start of
-// the freed hook (the start failed while the close had worked). state is the
-// latest handle value (-1 while it waits to re-open), how many times it
-// rotated and how many times it lost the handle.
-func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), state func() (handle int64, rotations, lost int), allowReopen func()) {
+// is never free. It acts only when the test steps it (step returns once the
+// holder answered), never on its own timer: a holder on a 300 ms timer
+// rotated inside the guardian's scan now and then, between its handle-table
+// snapshot and its probe, which hides the hold from that check (the product
+// limit rel-1-0-10:GAP-0068), and re-opened the file before the test could
+// start the freed hook. A step that finds its handle closed by someone else
+// says so ("lost n") and opens the file again only after allowReopen. state
+// is the latest handle value (-1 while it waits to re-open), how many times
+// it rotated and how many times it lost the handle.
+func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), state func() (handle int64, rotations, lost int), step func(), allowReopen func()) {
 	t.Helper()
 	if _, err := os.Stat(shell); err != nil {
 		t.Skipf("PowerShell unavailable: %v", err)
 	}
-	gate := filepath.Join(t.TempDir(), "reopen")
+	gates := t.TempDir()
+	gate, stepGate := filepath.Join(gates, "reopen"), filepath.Join(gates, "step")
 	script := strings.Join([]string{
 		`Add-Type -TypeDefinition @'`,
 		`using System; using System.Runtime.InteropServices;`,
@@ -817,11 +821,14 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 		`'@`,
 		fmt.Sprintf(`$p = '%s'`, strings.ReplaceAll(path, "'", "''")),
 		fmt.Sprintf(`$g = '%s'`, strings.ReplaceAll(gate, "'", "''")),
+		fmt.Sprintf(`$s = '%s'`, strings.ReplaceAll(stepGate, "'", "''")),
 		`$me = [R]::GetCurrentProcess(); $rot = 0; $lost = 0; $keep = @()`,
 		`$h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero)`,
 		`[Console]::Out.WriteLine('ready'); [Console]::Out.Flush()`,
-		`for ($i = 0; $i -lt 600; $i++) {`,
-		`  Start-Sleep -Milliseconds 300`,
+		`for ($i = 0; $i -lt 3600; $i++) {`,
+		`  Start-Sleep -Milliseconds 50`,
+		`  if (-not (Test-Path -LiteralPath $s)) { continue }`,
+		`  Remove-Item -LiteralPath $s -Force`,
 		`  $keep += New-Object System.Threading.ManualResetEvent($false)`, // takes a handle slot, so that values do not just alternate
 		`  $n = [IntPtr]::Zero`,
 		// -1 is "could not open" (the hook is in use for a moment): try again; it is not a handle to rotate.
@@ -832,7 +839,7 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 		`  else { $lost++; [Console]::Out.WriteLine('lost ' + $lost); [Console]::Out.Flush()`,
 		`    while (-not (Test-Path -LiteralPath $g)) { Start-Sleep -Milliseconds 50 }`,
 		`    Remove-Item -LiteralPath $g -Force`,
-		`    $h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero) }`,
+		`    do { $h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero); if ($h.ToInt64() -eq -1) { Start-Sleep -Milliseconds 50 } } while ($h.ToInt64() -eq -1) }`,
 		`  [Console]::Out.WriteLine('state ' + $h.ToInt64() + ' ' + $rot + ' ' + $lost); [Console]::Out.Flush()`,
 		`}`,
 	}, "\n")
@@ -860,6 +867,7 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 	var last struct {
 		handle        int64
 		rotations, lo int
+		answers       int
 	}
 	ready := make(chan struct{})
 	go func() {
@@ -878,10 +886,12 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 			if _, err := fmt.Sscanf(line, "state %d %d %d", &h, &r, &l); err == nil {
 				mu.Lock()
 				last.handle, last.rotations, last.lo = h, r, l
+				last.answers++
 				mu.Unlock()
 			} else if _, err := fmt.Sscanf(line, "lost %d", &l); err == nil {
 				mu.Lock()
 				last.handle, last.lo = -1, l
+				last.answers++
 				mu.Unlock()
 			}
 		}
@@ -901,21 +911,38 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 		}
 	}
 	t.Cleanup(stop)
-	return stop, func() (int64, int, int) {
-			mu.Lock()
-			defer mu.Unlock()
-			return last.handle, last.rotations, last.lo
-		}, func() {
-			if err := os.WriteFile(gate, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
+	answers := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return last.answers
+	}
+	state = func() (int64, int, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		return last.handle, last.rotations, last.lo
+	}
+	step = func() {
+		t.Helper()
+		before := answers()
+		if err := os.WriteFile(stepGate, nil, 0o600); err != nil {
+			t.Fatal(err)
 		}
+		waitFor(t, 30*time.Second, func() bool { return answers() > before })
+	}
+	allowReopen = func() {
+		if err := os.WriteFile(gate, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return stop, state, step, allowReopen
 }
 
-// GAP-0755: a holder that hands its file to a new handle value
-// every 300 ms, so that no value lasts two checks and the hook is never free,
-// is closed at the second check, and then waits out the backoff. The session
-// and the account are injected (interactiveFactsSystem); the calls are real.
+// GAP-0755: a holder that hands its file to a new handle value (twice
+// between two checks), so that no value lasts two checks and the hook is
+// never free, is closed at the second check, and then waits out the backoff.
+// The holder rotates between the checks, not during one (see
+// startWindowsRotatingHolder and rel-1-0-10:GAP-0068). The session and the
+// account are injected (interactiveFactsSystem); the calls are real.
 func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 	resetWindowsHeldSwapsForTest(t)
 	advance := fakeWindowsHeldSwapClock(t)
@@ -955,17 +982,18 @@ func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 		out, err := exec.Command(target).Output()
 		return err == nil && len(strings.TrimSpace(string(out))) > 0
 	}
-	_, state, allowReopen := startWindowsRotatingHolder(t, powershellForTest(), target)
+	_, state, step, allowReopen := startWindowsRotatingHolder(t, powershellForTest(), target)
+	rotate := func() { step(); step() } // two new handle values: none lasts to the next check
 	if started() {
 		t.Fatal("a start succeeded while another process held the hook with no sharing")
 	}
-	waitFor(t, 30*time.Second, func() bool { _, rot, _ := state(); return rot >= 1 })
+	step()
 	check() // check 1: the hold is seen
 	first, rot1, _ := state()
 	if started() || len(rows) != 0 {
 		t.Fatalf("the first check acted (rows %d)", len(rows))
 	}
-	time.Sleep(900 * time.Millisecond) // the handle value changes before the next check
+	rotate() // the handle value changes before the next check
 	_, _, lostBefore := state()
 	advance(windowsHookBinaryCheckInterval)
 	check() // check 2: another handle value, the same hold
@@ -977,6 +1005,7 @@ func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 	if !started() || len(rows) != 1 || !rows[0].Closed {
 		t.Fatalf("second check: start works %v, rows %+v", started(), rows)
 	}
+	step() // the holder finds its handle gone
 	waitFor(t, 10*time.Second, func() bool { _, _, l := state(); return l > lostBefore })
 	allowReopen()
 	waitFor(t, 10*time.Second, func() bool { h, _, l := state(); return l > lostBefore && h != -1 }) // it holds the file again
@@ -989,15 +1018,16 @@ func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 	}
 	// 10 s after the first close the hold is seen again (the two checks start
 	// over after a close), and 15 s after it is closed again.
-	time.Sleep(900 * time.Millisecond)
+	rotate()
 	advance(windowsHookBinaryCheckInterval)
 	check()
 	if len(rows) != 1 || strings.Count(log.String(), "tamper: closed the handle") != 1 {
 		t.Fatalf("closed at the first sight after the backoff: rows %d, log %q", len(rows), log.String())
 	}
-	time.Sleep(900 * time.Millisecond)
+	rotate()
 	advance(windowsHookBinaryCheckInterval)
 	check()
+	step() // the holder finds its handle gone again
 	waitFor(t, 10*time.Second, func() bool { _, _, l := state(); return l > lost })
 	if strings.Count(log.String(), "tamper: closed the handle") != 2 || len(rows) != 1 {
 		t.Fatalf("second close after the backoff: rows %d, log %q", len(rows), log.String())
