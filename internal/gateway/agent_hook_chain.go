@@ -641,7 +641,7 @@ func (a *APIServer) applyAgentHookToolChains(
 	if result.Status == audit.ToolChainObserveFresh &&
 		len(result.DetectedChainIDs) != 0 {
 		chainFindings := toolChainRuleFindings(result)
-		intent := toolChainHookIntent(
+		intent := substrateChainEgressIntent(ctx, toolChainHookIntent(
 			guardrailActionForConnector(
 				a.decisionConfig(ctx),
 				req.ConnectorName,
@@ -650,7 +650,7 @@ func (a *APIServer) applyAgentHookToolChains(
 			),
 			denyEligible,
 			result,
-		)
+		), result)
 		resp = mergeAgentHookFindings(profile, req, resp, chainFindings, intent)
 		eval := a.emitHookRuleFindings(
 			ctx,
@@ -682,7 +682,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		// Exact transport replays reproduce the durable decision but do not
 		// create duplicate finding telemetry.
 		chainFindings := toolChainRuleFindings(result)
-		intent := toolChainHookIntent(
+		intent := substrateChainEgressIntent(ctx, toolChainHookIntent(
 			guardrailActionForConnector(
 				a.decisionConfig(ctx),
 				req.ConnectorName,
@@ -691,7 +691,7 @@ func (a *APIServer) applyAgentHookToolChains(
 			),
 			denyEligible,
 			result,
-		)
+		), result)
 		resp = mergeAgentHookFindings(profile, req, resp, chainFindings, intent)
 		resp.RuleIDs = mergeBoundedRuleIDs(
 			8,

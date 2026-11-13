@@ -170,7 +170,7 @@ func init() {
 	f.BoolVar(&serveFlags.actorPlainHTTP, "actor-plain-http", false,
 		"serve the actor listener as plain HTTP (egress reaches it on an http rule; the actor JWT authenticates); the admin listener and the leader RPC keep TLS")
 	f.StringVar(&serveFlags.chainKeyFile, "chain-key-file", "/var/run/secrets/defenseclaw-chain-key/key", "value lineage key every gateway replica shares (gateway)")
-	f.StringVar(&serveFlags.chainEgressAction, "chain-egress-action", chainstate.EgressBlock, "block or alert a secret read followed by egress at the callout (leader)")
+	f.StringVar(&serveFlags.chainEgressAction, "chain-egress-action", chainstate.EgressBlock, "block or alert a secret read followed by egress: the callout (leader) and a verified actor's hook (gateway)")
 	f.DurationVar(&serveFlags.chainRetention, "chain-retention", chainstate.DefaultRetention, "how long a suspended actor's chain windows count as live (leader)")
 	rootCmd.AddCommand(serveCmd)
 }
@@ -223,6 +223,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 				sources = append(sources, substrateBundleActivation(cfg))
 			}
 			gateway.SetSubstrateClusterActivation(gateway.SubstrateActivationSources(sources...))
+		}
+		// A verified actor's hook refuses egress after a secret read by the
+		// same flag as the callout (owner decision 2026-11-13).
+		if err := gateway.SetSubstrateChainEgressAction(serveFlags.chainEgressAction); err != nil {
+			return fmt.Errorf("serve: --chain-egress-action: %w", err)
 		}
 		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
 		return runSidecar(cmd, args)
