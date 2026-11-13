@@ -185,7 +185,9 @@ callout:
   judge:
     tokenSecret: defenseclaw-callout-judge
   # A Secret whose keys are the exposed actor_secrets values (one file per
-  # name), for exact-value DLP on egress. Never mounted into actors.
+  # name), for exact-value DLP on egress (the callout) and on /llm (the
+  # gateway). Mounted read-only in those two only, never into actors or the
+  # leader; the chart sets config.substrate.extproc.actor_secrets_dir.
   actorSecrets:
     secretName: ""
   args: []

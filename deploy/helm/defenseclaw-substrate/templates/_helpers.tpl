@@ -88,6 +88,13 @@ name this release's Services and the Substrate API filled in.
 {{- if not (hasKey $sub "api") -}}
 {{- $_ := set $sub "api" (dict "address" .Values.substrate.apiAddress "server_name" .Values.substrate.apiAudience "auth" "serviceaccount" "token_file" "/var/run/ate/token" "ca_file" "/var/run/ate/ca.crt") -}}
 {{- end -}}
+{{- /* The exposed actor_secrets values: the gateway's /llm exact-value DLP
+reads them from the same directory as the callout (F3, fa2fb4c476). */ -}}
+{{- if .Values.callout.actorSecrets.secretName -}}
+{{- $x := get $sub "extproc" | default dict -}}
+{{- if not (hasKey $x "actor_secrets_dir") }}{{ $_ := set $x "actor_secrets_dir" (include "dc.actorSecretsDir" .) }}{{ end -}}
+{{- $_ := set $sub "extproc" $x -}}
+{{- end -}}
 {{- if and .Values.bundles.enabled (not (hasKey $sub "bundles")) -}}
 {{- $_ := set $sub "bundles" (dict "enabled" true "anchors_file" "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json" "inbox" .Values.bundles.inbox) -}}
 {{- end -}}
@@ -337,6 +344,27 @@ checksum/config: {{ include "dc.config" .ctx | sha256sum }}
 - --peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
 - --callout-peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "callout") }}
 - --controller-peer-id={{ include "dc.spiffe" (dict "ctx" . "component" "controller") }}
+{{- end -}}
+
+{{/* Where the exposed actor_secrets values are mounted, in the callout and
+the gateway: config.substrate.extproc.actor_secrets_dir when set. */}}
+{{- define "dc.actorSecretsDir" -}}
+{{- dig "substrate" "extproc" "actor_secrets_dir" "/run/defenseclaw/actor-secrets" (.Values.config | default dict) -}}
+{{- end -}}
+
+{{/* The exposed actor_secrets Secret, read-only, for exact-value DLP in
+the callout (egress) and the gateway (/llm). Never mounted into actors or
+the leader. */}}
+{{- define "dc.actorSecretsMount" -}}
+- name: actor-secrets
+  mountPath: {{ include "dc.actorSecretsDir" . }}
+  readOnly: true
+{{- end -}}
+{{- define "dc.actorSecretsVolume" -}}
+- name: actor-secrets
+  secret:
+    secretName: {{ .Values.callout.actorSecrets.secretName }}
+    defaultMode: 0440
 {{- end -}}
 
 {{/* Optional Secrets of the gateway and leader (absent ones are skipped). */}}

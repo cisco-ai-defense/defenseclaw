@@ -85,6 +85,10 @@ spec:
         volumeMounts:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
         {{- include "dc.gatewaySecretMounts" . | nindent 8 }}
+        {{- if .Values.callout.actorSecrets.secretName }}
+        # Exposed actor_secrets values, for the /llm exact-value DLP (F3).
+        {{- include "dc.actorSecretsMount" . | nindent 8 }}
+        {{- end }}
         # The create path admits a launcher actor with the controller's own
         # attestation check (GAP-0154), so it reads the same anchors.
         {{- include "dc.templateAnchorsMount" . | nindent 8 }}
@@ -98,6 +102,9 @@ spec:
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
       {{- include "dc.gatewaySecretVolumes" . | nindent 6 }}
+      {{- if .Values.callout.actorSecrets.secretName }}
+      {{- include "dc.actorSecretsVolume" . | nindent 6 }}
+      {{- end }}
       {{- include "dc.templateAnchorsVolume" . | nindent 6 }}
       {{- include "dc.kubeTokenVolume" . | nindent 6 }}
       {{- if .Values.admin.tlsSecretName }}

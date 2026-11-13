@@ -32,7 +32,7 @@ const chartKubeVersion = "1.34.0"
 
 // chartCases are the golden renders: values files under
 // deploy/helm/defenseclaw-substrate/tests/values (empty for the defaults).
-var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed"}
+var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed", "actor-secrets"}
 
 // helmPinnedVersion is the helm release the goldens are rendered with and
 // that the CI job substrate-chart installs (keep it equal to HELM_VERSION in
