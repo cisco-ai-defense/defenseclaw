@@ -37,7 +37,6 @@ func TestNewApplicationProtectionControllerHandlesMissingConfig(t *testing.T) {
 		"tok",
 		"127.0.0.1:4000",
 		"127.0.0.1:18970",
-		"master",
 	)
 	if controller == nil {
 		t.Fatal("controller is nil")
@@ -69,7 +68,7 @@ func TestApplicationProtectionControllerActivatesHookConnector(t *testing.T) {
 		hookConfigPath:    hookConfigPath,
 	}
 	registry.RegisterBuiltin(conn)
-	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -149,7 +148,7 @@ func TestApplicationProtectionRulePackFailureIsConnectorScoped(t *testing.T) {
 	registry.RegisterBuiltin(invalid)
 	registry.RegisterBuiltin(valid)
 	controller := newApplicationProtectionController(
-		sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master",
+		sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970",
 	)
 
 	now := time.Now().UTC()
@@ -197,7 +196,7 @@ func TestApplicationProtectionControllerSkipsMissingHookConfig(t *testing.T) {
 		hookConfigPath:    hookConfigPath,
 	}
 	registry.RegisterBuiltin(conn)
-	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -250,7 +249,7 @@ func TestApplicationProtectionControllerManagedEnterpriseDoesNotWriteUserHooks(t
 		hookConfigPath:    hookConfigPath,
 	}
 	registry.RegisterBuiltin(conn)
-	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -301,7 +300,7 @@ func TestApplicationProtectionControllerSkipsUnverifiedHookContractInActionMode(
 		hookConfigPath:    hookConfigPath,
 	}
 	registry.RegisterBuiltin(conn)
-	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -362,7 +361,7 @@ func TestApplicationProtectionControllerRepairsPreviouslyActiveWithoutHookConfig
 		hookConfigPath:    hookConfigPath,
 	}
 	registry.RegisterBuiltin(conn)
-	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -397,7 +396,7 @@ func TestApplicationProtectionControllerSkipsProxyConnector(t *testing.T) {
 		Guardrail:             config.GuardrailConfig{HookSelfHeal: false},
 	}
 	sidecar := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
-	controller := newApplicationProtectionController(sidecar, connector.NewDefaultRegistry(), "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, connector.NewDefaultRegistry(), "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{

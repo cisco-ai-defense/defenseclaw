@@ -43,7 +43,7 @@ Hooks run in the interactive user's session, read the account from the operating
 | --- | --- | --- |
 | Hook and inspect | The gateway's own account | The peer uid of the hook socket, or the uid or SID of the per-user credential. A request whose headers name another user is refused with `403`. |
 | ACP | The gateway's own account, for signed requests and bearer tokens | The user bound to the ACP enrollment credential, one per user, editor and agent (preview). |
-| LLM proxy | The gateway's own account when the request presents the gateway token or master key. The `X-DefenseClaw-User-*` pair is removed from every request. | No user is bound. The pair is removed. |
+| LLM proxy | The gateway's own account when the request presents the gateway token. The `X-DefenseClaw-User-*` pair is removed from every request. | No user is bound. The pair is removed. |
 | Sandbox ingress | The host user on the sandbox binding, recorded for attribution without verified facts. Identity headers from the sandbox are ignored. | Same. |
 | Other routes that take the gateway token | The gateway's own account | No user is bound. |
 
