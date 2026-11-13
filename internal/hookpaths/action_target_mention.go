@@ -232,6 +232,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 		var pendingReads []pendingRead
 		direct := actionDirectStatements(file)
+		// Quoting makes *, ? and [ literal only in a POSIX reading of a
+		// POSIX home; a Windows-spelled home reads them as wildcards.
+		literalReading := !spelledWindows && !actionPosixWindowsHome(home)
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -243,7 +246,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// pattern characters ('k[1]'* reads as k[1]*, matching k1x
 				// and missing k[1]x). The pattern that escapes them is the
 				// shell's reading (GAP-0293).
-				if activeGlob {
+				if activeGlob && literalReading && noDereferenceTouchLiteralWord(word) {
 					if pattern, escaped := noDereferenceTouchPattern(word, home); escaped {
 						value = pattern
 					}
@@ -261,6 +264,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			// Quoted or escaped glob characters are part of the name: the
 			// word names that one entry, a hard link of a protected file
 			// included (GAP-0293: 'k[1]' was never resolved).
+			if !literalReading {
+				return !stateOnly && !globs.recording() && actionUnknownWordMayNameKey(word, effectiveCWD, home)
+			}
 			// A double-quoted or backslash-escaped one has no plain value:
 			// the shell's own field is the name.
 			if !known && noDereferenceTouchLiteralWord(word) {

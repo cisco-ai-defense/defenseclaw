@@ -18,9 +18,9 @@ import (
 // characters, which may be an unexpanded pattern, so without this list a
 // managed gateway that cannot see the home had no answer for such a name and
 // a hard link or symlink of a protected file named 'k[1]' was allowed
-// (GAP-0293).
+// (GAP-0293). A Windows-spelled home reads these characters as wildcards.
 func quotedGlobNameWriteOperands(command, cwd, home string, paths []actionfacts.PathFact) []string {
-	if !strings.ContainsAny(command, "*?[") || !strings.ContainsAny(command, "'\"\\") {
+	if actionWindowsHome(home) || !strings.ContainsAny(command, "*?[") || !strings.ContainsAny(command, "'\"\\") {
 		return nil
 	}
 	file, ok := parseShell(command)
