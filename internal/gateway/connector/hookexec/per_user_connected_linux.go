@@ -382,6 +382,7 @@ func threadHasOwnIDs(threadDir string) bool {
 // row's real owner is proof; a foreign owner after accept is final.
 func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int, error)) error {
 	lastErr := errConnectedSocketNotFound
+	attempt := 0
 	for {
 		if ctx.Err() != nil {
 			return lastErr
@@ -400,7 +401,7 @@ func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int,
 		select {
 		case <-ctx.Done():
 			return lastErr
-		case <-time.After(20 * time.Millisecond):
+		case <-time.After(nextConnectedPollPause(&attempt)):
 		}
 	}
 }
