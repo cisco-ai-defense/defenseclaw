@@ -199,6 +199,10 @@ func isSink(e *effects.Effect, cfg Config) bool {
 		// A fetch is a sink only when it carries data (a query/body the model
 		// built), handled by the value/label check; a plain GET is not.
 		return e.Data != nil || hasQuery(e.Target)
+	case effects.KindWrite, effects.KindAppend, effects.KindLink:
+		// A write/copy to another host (scp/rsync host:path, an ssh remote
+		// operand) sends the data off the machine, so it is an external sink.
+		return e.Target.Type == effects.TargetRemote
 	}
 	return false
 }

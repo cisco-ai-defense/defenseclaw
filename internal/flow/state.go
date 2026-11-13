@@ -157,6 +157,22 @@ func (s *State) sinkHit(e *effects.Effect, host string, all []effects.Effect, re
 	if prog == "" {
 		prog = string(e.Origin.Surface)
 	}
+	// A remote write (scp/rsync host:path): the sent data is this file. Decide
+	// its label the same way a local write would be labeled; a hit means the
+	// copied file is labeled, or a labeled source feeds it (copier fallback).
+	if e.Kind == effects.KindWrite || e.Kind == effects.KindAppend || e.Kind == effects.KindLink {
+		rh := host
+		if rh == "" {
+			rh = remoteHostOf(e.Target)
+		}
+		if lbl, sets, src, ok := s.writeLabel(e, all, readLabel, cfg); ok && lbl.labeled() {
+			return Hit{Kind: HitLabeledFile, Program: prog, Host: rh, Sets: sets, Source: src}, true
+		}
+		if s.Label.labeled() {
+			return Hit{Kind: HitSessionContext, Program: prog, Host: rh, Sets: []string{"session:" + s.Label.String()}, Source: s.Label.String()}, true
+		}
+		return Hit{}, false
+	}
 	// Data lane: a labeled file or labeled read feeds the sink.
 	if e.Data != nil {
 		for _, src := range e.Data.Sources {
@@ -414,6 +430,22 @@ func sourcePathKey(src effects.Source, cfg Config) string {
 func physicalKey(t effects.Target) string {
 	pt := effects.Target{Path: t.Physical, Flavor: t.Flavor, CaseFold: t.CaseFold}
 	return pt.Key()
+}
+
+func remoteHostOf(t effects.Target) string {
+	v := t.Host
+	if v != "" {
+		return v
+	}
+	spell := t.Spelling
+	if i := strings.IndexByte(spell, ':'); i > 0 {
+		hostpart := spell[:i]
+		if at := strings.IndexByte(hostpart, '@'); at >= 0 {
+			hostpart = hostpart[at+1:]
+		}
+		return hostpart
+	}
+	return ""
 }
 
 func copierProgram(p string) bool {
