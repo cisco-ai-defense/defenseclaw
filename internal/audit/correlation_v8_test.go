@@ -893,6 +893,13 @@ func TestCorrelationPendingOperationsAreTypedScopedAndRestartSafe(t *testing.T) 
 				CorrelationOperationCompleted, event.ReceivedTime); err != nil {
 				t.Fatal(err)
 			}
+			// Session b holds an operation of the same ID, so the ended
+			// operation stays marked and the same end again is stale, not a
+			// scope conflict (S8 R5).
+			if err := tx.ResolvePendingOperation(t.Context(), correct, event.SemanticEventID,
+				CorrelationOperationCompleted, event.ReceivedTime); !errors.Is(err, ErrCorrelationStale) {
+				t.Errorf("second resolve error=%v, want stale", err)
+			}
 		},
 	})
 	completed, err := repo.ListPendingOperations(t.Context(), CorrelationPendingQuery{

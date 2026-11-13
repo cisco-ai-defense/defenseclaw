@@ -237,3 +237,43 @@ func TestNativeCustodyClaudeHooksKeepClaimsAndToolIdentifier(t *testing.T) {
 		})
 	}
 }
+
+// TestSettledToolCallLeavesNoPendingOperation: a PostToolUse resolves its
+// PreToolUse's pending operation by deleting it, and the same PostToolUse
+// delivered again finds nothing to resolve and is recorded without error
+// (S8 R5).
+func TestSettledToolCallLeavesNoPendingOperation(t *testing.T) {
+	installCorrelationHMACForTest()
+	path := filepath.Join(t.TempDir(), "audit.db")
+	server, store := newHookCorrelationServer(t, path)
+	defer store.Close() //nolint:errcheck
+	server.scannerCfg = config.DefaultConfig()
+	cwd := t.TempDir()
+	start := correlateClaudeHookForTest(t, server, map[string]any{
+		"hook_event_name": "PreToolUse", "session_id": "session-r5-pending", "cwd": cwd, "tool_name": "Bash",
+		"tool_use_id": "toolu_r5_pending", "tool_input": map[string]any{"command": "git status"},
+	})
+	if got := countCorrelationRowsForTest(t, path, `SELECT COUNT(*) FROM correlation_pending_operations
+		WHERE status='active' AND start_semantic_event_id=?`, start.SemanticEventID); got != 1 {
+		t.Fatalf("PreToolUse left %d active operations, want 1", got)
+	}
+	post := map[string]any{
+		"hook_event_name": "PostToolUse", "session_id": "session-r5-pending", "cwd": cwd, "tool_name": "Bash",
+		"tool_use_id": "toolu_r5_pending", "tool_input": map[string]any{"command": "git status"},
+		"tool_response": map[string]any{"stdout": "On branch main", "stderr": "", "interrupted": false},
+	}
+	end := correlateClaudeHookForTest(t, server, post)
+	if end.ToolInvocationID != start.ToolInvocationID || end.TurnID != start.TurnID || end.AgentID != start.AgentID {
+		t.Fatalf("PostToolUse did not continue its start: start %+v end %+v", start, end)
+	}
+	if got := countCorrelationRowsForTest(t, path, `SELECT COUNT(*) FROM correlation_pending_operations`); got != 0 {
+		t.Fatalf("a settled tool call left %d pending operations, want 0", got)
+	}
+	replay := correlateClaudeHookForTest(t, server, post)
+	if replay.ToolInvocationID != start.ToolInvocationID {
+		t.Fatalf("replayed PostToolUse lost its tool call: %+v", replay)
+	}
+	if got := countCorrelationRowsForTest(t, path, `SELECT COUNT(*) FROM correlation_pending_operations`); got != 0 {
+		t.Fatalf("a replayed PostToolUse left %d pending operations, want 0", got)
+	}
+}

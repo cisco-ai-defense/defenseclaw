@@ -399,16 +399,17 @@ func TestNativeOTLPIDlessToolLinksUniquePendingWithoutCollapse(t *testing.T) {
 		WHERE relationship_type='same_as'`).Scan(&sameAs); err != nil {
 		t.Fatal(err)
 	}
-	var pendingStatus, terminalSemantic string
-	if err := database.QueryRow(`SELECT status, terminal_semantic_event_id
+	// The native end resolved the hook's pending start, which deletes it
+	// (S8 R5).
+	var pendingLeft int
+	if err := database.QueryRow(`SELECT COUNT(*)
 		FROM correlation_pending_operations WHERE operation_id=?`,
-		hook.ToolInvocationID).Scan(&pendingStatus, &terminalSemantic); err != nil {
+		hook.ToolInvocationID).Scan(&pendingLeft); err != nil {
 		t.Fatal(err)
 	}
-	if causedBy != 1 || sameAs != 0 || pendingStatus != string(audit.CorrelationOperationCompleted) ||
-		terminalSemantic != nativeSemantic {
-		t.Fatalf("derived join caused_by=%d same_as=%d pending=%q terminal=%q native=%q",
-			causedBy, sameAs, pendingStatus, terminalSemantic, nativeSemantic)
+	if causedBy != 1 || sameAs != 0 || pendingLeft != 0 {
+		t.Fatalf("derived join caused_by=%d same_as=%d pending left=%d native=%q",
+			causedBy, sameAs, pendingLeft, nativeSemantic)
 	}
 }
 

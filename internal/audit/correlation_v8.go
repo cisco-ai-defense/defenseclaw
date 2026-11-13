@@ -1857,7 +1857,19 @@ func (tx *CorrelationTx) PutPendingOperation(
 // The statements of ResolvePendingOperation; the index trim test runs
 // EXPLAIN on them. The exact key is the primary key of the table.
 const (
-	correlationPendingResolveSQL = `UPDATE correlation_pending_operations SET
+	correlationPendingResolveSQL = `DELETE FROM correlation_pending_operations
+		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
+		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=? AND status='active'
+		AND NOT EXISTS (SELECT 1 FROM correlation_pending_operations AS other
+			WHERE other.connector_instance_id=correlation_pending_operations.connector_instance_id
+			AND other.operation_namespace=correlation_pending_operations.operation_namespace
+			AND other.operation_kind=correlation_pending_operations.operation_kind
+			AND other.operation_id=correlation_pending_operations.operation_id
+			AND other.operation_type=correlation_pending_operations.operation_type
+			AND other.status='active'
+			AND (other.scope_kind<>correlation_pending_operations.scope_kind
+				OR other.scope_id<>correlation_pending_operations.scope_id))`
+	correlationPendingMarkResolvedSQL = `UPDATE correlation_pending_operations SET
 		terminal_semantic_event_id=?, terminal_time_unix_nano=?, status=?, updated_time_unix_nano=?
 		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
 		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=? AND status='active'`
@@ -1869,6 +1881,17 @@ const (
 		AND operation_id=? AND operation_type=? AND status='active' LIMIT 1`
 )
 
+// ResolvePendingOperation ends the active operation at locator. It deletes
+// it: every reader of pending operations asks for active ones, and every
+// caller treats an operation already ended (ErrCorrelationStale) and one
+// never started (ErrCorrelationNotFound) alike, so the ended row, with its
+// terminal event and status, was never read again and only took bytes until
+// retention (S8 R5). The one exception keeps the row, marked with its end as
+// before: another scope holds an operation of the same ID (a provider ID
+// reused across sessions). Without the ended row, a second delivery of this
+// end would meet that operation and be refused as a scope conflict instead
+// of being found stale. Ended rows are still removed by retention's
+// ended-operation batch, as are those a 1.0.9 binary left.
 func (tx *CorrelationTx) ResolvePendingOperation(
 	ctx context.Context,
 	locator CorrelationPendingLocator,
@@ -1891,8 +1914,20 @@ func (tx *CorrelationTx) ResolvePendingOperation(
 	if terminalAt.IsZero() {
 		terminalAt = time.Now().UTC()
 	}
-	result, err := txExecContextObserved(ctx, tx.tx, "correlation_pending_resolve",
+	deleted, err := txExecContextObserved(ctx, tx.tx, "correlation_pending_resolve",
 		tx.repo.store.sqliteBusyObservabilityV8(), correlationPendingResolveSQL,
+		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
+		string(locator.Type), string(locator.ScopeKind), locator.ScopeID)
+	if err != nil {
+		return fmt.Errorf("audit: resolve correlation pending operation: %w", err)
+	}
+	if changed, err := deleted.RowsAffected(); err != nil {
+		return fmt.Errorf("audit: inspect resolved correlation pending operation: %w", err)
+	} else if changed == 1 {
+		return nil
+	}
+	result, err := txExecContextObserved(ctx, tx.tx, "correlation_pending_resolve_mark",
+		tx.repo.store.sqliteBusyObservabilityV8(), correlationPendingMarkResolvedSQL,
 		string(terminalEventID), unixNano(terminalAt), string(status), unixNano(terminalAt),
 		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
 		string(locator.Type), string(locator.ScopeKind), locator.ScopeID)

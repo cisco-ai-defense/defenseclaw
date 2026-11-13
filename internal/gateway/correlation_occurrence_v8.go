@@ -561,9 +561,8 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	if stateAdmissible && lifecycle == connector.CorrelationLifecycleToolEnd && pendingLocator != nil &&
 		pendingLocator.OperationID != "" {
 		terminalStatus := hookToolCorrelationTerminalStatus(profile, req)
-		if resolveErr := tx.ResolvePendingOperation(ctx, *pendingLocator,
-			semantic, terminalStatus, now); resolveErr != nil &&
-			!errors.Is(resolveErr, audit.ErrCorrelationStale) &&
+		resolveErr := tx.ResolvePendingOperation(ctx, *pendingLocator, semantic, terminalStatus, now)
+		if resolveErr != nil && !errors.Is(resolveErr, audit.ErrCorrelationStale) &&
 			!errors.Is(resolveErr, audit.ErrCorrelationNotFound) {
 			return ctx, req, resolveErr
 		}
