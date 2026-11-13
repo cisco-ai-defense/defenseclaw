@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
@@ -80,19 +79,21 @@ func (r urlRule) matchesPath(canonical string) bool {
 	return pathHasPrefix(p, r.foldedPrefix) || (strings.HasSuffix(r.foldedPrefix, "/") && p+"/" == r.foldedPrefix)
 }
 
-// ruleMethods is every method a method-scoped URL rule names: under all of
-// them, a rule that would refuse or ask for some override applies.
-func (p *Policy) ruleMethods() []string {
-	var out []string
+// rulesOnPath reports whether a URL rule (deny or ask) covers the
+// request's host and path under some method, so a method its body names
+// could change the verdict (GAP-0046). An ambiguous path counts where a
+// rule has a path prefix: under a body method it may be refused.
+func (p *Policy) rulesOnPath(req *Request) bool {
+	reqPath, pathErr := canonicalPath(pathOnly(req.Path))
 	for _, r := range p.urlRules {
-		for m := range r.methods {
-			if !slices.Contains(out, m) {
-				out = append(out, m)
-			}
+		if _, ok := r.hosts.match(req.Host); !ok {
+			continue
+		}
+		if r.pathPrefix == "" || pathErr != nil || r.matchesPath(reqPath) {
+			return true
 		}
 	}
-	slices.Sort(out)
-	return out
+	return false
 }
 
 // compilePolicy builds a Policy. The Decider runs in open mode: the
@@ -122,6 +123,11 @@ func compilePolicy(cfg *Config, p ProfileConfig, blocklists []*egress.Feed) (*Po
 	if pol.askHosts, err = newHostMatcher(p.AskHosts); err != nil {
 		return nil, err
 	}
+	// defs is each rule name's definition: an approval of an ask rule is
+	// keyed by its name (GAP-0177), so a name given to two different rules
+	// (substrate.admin's and the profile's are added together) is made
+	// unique for the later one, which never shares the earlier's approval.
+	defs := map[string]string{}
 	for _, r := range p.URLRules {
 		hm, err := newHostMatcher(r.Hosts)
 		if err != nil {
@@ -145,6 +151,11 @@ func compilePolicy(cfg *Config, p ProfileConfig, blocklists []*egress.Feed) (*Po
 			// name (GAP-0177), so two unnamed rules on a host never share one.
 			ur.name = r.Action + ":" + strings.Join(r.Hosts, ",") + ":" + strings.Join(r.Methods, ",") + ":" + prefix
 		}
+		def := r.Action + ":" + strings.Join(r.Hosts, ",") + ":" + strings.Join(r.Methods, ",") + ":" + prefix
+		for base, i := ur.name, 2; defs[ur.name] != "" && defs[ur.name] != def; i++ {
+			ur.name = fmt.Sprintf("%s#%d", base, i)
+		}
+		defs[ur.name] = def
 		pol.urlRules = append(pol.urlRules, ur)
 	}
 	return pol, nil
