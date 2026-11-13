@@ -58,7 +58,7 @@ func (a *APIServer) correlateHookOccurrence(
 		defer cancel()
 	}
 	for attempt := 1; ; attempt++ {
-		outCtx, out, err := a.correlateHookOccurrenceOnce(runCtx, profile, cloneHookCorrelationState(req), rawBody)
+		outCtx, out, err := a.correlateHookOccurrenceInTurn(runCtx, profile, cloneHookCorrelationState(req), rawBody)
 		if runCtx != ctx {
 			// The ledger's deadline bounds the ledger only: the call goes on
 			// with the request's own context and the values the ledger added.
@@ -166,6 +166,8 @@ func cloneHookCorrelationState(req agentHookRequest) agentHookRequest {
 
 func (a *APIServer) correlateHookOccurrenceOnce(
 	ctx context.Context,
+	repo *audit.CorrelationRepository,
+	release func(),
 	profile connector.HookProfile,
 	req agentHookRequest,
 	rawBody []byte,
@@ -173,17 +175,10 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	if a == nil || a.store == nil {
 		return ctx, req, nil
 	}
-	// One attempt of a session at a time, from the read of its cursor to the
-	// commit that moves it (hookCorrelationSerial). The wait ends with ctx.
-	release, waitErr := a.hookCorrelationTurns.acquire(ctx, req.ConnectorName+"\x00"+req.SessionID)
-	if waitErr != nil {
-		return ctx, req, waitErr
-	}
+	// The attempt holds the store's correlation turn from its first read to
+	// the end of its savepoint in the transaction the queued occurrences
+	// share (correlateHookOccurrenceInTurn).
 	defer release()
-	repo, err := a.store.CorrelationRepository()
-	if err != nil {
-		return ctx, req, err
-	}
 	spec := profile.Correlation
 	if spec.Connector == "" || len(spec.HookBindings) == 0 {
 		spec = connector.ExplicitCanonicalCorrelationSpec(req.ConnectorName)

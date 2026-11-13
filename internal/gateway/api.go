@@ -439,9 +439,6 @@ type APIServer struct {
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
 	sandboxIngressMu sync.RWMutex
 	sandboxIngress   *sandboxIngressState
-	// hookCorrelationTurns holds the hooks of one session to one correlation
-	// attempt at a time (hookCorrelationSerial).
-	hookCorrelationTurns hookCorrelationSerial
 
 	// sandboxCtl is the OpenShell sandbox manager behind /api/v1/sandbox/
 	// (api_sandbox.go); nil when sandboxes are off.
