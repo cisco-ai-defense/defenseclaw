@@ -1804,6 +1804,21 @@ func (tx *CorrelationTx) PutPendingOperation(
 	return fmt.Errorf("audit: pending operation identity collision: %w", ErrCorrelationConflict)
 }
 
+// The statements of ResolvePendingOperation; the index trim test runs
+// EXPLAIN on them. The exact key is the primary key of the table.
+const (
+	correlationPendingResolveSQL = `UPDATE correlation_pending_operations SET
+		terminal_semantic_event_id=?, terminal_time_unix_nano=?, status=?, updated_time_unix_nano=?
+		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
+		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=? AND status='active'`
+	correlationPendingExactStatusSQL = `SELECT status FROM correlation_pending_operations
+		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
+		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=?`
+	correlationPendingOtherScopeSQL = `SELECT 1 FROM correlation_pending_operations
+		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
+		AND operation_id=? AND operation_type=? AND status='active' LIMIT 1`
+)
+
 func (tx *CorrelationTx) ResolvePendingOperation(
 	ctx context.Context,
 	locator CorrelationPendingLocator,
@@ -1827,10 +1842,7 @@ func (tx *CorrelationTx) ResolvePendingOperation(
 		terminalAt = time.Now().UTC()
 	}
 	result, err := txExecContextObserved(ctx, tx.tx, "correlation_pending_resolve",
-		tx.repo.store.sqliteBusyObservabilityV8(), `UPDATE correlation_pending_operations SET
-		terminal_semantic_event_id=?, terminal_time_unix_nano=?, status=?, updated_time_unix_nano=?
-		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
-		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=? AND status='active'`,
+		tx.repo.store.sqliteBusyObservabilityV8(), correlationPendingResolveSQL,
 		string(terminalEventID), unixNano(terminalAt), string(status), unixNano(terminalAt),
 		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
 		string(locator.Type), string(locator.ScopeKind), locator.ScopeID)
@@ -1845,9 +1857,7 @@ func (tx *CorrelationTx) ResolvePendingOperation(
 		return nil
 	}
 	var exactStatus string
-	err = tx.tx.QueryRowContext(ctx, `SELECT status FROM correlation_pending_operations
-		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
-		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=?`,
+	err = tx.tx.QueryRowContext(ctx, correlationPendingExactStatusSQL,
 		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
 		string(locator.Type), string(locator.ScopeKind), locator.ScopeID).Scan(&exactStatus)
 	if err == nil {
@@ -1857,9 +1867,7 @@ func (tx *CorrelationTx) ResolvePendingOperation(
 		return fmt.Errorf("audit: inspect unresolved exact pending operation: %w", err)
 	}
 	var otherScope int
-	err = tx.tx.QueryRowContext(ctx, `SELECT 1 FROM correlation_pending_operations
-		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
-		AND operation_id=? AND operation_type=? AND status='active' LIMIT 1`,
+	err = tx.tx.QueryRowContext(ctx, correlationPendingOtherScopeSQL,
 		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
 		string(locator.Type)).Scan(&otherScope)
 	if err == nil {
