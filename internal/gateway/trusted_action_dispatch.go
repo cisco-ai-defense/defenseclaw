@@ -173,6 +173,10 @@ type trustedActionRequest struct {
 	// hostTwinListed: the call is a statement, or a run of statements, of a
 	// list already read one by one.
 	hostTwinListed bool
+	// hostScriptTwinOff turns the script reading off, so a test can compare a
+	// call's findings with and without it (TestHostScriptTwinOnlyAddsFindings).
+	// Production requests never set it.
+	hostScriptTwinOff bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
@@ -605,12 +609,10 @@ func dispatchTrustedAction(
 				if twin.hostTwinListed {
 					// A statement of a list read alone is a fragment: that it
 					// is too large to judge says nothing the whole call's own
-					// limit does not, and its stronger finding of a rule the
-					// call raised keeps the call's name for it.
-					findings = withHostTwinFindings(findings, withoutLimitFindings(twinFindings))
-					continue
+					// limit does not.
+					twinFindings = withoutLimitFindings(twinFindings)
 				}
-				findings = withOverLimitTwinFindings(findings, twinFindings)
+				findings = withHostTwinFindings(findings, twinFindings)
 			}
 			findings = withBoundedTruncation(findings, caps, request)
 		}()
@@ -6443,9 +6445,22 @@ func withCradleUnknownTier(findings []RuleFinding, request trustedActionRequest)
 // written gave a rule: a stronger finding of the same rule family from the
 // reading raises the proof, never renames the finding (a Windows path rule
 // stays the Windows path rule).
+//
+// The reading may add only what it proves. A finding of the reading that would
+// enforce without a proof that authorizes the rule (a target the reading could
+// not place, a path it only mentions) is recorded, not enforced: a read-only
+// listing proves no write, and a launcher the tokenizer holds as partial stays
+// partial (rel-1-0-10:GAP-0364).
 func withHostTwinFindings(findings, twin []RuleFinding) []RuleFinding {
 	before := slices.Clone(findings)
-	joined := withOverLimitTwinFindings(findings, twin)
+	proven := make([]RuleFinding, len(twin))
+	for index, finding := range twin {
+		if finding.contributesToEnforcement() && !finding.proof.authorizes(finding.RuleID) {
+			finding.enforcement = findingEnforcementDetectionOnly
+		}
+		proven[index] = finding
+	}
+	joined := withOverLimitTwinFindings(findings, proven)
 	for index := range before {
 		if index < len(joined) && joined[index].RuleID != before[index].RuleID &&
 			trustedActionFindingKey(joined[index].RuleID) == trustedActionFindingKey(before[index].RuleID) {

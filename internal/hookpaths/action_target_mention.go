@@ -3063,6 +3063,15 @@ func actionPowerShellListOnlyBody(body, home string) bool {
 	return listOnly && calls > 0
 }
 
+// PowerShellListOnlyBody reports a PowerShell script whose every command only
+// lists names or properties (Get-ChildItem, Test-Path, Select-Object ...) and
+// whose text holds no other syntax: it proves no write to any path it names. A
+// second reading of such a script adds nothing the call as written lacks
+// (rel-1-0-10:GAP-0364).
+func PowerShellListOnlyBody(body, home string) bool {
+	return actionPowerShellListOnlyBody(body, home)
+}
+
 // actionWindowsLaunchText is the text a list-only PowerShell launch may hold
 // on a native Windows host: words, paths, wildcards, double quotes and
 // backslashes. No reading of it (Git Bash, PowerShell, cmd) finds a

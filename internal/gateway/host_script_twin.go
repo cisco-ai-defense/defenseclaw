@@ -19,12 +19,8 @@ package gateway
 import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
-
-// hostScriptTwinEnabled turns the script reading of a static PowerShell or cmd
-// launcher off, so a test can compare a call's findings with and without it
-// (TestHostScriptTwinOnlyAddsFindings). It is always true in production.
-var hostScriptTwinEnabled = true
 
 // hostScriptTwinRequests are the requests for the scripts a static powershell,
 // pwsh or cmd launcher (or call block, or Invoke-Expression literal) runs, or
@@ -43,19 +39,24 @@ var hostScriptTwinEnabled = true
 // past its statement count) comes back as caps, and the call is truncated at the
 // unknown tier of the pack (withBoundedTruncation), never a clean allow.
 func hostScriptTwinRequests(request trustedActionRequest, facts actionfacts.Facts) ([]trustedActionRequest, bounded.CapSet) {
-	if !hostScriptTwinEnabled {
+	if request.hostScriptTwinOff {
 		return nil, bounded.CapSet{}
 	}
 	reading := actionfacts.HostScriptReadings(request.Input, facts, request.hostTwinDepth, request.hostTwinListed)
 	twins := make([]trustedActionRequest, 0, len(reading.Twins))
-	for _, input := range reading.Twins {
+	for index, input := range reading.Twins {
+		// A script that only lists proves no write to the paths it names; its
+		// second reading could only repeat the mention of a path as a block.
+		if hookpaths.PowerShellListOnlyBody(input.Command, input.ActiveHome) {
+			continue
+		}
 		twin := request
 		twin.Input = input
 		twin.LegacyText = input.Command
 		twin.conflictSource = nil
 		twin.record, twin.recordTelemetry = nil, nil
 		twin.hostTwinDepth = reading.Depth
-		twin.hostTwinListed = reading.Listed
+		twin.hostTwinListed = index < len(reading.Listed) && reading.Listed[index]
 		twins = append(twins, twin)
 	}
 	return twins, reading.Caps

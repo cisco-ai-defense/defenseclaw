@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -119,6 +120,29 @@ func TestHostScriptTwinReadsAStructuredLauncher(t *testing.T) {
 
 // Anything psparse cannot resolve to one static script has no reading: the
 // call stays exactly as unknown as the tokenizer left it.
+// A Start-Process -ArgumentList of literal words is the command line the child
+// gets: -Command takes the words after it, joined by blanks. The twin is that
+// script (review F7).
+func TestHostScriptTwinReadsAStartProcessArgumentList(t *testing.T) {
+	input := hookShellInput(t, "PowerShell", `Start-Process powershell -ArgumentList '-NoProfile','-c','Get-Content','C:\tmp\a.txt'`)
+	reading := HostScriptReadings(input, Analyze(input), 0, false)
+	if !slices.ContainsFunc(reading.Twins, func(twin Input) bool { return twin.Command == `Get-Content C:\tmp\a.txt` }) {
+		t.Fatalf("no reading of the Start-Process child: %#v", reading.Twins)
+	}
+	for _, opaque := range []string{
+		`Start-Process powershell -ArgumentList '-c',$payload`,
+		`Start-Process C:\tmp\powershell.exe -ArgumentList '-c','Get-Date'`,
+		`Start-Process powershell -ArgumentList '-c','Write-Output "x"'`,
+	} {
+		input := hookShellInput(t, "PowerShell", opaque)
+		for _, twin := range HostScriptReadings(input, Analyze(input), 0, false).Twins {
+			if strings.Contains(twin.Command, "Get-Date") || strings.Contains(twin.Command, "Write-Output") {
+				t.Fatalf("%s: a Start-Process child that is not static has a reading: %#v", opaque, twin)
+			}
+		}
+	}
+}
+
 func TestHostScriptTwinIsAbsentWhenTheScriptIsNotStatic(t *testing.T) {
 	for _, test := range []struct {
 		name, command string
@@ -135,7 +159,6 @@ func TestHostScriptTwinIsAbsentWhenTheScriptIsNotStatic(t *testing.T) {
 		{"colon-glued switch", `pwsh -Command: "Get-Content C:\tmp\a.txt"`},
 		{"number word", `pwsh -Command Get-Content 0x10`},
 		{"unknown host switch", `powershell -Frobnicate -Command "Get-Content C:\tmp\a.txt"`},
-		{"start process child", `Start-Process powershell -ArgumentList '-c','Get-Content C:\tmp\a.txt'`},
 		{"arbitrary path launcher", `C:\tmp\powershell.exe -Command "Get-Content C:\tmp\a.txt"`},
 		{"encoded command that is not base64", `powershell -EncodedCommand not-base64!`},
 	} {

@@ -37,6 +37,24 @@ func TestProvesWindowsAccessibilityFeatureHijack(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "PowerShell Copy-Item named parameters in any order",
+			command: `Copy-Item -Force -Destination C:\Windows\System32\utilman.exe -Path C:\Windows\System32\cmd.exe`,
+			dialect: DialectPowerShell,
+			want:    true,
+		},
+		{
+			name:    "PowerShell Copy-Item with -Force first",
+			command: `Copy-Item -Force C:\Windows\System32\cmd.exe C:\Windows\System32\utilman.exe`,
+			dialect: DialectPowerShell,
+			want:    true,
+		},
+		{
+			name:    "PowerShell Copy-Item with another switch",
+			command: `Copy-Item C:\Windows\System32\cmd.exe C:\Windows\System32\utilman.exe -Recurse`,
+			dialect: DialectPowerShell,
+			want:    false,
+		},
+		{
 			name:    "PowerShell copy alias sethc replacement",
 			command: `copy C:\Windows\System32\cmd.exe C:\Windows\System32\sethc.exe`,
 			dialect: DialectPowerShell,

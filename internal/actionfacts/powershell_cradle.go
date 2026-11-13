@@ -127,7 +127,7 @@ func mayHoldCradle(source string) bool {
 	lower := strings.ToLower(source)
 	for _, word := range []string{"iex", "invoke-expression", "scriptblock", "-e", "/c",
 		"outfile", "-o", "destination", "downloadfile", "certutil", "bitsadmin", "urlcache", "-file",
-		"command", "powershell", "pwsh"} {
+		"command", "powershell", "pwsh", "invokescript"} {
 		if strings.Contains(lower, word) {
 			return true
 		}
@@ -497,6 +497,9 @@ func (a *cradleAnalysis) commandRuns(command *psparse.Command, flow bool) bool {
 	if named && cradleLaunchers[name] && a.launcherRunsFetched(command, flow) {
 		return true
 	}
+	if named && flow && cradleForEachCommands[name] && cradleBlockRunsItem(command) {
+		return true
+	}
 	if a.opensDownloadedFile(command) {
 		return true
 	}
@@ -512,6 +515,59 @@ func (a *cradleAnalysis) commandRuns(command *psparse.Command, flow bool) bool {
 func (a *cradleAnalysis) expressionRuns(expression psparse.Expr) bool {
 	if invoke, ok := expression.(*psparse.Invoke); ok && strings.EqualFold(invoke.Name, "Invoke") {
 		return a.scriptBlockOfFetched(invoke.Target)
+	} else if ok && cradleScriptRunMethods[cradleMethodName(invoke.Name)] {
+		for _, argument := range invoke.Args {
+			if a.expressionFetched(argument) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// cradleMethodName is the lower-case method of an invocation: psparse names a
+// call on a property chain by the whole chain (InvokeCommand.NewScriptBlock).
+func cradleMethodName(name string) string {
+	name = strings.ToLower(name)
+	if index := strings.LastIndexByte(name, '.'); index >= 0 {
+		name = name[index+1:]
+	}
+	return name
+}
+
+// cradleBlockRunsItem reports a command whose script block argument runs the
+// piped item as a script: ForEach-Object { Invoke-Expression $_ } (and $PSItem).
+func cradleBlockRunsItem(command *psparse.Command) bool {
+	for _, element := range command.Elements {
+		argument, isArg := element.(*psparse.Arg)
+		if !isArg {
+			continue
+		}
+		block, isBlock := argument.Value.(*psparse.ScriptBlockExpr)
+		if !isBlock {
+			continue
+		}
+		for _, statement := range block.Statements {
+			pipeline, isPipeline := statement.(*psparse.Pipeline)
+			if !isPipeline {
+				continue
+			}
+			for _, stage := range pipeline.Elements {
+				inner, isCommand := stage.(*psparse.Command)
+				if !isCommand {
+					continue
+				}
+				name, named := cradleCommandName(inner)
+				if !named || name != "iex" && name != "invoke-expression" {
+					continue
+				}
+				for _, word := range cradleWords(inner) {
+					if variable, ok := word.value.(*psparse.Variable); ok && cradlePipelineItem[strings.ToLower(variable.Name)] {
+						return true
+					}
+				}
+			}
+		}
 	}
 	return false
 }
@@ -530,12 +586,15 @@ func (a *cradleAnalysis) scriptBlockOfFetched(expression psparse.Expr) bool {
 			return a.scriptBlockOfFetched(statement.Expr)
 		}
 	case *psparse.Invoke:
-		if !strings.EqualFold(typed.Name, "Create") {
+		method := cradleMethodName(typed.Name)
+		if !cradleScriptBuildMethods[method] {
 			return false
 		}
-		target, ok := typed.Target.(*psparse.TypeExpr)
-		if !ok || !strings.HasSuffix(strings.ToLower(target.Name), "scriptblock") {
-			return false
+		if method == "create" {
+			target, ok := typed.Target.(*psparse.TypeExpr)
+			if !ok || !strings.HasSuffix(strings.ToLower(target.Name), "scriptblock") {
+				return false
+			}
 		}
 		for _, argument := range typed.Args {
 			if a.expressionFetched(argument) {
@@ -759,6 +818,14 @@ var (
 	cradleFileDownloadMethods = map[string]bool{
 		"downloadfile": true, "downloadfileasync": true, "downloadfiletaskasync": true,
 	}
+	// cradleScriptRunMethods run, or build a script block from, the text they
+	// are given ($ExecutionContext.InvokeCommand and the script block type).
+	cradleScriptRunMethods   = map[string]bool{"invokescript": true}
+	cradleScriptBuildMethods = map[string]bool{"create": true, "newscriptblock": true}
+	// cradleForEachCommands run a script block once per piped item; the item is
+	// $_ or $PSItem.
+	cradleForEachCommands = map[string]bool{"foreach-object": true, "%": true, "foreach": true}
+	cradlePipelineItem    = map[string]bool{"_": true, "psitem": true}
 	// cradleLaunchers are PowerShell hosts: they run what -Command,
 	// -EncodedCommand or -File names, or what arrives on stdin.
 	cradleLaunchers = map[string]bool{
@@ -786,6 +853,7 @@ func cradleFetchCommand(name string) bool { return cradleFetchCmdlets[name] }
 // cradleWritesFile reports a fetch whose body goes to a file, not to the
 // output (-OutFile, curl -o/--output).
 func cradleWritesFile(command *psparse.Command) bool {
+	writes, passThru := false, false
 	for _, element := range command.Elements {
 		parameter, ok := element.(*psparse.Parameter)
 		if !ok {
@@ -793,10 +861,14 @@ func cradleWritesFile(command *psparse.Command) bool {
 		}
 		name := strings.ToLower(parameter.Name)
 		if name == "o" || name == "output" || (len(name) >= 4 && strings.HasPrefix("outfile", name)) {
-			return true
+			writes = true
+		}
+		if len(name) >= 4 && strings.HasPrefix("passthru", name) {
+			passThru = true
 		}
 	}
-	return false
+	// -OutFile with -PassThru writes the file and still outputs the response.
+	return writes && !passThru
 }
 
 func cradleDownloadMethod(name string) bool { return cradleDownloadMethods[strings.ToLower(name)] }

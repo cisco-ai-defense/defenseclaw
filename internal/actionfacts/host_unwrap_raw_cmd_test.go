@@ -27,7 +27,7 @@ func TestRawCMDLauncherLine(t *testing.T) {
 		{"exe name and switches", `CMD.EXE /d /s /c dir C:\work`, `dir C:\work`, true},
 		{"double quotes around the line", `cmd /c "dir C:\work"`, `dir C:\work`, true},
 		{"single quotes around the line", `cmd /c 'dir C:\work'`, `dir C:\work`, true},
-		{"keep-open switch", `cmd /k dir`, `dir`, true},
+		{"keep-open switch is not modeled", `cmd /k dir`, "", false},
 		{"quote inside the line stays", `cmd /c dir "C:\my dir"`, `dir "C:\my dir"`, true},
 		{"unknown switch before /c", `cmd /x /c dir`, ``, false},
 		{"no switch", `cmd dir`, ``, false},

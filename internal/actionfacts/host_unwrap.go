@@ -555,11 +555,11 @@ func powerShellSingleQuote(word string) string {
 // not modeled: the call stays opaque.
 func cmdHostBody(argv []string) (string, Dialect, bool) {
 	for i := 1; i < len(argv); i++ {
-		switch strings.ToLower(argv[i]) {
-		case "/c", "/k":
+		switch strings.TrimPrefix(strings.ToLower(argv[i]), "/") {
+		case "c":
 			body, ok := cmdJoinPayload(argv[i+1:])
 			return body, DialectCMD, ok
-		case "/d", "/q", "/s", "/a", "/u":
+		case "d", "q", "s", "a", "u":
 		default:
 			return "", DialectNone, false
 		}
@@ -677,8 +677,13 @@ func rawCMDLauncherLine(source string) (string, Dialect, bool) {
 		return "", DialectNone, false
 	}
 	for text != "" {
-		switch switchWord := strings.ToLower(word()); switchWord {
-		case "/c", "/k":
+		switchWord := strings.ToLower(word())
+		if strings.HasPrefix(switchWord, "//") {
+			// Git Bash (MSYS) hands a //c switch to cmd.exe as /c.
+			switchWord = switchWord[1:]
+		}
+		switch switchWord {
+		case "/c":
 			line := text
 			if len(line) >= 2 && (line[0] == '"' && line[len(line)-1] == '"' ||
 				line[0] == '\'' && line[len(line)-1] == '\'') {
@@ -711,9 +716,9 @@ type HostScriptReading struct {
 	// this reading unwrapped. A twin is read again with it as its depth, so
 	// one call has one wrapper budget however its twins nest.
 	Depth int
-	// Listed marks twins that are statements (or edge-trimmed runs of
-	// statements) of a list: they are never split into statements again.
-	Listed bool
+	// Listed[i] marks twin i as a statement (or an edge-trimmed run of
+	// statements) of a list: it is never split into statements again.
+	Listed []bool
 	// Caps is the set of bounds the reading hit: the wrapper depth, the
 	// nested size budget, a body past the in-list size, a list past
 	// maxListReadings. A truncated reading is judged at the unknown tier of
@@ -829,8 +834,175 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 		reading.Twins = append(reading.Twins, twin)
 	}
 	reading.Depth = depth + 1
-	reading.Listed = len(reading.Twins) != 0
+	for range reading.Twins {
+		reading.Listed = append(reading.Listed, true)
+	}
+	// Launchers, call blocks and evaluated literals anywhere in the tree (in a
+	// branch, a loop, a try, a function, a pipeline stage, an assignment or a
+	// sub-expression), each read as the script it runs.
+	nested, nestedCaps := powerShellNestedTexts(source)
+	reading.Caps = reading.Caps.Union(nestedCaps)
+	for _, item := range nested {
+		if slices.ContainsFunc(reading.Twins, func(have Input) bool { return have.Command == item.text }) {
+			continue
+		}
+		twin := input
+		twin.Args, twin.Argv = nil, nil
+		twin.Command = item.text
+		twin.DialectHint = item.dialect
+		reading.Twins = append(reading.Twins, twin)
+		reading.Listed = append(reading.Listed, false)
+	}
 	return reading
+}
+
+// nonStaticNestedText is the script of a launcher spelling psparse reports as
+// not static but whose text is written out: powershell -Command { block }, and
+// Start-Process powershell -ArgumentList <literal words with -Command>.
+func nonStaticNestedText(source string, nested psparse.NestedScript) (string, bool) {
+	command, ok := nested.Source.(*psparse.Command)
+	if !ok {
+		return "", false
+	}
+	name, named := psparse.LiteralString(command.Name)
+	if !named {
+		return "", false
+	}
+	switch nested.Reason {
+	case psparse.ReasonNonLiteral:
+		if !hostLauncherIdentity(name, "powershell") && !hostLauncherIdentity(name, "pwsh") ||
+			commandHasWorkingDirectoryOption(command) || commandHasEmptyWord(command) {
+			return "", false
+		}
+		var block *psparse.ScriptBlockExpr
+		for _, element := range command.Elements {
+			if argument, isArg := element.(*psparse.Arg); isArg {
+				if candidate, isBlock := argument.Value.(*psparse.ScriptBlockExpr); isBlock {
+					if block != nil {
+						return "", false
+					}
+					block = candidate
+				}
+			}
+		}
+		if block == nil || len(block.Params) != 0 {
+			return "", false
+		}
+		start, end := block.Span()
+		if start < 0 || end > len(source) || end-start < 2 || source[start] != '{' || source[end-1] != '}' {
+			return "", false
+		}
+		return source[start+1 : end-1], true
+	case psparse.ReasonChildArgv:
+		switch strings.ToLower(name) {
+		case "start-process", "saps", "start":
+		default:
+			return "", false
+		}
+		words := cradleWords(command)
+		var host string
+		var list psparse.Expr
+		for index, word := range words {
+			switch {
+			case word.param && len(word.text) >= 1 && strings.HasPrefix("argumentlist", word.text):
+				list = word.value
+				if list == nil && index+1 < len(words) {
+					list = words[index+1].value
+				}
+			case !word.param && host == "" && word.text != "":
+				host = word.text
+			}
+		}
+		array, isArray := list.(*psparse.ArrayLit)
+		if !isArray || (!hostLauncherIdentity(host, "powershell") && !hostLauncherIdentity(host, "pwsh")) {
+			return "", false
+		}
+		var rest []string
+		seen := false
+		for _, element := range array.Elements {
+			text, static := psparse.LiteralString(element)
+			if !static || strings.Contains(text, `"`) {
+				return "", false
+			}
+			if seen {
+				rest = append(rest, text)
+			} else if lower := strings.ToLower(text); lower != "" && lower[0] == '-' &&
+				len(lower) >= 2 && strings.HasPrefix("command", lower[1:]) {
+				seen = true
+			}
+		}
+		if !seen || len(rest) == 0 {
+			return "", false
+		}
+		return strings.Join(rest, " "), true
+	}
+	return "", false
+}
+
+type nestedText struct {
+	text    string
+	dialect Dialect
+}
+
+// powerShellNestedTexts is every static script embedded anywhere in a
+// PowerShell script that psparse reads in full (psparse.ExtractNestedScripts
+// walks the whole tree): a -Command or -EncodedCommand body of a PowerShell
+// host, an Invoke-Expression literal, a script block built from a literal, a
+// Start-Process -ArgumentList to a host, and a cmd /c line. Only the
+// launchers' own identity is checked here (a program called powershell that
+// is not the system's is not read as one). A script past the in-list size, or
+// more of them than maxListReadings, is truncated.
+func powerShellNestedTexts(source string) ([]nestedText, bounded.CapSet) {
+	var caps bounded.CapSet
+	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
+	if script == nil || len(script.Diagnostics) != 0 {
+		return nil, caps
+	}
+	var out []nestedText
+	for _, nested := range psparse.ExtractNestedScripts(script) {
+		if !nested.Static {
+			// psparse leaves two launcher spellings open that are static
+			// text all the same: a script block given as the -Command value,
+			// and the words of a Start-Process -ArgumentList to a host.
+			text, ok := nonStaticNestedText(source, nested)
+			if !ok {
+				continue
+			}
+			nested.Text, nested.Dialect, nested.Static = text, "powershell", true
+		}
+		if strings.TrimSpace(nested.Text) == "" {
+			continue
+		}
+		if command, ok := nested.Source.(*psparse.Command); ok {
+			name, named := psparse.LiteralString(command.Name)
+			switch nested.Kind {
+			case psparse.KindPowerShellCommand, psparse.KindEncodedCommand:
+				if !named || !hostLauncherIdentity(name, "powershell") && !hostLauncherIdentity(name, "pwsh") ||
+					commandHasWorkingDirectoryOption(command) || commandHasEmptyWord(command) ||
+					!launcherWordsArePlain(command) {
+					continue
+				}
+			case psparse.KindCmdC:
+				if !named || !hostLauncherIdentity(name, "cmd") {
+					continue
+				}
+			}
+		}
+		if len(nested.Text) > maxHostMidListBody {
+			caps = caps.Union(bounded.Of(bounded.Bytes))
+			continue
+		}
+		if len(out) >= maxListReadings {
+			caps = caps.Union(bounded.Of(bounded.Items))
+			break
+		}
+		dialect := DialectPowerShell
+		if nested.Dialect == "cmd" {
+			dialect = DialectCMD
+		}
+		out = append(out, nestedText{text: strings.TrimSpace(nested.Text), dialect: dialect})
+	}
+	return out, caps
 }
 
 // powerShellInertCommands are commands that change nothing a later statement

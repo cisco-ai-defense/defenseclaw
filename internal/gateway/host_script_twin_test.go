@@ -57,9 +57,6 @@ func TestHostScriptTwinOnlyAddsFindings(t *testing.T) {
 		{name: "arbitrary path launcher", tool: "PowerShell", command: `C:\tmp\pwsh.exe -c "Remove-Item C:\ -Recurse -Force"`, opaque: true},
 	}
 	run := func(c call, enabled bool, pack string) []RuleFinding {
-		saved := hostScriptTwinEnabled
-		hostScriptTwinEnabled = enabled
-		defer func() { hostScriptTwinEnabled = saved }()
 		args, err := json.Marshal(map[string]string{"command": c.command})
 		if err != nil {
 			t.Fatal(err)
@@ -67,6 +64,7 @@ func TestHostScriptTwinOnlyAddsFindings(t *testing.T) {
 		input := actionfacts.Input{Tool: c.tool, Args: args, CWD: `C:\work`, ActiveHome: `C:\Users\alice`}
 		return dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: input, LegacyText: string(args), Connector: "host-script-twin", EnforcementCapable: true,
+			hostScriptTwinOff: !enabled,
 		})
 	}
 	for _, pack := range []string{"default", "strict"} {
