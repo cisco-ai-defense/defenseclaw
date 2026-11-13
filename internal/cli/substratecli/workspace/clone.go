@@ -33,9 +33,11 @@ import (
 )
 
 // run --clone (GAP-0175): the repository is cloned inside the actor through
-// the relay, so it goes out through the actor's egress rules, which add the
-// credential for a listed host; nothing of this computer's git
-// credentials is used.
+// the relay, so it goes out through the actor's egress rules. A private
+// repository works the way every git call in the actor does: the image's
+// root-owned credential helper (kit gitConfig) answers with a placeholder,
+// and egress swaps it for the person's or the shared token on the hosts the
+// token is bound to. Nothing of this computer's git credentials is used.
 
 const cloneTimeout = 15 * time.Minute
 
@@ -144,6 +146,8 @@ func (e *CloneError) Error() string {
 		msg += ". The agent has no SSH key; use the https:// address, for which the cluster adds the credential"
 	case strings.Contains(low, "could not resolve host") || strings.Contains(low, "connection refused") || strings.Contains(low, "403 forbidden"):
 		msg += ". The agent's network rules may not allow this host; ask your administrator"
+	case strings.Contains(low, "returned error: 503") || strings.Contains(low, "returned error: 502"):
+		msg += ". The cluster's network guard refused the request or could not check it; ask your administrator to look at the DefenseClaw egress log for this agent"
 	}
 	return msg
 }
@@ -174,9 +178,9 @@ func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string) (s
 		}
 		return nil
 	}
-	// No credential helper of the image: the egress rules add the
-	// credential for the hosts the profile allows.
-	if err := run("git", "-c", "credential.helper=", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
+	// The image's credential helper stays: its placeholder is what egress
+	// swaps for the bound token. No prompt, no local or ext transport.
+	if err := run("git", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
 		"clone", "--quiet", "--", rawURL, dir); err != nil {
 		return "", err
 	}
