@@ -797,7 +797,7 @@ func fileURIPath(s string) (string, int) {
 	if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
 		p = p[1:]
 	}
-	if p == "" || (p[0] != '/' && !(len(p) >= 2 && p[1] == ':')) {
+	if p == "" || (p[0] != '/' && (len(p) < 2 || p[1] != ':')) {
 		return "", fileURIUnplaced
 	}
 	return p, fileURIPlaced
