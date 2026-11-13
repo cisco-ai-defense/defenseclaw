@@ -337,11 +337,18 @@ func TestIdentityAndUID(t *testing.T) {
 	if !v.Allow || !v.Alert || !strings.Contains(strings.Join(v.Findings, ","), "registration_unavailable") {
 		t.Fatalf("lookup outage: %+v", v)
 	}
-	// With the chain check on: an alert on OSS, refused on a managed install.
+	// With the chain check on: an alert on OSS for an attended actor the
+	// callout knows, refused (retryable) for one whose attendance nobody
+	// can tell (GAP-0188), and refused on a managed install.
 	hc := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = fakeChecker{} })
+	hc.eng.DecideHeaders(ctx, req("down", "GET", "example.com", "/"))
 	hc.uids.err = errors.New("leader down")
+	hc.eng.uids.now = func() time.Time { return time.Now().Add(time.Hour) }
 	if v := hc.eng.DecideHeaders(ctx, req("down", "GET", "example.com", "/")); !v.Allow || !strings.Contains(strings.Join(v.Findings, ","), "chain_unchecked:"+uncheckedLookup) {
-		t.Fatalf("lookup outage, oss: %+v", v)
+		t.Fatalf("lookup outage, oss, known attended: %+v", v)
+	}
+	if v := hc.eng.DecideHeaders(ctx, req("new", "GET", "example.com", "/")); v.Allow || v.Category != CategoryChainUnchecked || !v.Retryable {
+		t.Fatalf("lookup outage, oss, unknown attendance: %+v", v)
 	}
 	hm := newHarness(t, func(c *Config, o *Options) { c.Managed = true; o.ChainChecker = fakeChecker{} })
 	hm.uids.err = errors.New("leader down")
