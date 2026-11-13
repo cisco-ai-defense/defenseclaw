@@ -188,6 +188,9 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
 		return
 	}
+	if !substrateBodyKeysUnique(w, r) {
+		return
+	}
 	if !s.exposedValueCheck(w, r) {
 		return
 	}
@@ -353,7 +356,7 @@ func (s *substrateLLM) bedrockOpenAIModel(w http.ResponseWriter, r *http.Request
 	_ = r.Body.Close()
 	var doc map[string]json.RawMessage
 	var model string
-	if json.Unmarshal(body, &doc) != nil || json.Unmarshal(doc["model"], &model) != nil {
+	if _, dup := substrateDuplicateBodyKey(body); dup || json.Unmarshal(body, &doc) != nil || json.Unmarshal(doc["model"], &model) != nil {
 		writeSubstrateRefusal(w, http.StatusBadRequest, "model_unreadable")
 		return false, false
 	}
@@ -363,14 +366,80 @@ func (s *substrateLLM) bedrockOpenAIModel(w http.ResponseWriter, r *http.Request
 	}
 	if !listed {
 		doc["model"], _ = json.Marshal(allowed[0])
-		if body, err = json.Marshal(doc); err != nil {
-			writeSubstrateRefusal(w, http.StatusBadRequest, "model_unreadable")
-			return false, false
-		}
+	}
+	// The checked document is what goes upstream, never the original
+	// bytes (TST-0478).
+	if body, err = json.Marshal(doc); err != nil {
+		writeSubstrateRefusal(w, http.StatusBadRequest, "model_unreadable")
+		return false, false
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 	return !listed, true
+}
+
+// substrateCheckedBodyKeys are the top-level body fields /llm and the proxy
+// read to decide (the model allowlist, the prompt inspection). Two of them
+// that fold to the same name are refused: JSON parsers disagree on which
+// value wins (Go keeps the last, others the first or match keys
+// case-insensitively), so the checked value and the one the provider runs
+// could differ (GAP-0187 residual, TST-0478).
+var substrateCheckedBodyKeys = map[string]bool{"model": true, "input": true, "messages": true,
+	"instructions": true, "system": true, "prompt": true, "contents": true}
+
+// substrateDuplicateBodyKey reports the first checked top-level key of a
+// JSON object body that appears twice, case-folded. A body that is not a
+// JSON object has none.
+func substrateDuplicateBodyKey(body []byte) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return "", false
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		key, _ := t.(string)
+		k := strings.ToLower(key)
+		if substrateCheckedBodyKeys[k] {
+			if seen[k] {
+				return k, true
+			}
+			seen[k] = true
+		}
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// substrateBodyKeysUnique refuses a model call whose body repeats a checked
+// key (substrateDuplicateBodyKey), in every mode, and one whose body is
+// compressed: neither /llm nor the proxy can read that body, so its prompt
+// and model would pass unchecked. The body is put back otherwise.
+func substrateBodyKeysUnique(w http.ResponseWriter, r *http.Request) bool {
+	if enc := strings.TrimSpace(r.Header.Get("Content-Encoding")); enc != "" && !strings.EqualFold(enc, "identity") {
+		writeSubstrateRefusal(w, http.StatusUnsupportedMediaType, "request_body_encoded")
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, substrateLLMMaxDLPBody+1))
+	if err != nil || len(body) > substrateLLMMaxDLPBody {
+		writeSubstrateRefusal(w, http.StatusRequestEntityTooLarge, "body_too_large")
+		return false
+	}
+	_ = r.Body.Close()
+	if key, dup := substrateDuplicateBodyKey(body); dup {
+		fmt.Fprintf(os.Stderr, "[substrate] llm: refused a model call whose body repeats the key %q\n", key)
+		writeSubstrateRefusal(w, http.StatusBadRequest, "duplicate_body_key")
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	return true
 }
 
 // substrateBedrockRoute rewrites /model/<id>/<action> to the first allowed
