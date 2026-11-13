@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
 
 // The first sign-in needs only --admin-url: the cluster says how people
@@ -124,23 +125,45 @@ func TestSubstrateRunNeedsNoProfile(t *testing.T) {
 	}
 }
 
-// GAP-0184: OpenCode runs (proven in an actor although its OpenShell harness
-// is unverified); the connectors with no Substrate proof stay refused.
+// GAP-0184 and the E9 ruling: every connector runs from the launcher; the
+// cluster refuses the sign-in ones in managed and warns in open source.
+// substrateProven holds only unverified harnesses (no dead entries).
 func TestSubstrateRunVerifiedConnectors(t *testing.T) {
 	t.Setenv("DEFENSECLAW_SUBSTRATE_PROFILE", "")
 	t.Setenv("DEFENSECLAW_SUBSTRATE_TEMPLATE", "")
-	tg, err := resolveSubstrateRunTarget(&substrateSession{}, &substrateRunFlags{}, "opencode")
-	if err != nil {
-		t.Fatalf("run opencode refused: %v", err)
-	}
-	if tg.connName != "opencode" {
-		t.Errorf("connector %q, want opencode", tg.connName)
-	}
-	for _, agent := range []string{"amp", "cursor-agent", "devin"} {
-		_, err := resolveSubstrateRunTarget(&substrateSession{}, &substrateRunFlags{}, agent)
-		if err == nil || !strings.Contains(err.Error(), "not verified yet") {
-			t.Errorf("run %s: %v, want the not-verified refusal", agent, err)
+	for _, agent := range []string{"claude", "codex", "copilot", "opencode", "hermes", "kiro", "antigravity", "cursor-agent", "amp", "devin"} {
+		tg, err := resolveSubstrateRunTarget(&substrateSession{}, &substrateRunFlags{}, agent)
+		if err != nil {
+			t.Errorf("run %s refused: %v", agent, err)
+			continue
 		}
+		if (tg.connName == "amp") != (tg.note != "") {
+			t.Errorf("run %s: note %q (only Amp has one, the WebSocket limit)", agent, tg.note)
+		}
+	}
+	for name := range substrateProven {
+		h, ok := harness.Get(name)
+		if !ok {
+			t.Errorf("substrateProven names %q, which is not a harness", name)
+			continue
+		}
+		if h.Verification().Status != harness.Unverified {
+			t.Errorf("substrateProven names %s, whose harness is verified already", name)
+		}
+	}
+}
+
+// E9 in managed: the refusal shows the gateway's own explanation.
+func TestSubstrateSigninRefusalMessage(t *testing.T) {
+	msg := substrateAPIMessage(&api.Error{Status: 403, Reason: "subscription_signin_refused",
+		Message: "Devin CLI signs in with a vendor account, and a managed deployment does not allow that."})
+	for _, want := range []string{"Devin CLI signs in", "managed deployment", "Nothing was started", "subscription_signin_refused"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q lacks %q", msg, want)
+		}
+	}
+	if msg := substrateAPIMessage(&api.Error{Status: 403, Reason: "agent_hook_tamper_refused"}); !strings.Contains(msg, "Nothing was started") {
+		t.Errorf("tamper refusal without a message: %q", msg)
 	}
 }
 

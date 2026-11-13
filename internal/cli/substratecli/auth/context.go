@@ -57,8 +57,12 @@ type Context struct {
 	// KubeContext is the kubeconfig context; empty is its current-context.
 	KubeContext string `json:"kube_context,omitempty"`
 	// KubeNamespace is where the cluster publishes its launcher endpoint
-	// record (default DefaultKubeNamespace).
+	// record; login --kube finds it when none is given and records it.
 	KubeNamespace string `json:"kube_namespace,omitempty"`
+	// KubeServiceAccount ("NAMESPACE/NAME" or "NAME") is the ServiceAccount
+	// the launcher mints the gateway's token for (GAP-0192); a client
+	// certificate user without one uses DefaultKubeServiceAccount.
+	KubeServiceAccount string `json:"kube_service_account,omitempty"`
 	// KubePinServer and KubePinAdminURL are what login --kube verified:
 	// the kubeconfig cluster's API server and the admin URL it publishes.
 	// The kube bearer is handed out only while both still match.
@@ -200,6 +204,9 @@ func (c Context) Validate(needIssuer bool) error {
 	}
 	if c.KubeNamespace != "" {
 		add(checkKubeNamespace(c.KubeNamespace))
+	}
+	if c.KubeServiceAccount != "" {
+		add(CheckKubeServiceAccount(c.KubeServiceAccount))
 	}
 	if c.Kube {
 		if len(errs) > 0 {

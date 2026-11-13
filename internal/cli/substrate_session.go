@@ -47,6 +47,7 @@ type substrateLoginFlags struct {
 	kubeconfig   string
 	kubeContext  string
 	kubeNS       string
+	kubeSA       string
 	noBrowser    bool
 	workload     bool
 	workloadFile string
@@ -90,7 +91,8 @@ pipeline's own identity, with a GitHub Actions token or a projected Kubernetes t
 	fl.BoolVar(&f.kube, "kube", false, "sign in with your current kubeconfig identity (clusters without a sign-in server)")
 	fl.StringVar(&f.kubeconfig, "kubeconfig", "", "with --kube, the kubeconfig file (default: kubectl's own rules)")
 	fl.StringVar(&f.kubeContext, "kube-context", "", "with --kube, the kubeconfig context (default: its current one)")
-	fl.StringVar(&f.kubeNS, "kube-namespace", "", "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)")
+	fl.StringVar(&f.kubeNS, "kube-namespace", "", "with --kube, the namespace DefenseClaw runs in (default: the one whose launcher endpoint record names --admin-url)")
+	fl.StringVar(&f.kubeSA, "kube-service-account", "", "with --kube, sign in as this ServiceAccount (NAMESPACE/NAME or NAME) with a short-lived token; a client-certificate kubeconfig uses defenseclaw-launcher")
 	fl.BoolVar(&f.noBrowser, "no-browser", false, "do not open a browser; print the address and code only")
 	fl.BoolVar(&f.workload, "workload", false, "sign in as a CI workload with the pipeline's own token")
 	fl.StringVar(&f.workloadFile, "workload-token-file", "", "file holding the workload token (CI)")
@@ -180,6 +182,7 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	set("kubeconfig", &c.Kubeconfig, f.kubeconfig)
 	set("kube-context", &c.KubeContext, f.kubeContext)
 	set("kube-namespace", &c.KubeNamespace, f.kubeNS)
+	set("kube-service-account", &c.KubeServiceAccount, f.kubeSA)
 	if c.Kube && (f.workload || f.noBrowser || fl.Changed("issuer") || fl.Changed("client-id")) {
 		return withExitCode(errors.New("--kube signs in with your kubeconfig; leave --workload, --issuer, --client-id and --no-browser out"), 2)
 	}
@@ -258,6 +261,11 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	who := substrateDash(tok.Principal)
 	if asJSON {
 		return writeSubstrateJSON(w, map[string]any{"context": name, "signed_in_as": tok.Principal, "subject": tok.Subject, "kind": tok.Kind, "note": note})
+	}
+	if kube && c.KubeServiceAccount == "" && strings.HasPrefix(tok.Principal, "system:serviceaccount:") {
+		// GAP-0192: say once why the person is a ServiceAccount now.
+		fmt.Fprintf(cmd.ErrOrStderr(), "Your kubeconfig signs in with a client certificate, which DefenseClaw cannot check, so you sign in as the ServiceAccount %s (name another with --kube-service-account NAMESPACE/NAME).\n",
+			safetext.Line(strings.Replace(strings.TrimPrefix(tok.Principal, "system:serviceaccount:"), ":", "/", 1)))
 	}
 	fmt.Fprintf(w, "Signed in as %s on %s.\n", who, name)
 	if note != "" {

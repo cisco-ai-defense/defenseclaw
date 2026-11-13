@@ -300,6 +300,9 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	if err := fs.Parse(args); err != nil {
 		return ExitUsageError, nil
 	}
+	if err := kit.CheckConnector(*connectorName); err != nil {
+		return ExitUsageError, err
+	}
 	if *from == "" || *to == "" || *hookBin == "" || *relayBin == "" || (*keyFile == "" && !*dry) {
 		return ExitUsageError, errors.New("build needs --from, --to, --hook-binary, --relay-binary and --key")
 	}
@@ -620,6 +623,11 @@ func runScan(ctx context.Context, args []string, stdout io.Writer) (int, error) 
 	}
 	if image == "" {
 		return ExitUsageError, errors.New("scan needs an image")
+	}
+	if *connectorName != "" {
+		if err := kit.CheckConnector(*connectorName); err != nil {
+			return ExitUsageError, err
+		}
 	}
 	reg, err := c.registry()
 	if err != nil {

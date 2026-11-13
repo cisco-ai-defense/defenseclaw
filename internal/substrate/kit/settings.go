@@ -380,6 +380,16 @@ func Connectors() []string {
 	return append(out, Wave3Connectors...)
 }
 
+// CheckConnector refuses a connector the kit does not build an image for.
+func CheckConnector(name string) error {
+	for _, c := range Connectors() {
+		if c == name {
+			return nil
+		}
+	}
+	return fmt.Errorf("%q is not a connector the kit builds; use %s", name, ConnectorList())
+}
+
 // ConnectorList is Connectors in words: "claudecode, codex, ... or devin".
 func ConnectorList() string {
 	c := Connectors()
