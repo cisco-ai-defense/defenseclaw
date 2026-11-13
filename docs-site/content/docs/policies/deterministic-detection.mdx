@@ -56,9 +56,9 @@ rules and lexical fallback posture:
 
 | Profile | Declared rules | Enabled rules | CEL declarations | Tool-call-only | Never-match `a^` fallbacks |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Balanced/default | 248 | 244 | 137 | 127 | 69 |
-| Permissive | 248 | 240 | 137 | 127 | 71 |
-| Strict | 260 | 260 | 150 | 145 | 71 |
+| Balanced/default | 254 | 250 | 137 | 127 | 69 |
+| Permissive | 254 | 246 | 137 | 127 | 71 |
+| Strict | 266 | 266 | 150 | 145 | 71 |
 
 `a^` is an intentionally impossible RE2 pattern. It is used when a broad raw
 text fallback would add noise or could not safely prove the same semantic
@@ -70,7 +70,7 @@ the permissive ones. In every profile,
 `CMD-WRAPPED-DOWNLOAD-EXEC` and `CMD-SUBST-DOWNLOAD-EXEC` keep a `false`
 declaration because only their exact action proof can match them.
 
-The 244 enabled balanced/default rules are generated from
+The 250 enabled balanced/default rules are generated from
 `policies/guardrail/default/rules/*.yaml`:
 
 | Family | Rules | What it detects |
@@ -78,10 +78,40 @@ The 244 enabled balanced/default rules are generated from
 | `command` | 131 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
 | `sensitive-path` | 26 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
 | `secret` | 23 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and high-confidence secret assignments |
-| `trust-exploit` | 22 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, and obfuscation signals |
+| `trust-exploit` | 28 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, role and chat-template spoofing, hidden text, and obfuscation signals |
 | `c2` | 18 | Known exfiltration endpoints, cloud metadata SSRF forms, DNS tunneling, and DNS exfiltration indicators |
 | `enterprise-data` | 13 | Structured payment, banking, contact, medical, birth-date, CSV, and JSON PII shapes |
 | `cognitive-file` | 11 | Agent instruction, memory, configuration, gateway, and detector-state modification |
+
+### Prompt-injection floor
+
+The default packs carry a small structural floor for text that reaches the model
+as user content (an `/llm` prompt, a hook prompt, a tool result). It is not a
+list of injection phrases; each rule claims one structure that ordinary prompts
+do not have:
+
+| Rule | Structure | Balanced/default | Strict |
+| --- | --- | --- | --- |
+| `TRUST-ADDRESSED-DEFER` | A message addressed to the assistant that defers the user's own task ("a message from X to you ... before you can solve the task ...") | alert (HIGH) | block |
+| `TRUST-CHAT-TEMPLATE-TOKEN` | A chat-template token that opens a system or assistant turn (`<\|im_start\|>system`, `<<SYS>>`, `[INST]`) | alert (HIGH) | block |
+| `TRUST-FAKE-ROLE-HEADER` | A line that starts as a system or assistant header (`###(system_message)`, `[SYSTEM_PROMPT]`) | alert (HIGH) | block |
+| `TRUST-HIDDEN-TAGS` | Eight or more Unicode tag characters in a row (text no reader sees) | alert (HIGH) | block |
+| `TRUST-HIDDEN-INVISIBLE` | Sixteen or more zero-width or format characters in a row | alert (HIGH) | block |
+| `TRUST-HIDDEN-BIDI` | A bidirectional override or isolate control that is closed again | alert (MEDIUM) | block |
+
+`TRUST-IGNORE-PREVIOUS` and `TRUST-DISREGARD` also accept the determiners
+people write ("ignore your previous instructions", "disregard the above
+rules"); like before they are CRITICAL and block in every pack that blocks
+CRITICAL. The prompt path also scans the trust rules on a folded view of the
+text (invisible separators removed, look-alike letters mapped), as the hook path
+does, so a directive with a zero-width character inside a word is still found.
+
+With `guardrail.detection_strategy: regex_judge` and an opted-in judge, a prompt
+that has only half of one of these shapes (a label directive such as `TODO:` as
+the first words, a signed message inside a tag envelope, "ignore your previous
+<word>", a message addressed to the assistant, or a deferral of the user's task)
+goes to the injection adjudicator. Without a judge these near misses do nothing,
+and a judge that fails never turns one into an alert.
 
 The generated Go catalog is checked against the YAML in CI. Edit the YAML
 sources, not `internal/gateway/rules_catalog_generated.go`.

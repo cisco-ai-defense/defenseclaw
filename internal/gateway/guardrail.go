@@ -1158,6 +1158,13 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
 	signals := triagePatterns(direction, content)
+	judge := g.requestJudge(ctx)
+	if judge != nil && direction == "prompt" {
+		// Opt-in only: a prompt with one half of an injection shape goes to the
+		// injection adjudicator. With no judge these signals do not exist, so
+		// the default posture never alerts on a near miss.
+		signals = append(signals, promptInjectionReviewSignals(content)...)
+	}
 	high, review, _ := partitionSignals(signals)
 
 	// Keep trust, credential, and PII detection on untrusted content. Concrete
@@ -1240,7 +1247,6 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	// signals as MEDIUM alerts so they appear in the audit log rather than
 	// being silently dropped.
 	var judgeVerdict *ScanVerdict
-	judge := g.requestJudge(ctx)
 	if len(review) > 0 {
 		if judge != nil {
 			judgeStart := time.Now()
@@ -1249,9 +1255,15 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 			endJudge(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(judgeStart))
 		}
 		if judgeVerdict == nil || judgeVerdict.JudgeFailed {
-			judgeVerdict = signalsToVerdict(review, "local-triage-fallback")
-			judgeVerdict.Severity = "MEDIUM"
-			judgeVerdict.Action = "alert"
+			// A near-miss injection signal only asks the judge; when the judge
+			// cannot answer it is dropped, never turned into an alert.
+			fallback := withoutInjectionReviewSignals(review)
+			judgeVerdict = nil
+			if len(fallback) > 0 {
+				judgeVerdict = signalsToVerdict(fallback, "local-triage-fallback")
+				judgeVerdict.Severity = "MEDIUM"
+				judgeVerdict.Action = "alert"
+			}
 		}
 	}
 
@@ -1835,7 +1847,39 @@ func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 	if ManagedEnterpriseActive() {
 		return nil
 	}
-	return scanContentRuleCategoryWithGeneration(proxyRuleGeneration(ctx), content, "", ruleContentScopeUntrusted, "")
+	return scanUntrustedContentRules(proxyRuleGeneration(ctx), content)
+}
+
+// scanUntrustedContentRules is the content rule scan of untrusted text with
+// generation: every content rule on the text as written, then the trust rules
+// on the same text with invisible separators and look-alike letters folded, for
+// a rule the first pass did not find. A directive with a zero-width character
+// spliced into a word, or a Latin letter swapped for a Cyrillic one, reads the
+// same to a model and must not read differently to the rules. The hook path
+// does the same (messageRuleFindings); the Secure Client generation keeps its
+// single pass.
+func scanUntrustedContentRules(generation *compiledRulePackCategories, content string) []RuleFinding {
+	findings := scanContentRuleCategoryWithGeneration(generation, content, "", ruleContentScopeUntrusted, "")
+	if secureClientGeneration() {
+		return findings
+	}
+	folded := trustPatternText(content)
+	if folded == content {
+		return findings
+	}
+	seen := make(map[string]bool, len(findings))
+	for _, finding := range findings {
+		seen[finding.RuleID] = true
+	}
+	for _, finding := range scanRuleGeneration(generation, folded, "", ruleScanOptions{
+		contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit",
+	}) {
+		if !seen[finding.RuleID] {
+			findings = append(findings, finding)
+			seen[finding.RuleID] = true
+		}
+	}
+	return findings
 }
 
 func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {
@@ -1963,7 +2007,7 @@ func scanLocalPatternsWithActivation(
 	// commands, paths, cognitive files, and C2 indicators are action categories
 	// and require parsed tool-call facts before they can affect enforcement.
 	maxRuleSev := "NONE"
-	ruleFindings := scanContentRuleCategoryWithGeneration(rules, content, "", ruleContentScopeUntrusted, "")
+	ruleFindings := scanUntrustedContentRules(rules, content)
 	catalogPIIEvidence := make(map[string]struct{})
 	for _, rf := range ruleFindings {
 		if strings.HasPrefix(rf.RuleID, "ENT-") && hasTag(rf.Tags, "pii") {
@@ -2187,6 +2231,68 @@ func triagePatterns(direction, content string) []TriageSignal {
 	}
 
 	return signals
+}
+
+// promptInjectionReviewFindingID marks a near-miss injection signal: text that
+// has one half of an injection shape but not what a rule needs to alert.
+const promptInjectionReviewFindingID = "TRIAGE-INJECTION-REVIEW"
+
+// promptInjectionReviewPatterns are the near misses the opt-in judge may look
+// at on a prompt (strategy regex_judge). They run on the normalised, lower-cased
+// text. They are structural halves of the shapes the trust-exploit rules alert
+// on, so a prompt that matches one is rare in ordinary use; they never alert
+// on their own, and they do not exist without a judge.
+var promptInjectionReviewPatterns = []struct {
+	name string
+	re   *regexp.Regexp
+}{
+	// A signed pseudo-letter inside a markup envelope.
+	{"signed message inside a tag envelope", regexp.MustCompile(`(?s)<[a-z_]{3,}>.{0,900}?\bsigned,?\s+[^\n<]{1,60}\s*</[a-z_]{3,}>`)},
+	// A label directive as the first words ("todo:", "important!").
+	{"label directive opening the prompt", regexp.MustCompile(`^\s*(?:todo|important|urgent|attention|new task|priority)\s*[:!]+\s*\S`)},
+	// "ignore your previous <word>": the noun is free, the rules need an instruction noun.
+	{"ignore-previous opening with a free object", regexp.MustCompile(`(?m)(?:^|[.!?;,:]\s*)ignore\s+(?:(?:all|any|every|the|these|those|of)\s+)*(?:(?:your|my)\s+)?(?:previous|prior|above|earlier|preceding|former)\s+\w+`)},
+	// Half of TRUST-ADDRESSED-DEFER: a message addressed to the assistant.
+	{"message addressed to the assistant", regexp.MustCompile(`(?s)\b(?:message|note|notice)s?\s+(?:from\s+[^\n.]{1,80}?\s+)?to\s+(?:you|the\s+(?:ai|assistant|model|agent|llm|bot))\b`)},
+	// The other half: deferring the user's own task.
+	{"defers the user's own task", regexp.MustCompile(`(?s)\b(?:before|prior\s+to)\s+(?:you\s+)?(?:can\s+)?(?:solv|complet|finish|continu|proceed)\w*\s+(?:on\s+|with\s+)?(?:the|your|my)\s+(?:original\s+|initial\s+|first\s+)?(?:task|request)\b`)},
+}
+
+// promptInjectionReviewSignals returns one NEEDS_REVIEW injection signal per
+// near-miss pattern the prompt matches (at most three), for the injection
+// adjudicator. Call it only when a judge is configured.
+func promptInjectionReviewSignals(content string) []TriageSignal {
+	if ManagedEnterpriseActive() || content == "" {
+		return nil
+	}
+	lower := normalizeForTriage(content)
+	var out []TriageSignal
+	for _, p := range promptInjectionReviewPatterns {
+		if !p.re.MatchString(lower) {
+			continue
+		}
+		out = append(out, TriageSignal{
+			Level: "NEEDS_REVIEW", FindingID: promptInjectionReviewFindingID,
+			Category: "injection", Pattern: p.name,
+			Evidence:   extractEvidenceRegex(content, lower, p.re),
+			Confidence: 0.50,
+		})
+		if len(out) == 3 {
+			break
+		}
+	}
+	return out
+}
+
+// withoutInjectionReviewSignals drops the near-miss injection signals.
+func withoutInjectionReviewSignals(signals []TriageSignal) []TriageSignal {
+	var out []TriageSignal
+	for _, s := range signals {
+		if s.FindingID != promptInjectionReviewFindingID {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // partitionSignals separates triage signals by level.

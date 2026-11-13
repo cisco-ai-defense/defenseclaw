@@ -79,6 +79,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f24c07c3beea7d1b590347461d9d263db597aad5bd73f1a43b4a546f60df4ad0",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
+            # 1.0.10 (s7/promptfloor, GAP-0175): prompt-injection floor in trust-exploit.yaml.
+            "142667a6bbc21568e2a15eda35555d88c62870b7db04005f2dbff71acb3dc6b8",
         }
     ),
     "permissive": frozenset(
@@ -114,6 +116,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "fa8ca0ad415436e8b4f5d6043f36de782cfe27bfbfca83f27d2359b97914f5f7",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
+            # 1.0.10 (s7/promptfloor, GAP-0175): prompt-injection floor in trust-exploit.yaml.
+            "669543a89607b9b4df8add58250a5a6ecb88093cba081deeeaf86c28ef1d186c",
         }
     ),
     "strict": frozenset(
@@ -148,6 +152,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f5d6d19b78fe7d3897acb6a28a9fae08049fcda9745f944d5cdb45e573669bc5",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
+            # 1.0.10 (s7/promptfloor, GAP-0175): prompt-injection floor in trust-exploit.yaml.
+            "3c6307f82175c29c77bd7a65dde22ad185caafa61844908351db47221aab258a",
         }
     ),
 }
