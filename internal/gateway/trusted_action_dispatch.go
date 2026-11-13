@@ -6327,7 +6327,7 @@ func commandByID(
 // (rel-1-0-10:GAP-0160).
 func powerShellCradleShadowOnly(input actionfacts.Input, facts actionfacts.Facts) bool {
 	if powerShellDownloadExecPrerequisite(facts) &&
-		!(powerShellStatementListOnly(facts) && actionfacts.PowerShellStatementList(input)) {
+		(!powerShellStatementListOnly(facts) || !actionfacts.PowerShellStatementList(input)) {
 		return false
 	}
 	return actionfacts.PowerShellFetchedContentExecution(input)
