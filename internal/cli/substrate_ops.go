@@ -33,6 +33,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
+
+	"golang.org/x/term"
 )
 
 // --- logs -------------------------------------------------------------------
@@ -222,9 +224,11 @@ func substratePullChoose(cmd *cobra.Command, f *substratePullFlags, a api.Actor,
 	return substrateApply(cmd, dataDir, name, workspace.ModeApply, "", "", true)
 }
 
+// substrateInteractive is true when stdin is a terminal. A char device is
+// not enough: /dev/null is one, and a script that gives pull no input must
+// get the hint, not a question.
 func substrateInteractive() bool {
-	st, err := os.Stdin.Stat()
-	return err == nil && st.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 func substrateApply(cmd *cobra.Command, dataDir, name string, mode workspace.ApplyMode, branch, patch string, accept bool) error {

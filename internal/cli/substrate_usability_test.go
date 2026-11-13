@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -140,6 +141,22 @@ func TestSubstrateRunVerifiedConnectors(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "not verified yet") {
 			t.Errorf("run %s: %v, want the not-verified refusal", agent, err)
 		}
+	}
+}
+
+// Live on stk (f7-clone4, 11-13 05:53Z): pull with stdin from /dev/null (a char device) asked for a
+// yes instead of printing the hint.
+func TestSubstrateInteractiveNeedsATerminal(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	old := os.Stdin
+	os.Stdin = f
+	defer func() { os.Stdin = old }()
+	if substrateInteractive() {
+		t.Error("stdin from the null device counted as a terminal")
 	}
 }
 
