@@ -487,6 +487,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			// receipts hold on every replica that shares the chain key.
 			BlockUnscannedSkills: substrateBlocksUnscannedSkills(c),
 			SkillReceiptKey:      substrateSkillReceiptKey(chainKey),
+			TemplateSkills:       substrateTemplateSkills(ctl),
 			Info:                 substrateInfo(c),
 			// E23: the workspace cap of an upload through attach.
 			WorkspaceMaxBytes: c.Substrate.EffectiveWorkspaceMaxBytes(),

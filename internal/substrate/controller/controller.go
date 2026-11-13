@@ -1294,3 +1294,18 @@ func (c *Controller) retryLifecycle(ctx context.Context) {
 		}
 	}
 }
+
+// TemplateSkillDigests returns the admitted skill folder digests of an
+// attested template (Attestation.SkillDigests), from the controller's
+// template cache. ok is false when the template is not attested: then no
+// folder is trusted by digest (GAP-0164).
+func (c *Controller) TemplateSkillDigests(ctx context.Context, ref *ateapi.ObjectRef) (digests []string, ok bool, err error) {
+	_, att, err := c.template(ctx, ref, false)
+	if err != nil {
+		return nil, false, err
+	}
+	if !att.Attested {
+		return nil, false, nil
+	}
+	return att.SkillDigests, true, nil
+}

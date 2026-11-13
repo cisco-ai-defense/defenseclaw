@@ -5,12 +5,15 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi/ateapifake"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
@@ -122,5 +125,18 @@ func TestCreatePathReadsTheTemplateAnchors(t *testing.T) {
 	}
 	if config.DefaultSubstrateTemplateAnchors != "/etc/defenseclaw/substrate/template-anchors/anchors.pem" {
 		t.Fatal("the default anchors path moved: move the chart mount (dc.templateAnchorsMount) with it")
+	}
+}
+
+// GAP-0164: the shipped skill scan in a gateway whose image has no
+// skill-scanner says "unavailable" (the fail mode decides), not "blocked".
+func TestRuntimeSkillScannerWithoutAScannerIsUnavailable(t *testing.T) {
+	c := &config.Config{}
+	c.Scanners.SkillScanner.Binary = filepath.Join(t.TempDir(), "skill-scanner")
+	s := newRuntimeSkillScanner(c)
+	blocked, _, err := s.ScanSkillFolder(context.Background(), "fmt", "/sandbox/.claude/skills/fmt",
+		[]gateway.SubstrateAttachedFile{{Role: "skill_file", Path: "/sandbox/.claude/skills/fmt/SKILL.md", Content: []byte("---\nname: fmt\n---\nformat code")}})
+	if blocked || !errors.Is(err, gateway.ErrSubstrateSkillScannerUnavailable) {
+		t.Fatalf("missing scanner: blocked=%v err=%v", blocked, err)
 	}
 }

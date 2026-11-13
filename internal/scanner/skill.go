@@ -491,11 +491,14 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		}
-		if errors.Is(err, exec.ErrNotFound) {
-			scanErr = scannerNotFound(s.Name(), s.Config.Binary, "repair the managed DefenseClaw installation; source checkouts: uv sync")
-			return nil, scanErr
-		}
 		if !errors.As(err, &exitErr) {
+			// The contained run reports a missing scanner only as a failed
+			// custody handshake, which reads like a scanner that ran and failed
+			// (substrate-1 GAP-0164: a gateway image without skill-scanner). A run
+			// that wrote output did start, so it is never "not found".
+			if _, lerr := exec.LookPath(binary); lerr != nil && stdout.Len() == 0 {
+				return nil, scannerNotFound(s.Name(), s.Config.Binary, "repair the managed DefenseClaw installation; source checkouts: uv sync")
+			}
 			result.ExitCode = -1
 			result.ScanError = err.Error()
 			return result, fmt.Errorf("scanner: %s could not complete: %w", s.Name(), err)

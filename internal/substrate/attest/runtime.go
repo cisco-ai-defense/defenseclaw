@@ -78,6 +78,10 @@ type RuntimeDecision struct {
 	// Incomplete is true when attached content was cut by the kit's cap; the
 	// decision then fails closed for kind skill and mcp.
 	Incomplete bool
+	// Unavailable is true when no scanner could run here (scanner.Unavailable:
+	// not installed, or a host that refuses scanner containment). The action
+	// is then block; the caller applies its fail mode (GAP-0164).
+	Unavailable bool
 }
 
 // RuntimeScanner scans assets added mid-session.
@@ -171,6 +175,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 	if so.Admission == nil {
 		so.Admission = FallbackAdmission
 	}
+	unavailable := false
 	var res *scanner.ScanResult
 	switch a.Kind {
 	case config.AdmissionTypeSkill:
@@ -186,6 +191,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 			}
 		}
 		res, err = r.Skill.Scan(ctx, dir)
+		unavailable = err != nil && scanner.Unavailable(err)
 		if err != nil || res == nil {
 			res = failedScan(r.Skill.Name(), a.Name, err)
 		}
@@ -226,7 +232,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 
 	// Host admission rules: no template-build floor.
 	verdict, reason, _ := so.decide(ctx, a.Kind, a.Name, a.Path, res)
-	d := &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Result: res, Reason: reason, Incomplete: incomplete}
+	d := &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Result: res, Reason: reason, Incomplete: incomplete, Unavailable: unavailable}
 	switch verdict {
 	case VerdictBlock:
 		d.Action = "block"
@@ -237,6 +243,10 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 	}
 	if incomplete && d.Action != "block" {
 		d.Action, d.Reason = "block", "the attached content was cut by the size cap, so it was not fully scanned"
+	}
+	if unavailable {
+		// Not a verdict about the asset: ask again next time.
+		return d, nil
 	}
 	r.mu.Lock()
 	r.cache[key] = cachedDecision{d: *d, at: r.now()}
