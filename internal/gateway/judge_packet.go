@@ -166,7 +166,8 @@ func judgePacketAccess(access actionfacts.PathAccess) string {
 }
 
 // judgePacketValue bounds one value taken from the call: no control
-// characters (a newline would forge a packet line), no block tags.
+// characters, so a newline cannot forge a packet line. Section tags need no
+// rewriting: only tags with the call's nonce are sections (tool_judge_nonce.go).
 func judgePacketValue(value string) string {
 	value = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
@@ -174,12 +175,12 @@ func judgePacketValue(value string) string {
 		}
 		return r
 	}, value)
-	return neutralizeToolJudgeDelimiters(utf8SafePrefix(strings.TrimSpace(value), maxJudgePacketValueBytes))
+	return utf8SafePrefix(strings.TrimSpace(value), maxJudgePacketValueBytes)
 }
 
-// render writes the CALL_EFFECTS block; nothing when the parser found no
+// render writes the CALL_EFFECTS section; nothing when the parser found no
 // effect to report.
-func (e judgeCallEffects) render(b *strings.Builder) {
+func (e judgeCallEffects) render(b *strings.Builder, nonce string) {
 	if !e.modeled {
 		return
 	}
@@ -187,9 +188,9 @@ func (e judgeCallEffects) render(b *strings.Builder) {
 	if e.complete {
 		state = "complete"
 	}
-	fmt.Fprintf(b, "\n<CALL_EFFECTS parse=%q coverage=%q>\n", e.parse, state)
+	var lines []string
 	if len(e.programs) > 0 {
-		b.WriteString("programs: " + strings.Join(e.programs, ", ") + "\n")
+		lines = append(lines, "programs: "+strings.Join(e.programs, ", "))
 	}
 	byAccess := map[string][]string{}
 	for _, target := range e.targets {
@@ -197,30 +198,28 @@ func (e judgeCallEffects) render(b *strings.Builder) {
 	}
 	for _, access := range []string{"read", "list", "write", "delete", "execute", "connect"} {
 		if paths := byAccess[access]; len(paths) > 0 {
-			b.WriteString(access + ": " + strings.Join(paths, ", ") + "\n")
+			lines = append(lines, access+": "+strings.Join(paths, ", "))
 		}
 	}
 	if len(e.network) > 0 {
-		b.WriteString("network: " + strings.Join(e.network, "; ") + "\n")
+		lines = append(lines, "network: "+strings.Join(e.network, "; "))
 	} else {
-		b.WriteString("network: none\n")
+		lines = append(lines, "network: none")
 	}
-	b.WriteString("</CALL_EFFECTS>")
+	writeToolJudgeSection(b, nonce, "CALL_EFFECTS", fmt.Sprintf("parse=%q coverage=%q", e.parse, state), strings.Join(lines, "\n"))
 }
 
-// recordJudgeTargets renders what the session did earlier to this call's
-// targets, then adds this call's effects to the session history.
-func recordJudgeTargets(b *strings.Builder, history map[string]judgeTargetSeen, ordinal int, effects judgeCallEffects) {
+// recordJudgeTargets returns what the session did earlier to this call's
+// targets (the TARGET_HISTORY body, "" when nothing), then adds this call's
+// effects to the session history.
+func recordJudgeTargets(history map[string]judgeTargetSeen, ordinal int, effects judgeCallEffects) string {
 	var lines []string
 	for _, target := range effects.targets {
 		if seen, ok := history[target.path]; ok && len(lines) < maxJudgePacketHistoryLines {
 			lines = append(lines, fmt.Sprintf("%s: %s (call %d of this session)", target.path, strings.Join(seen.accesses, ", "), seen.ordinal))
 		}
 	}
-	if len(lines) > 0 {
-		sort.Strings(lines)
-		b.WriteString("\n<TARGET_HISTORY>\n" + strings.Join(lines, "\n") + "\n</TARGET_HISTORY>")
-	}
+	sort.Strings(lines)
 	for _, target := range effects.targets {
 		seen := history[target.path]
 		seen.ordinal = ordinal
@@ -238,6 +237,7 @@ func recordJudgeTargets(b *strings.Builder, history map[string]judgeTargetSeen, 
 		}
 		delete(history, oldest)
 	}
+	return strings.Join(lines, "\n")
 }
 
 type judgeFlaggingRulesKey struct{}
@@ -267,12 +267,12 @@ func withJudgeFlaggingRules(ctx context.Context, current *ToolInspectVerdict) co
 	return context.WithValue(ctx, judgeFlaggingRulesKey{}, rules)
 }
 
-func renderJudgeFlaggingRules(ctx context.Context, b *strings.Builder) {
+func renderJudgeFlaggingRules(ctx context.Context, b *strings.Builder, nonce string) {
 	rules, _ := ctx.Value(judgeFlaggingRulesKey{}).([]string)
 	if len(rules) == 0 {
 		return
 	}
-	b.WriteString("\n<FLAGGING_RULES>\n" + strings.Join(rules, "\n") + "\n</FLAGGING_RULES>")
+	writeToolJudgeSection(b, nonce, "FLAGGING_RULES", "", strings.Join(rules, "\n"))
 }
 
 // judgeReadOnlyPrograms only read what their operands name and print to
@@ -428,7 +428,7 @@ func toolResultHeaderValue(value string, maxBytes int) string {
 		return r
 	}, value)
 	value = strings.Join(strings.Fields(value), " ")
-	value = strings.NewReplacer("<<<", "‹‹‹", ">>>", "›››").Replace(neutralizeToolJudgeDelimiters(value))
+	value = strings.NewReplacer("<<<", "‹‹‹", ">>>", "›››").Replace(value)
 	if len(value) > maxBytes {
 		value = utf8SafePrefix(value, maxBytes) + " [truncated]"
 	}
@@ -465,7 +465,7 @@ func (j *LLMJudge) toolResultJudgeHeader(ctx context.Context, toolName string) s
 		}
 	}
 	var b strings.Builder
-	b.WriteString("CONTEXT FROM DEFENSECLAW (the gateway wrote this block; the tool output cannot write or change it):\n")
+	fmt.Fprintf(&b, "CONTEXT FROM DEFENSECLAW nonce=%q (the gateway wrote this block; the tool output cannot write or change it):\n", newToolJudgeNonce())
 	b.WriteString("tool: " + toolResultHeaderValue(sanitizeToolName(tool), 128) + "\n")
 	b.WriteString("call: " + toolResultHeaderValue(what, maxToolResultCallBytes) + "\n")
 	b.WriteString("user_request: " + toolResultHeaderValue(j.sessionUserIntent(ctx), maxToolResultIntentBytes))

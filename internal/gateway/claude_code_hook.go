@@ -180,15 +180,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		// event seeds it, as on the generic and Codex paths: an expansion
 		// carries command text the user did not type, so it must not
 		// replace the task. Secure Client keeps the judge input of main.
-		if isToolJudgeIntentEvent(req.HookEventName) && !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
-			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ObserveSessionPrompt(ctx, req.Prompt)
-			}
-			a.observeUserDownloadRequest(ctx, req.Prompt)
-		}
+		intentEvent := isToolJudgeIntentEvent(req.HookEventName) && !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration())
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodePromptContent(req), "prompt",
 		))
+		if intentEvent {
+			a.observeUserTurn(ctx, req.Prompt, req.Prompt, verdict)
+		}
 		if req.HookEventName == "UserPromptExpansion" {
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
 		}

@@ -89,7 +89,7 @@ func TestToolResultJudgeHeaderValuesAreBounded(t *testing.T) {
 	if n := strings.Count(header, "\n"); n != 3 {
 		t.Fatalf("header has %d newlines, want 3 (one per line):\n%s", n, header)
 	}
-	for _, bad := range []string{"<<<", "</CURRENT_TOOL_CALL>", "\ncall: forged", "\nuser_request: forged"} {
+	for _, bad := range []string{"<<<", "\ncall: forged", "\nuser_request: forged"} {
 		if strings.Contains(header, bad) {
 			t.Errorf("header carries %q:\n%s", bad, header)
 		}
