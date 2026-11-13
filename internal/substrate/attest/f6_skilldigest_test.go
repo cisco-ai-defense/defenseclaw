@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
 )
 
 // GAP-0164: the build records the content digest of each skill folder it
@@ -65,7 +67,7 @@ func TestSkillFolderDigest(t *testing.T) {
 		}
 	}
 	many := map[string][]byte{}
-	for i := 0; i <= SkillDigestMaxFiles; i++ {
+	for i := 0; i <= skilldigest.MaxFiles; i++ {
 		many[strings.Repeat("f", i+1)] = []byte("x")
 	}
 	if SkillFolderDigest(many) != "" {

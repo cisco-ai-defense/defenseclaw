@@ -105,7 +105,11 @@ func (c *AskClient) Ask(ctx context.Context, req AskRequest) (AskResult, error) 
 			if in.AskID != "" && ctx.Err() != nil {
 				return AskResult{Outcome: AskPending, ID: in.AskID}, nil
 			}
-			return AskResult{ID: in.AskID}, err
+			// The gateway never answered (refused, unreachable, or still
+			// dialling when the hold ended): no ask exists, so this is an
+			// outage the failure mode decides, never a pending ask. %v keeps
+			// a context deadline out of the chain (GAP-0168).
+			return AskResult{ID: in.AskID}, fmt.Errorf("%w: %v", ErrAskUnreachable, err)
 		}
 		switch got.State {
 		case "approved":
@@ -139,6 +143,9 @@ func (c *AskClient) Ask(ctx context.Context, req AskRequest) (AskResult, error) 
 		}
 	}
 }
+
+// ErrAskUnreachable is a callout ask the gateway did not answer.
+var ErrAskUnreachable = errors.New("callout ask: the gateway did not answer")
 
 func (c *AskClient) post(ctx context.Context, in askWire) (askAnswer, error) {
 	body, err := json.Marshal(in)

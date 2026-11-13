@@ -496,8 +496,12 @@ func PurgeSteps(plan ChartPlan) []string {
 			" out of the global policy and of the policies of " + strings.Join(orNone(plan.WritableAtespaces), ", ") +
 			" (kubectl ate get|update access-policy), so a later ServiceAccount of the same name gets nothing.",
 	}
+	steps = append(steps, "  6. The Secrets the install hooks created are kept, so a reinstall keeps chain joins and the images built with "+
+		"the relay session key: "+ChainKeySecret+", "+CalloutTokenSecret+", "+plan.relaySessionSecret()+". Delete them with "+
+		"kubectl -n "+plan.Namespace+" delete secret "+ChainKeySecret+" "+CalloutTokenSecret+" "+plan.relaySessionSecret()+
+		" once nothing uses them (images built with the old relay session key then need a rebuild).")
 	if plan.AuthDelegatorBinding != "" {
-		steps = append(steps, "  6. After helm uninstall --no-hooks or a lost release, check the cluster-wide binding is gone: "+
+		steps = append(steps, "  7. After helm uninstall --no-hooks or a lost release, check the cluster-wide binding is gone: "+
 			"kubectl delete clusterrolebinding "+plan.AuthDelegatorBinding+" --ignore-not-found.")
 	}
 	return steps

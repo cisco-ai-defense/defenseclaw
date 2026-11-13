@@ -32,7 +32,7 @@ const chartKubeVersion = "1.34.0"
 
 // chartCases are the golden renders: values files under
 // deploy/helm/defenseclaw-substrate/tests/values (empty for the defaults).
-var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed", "actor-secrets", "kube-signin"}
+var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed", "actor-secrets", "kube-signin", "ask-keys"}
 
 // helmPinnedVersion is the helm release the goldens are rendered with and
 // that the CI job substrate-chart installs (keep it equal to HELM_VERSION in
@@ -350,6 +350,13 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	// into the gateway and the leader; the callout reaches the leader.
 	if !strings.Contains(string(out), "- chain-key") || !strings.Contains(string(out), "secretName: defenseclaw-chain-key") {
 		t.Errorf("%s: no chain-key hook or Secret mount", name)
+	}
+	// F4 follow-up: the relay session key is created by its own hook (never
+	// rendered), with its own ServiceAccount that may read only that
+	// Secret, and the gateway mounts it.
+	if !strings.Contains(string(out), "- relay-session\n") || !strings.Contains(string(out), "serviceAccountName: defenseclaw-relay-key") ||
+		!strings.Contains(string(out), "resourceNames: [\"defenseclaw-relay-session\"]") {
+		t.Errorf("%s: no relay-session hook with its own ServiceAccount", name)
 	}
 	if c, ok := byName["Deployment/defenseclaw-callout"]; ok {
 		raw, _ := yaml.Marshal(c.Spec)

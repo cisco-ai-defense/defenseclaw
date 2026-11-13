@@ -385,6 +385,7 @@ func TightenSandboxAdmin(base SandboxAdminConfig, overlay *SandboxAdminConfig) (
 	if o.DriverFallback == EnterpriseOpenShellFallbackNone || out.DriverFallback == "" {
 		out.DriverFallback = o.DriverFallback
 	}
+	tightenAskKeys(&out, o)
 	if err := tightenRuntimeKeys(&out, o); err != nil {
 		return SandboxAdminConfig{}, err
 	}
@@ -443,9 +444,10 @@ func cloneSandboxAdmin(a SandboxAdminConfig) SandboxAdminConfig {
 		}
 	}
 	for _, s := range []*[]string{&out.AllowedHarnesses, &out.EgressBlock, &out.EgressAllowOnly, &out.RequireCopyFor,
-		&out.Locked, &out.RequiredFor, &out.AllowedCredentials, &out.Runtimes, &out.ActorSecrets} {
+		&out.Locked, &out.RequiredFor, &out.AllowedCredentials, &out.Runtimes, &out.ActorSecrets, &out.AskHosts} {
 		*s = slices.Clone(*s)
 	}
+	out.URLRules = cloneURLRules(out.URLRules)
 	return out
 }
 
@@ -769,7 +771,7 @@ func sandboxFloorDigest(f SandboxAdminConfig, packDir string) (string, error) {
 	// that adds them keeps its host floor digest (runtimes stays: it gates
 	// host runs).
 	view.Floor.SandboxClass, view.Floor.IdleSuspendAfter, view.Floor.UnattendedAsks, view.Floor.AskTimeout = "", "", "", ""
-	view.Floor.ActorSecrets = nil
+	view.Floor.ActorSecrets, view.Floor.AskHosts, view.Floor.URLRules = nil, nil, nil
 	for _, s := range []*[]string{&view.Floor.AllowedHarnesses, &view.Floor.EgressBlock, &view.Floor.EgressAllowOnly,
 		&view.Floor.RequireCopyFor, &view.Floor.Locked, &view.Floor.RequiredFor, &view.Floor.AllowedCredentials,
 		&view.Floor.Runtimes, &view.Floor.ActorSecrets} {

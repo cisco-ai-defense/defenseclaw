@@ -88,6 +88,8 @@ type SubstrateSkillFingerprint struct {
 	Attached bool   `json:"attached,omitempty"`
 	// Receipt is the scan receipt a gateway gave for this fingerprint.
 	Receipt string `json:"receipt,omitempty"`
+	// Over marks a folder past a kit cap (no FP): the fail mode decides.
+	Over bool `json:"over,omitempty"`
 }
 
 // SubstratePathFact is one path argument as the actor resolves it.

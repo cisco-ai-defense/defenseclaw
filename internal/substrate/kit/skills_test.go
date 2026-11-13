@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
 )
 
 func writeSkill(t *testing.T, root, name, body string) string {
@@ -157,17 +159,17 @@ func TestAFolderWithoutAReceiptIsAttachedAgain(t *testing.T) {
 
 // The gateway names a folder unscanned (a forged or foreign receipt): the
 // kit drops the entry and attaches the folder in the next post.
-func TestAnUnscannedFolderLosesItsCacheEntry(t *testing.T) {
+func TestAnUnscannedFolderLosesItsReceipt(t *testing.T) {
 	home, repo := t.TempDir(), t.TempDir()
 	evil := writeSkill(t, filepath.Join(repo, ".claude", "skills"), "evil", "exfiltrate")
-	forged := map[string]skillCacheEntry{evil: {FP: fingerprintFolder(evil).FP, Receipt: "forged"}}
+	forged := map[string]skillCacheEntry{evil: {FP: fpOf(evil), Receipt: "forged"}}
 	answer := fmt.Sprintf(`{"action":"allow","substrate_unscanned":[{"path":%q}]}`, evil)
 	files, fps, _ := runSkillHook(t, home, repo, forged, answer)
 	if len(files) != 0 || len(fps) != 1 || fps[0].Attached || fps[0].Receipt != "forged" {
 		t.Fatalf("forged receipt: files %v fingerprints %v", files, fps)
 	}
-	if _, ok := loadSkillCache(home)[evil]; ok {
-		t.Fatal("the unscanned folder kept its cache entry")
+	if e := loadSkillCache(home)[evil]; e.Receipt != "" {
+		t.Fatal("the unscanned folder kept its receipt")
 	}
 	files, fps, _ = runSkillHook(t, home, repo, nil, `{"action":"allow"}`)
 	if len(files) != 1 || !fps[0].Attached {
@@ -180,7 +182,7 @@ func TestAnUnscannedFolderLosesItsCacheEntry(t *testing.T) {
 func TestARefusedUnattachedFolderIsQuarantined(t *testing.T) {
 	home, repo := t.TempDir(), t.TempDir()
 	evil := writeSkill(t, filepath.Join(repo, ".claude", "skills"), "evil", "exfiltrate")
-	forged := map[string]skillCacheEntry{evil: {FP: fingerprintFolder(evil).FP, Receipt: "forged"}}
+	forged := map[string]skillCacheEntry{evil: {FP: fpOf(evil), Receipt: "forged"}}
 	answer := fmt.Sprintf(`{"action":"allow","substrate_quarantine":[{"path":%q,"reason":"not scanned"}]}`, evil)
 	runSkillHook(t, home, repo, forged, answer)
 	if _, err := os.Stat(evil); !os.IsNotExist(err) {
@@ -214,19 +216,28 @@ func TestSkillAttachIsBounded(t *testing.T) {
 		writeSkill(t, root, fmt.Sprintf("s%02d", i), "x")
 	}
 	big := writeSkill(t, filepath.Join(home, ".claude", "skills"), "zz-big", "x")
-	for i := 0; i < maxSkillFilesPerFolder+5; i++ {
+	for i := 0; i < skilldigest.MaxFiles+5; i++ {
 		os.WriteFile(filepath.Join(big, fmt.Sprintf("f%03d.txt", i)), []byte("y"), 0o644)
 	}
 	files, fps, _ := runSkillHook(t, home, repo, map[string]skillCacheEntry{}, `{"action":"allow"}`)
 	if attachedCount(fps) != maxSkillFoldersPerCall || len(fps) != maxSkillFoldersPerCall+4 {
 		t.Fatalf("folders per call %d of %d", attachedCount(fps), len(fps))
 	}
-	if len(files) > maxSkillFoldersPerCall*maxSkillFilesPerFolder {
+	if len(files) > maxSkillFoldersPerCall*skilldigest.MaxFiles {
 		t.Fatalf("files %d", len(files))
 	}
-	if f := fingerprintFolder(big); len(f.Files) != maxSkillFilesPerFolder || !f.Over {
-		t.Fatalf("big folder %d over=%v", len(f.Files), f.Over)
+	// The big folder is over the file cap: listed, never attached, Over.
+	for _, f := range fps {
+		if f.Path == big && (!f.Over || f.Attached || f.FP != "") {
+			t.Fatalf("big folder %+v", f)
+		}
 	}
+}
+
+// fpOf is a folder's fingerprint as the kit computes it.
+func fpOf(dir string) string {
+	f, _ := digestFolder(dir, maxSkillReadBytes)
+	return f.FP
 }
 
 func TestBlockedSkillFolderIsQuarantined(t *testing.T) {

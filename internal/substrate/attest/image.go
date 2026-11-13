@@ -562,7 +562,9 @@ func (f *ImageFS) canon(p string, followLast bool) (string, bool) {
 // to the file, a link to one of its folders, links to those links), at most
 // maxNames. Files are indexed by real path, so a check that decides by name
 // (which file is an MCP config) must look at all of them (GAP-0051).
-func (f *ImageFS) Names(p string) []string {
+// complete is false when more names exist than maxNames: a caller that
+// decides by name must then fail closed, never on the names it got.
+func (f *ImageFS) Names(p string) (names []string, complete bool) {
 	if f.links == nil {
 		f.links = map[string][]string{}
 		for lp, e := range f.idx {
@@ -577,9 +579,10 @@ func (f *ImageFS) Names(p string) []string {
 			sort.Strings(ls)
 		}
 	}
-	names := []string{p}
+	names = []string{p}
 	seen := map[string]bool{p: true}
-	for i := 0; i < len(names) && len(names) < maxNames; i++ {
+	complete = true
+	for i := 0; i < len(names); i++ {
 		n := names[i]
 		// Every ancestor of n (n included) a link resolves to gives a name.
 		for a := n; ; a = path.Dir(a) {
@@ -588,17 +591,22 @@ func (f *ImageFS) Names(p string) []string {
 				if a == "/" {
 					cand = path.Join(l, n)
 				}
-				if !seen[cand] && len(names) < maxNames {
-					seen[cand] = true
-					names = append(names, cand)
+				if seen[cand] {
+					continue
 				}
+				if len(names) >= maxNames {
+					complete = false
+					continue
+				}
+				seen[cand] = true
+				names = append(names, cand)
 			}
 			if a == "/" {
 				break
 			}
 		}
 	}
-	return names
+	return names, complete
 }
 
 // removeBelow deletes p (when self) and everything below it that lower

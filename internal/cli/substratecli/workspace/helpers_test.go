@@ -63,6 +63,8 @@ func newActor(t *testing.T) *actor {
 		t.Fatal(err)
 	}
 	cfg.Relay.Workdir = wd
+	// The relay keeps copy state under its home (GAP-0163): a test home.
+	t.Setenv("HOME", t.TempDir())
 	s := relay.NewServer(relay.Options{
 		Config: cfg, Verifier: bearer(testToken),
 		Log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -89,6 +91,10 @@ type sandboxFS struct {
 func (s sandboxFS) rw(p string) string { return strings.ReplaceAll(p, "/sandbox/", s.dir+"/sandbox/") }
 
 func (s sandboxFS) Root(context.Context) (string, error) { return osw.DefaultRemoteRoot, nil }
+
+// StateRoot keeps copy state beside the copy in these tests (the paths
+// they rewrite are under /sandbox).
+func (s sandboxFS) StateRoot(context.Context) (string, error) { return "", nil }
 
 func (s sandboxFS) Exec(ctx context.Context, sb string, req osw.ExecRequest) (*osw.ExecResult, error) {
 	argv := make([]string, len(req.Argv))

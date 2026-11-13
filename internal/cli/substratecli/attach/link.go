@@ -18,6 +18,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
@@ -29,6 +30,9 @@ type link struct {
 	o      Options
 	tun    *Tunnel
 	errTTY bool
+	// sayMu orders status lines: the reconnect loop, the outage input
+	// reader and the relay hello can all write one.
+	sayMu sync.Mutex
 	// pending: a status line without a newline is on Err.
 	pending bool
 }
@@ -110,6 +114,8 @@ func (l *link) statusOutcome(st int, err error) (outcome, error) {
 // say prints a status message on Err. On a terminal a transient message
 // stays on one line that the next one (or the agent's screen) overwrites.
 func (l *link) say(msg string, final bool) {
+	l.sayMu.Lock()
+	defer l.sayMu.Unlock()
 	// Error text in msg may come from the gateway or the relay.
 	msg = safetext.Line(msg)
 	w := l.o.Err
@@ -133,6 +139,8 @@ func (l *link) say(msg string, final bool) {
 
 // endLine ends a pending status line so an error does not share it.
 func (l *link) endLine() {
+	l.sayMu.Lock()
+	defer l.sayMu.Unlock()
 	if l.pending {
 		io.WriteString(l.o.Err, "\r\n")
 		l.pending = false

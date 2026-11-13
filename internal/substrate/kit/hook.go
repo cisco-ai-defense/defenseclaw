@@ -131,8 +131,9 @@ func RunHook(ctx context.Context, o HookOptions) int {
 		Facts: CollectFacts(o.Connector, call.Event, payload, o.Config.attachCap()),
 	}
 	var skillsSent map[string]string
+	var skillsAttached []string
 	if skillScanEvents[call.Event] {
-		skillsSent = o.attachSkills(&env, payload)
+		skillsSent, skillsAttached = o.attachSkills(&env, payload)
 	}
 	body, err := json.Marshal(env)
 	if err != nil {
@@ -157,7 +158,7 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	}
 	resp, _, err := send(ctx, Request{Path: HookPathPrefix + o.Connector, Header: header, Body: body})
 	if err == nil && resp.Status >= 200 && resp.Status < 300 && skillsSent != nil {
-		if moved := applySkillAnswer(o.home(), resp.Body, skillsSent, time.Now()); len(moved) > 0 {
+		if moved := applySkillAnswer(o.home(), resp.Body, skillsSent, skillsAttached, time.Now()); len(moved) > 0 {
 			fmt.Fprintf(o.Stderr, "defenseclaw: blocked skill folders moved out of the skill root: %s\n", strings.Join(moved, ", "))
 		}
 	}
@@ -197,7 +198,7 @@ func RunHook(ctx context.Context, o HookOptions) int {
 // attaches the files of the folders the receipt cache does not cover. It
 // returns the folders it listed. The cache only saves bytes: the gateway
 // checks every receipt, so a cache the agent edited hides nothing.
-func (o HookOptions) attachSkills(env *HookEnvelope, payload []byte) map[string]string {
+func (o HookOptions) attachSkills(env *HookEnvelope, payload []byte) (map[string]string, []string) {
 	var v struct {
 		CWD string `json:"cwd"`
 	}
@@ -210,11 +211,11 @@ func (o HookOptions) attachSkills(env *HookEnvelope, payload []byte) map[string]
 	for _, a := range f.Files {
 		used += int64(len(a.Content))
 	}
-	sent, _ := collectSkills(f, skillRoots(o.home(), filepath.Clean(v.CWD)), loadSkillCache(o.home()), o.Config.attachCap()-used)
+	sent, attached := collectSkills(f, skillRoots(o.home(), filepath.Clean(v.CWD)), loadSkillCache(o.home()), o.Config.attachCap()-used)
 	if len(f.Paths) > 0 || len(f.Files) > 0 || len(f.Skills) > 0 || f.Truncated {
 		env.Facts = f
 	}
-	return sent
+	return sent, attached
 }
 
 func (o HookOptions) home() string {
