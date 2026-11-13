@@ -31,8 +31,9 @@ import (
 // it. An allow rule then admits it without a scan, a deny refuses it, and a
 // scan decides as for a new server. The pass runs once: a row of type
 // mcpNoScanHealType records it with one upgrade audit row. A store it could
-// not finish (a read or write error, more than mcpNoScanHealMaxRows records)
-// is not recorded, and the next start goes on; the marks it wrote stay.
+// not finish (a read or write error)
+// is not recorded, and the next start goes on; the marks it wrote stay. It
+// reads each stored MCP record once (one small row per server definition).
 // After a 0.8.x upgrade the bridge first baselines the servers the earlier
 // release ran (GAP-1227); the next start marks the ones its scan left plain.
 
@@ -46,10 +47,6 @@ const (
 	mcpNoScanHealType    = "mcp_noscan_heal"
 	mcpNoScanHealVersion = "1.0.10"
 )
-
-// mcpNoScanHealMaxRows bounds the records one start reads. Replaceable in
-// tests.
-var mcpNoScanHealMaxRows = 10000
 
 // mcpAdmissionOwed reports a baseline the pass marked.
 func mcpAdmissionOwed(baseline *audit.SnapshotRow) bool {
@@ -71,6 +68,11 @@ func mcpFingerprintPlain(fingerprint string) bool {
 	return true
 }
 
+// PrepareMCPAdmissions runs the 1.0.10 upgrade pass before the gateway hands
+// the watcher to the hooks, so no call reads a plain record as admitted in
+// between; Run runs it too (a done pass costs one read).
+func (w *InstallWatcher) PrepareMCPAdmissions() { w.markMCPNoScanAdmissionsOwed() }
+
 // markMCPNoScanAdmissionsOwed runs the pass, once per data directory. It does
 // not apply without a store, with MCP admission off, under Secure Client
 // (issue #1092), or while a 0.8.x bridge has yet to baseline its servers.
@@ -79,6 +81,9 @@ func (w *InstallWatcher) markMCPNoScanAdmissionsOwed() {
 		return
 	}
 	if _, err := w.store.GetTargetSnapshot(mcpNoScanHealType, mcpNoScanHealVersion); !errors.Is(err, sql.ErrNoRows) {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[watcher] read the 1.0.10 upgrade pass record: %v; the pass runs at the next start\n", err)
+		}
 		return
 	}
 	paths, err := w.store.ListTargetSnapshotPaths(string(InstallMCP))
@@ -87,10 +92,6 @@ func (w *InstallWatcher) markMCPNoScanAdmissionsOwed() {
 		return
 	}
 	owed, complete := 0, true
-	if len(paths) > mcpNoScanHealMaxRows {
-		fmt.Fprintf(os.Stderr, "[watcher] %d MCP baselines, over the %d one start reads; the 1.0.10 upgrade pass goes on at the next start\n", len(paths), mcpNoScanHealMaxRows)
-		paths, complete = paths[:mcpNoScanHealMaxRows], false
-	}
 	for _, path := range paths {
 		row, err := w.store.GetTargetSnapshot(string(InstallMCP), path)
 		if err != nil {

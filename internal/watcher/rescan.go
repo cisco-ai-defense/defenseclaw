@@ -1183,8 +1183,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	// was released kept running, also after a restart (gas-ux-r2:GAP-0088).
 	// Admission applies the failure as the tier says: blocked where MCP
 	// admission fails closed, kept with a warning in the OSS default and
-	// permissive tiers. A plain baseline without a scan is the record of a
-	// server configured before the upgrade (GAP-1227) and stays one.
+	// permissive tiers. A plain baseline without a scan (a server the 0.8.x
+	// bridge baselined, GAP-1227, or one a release before 1.0.10 wrote) is
+	// marked owed by the one-time pass at the next start (mcp_noscan_heal.go)
+	// and admitted here then.
 	if evt.Type == InstallMCP && !w.secureClientActive() && baseline.ScanID == "" && mcpFingerprintFailed(baseline.ScannerFingerprint) {
 		if strings.HasSuffix(baseline.ScannerFingerprint, mcpPolicyRefusedMark) &&
 			baseline.ContentHash == currentSnap.ContentHash && !w.mcpPolicyRefusalLapsed(evt, baseline) {

@@ -4705,6 +4705,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		s.enrolledMCPRefresh.Store(refresher)
 		defer s.enrolledMCPRefresh.CompareAndSwap(refresher, nil)
 	}
+	// Before the hooks see this watcher (gas-ux-r2:GAP-0088 upgrade pass).
+	w.PrepareMCPAdmissions()
 	s.installWatcher.Store(w)
 	runErr := w.Run(watchCtx)
 	s.installWatcher.CompareAndSwap(w, nil)

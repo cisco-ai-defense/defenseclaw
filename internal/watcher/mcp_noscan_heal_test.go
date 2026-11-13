@@ -135,25 +135,17 @@ func TestNoScanHealRunsOnce(t *testing.T) {
 	}
 }
 
-// Bounded: a store with more records than one start reads is marked in part
-// and not recorded done, so the next start goes on.
-func TestNoScanHealIsBoundedPerStart(t *testing.T) {
-	previous := mcpNoScanHealMaxRows
-	t.Cleanup(func() { mcpNoScanHealMaxRows = previous })
-	mcpNoScanHealMaxRows = 1
+// Every stored record is read at the start, also with many of them, and the
+// pass is recorded done after that start.
+func TestNoScanHealMarksEveryStoredRecord(t *testing.T) {
 	f := newManagedAllowRemovalFixture(t)
 	first, second := f.server, config.MCPServerEntry{Name: "v2probe-b", URL: "http://127.0.0.1:19556/mcp", Transport: "http", Connector: "claudecode", Home: "/home/u1"}
 	f.noScanBaseline("")
 	f.server = second
 	f.noScanBaseline("")
 	f.start()
-	if f.healDone() {
-		t.Fatal("the pass was recorded done with records left unread")
-	}
-	mcpNoScanHealMaxRows = 10
-	f.start()
 	if !f.healDone() {
-		t.Fatal("the pass was not recorded done after the start that finished it")
+		t.Fatal("the pass was not recorded done")
 	}
 	for _, server := range []config.MCPServerEntry{first, second} {
 		row, err := mcpSnapshotForServer(f.w.store, server)
