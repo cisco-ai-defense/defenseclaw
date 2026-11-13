@@ -171,12 +171,19 @@ def _emit_json(data: Any) -> None:
 # gateway access
 
 
+def _loaded_cfg(app: AppContext):
+    """The loaded config: the routing group skips the root load, so load it here once."""
+    if app.cfg is None:
+        from defenseclaw import config as config_module
+
+        app.cfg = config_module.load()
+    return app.cfg
+
+
 def _client(app: AppContext, timeout: float = 5):
-    from defenseclaw import config as config_module
     from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
-    cfg = app.cfg if app.cfg is not None else config_module.load()
-    app.cfg = cfg
+    cfg = _loaded_cfg(app)
     return OrchestratorClient(
         host=gateway_api_client_host(cfg),
         port=cfg.gateway.api_port,
@@ -375,13 +382,34 @@ def routing_status(app: AppContext, as_json: bool) -> None:
 # ---------------- enable / disable
 
 
-def _route_only():
-    """The route-only helpers (routing_route_only.py, owned by the routing core)."""
+def _route_only_change(app: AppContext, connector: str, *, enable: bool) -> None:
+    """Route one hook connector (or stop) through routing_route_only, owned
+    by the routing core. Its helpers take the loaded config and save
+    config.yaml; disable also restores the agent settings with the gateway
+    down (defenseclaw-gateway connector route-restore)."""
+    from defenseclaw import routing_route_only as ro
+
+    cfg = _loaded_cfg(app)
     try:
-        from defenseclaw import routing_route_only
-    except ImportError as exc:
-        raise click.ClickException("routing a hook connector needs a DefenseClaw build with route-only mode") from exc
-    return routing_route_only
+        out = ro.enable(cfg, connector) if enable else ro.disable(cfg, connector)
+    except ro.RouteOnlyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if enable:
+        base = str((out.get("upstream") or {}).get("base_url") or "")
+        click.echo(f"Routing {connector} model calls through DefenseClaw" + (f" (upstream {base})." if base else "."))
+    elif not out.get("changed"):
+        click.echo(f"{connector} was not routed; nothing to stop.")
+    else:
+        click.echo(f"Stopped routing {connector}.")
+        if out.get("agent_config_restored"):
+            click.echo(f"Restored the {connector} model settings.")
+        else:
+            ux.warn(
+                f"could not restore the {connector} model settings now: run defenseclaw-gateway connector "
+                f"route-restore --connector {connector} (the gateway also restores them when it starts)"
+            )
+    if out.get("restart_agent"):
+        click.echo(f"Restart {connector} to pick it up.")
 
 
 @routing_cmd.command("enable")
@@ -391,7 +419,7 @@ def routing_enable(app: AppContext, connector: str) -> None:
     """Turn routing on (or route one connector's model calls)."""
     _refuse_on_managed(["routing.route_only" if connector else "routing.enabled"])
     if connector:
-        _route_only().enable(app, connector)
+        _route_only_change(app, connector, enable=True)
         return
     doc = _document()
     if not _aliases(doc):
@@ -409,7 +437,7 @@ def routing_disable(app: AppContext, connector: str) -> None:
     """Turn routing off (or stop routing one connector; works with the gateway stopped)."""
     _refuse_on_managed(["routing.route_only" if connector else "routing.enabled"])
     if connector:
-        _route_only().disable(app, connector)
+        _route_only_change(app, connector, enable=False)
         return
     _document()
     _write(app, {"routing.enabled": False})

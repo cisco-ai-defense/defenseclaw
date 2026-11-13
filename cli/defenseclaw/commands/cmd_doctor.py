@@ -13257,6 +13257,8 @@ def _check_routing_policy(r: _DoctorResult) -> None:
     for status, detail in doctor_rows():
         remediation = "see defenseclaw routing rules list" if status == "warn" else ""
         _emit(status, "Routing policy", detail, remediation=remediation, r=r)
+
+
 def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
     """Warn about routed models a managed host keys by api_key_env.
 
