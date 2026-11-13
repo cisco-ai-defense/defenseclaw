@@ -60,6 +60,8 @@ func selfProtVerdict(t *testing.T, r selfProtRow, managed bool, connector string
 		return "block"
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow"
+	case strings.HasPrefix(body, `{"action":"alert"`):
+		return "alert"
 	default:
 		return "status " + recorder.Result().Status
 	}
@@ -70,8 +72,14 @@ func checkSelfProtRows(t *testing.T, rows []selfProtRow, connectors ...string) {
 	for _, managed := range []bool{true, false} {
 		for _, connector := range connectors {
 			for _, r := range rows {
-				if got := selfProtVerdict(t, r, managed, connector); got != r.want {
-					t.Errorf("%s managed=%v %s: %q = %s, want %s", r.id, managed, connector, r.cmd, got, r.want)
+				want := r.want
+				if want == "warn" {
+					// UNCERTAIN target: the per-user default pack alerts, a managed
+					// call with no complete client reading blocks.
+					want = map[bool]string{true: "block", false: "alert"}[managed]
+				}
+				if got := selfProtVerdict(t, r, managed, connector); got != want {
+					t.Errorf("%s managed=%v %s: %q = %s, want %s", r.id, managed, connector, r.cmd, got, want)
 				}
 			}
 		}
@@ -132,7 +140,7 @@ func TestSelfProtMoveAfterStaticCdIsFollowed(t *testing.T) {
 func TestSelfProtCopyAfterDirectoryChange(t *testing.T) {
 	checkSelfProtRows(t, []selfProtRow{
 		{"B11", `env -C ~ cp -r project project-bak`, "allow"},
-		{"E01", `env -C ~ cp -r project project-bak; echo key >> ~/project-bak/keylink`, "block"},
+		{"E01", `env -C ~ cp -r project project-bak; echo key >> ~/project-bak/keylink`, "warn"},
 		{"E05", `env -C ~ cp -a project/keylink kl2; echo key >> ~/kl2`, "block"},
 	}, "claudecode", "codex")
 }
@@ -204,12 +212,12 @@ func TestSelfProtLinkNameBesideReaders(t *testing.T) {
 		{"R06", `readlink -f ~/.ssh`, "allow"},
 		{"R17", `ln -s /usr/lib lib; bash -c "cd ~nosuchuser9 && ls"`, "allow"},
 		{"R18", `du -sh ~/.*/`, "allow"},
-		{"R19", `ln -s /usr/lib lib; ls ~nosuchuser9; bash -c "cd lib && ls"`, "block"},
-		{"R07", `ln -s / r; bash -c "cd r && touch x"`, "block"},
-		{"R08", `ln -s / r; bash -c "cd r && sed -i s/a/b/ x"`, "block"},
-		{"R09", `ln -s / r; bash -c "cd r && ./run.sh"`, "block"},
+		{"R19", `ln -s /usr/lib lib; ls ~nosuchuser9; bash -c "cd lib && ls"`, "warn"},
+		{"R07", `ln -s / r; bash -c "cd r && touch x"`, "warn"},
+		{"R08", `ln -s / r; bash -c "cd r && sed -i s/a/b/ x"`, "warn"},
+		{"R09", `ln -s / r; bash -c "cd r && ./run.sh"`, "warn"},
 		{"R10", `ln -s / r; bash -c "cd r && ls"; echo k >> r/home/alice/.ssh/authorized_keys`, "block"},
-		{"R11", `ln -s / r; bash -c "cd r && ls"; mv a.txt r`, "block"},
+		{"R11", `ln -s / r; bash -c "cd r && ls"; mv a.txt r`, "warn"},
 		{"R12", `ln -s ../.ssh ks; bash -c "cd ks && cat authorized_keys"`, "block"},
 		{"R13", `ln -s ~/.ssh/authorized_keys k; mv k build/; echo x >> build/k`, "block"},
 		{"R14", `du -sh ~/.ssh/ > ~/.ssh/authorized_keys`, "block"},

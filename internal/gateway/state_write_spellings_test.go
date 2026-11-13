@@ -702,7 +702,15 @@ func TestHomeCdRecursiveCopyReadsSourcesInTheNewDirectory(t *testing.T) {
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, Connector: connectorName, EnforcementCapable: true,
 				})
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				verdict := buildVerdict(findings, "tool_call").Action
+				if row.block && strings.Contains(row.command, "linked-bak") {
+					// The copied link name is UNCERTAIN: the default pack alerts (GAP-0018).
+					if verdict != "alert" {
+						t.Errorf("%s hint=%q %q: action=%s, want alert %v", connectorName, hint, row.command, verdict, FindingStrings(findings))
+					}
+					continue
+				}
+				if blocked := verdict == "block"; blocked != row.block {
 					t.Errorf("%s hint=%q %q: block=%v, want %v %v", connectorName, hint, row.command, blocked, row.block, FindingStrings(findings))
 				}
 			}

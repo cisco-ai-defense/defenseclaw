@@ -17,7 +17,8 @@ import (
 // an SSH authorized_keys command (GAP-2586, cells L-mac-J3-011 and
 // L-erhel-J3-013). A copy into or out of ~/.ssh, a stack word that names a
 // directory carrying a link to the keys file then a write through it, and a
-// stack word after a cd that may have failed still block.
+// stack word after a cd that may have failed leave the copied link name
+// UNCERTAIN: the default pack alerts, the strict pack blocks (GAP-0018).
 func TestR106DirectoryStackCopyAfterPushdStaysAllowed(t *testing.T) {
 	judgeR106HookRows(t, []r106HookRow{
 		{command: `pushd src && cp -r ../ordinary ord4`},
@@ -36,12 +37,12 @@ func TestR106DirectoryStackCopyAfterPushdStaysAllowed(t *testing.T) {
 		{command: `pushd src && cp -r ~1/ordinary ~/.ssh/`, block: true},
 		{command: `pushd src && cp a.txt ~/.ssh/authorized_keys`, block: true},
 		{command: `pushd ~/.ssh && pushd /tmp && cp a.txt ~1/authorized_keys`, block: true},
-		{command: `pushd ~/linked && pushd ~/project && cp -a ~1 lb && echo k >> lb/lnk`, block: true},
-		{command: `pushd ~/linked; cp -a ~1 lb && echo k >> lb/lnk`, block: true},
-		{command: `cd ~/linked && cd ~/project && cp -a ~- lb && echo k >> lb/lnk`, block: true},
-		{command: `cd ~/linked && cd ~/project && cd /nonexistent-zz || cp -a ~- lb && echo k >> lb/lnk`, block: true},
-		{command: `cd ~/linked && cd ~/project && cd /nonexistent-zz && true; cp -a ~- lb && echo k >> lb/lnk`, block: true},
-		{command: `pushd /nonexistent-zz; pushd ~/linked && pushd ~/project && cp -a ~1 lb; echo k >> lb/lnk`, block: true},
+		{command: `pushd ~/linked && pushd ~/project && cp -a ~1 lb && echo k >> lb/lnk`, warn: true},
+		{command: `pushd ~/linked; cp -a ~1 lb && echo k >> lb/lnk`, warn: true},
+		{command: `cd ~/linked && cd ~/project && cp -a ~- lb && echo k >> lb/lnk`, warn: true},
+		{command: `cd ~/linked && cd ~/project && cd /nonexistent-zz || cp -a ~- lb && echo k >> lb/lnk`, warn: true},
+		{command: `cd ~/linked && cd ~/project && cd /nonexistent-zz && true; cp -a ~- lb && echo k >> lb/lnk`, warn: true},
+		{command: `pushd /nonexistent-zz; pushd ~/linked && pushd ~/project && cp -a ~1 lb; echo k >> lb/lnk`, warn: true},
 		// Copies out of ~/.ssh: a managed gateway reads a word that names
 		// the .ssh directory as a per-user gateway does (rel-1-0-6:GAP-0130).
 		{command: `pushd src && cp -r ~/.ssh ~1/sshcopy`, block: true},

@@ -1601,7 +1601,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			// the target is not a known key write: outside the strict and
 			// managed tiers it warns (rel-1-0-10:GAP-0013, GAP-0004).
 			unprovenOnly := symlinkWrite && unprovenTarget.class != "" && named.ID == rule.ID &&
-				unprovenKeyWriteMayWarn(request, commandText, facts.ActiveHome, unprovenTarget) &&
+				unprovenKeyWriteMayWarn(request, commandText, unprovenTarget) &&
 				!trustedAuthorizedKeysSymlinkWrite(input) &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request)
@@ -1651,78 +1651,28 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 }
 
 // unprovenKeyWriteMayWarn reports a call whose authorized-keys finding warns,
-// not blocks, when the proof could only hold its write as unknown. The pack
-// decides, not the install: the strict pack keeps the block, the default and
-// permissive packs alert (S7 lead 2026-11-13, GAP-0675). A write held because
-// an unreadable link or copy scope may reach the home keeps the stricter
-// guards of unprovenLinkScopeMayWarn; a write held because its target is a
-// variable-expanded word the proof cannot bound is unknown only
-// (unprovenTargetMayWarn).
-func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home string, held unprovenWrite) bool {
-	if held.evidenceGap {
-		// A managed gateway that holds no complete reading from its hook client
-		// (no header, an undecodable or rejected one, a map past its bound)
-		// cannot tell an unknown call from a stripped one: it keeps failing
-		// closed. The unknown tier is for a call whose own words leave the
-		// target open.
-		return false
-	}
-	if held.class == hookpaths.UnprovenTargetUnresolved {
-		return unprovenTargetMayWarn(request, commandText, home, held)
-	}
-	return unprovenLinkScopeMayWarn(request, commandText, home, held)
-}
-
-// unprovenLinkScopeMayWarn reports a call whose authorized-keys finding
-// warns, not blocks, when the proof could only hold its write as unknown:
-// a shell command (a native write or patch tool keeps its enforcement) in
-// the default or permissive tier of a per-user install (no managed hook
-// peer) that does not name
-// an authorized-keys file or carry base64 text that could spell one. The
-// strict tier and every managed install keep the block (owner 2026-11-06
-// ruling on rel-1-0-6:GAP-0675; S7 plan: unknown effects never block in
-// default; lead answer 2026-11-12 for rel-1-0-10:GAP-0013). A target the
-// proof found protected blocks in every tier. The confirm ("ask") ceiling
-// for these calls belongs to the hook answer path (S8), so they alert.
-//
-// The call must make no link itself (hookpaths.CommandMayMakeLink): only an
-// operand it cannot resolve, or an archive or copy scope it cannot read,
-// is lowered (the archive-before-write class the owner ruled a balanced
-// warning on rel-1-0-6:GAP-0675). The held write must also be away from
-// every protected file: its operand
-// is outside the active home (where the key files, DefenseClaw state and the
-// agent hook configs live) and outside sshd's ProgramData folder, and the
-// command names no home spelling (~, $HOME, %USERPROFILE%, the home path,
-// OLDPWD). An unreadable link or copy scope inside the home can reach those
-// files, so it keeps the block (owner rule: self-protection blocks whenever
-// an effect can plausibly reach the protected file).
-func unprovenLinkScopeMayWarn(request trustedActionRequest, commandText, home string, held unprovenWrite) bool {
-	if request.StrictPolicy || !trustedShellCommandInput(request.Input) {
-		return false
-	}
-	if held.operand == "" || !filepath.IsAbs(held.operand) || home == "" || !filepath.IsAbs(home) ||
-		unprovenOperandNearProtected(held.operand, home) {
-		return false
-	}
-	command, _ := trustedBashCommandInput(request.Input)
-	if command == "" {
-		command = request.Input.Command
-	}
-	if hookpaths.CommandMayMakeLink(command) {
-		// The unknown may be where a link the call makes points, not where
-		// its name sits: a target built at run time reaches the home from
-		// /tmp as easily (review F1: python os.symlink, ln -s "$(cd;pwd)").
+// not blocks, when the proof could only hold its write as UNCERTAIN: a target
+// the resolver cannot settle (a variable-expanded word, a name built by eval,
+// a name reference, a trap or a pattern, an unreadable link or copy scope). The
+// pack decides, not the install: the default and permissive packs alert, the
+// strict pack blocks (owner rule: an unknown case asks or alerts and never
+// blocks in the free default; S7 lead 2026-11-13; rel-1-0-6:GAP-0675,
+// rel-1-0-10:GAP-0013, GAP-0018, GAP-0350). A write the proof found protected
+// is a known effect and blocks in every pack, and so does a write whose command
+// names a protected file or folder (unprovenNamedProtected). A managed gateway that holds no
+// complete reading from its hook client (no header, an undecodable or rejected
+// one, a map past its bound) cannot tell an unknown call from a stripped one
+// and keeps failing closed. Only a shell command lowers: a native write or
+// patch tool keeps its enforcement. The confirm ("ask") ceiling for these calls
+// belongs to the hook answer path (S8), so they alert.
+func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText string, held unprovenWrite) bool {
+	if request.StrictPolicy || !trustedShellCommandInput(request.Input) || held.class == "" || held.evidenceGap {
 		return false
 	}
 	// Quote and escape characters split a word without changing it
 	// (authorized_''keys), so the spellings are read without them.
 	lower := strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(strings.ToLower(commandText))
-	for _, spelling := range []string{
-		"authorized_k", "administrators_authorized", "base64", "~", "$home", "${home", "%userprofile%",
-		"%homepath%", "%homedrive%", "$env:userprofile", "${env:userprofile", "$env:home", "${env:home",
-		"getfolderpath", "oldpwd", "programdata", ".ssh", ".defenseclaw", ".claude", ".codex", ".cursor",
-		strings.ToLower(filepath.ToSlash(home)), strings.ToLower(home),
-	} {
+	for _, spelling := range unprovenNamedProtected {
 		if strings.Contains(lower, spelling) {
 			return false
 		}
@@ -1730,73 +1680,17 @@ func unprovenLinkScopeMayWarn(request trustedActionRequest, commandText, home st
 	return true
 }
 
-// unprovenTargetMayWarn reports a call whose authorized-keys finding
-// warns, not blocks, when the proof could only hold its write as unknown:
-// a shell command (a native write or patch tool keeps its enforcement) in
-// the default or permissive pack that does not name an SSH key file, a
-// DefenseClaw or agent configuration folder, or carry base64 text that could
-// spell one. The strict pack keeps the block, managed or not: the pack decides,
-// not the install (S7 lead 2026-11-13: the default pack never blocks on
-// unknown; owner 2026-11-06 ruling on rel-1-0-6:GAP-0675; lead answers
-// 2026-11-12 and 2026-11-13 for rel-1-0-10:GAP-0013 and GAP-0018: a target the
-// proof cannot bound is unknown, and unknown alerts).
-// A target the proof found protected blocks in every tier. The confirm
-// ("ask") ceiling for these calls belongs to the hook answer path (S8), so
-// they alert.
-//
-// The call must name no link maker (hookpaths.CommandNamesLinkMaking): the
-// unknown may be where a link the call makes points, so a call that links
-// keeps the block. The unknown operand may sit in the home: only a command
-// that itself names a key file or a protected folder holds a write it can
-// plausibly reach. A home spelling alone (~, $HOME, the home path) does not.
-func unprovenTargetMayWarn(request trustedActionRequest, commandText, home string, held unprovenWrite) bool {
-	if request.StrictPolicy || !trustedShellCommandInput(request.Input) || held.class == "" || home == "" {
-		return false
-	}
-	if held.operand != "" && (!filepath.IsAbs(held.operand) || strings.ContainsAny(held.operand, "*?[")) {
-		// A pattern or a relative name the proof could not expand may select a
-		// protected file in the working directory (f=keyl*; echo m >> $f);
-		// only an unknown variable target or a plain absolute path is unknown.
-		return false
-	}
-	command, _ := trustedBashCommandInput(request.Input)
-	if command == "" {
-		command = request.Input.Command
-	}
-	if unprovenIndirection.MatchString(strings.ToLower(command)) {
-		// The command builds its target through eval, a name reference, a
-		// trap, source or printf -v: the unknown is of its own making, which
-		// the owner rows of GAP-0356 and GAP-0229 pin as a block.
-		return false
-	}
-	if strings.ContainsAny(command, "*?[") {
-		// A pattern in the command may select a protected file in the working
-		// directory (f=keyl*; echo m >> $f): not unknown, but possibly named.
-		return false
-	}
-	if hookpaths.CommandNamesLinkMaking(command) {
-		// The unknown may be where a link the call makes points, not where
-		// its name sits: a target built at run time reaches the home from
-		// /tmp as easily (review F1: python os.symlink, ln -s "$(cd;pwd)").
-		return false
-	}
-	// Quote and escape characters split a word without changing it
-	// (authorized_''keys), so the spellings are read without them.
-	lower := strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(strings.ToLower(commandText))
-	for _, spelling := range []string{
-		"authorized_k", "administrators_authorized", "base64", "programdata", ".ssh", ".defenseclaw", ".claude", ".codex", ".cursor",
-	} {
-		if strings.Contains(lower, spelling) {
-			return false
-		}
-	}
-	return true
+// unprovenNamedProtected are the spellings that make the harm of an unresolved
+// write KNOWN: the command names a key file, the SSH folder, the DefenseClaw
+// state or an agent config folder, or hides a name in base64. What is open is
+// only where the path goes, not what the writer means to reach, so the call
+// keeps its block in every pack (a link made in the call, then written through,
+// is the usual shape). A command that names none of them leaves the target
+// itself open: that is UNCERTAIN.
+var unprovenNamedProtected = []string{
+	"authorized_k", "administrators_authorized", "base64", "programdata",
+	".ssh", ".defenseclaw", ".claude", ".codex", ".cursor",
 }
-
-// unprovenIndirection matches the shell constructs that rebind a name at run
-// time: eval, source (and the dot), trap, a name reference (declare -n, typeset
-// -n, local -n) and printf -v.
-var unprovenIndirection = lazyregexp.New(`(?m)(?:^|[\s;&|(){}])(?:eval|source|trap)(?:[\s;&|(){}]|$)|(?:^|[;&|(){}\n])\s*\.\s|\b(?:declare|typeset|local)\s+-\w*n\b|\bprintf\s+-v`)
 
 // unprovenWrite is what the authorized-keys proof held as unknown: the
 // hookpaths.UnprovenWriteTitle class and the operand at fault, if one was.
@@ -1806,33 +1700,6 @@ type unprovenWrite struct {
 	// from its hook client (no header, an undecodable or rejected one, a map past
 	// its bound).
 	evidenceGap bool
-}
-
-// unprovenOperandNearProtected reports an operand at or under the active
-// home or sshd's Windows ProgramData folder, or one that holds either (/,
-// /home), compared without case on Windows.
-func unprovenOperandNearProtected(operand, home string) bool {
-	clean := func(path string) string {
-		path = filepath.Clean(path)
-		if runtime.GOOS == "windows" {
-			path = strings.ToLower(path)
-		}
-		return path
-	}
-	near := func(path, root string) bool {
-		path, root = clean(path), clean(root)
-		return path == root || strings.HasPrefix(path, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator)) ||
-			strings.HasPrefix(root, strings.TrimSuffix(path, string(filepath.Separator))+string(filepath.Separator))
-	}
-	if near(operand, home) {
-		return true
-	}
-	for _, path := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
-		if near(operand, filepath.Dir(path)) {
-			return true
-		}
-	}
-	return false
 }
 
 // sshControlFileTitlePrefix opens the title of a block whose only SSH target
