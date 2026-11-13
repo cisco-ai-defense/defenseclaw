@@ -60,6 +60,9 @@ type RuntimeAsset struct {
 	Files []AttachedFile
 	// Server is set for kind mcp.
 	Server *MCPServer
+	// Ambiguous is set for an MCP config whose keys differ only by case
+	// (GAP-0176): the asset is blocked whatever the admission rules say.
+	Ambiguous string
 }
 
 // RuntimeDecision is the answer for the hook route.
@@ -196,6 +199,13 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 			res = failedScan(r.Skill.Name(), a.Name, err)
 		}
 	case config.AdmissionTypeMCP:
+		if a.Ambiguous != "" {
+			// GAP-0176: the agent and the scan read different servers.
+			res = &scanner.ScanResult{Scanner: ConfigScannerName, Target: a.Name, Timestamp: r.now().UTC()}
+			res.Findings = append(res.Findings, ambiguousFinding(a.Path, errors.New(a.Ambiguous)))
+			return &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Result: res, Action: "block",
+				Reason: "the MCP config has keys that differ only by case, so the servers it starts cannot be checked"}, nil
+		}
 		if a.Server == nil {
 			return nil, errors.New("runtime scan: no MCP server definition")
 		}
@@ -454,6 +464,8 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 			servers, perr = ParseMCPConfig(target, []byte(text))
 		}
 		switch {
+		case wholeFile && errors.Is(perr, ErrMCPConfigAmbiguous):
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: path.Base(target), Path: target, Files: serverFiles(attached), Ambiguous: perr.Error()})
 		case wholeFile && perr == nil:
 			for _, s := range servers {
 				s := s
@@ -465,8 +477,10 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 	}
 	// MCP servers added by "claude mcp add" / "codex mcp add" (add-json too).
 	if command != "" && mcpAddJSONRE.MatchString(command) {
-		s := parseMCPAddJSON(command)
-		if s != nil {
+		s, amb := parseMCPAddJSON(command)
+		if amb != nil {
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: "mcp add-json", Path: "mcp add-json", Files: serverFiles(attached), Ambiguous: amb.Error()})
+		} else if s != nil {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: "mcp add-json", Server: s, Files: serverFiles(attached)})
 		} else {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: "mcp add-json", Path: "mcp add-json", Files: serverFiles(attached)})
@@ -486,6 +500,10 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 			continue
 		}
 		servers, err := ParseMCPConfig(f.Path, f.Content)
+		if errors.Is(err, ErrMCPConfigAmbiguous) {
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: path.Base(f.Path), Path: f.Path, Files: serverFiles(attached), Ambiguous: err.Error()})
+			continue
+		}
 		if err != nil || f.Truncated {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: path.Base(f.Path), Path: f.Path, Files: serverFiles(attached)})
 			continue
@@ -582,16 +600,21 @@ func parseMCPAddCommand(cmd string) *MCPServer {
 }
 
 // parseMCPAddJSON reads "claude mcp add-json [flags] <name> '<json>'".
-func parseMCPAddJSON(cmd string) *MCPServer {
+// A server object with keys that differ only by case is returned as an
+// ErrMCPConfigAmbiguous error (GAP-0176): the CLI reads the exact keys.
+func parseMCPAddJSON(cmd string) (*MCPServer, error) {
 	loc := mcpAddJSONRE.FindStringIndex(cmd)
 	rest := cmd[loc[1]:]
 	i, j := strings.Index(rest, "{"), strings.LastIndex(rest, "}")
 	if i < 0 || j < i {
-		return nil
+		return nil, nil
+	}
+	if err := checkMCPServerKeys([]byte(rest[i : j+1])); err != nil {
+		return nil, err
 	}
 	var raw rawServer
 	if json.Unmarshal([]byte(rest[i:j+1]), &raw) != nil {
-		return nil
+		return nil, nil
 	}
 	var name string
 	for _, f := range strings.Fields(rest[:i]) {
@@ -601,8 +624,8 @@ func parseMCPAddJSON(cmd string) *MCPServer {
 		}
 	}
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 	s := raw.server(name, "mcp add-json", "")
-	return &s
+	return &s, nil
 }
