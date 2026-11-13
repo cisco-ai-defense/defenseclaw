@@ -232,7 +232,7 @@ func normalizeStage(stage string, atespaces []string) (string, []string, error) 
 		return "", nil, refuse(CodeStageInvalid, "stage", "%q is not a stage name (lower-case letters, digits and '-')", stage)
 	}
 	if stage == StageAll {
-		if len(atespaces) > 0 && !(len(atespaces) == 1 && atespaces[0] == "*") {
+		if len(atespaces) > 0 && (len(atespaces) != 1 || atespaces[0] != "*") {
 			return "", nil, refuse(CodeStageInvalid, "atespaces", "the all stage covers every atespace; name no atespaces")
 		}
 		return stage, []string{"*"}, nil

@@ -10,7 +10,6 @@ package kit
 import (
 	"bytes"
 	"encoding/json"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -20,9 +19,6 @@ import (
 
 func wave2Overlay(t *testing.T, name string) Overlay {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("sandbox artifacts render on Linux and macOS hosts")
-	}
 	h, ok := harness.Get(name)
 	if !ok {
 		t.Fatalf("no harness %s", name)

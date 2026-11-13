@@ -437,7 +437,7 @@ func (p *pollAttachment) touch() {
 
 func (p *pollAttachment) end() {
 	p.once.Do(func() {
-		p.Attachment.Close()
+		p.Close()
 		close(p.done)
 	})
 }
