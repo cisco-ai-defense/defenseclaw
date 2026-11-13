@@ -108,6 +108,8 @@ func PowerShellFetchedContentExecuted(source string, dialect Dialect) (found boo
 	analysis := &cradleAnalysis{
 		fetched: map[string]bool{},
 		clients: map[string]bool{},
+		files:   map[string]bool{},
+		strs:    map[string]string{},
 	}
 	for _, statement := range script.Statements {
 		if analysis.statementRuns(statement) {
@@ -123,7 +125,9 @@ func PowerShellFetchedContentExecuted(source string, dialect Dialect) (found boo
 // screen, so the encoding switch passes it on.
 func mayHoldCradle(source string) bool {
 	lower := strings.ToLower(source)
-	for _, word := range []string{"iex", "invoke-expression", "scriptblock", "-e", "/c"} {
+	for _, word := range []string{"iex", "invoke-expression", "scriptblock", "-e", "/c",
+		"outfile", "-o", "destination", "downloadfile", "certutil", "bitsadmin", "urlcache", "-file",
+		"command", "powershell", "pwsh"} {
 		if strings.Contains(lower, word) {
 			return true
 		}
@@ -136,6 +140,10 @@ type cradleAnalysis struct {
 	// content and a web client object.
 	fetched map[string]bool
 	clients map[string]bool
+	// files are the normalized paths a top-level statement downloaded to a
+	// literal destination; strs are the variables bound to a literal string.
+	files map[string]bool
+	strs  map[string]string
 }
 
 // statementRuns reports a top-level statement that runs fetched content, and
@@ -148,14 +156,275 @@ func (a *cradleAnalysis) statementRuns(statement psparse.Statement) bool {
 			a.fetched[name] = typed.Op == "=" && a.statementFetched(typed.RHS) ||
 				typed.Op != "=" && a.fetched[name]
 			a.clients[name] = typed.Op == "=" && a.statementIsClient(typed.RHS)
+			delete(a.strs, name)
+			if text, ok := a.statementLiteral(typed.RHS); ok && typed.Op == "=" {
+				a.strs[name] = text
+			}
 		}
+		a.recordDownloads(typed.RHS)
 		return runs
 	case *psparse.Pipeline:
-		return a.pipelineRuns(typed)
+		runs := a.pipelineRuns(typed)
+		a.recordDownloads(typed)
+		return runs
 	case *psparse.ExprStatement:
-		return a.expressionRuns(typed.Expr)
+		runs := a.expressionRuns(typed.Expr)
+		a.recordDownloads(typed)
+		return runs
 	}
 	return false
+}
+
+// statementLiteral is the string a statement that is one literal evaluates to.
+func (a *cradleAnalysis) statementLiteral(statement psparse.Statement) (string, bool) {
+	switch typed := statement.(type) {
+	case *psparse.ExprStatement:
+		return a.literalOf(typed.Expr)
+	case *psparse.Pipeline:
+		if len(typed.Elements) == 1 {
+			if expression, ok := typed.Elements[0].(*psparse.ExprStatement); ok {
+				return a.literalOf(expression.Expr)
+			}
+		}
+	}
+	return "", false
+}
+
+// literalOf is the static text of an expression: a string literal or a
+// variable bound to one.
+func (a *cradleAnalysis) literalOf(expression psparse.Expr) (string, bool) {
+	if expression == nil {
+		return "", false
+	}
+	if variable, ok := expression.(*psparse.Variable); ok {
+		text, bound := a.strs[strings.ToLower(variable.Name)]
+		return text, bound
+	}
+	return psparse.LiteralString(expression)
+}
+
+// cradlePath is the comparison form of a file path: separators unified, case
+// folded, quotes and a leading current-directory mark removed.
+func cradlePath(text string) string {
+	text = strings.ToLower(strings.Trim(strings.TrimSpace(text), `"'`))
+	text = strings.ReplaceAll(text, `\`, "/")
+	for strings.HasPrefix(text, "./") {
+		text = text[2:]
+	}
+	return text
+}
+
+func (a *cradleAnalysis) literalPath(expression psparse.Expr) (string, bool) {
+	text, ok := a.literalOf(expression)
+	if !ok {
+		return "", false
+	}
+	path := cradlePath(text)
+	return path, path != ""
+}
+
+// cradleWord is one word of a command: a parameter (with its colon value) or
+// a positional value.
+type cradleWord struct {
+	param bool
+	text  string // lower case; for a positional word its literal text, if any
+	value psparse.Expr
+}
+
+func cradleWords(command *psparse.Command) []cradleWord {
+	var words []cradleWord
+	for _, element := range command.Elements {
+		switch typed := element.(type) {
+		case *psparse.Parameter:
+			words = append(words, cradleWord{param: true, text: strings.ToLower(typed.Name), value: typed.Colon})
+		case *psparse.Arg:
+			text, _ := psparse.LiteralString(typed.Value)
+			words = append(words, cradleWord{text: strings.ToLower(text), value: typed.Value})
+		case psparse.Expr:
+			text, _ := psparse.LiteralString(typed)
+			words = append(words, cradleWord{text: strings.ToLower(text), value: typed})
+		}
+	}
+	return words
+}
+
+// cradleParameterValue is the value of the first parameter that match accepts:
+// its colon value, or the positional word after it.
+func cradleParameterValue(words []cradleWord, match func(name string) bool) (psparse.Expr, bool) {
+	for index, word := range words {
+		if !word.param || !match(word.text) {
+			continue
+		}
+		if word.value != nil {
+			return word.value, true
+		}
+		if index+1 < len(words) && !words[index+1].param {
+			return words[index+1].value, true
+		}
+	}
+	return nil, false
+}
+
+// cradleHasWord reports a word spelled name with or without a leading - or /.
+func cradleHasWord(words []cradleWord, names ...string) bool {
+	for _, word := range words {
+		text := strings.TrimLeft(word.text, "-/")
+		for _, name := range names {
+			if text == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cradleLastPositional(words []cradleWord) (psparse.Expr, bool) {
+	for index := len(words) - 1; index >= 0; index-- {
+		if !words[index].param && words[index].value != nil {
+			return words[index].value, true
+		}
+	}
+	return nil, false
+}
+
+// commandDownloadDestination is the literal file a command's transfer writes.
+func (a *cradleAnalysis) commandDownloadDestination(command *psparse.Command) (string, bool) {
+	name, ok := cradleCommandName(command)
+	if !ok {
+		return "", false
+	}
+	words := cradleWords(command)
+	var destination psparse.Expr
+	switch {
+	case cradleFetchCmdlets[name]:
+		destination, ok = cradleParameterValue(words, func(parameter string) bool {
+			return parameter == "o" || parameter == "output" ||
+				len(parameter) >= 4 && strings.HasPrefix("outfile", parameter)
+		})
+	case name == "start-bitstransfer":
+		destination, ok = cradleParameterValue(words, func(parameter string) bool {
+			return len(parameter) >= 4 && strings.HasPrefix("destination", parameter)
+		})
+	case name == "bitsadmin" || name == "bitsadmin.exe":
+		if ok = cradleHasWord(words, "transfer"); ok {
+			destination, ok = cradleLastPositional(words)
+		}
+	case name == "certutil" || name == "certutil.exe":
+		if ok = cradleHasWord(words, "urlcache", "verifyctl"); ok {
+			destination, ok = cradleLastPositional(words)
+		}
+	default:
+		ok = false
+	}
+	if !ok {
+		return "", false
+	}
+	return a.literalPath(destination)
+}
+
+// recordDownloads notes the literal files the statement's transfers write.
+func (a *cradleAnalysis) recordDownloads(statement psparse.Statement) {
+	var elements []psparse.PipelineElement
+	switch typed := statement.(type) {
+	case *psparse.Pipeline:
+		elements = typed.Elements
+	case *psparse.ExprStatement:
+		a.recordExpressionDownload(typed.Expr)
+		return
+	case *psparse.Command:
+		elements = []psparse.PipelineElement{typed}
+	}
+	for _, element := range elements {
+		switch stage := element.(type) {
+		case *psparse.Command:
+			if path, ok := a.commandDownloadDestination(stage); ok {
+				a.files[path] = true
+			}
+		case *psparse.ExprStatement:
+			a.recordExpressionDownload(stage.Expr)
+		}
+	}
+}
+
+// recordExpressionDownload notes <client>.DownloadFile(<url>, <file>).
+func (a *cradleAnalysis) recordExpressionDownload(expression psparse.Expr) {
+	invoke, ok := expression.(*psparse.Invoke)
+	if !ok || !cradleFileDownloadMethods[strings.ToLower(invoke.Name)] ||
+		!a.expressionIsClient(invoke.Target) || len(invoke.Args) < 2 {
+		return
+	}
+	if path, ok := a.literalPath(invoke.Args[1]); ok {
+		a.files[path] = true
+	}
+}
+
+// opensDownloadedFile reports a command that is, or runs through an operand,
+// a file this call downloaded.
+func (a *cradleAnalysis) opensDownloadedFile(command *psparse.Command) bool {
+	if len(a.files) == 0 {
+		return false
+	}
+	if command.Name != nil {
+		if path, ok := a.literalPath(command.Name); ok && a.files[path] {
+			return true
+		}
+	}
+	name, named := cradleCommandName(command)
+	if !named || !cradleFileRunners[name] {
+		return false
+	}
+	for _, word := range cradleWords(command) {
+		if word.value == nil {
+			continue
+		}
+		if path, ok := a.literalPath(word.value); ok && a.files[path] {
+			return true
+		}
+	}
+	return false
+}
+
+// readsDownloadedFile reports a content reader (Get-Content and aliases) of a
+// file this call downloaded.
+func (a *cradleAnalysis) readsDownloadedFile(command *psparse.Command) bool {
+	name, named := cradleCommandName(command)
+	if len(a.files) == 0 || !named || !cradleContentReaders[name] {
+		return false
+	}
+	for _, word := range cradleWords(command) {
+		if word.value == nil {
+			continue
+		}
+		if path, ok := a.literalPath(word.value); ok && a.files[path] {
+			return true
+		}
+	}
+	return false
+}
+
+// launcherRunsFetched reports a PowerShell child that is handed fetched content
+// (as -Command, -EncodedCommand or -File text), or that reads fetched content
+// from stdin: the pipeline feeds it (flow) and no switch gives it a script of
+// its own.
+func (a *cradleAnalysis) launcherRunsFetched(command *psparse.Command, flow bool) bool {
+	words := cradleWords(command)
+	scriptSwitch, stdinMark := false, false
+	for _, word := range words {
+		if word.param {
+			switch {
+			case word.text == "":
+			case strings.HasPrefix("command", word.text), strings.HasPrefix("encodedcommand", word.text),
+				strings.HasPrefix("file", word.text):
+				scriptSwitch = true
+			}
+		} else if word.text == "-" {
+			stdinMark = true
+		}
+		if word.value != nil && a.expressionFetched(word.value) {
+			return true
+		}
+	}
+	return flow && (!scriptSwitch || stdinMark)
 }
 
 func (a *cradleAnalysis) pipelineRuns(pipeline *psparse.Pipeline) bool {
@@ -219,6 +488,12 @@ func (a *cradleAnalysis) commandRuns(command *psparse.Command, flow bool) bool {
 			}
 		}
 		return false
+	}
+	if named && cradleLaunchers[name] && a.launcherRunsFetched(command, flow) {
+		return true
+	}
+	if a.opensDownloadedFile(command) {
+		return true
 	}
 	if command.InvokeOp == "&" || command.InvokeOp == "." {
 		// & ([scriptblock]::Create(<fetched>)) runs the built script block.
@@ -295,6 +570,9 @@ func (a *cradleAnalysis) statementFetched(statement psparse.Statement) bool {
 func (a *cradleAnalysis) commandFetched(command *psparse.Command) bool {
 	if name, ok := cradleCommandName(command); ok && cradleFetchCommand(name) {
 		return !cradleWritesFile(command)
+	}
+	if a.readsDownloadedFile(command) {
+		return true
 	}
 	if command.Name != nil && a.expressionFetched(command.Name) {
 		return true
@@ -447,14 +725,58 @@ func cradleCommandName(command *psparse.Command) (string, bool) {
 	return name, true
 }
 
-func cradleFetchCommand(name string) bool {
-	switch name {
-	case "invoke-webrequest", "iwr", "invoke-restmethod", "irm",
-		"curl", "curl.exe", "wget", "wget.exe":
-		return true
+// The surface of fetching and running content, as ordinary documented names.
+// Nothing here is payload text: a fetch effect (a web request, a client
+// download, a BITS or certutil transfer) whose result reaches an execution
+// sink (Invoke-Expression, a built script block, a PowerShell child, a program
+// that opens the file just downloaded) is the cradle, whatever it fetches.
+var (
+	// cradleFetchCmdlets return the body, or write it to the file given by
+	// -OutFile (curl and wget: -o / --output).
+	cradleFetchCmdlets = map[string]bool{
+		"invoke-webrequest": true, "iwr": true, "invoke-restmethod": true, "irm": true,
+		"curl": true, "curl.exe": true, "wget": true, "wget.exe": true,
 	}
-	return false
-}
+	// cradleFileTransferPrograms only ever write a file (their destination is
+	// found per program in cradleDownloadDestination).
+	cradleFileTransferPrograms = map[string]bool{
+		"start-bitstransfer": true, "bitsadmin": true, "bitsadmin.exe": true,
+		"certutil": true, "certutil.exe": true,
+	}
+	// cradleDownloadMethods of a web client return the content;
+	// cradleFileDownloadMethods write it to the file named by the second
+	// argument.
+	cradleDownloadMethods = map[string]bool{
+		"downloadstring": true, "downloaddata": true, "openread": true,
+		"downloadstringtaskasync": true, "downloaddatataskasync": true,
+		"getstringasync": true, "getbytearrayasync": true, "getstreamasync": true,
+	}
+	cradleFileDownloadMethods = map[string]bool{
+		"downloadfile": true, "downloadfileasync": true, "downloadfiletaskasync": true,
+	}
+	// cradleLaunchers are PowerShell hosts: they run what -Command,
+	// -EncodedCommand or -File names, or what arrives on stdin.
+	cradleLaunchers = map[string]bool{
+		"powershell": true, "powershell.exe": true, "pwsh": true, "pwsh.exe": true,
+	}
+	// cradleFileRunners open a file operand and run it: the call operators are
+	// handled structurally, these are commands that take the file as an operand.
+	cradleFileRunners = map[string]bool{
+		"start-process": true, "saps": true, "start": true, "invoke-item": true, "ii": true,
+		"cmd": true, "cmd.exe": true, "powershell": true, "powershell.exe": true,
+		"pwsh": true, "pwsh.exe": true, "wscript": true, "wscript.exe": true,
+		"cscript": true, "cscript.exe": true, "mshta": true, "mshta.exe": true,
+		"rundll32": true, "rundll32.exe": true, "regsvr32": true, "regsvr32.exe": true,
+		"msiexec": true, "msiexec.exe": true,
+	}
+	// cradleContentReaders read a file's text; the text of a file just
+	// downloaded is fetched content.
+	cradleContentReaders = map[string]bool{
+		"get-content": true, "gc": true, "cat": true, "type": true,
+	}
+)
+
+func cradleFetchCommand(name string) bool { return cradleFetchCmdlets[name] }
 
 // cradleWritesFile reports a fetch whose body goes to a file, not to the
 // output (-OutFile, curl -o/--output).
@@ -472,15 +794,7 @@ func cradleWritesFile(command *psparse.Command) bool {
 	return false
 }
 
-func cradleDownloadMethod(name string) bool {
-	switch strings.ToLower(name) {
-	case "downloadstring", "downloaddata", "openread",
-		"downloadstringtaskasync", "downloaddatataskasync",
-		"getstringasync", "getbytearrayasync", "getstreamasync":
-		return true
-	}
-	return false
-}
+func cradleDownloadMethod(name string) bool { return cradleDownloadMethods[strings.ToLower(name)] }
 
 func cradleClientType(name string) bool {
 	lower := strings.ToLower(name)
