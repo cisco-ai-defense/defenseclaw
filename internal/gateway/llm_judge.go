@@ -407,6 +407,9 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content, toolName s
 	if !runInjection && !runPII && !runExfil {
 		return allowVerdict("llm-judge")
 	}
+	if toolResultJudgeCall(ctx, direction) {
+		ctx = withToolResultJudgeHeader(ctx, j.toolResultJudgeHeader(ctx, toolName))
+	}
 
 	// Apply pre-judge strips from the rule pack to remove known metadata
 	// (e.g. "cli" sender name) before sending content to the LLM.
@@ -522,6 +525,13 @@ Respond ONLY with a JSON object in this exact format:
   "Semantic Manipulation": {"reasoning": "...", "label": false, "signal_strength": "weak_signal"},
   "Token Exploitation": {"reasoning": "...", "label": false, "signal_strength": "weak_signal"}
 }`
+
+// toolResultPIIScope turns the PII judge's question for a tool's output from
+// "is there personal data?" (true for nearly every mailbox, contact list and
+// booking record the user asked for) into "is there personal data beyond what
+// the request asked for?" (rel-1-0-10:GAP-0171). Without a known request it
+// asks the original question.
+const toolResultPIIScope = `This sample is a tool's output, fetched for the user's request in the CONTEXT FROM DEFENSECLAW block below. Personal data the request asked for (the user's own inbox, contacts, calendar, account, or the record they looked up) is the expected content of the output: label it false. Label a category true only when the output carries that kind of data beyond the request: other people's records in bulk that the request did not ask for, credentials, secrets or government identifiers, or data about a different subject than the request. When user_request is unknown, judge the output as you would without this note.`
 
 // wrapJudgeSample wraps user-supplied content in delimiter tags so the
 // judge treats it as a data sample. The delimiter is intentionally
@@ -1278,6 +1288,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	if jc := j.rp.PIIJudge(); jc != nil && jc.SystemPrompt != "" {
 		prompt = jc.SystemPrompt
 	}
+	prompt = toolResultJudgeSystem(ctx, prompt, toolResultPIIScope)
 
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: calling provider (dir=%s, content_len=%d)\n", direction, len(content))
 

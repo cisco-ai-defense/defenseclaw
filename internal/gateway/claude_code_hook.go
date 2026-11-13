@@ -910,6 +910,8 @@ func (a *APIServer) inspectClaudeCodeToolResult(
 			j.ObserveToolResult(ctx, content) // decision_model.history_tool_results only
 		}
 	}
+	// The tool-result judges get the call this output answers (judge_packet.go).
+	ctx = withToolResultCall(ctx, req.ToolName, req.ToolInput)
 	if sandboxToolResultUntrusted(ctx) || req.HookEventName != "PostToolUse" || req.ToolResponse == nil ||
 		req.ToolCalls != nil || strings.TrimSpace(req.Error) != "" ||
 		strings.TrimSpace(req.ErrorDetails) != "" || strings.TrimSpace(req.ToolName) == "" {

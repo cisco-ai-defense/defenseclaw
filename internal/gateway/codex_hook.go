@@ -1017,6 +1017,8 @@ func (a *APIServer) inspectCodexToolResult(
 	for _, j := range a.hookSessionJudges(ctx) {
 		j.ObserveToolResult(ctx, content) // decision_model.history_tool_results only
 	}
+	// The tool-result judges get the call this output answers (judge_packet.go).
+	ctx = withToolResultCall(ctx, req.ToolName, req.ToolInput)
 	if sandboxToolResultUntrusted(ctx) {
 		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, ruleContentScopeUntrusted))
 	}
