@@ -79,6 +79,27 @@ func (r urlRule) matchesPath(canonical string) bool {
 	return pathHasPrefix(p, r.foldedPrefix) || (strings.HasSuffix(r.foldedPrefix, "/") && p+"/" == r.foldedPrefix)
 }
 
+// rulesNameAnotherMethod reports whether a URL rule covering the
+// request's host and path names a method other than POST, so a JSON POST
+// whose body names that method (_method) is held for its body (GAP-0046).
+func (p *Policy) rulesNameAnotherMethod(req *Request) bool {
+	reqPath, pathErr := canonicalPath(pathOnly(req.Path))
+	for _, r := range p.urlRules {
+		if _, ok := r.hosts.match(req.Host); !ok {
+			continue
+		}
+		if r.pathPrefix != "" && pathErr == nil && !r.matchesPath(reqPath) {
+			continue
+		}
+		for m := range r.methods {
+			if m != "POST" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // rulesOnPath reports whether a URL rule (deny or ask) covers the
 // request's host and path under some method, so a method its body names
 // could change the verdict (GAP-0046). An ambiguous path counts where a

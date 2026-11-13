@@ -17,6 +17,8 @@
 package extproc
 
 import (
+	"bytes"
+	"encoding/json"
 	"mime"
 	"net/url"
 	"slices"
@@ -42,7 +44,13 @@ import (
 //     Rails, Sinatra and Hanami; Symfony and Laravel; Spring; gorilla;
 //     ASP.NET Core's form field; django-method-override). Rack reads a POST
 //     with no media type as a form, so a body without a Content-Type
-//     counts (see bodyOverridable).
+//     counts (see bodyOverridable);
+//   - the top-level _method (or _HttpMethod) of a JSON POST body: Laravel
+//     swaps the request bag for a JSON body, and Symfony's getMethod reads
+//     _method there; Express method-override's documented req.body getter
+//     reads it after express.json(). Only where a deny or ask rule names a
+//     method other than POST (see jsonOverridable), so other JSON API POSTs
+//     are never held.
 //
 // Parameter keys are read as the most lenient of them does: percent and
 // "+" decoding, any case, PHP's key rules (leading spaces dropped, "." and
@@ -183,6 +191,55 @@ func bodyOverridable(req *Request) bool {
 	return false
 }
 
+// jsonBody is a POST with a body whose Content-Type (any line or list item,
+// any case or parameters) is application/json or a +json type.
+func jsonBody(req *Request) bool {
+	if !strings.EqualFold(req.Method, "POST") || req.EndOfStream {
+		return false
+	}
+	for _, mt := range mediaTypes(req) {
+		if mt == "application/json" || strings.HasSuffix(mt, "+json") {
+			return true
+		}
+	}
+	return false
+}
+
+// jsonOverrideMethods is every value of a top-level override key
+// (_method, _HttpMethod, in any case) of a JSON object, duplicates
+// included; a string, or each string of an array. Anything that is not a
+// JSON object names none.
+func jsonOverrideMethods(b []byte) []string {
+	dec := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(b)))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil
+	}
+	var out []string
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return out
+		}
+		key, _ := tok.(string)
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return out
+		}
+		if !slices.Contains(methodOverrideParams, strings.ToLower(strings.TrimSpace(key))) {
+			continue
+		}
+		var one string
+		var many []string
+		switch {
+		case json.Unmarshal(raw, &one) == nil:
+			out = append(out, one)
+		case json.Unmarshal(raw, &many) == nil:
+			out = append(out, many...)
+		}
+	}
+	return out
+}
+
 // multipartBody is a body the callout never buffers (D9), so its parts are
 // never read.
 func multipartBody(req *Request) bool {
@@ -200,7 +257,7 @@ const (
 	whyNoBody    = "body_not_received"
 )
 
-// bodyMethods is every method a form body names in _method, read the ways
+// bodyMethods is every method a form or JSON body names in _method, read the ways
 // an origin may read it: as sent (an origin that ignores Content-Encoding),
 // decoded (gzip, deflate), and in each charset a Content-Type line declares
 // (Tomcat, ASP.NET and Spring decode a form in its charset: UTF-16 and
@@ -239,6 +296,7 @@ func bodyMethods(raw []byte, req *Request, max int64) (methods []string, why str
 	}
 	for _, b := range readings {
 		methods = appendMethods(methods, strings.Join(overrideParams(string(b)), ","))
+		methods = appendMethods(methods, strings.Join(jsonOverrideMethods(b), ","))
 	}
 	return methods, why
 }
