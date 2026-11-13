@@ -235,6 +235,12 @@ func main() {
 	judgeTimeout := flag.Float64("judge-timeout", 0, "hook judge timeout seconds (0: product default)")
 	judgeParallel := flag.Int("judge-max-parallel", 16, "guardrail.judge.max_parallel; the local proxy stands in for a remote endpoint, which the product does not serialize (a loopback judge URL defaults to 1)")
 	dmHook := flag.Bool("dm-hook", false, "decision model answers alone for the connector (cascade 2)")
+	dmHookConnectors := flag.String("dm-hook-connectors", "claudecode", "connectors the decision model answers for with -dm-hook (decision_model.hook_connectors; names separated by , or +)")
+	dmAllowAt := flag.Float64("dm-allow-threshold", 0, "decision_model.allow_threshold (0: product default 0.30)")
+	dmBlockAt := flag.Float64("dm-block-threshold", 0, "decision_model.block_threshold (0: product default 0.75)")
+	dmOnBlock := flag.String("dm-on-confident-block", "", "decision_model.on_confident_block: escalate or decide (empty: product default)")
+	dmAllowCorpus := flag.String("dm-allow-corpus", "", "corpora that may be sent to an EXTERNAL decision model endpoint (names separated by , or +); a loopback endpoint (the stub) needs none; the run is refused when -corpus-name is not listed")
+	corpusName := flag.String("corpus-name", "", "name of the corpus in the gate registry (s7-gate passes it); used by -dm-allow-corpus")
 	layers := flag.String("layers", "", "probe layers per call: dm,judge")
 	connectorFlag := flag.String("connector", "claudecode", "claudecode (legacy: every case as a Claude Code call) | auto (each case to the hook handler of its strata.provider connector, with that connector's payload shape) | a connector name")
 	scratch := flag.String("scratch-dir", "", "parent directory of the run's scratch dir (default: the system temp dir)")
@@ -248,6 +254,14 @@ func main() {
 	flag.Parse()
 	if *surface != "hook" && *surface != "prompt" && *surface != "tool-result" {
 		fmt.Fprintln(os.Stderr, "-surface must be hook, prompt or tool-result")
+		os.Exit(2)
+	}
+	if err := dmCorpusAllowed(*dmURL, *corpusName, *dmAllowCorpus); err != nil {
+		fmt.Fprintln(os.Stderr, "[s7bench] FATAL:", err)
+		os.Exit(2)
+	}
+	if *dmURL != "" && !dmLoopback(*dmURL) && !dmKeyPresent() {
+		fmt.Fprintln(os.Stderr, "[s7bench] FATAL: an external decision model endpoint needs DEFENSECLAW_DECISION_MODEL_KEY in the environment (s7gate --dm-key-file)")
 		os.Exit(2)
 	}
 	if *corpus == "" || *out == "" || *policyDir == "" {
@@ -351,10 +365,12 @@ func main() {
 		cfg.Guardrail.Judge.LLM = config.LLMConfig{Model: "openai/" + *judgeModel, Provider: "openai", BaseURL: *judgeURL, APIKey: "s7-local-proxy"}
 	}
 	if *dmURL != "" {
-		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: *dmURL, Timeout: *dmTimeout}
+		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: *dmURL, Timeout: *dmTimeout,
+			AllowThreshold: *dmAllowAt, BlockThreshold: *dmBlockAt, OnConfidentBlock: *dmOnBlock}
 		if *dmHook {
-			cfg.DecisionModel.HookConnectors = []string{"claudecode"}
+			cfg.DecisionModel.HookConnectors = strings.FieldsFunc(*dmHookConnectors, func(r rune) bool { return r == ',' || r == '+' })
 		}
+		fmt.Fprintf(os.Stderr, "[s7bench] decision model: %s external=%v corpus=%s hook_connectors=%v key=%v\n", *dmModel, !dmLoopback(*dmURL), *corpusName, cfg.DecisionModel.HookConnectors, dmKeyPresent())
 	}
 	var err2 error
 	engine, err2 = gateway.S7NewEngineMulti(cfg, "claudecode", extra)
