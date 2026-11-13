@@ -591,3 +591,26 @@ func TestPerDeviceBounds(t *testing.T) {
 		t.Fatal("open keys a device may ask about are bounded")
 	}
 }
+
+// A repeated row is stored once (verify 3, P2-5), and an honest long-running
+// writer with many closed days is not refused.
+func TestRepeatedRowsAreMerged(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	cred, a := f.device([]string{aliceSID}, nil, 0)
+	key := userKey(cred, "daily", 0)
+	var rows []routingadmin.SeedRow
+	for i := 1; i <= 2000; i++ {
+		rows = append(rows, routingadmin.SeedRow{Day: today(), Key: key, USD: float64(i) / 1000})
+	}
+	for d := 2; d < 40; d++ {
+		rows = append(rows, routingadmin.SeedRow{Day: time.Now().UTC().AddDate(0, 0, -d).Format(time.DateOnly), Key: key, USD: 1})
+	}
+	if err := a.Push(ctx, "e1", rows); err != nil {
+		t.Fatal(err)
+	}
+	report, _ := f.store.Report(ctx, "2000-01-01", true)
+	if len(report) != 1 || report[0].USD != 2 {
+		t.Fatalf("one row, the largest value, open days only: %+v", report)
+	}
+}

@@ -1894,6 +1894,9 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	if judge == nil {
 		return nil
 	}
+	if strings.EqualFold(strategyDirection, "tool_call") && hookJudgeSkipsNoEffectCall(connector, toolName, current) {
+		return nil
+	}
 
 	switch strategy {
 	case "judge_first":
@@ -2049,6 +2052,24 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		hookJudgeAnswerWindow, connector, strategyDirection)
 	fallback(judgeFallbackLate)
 	return nil
+}
+
+// claudeCodeNoEffectTools are Claude Code built-ins whose call acts on nothing
+// outside the agent: ToolSearch loads tool definitions and TodoWrite edits the
+// agent's own task list. The judge read the tool names in a ToolSearch query
+// ("select:mcp__gmail__search_messages,...") as data access and blocked 17 of
+// 127 benign ToolSearch calls on the s3 corpus (Gemma 3 27B judge).
+var claudeCodeNoEffectTools = map[string]bool{"ToolSearch": true, "TodoWrite": true}
+
+// hookJudgeSkipsNoEffectCall reports a Claude Code no-effect built-in the
+// rules did not flag: the judge and the decision model are not asked, and the
+// call stays out of the session history later samples carry. Only Claude
+// Code: other connectors pass MCP tool names without a prefix (Cursor's
+// beforeMCPExecution), where a TodoWrite tool can write to a remote service.
+// A flagged call is judged as before, so the rule floor and the escalated
+// fail-closed refusal hold.
+func hookJudgeSkipsNoEffectCall(connector, toolName string, current *ToolInspectVerdict) bool {
+	return config.NormalizeConnectorName(connector) == "claudecode" && claudeCodeNoEffectTools[toolName] && !rulesFlagged(current)
 }
 
 // regexJudgeLocalVerdictDecisive reports whether the rule/AID verdict settles

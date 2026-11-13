@@ -206,6 +206,11 @@ func init() {
 	budgetStoreRevokeCmd.Flags().StringVar(&revokeDropFrom, "drop-spend-from", "", "also delete the device's spend from this UTC day on (YYYY-MM-DD; forged spend)")
 	budgetStoreReportCmd.Flags().BoolVar(&reportByDevice, "by-device", false, "one row per device and key")
 	budgetStoreReportCmd.Flags().StringVar(&reportSince, "since", "", "first UTC day (YYYY-MM-DD; default 30 days ago)")
+	// The store host and the admin workstation run no gateway: the commands
+	// read the --config they are given, never the daemon bootstrap.
+	for _, c := range []*cobra.Command{budgetStoreServeCmd, budgetStoreIssueCmd, budgetStoreAddCmd, budgetStoreRevokeCmd, budgetStoreListCmd, budgetStoreReportCmd} {
+		c.Annotations = map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"}
+	}
 	budgetStoreDeviceCmd.AddCommand(budgetStoreIssueCmd, budgetStoreAddCmd, budgetStoreRevokeCmd, budgetStoreListCmd)
 	budgetStoreCmd.AddCommand(budgetStoreServeCmd, budgetStoreDeviceCmd, budgetStoreReportCmd)
 	rootCmd.AddCommand(budgetStoreCmd)

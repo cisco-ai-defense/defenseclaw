@@ -632,13 +632,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 	}
 
 	const kind = "injection"
-	const scannerMetric = "llm-judge-injection"
 	maxTok := 1024
-	if c := judgeVerdictCache(); c != nil {
-		if snap, ok := c.Get(ctx, kind, j.model, "prompt", content, scannerMetric, "none"); ok {
-			return scanVerdictFromSnapshot(snap)
-		}
-	}
 
 	prompt := injectionSystemPrompt
 	if jc := j.rp.InjectionJudge(); jc != nil && jc.SystemPrompt != "" {
@@ -718,9 +712,6 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 	emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
 		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), InputContent: content})
-	if c := judgeVerdictCache(); c != nil {
-		c.Put(kind, j.model, "prompt", content, verdictSnapshotFrom(verdict))
-	}
 	return verdict
 }
 
@@ -758,41 +749,6 @@ var retainJudgeBodies atomic.Bool
 // is loaded. Safe to call multiple times (e.g. on config reload).
 func SetRetainJudgeBodies(v bool) {
 	retainJudgeBodies.Store(v)
-}
-
-// verdictCache is an optional process-local TTL cache for judge results.
-var verdictCache atomic.Pointer[guardrail.VerdictCache]
-
-// SetJudgeVerdictCache wires the verdict cache. Nil disables caching.
-func SetJudgeVerdictCache(c *guardrail.VerdictCache) {
-	verdictCache.Store(c)
-}
-
-// NewJudgeVerdictCache constructs a verdict cache with canonical v8 hit/miss hooks.
-func NewJudgeVerdictCache(ttl time.Duration, runtime hookLifecycleMetricV8Runtime) *guardrail.VerdictCache {
-	return guardrail.NewVerdictCache(ttl,
-		func(ctx context.Context, scanner, verdict, ttlB string) {
-			recordJudgeCacheMetricV8(ctx, runtime, true, scanner, verdict, ttlB)
-		},
-		func(ctx context.Context, scanner, verdict, ttlB string) {
-			recordJudgeCacheMetricV8(ctx, runtime, false, scanner, verdict, ttlB)
-		},
-	)
-}
-
-func judgeVerdictCache() *guardrail.VerdictCache {
-	return verdictCache.Load()
-}
-
-// InvalidateJudgeVerdictCache bumps the cache generation so every
-// currently-held entry becomes a miss on next lookup. Called from the
-// OPA policy reload handler so a verdict rendered under the old
-// policy is never served once the policy has changed. Safe to call
-// when the cache is unset (no-op).
-func InvalidateJudgeVerdictCache() {
-	if c := verdictCache.Load(); c != nil {
-		c.Invalidate()
-	}
 }
 
 func judgeGenAISystem(model string) string {
@@ -1098,38 +1054,6 @@ func piiCategoryNames() []string {
 	}
 }
 
-func verdictSnapshotFrom(v *ScanVerdict) *guardrail.VerdictSnapshot {
-	if v == nil {
-		return nil
-	}
-	return &guardrail.VerdictSnapshot{
-		Action:         v.Action,
-		Severity:       v.Severity,
-		Reason:         v.Reason,
-		Findings:       append([]string(nil), v.Findings...),
-		EntityCount:    v.EntityCount,
-		Scanner:        v.Scanner,
-		ScannerSources: append([]string(nil), v.ScannerSources...),
-		JudgeFailed:    v.JudgeFailed,
-	}
-}
-
-func scanVerdictFromSnapshot(s *guardrail.VerdictSnapshot) *ScanVerdict {
-	if s == nil {
-		return allowVerdict("llm-judge")
-	}
-	return &ScanVerdict{
-		Action:         s.Action,
-		Severity:       s.Severity,
-		Reason:         s.Reason,
-		Findings:       append([]string(nil), s.Findings...),
-		EntityCount:    s.EntityCount,
-		Scanner:        s.Scanner,
-		ScannerSources: append([]string(nil), s.ScannerSources...),
-		JudgeFailed:    s.JudgeFailed,
-	}
-}
-
 func judgeFindingsPayload(v *ScanVerdict) []gatewaylog.Finding {
 	if v == nil || len(v.Findings) == 0 {
 		return nil
@@ -1340,14 +1264,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	}
 
 	const kind = "pii"
-	const scannerMetric = "llm-judge-pii"
 	maxTok := 1024
-	dir := string(direction)
-	if c := judgeVerdictCache(); c != nil {
-		if snap, ok := c.Get(ctx, kind, j.model, dir, content, scannerMetric, "none"); ok {
-			return scanVerdictFromSnapshot(snap)
-		}
-	}
 
 	prompt := piiSystemPrompt
 	if jc := j.rp.PIIJudge(); jc != nil && jc.SystemPrompt != "" {
@@ -1447,9 +1364,6 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
 		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName, InputContent: content})
-	if c := judgeVerdictCache(); c != nil {
-		c.Put(kind, j.model, dir, content, verdictSnapshotFrom(verdict))
-	}
 	return verdict
 }
 
@@ -1837,7 +1751,7 @@ func (j *LLMJudge) exfilPrompt() string {
 
 // runExfilJudge runs the data-exfiltration classifier and returns a
 // ScanVerdict. The flow mirrors runInjectionJudge / runPIIJudge:
-// short-circuit on tiny content, consult verdict cache, dispatch to
+// short-circuit on tiny content, dispatch to
 // the provider, parse, emit telemetry, and persist the audit row
 // with kind="exfil" so future jsonl shows kind=exfil action=block.
 func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdict {
@@ -1847,13 +1761,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 	}
 
 	const kind = "exfil"
-	const scannerMetric = "llm-judge-exfil"
 	maxTok := 1024
-	if c := judgeVerdictCache(); c != nil {
-		if snap, ok := c.Get(ctx, kind, j.model, "prompt", content, scannerMetric, "none"); ok {
-			return scanVerdictFromSnapshot(snap)
-		}
-	}
 
 	prompt := j.exfilPrompt()
 
@@ -1920,9 +1828,6 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 	emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
 		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), InputContent: content})
-	if c := judgeVerdictCache(); c != nil {
-		c.Put(kind, j.model, "prompt", content, verdictSnapshotFrom(verdict))
-	}
 	return verdict
 }
 
@@ -2036,7 +1941,7 @@ func (j *LLMJudge) exfilToVerdict(data map[string]interface{}) *ScanVerdict {
 // larger than a local judge's context window. Keep the request bounded before
 // it reaches the provider. Retaining both ends is deliberate: setup and source
 // selection usually appear first, while execution and outbound sinks often
-// appear last. The full payload remains the cache identity and audit input.
+// appear last. The full payload remains the audit input.
 const maxToolJudgeArgumentBytes = 3072
 
 const (
@@ -2386,14 +2291,7 @@ func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample s
 	systemPrompt := fmt.Sprintf(basePrompt, sanitizedTool)
 
 	const kind = "tool_injection"
-	const scannerMetric = "llm-judge-tool"
 	maxTok := 512
-	cacheBody := toolName + "\x00" + sample
-	if c := judgeVerdictCache(); c != nil {
-		if snap, ok := c.Get(ctx, kind, j.model, "tool_call", cacheBody, scannerMetric, "none"); ok {
-			return scanVerdictFromSnapshot(snap)
-		}
-	}
 
 	messages := []ChatMessage{
 		{Role: "system", Content: systemPrompt},
@@ -2448,9 +2346,6 @@ func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample s
 	emitJudge(ctx, kind, j.model, dir,
 		len(args), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
 		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName, InputContent: args})
-	if c := judgeVerdictCache(); c != nil {
-		c.Put(kind, j.model, "tool_call", cacheBody, verdictSnapshotFrom(verdict))
-	}
 	return verdict
 }
 

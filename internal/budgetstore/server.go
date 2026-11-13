@@ -335,11 +335,32 @@ const (
 // clock) may grow, and the growth is clamped so the device's spend of a day
 // over all its writers stays within its daily cap.
 func (s *Store) Push(ctx context.Context, dev *device, req PushRequest) error {
+	// One row per (day, key) of the open days only: closed days never grow,
+	// and a writer's totals are absolute, so a repeated row keeps its largest
+	// value (never one upsert per copy).
+	clock := s.now().UTC()
+	openDay := map[string]bool{clock.Format(time.DateOnly): true, clock.AddDate(0, 0, -1).Format(time.DateOnly): true}
+	merged := map[[2]string]int{}
+	deduped := req.Rows[:0:0]
 	for _, row := range req.Rows {
 		if !dev.allows(row.Key) {
 			return errNotAllowed
 		}
+		if !openDay[row.Day] {
+			continue
+		}
+		k := [2]string{row.Day, row.Key}
+		if i, ok := merged[k]; ok {
+			deduped[i].USD = math.Max(deduped[i].USD, row.USD)
+			continue
+		}
+		merged[k] = len(deduped)
+		deduped = append(deduped, row)
 	}
+	if len(deduped) > len(dev.keys)*2+2*MaxOpenKeysPerDay {
+		return errTooMany // more (day, key) rows than two open days can hold
+	}
+	req.Rows = deduped
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -480,10 +501,15 @@ func (s *Store) Totals(ctx context.Context, dev *device, req TotalsRequest) (Tot
 	var resp TotalsResponse
 	var users, pooledKeys []string
 	open := 0
+	asked := map[string]bool{}
 	for _, key := range req.Keys {
 		if !dev.allows(key) {
 			return resp, errNotAllowed
 		}
+		if asked[key] {
+			continue
+		}
+		asked[key] = true
 		if !dev.keys[key] {
 			if open++; open > MaxOpenKeysPerDay {
 				return resp, errTooMany
