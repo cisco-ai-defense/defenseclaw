@@ -17575,7 +17575,7 @@ def _agent_not_on_path_hint(connector: str) -> str:
     finds neither on PATH nor in its documented install folders was reported
     only as a roster mismatch.
     """
-    if not connector or connector in {"openclaw", "openhands"}:
+    if not connector or connector == "openclaw":
         return ""
     try:
         spec = agent_discovery._SPECS.get(connector)

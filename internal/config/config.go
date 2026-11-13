@@ -445,6 +445,18 @@ type RoutingConfig struct {
 	Models    []RoutingModelBackend `mapstructure:"models"        yaml:"models,omitempty"`
 	Signals   RoutingSignalConfig   `mapstructure:"signals"       yaml:"signals,omitempty"`
 	Decisions []RoutingDecisionRule `mapstructure:"decisions"     yaml:"decisions,omitempty"`
+
+	// 1.0.10 keys (routing_policy.go). Absent keeps the 1.0.9 meaning.
+	Classifier        string                  `mapstructure:"classifier"          yaml:"classifier,omitempty"`
+	MinConfidence     float64                 `mapstructure:"min_confidence"      yaml:"min_confidence,omitempty"`
+	OnClassifierError string                  `mapstructure:"on_classifier_error" yaml:"on_classifier_error,omitempty"`
+	DefaultAlias      string                  `mapstructure:"default_alias"       yaml:"default_alias,omitempty"`
+	Categories        map[string]string       `mapstructure:"categories"          yaml:"categories,omitempty"`
+	AllowUserOverride bool                    `mapstructure:"allow_user_override" yaml:"allow_user_override,omitempty"`
+	Sensitive         *RoutingSensitiveConfig `mapstructure:"sensitive"           yaml:"sensitive,omitempty"`
+	SystemOne         *RoutingSystemOneConfig `mapstructure:"systemone"           yaml:"systemone,omitempty"`
+	RouteOnly         RoutingRouteOnlyConfig  `mapstructure:"route_only"          yaml:"route_only,omitempty"`
+	Admin             *RoutingAdminConfig     `mapstructure:"admin"               yaml:"admin,omitempty"`
 }
 
 type RoutingModelBackend struct {
@@ -454,6 +466,14 @@ type RoutingModelBackend struct {
 	BaseURL      string   `mapstructure:"base_url"          yaml:"base_url,omitempty"`
 	APIKeyEnv    string   `mapstructure:"api_key_env"       yaml:"api_key_env,omitempty"`
 	Capabilities []string `mapstructure:"capabilities"      yaml:"capabilities,omitempty"`
+	// APIs lists the API families this backend serves without translation
+	// (routing_policy.go RoutingAPIs); empty uses the provider default.
+	APIs []string `mapstructure:"apis" yaml:"apis,omitempty"`
+	// Credential names the protected credential that holds the key on a
+	// standalone managed host (api_key_env is refused there).
+	Credential string `mapstructure:"credential" yaml:"credential,omitempty"`
+	// Bedrock says how the gateway signs calls to a bedrock backend.
+	Bedrock *RoutingBedrockAuthConfig `mapstructure:"bedrock" yaml:"bedrock,omitempty"`
 }
 
 type RoutingSignalConfig struct {

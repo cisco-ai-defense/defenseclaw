@@ -88,10 +88,9 @@ func EnsureGatewayToken(dotenvPath string, notMaster ...string) (string, error) 
 		return true
 	}
 
-	// Check the process environment directly (not via ResolveAPIKey which
-	// is gated by localKeyResolutionDisabled). In enterprise/sidecar mode
-	// the gateway token is injected via ConfigMap envFrom and must be
-	// respected even when local key resolution is disabled for LLM keys.
+	// Check the process environment directly (not via ResolveAPIKey, which
+	// prefers the in-memory key store). In enterprise/sidecar mode the
+	// gateway token is injected via ConfigMap envFrom.
 	if t := strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")); usable(t) {
 		return t, nil
 	}

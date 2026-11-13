@@ -54,7 +54,7 @@ func (f *allowRemovalFixture) admitQueued() {
 }
 
 func (f *allowRemovalFixture) blocked() bool {
-	entry, err := f.w.store.GetActionForConnector(MCPJournalType(f.server), MCPJournalName(f.server), "codex")
+	entry, err := f.w.store.GetActionForConnector(MCPJournalType(f.server), MCPJournalName(f.server), f.server.Connector)
 	return err == nil && entry != nil && entry.Actions.Runtime == "disable" && entry.Actions.Install == "block"
 }
 

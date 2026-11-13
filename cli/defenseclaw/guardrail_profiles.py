@@ -77,6 +77,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "eb35cfd63246ee6343faf4114ea9a6b62155f8faf6825f05a2bb9180444bb61d",
             "ef527c66677705936f1ee319b24a76f3401286a1362265251ae2a69dc4f6dd22",
             "f24c07c3beea7d1b590347461d9d263db597aad5bd73f1a43b4a546f60df4ad0",
+            # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
+            "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
         }
     ),
     "permissive": frozenset(
@@ -110,6 +112,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f1e4fd9a0be9cfac47f5eb47f3086378cd6f9d8f82bfd462ea75296c99d0d913",
             "f8addded6944af03eaad33d26f34f700a7ceda919697ac3f76528331aa4d4a77",
             "fa8ca0ad415436e8b4f5d6043f36de782cfe27bfbfca83f27d2359b97914f5f7",
+            # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
+            "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
         }
     ),
     "strict": frozenset(
@@ -142,6 +146,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "e9e7bde2dccb00dd7207ee1cf372ecd901bdac84bb0fea5098770af10de04206",
             "eabc629d3b25da4515c280ea0bb947686a891029dbf186328a947d7a6d91f7d0",
             "f5d6d19b78fe7d3897acb6a28a9fae08049fcda9745f944d5cdb45e573669bc5",
+            # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
+            "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
         }
     ),
 }

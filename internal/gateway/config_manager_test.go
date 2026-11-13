@@ -1626,23 +1626,46 @@ func TestDiffConfigsAIDiscoveryRestartOnlyForSecureClient(t *testing.T) {
 	}
 }
 
-func TestDiffConfigsMarksRoutingRestartRequired(t *testing.T) {
+func TestDiffConfigsRoutingRestartOnlyForTheVLLMContainer(t *testing.T) {
 	oldCfg := config.DefaultConfig()
-	newCfg := cloneConfig(oldCfg)
-	newCfg.Routing.Enabled = true
-	newCfg.Routing.Models = []config.RoutingModelBackend{{
+	vllm := cloneConfig(oldCfg)
+	vllm.Routing.Enabled = true
+	vllm.Routing.Models = []config.RoutingModelBackend{{
 		Name:      "fast",
 		Provider:  "openai",
 		Model:     "gpt-4.1-mini",
 		APIKeyEnv: "OPENAI_API_KEY",
 	}}
-
-	diff := diffConfigs(oldCfg, newCfg)
-	if !slices.Contains(diff.Changed, "routing") {
-		t.Fatalf("changed = %v, missing routing", diff.Changed)
+	diff := diffConfigs(oldCfg, vllm)
+	if !slices.Contains(diff.Changed, "routing") || !slices.Contains(diff.RestartRequired, "routing.container") {
+		t.Fatalf("enabling the vLLM Semantic Router (no classifier key, the 1.0.9 meaning) must restart: changed=%v restart=%v", diff.Changed, diff.RestartRequired)
 	}
-	if !slices.Contains(diff.RestartRequired, "routing") {
-		t.Fatalf("restart_required = %v, missing routing", diff.RestartRequired)
+	if slices.Contains(diff.RestartRequired, "routing") {
+		t.Fatalf("routing policy is hot: restart=%v", diff.RestartRequired)
+	}
+
+	rules := cloneConfig(vllm)
+	rules.Routing.Classifier = config.RoutingClassifierRules
+	rulesOn := cloneConfig(oldCfg)
+	rulesOn.Routing = rules.Routing
+	if diff := diffConfigs(oldCfg, rulesOn); len(diff.RestartRequired) != 0 {
+		t.Fatalf("enabling the in-process rules classifier needs no restart: %v", diff.RestartRequired)
+	}
+	edited := cloneConfig(rulesOn)
+	edited.Routing.DefaultAlias = "fast"
+	edited.Routing.Models = append(edited.Routing.Models, config.RoutingModelBackend{Name: "local", Provider: "ollama", Model: "llama3.1"})
+	if diff := diffConfigs(rulesOn, edited); len(diff.RestartRequired) != 0 || !slices.Contains(diff.Changed, "routing") {
+		t.Fatalf("rules policy edit: changed=%v restart=%v", diff.Changed, diff.RestartRequired)
+	}
+	ported := cloneConfig(rulesOn)
+	ported.Routing.Port = 9999
+	if diff := diffConfigs(rulesOn, ported); !slices.Contains(diff.RestartRequired, "routing.container") {
+		t.Fatalf("routing.port stays restart-bound: %v", diff.RestartRequired)
+	}
+
+	held := holdRestartRequired(oldCfg, vllm, []string{"routing.container"})
+	if held == nil || held.Routing.Enabled || len(held.Routing.Models) != 0 {
+		t.Fatalf("held routing = %+v, want the running (disabled) container settings", held.Routing)
 	}
 }
 
