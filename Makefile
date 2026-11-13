@@ -1079,6 +1079,7 @@ macos-app-build: macos-app-license-check
 	    build
 
 macos-app-test-scripts:
+	python3 scripts/sync-macos-command-registry.py --check
 	macos/DefenseClawMac/script/test_connector_onboarding.sh
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
 	macos/DefenseClawMac/script/test_ai_discovery_models.sh
@@ -1101,6 +1102,7 @@ macos-app-test-scripts:
 	macos/DefenseClawMac/script/test_connector_inventory_compatibility.sh
 	macos/DefenseClawMac/script/test_inspector_layout_policy.sh
 	macos/DefenseClawMac/script/test_main_window_lifecycle_contract.sh
+	macos/DefenseClawMac/script/test_resource_boundaries.sh
 
 macos-app-test: macos-app-test-scripts
 	$(MAKE) macos-app-build

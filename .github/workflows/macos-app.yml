@@ -44,6 +44,8 @@ jobs:
         :(glob)macos/**
         scripts/build-macos-app-release.sh
         scripts/check-macos-upstream.py
+        scripts/sync-macos-command-registry.py
+        cli/defenseclaw/tui/registry_data.py
         scripts/macos_license_headers.py
         scripts/update-macos-app.sh
         scripts/verify-macos-app-release.sh

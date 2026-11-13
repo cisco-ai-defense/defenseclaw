@@ -41,7 +41,7 @@ enum SetupSecretTransportPolicy {
 enum TUIWizards {
     static let connectors = ["openclaw", "zeptoclaw", "codex", "claudecode", "hermes",
                              "cursor", "devin", "copilot",
-                             "antigravity", "opencode", "amp"]
+                             "antigravity", "opencode", "amp", "kiro"]
     static let proxyConnectors = ["openclaw", "zeptoclaw"]
     static let hookConnectors = connectors.filter { !proxyConnectors.contains($0) }
     static let llmProviders = ["anthropic", "openai", "openrouter", "azure", "gemini",
@@ -129,8 +129,10 @@ enum TUIWizards {
             WizardField(key: "action", label: "Action", kind: .choice(options: ["setup", "batch", "remove"]),
                         defaultValue: "setup",
                         help: "Set up/add one connector, choose the active connector set, or remove one."),
+            // 1.0.7: no connector is preselected; an empty or unsupported
+            // choice runs nothing (the configured claw.mode still seeds it).
             WizardField(key: "connector", label: "Framework", kind: .choice(options: connectors),
-                        defaultValue: "claudecode",
+                        defaultValue: "",
                         visibleWhen: (key: "action", equals: ["setup", "remove"])),
             WizardField(key: "connectors-csv", label: "Connectors (CSV)",
                         kind: .text(placeholder: "codex,hermes,antigravity"),
@@ -182,7 +184,8 @@ enum TUIWizards {
             return [args]
         }
 
-        let connector = value(v, "connector", "openclaw")
+        let connector = value(v, "connector")
+        guard connectors.contains(connector) else { return [] }
         if action == "remove" {
             var args = ["setup", "remove", connector, "--yes"]
             if restartOff { args.append("--no-restart") }
@@ -208,7 +211,9 @@ enum TUIWizards {
     /// Batch requires a target set: CSV names, detected, or all (TUI
     /// missing_required_fields connector branch).
     private static func connectorValidation(_ v: [String: String]) -> String? {
-        guard value(v, "action", "setup") == "batch" else { return nil }
+        guard value(v, "action", "setup") == "batch" else {
+            return connectors.contains(value(v, "connector")) ? nil : "Choose a connector."
+        }
         let csv = value(v, "connectors-csv")
         if csv.isEmpty, !yes(v, "detected"), !yes(v, "all") {
             return "Missing required field(s): Connectors (CSV) or Detected/All"
@@ -776,8 +781,20 @@ enum TUIWizards {
             var environment: [String: String] = [:]
             let accessToken = value(v, "access-token")
             let hecToken = value(v, "hec-token")
-            if !accessToken.isEmpty { environment["SPLUNK_ACCESS_TOKEN"] = accessToken }
-            if !hecToken.isEmpty { environment["DEFENSECLAW_SPLUNK_HEC_TOKEN"] = hecToken }
+            // Runtime 1.0.4+ reads the click envvars DEFENSECLAW_SETUP_SPLUNK_*
+            // (cmd_setup.py): the O11y path still falls back to
+            // SPLUNK_ACCESS_TOKEN, but the HEC fallback to
+            // DEFENSECLAW_SPLUNK_HEC_TOKEN is gone — only pre-1.0.4 runtimes
+            // read it. Export every name a supported runtime reads so the
+            // secret stays off argv whichever runtime is selected.
+            if !accessToken.isEmpty {
+                environment["DEFENSECLAW_SETUP_SPLUNK_ACCESS_TOKEN"] = accessToken
+                environment["SPLUNK_ACCESS_TOKEN"] = accessToken
+            }
+            if !hecToken.isEmpty {
+                environment["DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN"] = hecToken
+                environment["DEFENSECLAW_SPLUNK_HEC_TOKEN"] = hecToken
+            }
             return environment
         },
         validation: { v in
@@ -792,6 +809,10 @@ enum TUIWizards {
             WizardField(key: "access-token", label: "Access token", kind: .secure(placeholder: "O11y token"), visibleWhen: (key: "mode", equals: ["splunk-o11y"])),
             WizardField(key: "hec-endpoint", label: "HEC endpoint", kind: .text(placeholder: "https://host:8088"), visibleWhen: (key: "mode", equals: ["enterprise"])),
             WizardField(key: "hec-token", label: "HEC token", kind: .secure(placeholder: "HEC token"), visibleWhen: (key: "mode", equals: ["enterprise"])),
+            // 1.0.7 probes the HEC endpoint before saving and saves nothing
+            // when the probe fails (exit 1); --skip-test saves without it.
+            WizardField(key: "skip-test", label: "Skip the live HEC probe", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "mode", equals: ["enterprise"]),
+                        help: "setup splunk --enterprise probes the HEC endpoint first and saves nothing when the probe fails; --skip-test saves without it."),
             WizardField(key: "accept-splunk-license", label: "Accept Splunk license", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "mode", equals: ["local-docker"])),
             WizardField(key: "traces", label: "Export traces", kind: .bool, defaultValue: "yes"),
             WizardField(key: "metrics", label: "Export metrics", kind: .bool, defaultValue: "yes"),
@@ -1427,6 +1448,9 @@ enum TUIWizards {
         var args = ["setup", "splunk", modeFlag, "--non-interactive"]
         append(v, "realm", flag: "--realm", to: &args)
         append(v, "hec-endpoint", flag: "--hec-endpoint", to: &args)
+        // Only the enterprise pipeline probes HEC, so the flag is only
+        // meaningful (and only visible) there.
+        if mode == "enterprise" { flag(v, "skip-test", "--skip-test", to: &args) }
         flag(v, "accept-splunk-license", "--accept-splunk-license", to: &args)
         args.append(yes(v, "traces") ? "--traces" : "--no-traces")
         args.append(yes(v, "metrics") ? "--metrics" : "--no-metrics")

@@ -45,6 +45,8 @@ The updater performs a three-way merge using the commit in [upstream.lock.toml](
 
 Review upstream changes since the old locked SHA before accepting the generated diff.
 
+The command palette table `CommandRegistry.all` in `DefenseClawMac/DataLayer/CommandRegistry.swift` is generated from the TUI's `cli/defenseclaw/tui/registry_data.py`. If the merge conflicts inside that table, take either side and regenerate it with `python3 scripts/sync-macos-command-registry.py`; `make macos-app-test-scripts` runs it with `--check`.
+
 Only sync these maintained paths:
 
 ```text
