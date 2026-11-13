@@ -49,7 +49,7 @@ categories:
   "Email Address":
     finding_id: JUDGE-PII-EMAIL
     severity_default: HIGH
-    severity_prompt: HIGH
+    severity_prompt: LOW
     severity_completion: CRITICAL
     enabled: true
   "IP Address":
