@@ -50,7 +50,7 @@ func TestGAP0104RegistrationFlowCountsOnlyWritingParts(t *testing.T) {
 		{`for p in .claude/settings.json .codex/config.toml; do shasum ~/$p; done > /tmp/l`, nil},
 		{`sudo -n sh -c "shasum ~/.codex/config.toml; ls -ld ~/.codex/config.toml" > /tmp/o`, nil},
 		{`sudo -iu u sh -lc "defenseclaw doctor; sha256sum ~/.claude/settings.json" > /tmp/o`, nil},
-		{"python3 - <<'PY' > /tmp/o\nimport json\nprint(json.load(open('" + settings + "')))\nPY", nil},
+		{"python3 - <<'PY' > /tmp/o\nimport json\nprint(json.load(open('" + filepath.ToSlash(settings) + "')))\nPY", nil},
 		{`cat ~/.codex/config.toml | head -3 > /tmp/o`, nil},
 		{`echo '{}' > ~/.claude/settings.json; sha256sum ~/.codex/config.toml`, []string{settings}},
 		{`cp /tmp/b/config.toml ~/.codex/config.toml && sha256sum ~/.codex/config.toml`, []string{codex}},

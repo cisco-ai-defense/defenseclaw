@@ -436,6 +436,16 @@ func registrationHeredocCode(src string, stmt *syntax.Stmt) (string, bool) {
 		if !quoted && strings.ContainsAny(text, "$`\\") {
 			return "", false
 		}
+		// The text runs through the closing delimiter line; the program is
+		// what precedes it. A text that does not end in the delimiter is
+		// returned whole, and the reader does not recognise the extra line.
+		wordStart, wordEnd := int(redir.Word.Pos().Offset()), int(redir.Word.End().Offset())
+		if wordStart >= 0 && wordEnd <= len(src) && wordStart <= wordEnd {
+			delimiter := strings.Trim(src[wordStart:wordEnd], `'"\\`)
+			if cut := strings.LastIndex(text, "\n"); cut >= 0 && strings.Trim(text[cut+1:], "\t") == delimiter {
+				text = text[:cut+1]
+			}
+		}
 		return text, true
 	}
 	return "", false
