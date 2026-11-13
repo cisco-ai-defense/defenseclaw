@@ -234,10 +234,16 @@ func (e *Engine) BodyModeStatus() string { return e.body.status() }
 
 // Degraded names what the callout can't do now, for readiness and doctor:
 // "mcp_refused_until_body_support" while closed-mode auto refuses MCP
-// requests to listed hosts (GAP-0146), "" otherwise.
+// requests to listed hosts (GAP-0146); "mcp_bodies_not_inspected" for a
+// managed callout whose admin set body_inspection off, which records every
+// MCP request to a listed host but never reads its body (GAP-0146
+// residual); "" otherwise.
 func (e *Engine) Degraded() string {
-	if e.closedAuto() && len(e.cfg.MCPHosts) > 0 && !e.body.confirmed() {
+	switch {
+	case e.closedAuto() && len(e.cfg.MCPHosts) > 0 && !e.body.confirmed():
 		return "mcp_refused_until_body_support"
+	case e.cfg.Managed && e.cfg.BodyInspection == BodyOff && len(e.cfg.MCPHosts) > 0:
+		return "mcp_bodies_not_inspected"
 	}
 	return ""
 }
