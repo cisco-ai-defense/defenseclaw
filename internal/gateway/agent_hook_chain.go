@@ -1138,7 +1138,12 @@ func projectTrustedActionChainSteps(
 		"secrets.browser_session_store_read",
 		"secrets.workload_identity_token_read",
 	}
-	secretRead := hasAnyFinding(secretReadIDs...)
+	// A read of a credentials file starts the chain wherever the file is
+	// (the home, a project, a work directory) and whether or not the active
+	// pack alerts on the read itself: PATH-ENV-FILE is quiet in default and
+	// the home-path rules name only the account's own copy
+	// (substrate-1:GAP-0210).
+	secretRead := hasAnyFinding(secretReadIDs...) || credentialFileContentRead(facts)
 	secretReadDigest, secretReadIdentityExact := exactSingleReadPathDigest(facts)
 	secretReadExact := secretRead && secretReadIdentityExact &&
 		facts.Authoritative() && facts.EnforcementEligible()
@@ -1983,6 +1988,52 @@ func gitBashDriveLetterIdentity(candidate actionfacts.PathFact) (string, bool) {
 		return "", false
 	}
 	return strings.ToLower(value[:2] + path.Clean(strings.ReplaceAll(value[2:], `\`, "/"))), true
+}
+
+// credentialFileContentRead reports an executed command that reads,
+// searches (grep) or copies the contents of a file of a credentials-file shape
+// (actionfacts.MatchCredentialFileShape, the one table) anywhere the agent
+// can reach. Not counted: a repository fixture (credentialFileFixturePath)
+// and an SSH client that only presents a key (ssh -i, scp -i), which
+// PATH-SSH-KEY does not count either.
+func credentialFileContentRead(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessRead {
+			continue
+		}
+		value := semanticPathValue(candidate)
+		if _, ok := actionfacts.MatchCredentialFileShape(value); !ok ||
+			credentialFileFixturePath(value) {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || command.Effect != actionfacts.EffectExecute ||
+			sshIdentityConsumer(command) ||
+			!hasAnyOperation(command, actionfacts.OperationRead,
+				actionfacts.OperationSearch, actionfacts.OperationCopy) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// credentialFileFixturePath reports a credentials-shaped file inside a
+// repository's test or documentation tree, or inside an installed
+// third-party package, which ship sample keys and .env files (owner traces,
+// substrate-1:GAP-0210).
+func credentialFileFixturePath(value string) bool {
+	if integrityPathHasFixtureSegment(value) {
+		return true
+	}
+	for _, component := range strings.Split(strings.Trim(canonicalSemanticPath(value), "/"), "/") {
+		switch component {
+		case "__tests__", "__fixtures__", "__mocks__",
+			"node_modules", "site-packages", "dist-packages":
+			return true
+		}
+	}
+	return false
 }
 
 func exactSingleReadPathDigest(facts actionfacts.Facts) (string, bool) {

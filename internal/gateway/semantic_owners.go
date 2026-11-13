@@ -1278,15 +1278,10 @@ func isDefinitelyNonSensitivePath(
 }
 
 func matchesAnySensitivePathCandidate(value string) bool {
+	_, credentialFile := actionfacts.MatchCredentialFileShape(value)
 	return canonicalSemanticPath(value) == "/etc/shadow" ||
-		matchesEnvironmentFile(value) ||
-		matchesSSHPrivateKey(value) ||
-		matchesAWSCredentials(value) ||
-		matchesKubeConfig(value) ||
-		matchesPackageCredentialFile(value) ||
-		matchesGitCredentialFile(value) ||
+		credentialFile ||
 		matchesProcEnvironCandidate(value) ||
-		matchesCloudCredentialFile(value) ||
 		matchesBrowserSessionStore(value) ||
 		matchesWorkloadIdentityTokenCandidate(value)
 }
@@ -1501,14 +1496,40 @@ func matchesActiveSensitivePath(
 		matchesWorkloadIdentityToken(value)
 }
 
-func matchesEnvironmentFile(value string) bool {
-	switch pathBase(value) {
-	case ".env", ".env.local", ".env.production", ".env.prod",
-		".env.development", ".env.dev", ".env.staging", ".env.test":
-		return true
-	default:
+// credentialFileShapeIs reports whether value has a credentials-file shape
+// of class (actionfacts.MatchCredentialFileShape, the single table).
+func credentialFileShapeIs(value string, class actionfacts.CredentialFileClass) bool {
+	shape, ok := actionfacts.MatchCredentialFileShape(value)
+	return ok && shape.Class == class
+}
+
+// activeHomeCredentialFile reports whether candidate is the active
+// account's own credentials file of class: the table entry names the whole
+// home-relative path (~/.aws/credentials, not ~/proj/.aws/credentials).
+// within, when set, instead takes the entry anywhere below that home folder
+// (~/.ssh/id_rsa, ~/.ssh/keys/id_rsa) and nowhere else in the home.
+func activeHomeCredentialFile(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+	class actionfacts.CredentialFileClass,
+	within string,
+) bool {
+	relative, ok := activeHomeRelative(facts, candidate)
+	if !ok || relative == "" {
 		return false
 	}
+	shape, ok := actionfacts.MatchCredentialFileShape(relative)
+	if !ok || shape.Class != class {
+		return false
+	}
+	if within != "" {
+		return strings.HasPrefix(relative, within+"/")
+	}
+	return relative == shape.Relative
+}
+
+func matchesEnvironmentFile(value string) bool {
+	return credentialFileShapeIs(value, actionfacts.CredentialFileEnvironment)
 }
 
 func matchesContextualEnvironmentFile(
@@ -1521,26 +1542,20 @@ func matchesContextualEnvironmentFile(
 }
 
 func matchesSSHPrivateKey(value string) bool {
-	switch pathBase(value) {
-	case "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa":
-		return true
-	default:
-		return false
-	}
+	return credentialFileShapeIs(value, actionfacts.CredentialFileSSHPrivateKey)
 }
 
 func matchesActiveSSHPrivateKey(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	relative, ok := activeHomeRelative(facts, candidate)
-	return ok && strings.HasPrefix(relative, ".ssh/") &&
-		matchesSSHPrivateKey(relative)
+	return activeHomeCredentialFile(
+		facts, candidate, actionfacts.CredentialFileSSHPrivateKey, ".ssh",
+	)
 }
 
 func matchesAWSCredentials(value string) bool {
-	name, ok := awsDirectoryEntry(value)
-	return ok && matchesAWSCredentialsName(name)
+	return credentialFileShapeIs(value, actionfacts.CredentialFileAWS)
 }
 
 // matchesExactAWSCredentials is the credentials file itself: unlike
@@ -1562,21 +1577,11 @@ func awsDirectoryEntry(value string) (string, bool) {
 	return value[index+len("/.aws/"):], true
 }
 
-func matchesAWSCredentialsName(name string) bool {
-	if name == "credentials" {
-		return true
-	}
-	suffix, ok := strings.CutPrefix(name, "credentials.")
-	return ok && suffix != "" && !strings.Contains(suffix, "/")
-}
-
 func matchesActiveAWSCredentials(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	relative, ok := activeHomeRelative(facts, candidate)
-	return ok && strings.HasPrefix(relative, ".aws/") &&
-		matchesAWSCredentialsName(strings.TrimPrefix(relative, ".aws/"))
+	return activeHomeCredentialFile(facts, candidate, actionfacts.CredentialFileAWS, "")
 }
 
 func passwordCrackerPotfileReadPrerequisite(facts actionfacts.Facts) bool {
@@ -1630,74 +1635,36 @@ func matchesPasswordCrackerPotfile(
 }
 
 func matchesKubeConfig(value string) bool {
-	return strings.HasSuffix(value, "/.kube/config") ||
-		value == ".kube/config"
+	return credentialFileShapeIs(value, actionfacts.CredentialFileKubeconfig)
 }
 
 func matchesActiveKubeConfig(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	relative, ok := activeHomeRelative(facts, candidate)
-	return ok && relative == ".kube/config"
+	return activeHomeCredentialFile(facts, candidate, actionfacts.CredentialFileKubeconfig, "")
 }
 
 func matchesPackageCredentialFile(value string) bool {
-	base := pathBase(value)
-	return strings.HasSuffix(value, "/.docker/config.json") ||
-		value == ".docker/config.json" ||
-		base == ".npmrc" ||
-		base == ".pypirc"
+	return credentialFileShapeIs(value, actionfacts.CredentialFilePackageRegistry)
 }
 
 func matchesActivePackageCredentialFile(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	relative, ok := activeHomeRelative(facts, candidate)
-	if !ok {
-		return false
-	}
-	return relative == ".docker/config.json" ||
-		relative == ".npmrc" ||
-		relative == ".pypirc"
+	return activeHomeCredentialFile(facts, candidate, actionfacts.CredentialFilePackageRegistry, "")
 }
 
 func matchesGitCredentialFile(value string) bool {
-	return matchesRelativePathAtComponentBoundary(
-		value,
-		matchesDeveloperCredentialRelative,
-	)
+	return credentialFileShapeIs(value, actionfacts.CredentialFileDeveloperToken)
 }
 
 func matchesActiveGitCredentialFile(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	relative, ok := activeHomeRelative(facts, candidate)
-	if !ok {
-		return false
-	}
-	return matchesDeveloperCredentialRelative(relative)
-}
-
-func matchesDeveloperCredentialRelative(relative string) bool {
-	switch relative {
-	case ".git-credentials",
-		".netrc",
-		"_netrc",
-		".pgpass",
-		".cache/huggingface/token",
-		".huggingface/token",
-		".config/huggingface/token",
-		".config/pypoetry/auth.toml",
-		".kaggle/kaggle.json",
-		"library/application support/pypoetry/auth.toml",
-		"appdata/roaming/pypoetry/auth.toml":
-		return true
-	default:
-		return false
-	}
+	return activeHomeCredentialFile(facts, candidate, actionfacts.CredentialFileDeveloperToken, "")
 }
 
 func matchesProcEnviron(value string) bool {
@@ -1752,26 +1719,12 @@ func matchesContextualCloudCredentialFile(
 	return ok && matchesCloudCredentialRelative(relative)
 }
 
+// matchesCloudCredentialRelative reports whether relative (a home-relative
+// path) is a cloud CLI token file of the credentials-file table.
 func matchesCloudCredentialRelative(relative string) bool {
-	switch relative {
-	case ".config/gcloud/application_default_credentials.json",
-		".config/gcloud/credentials.db",
-		".config/gcloud/access_tokens.db",
-		".config/gh/hosts.yml",
-		".config/anthropic/keys.json",
-		"appdata/roaming/gcloud/application_default_credentials.json",
-		"appdata/roaming/gcloud/credentials.db",
-		"appdata/roaming/gcloud/access_tokens.db",
-		"appdata/roaming/github cli/hosts.yml",
-		".azure/azureprofile.json",
-		".azure/tokencache.dat":
-		return true
-	}
-	if !strings.HasPrefix(relative, ".azure/msal_token_cache") {
-		return false
-	}
-	return strings.HasSuffix(relative, ".json") ||
-		strings.HasSuffix(relative, ".bin")
+	shape, ok := actionfacts.MatchCredentialFileShape(relative)
+	return ok && shape.Class == actionfacts.CredentialFileCloudCLI &&
+		shape.Relative == relative
 }
 
 func matchesBrowserSessionStore(value string) bool {
