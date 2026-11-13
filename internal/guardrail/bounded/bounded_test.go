@@ -50,7 +50,8 @@ func TestCounterRefusesANegativeTake(t *testing.T) {
 }
 
 // A Counter bound to another Truncated than the reader returns is a panic
-// under go test (review V7), and its hits are merged in production.
+// with PanicOnMisuse on (go test), and its hits are merged in production
+// (review V7).
 func TestSetCatchesAMisboundCounter(t *testing.T) {
 	var reader, other Truncated
 	items := NewCounter(&other, Items, 1)
@@ -59,13 +60,13 @@ func TestSetCatchesAMisboundCounter(t *testing.T) {
 	func() {
 		defer func() {
 			if recover() == nil {
-				t.Fatal("Set with a Counter bound to another Truncated did not panic under go test")
+				t.Fatal("Set with a Counter bound to another Truncated did not panic with PanicOnMisuse on")
 			}
 		}()
 		_ = reader.Set(&items)
 	}()
-	misboundPanics = false
-	defer func() { misboundPanics = true }()
+	PanicOnMisuse(false)
+	defer PanicOnMisuse(true)
 	if got := reader.Set(&items); !got.Has(Items) {
 		t.Fatalf("production Set lost the misbound Counter's hit: %+v", got)
 	}
@@ -76,18 +77,28 @@ func TestSetCatchesAMisboundCounter(t *testing.T) {
 	}
 }
 
-// A zero Counter (a struct literal, no NewCounter) is rejected cleanly: its
-// first take is a hit, which reaches the result (review V8).
-func TestZeroCounterIsRejectedCleanly(t *testing.T) {
-	var reader Truncated
+// A zero Counter (a struct literal, no NewCounter) is never a silent unread
+// (review round 3 P3-1): under go test its first take panics; in production
+// it refuses the take and every Truncated reports the hit (Any and Set), so
+// every call floors.
+func TestZeroCounterIsNeverASilentUnread(t *testing.T) {
 	var zero Counter
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("a take on an unbound Counter did not panic with PanicOnMisuse on")
+			}
+		}()
+		zero.Take()
+	}()
+	PanicOnMisuse(false)
+	t.Cleanup(func() { PanicOnMisuse(true); unboundHits.Store(0) })
 	if zero.Take() {
 		t.Fatal("a zero Counter allowed a take")
 	}
-	misboundPanics = false
-	defer func() { misboundPanics = true }()
-	if got := reader.Set(&zero); !got.Has(Items) {
-		t.Fatalf("a zero Counter's hit is lost: %+v", got)
+	var anyReader Truncated
+	if !anyReader.Any() || !anyReader.Set().Has(Items) {
+		t.Fatalf("an unbound Counter's hit is not seen by another reader: any=%t set=%+v", anyReader.Any(), anyReader.Set())
 	}
 }
 
