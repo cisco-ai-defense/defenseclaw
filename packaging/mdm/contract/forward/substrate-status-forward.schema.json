@@ -54,8 +54,8 @@
       "items": {
         "$ref": "#/$defs/check"
       },
-      "minItems": 8,
-      "maxItems": 8
+      "minItems": 9,
+      "maxItems": 9
     }
   },
   "$defs": {
@@ -331,6 +331,7 @@
           "enum": [
             "substrate_version",
             "issuer_unique",
+            "actor_keys",
             "snapshot_bucket",
             "openfga_grants",
             "callout_registered",
