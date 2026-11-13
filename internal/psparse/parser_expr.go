@@ -244,7 +244,12 @@ func (p *parser) parsePrimary() Expr {
 		return numberLit(t)
 	case TokGeneric:
 		p.advance()
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: decodeBareword(t.Raw), Static: true, Bare: true}
+		v, amb := p.decodeBacktick(t.Raw, false)
+		sl := &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: v, Static: !amb, Bare: true}
+		if amb {
+			p.diag(t.Start, t.End, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
+		}
+		return sl
 	case TokLParen:
 		return p.parseParenExpr()
 	case TokDollarParen:

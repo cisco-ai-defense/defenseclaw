@@ -4,11 +4,6 @@
 
 package psparse
 
-import (
-	"strconv"
-	"strings"
-)
-
 // parsePipelineChainOrAssignment parses a statement that is a pipeline, a
 // pipeline chain (&& / ||), a background job (trailing &), or an assignment.
 func (p *parser) parsePipelineChainOrAssignment(s stopSet) Statement {
@@ -232,7 +227,12 @@ doneName:
 	if s0 >= 0 && end <= len(p.src) && end >= s0 {
 		raw = p.src[s0:end]
 	}
-	return &StringLit{span: span{s0, end}, Kind: StrBare, Bare: true, Static: true, Value: nameValue(raw)}
+	v, amb := p.decodeBacktick(raw, true)
+	sl := &StringLit{span: span{s0, end}, Kind: StrBare, Bare: true, Static: !amb, Value: v}
+	if amb {
+		p.diag(s0, end, ReasonDialectAmbiguous, "backtick escape in a name differs between PS 5.1 and 7")
+	}
+	return sl
 }
 
 // consumeBalancedEnd consumes a balanced ( ), [ ] or { } group (the current
@@ -273,38 +273,6 @@ func (p *parser) consumeBalancedEnd() int {
 		}
 	}
 	return end
-}
-
-// nameValue resolves a command-name generic token: backtick escapes are
-// decoded, unescaped quote delimiters are dropped, and $(...) is kept literal.
-func nameValue(raw string) string {
-	rs := []rune(raw)
-	var b strings.Builder
-	for i := 0; i < len(rs); i++ {
-		if rs[i] == '`' && i+1 < len(rs) {
-			if rs[i+1] == 'u' && i+2 < len(rs) && rs[i+2] == '{' {
-				j := i + 3
-				for j < len(rs) && rs[j] != '}' {
-					j++
-				}
-				if j < len(rs) {
-					if cp, err := strconv.ParseInt(string(rs[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
-						b.WriteRune(rune(cp))
-						i = j
-						continue
-					}
-				}
-			}
-			b.WriteRune(backtickEscape(rs[i+1]))
-			i++
-			continue
-		}
-		if isSingleQuote(rs[i]) || isDoubleQuote(rs[i]) {
-			continue
-		}
-		b.WriteRune(rs[i])
-	}
-	return b.String()
 }
 
 func (p *parser) parseCommandName() Expr {
@@ -464,7 +432,12 @@ func (p *parser) parseArgAtom() Expr {
 		if start >= 0 && end <= len(p.src) && end >= start {
 			raw = p.src[start:end]
 		}
-		return &StringLit{span: span{start, end}, Kind: StrBare, Value: nameValue(raw), Static: true, Bare: true}
+		v, amb := p.decodeBacktick(raw, true)
+		sl := &StringLit{span: span{start, end}, Kind: StrBare, Value: v, Static: !amb, Bare: true}
+		if amb {
+			p.diag(start, end, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
+		}
+		return sl
 	}
 	return nil
 }
@@ -498,11 +471,14 @@ func (p *parser) composeAtoms(atoms []Expr, s0, end int) Expr {
 		// the processed source span (quote delimiters dropped, backtick escapes
 		// decoded, $(...) kept literal) -- not the per-atom values, so a glued
 		// number keeps its source text (0x10-1 stays "0x10-1", not "16-1").
-		val := ""
+		val, amb := "", false
 		if s0 >= 0 && end <= len(p.src) && end >= s0 {
-			val = nameValue(p.src[s0:end])
+			val, amb = p.decodeBacktick(p.src[s0:end], true)
 		}
-		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: true, Bare: true}
+		if amb {
+			p.diag(s0, end, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
+		}
+		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: !amb, Bare: true}
 	}
 	parts := make([]StringPart, 0, len(atoms))
 	for _, a := range atoms {

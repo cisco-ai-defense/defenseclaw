@@ -146,19 +146,10 @@ func walkCommandsExpr(e Expr, fn func(*Command)) {
 func LiteralString(e Expr) (string, bool) {
 	switch v := e.(type) {
 	case *StringLit:
+		// A non-static string is never a trusted literal (a variable, sub
+		// expression, or a dialect-ambiguous escape): the caller must escalate.
 		if v.Static {
 			return v.Value, true
-		}
-		// an expandable string whose parts are all literal is still static
-		if len(v.Parts) > 0 {
-			var b strings.Builder
-			for _, pt := range v.Parts {
-				if pt.Expr != nil {
-					return "", false
-				}
-				b.WriteString(pt.Lit)
-			}
-			return b.String(), true
 		}
 		return "", false
 	case *Number:

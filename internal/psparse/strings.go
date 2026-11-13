@@ -108,13 +108,38 @@ func (p *parser) expandable(s string, base int) (parts []StringPart, static bool
 					j++
 				}
 				if j < len(runes) {
-					if cp, err := strconv.ParseInt(string(runes[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
-						lit.WriteRune(rune(cp))
+					switch p.dialect {
+					case DialectWindowsPS51:
+						lit.WriteString(string(runes[i+1 : j+1])) // `u{..} literal in 5.1
 						i = j + 1
 						continue
+					case DialectUnknown:
+						forceDyn = true
+						lit.WriteString(string(runes[i+1 : j+1]))
+						i = j + 1
+						continue
+					default:
+						if cp, err := strconv.ParseInt(string(runes[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
+							lit.WriteRune(rune(cp))
+							i = j + 1
+							continue
+						}
 					}
 				}
 				forceDyn = true // malformed `u{...}: cannot resolve statically
+			}
+			if runes[i+1] == 'e' {
+				switch p.dialect {
+				case DialectWindowsPS51:
+					lit.WriteRune('e')
+				case DialectUnknown:
+					forceDyn = true
+					lit.WriteRune('e')
+				default:
+					lit.WriteRune(0x1b)
+				}
+				i += 2
+				continue
 			}
 			lit.WriteRune(backtickEscape(runes[i+1]))
 			i += 2
@@ -165,8 +190,6 @@ func backtickEscape(r rune) rune {
 		return 12
 	case 'v':
 		return 11
-	case 'e':
-		return 0x1b
 	}
 	return r
 }
@@ -179,37 +202,71 @@ func dollarStartsVar(r rune) bool {
 		unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-// decodeBareword resolves PowerShell 7 backtick escapes in a bareword / command
-// name (the raw keeps the escapes so spans stay exact; the value is decoded).
-// Handles `n `t `r `0 `a `b `f `v `e, `u{hex}, and `<char> (literal char).
-func decodeBareword(raw string) string {
-	if !strings.ContainsRune(raw, '`') {
-		return raw
-	}
+// decodeBacktick resolves PowerShell backtick escapes in a bareword or command
+// name per the parser's dialect. `n `t `r `0 `a `b `f `v and `<char> are the
+// same in all editions; `e (ESC) and `u{hex} exist only in PS 6/7, so under
+// DialectWindowsPS51 they stay literal and under DialectUnknown they make the
+// value ambiguous (the second return is true -> the caller marks it
+// non-static). When stripQuotes is set, unescaped quote-class delimiters are
+// dropped (command-name generic token).
+func (p *parser) decodeBacktick(raw string, stripQuotes bool) (string, bool) {
 	rs := []rune(raw)
 	var b strings.Builder
+	ambiguous := false
 	for i := 0; i < len(rs); i++ {
 		if rs[i] == '`' && i+1 < len(rs) {
-			if rs[i+1] == 'u' && i+2 < len(rs) && rs[i+2] == '{' {
+			c := rs[i+1]
+			if c == 'u' && i+2 < len(rs) && rs[i+2] == '{' {
 				j := i + 3
 				for j < len(rs) && rs[j] != '}' {
 					j++
 				}
 				if j < len(rs) {
-					if cp, err := strconv.ParseInt(string(rs[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
-						b.WriteRune(rune(cp))
+					switch p.dialect {
+					case DialectWindowsPS51:
+						b.WriteString(string(rs[i+1 : j+1])) // `u{hex} is literal in 5.1
 						i = j
 						continue
+					case DialectUnknown:
+						ambiguous = true
+						b.WriteString(string(rs[i+1 : j+1]))
+						i = j
+						continue
+					default: // PS 6/7
+						if cp, err := strconv.ParseInt(string(rs[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
+							b.WriteRune(rune(cp))
+							i = j
+							continue
+						}
 					}
 				}
+				b.WriteRune('u')
+				i++
+				continue
 			}
-			b.WriteRune(backtickEscape(rs[i+1]))
+			if c == 'e' {
+				switch p.dialect {
+				case DialectWindowsPS51:
+					b.WriteRune('e')
+				case DialectUnknown:
+					ambiguous = true
+					b.WriteRune('e')
+				default:
+					b.WriteRune(0x1b)
+				}
+				i++
+				continue
+			}
+			b.WriteRune(backtickEscape(c))
 			i++
+			continue
+		}
+		if stripQuotes && (isSingleQuote(rs[i]) || isDoubleQuote(rs[i])) {
 			continue
 		}
 		b.WriteRune(rs[i])
 	}
-	return b.String()
+	return b.String(), ambiguous
 }
 
 // scanParenBody returns the text inside a $( ... ) starting just after the '(',
