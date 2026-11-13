@@ -41,7 +41,7 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 	resp := agentHookResponse{
 		Action: "allow", RawAction: "allow", Severity: "NONE", Mode: "action",
 		Reason: "<redacted len=23 sha=response>", SourceReason: "clean decision for alice@example.com",
-		RuleIDs: []string{"rule-one"}, EvaluationID: "evaluation-hook-1",
+		RuleIDs: []string{"rule-one"}, RuleNames: []string{"Limit JIRA actions"}, EvaluationID: "evaluation-hook-1",
 	}
 	env := HookAuditEnvelope{ElapsedMs: 23, StepIdx: 4}
 	api.emitHookDecisionObservabilityV8(ctx, req, resp, env, false)
@@ -122,6 +122,9 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 	}
 	if got, ok := logWire.Body["defenseclaw.guardrail.rule_ids"].([]interface{}); !ok || len(got) != 1 || got[0] != "rule-one" {
 		t.Errorf("generated hook decision rule_ids=%v", logWire.Body["defenseclaw.guardrail.rule_ids"])
+	}
+	if got, ok := logWire.Body["defenseclaw.guardrail.rule_names"].([]interface{}); !ok || len(got) != 1 || got[0] != "Limit JIRA actions" {
+		t.Errorf("generated hook decision rule_names=%v", logWire.Body["defenseclaw.guardrail.rule_names"])
 	}
 
 	invocations := hookModelV8MetricPoints(

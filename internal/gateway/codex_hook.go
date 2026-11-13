@@ -150,6 +150,7 @@ type codexHookResponse struct {
 	// connector hook scripts ignore the fields.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	RuleNames    []string `json:"-"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
 	// finalizeAgentHookAnswer can honor it on the hook_decision event +
@@ -453,6 +454,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	}
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
+	resp.RuleNames = hookResponseRuleNames(resp.RuleIDs, evalCtx)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
