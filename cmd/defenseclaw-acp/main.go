@@ -196,6 +196,15 @@ func newStartupError(err error, clientID, agentID, profile, mode, contractLock s
 			"DefenseClaw ACP guard is not set up for %s (the binding was removed). Run '%s', or delete this editor entry.",
 			pair, setup)}
 	}
+	if errors.Is(err, acp.ErrAgentExecutableDrift) {
+		// The agent updated in place (rel-1-0-10:GAP-0250): acp refresh
+		// --agent re-pins it once only this account or an administrator can
+		// change the file; setup binds anything else.
+		return &startupError{err: err, message: fmt.Sprintf(
+			"DefenseClaw ACP guard could not start for %s: %v. If you updated %s, run 'defenseclaw acp refresh --agent %s'; "+
+				"otherwise run 'defenseclaw acp verify', then '%s', or delete this editor entry.",
+			pair, err, agentID, agentID, setup)}
+	}
 	return &startupError{err: err, message: fmt.Sprintf(
 		"DefenseClaw ACP guard could not start for %s: %v. Run 'defenseclaw acp verify', then '%s', or delete this editor entry.",
 		pair, err, setup)}

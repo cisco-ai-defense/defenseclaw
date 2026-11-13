@@ -19624,10 +19624,15 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
             _emit("pass", label, f"healthy; profile {profile} ({mode})", r=r)
             continue
         if all("acp refresh" in problem for problem in problems):
-            fix = "re-pin the upgraded guard: defenseclaw doctor --fix (or defenseclaw acp refresh)"
+            # The upgraded guard, or an agent the user updated (acp refresh
+            # --agent re-pins it after its custody check, rel-1-0-10:GAP-0250).
+            fix = (
+                "re-pin it: defenseclaw doctor --fix (or defenseclaw acp refresh"
+                + (f" --agent {agent}" if any("--agent" in problem for problem in problems) else "")
+                + ")"
+            )
         else:
-            # Setup re-pins the agent and the guard; refresh never re-pins
-            # a changed agent binary.
+            # Setup re-pins the agent and the guard.
             fix = cmd_acp.setup_repair_command(cfg, client, agent, data_dir)
             if os.name == "nt":
                 fix = run_instruction(fix)
@@ -21883,40 +21888,75 @@ def _fix_acp_guard_pins(
         if not pairs:
             return ("skip", "no ACP binding is configured")
         pending = cmd_acp.refresh_guard_pins(data_dir, apply=False)
-        agent_drift = [
-            f"{client}/{agent}"
+        drifted = {
+            (client, agent)
             for client, agent in pairs
-            if "agent executable digest has drifted" in cmd_acp._verify_binding(data_dir, client, agent)
-        ]
+            if "agent executable digest has drifted" in " ".join(cmd_acp._verify_binding(data_dir, client, agent))
+        }
+        # An agent the user updated is re-pinned at its pinned path after
+        # the custody check (rel-1-0-10:GAP-0250); one that fails it keeps
+        # its setup command.
+        agent_pending, agent_refused = (
+            cmd_acp.refresh_agent_pins(data_dir, pairs=drifted, apply=False) if drifted else ([], [])
+        )
     except Exception as exc:  # noqa: BLE001 - unreadable editor settings must not abort the repair run.
         return ("skip", f"could not read the editor ACP settings: {exc}")
     agent_note = ""
-    if agent_drift:
-        commands = ", ".join(
-            f"`{cmd_acp.setup_repair_command(cfg, *pair.split('/'), data_dir)}`" for pair in agent_drift
+    if agent_refused:
+        agent_note = "; ".join(
+            f"{pair}: the agent changed since setup and cannot be re-pinned ({reason}); review it and "
+            + run_instruction(f"`{cmd_acp.setup_repair_command(cfg, *pair.split('/'), data_dir)}`")
+            for pair, reason in agent_refused
         )
-        agent_note = (
-            f"{', '.join(agent_drift)}: the agent executable changed since setup (for example, it updated); "
-            f"doctor does not re-pin it, so review it and {run_instruction(commands)}"
-        )
-    if not pending:
+    agent_pairs = [pair for pair, _path, _old, _new in agent_pending]
+    work = []
+    if pending:
+        work.append(f"the DefenseClaw ACP guard for {', '.join(pending)}")
+    if agent_pairs:
+        work.append(f"the updated agent for {', '.join(agent_pairs)}")
+    if not work:
         current = "the ACP guard pins are current"
         return ("skip", f"{current}; {agent_note}" if agent_note else current)
     suffix = f"; {agent_note}" if agent_note else ""
     if plan_only:
         return (
             "plan",
-            f"re-pin the DefenseClaw ACP guard for {', '.join(pending)} (as 'defenseclaw acp refresh'){suffix}",
+            f"re-pin {' and '.join(work)} (as 'defenseclaw acp refresh' [--agent]){suffix}",
         )
-    if not assume_yes and not click.confirm(
-        f"    Re-pin the DefenseClaw ACP guard for {', '.join(pending)}?",
-        default=True,
-    ):
+    if not assume_yes and not click.confirm(f"    Re-pin {' and '.join(work)}?", default=True):
         return ("skip", "declined by user")
     try:
-        done = cmd_acp.refresh_guard_pins(data_dir)
+        done = cmd_acp.refresh_guard_pins(data_dir) if pending else []
+        agent_done = (
+            cmd_acp.refresh_agent_pins(data_dir, pairs={tuple(pair.split("/", 1)) for pair in agent_pairs})[0]
+            if agent_pairs
+            else []
+        )
     except (OSError, click.ClickException) as exc:
-        return ("fail", f"could not re-pin the ACP guard: {exc}")
-    if not done:
+        return ("fail", f"could not re-pin the ACP pins: {exc}")
+    _log_acp_agent_repins(cfg, agent_done)
+    parts = []
+    if done:
+        parts.append(f"the DefenseClaw ACP guard for {', '.join(done)}")
+    if agent_done:
+        parts.append(f"the updated agent for {', '.join(pair for pair, _p, _o, _n in agent_done)}")
+    if not parts:
         return ("skip", "the ACP guard pins are current")
-    return ("pass", f"re-pinned the DefenseClaw ACP guard for {', '.join(done)}{suffix}")
+    return ("pass", f"re-pinned {' and '.join(parts)}{suffix}")
+
+
+def _log_acp_agent_repins(cfg, repinned) -> None:
+    """Record each agent doctor re-pinned, as 'acp refresh --agent' does (rel-1-0-10:GAP-0250)."""
+    if not repinned:
+        return
+    from defenseclaw.logger import CanonicalObservabilityError, Logger
+
+    try:
+        logger = Logger(_VerifiedGatewayRecorder(cfg))
+        for pair, path_value, previous, digest in repinned:
+            logger.log_config_change(
+                "acp-agent-repin",
+                f"scope={pair} agent={path_value} previous_sha256={previous} sha256={digest} source=doctor",
+            )
+    except (CanonicalObservabilityError, OSError) as exc:
+        ux.echo(f"    ⚠ Re-pinned, but the audit event was not recorded ({exc}).", err=True)

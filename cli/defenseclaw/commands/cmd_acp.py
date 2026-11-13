@@ -32,9 +32,13 @@ from defenseclaw.enforce.asset_lists import is_secure_client
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
     atomic_write_text_secure,
+    darwin_acl_write_error,
     make_private_directory,
+    other_accounts_can_write,
     protect_private_file,
     read_regular_file_no_follow,
+    trusted_runtime_owner,
+    windows_acl_write_error,
     windows_guard_private_file_error,
 )
 from defenseclaw.winquote import powershell_command_line, powershell_literal, run_instruction
@@ -1228,7 +1232,11 @@ def _verify_binding(
         ):
             problems.append(
                 f"{key} executable digest has drifted"
-                + ("; after a DefenseClaw upgrade run: defenseclaw acp refresh" if key == "guard" else "")
+                + (
+                    "; after a DefenseClaw upgrade run: defenseclaw acp refresh"
+                    if key == "guard"
+                    else _agent_drift_hint(agent, lock_guard, path_value)
+                )
             )
     # Policy drift. The guard carries its profile and mode in argv, pinned
     # here at setup, and the gateway refuses a request whose profile the
@@ -1929,6 +1937,12 @@ def _print_acp_status(payload: dict) -> None:
         for problem in info["problems"]:
             ux.warn(str(problem), indent="      ")
     if any(not info["healthy"] for info in bindings.values()):
+        if any(
+            "agent executable digest has drifted" in str(problem)
+            for info in bindings.values()
+            for problem in info["problems"]
+        ):
+            ux.subhead("An agent you updated: defenseclaw acp refresh --agent <agent>", indent="  ")
         ux.subhead("Fix with: defenseclaw acp verify, then re-run defenseclaw acp setup for that pair", indent="  ")
     clients = payload["configured_clients"]
     for name in clients:
@@ -2111,6 +2125,118 @@ def refresh_guard_pins(
     return repinned
 
 
+def _agent_drift_hint(agent: str, lock_guard: Any, path_value: str) -> str:
+    """How to recover from an agent that changed since setup (rel-1-0-10:GAP-0250).
+
+    A managed enrollment lock is the administrator's: its agent is re-pinned
+    by enrolling again, which the repair command names. An agent another
+    account could have changed is bound again only by acp setup.
+    """
+    if isinstance(lock_guard, dict) and lock_guard.get("managed_custody") is True:
+        return " (the agent changed since your administrator enrolled it)"
+    problem = _agent_custody_problem(path_value)
+    if problem:
+        return f" (the agent changed since setup, and {problem}; review it and bind it again with acp setup)"
+    return (
+        " (the agent changed since setup, for example it updated); "
+        f"if you updated it, run: defenseclaw acp refresh --agent {agent}"
+    )
+
+
+def _agent_custody_problem(path_value: str) -> str:
+    """Why an updated agent at its pinned path cannot be re-pinned without setup, or "".
+
+    Setup pins the agent the operator chose by absolute path and SHA-256. An
+    agent update replaces the bytes at that path, so a re-pin keeps the path
+    and the trust setup gave it, and adds the custody check setup never made:
+    the guard starts only a regular file, not a link, and the file and its
+    folder must be changeable by no one but this account, root or (on
+    Windows) SYSTEM, Administrators and TrustedInstaller. Otherwise another
+    account could have placed these bytes, and only acp setup may bind them.
+    """
+    if not _is_regular_no_follow(path_value):
+        return f"{path_value} is a link or not a regular file"
+    folder = str(Path(path_value).parent)
+    if os.name == "nt":
+        for target in (path_value, folder):
+            problem = windows_acl_write_error(target, trust_administrators=True)
+            if problem:
+                return f"other accounts can change {target} ({problem})"
+        return ""
+    for target in (path_value, folder):
+        try:
+            info = os.lstat(target)
+        except OSError as exc:
+            return f"{target} cannot be checked ({exc.strerror or exc})"
+        if not trusted_runtime_owner(info.st_uid):
+            return f"other accounts can change {target} (it is owned by another account)"
+        if other_accounts_can_write(target, info):
+            return f"other accounts can change {target} (group or other write permission)"
+        acl = darwin_acl_write_error(target)
+        if acl:
+            return f"other accounts can change {target} ({acl})"
+    return ""
+
+
+def refresh_agent_pins(
+    data_dir: str,
+    *,
+    agent: str = "",
+    pairs: set[tuple[str, str]] | None = None,
+    apply: bool = True,
+) -> tuple[list[tuple[str, str, str, str]], list[tuple[str, str]]]:
+    """Re-pin an updated ACP agent in this runtime's own contract locks (rel-1-0-10:GAP-0250).
+
+    An agent update (kiro-cli 2.35.1 to 3.3.0) replaces the pinned file, so
+    the guard refused to start the pair until acp setup ran again. This
+    re-pins only the agent digest, only at the path setup pinned, and only
+    when _agent_custody_problem finds no other account could have changed
+    it; a managed enrollment lock is never touched. ``agent`` or ``pairs``
+    limits it. Returns the re-pinned ``(client/agent, path, old, new)`` and
+    the refused ``(client/agent, reason)``; with ``apply=False`` nothing is
+    written.
+    """
+    if _acp_dir_is_redirected(data_dir):
+        return [], []
+    repinned: list[tuple[str, str, str, str]] = []
+    refused: list[tuple[str, str]] = []
+    for client, pair_agent in sorted(_lock_pairs(data_dir)):
+        if (agent and pair_agent != agent) or (pairs is not None and (client, pair_agent) not in pairs):
+            continue
+        pair = f"{client}/{pair_agent}"
+        lock_path = _contract_lock_path(data_dir, client, pair_agent)
+        try:
+            if lock_path.is_symlink() or not lock_path.is_file() or lock_path.stat().st_size > 64 << 10:
+                continue
+            document = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        item = document.get("agent") if isinstance(document, dict) else None
+        guard = document.get("guard") if isinstance(document, dict) else None
+        path_value = item.get("path") if isinstance(item, dict) else None
+        if not isinstance(path_value, str) or not Path(path_value).is_absolute() or item.get("id") != pair_agent:
+            continue
+        if not os.path.lexists(path_value) or not Path(path_value).is_file():
+            refused.append((pair, f"the pinned agent {path_value} is missing"))
+            continue
+        digest = _sha256_file(path_value)
+        if item.get("sha256") == digest:
+            continue
+        if isinstance(guard, dict) and guard.get("managed_custody") is True:
+            refused.append((pair, "this binding is a managed enrollment; ask your administrator to enroll it again"))
+            continue
+        problem = _agent_custody_problem(path_value)
+        if problem:
+            refused.append((pair, problem))
+            continue
+        previous = str(item.get("sha256", ""))
+        if apply:
+            item["sha256"] = digest
+            atomic_write_private_bytes(lock_path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
+        repinned.append((pair, path_value, previous, digest))
+    return repinned, refused
+
+
 @acp_cmd.command("refresh")
 @click.option(
     "--from-sha256",
@@ -2124,8 +2250,15 @@ def refresh_guard_pins(
     default="",
     help="Re-pin only locks whose guard is this file (a source install passes the guard it just published).",
 )
+@click.option(
+    "--agent",
+    "agent",
+    type=click.Choice(sorted(_AGENTS)),
+    default=None,
+    help="Re-pin this ACP agent after you updated it (only its digest, at the path setup pinned).",
+)
 @pass_ctx
-def refresh_cmd(app: AppContext, from_sha256: str, guard_path: str) -> None:
+def refresh_cmd(app: AppContext, from_sha256: str, guard_path: str, agent: str | None = None) -> None:
     """Re-pin the DefenseClaw ACP guard in every editor entry after an upgrade.
 
     An upgrade replaces defenseclaw-acp, so each contract lock still names the
@@ -2133,10 +2266,32 @@ def refresh_cmd(app: AppContext, from_sha256: str, guard_path: str) -> None:
     DefenseClaw's own guard and the protocol schema; a changed agent binary or
     editor entry still needs 'defenseclaw acp setup'. The installers and
     'make all' run it, and 'defenseclaw doctor --fix' does too.
+
+    With --agent it re-pins that agent instead, after you updated it: only
+    its digest at the path setup pinned, once only this account or an
+    administrator can change the file and its folder (rel-1-0-10:GAP-0250).
     """
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
     data_dir = str(Path(app.cfg.data_dir).expanduser().resolve())
+    if agent:
+        repinned, refused = refresh_agent_pins(data_dir, agent=agent)
+        for pair, path_value, previous, digest in repinned:
+            _log_acp_change(
+                app,
+                "acp-agent-repin",
+                f"scope={pair} agent={path_value} previous_sha256={previous} sha256={digest}",
+            )
+            click.echo(f"Re-pinned the updated {agent} agent for {pair} ({path_value})")
+        if refused:
+            raise click.ClickException(
+                "; ".join(
+                    f"{pair}: not re-pinned: {reason}; to bind it again, "
+                    f"{run_instruction(setup_repair_command(app.cfg, *pair.split('/'), data_dir))}"
+                    for pair, reason in refused
+                )
+            )
+        return
     for pair in refresh_guard_pins(data_dir, from_sha256=from_sha256, guard_path=guard_path):
         click.echo(f"Re-pinned the DefenseClaw ACP guard for {pair}")
 
