@@ -14827,6 +14827,13 @@ def _remove_connector(
             click.echo()
             ux.warn("Cowork is no longer protected; remove the DefenseClaw plugin in Claude (Customize > Plugins)")
 
+    if match == "openclaw":
+        from defenseclaw.openclaw_plugin_config import openclaw_separate_user_teardown_note
+
+        if note := openclaw_separate_user_teardown_note(cfg):
+            click.echo()
+            ux.warn(note)
+
     remaining_label = ",".join(sorted(remaining)) if remaining else "(none)"
     _log_setup_action(
         app,

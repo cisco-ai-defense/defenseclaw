@@ -339,3 +339,23 @@ def openclaw_plugin_evidence(cfg: object, health: object) -> tuple[str, str, boo
         step = f"merge the block in {merge} into openclaw.json and " + step
     when = "has not called in since the gateway started" if age is None else f"last called in {int(age // 60)} min ago"
     return "unverified", f"expected {expected}; the OpenClaw plugin {when}: {step}", False
+
+
+def openclaw_separate_user_teardown_note(cfg: object) -> str:
+    # What the administrator removes from openclaw.json after setup remove in
+    # the separate-user layout; the gateway prints it only to its own log
+    # (rel-1-0-10 GAP-0083).
+    block = _openclaw_connector_block()
+    if not str(block.get("plugin_account") or "").strip():
+        return ""
+    claw = getattr(cfg, "claw", None)
+    home = str(getattr(claw, "home_dir", "") or "~/.openclaw")
+    config_file = str(getattr(claw, "config_file", "") or os.path.join(home, "openclaw.json"))
+    plugin_dir = str(block.get("plugin_dir") or "").strip()
+    return (
+        f"DefenseClaw does not write {config_file} in the separate-user layout. As the OpenClaw account or an "
+        "administrator, remove plugins.entries.defenseclaw, defenseclaw from plugins.allow if you added it, "
+        f"{plugin_dir or 'the plugin_dir path'} from plugins.load.paths and a security.installPolicy that runs "
+        "defenseclaw-gateway, then restart the OpenClaw gateway. Until then the plugin has no credential and blocks "
+        "every tool call."
+    )
