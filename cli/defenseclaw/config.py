@@ -2978,6 +2978,40 @@ class GuardrailProfile:
 
 
 @dataclass
+class SecretFlowLabelSets:
+    credentials: bool = True
+    extra_path_globs: list[str] = field(default_factory=list)
+    extra_secret_patterns: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecretFlowSinkAction:
+    default: str = "alert"  # the default profile never blocks
+    strict: str = "block"
+    managed: str = "block"
+
+
+@dataclass
+class SecretFlowMemory:
+    max_labeled_paths: int = 512
+    max_value_digests: int = 256
+
+
+@dataclass
+class SecretFlowConfig:
+    """guardrail.secret_flow: Secret flow tracking settings. Rollout rides
+    guardrail.effects_rules; these are the feature's own settings. Mirrors
+    internal/config.SecretFlowConfig."""
+
+    mode: str = "shadow"  # off | shadow | on (ships shadow)
+    label_sets: "SecretFlowLabelSets" = field(default_factory=lambda: SecretFlowLabelSets())
+    sink_action: "SecretFlowSinkAction" = field(default_factory=lambda: SecretFlowSinkAction())
+    reencodings: bool = True
+    memory: "SecretFlowMemory" = field(default_factory=lambda: SecretFlowMemory())
+    destination_allowlist: list[str] = field(default_factory=list)
+
+
+@dataclass
 class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"  # observe | action
@@ -3006,6 +3040,7 @@ class GuardrailConfig:
     detection_strategy_completion: str = ""  # per-direction override
     detection_strategy_tool_call: str = ""  # per-direction override
     effects_rules: str = "shadow"  # off | shadow | on (effect-model rule lane)
+    secret_flow: "SecretFlowConfig" = field(default_factory=lambda: SecretFlowConfig())  # Secret flow tracking
     # Run full judge classification on content with no regex signal
     # (regex_judge mode). Flipped from False to True in the
     # multi-provider-adapters PR: pure-regex triage misses enough
@@ -6943,6 +6978,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         effects_rules=raw.get("effects_rules", "shadow"),
+        secret_flow=_merge_secret_flow(raw.get("secret_flow")),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack=str(raw.get("rule_pack", "") or ""),
         custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
@@ -7145,6 +7181,39 @@ def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
     return HILTConfig(
         enabled=bool(raw.get("enabled", False)),
         min_severity=str(raw.get("min_severity", "HIGH") or "HIGH").upper(),
+    )
+
+
+def _merge_secret_flow(raw: dict[str, Any] | None) -> SecretFlowConfig:
+    if not isinstance(raw, dict):
+        return SecretFlowConfig()
+    label_raw = raw.get("label_sets") or {}
+    sink_raw = raw.get("sink_action") or {}
+    mem_raw = raw.get("memory") or {}
+    allow_raw = raw.get("destination_allowlist", [])
+    allow = (
+        [str(v).strip() for v in allow_raw if str(v).strip()]
+        if isinstance(allow_raw, list | tuple)
+        else []
+    )
+    return SecretFlowConfig(
+        mode=str(raw.get("mode", "shadow") or "shadow"),
+        label_sets=SecretFlowLabelSets(
+            credentials=bool(label_raw.get("credentials", True)),
+            extra_path_globs=_string_list(label_raw.get("extra_path_globs")),
+            extra_secret_patterns=_string_list(label_raw.get("extra_secret_patterns")),
+        ),
+        sink_action=SecretFlowSinkAction(
+            default=str(sink_raw.get("default", "alert") or "alert"),
+            strict=str(sink_raw.get("strict", "block") or "block"),
+            managed=str(sink_raw.get("managed", "block") or "block"),
+        ),
+        reencodings=bool(raw.get("reencodings", True)),
+        memory=SecretFlowMemory(
+            max_labeled_paths=int(mem_raw.get("max_labeled_paths", 512) or 512),
+            max_value_digests=int(mem_raw.get("max_value_digests", 256) or 256),
+        ),
+        destination_allowlist=allow,
     )
 
 
