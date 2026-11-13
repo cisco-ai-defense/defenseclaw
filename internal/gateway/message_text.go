@@ -134,8 +134,26 @@ func collectMessageText(value interface{}, depth int, leaves *int, out *[]string
 }
 
 // messageCallHasNoText reports whether a message call reaching /inspect/tool
-// carries nothing the content rules can read: no content and no string in the
-// args. Such a call takes the tool policy lane instead of being allowed.
+// carries arguments but nothing the content rules can read: no content and no
+// string outside the routing keys. Such a call takes the tool policy lane,
+// which reads the arguments, instead of being allowed unread. A call with no
+// arguments at all has nothing to inspect (an empty prompt or tool result).
 func messageCallHasNoText(req *ToolInspectRequest) bool {
-	return req.Content == "" && messageTextFromArgs(req.Args) == ""
+	if req.Content != "" || messageTextFromArgs(req.Args) != "" {
+		return false
+	}
+	var args interface{}
+	if err := json.Unmarshal(req.Args, &args); err != nil {
+		return false
+	}
+	switch v := args.(type) {
+	case map[string]interface{}:
+		return len(v) > 0
+	case []interface{}:
+		return len(v) > 0
+	case nil:
+		return false
+	default:
+		return true
+	}
 }

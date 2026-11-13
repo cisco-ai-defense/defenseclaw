@@ -125,3 +125,27 @@ func TestInspectToolMessageWithoutTextTakesToolPolicy(t *testing.T) {
 		t.Fatalf("clean routing-only call: action = %q, want allow", verdict.Action)
 	}
 }
+
+// A message call with no arguments, or empty ones, has nothing to inspect and
+// is allowed without the tool policy lane.
+func TestMessageCallHasNoText(t *testing.T) {
+	cases := []struct {
+		name string
+		req  ToolInspectRequest
+		want bool
+	}{
+		{"no args, no content", ToolInspectRequest{Tool: "message"}, false},
+		{"empty object", ToolInspectRequest{Tool: "message", Args: json.RawMessage(`{}`)}, false},
+		{"null", ToolInspectRequest{Tool: "message", Args: json.RawMessage(`null`)}, false},
+		{"content given", ToolInspectRequest{Tool: "message", Content: "hi", Args: json.RawMessage(`{"to":"x"}`)}, false},
+		{"text in args", ToolInspectRequest{Tool: "message", Args: json.RawMessage(`{"text":"hi"}`)}, false},
+		{"routing keys only", ToolInspectRequest{Tool: "message", Args: json.RawMessage(`{"to":"x","action":"send"}`)}, true},
+		{"non-string values only", ToolInspectRequest{Tool: "message", Args: json.RawMessage(`{"media":42}`)}, true},
+		{"not JSON", ToolInspectRequest{Tool: "message", Args: json.RawMessage(`nope`)}, false},
+	}
+	for _, tc := range cases {
+		if got := messageCallHasNoText(&tc.req); got != tc.want {
+			t.Errorf("%s: messageCallHasNoText = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

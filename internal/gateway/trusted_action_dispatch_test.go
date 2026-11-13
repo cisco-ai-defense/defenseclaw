@@ -3139,9 +3139,22 @@ func TestInspectMessageAndConnectorBoundary(t *testing.T) {
 	)
 	messageRecorder := httptest.NewRecorder()
 	api.handleInspectTool(messageRecorder, message)
+	// The text of a message call can sit in any string field of its args, so a
+	// message whose empty content leaves the text in args.command is inspected
+	// as outbound text (GAP-0177). Before, only args.content and args.body were
+	// read and this call was allowed unread.
 	if messageRecorder.Code != http.StatusOK ||
-		!bytes.Contains(messageRecorder.Body.Bytes(), []byte(`"action":"allow"`)) {
-		t.Fatalf("empty message entered tool lane: status=%d body=%s", messageRecorder.Code, messageRecorder.Body.String())
+		!bytes.Contains(messageRecorder.Body.Bytes(), []byte(`"action":"block"`)) {
+		t.Fatalf("message with text in args.command was not inspected: status=%d body=%s", messageRecorder.Code, messageRecorder.Body.String())
+	}
+	// With nothing to read at all (no content, no arguments) the call is allowed.
+	empty := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool",
+		bytes.NewBufferString(`{"tool":"message","content":""}`))
+	emptyRecorder := httptest.NewRecorder()
+	api.handleInspectTool(emptyRecorder, empty)
+	if emptyRecorder.Code != http.StatusOK ||
+		!bytes.Contains(emptyRecorder.Body.Bytes(), []byte(`"action":"allow"`)) {
+		t.Fatalf("empty message was not allowed: status=%d body=%s", emptyRecorder.Code, emptyRecorder.Body.String())
 	}
 
 	mismatch := httptest.NewRequest(
