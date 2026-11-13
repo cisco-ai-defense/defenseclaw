@@ -1987,6 +1987,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		var v *ScanVerdict
 		if strings.EqualFold(strategyDirection, "tool_call") {
 			jctx = withDecisionRuleFloor(jctx, ruleFloor)
+			jctx = withJudgeFlaggingRules(jctx, current)
 			v = judge.RunToolJudge(jctx, toolName, content)
 		} else {
 			v = judge.RunJudges(jctx, judgeDirection, content, toolName)

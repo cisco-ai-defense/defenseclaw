@@ -142,6 +142,10 @@ type toolJudgeSessionContext struct {
 	userIntent string
 	events     []toolJudgeContextEvent
 	lastSeen   time.Time
+	// calls counts the session's judged calls; targets is what the session
+	// did to each resolved target (judge_packet.go), bounded.
+	calls   int
+	targets map[string]judgeTargetSeen
 }
 
 type toolJudgeContextEvent struct {
@@ -2003,6 +2007,12 @@ func neutralizeToolJudgeDelimiters(value string) string {
 		"</RECENT_TOOL_CALL>", "‹/RECENT_TOOL_CALL›",
 		"<CURRENT_TOOL_CALL", "‹CURRENT_TOOL_CALL",
 		"</CURRENT_TOOL_CALL>", "‹/CURRENT_TOOL_CALL›",
+		"<CALL_EFFECTS", "‹CALL_EFFECTS",
+		"</CALL_EFFECTS>", "‹/CALL_EFFECTS›",
+		"<TARGET_HISTORY", "‹TARGET_HISTORY",
+		"</TARGET_HISTORY>", "‹/TARGET_HISTORY›",
+		"<FLAGGING_RULES", "‹FLAGGING_RULES",
+		"</FLAGGING_RULES>", "‹/FLAGGING_RULES›",
 	)
 	return replacer.Replace(value)
 }
@@ -2118,9 +2128,14 @@ func asciiLowerPreservingBytes(value string) string {
 
 func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args string) string {
 	current := boundToolJudgeArguments(args)
+	effects := toolJudgeCallEffects(ctx, toolName, args)
 	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
 	if j == nil || sessionID == "" {
-		return current
+		var sample strings.Builder
+		fmt.Fprintf(&sample, "<CURRENT_TOOL_CALL tool=%q>\n%s\n</CURRENT_TOOL_CALL>", sanitizeToolName(toolName), current)
+		effects.render(&sample)
+		renderJudgeFlaggingRules(ctx, &sample)
+		return sample.String()
 	}
 
 	now := time.Now()
@@ -2141,6 +2156,12 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		entry.events = append([]toolJudgeContextEvent(nil), entry.events[len(entry.events)-maxToolJudgePriorEvents:]...)
 	}
 	entry.lastSeen = now
+	entry.calls++
+	if entry.targets == nil {
+		entry.targets = make(map[string]judgeTargetSeen)
+	}
+	var targetHistory strings.Builder
+	recordJudgeTargets(&targetHistory, entry.targets, entry.calls, effects)
 	j.toolContext[sessionID] = entry
 	j.toolContextMu.Unlock()
 
@@ -2157,6 +2178,9 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		}
 	}
 	fmt.Fprintf(&sample, "<CURRENT_TOOL_CALL tool=%q>\n%s\n</CURRENT_TOOL_CALL>", sanitizeToolName(toolName), current)
+	effects.render(&sample)
+	sample.WriteString(targetHistory.String())
+	renderJudgeFlaggingRules(ctx, &sample)
 	if j.decision != nil {
 		state := decisionModelState{
 			SessionUserIntent: entry.userIntent,
