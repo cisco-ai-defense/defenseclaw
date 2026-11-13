@@ -7,6 +7,7 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -15,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -24,6 +27,7 @@ const hookImageTestBin = `C:\Program Files\Cisco\DefenseClaw\bin`
 type fakeHookImageNode struct {
 	dir, link bool
 	data      string
+	mod       time.Time
 }
 
 // fakeHookImageFS is an in-memory Windows tree (case-insensitive) with the
@@ -33,6 +37,7 @@ type fakeHookImageFS struct {
 	names      map[string]string // lower -> spelled path
 	random     int
 	renameErr  map[string]error // by lower source path
+	renameBusy map[string]int   // refusals (fs.ErrPermission) left, by lower source path
 	removeErr  map[string]error
 	placeErr   error
 	replaced   []string
@@ -74,7 +79,7 @@ func (i fakeHookImageInfo) Mode() fs.FileMode {
 	}
 	return mode
 }
-func (i fakeHookImageInfo) ModTime() time.Time { return time.Time{} }
+func (i fakeHookImageInfo) ModTime() time.Time { return i.node.mod }
 func (i fakeHookImageInfo) IsDir() bool        { return i.node.dir }
 func (i fakeHookImageInfo) Sys() any           { return nil }
 
@@ -162,6 +167,10 @@ func (f *fakeHookImageFS) ReplaceImage(source, destination string) error {
 }
 
 func (f *fakeHookImageFS) Rename(from, to string) error {
+	if f.renameBusy[strings.ToLower(from)] > 0 {
+		f.renameBusy[strings.ToLower(from)]--
+		return fmt.Errorf("rename %s: %w", from, fs.ErrPermission)
+	}
 	if err := f.renameErr[strings.ToLower(from)]; err != nil {
 		return err
 	}
@@ -206,33 +215,57 @@ func (f *fakeHookImageFS) RandomHex(n int) (string, error) {
 	return fmt.Sprintf("%0*x", 2*n, f.random), nil
 }
 
-// fakeHookImageStarter answers --version-json and --version like the real
-// images, per path, unless told otherwise.
+// fakeHookImageStarter answers --version-json, --version and the managed
+// Claude Code self test like the real images, per image name (the self test
+// is "selftest"), unless told otherwise.
 type fakeHookImageStarter struct {
-	runs   []string
-	answer map[string]string
-	fail   map[string]error
-	build  windowsHookImageBuild
+	runs         []string
+	starts       []windowsHookImageStart
+	answer       map[string]string
+	stderr       map[string]string
+	exit         map[string]int
+	fail         map[string]error
+	build        windowsHookImageBuild
+	unrestricted string // TokenProblem when the filtered token is unavailable
 }
 
-func (s *fakeHookImageStarter) Run(path string, args []string, timeout time.Duration) ([]byte, error) {
-	s.runs = append(s.runs, baseOf(path)+" "+strings.Join(args, " "))
-	if timeout != windowsHookImageStartTimeout {
-		return nil, fmt.Errorf("timeout %s", timeout)
+func fakeHookImageStartKey(req windowsHookImageStart) string {
+	for _, arg := range req.Args {
+		if arg == "--enterprise-managed" {
+			return "selftest"
+		}
 	}
-	if err := s.fail[baseOf(path)]; err != nil {
-		return nil, err
+	return baseOf(req.Path)
+}
+
+func (s *fakeHookImageStarter) Start(req windowsHookImageStart) (windowsHookImageStartResult, error) {
+	key := fakeHookImageStartKey(req)
+	s.runs = append(s.runs, key+" "+strings.Join(req.Args, " "))
+	s.starts = append(s.starts, req)
+	result := windowsHookImageStartResult{Restricted: s.unrestricted == "", TokenProblem: s.unrestricted}
+	if req.Timeout != windowsHookImageStartTimeout {
+		return result, fmt.Errorf("timeout %s", req.Timeout)
 	}
-	if answer, ok := s.answer[baseOf(path)]; ok {
-		return []byte(answer), nil
+	if err := s.fail[key]; err != nil {
+		return result, err
 	}
-	switch baseOf(path) {
+	result.ExitCode = s.exit[key]
+	result.Stderr = []byte(s.stderr[key])
+	if answer, ok := s.answer[key]; ok {
+		result.Stdout = []byte(answer)
+		return result, nil
+	}
+	switch key {
 	case winpath.EnterpriseHookImageName:
-		return []byte(fmt.Sprintf(`{"schema_version":1,"name":"defenseclaw-hook","version":%q,"commit":%q,"built":"2026-11-13T00:00:00Z"}`+"\n", s.build.Version, s.build.Commit)), nil
+		result.Stdout = []byte(fmt.Sprintf(`{"schema_version":1,"name":"defenseclaw-hook","version":%q,"commit":%q,"built":"2026-11-13T00:00:00Z"}`+"\n", s.build.Version, s.build.Commit))
 	case winpath.EnterpriseHookGuardImageName:
-		return []byte(fmt.Sprintf("defenseclaw-hook-guard version %s (commit=%s, built=2026-11-13T00:00:00Z)\n", s.build.Version, s.build.Commit)), nil
+		result.Stdout = []byte(fmt.Sprintf("defenseclaw-hook-guard version %s (commit=%s, built=2026-11-13T00:00:00Z)\n", s.build.Version, s.build.Commit))
+	case "selftest":
+		result.Stdout = []byte(`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw is being updated"}}` + "\n")
+	default:
+		return result, errors.New("unknown image")
 	}
-	return nil, errors.New("unknown image")
+	return result, nil
 }
 
 var hookImageTestBuild = windowsHookImageBuild{Version: "1.0.10", Commit: "abc1234"}
@@ -276,7 +309,7 @@ func TestHookImageUpgradeFromTheFixedPathLayout(t *testing.T) {
 	// then stages its launch folder.
 	hook10, guard10 := installRelease(f, "1.0.10")
 	report := stageRelease(t, f, hook10, guard10)
-	if !report.OK || !report.CreatedRoot || !report.CreatedFolder || !report.Changed ||
+	if !report.OK || !report.CreatedFolder || !report.Changed ||
 		report.Hook != launchDir(hook10)+`\defenseclaw-hook.exe` || report.Guard != launchDir(hook10)+`\defenseclaw-hook-guard.exe` {
 		t.Fatalf("first upgrade stage = %+v", report)
 	}
@@ -292,7 +325,7 @@ func TestHookImageUpgradeFromTheFixedPathLayout(t *testing.T) {
 
 	// A repeated ensure of the same release changes nothing.
 	again := stageRelease(t, f, hook10, guard10)
-	if !again.OK || again.Changed || again.CreatedFolder || again.CreatedRoot {
+	if !again.OK || again.Changed || again.CreatedFolder {
 		t.Fatalf("repeated ensure = %+v; it must keep the exact folder", again)
 	}
 
@@ -309,7 +342,7 @@ func TestHookImageUpgradeFromTheFixedPathLayout(t *testing.T) {
 	// Second upgrade: a new folder; the 1.0.10 folder is never touched.
 	hook11, guard11 := installRelease(f, "1.0.11")
 	second := stageRelease(t, f, hook11, guard11)
-	if !second.OK || second.CreatedRoot || !second.CreatedFolder {
+	if !second.OK || !second.CreatedFolder {
 		t.Fatalf("second upgrade stage = %+v", second)
 	}
 	if sum, _ := f.SHA256(report.Hook); sum != hook10 {
@@ -463,10 +496,14 @@ func TestHookImageStageWithoutGuardAndLeftovers(t *testing.T) {
 	f.file(stale+`\defenseclaw-hook.exe`, "half")
 	starter := &fakeHookImageStarter{build: hookImageTestBuild}
 	report := stageWindowsHookImage(f, starter, windowsHookImageStageRequest{Bin: hookImageTestBin, HookSHA256: fakeSHA("hook only"), Build: hookImageTestBuild})
-	if !report.OK || report.Guard != "" || report.CreatedRoot || !report.CreatedFolder {
+	if !report.OK || report.Guard != "" || !report.CreatedFolder {
 		t.Fatalf("stage = %+v", report)
 	}
-	if len(starter.runs) != 1 || starter.runs[0] != "defenseclaw-hook.exe --version-json" {
+	// Without a guard the self test runs the hook itself (the writer registers
+	// it unwrapped then).
+	if len(starter.runs) != 2 || starter.runs[0] != "defenseclaw-hook.exe --version-json" ||
+		starter.runs[1] != "selftest hook --connector claudecode --enterprise-managed" ||
+		starter.starts[1].Path != report.Hook {
 		t.Fatalf("start checks = %v", starter.runs)
 	}
 	if _, ok := f.get(stale); ok {
@@ -599,5 +636,195 @@ func TestWindowsHookImageVerifyProblem(t *testing.T) {
 		if p := windowsHookImageVerifyProblem(image); !strings.Contains(p, image.Hook) {
 			t.Fatalf("%s problem %q does not name the image agents start", image.State, p)
 		}
+	}
+}
+
+// The start check runs the hook, the guard and then the managed Claude Code
+// command the writer registers, all from the new folder (review P2-1).
+func TestHookImageStartCheckRunsTheManagedClaudeCommandFromTheNewFolder(t *testing.T) {
+	f := newFakeHookImageFS()
+	hookSHA, guardSHA := installRelease(f, "1.0.10")
+	starter := &fakeHookImageStarter{build: hookImageTestBuild}
+	report := stageWindowsHookImage(f, starter, windowsHookImageStageRequest{
+		Bin: hookImageTestBin, HookSHA256: hookSHA, GuardSHA256: guardSHA, Build: hookImageTestBuild,
+	})
+	if !report.OK || len(report.Notes) != 0 {
+		t.Fatalf("stage = %+v", report)
+	}
+	if len(starter.starts) != 3 {
+		t.Fatalf("starts = %v", starter.runs)
+	}
+	self := starter.starts[2]
+	if !strings.EqualFold(baseOf(self.Path), "cmd.exe") || string(self.Stdin) != string(windowsHookImageSelfTestInput) {
+		t.Fatalf("self test = %+v", self)
+	}
+	joined := strings.Join(self.Args, " ")
+	for _, want := range []string{report.Guard, report.Hook, "--enterprise-managed", "--event PreToolUse"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("self test args %q do not name %q", joined, want)
+		}
+	}
+	command, args, ok := connector.ClaudeCodeManagedGuardInvocation("PreToolUse", report.Hook, windowsHookImageSelfTestArgs)
+	if !ok || command != self.Path || strings.Join(args, "\x00") != strings.Join(self.Args, "\x00") {
+		t.Fatal("the self test is not the command the managed Claude Code writer registers")
+	}
+	var input map[string]any
+	if err := json.Unmarshal(self.Stdin, &input); err != nil || input["hook_event_name"] != "PreToolUse" || input["tool_name"] != "Read" {
+		t.Fatalf("self test input %s: %v", self.Stdin, err)
+	}
+}
+
+func TestHookImageSelfTestAnswers(t *testing.T) {
+	cases := map[string]struct {
+		stdout, stderr string
+		exit           int
+		fail           error
+		pass           bool
+	}{
+		"closed deny with JSON":        {stdout: `{"hookSpecificOutput":{"permissionDecision":"deny"}}`, pass: true},
+		"block with a reason":          {stderr: "DefenseClaw blocked this tool call: the gateway is being updated", exit: 2, pass: true},
+		"allow with no output":         {pass: true},
+		"guard missing (cmd fallback)": {stderr: "DefenseClaw could not start its Claude Code hook guard. Run the DefenseClaw installer again to repair it.", exit: 2},
+		"hook missing":                 {stderr: hookguard.MissingMessage, exit: 2},
+		"hook cannot start":            {stderr: hookguard.CannotStartMessage, exit: 2},
+		"hook crashed":                 {exit: 1, stderr: "panic"},
+		"wrapped error status":         {exit: hookguard.WrappedExitBase + 3},
+		"cmd cannot find the program":  {exit: 9009},
+		"malformed answer":             {stdout: "not json"},
+		"two answers":                  {stdout: `{"a":1}{"b":2}`},
+		"silent block":                 {exit: 2},
+		"did not start":                {fail: errors.New("access denied by policy")},
+		"timeout":                      {fail: errors.New("no answer within 1m0s")},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeHookImageFS()
+			hookSHA, guardSHA := installRelease(f, "1.0.10")
+			starter := &fakeHookImageStarter{
+				build:  hookImageTestBuild,
+				answer: map[string]string{"selftest": tc.stdout},
+				stderr: map[string]string{"selftest": tc.stderr},
+				exit:   map[string]int{"selftest": tc.exit},
+				fail:   map[string]error{"selftest": tc.fail},
+			}
+			report := stageWindowsHookImage(f, starter, windowsHookImageStageRequest{
+				Bin: hookImageTestBin, HookSHA256: hookSHA, GuardSHA256: guardSHA, Build: hookImageTestBuild,
+			})
+			if report.OK != tc.pass {
+				t.Fatalf("report = %+v; want ok %v", report, tc.pass)
+			}
+			if !tc.pass && (report.Reason != windowsHookImageStartFailed || !strings.Contains(report.Error, "managed Claude Code hook command")) {
+				t.Fatalf("report = %+v; want hook_image_start_failed naming the managed command", report)
+			}
+		})
+	}
+}
+
+func TestHookImageStartCheckNotesTheInstallerToken(t *testing.T) {
+	f := newFakeHookImageFS()
+	hookSHA, guardSHA := installRelease(f, "1.0.10")
+	starter := &fakeHookImageStarter{build: hookImageTestBuild, unrestricted: "create the filtered token: Access is denied."}
+	report := stageWindowsHookImage(f, starter, windowsHookImageStageRequest{
+		Bin: hookImageTestBin, HookSHA256: hookSHA, GuardSHA256: guardSHA, Build: hookImageTestBuild,
+	})
+	if !report.OK || len(report.Notes) != 1 ||
+		report.Notes[0] != "start check ran with the installer token: create the filtered token: Access is denied." {
+		t.Fatalf("stage = %+v; want one installer-token note", report)
+	}
+}
+
+func TestHookImageVersionStartThatFailsIsRefused(t *testing.T) {
+	f := newFakeHookImageFS()
+	hookSHA, guardSHA := installRelease(f, "1.0.10")
+	starter := &fakeHookImageStarter{build: hookImageTestBuild, exit: map[string]int{winpath.EnterpriseHookImageName: 1}}
+	report := stageWindowsHookImage(f, starter, windowsHookImageStageRequest{
+		Bin: hookImageTestBin, HookSHA256: hookSHA, GuardSHA256: guardSHA, Build: hookImageTestBuild,
+	})
+	if report.OK || report.Reason != windowsHookImageStartFailed || !strings.Contains(report.Error, "ended with status 1") {
+		t.Fatalf("stage = %+v", report)
+	}
+}
+
+// The publish rename is retried while a handle in the new folder refuses it
+// (an antivirus scan), then reported as hook_image_publish_busy (review P2-2).
+func TestHookImagePublishRetriesABusyRename(t *testing.T) {
+	var slept []time.Duration
+	restore := windowsHookImageSleep
+	windowsHookImageSleep = func(d time.Duration) { slept = append(slept, d) }
+	t.Cleanup(func() { windowsHookImageSleep = restore })
+	staging := func(f *fakeHookImageFS) string {
+		return strings.ToLower(hookImageTestBin + `\hooks\.staging-` + fmt.Sprintf("%032x", f.random+1))
+	}
+
+	f := newFakeHookImageFS()
+	hookSHA, guardSHA := installRelease(f, "1.0.10")
+	f.renameBusy = map[string]int{staging(f): 3}
+	report := stageRelease(t, f, hookSHA, guardSHA)
+	if !report.OK || !report.CreatedFolder {
+		t.Fatalf("busy then free = %+v", report)
+	}
+	if want := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}; fmt.Sprint(slept) != fmt.Sprint(want) {
+		t.Fatalf("waits = %v, want %v", slept, want)
+	}
+
+	slept = nil
+	f = newFakeHookImageFS()
+	hookSHA, guardSHA = installRelease(f, "1.0.10")
+	f.renameBusy = map[string]int{staging(f): 100}
+	report = stageRelease(t, f, hookSHA, guardSHA)
+	if report.OK || report.Reason != windowsHookImagePublishBusy || !strings.Contains(report.Error, "still refused after 10 tries") {
+		t.Fatalf("always busy = %+v", report)
+	}
+	want := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond,
+		1600 * time.Millisecond, 2 * time.Second, 2 * time.Second, 2 * time.Second, 2 * time.Second}
+	if fmt.Sprint(slept) != fmt.Sprint(want) {
+		t.Fatalf("waits = %v, want %v", slept, want)
+	}
+	for key := range f.nodes {
+		if strings.Contains(key, ".staging-") {
+			t.Fatalf("a busy publish left %s", key)
+		}
+	}
+
+	// Any other refusal is not retried.
+	slept = nil
+	f = newFakeHookImageFS()
+	hookSHA, guardSHA = installRelease(f, "1.0.10")
+	f.renameErr = map[string]error{staging(f): errors.New("the file name is too long")}
+	report = stageRelease(t, f, hookSHA, guardSHA)
+	if report.OK || report.Reason != windowsHookImageStageFailed || len(slept) != 0 {
+		t.Fatalf("other error = %+v, waits %v", report, slept)
+	}
+}
+
+// A stage removes only staging folders older than an hour: a younger one may
+// be another run's folder in flight (review P3-6).
+func TestHookImageStageLeavesAYoungStagingFolder(t *testing.T) {
+	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	restore := windowsHookImageNow
+	windowsHookImageNow = func() time.Time { return now }
+	t.Cleanup(func() { windowsHookImageNow = restore })
+	f := newFakeHookImageFS()
+	hookSHA, guardSHA := installRelease(f, "1.0.10")
+	f.dir(hookImageTestBin + `\hooks`)
+	young := hookImageTestBin + `\hooks\.staging-` + strings.Repeat("b", 32)
+	old := hookImageTestBin + `\hooks\.staging-` + strings.Repeat("c", 32)
+	f.put(young, &fakeHookImageNode{dir: true, mod: now.Add(-10 * time.Minute)})
+	f.put(old, &fakeHookImageNode{dir: true, mod: now.Add(-2 * time.Hour)})
+	if report := stageRelease(t, f, hookSHA, guardSHA); !report.OK {
+		t.Fatalf("stage = %+v", report)
+	}
+	if _, ok := f.get(young); !ok {
+		t.Fatal("a stage removed a staging folder another run may still write")
+	}
+	if _, ok := f.get(old); ok {
+		t.Fatal("a stage kept an hour-old staging folder")
+	}
+}
+
+func TestHookImageStageReportHasNoCreatedRoot(t *testing.T) {
+	encoded, err := json.Marshal(windowsHookImageStageReport{SchemaVersion: 1})
+	if err != nil || strings.Contains(string(encoded), "created_root") {
+		t.Fatalf("report %s, %v", encoded, err)
 	}
 }

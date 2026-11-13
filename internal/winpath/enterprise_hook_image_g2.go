@@ -32,7 +32,7 @@ func EnterpriseHookStagingDirName(suffix string) string {
 // IsEnterpriseHookStagingDirName reports a staging folder left by an
 // interrupted stage: .staging-<32 hex>.
 func IsEnterpriseHookStagingDirName(name string) bool {
-	suffix, ok := strings.CutPrefix(strings.ToLower(name), enterpriseHookStagingPrefix)
+	suffix, ok := strings.CutPrefix(name, enterpriseHookStagingPrefix)
 	return ok && isLowerHex(suffix, 32)
 }
 

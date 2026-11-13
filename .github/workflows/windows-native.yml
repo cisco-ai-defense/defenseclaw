@@ -193,6 +193,24 @@ jobs:
               throw "$shippedTest did not complete with PASS on the native Windows runner"
             }
           }
+          # The versioned hook image (GAP-0751 review 1): the folder rename that
+          # prune relies on is refused while an image runs, the launch folder
+          # DACL, and the start check (timeout, no inherited handles, filtered
+          # token). Every test must PASS here, none may SKIP.
+          $hookImage = Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=1', '-run', '^TestWindowsHookImageNative', './internal/cli'
+          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-hook-image-native-test.log')
+          foreach ($hookImageTest in @(
+            'TestWindowsHookImageNativeRenameRefusedWhileAnImageRuns',
+            'TestWindowsHookImageNativeFolderDACL',
+            'TestWindowsHookImageNativeStarterTimesOut',
+            'TestWindowsHookImageNativeStarterInheritsNoHandles',
+            'TestWindowsHookImageNativeStarterUsesTheFilteredToken'
+          )) {
+            if ([string]$hookImage.StdOut -notmatch "(?m)^--- PASS: $([regex]::Escape($hookImageTest)) ") {
+              throw "$hookImageTest did not complete with PASS on the native Windows runner"
+            }
+          }
       - name: Run native Windows enterprise Setup recovery and mutex tests
         if: ${{ matrix.kind == 'checks' }}
         run: |
