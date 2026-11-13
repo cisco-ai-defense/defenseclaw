@@ -52,7 +52,9 @@ func TestPowerShellOnlyGrammar(t *testing.T) {
 	}{
 		{`& { git status }`, true},
 		{`Set-Location C:\work; git status`, true},
-		{`git status ; Write-Output done`, true},
+		{`git status ; Write-Output done`, false},
+		{`mkdir -p /tmp/w && cd /tmp/w && cat > lib.ps1 <<'EOF'` + "\n" + `New-Item -ItemType Directory x` + "\n" + `EOF`, false},
+		{`pwsh -NoProfile -Command "New-Item -ItemType Directory C:\x | Out-Null"; scp -q a.ps1 host:C:/x/`, false},
 		{`Get-ChildItem | Select-Object Name`, true},
 		{`ls -la /tmp`, false},
 		{`docker-compose up -d`, false},

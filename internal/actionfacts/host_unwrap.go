@@ -587,15 +587,18 @@ func posixSoleHostCallSource(source string) (string, Dialect, bool) {
 }
 
 // powerShellVerbNoun is a cmdlet name in the approved-verb form
-// (Get-ChildItem, Set-Location, Invoke-WebRequest) at the start of a statement
-// or of a call block. No POSIX program is named so; the text is PowerShell
-// whatever tool label it arrived under, because connector tool labels do not
-// identify the host shell on Windows (chooseRawCommandDialect).
-var powerShellVerbNoun = lazyMustCompile(`(?i)(?:^|[;|&{(\n]\s*)(?:get|set|new|remove|add|invoke|start|stop|out|write|copy|move|test|select|where|foreach|clear|import|export|enable|disable|register|unregister|update|restart|resolve|read|rename|expand|compress|format|measure|sort|join|split|convert|find|install|uninstall|grant|revoke|send|wait|push|pop|reset)-[a-z][a-z0-9]*\b`)
+// (Get-ChildItem, Set-Location, Invoke-WebRequest) that opens the text or its
+// call block. No POSIX program is named so; the text is PowerShell whatever
+// tool label it arrived under, because connector tool labels do not identify
+// the host shell on Windows (chooseRawCommandDialect). A cmdlet name further in
+// (inside a quoted -Command body, after a POSIX && or here-document) does not
+// make the text PowerShell: a mixed text read whole as PowerShell resolves its
+// POSIX paths and redirects wrongly.
+var powerShellVerbNoun = lazyMustCompile(`(?i)^\s*(?:&\s*\{\s*)?(?:get|set|new|remove|add|invoke|start|stop|out|write|copy|move|test|select|where|foreach|clear|import|export|enable|disable|register|unregister|update|restart|resolve|read|rename|expand|compress|format|measure|sort|join|split|convert|find|install|uninstall|grant|revoke|send|wait|push|pop|reset)-[a-z][a-z0-9]*\b`)
 
 // powerShellOnlyGrammar reports a text, read by the tokenizer as a POSIX or
-// unlabeled command, that holds PowerShell-only grammar: a call block (& { ...
-// }) or a statement that starts with a verb-noun cmdlet. HostScriptTwin then
+// unlabeled command, that opens with PowerShell-only grammar: a call block (& {
+// ... }) or a verb-noun cmdlet. HostScriptTwin then
 // reads the same text a second time as PowerShell; the reading only adds.
 func powerShellOnlyGrammar(source string) bool {
 	if strings.HasPrefix(strings.TrimSpace(source), "& {") {

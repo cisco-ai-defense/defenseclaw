@@ -577,7 +577,7 @@ func dispatchTrustedAction(
 	// ever adds findings (host_script_twin.go).
 	if twin, ok := hostScriptTwinRequest(request, facts); ok {
 		defer func() {
-			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+			findings = withOverLimitTwinFindings(findings, withoutLimitFindings(dispatchTrustedAction(parent, twin)))
 		}()
 	}
 	twins, overflow := unknownKeyTwinRequests(request, facts)
@@ -6374,6 +6374,19 @@ func powerShellStatementListOnly(facts actionfacts.Facts) bool {
 		}
 	}
 	return true
+}
+
+// withoutLimitFindings drops the evaluation-limit finding of a script reading:
+// that the second reading of a call was too large to judge says nothing about
+// the call, which has its own result.
+func withoutLimitFindings(findings []RuleFinding) []RuleFinding {
+	kept := findings[:0:0]
+	for _, finding := range findings {
+		if finding.RuleID != "ACTION-COMPOUND-LIMIT" {
+			kept = append(kept, finding)
+		}
+	}
+	return kept
 }
 
 func filterExactFallbackFindings(
