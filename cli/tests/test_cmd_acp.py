@@ -281,6 +281,7 @@ def test_verify_detects_agent_digest_drift(tmp_path, monkeypatch):
 
 
 def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
+    _require_private_temp_folders(tmp_path)
     """GAP-1534: doctor lists each binding and FAILs with the fix on drift."""
     from defenseclaw.commands.cmd_doctor import _check_acp_bindings, _DoctorResult
 
@@ -1009,6 +1010,7 @@ def test_refresh_repins_only_the_upgraded_defenseclaw_guard(tmp_path, monkeypatc
 
 
 def test_source_install_and_doctor_fix_repin_only_defenseclaws_guard(tmp_path, monkeypatch):
+    _require_private_temp_folders(tmp_path)
     # make all re-pins the entries that start the guard it just published;
     # doctor --fix plans the same refresh and applies it once. An agent the
     # user updated at its pinned path, which only this account can change, is
@@ -2540,6 +2542,23 @@ def test_windows_repair_command_is_pinned_by_a_literal(monkeypatch, deployment_m
     assert cmd_acp_module.setup_repair_command(cfg, "zed", "kiro", data_dir) == expected
 
 
+def _require_private_temp_folders(tmp_path: Path) -> None:
+    """Skip when a folder above tmp_path is one other accounts can change.
+
+    The re-pin custody check (rel-1-0-10:GAP-0250) refuses such a chain, as it
+    should; some lab hosts grant another account Modify on the profile Temp
+    folder. CI and a normal profile pass and run the test.
+    """
+    probe = tmp_path / "custody-probe"
+    probe.mkdir(mode=0o700)
+    target = probe / "agent"
+    target.write_bytes(b"probe")
+    problem = cmd_acp_module._agent_custody_problem(str(target))
+    target.unlink()
+    probe.rmdir()
+    if problem and str(probe) not in problem and str(target) not in problem:
+        pytest.skip(f"the temp folders of this host are not private: {problem}")
+
 def _setup_zed_kiro(tmp_path: Path, monkeypatch, app) -> tuple[str, Path]:
     """Set up zed/kiro with an agent in a private bin folder; returns (guard, agent path)."""
     _isolate_client_config(monkeypatch, tmp_path)
@@ -2567,6 +2586,7 @@ def _lock(data_dir: str) -> dict:
 # re-pins the updated agent at the same path once only this account or an
 # administrator can change it, records the change, and verify passes again.
 def test_refresh_agent_repins_an_updated_agent_and_records_it(tmp_path, monkeypatch):
+    _require_private_temp_folders(tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     try:
         guard, agent_path = _setup_zed_kiro(tmp_path, monkeypatch, app)
@@ -2657,6 +2677,7 @@ def test_refresh_agent_refuses_an_agent_other_accounts_can_change(tmp_path, monk
 
 
 def test_refresh_agent_refuses_a_link_and_a_managed_enrollment(tmp_path, monkeypatch):
+    _require_private_temp_folders(tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     try:
         _guard, agent_path = _setup_zed_kiro(tmp_path, monkeypatch, app)
