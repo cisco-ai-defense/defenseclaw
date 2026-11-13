@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -139,6 +140,14 @@ type SubstrateConfig struct {
 	// Skills scans the skill folders the kit attaches (GAP-0039); nil
 	// scans nothing.
 	Skills SubstrateSkillScanner
+	// BlockUnscannedSkills says whether a skill folder that reaches an
+	// actor of this connector without a scan is refused (managed installs and
+	// the strict tier) rather than alerted on (OSS default tiers).
+	BlockUnscannedSkills func(connector string) bool
+	// SkillReceiptKey signs skill scan receipts; every replica must have the
+	// same key (derived from the shared chain key). Empty: a random key per
+	// process, so receipts hold only on the replica that gave them.
+	SkillReceiptKey []byte
 	// Asks is the leader's ask and decision store (nil: 501).
 	Asks SubstrateAskStore
 	// UnattendedAsk is what an unattended actor's ask does for its profile
@@ -197,10 +206,12 @@ type substrateState struct {
 	// refused, not logged line by line.
 	refusals *rate.Limiter
 
-	// skillsSeen is the scanned skill fingerprint per actor UID and folder
-	// (substrate_skills.go).
-	skillsMu   sync.Mutex
-	skillsSeen map[string]string
+	// receiptKey signs skill scan receipts (substrate_skills.go);
+	// receiptShared says every replica has it.
+	receiptKey    []byte
+	receiptShared bool
+	// alert raises an audit alert (the API server's logger).
+	alert func(ctx context.Context, severity, summary string, details map[string]any)
 
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler
@@ -237,7 +248,19 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 	if cfg.IsAdmin == nil {
 		cfg.IsAdmin = func(identity.Person) bool { return false }
 	}
-	st := &substrateState{cfg: cfg, refusals: rate.NewLimiter(5, 20)}
+	st := &substrateState{cfg: cfg, refusals: rate.NewLimiter(5, 20), receiptKey: cfg.SkillReceiptKey, receiptShared: len(cfg.SkillReceiptKey) > 0}
+	if !st.receiptShared {
+		st.receiptKey = make([]byte, 32)
+		if _, err := cryptorand.Read(st.receiptKey); err != nil {
+			return fmt.Errorf("substrate: skill receipt key: %w", err)
+		}
+	}
+	st.alert = func(ctx context.Context, severity, summary string, details map[string]any) {
+		if a.logger != nil {
+			_ = a.logger.LogAlertCtx(ctx, "substrate", severity, summary, details)
+		}
+		st.logRefusal("%s: %v", summary, details["folder"])
+	}
 	a.substrateMu.Lock()
 	a.substrate = st
 	a.substrateMu.Unlock()

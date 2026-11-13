@@ -49,7 +49,7 @@ func (c *Controller) classRefusal(ctx context.Context, a *ateapi.Actor, required
 	if required == "" || required == config.SubstrateSandboxGVisor {
 		return ""
 	}
-	tmpl, _, err := c.template(ctx, a.GetActorTemplate())
+	tmpl, _, err := c.template(ctx, a.GetActorTemplate(), false)
 	if err != nil {
 		return ""
 	}

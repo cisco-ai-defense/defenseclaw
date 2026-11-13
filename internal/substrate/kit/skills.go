@@ -18,23 +18,26 @@ import (
 // Skills that arrive mid-session (substrate-1 GAP-0039). Claude Code loads
 // every skill's name and description into the model context as soon as it
 // sees the folder, with no tool call, so a skill that arrives by cp, git
-// clone or an installer would reach the model before any hook saw it. After
-// PostToolUse, SessionStart and Stop the kit fingerprints the skill roots
-// (lstat only), and attaches each new or changed folder's files with role
-// skill_file; the gateway scans them (attest.RuntimeScanner) and names a
-// folder it blocks in its answer, which the kit then moves out of the skill
-// root (quarantine).
+// clone or an installer would reach the model before any hook saw it. On
+// UserPromptSubmit, PostToolUse, SessionStart and Stop the kit fingerprints
+// the skill roots (lstat only), and attaches each new or changed folder's
+// files with role skill_file; the gateway scans them (attest.RuntimeScanner)
+// and names a folder it blocks in its answer, which the kit then moves out
+// of the skill root (quarantine).
 //
 // Every such call also lists the fingerprint of every folder (facts.skills).
-// The kit keeps the fingerprints the gateway has answered for in a cache to
-// skip re-sending files; the cache is the agent's to edit, so the gateway
-// must not trust it: a folder whose fingerprint the gateway has not scanned
-// and whose files are not attached counts as not scanned (A2: quarantine it,
-// and deny the skill at its next use).
+// For a folder that passed, the gateway answers a scan receipt (an HMAC
+// every gateway replica can check); the kit keeps it with the fingerprint
+// and sends it back instead of the files while the folder is unchanged. The
+// cache is the agent's to edit, so it proves nothing: a folder that is
+// neither attached nor carries a valid receipt is named unscanned (the kit
+// attaches it next time), and when the kit had room to attach it, it is
+// refused in managed installs and the strict tier (quarantined) and alerted
+// on in the OSS default tiers (GAP-0039, gateway substrate_skills.go).
 //
-// Gateway answer field (A2): "substrate_quarantine": [{"path": "<the
-// folder>", "reason": "..."}]. The kit moves only folders it listed in that
-// call.
+// Gateway answer fields: "substrate_quarantine": [{"path", "reason"}],
+// "substrate_scanned": [{"path", "fp", "receipt"}], "substrate_unscanned":
+// [{"path", "fp"}]. The kit acts only on folders it listed in that call.
 
 const (
 	// SkillQuarantineField is the answer field naming blocked folders.
@@ -47,12 +50,16 @@ const (
 	maxSkillFoldersPerRoot = 64
 	maxSkillDepth          = 3
 	quarantineDirName      = ".defenseclaw-quarantine"
-	skillCacheName         = "skills-seen.json"
+	skillCacheName         = "skill-receipts.json"
 	maxSkillCacheEntries   = 512
 )
 
-// skillScanEvents are the events after which the kit looks at the roots.
+// skillScanEvents are the events on which the kit looks at the roots:
+// UserPromptSubmit runs before the model reads the prompt, so a folder
+// copied in between turns (outside any tool call) is scanned before the
+// next turn.
 var skillScanEvents = map[string]bool{
+	"UserPromptSubmit": true, "userPromptSubmit": true,
 	"PostToolUse": true, "postToolUse": true, "SessionStart": true, "sessionStart": true, "Stop": true, "stop": true,
 }
 
@@ -156,59 +163,74 @@ func fingerprintFolder(dir string) skillFolder {
 }
 
 // collectSkills lists every folder's fingerprint in f and attaches the files
-// of the folders not in known (the cache) within budget, at most
-// maxSkillFoldersPerCall. It returns every listed fingerprint.
-func collectSkills(f *Facts, roots []string, known map[string]string, budget int64) (map[string]string, int64) {
+// of the folders the cache has no receipt for (new, changed, or never
+// scanned) within budget, at most maxSkillFoldersPerCall. A folder with a
+// receipt for its current fingerprint is listed with the receipt instead of
+// its files. It returns every listed folder and its fingerprint.
+func collectSkills(f *Facts, roots []string, known map[string]skillCacheEntry, budget int64) (map[string]string, int64) {
 	listed := map[string]string{}
 	attachedFolders := 0
 	for _, folder := range scanSkillFolders(roots) {
 		fp := SkillFingerprint{Path: folder.Path, FP: folder.FP}
 		listed[folder.Path] = folder.FP
-		if known[folder.Path] != folder.FP {
-			if attachedFolders >= maxSkillFoldersPerCall || budget <= 0 {
-				f.Truncated = true
-			} else {
-				for _, file := range folder.Files {
-					budget = attach(f, RoleSkillFile, file, "", budget)
-				}
-				if folder.Over {
-					f.Truncated = true
-				}
-				fp.Attached = true
-				attachedFolders++
+		if k, ok := known[folder.Path]; ok && k.FP == folder.FP && k.Receipt != "" {
+			fp.Receipt = k.Receipt
+		} else if attachedFolders >= maxSkillFoldersPerCall || budget <= 0 {
+			f.Truncated = true
+		} else {
+			for _, file := range folder.Files {
+				budget = attach(f, RoleSkillFile, file, "", budget)
 			}
+			if folder.Over {
+				f.Truncated = true
+			}
+			fp.Attached = true
+			attachedFolders++
 		}
 		f.Skills = append(f.Skills, fp)
 	}
 	return listed, budget
 }
 
-// The seen-cache, ~/.defenseclaw/skills-seen.json, is only an optimization
+// skillCacheEntry is a folder fingerprint and the gateway's scan receipt.
+type skillCacheEntry struct {
+	FP      string `json:"fp"`
+	Receipt string `json:"receipt"`
+}
+
+// The receipt cache, ~/.defenseclaw/skill-receipts.json, only saves bytes
 // (see above); unreadable means empty.
 func skillCachePath(home string) string { return filepath.Join(home, ".defenseclaw", skillCacheName) }
 
-func loadSkillCache(home string) map[string]string {
-	m := map[string]string{}
+func loadSkillCache(home string) map[string]skillCacheEntry {
+	m := map[string]skillCacheEntry{}
 	if home == "" {
 		return m
 	}
 	b, err := os.ReadFile(skillCachePath(home))
 	if err == nil && len(b) < 1<<20 {
-		_ = json.Unmarshal(b, &m)
+		if json.Unmarshal(b, &m) != nil {
+			m = map[string]skillCacheEntry{}
+		}
 	}
 	return m
 }
 
-func saveSkillCache(home string, sent map[string]string) {
-	if home == "" || len(sent) == 0 {
+func saveSkillCache(home string, m map[string]skillCacheEntry) {
+	if home == "" {
 		return
 	}
-	m := loadSkillCache(home)
-	for k, v := range sent {
-		m[k] = v
-	}
 	if len(m) > maxSkillCacheEntries {
-		m = sent
+		// Keep the bound: drop entries in path order (a dropped folder is
+		// only attached once more).
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys[maxSkillCacheEntries:] {
+			delete(m, k)
+		}
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -224,41 +246,80 @@ func saveSkillCache(home string, sent map[string]string) {
 	}
 }
 
-// quarantineSkills moves the folders the gateway blocked out of their skill
-// root, into <root>/../.defenseclaw-quarantine/ (the same file system, so a
-// rename). Only folders the kit attached in this call are moved. It returns
-// what it moved.
-func quarantineSkills(answer []byte, attached map[string]string, now time.Time) []string {
-	if len(attached) == 0 {
+// skillAnswer is the skill part of a gateway hook answer.
+type skillAnswer struct {
+	Quarantine []struct {
+		Path   string `json:"path"`
+		Reason string `json:"reason"`
+	} `json:"substrate_quarantine"`
+	Scanned []struct {
+		Path    string `json:"path"`
+		FP      string `json:"fp"`
+		Receipt string `json:"receipt"`
+	} `json:"substrate_scanned"`
+	Unscanned []struct {
+		Path string `json:"path"`
+	} `json:"substrate_unscanned"`
+}
+
+// applySkillAnswer acts on a 2xx answer to a post that listed the folders in
+// listed: receipts are kept for the fingerprint the kit listed, a folder the
+// gateway names unscanned loses its cache entry (so its files go with the
+// next post), and a quarantined folder is moved out of its skill root. It
+// returns what it moved.
+func applySkillAnswer(home string, answer []byte, listed map[string]string, now time.Time) []string {
+	if len(listed) == 0 {
 		return nil
 	}
-	var a struct {
-		Q []struct {
-			Path   string `json:"path"`
-			Reason string `json:"reason"`
-		} `json:"substrate_quarantine"`
-	}
+	var a skillAnswer
 	if json.Unmarshal(answer, &a) != nil {
 		return nil
 	}
-	var moved []string
-	for _, q := range a.Q {
-		dir := filepath.Clean(q.Path)
-		if _, ok := attached[dir]; !ok {
-			continue
-		}
-		root := filepath.Dir(dir)
-		if filepath.Base(root) != "skills" {
-			continue
-		}
-		qdir := filepath.Join(filepath.Dir(root), quarantineDirName)
-		if err := os.MkdirAll(qdir, 0o700); err != nil {
-			continue
-		}
-		dst := filepath.Join(qdir, fmt.Sprintf("%s-%d", filepath.Base(dir), now.UnixNano()))
-		if os.Rename(dir, dst) == nil {
-			moved = append(moved, dir)
+	cache := loadSkillCache(home)
+	changed := false
+	for _, s := range a.Scanned {
+		dir := filepath.Clean(s.Path)
+		if fp, ok := listed[dir]; ok && fp == s.FP && s.Receipt != "" {
+			cache[dir] = skillCacheEntry{FP: s.FP, Receipt: s.Receipt}
+			changed = true
 		}
 	}
+	for _, u := range a.Unscanned {
+		dir := filepath.Clean(u.Path)
+		if _, ok := cache[dir]; ok {
+			delete(cache, dir)
+			changed = true
+		}
+	}
+	var moved []string
+	for _, q := range a.Quarantine {
+		dir := filepath.Clean(q.Path)
+		if _, ok := listed[dir]; !ok {
+			continue // the kit moves only folders it listed in this call
+		}
+		if quarantineSkillFolder(dir, now) {
+			moved = append(moved, dir)
+			delete(cache, dir)
+			changed = true
+		}
+	}
+	if changed {
+		saveSkillCache(home, cache)
+	}
 	return moved
+}
+
+// quarantineSkillFolder moves one folder out of its skill root, into
+// <root>/../.defenseclaw-quarantine/ (the same file system, so a rename).
+func quarantineSkillFolder(dir string, now time.Time) bool {
+	root := filepath.Dir(dir)
+	if filepath.Base(root) != "skills" {
+		return false
+	}
+	qdir := filepath.Join(filepath.Dir(root), quarantineDirName)
+	if err := os.MkdirAll(qdir, 0o700); err != nil {
+		return false
+	}
+	dst := filepath.Join(qdir, fmt.Sprintf("%s-%d", filepath.Base(dir), now.UnixNano()))
+	return os.Rename(dir, dst) == nil
 }

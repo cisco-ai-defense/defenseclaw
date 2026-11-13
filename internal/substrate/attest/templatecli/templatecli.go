@@ -56,20 +56,29 @@ func (c *common) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&c.json, "json", false, "print JSON")
 	fs.Var(&c.plain, "insecure-registry", "registry host:port reached over plain HTTP (repeatable)")
 	fs.StringVar(&c.user, "registry-user", "", "registry user")
-	fs.Var(&c.authHosts, "registry-auth-host", "registry host that gets the credentials (repeatable; build adds the hosts of --from and --to)")
+	fs.Var(&c.authHosts, "registry-auth-host", "registry or token-service host that gets the credentials (repeatable; build adds the --to host, never the --from host)")
 	fs.StringVar(&c.passFile, "registry-password-file", "", "file with the registry password")
 	fs.StringVar(&c.configPath, "config", "", "DefenseClaw config.yaml (scanner and admission settings)")
 	fs.StringVar(&c.platform, "platform", "linux/amd64", "image platform")
 }
 
 func (c *common) registry() (*attest.Registry, error) {
-	o := attest.RegistryOptions{PlainHTTP: c.plain, Username: c.user, AuthHosts: c.authHosts}
+	o := attest.RegistryOptions{PlainHTTP: c.plain}
+	if c.user == "" {
+		return attest.NewRegistry(o), nil
+	}
+	cred := attest.Credential{Username: c.user, TokenHosts: c.authHosts}
 	if c.passFile != "" {
 		b, err := os.ReadFile(c.passFile)
 		if err != nil {
 			return nil, err
 		}
-		o.Password = strings.TrimSpace(string(b))
+		cred.Password = strings.TrimSpace(string(b))
+	}
+	// The one login belongs to the listed hosts only (GAP-0052).
+	o.Credentials = map[string]attest.Credential{}
+	for _, h := range c.authHosts {
+		o.Credentials[h] = cred
 	}
 	return attest.NewRegistry(o), nil
 }
@@ -294,10 +303,11 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	if *from == "" || *to == "" || *hookBin == "" || *relayBin == "" || (*keyFile == "" && !*dry) {
 		return ExitUsageError, errors.New("build needs --from, --to, --hook-binary, --relay-binary and --key")
 	}
-	for _, img := range []string{*from, *to} {
-		if r, perr := attest.ParseRef(img); perr == nil {
-			c.authHosts = append(c.authHosts, r.Registry)
-		}
+	// The login is for the registry the template goes to. The base image
+	// names its own registry, so it gets the login only when the admin lists
+	// its host with --registry-auth-host (GAP-0052).
+	if r, perr := attest.ParseRef(*to); perr == nil {
+		c.authHosts = append(c.authHosts, r.Registry)
 	}
 	reg, err := c.registry()
 	if err != nil {
