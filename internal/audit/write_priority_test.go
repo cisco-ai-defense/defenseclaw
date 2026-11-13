@@ -84,7 +84,16 @@ func TestWriteBatonUrgentFirstThenAlternates(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 	var wg sync.WaitGroup
+	queued := func(urgent bool) int {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if urgent {
+			return len(b.urgent)
+		}
+		return len(b.normal)
+	}
 	queue := func(name string, urgent bool) {
+		before := queued(urgent)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -102,13 +111,9 @@ func TestWriteBatonUrgentFirstThenAlternates(t *testing.T) {
 			mu.Unlock()
 			rel()
 		}()
-		for {
-			b.mu.Lock()
-			n := len(b.urgent) + len(b.normal)
-			b.mu.Unlock()
-			if n > 0 && waiting(&b, name, urgent) {
-				return
-			}
+		// Wait until this waiter is in its queue, so the arrival order is
+		// the order of the calls.
+		for queued(urgent) == before {
 			time.Sleep(50 * time.Microsecond)
 		}
 	}
@@ -127,7 +132,7 @@ func TestWriteBatonUrgentFirstThenAlternates(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	gotErr := make(chan error, 1)
 	go func() { _, err := b.acquireUrgent(ctx); gotErr <- err }()
-	for !waiting(&b, "", true) {
+	for queued(true) == 0 {
 		time.Sleep(50 * time.Microsecond)
 	}
 	cancel()
@@ -141,15 +146,6 @@ func TestWriteBatonUrgentFirstThenAlternates(t *testing.T) {
 		t.Fatalf("baton lost after a cancelled hand-over: %v", err)
 	}
 	again()
-}
-
-func waiting(b *writeBaton, _ string, urgent bool) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if urgent {
-		return len(b.urgent) > 0
-	}
-	return len(b.normal) > 0
 }
 
 // Close finishes while durable writes and journal deletions are queued in
