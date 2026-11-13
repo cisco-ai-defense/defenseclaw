@@ -14861,9 +14861,6 @@ producer_identity_sets:
   - event_name: model.stream.completed
     bucket: model.io
     family: log.model.stream.completed
-  - event_name: model.usage
-    bucket: model.io
-    family: log.model.usage
 - id: identity_set.network_egress
   identities:
   - event_name: egress.allowed
