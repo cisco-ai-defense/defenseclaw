@@ -247,6 +247,13 @@ var managedCommands = []managedCommand{
 		PerUser: perUserEverywhere, PerUserPath: []string{"audit", "export"},
 		Note: "The managed audit log is administrator-only.",
 	},
+	{
+		Command: "defenseclaw audit compact",
+		Windows: managedAdminOnly,
+		Probes:  [][]string{{"audit", "compact"}},
+		PerUser: perUserEverywhere, PerUserPath: []string{"audit", "compact"},
+		Note: "Gives the disk space of deleted audit history back. An administrator runs it after stopping the gateway service.",
+	},
 }
 
 // launcherOffers reports whether the launcher runs args at all. The bare

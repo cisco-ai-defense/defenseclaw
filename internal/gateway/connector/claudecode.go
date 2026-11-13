@@ -1476,7 +1476,7 @@ func claudeCodePerUserNativeOwnerHome(hook map[string]interface{}, fallback bool
 // the companion guard binary is unavailable. Both the launcher and hook home
 // must name the same account, and the command must have only Setup's flags.
 func claudeCodePerUserNativeShellOwnerHome(command string) (string, bool) {
-	if runtime.GOOS != "linux" {
+	if !claudeCodeNativePerUserOS() {
 		return "", false
 	}
 	command = claudeCodeUnguardedHookCommand(command)
@@ -1501,14 +1501,23 @@ func claudeCodePerUserNativeShellOwnerHome(command string) (string, bool) {
 	return home, ok && tail == "" && claudeCodeLoopbackGatewayEndpoint("http://"+address)
 }
 
+// claudeCodeNativePerUserOS reports whether per-user Claude Code hooks use
+// the native launcher here: Linux since 1.0.8, macOS since 1.0.10 (its
+// startup was measured on dc-mac: p50 54 ms against 128 ms for the shell
+// hook, and the shell hook fan-out saturated the host at 50 calls a second,
+// rel-1-0-6 GAP-0559, #1384). Windows has its own native registration.
+func claudeCodeNativePerUserOS() bool {
+	return runtime.GOOS == "linux" || runtime.GOOS == "darwin"
+}
+
 // claudeCodePerUserNativeHook selects the installed native launcher only for
-// per-user Linux hooks in the account's default data directory. macOS keeps
-// the shell hook until its startup path is measured (GAP-0559). A separate
+// per-user Linux and macOS hooks in the default data directory of the
+// account. A separate
 // data root keeps the shell's two-home install-lock checks. Managed and
 // Secure Client registrations keep their existing transport. Source installs
 // without this binary keep the script.
 func claudeCodePerUserNativeHook(opts SetupOpts) string {
-	if runtime.GOOS != "linux" || opts.ManagedEnterprise || opts.SecureClientHookDelivery ||
+	if !claudeCodeNativePerUserOS() || opts.ManagedEnterprise || opts.SecureClientHookDelivery ||
 		!filepath.IsAbs(opts.DataDir) || filepath.Clean(opts.DataDir) != opts.DataDir ||
 		opts.DataDir != filepath.Join(userHomeDir(), ".defenseclaw") ||
 		strings.ContainsAny(opts.DataDir, "\x00\r\n") ||
