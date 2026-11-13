@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,7 +17,6 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
@@ -49,6 +50,10 @@ type routeOnlyServer struct {
 	tokens   *routeTokenStore
 	client   *http.Client
 	ownerUID int
+	// api answers verified callers on a managed gateway (set by
+	// APIServer.SetRouteOnly); goos selects the credential custody rule.
+	api  *APIServer
+	goos string
 
 	mu        sync.Mutex
 	inflight  map[string]int
@@ -67,7 +72,7 @@ func newRouteOnlyServer(router *engineRouter, cfg func() *config.Config, dataDir
 	}
 	return &routeOnlyServer{
 		router: router, config: cfg, tokens: newRouteTokenStore(dataDir, routeOwner()),
-		ownerUID: os.Getuid(), inflight: map[string]int{},
+		ownerUID: os.Getuid(), inflight: map[string]int{}, goos: runtime.GOOS,
 		client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
 }
@@ -149,21 +154,12 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		routeOnlyError(w, http.StatusMethodNotAllowed, "invalid_request_error", "route-only accepts POST, and GET on the models path")
 		return
 	}
-	if cfg.StandaloneEnterprise() {
-		// Managed hosts need the verified-caller work of S1 slice 4 (DESIGN
-		// 17.2, 19); until then route-only stays off there.
-		routeOnlyError(w, http.StatusForbidden, "permission_error", "route-only is not available on managed hosts in this build")
+	caller := s.caller(r, cfg, connector)
+	if !caller.Verified {
+		// Never the credential or a header value: the connector and why.
+		fmt.Fprintf(os.Stderr, "[routing] route-only refused connector=%s reason=%s\n", connector, caller.Reason)
+		routeOnlyError(w, http.StatusUnauthorized, "authentication_error", routeCallerRefusalText(caller.Reason))
 		return
-	}
-	if !s.tokens.Valid(connector, r.Header.Get(routeTokenHeader)) {
-		routeOnlyError(w, http.StatusUnauthorized, "authentication_error", "missing or invalid route credential; run defenseclaw doctor")
-		return
-	}
-	if runtime.GOOS != "windows" {
-		if uid, err := acpLoopbackPeerUID(r); err != nil || uid != s.ownerUID {
-			routeOnlyError(w, http.StatusUnauthorized, "authentication_error", "the caller is not the account this gateway runs as")
-			return
-		}
 	}
 	upstream, ok := cfg.Routing.RouteOnly.Upstreams[connector]
 	if !ok || strings.TrimSpace(upstream.BaseURL) == "" {
@@ -192,7 +188,16 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		signer = sg
 	}
-	subject := strconv.Itoa(s.ownerUID)
+	// Managed Windows and macOS: no agent provider credential is forwarded
+	// (DESIGN 16.2: another account can hold the port while the gateway
+	// restarts there); the gateway uses its own credential for the target.
+	custody := s.custody(cfg)
+	subject := caller.Subject
+	if cfg.StandaloneEnterprise() {
+		// Managed: the proved account is the subject downstream (profile
+		// matching, audit). OSS: the gateway owner, as before.
+		r = r.WithContext(attachVerifiedSubject(r.Context(), nil, subject, sanitizeLLMEventUser(userScopedIdentityName(subject)), subjectSourceKernelPeer))
+	}
 	if !s.acquire(subject) {
 		routeOnlyError(w, http.StatusTooManyRequests, "rate_limit_error", "too many concurrent model calls through DefenseClaw")
 		return
@@ -200,6 +205,12 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer s.release(subject)
 
 	original := routeOnlyAttempt{base: upstream.BaseURL, native: native, keepInbound: true, signer: signer}
+	if custody {
+		if !s.holdCredential(cfg, &original, routeOnlyProvider(routeOnlyAPIFamily(native))) {
+			routeOnlyError(w, http.StatusServiceUnavailable, "api_error", "route-only on this managed host forwards no agent credential: set routing.models[].credential for the upstream of "+connector)
+			return
+		}
+	}
 	if r.Method != http.MethodPost {
 		s.forward(w, r, original, nil, nil)
 		return
@@ -247,10 +258,42 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		routeOnlyError(w, http.StatusBadRequest, "invalid_request_error", "a SigV4-signed Bedrock request cannot pass through the gateway; use a Bedrock API key, or gateway signing (bedrock.auth profile, instance_role or iam_credentials)")
 		return
 	}
-	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body)
+	if custody {
+		// The agent sent the placeholder (or a credential that is dropped):
+		// every attempt uses a gateway-held credential.
+		inClass = engine.CredentialGateway
+	}
+	original.usage = routeOnlyUsageFacts(connector, native, family, body)
+	// The verified caller (OSS gateway owner or managed kernel peer).
+	original.usage.Subject = subject
+	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body, engine.Caller{Verified: true, Key: subject, Source: subjectSourceKernelPeer})
+	original.usage.Route = usageDecision(usageRouteFacts(routedOutcome, true), false)
+	if routedOutcome.Result == "" {
+		original.usage.Route.Decision = modelusage.DecisionPassthrough
+	}
+	if routedOutcome.Route != nil {
+		// Unrouted calls are charged too (S11 budgets).
+		original.usage.ChargeKeys = routedOutcome.Route.ChargeKeys
+	}
+	if attempt != nil {
+		attempt.usage = original.usage
+		attempt.usage.Route = usageRouteFacts(routedOutcome, true)
+		attempt.usage.SelectedProvider = attempt.provider
+		if routedOutcome.Decision != nil {
+			attempt.usage.SelectedModel = routedOutcome.Decision.Model
+		}
+		if routedOutcome.Route != nil {
+			attempt.usage.ChargeKeys = routedOutcome.Route.ChargeKeys
+		}
+		// The retry of the original is a fallback record (DESIGN 17.3).
+		original.usage.Route.Decision = modelusage.DecisionFallback
+	}
 	if routedOutcome.Result == SemanticRouteDenied {
 		routeOnlyError(w, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
 		return
+	}
+	if attempt != nil && custody && attempt.keepInbound && !s.holdCredential(cfg, attempt, attempt.provider) {
+		attempt = nil
 	}
 	if attempt == nil {
 		s.forward(w, r, original, body, nil)
@@ -326,6 +369,7 @@ type routeOnlyAttempt struct {
 	auth        string // gateway-held credential (header form set by authHeader)
 	provider    string
 	signer      *bedrockSigner // gateway SigV4 signing (nil: none)
+	usage       modelusage.CallFacts
 }
 
 // routeOnlyAPIFamily names the routable API family of a native path.
@@ -507,7 +551,7 @@ func routeOnlyConversationID(h http.Header) string {
 // decide asks the router and returns the routed attempt (nil: send the
 // original), the outcome, and whether the admin gate allows the original
 // request as a fallback target.
-func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, signer *bedrockSigner, body []byte) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
+func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, signer *bedrockSigner, body []byte, caller engine.Caller) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
 	if s.router == nil {
 		return nil, SemanticRouteOutcome{}, true
 	}
@@ -534,7 +578,7 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 		Model: model, RequestModel: model, APIFamily: family, Connector: connector,
 		Listener: engine.ListenerRouteOnly, RequestedProvider: inProvider, CredentialClass: inClass,
 		ConversationID: routeOnlyConversationID(r.Header), Text: text, HasImages: images, ToolTurn: toolTurn,
-		Caller: engine.Caller{Verified: true, Key: strconv.Itoa(s.ownerUID), Source: "route_credential"},
+		Caller: caller,
 	}
 	if hasTools {
 		in.Tools = []interface{}{true}
@@ -583,7 +627,7 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 	if origin == "" {
 		return fallback()
 	}
-	a := &routeOnlyAttempt{base: base, native: native, provider: d.Provider}
+	a := &routeOnlyAttempt{base: base, native: native, provider: firstNonEmptyRouteReason(d.Provider, inProvider)}
 	switch family {
 	case config.RoutingAPIConverse, config.RoutingAPIInvoke:
 		if !strings.EqualFold(d.Provider, "bedrock") {
@@ -708,7 +752,12 @@ func retryableRouteStatus(status int, crossProvider bool) bool {
 // twice; 500, 502 and 504 are never retried.
 func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Request, routed routeOnlyAttempt, original *routeOnlyAttempt, body []byte) {
 	started := time.Now()
+	routed.usage.RequestID = RequestIDFromContext(r.Context())
+	call := usageRecorder().Begin(r.Context(), routed.usage)
 	resp, wrote, err := s.send(r, routed, body, nil)
+	if resp != nil {
+		call.UpstreamHeader(resp.StatusCode, resp.Header)
+	}
 	cross := !strings.EqualFold(routed.provider, routeOnlyProvider(routeOnlyAPIFamily(routed.native)))
 	retryable := (err != nil && !wrote) || (err == nil && retryableRouteStatus(resp.StatusCode, cross))
 	if original != nil && retryable && r.Context().Err() == nil && time.Since(started) < routeOnlyRetryWindow {
@@ -716,25 +765,36 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
 		}
+		call.End(errRouteOnlyRetried)
 		fmt.Fprintf(os.Stderr, "[routing] route-only: routed call failed before its first byte; sending the original request\n")
 		w.Header().Set("X-Semantic-Router", "fallback")
 		s.forward(w, r, *original, body, nil)
 		return
 	}
 	if err != nil {
+		call.End(err)
 		routeOnlySendError(w, err, "the routed model is unreachable")
 		return
 	}
-	copyRouteOnlyResponse(w, resp)
+	call.End(copyRouteOnlyResponse(w, resp, call, routed.usage.Streaming))
 }
 
 func (s *routeOnlyServer) forward(w http.ResponseWriter, r *http.Request, a routeOnlyAttempt, body []byte, rest io.Reader) {
+	var call modelusage.Call = modelusage.Noop.Begin(r.Context(), a.usage)
+	if a.usage.Listener != "" {
+		// Calls without facts (GET models, bodies streamed unbuffered) are
+		// not model calls with usage the gateway can attribute.
+		a.usage.RequestID = RequestIDFromContext(r.Context())
+		call = usageRecorder().Begin(r.Context(), a.usage)
+	}
 	resp, _, err := s.send(r, a, body, rest)
 	if err != nil {
+		call.End(err)
 		routeOnlySendError(w, err, "the model upstream is unreachable")
 		return
 	}
-	copyRouteOnlyResponse(w, resp)
+	call.UpstreamHeader(resp.StatusCode, resp.Header)
+	call.End(copyRouteOnlyResponse(w, resp, call, a.usage.Streaming))
 }
 
 // routeOnlyBoundaryQuery are the query keys kept across a credential
@@ -788,8 +848,9 @@ func (s *routeOnlyServer) send(r *http.Request, a routeOnlyAttempt, body []byte,
 	return resp, wrote, err
 }
 
-// copyRouteOnlyResponse streams the upstream answer with a flush per read.
-func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response) {
+// copyRouteOnlyResponse streams the upstream answer with a flush per read,
+// feeding the usage call (chunks when streaming, the body otherwise).
+func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response, call modelusage.Call, streaming bool) error {
 	defer resp.Body.Close()
 	for k, vs := range resp.Header {
 		ck := http.CanonicalHeaderKey(k)
@@ -799,38 +860,126 @@ func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response) {
 		w.Header()[ck] = slices.Clone(vs)
 	}
 	w.WriteHeader(resp.StatusCode)
+	if !streaming && strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
+		streaming = true
+	}
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32<<10)
+	var body []byte
+	over := false
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
+			if streaming {
+				call.Chunk(buf[:n])
+			} else if !over {
+				if len(body)+n > usageBodyCap {
+					over, body = true, nil
+				} else {
+					body = append(body, buf[:n]...)
+				}
+			}
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
+				return werr
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
 		if err != nil {
-			return
+			if !streaming && len(body) > 0 {
+				call.Body(body)
+			}
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
 		}
 	}
 }
 
-// routeOnlySetupFor is the route-only rendering of connector derived from
-// config.yaml, or nil when the connector is not routed (Setup then restores
-// an earlier render). Managed hosts get nil until the verified-caller slice
-// lands (DESIGN 17.2, 19).
-func routeOnlySetupFor(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
-	if cfg == nil || !cfg.Routing.Enabled || cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
-		return nil
+var errRouteOnlyRetried = errors.New("routed attempt retried on the original upstream")
+
+// routeOnlyUsageFacts are the usage facts of a route-only request before
+// routing (the original upstream).
+func routeOnlyUsageFacts(connector, native, family string, body []byte) modelusage.CallFacts {
+	var probe struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
 	}
-	if !slices.Contains(cfg.Routing.RouteOnly.Connectors, connectorName) || strings.TrimSpace(apiAddr) == "" {
+	_ = json.Unmarshal(body, &probe)
+	model := probe.Model
+	if family == config.RoutingAPIConverse || family == config.RoutingAPIInvoke {
+		model = bedrockModelFromPath(native)
+	}
+	fam := usageAPIFamily(native)
+	provider := routeOnlyProvider(family)
+	return modelusage.CallFacts{
+		Listener: engine.ListenerRouteOnly, Connector: connector, APIFamily: fam, CallRole: modelusage.RoleAgent,
+		Streaming:         usageStreaming(native, body, probe.Stream),
+		RequestedProvider: provider, RequestedModel: model, SelectedProvider: provider, SelectedModel: model,
+		Subject: routeOwner(), SubjectKind: "route_credential", IdentityVerified: true,
+	}
+}
+
+// routeOnlySetupFor is the route-only rendering of connector derived from
+// config.yaml on an OSS per-user gateway, or nil when the connector is not
+// routed (Setup then restores an earlier render). Managed hosts render per
+// enrolled user through the guardian (ManagedRouteOnlySetup), never from
+// the gateway or into a machine-wide file (DESIGN 17.7).
+func routeOnlySetupFor(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
+	if cfg == nil || cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
 		return nil
 	}
 	// Only connectors whose hooks DefenseClaw installs: teardown and
-	// uninstall restore exactly those (REVIEW-code-slice5b P1-2).
+	// uninstall restore exactly those (REVIEW-code-slice5b P1-2). Managed
+	// hosts render protected ledger targets through the guardian instead.
 	if !slices.Contains(cfg.ActiveConnectors(), connectorName) {
+		return nil
+	}
+	route := routeOnlySetupBase(cfg, connectorName, apiAddr)
+	if route == nil {
+		return nil
+	}
+	token, err := newRouteTokenStore(cfg.DataDir, routeOwner()).Token(connectorName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[routing] route-only credential for %s unavailable: %v\n", connectorName, err)
+		return nil
+	}
+	route.Token = token
+	return route
+}
+
+// ManagedRouteOnlySetup is the route-only rendering of one enrolled user on
+// a managed (standalone) host: the guardian calls it for protected targets
+// only and renders the result into that user agent files (Claude Code user
+// settings.json, Codex ~/.codex/config.toml), with token the user route
+// credential (connector.ManagedRouteToken). nil when the connector is not
+// routed on this host.
+func ManagedRouteOnlySetup(cfg *config.Config, connectorName, apiAddr, token string) *connector.RouteOnlySetup {
+	if cfg == nil || !cfg.StandaloneEnterprise() || strings.TrimSpace(token) == "" {
+		return nil
+	}
+	route := routeOnlySetupBase(cfg, connectorName, apiAddr)
+	if route == nil {
+		return nil
+	}
+	route.Token = token
+	// Custody hosts give the agent a placeholder credential: its own key
+	// or login token never reaches the loopback port (DESIGN 16.2, S1
+	// REVIEW-code-slice4 P1-2).
+	route.Custody = routeOnlyCustodyOS(managedRouteOnlyGOOS)
+	return route
+}
+
+// RouteOnlyRouted reports whether config.yaml routes connector route-only.
+func RouteOnlyRouted(cfg *config.Config, connectorName string) bool {
+	return cfg != nil && cfg.Routing.Enabled && slices.Contains(cfg.Routing.RouteOnly.Connectors, connectorName)
+}
+
+// routeOnlySetupBase is the rendering without its credential, or nil.
+func routeOnlySetupBase(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
+	if !RouteOnlyRouted(cfg, connectorName) || strings.TrimSpace(apiAddr) == "" {
 		return nil
 	}
 	// The agent always talks to the loopback listener, whatever the bind
@@ -842,12 +991,7 @@ func routeOnlySetupFor(cfg *config.Config, connectorName, apiAddr string) *conne
 	if !ok {
 		return nil
 	}
-	token, err := newRouteTokenStore(cfg.DataDir, routeOwner()).Token(connectorName)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[routing] route-only credential for %s unavailable: %v\n", connectorName, err)
-		return nil
-	}
-	route := &connector.RouteOnlySetup{BaseURL: "http://" + apiAddr + routeOnlyPrefix + connectorName, Token: token}
+	route := &connector.RouteOnlySetup{BaseURL: "http://" + apiAddr + routeOnlyPrefix + connectorName}
 	if up.API == config.RoutingAPIConverse || up.API == config.RoutingAPIInvoke {
 		route.Bedrock = true
 		if bedrockGatewaySigning(up.Bedrock) {

@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -114,6 +115,14 @@ type userScopedCredentialStore struct {
 	index      map[[sha256.Size]byte]userScopedCredential
 	// ledgerReadAt is when the ledger was last read without an error.
 	ledgerReadAt time.Time
+	// routeEpoch is the gateway-owned route rotation of a managed Windows
+	// gateway (routeonly_epoch.go); nil elsewhere. While it has no epoch
+	// (the gateway does not own its API port yet) no route credential
+	// authenticates.
+	routeEpoch   *routeEpochState
+	epochVersion uint64
+	// enrolled holds identity 0 connector for every protected target.
+	enrolled map[string]bool
 }
 
 func newUserScopedCredentialStore(dataDir func() string) *userScopedCredentialStore {
@@ -205,7 +214,9 @@ func (s *userScopedCredentialStore) refreshLocked() {
 		if s.built {
 			userScopedCredentialDropLog(cause, err)
 		}
-		s.index, s.keys, s.built = nil, nil, false
+		// enrolled goes with the index: the Windows proxy path must not
+		// answer from the last good ledger (S1 REVIEW-code-slice4 P3-1).
+		s.index, s.keys, s.built, s.enrolled = nil, nil, false, nil
 	}
 	if dir == "" || s.ledger == nil {
 		fail("no data directory", errors.New("data directory not set"))
@@ -245,11 +256,58 @@ func (s *userScopedCredentialStore) refreshLocked() {
 		return
 	}
 	s.ledgerReadAt = now
-	if s.built && slices.Equal(keys, s.keys) && generation == s.generation {
+	var epoch *connector.RouteEpoch
+	var epochVersion uint64
+	if s.routeEpoch != nil {
+		// An enrollment that ended and came back gets a new route
+		// credential (S1 DESIGN 19); the old one stops at the rebuild below.
+		s.routeEpoch.observe(routeEnrollments(ledger))
+		epoch, epochVersion = s.routeEpoch.snapshot()
+	}
+	if s.built && slices.Equal(keys, s.keys) && generation == s.generation && epochVersion == s.epochVersion {
 		return
 	}
-	s.index = buildUserScopedCredentialIndex(keys, ledger)
-	s.keys, s.generation, s.built = keys, generation, true
+	s.index, s.enrolled = buildUserScopedCredentialIndex(keys, ledger, s.routeEpoch != nil, epoch)
+	s.keys, s.generation, s.epochVersion, s.built = keys, generation, epochVersion, true
+}
+
+// invalidate makes the next lookup refresh at once (a route rotation).
+func (s *userScopedCredentialStore) invalidate() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.checkedAt = time.Time{}
+	s.mu.Unlock()
+}
+
+// enrolledFor reports whether identity holds a protected target for
+// connector in the ledger the index was built from.
+func (s *userScopedCredentialStore) enrolledFor(identity, connectorName string) bool {
+	canonical, ok := connector.CanonicalUserScopedIdentity(identity)
+	if s == nil || !ok {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshLocked()
+	return s.enrolled[canonical+"\x00"+strings.ToLower(strings.TrimSpace(connectorName))]
+}
+
+// routeEnrollments are the identity 0 connector pairs of the protected
+// targets that can carry a route credential.
+func routeEnrollments(ledger managedHookLedger) map[string]bool {
+	out := map[string]bool{}
+	for _, target := range ledger.Targets {
+		name := strings.ToLower(strings.TrimSpace(target.Connector))
+		if !target.OK || !slices.Contains(config.RouteOnlyCapableConnectors, name) {
+			continue
+		}
+		if identity, ok := userScopedLedgerIdentity(target); ok {
+			out[identity+"\x00"+name] = true
+		}
+	}
+	return out
 }
 
 // keyFingerprints names the keys whose credentials authenticate right now:
@@ -270,8 +328,13 @@ func (s *userScopedCredentialStore) keyFingerprints() []string {
 	return fingerprints
 }
 
-func buildUserScopedCredentialIndex(keys []string, ledger managedHookLedger) map[[sha256.Size]byte]userScopedCredential {
+// buildUserScopedCredentialIndex derives the credentials of every protected
+// target. Route credentials (route-capable connectors only) derive from the
+// route epoch where epochRequired is set (managed Windows), and none while
+// that epoch is nil.
+func buildUserScopedCredentialIndex(keys []string, ledger managedHookLedger, epochRequired bool, epoch *connector.RouteEpoch) (map[[sha256.Size]byte]userScopedCredential, map[string]bool) {
 	index := map[[sha256.Size]byte]userScopedCredential{}
+	enrolled := map[string]bool{}
 	add := func(kind, scope, identity, token string, key int) {
 		index[sha256.Sum256([]byte(token))] = userScopedCredential{kind: kind, scope: scope, identity: identity, key: key}
 	}
@@ -284,8 +347,15 @@ func buildUserScopedCredentialIndex(keys []string, ledger managedHookLedger) map
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(target.Connector))
+		enrolled[identity+"\x00"+name] = true
 		otlpScope, hasOTLP := connector.OTLPPathTokenScopeForConnector(name)
+		routable := slices.Contains(config.RouteOnlyCapableConnectors, name) && (!epochRequired || epoch != nil)
 		for keyIndex, key := range keys {
+			if routable {
+				if token, err := connector.ManagedRouteToken(key, epoch, name, identity); err == nil {
+					add(connector.UserScopedRouteCredential, name, identity, token, keyIndex)
+				}
+			}
 			if token, err := connector.UserScopedHookAPIToken(key, name, identity); err == nil {
 				add(connector.UserScopedHookCredential, name, identity, token, keyIndex)
 			}
@@ -296,7 +366,7 @@ func buildUserScopedCredentialIndex(keys []string, ledger managedHookLedger) map
 			}
 		}
 	}
-	return index
+	return index, enrolled
 }
 
 // userScopedLedgerIdentity is the OS identity a protected target's
@@ -425,6 +495,9 @@ func (a *APIServer) userScopedCredentialStore() *userScopedCredentialStore {
 	a.userScopedCredentialsOnce.Do(func() {
 		if a.userScopedCredentials == nil {
 			a.userScopedCredentials = newUserScopedCredentialStore(a.configDataDir)
+			if routeEpochPlatform {
+				a.userScopedCredentials.routeEpoch = newRouteEpochState(a.configDataDir)
+			}
 		}
 	})
 	return a.userScopedCredentials

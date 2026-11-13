@@ -28,7 +28,17 @@ type RouteOnlySetup struct {
 	// GatewaySigning: the gateway signs Bedrock calls (the agent skips its
 	// own AWS auth).
 	GatewaySigning bool
+	// Custody: the gateway holds the provider credential and forwards none
+	// from the agent (managed macOS and Windows, S1 DESIGN 16.2). The agent
+	// gets RouteOnlyPlaceholderCredential in place of its own key or login
+	// token, so another account that binds the port while the gateway
+	// restarts receives nothing it can use.
+	Custody bool
 }
+
+// RouteOnlyPlaceholderCredential is the fixed, non-secret value a custody
+// render gives the agent as its provider credential.
+const RouteOnlyPlaceholderCredential = "defenseclaw-gateway-held-credential"
 
 // RouteOnlyConnector is implemented by connectors whose agent exposes a
 // model base URL (capability routing base_url).
@@ -56,7 +66,7 @@ type routeEnvBackup struct {
 // isOwnRouteValue reports a value that only a route-only render writes (a
 // loopback /r/<connector> URL), used to recover after a lost record.
 func isOwnRouteValue(v string) bool {
-	return strings.Contains(v, "/r/claudecode") || strings.Contains(v, "/r/codex")
+	return strings.Contains(v, "/r/claudecode") || strings.Contains(v, "/r/codex") || v == RouteOnlyPlaceholderCredential
 }
 
 func routeBackupPath(dataDir, connector string) string {

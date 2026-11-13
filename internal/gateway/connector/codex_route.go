@@ -17,7 +17,8 @@ import (
 // top-level model_provider pointing at it. The wrapped provider settings
 // (wire_api, env_key, requires_openai_auth) are copied so the agent keeps
 // its own login or key; the gateway forwards to routing.route_only
-// .upstreams.codex. Restore puts the original model_provider line back byte
+// .upstreams.codex. A custody render (managed macOS and Windows) drops the
+// credential settings and sends a placeholder bearer instead. Restore puts the original model_provider line back byte
 // for byte and deletes the owned table.
 
 const (
@@ -38,6 +39,12 @@ type codexWrappedProvider struct {
 var codexWrappedFields = []string{
 	"wire_api", "env_key", "env_key_instructions", "requires_openai_auth", "query_params",
 	"http_headers", "env_http_headers", "request_max_retries", "stream_max_retries", "stream_idle_timeout_ms",
+}
+
+// codexCustodyDroppedFields are the wrapped provider settings a custody
+// render leaves out: each makes Codex send a credential of its own.
+var codexCustodyDroppedFields = map[string]bool{
+	"env_key": true, "env_key_instructions": true, "requires_openai_auth": true, "env_http_headers": true,
 }
 
 // codexWrapped reads the provider Codex uses now (built-in openai when
@@ -120,17 +127,29 @@ func codexRouteTable(route *RouteOnlySetup, w codexWrappedProvider, eol string) 
 	headers := map[string]interface{}{}
 	if h, ok := w.Table["http_headers"].(map[string]interface{}); ok {
 		for k, v := range h {
+			if route.Custody && strings.EqualFold(k, "Authorization") {
+				continue
+			}
 			headers[k] = v
 		}
 	}
 	headers[RouteOnlyHeader] = route.Token
+	if route.Custody {
+		// The gateway holds the provider credential (S1 DESIGN 16.2): Codex
+		// sends a placeholder bearer, never OPENAI_API_KEY, the env_key of
+		// the wrapped provider or a ChatGPT login token.
+		headers["Authorization"] = "Bearer " + RouteOnlyPlaceholderCredential
+	}
 	for _, k := range codexWrappedFields {
-		if k == "http_headers" {
+		if k == "http_headers" || route.Custody && codexCustodyDroppedFields[k] {
 			continue
 		}
 		if v, ok := w.Table[k]; ok {
 			lines = append(lines, k+" = "+tomlInlineValue(v))
 		}
+	}
+	if route.Custody {
+		lines = append(lines, "requires_openai_auth = false")
 	}
 	lines = append(lines, "supports_websockets = false", "http_headers = "+tomlInlineValue(headers))
 	return strings.Join(lines, eol) + eol

@@ -6326,20 +6326,12 @@ func loadEnterpriseHookUserScopedTokens(dataDir, connectorName, identity string)
 	return enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity, false)
 }
 
-func enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity string, mint bool) (string, string, error) {
-	connectorName = strings.TrimSpace(connectorName)
-	if connectorName == "" {
-		return "", "", fmt.Errorf("enterprise hooks: connector is required before deriving per-user credentials")
-	}
-	dataDir = strings.TrimSpace(dataDir)
-	if dataDir == "" {
-		return "", "", fmt.Errorf("enterprise hooks: config data_dir is required before deriving per-user credentials")
-	}
-	if _, ok := connector.CanonicalUserScopedIdentity(identity); !ok {
-		return "", "", fmt.Errorf("enterprise hooks: per-user credentials need the target's uid or SID")
-	}
+// enterpriseHookUserScopedKey is the per-user credential key targets are
+// rendered from: the staged key while a rotation runs, else the committed
+// one (minted on first use when mint is set).
+func enterpriseHookUserScopedKey(dataDir string, mint bool) (string, error) {
 	if err := validateEnterpriseHookUserTokenKeyLocation(dataDir); err != nil {
-		return "", "", err
+		return "", err
 	}
 	// While a credential rotation has staged the next key, every target is
 	// rendered (and verified) with credentials derived from it; the gateway
@@ -6359,7 +6351,26 @@ func enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity string, 
 		}
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("enterprise hooks: %w", err)
+		return "", fmt.Errorf("enterprise hooks: %w", err)
+	}
+	return key, nil
+}
+
+func enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity string, mint bool) (string, string, error) {
+	connectorName = strings.TrimSpace(connectorName)
+	if connectorName == "" {
+		return "", "", fmt.Errorf("enterprise hooks: connector is required before deriving per-user credentials")
+	}
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return "", "", fmt.Errorf("enterprise hooks: config data_dir is required before deriving per-user credentials")
+	}
+	if _, ok := connector.CanonicalUserScopedIdentity(identity); !ok {
+		return "", "", fmt.Errorf("enterprise hooks: per-user credentials need the target's uid or SID")
+	}
+	key, err := enterpriseHookUserScopedKey(dataDir, mint)
+	if err != nil {
+		return "", "", err
 	}
 	hookToken, err := connector.UserScopedHookAPIToken(key, connectorName, identity)
 	if err != nil {
