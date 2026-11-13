@@ -65,8 +65,20 @@ spec:
         {{- end }}
         {{- include "dc.peerFlags" . | nindent 8 }}
         {{- end }}
+        {{- range .Values.gateway.adminGroups }}
+        - --admin-groups={{ . }}
+        {{- end }}
+        {{- if .Values.gateway.oidcCA.configMap }}
+        - --oidc-ca-file=/etc/defenseclaw/oidc-ca/{{ .Values.gateway.oidcCA.key }}
+        {{- end }}
+        {{- with .Values.gateway.extraArgs }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         env:
         {{- include "dc.env" . | nindent 8 }}
+        {{- with .Values.gateway.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         ports:
         - name: actor
           containerPort: {{ .Values.gateway.ports.actor }}
@@ -102,6 +114,15 @@ spec:
           mountPath: /etc/defenseclaw/admin-tls
           readOnly: true
         {{- end }}
+        {{- if .Values.gateway.oidcCA.configMap }}
+        # The trust bundle of a private OIDC issuer (--oidc-ca-file).
+        - name: oidc-ca
+          mountPath: /etc/defenseclaw/oidc-ca
+          readOnly: true
+        {{- end }}
+        {{- with .Values.gateway.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
       {{- include "dc.gatewaySecretVolumes" . | nindent 6 }}
@@ -109,6 +130,18 @@ spec:
       {{- include "dc.actorSecretsVolume" . | nindent 6 }}
       {{- end }}
       {{- include "dc.templateAnchorsVolume" . | nindent 6 }}
+      {{- if .Values.gateway.oidcCA.configMap }}
+      - name: oidc-ca
+        configMap:
+          name: {{ .Values.gateway.oidcCA.configMap }}
+          items:
+          - key: {{ .Values.gateway.oidcCA.key }}
+            path: {{ .Values.gateway.oidcCA.key }}
+          defaultMode: 0444
+      {{- end }}
+      {{- with .Values.gateway.extraVolumes }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
       {{- include "dc.kubeTokenVolume" . | nindent 6 }}
       {{- if .Values.admin.tlsSecretName }}
       - name: admin-tls
