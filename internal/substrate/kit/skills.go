@@ -625,7 +625,7 @@ func folderInReach(dir string) bool {
 	if err != nil {
 		return false
 	}
-	return !(info.IsDir() && info.Mode().Perm() == 0)
+	return !info.IsDir() || info.Mode().Perm() != 0
 }
 
 // quarantinePlugins moves a plugins folder the kit could not search whole
