@@ -406,7 +406,10 @@ func TestInvariantNonEmptyProducesEffectOrReason(t *testing.T) {
 // program name with an escape that decodes differently in 5.1 vs 7 (\u{..},
 // \x..) must not resolve to a KNOWN program target (R4 / psparse review 3).
 func TestPSDialectDivergentNameNotKnown(t *testing.T) {
-	for _, cmd := range []string{`& 'a\u{48}' /tmp/x`, `Remove-Item -LiteralPath 'C:\x\u{5c}y'`} {
+	// `u{48} is a PowerShell backtick escape that decodes differently under 5.1
+	// and 7; \u is not an escape in PowerShell, so the earlier \u{..} form was
+	// inert (psparse delta review 6 R6-M). \x60 is the backtick.
+	for _, cmd := range []string{"& 'a\x60u{48}' /tmp/x", "Remove-Item -LiteralPath 'C:\\x\x60u{5c}y'"} {
 		r := Extract(Call{Surface: SurfaceShell, Command: cmd}, winPS)
 		for i, e := range r.Effects {
 			if e.TargetState == TargetStateKnown && e.Target.Type == TargetPath && e.Target.Path != "" {

@@ -152,7 +152,9 @@ func psStartProcessShellTarget(c *psparse.Command) bool {
 		return false
 	}
 	s, ok := psparse.LiteralString(target)
-	return ok && isShellName(s)
+	// A shell child, or a launcher (wt/conhost/start) that itself starts a shell,
+	// runs an opaque payload (psparse delta review 5 (a) / review 6 (c)).
+	return ok && (isShellName(s) || isLauncherName(s))
 }
 
 // psBaseNameOf returns the leaf name of a command, or "" when it is not a literal.
