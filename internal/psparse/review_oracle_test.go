@@ -59,6 +59,9 @@ var revExtraLines = []string{
 	`@{a=1;b=& rm C:\x}`, `@{a=1;b=iex 'Remove-Item C:\x'}`, `@{a=1;b=powershell -c Remove-Item C:\x}`,
 	`Write-Output @{a=1;b=Remove-Item C:\x}`, `Remove-Item @{a=1;b=Remove-Item C:\x}`,
 	`@{a =1}`, `@{a = 1}`, `@{'a'=Remove-Item C:\x}`, `@{"a"=Remove-Item C:\x}`, `@{1=Remove-Item C:\x}`,
+	// review 5 R5-7: a control-flow hashtable value walks its commands, not "foreach"/"in"
+	`@{a=foreach($i in Remove-Item C:\Windows){1}}`, `@{a=if($x){Remove-Item C:\y}}`,
+	`@{a=while($x){Remove-Item C:\z}}`,
 }
 
 func bq2(s string) string { return strings.ReplaceAll(s, "§", "`") }
