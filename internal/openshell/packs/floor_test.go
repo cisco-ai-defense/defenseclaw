@@ -582,32 +582,56 @@ func TestEffectiveWireRoundTrip(t *testing.T) {
 // cloneFloor copies every list and switch: a new floor key that is a slice
 // or a pointer fails here until cloneFloor copies it.
 func TestCloneFloorCopiesEveryReference(t *testing.T) {
-	fill := func() config.OpenShellAdminConfig {
-		var f config.OpenShellAdminConfig
-		v := reflect.ValueOf(&f).Elem()
-		for i := 0; i < v.NumField(); i++ {
-			field := v.Field(i)
-			switch field.Kind() {
-			case reflect.Slice:
-				field.Set(reflect.MakeSlice(field.Type(), 1, 1))
-			case reflect.Pointer:
-				field.Set(reflect.New(field.Type().Elem()))
+	// fill gives every list and pointer a one-element value, also inside a struct element (the egress URL rules
+	// hold lists of their own); change then writes through every reference of a clone.
+	var fill func(v reflect.Value)
+	fill = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.Slice:
+			v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+			fill(v.Index(0))
+		case reflect.Pointer:
+			v.Set(reflect.New(v.Type().Elem()))
+			fill(v.Elem())
+		case reflect.Struct:
+			for i := 0; i < v.NumField(); i++ {
+				if v.Field(i).CanSet() {
+					fill(v.Field(i))
+				}
 			}
 		}
-		return f
 	}
-	orig, want := fill(), fill()
-	clone := cloneFloor(orig)
-	v := reflect.ValueOf(&clone).Elem()
-	for i := 0; i < v.NumField(); i++ {
-		field := v.Field(i)
-		switch field.Kind() {
+	var change func(v reflect.Value)
+	change = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.String:
+			v.SetString("changed")
+		case reflect.Bool:
+			v.SetBool(true)
 		case reflect.Slice:
-			field.Index(0).Set(reflect.ValueOf("changed").Convert(field.Type().Elem()))
+			if v.Len() > 0 {
+				change(v.Index(0))
+			}
 		case reflect.Pointer:
-			field.Elem().Set(reflect.ValueOf(true).Convert(field.Type().Elem()))
+			if !v.IsNil() {
+				change(v.Elem())
+			}
+		case reflect.Struct:
+			for i := 0; i < v.NumField(); i++ {
+				if v.Field(i).CanSet() {
+					change(v.Field(i))
+				}
+			}
 		}
 	}
+	build := func() config.OpenShellAdminConfig {
+		var f config.OpenShellAdminConfig
+		fill(reflect.ValueOf(&f).Elem())
+		return f
+	}
+	orig, want := build(), build()
+	clone := cloneFloor(orig)
+	change(reflect.ValueOf(&clone).Elem())
 	if !reflect.DeepEqual(orig, want) {
 		t.Fatalf("cloneFloor shares references: %+v", orig)
 	}
