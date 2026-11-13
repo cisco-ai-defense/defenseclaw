@@ -94,6 +94,19 @@ func (r *Request) header(name string) string {
 	return ""
 }
 
+// headerList joins every line of a list-valued header with commas, as an
+// origin that merges repeated lines reads it (RFC 9110 5.3): a second
+// Content-Encoding line is never ignored.
+func (r *Request) headerList(name string) string {
+	var vals []string
+	for _, h := range r.Headers {
+		if h.Name == name {
+			vals = append(vals, h.Value)
+		}
+	}
+	return strings.Join(vals, ",")
+}
+
 // Verdict is the Engine's decision for a request.
 type Verdict struct {
 	Allow bool
@@ -519,7 +532,7 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 	// Inspect what the origin reads (GAP-0044): a gzip body or a UTF-8 BOM
 	// is decoded, and a body that can't be is refused or alerted, never
 	// passed as "no tool call".
-	body, why := decodeBody(body, req.header("content-encoding"), req.ContentType, e.cfg.BodyMaxBytes)
+	body, why := decodeBody(body, req.headerList("content-encoding"), req.ContentType, e.cfg.BodyMaxBytes)
 	switch why {
 	case "":
 	case whyOverCap:

@@ -41,6 +41,11 @@ type ChartPlan struct {
 	ControllerDeployment string `json:"controller_deployment"`
 	OwnerTokenSecret     string `json:"owner_token_secret"`
 	DeleteOwnerToken     bool   `json:"delete_owner_token"`
+	// AuthDelegatorBinding is the chart's ClusterRoleBinding of the gateway
+	// ServiceAccount to system:auth-delegator, rendered only for the
+	// Kubernetes sign-in (GAP-0153); "" when there is none. The uninstall
+	// names it among what goes.
+	AuthDelegatorBinding string `json:"auth_delegator_binding,omitempty"`
 }
 
 // PlanAPI is the ate-api-server address and token audience.

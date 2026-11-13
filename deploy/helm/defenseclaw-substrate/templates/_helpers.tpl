@@ -153,8 +153,11 @@ off with --no-kube-sign-in in custom gateway args. */}}
 {{- if and (not $issuer) (not (include "dc.managed" .)) (not (has "--no-kube-sign-in" (.Values.gateway.args | default list))) }}true{{ end -}}
 {{- end -}}
 
-{{- define "dc.tokenReviewName" -}}
-{{- printf "defenseclaw-tokenreview-%s-%s" .Release.Namespace .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{/* The auth-delegator ClusterRoleBinding's name: gateway.authDelegatorBinding,
+else defenseclaw-auth-delegator-<namespace>-<release> (cluster-scoped, so
+two releases never share one). */}}
+{{- define "dc.authDelegatorBinding" -}}
+{{- .Values.gateway.authDelegatorBinding | default (printf "defenseclaw-auth-delegator-%s-%s" .Release.Namespace .Release.Name) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "dc.managed" -}}

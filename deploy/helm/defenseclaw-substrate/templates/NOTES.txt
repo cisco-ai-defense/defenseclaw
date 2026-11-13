@@ -16,6 +16,12 @@ Next:
 Actor Service (the only DefenseClaw host in egress policies): {{ include "dc.actorHost" . }}
 Admin Service (launcher, fleet; never reachable from actors): {{ include "dc.adminHost" . }}
 
+{{- if include "dc.kubeSignIn" . }}
+People sign in with their Kubernetes credentials (no OIDC issuer): the
+gateway ServiceAccount is bound to system:auth-delegator by the cluster-wide
+ClusterRoleBinding {{ include "dc.authDelegatorBinding" . }}.
+{{- end }}
+
 Uninstall removes DefenseClaw-written egress policies first (actors fall back
 to deny-all), then run `defenseclaw substrate setup --remove` to take the
 callout out of Substrate. Snapshots stay in the Substrate bucket: the
