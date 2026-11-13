@@ -833,6 +833,10 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 				defer cancel()
 				if jv := judge.RunJudges(jctx, "prompt", content, ""); jv != nil {
 					verdict = mergeWithJudge(verdict, jv)
+					if guardrailSeverityRank(jv.Severity) >= guardrailSeverityRank("HIGH") {
+						// The prompt judge rates it HIGH: it is not a task either.
+						judge.ObserveSessionPromptScope(ContextWithSessionID(context.Background(), sessionKey), "", "")
+					}
 				}
 			}()
 		default:

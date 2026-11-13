@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"sort"
 	"strings"
@@ -380,41 +381,41 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 }
 
 // keepScopeFloor remembers the scope finding of a prepared sample until it is
-// judged, as keepDecisionState does for the decision model.
+// judged, as keepDecisionState does for the decision model. A sample is unique
+// (it carries the call's nonce), so the key is its digest; when the cap is
+// reached the oldest pending floor goes, one at a time.
 func (j *LLMJudge) keepScopeFloor(sample, reason string) {
 	j.scopeFloorsMu.Lock()
 	defer j.scopeFloorsMu.Unlock()
 	if j.scopeFloors == nil {
-		j.scopeFloors = make(map[string]*scopeFloorEntry)
+		j.scopeFloors = make(map[[sha256.Size]byte]scopeFloorEntry)
 	}
-	if e := j.scopeFloors[sample]; e != nil {
-		e.n++ // two concurrent identical samples each get their floor
-		return
+	for len(j.scopeFloors) >= pendingScopeFloorsCap {
+		var oldest [sha256.Size]byte
+		oldestSeq := uint64(1<<63 - 1)
+		for key, e := range j.scopeFloors {
+			if e.seq < oldestSeq {
+				oldest, oldestSeq = key, e.seq
+			}
+		}
+		delete(j.scopeFloors, oldest)
 	}
-	for len(j.scopeFloors) >= pendingScopeFloorsCap && len(j.scopeFloorOrder) > 0 {
-		delete(j.scopeFloors, j.scopeFloorOrder[0]) // the oldest pending floor goes, not all of them
-		j.scopeFloorOrder = j.scopeFloorOrder[1:]
-	}
-	j.scopeFloors[sample] = &scopeFloorEntry{reason: reason, n: 1}
-	j.scopeFloorOrder = append(j.scopeFloorOrder, sample)
+	j.scopeFloorSeq++
+	j.scopeFloors[sha256.Sum256([]byte(sample))] = scopeFloorEntry{reason: reason, seq: j.scopeFloorSeq}
 }
 
 func (j *LLMJudge) takeScopeFloor(sample string) string {
 	j.scopeFloorsMu.Lock()
 	defer j.scopeFloorsMu.Unlock()
-	e := j.scopeFloors[sample]
-	if e == nil {
-		return ""
-	}
-	if e.n--; e.n <= 0 {
-		delete(j.scopeFloors, sample)
-	}
+	key := sha256.Sum256([]byte(sample))
+	e := j.scopeFloors[key]
+	delete(j.scopeFloors, key)
 	return e.reason
 }
 
 type scopeFloorEntry struct {
 	reason string
-	n      int
+	seq    uint64
 }
 
 // applyIntentScopeFloor keeps the judge's verdict from falling below an alert

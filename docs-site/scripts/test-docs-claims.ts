@@ -34,10 +34,12 @@ describe('Tool judge task scope', () => {
   it('lists the connectors that keep the task and documents the scope finding', () => {
     const section = text();
     assert.match(section, /\*\*Kept:\*\*[^*]*Claude Code[^*]*Devin\./);
+    assert.match(section, /\*\*Kept, but names no destination:\*\* Hermes/);
     assert.match(section, /\*\*Not kept[^*]*\*\*[^*]*OpenCode[^*]*OpenClaw/);
     assert.match(section, /`INTENT-SCOPE-SEND`/);
     assert.match(section, /`alert_at`/);
-    assert.match(section, /Naming a mailbox covers that address only/);
+    assert.match(section, /Naming a mailbox covers that address only, and naming only a domain covers no mailbox at it/);
+    assert.match(section, /never a block/);
   });
 });
 

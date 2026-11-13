@@ -529,7 +529,8 @@ func (a *APIServer) observeUserTurn(ctx context.Context, prompt, scopeText strin
 	if verdict != nil && strings.EqualFold(verdict.Action, "block") {
 		prompt, scopeText = "", ""
 	} else {
-		a.observeUserDownloadRequest(ctx, prompt)
+		// Only text the owner typed names a run-from host, as for the scope.
+		a.observeUserDownloadRequest(ctx, scopeText)
 	}
 	for _, judge := range a.hookSessionJudges(ctx) {
 		judge.ObserveSessionPromptScope(ctx, prompt, scopeText)

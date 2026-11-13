@@ -49,7 +49,8 @@ func TestIntentHookAPIBlockedPromptRecordsNoDownloadHost(t *testing.T) {
 	}
 }
 
-// Pending scope floors leave one at a time, and two identical samples each get theirs (P4-1).
+// Pending scope floors leave one at a time, and nothing outlives its take: the
+// store stays bounded however many calls pass (P4-1, P3-B of the review).
 func TestScopeFloorSurvivesPendingCap(t *testing.T) {
 	j := &LLMJudge{}
 	j.keepScopeFloor("first", "r1")
@@ -65,15 +66,28 @@ func TestScopeFloorSurvivesPendingCap(t *testing.T) {
 	if n := len(j.scopeFloors); n > pendingScopeFloorsCap {
 		t.Fatalf("pending floors grew past the cap: %d", n)
 	}
-	j2 := &LLMJudge{}
-	j2.keepScopeFloor("same", "r")
-	j2.keepScopeFloor("same", "r")
-	first, second := j2.takeScopeFloor("same"), j2.takeScopeFloor("same")
-	if first == "" || second == "" {
-		t.Fatal("two concurrent identical samples must each get their floor")
+	if j.takeScopeFloor("never kept") != "" {
+		t.Fatal("a floor appeared from nowhere")
 	}
-	if j2.takeScopeFloor("same") != "" {
-		t.Fatal("a floor was taken more often than it was kept")
+}
+
+func TestScopeFloorStoreIsBoundedPast20000Calls(t *testing.T) {
+	j := &LLMJudge{}
+	for i := 0; i < 20000; i++ {
+		sample := fmt.Sprintf("sample %d with a long body %s", i, strings.Repeat("x", 4096))
+		j.keepScopeFloor(sample, "r")
+		if i%3 != 0 { // a third are never judged (an ineligible or skipped call)
+			if j.takeScopeFloor(sample) == "" {
+				t.Fatalf("call %d lost its floor", i)
+			}
+		}
+	}
+	if n := len(j.scopeFloors); n > pendingScopeFloorsCap {
+		t.Fatalf("%d pending floors after 20,000 calls, cap %d", n, pendingScopeFloorsCap)
+	}
+	// the latest unjudged sample is still there: eviction took the oldest, not the newest
+	if j.takeScopeFloor(fmt.Sprintf("sample %d with a long body %s", 19998, strings.Repeat("x", 4096))) == "" {
+		t.Fatal("eviction removed a recent floor")
 	}
 }
 

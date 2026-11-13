@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,9 +134,9 @@ type LLMJudge struct {
 	// scopeFloors holds, per prepared sample, the scope finding of a call that
 	// sends data to a destination the user's task does not name
 	// (intent_scope.go); runToolDecision applies it to the judge's verdict.
-	scopeFloorsMu   sync.Mutex
-	scopeFloors     map[string]*scopeFloorEntry
-	scopeFloorOrder []string
+	scopeFloorsMu sync.Mutex
+	scopeFloors   map[[sha256.Size]byte]scopeFloorEntry
+	scopeFloorSeq uint64
 
 	telemetryMu sync.RWMutex
 	traceV8     judgeTraceV8Runtime
