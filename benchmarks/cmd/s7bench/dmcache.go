@@ -51,9 +51,9 @@ type dmCache struct {
 	client                       *http.Client
 	logMu                        sync.Mutex
 	log                          *os.File
-	pauseMu                      sync.Mutex
-	pauseUntil                   time.Time
 	flight                       sync.Map // sha -> *dmFlight
+	bg                           chan struct{}
+	background                   atomic.Int64
 	// tpm paces upstream calls to this many input tokens per minute (0:
 	// none); the key's quota is shared with other lanes.
 	tpm, rpm int
@@ -62,7 +62,7 @@ type dmCache struct {
 	budgetFile string
 	budget     int64
 	paceMu     sync.Mutex
-	paceNext   time.Time
+	paceNext time.Time
 
 	hits, misses, upstreamCalls, rateLimited, failed, offlineMisses, stored atomic.Int64
 }
@@ -81,7 +81,7 @@ func startDMCache(upstream, protocol, dir string, only bool, inflight, tpm, rpm 
 		return "", nil, err
 	}
 	c := &dmCache{upstream: upstream, protocol: protocol, key: os.Getenv("DEFENSECLAW_DECISION_MODEL_KEY"), dir: dir, only: only,
-		sem: make(chan struct{}, inflight), tpm: tpm, rpm: rpm, budgetFile: budgetFile, budget: budget,
+		sem: make(chan struct{}, inflight), bg: make(chan struct{}, 4), tpm: tpm, rpm: rpm, budgetFile: budgetFile, budget: budget,
 		client: &http.Client{Timeout: 120 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
@@ -177,18 +177,32 @@ func (c *dmCache) fetchOnce(sha string, body []byte) *dmCacheEntry {
 	}
 	defer func() { close(f.done); c.flight.Delete(sha) }()
 	c.misses.Add(1)
-	f.entry = c.fetch(sha, body)
+	f.entry = c.fetch(sha, body, dmInWindow)
+	if f.entry == nil && !c.only {
+		// The product has given up on this call (its hook window is a few
+		// seconds); keep trying in the background so the answer is cached
+		// for the next pass.
+		select {
+		case c.bg <- struct{}{}:
+			c.background.Add(1)
+			go func() {
+				defer func() { <-c.bg }()
+				_ = c.fetch(sha, body, dmBackground)
+			}()
+		default:
+		}
+	}
 	return f.entry
 }
 
-func (c *dmCache) waitPause() {
-	c.pauseMu.Lock()
-	d := time.Until(c.pauseUntil)
-	c.pauseMu.Unlock()
-	if d > 0 {
-		time.Sleep(d)
-	}
-}
+// dmInWindow is how long a request may retry while the product waits (its
+// hook answer window is 2 to 3.4 s); dmBackground is the retry time of a
+// background completion.
+const (
+	dmInWindow   = 1200 * time.Millisecond
+	dmBackground = 90 * time.Second
+)
+
 
 // takeBudget records one upstream request in the shared budget file and
 // reports whether it is still within the budget.
@@ -234,24 +248,18 @@ func (c *dmCache) waitPace(bodyBytes int) {
 	}
 }
 
-func (c *dmCache) pause(d time.Duration) {
-	c.pauseMu.Lock()
-	if until := time.Now().Add(d); until.After(c.pauseUntil) {
-		c.pauseUntil = until
-	}
-	c.pauseMu.Unlock()
-}
 
-func (c *dmCache) fetch(sha string, body []byte) *dmCacheEntry {
-	c.sem <- struct{}{}
-	defer func() { <-c.sem }()
+func (c *dmCache) fetch(sha string, body []byte, window time.Duration) *dmCacheEntry {
+	if window <= dmInWindow {
+		c.sem <- struct{}{}
+		defer func() { <-c.sem }()
+	}
 	start := time.Now()
 	n429, attempts := 0, 0
 	var lastStatus int
 	var lastErr string
-	for attempts < 12 {
+	for attempts < 12 && (attempts == 0 || time.Since(start) < window) {
 		attempts++
-		c.waitPause()
 		c.waitPace(len(body))
 		if !c.takeBudget() {
 			c.failed.Add(1)
@@ -271,7 +279,10 @@ func (c *dmCache) fetch(sha string, body []byte) *dmCacheEntry {
 		c.upstreamCalls.Add(1)
 		resp, err := c.client.Do(req)
 		ms := time.Since(t0).Milliseconds()
-		backoff := time.Duration(500*(1<<min(attempts-1, 6)))*time.Millisecond + time.Duration(rand.IntN(400))*time.Millisecond
+		backoff := time.Duration(150*(1<<min(attempts-1, 7)))*time.Millisecond + time.Duration(rand.IntN(100))*time.Millisecond
+		if window > dmInWindow {
+			backoff = time.Duration(1000*(1<<min(attempts-1, 4)))*time.Millisecond + time.Duration(rand.IntN(500))*time.Millisecond
+		}
 		if err != nil {
 			lastErr = "transport"
 			time.Sleep(min(backoff, 30*time.Second))
@@ -284,10 +295,9 @@ func (c *dmCache) fetch(sha string, body []byte) *dmCacheEntry {
 			if resp.StatusCode == http.StatusTooManyRequests {
 				n429++
 				c.rateLimited.Add(1)
-				if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s > 0 {
+				if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s > 0 && window > dmInWindow {
 					backoff = time.Duration(s) * time.Second
 				}
-				c.pause(min(backoff, 30*time.Second))
 			}
 			time.Sleep(min(backoff, 30*time.Second))
 			continue
@@ -332,6 +342,10 @@ func dmAnswerFacts(raw []byte) (string, int) {
 }
 
 func (c *dmCache) summary() string {
-	return fmt.Sprintf("dm-cache hits=%d misses=%d upstream_calls=%d rate_limited=%d gave_up=%d offline_misses=%d stored=%d",
-		c.hits.Load(), c.misses.Load(), c.upstreamCalls.Load(), c.rateLimited.Load(), c.failed.Load(), c.offlineMisses.Load(), c.stored.Load())
+	// Give background completions a moment to land before the process exits.
+	for i := 0; i < 600 && len(c.bg) > 0; i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Sprintf("dm-cache hits=%d misses=%d upstream_calls=%d rate_limited=%d gave_up=%d offline_misses=%d stored=%d background=%d",
+		c.hits.Load(), c.misses.Load(), c.upstreamCalls.Load(), c.rateLimited.Load(), c.failed.Load(), c.offlineMisses.Load(), c.stored.Load(), c.background.Load())
 }
