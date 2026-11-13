@@ -143,6 +143,9 @@ type Error struct {
 	Detail   string
 	Actor    string
 	ActorUID string
+	// Message is the gateway's explanation, sent with a sign-in refusal
+	// (subscription_signin_refused, agent_hook_tamper_refused), one line.
+	Message string
 }
 
 func (e *Error) Error() string {
@@ -221,10 +224,12 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 			Detail   string `json:"detail"`
 			Actor    string `json:"actor"`
 			ActorUID string `json:"actor_uid"`
+			Message  string `json:"message"`
 		}
 		if json.Unmarshal(raw, &d) == nil {
 			e.Reason = d.Reason
 			e.Refusal, e.Detail, e.Actor, e.ActorUID = d.Refusal, d.Detail, d.Actor, d.ActorUID
+			e.Message = safetext.Line(d.Message)
 		}
 		return e
 	}

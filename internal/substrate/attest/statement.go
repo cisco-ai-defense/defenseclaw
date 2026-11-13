@@ -26,7 +26,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 )
@@ -276,16 +275,6 @@ func normalizeFindings(m map[string]int) map[string]int {
 		out[strings.ToLower(k)] = v
 	}
 	return out
-}
-
-// SortedKeys is a helper for stable output of the findings map.
-func SortedKeys(m map[string]int) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // sha256Hex validates "sha256:<64 hex>" and returns the hex part.

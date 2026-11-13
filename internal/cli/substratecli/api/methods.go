@@ -44,6 +44,9 @@ type Actor struct {
 	// SessionToken is present on create for an attended run.
 	SessionToken   string    `json:"session_token,omitempty"`
 	SessionExpires time.Time `json:"session_expires,omitempty"`
+	// Warnings come with a create: what the cluster allowed but wants the
+	// person to know (an open-source vendor sign-in, E9).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // shown returns a with every field a person reads made safe to print
@@ -53,6 +56,13 @@ type Actor struct {
 func (a Actor) shown() Actor {
 	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.State} {
 		*f = safetext.Line(*f)
+	}
+	if a.Warnings != nil {
+		warnings := make([]string, len(a.Warnings))
+		for i, w := range a.Warnings {
+			warnings[i] = safetext.Line(w)
+		}
+		a.Warnings = warnings
 	}
 	return a
 }
@@ -299,10 +309,4 @@ func (c *Client) RemoveSecret(ctx context.Context, name string) error {
 func (c *Client) TestSecret(ctx context.Context, name string) (map[string]any, error) {
 	var out map[string]any
 	return out, c.do(ctx, http.MethodPost, "secrets/"+url.PathEscape(name)+"/test", nil, map[string]any{}, &out)
-}
-
-// FleetStatus returns the administrator status document.
-func (c *Client) FleetStatus(ctx context.Context) (map[string]any, error) {
-	var out map[string]any
-	return out, c.do(ctx, http.MethodGet, "fleet/status", nil, nil, &out)
 }

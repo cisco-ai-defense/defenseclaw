@@ -38,6 +38,13 @@ import (
 // Kubernetes user (id_kind k8s_user). Managed installs require OIDC.
 const PersonKube = "k8s_user"
 
+// KubeTokenAudience is the audience of the ServiceAccount token the
+// launcher mints with TokenRequest for a person whose kubeconfig signs in
+// with a client certificate (GAP-0192). The gateway accepts a
+// ServiceAccount only when the API server authenticates its token for this
+// audience: a pod's mounted token (the API server's audience) is refused.
+const KubeTokenAudience = "defenseclaw-substrate"
+
 // KubeIssuer is the Issuer of a Kubernetes person: the cluster's API
 // server, the one authority for the name.
 const KubeIssuer = "kubernetes"
@@ -88,49 +95,31 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 		return c.p, nil
 	}
 	k.mu.Unlock()
-	own, err := os.ReadFile(k.TokenFile)
+	u, ok, err := k.review(ctx, token, nil)
 	if err != nil {
-		return Person{}, reasonf(ReasonUnavailable, "the gateway has no Kubernetes token")
+		return Person{}, err
 	}
-	body, _ := json.Marshal(map[string]any{
-		"apiVersion": "authentication.k8s.io/v1", "kind": "TokenReview", "spec": map[string]any{"token": token},
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, k.Server+"/apis/authentication.k8s.io/v1/tokenreviews", bytes.NewReader(body))
-	if err != nil {
-		return Person{}, reasonf(ReasonUnavailable, "token review request")
+	switch {
+	case !ok:
+		// Not a token of the API server's own audience: it counts only as a
+		// ServiceAccount token minted for DefenseClaw (GAP-0192).
+		u, ok, err = k.review(ctx, token, []string{KubeTokenAudience})
+		if err != nil {
+			return Person{}, err
+		}
+		if !ok {
+			return Person{}, reasonf(ReasonSignature, "the Kubernetes API does not know the token")
+		}
+		if !strings.HasPrefix(u.Username, "system:serviceaccount:") {
+			return Person{}, reasonf(ReasonSubject, "only a ServiceAccount token may carry the DefenseClaw audience")
+		}
+	case strings.HasPrefix(u.Username, "system:serviceaccount:"):
+		// A pod's own token: the ServiceAccount of a workload is not a
+		// person, and an actor has no Kubernetes identity (D15).
+		return Person{}, reasonf(ReasonSubject, "a ServiceAccount token must be minted for DefenseClaw (audience %s); sign in with defenseclaw substrate login --kube", KubeTokenAudience)
 	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(own)))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := k.HTTP.Do(req)
-	if err != nil {
-		return Person{}, reasonf(ReasonUnavailable, "the Kubernetes API did not answer")
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return Person{}, reasonf(ReasonUnavailable, "token review: HTTP %d", resp.StatusCode)
-	}
-	var tr struct {
-		Status struct {
-			Authenticated bool `json:"authenticated"`
-			User          struct {
-				Username string   `json:"username"`
-				UID      string   `json:"uid"`
-				Groups   []string `json:"groups"`
-			} `json:"user"`
-		} `json:"status"`
-	}
-	if json.Unmarshal(raw, &tr) != nil {
-		return Person{}, reasonf(ReasonUnavailable, "token review answer is unreadable")
-	}
-	u := tr.Status.User
-	if !tr.Status.Authenticated || strings.TrimSpace(u.Username) == "" {
-		return Person{}, reasonf(ReasonSignature, "the Kubernetes API does not know the token")
-	}
-	// A pod's ServiceAccount is not a person, and an actor has no
-	// Kubernetes identity of its own (it reaches no admin listener, D15).
-	if strings.HasPrefix(u.Username, "system:serviceaccount:") || strings.HasPrefix(u.Username, "system:node:") {
-		return Person{}, reasonf(ReasonSubject, "a ServiceAccount or node token is not a person")
+	if strings.HasPrefix(u.Username, "system:node:") {
+		return Person{}, reasonf(ReasonSubject, "a node token is not a person")
 	}
 	p := Person{Kind: PersonKube, Issuer: KubeIssuer, Subject: u.Username, Principal: u.Username,
 		Expires: now.Add(kubeReviewTTL)}
@@ -146,6 +135,68 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	k.cache[key] = kubeReview{p: p, at: now}
 	k.mu.Unlock()
 	return p, nil
+}
+
+// kubeUser is the user of an authenticated TokenReview.
+type kubeUser struct {
+	Username string   `json:"username"`
+	UID      string   `json:"uid"`
+	Groups   []string `json:"groups"`
+}
+
+// review asks the API server who token is, for audiences (nil: the API
+// server's own). ok is false when the token is not authenticated for one of
+// them; a ServiceAccount token reviewed for its own audience must also be
+// answered with that audience.
+func (k *KubeTokenVerifier) review(ctx context.Context, token string, audiences []string) (kubeUser, bool, error) {
+	own, err := os.ReadFile(k.TokenFile)
+	if err != nil {
+		return kubeUser{}, false, reasonf(ReasonUnavailable, "the gateway has no Kubernetes token")
+	}
+	spec := map[string]any{"token": token}
+	if len(audiences) > 0 {
+		spec["audiences"] = audiences
+	}
+	body, _ := json.Marshal(map[string]any{"apiVersion": "authentication.k8s.io/v1", "kind": "TokenReview", "spec": spec})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, k.Server+"/apis/authentication.k8s.io/v1/tokenreviews", bytes.NewReader(body))
+	if err != nil {
+		return kubeUser{}, false, reasonf(ReasonUnavailable, "token review request")
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(own)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := k.HTTP.Do(req)
+	if err != nil {
+		return kubeUser{}, false, reasonf(ReasonUnavailable, "the Kubernetes API did not answer")
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return kubeUser{}, false, reasonf(ReasonUnavailable, "token review: HTTP %d", resp.StatusCode)
+	}
+	var tr struct {
+		Status struct {
+			Authenticated bool     `json:"authenticated"`
+			User          kubeUser `json:"user"`
+			Audiences     []string `json:"audiences"`
+		} `json:"status"`
+	}
+	if json.Unmarshal(raw, &tr) != nil {
+		return kubeUser{}, false, reasonf(ReasonUnavailable, "token review answer is unreadable")
+	}
+	u := tr.Status.User
+	if !tr.Status.Authenticated || strings.TrimSpace(u.Username) == "" {
+		return kubeUser{}, false, nil
+	}
+	for _, want := range audiences {
+		found := false
+		for _, got := range tr.Status.Audiences {
+			found = found || got == want
+		}
+		if !found {
+			return kubeUser{}, false, nil
+		}
+	}
+	return u, true, nil
 }
 
 // PersonVerifiers tries OIDC first and a Kubernetes token second: a token

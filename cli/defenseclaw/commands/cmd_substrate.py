@@ -381,7 +381,18 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "kube-namespace",
                 "string",
-                "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)",
+                (
+                    "with --kube, the namespace DefenseClaw runs in (default: the one whose launcher endpoint record "
+                    "names --admin-url)"
+                ),
+            ),
+            _Flag(
+                "kube-service-account",
+                "string",
+                (
+                    "with --kube, sign in as this ServiceAccount (NAMESPACE/NAME or NAME) with a short-lived token; a "
+                    "client-certificate kubeconfig uses defenseclaw-launcher"
+                ),
             ),
             _Flag("kubeconfig", "string", "with --kube, the kubeconfig file (default: kubectl's own rules)"),
             _Flag(
@@ -551,9 +562,12 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret\n"
             "files such as .env and keys are held back), and puts the agent on your terminal. The agent is "
             "claude,\n"
-            "codex, copilot, opencode, kiro, hermes or antigravity (amp, cursor-agent and devin are not verified "
-            "yet, so\n"
-            "they do not run). A banner shows the guard profile, model, allowed hosts and how to leave. When the\n"
+            "codex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that "
+            "sign in to a\n"
+            "vendor account (kiro, antigravity, cursor-agent, amp, devin) run with a warning in open source, "
+            "because the\n"
+            "sign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows "
+            "the guard profile, model, allowed hosts and how to leave. When the\n"
             "guard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, "
             "always or deny.\n"
             "\n"
@@ -829,7 +843,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "--relay-binary FILE --key FILE [flags]\n"
             "\n"
             "Flags:\n"
-            "  --connector NAME                claudecode or codex (default claudecode)\n"
+            "  --connector NAME                connector to build: claudecode, codex, opencode, copilot, hermes, "
+            "kiro, antigravity,\n"
+            "                                  cursor, amp or devin (default claudecode)\n"
             "  --from IMAGE                    base image (the OpenShell harness image for the connector, with "
             "tmux)\n"
             "  --to REPO:TAG                   target repository and tag\n"
@@ -981,8 +997,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --mcp-analyzers LIST            mcp-scanner analyzers (default yara)\n"
             "  --block-at LEVEL                lowest finding severity that blocks: critical, high, medium, low "
             "or none (default high)\n"
-            "  --connector NAME                check the kit's hook files and switches for this connector "
-            "(claudecode or codex)\n"
+            "  --connector NAME                check the kit's hook files and switches for this connector: "
+            "claudecode, codex,\n"
+            "                                  opencode, copilot, hermes, kiro, antigravity, cursor, amp or "
+            "devin\n"
             "  --mcp-host HOST                 remote MCP host that is allowed (repeatable)\n"
             "\n"
             "Flags build, verify, scan and publish all take:\n"

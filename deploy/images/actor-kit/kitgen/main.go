@@ -40,7 +40,7 @@ func (k keyFlag) Set(v string) error {
 }
 
 func main() {
-	connectorName := flag.String("connector", "claudecode", "claudecode or codex")
+	connectorName := flag.String("connector", "claudecode", kit.ConnectorList())
 	out := flag.String("out", "", "output directory (created; must not exist)")
 	uid := flag.Int("uid", 1000, "image USER uid")
 	gid := flag.Int("gid", 1000, "image USER gid")

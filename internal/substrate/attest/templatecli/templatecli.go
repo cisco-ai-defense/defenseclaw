@@ -263,7 +263,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	var c common
 	c.bind(fs)
 	var (
-		connectorName = fs.String("connector", "claudecode", "claudecode or codex")
+		connectorName = fs.String("connector", "claudecode", kit.ConnectorList())
 		from          = fs.String("from", "", "base image (the OpenShell harness image for the connector)")
 		to            = fs.String("to", "", "target repository and tag")
 		kitVersion    = fs.String("kit-version", "dev", "kit version")
@@ -299,6 +299,9 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	fs.Var(&sessionKeys, "session-key", "the gateway's relay session public key, PEM FILE or KID=FILE (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsageError, nil
+	}
+	if err := kit.CheckConnector(*connectorName); err != nil {
+		return ExitUsageError, err
 	}
 	if *from == "" || *to == "" || *hookBin == "" || *relayBin == "" || (*keyFile == "" && !*dry) {
 		return ExitUsageError, errors.New("build needs --from, --to, --hook-binary, --relay-binary and --key")
@@ -611,7 +614,7 @@ func runScan(ctx context.Context, args []string, stdout io.Writer) (int, error) 
 	noMCP := fs.Bool("no-mcp-static", false, "do not run mcp-scanner over tool descriptions")
 	analyzers := fs.String("mcp-analyzers", "yara", "mcp-scanner analyzers")
 	blockAt := fs.String("block-at", "high", "lowest finding severity that blocks (critical, high, medium, low, none)")
-	connectorName := fs.String("connector", "", "check the kit's hook files and switches for this connector (claudecode or codex)")
+	connectorName := fs.String("connector", "", "check the kit's hook files and switches for this connector ("+kit.ConnectorList()+")")
 	var mcpHosts multi
 	fs.Var(&mcpHosts, "mcp-host", "remote MCP host that is allowed (repeatable)")
 	image, rest := splitFirst(args)
@@ -620,6 +623,11 @@ func runScan(ctx context.Context, args []string, stdout io.Writer) (int, error) 
 	}
 	if image == "" {
 		return ExitUsageError, errors.New("scan needs an image")
+	}
+	if *connectorName != "" {
+		if err := kit.CheckConnector(*connectorName); err != nil {
+			return ExitUsageError, err
+		}
 	}
 	reg, err := c.registry()
 	if err != nil {
